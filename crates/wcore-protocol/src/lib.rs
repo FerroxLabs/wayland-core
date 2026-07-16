@@ -2,6 +2,7 @@
 // Contains: events (agent→host), commands (host→agent), approval manager.
 
 pub mod anvil;
+pub mod child;
 pub mod commands;
 pub mod contract;
 pub mod diagnostics;

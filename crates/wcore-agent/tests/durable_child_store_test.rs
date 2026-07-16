@@ -212,6 +212,28 @@ fn durable_child_lifecycle_is_idempotent_and_survives_reopen() {
 }
 
 #[test]
+fn durable_child_list_is_stable_by_child_identity_after_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let journal_path = temp.path().join("session.journal");
+    {
+        let journal = SessionJournal::open(&journal_path, "session-1").unwrap();
+        let store = DurableChildStore::new(journal);
+        store.declare(child_record("child-z", false)).unwrap();
+        store.declare(child_record("child-a", false)).unwrap();
+    }
+
+    let reopened = SessionJournal::open(&journal_path, "session-1").unwrap();
+    let children = DurableChildStore::new(reopened).list().unwrap();
+    assert_eq!(
+        children
+            .iter()
+            .map(|child| child.child_id.as_str())
+            .collect::<Vec<_>>(),
+        ["child-a", "child-z"]
+    );
+}
+
+#[test]
 fn stale_conflicting_and_post_terminal_transitions_fail_closed() {
     let temp = tempfile::tempdir().unwrap();
     let journal_path = temp.path().join("session.journal");

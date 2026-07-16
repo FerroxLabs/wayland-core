@@ -15,13 +15,14 @@ use super::observation::{ContractCapabilityStatus, ContractDescriptor};
 use super::spec::{
     COMMAND_SPECS, EVENT_SPECS, PRODUCER_COMMAND_TYPES, PRODUCER_EVENT_TYPES, SOURCE_INPUTS,
     WireSpec, anvil_invalidation, anvil_receipt, command_fixture_values,
-    compatibility_event_values, event_fixture_values, workflow_lifecycle_events,
+    compatibility_event_values, durable_child_fixture_values, event_fixture_values,
+    workflow_lifecycle_events,
 };
 
 pub const CONTRACT_NAME: &str = "wayland-desktop-core";
 pub const CONTRACT_MAJOR: u64 = 1;
-pub const CONTRACT_MINOR: u64 = 7;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/10";
+pub const CONTRACT_MINOR: u64 = 8;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/11";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
@@ -1106,7 +1107,7 @@ fn specs_manifest(specs: &[WireSpec]) -> Vec<Value> {
 fn fixtures_digest(artifacts: &BTreeMap<String, Vec<u8>>) -> ContractResult<String> {
     let mut normalized = Vec::new();
     for (path, bytes) in artifacts {
-        let included = ["commands/", "events/", "compat/", "adversarial/"]
+        let included = ["commands/", "events/", "types/", "compat/", "adversarial/"]
             .iter()
             .any(|prefix| path.starts_with(prefix));
         if !included {
@@ -1158,6 +1159,10 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
         ("cua_events".into(), ContractCapabilityStatus::ShapeOnly),
         (
             "effective_execution_policy_revisions".into(),
+            ContractCapabilityStatus::Available,
+        ),
+        (
+            "durable_child_model_v1".into(),
             ContractCapabilityStatus::Available,
         ),
         (
@@ -1264,6 +1269,26 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
     {
         artifacts.insert(path, canonical_json(&serde_json::to_value(event)?)?);
     }
+    for (path, value) in durable_child_fixture_values() {
+        artifacts.insert(path, canonical_json(&value)?);
+    }
+
+    let mut malformed_child = durable_child_fixture_values()
+        .remove("types/durable_child_record.json")
+        .expect("durable child record fixture must exist");
+    malformed_child["child_id"] = json!(" child-001");
+    artifacts.insert(
+        "adversarial/types/durable-child-invalid-id.json".into(),
+        canonical_json(&malformed_child)?,
+    );
+    let mut unknown_field_child = durable_child_fixture_values()
+        .remove("types/durable_child_record.json")
+        .expect("durable child record fixture must exist");
+    unknown_field_child["unexpected_authority"] = json!(true);
+    artifacts.insert(
+        "adversarial/types/durable-child-unknown-field.json".into(),
+        canonical_json(&unknown_field_child)?,
+    );
 
     let canonical_events = event_fixture_values();
     let ready = event_value(
@@ -1645,16 +1670,24 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
     let fixture_inventory = artifacts
         .keys()
         .filter(|path| {
-            ["commands/", "events/", "compat/", "adversarial/"]
+            ["commands/", "events/", "types/", "compat/", "adversarial/"]
                 .iter()
                 .any(|prefix| path.starts_with(prefix))
         })
         .cloned()
         .collect::<Vec<_>>();
+    let child_type_inventory = artifacts
+        .keys()
+        .filter(|path| path.starts_with("types/"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let child_type_count = child_type_inventory.len();
     let manifest = json!({
         "capabilities": capabilities,
+        "child_types": child_type_inventory,
         "commands": specs_manifest(COMMAND_SPECS),
         "counts": {
+            "child_types": child_type_count,
             "commands": COMMAND_SPECS.len(),
             "events": EVENT_SPECS.len(),
             "fixtures": fixture_inventory.len()
@@ -1675,6 +1708,7 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
         "generator": GENERATOR_VERSION,
         "subcontracts": {
             "anvil_receipts": "1.0",
+            "durable_child": "1.0",
             "execution_policy": "1.0",
             "operator_tool_effect_resolution": "1.0",
             "runtime_diagnostics": "1.0",

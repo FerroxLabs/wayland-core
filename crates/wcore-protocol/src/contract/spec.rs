@@ -8,6 +8,12 @@ use crate::anvil::{
     AnvilInvalidationReason, AnvilReceipt, AnvilReceiptInvalidation,
     anvil_invalidation_body_digest, anvil_receipt_body_digest,
 };
+use crate::child::{
+    ChildDeliveryState, ChildDeliveryTarget, ChildDesiredState, ChildId, ChildOrigin, ChildParent,
+    ChildPolicySnapshot, ChildRecoveryState, ChildRequestEvidence, ChildTimestamps, ChildWorkspace,
+    ChildWorkspaceMode, DURABLE_CHILD_PROTOCOL_VERSION, DurableChildRecord, DurableChildResult,
+    DurableChildStatus, DurableChildTransition,
+};
 use crate::diagnostics::{
     ConfigSourceDisposition, ConfigSourceRole, McpConnectionState, McpDeclarationOrigin,
     McpExecutableReadiness, McpExposureState, McpServerDiagnostic, McpTransportKind,
@@ -825,6 +831,7 @@ pub const PRODUCER_EVENT_TYPES: &[&str] = &[
 ];
 
 pub const SOURCE_INPUTS: &[&str] = &[
+    "crates/wcore-protocol/src/child.rs",
     "crates/wcore-protocol/src/commands.rs",
     "crates/wcore-protocol/src/events.rs",
     "crates/wcore-protocol/src/diagnostics.rs",
@@ -841,6 +848,7 @@ pub const SOURCE_INPUTS: &[&str] = &[
     "crates/wcore-protocol/src/contract/check.rs",
     "crates/wcore-protocol/src/bin/wcore-contract.rs",
     "crates/wcore-types/src/execution_policy.rs",
+    "crates/wcore-types/src/spawner.rs",
     "crates/wcore-types/src/workspace_trust.rs",
     "crates/wcore-agent/src/output/protocol_sink.rs",
     "crates/wcore-agent/src/bootstrap.rs",
@@ -863,6 +871,107 @@ pub const SOURCE_INPUTS: &[&str] = &[
     "crates/wcore-plugin-subprocess/src/mcp_bridge.rs",
     "crates/wcore-tools/src/registry.rs",
 ];
+
+/// Canonical F18 durable-child values constructed through the real protocol
+/// types. Commands and events remain an F22 concern.
+pub fn durable_child_fixture_values() -> BTreeMap<String, Value> {
+    fn digest(character: char) -> String {
+        character.to_string().repeat(64)
+    }
+
+    fn prepared(child_id: &str) -> DurableChildRecord {
+        DurableChildRecord {
+            schema_version: DURABLE_CHILD_PROTOCOL_VERSION,
+            declaration_id: format!("declare-{child_id}"),
+            child_id: ChildId::new(child_id).expect("fixture child id must be valid"),
+            parent: ChildParent {
+                session_id: "session-desktop-001".into(),
+                turn_id: Some("turn-001".into()),
+                parent_child_id: None,
+                workflow_run_id: Some("workflow-run-001".into()),
+                graph_node_id: Some("research".into()),
+                parent_call_id: Some("call-spawn-001".into()),
+            },
+            origin: ChildOrigin::Workflow,
+            request: ChildRequestEvidence::redacted(digest('a')),
+            policy_snapshot: ChildPolicySnapshot {
+                contract_version: "1.0".into(),
+                exact_digest: digest('b'),
+                posture: "smart".into(),
+                approvals: "on_request".into(),
+                sandbox: "workspace_write".into(),
+                source: "parent_intersection".into(),
+                managed_floor_active: true,
+                dangerous_activation_id_digest: None,
+            },
+            provider: Some("anthropic".into()),
+            model: Some("claude-sonnet-4-5".into()),
+            workspace: ChildWorkspace {
+                mode: ChildWorkspaceMode::Isolated,
+                workspace_id: format!("workspace-{child_id}"),
+            },
+            status: DurableChildStatus::Prepared,
+            desired_state: ChildDesiredState::Run,
+            recovery: ChildRecoveryState::Clean,
+            revision: 0,
+            timestamps: ChildTimestamps {
+                created_at_unix_ms: 1_721_000_000_000,
+                updated_at_unix_ms: 1_721_000_000_000,
+                queued_at_unix_ms: None,
+                started_at_unix_ms: None,
+                terminal_at_unix_ms: None,
+            },
+            result: None,
+            delivery_target: Some(ChildDeliveryTarget::ParentTurn),
+            delivery_state: ChildDeliveryState::Pending,
+            attempt: 1,
+            retry_of: None,
+            applied_events: BTreeMap::new(),
+        }
+    }
+
+    let queued = prepared("child-002");
+    let mut terminal = prepared("child-001");
+    terminal.status = DurableChildStatus::Succeeded;
+    terminal.revision = 3;
+    terminal.timestamps.updated_at_unix_ms = 1_721_000_003_000;
+    terminal.timestamps.queued_at_unix_ms = Some(1_721_000_001_000);
+    terminal.timestamps.started_at_unix_ms = Some(1_721_000_002_000);
+    terminal.timestamps.terminal_at_unix_ms = Some(1_721_000_003_000);
+    terminal.result = Some(DurableChildResult {
+        exact_digest: digest('c'),
+        turns: 2,
+        input_tokens: 1_024,
+        output_tokens: 256,
+        artifact_digests: vec![digest('d')],
+    });
+    terminal
+        .applied_events
+        .insert("enqueue-001".into(), digest('e'));
+    terminal
+        .applied_events
+        .insert("start-001".into(), digest('f'));
+    terminal
+        .applied_events
+        .insert("succeed-001".into(), digest('1'));
+
+    BTreeMap::from([
+        (
+            "types/durable_child_list.json".into(),
+            serde_json::to_value(vec![terminal.clone(), queued])
+                .expect("durable child list fixture must serialize"),
+        ),
+        (
+            "types/durable_child_record.json".into(),
+            serde_json::to_value(terminal).expect("durable child record fixture must serialize"),
+        ),
+        (
+            "types/durable_child_transition.json".into(),
+            serde_json::to_value(DurableChildTransition::RequestCancel)
+                .expect("durable child transition fixture must serialize"),
+        ),
+    ])
+}
 
 /// Canonical command inputs. Every value is accepted by `ProtocolCommand`.
 pub fn command_fixture_values() -> BTreeMap<String, Value> {

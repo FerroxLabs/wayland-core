@@ -3,6 +3,9 @@ use std::fs;
 use std::path::Path;
 
 use serde_json::Value;
+use wcore_protocol::child::{
+    DURABLE_CHILD_PROTOCOL_VERSION, DurableChildRecord, DurableChildStatus, DurableChildTransition,
+};
 use wcore_protocol::commands::ProtocolCommand;
 use wcore_protocol::contract::{
     COMMAND_SPECS, CONTRACT_MAJOR, CONTRACT_MINOR, CONTRACT_ROOT, ContractCriticality, EVENT_SPECS,
@@ -232,6 +235,44 @@ fn inventory_is_exactly_eighteen_commands_and_forty_nine_events() {
 }
 
 #[test]
+fn durable_child_type_fixtures_round_trip_without_a_parallel_model() {
+    let record: DurableChildRecord =
+        serde_json::from_value(generated_json("types/durable_child_record.json")).unwrap();
+    assert_eq!(record.schema_version, DURABLE_CHILD_PROTOCOL_VERSION);
+    assert_eq!(record.status, DurableChildStatus::Succeeded);
+    assert!(record.status.is_terminal());
+
+    let children: Vec<DurableChildRecord> =
+        serde_json::from_value(generated_json("types/durable_child_list.json")).unwrap();
+    assert_eq!(
+        children
+            .iter()
+            .map(|child| child.child_id.as_str())
+            .collect::<Vec<_>>(),
+        ["child-001", "child-002"]
+    );
+    assert_eq!(children[0], record);
+
+    let transition: DurableChildTransition =
+        serde_json::from_value(generated_json("types/durable_child_transition.json")).unwrap();
+    assert_eq!(transition, DurableChildTransition::RequestCancel);
+}
+
+#[test]
+fn malformed_durable_child_fixtures_are_rejected() {
+    for relative in [
+        "adversarial/types/durable-child-invalid-id.json",
+        "adversarial/types/durable-child-unknown-field.json",
+    ] {
+        let value = generated_json(relative);
+        assert!(
+            serde_json::from_value::<DurableChildRecord>(value).is_err(),
+            "{relative} must fail closed"
+        );
+    }
+}
+
+#[test]
 fn every_command_fixture_deserializes_through_protocol_command() {
     for entry in fs::read_dir(root().join("commands")).unwrap() {
         let path = entry.unwrap().path();
@@ -278,6 +319,15 @@ fn manifest_pins_generator_and_all_three_digests() {
     assert_eq!(manifest["events"].as_array().unwrap().len(), 49);
     assert_eq!(manifest["counts"]["commands"], 18);
     assert_eq!(manifest["counts"]["events"], 49);
+    assert_eq!(manifest["counts"]["child_types"], 3);
+    assert_eq!(
+        manifest["child_types"],
+        serde_json::json!([
+            "types/durable_child_list.json",
+            "types/durable_child_record.json",
+            "types/durable_child_transition.json"
+        ])
+    );
     assert_eq!(
         manifest["capabilities"]["contract_negotiation"],
         "available"
@@ -299,6 +349,11 @@ fn manifest_pins_generator_and_all_three_digests() {
         "available"
     );
     assert_eq!(manifest["capabilities"]["turn_recovery_v1"], "available");
+    assert_eq!(
+        manifest["capabilities"]["durable_child_model_v1"],
+        "available"
+    );
+    assert_eq!(manifest["subcontracts"]["durable_child"], "1.0");
     assert_eq!(
         manifest["capabilities"]["runtime_diagnostics_v1"],
         "available"
