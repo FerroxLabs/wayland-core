@@ -1286,6 +1286,11 @@ struct ToolCallAccumulator {
 
 struct StreamState {
     tool_calls: Vec<ToolCallAccumulator>,
+    /// Per-response namespace for tool calls whose upstream stream omits the
+    /// required id. The synthesized id is persisted with the assistant/tool
+    /// pair, so the next request can replay the result instead of stripping it
+    /// as an invalid empty-id exchange.
+    synthetic_tool_call_namespace: String,
     input_tokens: u64,
     output_tokens: u64,
     /// Cache-read (prompt cache hit) tokens reported by the chat path's usage
@@ -1310,6 +1315,7 @@ impl StreamState {
     fn new() -> Self {
         Self {
             tool_calls: Vec::new(),
+            synthetic_tool_call_namespace: uuid::Uuid::new_v4().simple().to_string(),
             input_tokens: 0,
             output_tokens: 0,
             cache_read_tokens: 0,
@@ -2045,7 +2051,17 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState) -> Vec<LlmEvent> {
         let stop_reason = match (finish_reason_raw, state.tool_calls.is_empty()) {
             // tool_calls / stop with pending calls → flush them as ToolUse
             ("tool_calls" | "stop", false) => {
-                for tc in state.tool_calls.drain(..) {
+                let synthetic_namespace = state.synthetic_tool_call_namespace.clone();
+                for (index, mut tc) in state.tool_calls.drain(..).enumerate() {
+                    if tc.id.trim().is_empty() {
+                        tc.id = format!("call_wcore_{synthetic_namespace}_{index}");
+                        tracing::warn!(
+                            target: "wcore_providers::openai",
+                            tool_call_index = index,
+                            synthetic_id = %tc.id,
+                            "OpenAI-compatible stream omitted a tool-call id; synthesized a unique internal id"
+                        );
+                    }
                     // Fail closed: non-empty argument JSON that does not parse
                     // must not run the tool with empty input — emit an error and
                     // skip the call. Empty arguments remain a valid empty object.
@@ -2436,6 +2452,65 @@ mod tests {
         assert_eq!(state.tool_calls.len(), 4, "indices 0..=3 create 4 slots");
         assert_eq!(state.tool_calls[3].name, "lookup");
         assert_eq!(state.tool_calls[3].id, "call_a");
+    }
+
+    #[test]
+    fn missing_tool_call_id_is_synthesized_and_round_trips() {
+        // #862: Flux occasionally streamed a valid tool name/arguments without
+        // the required call id. The engine executed it, but the next request's
+        // empty-id guard stripped both the assistant call and its result. The
+        // fork then repeated the same blind turn until its 11-turn cap.
+        let mut state = StreamState::new();
+        let data = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"Bash","arguments":"{\"command\":\"pwd\"}"}}]},"finish_reason":"tool_calls"}]}"#;
+
+        let events = parse_sse_chunk(data, &mut state);
+        let (id, name, input) = events
+            .into_iter()
+            .find_map(|event| match event {
+                LlmEvent::ToolUse {
+                    id, name, input, ..
+                } => Some((id, name, input)),
+                _ => None,
+            })
+            .expect("the completed stream emits its tool call");
+
+        assert!(
+            id.starts_with("call_wcore_") && !id.trim().is_empty(),
+            "a missing upstream id must become a non-empty internal id: {id:?}"
+        );
+
+        let history = vec![
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: id.clone(),
+                    name,
+                    input,
+                    extra: None,
+                }],
+            ),
+            Message::new(
+                Role::Tool,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: id.clone(),
+                    content: "/workspace".into(),
+                    is_error: false,
+                }],
+            ),
+        ];
+        let replay = OpenAIProvider::build_messages(&history, "", &openai_compat());
+        let call_id = replay
+            .iter()
+            .find_map(|message| message["tool_calls"].as_array())
+            .and_then(|calls| calls.first())
+            .and_then(|call| call["id"].as_str());
+        let result_id = replay
+            .iter()
+            .find(|message| message["role"] == "tool")
+            .and_then(|message| message["tool_call_id"].as_str());
+
+        assert_eq!(call_id, Some(id.as_str()));
+        assert_eq!(result_id, Some(id.as_str()));
     }
 
     // --- is_tools_unsupported_error (#389) --------------------------------
