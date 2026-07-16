@@ -2,6 +2,7 @@
 // No dependencies on other wcore-* crates.
 
 pub mod cache_tier;
+pub mod child_transaction;
 pub mod compact;
 pub mod crucible;
 pub mod execution_policy;

@@ -13,3 +13,4 @@ serde_json.workspace  = true
 async-trait.workspace = true
 chrono.workspace      = true
 thiserror.workspace   = true
+sha2.workspace        = true

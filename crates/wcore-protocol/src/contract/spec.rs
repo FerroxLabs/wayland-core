@@ -849,6 +849,7 @@ pub const SOURCE_INPUTS: &[&str] = &[
     "crates/wcore-protocol/src/bin/wcore-contract.rs",
     "crates/wcore-types/src/execution_policy.rs",
     "crates/wcore-types/src/spawner.rs",
+    "crates/wcore-types/src/child_transaction.rs",
     "crates/wcore-types/src/workspace_trust.rs",
     "crates/wcore-agent/src/output/protocol_sink.rs",
     "crates/wcore-agent/src/bootstrap.rs",

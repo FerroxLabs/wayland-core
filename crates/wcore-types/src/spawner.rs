@@ -6,6 +6,13 @@ use thiserror::Error;
 
 use crate::message::TokenUsage;
 
+pub use crate::child_transaction::{
+    CHILD_TRANSACTION_RECEIPT_SCHEMA_VERSION, ChildGateOutcome, ChildGatePlan, ChildGateReceipt,
+    ChildGateRequirement, ChildGateSubject, ChildTransactionDisposition, ChildTransactionReceipt,
+    ChildTransactionReducer, ChildTransactionReplay, ChildTransactionValidationError,
+    MAX_CHILD_TRANSACTION_GATES,
+};
+
 pub const DURABLE_CHILD_SCHEMA_VERSION: u16 = 1;
 pub const MAX_DURABLE_CHILD_ID_BYTES: usize = 256;
 pub const MAX_DURABLE_CHILD_STRING_BYTES: usize = 512;

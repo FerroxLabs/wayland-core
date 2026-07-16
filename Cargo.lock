@@ -10184,10 +10184,12 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
  "wcore-config",
  "wcore-memory",
+ "wcore-sandbox",
  "wcore-types",
 ]
 
@@ -10249,6 +10251,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
 ]
 
