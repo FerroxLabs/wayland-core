@@ -70,6 +70,17 @@ pub(super) fn ensure_absent_destination(path: &Path) -> Result<()> {
     }
 }
 
+pub(super) fn is_real_directory_entry(path: &Path) -> Result<bool> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if is_symlink_or_reparse(&metadata) {
+        return Err(SwarmError::WorktreeIo(format!(
+            "refused linked cleanup entry: {}",
+            path.display()
+        )));
+    }
+    Ok(metadata.is_dir())
+}
+
 fn validate_real_directory(path: &Path, metadata: &std::fs::Metadata) -> Result<()> {
     if !metadata.is_dir() || is_symlink_or_reparse(metadata) {
         return Err(SwarmError::WorktreeIo(format!(
@@ -93,4 +104,27 @@ fn is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
     }
     #[cfg(not(windows))]
     false
+}
+
+pub(super) fn make_guard_dir_private(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+pub(super) fn write_empty_private_config(path: &Path) -> std::io::Result<()> {
+    std::fs::File::create(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }

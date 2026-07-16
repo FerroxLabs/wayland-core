@@ -8,10 +8,14 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use tokio::process::Command;
-use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
+use wcore_config::shell;
+use wcore_sandbox::process_capture::{CaptureLimits, ProcessCaptureError, capture_bounded_process};
 
 use crate::worktree::WorktreeManager;
 use crate::{SwarmBrief, SwarmResult, WorkerHandle, WorkerStatus};
+
+const MAX_WORKER_STREAM_BYTES: usize = 8 * 1024 * 1024;
 
 /// Run a single worker end-to-end: create the worktree, spawn the
 /// subprocess, wait up to `brief.timeout`, capture stdout/stderr. Returns
@@ -22,21 +26,29 @@ pub(crate) async fn run_worker(
     manager: &WorktreeManager,
     worker_id: String,
     brief: &SwarmBrief,
+    cancel: CancellationToken,
 ) -> WorkerHandle {
     let branch = format!("{}/{}", brief.worker_branch_prefix, worker_id);
     let start = Instant::now();
 
     // 1. Create the worker worktree.
-    let tree_path = match manager
-        .create_worker_tree(&worker_id, &branch, &brief.base_branch)
-        .await
-    {
-        Ok(p) => p,
-        Err(e) => {
+    let create_result = {
+        let create_tree = manager.create_worker_tree(&worker_id, &branch, &brief.base_branch);
+        tokio::pin!(create_tree);
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => None,
+            result = &mut create_tree => Some(result),
+        }
+    };
+    let tree_path = match create_result {
+        None => return cancelled(worker_id, branch, start.elapsed()),
+        Some(Ok(path)) => path,
+        Some(Err(error)) => {
             return WorkerHandle::failed(
                 worker_id,
                 branch,
-                format!("worktree create: {e}"),
+                format!("worktree create: {error}"),
                 start.elapsed(),
             );
         }
@@ -57,20 +69,26 @@ pub(crate) async fn run_worker(
     };
     let args: Vec<String> = iter.cloned().collect();
 
-    // 3. Spawn the subprocess in the worker's tree.
-    let output_fut = build_worker_command(&program, &args, &tree_path, &brief.env).output();
-
-    // 4. Wait up to timeout. tokio::process::Command has kill_on_drop set
-    //    by default only when constructed via shell::shell_command_argv; we
-    //    construct directly here for the worker (the helper requires the
-    //    program to be a known shell binary in some signatures). Use
-    //    `.kill_on_drop(true)` explicitly to mirror the safety invariant.
-    let output = match timeout(brief.timeout, output_fut).await {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) => {
-            return WorkerHandle::failed(worker_id, branch, format!("spawn: {e}"), start.elapsed());
+    // 3. Capture the worker under the same platform-owned process-tree
+    // primitive used by the sandbox. Output is capped while it is read, not
+    // truncated after an unbounded allocation.
+    let command = build_worker_command(&program, &args, &tree_path, &brief.env);
+    let output = match capture_bounded_process(
+        command,
+        CaptureLimits {
+            stdout_bytes: MAX_WORKER_STREAM_BYTES,
+            stderr_bytes: MAX_WORKER_STREAM_BYTES,
+            timeout: brief.timeout,
+        },
+        Some(&cancel),
+    )
+    .await
+    {
+        Ok(output) => output,
+        Err(ProcessCaptureError::Cancelled) => {
+            return cancelled(worker_id, branch, start.elapsed());
         }
-        Err(_) => {
+        Err(ProcessCaptureError::Timeout(_)) => {
             return WorkerHandle {
                 worker_id,
                 branch,
@@ -79,6 +97,22 @@ pub(crate) async fn run_worker(
                 stderr: String::new(),
                 duration: start.elapsed(),
             };
+        }
+        Err(ProcessCaptureError::OutputLimit { stream, limit }) => {
+            return WorkerHandle::failed(
+                worker_id,
+                branch,
+                format!("output limit exceeded: {stream} exceeded the {limit}-byte limit"),
+                start.elapsed(),
+            );
+        }
+        Err(error) => {
+            return WorkerHandle::failed(
+                worker_id,
+                branch,
+                format!("worker process: {error}"),
+                start.elapsed(),
+            );
         }
     };
 
@@ -110,12 +144,24 @@ fn build_worker_command(
     cwd: &Path,
     env: &[(String, String)],
 ) -> Command {
-    let mut cmd = Command::new(program);
-    cmd.args(args).current_dir(cwd).kill_on_drop(true);
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut cmd = shell::shell_command_argv(program, &args);
+    cmd.current_dir(cwd);
     for (k, v) in env {
         cmd.env(k, v);
     }
     cmd
+}
+
+fn cancelled(worker_id: String, branch: String, duration: Duration) -> WorkerHandle {
+    WorkerHandle {
+        worker_id,
+        branch,
+        status: WorkerStatus::Cancelled,
+        stdout: String::new(),
+        stderr: String::new(),
+        duration,
+    }
 }
 
 impl WorkerHandle {

@@ -13,6 +13,7 @@ rust-version.workspace = true
 
 [dependencies]
 wcore-config        = { workspace = true }
+wcore-sandbox       = { workspace = true }
 wcore-types         = { workspace = true }
 # M5.7 — SwarmMemoryBridge wires Swarm dispatch into wcore-memory's
 # episodic / procedural / semantic partitions for cross-session memory
@@ -23,13 +24,14 @@ serde               = { workspace = true }
 serde_json          = { workspace = true }
 thiserror           = { workspace = true }
 tokio               = { workspace = true }
+tokio-util          = { workspace = true }
 futures             = { workspace = true }
 tracing             = { workspace = true }
 uuid                = { workspace = true }
 humantime-serde     = { workspace = true }
 # T3-2 — sqlite-backed Auto-Mode audit trail (lifted from Forge AuditTrail).
 rusqlite            = { workspace = true }
+tempfile             = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 tokio    = { workspace = true }

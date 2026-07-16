@@ -78,6 +78,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 use crate::worktree::WorktreeManager;
 
@@ -180,13 +181,36 @@ impl Swarm {
     /// Refuses with [`SwarmError::DirtyCheckout`] if `repo_root` has any
     /// uncommitted changes (collision detection).
     pub async fn dispatch(&self, brief: SwarmBrief, count: usize) -> Result<Vec<WorkerHandle>> {
-        self.manager.assert_clean().await?;
+        self.dispatch_with_cancel(brief, count, CancellationToken::new())
+            .await
+    }
+
+    /// Dispatch workers under a cooperative cancellation token.
+    ///
+    /// Cancellation terminates each worker's owned process group or Windows
+    /// Job and returns [`WorkerStatus::Cancelled`] for unfinished workers.
+    pub async fn dispatch_with_cancel(
+        &self,
+        brief: SwarmBrief,
+        count: usize,
+        cancel: CancellationToken,
+    ) -> Result<Vec<WorkerHandle>> {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(Vec::new()),
+            result = self.manager.assert_clean() => result?,
+        }
         let mut futs = Vec::with_capacity(count);
         for i in 0..count {
             let worker_id = format!("{}-{}", uuid::Uuid::new_v4().simple(), i);
             let manager_ref = &self.manager;
             let brief_ref = &brief;
-            futs.push(dispatch::run_worker(manager_ref, worker_id, brief_ref));
+            futs.push(dispatch::run_worker(
+                manager_ref,
+                worker_id,
+                brief_ref,
+                cancel.clone(),
+            ));
         }
         // Concurrent poll of all worker futures via futures::join_all.
         // This is true parallelism for the await-points inside each
@@ -206,7 +230,13 @@ impl Swarm {
     /// Remove every worker worktree under `.swarm-worktrees/` via
     /// `git worktree remove --force`. Idempotent — safe to call twice.
     pub async fn cleanup(&self) -> Result<()> {
-        self.manager.cleanup_all().await?;
+        self.cleanup_with_cancel(CancellationToken::new()).await
+    }
+
+    /// Run bounded cleanup, aborting the active Git subprocess if cancelled.
+    /// Incomplete cleanup returns every residual path observed before return.
+    pub async fn cleanup_with_cancel(&self, cancel: CancellationToken) -> Result<()> {
+        self.manager.cleanup_all(&cancel).await?;
         Ok(())
     }
 
