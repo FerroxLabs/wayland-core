@@ -28,7 +28,7 @@ use wcore_agent::output::terminal::TerminalSink;
 use wcore_agent::session;
 use wcore_agent::slash::{Dispatcher as SlashDispatcher, SlashError, SlashOutcome};
 use wcore_config::config::{self, CliArgs, Config, McpServerConfig, TransportType};
-use wcore_mcp::manager::McpManager;
+use wcore_mcp::manager::{McpManager, McpServerHealth};
 use wcore_mcp::tool_proxy::register_single_server_tools;
 use wcore_protocol::commands::{ProtocolCommand, ResumeTurnAction};
 use wcore_protocol::events::{
@@ -2545,20 +2545,32 @@ fn print_skills_paths() {
 /// harness. Server iteration order is sorted by name so the event
 /// sequence is deterministic for fixture-based tests and golden
 /// streams.
-fn mcp_ready_events_for(mgr: &McpManager) -> Vec<ProtocolEvent> {
+fn registered_mcp_tool_names(
+    registry: &wcore_tools::registry::ToolRegistry,
+    server_name: &str,
+) -> Vec<String> {
+    let mut names: Vec<String> = registry
+        .to_tool_defs()
+        .into_iter()
+        .filter(|tool| tool.server.as_deref() == Some(server_name))
+        .map(|tool| tool.name)
+        .collect();
+    names.sort();
+    names
+}
+
+fn mcp_ready_events_for(
+    mgr: &McpManager,
+    registry: &wcore_tools::registry::ToolRegistry,
+) -> Vec<ProtocolEvent> {
     let mut per_server: HashMap<String, Vec<String>> = HashMap::new();
-    // Seed the map with every connected server so tool-less servers
-    // still produce an empty-tools `McpReady`, matching the dynamic
-    // `AddMcpServer` path (which always emits one event per
-    // successfully-connected server regardless of tool count).
-    for name in mgr.server_names() {
-        per_server.entry(name).or_default();
-    }
-    for (server_name, tool) in mgr.all_tools() {
-        per_server
-            .entry(server_name.to_string())
-            .or_default()
-            .push(tool.name.clone());
+    // Include every connected server so tool-less servers still produce an
+    // empty-tools `McpReady`, matching the dynamic AddMcpServer path.
+    for server_name in mgr.server_names() {
+        per_server.insert(
+            server_name.clone(),
+            registered_mcp_tool_names(registry, &server_name),
+        );
     }
     let mut names: Vec<String> = per_server.keys().cloned().collect();
     names.sort();
@@ -2577,26 +2589,30 @@ fn mcp_ready_events_for(mgr: &McpManager) -> Vec<ProtocolEvent> {
 /// server's tools never appeared (parity with the dynamic `AddMcpServer`
 /// path's failure emit). Pure and name-sorted for deterministic tests.
 fn mcp_failed_events_for(mgr: &McpManager) -> Vec<ProtocolEvent> {
-    use wcore_mcp::manager::McpServerHealth;
     let mut entries: Vec<(&String, &McpServerHealth)> = mgr.health().iter().collect();
     entries.sort_by_key(|(name, _)| name.as_str());
     entries
         .into_iter()
         .filter_map(|(name, health)| {
-            let reason = match health {
-                McpServerHealth::Failed { reason } => reason.clone(),
-                McpServerHealth::TimedOut { after } => {
-                    format!("connect timed out after {}s", after.as_secs())
-                }
-                McpServerHealth::Skipped { reason } => reason.clone(),
-                McpServerHealth::Ready { .. } => return None,
-            };
+            let reason = mcp_server_failure_reason(health)?;
             Some(ProtocolEvent::McpFailed {
                 name: name.clone(),
                 reason,
             })
         })
         .collect()
+}
+
+fn mcp_server_failure_reason(health: &McpServerHealth) -> Option<String> {
+    match health {
+        McpServerHealth::Failed { reason } | McpServerHealth::Skipped { reason } => {
+            Some(reason.clone())
+        }
+        McpServerHealth::TimedOut { after } => {
+            Some(format!("connect timed out after {}s", after.as_secs()))
+        }
+        McpServerHealth::Ready { .. } => None,
+    }
 }
 
 /// wayland#551 — integrate a background-connected config-MCP manager into
@@ -2645,11 +2661,13 @@ fn integrate_deferred_mcp(
     dynamic_managers: &mut Vec<Arc<McpManager>>,
 ) -> bool {
     let builtin_names = engine.tool_names();
+    let defer_cold = engine.defer_cold_config();
     let Some(reg) = engine.registry_mut() else {
         return false;
     };
     wcore_mcp::tool_proxy::register_mcp_tools(reg, &mgr, &builtin_names, resolved_servers);
-    for event in mcp_ready_events_for(&mgr) {
+    reg.refresh_tool_search_catalog(&defer_cold);
+    for event in mcp_ready_events_for(&mgr, reg) {
         let _ = writer.emit(&event);
     }
     for event in mcp_failed_events_for(&mgr) {
@@ -2657,6 +2675,56 @@ fn integrate_deferred_mcp(
     }
     dynamic_managers.push(mgr);
     true
+}
+
+type DeferredMcpReceiver = tokio::sync::oneshot::Receiver<(
+    Result<McpManager, wcore_mcp::transport::McpError>,
+    HashMap<String, McpServerConfig>,
+)>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionCommandReadiness {
+    Immediate,
+    SettleDeferredMcp,
+}
+
+/// Classify the between-turn readiness boundary for a protocol command.
+/// Setup and control commands remain immediate; only a provider-bound Message
+/// must wait for the already-running configured-MCP handshake.
+fn session_command_readiness(command: &ProtocolCommand) -> SessionCommandReadiness {
+    if matches!(command, ProtocolCommand::Message { .. }) {
+        SessionCommandReadiness::SettleDeferredMcp
+    } else {
+        SessionCommandReadiness::Immediate
+    }
+}
+
+/// Settle the configured-MCP connect task at the actual provider-turn
+/// boundary. Hosts may send setup commands (`InitHistory`, `SetMode`, etc.)
+/// before their first `Message`; those commands must not let the message race
+/// ahead of the already-running MCP handshake.
+async fn settle_deferred_mcp_before_message(
+    deferred_mcp_rx: &mut Option<DeferredMcpReceiver>,
+    pending_deferred_mcp: &mut Option<(Arc<McpManager>, HashMap<String, McpServerConfig>)>,
+    engine: &mut wcore_agent::engine::AgentEngine,
+    writer: &ProtocolWriter,
+    output: &Arc<dyn OutputSink>,
+    dynamic_managers: &mut Vec<Arc<McpManager>>,
+) -> bool {
+    if let Some(rx) = deferred_mcp_rx.take()
+        && let Ok((outcome, resolved)) = rx.await
+    {
+        *pending_deferred_mcp =
+            note_deferred_mcp_connect(outcome, resolved, engine, writer, output, dynamic_managers);
+    }
+
+    if let Some((mgr, resolved)) = pending_deferred_mcp.take()
+        && !integrate_deferred_mcp(engine, mgr.clone(), &resolved, writer, dynamic_managers)
+    {
+        *pending_deferred_mcp = Some((mgr, resolved));
+    }
+
+    pending_deferred_mcp.is_none()
 }
 
 fn to_mcp_server_config(
@@ -3698,7 +3766,7 @@ async fn run_json_stream_mode(
     // and showed up most visibly on Gemini because Gemini hosts rely on
     // the boot path more heavily.
     for mgr in &result.mcp_managers {
-        for event in mcp_ready_events_for(mgr) {
+        for event in mcp_ready_events_for(mgr, &engine.tools()) {
             let _ = writer.emit(&event);
         }
     }
@@ -3849,14 +3917,29 @@ async fn run_json_stream_mode(
                 .await
                 {
                     Ok(mgr) => {
-                        let tool_names: Vec<String> = mgr
-                            .all_tools()
-                            .iter()
-                            .map(|(_, t)| t.name.clone())
-                            .collect();
-                        eprintln!("[mcp] Connected to '{name}': {} tools", tool_names.len());
+                        let failure_reason = match mgr.health().get(&name) {
+                            Some(health) => mcp_server_failure_reason(health),
+                            None => {
+                                Some("connect outcome missing from MCP health report".to_string())
+                            }
+                        };
+                        if let Some(reason) = failure_reason {
+                            eprintln!("[mcp] connect failed for '{name}': {reason}");
+                            output.emit_error(
+                                &format!("AddMcpServer '{name}' failed: {reason}"),
+                                false,
+                            );
+                            let _ = writer.emit(&ProtocolEvent::McpFailed {
+                                name: name.clone(),
+                                reason,
+                            });
+                            continue;
+                        }
+                        let discovered_tool_count = mgr.all_tools().len();
+                        eprintln!("[mcp] Connected to '{name}': {discovered_tool_count} tools");
                         let mgr_arc = Arc::new(mgr);
                         let builtin_names = engine.tool_names();
+                        let defer_cold = engine.defer_cold_config();
                         // Wave OR: `registry_mut` returns `Option` because
                         // the registry is now Arc-shared. At this CLI boot
                         // site the engine is not running so the refcount
@@ -3864,13 +3947,16 @@ async fn run_json_stream_mode(
                         // (not panic) keeps the dynamic-MCP add-path
                         // resilient if a future change leaks a clone.
                         match engine.registry_mut() {
-                            Some(reg) => register_single_server_tools(
-                                reg,
-                                &mgr_arc,
-                                &name,
-                                &builtin_names,
-                                config.deferred.unwrap_or(true),
-                            ),
+                            Some(reg) => {
+                                register_single_server_tools(
+                                    reg,
+                                    &mgr_arc,
+                                    &name,
+                                    &builtin_names,
+                                    config.deferred.unwrap_or(true),
+                                    &defer_cold,
+                                );
+                            }
                             None => {
                                 eprintln!(
                                     "[mcp] cannot register tools for '{name}': registry is currently borrowed"
@@ -3884,6 +3970,7 @@ async fn run_json_stream_mode(
                                 continue;
                             }
                         }
+                        let tool_names = registered_mcp_tool_names(&engine.tools(), &name);
                         dynamic_managers.push(mgr_arc);
                         let _ = writer.emit(&ProtocolEvent::McpReady {
                             name,
@@ -4000,6 +4087,32 @@ async fn run_json_stream_mode(
                 }
             }
         };
+
+        if session_command_readiness(&cmd) == SessionCommandReadiness::SettleDeferredMcp {
+            // Configured MCP is connected after `ready` so desktop boot is
+            // never gated by a slow server. The first actual provider turn
+            // is the stronger boundary: await the already-running,
+            // per-server-bounded handshake here even when setup commands
+            // caused the pre-message loop to exit earlier.
+            let ready = settle_deferred_mcp_before_message(
+                &mut deferred_mcp_rx,
+                &mut pending_deferred_mcp,
+                &mut engine,
+                &writer,
+                &output,
+                &mut dynamic_managers,
+            )
+            .await;
+            if !ready {
+                // A per-turn registry reader has not released its Arc yet.
+                // Keep the exact Message parked and retry after yielding;
+                // executing it now would give the provider an incomplete
+                // tool manifest for the whole turn.
+                pending_cmd = Some(cmd);
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                continue;
+            }
+        }
 
         match cmd {
             ProtocolCommand::Message {
@@ -4704,6 +4817,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use serde_json::{Value, json};
+    use std::time::Duration;
     use wcore_mcp::manager::McpManager;
     use wcore_types::execution_policy::{BaselineExecutionPolicy, PolicySource};
 
@@ -5573,7 +5687,7 @@ mod tests {
     /// health, breaking the MCP-server status UI for that path.
     #[test]
     fn test_mcp_ready_events_for_emits_one_per_server_with_tools() {
-        let mgr = McpManager::new_for_test_with_tools(vec![
+        let mgr = Arc::new(McpManager::new_for_test_with_tools(vec![
             (
                 "fs",
                 false,
@@ -5586,9 +5700,11 @@ mod tests {
                 Box::new(NoopTransport) as Box<dyn McpTransport>,
                 vec![tool("grep")],
             ),
-        ]);
+        ]));
+        let mut registry = wcore_tools::registry::ToolRegistry::new();
+        wcore_mcp::tool_proxy::register_mcp_tools(&mut registry, &mgr, &[], &HashMap::new());
 
-        let events = mcp_ready_events_for(&mgr);
+        let events = mcp_ready_events_for(&mgr, &registry);
         assert_eq!(events.len(), 2, "expected one McpReady per server");
 
         // Helper sorts servers by name, so order is deterministic: fs, search.
@@ -5615,7 +5731,8 @@ mod tests {
     #[test]
     fn test_mcp_ready_events_for_empty_manager_emits_nothing() {
         let mgr = McpManager::new_for_test_with_tools(vec![]);
-        let events = mcp_ready_events_for(&mgr);
+        let registry = wcore_tools::registry::ToolRegistry::new();
+        let events = mcp_ready_events_for(&mgr, &registry);
         assert!(events.is_empty(), "no MCP servers => no McpReady events");
     }
 
@@ -5633,7 +5750,8 @@ mod tests {
             Box::new(NoopTransport) as Box<dyn McpTransport>,
             vec![],
         )]);
-        let events = mcp_ready_events_for(&mgr);
+        let registry = wcore_tools::registry::ToolRegistry::new();
+        let events = mcp_ready_events_for(&mgr, &registry);
         assert_eq!(events.len(), 1, "tool-less servers must still emit");
         match &events[0] {
             ProtocolEvent::McpReady { name, tools } => {
@@ -5684,17 +5802,24 @@ mod tests {
         }
     }
 
-    /// wayland#551: deferred-MCP integration must register the manager's
-    /// tools into a LIVE engine (post-boot), emit per-server events, and
-    /// park the manager alive in `dynamic_managers`. Pins the integration
-    /// half of the deferral wiring — removing `register_mcp_tools` from
-    /// `integrate_deferred_mcp` fails this.
+    /// wayland#551/#562: deferred-MCP integration must register the manager's
+    /// tools into a LIVE engine (post-boot), refresh the real registered
+    /// ToolSearch catalog, emit per-server events, and park the manager alive
+    /// in `dynamic_managers`. Merely adding the proxy to the registry is not
+    /// enough: ToolSearch snapshots the catalog during bootstrap, so a late
+    /// proxy is otherwise callable by name but undiscoverable to the model.
     #[tokio::test]
     async fn integrate_deferred_mcp_registers_tools_into_live_engine() {
-        let (mut engine, _sink) = wcore_agent::bootstrap::AgentBootstrap::build_for_test(
-            wcore_config::config::Config::default(),
-            vec![],
-        );
+        let config = wcore_config::config::Config::default();
+        let defer_cold = config.builtin_tools.defer_cold.clone();
+        let (mut engine, _sink) =
+            wcore_agent::bootstrap::AgentBootstrap::build_for_test(config, vec![]);
+        // `build_for_test` deliberately omits ToolSearch; seed it through the
+        // same live-registry helper production bootstrap uses.
+        engine
+            .registry_mut()
+            .expect("idle fixture registry must be mutable")
+            .refresh_tool_search_catalog(&defer_cold);
         let before = engine.tool_names().len();
         let mgr = Arc::new(McpManager::new_for_test_with_tools(vec![(
             "quick",
@@ -5704,14 +5829,22 @@ mod tests {
         )]));
         let writer = ProtocolWriter::new();
         let mut dynamic_managers = Vec::new();
+        // Mark the server itself non-deferred to prove the refresh reapplies
+        // the global cold policy before ToolSearch snapshots the live tools.
+        let resolved = HashMap::from([(
+            "quick".to_string(),
+            to_mcp_server_config(
+                "stdio",
+                Some("unused-test-command".to_string()),
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("valid test server config"),
+        )]);
         assert!(
-            integrate_deferred_mcp(
-                &mut engine,
-                mgr,
-                &HashMap::new(),
-                &writer,
-                &mut dynamic_managers
-            ),
+            integrate_deferred_mcp(&mut engine, mgr, &resolved, &writer, &mut dynamic_managers),
             "integration must succeed on an idle engine"
         );
         assert!(
@@ -5720,7 +5853,277 @@ mod tests {
             "deferred server's tools must be registered; got {:?}",
             engine.tool_names()
         );
+        let registry = engine.tools();
+        let search = registry
+            .get("ToolSearch")
+            .expect("bootstrap must register the real ToolSearch tool");
+        let result = search.execute(json!({"query": "quick_echo"})).await;
+        assert!(
+            result.content.contains("\"name\": \"quick_echo\"")
+                && result.content.contains("\"parameters\""),
+            "late MCP tool must be discoverable through the registered ToolSearch; got {}",
+            result.content
+        );
+        drop(registry);
+
+        // A second live refresh replaces rather than duplicates ToolSearch,
+        // and the catalog snapshot must never index ToolSearch itself.
+        engine
+            .registry_mut()
+            .expect("registry must be mutable after dropping the read handle")
+            .refresh_tool_search_catalog(&defer_cold);
+        assert_eq!(
+            engine
+                .tool_names()
+                .iter()
+                .filter(|name| name.as_str() == "ToolSearch")
+                .count(),
+            1,
+            "repeated refresh must leave exactly one registered ToolSearch"
+        );
+        let registry = engine.tools();
+        let self_search = registry
+            .get("ToolSearch")
+            .expect("ToolSearch must survive repeated refresh")
+            .execute(json!({"query": "ToolSearch"}))
+            .await;
+        assert!(
+            !self_search.content.contains("\"name\": \"ToolSearch\""),
+            "ToolSearch must not index or hydrate itself; got {}",
+            self_search.content
+        );
         assert_eq!(dynamic_managers.len(), 1, "manager must be kept alive");
+    }
+
+    /// #562: `ToolSearch` is a reserved built-in name before boot MCP proxy
+    /// delivery and is refreshed after live additions. A server exporting that
+    /// literal name must remain callable under the deterministic MCP namespace,
+    /// while host health reports the same display name the catalog exposes.
+    #[tokio::test]
+    async fn literal_tool_search_mcp_is_namespaced_preserved_and_health_aligned() {
+        let config = wcore_config::config::Config::default();
+        let defer_cold = config.builtin_tools.defer_cold.clone();
+        let (mut engine, _sink) =
+            wcore_agent::bootstrap::AgentBootstrap::build_for_test(config, vec![]);
+        engine
+            .registry_mut()
+            .expect("idle fixture registry must be mutable")
+            .refresh_tool_search_catalog(&defer_cold);
+
+        let manager = Arc::new(McpManager::new_for_test_with_tools(vec![(
+            "collision",
+            false,
+            Box::new(NoopTransport) as Box<dyn McpTransport>,
+            vec![tool("ToolSearch")],
+        )]));
+        let resolved = HashMap::from([(
+            "collision".to_string(),
+            to_mcp_server_config(
+                "stdio",
+                Some("unused-test-command".to_string()),
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("valid test server config"),
+        )]);
+        let writer = ProtocolWriter::new();
+        let mut dynamic_managers = Vec::new();
+
+        assert!(integrate_deferred_mcp(
+            &mut engine,
+            manager.clone(),
+            &resolved,
+            &writer,
+            &mut dynamic_managers,
+        ));
+
+        let registry = engine.tools();
+        let names = registry.tool_names();
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "ToolSearch")
+                .count(),
+            1,
+            "the built-in ToolSearch must remain singular"
+        );
+        assert!(
+            names
+                .iter()
+                .any(|name| name == "mcp__collision__ToolSearch"),
+            "the colliding MCP proxy must be preserved under its namespace: {names:?}"
+        );
+        let catalog_result = registry
+            .get("ToolSearch")
+            .expect("built-in ToolSearch must remain installed")
+            .execute(json!({"query": "mcp__collision__ToolSearch"}))
+            .await;
+        assert!(
+            catalog_result
+                .content
+                .contains("\"name\": \"mcp__collision__ToolSearch\""),
+            "built-in catalog must expose the preserved proxy: {}",
+            catalog_result.content
+        );
+
+        let events = mcp_ready_events_for(&manager, &registry);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ProtocolEvent::McpReady { name, tools } => {
+                assert_eq!(name, "collision");
+                assert_eq!(tools, &["mcp__collision__ToolSearch".to_string()]);
+            }
+            other => panic!("expected McpReady, got {other:?}"),
+        }
+        assert_eq!(dynamic_managers.len(), 1, "manager must remain alive");
+    }
+
+    /// #562 structural ordering regression: execute the same readiness seam
+    /// used by the session loop across `InitHistory -> Message`. Setup remains
+    /// immediate; the delayed manager becomes provider-visible exactly at the
+    /// Message boundary.
+    #[tokio::test]
+    async fn session_readiness_preserves_init_history_then_settles_mcp_for_message() {
+        let config = wcore_config::config::Config::default();
+        let defer_cold = config.builtin_tools.defer_cold.clone();
+        let (mut engine, _sink) =
+            wcore_agent::bootstrap::AgentBootstrap::build_for_test(config, vec![]);
+        engine
+            .registry_mut()
+            .expect("idle fixture registry must be mutable")
+            .refresh_tool_search_catalog(&defer_cold);
+
+        let resolved = HashMap::from([(
+            "delayed".to_string(),
+            to_mcp_server_config(
+                "stdio",
+                Some("unused-test-command".to_string()),
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("valid test server config"),
+        )]);
+        let manager = McpManager::new_for_test_with_tools(vec![(
+            "delayed",
+            false,
+            Box::new(NoopTransport) as Box<dyn McpTransport>,
+            vec![tool("late_after_init")],
+        )]);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            let _ = tx.send((Ok(manager), resolved));
+        });
+
+        let writer = ProtocolWriter::new();
+        let output: Arc<dyn OutputSink> = Arc::new(wcore_agent::output::null_sink::NullSink);
+        let mut deferred_mcp_rx = Some(rx);
+        let mut pending_deferred_mcp = None;
+        let mut dynamic_managers = Vec::new();
+
+        let commands = [
+            ProtocolCommand::InitHistory {
+                text: "desktop init-history sentinel".to_string(),
+            },
+            ProtocolCommand::Message {
+                msg_id: "first-message".to_string(),
+                content: "use the delayed tool".to_string(),
+                files: Vec::new(),
+            },
+        ];
+        let mut readiness_trace = Vec::new();
+        let mut init_history_applied = false;
+
+        for command in commands {
+            let readiness = session_command_readiness(&command);
+            readiness_trace.push(readiness);
+            if readiness == SessionCommandReadiness::SettleDeferredMcp {
+                let ready = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    settle_deferred_mcp_before_message(
+                        &mut deferred_mcp_rx,
+                        &mut pending_deferred_mcp,
+                        &mut engine,
+                        &writer,
+                        &output,
+                        &mut dynamic_managers,
+                    ),
+                )
+                .await
+                .expect("the message readiness boundary must remain bounded");
+                assert!(ready, "an idle registry must be ready before Message");
+            }
+
+            match command {
+                ProtocolCommand::InitHistory { text } => {
+                    engine.inject_history(text);
+                    init_history_applied = true;
+                    assert!(
+                        deferred_mcp_rx.is_some(),
+                        "setup commands must not wait for configured MCP"
+                    );
+                    assert!(
+                        !engine
+                            .tools()
+                            .to_tool_defs()
+                            .iter()
+                            .any(|def| def.name == "late_after_init"),
+                        "delayed tool must remain absent before the Message boundary"
+                    );
+                }
+                ProtocolCommand::Message { .. } => {
+                    assert!(
+                        init_history_applied,
+                        "InitHistory must execute before the immediate Message"
+                    );
+                    assert!(
+                        engine
+                            .tools()
+                            .to_tool_defs()
+                            .iter()
+                            .any(|def| def.name == "late_after_init"),
+                        "provider-visible registry must be ready before Message processing"
+                    );
+                }
+                _ => unreachable!("fixture contains only InitHistory and Message"),
+            }
+        }
+
+        assert_eq!(
+            readiness_trace,
+            [
+                SessionCommandReadiness::Immediate,
+                SessionCommandReadiness::SettleDeferredMcp,
+            ],
+            "only Message may cross the configured-MCP readiness boundary"
+        );
+
+        assert!(deferred_mcp_rx.is_none());
+        assert!(pending_deferred_mcp.is_none());
+        assert_eq!(dynamic_managers.len(), 1, "manager must be kept alive");
+        assert!(
+            engine
+                .tools()
+                .to_tool_defs()
+                .iter()
+                .any(|def| def.name == "late_after_init"),
+            "provider-visible tool registry must include the delayed MCP tool"
+        );
+        let registry = engine.tools();
+        let result = registry
+            .get("ToolSearch")
+            .expect("ToolSearch must remain registered")
+            .execute(json!({"query": "late_after_init"}))
+            .await;
+        assert!(
+            result.content.contains("\"name\": \"late_after_init\""),
+            "the delayed tool must be discoverable before the provider turn; got {}",
+            result.content
+        );
     }
 
     /// wayland#551: while the registry Arc is borrowed (as during a turn),
@@ -5757,6 +6160,64 @@ mod tests {
             "no tools may be registered on a declined integration"
         );
         drop(hold);
+    }
+
+    /// F17 review regression: the Message boundary must report that it is not
+    /// ready while a registry reader is retained. The session loop uses this
+    /// result to park and retry the exact command instead of running a turn
+    /// with a partial tool manifest.
+    #[tokio::test]
+    async fn message_readiness_fails_closed_while_registry_is_borrowed() {
+        let (mut engine, _sink) = wcore_agent::bootstrap::AgentBootstrap::build_for_test(
+            wcore_config::config::Config::default(),
+            vec![],
+        );
+        let hold = engine.tools();
+        let manager = Arc::new(McpManager::new_for_test_with_tools(vec![(
+            "held",
+            false,
+            Box::new(NoopTransport) as Box<dyn McpTransport>,
+            vec![tool("held_echo")],
+        )]));
+        let mut deferred_mcp_rx = None;
+        let mut pending_deferred_mcp = Some((manager, HashMap::new()));
+        let writer = ProtocolWriter::new();
+        let output: Arc<dyn OutputSink> = Arc::new(wcore_agent::output::null_sink::NullSink);
+        let mut dynamic_managers = Vec::new();
+
+        assert!(
+            !settle_deferred_mcp_before_message(
+                &mut deferred_mcp_rx,
+                &mut pending_deferred_mcp,
+                &mut engine,
+                &writer,
+                &output,
+                &mut dynamic_managers,
+            )
+            .await,
+            "a retained registry reader must block the provider boundary"
+        );
+        assert!(
+            pending_deferred_mcp.is_some(),
+            "integration must stay parked"
+        );
+        assert!(dynamic_managers.is_empty());
+
+        drop(hold);
+        assert!(
+            settle_deferred_mcp_before_message(
+                &mut deferred_mcp_rx,
+                &mut pending_deferred_mcp,
+                &mut engine,
+                &writer,
+                &output,
+                &mut dynamic_managers,
+            )
+            .await,
+            "the parked manager must integrate after the reader is released"
+        );
+        assert!(pending_deferred_mcp.is_none());
+        assert_eq!(dynamic_managers.len(), 1);
     }
 
     /// Rank 47 regression: `--no-memory` must parse and flip

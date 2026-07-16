@@ -170,6 +170,26 @@ impl ToolRegistry {
         self.tools.push(tool);
     }
 
+    /// Rebuild the registered `ToolSearch` tool from the live registry.
+    ///
+    /// `ToolSearch` deliberately owns a snapshot so searches do not hold a
+    /// registry lock. Any tool added after bootstrap (for example a deferred
+    /// config MCP or `/mcp add`) therefore has to replace that snapshot before
+    /// it can be discovered. Reapply the configured cold split so a newly
+    /// added non-deferred proxy is still searchable when global cold deferral
+    /// is enabled.
+    pub fn refresh_tool_search_catalog(
+        &mut self,
+        defer_cold: &wcore_config::tools::DeferColdConfig,
+    ) {
+        let mut snapshot = self.to_tool_defs();
+        snapshot.retain(|def| def.name != "ToolSearch");
+        if defer_cold.enabled {
+            apply_cold_deferral(&mut snapshot, &defer_cold.hot_allowlist);
+        }
+        self.replace_by_name(Box::new(crate::tool_search::ToolSearchTool::new(snapshot)));
+    }
+
     /// Find a tool by name
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools

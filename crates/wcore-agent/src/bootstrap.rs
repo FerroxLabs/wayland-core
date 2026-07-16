@@ -1257,6 +1257,12 @@ impl AgentBootstrap {
             )));
         }
 
+        // Reserve ToolSearch in the live registry before plugin and MCP tool
+        // delivery. The final refresh below replaces this early snapshot after
+        // every boot-time tool is present. Seeding it here makes collision
+        // handling deterministic for any extension exporting `ToolSearch` and
+        // prevents the final replacement from silently deleting that tool.
+        registry.refresh_tool_search_catalog(&self.config.builtin_tools.defer_cold);
         let builtin_names: Vec<String> = registry.tool_names();
 
         // v0.6.4 Task 1.7 — deliver every captured plugin capability.
@@ -2405,20 +2411,10 @@ impl AgentBootstrap {
             self.config.advertised_capabilities.online_evolution = true;
         }
 
-        let mut tool_defs_snapshot = registry.to_tool_defs();
-        // Layer D1 (token-opt): mark cold tools deferred in the snapshot so
-        // ToolSearch can find and hydrate them — it only searches defs with
-        // `deferred == true`. Same pure config-driven split the engine
-        // applies to every outbound tools[] array.
-        if self.config.builtin_tools.defer_cold.enabled {
-            wcore_tools::registry::apply_cold_deferral(
-                &mut tool_defs_snapshot,
-                &self.config.builtin_tools.defer_cold.hot_allowlist,
-            );
-        }
-        registry.register(Box::new(wcore_tools::tool_search::ToolSearchTool::new(
-            tool_defs_snapshot,
-        )));
+        // Layer D1 (token-opt): seed ToolSearch from the same live-registry
+        // refresh used by post-boot MCP registration. The helper reapplies the
+        // configured cold split before replacing the catalog snapshot.
+        registry.refresh_tool_search_catalog(&self.config.builtin_tools.defer_cold);
 
         // M3.6.2: memory_api + decay_handle are constructed earlier in this
         // function (before skill_refs) so the SkillPrioritizer can use them.

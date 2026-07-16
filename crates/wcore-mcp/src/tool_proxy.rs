@@ -259,6 +259,7 @@ pub fn register_single_server_tools(
     server_name: &str,
     builtin_names: &[String],
     deferred: bool,
+    defer_cold: &wcore_config::tools::DeferColdConfig,
 ) {
     let all_tools = manager.all_tools();
     let server_tools: Vec<_> = all_tools
@@ -297,6 +298,11 @@ pub fn register_single_server_tools(
 
         registry.register(Box::new(proxy));
     }
+
+    // Live single-server adds happen after bootstrap's ToolSearch snapshot.
+    // Refresh in this shared registration seam so both JSON AddMcpServer and
+    // the TUI `/mcp add` path cannot advertise tools that remain undiscoverable.
+    registry.refresh_tool_search_catalog(defer_cold);
 }
 
 // ---------------------------------------------------------------------------
@@ -738,6 +744,43 @@ mod tests {
         async fn close(&self) -> Result<(), McpError> {
             Ok(())
         }
+    }
+
+    /// #562: the shared one-server registration seam used by JSON
+    /// `AddMcpServer` and TUI `/mcp add` must refresh the already-registered
+    /// ToolSearch catalog. The proxy is explicitly non-deferred, so finding it
+    /// also proves the global cold split is reapplied before snapshotting.
+    #[tokio::test]
+    async fn single_server_live_add_refreshes_real_tool_search_catalog() {
+        use crate::protocol::McpToolDef;
+
+        let manager = Arc::new(McpManager::new_for_test_with_tools(vec![(
+            "dynamic",
+            false,
+            Box::new(StubTransport),
+            vec![McpToolDef {
+                name: "late_dynamic".into(),
+                description: Some("late dynamic MCP fixture".into()),
+                input_schema: json!({"type": "object"}),
+            }],
+        )]));
+        let defer_cold = wcore_config::tools::DeferColdConfig::default();
+        let mut registry = wcore_tools::registry::ToolRegistry::new();
+        registry.refresh_tool_search_catalog(&defer_cold);
+
+        register_single_server_tools(&mut registry, &manager, "dynamic", &[], false, &defer_cold);
+
+        let result = registry
+            .get("ToolSearch")
+            .expect("live add must retain ToolSearch")
+            .execute(json!({"query": "late_dynamic"}))
+            .await;
+        assert!(
+            result.content.contains("\"name\": \"late_dynamic\"")
+                && result.content.contains("\"parameters\""),
+            "live-added tool must be discoverable through the real ToolSearch; got {}",
+            result.content
+        );
     }
 
     #[tokio::test]

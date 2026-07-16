@@ -2371,6 +2371,7 @@ impl TuiEngine {
         // Arc internally, so it stays alive after this scope.
         let mut guard = engine.lock().await;
         let builtin_names = guard.tool_names();
+        let defer_cold = guard.defer_cold_config();
         let message = match guard.registry_mut() {
             Some(reg) => {
                 wcore_mcp::tool_proxy::register_single_server_tools(
@@ -2379,13 +2380,15 @@ impl TuiEngine {
                     &name,
                     &builtin_names,
                     config.deferred.unwrap_or(true),
+                    &defer_cold,
                 );
-                let tool_names: Vec<String> = manager
-                    .all_tools()
-                    .iter()
-                    .filter(|(sn, _)| *sn == name.as_str())
-                    .map(|(_, t)| t.name.clone())
+                let mut tool_names: Vec<String> = reg
+                    .to_tool_defs()
+                    .into_iter()
+                    .filter(|tool| tool.server.as_deref() == Some(name.as_str()))
+                    .map(|tool| tool.name)
                     .collect();
+                tool_names.sort();
                 let tool_count = tool_names.len();
                 // Update the TUI's live mcp_status (so /doctor reflects the
                 // add) — the bridge's McpReady arm records Ready{tool_count}.

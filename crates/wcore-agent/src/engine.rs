@@ -3250,6 +3250,13 @@ impl AgentEngine {
         Arc::get_mut(&mut self.tools)
     }
 
+    /// Static cold-deferral policy used when a host refreshes ToolSearch after
+    /// registering tools post-bootstrap. Returning an owned copy lets callers
+    /// apply it while holding the registry's mutable borrow.
+    pub fn defer_cold_config(&self) -> wcore_config::tools::DeferColdConfig {
+        self.config.builtin_tools.defer_cold.clone()
+    }
+
     /// v0.9.1 W1 E (debt sweep): a cheap `Arc` clone of the tool
     /// registry, for hosts that need to invoke a tool directly
     /// (e.g. the TUI `/voice` slash dispatcher calls
