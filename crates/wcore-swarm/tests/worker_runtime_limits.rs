@@ -8,9 +8,10 @@ use wcore_config::shell;
 use wcore_swarm::{Swarm, SwarmBrief, WorkerStatus};
 
 const OUTPUT_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+const OUTPUT_EXHAUSTION_WORKERS: usize = 5;
 
 #[tokio::test]
-async fn stdout_and_stderr_floods_fail_without_retaining_oversized_buffers() {
+async fn multi_worker_output_exhaustion_fails_without_retaining_buffers() {
     for stream in ["stdout", "stderr"] {
         let tmp = tempfile::tempdir().expect("temp repo");
         init_repo(tmp.path()).await;
@@ -25,18 +26,23 @@ async fn stdout_and_stderr_floods_fail_without_retaining_oversized_buffers() {
         };
 
         let started = Instant::now();
-        let handles = swarm.dispatch(brief, 1).await.expect("dispatch flood");
-        assert!(started.elapsed() < Duration::from_secs(10));
-        let handle = handles.into_iter().next().expect("worker result");
-        let reason = match &handle.status {
-            WorkerStatus::Failed(reason) => reason,
-            status => panic!("flood worker reported {status:?}"),
-        };
-        assert!(
-            reason.contains("output limit exceeded") && reason.contains(stream),
-            "{reason}"
-        );
-        assert!(handle.stdout.is_empty() && handle.stderr.is_empty());
+        let handles = swarm
+            .dispatch(brief, OUTPUT_EXHAUSTION_WORKERS)
+            .await
+            .expect("dispatch floods");
+        assert!(started.elapsed() < Duration::from_secs(20));
+        assert_eq!(handles.len(), OUTPUT_EXHAUSTION_WORKERS);
+        for handle in handles {
+            let reason = match &handle.status {
+                WorkerStatus::Failed(reason) => reason,
+                status => panic!("flood worker reported {status:?}"),
+            };
+            assert!(
+                reason.contains("output limit exceeded") && reason.contains(stream),
+                "{reason}"
+            );
+            assert!(handle.stdout.is_empty() && handle.stderr.is_empty());
+        }
         swarm.cleanup().await.expect("cleanup flood worktree");
     }
 }

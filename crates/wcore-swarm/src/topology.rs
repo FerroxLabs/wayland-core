@@ -15,7 +15,7 @@
 //! | Topology | Max agents | Parent visibility           | Blackboard scope    |
 //! |----------|-----------:|-----------------------------|---------------------|
 //! | Spawn    |          5 | FullTranscript              | None                |
-//! | Swarm    |         20 | StatusAndArtifacts          | None                |
+//! | Swarm    |        100 | StatusAndArtifacts          | None                |
 //! | Mesh     |         50 | BlackboardTopics            | SharedTopicTree     |
 //! | Fleet    |        100 | HierarchicalSummary         | ShardedByTier       |
 
@@ -32,8 +32,8 @@ pub enum Topology {
     /// Up to 5 sub-agents with full transcript visibility. The default —
     /// matches the legacy SpawnTool behaviour.
     Spawn,
-    /// Up to 20 worktree-isolated workers. Parent sees status + final
-    /// artifacts only.
+    /// Up to 100 scheduled worktree-isolated workers, with simultaneous
+    /// execution bounded separately. Parent sees status + final artifacts.
     Swarm,
     /// Up to 50 agents sharing a blackboard. Parent sees blackboard
     /// topics (not individual transcripts).
@@ -107,7 +107,7 @@ impl Topology {
             },
             Self::Swarm => TopologyConfig {
                 topology: self,
-                max_agents: 20,
+                max_agents: crate::MAX_DISPATCH_WORKERS as u32,
                 parent_visibility: ParentVisibility::StatusAndArtifacts,
                 blackboard_scope: BlackboardScope::None,
             },
@@ -187,7 +187,7 @@ mod tests {
         assert!(matches!(spawn.blackboard_scope, BlackboardScope::None));
 
         let swarm = Topology::Swarm.default_config();
-        assert_eq!(swarm.max_agents, 20);
+        assert_eq!(swarm.max_agents, crate::MAX_DISPATCH_WORKERS as u32);
         assert!(matches!(
             swarm.parent_visibility,
             ParentVisibility::StatusAndArtifacts

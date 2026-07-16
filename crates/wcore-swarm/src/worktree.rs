@@ -91,6 +91,30 @@ impl WorktreeManager {
         &self.swarm_root
     }
 
+    /// Count retained worker worktrees without following linked entries.
+    /// Enumeration stops once `stop_after` is exceeded so an already-invalid
+    /// worktree root cannot force an unbounded admission scan.
+    pub(crate) fn retained_worker_count(&self, stop_after: usize) -> Result<usize> {
+        self.validate_swarm_root()?;
+        let mut count = 0_usize;
+        for entry in std::fs::read_dir(&self.swarm_root)? {
+            let path = entry?.path();
+            if !is_real_directory_entry(&path)? {
+                return Err(SwarmError::WorktreeIo(format!(
+                    "refused non-directory worktree entry during admission: {}",
+                    path.display()
+                )));
+            }
+            count = count.checked_add(1).ok_or_else(|| {
+                SwarmError::DispatchAdmission("retained worktree count overflowed".into())
+            })?;
+            if count > stop_after {
+                break;
+            }
+        }
+        Ok(count)
+    }
+
     /// Reject dispatch on a dirty checkout. Runs `git status --porcelain`
     /// in `repo_root` and returns [`SwarmError::DirtyCheckout`] if the
     /// output is non-empty.

@@ -8,6 +8,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SwarmError {
+    /// Refused before creating worktrees or starting worker processes because
+    /// the request would exceed the dispatch resource envelope.
+    #[error("dispatch admission refused: {0}")]
+    DispatchAdmission(String),
+
     /// Refused to dispatch because the base checkout has uncommitted changes.
     /// The string is the raw `git status --porcelain` output.
     #[error("dirty checkout — refused dispatch: {0}")]

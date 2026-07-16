@@ -30,6 +30,8 @@
 //! # Lifecycle invariants
 //!
 //! - `dispatch` REFUSES if the base repo is dirty (collision detection).
+//! - Dispatch admission caps worker processes, retained worktrees, and total
+//!   captured output before any worker is created.
 //! - Each worker gets a fresh worktree at `<repo>/.swarm-worktrees/<id>`.
 //! - `collect` waits for all workers (already-finished handles in the
 //!   v0.6 implementation; future versions may aggregate streaming output).
@@ -74,13 +76,96 @@ pub use reduce::{ReduceMode, ReduceOutput, reduce};
 pub use scorer::{RuleBasedScorer, Scorer};
 pub use topology::{BlackboardScope, ParentVisibility, Topology, TopologyConfig, TopologyError};
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::worktree::WorktreeManager;
+
+/// Maximum number of workers scheduled by one Swarm dispatch.
+/// This is also the canonical cap exposed by [`Topology::Swarm`].
+pub const MAX_DISPATCH_WORKERS: usize = 100;
+
+/// Maximum workers creating worktrees or executing processes at once. The
+/// remaining admitted workers stay as bounded futures without host processes.
+pub const MAX_CONCURRENT_WORKERS: usize = 20;
+
+/// Separate evidence quota for worktrees retained across dispatches. It is
+/// deliberately larger than one full wave so preserving a failed wave does
+/// not prevent the next frontier-capacity dispatch.
+pub const MAX_RETAINED_WORKTREES: usize = 256;
+
+/// Maximum aggregate stdout + stderr bytes retained by one dispatch,
+/// independent of worker count.
+pub const MAX_DISPATCH_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+
+const MAX_WORKER_STREAM_BYTES: usize = 8 * 1024 * 1024;
+
+type DispatchGate = tokio::sync::Mutex<()>;
+
+fn dispatch_gate_for(repo_root: &Path) -> Result<Arc<DispatchGate>> {
+    static GATES: OnceLock<Mutex<HashMap<PathBuf, Weak<DispatchGate>>>> = OnceLock::new();
+
+    let mut gates = GATES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| {
+            SwarmError::DispatchAdmission("repository dispatch registry is unavailable".into())
+        })?;
+    gates.retain(|_, gate| gate.strong_count() > 0);
+    if let Some(gate) = gates.get(repo_root).and_then(Weak::upgrade) {
+        return Ok(gate);
+    }
+
+    let gate = Arc::new(DispatchGate::new(()));
+    gates.insert(repo_root.to_path_buf(), Arc::downgrade(&gate));
+    Ok(gate)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DispatchLimits {
+    worker_stream_bytes: usize,
+}
+
+impl DispatchLimits {
+    fn admit(requested: usize, retained: usize) -> Result<Self> {
+        let occupied = retained
+            .checked_add(requested)
+            .ok_or_else(|| SwarmError::DispatchAdmission("worker count overflowed".into()))?;
+        if requested > MAX_DISPATCH_WORKERS {
+            return Err(SwarmError::DispatchAdmission(format!(
+                "requested {requested} worker(s); scheduled-worker cap is {MAX_DISPATCH_WORKERS}"
+            )));
+        }
+        if occupied > MAX_RETAINED_WORKTREES {
+            return Err(SwarmError::DispatchAdmission(format!(
+                "requested {requested} worker(s) with {retained} retained worktree(s); evidence quota is {MAX_RETAINED_WORKTREES}"
+            )));
+        }
+
+        let worker_stream_bytes = if requested == 0 {
+            MAX_WORKER_STREAM_BYTES
+        } else {
+            let streams = requested.checked_mul(2).ok_or_else(|| {
+                SwarmError::DispatchAdmission("worker stream count overflowed".into())
+            })?;
+            (MAX_DISPATCH_OUTPUT_BYTES / streams).min(MAX_WORKER_STREAM_BYTES)
+        };
+        if worker_stream_bytes == 0 {
+            return Err(SwarmError::DispatchAdmission(
+                "dispatch output budget cannot provide a bounded worker stream".into(),
+            ));
+        }
+        Ok(Self {
+            worker_stream_bytes,
+        })
+    }
+}
 
 /// Brief describing what each worker should run. Wire-friendly:
 /// `timeout` uses humantime so TOML briefs can write `timeout = "30s"`.
@@ -154,6 +239,7 @@ pub struct SwarmResult {
 pub struct Swarm {
     repo_root: PathBuf,
     manager: WorktreeManager,
+    dispatch_gate: Arc<DispatchGate>,
 }
 
 impl Swarm {
@@ -161,9 +247,12 @@ impl Swarm {
     /// `<repo_root>/.swarm-worktrees/` if it does not exist.
     pub fn new(repo_root: &Path) -> Result<Self> {
         let manager = WorktreeManager::new(repo_root)?;
+        let repo_root = manager.repo_root().to_path_buf();
+        let dispatch_gate = dispatch_gate_for(&repo_root)?;
         Ok(Self {
-            repo_root: repo_root.to_path_buf(),
+            repo_root,
             manager,
+            dispatch_gate,
         })
     }
 
@@ -179,7 +268,9 @@ impl Swarm {
     /// differ from index order — the caller should not assume).
     ///
     /// Refuses with [`SwarmError::DirtyCheckout`] if `repo_root` has any
-    /// uncommitted changes (collision detection).
+    /// uncommitted changes (collision detection), or
+    /// [`SwarmError::DispatchAdmission`] if this request would exceed the
+    /// worker/worktree/output envelope.
     pub async fn dispatch(&self, brief: SwarmBrief, count: usize) -> Result<Vec<WorkerHandle>> {
         self.dispatch_with_cancel(brief, count, CancellationToken::new())
             .await
@@ -195,6 +286,13 @@ impl Swarm {
         count: usize,
         cancel: CancellationToken,
     ) -> Result<Vec<WorkerHandle>> {
+        let _dispatch_guard = self.dispatch_gate.try_lock().map_err(|_| {
+            SwarmError::DispatchAdmission(
+                "another dispatch is already active for this repository in this process".into(),
+            )
+        })?;
+        let retained = self.manager.retained_worker_count(MAX_RETAINED_WORKTREES)?;
+        let limits = DispatchLimits::admit(count, retained)?;
         tokio::select! {
             biased;
             _ = cancel.cancelled() => return Ok(Vec::new()),
@@ -209,14 +307,17 @@ impl Swarm {
                 manager_ref,
                 worker_id,
                 brief_ref,
+                limits.worker_stream_bytes,
                 cancel.clone(),
             ));
         }
-        // Concurrent poll of all worker futures via futures::join_all.
-        // This is true parallelism for the await-points inside each
-        // worker (worktree creation, subprocess output), all driven by
-        // the current tokio runtime.
-        let handles = futures::future::join_all(futs).await;
+        // Keep all admitted workers scheduled while bounding simultaneous
+        // worktree creation and subprocess ownership. `buffer_unordered`
+        // also makes the documented completion-order result explicit.
+        let handles = futures::stream::iter(futs)
+            .buffer_unordered(MAX_CONCURRENT_WORKERS)
+            .collect()
+            .await;
         Ok(handles)
     }
 
@@ -249,5 +350,109 @@ impl Swarm {
     pub fn worker_status(&self, handle: &WorkerHandle) -> Result<Option<WorkerStatusFile>> {
         let worktree = self.manager.swarm_root().join(&handle.worker_id);
         heartbeat::read_status(&worktree)
+    }
+}
+
+#[cfg(test)]
+mod dispatch_limit_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn brief() -> SwarmBrief {
+        SwarmBrief {
+            task: "admission test".into(),
+            base_branch: "main".into(),
+            worker_branch_prefix: "swarm/admission".into(),
+            worker_command: vec!["unused".into()],
+            timeout: Duration::from_secs(1),
+            env: vec![],
+        }
+    }
+
+    #[test]
+    fn aggregate_output_budget_is_fixed_across_worker_counts() {
+        for workers in 1..=MAX_DISPATCH_WORKERS {
+            let limits = DispatchLimits::admit(workers, 0).expect("admit bounded dispatch");
+            let aggregate = workers
+                .checked_mul(2)
+                .and_then(|streams| streams.checked_mul(limits.worker_stream_bytes))
+                .expect("bounded aggregate");
+            assert!(aggregate <= MAX_DISPATCH_OUTPUT_BYTES);
+        }
+        assert_eq!(
+            DispatchLimits::admit(1, 0).unwrap().worker_stream_bytes,
+            MAX_WORKER_STREAM_BYTES
+        );
+        assert!(
+            DispatchLimits::admit(MAX_DISPATCH_WORKERS, 0)
+                .unwrap()
+                .worker_stream_bytes
+                < MAX_WORKER_STREAM_BYTES
+        );
+    }
+
+    #[test]
+    fn admission_bounds_requested_and_retained_workers() {
+        assert!(DispatchLimits::admit(MAX_DISPATCH_WORKERS, 0).is_ok());
+        assert!(DispatchLimits::admit(MAX_DISPATCH_WORKERS, MAX_DISPATCH_WORKERS).is_ok());
+        assert!(matches!(
+            DispatchLimits::admit(MAX_DISPATCH_WORKERS + 1, 0),
+            Err(SwarmError::DispatchAdmission(_))
+        ));
+        assert!(matches!(
+            DispatchLimits::admit(1, MAX_RETAINED_WORKTREES),
+            Err(SwarmError::DispatchAdmission(_))
+        ));
+        assert!(matches!(
+            DispatchLimits::admit(usize::MAX, 1),
+            Err(SwarmError::DispatchAdmission(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn count_cap_fails_before_git_or_worker_side_effects() {
+        let repo = tempfile::tempdir().unwrap();
+        let swarm = Swarm::new(repo.path()).unwrap();
+        let error = swarm
+            .dispatch(brief(), MAX_DISPATCH_WORKERS + 1)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SwarmError::DispatchAdmission(_)));
+        assert_eq!(
+            std::fs::read_dir(swarm.manager.swarm_root())
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_worktrees_consume_admission_slots() {
+        let repo = tempfile::tempdir().unwrap();
+        let swarm = Swarm::new(repo.path()).unwrap();
+        for index in 0..MAX_RETAINED_WORKTREES {
+            std::fs::create_dir(swarm.manager.swarm_root().join(format!("worker-{index}")))
+                .unwrap();
+        }
+        let error = swarm.dispatch(brief(), 1).await.unwrap_err();
+        assert!(matches!(error, SwarmError::DispatchAdmission(_)));
+    }
+
+    #[tokio::test]
+    async fn overlapping_dispatch_across_same_repo_instances_fails_closed() {
+        let repo = tempfile::tempdir().unwrap();
+        let first = Swarm::new(repo.path()).unwrap();
+        let second = Swarm::new(repo.path()).unwrap();
+        assert!(Arc::ptr_eq(&first.dispatch_gate, &second.dispatch_gate));
+
+        let _active = first.dispatch_gate.try_lock().unwrap();
+        let error = second.dispatch(brief(), 1).await.unwrap_err();
+        assert!(matches!(error, SwarmError::DispatchAdmission(_)));
+        assert_eq!(
+            std::fs::read_dir(second.manager.swarm_root())
+                .unwrap()
+                .count(),
+            0
+        );
     }
 }

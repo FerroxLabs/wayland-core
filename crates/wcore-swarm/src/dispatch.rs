@@ -15,8 +15,6 @@ use wcore_sandbox::process_capture::{CaptureLimits, ProcessCaptureError, capture
 use crate::worktree::WorktreeManager;
 use crate::{SwarmBrief, SwarmResult, WorkerHandle, WorkerStatus};
 
-const MAX_WORKER_STREAM_BYTES: usize = 8 * 1024 * 1024;
-
 /// Run a single worker end-to-end: create the worktree, spawn the
 /// subprocess, wait up to `brief.timeout`, capture stdout/stderr. Returns
 /// the handle (which carries the final status — never returns an Err;
@@ -26,6 +24,7 @@ pub(crate) async fn run_worker(
     manager: &WorktreeManager,
     worker_id: String,
     brief: &SwarmBrief,
+    stream_output_bytes: usize,
     cancel: CancellationToken,
 ) -> WorkerHandle {
     let branch = format!("{}/{}", brief.worker_branch_prefix, worker_id);
@@ -76,8 +75,8 @@ pub(crate) async fn run_worker(
     let output = match capture_bounded_process(
         command,
         CaptureLimits {
-            stdout_bytes: MAX_WORKER_STREAM_BYTES,
-            stderr_bytes: MAX_WORKER_STREAM_BYTES,
+            stdout_bytes: stream_output_bytes,
+            stderr_bytes: stream_output_bytes,
             timeout: brief.timeout,
         },
         Some(&cancel),
@@ -116,13 +115,15 @@ pub(crate) async fn run_worker(
         }
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let status = if output.status.success() {
         WorkerStatus::Succeeded
     } else {
         WorkerStatus::Failed(format!("exit {:?}", output.status.code()))
     };
+    // Valid UTF-8 reuses the bounded capture allocations rather than briefly
+    // duplicating the complete dispatch output during result conversion.
+    let stdout = into_lossy_string(output.stdout);
+    let stderr = into_lossy_string(output.stderr);
     WorkerHandle {
         worker_id,
         branch,
@@ -131,6 +132,11 @@ pub(crate) async fn run_worker(
         stderr,
         duration: start.elapsed(),
     }
+}
+
+fn into_lossy_string(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
 }
 
 /// Build the worker subprocess Command. Always argv mode (no shell).
