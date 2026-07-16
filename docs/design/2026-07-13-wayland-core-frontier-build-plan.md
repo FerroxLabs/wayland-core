@@ -248,7 +248,7 @@ Before the first candidate run, F00 freezes a versioned threshold manifest cover
 | M0 — Characterized Core | Existing behavior is captured; dormant and split paths are contained; evaluation can prove the real binary | F00–F06 | E3 |
 | M1 — Bounded Core | Smart Default is useful; authority and resources are bounded; managed floor is monotonic | F07–F11 | E3 plus adversarial E5 for authority boundaries |
 | M2 — Recoverable Core | A crash, provider failure or subsystem restart has an explicit safe recovery outcome | F12–F17 | E4 and crash/fault E5 |
-| M3 — Durable Agency | Every child is persistent, inspectable, cancellable, resumable and transactionally isolated | F18–F23 | E4 plus concurrency/restart E5 |
+| M3 — Durable Agency | Every child is persistent, inspectable, cancellable, resumable and transactionally isolated | F18–F23, including F22A–F22D | E4 plus concurrency/restart E5 |
 | M4 — Complete Core Product | Standalone Core and host protocol expose gateway, remote, migration and multimodal primitives honestly | F24–F27 | E4/E5 by capability |
 | M5 — Frontier Candidate | All platforms pass strict adversarial, soak, performance, release-integrity and peer-comparison gates | F28–F30 | E5 |
 
@@ -258,7 +258,7 @@ M0's required platform set is Linux at E3. M0 characterizes the integrated packa
 
 ## 6. Task ledger
 
-The ledger contains thirty-one bounded tasks. Each task should map to one or more GitHub issues before execution. Existing issue numbers below are reconciliation hints, not authorization to modify issue state.
+The ledger contains thirty-five bounded tasks: F00–F30 plus the additive Goal/Loop packets F22A–F22D. Each task should map to one or more GitHub issues before execution. Existing issue numbers below are reconciliation hints, not authorization to modify issue state.
 
 ### M0 — Characterized Core
 
@@ -924,7 +924,7 @@ Do not start journal, failover, durable-agent or Desktop implementation before M
 
 The Core frontier program is complete only when:
 
-1. All F00–F30 acceptance criteria have evidence receipts.
+1. All F00–F30 and F22A–F22D acceptance criteria have evidence receipts.
 2. Every advertised Core capability passes the activation-completion chain.
 3. Smart Default completes representative work with low cognitive tax.
 4. Managed policy is non-bypassable across every host and child path.
