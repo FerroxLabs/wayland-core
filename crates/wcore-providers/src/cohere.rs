@@ -324,8 +324,6 @@ async fn process_cohere_stream(
     tx: &mpsc::Sender<LlmEvent>,
     debug: &DebugConfig,
 ) -> Result<(), ProviderError> {
-    use futures::StreamExt;
-
     let mut buffer = String::new();
     let mut stream = response.bytes_stream();
     // Decode the byte stream incrementally so a multi-byte codepoint split
@@ -334,7 +332,12 @@ async fn process_cohere_stream(
 
     let mut usage = TokenUsage::default();
 
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let chunk = match crate::http_client::next_or_consumer_closed(&mut stream, tx).await {
+            crate::http_client::StreamPoll::Item(chunk) => chunk,
+            crate::http_client::StreamPoll::End => break,
+            crate::http_client::StreamPoll::ConsumerClosed => return Ok(()),
+        };
         let chunk = chunk.map_err(|e| ProviderError::Connection(e.to_string()))?;
         let text = utf8.push(&chunk);
         buffer.push_str(&text);

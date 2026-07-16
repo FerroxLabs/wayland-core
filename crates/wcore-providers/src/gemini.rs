@@ -760,8 +760,6 @@ pub(crate) async fn process_sse_stream(
     tx: &mpsc::Sender<LlmEvent>,
     debug: &DebugConfig,
 ) -> Result<(), ProviderError> {
-    use futures::StreamExt;
-
     let mut state = GeminiStreamState::default();
     let mut buffer = String::new();
     let mut stream = response.bytes_stream();
@@ -773,7 +771,12 @@ pub(crate) async fn process_sse_stream(
     // a stream that closes with neither was truncated.
     let mut error_seen = false;
 
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let chunk = match crate::http_client::next_or_consumer_closed(&mut stream, tx).await {
+            crate::http_client::StreamPoll::Item(chunk) => chunk,
+            crate::http_client::StreamPoll::End => break,
+            crate::http_client::StreamPoll::ConsumerClosed => return Ok(()),
+        };
         let chunk = chunk.map_err(|e| ProviderError::Connection(e.to_string()))?;
         let text = utf8.push(&chunk);
         buffer.push_str(&text);

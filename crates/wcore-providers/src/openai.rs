@@ -1662,8 +1662,6 @@ pub(crate) async fn process_sse_stream(
     tx: &mpsc::Sender<LlmEvent>,
     debug: &DebugConfig,
 ) -> Result<(), ProviderError> {
-    use futures::StreamExt;
-
     let mut state = StreamState::new();
     let mut buffer = String::new();
     let mut stream = response.bytes_stream();
@@ -1675,7 +1673,12 @@ pub(crate) async fn process_sse_stream(
     // not a clean empty success — surface it as an error.
     let mut terminal_seen = false;
 
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let chunk = match crate::http_client::next_or_consumer_closed(&mut stream, tx).await {
+            crate::http_client::StreamPoll::Item(chunk) => chunk,
+            crate::http_client::StreamPoll::End => break,
+            crate::http_client::StreamPoll::ConsumerClosed => return Ok(()),
+        };
         let chunk = chunk.map_err(|e| ProviderError::Connection(e.to_string()))?;
         let text = utf8.push(&chunk);
         buffer.push_str(&text);
@@ -1776,15 +1779,18 @@ pub(crate) async fn process_responses_sse_stream(
     tx: &mpsc::Sender<LlmEvent>,
     debug: &DebugConfig,
 ) -> Result<(), ProviderError> {
-    use futures::StreamExt;
-
     let mut state = openai_responses::ResponsesStreamState::new();
     let mut buffer = String::new();
     let mut stream = response.bytes_stream();
     let mut utf8 = wcore_types::utf8_stream::Utf8StreamDecoder::new();
     let mut terminal_seen = false;
 
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let chunk = match crate::http_client::next_or_consumer_closed(&mut stream, tx).await {
+            crate::http_client::StreamPoll::Item(chunk) => chunk,
+            crate::http_client::StreamPoll::End => break,
+            crate::http_client::StreamPoll::ConsumerClosed => return Ok(()),
+        };
         let chunk = chunk.map_err(|e| ProviderError::Connection(e.to_string()))?;
         let text = utf8.push(&chunk);
         buffer.push_str(&text);
@@ -2511,6 +2517,52 @@ mod tests {
 
         assert_eq!(call_id, Some(id.as_str()));
         assert_eq!(result_id, Some(id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn stream_worker_exits_when_event_consumer_is_dropped() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("test server address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n",
+                )
+                .await
+                .expect("write response headers");
+            socket.flush().await.expect("flush response headers");
+            std::future::pending::<()>().await;
+        });
+
+        let response = crate::http_client::build()
+            .get(format!("http://{addr}/stream"))
+            .send()
+            .await
+            .expect("receive streaming response headers");
+        let (tx, rx) = mpsc::channel(1);
+        let worker = tokio::spawn(async move {
+            process_sse_stream(response, &tx, &DebugConfig::default()).await
+        });
+
+        tokio::task::yield_now().await;
+        drop(rx);
+        let result = tokio::time::timeout(std::time::Duration::from_millis(250), worker)
+            .await
+            .expect("the stream worker must not wait for the read timeout")
+            .expect("the stream worker must not panic");
+        assert!(
+            result.is_ok(),
+            "consumer cancellation is a clean exit: {result:?}"
+        );
+
+        server.abort();
     }
 
     // --- is_tools_unsupported_error (#389) --------------------------------

@@ -317,8 +317,6 @@ pub async fn process_sse_stream(
     tx: &mpsc::Sender<LlmEvent>,
     debug: &DebugConfig,
 ) -> Result<(), ProviderError> {
-    use futures::StreamExt;
-
     let mut state = StreamState::new();
     let mut buffer = String::new();
     let mut current_event_type = String::new();
@@ -331,7 +329,12 @@ pub async fn process_sse_stream(
     // surface it as an error instead of a silent clean turn.
     let mut terminal_seen = false;
 
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let chunk = match crate::http_client::next_or_consumer_closed(&mut stream, tx).await {
+            crate::http_client::StreamPoll::Item(chunk) => chunk,
+            crate::http_client::StreamPoll::End => break,
+            crate::http_client::StreamPoll::ConsumerClosed => return Ok(()),
+        };
         let chunk = chunk.map_err(|e| ProviderError::Connection(e.to_string()))?;
         let text = utf8.push(&chunk);
         buffer.push_str(&text);
