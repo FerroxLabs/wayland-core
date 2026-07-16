@@ -28,7 +28,10 @@ use crate::output::null_sink::NullSink;
 // Re-export from wcore-types — single source of truth
 pub use wcore_types::spawner::{ForkOverrides, Spawner, SubAgentConfig, SubAgentResult};
 
-pub use crate::durable_spawner::{DurableCancelDisposition, DurableSpawner, DurableSpawnerError};
+pub use crate::durable_spawner::{
+    DurableAuthorityFailure, DurableCancelDisposition, DurableSpawner, DurableSpawnerError,
+    DurableSpawnerPoison,
+};
 
 /// #661 (fail-loud) — build a [`SubAgentResult`] from a sub-agent's terminal
 /// [`AgentResult`](crate::engine::AgentResult).

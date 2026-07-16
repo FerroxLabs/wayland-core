@@ -34,6 +34,18 @@ pub enum DurableCancelDisposition {
     AlreadyTerminal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurableAuthorityFailure {
+    RecoveryInspect,
+    RecoveryPersist,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableSpawnerPoison {
+    pub child_id: ChildId,
+    pub failure: DurableAuthorityFailure,
+}
+
 #[derive(Debug, Error)]
 pub enum DurableSpawnerError {
     #[error(transparent)]
@@ -57,6 +69,11 @@ pub enum DurableSpawnerError {
     InvalidResultPayload(String),
     #[error("durable child {child_id} is already delivered with a different receipt")]
     DeliveryReceiptConflict { child_id: ChildId },
+    #[error("durable spawner authority is poisoned after {failure:?} failed for child {child_id}")]
+    AuthorityPoisoned {
+        child_id: ChildId,
+        failure: DurableAuthorityFailure,
+    },
 }
 
 /// Journal-backed adapter for durable child execution and supervision.
@@ -71,6 +88,8 @@ pub struct DurableSpawner {
     executor: Arc<dyn Spawner>,
     running: Arc<Mutex<BTreeMap<ChildId, CancellationToken>>>,
     mutations: Arc<Mutex<()>>,
+    poison: Arc<Mutex<Option<DurableSpawnerPoison>>>,
+    drop_recovery: Arc<dyn DropRecoveryAuthority>,
 }
 
 impl DurableSpawner {
@@ -78,11 +97,14 @@ impl DurableSpawner {
         store: DurableChildStore,
         executor: Arc<dyn Spawner>,
     ) -> Result<Self, DurableSpawnerError> {
+        let drop_recovery: Arc<dyn DropRecoveryAuthority> = Arc::new(store.clone());
         let spawner = Self {
             store,
             executor,
             running: Arc::new(Mutex::new(BTreeMap::new())),
             mutations: Arc::new(Mutex::new(())),
+            poison: Arc::new(Mutex::new(None)),
+            drop_recovery,
         };
         spawner.reconcile_startup()?;
         Ok(spawner)
@@ -125,6 +147,15 @@ impl DurableSpawner {
 
     pub fn list(&self) -> Result<Vec<DurableChildRecord>, JournalError> {
         self.store.list()
+    }
+
+    /// Return the in-process fail-closed authority state.
+    ///
+    /// A poisoned adapter rejects every spawn, mutation, and delivery action.
+    /// Construct a new adapter over the journal to run startup reconciliation
+    /// and re-establish authority.
+    pub fn authority_poison(&self) -> Option<DurableSpawnerPoison> {
+        self.poison.lock().clone()
     }
 
     fn validate_execution_evidence(
@@ -203,13 +234,19 @@ impl DurableSpawner {
         overrides: ForkOverrides,
         effective_policy_digest: &str,
     ) -> Result<SubAgentResult, DurableSpawnerError> {
-        self.validate_execution_evidence(&record, &config, &overrides, effective_policy_digest)?;
         let child_id = record.child_id.clone();
         let declaration_id = record.declaration_id.clone();
         let cancel = CancellationToken::new();
 
         {
             let _mutation = self.mutations.lock();
+            self.ensure_healthy()?;
+            self.validate_execution_evidence(
+                &record,
+                &config,
+                &overrides,
+                effective_policy_digest,
+            )?;
             self.store.declare(record)?;
             let current = self.required_child(&child_id)?;
             match current.status {
@@ -246,9 +283,10 @@ impl DurableSpawner {
         let mut running = RunningChildGuard {
             child_id: child_id.clone(),
             declaration_id: declaration_id.clone(),
-            store: self.store.clone(),
+            recovery: Arc::clone(&self.drop_recovery),
             running: Arc::clone(&self.running),
             mutations: Arc::clone(&self.mutations),
+            poison: Arc::clone(&self.poison),
             armed: true,
         };
         let execution = self.executor.spawn_fork(config, overrides);
@@ -258,6 +296,7 @@ impl DurableSpawner {
             biased;
             () = cancel.cancelled() => {
                 let _mutation = self.mutations.lock();
+                self.ensure_healthy()?;
                 let current = self.required_child(&child_id)?;
                 self.transition_current(
                     &current,
@@ -273,6 +312,8 @@ impl DurableSpawner {
             }
             result = &mut execution => {
                 let (payload, durable_result) = encode_result_payload(&result)?;
+                let _mutation = self.mutations.lock();
+                self.ensure_healthy()?;
                 self.store
                     .store_result_payload(&durable_result.exact_digest, &payload)?;
                 let transition = if result.is_error {
@@ -280,7 +321,6 @@ impl DurableSpawner {
                 } else {
                     DurableChildTransition::Succeed { result: durable_result }
                 };
-                let _mutation = self.mutations.lock();
                 let current = self.required_child(&child_id)?;
                 self.transition_current(&current, &declaration_id, "terminal", transition)?;
                 running.disarm();
@@ -295,6 +335,7 @@ impl DurableSpawner {
         child_id: &ChildId,
     ) -> Result<DurableCancelDisposition, DurableSpawnerError> {
         let _mutation = self.mutations.lock();
+        self.ensure_healthy()?;
         let mut current = self.required_child(child_id)?;
         if current.status.is_terminal() {
             return Ok(DurableCancelDisposition::AlreadyTerminal);
@@ -338,6 +379,7 @@ impl DurableSpawner {
         child_id: &ChildId,
     ) -> Result<Option<SubAgentResult>, DurableSpawnerError> {
         let _mutation = self.mutations.lock();
+        self.ensure_healthy()?;
         let current = self.required_child(child_id)?;
         if !matches!(current.delivery_state, ChildDeliveryState::Pending) {
             return Ok(None);
@@ -363,6 +405,7 @@ impl DurableSpawner {
         receipt_digest: String,
     ) -> Result<DurableChildWrite, DurableSpawnerError> {
         let _mutation = self.mutations.lock();
+        self.ensure_healthy()?;
         let current = self.required_child(child_id)?;
         if let ChildDeliveryState::Delivered {
             receipt_digest: committed,
@@ -390,6 +433,7 @@ impl DurableSpawner {
         error_digest: String,
     ) -> Result<DurableChildWrite, DurableSpawnerError> {
         let _mutation = self.mutations.lock();
+        self.ensure_healthy()?;
         let current = self.required_child(child_id)?;
         let phase = format!("delivery-failed-{}-{error_digest}", current.revision);
         self.transition_current(
@@ -406,6 +450,7 @@ impl DurableSpawner {
         evidence_digest: String,
     ) -> Result<DurableChildWrite, DurableSpawnerError> {
         let _mutation = self.mutations.lock();
+        self.ensure_healthy()?;
         let current = self.required_child(child_id)?;
         let phase = format!("delivery-unknown-{}-{evidence_digest}", current.revision);
         self.transition_current(
@@ -422,6 +467,7 @@ impl DurableSpawner {
         prior_error_digest: String,
     ) -> Result<DurableChildWrite, DurableSpawnerError> {
         let _mutation = self.mutations.lock();
+        self.ensure_healthy()?;
         let current = self.required_child(child_id)?;
         let phase = format!("delivery-retry-{}-{prior_error_digest}", current.revision);
         self.transition_current(
@@ -439,6 +485,7 @@ impl DurableSpawner {
         resolution: ChildDeliveryReconciliation,
     ) -> Result<DurableChildWrite, DurableSpawnerError> {
         let _mutation = self.mutations.lock();
+        self.ensure_healthy()?;
         let current = self.required_child(child_id)?;
         let phase = format!(
             "delivery-reconcile-{}-{prior_evidence_digest}",
@@ -453,6 +500,16 @@ impl DurableSpawner {
                 resolution,
             },
         )
+    }
+
+    fn ensure_healthy(&self) -> Result<(), DurableSpawnerError> {
+        match self.poison.lock().clone() {
+            Some(poison) => Err(DurableSpawnerError::AuthorityPoisoned {
+                child_id: poison.child_id,
+                failure: poison.failure,
+            }),
+            None => Ok(()),
+        }
     }
 
     fn required_child(
@@ -484,12 +541,66 @@ impl DurableSpawner {
     }
 }
 
+enum DropRecoveryError {
+    Inspect(JournalError),
+    Persist(JournalError),
+}
+
+trait DropRecoveryAuthority: Send + Sync {
+    fn require_recovery_if_running(
+        &self,
+        child_id: &ChildId,
+        declaration_id: &str,
+    ) -> Result<(), DropRecoveryError>;
+}
+
+impl DropRecoveryAuthority for DurableChildStore {
+    fn require_recovery_if_running(
+        &self,
+        child_id: &ChildId,
+        declaration_id: &str,
+    ) -> Result<(), DropRecoveryError> {
+        let current = self
+            .inspect(child_id)
+            .map_err(DropRecoveryError::Inspect)?
+            .ok_or_else(|| {
+                DropRecoveryError::Inspect(JournalError::InvalidTransition(format!(
+                    "lost durable child {child_id} while reconciling its executor"
+                )))
+            })?;
+        if current.status != DurableChildStatus::Running
+            || !matches!(current.recovery, ChildRecoveryState::Clean)
+        {
+            return Ok(());
+        }
+        let transition = DurableChildTransition::RequireRecovery {
+            reason_digest: executor_lost_digest(child_id, current.revision),
+        };
+        let at_unix_ms = now_unix_ms()
+            .unwrap_or(current.timestamps.updated_at_unix_ms)
+            .max(current.timestamps.updated_at_unix_ms);
+        self.transition(
+            child_id.clone(),
+            event_id(
+                declaration_id,
+                &format!("executor-lost-{}", current.revision),
+            ),
+            current.revision,
+            at_unix_ms,
+            transition,
+        )
+        .map(|_| ())
+        .map_err(DropRecoveryError::Persist)
+    }
+}
+
 struct RunningChildGuard {
     child_id: ChildId,
     declaration_id: String,
-    store: DurableChildStore,
+    recovery: Arc<dyn DropRecoveryAuthority>,
     running: Arc<Mutex<BTreeMap<ChildId, CancellationToken>>>,
     mutations: Arc<Mutex<()>>,
+    poison: Arc<Mutex<Option<DurableSpawnerPoison>>>,
     armed: bool,
 }
 
@@ -501,36 +612,30 @@ impl RunningChildGuard {
 
 impl Drop for RunningChildGuard {
     fn drop(&mut self) {
-        self.running.lock().remove(&self.child_id);
         if !self.armed {
+            self.running.lock().remove(&self.child_id);
             return;
         }
         let _mutation = self.mutations.lock();
-        let Ok(Some(current)) = self.store.inspect(&self.child_id) else {
-            return;
-        };
-        if current.status != DurableChildStatus::Running
-            || !matches!(current.recovery, ChildRecoveryState::Clean)
+        self.running.lock().remove(&self.child_id);
+        if let Err(error) = self
+            .recovery
+            .require_recovery_if_running(&self.child_id, &self.declaration_id)
         {
-            return;
-        }
-        let transition = DurableChildTransition::RequireRecovery {
-            reason_digest: executor_lost_digest(&self.child_id, current.revision),
-        };
-        let at_unix_ms = now_unix_ms()
-            .unwrap_or(current.timestamps.updated_at_unix_ms)
-            .max(current.timestamps.updated_at_unix_ms);
-        if let Err(error) = self.store.transition(
-            self.child_id.clone(),
-            event_id(
-                &self.declaration_id,
-                &format!("executor-lost-{}", current.revision),
-            ),
-            current.revision,
-            at_unix_ms,
-            transition,
-        ) {
-            tracing::error!(child_id = %self.child_id, %error, "failed to persist lost durable child executor");
+            let (failure, error) = match error {
+                DropRecoveryError::Inspect(error) => {
+                    (DurableAuthorityFailure::RecoveryInspect, error)
+                }
+                DropRecoveryError::Persist(error) => {
+                    (DurableAuthorityFailure::RecoveryPersist, error)
+                }
+            };
+            let poison = DurableSpawnerPoison {
+                child_id: self.child_id.clone(),
+                failure,
+            };
+            self.poison.lock().get_or_insert(poison);
+            tracing::error!(child_id = %self.child_id, %error, ?failure, "durable spawner authority poisoned while reconciling a lost executor");
         }
     }
 }
@@ -631,4 +736,134 @@ fn now_unix_ms() -> Result<u64, DurableSpawnerError> {
         .map_err(DurableSpawnerError::Clock)?
         .as_millis();
     Ok(u64::try_from(millis).unwrap_or(u64::MAX))
+}
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::session_journal::SessionJournal;
+
+    struct UnusedSpawner;
+
+    #[async_trait]
+    impl Spawner for UnusedSpawner {
+        async fn spawn_fork(
+            &self,
+            config: SubAgentConfig,
+            _overrides: ForkOverrides,
+        ) -> SubAgentResult {
+            SubAgentResult::error(
+                &config.name,
+                "executor must not run while authority is poisoned",
+            )
+        }
+    }
+
+    struct FailingRecovery(DurableAuthorityFailure);
+
+    impl DropRecoveryAuthority for FailingRecovery {
+        fn require_recovery_if_running(
+            &self,
+            _child_id: &ChildId,
+            _declaration_id: &str,
+        ) -> Result<(), DropRecoveryError> {
+            let error = JournalError::WriterFaulted;
+            match self.0 {
+                DurableAuthorityFailure::RecoveryInspect => Err(DropRecoveryError::Inspect(error)),
+                DurableAuthorityFailure::RecoveryPersist => Err(DropRecoveryError::Persist(error)),
+            }
+        }
+    }
+
+    fn poison_with_drop_failure(
+        failure: DurableAuthorityFailure,
+    ) -> (tempfile::TempDir, DurableSpawner, ChildId) {
+        let temp = tempfile::tempdir().unwrap();
+        let journal_path = temp.path().join("session.journal");
+        let journal = SessionJournal::open(&journal_path, "session-1").unwrap();
+        let spawner =
+            DurableSpawner::new(DurableChildStore::new(journal), Arc::new(UnusedSpawner)).unwrap();
+        let child_id = ChildId::new("drop-fault-child").unwrap();
+        spawner
+            .running
+            .lock()
+            .insert(child_id.clone(), CancellationToken::new());
+        let guard = RunningChildGuard {
+            child_id: child_id.clone(),
+            declaration_id: "declare-drop-fault-child".into(),
+            recovery: Arc::new(FailingRecovery(failure)),
+            running: Arc::clone(&spawner.running),
+            mutations: Arc::clone(&spawner.mutations),
+            poison: Arc::clone(&spawner.poison),
+            armed: true,
+        };
+
+        drop(guard);
+        (temp, spawner, child_id)
+    }
+
+    fn assert_poisoned(
+        spawner: &DurableSpawner,
+        child_id: &ChildId,
+        failure: DurableAuthorityFailure,
+    ) {
+        assert_eq!(
+            spawner.authority_poison(),
+            Some(DurableSpawnerPoison {
+                child_id: child_id.clone(),
+                failure,
+            })
+        );
+        assert!(!spawner.running.lock().contains_key(child_id));
+        assert!(matches!(
+            spawner.request_cancel(child_id),
+            Err(DurableSpawnerError::AuthorityPoisoned {
+                child_id: poisoned,
+                failure: observed,
+            }) if poisoned == *child_id && observed == failure
+        ));
+        assert!(matches!(
+            spawner.claim_result(child_id),
+            Err(DurableSpawnerError::AuthorityPoisoned {
+                child_id: poisoned,
+                failure: observed,
+            }) if poisoned == *child_id && observed == failure
+        ));
+    }
+
+    #[test]
+    fn guard_inspect_failure_poison_is_shared_and_rejects_authority_actions() {
+        let (_temp, spawner, child_id) =
+            poison_with_drop_failure(DurableAuthorityFailure::RecoveryInspect);
+        assert_poisoned(
+            &spawner,
+            &child_id,
+            DurableAuthorityFailure::RecoveryInspect,
+        );
+        assert_poisoned(
+            &spawner.clone(),
+            &child_id,
+            DurableAuthorityFailure::RecoveryInspect,
+        );
+    }
+
+    #[test]
+    fn guard_write_failure_poison_clears_only_after_reconstruction() {
+        let (temp, spawner, child_id) =
+            poison_with_drop_failure(DurableAuthorityFailure::RecoveryPersist);
+        assert_poisoned(
+            &spawner,
+            &child_id,
+            DurableAuthorityFailure::RecoveryPersist,
+        );
+
+        let journal_path = temp.path().join("session.journal");
+        drop(spawner);
+        let journal = SessionJournal::open(journal_path, "session-1").unwrap();
+        let reconstructed =
+            DurableSpawner::new(DurableChildStore::new(journal), Arc::new(UnusedSpawner)).unwrap();
+        assert_eq!(reconstructed.authority_poison(), None);
+    }
 }
