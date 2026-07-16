@@ -11,6 +11,8 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+const DEFAULT_PROBE_LEASE: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CooldownClass {
     Transient,
@@ -81,7 +83,7 @@ pub enum CooldownPermit {
 struct CooldownInner {
     state: CooldownState,
     failure_count: u32,
-    probe_in_flight: bool,
+    probe_lease_until: Option<Duration>,
 }
 
 pub struct CooldownTracker {
@@ -89,6 +91,7 @@ pub struct CooldownTracker {
     clock: Arc<dyn CooldownClock>,
     transient_base: Duration,
     failure_threshold: u32,
+    probe_lease: Duration,
 }
 
 impl std::fmt::Debug for CooldownTracker {
@@ -97,6 +100,7 @@ impl std::fmt::Debug for CooldownTracker {
             .field("inner", &self.inner)
             .field("transient_base", &self.transient_base)
             .field("failure_threshold", &self.failure_threshold)
+            .field("probe_lease", &self.probe_lease)
             .finish_non_exhaustive()
     }
 }
@@ -136,15 +140,35 @@ impl CooldownTracker {
         transient_base: Duration,
         failure_threshold: u32,
     ) -> Self {
+        Self::with_clock_and_probe_lease(
+            clock,
+            transient_base,
+            failure_threshold,
+            DEFAULT_PROBE_LEASE,
+        )
+    }
+
+    /// Construct a tracker with an explicit half-open probe lease.
+    ///
+    /// If the probe owner disappears without recording an outcome, another
+    /// caller may probe after this lease expires. A zero lease is normalized
+    /// to one millisecond so concurrent callers cannot all acquire it.
+    pub fn with_clock_and_probe_lease(
+        clock: Arc<dyn CooldownClock>,
+        transient_base: Duration,
+        failure_threshold: u32,
+        probe_lease: Duration,
+    ) -> Self {
         Self {
             inner: Mutex::new(CooldownInner {
                 state: CooldownState::Ready,
                 failure_count: 0,
-                probe_in_flight: false,
+                probe_lease_until: None,
             }),
             clock,
             transient_base,
             failure_threshold: failure_threshold.max(1),
+            probe_lease: probe_lease.max(Duration::from_millis(1)),
         }
     }
 
@@ -156,7 +180,14 @@ impl CooldownTracker {
             && self.clock.now() >= retry_at
         {
             inner.state = CooldownState::HalfOpen { reason };
-            inner.probe_in_flight = false;
+            inner.probe_lease_until = None;
+        }
+        if matches!(inner.state, CooldownState::HalfOpen { .. })
+            && inner
+                .probe_lease_until
+                .is_some_and(|lease_until| self.clock.now() >= lease_until)
+        {
+            inner.probe_lease_until = None;
         }
     }
 
@@ -167,14 +198,15 @@ impl CooldownTracker {
     }
 
     /// Acquire dispatch permission. A half-open candidate grants one probe;
-    /// concurrent callers remain denied until that probe records an outcome.
+    /// concurrent callers remain denied until that probe records an outcome
+    /// or its lease expires.
     pub fn try_acquire(&self) -> Option<CooldownPermit> {
         let mut inner = self.inner.lock();
         self.refresh_expiry(&mut inner);
         match inner.state {
             CooldownState::Ready => Some(CooldownPermit::Ready),
-            CooldownState::HalfOpen { .. } if !inner.probe_in_flight => {
-                inner.probe_in_flight = true;
+            CooldownState::HalfOpen { .. } if inner.probe_lease_until.is_none() => {
+                inner.probe_lease_until = Some(self.clock.now().saturating_add(self.probe_lease));
                 Some(CooldownPermit::HalfOpen)
             }
             CooldownState::HalfOpen { .. } | CooldownState::Cooling { .. } => None,
@@ -183,7 +215,7 @@ impl CooldownTracker {
 
     pub fn record_failure(&self, reason: FailoverReason, retry_after: Option<Duration>) {
         let mut inner = self.inner.lock();
-        inner.probe_in_flight = false;
+        inner.probe_lease_until = None;
         if reason.cooldown_class() == CooldownClass::Semantic {
             inner.state = CooldownState::Ready;
             return;
@@ -224,7 +256,7 @@ impl CooldownTracker {
         let mut inner = self.inner.lock();
         inner.state = CooldownState::Ready;
         inner.failure_count = 0;
-        inner.probe_in_flight = false;
+        inner.probe_lease_until = None;
     }
 
     pub fn reset(&self) {
@@ -232,10 +264,11 @@ impl CooldownTracker {
     }
 
     pub fn is_available(&self) -> bool {
-        matches!(
-            self.state(),
-            CooldownState::Ready | CooldownState::HalfOpen { .. }
-        )
+        let mut inner = self.inner.lock();
+        self.refresh_expiry(&mut inner);
+        matches!(inner.state, CooldownState::Ready)
+            || matches!(inner.state, CooldownState::HalfOpen { .. })
+                && inner.probe_lease_until.is_none()
     }
 
     pub fn failure_count(&self) -> u32 {
@@ -280,6 +313,19 @@ mod tests {
         CooldownTracker::with_clock(clock, Duration::from_secs(5), threshold)
     }
 
+    fn tracker_with_probe_lease(
+        clock: Arc<ManualClock>,
+        threshold: u32,
+        probe_lease: Duration,
+    ) -> CooldownTracker {
+        CooldownTracker::with_clock_and_probe_lease(
+            clock,
+            Duration::from_secs(5),
+            threshold,
+            probe_lease,
+        )
+    }
+
     #[test]
     fn transient_uses_threshold_fake_time_and_one_half_open_probe() {
         let clock = Arc::new(ManualClock::default());
@@ -303,6 +349,24 @@ mod tests {
         assert_eq!(tracker.try_acquire(), None);
         clock.advance(Duration::from_secs(1));
         assert_eq!(tracker.try_acquire(), Some(CooldownPermit::HalfOpen));
+    }
+
+    #[test]
+    fn abandoned_half_open_probe_is_recoverable_after_lease_expiry() {
+        let clock = Arc::new(ManualClock::default());
+        let tracker = tracker_with_probe_lease(clock.clone(), 1, Duration::from_secs(10));
+        tracker.record_failure(FailoverReason::Timeout, None);
+        clock.advance(Duration::from_secs(5));
+
+        assert_eq!(tracker.try_acquire(), Some(CooldownPermit::HalfOpen));
+        assert!(!tracker.is_available());
+        clock.advance(Duration::from_secs(9));
+        assert_eq!(tracker.try_acquire(), None);
+
+        clock.advance(Duration::from_secs(1));
+        assert!(tracker.is_available());
+        assert_eq!(tracker.try_acquire(), Some(CooldownPermit::HalfOpen));
+        assert_eq!(tracker.try_acquire(), None);
     }
 
     #[test]
