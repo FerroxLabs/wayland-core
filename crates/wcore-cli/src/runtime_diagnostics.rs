@@ -11,7 +11,11 @@ use wcore_config::resolution_provenance::{
     ConfigResolutionProvenance, ConfigSourceDisposition as EvidenceDisposition,
     ConfigSourceRole as EvidenceRole, LaunchBindingEvidence,
 };
+use wcore_config::shell::LaunchValueSource;
 use wcore_mcp::manager::{McpManager, McpServerHealth};
+use wcore_mcp::transport::stdio_readiness::{
+    McpStdioExecutableReadiness, McpStdioExecutableReadinessStatus,
+};
 use wcore_protocol::diagnostics::{
     ConfigSourceDisposition, ConfigSourceRole, McpConnectionState, McpDeclarationOrigin,
     McpExecutableReadiness, McpExposureState, McpFailureCode, McpServerDiagnostic,
@@ -30,6 +34,8 @@ struct McpDeclaration {
     assistant_scoped: bool,
     visible_to_assistant: bool,
     executable_basename: Option<String>,
+    executable_readiness: McpExecutableReadiness,
+    path_source: LaunchValueSource,
 }
 
 /// Immutable launch evidence plus redacted declarations. Arguments,
@@ -100,6 +106,13 @@ impl RuntimeDiagnosticsState {
 
     pub fn record_plugin_declarations(&mut self, declarations: &[PluginMcpDeclaration]) {
         for declaration in declarations {
+            let (executable_readiness, path_source) = declaration
+                .executable_readiness
+                .map(|evidence| (project_readiness(evidence.status), evidence.path_source))
+                .unwrap_or((
+                    McpExecutableReadiness::NotApplicable,
+                    LaunchValueSource::Unavailable,
+                ));
             let server = McpDeclaration {
                 name: declaration.name.clone(),
                 origin: McpDeclarationOrigin::Plugin,
@@ -108,6 +121,8 @@ impl RuntimeDiagnosticsState {
                 assistant_scoped: false,
                 visible_to_assistant: true,
                 executable_basename: None,
+                executable_readiness,
+                path_source,
             };
             self.declarations.insert(
                 (McpDeclarationOrigin::Plugin, declaration.name.clone()),
@@ -136,8 +151,34 @@ impl RuntimeDiagnosticsState {
                     .is_some_and(|names| !names.is_empty()),
                 visible_to_assistant,
                 executable_basename: server.command.as_deref().and_then(executable_basename),
+                executable_readiness: if server.transport == TransportType::Stdio {
+                    McpExecutableReadiness::Unchecked
+                } else {
+                    McpExecutableReadiness::NotApplicable
+                },
+                path_source: LaunchValueSource::Unavailable,
             },
         );
+    }
+
+    /// Attach secret-free readiness evidence produced from the exact launch
+    /// environment. The declaration remains authoritative for origin and
+    /// transport; unknown names cannot create diagnostic rows.
+    pub fn record_executable_readiness(
+        &mut self,
+        origin: McpDeclarationOrigin,
+        name: &str,
+        evidence: McpStdioExecutableReadiness,
+    ) -> bool {
+        let Some(declaration) = self.declarations.get_mut(&(origin, name.to_owned())) else {
+            return false;
+        };
+        if declaration.transport != McpTransportKind::Stdio || !declaration.visible_to_assistant {
+            return false;
+        }
+        declaration.executable_readiness = project_readiness(evidence.status);
+        declaration.path_source = evidence.path_source;
+        true
     }
 
     pub fn snapshot(
@@ -196,10 +237,23 @@ fn project_server(
     tool_counts: &HashMap<String, u32>,
     origin_collision: bool,
 ) -> McpServerDiagnostic {
-    let health = managers
+    let (health, manager_readiness) = managers
         .iter()
-        .filter_map(|manager| manager.health().get(&declaration.name))
-        .max_by_key(|health| health_rank(health));
+        .filter_map(|manager| {
+            manager.health().get(&declaration.name).map(|health| {
+                (
+                    health,
+                    manager
+                        .executable_readiness()
+                        .get(&declaration.name)
+                        .copied(),
+                )
+            })
+        })
+        .max_by_key(|(health, _)| health_rank(health))
+        .map_or((None, None), |(health, readiness)| {
+            (Some(health), readiness)
+        });
     let resources_declared = managers
         .iter()
         .any(|manager| manager.server_supports_resources(&declaration.name));
@@ -209,7 +263,7 @@ fn project_server(
     let resources_exposed = false;
     let tool_count = tool_counts.get(&declaration.name).copied().unwrap_or(0);
 
-    let (connection, failure) = if origin_collision {
+    let (connection, mut failure) = if origin_collision {
         (
             McpConnectionState::Skipped,
             Some(McpFailureCode::InvalidConfiguration),
@@ -263,6 +317,31 @@ fn project_server(
         McpExposureState::NotAttempted
     };
 
+    // A completed MCP handshake is stronger evidence than the advisory,
+    // TOCTOU-sensitive filesystem readiness probe. Never tell an operator to
+    // install or repair an executable that this process already launched and
+    // negotiated successfully.
+    let advisory_readiness = manager_readiness
+        .map(|evidence| project_readiness(evidence.status))
+        .unwrap_or(declaration.executable_readiness);
+    let path_source = manager_readiness
+        .map(|evidence| evidence.path_source)
+        .unwrap_or(declaration.path_source);
+    let executable_readiness = if connection == McpConnectionState::Ready
+        && declaration.transport == McpTransportKind::Stdio
+    {
+        McpExecutableReadiness::Resolved
+    } else {
+        advisory_readiness
+    };
+
+    if failure.is_none()
+        && connection != McpConnectionState::Ready
+        && declaration.visible_to_assistant
+    {
+        failure = readiness_failure(executable_readiness);
+    }
+
     let mut remediation = Vec::new();
     if origin_collision {
         remediation.push(RuntimeRemediationCode::ReviewServerConfig);
@@ -283,6 +362,13 @@ fn project_server(
     if exposure == McpExposureState::ResourceOnlyUnavailable {
         remediation.push(RuntimeRemediationCode::RestartToLoadResources);
     }
+    append_readiness_remediation(&mut remediation, executable_readiness, path_source);
+    let mut deduplicated = Vec::with_capacity(remediation.len());
+    for code in remediation {
+        if !deduplicated.contains(&code) {
+            deduplicated.push(code);
+        }
+    }
 
     McpServerDiagnostic {
         name: declaration.name.clone(),
@@ -296,14 +382,102 @@ fn project_server(
         resources_exposed,
         assistant_scoped: declaration.assistant_scoped,
         executable_basename: declaration.executable_basename.clone(),
-        executable_readiness: if declaration.transport == McpTransportKind::Stdio {
-            McpExecutableReadiness::Unchecked
-        } else {
-            McpExecutableReadiness::NotApplicable
-        },
+        executable_readiness,
         working_directory: McpWorkingDirectoryRole::InheritedProcess,
         failure,
-        remediation,
+        remediation: deduplicated,
+    }
+}
+
+fn project_readiness(status: McpStdioExecutableReadinessStatus) -> McpExecutableReadiness {
+    match status {
+        McpStdioExecutableReadinessStatus::Resolved => McpExecutableReadiness::Resolved,
+        McpStdioExecutableReadinessStatus::InvalidExecutable => {
+            McpExecutableReadiness::InvalidExecutable
+        }
+        McpStdioExecutableReadinessStatus::MissingEffectivePath => {
+            McpExecutableReadiness::MissingEffectivePath
+        }
+        McpStdioExecutableReadinessStatus::InvalidEffectiveEnvironment => {
+            McpExecutableReadiness::InvalidEffectiveEnvironment
+        }
+        McpStdioExecutableReadinessStatus::PermissionDenied => {
+            McpExecutableReadiness::PermissionDenied
+        }
+        McpStdioExecutableReadinessStatus::NotExecutable => McpExecutableReadiness::NotExecutable,
+        McpStdioExecutableReadinessStatus::NotFound => McpExecutableReadiness::NotFound,
+        McpStdioExecutableReadinessStatus::ProbeTimedOut => McpExecutableReadiness::ProbeTimedOut,
+        McpStdioExecutableReadinessStatus::Unchecked => McpExecutableReadiness::Unchecked,
+    }
+}
+
+fn readiness_failure(readiness: McpExecutableReadiness) -> Option<McpFailureCode> {
+    match readiness {
+        McpExecutableReadiness::MissingEffectivePath | McpExecutableReadiness::NotFound => {
+            Some(McpFailureCode::MissingExecutable)
+        }
+        McpExecutableReadiness::InvalidAbsolutePath
+        | McpExecutableReadiness::InvalidExecutable
+        | McpExecutableReadiness::InvalidEffectiveEnvironment => {
+            Some(McpFailureCode::InvalidConfiguration)
+        }
+        McpExecutableReadiness::PermissionDenied | McpExecutableReadiness::NotExecutable => {
+            Some(McpFailureCode::LaunchFailed)
+        }
+        McpExecutableReadiness::NotApplicable
+        | McpExecutableReadiness::Unchecked
+        | McpExecutableReadiness::Resolved
+        | McpExecutableReadiness::ProbeTimedOut
+        | McpExecutableReadiness::UnsupportedTransport => None,
+    }
+}
+
+fn append_readiness_remediation(
+    remediation: &mut Vec<RuntimeRemediationCode>,
+    readiness: McpExecutableReadiness,
+    path_source: LaunchValueSource,
+) {
+    match readiness {
+        McpExecutableReadiness::MissingEffectivePath => match path_source {
+            LaunchValueSource::ExplicitServer => {
+                remediation.push(RuntimeRemediationCode::OpenActiveConfig);
+                remediation.push(RuntimeRemediationCode::ReviewServerConfig);
+            }
+            LaunchValueSource::InheritedAllowlist | LaunchValueSource::Unavailable => {
+                remediation.push(RuntimeRemediationCode::FixGuiLaunchPath);
+                remediation.push(RuntimeRemediationCode::RestartDesktop);
+            }
+        },
+        McpExecutableReadiness::NotFound => {
+            remediation.push(RuntimeRemediationCode::InstallExecutable);
+            match path_source {
+                LaunchValueSource::ExplicitServer => {
+                    remediation.push(RuntimeRemediationCode::OpenActiveConfig);
+                    remediation.push(RuntimeRemediationCode::ReviewServerConfig);
+                }
+                LaunchValueSource::InheritedAllowlist | LaunchValueSource::Unavailable => {
+                    remediation.push(RuntimeRemediationCode::FixGuiLaunchPath);
+                    remediation.push(RuntimeRemediationCode::RestartDesktop);
+                }
+            }
+        }
+        McpExecutableReadiness::InvalidAbsolutePath
+        | McpExecutableReadiness::InvalidExecutable
+        | McpExecutableReadiness::InvalidEffectiveEnvironment => {
+            remediation.push(RuntimeRemediationCode::OpenActiveConfig);
+            remediation.push(RuntimeRemediationCode::ReviewServerConfig);
+        }
+        McpExecutableReadiness::PermissionDenied | McpExecutableReadiness::NotExecutable => {
+            remediation.push(RuntimeRemediationCode::FixExecutablePermissions);
+            remediation.push(RuntimeRemediationCode::ReviewServerConfig);
+        }
+        McpExecutableReadiness::ProbeTimedOut => {
+            remediation.push(RuntimeRemediationCode::RetryDiagnostics);
+        }
+        McpExecutableReadiness::NotApplicable
+        | McpExecutableReadiness::Unchecked
+        | McpExecutableReadiness::Resolved
+        | McpExecutableReadiness::UnsupportedTransport => {}
     }
 }
 
@@ -321,10 +495,21 @@ fn executable_basename(command: &str) -> Option<String> {
         .rsplit(['/', '\\'])
         .next()
         .filter(|part| !part.is_empty())?;
+    // `command` is operator configuration, not a trusted argv token. A common
+    // malformed form puts inline args or credentials in this field; retaining
+    // that text would violate the diagnostics redaction contract. Publish only
+    // a conservative executable identifier and fail closed for everything else.
+    if basename.len() > 255
+        || !basename
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+'))
+    {
+        return None;
+    }
     Path::new(basename)
         .file_name()
         .and_then(|name| name.to_str())
-        .map(str::to_string)
+        .map(str::to_owned)
 }
 
 fn transport_kind(transport: &TransportType) -> McpTransportKind {
@@ -720,6 +905,266 @@ mod tests {
     }
 
     #[test]
+    fn readiness_mapping_and_remediation_are_exhaustive_and_secret_safe() {
+        use McpExecutableReadiness as Projected;
+        use McpFailureCode as Failure;
+        use McpStdioExecutableReadinessStatus as Inspected;
+        use RuntimeRemediationCode as Remediation;
+
+        let cases = [
+            (
+                "resolved",
+                Inspected::Resolved,
+                LaunchValueSource::InheritedAllowlist,
+                Projected::Resolved,
+                None,
+                vec![],
+            ),
+            (
+                "invalid-executable",
+                Inspected::InvalidExecutable,
+                LaunchValueSource::InheritedAllowlist,
+                Projected::InvalidExecutable,
+                Some(Failure::InvalidConfiguration),
+                vec![
+                    Remediation::OpenActiveConfig,
+                    Remediation::ReviewServerConfig,
+                ],
+            ),
+            (
+                "missing-inherited-path",
+                Inspected::MissingEffectivePath,
+                LaunchValueSource::InheritedAllowlist,
+                Projected::MissingEffectivePath,
+                Some(Failure::MissingExecutable),
+                vec![Remediation::FixGuiLaunchPath, Remediation::RestartDesktop],
+            ),
+            (
+                "missing-explicit-path",
+                Inspected::MissingEffectivePath,
+                LaunchValueSource::ExplicitServer,
+                Projected::MissingEffectivePath,
+                Some(Failure::MissingExecutable),
+                vec![
+                    Remediation::OpenActiveConfig,
+                    Remediation::ReviewServerConfig,
+                ],
+            ),
+            (
+                "invalid-environment",
+                Inspected::InvalidEffectiveEnvironment,
+                LaunchValueSource::InheritedAllowlist,
+                Projected::InvalidEffectiveEnvironment,
+                Some(Failure::InvalidConfiguration),
+                vec![
+                    Remediation::OpenActiveConfig,
+                    Remediation::ReviewServerConfig,
+                ],
+            ),
+            (
+                "permission-denied",
+                Inspected::PermissionDenied,
+                LaunchValueSource::InheritedAllowlist,
+                Projected::PermissionDenied,
+                Some(Failure::LaunchFailed),
+                vec![
+                    Remediation::FixExecutablePermissions,
+                    Remediation::ReviewServerConfig,
+                ],
+            ),
+            (
+                "not-executable",
+                Inspected::NotExecutable,
+                LaunchValueSource::InheritedAllowlist,
+                Projected::NotExecutable,
+                Some(Failure::LaunchFailed),
+                vec![
+                    Remediation::FixExecutablePermissions,
+                    Remediation::ReviewServerConfig,
+                ],
+            ),
+            (
+                "not-found-inherited",
+                Inspected::NotFound,
+                LaunchValueSource::InheritedAllowlist,
+                Projected::NotFound,
+                Some(Failure::MissingExecutable),
+                vec![
+                    Remediation::InstallExecutable,
+                    Remediation::FixGuiLaunchPath,
+                    Remediation::RestartDesktop,
+                ],
+            ),
+            (
+                "not-found-explicit",
+                Inspected::NotFound,
+                LaunchValueSource::ExplicitServer,
+                Projected::NotFound,
+                Some(Failure::MissingExecutable),
+                vec![
+                    Remediation::InstallExecutable,
+                    Remediation::OpenActiveConfig,
+                    Remediation::ReviewServerConfig,
+                ],
+            ),
+            (
+                "probe-timed-out",
+                Inspected::ProbeTimedOut,
+                LaunchValueSource::InheritedAllowlist,
+                Projected::ProbeTimedOut,
+                None,
+                vec![Remediation::RetryDiagnostics],
+            ),
+            (
+                "unchecked",
+                Inspected::Unchecked,
+                LaunchValueSource::Unavailable,
+                Projected::Unchecked,
+                None,
+                vec![],
+            ),
+        ];
+
+        for (label, inspected, path_source, projected, failure, remediation) in cases {
+            let mut state = state_with_servers(
+                [("server".to_string(), stdio_server("server-mcp", None))],
+                None,
+            );
+            assert!(state.record_executable_readiness(
+                McpDeclarationOrigin::EffectiveConfig,
+                "server",
+                McpStdioExecutableReadiness {
+                    status: inspected,
+                    path_source,
+                    pathext_source: LaunchValueSource::Unavailable,
+                },
+            ));
+
+            let snapshot = state.snapshot(&McpLifecycleCatalog::new(), &[], &ToolRegistry::new());
+            let server = &snapshot.mcp_servers[0];
+            assert_eq!(server.executable_readiness, projected, "{label}");
+            assert_eq!(server.failure, failure, "{label}");
+            assert_eq!(server.remediation, remediation, "{label}");
+            assert!(
+                !serde_json::to_string(&snapshot)
+                    .unwrap()
+                    .contains("ENV_SECRET"),
+                "{label} retained launch environment"
+            );
+        }
+
+        for (label, readiness, failure, remediation) in [
+            ("not-applicable", Projected::NotApplicable, None, vec![]),
+            (
+                "invalid-absolute-path",
+                Projected::InvalidAbsolutePath,
+                Some(Failure::InvalidConfiguration),
+                vec![
+                    Remediation::OpenActiveConfig,
+                    Remediation::ReviewServerConfig,
+                ],
+            ),
+            (
+                "unsupported-transport",
+                Projected::UnsupportedTransport,
+                None,
+                vec![],
+            ),
+        ] {
+            let mut actual_remediation = Vec::new();
+            append_readiness_remediation(
+                &mut actual_remediation,
+                readiness,
+                LaunchValueSource::Unavailable,
+            );
+            assert_eq!(readiness_failure(readiness), failure, "{label}");
+            assert_eq!(actual_remediation, remediation, "{label}");
+        }
+    }
+
+    #[test]
+    fn successful_handshake_dominates_stale_advisory_readiness() {
+        let mut state = state_with_servers(
+            [("ready".to_string(), stdio_server("ready-mcp", None))],
+            None,
+        );
+        assert!(state.record_executable_readiness(
+            McpDeclarationOrigin::EffectiveConfig,
+            "ready",
+            McpStdioExecutableReadiness {
+                status: McpStdioExecutableReadinessStatus::NotFound,
+                path_source: LaunchValueSource::InheritedAllowlist,
+                pathext_source: LaunchValueSource::Unavailable,
+            },
+        ));
+        let manager = Arc::new(McpManager::new_for_test(vec![(
+            "ready",
+            false,
+            Box::new(NoopTransport),
+        )]));
+
+        let snapshot = state.snapshot(
+            &McpLifecycleCatalog::new(),
+            &[manager],
+            &ToolRegistry::new(),
+        );
+        let server = &snapshot.mcp_servers[0];
+        assert_eq!(server.connection, McpConnectionState::Ready);
+        assert_eq!(
+            server.executable_readiness,
+            McpExecutableReadiness::Resolved
+        );
+        assert_eq!(server.failure, None);
+        assert!(server.remediation.is_empty());
+    }
+
+    #[test]
+    fn executable_basename_rejects_inline_command_data() {
+        let state = state_with_servers(
+            [
+                (
+                    "inline".to_string(),
+                    stdio_server("node --token=INLINE_COMMAND_SECRET", None),
+                ),
+                (
+                    "shellish".to_string(),
+                    stdio_server("node;INLINE_COMMAND_SECRET", None),
+                ),
+                (
+                    "safe".to_string(),
+                    stdio_server("/Applications/Wayland Tools/bin/safe-mcp.exe", None),
+                ),
+            ],
+            None,
+        );
+
+        let snapshot = state.snapshot(&McpLifecycleCatalog::new(), &[], &ToolRegistry::new());
+        let inline = snapshot
+            .mcp_servers
+            .iter()
+            .find(|server| server.name == "inline")
+            .unwrap();
+        let shellish = snapshot
+            .mcp_servers
+            .iter()
+            .find(|server| server.name == "shellish")
+            .unwrap();
+        let safe = snapshot
+            .mcp_servers
+            .iter()
+            .find(|server| server.name == "safe")
+            .unwrap();
+        assert_eq!(inline.executable_basename, None);
+        assert_eq!(shellish.executable_basename, None);
+        assert_eq!(safe.executable_basename.as_deref(), Some("safe-mcp.exe"));
+        assert!(
+            !serde_json::to_string(&snapshot)
+                .unwrap()
+                .contains("INLINE_COMMAND_SECRET")
+        );
+    }
+
+    #[test]
     fn plugin_declarations_are_visible_and_name_collisions_fail_closed() {
         let mut state = state_with_servers(
             [("same".to_string(), stdio_server("configured", None))],
@@ -729,10 +1174,12 @@ mod tests {
             PluginMcpDeclaration {
                 name: "plugin-only".into(),
                 transport: TransportType::StreamableHttp,
+                executable_readiness: None,
             },
             PluginMcpDeclaration {
                 name: "same".into(),
                 transport: TransportType::Stdio,
+                executable_readiness: None,
             },
         ]);
 

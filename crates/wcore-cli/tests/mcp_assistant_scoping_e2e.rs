@@ -248,6 +248,30 @@ fn assert_runtime_diagnostics(obs: &DialObs, scoped_connection: &str) {
         .find(|server| server["name"] == "diag")
         .expect("scoped declaration remains visible");
     assert_eq!(scoped["connection"], scoped_connection);
+    let remediation = scoped["remediation"]
+        .as_array()
+        .expect("diagnostics remediation array");
+    if scoped_connection == "failed" {
+        assert_eq!(scoped["executable_readiness"], "not_found");
+        for expected in [
+            "install_executable",
+            "fix_gui_launch_path",
+            "restart_desktop",
+        ] {
+            assert!(
+                remediation.iter().any(|code| code == expected),
+                "missing actionable readiness remediation {expected}"
+            );
+        }
+    } else {
+        assert_eq!(scoped["executable_readiness"], "unchecked");
+        assert!(
+            remediation
+                .iter()
+                .any(|code| code == "check_assistant_scope"),
+            "a scoped-out server must explain why it was not inspected"
+        );
+    }
 
     let serialized = serde_json::to_string(diagnostics).unwrap();
     for canary in ["diagnostics-redaction-sentinel", "--noop", "127.0.0.1:9"] {

@@ -2709,14 +2709,27 @@ fn emit_runtime_diagnostics(
 fn runtime_diagnostics_admission_rejection(
     command: &wcore_protocol::diagnostics::GetRuntimeDiagnosticsCommand,
 ) -> Option<ProtocolEvent> {
-    wcore_protocol::diagnostics::validate_runtime_diagnostics_version(command.diagnostics_version)
-        .err()
-        .map(|_| ProtocolEvent::RuntimeDiagnosticsUnavailable {
-            diagnostics_version: command.diagnostics_version,
-            supported_version: wcore_protocol::diagnostics::RUNTIME_DIAGNOSTICS_VERSION,
-            request_id: command.request_id.clone(),
-            reason: wcore_protocol::diagnostics::RuntimeDiagnosticsUnavailableReason::UnsupportedVersion,
-        })
+    let reason = if wcore_protocol::diagnostics::validate_runtime_diagnostics_version(
+        command.diagnostics_version,
+    )
+    .is_err()
+    {
+        Some(wcore_protocol::diagnostics::RuntimeDiagnosticsUnavailableReason::UnsupportedVersion)
+    } else if wcore_protocol::diagnostics::validate_runtime_diagnostics_request_id(
+        &command.request_id,
+    )
+    .is_err()
+    {
+        Some(wcore_protocol::diagnostics::RuntimeDiagnosticsUnavailableReason::InvalidRequest)
+    } else {
+        None
+    };
+    reason.map(|reason| ProtocolEvent::RuntimeDiagnosticsUnavailable {
+        diagnostics_version: command.diagnostics_version,
+        supported_version: wcore_protocol::diagnostics::RUNTIME_DIAGNOSTICS_VERSION,
+        request_id: command.request_id.clone(),
+        reason,
+    })
 }
 
 /// wayland#551 — integrate a background-connected config-MCP manager into
@@ -2731,16 +2744,29 @@ fn runtime_diagnostics_admission_rejection(
 /// turns); on failure, surface the error with bootstrap's inline-connect
 /// wording. Shared by the loop-top non-blocking poll and the select arm.
 fn note_deferred_mcp_connect(
-    outcome: Result<McpManager, wcore_mcp::transport::McpError>,
-    resolved: HashMap<String, McpServerConfig>,
-    mut reservations: HashMap<String, McpConnectionReservation>,
+    result: DeferredMcpConnectResult,
+    runtime_diagnostics: Option<&mut RuntimeDiagnosticsState>,
     engine: &mut wcore_agent::engine::AgentEngine,
     writer: &ProtocolWriter,
     output: &Arc<dyn OutputSink>,
     dynamic_managers: &mut Vec<Arc<McpManager>>,
 ) -> Option<PendingDeferredMcp> {
+    let DeferredMcpConnectResult {
+        outcome,
+        resolved,
+        mut reservations,
+    } = result;
     match outcome {
         Ok(mgr) => {
+            if let Some(state) = runtime_diagnostics {
+                for (name, evidence) in mgr.executable_readiness() {
+                    state.record_executable_readiness(
+                        wcore_protocol::diagnostics::McpDeclarationOrigin::EffectiveConfig,
+                        name,
+                        *evidence,
+                    );
+                }
+            }
             let mgr = Arc::new(mgr);
             if integrate_deferred_mcp(
                 engine,
@@ -2853,14 +2879,14 @@ async fn settle_deferred_mcp_before_message(
     writer: &ProtocolWriter,
     output: &Arc<dyn OutputSink>,
     dynamic_managers: &mut Vec<Arc<McpManager>>,
+    runtime_diagnostics: Option<&mut RuntimeDiagnosticsState>,
 ) -> bool {
     if let Some(rx) = deferred_mcp_rx.take()
         && let Ok(result) = rx.await
     {
         *pending_deferred_mcp = note_deferred_mcp_connect(
-            result.outcome,
-            result.resolved,
-            result.reservations,
+            result,
+            runtime_diagnostics,
             engine,
             writer,
             output,
@@ -4043,9 +4069,8 @@ async fn run_json_stream_mode(
                 // Err = connect task dropped without sending (panic).
                 if let Ok(result) = res {
                     pending_deferred_mcp = note_deferred_mcp_connect(
-                        result.outcome,
-                        result.resolved,
-                        result.reservations,
+                        result,
+                        Some(&mut runtime_diagnostics),
                         &mut engine,
                         &writer,
                         &output,
@@ -4153,13 +4178,20 @@ async fn run_json_stream_mode(
                 let mut single_configs = HashMap::new();
                 single_configs.insert(name.clone(), config.clone());
                 eprintln!("[mcp] Connecting to '{name}'...");
-                match McpManager::connect_all_with_policy(
+                let connect_outcome = McpManager::connect_all_with_policy(
                     &single_configs,
                     session_egress_policy.clone(),
                 )
-                .await
-                {
+                .await;
+                match connect_outcome {
                     Ok(mgr) => {
+                        if let Some(evidence) = mgr.executable_readiness().get(&name).copied() {
+                            runtime_diagnostics.record_executable_readiness(
+                                wcore_protocol::diagnostics::McpDeclarationOrigin::RuntimeCommand,
+                                &name,
+                                evidence,
+                            );
+                        }
                         let mgr_arc = Arc::new(mgr);
                         let failure_reason = match mgr_arc.health().get(&name) {
                             Some(health) => mcp_server_failure_reason(health),
@@ -4255,9 +4287,8 @@ async fn run_json_stream_mode(
                     && let Ok(result) = rx.await
                 {
                     pending_deferred_mcp = note_deferred_mcp_connect(
-                        result.outcome,
-                        result.resolved,
-                        result.reservations,
+                        result,
+                        Some(&mut runtime_diagnostics),
                         &mut engine,
                         &writer,
                         &output,
@@ -4285,9 +4316,8 @@ async fn run_json_stream_mode(
         {
             deferred_mcp_rx = None;
             pending_deferred_mcp = note_deferred_mcp_connect(
-                result.outcome,
-                result.resolved,
-                result.reservations,
+                result,
+                Some(&mut runtime_diagnostics),
                 &mut engine,
                 &writer,
                 &output,
@@ -4328,9 +4358,8 @@ async fn run_json_stream_mode(
                         // nothing to integrate.
                         if let Ok(result) = res {
                             pending_deferred_mcp = note_deferred_mcp_connect(
-                                result.outcome,
-                                result.resolved,
-                                result.reservations,
+                                result,
+                                Some(&mut runtime_diagnostics),
                                 &mut engine,
                                 &writer,
                                 &output,
@@ -4355,6 +4384,7 @@ async fn run_json_stream_mode(
                 &writer,
                 &output,
                 &mut dynamic_managers,
+                Some(&mut runtime_diagnostics),
             )
             .await;
             if !ready {
@@ -6367,6 +6397,7 @@ mod tests {
                         &writer,
                         &output,
                         &mut dynamic_managers,
+                        None,
                     ),
                 )
                 .await
@@ -6515,6 +6546,7 @@ mod tests {
                 &writer,
                 &output,
                 &mut dynamic_managers,
+                None,
             )
             .await,
             "a retained registry reader must block the provider boundary"
@@ -6534,6 +6566,7 @@ mod tests {
                 &writer,
                 &output,
                 &mut dynamic_managers,
+                None,
             )
             .await,
             "the parked manager must integrate after the reader is released"

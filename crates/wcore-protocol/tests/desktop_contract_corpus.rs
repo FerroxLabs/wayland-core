@@ -241,7 +241,7 @@ fn manifest_pins_generator_and_all_three_digests() {
         );
     }
     assert_eq!(manifest["contract"]["major"], 1);
-    assert_eq!(manifest["contract"]["minor"], 4);
+    assert_eq!(manifest["contract"]["minor"], 5);
     assert_eq!(manifest["commands"].as_array().unwrap().len(), 16);
     assert_eq!(manifest["events"].as_array().unwrap().len(), 47);
     assert_eq!(manifest["counts"]["commands"], 16);
@@ -269,7 +269,7 @@ fn manifest_pins_generator_and_all_three_digests() {
     assert_eq!(manifest["capabilities"]["turn_recovery_v1"], "available");
     assert_eq!(
         manifest["capabilities"]["runtime_diagnostics_v1"],
-        "shape_only"
+        "available"
     );
     assert_eq!(manifest["subcontracts"]["runtime_diagnostics"], "1.0");
     assert_eq!(manifest["subcontracts"]["turn_recovery"], "1.0");

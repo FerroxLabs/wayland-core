@@ -9,61 +9,10 @@ use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, error, warn};
-use wcore_config::shell::mcp_stdio_command_builder;
+use wcore_config::shell::{McpStdioLaunchContext, mcp_stdio_command_builder};
 
 use super::{McpError, McpTransport};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
-
-/// Env vars forwarded to MCP stdio children after `env_clear()`.
-///
-/// Everything else — `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
-/// `WAYLAND_VAULT_PASSPHRASE`, `AWS_SECRET_ACCESS_KEY`, etc. — is withheld.
-/// Per-server `env` entries from `mcp-servers.toml` are layered on top by
-/// `spawn_with_timeout` after this allowlist, so operators can explicitly
-/// forward additional variables when required. Mirrors the pattern in
-/// `wcore-plugin-subprocess/src/mcp_bridge.rs:107`. (F-016)
-const FORWARDED_ENV_VARS: &[&str] = &[
-    // Unix essentials
-    "PATH",
-    "HOME",
-    "USER",
-    "LANG",
-    "TZ",
-    "LC_ALL",
-    "LC_CTYPE",
-    "LC_MESSAGES",
-    "LC_MONETARY",
-    "LC_NUMERIC",
-    "LC_TIME",
-    "TMPDIR", // macOS: per-user temp dir used by many npm CLIs
-    // C3: the isolated-profile home. A wayland-aware MCP child (e.g. the IJFW
-    // memory server) must resolve the SAME profile as the parent — without this
-    // it falls back to the default ~/.wayland (cross-profile leak). Non-secret
-    // path; the vault passphrase (WAYLAND_VAULT_*) is never forwarded. This is
-    // distinct from the WAYLAND_PROFILE_HOME contract below (a resolved path for
-    // plugins that read it); WAYLAND_HOME drives the child's own
-    // wayland_config_dir() resolution.
-    "WAYLAND_HOME",
-    // Windows essentials. Without these, cmd.exe / powershell.exe / .NET-based
-    // MCP servers fail to initialise on Windows and the spawned child dies in
-    // ~15ms before the first JSON-RPC request reaches it — diagnosed via
-    // `ERROR_ENVVAR_NOT_FOUND (0xcb)` from CreateProcessAsUserW in CI run
-    // 26422952732 (round 17) plus "MCP stdio server exited before responding"
-    // in rounds 15/16. v0.8.6 fix.
-    "SYSTEMROOT",             // Windows kernel + system32 tooling
-    "WINDIR",                 // %WINDIR% — many libs probe this
-    "COMSPEC",                // cmd.exe absolute path; cmd.exe itself checks this
-    "PATHEXT",                // .exe/.cmd/.bat/.ps1 resolution under cmd.exe
-    "PROCESSOR_ARCHITECTURE", // DLL load-path resolution
-    "USERPROFILE",            // user home dir; .NET + powershell need this
-    "APPDATA",                // roaming app data
-    "LOCALAPPDATA",           // local app data
-    "PROGRAMFILES",           // 64-bit installs
-    "PROGRAMFILES(X86)",      // 32-bit installs
-    "PSMODULEPATH",           // PowerShell module resolution
-    "TEMP",                   // Windows temp dir
-    "TMP",                    // Windows temp dir alt
-];
 
 /// Per-request timeout for stdio JSON-RPC calls (audit C1).
 ///
@@ -400,6 +349,33 @@ impl StdioTransport {
         env: &HashMap<String, String>,
         rpc_timeout: Duration,
     ) -> Result<Self, McpError> {
+        let launch_context = McpStdioLaunchContext::capture(env).map_err(|error| {
+            McpError::Transport(format!(
+                "Failed to construct sanitized launch environment for '{}': {error}",
+                command
+            ))
+        })?;
+        Self::spawn_with_context_and_timeout(command, args, launch_context, rpc_timeout).await
+    }
+
+    /// Spawn with a context already captured and inspected by the manager.
+    /// Keeping capture outside this method lets diagnostics and process launch
+    /// share one immutable cwd/environment snapshot.
+    pub(crate) async fn spawn_with_context(
+        command: &str,
+        args: &[String],
+        launch_context: McpStdioLaunchContext,
+    ) -> Result<Self, McpError> {
+        Self::spawn_with_context_and_timeout(command, args, launch_context, DEFAULT_RPC_TIMEOUT)
+            .await
+    }
+
+    async fn spawn_with_context_and_timeout(
+        command: &str,
+        args: &[String],
+        launch_context: McpStdioLaunchContext,
+        rpc_timeout: Duration,
+    ) -> Result<Self, McpError> {
         // Windows: bypass shell_command_builder when the command is already
         // cmd[.exe]. shell_command_builder wraps everything in `cmd /C ...`
         // for PATHEXT shim resolution (npx.cmd, node.cmd) — but when the
@@ -456,26 +432,8 @@ impl StdioTransport {
         // explicitly forward additional variables for servers that need them.
         cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .env_clear();
-        for var in FORWARDED_ENV_VARS {
-            if let Ok(val) = std::env::var(var) {
-                cmd.env(var, val);
-            }
-        }
-        // Profile-home handshake: expose the canonical `~/.wayland` profile root
-        // (honouring `WAYLAND_HOME`) so plugin MCP servers route their state to
-        // the same directory the host and the plugin installer agree on. The host
-        // contract is the vendor-neutral `WAYLAND_PROFILE_HOME`; a plugin whose
-        // server reads a differently-named var maps it on its own side (the host
-        // must not bake in any one plugin's variable name). Set after the
-        // allowlist but before per-server `env`, so an explicit operator override
-        // in mcp-servers.toml still wins.
-        if let Some(home) = wcore_config::config::profile_home().to_str() {
-            cmd.env("WAYLAND_PROFILE_HOME", home);
-        }
-        // Per-server env entries from mcp-servers.toml layered last.
-        cmd.envs(env);
+            .stderr(std::process::Stdio::piped());
+        launch_context.apply_to(&mut cmd);
 
         // Rank 24 (unix) — put the child in its own process group so a
         // `killpg` on close reaps the WHOLE subtree, not just the shell
@@ -1162,106 +1120,36 @@ mod tests {
         );
     }
 
-    /// F-016 (security) — the FORWARDED_ENV_VARS allowlist covers PATH/HOME/USER/LANG.
-    ///
-    /// We verify the allowlist is non-empty and contains the minimum
-    /// required vars, without spawning a process that reads host env vars
-    /// (which is inherently racy in multi-threaded test harnesses).
-    /// The actual spawn-and-verify path is covered by the integration test
-    /// `mcp_bridge_env_clear_blocks_secret_vars` in wcore-plugin-subprocess,
-    /// which already has an established pattern and `serial_test` guard.
-    #[test]
-    fn f016_forwarded_env_vars_allowlist_sanity() {
-        // The allowlist must contain the minimum set required for CLI tools.
-        assert!(
-            FORWARDED_ENV_VARS.contains(&"PATH"),
-            "PATH must be in the allowlist"
-        );
-        assert!(
-            FORWARDED_ENV_VARS.contains(&"HOME"),
-            "HOME must be in the allowlist"
-        );
-        assert!(
-            FORWARDED_ENV_VARS.contains(&"USER"),
-            "USER must be in the allowlist"
-        );
-        assert!(
-            FORWARDED_ENV_VARS.contains(&"LANG"),
-            "LANG must be in the allowlist"
-        );
-        assert!(
-            FORWARDED_ENV_VARS.contains(&"WAYLAND_HOME"),
-            "WAYLAND_HOME must be forwarded for C3 profile propagation"
-        );
-
-        // Sensitive vars must NOT appear in the allowlist.
-        let sensitive = [
-            "OPENAI_API_KEY",
-            "ANTHROPIC_API_KEY",
-            "WAYLAND_VAULT_PASSPHRASE",
-            "AWS_SECRET_ACCESS_KEY",
-        ];
-        for var in sensitive {
-            assert!(
-                !FORWARDED_ENV_VARS.contains(&var),
-                "sensitive var {var} must NOT be in the allowlist"
-            );
-        }
-    }
-
-    /// F-016 (process-level) — spawn a child via the same env_clear+allowlist
-    /// pattern that `spawn_with_timeout` now uses, and verify the canary is absent.
-    ///
-    /// This test uses a direct tokio::process::Command (not the transport) so it
-    /// can capture stdout and assert the child environment. The transport's
-    /// `spawn_with_timeout` applies the same env_clear logic.
+    /// F-016 — the real transport applies the canonical sanitized context:
+    /// ambient secrets are absent, curated PATH survives, and explicit
+    /// per-server values are applied last.
     #[tokio::test]
-    async fn f016_env_clear_blocks_secret_vars_process_check() {
-        use tokio::io::AsyncReadExt;
-
-        // Spawn a child with the same env logic the transport applies:
-        // env_clear() + allowlist + per-server extras (but NO host secrets).
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c")
-            .arg("env")
-            .env_clear()
-            .stdout(std::process::Stdio::piped());
-
-        // Forward the allowlist vars from the CURRENT test process env.
-        for var in FORWARDED_ENV_VARS {
-            if let Ok(val) = std::env::var(var) {
-                cmd.env(var, val);
-            }
+    #[serial_test::serial(mcp_stdio_environment)]
+    async fn f016_real_spawn_uses_sanitized_launch_context() {
+        let previous = std::env::var_os("WAYLAND_TEST_SECRET_CANARY");
+        unsafe {
+            std::env::set_var("WAYLAND_TEST_SECRET_CANARY", "ambient-secret");
         }
-        // Simulate per-server env entry.
-        cmd.env("MCP_EXPLICIT_VAR", "explicit_value");
-        // Do NOT forward "WAYLAND_TEST_SECRET_CANARY" — it must not appear.
-        // (We don't set it in the parent process env here to avoid the
-        //  multi-thread set_var unsafety; we simply assert the child doesn't
-        //  have an entry we never added.)
+        let script = r#"read line; printf '{"jsonrpc":"2.0","id":1,"result":{"secret":"%s","explicit":"%s","path":"%s"}}\n' "${WAYLAND_TEST_SECRET_CANARY-unset}" "$MCP_EXPLICIT_VAR" "${PATH:+present}""#;
+        let environment =
+            HashMap::from([("MCP_EXPLICIT_VAR".to_owned(), "explicit-value".to_owned())]);
+        let spawned =
+            StdioTransport::spawn("sh", &["-c".to_owned(), script.to_owned()], &environment).await;
+        match previous {
+            Some(value) => unsafe { std::env::set_var("WAYLAND_TEST_SECRET_CANARY", value) },
+            None => unsafe { std::env::remove_var("WAYLAND_TEST_SECRET_CANARY") },
+        }
+        let transport = spawned.expect("spawn environment fixture");
 
-        let mut child = cmd.spawn().expect("spawn env-dump");
-        let stdout = child.stdout.take().expect("stdout");
-        let _ = child.wait().await;
-        let mut buf = String::new();
-        let mut reader = tokio::io::BufReader::new(stdout);
-        reader
-            .read_to_string(&mut buf)
+        let response = transport
+            .request(&JsonRpcRequest::new(1, "ping", None))
             .await
-            .expect("read child stdout");
-
-        // Per-server entry MUST be present.
-        assert!(
-            buf.contains("MCP_EXPLICIT_VAR=explicit_value"),
-            "per-server env var missing: {buf}"
-        );
-        // PATH must be present (from the allowlist).
-        assert!(buf.contains("PATH="), "PATH missing from child env: {buf}");
-        // Secret canary must NOT be present — we never added it.
-        assert!(
-            !buf.contains("WAYLAND_TEST_SECRET_CANARY"),
-            "canary appeared unexpectedly: {buf}"
-        );
+            .expect("environment fixture response");
+        let result = response.result.expect("environment result");
+        assert_eq!(result["secret"], "unset");
+        assert_eq!(result["explicit"], "explicit-value");
+        assert_eq!(result["path"], "present");
+        transport.close().await.expect("close environment fixture");
     }
 
     /// B1 — the profile-home handshake reaches the spawned MCP child.

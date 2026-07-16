@@ -17,12 +17,12 @@ use super::spec::{
 };
 
 pub const CONTRACT_NAME: &str = "wayland-desktop-core";
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/5";
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/6";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
 
-This v1.4 corpus records the current producer wire. Contract negotiation,
+This v1.5 corpus records the current producer wire. Contract negotiation,
 unknown-critical rejection, and unknown-noncritical dropping are live and
 proved by serialized replay through the reference host observer.
 
@@ -47,8 +47,9 @@ replay and a persistent later-mutation watcher remain deferred.
 Malformed command fixtures and the current unknown-type behavior are proved by
 `desktop_contract_adversarial.rs`. Browser, CUA, and plugin event fixtures are
 shape-only because no production emitter is proven at this source baseline.
-Runtime diagnostics are likewise shape-only until the redacted producer
-mapping and correlated command handler land atomically.
+Runtime diagnostics v1 is production-backed by correlated serialized replay;
+its executable readiness is non-spawning, launch-environment exact, and
+redacted before entering protocol state.
 "#;
 
 fn json_lines(values: impl IntoIterator<Item = Value>) -> ContractResult<Vec<u8>> {
@@ -138,7 +139,15 @@ fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> V
             json!({"const": 1, "type": "integer"})
         }
         ("runtime_diagnostics_unavailable", "reason") => {
-            json!({"enum": ["unsupported_version"], "type": "string"})
+            json!({"enum": ["unsupported_version", "invalid_request"], "type": "string"})
+        }
+        (
+            "get_runtime_diagnostics"
+            | "runtime_diagnostics_snapshot"
+            | "runtime_diagnostics_unavailable",
+            "request_id",
+        ) => {
+            json!({"minLength": 1, "maxLength": 128, "type": "string"})
         }
         ("resume_turn", "action") => {
             json!({"enum": ["continue", "reconcile", "cancel"], "type": "string"})
@@ -526,10 +535,10 @@ fn runtime_diagnostics_snapshot_schema() -> Value {
                         "resources_exposed": {"type": "boolean"},
                         "assistant_scoped": {"type": "boolean"},
                         "executable_basename": {"type": "string"},
-                        "executable_readiness": {"enum": ["not_applicable", "unchecked", "resolved", "missing_effective_path", "not_found", "invalid_absolute_path", "unsupported_transport"], "type": "string"},
+                        "executable_readiness": {"enum": ["not_applicable", "unchecked", "resolved", "missing_effective_path", "not_found", "invalid_absolute_path", "invalid_executable", "invalid_effective_environment", "permission_denied", "not_executable", "probe_timed_out", "unsupported_transport"], "type": "string"},
                         "working_directory": {"enum": ["inherited_process", "project_root", "profile_home", "explicit"], "type": "string"},
                         "failure": {"enum": ["missing_executable", "launch_failed", "connection_refused", "timeout", "protocol_mismatch", "authentication_required", "authorization_denied", "invalid_configuration", "transport_closed", "unknown"], "type": "string"},
-                        "remediation": {"items": {"enum": ["open_active_config", "restart_desktop", "fix_gui_launch_path", "install_executable", "review_server_config", "retry_connection", "check_assistant_scope", "restart_to_load_resources"], "type": "string"}, "type": "array"}
+                        "remediation": {"items": {"enum": ["open_active_config", "restart_desktop", "fix_gui_launch_path", "install_executable", "fix_executable_permissions", "review_server_config", "retry_connection", "retry_diagnostics", "check_assistant_scope", "restart_to_load_resources"], "type": "string"}, "type": "array"}
                     },
                     "required": ["name", "origin", "transport", "connection", "exposure", "deferred", "tool_count", "resources_declared", "resources_exposed", "assistant_scoped", "executable_readiness", "working_directory", "remediation"],
                     "type": "object"
@@ -1083,7 +1092,7 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
         ),
         (
             "runtime_diagnostics_v1".into(),
-            ContractCapabilityStatus::ShapeOnly,
+            ContractCapabilityStatus::Available,
         ),
         (
             "workflow_lifecycle_v1".into(),
@@ -1101,7 +1110,7 @@ fn descriptor(
     ContractDescriptor {
         name: CONTRACT_NAME.into(),
         major: 1,
-        minor: 4,
+        minor: 5,
         generator: GENERATOR_VERSION.into(),
         fixture_digest,
         schema_digest,
@@ -1504,12 +1513,11 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
             "events": EVENT_SPECS.len(),
             "fixtures": fixture_inventory.len()
         },
-        "contract": {"major": 1, "minor": 4, "name": CONTRACT_NAME},
+        "contract": {"major": 1, "minor": 5, "name": CONTRACT_NAME},
         "deferred_adversarial": [
             "ordinary_turn_tool_replay_reducer",
             "anvil_desktop_replay_reducer",
-            "anvil_persistent_mutation_watcher",
-            "runtime_diagnostics_producer"
+            "anvil_persistent_mutation_watcher"
         ],
         "events": specs_manifest(EVENT_SPECS),
         "fixture_digest": fixture_digest,

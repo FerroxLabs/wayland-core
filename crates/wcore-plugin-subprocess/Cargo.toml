@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+wcore-config.workspace = true
 wcore-plugin-api.workspace = true
 # v0.6.5 Task 3.1 — reuse JSON-RPC envelope types from wcore-mcp::protocol
 # (pub mod protocol in crates/wcore-mcp/src/lib.rs:3).

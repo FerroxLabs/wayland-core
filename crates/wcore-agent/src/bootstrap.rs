@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use wcore_config::config::{Config, TransportType};
 use wcore_mcp::manager::McpManager;
+use wcore_mcp::transport::stdio_readiness::McpStdioExecutableReadiness;
 use wcore_observability::sink::SpanSink;
 use wcore_plugin_api::registry::providers::PluginProvider;
 use wcore_providers::{
@@ -39,6 +40,7 @@ fn approval_policy_to_session_mode(
 pub struct PluginMcpDeclaration {
     pub name: String,
     pub transport: TransportType,
+    pub executable_readiness: Option<McpStdioExecutableReadiness>,
 }
 
 pub struct BootstrapResult {
@@ -683,11 +685,10 @@ impl AgentBootstrap {
             )
             .await;
         let mut plugin_runtime_keepalives: Vec<crate::plugins::LoadedRuntimeHandle> = Vec::new();
-        // A4c: declarative stdio MCP servers dropped by the pre-connect
-        // reachability gate are collected here (name, reason) so the boot
-        // snapshot can render a skipped (⊘) row in /mcp and /doctor instead
-        // of dropping them silently into an info-log.
-        let mut skipped_mcp_servers: Vec<(String, String)> = Vec::new();
+        // Declarative MCP servers now remain visible through connection and
+        // readiness diagnostics instead of being dropped by a preflight.
+        // Preserve the existing result field as an empty compatibility value.
+        let skipped_mcp_servers: Vec<(String, String)> = Vec::new();
         for record in plugin_loader.take_on_disk_dispatches() {
             if let Err(reason) = &record.load_result {
                 tracing::warn!(
@@ -772,26 +773,13 @@ impl AgentBootstrap {
                                 );
                                 crate::plugins::var_subst::substitute_spec(&mut spec, &ctx);
                             }
-                            // Reachability gate mirroring the compiled-in IJFW
-                            // plugin: a stdio server whose command isn't launchable
-                            // is skipped (info-log) so boot never hangs. SSE/HTTP
-                            // transports can't be cheaply probed locally — trust
-                            // them and let wcore-mcp surface connect-time errors.
-                            if declarative_mcp_server_is_reachable(&spec) {
-                                plugin_outcome.mcp_servers.push(spec);
-                            } else {
-                                tracing::info!(
-                                    plugin = %plugin_name,
-                                    server = %spec.name,
-                                    "declarative plugin MCP server did not start cleanly — \
-                                     skipping registration (hooks stay log-only)"
-                                );
-                                // A4c: surface the pre-connect skip as a ⊘ row.
-                                skipped_mcp_servers.push((
-                                    spec.name.clone(),
-                                    "stdio command not launchable — skipped before connect (check the plugin command/PATH)".to_string(),
-                                ));
-                            }
+                            // Readiness is inspected later through the same
+                            // sanitized launch context as the real MCP
+                            // transport. Never execute third-party code as a
+                            // preflight: the old `<command> --help` probe used
+                            // the ambient parent environment, leaked secrets,
+                            // and disagreed with Windows PATHEXT semantics.
+                            plugin_outcome.mcp_servers.push(spec);
                         }
                     }
                 }
@@ -1395,6 +1383,14 @@ impl AgentBootstrap {
                 .expect("session egress policy is installed before scoped bootstrap")
                 .clone(),
         );
+        let plugin_mcp_manager =
+            crate::plugins::mcp_delivery::connect_plugin_mcp_servers_with_policy(
+                &applied.plugin_mcp_servers,
+                &mut registry,
+                &builtin_names,
+                plugin_egress_policy,
+            )
+            .await;
         let plugin_mcp_declarations = applied
             .plugin_mcp_servers
             .iter()
@@ -1405,17 +1401,12 @@ impl AgentBootstrap {
                     wcore_plugin_api::McpTransport::Sse { .. } => TransportType::Sse,
                     wcore_plugin_api::McpTransport::Http { .. } => TransportType::StreamableHttp,
                 },
+                executable_readiness: plugin_mcp_manager
+                    .as_ref()
+                    .and_then(|manager| manager.executable_readiness().get(&server.name).copied()),
             })
             .collect();
-        if let Some(plugin_mcp_mgr) =
-            crate::plugins::mcp_delivery::connect_plugin_mcp_servers_with_policy(
-                &applied.plugin_mcp_servers,
-                &mut registry,
-                &builtin_names,
-                plugin_egress_policy,
-            )
-            .await
-        {
+        if let Some(plugin_mcp_mgr) = plugin_mcp_manager {
             mcp_managers.push(plugin_mcp_mgr);
         }
 
@@ -3365,65 +3356,6 @@ impl AgentBootstrap {
     }
 }
 
-/// Path B step 1 — reachability probe for a declarative plugin's MCP server.
-///
-/// Mirrors the compiled-in IJFW plugin's `mcp_server_is_reachable`: a stdio
-/// server is launchable iff (a) for `node`/`python`/`deno` with an absolute
-/// first arg, the script file exists, or (b) for any other command, a fast
-/// `--help` spawn with a 2-second cap at least *starts* the process. SSE/HTTP
-/// transports can't be cheaply probed and are trusted (connect-time errors
-/// surface in wcore-mcp). Non-fatal: a `false` here only skips registration.
-fn declarative_mcp_server_is_reachable(spec: &wcore_plugin_api::McpServerSpec) -> bool {
-    use wcore_plugin_api::McpTransport;
-    let (command, args) = match &spec.transport {
-        McpTransport::Stdio { command, args } => (command, args),
-        // SSE / HTTP: trust the registration.
-        McpTransport::Sse { .. } | McpTransport::Http { .. } => return true,
-    };
-
-    // Fast path: interpreter + absolute script path → check the file exists.
-    if matches!(command.as_str(), "node" | "python3" | "python" | "deno")
-        && args
-            .first()
-            .map(|a| std::path::Path::new(a).is_absolute())
-            .unwrap_or(false)
-    {
-        return std::path::Path::new(&args[0]).exists();
-    }
-
-    // Smoke-test path: spawn `<command> <args...> --help`, give it 2 seconds.
-    // The process merely STARTING (even if `--help` exits non-zero) proves the
-    // binary is present and executable.
-    let mut probe_args: Vec<&str> = args.iter().map(String::as_str).collect();
-    probe_args.push("--help");
-    let mut cmd = std::process::Command::new(command);
-    cmd.args(&probe_args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-
-    match cmd.spawn() {
-        Err(_) => false,
-        Ok(mut child) => {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => return true,
-                    Ok(None) if std::time::Instant::now() < deadline => {
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                    Ok(None) => {
-                        // Still running after 2 s — a real server. Reachable.
-                        let _ = child.kill();
-                        return true;
-                    }
-                    Err(_) => return false,
-                }
-            }
-        }
-    }
-}
-
 /// Lane E/D4 — spawn-consent gate for a declarative plugin's MCP server.
 ///
 /// Marketplace-installed plugins carry a `provenance.json` and a `consent.json`
@@ -3931,8 +3863,7 @@ mod consent_gate_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use wcore_plugin_api::{BundledSkillSpec, McpServerSpec, McpTransport};
+    use wcore_plugin_api::BundledSkillSpec;
 
     fn bootstrap_skill(name: &str) -> BundledSkillSpec {
         BundledSkillSpec {
@@ -4002,22 +3933,6 @@ mod tests {
             reg.get("Read").is_some() && reg.get("Bash").is_some(),
             "non-search tools still survive in the Script mini-registry under Full"
         );
-    }
-
-    /// A4c: a declarative stdio MCP server whose command cannot be launched
-    /// must fail the reachability gate. This is the only pre-connect skip on
-    /// this branch, and a `false` here is what feeds the skipped (⊘) row.
-    #[test]
-    fn unreachable_stdio_command_is_not_reachable() {
-        let spec = McpServerSpec {
-            name: "bogus-server".to_string(),
-            transport: McpTransport::Stdio {
-                command: "wayland-nonexistent-mcp-command-xyz".to_string(),
-                args: Vec::new(),
-            },
-            env: HashMap::new(),
-        };
-        assert!(!declarative_mcp_server_is_reachable(&spec));
     }
 
     /// Task 5.1: the OAuth bearer closure bootstrap builds for the chatgpt

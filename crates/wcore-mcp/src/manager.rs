@@ -14,8 +14,13 @@ use super::protocol::{
 };
 use super::transport::sse::SseTransport;
 use super::transport::stdio::StdioTransport;
+use super::transport::stdio_readiness::{
+    McpStdioExecutableReadiness, McpStdioExecutableReadinessStatus,
+    inspect_mcp_stdio_executable_in_context,
+};
 use super::transport::streamable_http::StreamableHttpTransport;
 use super::transport::{McpError, McpTransport};
+use wcore_config::shell::{LaunchValueSource, McpStdioLaunchContext};
 
 /// Per-server connect budget (audit C2).
 ///
@@ -64,9 +69,18 @@ pub enum McpServerHealth {
 /// connect loop record `TimedOut` vs `Failed` distinctly (the boundary between
 /// them is lost once flattened to a single `McpError`).
 enum ConnectOutcome {
-    Ok(Box<McpServer>),
-    Failed(String),
-    TimedOut(Duration),
+    Ok {
+        server: Box<McpServer>,
+        executable_readiness: Option<McpStdioExecutableReadiness>,
+    },
+    Failed {
+        reason: String,
+        executable_readiness: Option<McpStdioExecutableReadiness>,
+    },
+    TimedOut {
+        after: Duration,
+        executable_readiness: Option<McpStdioExecutableReadiness>,
+    },
 }
 
 /// Outcome of a transport-successful MCP tool call ([`McpManager::call_tool`]).
@@ -118,6 +132,9 @@ pub struct McpManager {
     servers: HashMap<String, McpServer>,
     /// Per-server connect outcome (every attempted server, including failures).
     health: HashMap<String, McpServerHealth>,
+    /// Redacted readiness captured from the same immutable stdio context used
+    /// by the actual child process. Non-stdio servers have no entry.
+    executable_readiness: HashMap<String, McpStdioExecutableReadiness>,
     /// Monotonically increasing request ID counter for all JSON-RPC calls
     next_id: AtomicU64,
     /// Immutable authority used by every HTTP transport added to this manager.
@@ -180,9 +197,16 @@ impl McpManager {
 
         let mut servers = HashMap::new();
         let mut health = HashMap::new();
+        let mut executable_readiness = HashMap::new();
         for (name, outcome) in results {
             match outcome {
-                ConnectOutcome::Ok(server) => {
+                ConnectOutcome::Ok {
+                    server,
+                    executable_readiness: readiness,
+                } => {
+                    if let Some(readiness) = readiness {
+                        executable_readiness.insert(name.clone(), readiness);
+                    }
                     eprintln!(
                         "[mcp] Connected to '{}': {} tools, resources={}",
                         name,
@@ -197,13 +221,25 @@ impl McpManager {
                     );
                     servers.insert(name, *server);
                 }
-                ConnectOutcome::Failed(reason) => {
+                ConnectOutcome::Failed {
+                    reason,
+                    executable_readiness: readiness,
+                } => {
+                    if let Some(readiness) = readiness {
+                        executable_readiness.insert(name.clone(), readiness);
+                    }
                     // Non-fatal: continue with other servers, but keep the
                     // cause so `/doctor` can surface it (was: log-and-forget).
                     tracing::warn!(target: "mcp.manager", server = %name, error = %reason, "failed to connect MCP server");
                     health.insert(name, McpServerHealth::Failed { reason });
                 }
-                ConnectOutcome::TimedOut(after) => {
+                ConnectOutcome::TimedOut {
+                    after,
+                    executable_readiness: readiness,
+                } => {
+                    if let Some(readiness) = readiness {
+                        executable_readiness.insert(name.clone(), readiness);
+                    }
                     tracing::warn!(target: "mcp.manager", server = %name, ?after, "MCP server connect timed out");
                     health.insert(name, McpServerHealth::TimedOut { after });
                 }
@@ -213,6 +249,7 @@ impl McpManager {
         Ok(Self {
             servers,
             health,
+            executable_readiness,
             next_id: AtomicU64::new(10),
             egress_policy,
         })
@@ -228,17 +265,57 @@ impl McpManager {
         connect_timeout: Duration,
         egress_policy: wcore_egress::SharedPolicy,
     ) -> ConnectOutcome {
+        let (stdio_context, executable_readiness) = if config.transport == TransportType::Stdio {
+            let Some(command) = config.command.as_deref() else {
+                return ConnectOutcome::Failed {
+                    reason: "stdio transport requires 'command'".to_string(),
+                    executable_readiness: Some(McpStdioExecutableReadiness {
+                        status: McpStdioExecutableReadinessStatus::InvalidExecutable,
+                        path_source: LaunchValueSource::Unavailable,
+                        pathext_source: LaunchValueSource::Unavailable,
+                    }),
+                };
+            };
+            let empty_environment = HashMap::new();
+            let environment = config.env.as_ref().unwrap_or(&empty_environment);
+            let context = match McpStdioLaunchContext::capture(environment) {
+                Ok(context) => context,
+                Err(error) => {
+                    return ConnectOutcome::Failed {
+                        reason: format!("cannot construct sanitized stdio launch context: {error}"),
+                        executable_readiness: Some(McpStdioExecutableReadiness {
+                            status: McpStdioExecutableReadinessStatus::InvalidEffectiveEnvironment,
+                            path_source: LaunchValueSource::Unavailable,
+                            pathext_source: LaunchValueSource::Unavailable,
+                        }),
+                    };
+                }
+            };
+            let readiness = inspect_mcp_stdio_executable_in_context(command, &context).await;
+            (Some(context), Some(readiness))
+        } else {
+            (None, None)
+        };
         match timeout(
             connect_timeout,
-            Self::connect_server(name, config, egress_policy),
+            Self::connect_server(name, config, egress_policy, stdio_context),
         )
         .await
         {
-            Ok(Ok(server)) => ConnectOutcome::Ok(Box::new(server)),
-            Ok(Err(e)) => ConnectOutcome::Failed(e.to_string()),
+            Ok(Ok(server)) => ConnectOutcome::Ok {
+                server: Box::new(server),
+                executable_readiness,
+            },
+            Ok(Err(e)) => ConnectOutcome::Failed {
+                reason: e.to_string(),
+                executable_readiness,
+            },
             Err(_) => {
                 warn!(server = %name, "[mcp] connect timed out — skipping server");
-                ConnectOutcome::TimedOut(connect_timeout)
+                ConnectOutcome::TimedOut {
+                    after: connect_timeout,
+                    executable_readiness,
+                }
             }
         }
     }
@@ -270,7 +347,13 @@ impl McpManager {
         )
         .await
         {
-            ConnectOutcome::Ok(server) => {
+            ConnectOutcome::Ok {
+                server,
+                executable_readiness,
+            } => {
+                if let Some(readiness) = executable_readiness {
+                    self.executable_readiness.insert(name.clone(), readiness);
+                }
                 let tool_names: Vec<String> = server.tools.iter().map(|t| t.name.clone()).collect();
                 eprintln!(
                     "[mcp] Connected to '{}': {} tools, resources={}",
@@ -287,7 +370,13 @@ impl McpManager {
                 self.servers.insert(name, *server);
                 Ok(tool_names)
             }
-            ConnectOutcome::Failed(reason) => {
+            ConnectOutcome::Failed {
+                reason,
+                executable_readiness,
+            } => {
+                if let Some(readiness) = executable_readiness {
+                    self.executable_readiness.insert(name.clone(), readiness);
+                }
                 self.health.insert(
                     name,
                     McpServerHealth::Failed {
@@ -296,7 +385,13 @@ impl McpManager {
                 );
                 Err(McpError::Transport(reason))
             }
-            ConnectOutcome::TimedOut(after) => {
+            ConnectOutcome::TimedOut {
+                after,
+                executable_readiness,
+            } => {
+                if let Some(readiness) = executable_readiness {
+                    self.executable_readiness.insert(name.clone(), readiness);
+                }
                 self.health
                     .insert(name.clone(), McpServerHealth::TimedOut { after });
                 Err(McpError::Transport(format!(
@@ -311,6 +406,7 @@ impl McpManager {
         name: &str,
         config: &McpServerConfig,
         egress_policy: wcore_egress::SharedPolicy,
+        stdio_context: Option<McpStdioLaunchContext>,
     ) -> Result<McpServer, McpError> {
         let empty_map = HashMap::new();
 
@@ -321,8 +417,10 @@ impl McpManager {
                     McpError::InitFailed("stdio transport requires 'command'".into())
                 })?;
                 let args = config.args.as_deref().unwrap_or(&[]);
-                let env = config.env.as_ref().unwrap_or(&empty_map);
-                Box::new(StdioTransport::spawn(command, args, env).await?)
+                let context = stdio_context.ok_or_else(|| {
+                    McpError::InitFailed("stdio launch context was not prepared".into())
+                })?;
+                Box::new(StdioTransport::spawn_with_context(command, args, context).await?)
             }
             TransportType::Sse => {
                 let url = config
@@ -570,6 +668,12 @@ impl McpManager {
         &self.health
     }
 
+    /// Secret-free executable readiness captured from the same stdio launch
+    /// context used by each attempted child.
+    pub fn executable_readiness(&self) -> &HashMap<String, McpStdioExecutableReadiness> {
+        &self.executable_readiness
+    }
+
     /// Whether this manager hosts a connected server named `name`. No
     /// allocation (unlike `server_names`, which clones every key) — preferred
     /// for hot per-dispatch lookups.
@@ -667,6 +771,7 @@ impl McpManager {
                 .into_iter()
                 .map(|(name, h)| (name.to_string(), h))
                 .collect(),
+            executable_readiness: HashMap::new(),
             next_id: AtomicU64::new(10),
             egress_policy: wcore_egress::default_policy(),
         }
@@ -694,6 +799,7 @@ impl McpManager {
         Self {
             servers,
             health,
+            executable_readiness: HashMap::new(),
             next_id: AtomicU64::new(10),
             egress_policy: wcore_egress::default_policy(),
         }
@@ -726,6 +832,7 @@ impl McpManager {
         Self {
             servers,
             health,
+            executable_readiness: HashMap::new(),
             next_id: AtomicU64::new(10),
             egress_policy: wcore_egress::default_policy(),
         }
@@ -1296,6 +1403,14 @@ mod tests {
             }
             other => panic!("expected TimedOut, got {other:?}"),
         }
+        assert_eq!(
+            manager
+                .executable_readiness()
+                .get("hung")
+                .map(|readiness| readiness.status),
+            Some(McpStdioExecutableReadinessStatus::Resolved),
+            "timeout evidence must come from the launch context used by the child"
+        );
     }
 
     #[cfg(unix)]
@@ -1330,6 +1445,14 @@ mod tests {
             }
             other => panic!("expected Failed, got {other:?}"),
         }
+        assert_eq!(
+            manager
+                .executable_readiness()
+                .get("broken")
+                .map(|readiness| readiness.status),
+            Some(McpStdioExecutableReadinessStatus::NotFound),
+            "spawn failure must retain readiness from the same launch context"
+        );
     }
 
     #[cfg(unix)]
@@ -1383,6 +1506,14 @@ mod tests {
             Some(McpServerHealth::Ready { tool_count }) => assert_eq!(*tool_count, 1),
             other => panic!("expected Ready{{1}}, got {other:?}"),
         }
+        assert_eq!(
+            manager
+                .executable_readiness()
+                .get("healthy")
+                .map(|readiness| readiness.status),
+            Some(McpStdioExecutableReadinessStatus::Resolved),
+            "successful child must retain resolved readiness from its launch context"
+        );
         assert!(
             matches!(
                 manager.health().get("hung"),

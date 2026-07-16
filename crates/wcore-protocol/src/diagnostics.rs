@@ -2,13 +2,24 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const RUNTIME_DIAGNOSTICS_VERSION: u16 = 1;
+pub const RUNTIME_DIAGNOSTICS_REQUEST_ID_MAX_CHARS: usize = 128;
 
 /// Closed, versioned request for the process's effective runtime view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GetRuntimeDiagnosticsCommand {
     pub diagnostics_version: u16,
+    #[serde(deserialize_with = "deserialize_runtime_diagnostics_request_id")]
     pub request_id: String,
+}
+
+fn deserialize_runtime_diagnostics_request_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let request_id = String::deserialize(deserializer)?;
+    validate_runtime_diagnostics_request_id(&request_id).map_err(serde::de::Error::custom)?;
+    Ok(request_id)
 }
 
 /// Fail-closed version negotiation for runtime diagnostics.
@@ -16,6 +27,29 @@ pub struct GetRuntimeDiagnosticsCommand {
 pub enum RuntimeDiagnosticsVersionError {
     #[error("unsupported runtime diagnostics version: {actual}")]
     UnsupportedVersion { actual: u16 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum RuntimeDiagnosticsRequestIdError {
+    #[error("runtime diagnostics request_id must not be empty")]
+    Empty,
+    #[error("runtime diagnostics request_id exceeds {max_chars} characters")]
+    TooLong { max_chars: usize },
+}
+
+pub fn validate_runtime_diagnostics_request_id(
+    request_id: &str,
+) -> Result<(), RuntimeDiagnosticsRequestIdError> {
+    let length = request_id.chars().count();
+    if length == 0 {
+        Err(RuntimeDiagnosticsRequestIdError::Empty)
+    } else if length > RUNTIME_DIAGNOSTICS_REQUEST_ID_MAX_CHARS {
+        Err(RuntimeDiagnosticsRequestIdError::TooLong {
+            max_chars: RUNTIME_DIAGNOSTICS_REQUEST_ID_MAX_CHARS,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 pub const fn validate_runtime_diagnostics_version(
@@ -71,6 +105,7 @@ pub enum RuntimeProfileBinding {
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeDiagnosticsUnavailableReason {
     UnsupportedVersion,
+    InvalidRequest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,6 +209,11 @@ pub enum McpExecutableReadiness {
     MissingEffectivePath,
     NotFound,
     InvalidAbsolutePath,
+    InvalidExecutable,
+    InvalidEffectiveEnvironment,
+    PermissionDenied,
+    NotExecutable,
+    ProbeTimedOut,
     UnsupportedTransport,
 }
 
@@ -208,8 +248,10 @@ pub enum RuntimeRemediationCode {
     RestartDesktop,
     FixGuiLaunchPath,
     InstallExecutable,
+    FixExecutablePermissions,
     ReviewServerConfig,
     RetryConnection,
+    RetryDiagnostics,
     CheckAssistantScope,
     RestartToLoadResources,
 }
@@ -246,4 +288,29 @@ pub struct RuntimeDiagnosticsSnapshotV1 {
     pub config_sources: Vec<RuntimeConfigSource>,
     pub unsupported_overrides: Vec<UnsupportedConfigOverride>,
     pub mcp_servers: Vec<McpServerDiagnostic>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagnostics_request_id_must_be_non_empty_and_bounded() {
+        for request_id in [
+            "",
+            &"x".repeat(RUNTIME_DIAGNOSTICS_REQUEST_ID_MAX_CHARS + 1),
+        ] {
+            let value = serde_json::json!({
+                "diagnostics_version": RUNTIME_DIAGNOSTICS_VERSION,
+                "request_id": request_id,
+            });
+            assert!(serde_json::from_value::<GetRuntimeDiagnosticsCommand>(value).is_err());
+        }
+
+        let value = serde_json::json!({
+            "diagnostics_version": RUNTIME_DIAGNOSTICS_VERSION,
+            "request_id": "x".repeat(RUNTIME_DIAGNOSTICS_REQUEST_ID_MAX_CHARS),
+        });
+        assert!(serde_json::from_value::<GetRuntimeDiagnosticsCommand>(value).is_ok());
+    }
 }

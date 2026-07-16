@@ -1,6 +1,6 @@
 # Deferred Desktop contract adversarial cases
 
-This v1.4 corpus records the current producer wire. Contract negotiation,
+This v1.5 corpus records the current producer wire. Contract negotiation,
 unknown-critical rejection, and unknown-noncritical dropping are live and
 proved by serialized replay through the reference host observer.
 
@@ -25,5 +25,6 @@ replay and a persistent later-mutation watcher remain deferred.
 Malformed command fixtures and the current unknown-type behavior are proved by
 `desktop_contract_adversarial.rs`. Browser, CUA, and plugin event fixtures are
 shape-only because no production emitter is proven at this source baseline.
-Runtime diagnostics are likewise shape-only until the redacted producer
-mapping and correlated command handler land atomically.
+Runtime diagnostics v1 is production-backed by correlated serialized replay;
+its executable readiness is non-spawning, launch-environment exact, and
+redacted before entering protocol state.

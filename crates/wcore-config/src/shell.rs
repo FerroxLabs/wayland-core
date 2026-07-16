@@ -19,6 +19,7 @@
 //! See `AGENTS.md` "Shell Execution" for the policy and migration guidance.
 
 mod executable_readiness;
+mod mcp_stdio_launch_context;
 
 use std::process::Output;
 use std::sync::OnceLock;
@@ -28,6 +29,9 @@ use tokio::process::Command;
 pub use executable_readiness::{
     ExecutableEnvironmentVariable, ExecutableReadinessError, ExecutableReadinessLimit,
     ResolvedExecutable, resolve_mcp_stdio_executable,
+};
+pub use mcp_stdio_launch_context::{
+    LaunchValueSource, McpStdioLaunchContext, McpStdioLaunchContextError,
 };
 
 /// Process-global Bash-tool shell override, sourced from `[tools] windows_shell`
