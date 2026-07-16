@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::resolution_provenance::{LaunchBindingEvidence, ProfileSelectionSource};
+
 /// Maximum profile-name length. Generous for human-chosen names while staying
 /// well under filesystem component limits (255 bytes on ext4/APFS/NTFS).
 pub const MAX_PROFILE_NAME_LEN: usize = 64;
@@ -242,6 +244,9 @@ pub struct LaunchOutcome {
     /// that was asked for and NOT bound. A host protocol must refuse rather than
     /// serve the default home's credentials/memory under that name.
     pub unbound_selection: Option<String>,
+    /// The authority that selected the process's effective home. This records
+    /// names and source classes only; it never retains `WAYLAND_HOME` values.
+    pub binding: LaunchBindingEvidence,
 }
 
 static LAUNCH_OUTCOME: std::sync::OnceLock<LaunchOutcome> = std::sync::OnceLock::new();
@@ -260,12 +265,23 @@ fn activate_for_launch_impl(args: impl Iterator<Item = String>) -> LaunchOutcome
     // 1. Explicit WAYLAND_HOME wins — never override it. An explicit home is an
     //    unambiguous binding, so nothing is left unbound.
     if std::env::var_os("WAYLAND_HOME").is_some() {
-        return LaunchOutcome::default();
+        return LaunchOutcome {
+            unbound_selection: None,
+            binding: LaunchBindingEvidence::ExplicitWaylandHome,
+        };
     }
 
     // 2. --profile on argv, else 3. the active pointer.
-    let Some(name) = profile_flag_from_args(args).or_else(read_active_pointer) else {
-        return LaunchOutcome::default();
+    let selection = profile_flag_from_args(args)
+        .map(|name| (name, ProfileSelectionSource::CommandLine))
+        .or_else(|| {
+            read_active_pointer().map(|name| (name, ProfileSelectionSource::ActivePointer))
+        });
+    let Some((name, source)) = selection else {
+        return LaunchOutcome {
+            unbound_selection: None,
+            binding: LaunchBindingEvidence::DefaultHome,
+        };
     };
 
     match profile_dir(&name) {
@@ -273,7 +289,10 @@ fn activate_for_launch_impl(args: impl Iterator<Item = String>) -> LaunchOutcome
             // SAFETY: single-threaded at process entry (see the doc comment and
             // the `main()` call site). No other thread can observe the env race.
             unsafe { std::env::set_var("WAYLAND_HOME", &dir) };
-            LaunchOutcome::default()
+            LaunchOutcome {
+                unbound_selection: None,
+                binding: LaunchBindingEvidence::BoundProfile { name, source },
+            }
         }
         Ok(dir) => {
             eprintln!(
@@ -281,13 +300,15 @@ fn activate_for_launch_impl(args: impl Iterator<Item = String>) -> LaunchOutcome
                 dir.display()
             );
             LaunchOutcome {
-                unbound_selection: Some(name),
+                unbound_selection: Some(name.clone()),
+                binding: LaunchBindingEvidence::UnboundProfile { name, source },
             }
         }
         Err(e) => {
             eprintln!("warning: ignoring invalid profile selection: {e}");
             LaunchOutcome {
-                unbound_selection: Some(name),
+                unbound_selection: Some(name.clone()),
+                binding: LaunchBindingEvidence::UnboundProfile { name, source },
             }
         }
     }
@@ -1041,6 +1062,13 @@ mod tests {
         assert_eq!(std::env::var_os("WAYLAND_HOME"), None);
         // ...and the outcome records the unbound selection so a host can refuse.
         assert_eq!(outcome.unbound_selection.as_deref(), Some("ghost"));
+        assert_eq!(
+            outcome.binding,
+            LaunchBindingEvidence::UnboundProfile {
+                name: "ghost".to_string(),
+                source: ProfileSelectionSource::CommandLine,
+            }
+        );
     }
 
     #[test]
@@ -1054,6 +1082,13 @@ mod tests {
         let outcome = activate_for_launch_impl(argv(&["wcore", "--profile", "../escape"]));
         assert_eq!(std::env::var_os("WAYLAND_HOME"), None);
         assert_eq!(outcome.unbound_selection.as_deref(), Some("../escape"));
+        assert_eq!(
+            outcome.binding,
+            LaunchBindingEvidence::UnboundProfile {
+                name: "../escape".to_string(),
+                source: ProfileSelectionSource::CommandLine,
+            }
+        );
     }
 
     /// The pointer path is a first-class selection source, so its missing-home
@@ -1083,6 +1118,13 @@ mod tests {
             Some("work"),
             "a pointer-selected missing home must be recorded, not silently ignored"
         );
+        assert_eq!(
+            outcome.binding,
+            LaunchBindingEvidence::UnboundProfile {
+                name: "work".to_string(),
+                source: ProfileSelectionSource::ActivePointer,
+            }
+        );
     }
 
     /// A cleanly bound profile (home exists) leaves nothing unbound.
@@ -1101,6 +1143,13 @@ mod tests {
             Some(root.path().join("work").into_os_string())
         );
         assert_eq!(outcome.unbound_selection, None);
+        assert_eq!(
+            outcome.binding,
+            LaunchBindingEvidence::BoundProfile {
+                name: "work".to_string(),
+                source: ProfileSelectionSource::CommandLine,
+            }
+        );
     }
 
     // --- Phase 2 management helpers ----------------------------------------

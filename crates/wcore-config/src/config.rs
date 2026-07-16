@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::browser::BrowserConfig;
@@ -11,6 +10,10 @@ use crate::debug::DebugConfig;
 use crate::file_cache::FileCacheConfig;
 use crate::hooks::{HookDef, HooksConfig};
 use crate::plan::PlanConfig;
+use crate::resolution_provenance::{
+    ConfigResolutionError, ConfigResolutionProvenance, ConfigSourceDisposition,
+    ConfigSourceEvidence, ConfigSourceRole, LaunchBindingEvidence, WithConfigProvenance,
+};
 use wcore_types::llm::ThinkingConfig;
 
 // ---------------------------------------------------------------------------
@@ -2001,51 +2004,35 @@ impl Config {
         Self::resolve_inner(cli, true)
     }
 
+    /// Load and merge config while retaining source identity and disposition.
+    pub fn resolve_with_provenance(
+        cli: &CliArgs,
+    ) -> Result<WithConfigProvenance<Self>, ConfigResolutionError> {
+        let files = resolve_config_files(cli)?;
+        let provenance = files.provenance.clone();
+        Self::resolve_inner_from_files(cli, true, files)
+            .map(|value| WithConfigProvenance {
+                value,
+                provenance: provenance.clone(),
+            })
+            .map_err(|source| ConfigResolutionError::new(provenance, source))
+    }
+
     fn resolve_inner(cli: &CliArgs, resolve_fallbacks: bool) -> anyhow::Result<Self> {
-        // 1. Load global config. D011: a corrupt (parse-failing) file that
-        //    EXISTS must propagate a typed error here rather than silently
-        //    downgrade to defaults — silent defaulting wipes the user's whole
-        //    config and reads as a fresh install. A genuinely-absent file
-        //    still yields defaults (handled inside try_load_config_file).
-        let global = try_load_config_file(&global_config_path())?;
+        let files = resolve_config_files(cli).map_err(anyhow::Error::new)?;
+        Self::resolve_inner_from_files(cli, resolve_fallbacks, files)
+    }
 
-        // 2. Load project config (from project_dir if specified, else CWD).
-        //    Same dataloss-safe contract as the global file.
-        let project_path = cli
-            .project_dir
-            .as_ref()
-            .map(|d| d.join(".wayland-core.toml"))
-            .unwrap_or_else(project_config_path);
-        let project = try_load_config_file(&project_path)?;
-
-        let workspace_root = match &cli.project_dir {
-            Some(path) => path.clone(),
-            None => std::env::current_dir().context("resolving current workspace directory")?,
-        };
-        let managed_workspace = global.execution.managed;
-        let workspace_trust = crate::workspace_trust::WorkspaceTrustStore::for_current_home()
-            .resolve(
-                &workspace_root,
-                false,
-                managed_workspace.then_some(wcore_types::workspace_trust::AuthoritySource::Managed),
-            )
-            .unwrap_or_else(|error| {
-                tracing::warn!(%error, "workspace trust resolution failed closed");
-                wcore_types::workspace_trust::EffectiveWorkspaceTrust::untrusted(
-                    wcore_types::workspace_trust::AuthoritySource::Default,
-                    "unavailable",
-                    format!("workspace trust evidence unavailable: {error}"),
-                )
-            });
-
-        // 3. Merge: global <- project
-        let mut merged =
-            merge_config_files_with_trust(global, project, workspace_trust.is_trusted());
-
-        // 4. If --profile specified, overlay profile settings
-        if let Some(profile_name) = &cli.profile {
-            merged = apply_profile(merged, profile_name)?;
-        }
+    fn resolve_inner_from_files(
+        cli: &CliArgs,
+        resolve_fallbacks: bool,
+        files: ResolvedConfigFiles,
+    ) -> anyhow::Result<Self> {
+        let ResolvedConfigFiles {
+            merged,
+            workspace_trust,
+            ..
+        } = files;
 
         // 5. Apply CLI overrides and resolve final config
         let provider_str = cli.provider.as_deref().unwrap_or(&merged.default.provider);
@@ -3117,8 +3104,23 @@ pub fn global_config_path() -> PathBuf {
 /// (dir form) while the documented layout is `.wayland-core.toml` (file
 /// form).  We try the file form first; if absent, fall back to the dir
 /// form.  If BOTH are present we warn and use the file form.
-fn project_config_path() -> PathBuf {
-    let file_form = PathBuf::from(".wayland-core.toml");
+struct ProjectConfigSelection {
+    selected: PathBuf,
+    overridden: Option<PathBuf>,
+}
+
+fn project_config_selection(project_dir: Option<&Path>) -> ProjectConfigSelection {
+    let file_form = project_dir
+        .map(|dir| dir.join(".wayland-core.toml"))
+        .unwrap_or_else(|| PathBuf::from(".wayland-core.toml"));
+    // Preserve the existing explicit-project contract: callers that supplied
+    // `project_dir` historically read only the documented file form.
+    if project_dir.is_some() {
+        return ProjectConfigSelection {
+            selected: file_form,
+            overridden: None,
+        };
+    }
     let dir_form = PathBuf::from(".wayland-core").join("config.toml");
     match (file_form.exists(), dir_form.exists()) {
         (true, true) => {
@@ -3126,12 +3128,207 @@ fn project_config_path() -> PathBuf {
                 "Warning: both .wayland-core.toml and .wayland-core/config.toml exist; \
                  using .wayland-core.toml (file form). Remove one to silence this warning."
             );
-            file_form
+            ProjectConfigSelection {
+                selected: file_form,
+                overridden: Some(dir_form),
+            }
         }
-        (true, false) => file_form,
-        (false, true) => dir_form,
-        (false, false) => file_form, // neither exists; return file form (canonical)
+        (true, false) => ProjectConfigSelection {
+            selected: file_form,
+            overridden: None,
+        },
+        (false, true) => ProjectConfigSelection {
+            selected: dir_form,
+            overridden: None,
+        },
+        (false, false) => ProjectConfigSelection {
+            selected: file_form,
+            overridden: None,
+        },
     }
+}
+
+struct ResolvedConfigFiles {
+    merged: ConfigFile,
+    workspace_trust: wcore_types::workspace_trust::EffectiveWorkspaceTrust,
+    provenance: ConfigResolutionProvenance,
+}
+
+fn resolve_config_files(cli: &CliArgs) -> Result<ResolvedConfigFiles, ConfigResolutionError> {
+    const GLOBAL_PRECEDENCE: u16 = 10;
+    const PROJECT_PRECEDENCE: u16 = 20;
+    const PROFILE_PRECEDENCE: u16 = 30;
+    const CLI_PRECEDENCE: u16 = 40;
+
+    let launch_binding = crate::profile::launch_outcome()
+        .map(|outcome| outcome.binding)
+        .unwrap_or_else(|| {
+            if std::env::var_os("WAYLAND_HOME").is_some() {
+                LaunchBindingEvidence::ExplicitWaylandHome
+            } else {
+                LaunchBindingEvidence::Unavailable
+            }
+        });
+    let mut provenance = ConfigResolutionProvenance {
+        sources: Vec::new(),
+        launch_binding,
+    };
+
+    // This legacy variable is observed by diagnostics only. Core has never
+    // treated its value as authority and must not grow a second config reader.
+    if std::env::var_os("WAYLAND_CONFIG_PATH").is_some() {
+        provenance.sources.push(ConfigSourceEvidence::new(
+            ConfigSourceRole::EnvironmentOverride {
+                variable: "WAYLAND_CONFIG_PATH".to_string(),
+            },
+            None,
+            0,
+            ConfigSourceDisposition::Ignored,
+        ));
+    }
+
+    let global_path = global_config_path();
+    let global = match try_load_config_file_with_disposition(&global_path) {
+        Ok((config, disposition)) => {
+            provenance.sources.push(ConfigSourceEvidence::new(
+                ConfigSourceRole::Global,
+                Some(global_path),
+                GLOBAL_PRECEDENCE,
+                disposition,
+            ));
+            config
+        }
+        Err(error) => {
+            provenance.sources.push(ConfigSourceEvidence::new(
+                ConfigSourceRole::Global,
+                Some(global_path),
+                GLOBAL_PRECEDENCE,
+                ConfigSourceDisposition::Invalid,
+            ));
+            return Err(ConfigResolutionError::new(provenance, error));
+        }
+    };
+
+    let selection = project_config_selection(cli.project_dir.as_deref());
+    let project_path = selection.selected;
+    let project = match try_load_config_file_with_disposition(&project_path) {
+        Ok((config, disposition)) => {
+            provenance.sources.push(ConfigSourceEvidence::new(
+                ConfigSourceRole::Project,
+                Some(project_path),
+                PROJECT_PRECEDENCE,
+                disposition,
+            ));
+            config
+        }
+        Err(error) => {
+            provenance.sources.push(ConfigSourceEvidence::new(
+                ConfigSourceRole::Project,
+                Some(project_path),
+                PROJECT_PRECEDENCE,
+                ConfigSourceDisposition::Invalid,
+            ));
+            return Err(ConfigResolutionError::new(provenance, error));
+        }
+    };
+    if let Some(path) = selection.overridden {
+        provenance.sources.push(ConfigSourceEvidence::new(
+            ConfigSourceRole::Project,
+            Some(path),
+            PROJECT_PRECEDENCE,
+            ConfigSourceDisposition::Overridden,
+        ));
+    }
+
+    let workspace_root = match &cli.project_dir {
+        Some(path) => path.clone(),
+        None => std::env::current_dir().map_err(|source| {
+            ConfigResolutionError::new(
+                provenance.clone(),
+                anyhow::Error::new(source).context("resolving current workspace directory"),
+            )
+        })?,
+    };
+    let managed_workspace = global.execution.managed;
+    let workspace_trust = crate::workspace_trust::WorkspaceTrustStore::for_current_home()
+        .resolve(
+            &workspace_root,
+            false,
+            managed_workspace.then_some(wcore_types::workspace_trust::AuthoritySource::Managed),
+        )
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "workspace trust resolution failed closed");
+            wcore_types::workspace_trust::EffectiveWorkspaceTrust::untrusted(
+                wcore_types::workspace_trust::AuthoritySource::Default,
+                "unavailable",
+                format!("workspace trust evidence unavailable: {error}"),
+            )
+        });
+    if !workspace_trust.is_trusted()
+        && let Some(project_source) = provenance.sources.iter_mut().find(|source| {
+            source.role == ConfigSourceRole::Project
+                && source
+                    .dispositions
+                    .contains(&ConfigSourceDisposition::Loaded)
+        })
+    {
+        project_source.add_disposition(ConfigSourceDisposition::Restricted);
+    }
+
+    let mut merged = merge_config_files_with_trust(global, project, workspace_trust.is_trusted());
+    match &cli.profile {
+        Some(profile_name) => match apply_profile(merged, profile_name) {
+            Ok(profiled) => {
+                merged = profiled;
+                provenance.sources.push(ConfigSourceEvidence::new(
+                    ConfigSourceRole::Profile,
+                    None,
+                    PROFILE_PRECEDENCE,
+                    ConfigSourceDisposition::Loaded,
+                ));
+            }
+            Err(source) => {
+                provenance.sources.push(ConfigSourceEvidence::new(
+                    ConfigSourceRole::Profile,
+                    None,
+                    PROFILE_PRECEDENCE,
+                    ConfigSourceDisposition::Invalid,
+                ));
+                return Err(ConfigResolutionError::new(provenance, source));
+            }
+        },
+        None => provenance.sources.push(ConfigSourceEvidence::new(
+            ConfigSourceRole::Profile,
+            None,
+            PROFILE_PRECEDENCE,
+            ConfigSourceDisposition::Absent,
+        )),
+    }
+
+    let has_cli_overrides = cli.provider.is_some()
+        || cli.api_key.is_some()
+        || cli.base_url.is_some()
+        || cli.model.is_some()
+        || cli.max_tokens.is_some()
+        || cli.max_turns.is_some()
+        || cli.system_prompt.is_some()
+        || cli.auto_approve;
+    provenance.sources.push(ConfigSourceEvidence::new(
+        ConfigSourceRole::CliOverrides,
+        None,
+        CLI_PRECEDENCE,
+        if has_cli_overrides {
+            ConfigSourceDisposition::Loaded
+        } else {
+            ConfigSourceDisposition::Absent
+        },
+    ));
+
+    Ok(ResolvedConfigFiles {
+        merged,
+        workspace_trust,
+        provenance,
+    })
 }
 
 /// Load + merge the global and project config files into a [`ConfigFile`]
@@ -3144,24 +3341,13 @@ fn project_config_path() -> PathBuf {
 /// merged file directly here. `project_dir` defaults to the CWD's
 /// `.wayland-core.toml` when `None`.
 pub fn load_merged_config_file(project_dir: Option<&Path>) -> anyhow::Result<ConfigFile> {
-    let global = try_load_config_file(&global_config_path())?;
-    let project_path = project_dir
-        .map(|d| d.join(".wayland-core.toml"))
-        .unwrap_or_else(project_config_path);
-    let project = try_load_config_file(&project_path)?;
-    let workspace = project_dir
-        .map(Path::to_path_buf)
-        .unwrap_or(std::env::current_dir()?);
-    let managed = global.execution.managed;
-    let trusted = crate::workspace_trust::WorkspaceTrustStore::for_current_home()
-        .resolve(
-            &workspace,
-            false,
-            managed.then_some(wcore_types::workspace_trust::AuthoritySource::Managed),
-        )
-        .map(|decision| decision.is_trusted())
-        .unwrap_or(false);
-    Ok(merge_config_files_with_trust(global, project, trusted))
+    let cli = CliArgs {
+        project_dir: project_dir.map(Path::to_path_buf),
+        ..CliArgs::default()
+    };
+    resolve_config_files(&cli)
+        .map(|files| files.merged)
+        .map_err(anyhow::Error::new)
 }
 
 /// Read the configured profiles from the global `config.toml`, for the
@@ -3235,6 +3421,12 @@ pub enum ConfigLoadError {
 ///   on-disk file is never read-modified-written on this path, so the user's
 ///   settings are preserved untouched.
 fn try_load_config_file(path: &Path) -> Result<ConfigFile, ConfigLoadError> {
+    try_load_config_file_with_disposition(path).map(|(config, _)| config)
+}
+
+fn try_load_config_file_with_disposition(
+    path: &Path,
+) -> Result<(ConfigFile, ConfigSourceDisposition), ConfigLoadError> {
     match std::fs::read_to_string(path) {
         Ok(content) => {
             // Wave SD SECURITY MAJOR #16: warn if config file (which may
@@ -3250,13 +3442,19 @@ fn try_load_config_file(path: &Path) -> Result<ConfigFile, ConfigLoadError> {
             // `deny_unknown_fields` would reject existing configs on a
             // release, so we surface rather than reject.
             warn_unknown_config_keys(&content, path);
-            toml::from_str(&content).map_err(|source| ConfigLoadError::ParseFailed {
-                path: path.display().to_string(),
-                source,
-            })
+            toml::from_str(&content)
+                .map(|config| (config, ConfigSourceDisposition::Loaded))
+                .map_err(|source| ConfigLoadError::ParseFailed {
+                    path: path.display().to_string(),
+                    source,
+                })
         }
-        // No file (or unreadable) → fresh-install defaults are correct.
-        Err(_) => Ok(ConfigFile::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok((ConfigFile::default(), ConfigSourceDisposition::Absent))
+        }
+        // Preserve the historical fail-open behavior for unreadable sources,
+        // but retain the distinction so diagnostics never call it "absent".
+        Err(_) => Ok((ConfigFile::default(), ConfigSourceDisposition::Unreadable)),
     }
 }
 
@@ -3571,9 +3769,8 @@ pub fn migrate_legacy_yaml_if_needed() {
 /// (global ← project ← `--profile`) with the headline CLI overrides stamped on.
 ///
 /// This is the data layer behind the `/doctor` Effective-config preview. It
-/// repeats the file-merge phase of [`Config::resolve`] (steps 1–4) — the same
-/// `try_load_config_file` / `merge_config_files` / `apply_profile` path — so the
-/// preview never drifts from what `resolve` actually loads.
+/// consumes the same source-resolution operation as [`Config::resolve`], so
+/// the preview cannot drift onto a second config-reader path.
 ///
 /// **Secrets are redacted.** Every string value whose key name looks like a
 /// credential (`api_key`, `token`, `secret`, `password`, `credential`,
@@ -3586,32 +3783,21 @@ pub fn migrate_legacy_yaml_if_needed() {
 /// keys never appear here (the file never holds them), and `WAYLAND_HOME`
 /// sandboxing is honored through [`global_config_path`].
 pub fn effective_config_toml(cli: &CliArgs) -> anyhow::Result<String> {
+    effective_config_toml_with_provenance(cli)
+        .map(|resolved| resolved.value)
+        .map_err(anyhow::Error::new)
+}
+
+/// Render the effective configuration and return the exact same source
+/// evidence used by [`Config::resolve_with_provenance`].
+pub fn effective_config_toml_with_provenance(
+    cli: &CliArgs,
+) -> Result<WithConfigProvenance<String>, ConfigResolutionError> {
     use anyhow::Context;
 
-    // Steps 1–4 of `resolve`: load + merge + optional profile overlay.
-    let global = try_load_config_file(&global_config_path())
-        .context("loading global config for the effective-config preview")?;
-    let project_path = cli
-        .project_dir
-        .as_ref()
-        .map(|d| d.join(".wayland-core.toml"))
-        .unwrap_or_else(project_config_path);
-    let project = try_load_config_file(&project_path)
-        .context("loading project config for the effective-config preview")?;
-    let workspace = cli.project_dir.clone().unwrap_or(std::env::current_dir()?);
-    let managed = global.execution.managed;
-    let trusted = crate::workspace_trust::WorkspaceTrustStore::for_current_home()
-        .resolve(
-            &workspace,
-            false,
-            managed.then_some(wcore_types::workspace_trust::AuthoritySource::Managed),
-        )
-        .map(|decision| decision.is_trusted())
-        .unwrap_or(false);
-    let mut merged = merge_config_files_with_trust(global, project, trusted);
-    if let Some(profile_name) = &cli.profile {
-        merged = apply_profile(merged, profile_name)?;
-    }
+    let files = resolve_config_files(cli)?;
+    let provenance = files.provenance;
+    let mut merged = files.merged;
 
     // Stamp the headline CLI overrides so the preview reflects launch flags
     // (the rest of the CLI surface is provider-resolution detail that does not
@@ -3626,10 +3812,14 @@ pub fn effective_config_toml(cli: &CliArgs) -> anyhow::Result<String> {
         merged.default.max_turns = cli.max_turns;
     }
 
-    let mut value =
-        toml::Value::try_from(&merged).context("serializing the merged config for redaction")?;
+    let mut value = toml::Value::try_from(&merged)
+        .context("serializing the merged config for redaction")
+        .map_err(|source| ConfigResolutionError::new(provenance.clone(), source))?;
     redact_secrets_in_place(&mut value);
-    toml::to_string_pretty(&value).context("rendering the effective config as TOML")
+    let value = toml::to_string_pretty(&value)
+        .context("rendering the effective config as TOML")
+        .map_err(|source| ConfigResolutionError::new(provenance.clone(), source))?;
+    Ok(WithConfigProvenance { value, provenance })
 }
 
 /// True if a TOML key name designates a secret value that must be redacted.

@@ -48,6 +48,7 @@ pub mod mcp_cred_refs;
 pub mod plan;
 pub mod plugins_config;
 pub mod profile;
+pub mod resolution_provenance;
 pub mod shell;
 pub mod tools;
 pub mod workspace_trust;
