@@ -16,7 +16,9 @@ use wcore_tools::grep::GrepTool;
 use wcore_tools::read::ReadTool;
 use wcore_tools::registry::ToolRegistry;
 use wcore_tools::write::WriteTool;
+use wcore_types::execution_policy::EffectiveExecutionPolicy;
 use wcore_types::message::{FinishReason, TokenUsage};
+use wcore_types::spawner::{ChildPolicySnapshot, DurableChildRecord};
 
 use crate::agents::bus::{AgentBus, AgentMessage, now_ms, preview};
 use crate::agents::channel_sink::ChannelSink;
@@ -29,9 +31,121 @@ use crate::output::null_sink::NullSink;
 pub use wcore_types::spawner::{ForkOverrides, Spawner, SubAgentConfig, SubAgentResult};
 
 pub use crate::durable_spawner::{
-    DurableAuthorityFailure, DurableCancelDisposition, DurableSpawner, DurableSpawnerError,
-    DurableSpawnerPoison,
+    DurableAuthorityFailure, DurableAuthorityToken, DurableCancelDisposition,
+    DurableSessionAuthority, DurableSpawner, DurableSpawnerError, DurableSpawnerPoison,
 };
+
+const CHILD_POLICY_CONTRACT_VERSION: &str = "effective-execution-policy/v1";
+
+struct ResolvedProvider {
+    provider: Arc<dyn LlmProvider>,
+    provider_id: String,
+    model: Option<String>,
+}
+
+/// Fully resolved execution inputs for one durable child launch.
+///
+/// The provider and child config are selected once. Durable declaration and
+/// execution consume this value rather than re-reading mutable session state.
+pub struct ResolvedChildLaunch {
+    request: SubAgentConfig,
+    overrides: ForkOverrides,
+    provider: Arc<dyn LlmProvider>,
+    provider_id: String,
+    model: String,
+    config: Config,
+    policy: ChildPolicySnapshot,
+    authority: DurableAuthorityToken,
+}
+
+impl ResolvedChildLaunch {
+    #[must_use]
+    pub fn provider(&self) -> Arc<dyn LlmProvider> {
+        Arc::clone(&self.provider)
+    }
+
+    #[must_use]
+    pub fn provider_id(&self) -> &str {
+        &self.provider_id
+    }
+
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    #[must_use]
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    #[must_use]
+    pub fn policy_snapshot(&self) -> &ChildPolicySnapshot {
+        &self.policy
+    }
+
+    #[must_use]
+    pub fn authority(&self) -> &DurableAuthorityToken {
+        &self.authority
+    }
+
+    pub fn validate_record(&self, record: &DurableChildRecord) -> Result<(), DurableSpawnerError> {
+        if record.parent.session_id != self.authority.session_id() {
+            return Err(DurableSpawnerError::EvidenceMismatch("parent session"));
+        }
+        if record.request.exact_digest()
+            != DurableSpawner::request_digest(&self.request, &self.overrides)?
+        {
+            return Err(DurableSpawnerError::EvidenceMismatch("request digest"));
+        }
+        if record.provider.as_deref() != Some(self.provider_id.as_str()) {
+            return Err(DurableSpawnerError::EvidenceMismatch("provider"));
+        }
+        if record.model.as_deref() != Some(self.model.as_str()) {
+            return Err(DurableSpawnerError::EvidenceMismatch("model"));
+        }
+        if record.policy_snapshot != self.policy {
+            return Err(DurableSpawnerError::EvidenceMismatch("policy snapshot"));
+        }
+        Ok(())
+    }
+}
+
+fn child_policy_snapshot(
+    policy: &EffectiveExecutionPolicy,
+) -> Result<ChildPolicySnapshot, DurableSpawnerError> {
+    let value = serde_json::to_value(policy)
+        .map_err(|_| DurableSpawnerError::EvidenceMismatch("effective policy encoding"))?;
+    let field = |name: &'static str| {
+        value
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or(DurableSpawnerError::EvidenceMismatch(name))
+    };
+    let dangerous_activation_id_digest = value
+        .get("dangerous_activation_id")
+        .and_then(serde_json::Value::as_str)
+        .map(|activation_id| {
+            crate::session_journal::state_payload_digest(&serde_json::json!(activation_id))
+        })
+        .transpose()?;
+    Ok(ChildPolicySnapshot {
+        contract_version: CHILD_POLICY_CONTRACT_VERSION.to_owned(),
+        exact_digest: crate::session_journal::state_payload_digest(&value)?,
+        posture: field("posture")?,
+        approvals: field("approvals")?,
+        sandbox: field("sandbox")?,
+        source: field("source")?,
+        managed_floor_active: value
+            .get("managed_floor_active")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or(DurableSpawnerError::EvidenceMismatch(
+                "managed_floor_active",
+            ))?,
+        dangerous_activation_id_digest,
+    })
+}
 
 /// #661 (fail-loud) — build a [`SubAgentResult`] from a sub-agent's terminal
 /// [`AgentResult`](crate::engine::AgentResult).
@@ -261,6 +375,11 @@ pub struct AgentSpawner {
     /// Keeps the standalone session's budget watcher alive for exactly as
     /// long as the spawner and its clones can dispatch child work.
     budget_guard: Option<Arc<crate::cancel::BudgetGuard>>,
+    /// Clone-shared journal authority. It is deliberately unbound while tools
+    /// are built and is bound only after the engine owns a canonical session.
+    durable_authority: DurableSessionAuthority,
+    /// Resolver-produced session policy used to derive redacted child evidence.
+    effective_policy: EffectiveExecutionPolicy,
 }
 
 /// Provider-spend, execution, and cancellation authority inherited by a
@@ -329,6 +448,7 @@ impl SpawnerBudgetGovernance {
 impl AgentSpawner {
     pub fn new(provider: Arc<dyn LlmProvider>, config: Config) -> Self {
         let sandbox_runtime = ToolRegistry::new().sandbox_runtime();
+        let effective_policy = EffectiveExecutionPolicy::baseline(&config.execution_policy);
         Self {
             provider,
             base_config: config,
@@ -346,7 +466,20 @@ impl AgentSpawner {
             budget_session_id: None,
             execution_budget: None,
             budget_guard: None,
+            durable_authority: DurableSessionAuthority::new(),
+            effective_policy,
         }
+    }
+
+    /// Install the one session authority shared by every transient spawner.
+    pub(crate) fn with_durable_session_authority(
+        mut self,
+        authority: DurableSessionAuthority,
+        effective_policy: EffectiveExecutionPolicy,
+    ) -> Self {
+        self.durable_authority = authority;
+        self.effective_policy = effective_policy;
+        self
     }
 
     /// Bind spawned children to the parent session's immutable sandbox.
@@ -616,17 +749,103 @@ impl AgentSpawner {
     ///   pinned but nothing can resolve it. Fail that sub-agent loudly rather
     ///   than silently running it on the parent provider.
     fn provider_for(&self, sub: &SubAgentConfig) -> Result<Arc<dyn LlmProvider>, SubAgentResult> {
+        self.resolve_provider_for(sub)
+            .map(|resolved| resolved.provider)
+    }
+
+    fn resolve_provider_for(
+        &self,
+        sub: &SubAgentConfig,
+    ) -> Result<ResolvedProvider, SubAgentResult> {
         match (&sub.provider, &self.resolver) {
-            (None, _) => Ok(self.provider.clone()),
+            (None, _) => {
+                let provider_id = if self.base_config.provider_label.trim().is_empty() {
+                    self.base_config.compat.provider_type().to_owned()
+                } else {
+                    self.base_config.provider_label.clone()
+                };
+                Ok(ResolvedProvider {
+                    provider: self.provider.clone(),
+                    provider_id,
+                    model: None,
+                })
+            }
             (Some(spec), Some(resolver)) => resolver
                 .resolve_provider(spec)
-                .map(|(provider, _model)| provider)
+                .map(|(provider, model)| {
+                    let provider_id = spec.split_once(':').map_or(spec.as_str(), |(id, _)| id);
+                    ResolvedProvider {
+                        provider,
+                        provider_id: provider_id.to_owned(),
+                        model,
+                    }
+                })
                 .map_err(|e| SubAgentResult::error(&sub.name, &format!("provider '{spec}': {e}"))),
             (Some(spec), None) => Err(SubAgentResult::error(
                 &sub.name,
                 &format!("provider '{spec}' pinned but no provider resolver is attached"),
             )),
         }
+    }
+
+    /// Resolve every mutable child input once and bind it to the active durable
+    /// session generation. No journal write occurs here.
+    pub fn resolve_durable_launch(
+        &self,
+        request: SubAgentConfig,
+        overrides: ForkOverrides,
+    ) -> Result<ResolvedChildLaunch, DurableSpawnerError> {
+        let authority = self.durable_authority.token()?;
+        let ResolvedProvider {
+            provider,
+            provider_id,
+            model: provider_model,
+        } = self
+            .resolve_provider_for(&request)
+            .map_err(|_| DurableSpawnerError::EvidenceMismatch("provider resolution"))?;
+        let mut config = self.child_config(&request);
+        let model = overrides
+            .model
+            .clone()
+            .or_else(|| request.model.clone())
+            .or(provider_model)
+            .unwrap_or_else(|| config.model.clone());
+        if provider_id.trim().is_empty() {
+            return Err(DurableSpawnerError::EvidenceMismatch("resolved provider"));
+        }
+        if model.trim().is_empty() {
+            return Err(DurableSpawnerError::EvidenceMismatch("resolved model"));
+        }
+        config.model.clone_from(&model);
+        let runtime_policy = self
+            .effective_policy
+            .with_runtime_approvals(config.smart_approval_policy());
+        let policy = child_policy_snapshot(&runtime_policy)?;
+        Ok(ResolvedChildLaunch {
+            request,
+            overrides,
+            provider,
+            provider_id,
+            model,
+            config,
+            policy,
+            authority,
+        })
+    }
+
+    /// Validate and declare against the same generation used during resolve.
+    /// The authority mutex stays held through declaration, so a concurrent
+    /// session switch cannot redirect the write to another journal.
+    pub fn declare_resolved_child(
+        &self,
+        launch: &ResolvedChildLaunch,
+        record: DurableChildRecord,
+    ) -> Result<crate::durable_child::DurableChildWrite, DurableSpawnerError> {
+        self.durable_authority
+            .with_store(launch.authority(), |store| {
+                launch.validate_record(&record)?;
+                store.declare(record).map_err(DurableSpawnerError::Journal)
+            })
     }
 
     /// Spawn a single sub-agent and wait for result.
@@ -1053,6 +1272,8 @@ impl AgentSpawner {
             budget_session_id: self.budget_session_id.clone(),
             execution_budget: self.execution_budget.clone(),
             budget_guard: self.budget_guard.clone(),
+            durable_authority: self.durable_authority.clone(),
+            effective_policy: self.effective_policy.clone(),
         }
     }
 
@@ -1612,8 +1833,13 @@ mod crucible_provider_resolution_tests {
     use wcore_config::config::Config;
     use wcore_providers::{LlmProvider, ProviderError};
     use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::spawner::{
+        ChildDeliveryState, ChildDeliveryTarget, ChildDesiredState, ChildId, ChildOrigin,
+        ChildParent, ChildRecoveryState, ChildRequestEvidence, ChildTimestamps, ChildWorkspace,
+        ChildWorkspaceMode, DURABLE_CHILD_SCHEMA_VERSION, DurableChildRecord, DurableChildStatus,
+    };
 
-    use super::{AgentSpawner, SubAgentConfig};
+    use super::{AgentSpawner, DurableSessionAuthority, ForkOverrides, SubAgentConfig};
     use crate::orchestration::council::{ProviderResolver, ResolveError};
 
     /// A provider that never streams — identity is all these tests check.
@@ -1789,6 +2015,167 @@ mod crucible_provider_resolution_tests {
         let s = AgentSpawner::new(parent, Config::default()).with_budget_tracker(tracker.clone());
         assert!(s.budget_tracker().is_some());
         assert!(s.clone_for_spawn().budget_tracker().is_some());
+    }
+
+    #[test]
+    fn resolved_launch_preserves_override_model_request_evidence_and_shared_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let session = manager
+            .create("test", "parent-model", "/tmp", Some("f19000c"))
+            .unwrap();
+        manager.persist_first_message(&session).unwrap();
+        let active = manager.load_for_run(&session.id).unwrap();
+        let authority = DurableSessionAuthority::new();
+        let token = authority.bind(active.journal, &session.id).unwrap();
+
+        let parent: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        let pinned: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        let spawner = AgentSpawner::new(parent, Config::default())
+            .with_provider_resolver(resolver_mapping(&[("openai", pinned.clone())]))
+            .with_durable_session_authority(
+                authority,
+                wcore_types::execution_policy::EffectiveExecutionPolicy::baseline(
+                    &Config::default().execution_policy,
+                ),
+            );
+        let mut request = sub("child", Some("openai"));
+        request.model = Some("request-model".into());
+        let overrides = ForkOverrides {
+            model: Some("override-model".into()),
+            effort: Some("high".into()),
+            allowed_tools: vec!["Read".into(), "Grep".into()],
+        };
+        let launch = spawner
+            .resolve_durable_launch(request.clone(), overrides.clone())
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&launch.provider(), &pinned));
+        assert_eq!(launch.provider_id(), "openai");
+        assert_eq!(launch.model(), "override-model");
+        assert_eq!(launch.config().model, "override-model");
+        assert_eq!(launch.authority(), &token);
+        assert_eq!(
+            spawner
+                .clone_for_spawn()
+                .resolve_durable_launch(request.clone(), overrides.clone())
+                .unwrap()
+                .authority(),
+            &token,
+            "transient clones must observe the exact session generation"
+        );
+
+        let exact = super::DurableSpawner::request_digest(&request, &overrides).unwrap();
+        let mut different_effort = overrides.clone();
+        different_effort.effort = Some("low".into());
+        assert_ne!(
+            exact,
+            super::DurableSpawner::request_digest(&request, &different_effort).unwrap()
+        );
+        let mut different_tools = overrides;
+        different_tools.allowed_tools = vec!["Read".into()];
+        assert_ne!(
+            exact,
+            super::DurableSpawner::request_digest(&request, &different_tools).unwrap()
+        );
+    }
+
+    fn record_for_launch(
+        id: &str,
+        launch: &super::ResolvedChildLaunch,
+        request: &SubAgentConfig,
+        overrides: &ForkOverrides,
+    ) -> DurableChildRecord {
+        DurableChildRecord {
+            schema_version: DURABLE_CHILD_SCHEMA_VERSION,
+            declaration_id: format!("declare-{id}"),
+            child_id: ChildId::new(id).unwrap(),
+            parent: ChildParent {
+                session_id: launch.authority().session_id().to_owned(),
+                turn_id: None,
+                parent_child_id: None,
+                workflow_run_id: None,
+                graph_node_id: None,
+                parent_call_id: None,
+            },
+            origin: ChildOrigin::Spawn,
+            request: ChildRequestEvidence::redacted(
+                super::DurableSpawner::request_digest(request, overrides).unwrap(),
+            ),
+            policy_snapshot: launch.policy_snapshot().clone(),
+            provider: Some(launch.provider_id().to_owned()),
+            model: Some(launch.model().to_owned()),
+            workspace: ChildWorkspace {
+                mode: ChildWorkspaceMode::Isolated,
+                workspace_id: "workspace-f19".into(),
+            },
+            status: DurableChildStatus::Prepared,
+            desired_state: ChildDesiredState::Run,
+            recovery: ChildRecoveryState::Clean,
+            revision: 0,
+            timestamps: ChildTimestamps {
+                created_at_unix_ms: 1,
+                updated_at_unix_ms: 1,
+                queued_at_unix_ms: None,
+                started_at_unix_ms: None,
+                terminal_at_unix_ms: None,
+            },
+            result: None,
+            delivery_target: Some(ChildDeliveryTarget::SessionOutbox),
+            delivery_state: ChildDeliveryState::Pending,
+            attempt: 1,
+            retry_of: None,
+            applied_events: Default::default(),
+        }
+    }
+
+    #[test]
+    fn stale_resolved_launch_cannot_declare_into_switched_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let manager_a = crate::session::SessionManager::new(dir.path().join("a"), 10);
+        let session_a = manager_a
+            .create("test", "model-a", "/tmp", Some("f19000d"))
+            .unwrap();
+        manager_a.persist_first_message(&session_a).unwrap();
+        let active_a = manager_a.load_for_run(&session_a.id).unwrap();
+        authority.bind(active_a.journal, &session_a.id).unwrap();
+
+        let parent: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        let spawner = AgentSpawner::new(parent, Config::default()).with_durable_session_authority(
+            authority.clone(),
+            wcore_types::execution_policy::EffectiveExecutionPolicy::baseline(
+                &Config::default().execution_policy,
+            ),
+        );
+        let request = sub("stale-child", None);
+        let overrides = ForkOverrides {
+            model: Some("model-a".into()),
+            ..ForkOverrides::default()
+        };
+        let launch = spawner
+            .resolve_durable_launch(request.clone(), overrides.clone())
+            .unwrap();
+        let record = record_for_launch("stale-child", &launch, &request, &overrides);
+
+        let manager_b = crate::session::SessionManager::new(dir.path().join("b"), 10);
+        let session_b = manager_b
+            .create("test", "model-b", "/tmp", Some("f19000e"))
+            .unwrap();
+        manager_b.persist_first_message(&session_b).unwrap();
+        let active_b = manager_b.load_for_run(&session_b.id).unwrap();
+        let token_b = authority.bind(active_b.journal, &session_b.id).unwrap();
+
+        assert!(matches!(
+            spawner.declare_resolved_child(&launch, record),
+            Err(super::DurableSpawnerError::StaleAuthority { .. })
+        ));
+        authority
+            .with_store(&token_b, |store| {
+                assert!(store.list()?.is_empty(), "stale launch must not write B");
+                Ok(())
+            })
+            .unwrap();
     }
 }
 

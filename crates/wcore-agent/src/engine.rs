@@ -61,6 +61,97 @@ fn delivery_origin_belongs_to_turn(origin: &DeliveryOrigin, turn_id: &str) -> bo
     matches!(origin, DeliveryOrigin::Turn { turn_id: origin_turn } if origin_turn == turn_id)
 }
 
+#[cfg(test)]
+mod durable_session_authority_tests {
+    use std::sync::Arc;
+
+    use wcore_config::config::Config;
+    use wcore_tools::registry::ToolRegistry;
+
+    use super::AgentEngine;
+    use crate::durable_spawner::{DurableSessionAuthority, DurableSpawnerError};
+    use crate::output::null_sink::NullSink;
+    use crate::test_utils::ScriptedProvider;
+
+    fn session_config(directory: &std::path::Path) -> Config {
+        let mut config = Config::default();
+        config.session.enabled = true;
+        config.session.directory = directory.to_string_lossy().into_owned();
+        config
+    }
+
+    #[test]
+    fn fresh_engine_binds_shared_authority_only_after_canonical_init() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let observer = authority.clone();
+        let mut engine = AgentEngine::new_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            session_config(dir.path()),
+            ToolRegistry::new(),
+            Arc::new(NullSink),
+        );
+
+        engine.install_durable_session_authority(authority).unwrap();
+        assert!(matches!(
+            observer.token(),
+            Err(DurableSpawnerError::AuthorityUnbound)
+        ));
+        engine
+            .init_session("test", &dir.path().to_string_lossy(), Some("f19000f"))
+            .unwrap();
+        assert_eq!(observer.token().unwrap().session_id(), "f19000f");
+    }
+
+    #[test]
+    fn resumed_engine_binds_and_session_switch_rebinds_shared_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let session_a = manager
+            .create(
+                "test",
+                "model-a",
+                &dir.path().to_string_lossy(),
+                Some("f190010"),
+            )
+            .unwrap();
+        let session_b = manager
+            .create(
+                "test",
+                "model-b",
+                &dir.path().to_string_lossy(),
+                Some("f190011"),
+            )
+            .unwrap();
+        manager.persist_first_message(&session_a).unwrap();
+        manager.persist_first_message(&session_b).unwrap();
+        let active_a = manager.load_for_run(&session_a.id).unwrap();
+        let active_b = manager.load_for_run(&session_b.id).unwrap();
+        let mut engine = AgentEngine::resume_active_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            session_config(dir.path()),
+            ToolRegistry::new(),
+            Arc::new(NullSink),
+            active_a,
+        );
+        let authority = DurableSessionAuthority::new();
+        let observer = authority.clone();
+
+        engine.install_durable_session_authority(authority).unwrap();
+        let token_a = observer.token().unwrap();
+        assert_eq!(token_a.session_id(), "f190010");
+
+        engine.switch_active_session(active_b).unwrap();
+        let token_b = observer.token().unwrap();
+        assert_eq!(token_b.session_id(), "f190011");
+        assert_ne!(token_a.generation(), token_b.generation());
+        assert!(matches!(
+            observer.with_store(&token_a, |_| Ok(())),
+            Err(DurableSpawnerError::StaleAuthority { .. })
+        ));
+    }
+}
+
 fn approval_origin_belongs_to_turn(
     state: &crate::session_journal::ReducedSessionState,
     origin: &ApprovalOrigin,
@@ -2232,6 +2323,9 @@ pub struct AgentEngine {
     /// Exclusive journal writer authority for the active persisted session.
     /// This handle must live for the same lifetime as the engine.
     session_journal: Option<SessionJournal>,
+    /// Shared child-journal authority installed after bootstrap constructs the
+    /// canonical session journal. Transient spawner clones hold the same cell.
+    durable_session_authority: Option<crate::durable_spawner::DurableSessionAuthority>,
     /// Durable turn currently owned by `run`; set before turn work begins.
     active_journal_turn_id: Option<String>,
     output: Arc<dyn OutputSink>,
@@ -2856,6 +2950,7 @@ impl AgentEngine {
             session_manager,
             current_session: None,
             session_journal: None,
+            durable_session_authority: None,
             active_journal_turn_id: None,
             output,
             current_msg_id: String::new(),
@@ -3092,6 +3187,7 @@ impl AgentEngine {
             session_manager,
             current_session: Some(session),
             session_journal,
+            durable_session_authority: None,
             active_journal_turn_id: None,
             output,
             current_msg_id: String::new(),
@@ -3315,6 +3411,7 @@ impl AgentEngine {
             let ActiveSession { session, journal } =
                 mgr.create_for_run(provider_name, &self.model, cwd, session_id)?;
             self.bind_budget_authority(journal.clone(), &session.id)?;
+            self.bind_durable_session_authority(journal.clone(), &session.id)?;
             // W6 F16: if a previous plan was persisted for this session id,
             // advertise resume-availability via the existing Info channel.
             // No new protocol variant (audit rev-2). Errors from the probe
@@ -3385,6 +3482,11 @@ impl AgentEngine {
             .into_iter()
             .map(serde_json::from_value)
             .collect::<Result<Vec<Message>, _>>()?;
+
+        // Rebind before mutating engine state. The authority increments its
+        // generation and clears A before inspecting B, so any launch resolved
+        // under A becomes stale and a failed bind cannot expose A afterward.
+        self.bind_durable_session_authority(journal.clone(), &session.id)?;
 
         // Everything below is infallible. Keep the validated replacement
         // journal alive before assigning it; replacing `session_journal`
@@ -3526,6 +3628,33 @@ impl AgentEngine {
         self.budget_authority_seed = Some(seed);
         self.budget_tracker = None;
         self.budget_session_id = None;
+        Ok(())
+    }
+
+    /// Install the clone-shared child authority after tools and the engine have
+    /// been constructed. Resume binds immediately; fresh sessions bind in
+    /// `init_session` after their canonical journal exists.
+    pub(crate) fn install_durable_session_authority(
+        &mut self,
+        authority: crate::durable_spawner::DurableSessionAuthority,
+    ) -> anyhow::Result<()> {
+        if let (Some(session), Some(journal)) =
+            (self.current_session.as_ref(), self.session_journal.as_ref())
+        {
+            authority.bind(journal.clone(), &session.id)?;
+        }
+        self.durable_session_authority = Some(authority);
+        Ok(())
+    }
+
+    fn bind_durable_session_authority(
+        &self,
+        journal: SessionJournal,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        if let Some(authority) = &self.durable_session_authority {
+            authority.bind(journal, session_id)?;
+        }
         Ok(())
     }
 
@@ -14912,6 +15041,7 @@ mod set_config_tests {
             session_manager: None,
             current_session: None,
             session_journal: None,
+            durable_session_authority: None,
             active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
@@ -16589,6 +16719,7 @@ mod phase6_tests {
             session_manager: None,
             current_session: None,
             session_journal: None,
+            durable_session_authority: None,
             active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
@@ -16902,6 +17033,7 @@ mod compact_tests {
             session_manager: None,
             current_session: None,
             session_journal: None,
+            durable_session_authority: None,
             active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
@@ -18289,6 +18421,7 @@ mod plan_mode_tests {
             session_manager: None,
             current_session: None,
             session_journal: None,
+            durable_session_authority: None,
             active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
@@ -18735,6 +18868,7 @@ mod hook_integration_tests {
             session_manager: None,
             current_session: None,
             session_journal: None,
+            durable_session_authority: None,
             active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
@@ -19591,6 +19725,7 @@ mod approval_bridge_engine_tests {
             session_manager: None,
             current_session: None,
             session_journal: None,
+            durable_session_authority: None,
             active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
@@ -20645,6 +20780,7 @@ mod user_model_writeback_tests {
             session_manager: None,
             current_session: None,
             session_journal: None,
+            durable_session_authority: None,
             active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),

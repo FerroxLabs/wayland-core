@@ -17,7 +17,7 @@ use wcore_types::spawner::{
 };
 
 use crate::durable_child::{DurableChildStore, DurableChildWrite};
-use crate::session_journal::{JournalError, state_payload_digest};
+use crate::session_journal::{JournalError, SessionJournal, state_payload_digest};
 
 const DURABLE_SPAWN_REQUEST_SCHEMA: &str = "durable-spawn-request/v1";
 const DURABLE_RESULT_PAYLOAD_SCHEMA_VERSION: u16 = 1;
@@ -74,6 +74,143 @@ pub enum DurableSpawnerError {
         child_id: ChildId,
         failure: DurableAuthorityFailure,
     },
+    #[error("durable child session authority is not bound")]
+    AuthorityUnbound,
+    #[error("durable child session authority generation overflowed")]
+    AuthorityGenerationOverflow,
+    #[error(
+        "durable child launch authority is stale: resolved for session {launch_session} generation {launch_generation}, current authority is {current}"
+    )]
+    StaleAuthority {
+        launch_session: String,
+        launch_generation: u64,
+        current: String,
+    },
+    #[error("durable child journal session mismatch: expected {expected}, found {found}")]
+    SessionMismatch { expected: String, found: String },
+    #[error("durable child journal {0} has no matching canonical baseline")]
+    NonCanonicalSession(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableAuthorityToken {
+    session_id: String,
+    generation: u64,
+}
+
+impl DurableAuthorityToken {
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct DurableSessionAuthority {
+    state: Arc<Mutex<DurableSessionAuthorityState>>,
+}
+
+#[derive(Default)]
+struct DurableSessionAuthorityState {
+    generation: u64,
+    binding: Option<DurableSessionBinding>,
+}
+
+struct DurableSessionBinding {
+    session_id: String,
+    store: DurableChildStore,
+}
+
+impl DurableSessionAuthority {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace the active journal authority atomically.
+    ///
+    /// The old binding is cleared before the candidate is inspected. A failed
+    /// bind therefore leaves every clone fail-closed instead of retaining stale
+    /// authority from the previous session.
+    pub(crate) fn bind(
+        &self,
+        journal: SessionJournal,
+        expected_session_id: &str,
+    ) -> Result<DurableAuthorityToken, DurableSpawnerError> {
+        let mut state = self.state.lock();
+        state.binding = None;
+        state.generation = state
+            .generation
+            .checked_add(1)
+            .ok_or(DurableSpawnerError::AuthorityGenerationOverflow)?;
+        let found = journal.session_id()?;
+        if found != expected_session_id {
+            return Err(DurableSpawnerError::SessionMismatch {
+                expected: expected_session_id.to_owned(),
+                found,
+            });
+        }
+        let journal_state = journal.state()?;
+        if journal_state.session_id.as_deref() != Some(found.as_str())
+            || journal_state.imported_baseline.is_none()
+        {
+            return Err(DurableSpawnerError::NonCanonicalSession(found));
+        }
+        let token = DurableAuthorityToken {
+            session_id: found.clone(),
+            generation: state.generation,
+        };
+        state.binding = Some(DurableSessionBinding {
+            session_id: found,
+            store: DurableChildStore::new(journal),
+        });
+        Ok(token)
+    }
+
+    pub(crate) fn token(&self) -> Result<DurableAuthorityToken, DurableSpawnerError> {
+        let state = self.state.lock();
+        let binding = state
+            .binding
+            .as_ref()
+            .ok_or(DurableSpawnerError::AuthorityUnbound)?;
+        Ok(DurableAuthorityToken {
+            session_id: binding.session_id.clone(),
+            generation: state.generation,
+        })
+    }
+
+    pub(crate) fn with_store<T>(
+        &self,
+        token: &DurableAuthorityToken,
+        use_store: impl FnOnce(&DurableChildStore) -> Result<T, DurableSpawnerError>,
+    ) -> Result<T, DurableSpawnerError> {
+        let state = self.state.lock();
+        let binding =
+            state
+                .binding
+                .as_ref()
+                .ok_or_else(|| DurableSpawnerError::StaleAuthority {
+                    launch_session: token.session_id.clone(),
+                    launch_generation: token.generation,
+                    current: format!("unbound generation {}", state.generation),
+                })?;
+        if state.generation != token.generation || binding.session_id != token.session_id {
+            return Err(DurableSpawnerError::StaleAuthority {
+                launch_session: token.session_id.clone(),
+                launch_generation: token.generation,
+                current: format!(
+                    "session {} generation {}",
+                    binding.session_id, state.generation
+                ),
+            });
+        }
+        use_store(&binding.store)
+    }
 }
 
 /// Journal-backed adapter for durable child execution and supervision.
@@ -865,5 +1002,65 @@ mod tests {
         let reconstructed =
             DurableSpawner::new(DurableChildStore::new(journal), Arc::new(UnusedSpawner)).unwrap();
         assert_eq!(reconstructed.authority_poison(), None);
+    }
+
+    fn canonical_journal(
+        directory: &std::path::Path,
+        session_id: &str,
+    ) -> (crate::session::SessionManager, SessionJournal) {
+        let manager = crate::session::SessionManager::new(directory.to_path_buf(), 10);
+        let session = manager
+            .create("test", "test-model", "/tmp", Some(session_id))
+            .unwrap();
+        manager.persist_first_message(&session).unwrap();
+        let active = manager.load_for_run(&session.id).unwrap();
+        (manager, active.journal)
+    }
+
+    #[test]
+    fn authority_binding_is_visible_to_clones_and_switch_invalidates_old_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let clone = authority.clone();
+        assert!(matches!(
+            clone.token(),
+            Err(DurableSpawnerError::AuthorityUnbound)
+        ));
+
+        let (_manager_a, journal_a) = canonical_journal(&dir.path().join("a"), "f19000a");
+        let token_a = authority.bind(journal_a, "f19000a").unwrap();
+        assert_eq!(clone.token().unwrap(), token_a);
+
+        let (_manager_b, journal_b) = canonical_journal(&dir.path().join("b"), "f19000b");
+        let token_b = clone.bind(journal_b, "f19000b").unwrap();
+        assert_ne!(token_a.generation(), token_b.generation());
+        assert!(matches!(
+            authority.with_store(&token_a, |_| Ok(())),
+            Err(DurableSpawnerError::StaleAuthority { .. })
+        ));
+        authority.with_store(&token_b, |_| Ok(())).unwrap();
+    }
+
+    #[test]
+    fn failed_rebind_leaves_every_clone_unbound() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let clone = authority.clone();
+        let (_manager_a, journal_a) = canonical_journal(&dir.path().join("a"), "f19000a");
+        let token_a = authority.bind(journal_a, "f19000a").unwrap();
+
+        let (_manager_b, journal_b) = canonical_journal(&dir.path().join("b"), "f19000b");
+        assert!(matches!(
+            clone.bind(journal_b, "wrong-session"),
+            Err(DurableSpawnerError::SessionMismatch { .. })
+        ));
+        assert!(matches!(
+            authority.token(),
+            Err(DurableSpawnerError::AuthorityUnbound)
+        ));
+        assert!(matches!(
+            clone.with_store(&token_a, |_| Ok(())),
+            Err(DurableSpawnerError::StaleAuthority { .. })
+        ));
     }
 }

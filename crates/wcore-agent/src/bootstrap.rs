@@ -2139,6 +2139,10 @@ impl AgentBootstrap {
         }
         let budget_authority = Arc::clone(&session_budget.authority);
         let budget_authority_seed = session_budget.authority_seed.clone();
+        // Tool construction precedes the canonical session journal. Share one
+        // initially-unbound cell with every spawner clone, then let the engine
+        // bind it after fresh/resume session authority exists.
+        let durable_session_authority = crate::durable_spawner::DurableSessionAuthority::new();
         let sink_for_budget = self.output.clone();
         // Crucible cost governance — a cap-less per-user/day spend ACCUMULATOR for
         // council members, built whenever the council has a daily or per-run cap
@@ -2159,6 +2163,10 @@ impl AgentBootstrap {
             .govern_spawner(
                 crate::spawner::AgentSpawner::new(provider.clone(), self.config.clone()),
                 session_runtime.active_turn_token(),
+            )
+            .with_durable_session_authority(
+                durable_session_authority.clone(),
+                effective_execution_policy.clone(),
             )
             .with_sandbox_runtime(registry.sandbox_runtime())
             .with_egress_policy(Arc::new(
@@ -2580,6 +2588,7 @@ impl AgentBootstrap {
         } else {
             AgentEngine::new_with_provider(provider.clone(), self.config, registry, self.output)
         };
+        engine.install_durable_session_authority(durable_session_authority)?;
         if let Some(policy) = self.session_egress_policy.as_ref() {
             let policy: wcore_egress::SharedPolicy = Arc::new(policy.clone());
             engine.set_egress_policy(policy);
