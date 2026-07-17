@@ -1866,6 +1866,7 @@ mod spawn_task_set_tests {
     use wcore_config::config::Config;
     use wcore_providers::{LlmProvider, ProviderError};
     use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
 
     use super::{
         AgentSpawner, SpawnTaskSet, SpawnerBudgetGovernance, SubAgentConfig, SubAgentResult,
@@ -1969,9 +1970,20 @@ mod spawn_task_set_tests {
                 .await
                 .expect("test release semaphore remains open")
                 .forget();
-            Err(ProviderError::Connection(
+            let (tx, rx) = tokio::sync::mpsc::channel(2);
+            tx.send(LlmEvent::TextDelta(
                 "peak concurrency probe completed".into(),
             ))
+            .await
+            .expect("test receiver remains open");
+            tx.send(LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
+                usage: TokenUsage::default(),
+            })
+            .await
+            .expect("test receiver remains open");
+            Ok(rx)
         }
     }
 
@@ -2022,7 +2034,7 @@ mod spawn_task_set_tests {
 
     #[tokio::test]
     async fn parallel_spawn_caps_active_child_engines_across_shared_calls() {
-        const CHILDREN_PER_CALL: usize = 15;
+        const CHILDREN_PER_CALL: usize = 50;
         const TOTAL_CHILDREN: usize = CHILDREN_PER_CALL * 2;
 
         let dir = tempfile::tempdir().unwrap();
@@ -2082,6 +2094,58 @@ mod spawn_task_set_tests {
             provider.peak.load(Ordering::SeqCst),
             wcore_swarm::MAX_CONCURRENT_WORKERS
         );
+    }
+
+    #[tokio::test]
+    async fn queued_parallel_child_honors_parent_cancellation_before_start() {
+        const TOTAL_CHILDREN: usize = wcore_swarm::MAX_CONCURRENT_WORKERS + 1;
+
+        let dir = tempfile::tempdir().unwrap();
+        let provider = Arc::new(PeakConcurrencyProvider {
+            active: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let config = Config {
+            model: "test-model".into(),
+            provider_label: "test-provider".into(),
+            ..Config::default()
+        };
+        let spawner = AgentSpawner::new(provider.clone(), config).with_cancel(cancel.clone());
+        bind_test_durable_session(&spawner, dir.path(), "f200021");
+        let children = (0..TOTAL_CHILDREN)
+            .map(|index| bounded_child(&format!("cancel-{index}")))
+            .collect();
+
+        let run = tokio::spawn(async move { spawner.spawn_parallel(children).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while provider.active.load(Ordering::SeqCst) < wcore_swarm::MAX_CONCURRENT_WORKERS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the active-child limit must fill before cancellation");
+
+        cancel.cancel();
+        let results = tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("cancellation must release active and queued children")
+            .expect("parallel spawn task must not panic");
+        assert_eq!(results.len(), TOTAL_CHILDREN);
+        assert!(results.iter().all(|result| result.is_error));
+        assert!(results.iter().any(|result| {
+            result
+                .text
+                .contains("parent cancelled before child concurrency admission")
+        }));
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            wcore_swarm::MAX_CONCURRENT_WORKERS,
+            "the queued child must never reach the provider"
+        );
+        assert_eq!(provider.active.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
