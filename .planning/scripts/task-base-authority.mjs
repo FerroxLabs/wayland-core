@@ -35,15 +35,35 @@ if (operation === "capture") {
   if (values.length !== 2 || !oid.test(values[0]) || !oid.test(values[1])) {
     throw new Error("capture requires exact commit and tree object IDs");
   }
-  const fd = fs.openSync(
-    file,
-    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow,
-    0o400,
-  );
+  const expected = `${values[0]}\n${values[1]}\n`;
+  let fd;
+  try {
+    fd = fs.openSync(
+      file,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow,
+      0o400,
+    );
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    const existingFd = fs.openSync(
+      file,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | noFollow,
+    );
+    try {
+      requireRegularMode(existingFd, 0o400);
+      if (parse(fs.readFileSync(existingFd)) !== expected) {
+        throw new Error("existing authority object does not match the requested tuple");
+      }
+      process.stdout.write(expected);
+    } finally {
+      fs.closeSync(existingFd);
+    }
+    process.exit(0);
+  }
   try {
     fs.fchmodSync(fd, 0o400);
     requireRegularMode(fd, 0o400);
-    fs.writeFileSync(fd, `${values[0]}\n${values[1]}\n`, { encoding: "utf8" });
+    fs.writeFileSync(fd, expected, { encoding: "utf8" });
     fs.fsyncSync(fd);
   } finally {
     fs.closeSync(fd);

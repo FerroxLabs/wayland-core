@@ -27,12 +27,15 @@ validate_base_file() {
 if [[ ${1:-} == --capture ]]; then
   [[ $# -eq 2 ]] || usage
   base_file=$2
+  if [[ -e "$base_file" || -L "$base_file" ]]; then
+    validate_base_file "$base_file"
+    git merge-base --is-ancestor "$validated_base" HEAD
+    printf 'scope-base-reused commit=%s tree=%s\n' \
+      "$validated_base" "$validated_tree"
+    exit 0
+  fi
   [[ -z "$(git status --porcelain)" ]] || {
     echo "cannot capture TASK_BASE from a dirty checkout" >&2
-    exit 1
-  }
-  [[ ! -e "$base_file" && ! -L "$base_file" ]] || {
-    echo "refusing to overwrite existing TASK_BASE: $base_file" >&2
     exit 1
   }
   mkdir -p "$(dirname "$base_file")"

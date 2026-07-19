@@ -153,11 +153,19 @@ base_file="$(git -C "$tmp" rev-parse --absolute-git-dir)/phase20-task-base"
 )
 [[ "$(sed -n '1p' "$base_file")" == "$scope_base_sha" ]]
 
-if (
+if ! (
   cd "$tmp"
   bash "$scripts_dir/verify-task-scope.sh" --capture "$base_file"
 ) >/dev/null 2>&1; then
-  echo 'scope verifier overwrote an existing TASK_BASE' >&2
+  echo 'scope verifier could not safely reuse an existing TASK_BASE' >&2
+  exit 1
+fi
+[[ "$(sed -n '1p' "$base_file")" == "$scope_base_sha" ]]
+
+if node "$scripts_dir/task-base-authority.mjs" capture \
+  "$base_file" "$review_sha" "$(git -C "$tmp" rev-parse "${review_sha}^{tree}")" \
+  >/dev/null 2>&1; then
+  echo 'authority helper replaced an existing TASK_BASE with a different tuple' >&2
   exit 1
 fi
 
@@ -216,6 +224,11 @@ rm "$tmp/delete-me.txt"
 git -C "$tmp" mv rename-me.txt renamed.txt
 cp "$tmp/copy-me.txt" "$tmp/copied.txt"
 git -C "$tmp" add copied.txt
+(
+  cd "$tmp"
+  bash "$scripts_dir/verify-task-scope.sh" --capture "$base_file"
+)
+[[ "$(sed -n '1p' "$base_file")" == "$scope_base_sha" ]]
 (
   cd "$tmp"
   bash "$scripts_dir/verify-task-scope.sh" "$base_file" \
