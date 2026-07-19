@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 20
 current_phase_name: transactional-delegated-mutation
 status: executing
-stopped_at: The candidate-gate plan is split into executable stock-GSD source and independent-review boundaries; final plan validation is in progress.
-last_updated: "2026-07-19T21:06:06.000Z"
+stopped_at: The candidate-gate plan is split into executable stock-GSD source and independent-review boundaries; the reopened 20-03 plan is the next incomplete execution boundary.
+last_updated: "2026-07-19T21:15:44.000Z"
 last_activity: 2026-07-20
 last_activity_desc: Phase 20 gate plan repaired into executable source and independent-review boundaries
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 14
-  completed_plans: 3
+  completed_plans: 2
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: `.planning/PROJECT.md` (updated 2026-07-19)
 ## Current Position
 
 Phase: 20 (transactional-delegated-mutation) — EXECUTING
-Plan: 4 of 14
+Plan: 3 of 14
 Status: Executing Phase 20
 Last activity: 2026-07-20 — Phase 20 gate plan repaired into executable source and independent-review boundaries
 
-Progress: [██░░░░░░░░] 21%
+Progress: [█░░░░░░░░░] 14%
 
 ## Execution Authority
 
@@ -49,7 +49,7 @@ Progress: [██░░░░░░░░] 21%
 
 **Velocity:**
 
-- Total plans completed: 3
+- Total plans completed: 2
 - Average duration: Not established
 - Total execution time: Not established
 
@@ -64,7 +64,7 @@ Progress: [██░░░░░░░░] 21%
 
 ### Pending Todos
 
-- Finish validation of the fourteen Phase 20 plans, commit the accepted GSD plan, reconcile the clean source execution checkout with the three completed summaries, and resume at plan 20-04.
+- Finish independent validation of the unified fourteen-plan Phase 20 graph, reconcile the clean source execution checkout with the two completed summaries, and resume the reopened plan 20-03.
 - Classify all 56 linked worktrees before any cleanup or deletion.
 - Complete D1 linked Desktop plan/consumer replay admission before broad Phase 21 execution; complete D2 by Phase 23 exit.
 - Refresh the competitive ledger and route live field regressions at every admitted phase.
