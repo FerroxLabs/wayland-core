@@ -28,6 +28,7 @@ pub struct ChildTransactionAuthority {
     opening_checksum: String,
     opening_token_digest: String,
     binding_digest: String,
+    storage_identity_digest: String,
 }
 
 impl fmt::Debug for ChildTransactionAuthority {
@@ -120,6 +121,7 @@ impl ChildTransactionStore {
                     gate_plan: expected_gate_plan.clone(),
                     snapshot: ChildTransactionSnapshotBinding {
                         session_id: snapshot_authority.session_id.clone(),
+                        storage_identity_digest: snapshot_authority.storage_identity_digest.clone(),
                         binding_schema_version: snapshot_authority.binding_schema_version,
                         durable_authority_generation: snapshot_authority
                             .durable_authority_generation
@@ -139,12 +141,15 @@ impl ChildTransactionStore {
             .child_transactions
             .get(&transaction_id)
             .ok_or_else(|| invalid(format!("child transaction {transaction_id} was not opened")))?;
-        authority_from_state(transaction)
+        let authority = authority_from_state(transaction)?;
+        self.validate_storage_identity(&authority)?;
+        Ok(authority)
     }
 
     /// Revalidate the retained opening before either workspace allocation or
     /// child launch. Unrelated journal appends do not change this authority.
     pub fn revalidate(&self, authority: &ChildTransactionAuthority) -> Result<(), JournalError> {
+        self.validate_storage_identity(authority)?;
         let state = self.journal.state()?;
         validate_retained_authority(&state, authority, true).map(|_| ())
     }
@@ -155,6 +160,7 @@ impl ChildTransactionStore {
         authority: &ChildTransactionAuthority,
         receipt: ChildTransactionReceipt,
     ) -> Result<ChildTransactionWrite, JournalError> {
+        self.validate_storage_identity(authority)?;
         let receipt_digest = receipt
             .canonical_digest()
             .map_err(|error| invalid(error.to_string()))?;
@@ -208,6 +214,19 @@ impl ChildTransactionStore {
             .child_transactions
             .into_values()
             .collect())
+    }
+
+    fn validate_storage_identity(
+        &self,
+        authority: &ChildTransactionAuthority,
+    ) -> Result<(), JournalError> {
+        if self.journal.storage_identity_digest()? != authority.storage_identity_digest {
+            return Err(invalid(format!(
+                "child transaction {} session storage was rebound",
+                authority.transaction_id
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -329,6 +348,7 @@ fn validate_retained_authority<'a>(
         || transaction.opening_checksum != authority.opening_checksum
         || transaction.opening_token_digest != authority.opening_token_digest
         || transaction.opening.snapshot.binding_digest != authority.binding_digest
+        || transaction.opening.snapshot.storage_identity_digest != authority.storage_identity_digest
         || recomputed != authority.opening_token_digest
     {
         return Err(invalid(format!(
@@ -377,6 +397,7 @@ pub(crate) fn authority_from_state(
         opening_checksum: transaction.opening_checksum.clone(),
         opening_token_digest: transaction.opening_token_digest.clone(),
         binding_digest: transaction.opening.snapshot.binding_digest.clone(),
+        storage_identity_digest: transaction.opening.snapshot.storage_identity_digest.clone(),
     })
 }
 

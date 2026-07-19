@@ -214,6 +214,7 @@ pub(crate) struct CommittedJournalAuthority {
 /// durable event before this locked operation returns.
 pub(crate) struct JournalSnapshotAuthority {
     pub(crate) session_id: String,
+    pub(crate) storage_identity_digest: String,
     pub(crate) binding_schema_version: u32,
     pub(crate) snapshot_schema_version: u32,
     pub(crate) cursor: Option<u64>,
@@ -352,6 +353,15 @@ impl SessionJournal {
     }
 
     pub fn append(&self, event: SessionEvent) -> Result<JournalEnvelope, JournalError> {
+        if matches!(
+            &event,
+            SessionEvent::ChildTransactionOpened { .. }
+                | SessionEvent::ChildTransactionReceiptCommitted { .. }
+        ) {
+            return Err(JournalError::InvalidTransition(
+                "child transaction authority events require ChildTransactionStore".to_owned(),
+            ));
+        }
         self.inner
             .lock()
             .map_err(|_| JournalError::WriterPoisoned)?
@@ -418,6 +428,7 @@ impl SessionJournal {
             "cursor_checksum": snapshot.cursor_checksum,
             "state_digest": snapshot.state_digest,
             "binding_digest": binding_digest,
+            "storage_identity_digest": storage_identity_digest(&writer.path),
             "base_snapshot_digest": committed
                 .base_snapshot
                 .as_ref()
@@ -425,6 +436,7 @@ impl SessionJournal {
         });
         let authority = JournalSnapshotAuthority {
             session_id: writer.session_id.clone(),
+            storage_identity_digest: storage_identity_digest(&writer.path),
             binding_schema_version: binding.schema_version,
             snapshot_schema_version: snapshot.schema_version,
             cursor: snapshot.cursor,
@@ -479,6 +491,15 @@ impl SessionJournal {
             .lock()
             .map_err(|_| JournalError::WriterPoisoned)
             .map(|writer| writer.session_id.clone())
+    }
+
+    pub(crate) fn storage_identity_digest(&self) -> Result<String, JournalError> {
+        let writer = self
+            .inner
+            .lock()
+            .map_err(|_| JournalError::WriterPoisoned)?;
+        writer.ensure_current_path_identity()?;
+        Ok(storage_identity_digest(&writer.path))
     }
 
     /// Persist a private content-addressed preimage used by filesystem-effect
@@ -2510,6 +2531,13 @@ fn sha256_hex(bytes: &[u8]) -> String {
         let _ = write!(hex, "{byte:02x}");
     }
     hex
+}
+
+fn storage_identity_digest(path: &Path) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"wayland-core:session-journal-storage:v1\0");
+    hasher.update(path.to_string_lossy().as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 fn valid_sha256_hex(value: &str) -> bool {

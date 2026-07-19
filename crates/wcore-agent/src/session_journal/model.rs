@@ -955,6 +955,7 @@ pub struct ChildState {
 #[serde(deny_unknown_fields)]
 pub struct ChildTransactionSnapshotBinding {
     pub session_id: String,
+    pub storage_identity_digest: String,
     pub binding_schema_version: u32,
     pub durable_authority_generation: String,
     pub snapshot_schema_version: u32,

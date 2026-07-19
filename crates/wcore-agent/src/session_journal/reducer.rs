@@ -120,6 +120,10 @@ fn apply_child_transaction_opened(
             "authority generation",
             opening.snapshot.durable_authority_generation.as_str(),
         ),
+        (
+            "storage identity",
+            opening.snapshot.storage_identity_digest.as_str(),
+        ),
         ("state", opening.snapshot.state_digest.as_str()),
         ("binding", opening.snapshot.binding_digest.as_str()),
     ] {
