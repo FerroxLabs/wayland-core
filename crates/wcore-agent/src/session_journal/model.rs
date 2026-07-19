@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use wcore_types::child_transaction::{ChildGatePlan, ChildTransactionReceipt};
 use wcore_types::spawner::{ChildId, DurableChildRecord, DurableChildTransition};
 use wcore_types::tool::ToolEffectContract;
 
@@ -756,6 +757,20 @@ pub enum SessionEvent {
         at_unix_ms: u64,
         transition: DurableChildTransition,
     },
+    /// Retained writer-derived authority for one delegated mutation. The
+    /// reducer derives the opaque token digest from this event's committed
+    /// sequence and checksum; callers cannot provide it.
+    ChildTransactionOpened {
+        opening: ChildTransactionOpening,
+    },
+    /// One content-addressed delegated-mutation receipt bound to its durable
+    /// opening token.
+    ChildTransactionReceiptCommitted {
+        transaction_id: String,
+        opening_token_digest: String,
+        receipt_digest: String,
+        receipt: ChildTransactionReceipt,
+    },
     DeliveryPrepared {
         delivery_id: String,
         origin: DeliveryOrigin,
@@ -935,6 +950,57 @@ pub struct ChildState {
     pub durable_declaration_digest: Option<String>,
 }
 
+/// Exact journal/snapshot authority retained when a child transaction opens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildTransactionSnapshotBinding {
+    pub session_id: String,
+    pub binding_schema_version: u32,
+    pub durable_authority_generation: String,
+    pub snapshot_schema_version: u32,
+    pub cursor: Option<u64>,
+    pub cursor_checksum: String,
+    pub state_digest: String,
+    pub binding_digest: String,
+}
+
+/// Immutable transaction subject chosen by parent authority before effects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildTransactionOpening {
+    pub transaction_id: String,
+    pub child_id: ChildId,
+    pub child_declaration_id: String,
+    pub child_revision: u64,
+    pub workspace_id: String,
+    pub base_revision: String,
+    pub request_digest: String,
+    pub policy_digest: String,
+    pub gate_plan: ChildGatePlan,
+    pub snapshot: ChildTransactionSnapshotBinding,
+}
+
+/// One receipt plus the exact durable-child revision that authorized it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommittedChildTransactionReceipt {
+    pub opening_token_digest: String,
+    pub receipt_digest: String,
+    pub receipt: ChildTransactionReceipt,
+    pub child_snapshot: DurableChildRecord,
+}
+
+/// Deterministic replay projection for one delegated-mutation transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildTransactionState {
+    pub opening: ChildTransactionOpening,
+    pub opening_seq: u64,
+    pub opening_checksum: String,
+    pub opening_token_digest: String,
+    pub receipts: Vec<CommittedChildTransactionReceipt>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryState {
     pub origin: DeliveryOrigin,
@@ -976,6 +1042,8 @@ pub struct ReducedSessionState {
     pub budget_authority: Option<BudgetAuthorityState>,
     pub checkpoints: BTreeMap<String, CheckpointState>,
     pub children: BTreeMap<String, ChildState>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub child_transactions: BTreeMap<String, ChildTransactionState>,
     pub deliveries: BTreeMap<String, DeliveryState>,
 }
 
@@ -998,6 +1066,7 @@ impl Default for ReducedSessionState {
             budget_authority: None,
             checkpoints: BTreeMap::new(),
             children: BTreeMap::new(),
+            child_transactions: BTreeMap::new(),
             deliveries: BTreeMap::new(),
         }
     }
