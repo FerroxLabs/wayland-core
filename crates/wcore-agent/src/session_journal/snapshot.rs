@@ -17,11 +17,18 @@ thread_local! {
     static FAIL_REPLACE_AFTER_PERSIST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static AFTER_AUTHORITY_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
         std::cell::RefCell::new(None);
+    static AFTER_SNAPSHOT_PERSIST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        std::cell::RefCell::new(None);
 }
 
 #[cfg(test)]
 pub(super) fn fail_next_replace_after_persist() {
     FAIL_REPLACE_AFTER_PERSIST.with(|fail| fail.set(true));
+}
+
+#[cfg(test)]
+pub(super) fn set_after_snapshot_persist_hook(hook: impl FnOnce(&Path) + 'static) {
+    AFTER_SNAPSHOT_PERSIST_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
 #[cfg(test)]
@@ -37,6 +44,18 @@ fn run_after_authority_read_hook(path: &Path) {
         }
     });
 }
+
+#[cfg(test)]
+fn run_after_snapshot_persist_hook(path: &Path) {
+    AFTER_SNAPSHOT_PERSIST_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook(path);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_after_snapshot_persist_hook(_path: &Path) {}
 
 #[cfg(not(test))]
 fn run_after_authority_read_hook(_path: &Path) {}
@@ -248,40 +267,17 @@ pub(super) fn write_snapshot_authority_head(
 pub(super) fn write_snapshot(
     path: impl AsRef<Path>,
     snapshot: &SessionSnapshot,
-) -> Result<(), JournalError> {
+) -> Result<File, JournalError> {
     snapshot.validate()?;
     let path = path.as_ref();
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent).map_err(|source| JournalError::Io {
-        path: parent.to_path_buf(),
-        source,
-    })?;
     let mut bytes = serde_json::to_vec(snapshot).map_err(|source| JournalError::Json {
         context: "encoding session snapshot",
         source,
     })?;
     bytes.push(b'\n');
-    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|source| JournalError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    secure_private_snapshot_file(temp.as_file(), temp.path())?;
-    temp.write_all(&bytes)
-        .and_then(|()| temp.as_file().sync_all())
-        .map_err(|source| JournalError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    let persisted = temp.persist(path).map_err(|error| JournalError::Io {
-        path: path.to_path_buf(),
-        source: error.error,
-    })?;
-    persisted.sync_all().map_err(|source| JournalError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let persisted = replace_snapshot_file_atomically(path, &bytes)?;
     sync_parent_directory(path)?;
-    Ok(())
+    Ok(persisted)
 }
 
 /// Companion snapshot path used by [`super::SessionJournal`].
@@ -1045,11 +1041,15 @@ pub(super) fn load_snapshot_if_present(
 }
 
 pub(super) fn replace_file_atomically(path: &Path, bytes: &[u8]) -> Result<File, JournalError> {
-    replace_file_atomically_inner(path, bytes, true, false)
+    replace_file_atomically_inner(path, bytes, true, false, false)
 }
 
 fn replace_private_file_atomically(path: &Path, bytes: &[u8]) -> Result<File, JournalError> {
-    replace_file_atomically_inner(path, bytes, false, true)
+    replace_file_atomically_inner(path, bytes, false, true, false)
+}
+
+fn replace_snapshot_file_atomically(path: &Path, bytes: &[u8]) -> Result<File, JournalError> {
+    replace_file_atomically_inner(path, bytes, false, true, true)
 }
 
 fn replace_file_atomically_inner(
@@ -1057,6 +1057,7 @@ fn replace_file_atomically_inner(
     bytes: &[u8],
     _inject_test_failure: bool,
     private: bool,
+    snapshot_publication: bool,
 ) -> Result<File, JournalError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|source| JournalError::Io {
@@ -1094,6 +1095,9 @@ fn replace_file_atomically_inner(
         path: path.to_path_buf(),
         source: error.error,
     })?;
+    if snapshot_publication {
+        run_after_snapshot_persist_hook(path);
+    }
     if private {
         super::lease::ensure_path_identity(&persisted, path)?;
         validate_private_snapshot_file(&persisted, path)?;

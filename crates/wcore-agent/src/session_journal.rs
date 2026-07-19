@@ -212,6 +212,48 @@ struct ParsedJournal {
     valid_len: usize,
 }
 
+#[cfg(test)]
+thread_local! {
+    static AFTER_JOURNAL_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn set_after_journal_read_hook(hook: impl FnOnce(&Path) + 'static) {
+    AFTER_JOURNAL_READ_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_after_journal_read_hook(path: &Path) {
+    AFTER_JOURNAL_READ_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook(path);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_after_journal_read_hook(_path: &Path) {}
+
+fn read_journal_if_present(path: &Path) -> Result<Vec<u8>, JournalError> {
+    let mut file = match lease::open_existing_nofollow(path) {
+        Ok(file) => file,
+        Err(JournalError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|source| JournalError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    run_after_journal_read_hook(path);
+    lease::ensure_path_identity(&file, path)?;
+    Ok(bytes)
+}
+
 /// Snapshot data promoted to durable recovery authority by journal evidence.
 ///
 /// The wrapper is deliberately private: serialized [`SessionSnapshot`] values
@@ -573,16 +615,7 @@ impl SessionJournal {
     /// ignored; opening the writer heals that fragment before the next append.
     pub fn replay(path: impl AsRef<Path>) -> Result<Vec<JournalEnvelope>, JournalError> {
         let path = path.as_ref();
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(source) => {
-                return Err(JournalError::Io {
-                    path: path.to_path_buf(),
-                    source,
-                });
-            }
-        };
+        let bytes = read_journal_if_present(path)?;
         let parsed = parse_complete_frames(path, &bytes)?;
         let snapshot = snapshot::load_snapshot_if_present(snapshot_path_for(path))?;
         recover_storage(&parsed.entries, &parsed.bindings, snapshot.as_ref(), None)?;
@@ -594,16 +627,7 @@ impl SessionJournal {
     /// companion snapshot plus compacted suffix.
     pub fn recovered_state(path: impl AsRef<Path>) -> Result<ReducedSessionState, JournalError> {
         let path = path.as_ref();
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(source) => {
-                return Err(JournalError::Io {
-                    path: path.to_path_buf(),
-                    source,
-                });
-            }
-        };
+        let bytes = read_journal_if_present(path)?;
         let parsed = parse_complete_frames(path, &bytes)?;
         let snapshot = snapshot::load_snapshot_if_present(snapshot_path_for(path))?;
         let recovery = recover_storage(&parsed.entries, &parsed.bindings, snapshot.as_ref(), None)?;
@@ -633,7 +657,7 @@ pub fn write_snapshot(
     path: impl AsRef<Path>,
     snapshot: &SessionSnapshot,
 ) -> Result<(), JournalError> {
-    snapshot::write_snapshot(path, snapshot)
+    snapshot::write_snapshot(path, snapshot).map(|_| ())
 }
 
 /// Reduce a suffix from self-consistent snapshot data for offline use.
@@ -1243,7 +1267,7 @@ impl JournalWriter {
         let snapshot_path = snapshot_path_for(&self.path);
         let publication = (|| {
             self.append_authority_frame(&binding_frame)?;
-            snapshot::write_snapshot(&snapshot_path, &snapshot)?;
+            let snapshot_file = snapshot::write_snapshot(&snapshot_path, &snapshot)?;
             // `persist` is an atomic replacement on supported tempfile platforms.
             // There is deliberately no remove-then-rename fallback: that would
             // create an authority gap on Windows and violate the journal contract.
@@ -1255,10 +1279,13 @@ impl JournalWriter {
                     path: self.path.clone(),
                     source,
                 })?;
-            Ok(file)
+            Ok((file, snapshot_file))
         })();
-        self.file = match publication {
-            Ok(file) => file,
+        let snapshot_file = match publication {
+            Ok((file, snapshot_file)) => {
+                self.file = file;
+                snapshot_file
+            }
             Err(error) => {
                 // Once snapshot publication starts, an error can leave the
                 // pathname and this open handle referring to different files.
@@ -1271,6 +1298,7 @@ impl JournalWriter {
             self.faulted = true;
             return Err(error);
         }
+        drop(snapshot_file);
         self.base_snapshot = Some(snapshot.clone());
         Ok(snapshot)
     }
@@ -1299,18 +1327,22 @@ impl JournalWriter {
             self.faulted = true;
             return Err(error);
         }
-        if let Err(error) = self
-            .append_authority_frame(&frame)
-            .and_then(|()| snapshot::write_snapshot(snapshot_path_for(&self.path), &snapshot))
-            .and_then(|()| lease::ensure_path_identity(&self.file, &self.path))
-        {
-            self.faulted = true;
-            return Err(error);
-        }
+        let snapshot_file = match self.append_authority_frame(&frame).and_then(|()| {
+            let snapshot_file = snapshot::write_snapshot(snapshot_path_for(&self.path), &snapshot)?;
+            lease::ensure_path_identity(&self.file, &self.path)?;
+            Ok(snapshot_file)
+        }) {
+            Ok(snapshot_file) => snapshot_file,
+            Err(error) => {
+                self.faulted = true;
+                return Err(error);
+            }
+        };
         if let Err(error) = self.finish_snapshot_authority(&binding) {
             self.faulted = true;
             return Err(error);
         }
+        drop(snapshot_file);
         self.base_snapshot = Some(snapshot.clone());
         Ok(snapshot)
     }
@@ -1428,9 +1460,10 @@ fn reconcile_snapshot_authority_head(
                 })?;
             lease::ensure_path_identity(journal_file, journal_path)?;
         }
-        snapshot::write_snapshot(snapshot_path_for(journal_path), &target)?;
+        let snapshot_file = snapshot::write_snapshot(snapshot_path_for(journal_path), &target)?;
         head.accepted = head.pending.take();
         snapshot::write_snapshot_authority_head(journal_path, &head)?;
+        drop(snapshot_file);
         return Ok(Some(target));
     }
 
@@ -3126,6 +3159,110 @@ mod fault_tests {
         ));
     }
 
+    fn write_valid_journal(path: &Path, turn_id: &str) {
+        let journal = SessionJournal::open(path, "s1").unwrap();
+        journal
+            .append(SessionEvent::TurnStarted {
+                turn_id: turn_id.to_owned(),
+                user_message: turn_id.to_owned(),
+            })
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readonly_recovery_rejects_symlink_to_valid_journal() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("valid.journal");
+        let alias = dir.path().join("alias.journal");
+        write_valid_journal(&target, "target-turn");
+        symlink(&target, &alias).unwrap();
+
+        assert!(matches!(
+            SessionJournal::replay(&alias),
+            Err(JournalError::SymbolicLink { path }) if path == alias
+        ));
+        assert!(matches!(
+            SessionJournal::recovered_state(&alias),
+            Err(JournalError::SymbolicLink { path }) if path == alias
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn readonly_recovery_rejects_symlink_to_valid_journal() {
+        use std::os::windows::fs::symlink_file;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("valid.journal");
+        let alias = dir.path().join("alias.journal");
+        write_valid_journal(&target, "target-turn");
+        symlink_file(&target, &alias)
+            .unwrap_or_else(|error| panic!("Windows symlink fixture is required: {error}"));
+
+        assert!(matches!(
+            SessionJournal::replay(&alias),
+            Err(JournalError::SymbolicLink { path }) if path == alias
+        ));
+        assert!(matches!(
+            SessionJournal::recovered_state(&alias),
+            Err(JournalError::SymbolicLink { path }) if path == alias
+        ));
+    }
+
+    #[test]
+    fn readonly_recovery_rejects_hard_link_to_valid_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("valid.journal");
+        let alias = dir.path().join("alias.journal");
+        write_valid_journal(&target, "target-turn");
+        std::fs::hard_link(&target, &alias).unwrap();
+
+        assert!(matches!(
+            SessionJournal::replay(&alias),
+            Err(JournalError::MultipleLinks { path }) if path == alias
+        ));
+        assert!(matches!(
+            SessionJournal::recovered_state(&alias),
+            Err(JournalError::MultipleLinks { path }) if path == alias
+        ));
+    }
+
+    fn assert_readonly_recovery_rejects_path_swap(
+        directory: &Path,
+        stem: &str,
+        read: impl FnOnce(&Path) -> Result<(), JournalError>,
+    ) {
+        let canonical = directory.join(format!("{stem}-canonical.journal"));
+        let displaced = directory.join(format!("{stem}-displaced.journal"));
+        let replacement = directory.join(format!("{stem}-replacement.journal"));
+        write_valid_journal(&canonical, "original-turn");
+        write_valid_journal(&replacement, "replacement-turn");
+        let replacement_for_hook = replacement.clone();
+        set_after_journal_read_hook(move |path| {
+            std::fs::rename(path, displaced).unwrap();
+            std::fs::rename(replacement_for_hook, path).unwrap();
+        });
+
+        assert!(matches!(
+            read(&canonical),
+            Err(JournalError::PathIdentityMismatch { path }) if path == canonical
+        ));
+    }
+
+    #[test]
+    fn readonly_recovery_rejects_valid_journal_path_swap_after_read() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_readonly_recovery_rejects_path_swap(dir.path(), "replay", |path| {
+            SessionJournal::replay(path).map(|_| ())
+        });
+        assert_readonly_recovery_rejects_path_swap(dir.path(), "state", |path| {
+            SessionJournal::recovered_state(path).map(|_| ())
+        });
+    }
+
     #[test]
     fn canonical_path_replacement_cannot_acknowledge_append_or_snapshot() {
         fn replace_open_journal(
@@ -3672,5 +3809,49 @@ mod fault_tests {
             Err(JournalError::WriterFaulted)
         ));
         assert!(matches!(writer.compact(), Err(JournalError::WriterFaulted)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn substituted_snapshot_after_persist_cannot_commit_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("session.journal");
+        let snapshot_path = snapshot_path_for(&journal_path);
+        let displaced = dir.path().join("displaced.snapshot");
+        let replacement = dir.path().join("replacement.snapshot");
+        let mut writer = JournalWriter::open(journal_path.clone(), "session".to_owned()).unwrap();
+        writer
+            .append(SessionEvent::TurnStarted {
+                turn_id: "turn".into(),
+                user_message: "hello".into(),
+            })
+            .unwrap();
+        let substitute = SessionSnapshot::new("session", ReducedSessionState::default()).unwrap();
+        snapshot::write_private_snapshot_fixture(
+            &replacement,
+            &serde_json::to_vec(&substitute).unwrap(),
+        )
+        .unwrap();
+        snapshot::set_after_snapshot_persist_hook(move |canonical| {
+            std::fs::rename(canonical, displaced).unwrap();
+            std::fs::rename(replacement, canonical).unwrap();
+        });
+
+        assert!(matches!(
+            writer.publish_snapshot(),
+            Err(JournalError::PathIdentityMismatch { path }) if path == snapshot_path
+        ));
+        assert!(matches!(
+            writer.append(SessionEvent::TurnCancelled {
+                turn_id: "turn".into(),
+            }),
+            Err(JournalError::WriterFaulted)
+        ));
+        let head = snapshot::load_snapshot_authority_head(&journal_path)
+            .unwrap()
+            .unwrap();
+        assert!(head.accepted.is_none());
+        assert!(head.pending.is_some());
+        assert_eq!(snapshot::load_snapshot(&snapshot_path).unwrap(), substitute);
     }
 }
