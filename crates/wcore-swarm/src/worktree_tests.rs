@@ -194,9 +194,21 @@ async fn external_workspace_root_keeps_checkout_outside_parent_repository() {
 }
 
 #[cfg(target_os = "linux")]
-#[tokio::test]
-async fn isolated_checkout_keeps_git_useful_without_parent_history_or_authority() {
-    Box::pin(assert_isolated_checkout_keeps_git_useful()).await;
+#[test]
+fn isolated_checkout_keeps_git_useful_without_parent_history_or_authority() {
+    std::thread::Builder::new()
+        .name("isolated-checkout-scenario".to_owned())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("scenario runtime")
+                .block_on(assert_isolated_checkout_keeps_git_useful());
+        })
+        .expect("scenario thread")
+        .join()
+        .expect("isolated checkout scenario");
 }
 
 #[cfg(target_os = "linux")]
