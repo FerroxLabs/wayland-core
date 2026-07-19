@@ -186,6 +186,26 @@ mod tests {
     }
 
     #[test]
+    fn full_page_evidence_finds_sensitive_candidates_in_context() {
+        let contextual_api_key =
+            ["header ", "sk-", "abcdef0123456789", "ABCDEFGHIJK footer"].concat();
+        for text in [
+            "Account sean@example.com balance",
+            contextual_api_key.as_str(),
+            "Invoice 2026 card 4111 1111 1111 1111",
+        ] {
+            let regions =
+                preserve_full_page_evidence(Vec::new(), text.to_owned(), Some((80, 24))).unwrap();
+
+            assert_eq!(
+                super::super::filter_sensitive_regions(&regions, 80, 24),
+                vec![(0, 0, 79, 23)],
+                "full-page OCR evidence did not redact contextual secret: {text}"
+            );
+        }
+    }
+
+    #[test]
     fn invalid_image_dimensions_fail_extraction() {
         assert!(preserve_full_page_evidence(Vec::new(), "secret".to_owned(), None).is_err());
         assert!(
