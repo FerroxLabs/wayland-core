@@ -315,9 +315,12 @@ impl ExecutionIdentity {
             )));
         }
         let _lock = MutationLock::acquire()?;
-        self.lease.state = LeaseState::ProcessExited;
-        self.lease.refresh_digest();
-        rewrite_synced_lease(&self.lease_path, &self.lease)
+        let mut exited = self.lease.clone();
+        exited.state = LeaseState::ProcessExited;
+        exited.refresh_digest();
+        rewrite_synced_lease(&self.lease_path, &exited)?;
+        self.lease = exited;
+        Ok(())
     }
 }
 
