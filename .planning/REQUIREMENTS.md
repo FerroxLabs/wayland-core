@@ -20,6 +20,8 @@
 - [ ] **F20-04**: Workspace creation, journal state, receipts, candidate gates, parent compare-and-swap, cleanup, and rollback are one coherent lifecycle.
 - [ ] **F20-05**: Snapshot authority and Windows AppContainer identity fail closed on stale, ambiguous, or unowned state.
 - [ ] **F20-06**: The accepted F20 successor is integrated into the one admitted candidate with exact focused and aggregate evidence.
+- [ ] **F20-GATE-01**: Failed, stale, incomplete, malformed, reordered, duplicated, post-terminal, or mismatched candidate gates remain non-landing and preserve durable diagnostics.
+- [ ] **F20-GATE-02**: Only parent-observed execution of the exact live candidate under qualifying hard containment, followed by authoritative receipt append and replay, can create the opaque candidate-acceptance handoff; caller, child, model, and advisory-evaluator claims cannot.
 
 ### Phase 21 — Child Authority and Budget Inheritance
 
@@ -123,7 +125,7 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| F20-01, F20-02, F20-03, F20-04, F20-05, F20-06 | Phase 20 | In Progress |
+| F20-01, F20-02, F20-03, F20-04, F20-05, F20-06, F20-GATE-01, F20-GATE-02 | Phase 20 | In Progress |
 | F21-01, F21-02, F21-03, F21-04 | Phase 21 | Pending |
 | F22-01, F22-02, F22-03, F22-04, F22-05, F22-06, F22-07 | Phase 22 | Pending |
 | F23-01, F23-02, F23-03, F23-04, F23-05, F23-06 | Phase 23 | Pending |
@@ -136,8 +138,8 @@
 | F30-01, F30-02, F30-03, F30-04, F30-05 | Phase 30 | Pending |
 
 **Coverage:**
-- v1 phase requirements: 56 total
-- Mapped to phases: 56
+- v1 phase requirements: 58 total
+- Mapped to phases: 58
 - Unmapped: 0
 - Duplicate mappings: 0
 - Program controls: 4 total (0 established, 4 open)

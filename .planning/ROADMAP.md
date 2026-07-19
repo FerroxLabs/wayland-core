@@ -37,7 +37,7 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
 **Goal**: Delegated coding can mutate only an isolated workspace and can affect the parent only through a gated, attributable, reversible integration.
 **Depends on**: None
 **Accepted Source**: F00-F19 entered Phase 20 at `97e44910fc6dd4761f1f862dbf54a5a76262cef2` (tree `8d27bd96b476a728d3ebbe0e1583c6488dd5effc`). The accepted Phase 20 starting candidate is `b9cc6698f2b43a04f1b4deee7064def8f754d9e7` (tree `cf97d5feda6099d39ab6484cc4fcaf06458f15fe`).
-**Requirements**: F20-01, F20-02, F20-03, F20-04, F20-05, F20-06
+**Requirements**: F20-01, F20-02, F20-03, F20-04, F20-05, F20-06, F20-GATE-01, F20-GATE-02
 **Success Criteria** (what must be TRUE):
   1. Parallel children can make conflicting edits without overwriting or silently mutating the parent.
   2. Stale identity, failed gates, and conflicts stop before merge while preserving usable evidence.
