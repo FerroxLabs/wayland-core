@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use wcore_config::shell;
 use wcore_sandbox::process_capture::{CaptureLimits, ProcessCaptureError, capture_bounded_process};
@@ -29,13 +30,62 @@ use security::{
 pub struct WorktreeManager {
     repo_root: PathBuf,
     swarm_root: PathBuf,
+    swarm_parent: PathBuf,
     git_program: String,
     capture_limits: CaptureLimits,
     _git_guard_dir: tempfile::TempDir,
     empty_git_config: PathBuf,
     disabled_hooks: PathBuf,
+    admission_lock: Mutex<()>,
     #[cfg(test)]
     ambient_git_env: Vec<(String, std::ffi::OsString)>,
+}
+
+/// Parent-issued storage proof for one delegated mutation checkout.
+#[derive(Clone, Copy, Debug)]
+pub struct WorkspaceCapacity {
+    pub available_bytes: u64,
+    pub safety_margin_bytes: u64,
+    pub max_transaction_bytes: u64,
+    pub max_aggregate_bytes: u64,
+}
+
+/// Identity-bound roots owned by one delegated mutation transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransactionWorkspace {
+    pub owner: String,
+    pub root: PathBuf,
+    pub checkout: PathBuf,
+    pub scratch: PathBuf,
+    pub base_commit: String,
+    pub head_commit: String,
+    pub tree: String,
+    pub reserved_bytes: u64,
+}
+
+const RESERVATION_FILE: &str = ".wayland-reservation";
+
+struct TransactionSetupGuard {
+    root: PathBuf,
+    armed: bool,
+}
+
+impl TransactionSetupGuard {
+    fn new(root: PathBuf) -> Self {
+        Self { root, armed: true }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TransactionSetupGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
 }
 
 const CLEANUP_GRACE: Duration = Duration::from_secs(5);
@@ -69,6 +119,7 @@ impl WorktreeManager {
         write_empty_private_config(&empty_git_config)?;
         let disabled_hooks = git_guard_dir.path().join("disabled-hooks");
         Ok(Self {
+            swarm_parent: repo_root.clone(),
             repo_root,
             swarm_root,
             git_program: "git".to_string(),
@@ -76,6 +127,62 @@ impl WorktreeManager {
             _git_guard_dir: git_guard_dir,
             empty_git_config,
             disabled_hooks,
+            admission_lock: Mutex::new(()),
+            #[cfg(test)]
+            ambient_git_env: Vec::new(),
+        })
+    }
+
+    /// Construct a manager whose child-controlled checkouts live in an
+    /// orchestrator-owned directory outside the source repository.
+    ///
+    /// The Git common directory remains owned by the parent orchestrator. A
+    /// child receives only its checkout path; callers must keep the repository
+    /// root and [`Self::git_common_dir`] outside the child's sandbox grants.
+    pub fn new_with_workspace_root(repo_root: &Path, workspace_root: &Path) -> Result<Self> {
+        if !workspace_root.is_absolute() {
+            return Err(SwarmError::WorktreeIo(
+                "orchestrator worktree root must be absolute".to_owned(),
+            ));
+        }
+        let repo_root = std::fs::canonicalize(repo_root)?;
+        let workspace_parent = workspace_root.parent().ok_or_else(|| {
+            SwarmError::WorktreeIo("orchestrator worktree root has no parent".to_owned())
+        })?;
+        std::fs::create_dir_all(workspace_parent)?;
+        let workspace_parent = std::fs::canonicalize(workspace_parent)?;
+        if workspace_parent.starts_with(&repo_root) || repo_root.starts_with(&workspace_parent) {
+            return Err(SwarmError::WorktreeIo(format!(
+                "orchestrator worktree root must not overlap repository {}",
+                repo_root.display()
+            )));
+        }
+        ensure_real_directory(workspace_root)?;
+        make_guard_dir_private(workspace_root)?;
+        let swarm_root = std::fs::canonicalize(workspace_root)?;
+        if swarm_root.parent() != Some(workspace_parent.as_path()) {
+            return Err(SwarmError::WorktreeIo(format!(
+                "refused worktree root outside orchestrator directory: {}",
+                swarm_root.display()
+            )));
+        }
+        let git_guard_dir = tempfile::Builder::new()
+            .prefix("wayland-swarm-git-")
+            .tempdir()?;
+        make_guard_dir_private(git_guard_dir.path())?;
+        let empty_git_config = git_guard_dir.path().join("empty-gitconfig");
+        write_empty_private_config(&empty_git_config)?;
+        let disabled_hooks = git_guard_dir.path().join("disabled-hooks");
+        Ok(Self {
+            repo_root,
+            swarm_root,
+            swarm_parent: workspace_parent,
+            git_program: "git".to_string(),
+            capture_limits: GIT_CAPTURE_LIMITS,
+            _git_guard_dir: git_guard_dir,
+            empty_git_config,
+            disabled_hooks,
+            admission_lock: Mutex::new(()),
             #[cfg(test)]
             ambient_git_env: Vec::new(),
         })
@@ -94,7 +201,7 @@ impl WorktreeManager {
     /// Count retained worker worktrees without following linked entries.
     /// Enumeration stops once `stop_after` is exceeded so an already-invalid
     /// worktree root cannot force an unbounded admission scan.
-    pub(crate) fn retained_worker_count(&self, stop_after: usize) -> Result<usize> {
+    pub fn retained_worker_count(&self, stop_after: usize) -> Result<usize> {
         self.validate_swarm_root()?;
         let mut count = 0_usize;
         for entry in std::fs::read_dir(&self.swarm_root)? {
@@ -113,6 +220,59 @@ impl WorktreeManager {
             }
         }
         Ok(count)
+    }
+
+    /// Resolve the parent repository's common Git administration directory
+    /// under the same scrubbed Git environment used for worktree operations.
+    pub async fn git_common_dir(&self) -> Result<PathBuf> {
+        self.reject_executable_checkout_config().await?;
+        let cmd = self.git_command(&["rev-parse", "--git-common-dir"]);
+        let out = capture_bounded_process(cmd, self.capture_limits, None)
+            .await
+            .map_err(|error| capture_error("git rev-parse common dir", error))?;
+        if !out.status.success() {
+            return Err(SwarmError::WorktreeIo(format!(
+                "git rev-parse common dir failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            self.repo_root.join(path)
+        };
+        std::fs::canonicalize(&path).map_err(Into::into)
+    }
+
+    /// Resolve the exact commit currently named by `HEAD` without consulting
+    /// ambient Git configuration. Delegated worktrees must branch from this
+    /// immutable object id rather than re-resolving a moving symbolic ref
+    /// after admission.
+    pub async fn pinned_head(&self) -> Result<String> {
+        self.reject_executable_checkout_config().await?;
+        self.read_pinned_head().await
+    }
+
+    async fn read_pinned_head(&self) -> Result<String> {
+        let cmd = self.git_command(&["rev-parse", "--verify", "HEAD^{commit}"]);
+        let out = capture_bounded_process(cmd, self.capture_limits, None)
+            .await
+            .map_err(|error| capture_error("git rev-parse HEAD", error))?;
+        if !out.status.success() {
+            return Err(SwarmError::WorktreeIo(format!(
+                "git rev-parse HEAD failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        let commit = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(SwarmError::WorktreeIo(
+                "git rev-parse HEAD returned an invalid object id".to_owned(),
+            ));
+        }
+        Ok(commit)
     }
 
     /// Reject dispatch on a dirty checkout. Runs `git status --porcelain`
@@ -190,6 +350,286 @@ impl WorktreeManager {
         Ok(tree_path)
     }
 
+    /// Create a private, single-commit Git checkout for a delegated agent.
+    ///
+    /// Unlike `git worktree add`, this checkout has its own object store and
+    /// administration directory. The child can therefore use ordinary local
+    /// Git inspection without receiving access to the parent's refs, object
+    /// store, hooks, remotes, tags, or history.
+    pub async fn create_isolated_checkout(
+        &self,
+        worker_id: &str,
+        branch: &str,
+        pinned_head: &str,
+        capacity: WorkspaceCapacity,
+    ) -> Result<TransactionWorkspace> {
+        Box::pin(self.create_isolated_checkout_inner(worker_id, branch, pinned_head, capacity))
+            .await
+    }
+
+    // Keep the construction future behind one allocation. This operation
+    // carries several bounded process-capture states; inlining all of them in
+    // a caller's async state machine can exhaust the default test-thread stack.
+    async fn create_isolated_checkout_inner(
+        &self,
+        worker_id: &str,
+        branch: &str,
+        pinned_head: &str,
+        capacity: WorkspaceCapacity,
+    ) -> Result<TransactionWorkspace> {
+        validate_worker_id(worker_id)?;
+        reject_option_like_ref("branch", branch)?;
+        reject_option_like_ref("base", pinned_head)?;
+        if !matches!(pinned_head.len(), 40 | 64)
+            || !pinned_head.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(SwarmError::WorktreeIo(
+                "isolated checkout requires an exact commit id".to_owned(),
+            ));
+        }
+
+        self.reject_executable_checkout_config().await?;
+        self.assert_clean().await?;
+        self.validate_swarm_root()?;
+        let _admission = self.admission_lock.lock().await;
+        let closure_bytes = self.transfer_closure_bytes(pinned_head).await?;
+        let aggregate = self.reserved_workspace_bytes()?;
+        let required = closure_bytes
+            .checked_add(capacity.safety_margin_bytes)
+            .ok_or_else(|| SwarmError::WorktreeIo("workspace capacity overflow".to_owned()))?;
+        if closure_bytes > capacity.max_transaction_bytes {
+            return Err(SwarmError::DispatchAdmission(format!(
+                "workspace closure {closure_bytes} exceeds transaction budget {}",
+                capacity.max_transaction_bytes
+            )));
+        }
+        if aggregate
+            .checked_add(closure_bytes)
+            .is_none_or(|total| total > capacity.max_aggregate_bytes)
+        {
+            return Err(SwarmError::DispatchAdmission(
+                "aggregate workspace budget exhausted".to_owned(),
+            ));
+        }
+        if required > capacity.available_bytes {
+            return Err(SwarmError::DispatchAdmission(format!(
+                "workspace requires {required} available bytes but authority proved only {}",
+                capacity.available_bytes
+            )));
+        }
+
+        let transaction_root = self.swarm_root.join(worker_id);
+        ensure_absent_destination(&transaction_root)?;
+        std::fs::create_dir(&transaction_root)?;
+        let setup_guard = TransactionSetupGuard::new(transaction_root.clone());
+        make_guard_dir_private(&transaction_root)?;
+        let reservation = transaction_root.join(RESERVATION_FILE);
+        std::fs::write(&reservation, closure_bytes.to_string())?;
+        let checkout = transaction_root.join("checkout");
+        let scratch = transaction_root.join("scratch");
+        std::fs::create_dir(&scratch)?;
+        make_guard_dir_private(&scratch)?;
+        let source = self.repo_root.to_string_lossy().into_owned();
+        let destination = checkout.to_string_lossy().into_owned();
+        let clone_args = [
+            "clone",
+            "--no-local",
+            "--no-hardlinks",
+            "--depth=1",
+            "--no-tags",
+            "--single-branch",
+            "--no-checkout",
+            "--",
+            source.as_str(),
+            destination.as_str(),
+        ];
+        let clone = Box::pin(capture_bounded_process(
+            self.git_command(&clone_args),
+            self.capture_limits,
+            None,
+        ))
+        .await;
+        let clone = match clone {
+            Ok(output) => output,
+            Err(error) => {
+                self.remove_owned_transaction_root(worker_id, &transaction_root)?;
+                return Err(SwarmError::WorktreeIo(format!(
+                    "isolated git clone failed: {error}"
+                )));
+            }
+        };
+        if !clone.status.success() {
+            self.remove_owned_transaction_root(worker_id, &transaction_root)?;
+            return Err(SwarmError::WorktreeIo(format!(
+                "isolated git clone failed: {}",
+                String::from_utf8_lossy(&clone.stderr).trim()
+            )));
+        }
+        make_guard_dir_private(&checkout)?;
+
+        Box::pin(self.run_checkout_git(&checkout, &["remote", "remove", "origin"])).await?;
+        let actual = Box::pin(
+            self.checkout_git_stdout(&checkout, &["rev-parse", "--verify", "HEAD^{commit}"]),
+        )
+        .await?;
+        if actual != pinned_head {
+            return Err(SwarmError::WorktreeIo(format!(
+                "isolated checkout raced parent HEAD: expected {pinned_head}, got {actual}"
+            )));
+        }
+        Box::pin(self.run_checkout_git(&checkout, &["checkout", "-b", branch, pinned_head, "--"]))
+            .await?;
+
+        let common =
+            Box::pin(self.checkout_git_stdout(&checkout, &["rev-parse", "--git-common-dir"]))
+                .await?;
+        let common = PathBuf::from(common);
+        let common = if common.is_absolute() {
+            common
+        } else {
+            checkout.join(common)
+        };
+        let common = std::fs::canonicalize(common)?;
+        if !common.starts_with(&checkout) {
+            return Err(SwarmError::WorktreeIo(format!(
+                "isolated checkout Git authority escaped its root: {}",
+                common.display()
+            )));
+        }
+        let alternates = common.join("objects").join("info").join("alternates");
+        if std::fs::symlink_metadata(&alternates).is_ok() {
+            return Err(SwarmError::WorktreeIo(
+                "isolated checkout unexpectedly uses an alternate object store".to_owned(),
+            ));
+        }
+        let remotes = Box::pin(self.checkout_git_stdout(&checkout, &["remote"])).await?;
+        if !remotes.is_empty() {
+            return Err(SwarmError::WorktreeIo(
+                "isolated checkout retained a remote".to_owned(),
+            ));
+        }
+        let tags = Box::pin(self.checkout_git_stdout(&checkout, &["tag", "--list"])).await?;
+        if !tags.is_empty() {
+            return Err(SwarmError::WorktreeIo(
+                "isolated checkout retained tags".to_owned(),
+            ));
+        }
+        let reachable =
+            Box::pin(self.checkout_git_stdout(&checkout, &["rev-list", "--count", "--all"]))
+                .await?;
+        if reachable != "1" {
+            return Err(SwarmError::WorktreeIo(format!(
+                "isolated checkout retained {reachable} reachable commits"
+            )));
+        }
+        if Box::pin(self.read_pinned_head()).await? != pinned_head {
+            return Err(SwarmError::WorktreeIo(
+                "parent HEAD changed during isolated checkout preparation".to_owned(),
+            ));
+        }
+        let head_commit = Box::pin(
+            self.checkout_git_stdout(&checkout, &["rev-parse", "--verify", "HEAD^{commit}"]),
+        )
+        .await?;
+        let tree = Box::pin(
+            self.checkout_git_stdout(&checkout, &["rev-parse", "--verify", "HEAD^{tree}"]),
+        )
+        .await?;
+        let checkout = std::fs::canonicalize(checkout)?;
+        let scratch = std::fs::canonicalize(scratch)?;
+        let transaction_root = std::fs::canonicalize(transaction_root)?;
+        if !checkout.starts_with(&transaction_root)
+            || !scratch.starts_with(&transaction_root)
+            || checkout.starts_with(&scratch)
+            || scratch.starts_with(&checkout)
+        {
+            return Err(SwarmError::WorktreeIo(
+                "transaction checkout and scratch roots are not disjoint".to_owned(),
+            ));
+        }
+        let workspace = TransactionWorkspace {
+            owner: worker_id.to_owned(),
+            root: transaction_root,
+            checkout,
+            scratch,
+            base_commit: pinned_head.to_owned(),
+            head_commit,
+            tree,
+            reserved_bytes: closure_bytes,
+        };
+        setup_guard.disarm();
+        Ok(workspace)
+    }
+
+    async fn transfer_closure_bytes(&self, pinned_head: &str) -> Result<u64> {
+        let output = capture_bounded_process(
+            self.git_command(&["rev-list", "--disk-usage", "--objects", pinned_head, "--"]),
+            self.capture_limits,
+            None,
+        )
+        .await
+        .map_err(|error| capture_error("git closure measurement", error))?;
+        if !output.status.success() {
+            return Err(SwarmError::WorktreeIo(format!(
+                "git closure measurement failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| SwarmError::WorktreeIo("invalid Git closure measurement".to_owned()))
+    }
+
+    fn reserved_workspace_bytes(&self) -> Result<u64> {
+        let mut total = 0_u64;
+        for entry in std::fs::read_dir(&self.swarm_root)? {
+            let entry = entry?;
+            if !is_real_directory_entry(&entry.path())? {
+                return Err(SwarmError::WorktreeIo(format!(
+                    "refused linked workspace reservation entry: {}",
+                    entry.path().display()
+                )));
+            }
+            let reservation = entry.path().join(RESERVATION_FILE);
+            if reservation.is_file() {
+                let bytes = std::fs::read_to_string(&reservation)?
+                    .trim()
+                    .parse::<u64>()
+                    .map_err(|_| {
+                        SwarmError::WorktreeIo(format!(
+                            "invalid workspace reservation: {}",
+                            reservation.display()
+                        ))
+                    })?;
+                total = total.checked_add(bytes).ok_or_else(|| {
+                    SwarmError::WorktreeIo("aggregate workspace reservation overflow".to_owned())
+                })?;
+            }
+        }
+        Ok(total)
+    }
+
+    fn remove_owned_transaction_root(&self, owner: &str, root: &Path) -> Result<()> {
+        validate_worker_id(owner)?;
+        self.validate_swarm_root()?;
+        if root != self.swarm_root.join(owner) || !root.starts_with(&self.swarm_root) {
+            return Err(SwarmError::WorktreeIo(
+                "refused cleanup outside owned transaction root".to_owned(),
+            ));
+        }
+        match std::fs::remove_dir_all(root) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Release a completed transaction and its persisted capacity reservation.
+    pub fn release_transaction(&self, workspace: &TransactionWorkspace) -> Result<()> {
+        self.remove_owned_transaction_root(&workspace.owner, &workspace.root)
+    }
+
     /// Remove every directory under `.swarm-worktrees/` via
     /// `git worktree remove --force`. Attempts every safe entry, then reports
     /// all failures and every residual path. Idempotent when the root is empty.
@@ -241,6 +681,24 @@ impl WorktreeManager {
                 Err(error) => {
                     failures.push(error.to_string());
                     continue;
+                }
+            }
+            if path.join(RESERVATION_FILE).is_file() {
+                let owner = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| {
+                        SwarmError::WorktreeIo(format!(
+                            "transaction workspace has invalid owner path: {}",
+                            path.display()
+                        ))
+                    })?;
+                match self.remove_owned_transaction_root(owner, &path) {
+                    Ok(()) => continue,
+                    Err(error) => {
+                        failures.push(format!("{}: {error}", path.display()));
+                        continue;
+                    }
                 }
             }
             let path_str = path.to_string_lossy().into_owned();
@@ -411,8 +869,49 @@ impl WorktreeManager {
         cmd
     }
 
+    fn checkout_git_command(&self, checkout: &Path, args: &[&str]) -> tokio::process::Command {
+        let checkout = checkout.to_string_lossy().into_owned();
+        let mut scoped = vec!["-C", checkout.as_str()];
+        scoped.extend_from_slice(args);
+        self.git_command(&scoped)
+    }
+
+    async fn run_checkout_git(&self, checkout: &Path, args: &[&str]) -> Result<()> {
+        let output = capture_bounded_process(
+            self.checkout_git_command(checkout, args),
+            self.capture_limits,
+            None,
+        )
+        .await
+        .map_err(|error| SwarmError::WorktreeIo(format!("isolated Git command failed: {error}")))?;
+        if !output.status.success() {
+            return Err(SwarmError::WorktreeIo(format!(
+                "isolated Git command failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(())
+    }
+
+    async fn checkout_git_stdout(&self, checkout: &Path, args: &[&str]) -> Result<String> {
+        let output = capture_bounded_process(
+            self.checkout_git_command(checkout, args),
+            self.capture_limits,
+            None,
+        )
+        .await
+        .map_err(|error| SwarmError::WorktreeIo(format!("isolated Git command failed: {error}")))?;
+        if !output.status.success() {
+            return Err(SwarmError::WorktreeIo(format!(
+                "isolated Git command failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
     fn validate_swarm_root(&self) -> Result<()> {
-        ensure_unchanged_real_directory(&self.swarm_root, &self.repo_root)
+        ensure_unchanged_real_directory(&self.swarm_root, &self.swarm_parent)
     }
 
     async fn capture_cleanup(
