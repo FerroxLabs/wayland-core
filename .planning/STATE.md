@@ -1,14 +1,19 @@
 ---
-gsd_state_version: '1.0'
-status: planning
+gsd_state_version: 1.0
+milestone: v1.0
+milestone_name: milestone
+current_phase: 20
+current_phase_name: transactional-delegated-mutation
+status: executing
+stopped_at: The invalid 22-plan chain is removed; the eight-plan pure-GSD replacement is under independent review before execution begins.
+last_updated: "2026-07-19T13:32:37.666Z"
+last_activity: 2026-07-19
+last_activity_desc: Phase 20 execution started
 progress:
-  total_phases: 11
+  total_phases: 1
   completed_phases: 0
   total_plans: 8
-  total_plans_scope: phase_20_provisional
-  program_completion_requires_all_phases: true
   completed_plans: 0
-  percent: 0
 ---
 
 # Project State
@@ -18,14 +23,14 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-07-19)
 
 **Core value:** Deliver a simple, bounded, crash-complete, transactionally delegated, operator-complete cross-platform agent proven through the packaged product.
-**Current focus:** Phase 20 — Transactional Delegated Mutation
+**Current focus:** Phase 20 — transactional-delegated-mutation
 
 ## Current Position
 
-Phase: 20 of 30 (11 active roadmap phases)
-Plan: 0 of 8 Phase 20 plans complete; replacement plans are under final independent review
-Status: The invalid 22-plan evidence chain was rejected; pure-GSD product planning is in progress and no SUMMARY exists
-Last activity: 2026-07-19 — Replaced the Strike-like execution design with eight serial product plans, normal GSD summaries, focused Hetzner checks, and one aggregate phase gate.
+Phase: 20 (transactional-delegated-mutation) — EXECUTING
+Plan: 1 of 8
+Status: Executing Phase 20
+Last activity: 2026-07-19 — Phase 20 execution started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -43,6 +48,7 @@ Progress: [░░░░░░░░░░] 0%
 ## Performance Metrics
 
 **Velocity:**
+
 - Total plans completed: 0
 - Average duration: Not established
 - Total execution time: Not established

@@ -27,7 +27,8 @@
     "test_gate_timeout": 1800,
     "test_command": "/Users/seandonahoe/.ratchet/harness/remote-cargo.sh gsd-workspace-test \"$PWD\" test --workspace --all-features",
     "build_command": "/Users/seandonahoe/.ratchet/harness/remote-cargo.sh gsd-workspace-build \"$PWD\" build --workspace --all-targets --all-features",
-    "plan_review_convergence": true
+    "plan_review_convergence": true,
+    "_auto_chain_active": false
   },
   "ship": {
     "pr_body_sections": []
