@@ -12,7 +12,7 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
 - Phases 20-23 execute serially. After Phase 23 admission, Phases 24-27 may execute in bounded parallel worktrees; shared protocol/schema/config/lock/fixture seams and final integration remain serial. Phase 28 fans them in.
 - `intel/COMPETITIVE-LEDGER.md`, `intel/FIELD-REGRESSIONS.md`, and `intel/DESKTOP-PROTOCOL-CHECKPOINT.md` are admission controls. D1 must pass before Phase 21 broad execution; D2 must pass by Phase 23 exit.
 - Source push, main merge, issue closure, release, deployment, canary promotion, and native proof dispatch require Sean's explicit authorization.
-- Each Phase 20 plan delivers product code, hostile tests, focused Hetzner proof, and one standard SUMMARY. No evidence-only plans or custom proof machinery are part of the execution chain.
+- Phase 20 source plans deliver product code or hostile tests plus focused proof and one standard SUMMARY. Fresh non-author reviews use separate dependency-ordered stock-GSD plan boundaries so author and reviewer identity cannot collapse inside one executor; repository-local scope/review verifiers mechanically reject stale or self-referential evidence.
 - GSD node repair, phase auto-advance, worktree mode, and Phase 20 plan parallelization are disabled. The Codex adapter is one clean serial execution checkout, not a custom executor.
 - The configured remote build/workspace test runs once after the final serial plan. Timeout, nonzero, incomplete output, unresolved review findings, failed validation/security, or missing authorized native Windows evidence blocks phase completion.
 - Independent code review covers every severity after construction. Every substantiated finding is repaired or rejected with executable counter-evidence before validation, security review, native UAT, and `phase.complete`.
@@ -43,7 +43,7 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
   2. Stale identity, failed gates, and conflicts stop before merge while preserving usable evidence.
   3. Snapshot, workspace, journal, receipt, merge, rollback, cleanup, and native Windows identity share one authoritative lifecycle.
   4. One exact F20 successor lands on the admitted candidate with focused and aggregate proof.
-**Plans**: Eight serial product plans (`20-01` through `20-08`): durable transaction journal, Windows AppContainer lease, workspace classification/isolation, spawn-path propagation, caller integration, candidate gates, parent compare-and-swap/rollback, and the complete hostile lifecycle. Standard code review, validation, security review, aggregate Hetzner proof, and authorized native Windows UAT follow construction before `phase.complete`.
+**Plans**: Fourteen dependency-ordered stock-GSD plans (`20-01` through `20-14`). The original candidate-gate plan is split into 06A source/review (`20-06`, `20-09`), 06B source/review (`20-10`, `20-11`), 06C private authoritative execution (`20-12`), 06D black-box proof (`20-13`), and an exact-candidate independent integrated audit (`20-14`). Caller integration (`20-05`) resumes only after `20-14`; parent CAS (`20-07`) follows `20-05`; `20-08` remains the final lifecycle, aggregate Hetzner, and native Windows acceptance plan.
 
 ### Phase 21: Child Authority and Budget Inheritance
 **Goal**: Every delegated actor remains inside the parent's authority and resource envelope.
