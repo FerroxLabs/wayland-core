@@ -15,9 +15,17 @@ review_file=$5
 shift 5
 source_paths=("$@")
 
+object_id_re='^[0-9a-f]{40}([0-9a-f]{24})?$'
+[[ "$source_sha" =~ $object_id_re && "$review_base_sha" =~ $object_id_re && "$review_sha" =~ $object_id_re ]] || {
+  echo "review tuple must use exact lowercase Git object IDs" >&2
+  exit 1
+}
 git cat-file -e "${source_sha}^{commit}"
 git cat-file -e "${review_base_sha}^{commit}"
 git cat-file -e "${review_sha}^{commit}"
+[[ "$(git rev-parse "${source_sha}^{commit}")" == "$source_sha" ]]
+[[ "$(git rev-parse "${review_base_sha}^{commit}")" == "$review_base_sha" ]]
+[[ "$(git rev-parse "${review_sha}^{commit}")" == "$review_sha" ]]
 
 metadata_history=$(git rev-list --reverse --ancestry-path "${source_sha}..${review_base_sha}")
 [[ -n "$metadata_history" ]] || {

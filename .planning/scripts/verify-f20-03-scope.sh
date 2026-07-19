@@ -11,13 +11,13 @@ case "$mode" in
 esac
 
 state_file=$(git rev-parse --git-path f20-03-accepted-plan)
-[[ -f "$state_file" && ! -L "$state_file" ]]
-state_lines=$(wc -l < "$state_file" | tr -d ' ')
-[[ "$state_lines" == 2 ]]
-F20_03_ACCEPTED_PLAN_COMMIT=$(sed -n '1p' "$state_file")
-F20_03_ACCEPTED_PLAN_TREE=$(sed -n '2p' "$state_file")
-[[ "$F20_03_ACCEPTED_PLAN_COMMIT" =~ ^[0-9a-f]{40,64}$ ]]
-[[ "$F20_03_ACCEPTED_PLAN_TREE" =~ ^[0-9a-f]{40,64}$ ]]
+scripts_dir=$(cd "$(dirname "$0")" && pwd -P)
+accepted_plan=$(node "$scripts_dir/task-base-authority.mjs" read "$state_file" 600)
+F20_03_ACCEPTED_PLAN_COMMIT=$(printf '%s\n' "$accepted_plan" | sed -n '1p')
+F20_03_ACCEPTED_PLAN_TREE=$(printf '%s\n' "$accepted_plan" | sed -n '2p')
+[[ "$F20_03_ACCEPTED_PLAN_COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+[[ "$F20_03_ACCEPTED_PLAN_TREE" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]
+[[ "$(git rev-parse "${F20_03_ACCEPTED_PLAN_COMMIT}^{commit}")" == "$F20_03_ACCEPTED_PLAN_COMMIT" ]]
 
 head_sha=$(git rev-parse HEAD)
 head_tree=$(git rev-parse HEAD^{tree})

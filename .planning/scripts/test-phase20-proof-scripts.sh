@@ -30,6 +30,16 @@ git -C "$tmp" add 20-06-INTERFACE-REVIEWS.md
 git -C "$tmp" commit -qm 'review'
 review_sha=$(git -C "$tmp" rev-parse HEAD)
 
+if (
+  cd "$tmp"
+  bash "$scripts_dir/verify-review-pair.sh" \
+    "${source_sha:0:12}" "$review_base_sha" "$review_sha" \
+    20-06-SUMMARY.md 20-06-INTERFACE-REVIEWS.md source.rs
+) >/dev/null 2>&1; then
+  echo 'review verifier accepted an abbreviated object ID' >&2
+  exit 1
+fi
+
 git -C "$tmp" --work-tree="$tmp" \
   -c core.safecrlf=false \
   -c core.autocrlf=false \
@@ -136,7 +146,64 @@ git -C "$tmp" add delete-me.txt rename-me.txt copy-me.txt
 git -C "$tmp" commit -qm 'scope fixtures'
 scope_base_sha=$(git -C "$tmp" rev-parse HEAD)
 base_file="$(git -C "$tmp" rev-parse --absolute-git-dir)/phase20-task-base"
-printf '%s\n' "$scope_base_sha" > "$base_file"
+(
+  cd "$tmp"
+  bash "$scripts_dir/verify-task-scope.sh" --capture "$base_file"
+)
+[[ "$(sed -n '1p' "$base_file")" == "$scope_base_sha" ]]
+
+if (
+  cd "$tmp"
+  bash "$scripts_dir/verify-task-scope.sh" --capture "$base_file"
+) >/dev/null 2>&1; then
+  echo 'scope verifier overwrote an existing TASK_BASE' >&2
+  exit 1
+fi
+
+real_base_file=$base_file
+symlink_base_file="${base_file}-symlink"
+ln -s "$real_base_file" "$symlink_base_file"
+if (
+  cd "$tmp"
+  bash "$scripts_dir/verify-task-scope.sh" "$symlink_base_file" source.rs
+) >/dev/null 2>&1; then
+  echo 'scope verifier accepted a symlink TASK_BASE' >&2
+  exit 1
+fi
+
+malformed_base_file="${base_file}-malformed"
+printf '%s\n%s\nextra\n' "$scope_base_sha" "$(git -C "$tmp" rev-parse "${scope_base_sha}^{tree}")" > "$malformed_base_file"
+chmod 400 "$malformed_base_file"
+if (
+  cd "$tmp"
+  bash "$scripts_dir/verify-task-scope.sh" "$malformed_base_file" source.rs
+) >/dev/null 2>&1; then
+  echo 'scope verifier accepted a multiline TASK_BASE' >&2
+  exit 1
+fi
+
+wrong_tree_base_file="${base_file}-wrong-tree"
+printf '%s\n%s\n' "$scope_base_sha" "$source_sha" > "$wrong_tree_base_file"
+chmod 400 "$wrong_tree_base_file"
+if (
+  cd "$tmp"
+  bash "$scripts_dir/verify-task-scope.sh" "$wrong_tree_base_file" source.rs
+) >/dev/null 2>&1; then
+  echo 'scope verifier accepted a mismatched TASK_BASE tree' >&2
+  exit 1
+fi
+
+fifo_base_file="${base_file}-fifo"
+mkfifo "$fifo_base_file"
+chmod 400 "$fifo_base_file"
+if (
+  cd "$tmp"
+  bash "$scripts_dir/verify-task-scope.sh" "$fifo_base_file" source.rs
+) >/dev/null 2>&1; then
+  echo 'scope verifier accepted a FIFO TASK_BASE' >&2
+  exit 1
+fi
+
 printf 'tracked\n' > "$tmp/tracked.txt"
 git -C "$tmp" add tracked.txt
 git -C "$tmp" commit -qm 'tracked scope'

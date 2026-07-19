@@ -2,22 +2,54 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <task-base-file> <required-path>..." >&2
+  echo "usage: $0 --capture <task-base-file> | <task-base-file> <required-path>..." >&2
   exit 64
 }
+
+scripts_dir=$(cd "$(dirname "$0")" && pwd -P)
+authority_helper="$scripts_dir/task-base-authority.mjs"
+
+validate_base_file() {
+  local file=$1 content commit tree expected_tree
+  content=$(node "$authority_helper" read "$file")
+  commit=$(printf '%s\n' "$content" | sed -n '1p')
+  tree=$(printf '%s\n' "$content" | sed -n '2p')
+  git cat-file -e "${commit}^{commit}"
+  expected_tree=$(git rev-parse "${commit}^{tree}")
+  [[ "$tree" == "$expected_tree" ]] || {
+    echo "TASK_BASE tree does not match its commit: $file" >&2
+    return 1
+  }
+  validated_base=$commit
+  validated_tree=$tree
+}
+
+if [[ ${1:-} == --capture ]]; then
+  [[ $# -eq 2 ]] || usage
+  base_file=$2
+  [[ -z "$(git status --porcelain)" ]] || {
+    echo "cannot capture TASK_BASE from a dirty checkout" >&2
+    exit 1
+  }
+  [[ ! -e "$base_file" && ! -L "$base_file" ]] || {
+    echo "refusing to overwrite existing TASK_BASE: $base_file" >&2
+    exit 1
+  }
+  mkdir -p "$(dirname "$base_file")"
+  node "$authority_helper" capture "$base_file" "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
+  validate_base_file "$base_file"
+  printf 'scope-base-captured commit=%s tree=%s\n' \
+    "$validated_base" "$validated_tree"
+  exit 0
+fi
 
 [[ $# -ge 2 ]] || usage
 base_file=$1
 shift
 required=("$@")
 
-[[ -f "$base_file" ]] || {
-  echo "missing recorded TASK_BASE: $base_file" >&2
-  exit 1
-}
-
-base=$(tr -d '\r\n' < "$base_file")
-git cat-file -e "${base}^{commit}"
+validate_base_file "$base_file"
+base=$validated_base
 git merge-base --is-ancestor "$base" HEAD
 
 observed=()

@@ -6,14 +6,14 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
 
 ## Execution Rules
 
-- Standard GSD is the phase-state and execution authority. One clean source checkout contains the code, plans, and standard summaries; GitHub only mirrors cross-lane coordination.
+- Standard GSD is the phase-state and execution authority. One clean standalone source clone whose `.git` is a directory contains the code, plans, and standard summaries; linked worktrees are forbidden for Phase 20 execution because stock GSD otherwise suppresses normal STATE/ROADMAP updates. GitHub only mirrors cross-lane coordination.
 - Exactly one integration candidate advances through one serial execution sequence from the reconciled source `94f014d039b8babf3f5926385a3bbc5cb5cf3c41` (tree `49635e1678bd96e42353ab0f7f943ba87497e9d0`); it already contains the accepted 20-01 and 20-02 source lineages, their standard summaries, and post-summary repairs. The reopened 20-03 begins only from the independently accepted planning successor of that source; `depends_on` expresses only genuine product dependencies.
 - Phase 20 WIP is one dependency-unlocked product plan. Read-only review may overlap, but product mutation remains serial.
 - Phases 20-23 execute serially. After Phase 23 admission, Phases 24-27 may execute in bounded parallel worktrees; shared protocol/schema/config/lock/fixture seams and final integration remain serial. Phase 28 fans them in.
 - `intel/COMPETITIVE-LEDGER.md`, `intel/FIELD-REGRESSIONS.md`, and `intel/DESKTOP-PROTOCOL-CHECKPOINT.md` are admission controls. D1 must pass before Phase 21 broad execution; D2 must pass by Phase 23 exit.
 - Source push, main merge, issue closure, release, deployment, canary promotion, and native proof dispatch require Sean's explicit authorization.
 - Phase 20 source plans deliver product code or hostile tests plus focused proof and one standard SUMMARY. Fresh non-author reviews use separate dependency-ordered stock-GSD plan boundaries so author and reviewer identity cannot collapse inside one executor; repository-local scope/review verifiers mechanically reject stale or self-referential evidence.
-- GSD node repair, phase auto-advance, worktree mode, and Phase 20 plan parallelization are disabled. The Codex adapter is one clean serial execution checkout, not a custom executor.
+- GSD node repair, phase auto-advance, worktree mode, and Phase 20 plan parallelization are disabled. The Codex adapter is one clean serial standalone clone with a real `.git` directory, not a linked worktree or custom executor.
 - Terminal plan 20-08 runs the configured remote build/workspace test once against the exact final candidate before summary or requirement completion; the phase verifier authenticates and reruns only after source or evidence-integrity drift. Timeout, nonzero, incomplete output, unresolved review findings, failed validation/security, or missing authorized same-candidate native Windows and macOS evidence blocks phase completion.
 - Independent code review covers every severity after construction. Every substantiated finding is repaired or rejected with executable counter-evidence before validation, security review, native UAT, and `phase.complete`.
 

@@ -20,7 +20,7 @@ Deliver a best-in-class cross-platform agent that stays simple in ordinary use, 
 ### Validated
 
 - ✓ F00-F19 architecture and accepted evidence remain preserved as the historical baseline; they are not re-executed or discarded by this milestone.
-- ✓ F00-F19 entered Phase 20 from source `97e44910fc6dd4761f1f862dbf54a5a76262cef2` (tree `8d27bd96b476a728d3ebbe0e1583c6488dd5effc`); accepted 20-01 source is `b9cc6698f2b43a04f1b4deee7064def8f754d9e7` (tree `cf97d5feda6099d39ab6484cc4fcaf06458f15fe`). The planning-control repository need not resolve either object and is not source authority.
+- ✓ F00-F19 entered Phase 20 from source `97e44910fc6dd4761f1f862dbf54a5a76262cef2` (tree `8d27bd96b476a728d3ebbe0e1583c6488dd5effc`); `b9cc6698f2b43a04f1b4deee7064def8f754d9e7` (tree `cf97d5feda6099d39ab6484cc4fcaf06458f15fe`) is the authoritative prerequisite types contract, while `626e1d4d3dee9fee7008ad172ec0b4add8f2004e` is the accepted stock-GSD 20-01 product commit. The planning-control repository need not resolve those source objects and is not source authority.
 - ✓ Existing F22A-F22D define the canonical Goal, Fleet, strategy, and bounded-loop architecture; no parallel lifecycle may be introduced.
 - ✓ The versioned peer taxonomy, live field-regression register, and Core↔Desktop D1/D2 checkpoints are program admission controls from Phase 20 onward.
 
@@ -37,7 +37,7 @@ Deliver a best-in-class cross-platform agent that stays simple in ordinary use, 
 - Wayland Desktop implementation — Core owns stable capability, policy, resource, and protocol truth; Desktop requires a linked plan at the protocol checkpoint.
 - A clean-slate rewrite of F00-F23 — accepted F00-F19 source and historical evidence are preserved; standard GSD summaries begin with the replacement Phase 20 execution, and partial F20-F23 work is salvaged only when it satisfies the current contracts.
 - Cloud-provider proliferation — F25 proves one hibernating cloud reference backend plus an extensible contract, not every vendor.
-- Source push, main merge, issue closure, release, deployment, or production canary — each remains a Sean-only authorization action. The sole Phase 20 exception is the exact candidate-specific proof tag after its explicit checkpoint.
+- Source push, main merge, issue closure, release, deployment, or production canary — each remains a Sean-only authorization action. The sole Phase 20 exception is one exact candidate-specific temporary UAT branch and one native-proof dispatch after its explicit checkpoint; Phase 20 creates no proof tag. That checkpoint authorizes the plan's exact-SHA, UAT-ref-only publication helper as a narrow exception to `just push`; it performs no Cargo, formatting, hook, auto-commit, main-ref, or source mutation.
 - Superiority claims based on source presence, types, unit tests, or local-only proof — positioning requires the F28-F30 evidence chain.
 
 ## Context
@@ -51,7 +51,7 @@ Deliver a best-in-class cross-platform agent that stays simple in ordinary use, 
 ## Constraints
 
 - **Execution authority**: Standard GSD executes product plans and writes its standard summaries in one clean source checkout. GitHub mirrors cross-lane coordination and is not a second execution authority.
-- **Candidate authority**: Exactly one integration candidate advances through one serial execution sequence from accepted source `b9cc6698f2b43a04f1b4deee7064def8f754d9e7`; `depends_on` expresses only genuine product dependencies.
+- **Candidate authority**: Exactly one integration candidate advances through one serial execution sequence from reconciled source `94f014d039b8babf3f5926385a3bbc5cb5cf3c41` and its independently accepted planning successor; `depends_on` expresses only genuine product dependencies.
 - **WIP**: Phase 20 executes one dependency-unlocked product plan at a time. Read-only review may overlap; source mutation remains serial.
 - **Dependency**: Phases 20-23 remain serial. After Phase 23 admission, Phases 24-27 may execute as bounded parallel workstreams with shared protocol/schema/config seams serialized; Phase 28 is their fan-in.
 - **Platform**: Rust 2021 stable on macOS, Linux, and Windows; no Cargo on this Mac.
@@ -64,7 +64,7 @@ Deliver a best-in-class cross-platform agent that stays simple in ordinary use, 
 ### Standard GSD Acceptance Contract
 
 - Phase 20 consists of fourteen dependency-ordered stock-GSD plans. Only terminal plan 20-08 carries the phase requirement IDs so no predecessor summary can mark Phase 20 complete before the exact final candidate passes focused, native, and aggregate proof. Evidence-only custom executors, dispatch ledgers, receipt schemas, and phase-specific runners are prohibited; independent reviews remain ordinary stock-GSD plans with repository-local review-pair checks.
-- `workflow.use_worktrees=false` and plan parallelization remain disabled. Codex executes serially in one clean Phase 20 checkout because its generic subagent API cannot provide GSD's typed worktree isolation.
+- `workflow.use_worktrees=false` and plan parallelization remain disabled. Codex executes serially in one clean standalone Phase 20 clone whose `.git` is a directory, not a linked worktree. This preserves stock GSD's normal STATE/ROADMAP updates while avoiding shared-worktree authority.
 - Every plan contains implementation, hostile tests, focused Hetzner verification, and a normal GSD SUMMARY. Cargo never runs on this Mac.
 - Terminal plan 20-08 runs the configured remote build and workspace test once against the exact final candidate before its summary or any requirement update. The installed phase verifier authenticates those receipts and reruns only after source or evidence-integrity drift. Timeout, failure, or incomplete output blocks verification; an advisory `Continue` path is not acceptance.
 - After construction, run independent `gsd-code-review`, repair every substantiated severity, and repeat review until clear. Then run `gsd-validate-phase` and `gsd-secure-phase`; `security_block_on: low` requires disposition of every finding.
