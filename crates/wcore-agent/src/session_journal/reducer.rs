@@ -2952,7 +2952,7 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
                 CommitProjection::Applied(projection) => {
                     state
                         .child_transactions
-                        .insert(transaction_id.clone(), projection);
+                        .insert(transaction_id.clone(), *projection);
                 }
                 CommitProjection::Duplicate => {}
             }

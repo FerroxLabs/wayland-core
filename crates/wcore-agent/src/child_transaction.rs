@@ -231,7 +231,7 @@ impl ChildTransactionStore {
 }
 
 pub(crate) enum CommitProjection {
-    Applied(ChildTransactionState),
+    Applied(Box<ChildTransactionState>),
     Duplicate,
 }
 
@@ -321,7 +321,7 @@ pub(crate) fn project_commit(
         receipt: receipt.clone(),
         child_snapshot: child.clone(),
     });
-    Ok(CommitProjection::Applied(projection))
+    Ok(CommitProjection::Applied(Box::new(projection)))
 }
 
 fn validate_retained_authority<'a>(
