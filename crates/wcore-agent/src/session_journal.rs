@@ -832,25 +832,32 @@ impl SessionStorageLease {
     ) -> Result<(), JournalError> {
         self.validate_retirement_paths(session_path, wal_path)?;
         self.validate_journal_retirement_authority()?;
-        let session = CapturedRetirementFile::capture(session_path, None)?;
-        let wal = CapturedRetirementFile::capture(wal_path, None)?;
-        let snapshot =
-            CapturedRetirementFile::capture(&snapshot_path_for(&self.journal_path), None)?;
-        let journal =
-            CapturedRetirementFile::capture(&self.journal_path, self._journal_file.as_ref())?;
-        let authority_head = CapturedRetirementFile::capture(
+        let mut first_error = None;
+        let session = capture_retirement_artifact(session_path, None, &mut first_error);
+        let wal = capture_retirement_artifact(wal_path, None, &mut first_error);
+        let snapshot = capture_retirement_artifact(
+            &snapshot_path_for(&self.journal_path),
+            None,
+            &mut first_error,
+        );
+        let journal = capture_retirement_artifact(
+            &self.journal_path,
+            self._journal_file.as_ref(),
+            &mut first_error,
+        );
+        let authority_head = capture_retirement_artifact(
             &snapshot::snapshot_authority_head_path(&self.journal_path),
             None,
-        )?;
+            &mut first_error,
+        );
 
         // Attempt every artifact so one undeletable file does not strand other
         // plaintext. The caller retains index authority if any unlink or
         // directory sync fails, making every residual file discoverable.
-        let mut first_error = None;
         if let Err(error) = remove_effect_checkpoint_directory(&self.journal_path) {
-            first_error = Some(error);
+            first_error.get_or_insert(error);
         }
-        for captured in [&session, &wal, &snapshot, &journal] {
+        for captured in [&session, &wal, &snapshot, &journal].into_iter().flatten() {
             if let Err(error) = captured.remove()
                 && first_error.is_none()
             {
@@ -858,6 +865,7 @@ impl SessionStorageLease {
             }
         }
         if first_error.is_none()
+            && let Some(authority_head) = authority_head.as_ref()
             && let Err(error) = authority_head.remove()
         {
             first_error = Some(error);
@@ -932,6 +940,20 @@ fn require_path_absent(path: &Path) -> Result<(), JournalError> {
 enum CapturedRetirementFile {
     Missing(PathBuf),
     Present { path: PathBuf, file: File },
+}
+
+fn capture_retirement_artifact(
+    path: &Path,
+    expected: Option<&File>,
+    first_error: &mut Option<JournalError>,
+) -> Option<CapturedRetirementFile> {
+    match CapturedRetirementFile::capture(path, expected) {
+        Ok(captured) => Some(captured),
+        Err(error) => {
+            first_error.get_or_insert(error);
+            None
+        }
+    }
 }
 
 impl CapturedRetirementFile {
