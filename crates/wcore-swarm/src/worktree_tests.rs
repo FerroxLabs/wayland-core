@@ -26,10 +26,9 @@ fn git_commands_clear_ambient_overrides_and_disable_checkout_hooks() {
             .is_some_and(|arg| arg.starts_with("core.hooksPath=")),
         "missing hooks override: {args:?}"
     );
-    assert!(
-        args.windows(2)
-            .any(|pair| pair == ["-c", "core.fsmonitor=false"])
-    );
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["-c", "core.fsmonitor=false"]));
     assert_eq!(
         env.get("GIT_CONFIG_NOSYSTEM").and_then(Option::as_deref),
         Some("1")
@@ -108,9 +107,22 @@ fn linked_swarm_root_is_rejected_without_touching_target() {
 
 #[cfg(target_os = "linux")]
 async fn run_fixture_git(repo: &Path, args: &[&str]) {
+    let output = fixture_git_output(repo, args).await;
+    assert!(
+        output.status.success(),
+        "fixture git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(target_os = "linux")]
+async fn fixture_git_output(
+    repo: &Path,
+    args: &[&str],
+) -> wcore_sandbox::process_capture::CapturedOutput {
     let mut command = shell::shell_command_argv("git", args);
     command.current_dir(repo);
-    let output = capture_bounded_process(
+    capture_bounded_process(
         command,
         CaptureLimits {
             stdout_bytes: 64 * 1024,
@@ -120,12 +132,7 @@ async fn run_fixture_git(repo: &Path, args: &[&str]) {
         None,
     )
     .await
-    .expect("fixture git command");
-    assert!(
-        output.status.success(),
-        "fixture git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    .expect("fixture git command")
 }
 
 #[cfg(target_os = "linux")]
@@ -160,6 +167,222 @@ async fn init_fixture_repo(path: &Path) {
         ],
     )
     .await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn external_workspace_root_keeps_checkout_outside_parent_repository() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let control = tempfile::tempdir().expect("orchestrator control root");
+    init_fixture_repo(fixture.path()).await;
+    let checkouts = control.path().join("checkouts");
+    let manager = WorktreeManager::new_with_workspace_root(fixture.path(), &checkouts)
+        .expect("external manager");
+    let head = manager.pinned_head().await.expect("pinned head");
+    let common = manager.git_common_dir().await.expect("common dir");
+    let tree = manager
+        .create_worker_tree("child-1", "wayland-child/child-1", &head)
+        .await
+        .expect("external checkout");
+
+    assert!(tree.starts_with(control.path()));
+    assert!(!tree.starts_with(fixture.path()));
+    assert!(!fixture.path().join(".swarm-worktrees").exists());
+    assert!(common.starts_with(fixture.path()));
+    assert!(std::fs::read_to_string(tree.join(".git")).is_ok());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn isolated_checkout_keeps_git_useful_without_parent_history_or_authority() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let control = tempfile::tempdir().expect("orchestrator control root");
+    init_fixture_repo(fixture.path()).await;
+    std::fs::write(fixture.path().join("README.md"), "before\n").unwrap();
+    std::fs::write(
+        fixture.path().join("historical-secret.txt"),
+        "do-not-retain\n",
+    )
+    .unwrap();
+    run_fixture_git(
+        fixture.path(),
+        &["add", "README.md", "historical-secret.txt"],
+    )
+    .await;
+    run_fixture_git(
+        fixture.path(),
+        &[
+            "-c",
+            "user.email=swarm-test@example.invalid",
+            "-c",
+            "user.name=Swarm Test",
+            "commit",
+            "-qm",
+            "historical secret",
+        ],
+    )
+    .await;
+    let secret_commit = String::from_utf8_lossy(
+        &fixture_git_output(fixture.path(), &["rev-parse", "HEAD"])
+            .await
+            .stdout,
+    )
+    .trim()
+    .to_owned();
+    std::fs::remove_file(fixture.path().join("historical-secret.txt")).unwrap();
+    std::fs::write(fixture.path().join("README.md"), "current\n").unwrap();
+    run_fixture_git(fixture.path(), &["add", "-A"]).await;
+    run_fixture_git(
+        fixture.path(),
+        &[
+            "-c",
+            "user.email=swarm-test@example.invalid",
+            "-c",
+            "user.name=Swarm Test",
+            "commit",
+            "-qm",
+            "current snapshot",
+        ],
+    )
+    .await;
+
+    let checkouts = control.path().join("checkouts");
+    let manager = WorktreeManager::new_with_workspace_root(fixture.path(), &checkouts)
+        .expect("external manager");
+    let parent_head = manager.pinned_head().await.expect("pinned head");
+    let transaction = manager
+        .create_isolated_checkout(
+            "child-1",
+            "wayland-child/child-1",
+            &parent_head,
+            WorkspaceCapacity {
+                available_bytes: u64::MAX,
+                safety_margin_bytes: 0,
+                max_transaction_bytes: u64::MAX,
+                max_aggregate_bytes: u64::MAX,
+            },
+        )
+        .await
+        .expect("private checkout");
+    let tree = &transaction.checkout;
+
+    assert!(tree.join(".git").is_dir());
+    assert!(transaction.scratch.is_dir());
+    assert!(!transaction.scratch.starts_with(tree));
+    assert!(!tree.join(".git/objects/info/alternates").exists());
+    assert!(fixture_git_output(&tree, &["remote"])
+        .await
+        .stdout
+        .is_empty());
+    assert!(fixture_git_output(&tree, &["tag", "--list"])
+        .await
+        .stdout
+        .is_empty());
+    let reachable = fixture_git_output(&tree, &["rev-list", "--count", "--all"]).await;
+    assert_eq!(String::from_utf8_lossy(&reachable.stdout).trim(), "1");
+    let old_commit = fixture_git_output(&tree, &["cat-file", "-e", &secret_commit]).await;
+    assert!(
+        !old_commit.status.success(),
+        "parent history leaked into child clone"
+    );
+
+    std::fs::write(tree.join("README.md"), "child edit\n").unwrap();
+    let status = fixture_git_output(&tree, &["status", "--short"]).await;
+    assert!(String::from_utf8_lossy(&status.stdout).contains("README.md"));
+    let diff = fixture_git_output(&tree, &["diff", "--", "README.md"]).await;
+    assert!(String::from_utf8_lossy(&diff.stdout).contains("child edit"));
+    run_fixture_git(&tree, &["add", "README.md"]).await;
+    run_fixture_git(
+        &tree,
+        &[
+            "-c",
+            "user.email=child@example.invalid",
+            "-c",
+            "user.name=Child",
+            "commit",
+            "-qm",
+            "child-local commit",
+        ],
+    )
+    .await;
+    assert_eq!(manager.pinned_head().await.unwrap(), parent_head);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn isolated_checkout_rejects_unproven_capacity_before_materialization() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let control = tempfile::tempdir().expect("orchestrator control root");
+    init_fixture_repo(fixture.path()).await;
+    let manager =
+        WorktreeManager::new_with_workspace_root(fixture.path(), &control.path().join("checkouts"))
+            .expect("manager");
+    let parent_head = manager.pinned_head().await.expect("pinned head");
+
+    let error = manager
+        .create_isolated_checkout(
+            "child-1",
+            "wayland-child/child-1",
+            &parent_head,
+            WorkspaceCapacity {
+                available_bytes: 0,
+                safety_margin_bytes: 1,
+                max_transaction_bytes: u64::MAX,
+                max_aggregate_bytes: u64::MAX,
+            },
+        )
+        .await
+        .expect_err("missing capacity proof must fail")
+        .to_string();
+    assert!(error.contains("available bytes"), "{error}");
+    assert!(!manager.swarm_root().join("child-1").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn persisted_reservation_enforces_aggregate_budget_and_owned_cleanup() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let control = tempfile::tempdir().expect("orchestrator control root");
+    init_fixture_repo(fixture.path()).await;
+    let manager =
+        WorktreeManager::new_with_workspace_root(fixture.path(), &control.path().join("checkouts"))
+            .expect("manager");
+    let head = manager.pinned_head().await.expect("head");
+    let first = manager
+        .create_isolated_checkout(
+            "child-1",
+            "wayland-child/child-1",
+            &head,
+            WorkspaceCapacity {
+                available_bytes: u64::MAX,
+                safety_margin_bytes: 0,
+                max_transaction_bytes: u64::MAX,
+                max_aggregate_bytes: u64::MAX,
+            },
+        )
+        .await
+        .expect("first checkout");
+    let foreign = control.path().join("foreign");
+    std::fs::create_dir(&foreign).unwrap();
+    let error = manager
+        .create_isolated_checkout(
+            "child-2",
+            "wayland-child/child-2",
+            &head,
+            WorkspaceCapacity {
+                available_bytes: u64::MAX,
+                safety_margin_bytes: 0,
+                max_transaction_bytes: u64::MAX,
+                max_aggregate_bytes: first.reserved_bytes,
+            },
+        )
+        .await
+        .expect_err("aggregate reservation must fail")
+        .to_string();
+    assert!(error.contains("aggregate workspace budget"), "{error}");
+    manager.release_transaction(&first).expect("owned cleanup");
+    assert!(!first.root.exists());
+    assert!(foreign.is_dir());
 }
 
 #[cfg(target_os = "linux")]
