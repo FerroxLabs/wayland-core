@@ -60,22 +60,33 @@ impl OcrBackend for LeptessOcr {
         if text.trim().is_empty() {
             return Ok(Vec::new());
         }
+        let image_dimensions = lt.get_image_dimensions();
 
         let mut regions: Vec<TextRegion> = Vec::new();
-        if let Ok(iter) =
-            lt.get_component_images(::leptess::capi::TessPageIteratorLevel_RIL_WORD, true)
+        if let Some(boxes) =
+            lt.get_component_boxes(::leptess::capi::TessPageIteratorLevel_RIL_WORD, true)
         {
-            for entry in iter {
-                let bbox = entry.bbox;
-                let word_text = entry.text.unwrap_or_default();
-                let x0 = bbox.x.max(0) as u32;
-                let y0 = bbox.y.max(0) as u32;
-                let x1 = (bbox.x + bbox.w).max(0) as u32;
-                let y1 = (bbox.y + bbox.h).max(0) as u32;
+            for bbox in &boxes {
+                let geometry = bbox.get_geometry();
+                if geometry.w <= 0 || geometry.h <= 0 {
+                    continue;
+                }
+                lt.set_rectangle_from_box(&bbox);
+                let Ok(word_text) = lt.get_utf8_text() else {
+                    continue;
+                };
+                let word_text = word_text.trim().to_owned();
+                if word_text.is_empty() {
+                    continue;
+                }
+                let x0 = geometry.x.max(0) as u32;
+                let y0 = geometry.y.max(0) as u32;
+                let x1 = geometry.x.saturating_add(geometry.w).max(0) as u32;
+                let y1 = geometry.y.saturating_add(geometry.h).max(0) as u32;
                 regions.push(TextRegion {
                     text: word_text,
                     bbox: BoundingBox { x0, y0, x1, y1 },
-                    confidence: 1.0,
+                    confidence: (lt.mean_text_conf() as f32 / 100.0).clamp(0.0, 1.0),
                 });
             }
         }
@@ -85,20 +96,19 @@ impl OcrBackend for LeptessOcr {
         // emit one region covering the full image with the full-page
         // text. The caller's `is_sensitive` filter decides whether to
         // blur it.
-        if regions.is_empty() {
-            let (w, h) = (lt.get_image_width(), lt.get_image_height());
-            if let (Some(w), Some(h)) = (w, h) {
-                regions.push(TextRegion {
-                    text,
-                    bbox: BoundingBox {
-                        x0: 0,
-                        y0: 0,
-                        x1: w.saturating_sub(1),
-                        y1: h.saturating_sub(1),
-                    },
-                    confidence: 1.0,
-                });
-            }
+        if regions.is_empty()
+            && let Some((w, h)) = image_dimensions
+        {
+            regions.push(TextRegion {
+                text,
+                bbox: BoundingBox {
+                    x0: 0,
+                    y0: 0,
+                    x1: w.saturating_sub(1),
+                    y1: h.saturating_sub(1),
+                },
+                confidence: 1.0,
+            });
         }
         Ok(regions)
     }
