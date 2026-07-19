@@ -10,8 +10,7 @@ use serde_json::Value;
 use wcore_types::message::{Message, TokenUsage};
 
 use crate::session_journal::{
-    JournalError, SessionEvent, SessionJournal, SessionSnapshot, SessionStorageLease,
-    state_payload_digest, write_snapshot,
+    JournalError, SessionEvent, SessionJournal, SessionStorageLease, state_payload_digest,
 };
 
 /// Current on-disk schema version. Increment when adding required fields.
@@ -609,8 +608,7 @@ impl SessionManager {
             })?;
         }
 
-        let snapshot = SessionSnapshot::new(session.id.clone(), journal.state()?)?;
-        write_snapshot(self.journal_snapshot_path(&session.id), &snapshot)?;
+        journal.publish_snapshot()?;
         Ok(())
     }
 
@@ -857,6 +855,7 @@ impl SessionManager {
         self.directory.join(format!("{session_id}.journal"))
     }
 
+    #[cfg(test)]
     fn journal_snapshot_path(&self, session_id: &str) -> PathBuf {
         self.directory
             .join(format!("{session_id}.journal.snapshot"))
@@ -1458,12 +1457,7 @@ mod tests {
         std::fs::write(&wal_path, b"durable wal evidence\n").unwrap();
         let journal_path = manager.journal_path(&id);
         let journal = SessionJournal::open(&journal_path, id.clone()).unwrap();
-        let snapshot = SessionSnapshot::new(
-            id.clone(),
-            crate::session_journal::ReducedSessionState::default(),
-        )
-        .unwrap();
-        write_snapshot(manager.journal_snapshot_path(&id), &snapshot).unwrap();
+        journal.publish_snapshot().unwrap();
         drop(journal);
 
         // Seed index with message_count=0 and old created_at.

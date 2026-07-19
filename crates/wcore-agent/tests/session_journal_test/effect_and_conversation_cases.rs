@@ -26,7 +26,10 @@ fn legacy_tool_intent_remains_replayable_as_conservative_opaque_state() {
     assert_eq!(tool.idempotency_key, "legacy:legacy-execution");
     assert_eq!(tool.effect_contract, ToolEffectContract::default());
     assert!(tool.effect_receipt.is_none());
-    assert!(matches!(tool.requested_input, StoredToolInput::Secured { .. }));
+    assert!(matches!(
+        tool.requested_input,
+        StoredToolInput::Secured { .. }
+    ));
 }
 
 #[test]
@@ -364,19 +367,43 @@ fn delivery_origins_and_terminal_unknown_evidence_remain_truthful() {
 
 #[test]
 fn snapshot_is_atomic_owner_only_and_detects_tampering() {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("session.snapshot");
-    let snapshot = SessionSnapshot::new("s1", ReducedSessionState::default()).unwrap();
-    write_snapshot(&path, &snapshot).unwrap();
-    assert_eq!(load_snapshot(&path).unwrap(), snapshot);
+    let journal_path = dir.path().join("session.journal");
+    let snapshot_path = snapshot_path_for(&journal_path);
+    let journal = SessionJournal::open(&journal_path, "s1").unwrap();
+    journal.append(turn_started("t0")).unwrap();
+    let snapshot = journal.publish_snapshot().unwrap();
+    assert_eq!(load_snapshot(&snapshot_path).unwrap(), snapshot);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         assert_eq!(
-            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            std::fs::metadata(&snapshot_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
             0o600
         );
     }
+    journal.append(turn_committed("t0")).unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&snapshot_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let snapshot = journal.compact().unwrap();
+    assert_eq!(load_snapshot(&snapshot_path).unwrap(), snapshot);
+    #[cfg(unix)]
+    assert_eq!(
+        std::fs::metadata(&snapshot_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    drop(journal);
+
     let mut tampered = snapshot;
     tampered.state.turns.insert(
         "x".into(),
@@ -385,9 +412,9 @@ fn snapshot_is_atomic_owner_only_and_detects_tampering() {
             completion: None,
         },
     );
-    std::fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    std::fs::write(&snapshot_path, serde_json::to_vec(&tampered).unwrap()).unwrap();
     assert!(matches!(
-        load_snapshot(path),
+        load_snapshot(snapshot_path),
         Err(JournalError::SnapshotDigestMismatch)
     ));
 }

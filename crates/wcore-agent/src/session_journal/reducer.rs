@@ -19,17 +19,13 @@ impl ReducedSessionState {
     }
 }
 
-pub fn reduce(
+pub(crate) fn reduce(
     mut state: ReducedSessionState,
     envelope: &JournalEnvelope,
 ) -> Result<ReducedSessionState, JournalError> {
     let expected_seq = state.last_seq.map_or(0, |seq| seq + 1);
-    if envelope.schema_version != SESSION_JOURNAL_SCHEMA_VERSION {
-        return Err(JournalError::UnsupportedSchema {
-            found: envelope.schema_version,
-            supported: SESSION_JOURNAL_SCHEMA_VERSION,
-        });
-    }
+    validate_journal_schema_for_reader(envelope.schema_version)?;
+    enforce_typed_event_schema_boundary(envelope)?;
     match state.session_id.as_deref() {
         Some(expected) if expected != envelope.session_id => {
             return Err(JournalError::SessionMismatch {
@@ -59,9 +55,14 @@ pub fn reduce(
 }
 
 pub fn replay_state(entries: &[JournalEnvelope]) -> Result<ReducedSessionState, JournalError> {
-    entries
-        .iter()
-        .try_fold(ReducedSessionState::default(), reduce)
+    let mut state = ReducedSessionState::default();
+    let mut previous_schema = None;
+    for envelope in entries {
+        reject_schema_regression(previous_schema, envelope.schema_version)?;
+        state = reduce(state, envelope)?;
+        previous_schema = Some(envelope.schema_version);
+    }
+    Ok(state)
 }
 
 fn duplicate(kind: &str, id: &str) -> JournalError {

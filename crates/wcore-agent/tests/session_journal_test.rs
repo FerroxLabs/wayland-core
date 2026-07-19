@@ -12,11 +12,11 @@ use wcore_agent::session_journal::{
     DeliveryEvidence, DeliveryNotStartedReason, DeliveryOrigin, DeliveryStage,
     DeliveryUnknownReason, ExternalEffectState, GENESIS_CHECKSUM, JournalEnvelope, JournalError,
     LEGACY_BUDGET_AUTHORITY_SCHEMA_VERSION, ProviderAttemptNotStartedReason,
-    ProviderAttemptPurpose, ProviderStreamEvent, ReducedSessionState,
+    ProviderAttemptPurpose, ProviderStreamEvent,
     SESSION_JOURNAL_SCHEMA_VERSION, SessionEvent, SessionJournal, SessionSnapshot, StoredToolInput,
     ToolEffectState, ToolNotStartedReason, TurnState, decode_prepared_provider_request_snapshot,
     load_snapshot, prepared_provider_request_snapshot, provider_request_digest,
-    replay_from_snapshot, replay_state, state_payload_digest, verify_chain, write_snapshot,
+    replay_from_snapshot, replay_state, snapshot_path_for, state_payload_digest, verify_chain,
 };
 use wcore_budget::{BudgetCap, BudgetTracker, ExecutionBudget};
 use wcore_types::cache_tier::CacheTier;

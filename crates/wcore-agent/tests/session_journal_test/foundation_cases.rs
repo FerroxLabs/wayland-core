@@ -128,7 +128,9 @@ fn prepared_provider_request_snapshot_rejects_unknown_structural_fields() {
     let request = LlmRequest {
         messages: vec![Message::new(
             Role::User,
-            vec![ContentBlock::Text { text: "hello".into() }],
+            vec![ContentBlock::Text {
+                text: "hello".into(),
+            }],
         )],
         tools: vec![ToolDef {
             name: "read".into(),
@@ -268,7 +270,7 @@ fn hard_link_alias_cannot_acquire_a_second_writer_authority() {
 
     assert!(matches!(
         SessionJournal::open(&alias, "s1"),
-        Err(JournalError::AlreadyOwned { .. })
+        Err(JournalError::MultipleLinks { .. })
     ));
 
     assert!(matches!(
@@ -333,26 +335,193 @@ fn symlink_alias_is_rejected_without_mutating_its_target() {
     assert_eq!(std::fs::read(path).unwrap(), before);
 }
 
+#[cfg(unix)]
+#[test]
+fn writer_lease_symlink_is_rejected_without_mutating_its_target() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.journal");
+    let lease_path = dir.path().join("session.journal.writer.lock");
+    let target = dir.path().join("protected");
+    std::fs::write(&target, b"must remain unchanged").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+    symlink(&target, &lease_path).unwrap();
+
+    assert!(matches!(
+        SessionJournal::open(&path, "s1"),
+        Err(JournalError::SymbolicLink { path }) if path == lease_path
+    ));
+    assert_eq!(std::fs::read(&target).unwrap(), b"must remain unchanged");
+    assert_eq!(
+        std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+}
+
+const TEST_CHILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn wait_for_child_path(
+    child: &mut std::process::Child,
+    path: &Path,
+    description: &str,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + TEST_CHILD_TIMEOUT;
+    loop {
+        if path.exists() {
+            return Ok(());
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("could not inspect {description}: {error}"))?
+        {
+            return Err(format!("{description} exited early with {status}"));
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "timed out after {TEST_CHILD_TIMEOUT:?} waiting for {description}"
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn wait_for_child_exit(
+    child: &mut std::process::Child,
+    description: &str,
+) -> Result<std::process::ExitStatus, String> {
+    let deadline = std::time::Instant::now() + TEST_CHILD_TIMEOUT;
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("could not inspect {description}: {error}"))?
+        {
+            return Ok(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "timed out after {TEST_CHILD_TIMEOUT:?} waiting for {description}"
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn lease_holder_process_exits_without_drop() {
     let Ok(path) = std::env::var("WCORE_TEST_JOURNAL_LEASE_PATH") else {
         return;
     };
     let _journal = SessionJournal::open(path, "crash-owner").unwrap();
-    std::process::exit(0);
+    let ready = std::env::var("WCORE_TEST_JOURNAL_LEASE_READY").unwrap();
+    let release = std::env::var("WCORE_TEST_JOURNAL_LEASE_RELEASE").unwrap();
+    std::fs::write(ready, b"ready").unwrap();
+    let deadline = std::time::Instant::now() + TEST_CHILD_TIMEOUT;
+    loop {
+        if std::path::Path::new(&release).exists() {
+            std::process::exit(0);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "parent did not release lease-holder child before {TEST_CHILD_TIMEOUT:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 #[test]
 fn operating_system_releases_writer_lease_after_process_exit() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.journal");
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
+    let ready = dir.path().join("lease.ready");
+    let release = dir.path().join("lease.release");
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "lease_holder_process_exits_without_drop"])
         .env("WCORE_TEST_JOURNAL_LEASE_PATH", &path)
-        .status()
+        .env("WCORE_TEST_JOURNAL_LEASE_READY", &ready)
+        .env("WCORE_TEST_JOURNAL_LEASE_RELEASE", &release)
+        .spawn()
         .unwrap();
+
+    wait_for_child_path(&mut child, &ready, "lease-holder child").unwrap();
+    assert!(matches!(
+        SessionJournal::open(&path, "crash-owner"),
+        Err(JournalError::AlreadyOwned { .. })
+    ));
+
+    std::fs::write(release, b"release").unwrap();
+    let status = wait_for_child_exit(&mut child, "lease-holder child").unwrap();
     assert!(status.success());
     assert!(SessionJournal::open(path, "crash-owner").is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn read_only_authority_replay_subprocess() {
+    let Ok(path) = std::env::var("WCORE_TEST_READ_ONLY_JOURNAL_PATH") else {
+        return;
+    };
+    if unsafe { libc::geteuid() } == 0 {
+        // SAFETY: this test runs alone in a dedicated subprocess. Dropping its
+        // credentials prevents root from bypassing the read-only fixture.
+        assert_eq!(unsafe { libc::setgroups(0, std::ptr::null()) }, 0);
+        // SAFETY: the numeric nobody credentials are used only in this child.
+        assert_eq!(unsafe { libc::setgid(65_534) }, 0);
+        // SAFETY: dropping the child UID cannot affect the parent test process.
+        assert_eq!(unsafe { libc::setuid(65_534) }, 0);
+    }
+    SessionJournal::recovered_state(path).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn replay_accepts_read_only_authority_files() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.journal");
+    let journal = SessionJournal::open(&path, "s1").unwrap();
+    journal.append(turn_started("t0")).unwrap();
+    journal.publish_snapshot().unwrap();
+    drop(journal);
+
+    let snapshot_path = snapshot_path_for(&path);
+    let authority_path = dir.path().join("session.journal.authority");
+    for authority_file in [&path, &snapshot_path, &authority_path] {
+        std::fs::set_permissions(authority_file, std::fs::Permissions::from_mode(0o400)).unwrap();
+    }
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    if unsafe { libc::geteuid() } == 0 {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        for authority_path in [dir.path(), &path, &snapshot_path, &authority_path] {
+            let authority_path = std::ffi::CString::new(authority_path.as_os_str().as_bytes())
+                .expect("temporary authority path must not contain NUL");
+            // SAFETY: the path is a live test fixture and the parent retains
+            // root authority to restore and remove it after the child exits.
+            assert_eq!(
+                unsafe { libc::chown(authority_path.as_ptr(), 65_534, 65_534) },
+                0
+            );
+        }
+    }
+
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "read_only_authority_replay_subprocess"])
+        .env("WCORE_TEST_READ_ONLY_JOURNAL_PATH", &path)
+        .spawn()
+        .unwrap();
+    let result = wait_for_child_exit(&mut child, "read-only replay child");
+
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    for authority_file in [&path, &snapshot_path, &authority_path] {
+        std::fs::set_permissions(authority_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    assert!(result.unwrap().success(), "read-only replay child failed");
 }
 
 #[test]
@@ -441,7 +610,7 @@ fn checksum_sequence_previous_and_schema_tampering_fail_closed() {
     ));
 
     let mut obsolete = entries[0].clone();
-    obsolete.schema_version = SESSION_JOURNAL_SCHEMA_VERSION - 1;
+    obsolete.schema_version = SESSION_JOURNAL_SCHEMA_VERSION - 2;
     assert!(matches!(
         verify_chain(&[obsolete]),
         Err(JournalError::UnsupportedSchema { .. })
@@ -449,8 +618,57 @@ fn checksum_sequence_previous_and_schema_tampering_fail_closed() {
 }
 
 #[test]
+fn public_replay_boundary_enforces_forward_only_schema_history() {
+    #[derive(serde::Serialize)]
+    struct ChecksumMaterial<'a> {
+        schema_version: u32,
+        session_id: &'a str,
+        seq: u64,
+        previous_checksum: &'a str,
+        event: &'a SessionEvent,
+    }
+
+    fn with_schema(mut envelope: JournalEnvelope, schema_version: u32) -> JournalEnvelope {
+        envelope.schema_version = schema_version;
+        let body = serde_json::to_vec(&ChecksumMaterial {
+            schema_version,
+            session_id: &envelope.session_id,
+            seq: envelope.seq,
+            previous_checksum: &envelope.previous_checksum,
+            event: &envelope.event,
+        })
+        .unwrap();
+        envelope.checksum = format!("{:x}", Sha256::digest(body));
+        envelope
+    }
+
+    assert_eq!(SESSION_JOURNAL_SCHEMA_VERSION, 5);
+    let dir = tempfile::tempdir().unwrap();
+    let entries = append_events(
+        &dir.path().join("public-schema-boundary.journal"),
+        vec![turn_started("t0"), turn_committed("t0")],
+    );
+
+    let current = entries[0].clone();
+    let regressed = with_schema(entries[1].clone(), 4);
+    assert!(matches!(
+        replay_state(&[current, regressed]),
+        Err(JournalError::SchemaRegression {
+            previous: 5,
+            found: 4,
+        })
+    ));
+
+    let legacy = with_schema(entries[0].clone(), 4);
+    let mut upgraded = entries[1].clone();
+    upgraded.previous_checksum.clone_from(&legacy.checksum);
+    let upgraded = with_schema(upgraded, 5);
+    assert_eq!(replay_state(&[legacy, upgraded]).unwrap().last_seq, Some(1));
+}
+
+#[test]
 fn unreleased_v3_journal_schema_is_explicitly_rejected_before_event_decode() {
-    assert_eq!(SESSION_JOURNAL_SCHEMA_VERSION, 4);
+    assert_eq!(SESSION_JOURNAL_SCHEMA_VERSION, 5);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("v3.journal");
     let obsolete = serde_json::to_vec(&json!({
@@ -472,7 +690,7 @@ fn unreleased_v3_journal_schema_is_explicitly_rejected_before_event_decode() {
         SessionJournal::replay(path),
         Err(JournalError::UnsupportedSchema {
             found: 3,
-            supported: 4
+            supported: 5
         })
     ));
 }

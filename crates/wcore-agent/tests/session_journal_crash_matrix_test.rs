@@ -6,14 +6,26 @@ use wcore_agent::session_journal::{
     ApprovalDecision, ApprovalOrigin, ApprovalResolution, BudgetAmount, BudgetOwner, BudgetPurpose,
     BudgetUnit, CheckpointOrigin, CheckpointPurpose, ChildNotStartedReason, CompletionOutcome,
     DeliveryCompletion, DeliveryEvidence, DeliveryNotStartedReason, DeliveryOrigin, DeliveryStage,
-    DeliveryUnknownReason, JournalEnvelope, JournalError, ProviderAttemptNotStartedReason,
-    ProviderAttemptPurpose, ProviderStreamEvent, ReducedSessionState, SessionEvent, SessionJournal,
-    SessionSnapshot, StoredToolInput, ToolNotStartedReason, ToolResolution, ToolResolutionSource,
-    ToolUnknownReason, replay_state, snapshot_path_for, state_payload_digest, write_snapshot,
+    DeliveryUnknownReason, JournalEnvelope, JournalError, LEGACY_SESSION_SNAPSHOT_SCHEMA_VERSION,
+    ProviderAttemptNotStartedReason, ProviderAttemptPurpose, ProviderStreamEvent,
+    ReducedSessionState, SessionEvent, SessionJournal, SessionSnapshot, StoredToolInput,
+    ToolNotStartedReason, ToolResolution, ToolResolutionSource, ToolUnknownReason, replay_state,
+    snapshot_path_for, state_payload_digest,
 };
 use wcore_types::tool::ToolEffectContract;
 
 const SESSION_ID: &str = "crash-matrix-session";
+
+fn write_private_snapshot(path: &std::path::Path, bytes: impl AsRef<[u8]>) {
+    std::fs::write(path, bytes).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
 const FRAME_HEADER_BYTES: usize = 12;
 const FRAME_DIGEST_BYTES: usize = 32;
 
@@ -628,10 +640,11 @@ fn snapshot_and_log_crash_phase_matrix_has_one_replay_result() {
     // Phase 2: every possible published snapshot prefix may overlap the full
     // log. Recovery validates the overlap and replays exactly the suffix.
     for prefix_len in 0..=entries.len() {
-        let snapshot =
+        let mut snapshot =
             SessionSnapshot::new(SESSION_ID, replay_state(&entries[..prefix_len]).unwrap())
                 .unwrap();
-        write_snapshot(&snapshot_path, &snapshot).unwrap();
+        snapshot.schema_version = LEGACY_SESSION_SNAPSHOT_SCHEMA_VERSION;
+        write_private_snapshot(&snapshot_path, serde_json::to_vec(&snapshot).unwrap());
         assert_eq!(
             SessionJournal::recovered_state(&path).unwrap(),
             expected,
@@ -643,12 +656,19 @@ fn snapshot_and_log_crash_phase_matrix_has_one_replay_result() {
     // retained checksum-linked anchor. Both the pre-rotation and post-rotation
     // disk images must select the same state.
     let journal = SessionJournal::open(&path, SESSION_ID).unwrap();
+    let pre_rotation_log = std::fs::read(&path).unwrap();
+    assert!(pre_rotation_log.starts_with(&full_log));
+    assert!(
+        pre_rotation_log.len() > full_log.len(),
+        "opening the final legacy snapshot must append its current authority binding"
+    );
+    assert_eq!(journal.state().unwrap(), expected);
     journal.compact().unwrap();
     let anchor_log = std::fs::read(&path).unwrap();
-    assert!(anchor_log.len() < full_log.len());
+    assert!(anchor_log.len() < pre_rotation_log.len());
     drop(journal);
     assert_eq!(SessionJournal::recovered_state(&path).unwrap(), expected);
-    std::fs::write(&path, &full_log).unwrap();
+    std::fs::write(&path, &pre_rotation_log).unwrap();
     assert_eq!(SessionJournal::recovered_state(&path).unwrap(), expected);
     std::fs::write(&path, &anchor_log).unwrap();
     assert_eq!(SessionJournal::recovered_state(&path).unwrap(), expected);
@@ -700,7 +720,7 @@ fn corrupt_snapshot_never_falls_back_to_a_plausible_log() {
     let path = dir.path().join("session.journal");
     let (_, _) = append_scenario(&path, &scenario.events);
     let snapshot_path = snapshot_path_for(&path);
-    std::fs::write(&snapshot_path, b"{truncated snapshot").unwrap();
+    write_private_snapshot(&snapshot_path, b"{truncated snapshot");
 
     assert!(matches!(
         SessionJournal::recovered_state(&path),

@@ -182,10 +182,17 @@ hound = { workspace = true, optional = true }
 
 workspace-hack.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
 ] }
 
 [features]
@@ -242,9 +249,6 @@ rstest.workspace      = true
 serial_test.workspace = true
 inventory.workspace   = true
 criterion.workspace   = true
-
-[target.'cfg(unix)'.dev-dependencies]
-libc.workspace = true
 
 # ── Integration test binaries ──────────────────────────────────────────────
 [[test]]
