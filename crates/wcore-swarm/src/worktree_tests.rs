@@ -349,9 +349,15 @@ async fn assert_isolated_checkout_keeps_git_useful() {
             .is_empty()
     );
 
-    let child_parent_object = tree.join(".git/objects").join(object_dir).join(object_file);
-    std::fs::create_dir_all(child_parent_object.parent().unwrap()).unwrap();
-    std::fs::write(&child_parent_object, b"corrupt child object").unwrap();
+    let child_pack = std::fs::read_dir(tree.join(".git/objects/pack"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "pack")
+        })
+        .expect("child-owned pack");
+    std::fs::write(&child_pack, b"corrupt child pack").unwrap();
     assert!(
         !fixture_git_output(tree, &["cat-file", "-e", &parent_head])
             .await
