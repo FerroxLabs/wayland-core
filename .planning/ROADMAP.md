@@ -14,7 +14,7 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
 - Source push, main merge, issue closure, release, deployment, canary promotion, and native proof dispatch require Sean's explicit authorization.
 - Phase 20 source plans deliver product code or hostile tests plus focused proof and one standard SUMMARY. Fresh non-author reviews use separate dependency-ordered stock-GSD plan boundaries so author and reviewer identity cannot collapse inside one executor; repository-local scope/review verifiers mechanically reject stale or self-referential evidence.
 - GSD node repair, phase auto-advance, worktree mode, and Phase 20 plan parallelization are disabled. The Codex adapter is one clean serial execution checkout, not a custom executor.
-- The configured remote build/workspace test runs once after the final serial plan. Timeout, nonzero, incomplete output, unresolved review findings, failed validation/security, or missing authorized native Windows evidence blocks phase completion.
+- Terminal plan 20-08 runs the configured remote build/workspace test once against the exact final candidate before summary or requirement completion; the phase verifier authenticates and reruns only after source or evidence-integrity drift. Timeout, nonzero, incomplete output, unresolved review findings, failed validation/security, or missing authorized same-candidate native Windows and macOS evidence blocks phase completion.
 - Independent code review covers every severity after construction. Every substantiated finding is repaired or rejected with executable counter-evidence before validation, security review, native UAT, and `phase.complete`.
 
 ## Phases
@@ -41,9 +41,9 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
 **Success Criteria** (what must be TRUE):
   1. Parallel children can make conflicting edits without overwriting or silently mutating the parent.
   2. Stale identity, failed gates, and conflicts stop before merge while preserving usable evidence.
-  3. Snapshot, workspace, journal, receipt, merge, rollback, cleanup, and native Windows identity share one authoritative lifecycle.
+  3. Snapshot, workspace, journal, receipt, merge, rollback, cleanup, and native Windows/macOS identities share one authoritative lifecycle.
   4. One exact F20 successor lands on the admitted candidate with focused and aggregate proof.
-**Plans**: Fourteen dependency-ordered stock-GSD plans (`20-01` through `20-14`). The original candidate-gate plan is split into 06A source/review (`20-06`, `20-09`), 06B source/review (`20-10`, `20-11`), 06C private authoritative execution (`20-12`), 06D black-box proof (`20-13`), and an exact-candidate independent integrated audit (`20-14`). Caller integration (`20-05`) resumes only after `20-14`; parent CAS (`20-07`) follows `20-05`; `20-08` remains the final lifecycle, aggregate Hetzner, and native Windows acceptance plan.
+**Plans**: Fourteen dependency-ordered stock-GSD plans (`20-01` through `20-14`). The original candidate-gate plan is split into 06A source/review (`20-06`, `20-09`), 06B source/review (`20-10`, `20-11`), 06C private authoritative execution (`20-12`), 06D black-box proof (`20-13`), and an exact-candidate independent integrated audit (`20-14`). Caller integration (`20-05`) resumes only after `20-14`; parent CAS (`20-07`) follows `20-05`; `20-08` remains the final lifecycle and same-candidate native Windows/macOS acceptance plan and runs the single aggregate Hetzner test/build gate before its summary. The later stock-GSD phase verifier authenticates that exact-candidate proof.
 
 ### Phase 21: Child Authority and Budget Inheritance
 **Goal**: Every delegated actor remains inside the parent's authority and resource envelope.

@@ -19,27 +19,49 @@ git cat-file -e "${source_sha}^{commit}"
 git cat-file -e "${review_base_sha}^{commit}"
 git cat-file -e "${review_sha}^{commit}"
 
-parent_line=$(git rev-list --parents -n 1 "$review_base_sha")
-read -r -a parent_fields <<< "$parent_line"
-[[ ${#parent_fields[@]} -eq 2 && "${parent_fields[1]}" == "$source_sha" ]] || {
-  echo "review base is not the sole-parent summary child of source commit" >&2
+metadata_history=$(git rev-list --reverse --ancestry-path "${source_sha}..${review_base_sha}")
+[[ -n "$metadata_history" ]] || {
+  echo "review base does not descend from source through a metadata chain" >&2
   exit 1
 }
 
-map_changed=()
-while IFS= read -r -d '' status; do
-  IFS= read -r -d '' first || exit 1
-  map_changed+=("$first")
-  case "$status" in
-    R*|C*)
-      IFS= read -r -d '' second || exit 1
-      map_changed+=("$second")
-      ;;
-  esac
-done < <(git diff --name-status -z --find-renames --find-copies-harder "$source_sha".."$review_base_sha")
+expected_parent=$source_sha
+summary_commit_count=0
+while IFS= read -r metadata_commit; do
+  [[ -n "$metadata_commit" ]] || continue
+  parent_line=$(git rev-list --parents -n 1 "$metadata_commit")
+  read -r -a parent_fields <<< "$parent_line"
+  [[ ${#parent_fields[@]} -eq 2 && "${parent_fields[1]}" == "$expected_parent" ]] || {
+    echo "source-to-review-base metadata history is not linear and merge-free" >&2
+    exit 1
+  }
 
-[[ ${#map_changed[@]} -eq 1 && "${map_changed[0]}" == "$summary_file" ]] || {
-  echo "source-to-review-base metadata delta is not exactly $summary_file" >&2
+  commit_changed=()
+  while IFS= read -r -d '' status; do
+    IFS= read -r -d '' first || exit 1
+    commit_changed+=("$first")
+    case "$status" in
+      R*|C*)
+        IFS= read -r -d '' second || exit 1
+        commit_changed+=("$second")
+        ;;
+    esac
+  done < <(git diff --name-status -z --find-renames --find-copies-harder "$expected_parent".."$metadata_commit")
+
+  for path in "${commit_changed[@]}"; do
+    case "$path" in
+      "$summary_file") summary_commit_count=$((summary_commit_count + 1)) ;;
+      .planning/STATE.md|.planning/ROADMAP.md|.planning/REQUIREMENTS.md) ;;
+      *)
+        echo "source-to-review-base changed non-stock metadata path: $path" >&2
+        exit 1
+        ;;
+    esac
+  done
+  expected_parent=$metadata_commit
+done <<< "$metadata_history"
+[[ "$expected_parent" == "$review_base_sha" && "$summary_commit_count" == 1 ]] || {
+  echo "metadata chain must reach review base and change the summary exactly once" >&2
   exit 1
 }
 
@@ -92,12 +114,21 @@ for path in "${combined_changed[@]}"; do
   fi
 done
 
-[[ ${#combined_changed[@]} -eq 2 && "$contains_summary" == true && "$contains_review" == true ]] || {
-    printf 'source-to-review delta is not exactly %s plus %s:' "$summary_file" "$review_file" >&2
-    printf ' %q' "${combined_changed[@]:-}" >&2
-    printf '\n' >&2
-    exit 1
-  }
+for path in "${combined_changed[@]}"; do
+  case "$path" in
+    "$summary_file"|"$review_file"|.planning/STATE.md|.planning/ROADMAP.md|.planning/REQUIREMENTS.md) ;;
+    *)
+      echo "source-to-review changed non-stock metadata path: $path" >&2
+      exit 1
+      ;;
+  esac
+done
+[[ "$contains_summary" == true && "$contains_review" == true ]] || {
+  printf 'source-to-review delta is missing %s or %s:' "$summary_file" "$review_file" >&2
+  printf ' %q' "${combined_changed[@]:-}" >&2
+  printf '\n' >&2
+  exit 1
+}
 
 for path in "${source_paths[@]}"; do
   source_blob=$(git rev-parse "${source_sha}:${path}")

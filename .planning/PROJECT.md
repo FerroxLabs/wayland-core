@@ -63,12 +63,12 @@ Deliver a best-in-class cross-platform agent that stays simple in ordinary use, 
 
 ### Standard GSD Acceptance Contract
 
-- Phase 20 consists of eight product-code plans with nonempty requirement traceability. Evidence-only plans, custom executors, dispatch ledgers, receipt schemas, and phase-specific runners are prohibited.
+- Phase 20 consists of fourteen dependency-ordered stock-GSD plans. Only terminal plan 20-08 carries the phase requirement IDs so no predecessor summary can mark Phase 20 complete before the exact final candidate passes focused, native, and aggregate proof. Evidence-only custom executors, dispatch ledgers, receipt schemas, and phase-specific runners are prohibited; independent reviews remain ordinary stock-GSD plans with repository-local review-pair checks.
 - `workflow.use_worktrees=false` and plan parallelization remain disabled. Codex executes serially in one clean Phase 20 checkout because its generic subagent API cannot provide GSD's typed worktree isolation.
 - Every plan contains implementation, hostile tests, focused Hetzner verification, and a normal GSD SUMMARY. Cargo never runs on this Mac.
-- The installed post-merge gate runs the configured remote build and workspace test once after the last serial plan. Timeout, failure, or an incomplete test result blocks verification; its advisory `Continue` path is not acceptance.
+- Terminal plan 20-08 runs the configured remote build and workspace test once against the exact final candidate before its summary or any requirement update. The installed phase verifier authenticates those receipts and reruns only after source or evidence-integrity drift. Timeout, failure, or incomplete output blocks verification; an advisory `Continue` path is not acceptance.
 - After construction, run independent `gsd-code-review`, repair every substantiated severity, and repeat review until clear. Then run `gsd-validate-phase` and `gsd-secure-phase`; `security_block_on: low` requires disposition of every finding.
-- Native Windows evidence is a separate human-verification item bound to the exact final candidate. It requires Sean's explicit candidate-specific authorization and cannot be inferred from source, cross-compilation, Linux proof, or prose.
+- Native Windows and macOS evidence are separate human-authorized verification items bound to the same exact final candidate and one newly dispatched workflow run. They require Sean's explicit candidate-specific publication authorization and cannot be inferred from source, cross-compilation, Linux proof, prose, an unavailable runner, or a reused run.
 - Only standard GSD plan state, exact Git identity, test output, validation, security review, and authorized native evidence determine Phase 20 completion. A SUMMARY records progress but does not by itself prove release readiness.
 - No source push, main merge, issue closure, release, deployment, canary, or frontier claim occurs without Sean's explicit authorization.
 
