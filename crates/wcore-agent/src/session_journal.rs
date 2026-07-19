@@ -854,10 +854,10 @@ impl SessionStorageLease {
                 first_error = Some(error);
             }
         }
-        if first_error.is_none() {
-            if let Err(error) = authority_head.remove() {
-                first_error = Some(error);
-            }
+        if first_error.is_none()
+            && let Err(error) = authority_head.remove()
+        {
+            first_error = Some(error);
         }
         match first_error {
             Some(error) => Err(error),
@@ -1800,11 +1800,9 @@ fn recover_legacy_snapshot(
         return Err(JournalError::SnapshotAuthorityMismatch);
     }
     match (Some(snapshot), entries.first()) {
-        (Some(_), None) => {
-            return Err(JournalError::SnapshotJournalMismatch(
-                "legacy snapshot has no complete seq-0 journal prefix".to_owned(),
-            ));
-        }
+        (Some(_), None) => Err(JournalError::SnapshotJournalMismatch(
+            "legacy snapshot has no complete seq-0 journal prefix".to_owned(),
+        )),
         (Some(snapshot), Some(first)) if first.seq == 0 => {
             verify_chain_for_session(entries, Some(&snapshot.session_id))?;
             let prefix_len = match snapshot.cursor {
