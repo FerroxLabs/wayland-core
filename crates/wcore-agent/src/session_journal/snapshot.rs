@@ -425,6 +425,15 @@ fn validate_private_snapshot_file(_file: &File, path: &Path) -> Result<(), Journ
     })
 }
 
+pub(super) fn validate_snapshot_authority_file(
+    file: &File,
+    path: &Path,
+) -> Result<(), JournalError> {
+    super::lease::ensure_path_identity(file, path)?;
+    validate_private_snapshot_file(file, path)?;
+    super::lease::ensure_path_identity(file, path)
+}
+
 #[cfg(unix)]
 unsafe extern "C" {
     #[link_name = "geteuid"]
