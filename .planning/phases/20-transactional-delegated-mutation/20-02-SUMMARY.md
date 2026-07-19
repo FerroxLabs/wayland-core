@@ -59,14 +59,14 @@ coverage:
     description: "Commit/tree-pinned native Windows ACL acceptance route"
     verification:
       - kind: other
-        ref: "Windows GNU all-targets cross-check at ba4f1a2ab22ffb354752e98df102e8d99d57a579"
+        ref: "Windows GNU all-targets cross-check at 96afb30aff362ef8f0d4f6f93773eae548d989ee"
         status: pass
       - kind: manual_procedural
         ref: "scripts/f20-native-windows-proof.ps1 -ExpectedCommit <sha> -ExpectedTree <tree>"
         status: unknown
     human_judgment: true
     rationale: "The route is constructed and cross-compiled but intentionally not dispatched by this plan."
-duration: 15min
+duration: 18min
 completed: 2026-07-19
 status: complete
 ---
@@ -77,9 +77,9 @@ status: complete
 
 ## Performance
 
-- **Duration:** 15 min
+- **Duration:** 18 min
 - **Started:** 2026-07-19T13:37:09Z
-- **Completed:** 2026-07-19T13:51:38Z
+- **Completed:** 2026-07-19T13:54:48Z
 - **Tasks:** 3
 - **Files modified:** 9
 
@@ -94,10 +94,11 @@ status: complete
 1. **Task 1: Own a unique AppContainer identity and ACL lease per execution** - `4dcd62a`
 2. **Task 2: Make lease storage race-safe and crash-recoverable** - `2ebf46a`
 3. **Task 3: Pin native Windows acceptance to the exact candidate** - `ba4f1a2`
+4. **Final self-review: Retain in-memory authority until the durable exit transition succeeds** - `96afb30`
 
 ## Verification
 
-- Hetzner unit gate: PASS, 43 passed, 0 failed at `ba4f1a2ab22ffb354752e98df102e8d99d57a579`.
+- Hetzner unit gate: PASS, 43 passed, 0 failed at `96afb30aff362ef8f0d4f6f93773eae548d989ee`.
 - Hetzner Windows GNU all-targets/all-features check: PASS at the same exact commit.
 - Hetzner clippy all-targets/all-features with `-D warnings`: PASS at the same exact commit.
 - Native Windows AppContainer UAT: NOT RUN and NOT CLAIMED; the later authorized entrypoint is `scripts/f20-native-windows-proof.ps1`.
