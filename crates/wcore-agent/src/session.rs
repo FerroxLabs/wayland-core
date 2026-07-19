@@ -1545,8 +1545,10 @@ mod tests {
         std::fs::write(&wal_path, b"plaintext wal").unwrap();
         let journal_path = manager.journal_path(&id);
         let journal = SessionJournal::open(&journal_path, id.clone()).unwrap();
+        journal.publish_snapshot().unwrap();
         let snapshot_path = manager.journal_snapshot_path(&id);
         std::fs::write(&snapshot_path, b"snapshot evidence").unwrap();
+        let authority_path = journal_path.with_file_name(format!("{id}.journal.authority"));
         drop(journal);
         let index = SessionIndex {
             sessions: vec![SessionMeta {
@@ -1573,6 +1575,14 @@ mod tests {
         assert!(
             !snapshot_path.exists(),
             "cleanup must still attempt later artifacts"
+        );
+        assert!(
+            !journal_path.exists(),
+            "cleanup must still attempt every captured artifact"
+        );
+        assert!(
+            authority_path.exists(),
+            "partial cleanup must retain snapshot authority"
         );
         assert!(
             manager.list().unwrap().iter().any(|meta| meta.id == id),
