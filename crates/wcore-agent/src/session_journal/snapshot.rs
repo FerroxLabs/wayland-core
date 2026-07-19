@@ -17,18 +17,11 @@ thread_local! {
     static FAIL_REPLACE_AFTER_PERSIST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static AFTER_AUTHORITY_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
         std::cell::RefCell::new(None);
-    static AFTER_SNAPSHOT_PERSIST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
-        std::cell::RefCell::new(None);
 }
 
 #[cfg(test)]
 pub(super) fn fail_next_replace_after_persist() {
     FAIL_REPLACE_AFTER_PERSIST.with(|fail| fail.set(true));
-}
-
-#[cfg(test)]
-pub(super) fn set_after_snapshot_persist_hook(hook: impl FnOnce(&Path) + 'static) {
-    AFTER_SNAPSHOT_PERSIST_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
 #[cfg(test)]
@@ -44,18 +37,6 @@ fn run_after_authority_read_hook(path: &Path) {
         }
     });
 }
-
-#[cfg(test)]
-fn run_after_snapshot_persist_hook(path: &Path) {
-    AFTER_SNAPSHOT_PERSIST_HOOK.with(|slot| {
-        if let Some(hook) = slot.borrow_mut().take() {
-            hook(path);
-        }
-    });
-}
-
-#[cfg(not(test))]
-fn run_after_snapshot_persist_hook(_path: &Path) {}
 
 #[cfg(not(test))]
 fn run_after_authority_read_hook(_path: &Path) {}
@@ -1041,15 +1022,15 @@ pub(super) fn load_snapshot_if_present(
 }
 
 pub(super) fn replace_file_atomically(path: &Path, bytes: &[u8]) -> Result<File, JournalError> {
-    replace_file_atomically_inner(path, bytes, true, false, false)
+    replace_file_atomically_inner(path, bytes, true, false)
 }
 
 fn replace_private_file_atomically(path: &Path, bytes: &[u8]) -> Result<File, JournalError> {
-    replace_file_atomically_inner(path, bytes, false, true, false)
+    replace_file_atomically_inner(path, bytes, false, true)
 }
 
 fn replace_snapshot_file_atomically(path: &Path, bytes: &[u8]) -> Result<File, JournalError> {
-    replace_file_atomically_inner(path, bytes, false, true, true)
+    replace_file_atomically_inner(path, bytes, false, true)
 }
 
 fn replace_file_atomically_inner(
@@ -1057,7 +1038,6 @@ fn replace_file_atomically_inner(
     bytes: &[u8],
     _inject_test_failure: bool,
     private: bool,
-    snapshot_publication: bool,
 ) -> Result<File, JournalError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|source| JournalError::Io {
@@ -1095,9 +1075,6 @@ fn replace_file_atomically_inner(
         path: path.to_path_buf(),
         source: error.error,
     })?;
-    if snapshot_publication {
-        run_after_snapshot_persist_hook(path);
-    }
     if private {
         super::lease::ensure_path_identity(&persisted, path)?;
         validate_private_snapshot_file(&persisted, path)?;

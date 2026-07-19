@@ -216,6 +216,8 @@ struct ParsedJournal {
 thread_local! {
     static AFTER_JOURNAL_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
         std::cell::RefCell::new(None);
+    static BEFORE_SNAPSHOT_AUTHORITY_COMMIT_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        std::cell::RefCell::new(None);
 }
 
 #[cfg(test)]
@@ -231,6 +233,23 @@ fn run_after_journal_read_hook(path: &Path) {
         }
     });
 }
+
+#[cfg(test)]
+fn set_before_snapshot_authority_commit_hook(hook: impl FnOnce(&Path) + 'static) {
+    BEFORE_SNAPSHOT_AUTHORITY_COMMIT_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_before_snapshot_authority_commit_hook(path: &Path) {
+    BEFORE_SNAPSHOT_AUTHORITY_COMMIT_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook(path);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_before_snapshot_authority_commit_hook(_path: &Path) {}
 
 #[cfg(not(test))]
 fn run_after_journal_read_hook(_path: &Path) {}
@@ -1294,7 +1313,7 @@ impl JournalWriter {
                 return Err(error);
             }
         };
-        if let Err(error) = self.finish_snapshot_authority(&binding) {
+        if let Err(error) = self.finish_snapshot_authority(&binding, &snapshot_file) {
             self.faulted = true;
             return Err(error);
         }
@@ -1338,7 +1357,7 @@ impl JournalWriter {
                 return Err(error);
             }
         };
-        if let Err(error) = self.finish_snapshot_authority(&binding) {
+        if let Err(error) = self.finish_snapshot_authority(&binding, &snapshot_file) {
             self.faulted = true;
             return Err(error);
         }
@@ -1375,12 +1394,16 @@ impl JournalWriter {
     fn finish_snapshot_authority(
         &self,
         binding: &SnapshotAuthorityBinding,
+        snapshot_file: &File,
     ) -> Result<(), JournalError> {
         let mut head = snapshot::load_snapshot_authority_head(&self.path)?
             .ok_or(JournalError::SnapshotAuthorityMismatch)?;
         if head.pending.as_ref() != Some(binding) {
             return Err(JournalError::SnapshotAuthorityMismatch);
         }
+        let snapshot_path = snapshot_path_for(&self.path);
+        run_before_snapshot_authority_commit_hook(&snapshot_path);
+        lease::ensure_path_identity(snapshot_file, &snapshot_path)?;
         head.accepted = head.pending.take();
         snapshot::write_snapshot_authority_head(&self.path, &head)
     }
@@ -1460,7 +1483,10 @@ fn reconcile_snapshot_authority_head(
                 })?;
             lease::ensure_path_identity(journal_file, journal_path)?;
         }
-        let snapshot_file = snapshot::write_snapshot(snapshot_path_for(journal_path), &target)?;
+        let snapshot_path = snapshot_path_for(journal_path);
+        let snapshot_file = snapshot::write_snapshot(&snapshot_path, &target)?;
+        run_before_snapshot_authority_commit_hook(&snapshot_path);
+        lease::ensure_path_identity(&snapshot_file, &snapshot_path)?;
         head.accepted = head.pending.take();
         snapshot::write_snapshot_authority_head(journal_path, &head)?;
         drop(snapshot_file);
@@ -3813,7 +3839,7 @@ mod fault_tests {
 
     #[cfg(unix)]
     #[test]
-    fn substituted_snapshot_after_persist_cannot_commit_authority() {
+    fn substituted_snapshot_after_write_before_authority_commit_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let journal_path = dir.path().join("session.journal");
         let snapshot_path = snapshot_path_for(&journal_path);
@@ -3832,7 +3858,7 @@ mod fault_tests {
             &serde_json::to_vec(&substitute).unwrap(),
         )
         .unwrap();
-        snapshot::set_after_snapshot_persist_hook(move |canonical| {
+        set_before_snapshot_authority_commit_hook(move |canonical| {
             std::fs::rename(canonical, displaced).unwrap();
             std::fs::rename(replacement, canonical).unwrap();
         });
