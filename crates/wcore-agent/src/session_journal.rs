@@ -494,7 +494,7 @@ impl SessionJournal {
     }
 
     pub(crate) fn storage_identity_digest(&self) -> Result<String, JournalError> {
-        let writer = self
+        let mut writer = self
             .inner
             .lock()
             .map_err(|_| JournalError::WriterPoisoned)?;
