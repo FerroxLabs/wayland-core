@@ -1522,8 +1522,10 @@ mod tests {
     fn nested_snapshot_fields_fail_closed_but_opaque_payload_fields_survive() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.snapshot");
-        let mut state = ReducedSessionState::default();
-        state.session_id = Some("s1".to_owned());
+        let mut state = ReducedSessionState {
+            session_id: Some("s1".to_owned()),
+            ..ReducedSessionState::default()
+        };
         state.turns.insert(
             "t0".to_owned(),
             TurnState {

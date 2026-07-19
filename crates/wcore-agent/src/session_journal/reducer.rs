@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use super::*;
+use crate::child_transaction::{CommitProjection, authority_from_state, project_commit};
 use crate::durable_child::{TransitionDisposition, apply_transition};
 use crate::provider_recovery::{
     provider_response_digest, validate_appended_provider_events, validate_finished_provider_events,
@@ -48,7 +49,12 @@ pub(crate) fn reduce(
     if envelope.computed_checksum()? != envelope.checksum {
         return Err(JournalError::ChecksumMismatch { seq: envelope.seq });
     }
-    apply_event(&mut state, &envelope.event)?;
+    match &envelope.event {
+        SessionEvent::ChildTransactionOpened { opening } => {
+            apply_child_transaction_opened(&mut state, opening, envelope.seq, &envelope.checksum)?;
+        }
+        _ => apply_event(&mut state, &envelope.event)?,
+    }
     state.last_seq = Some(envelope.seq);
     state.last_checksum.clone_from(&envelope.checksum);
     Ok(state)
@@ -75,6 +81,143 @@ fn missing(kind: &str, id: &str) -> JournalError {
 
 fn valid_sha256_digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+pub(crate) fn child_transaction_opening_token_digest(
+    opening: &ChildTransactionOpening,
+    opening_seq: u64,
+    opening_checksum: &str,
+) -> Result<String, JournalError> {
+    state_payload_digest(&serde_json::json!({
+        "domain": "wayland-core:child-transaction-opening-token:v1",
+        "opening": opening,
+        "opening_seq": opening_seq,
+        "opening_checksum": opening_checksum,
+    }))
+}
+
+fn apply_child_transaction_opened(
+    state: &mut ReducedSessionState,
+    opening: &ChildTransactionOpening,
+    opening_seq: u64,
+    opening_checksum: &str,
+) -> Result<(), JournalError> {
+    let transaction_id = opening.transaction_id.as_str();
+    if transaction_id.is_empty() || transaction_id.len() > 512 {
+        return Err(JournalError::InvalidTransition(
+            "child transaction opening has an invalid transaction id".to_owned(),
+        ));
+    }
+    if opening.base_revision.is_empty() || opening.base_revision.len() > 512 {
+        return Err(JournalError::InvalidTransition(format!(
+            "child transaction {transaction_id} has an invalid base revision"
+        )));
+    }
+    for (field, digest) in [
+        ("request", opening.request_digest.as_str()),
+        ("policy", opening.policy_digest.as_str()),
+        (
+            "authority generation",
+            opening.snapshot.durable_authority_generation.as_str(),
+        ),
+        (
+            "storage identity",
+            opening.snapshot.storage_identity_digest.as_str(),
+        ),
+        ("state", opening.snapshot.state_digest.as_str()),
+        ("binding", opening.snapshot.binding_digest.as_str()),
+    ] {
+        if !valid_sha256_digest(digest) {
+            return Err(JournalError::InvalidTransition(format!(
+                "child transaction {transaction_id} has an invalid {field} digest"
+            )));
+        }
+    }
+    opening
+        .gate_plan
+        .validate()
+        .map_err(|error| JournalError::InvalidTransition(error.to_string()))?;
+    if state.child_transactions.contains_key(transaction_id) {
+        return Err(duplicate("child transaction opening", transaction_id));
+    }
+    if let Some((other_id, _)) = state
+        .child_transactions
+        .iter()
+        .find(|(_, transaction)| transaction.opening.child_id == opening.child_id)
+    {
+        return Err(JournalError::InvalidTransition(format!(
+            "durable child {} is already bound to transaction {other_id}",
+            opening.child_id
+        )));
+    }
+    let expected_session = state.session_id.as_deref().ok_or_else(|| {
+        JournalError::InvalidTransition(format!(
+            "child transaction {transaction_id} has no journal session authority"
+        ))
+    })?;
+    if opening.snapshot.session_id != expected_session {
+        return Err(JournalError::SessionMismatch {
+            expected: expected_session.to_owned(),
+            found: opening.snapshot.session_id.clone(),
+        });
+    }
+    if opening.snapshot.binding_schema_version != 1
+        || opening.snapshot.snapshot_schema_version != SESSION_SNAPSHOT_SCHEMA_VERSION
+        || opening.snapshot.cursor != state.last_seq
+        || opening.snapshot.cursor_checksum != state.last_checksum
+        || opening.snapshot.state_digest != state.digest()?
+    {
+        return Err(JournalError::InvalidTransition(format!(
+            "child transaction {transaction_id} snapshot authority does not match the committed journal state"
+        )));
+    }
+    let binding_digest = state_payload_digest(&serde_json::json!({
+        "schema_version": opening.snapshot.binding_schema_version,
+        "snapshot_schema_version": opening.snapshot.snapshot_schema_version,
+        "session_id": opening.snapshot.session_id,
+        "cursor": opening.snapshot.cursor,
+        "cursor_checksum": opening.snapshot.cursor_checksum,
+        "state_digest": opening.snapshot.state_digest,
+    }))?;
+    if binding_digest != opening.snapshot.binding_digest {
+        return Err(JournalError::InvalidTransition(format!(
+            "child transaction {transaction_id} snapshot binding digest mismatch"
+        )));
+    }
+    let child = state
+        .children
+        .get(opening.child_id.as_str())
+        .and_then(|child| child.durable.as_ref())
+        .ok_or_else(|| {
+            JournalError::InvalidTransition(format!(
+                "child transaction {transaction_id} references unknown durable child {}",
+                opening.child_id
+            ))
+        })?;
+    if child.declaration_id != opening.child_declaration_id
+        || child.revision != opening.child_revision
+        || child.workspace.mode != wcore_types::spawner::ChildWorkspaceMode::Isolated
+        || child.workspace.workspace_id != opening.workspace_id
+        || child.request.exact_digest != opening.request_digest
+        || child.policy_snapshot.exact_digest != opening.policy_digest
+    {
+        return Err(JournalError::InvalidTransition(format!(
+            "child transaction {transaction_id} opening does not match durable child authority"
+        )));
+    }
+    let opening_token_digest =
+        child_transaction_opening_token_digest(opening, opening_seq, opening_checksum)?;
+    state.child_transactions.insert(
+        transaction_id.to_owned(),
+        ChildTransactionState {
+            opening: opening.clone(),
+            opening_seq,
+            opening_checksum: opening_checksum.to_owned(),
+            opening_token_digest,
+            receipts: Vec::new(),
+        },
+    );
+    Ok(())
 }
 
 fn valid_hook_manifest(slots: &[HookManifestSlot]) -> bool {
@@ -1472,6 +1615,7 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
                 && state.budget_authority.is_none()
                 && state.checkpoints.is_empty()
                 && state.children.is_empty()
+                && state.child_transactions.is_empty()
                 && state.deliveries.is_empty();
             if !pristine {
                 return Err(JournalError::InvalidTransition(
@@ -2775,6 +2919,42 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
             )? == TransitionDisposition::Applied
             {
                 project_durable_child_compatibility(child)?;
+            }
+        }
+        SessionEvent::ChildTransactionOpened { opening } => {
+            return Err(JournalError::InvalidTransition(format!(
+                "child transaction {} opening requires committed envelope authority",
+                opening.transaction_id
+            )));
+        }
+        SessionEvent::ChildTransactionReceiptCommitted {
+            transaction_id,
+            opening_token_digest,
+            receipt_digest,
+            receipt,
+        } => {
+            if receipt.transaction_id != *transaction_id {
+                return Err(JournalError::InvalidTransition(format!(
+                    "child transaction {transaction_id} receipt identity mismatch"
+                )));
+            }
+            let transaction = state
+                .child_transactions
+                .get(transaction_id)
+                .ok_or_else(|| missing("child transaction", transaction_id))?;
+            if transaction.opening_token_digest != *opening_token_digest {
+                return Err(JournalError::InvalidTransition(format!(
+                    "child transaction {transaction_id} receipt has the wrong opening token"
+                )));
+            }
+            let authority = authority_from_state(transaction)?;
+            match project_commit(state, &authority, receipt_digest, receipt)? {
+                CommitProjection::Applied(projection) => {
+                    state
+                        .child_transactions
+                        .insert(transaction_id.clone(), *projection);
+                }
+                CommitProjection::Duplicate => {}
             }
         }
         SessionEvent::DeliveryPrepared {

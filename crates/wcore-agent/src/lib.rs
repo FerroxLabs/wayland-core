@@ -30,6 +30,7 @@ pub mod channel_tools;
 // to avoid channel recursion) and drives an agent turn from each admitted
 // inbound message, returning the reply text the subscriber sends back.
 pub mod channel_dispatch;
+pub mod child_transaction;
 // Inbound media enrichment: resolves channel attachments (image/audio) to
 // derived text (description/transcript) via the host-wired vision /
 // transcription tools before the turn prompt is built. Inert when no

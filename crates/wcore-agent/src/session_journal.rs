@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+#[cfg_attr(test, allow(clippy::type_complexity))]
 mod lease;
 pub use lease::LeaseOwner;
 use lease::WriterLease;
@@ -33,8 +34,10 @@ pub use reducer::{
     state_payload_digest,
 };
 pub(crate) use reducer::{
-    reduce, require_turn_descendants_terminal, validate_durable_child_lineage,
+    child_transaction_opening_token_digest, reduce, require_turn_descendants_terminal,
+    validate_durable_child_lineage,
 };
+#[cfg_attr(test, allow(clippy::type_complexity))]
 mod snapshot;
 pub use snapshot::{
     LEGACY_SESSION_SNAPSHOT_SCHEMA_VERSION, SESSION_SNAPSHOT_SCHEMA_VERSION, SessionSnapshot,
@@ -206,6 +209,23 @@ pub(crate) struct CommittedJournalAuthority {
     pub(crate) base_snapshot: Option<SessionSnapshot>,
 }
 
+/// Exact committed state observed while the live writer lease is held.
+///
+/// This value is crate-private: public callers cannot turn snapshot-shaped
+/// bytes into journal authority. Transaction openings copy its fields into a
+/// durable event before this locked operation returns.
+pub(crate) struct JournalSnapshotAuthority {
+    pub(crate) session_id: String,
+    pub(crate) storage_identity_digest: String,
+    pub(crate) binding_schema_version: u32,
+    pub(crate) snapshot_schema_version: u32,
+    pub(crate) cursor: Option<u64>,
+    pub(crate) cursor_checksum: String,
+    pub(crate) state_digest: String,
+    pub(crate) binding_digest: String,
+    pub(crate) durable_authority_generation: String,
+}
+
 struct ParsedJournal {
     entries: Vec<JournalEnvelope>,
     bindings: Vec<SnapshotAuthorityBinding>,
@@ -213,11 +233,12 @@ struct ParsedJournal {
 }
 
 #[cfg(test)]
+type JournalPathHook = std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>>;
+
+#[cfg(test)]
 thread_local! {
-    static AFTER_JOURNAL_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
-        std::cell::RefCell::new(None);
-    static AFTER_SNAPSHOT_AUTHORITY_WRITE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
-        std::cell::RefCell::new(None);
+    static AFTER_JOURNAL_READ_HOOK: JournalPathHook = std::cell::RefCell::new(None);
+    static AFTER_SNAPSHOT_AUTHORITY_WRITE_HOOK: JournalPathHook = std::cell::RefCell::new(None);
 }
 
 #[cfg(test)]
@@ -335,6 +356,15 @@ impl SessionJournal {
     }
 
     pub fn append(&self, event: SessionEvent) -> Result<JournalEnvelope, JournalError> {
+        if matches!(
+            &event,
+            SessionEvent::ChildTransactionOpened { .. }
+                | SessionEvent::ChildTransactionReceiptCommitted { .. }
+        ) {
+            return Err(JournalError::InvalidTransition(
+                "child transaction authority events require ChildTransactionStore".to_owned(),
+            ));
+        }
         self.inner
             .lock()
             .map_err(|_| JournalError::WriterPoisoned)?
@@ -361,6 +391,66 @@ impl SessionJournal {
         if !should_append(&writer.state, &writer.session_id)? {
             return Ok(None);
         }
+        writer.append(event).map(Some)
+    }
+
+    /// Build and append an event from the exact committed state under one
+    /// uninterrupted writer-authority operation.
+    ///
+    /// The closure may return `None` for an exact idempotent replay. Even that
+    /// path validates the retained snapshot authority before returning.
+    pub(crate) fn append_from_committed_authority<F>(
+        &self,
+        build_event: F,
+    ) -> Result<Option<JournalEnvelope>, JournalError>
+    where
+        F: FnOnce(
+            &ReducedSessionState,
+            &JournalSnapshotAuthority,
+        ) -> Result<Option<SessionEvent>, JournalError>,
+    {
+        let mut writer = self
+            .inner
+            .lock()
+            .map_err(|_| JournalError::WriterPoisoned)?;
+        let committed = writer.committed_authority()?;
+        let snapshot = SessionSnapshot::new(writer.session_id.clone(), committed.state.clone())?;
+        let binding = SnapshotAuthorityBinding::new(&snapshot);
+        let binding_value =
+            serde_json::to_value(&binding).map_err(|source| JournalError::Json {
+                context: "encoding locked snapshot authority binding",
+                source,
+            })?;
+        let binding_digest = state_payload_digest(&binding_value)?;
+        let generation_value = serde_json::json!({
+            "domain": "wayland-core:journal-authority-generation:v1",
+            "session_id": writer.session_id,
+            "journal_schema_version": SESSION_JOURNAL_SCHEMA_VERSION,
+            "snapshot_schema_version": snapshot.schema_version,
+            "cursor": snapshot.cursor,
+            "cursor_checksum": snapshot.cursor_checksum,
+            "state_digest": snapshot.state_digest,
+            "binding_digest": binding_digest,
+            "storage_identity_digest": storage_identity_digest(&writer.path),
+            "base_snapshot_digest": committed
+                .base_snapshot
+                .as_ref()
+                .map(|base| base.state_digest.as_str()),
+        });
+        let authority = JournalSnapshotAuthority {
+            session_id: writer.session_id.clone(),
+            storage_identity_digest: storage_identity_digest(&writer.path),
+            binding_schema_version: binding.schema_version,
+            snapshot_schema_version: snapshot.schema_version,
+            cursor: snapshot.cursor,
+            cursor_checksum: snapshot.cursor_checksum,
+            state_digest: snapshot.state_digest,
+            binding_digest,
+            durable_authority_generation: state_payload_digest(&generation_value)?,
+        };
+        let Some(event) = build_event(&committed.state, &authority)? else {
+            return Ok(None);
+        };
         writer.append(event).map(Some)
     }
 
@@ -404,6 +494,15 @@ impl SessionJournal {
             .lock()
             .map_err(|_| JournalError::WriterPoisoned)
             .map(|writer| writer.session_id.clone())
+    }
+
+    pub(crate) fn storage_identity_digest(&self) -> Result<String, JournalError> {
+        let mut writer = self
+            .inner
+            .lock()
+            .map_err(|_| JournalError::WriterPoisoned)?;
+        writer.ensure_current_path_identity()?;
+        Ok(storage_identity_digest(&writer.path))
     }
 
     /// Persist a private content-addressed preimage used by filesystem-effect
@@ -758,10 +857,10 @@ impl SessionStorageLease {
                 first_error = Some(error);
             }
         }
-        if first_error.is_none() {
-            if let Err(error) = authority_head.remove() {
-                first_error = Some(error);
-            }
+        if first_error.is_none()
+            && let Err(error) = authority_head.remove()
+        {
+            first_error = Some(error);
         }
         match first_error {
             Some(error) => Err(error),
@@ -1202,6 +1301,11 @@ impl JournalWriter {
                 })?;
             self.ensure_current_path_identity()?;
             let parsed = parse_complete_frames(&self.path, &bytes)?;
+            verify_snapshot_authority_head_readonly(
+                &self.path,
+                &parsed.bindings,
+                self.base_snapshot.as_ref(),
+            )?;
             let entries = parsed.entries;
             if let Some(first) = entries.first() {
                 verify_chain_from(
@@ -1699,11 +1803,9 @@ fn recover_legacy_snapshot(
         return Err(JournalError::SnapshotAuthorityMismatch);
     }
     match (Some(snapshot), entries.first()) {
-        (Some(_), None) => {
-            return Err(JournalError::SnapshotJournalMismatch(
-                "legacy snapshot has no complete seq-0 journal prefix".to_owned(),
-            ));
-        }
+        (Some(_), None) => Err(JournalError::SnapshotJournalMismatch(
+            "legacy snapshot has no complete seq-0 journal prefix".to_owned(),
+        )),
         (Some(snapshot), Some(first)) if first.seq == 0 => {
             verify_chain_for_session(entries, Some(&snapshot.session_id))?;
             let prefix_len = match snapshot.cursor {
@@ -2430,6 +2532,13 @@ fn sha256_hex(bytes: &[u8]) -> String {
         let _ = write!(hex, "{byte:02x}");
     }
     hex
+}
+
+fn storage_identity_digest(path: &Path) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"wayland-core:session-journal-storage:v1\0");
+    hasher.update(path.to_string_lossy().as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 fn valid_sha256_hex(value: &str) -> bool {
