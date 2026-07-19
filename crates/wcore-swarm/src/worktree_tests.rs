@@ -196,6 +196,11 @@ async fn external_workspace_root_keeps_checkout_outside_parent_repository() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn isolated_checkout_keeps_git_useful_without_parent_history_or_authority() {
+    Box::pin(assert_isolated_checkout_keeps_git_useful()).await;
+}
+
+#[cfg(target_os = "linux")]
+async fn assert_isolated_checkout_keeps_git_useful() {
     let fixture = tempfile::tempdir().expect("fixture");
     let control = tempfile::tempdir().expect("orchestrator control root");
     init_fixture_repo(fixture.path()).await;
