@@ -2,6 +2,7 @@
 set -euo pipefail
 
 scripts_dir=$(cd "$(dirname "$0")" && pwd -P)
+source_repo=$(git rev-parse --show-toplevel)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/phase20-proof-scripts.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
@@ -230,6 +231,36 @@ if (
     rename-me.txt renamed.txt copy-me.txt copied.txt
 ) >/dev/null 2>&1; then
   echo 'scope verifier accepted an untracked out-of-scope path' >&2
+  exit 1
+fi
+
+self_auth_repo="$tmp/f20-self-authorizing-plan"
+git clone -q --no-hardlinks "$source_repo" "$self_auth_repo"
+cp "$scripts_dir/verify-f20-03-scope.sh" \
+  "$self_auth_repo/.planning/scripts/verify-f20-03-scope.sh"
+accepted_sha=$(git -C "$self_auth_repo" rev-parse HEAD)
+accepted_tree=$(git -C "$self_auth_repo" rev-parse HEAD^{tree})
+accepted_file="$(git -C "$self_auth_repo" rev-parse --absolute-git-dir)/f20-03-accepted-plan"
+printf '%s\n%s\n' "$accepted_sha" "$accepted_tree" > "$accepted_file"
+chmod 600 "$accepted_file"
+plan_file="$self_auth_repo/.planning/phases/20-transactional-delegated-mutation/20-03-PLAN.md"
+PLAN_FILE="$plan_file" node -e '
+  const fs = require("node:fs");
+  const file = process.env.PLAN_FILE;
+  const original = fs.readFileSync(file, "utf8");
+  const replacement = original.replace(
+    "  - Cargo.lock\n",
+    "  - .planning/phases/20-transactional-delegated-mutation/20-03-PLAN.md\n",
+  );
+  if (replacement === original) throw new Error("self-authorization fixture did not mutate plan");
+  fs.writeFileSync(file, replacement);
+'
+git -C "$self_auth_repo" add .planning/phases/20-transactional-delegated-mutation/20-03-PLAN.md
+if (
+  cd "$self_auth_repo"
+  bash .planning/scripts/verify-f20-03-scope.sh task
+) >/dev/null 2>&1; then
+  echo 'F20-03 scope verifier accepted a plan that authorized its own mutation' >&2
   exit 1
 fi
 

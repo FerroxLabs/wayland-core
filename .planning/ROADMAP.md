@@ -11,11 +11,11 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
 - Phase 20 WIP is one dependency-unlocked product plan. Read-only review may overlap, but product mutation remains serial.
 - Phases 20-23 execute serially. After Phase 23 admission, Phases 24-27 may execute in bounded parallel worktrees; shared protocol/schema/config/lock/fixture seams and final integration remain serial. Phase 28 fans them in.
 - `intel/COMPETITIVE-LEDGER.md`, `intel/FIELD-REGRESSIONS.md`, and `intel/DESKTOP-PROTOCOL-CHECKPOINT.md` are admission controls. D1 must pass before Phase 21 broad execution; D2 must pass by Phase 23 exit.
-- Source push, main merge, issue closure, release, deployment, canary promotion, and native proof dispatch require Sean's explicit authorization.
+- Source push, main merge, issue closure, release, deployment, canary promotion, native proof dispatch, and deletion of a retained candidate UAT evidence ref require Sean's explicit authorization.
 - Phase 20 source plans deliver product code or hostile tests plus focused proof and one standard SUMMARY. Fresh non-author reviews use separate dependency-ordered stock-GSD plan boundaries so author and reviewer identity cannot collapse inside one executor; repository-local scope/review verifiers mechanically reject stale or self-referential evidence.
 - GSD node repair, phase auto-advance, worktree mode, and Phase 20 plan parallelization are disabled. The Codex adapter is one clean serial standalone clone with a real `.git` directory, not a linked worktree or custom executor.
-- Terminal plan 20-08 runs the configured remote build/workspace test once against the exact final candidate before summary or requirement completion; the phase verifier authenticates and reruns only after source or evidence-integrity drift. Timeout, nonzero, incomplete output, unresolved review findings, failed validation/security, or missing authorized same-candidate native Windows and macOS evidence blocks phase completion.
-- Independent code review covers every severity after construction. Every substantiated finding is repaired or rejected with executable counter-evidence before validation, security review, native UAT, and `phase.complete`.
+- Terminal plan 20-17 runs candidate-specific native Windows/macOS acceptance plus the configured remote build/workspace test once against the exact 20-16-qualified source before summary or requirement completion; the phase verifier authenticates and reruns only after source or evidence-integrity drift. Timeout, nonzero, incomplete output, unresolved review findings, failed validation/security, or missing authorized same-candidate native evidence blocks phase completion.
+- Plan 20-16 performs blocking independent code review, phase validation, and ASVS Level 2 security prosecution against the exact construction source. Every substantiated finding is repaired or rejected with executable counter-evidence before native UAT and `phase.complete`; advisory post-phase checks cannot override this dependency gate.
 
 ## Phases
 
@@ -43,7 +43,7 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
   2. Stale identity, failed gates, and conflicts stop before merge while preserving usable evidence.
   3. Snapshot, workspace, journal, receipt, merge, rollback, cleanup, and native Windows/macOS identities share one authoritative lifecycle.
   4. One exact F20 successor lands on the admitted candidate with focused and aggregate proof.
-**Plans**: Fourteen dependency-ordered stock-GSD plans (`20-01` through `20-14`). The original candidate-gate plan is split into 06A source/review (`20-06`, `20-09`), 06B source/review (`20-10`, `20-11`), 06C private authoritative execution (`20-12`), 06D black-box proof (`20-13`), and an exact-candidate independent integrated audit (`20-14`). Caller integration (`20-05`) resumes only after `20-14`; parent CAS (`20-07`) follows `20-05`; `20-08` remains the final lifecycle and same-candidate native Windows/macOS acceptance plan and runs the single aggregate Hetzner test/build gate before its summary. The later stock-GSD phase verifier authenticates that exact-candidate proof.
+**Plans**: Seventeen dependency-ordered stock-GSD plans (`20-01` through `20-17`). Foundational isolation source plan `20-03` is independently reviewed by review-only plan `20-15` before caller wiring begins in `20-04`. The original candidate-gate plan is split into 06A source/review (`20-06`, `20-09`), 06B source/review (`20-10`, `20-11`), 06C private authoritative execution (`20-12`), 06D black-box proof (`20-13`), and an exact-candidate independent integrated audit (`20-14`). Caller integration (`20-05`) resumes only after `20-14`; parent CAS (`20-07`) follows `20-05`. Plan `20-08` constructs and focused-proves the final lifecycle/UAT machinery; review-only `20-16` prosecutes that exact source at every severity; terminal `20-17` alone owns requirements and runs candidate-specific native Windows/macOS plus aggregate Hetzner acceptance. The later stock-GSD phase verifier authenticates that exact-candidate proof.
 
 ### Phase 21: Child Authority and Budget Inheritance
 **Goal**: Every delegated actor remains inside the parent's authority and resource envelope.
@@ -168,7 +168,7 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 20. Transactional Delegated Mutation | 2/14 | Plans 20-01 and 20-02 complete; reopened 20-03 is the next serial execution boundary | - |
+| 20. Transactional Delegated Mutation | 2/17 | Plans 20-01 and 20-02 complete; reopened 20-03 is the next serial execution boundary | - |
 | 21. Child Authority and Budget Inheritance | 0/TBD | Not started | - |
 | 22. Supervision, Durable Goals, Fleet, and Loops | 0/TBD | Not started | - |
 | 23. Governed Continuous Personal Agency | 0/TBD | Not started | - |

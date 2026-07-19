@@ -25,8 +25,8 @@
     "cross_ai_command": "",
     "cross_ai_timeout": 300,
     "test_gate_timeout": 1800,
-    "test_command": "/Users/seandonahoe/.ratchet/harness/remote-cargo.sh gsd-workspace-test \"$PWD\" test --workspace --all-features",
-    "build_command": "/Users/seandonahoe/.ratchet/harness/remote-cargo.sh gsd-workspace-build \"$PWD\" build --workspace --all-targets --all-features",
+    "test_command": "git diff --check && bash .planning/scripts/test-phase20-proof-scripts.sh",
+    "build_command": "git diff --check",
     "plan_review_convergence": true,
     "_auto_chain_active": false
   },
