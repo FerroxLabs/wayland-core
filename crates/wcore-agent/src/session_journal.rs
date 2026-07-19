@@ -233,12 +233,12 @@ struct ParsedJournal {
 }
 
 #[cfg(test)]
-#[allow(clippy::type_complexity)]
+type JournalPathHook = std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>>;
+
+#[cfg(test)]
 thread_local! {
-    static AFTER_JOURNAL_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
-        std::cell::RefCell::new(None);
-    static AFTER_SNAPSHOT_AUTHORITY_WRITE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
-        std::cell::RefCell::new(None);
+    static AFTER_JOURNAL_READ_HOOK: JournalPathHook = std::cell::RefCell::new(None);
+    static AFTER_SNAPSHOT_AUTHORITY_WRITE_HOOK: JournalPathHook = std::cell::RefCell::new(None);
 }
 
 #[cfg(test)]
