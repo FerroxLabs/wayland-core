@@ -1,0 +1,21 @@
+{
+  "source_path": "/Users/seandonahoe/dev/waylandcore-gsd-control/docs/design/2026-07-13-wayland-core-frontier-cross-audit.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": true,
+  "title": "Wayland Core Frontier Build Plan — Cross-Audit",
+  "summary": "Cross-audit of the Wayland Core frontier build plan, documenting conditional approval, reproduced blockers, applied amendments, and the minimum safe first implementation slice.",
+  "scope": [
+    "Wayland Core frontier build plan",
+    "autonomous-skill containment",
+    "evidence receipts",
+    "process-global enforcement state",
+    "supply-chain and release integrity"
+  ],
+  "cross_refs": [
+    "2026-07-13-wayland-core-frontier-build-plan.md"
+  ],
+  "locked": false,
+  "precedence": 2,
+  "notes": ""
+}

@@ -1,0 +1,58 @@
+{
+  "mode": "autonomous",
+  "runtime": "codex",
+  "granularity": "fine",
+  "workflow": {
+    "research": false,
+    "ai_integration_phase": true,
+    "plan_check": true,
+    "inline_plan_threshold": 0,
+    "verifier": true,
+    "auto_advance": false,
+    "node_repair": false,
+    "use_worktrees": false,
+    "nyquist_validation": true,
+    "security_enforcement": true,
+    "security_asvs_level": 2,
+    "security_block_on": "low",
+    "discuss_mode": "skip",
+    "research_before_questions": false,
+    "code_review_command": null,
+    "plan_bounce": true,
+    "plan_bounce_script": null,
+    "plan_bounce_passes": 2,
+    "cross_ai_execution": false,
+    "cross_ai_command": "",
+    "cross_ai_timeout": 300,
+    "test_gate_timeout": 1800,
+    "test_command": "/Users/seandonahoe/.ratchet/harness/remote-cargo.sh gsd-workspace-test \"$PWD\" test --workspace --all-features",
+    "build_command": "/Users/seandonahoe/.ratchet/harness/remote-cargo.sh gsd-workspace-build \"$PWD\" build --workspace --all-targets --all-features",
+    "plan_review_convergence": true
+  },
+  "ship": {
+    "pr_body_sections": []
+  },
+  "planning": {
+    "commit_docs": true,
+    "search_gitignored": true,
+    "sub_repos": []
+  },
+  "git": {
+    "create_tag": false
+  },
+  "parallelization": {
+    "enabled": false,
+    "plan_level": false,
+    "task_level": false,
+    "skip_checkpoints": false,
+    "max_concurrent_agents": 1,
+    "min_plans_for_parallel": 2
+  },
+  "hooks": {
+    "context_warnings": true
+  },
+  "project_code": "WCF",
+  "phase_id_convention": "sequential",
+  "agent_skills": {},
+  "claude_md_path": "./CLAUDE.md"
+}

@@ -75,7 +75,6 @@ ijfw/
 
 # Internal working artifacts — never publish
 .blackboard/
-.planning/
 .ijfw/
 .session*
 STATE.md

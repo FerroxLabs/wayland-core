@@ -1,0 +1,27 @@
+{
+  "source_path": "/Users/seandonahoe/dev/waylandcore-gsd-control/docs/design/2026-07-13-wayland-core-frontier-gap-audit-and-execution-plan.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": true,
+  "title": "Wayland Core Frontier Gap Audit and Execution Plan",
+  "summary": "Audit and phased execution plan for closing Wayland Core's frontier-readiness gaps across safety, recovery, durable agency, product parity, and cross-platform evidence.",
+  "scope": [
+    "Wayland Core",
+    "Wayland Desktop",
+    "Hermes Agent",
+    "OpenClaw",
+    "evaluation",
+    "security",
+    "crash recovery",
+    "durable child agents",
+    "provider failover",
+    "cross-platform certification"
+  ],
+  "cross_refs": [
+    "2026-07-13-wayland-core-frontier-evaluation-program.md",
+    "STATE.md"
+  ],
+  "locked": false,
+  "precedence": 3,
+  "notes": ""
+}
