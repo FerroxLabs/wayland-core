@@ -82,6 +82,18 @@ jobs:
           restore-keys: |
             cargo-target-windows-soak-
 
+      - name: Run exact-candidate F20 AppContainer ACL acceptance
+        shell: pwsh
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+          WAYLAND_F20_NATIVE_ACCEPTANCE: "1"
+        run: |
+          $expectedTree = (git rev-parse "$env:EXPECTED_COMMIT^{tree}").Trim()
+          if ($LASTEXITCODE -ne 0) { throw "resolve expected tree failed" }
+          pwsh scripts/f20-native-windows-proof.ps1 `
+            -ExpectedCommit $env:EXPECTED_COMMIT `
+            -ExpectedTree $expectedTree
+
       - name: Run Windows soak
         shell: pwsh
         env:
