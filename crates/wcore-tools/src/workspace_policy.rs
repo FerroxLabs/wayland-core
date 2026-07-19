@@ -110,6 +110,17 @@ pub struct WorkspacePolicy {
     /// paths that the OS-sandbox backend must deny for reads. See
     /// `secret_deny_paths()` / `compute_secret_deny()`.
     secret_deny: Vec<PathBuf>,
+    /// Additional authority roots that must be unreadable to Bash even when a
+    /// platform backend would otherwise expose them through a system mount.
+    authority_read_deny: Vec<PathBuf>,
+    /// Orchestrator authority roots that must not be covered by an external
+    /// writable grant such as the host scratch directory. The child workspace
+    /// root itself remains writable even when both happen to share an ancestor.
+    authority_write_deny: Vec<PathBuf>,
+    /// Strip Git environment overrides that could redirect a command from the
+    /// contained checkout into orchestrator-owned repository administration.
+    deny_git_authority_env: bool,
+    delegated_scratch: Option<PathBuf>,
     /// #667: this policy relies on the OS sandbox actually enforcing
     /// `fs_read_deny` to keep secrets unreadable from `Bash` — so `Bash` must be
     /// REFUSED when the active backend cannot enforce read-deny (else it fails
@@ -134,6 +145,16 @@ pub enum WorkspaceCapabilityGrantError {
     CredentialPath(PathBuf),
     #[error("capability path could not be resolved: {0}")]
     Resolve(#[from] std::io::Error),
+}
+
+#[derive(Debug, Error)]
+pub enum DelegatedWorkspacePolicyError {
+    #[error("delegated workspace path could not be resolved: {0}")]
+    Resolve(#[from] std::io::Error),
+    #[error("delegated checkout and scratch roots must be disjoint")]
+    OverlappingRoots,
+    #[error("delegated root overlaps protected authority: {0}")]
+    AuthorityOverlap(PathBuf),
 }
 
 impl WorkspacePolicy {
@@ -182,6 +203,10 @@ impl WorkspacePolicy {
             network: crate::bash::default_bash_network_policy(),
             cache_env: Vec::new(),
             secret_deny,
+            authority_read_deny: Vec::new(),
+            authority_write_deny: Vec::new(),
+            deny_git_authority_env: false,
+            delegated_scratch: None,
             // Genuinely-local Trusted default: no project-secret denial, so the
             // Bash read-deny-enforcement gate does not apply. `with_project_secret_deny`
             // flips this to true for a Full/remote session (#667).
@@ -227,12 +252,89 @@ impl WorkspacePolicy {
             network: crate::bash::default_bash_network_policy(),
             cache_env,
             secret_deny,
+            authority_read_deny: Vec::new(),
+            authority_write_deny: Vec::new(),
+            deny_git_authority_env: false,
+            delegated_scratch: None,
             // Contained denies project secrets → Bash must be refused when the
             // backend can't enforce read-deny (else `cat .env` fails open).
             secret_read_deny_required: true,
             developer_capabilities: Arc::new(RwLock::new(Vec::new())),
             session_read_grants: Arc::new(RwLock::new(Vec::new())),
         }
+    }
+
+    /// Build the write policy for one owner-issued delegated mutation.
+    /// Global scratch and cache paths are deliberately excluded.
+    pub fn delegated_mutation(
+        checkout: impl AsRef<Path>,
+        scratch: impl AsRef<Path>,
+        protected_authority: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Self, DelegatedWorkspacePolicyError> {
+        let checkout = std::fs::canonicalize(checkout)?;
+        let scratch = std::fs::canonicalize(scratch)?;
+        if checkout.starts_with(&scratch) || scratch.starts_with(&checkout) {
+            return Err(DelegatedWorkspacePolicyError::OverlappingRoots);
+        }
+        let mut protected = protected_authority
+            .into_iter()
+            .map(std::fs::canonicalize)
+            .collect::<std::io::Result<Vec<_>>>()?;
+        protected.sort();
+        protected.dedup();
+        for authority in &protected {
+            if checkout.starts_with(authority)
+                || authority.starts_with(&checkout)
+                || scratch.starts_with(authority)
+                || authority.starts_with(&scratch)
+            {
+                return Err(DelegatedWorkspacePolicyError::AuthorityOverlap(
+                    authority.clone(),
+                ));
+            }
+        }
+
+        let readable_extra = minimal_toolchain_read_dirs();
+        let writable_extra = vec![scratch.clone()];
+        let readable_canon = readable_canon_roots(&checkout, &writable_extra, &readable_extra);
+        let secret_deny =
+            compute_secret_deny(WorkspaceTrust::Contained, &checkout, &readable_canon);
+        let mut cache_env = CACHE_ENV_DIRS
+            .iter()
+            .map(|(var, sub)| {
+                (
+                    (*var).to_string(),
+                    scratch
+                        .join("cache")
+                        .join(sub)
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        cache_env.extend(["TMPDIR", "TMP", "TEMP"].into_iter().map(|var| {
+            (
+                var.to_owned(),
+                scratch.join("tmp").to_string_lossy().into_owned(),
+            )
+        }));
+
+        Ok(Self {
+            root: checkout,
+            trust: WorkspaceTrust::Contained,
+            writable_extra,
+            readable_extra,
+            network: crate::bash::default_bash_network_policy(),
+            cache_env,
+            secret_deny,
+            authority_read_deny: protected.clone(),
+            authority_write_deny: protected,
+            deny_git_authority_env: true,
+            delegated_scratch: Some(scratch),
+            secret_read_deny_required: true,
+            developer_capabilities: Arc::new(RwLock::new(Vec::new())),
+            session_read_grants: Arc::new(RwLock::new(Vec::new())),
+        })
     }
 
     pub fn trust(&self) -> WorkspaceTrust {
@@ -244,7 +346,17 @@ impl WorkspacePolicy {
     pub fn writable_roots(&self) -> Vec<PathBuf> {
         let mut v = Vec::with_capacity(1 + self.writable_extra.len());
         v.push(self.root.clone());
-        v.extend(self.writable_extra.iter().cloned());
+        v.extend(
+            self.writable_extra
+                .iter()
+                .filter(|candidate| {
+                    !self.authority_write_deny.iter().any(|denied| {
+                        denied.starts_with(candidate.as_path())
+                            || candidate.starts_with(denied.as_path())
+                    })
+                })
+                .cloned(),
+        );
         v
     }
     pub fn readable_roots(&self) -> Vec<PathBuf> {
@@ -333,6 +445,60 @@ impl WorkspacePolicy {
         self
     }
 
+    /// Deny explicit orchestrator authority roots to shell commands.
+    pub fn with_authority_read_deny(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.authority_read_deny.extend(roots);
+        self.authority_read_deny.sort();
+        self.authority_read_deny.dedup();
+        self.secret_read_deny_required = true;
+        self
+    }
+
+    /// Remove every external writable grant that contains an orchestrator
+    /// authority root. This is the write-side complement to
+    /// [`Self::with_authority_read_deny`].
+    pub fn with_authority_write_deny(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.authority_write_deny.extend(roots);
+        self.authority_write_deny.sort();
+        self.authority_write_deny.dedup();
+        self
+    }
+
+    /// Prevent inherited/session-allowed Git variables from redirecting Bash
+    /// outside this policy's workspace.
+    pub fn with_git_authority_env_deny(mut self) -> Self {
+        self.deny_git_authority_env = true;
+        self
+    }
+
+    #[must_use]
+    pub fn denies_git_authority_env(&self) -> bool {
+        self.deny_git_authority_env
+    }
+
+    #[must_use]
+    pub fn delegated_scratch(&self) -> Option<&Path> {
+        self.delegated_scratch.as_deref()
+    }
+
+    /// Revalidate transaction roots immediately before process spawn.
+    pub fn delegated_roots_are_current(&self) -> bool {
+        let Some(scratch) = self.delegated_scratch.as_ref() else {
+            return true;
+        };
+        let Ok(root_now) = std::fs::canonicalize(&self.root) else {
+            return false;
+        };
+        let Ok(scratch_now) = std::fs::canonicalize(scratch) else {
+            return false;
+        };
+        root_now == self.root
+            && scratch_now == *scratch
+            && !root_now.starts_with(&scratch_now)
+            && !scratch_now.starts_with(&root_now)
+            && self.writable_roots() == vec![root_now, scratch_now]
+    }
+
     /// #234: the OS-sandbox read-deny list AS OF NOW, recomputed per Bash exec.
     ///
     /// Identical to [`secret_deny_paths`](Self::secret_deny_paths) EXCEPT it
@@ -390,6 +556,7 @@ impl WorkspacePolicy {
             out.extend(project_committed_secrets(&self.root, &readable_canon));
             out.extend(git_content_stores(&self.root));
         }
+        out.extend(self.authority_read_deny.iter().cloned());
         out.sort();
         out.dedup();
         out

@@ -91,10 +91,29 @@ fn build_sandbox_pieces_for_session(
     // (BashTool only); defaults to sh -c / cmd /C.
     let mut argv = bash_shell_argv_prefix();
     argv.push(command.to_string());
+    let mut env = crate::env_passthrough::build_sandboxed_env_for(&[], env_passthrough);
+    if policy.is_some_and(crate::workspace_policy::WorkspacePolicy::denies_git_authority_env) {
+        env.retain(|(name, _)| {
+            ![
+                "GIT_DIR",
+                "GIT_COMMON_DIR",
+                "GIT_WORK_TREE",
+                "GIT_INDEX_FILE",
+                "GIT_OBJECT_DIRECTORY",
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                "GIT_CONFIG",
+                "GIT_CONFIG_COUNT",
+                "GIT_CONFIG_PARAMETERS",
+            ]
+            .iter()
+            .any(|denied| name.eq_ignore_ascii_case(denied))
+        });
+    }
     let mut manifest = SandboxManifest {
         network: default_bash_network_policy(),
-        // Curated env — secrets excluded, see the doc-comment above.
-        env: crate::env_passthrough::build_sandboxed_env_for(&[], env_passthrough),
+        // Curated env — secrets excluded, see the doc-comment above. A child
+        // workspace policy additionally strips Git authority redirects.
+        env,
         // M-4 / sandbox-3: left Inherit / empty on purpose — see doc above.
         syscall_policy: SyscallPolicy::Inherit,
         ..Default::default()
@@ -800,6 +819,15 @@ impl Tool for BashTool {
             .min(MAX_TIMEOUT_MS);
         let timeout = Duration::from_millis(timeout_ms);
         let backend = Arc::clone(&ctx.sandbox);
+        if let Some(policy) = ctx.workspace.as_deref()
+            && !policy.delegated_roots_are_current()
+        {
+            return ToolResult {
+                content: "Refused: delegated workspace identity changed before shell spawn."
+                    .to_string(),
+                is_error: true,
+            };
+        }
         // Task 8 — exec-time capability gate. The same immutable session
         // runtime that executes the command decides whether it may run.
         if let Some(p) = ctx.workspace.as_deref()
@@ -873,6 +901,15 @@ impl Tool for BashTool {
         // Task 8 — exec-time capability gate (streaming path, same logic as
         // execute_with_ctx). Must check BEFORE wrapping in Arc.
         let backend = Arc::clone(&ctx.sandbox);
+        if let Some(policy) = ctx.workspace.as_deref()
+            && !policy.delegated_roots_are_current()
+        {
+            return ToolResult {
+                content: "Refused: delegated workspace identity changed before shell spawn."
+                    .to_string(),
+                is_error: true,
+            };
+        }
         if let Some(p) = ctx.workspace.as_deref()
             && p.secret_read_deny_required()
             && !backend.enforces_read_deny()
@@ -1767,6 +1804,75 @@ mod tests {
             "Trusted policy must NOT deny the workspace .env (trusted mode); got: {:?}",
             m.fs_read_deny
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn child_workspace_policy_strips_git_authority_env_and_denies_parent_roots() {
+        struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                for (name, prior) in self.0.drain(..) {
+                    // SAFETY: this test is serialized and restores every value.
+                    unsafe {
+                        match prior {
+                            Some(value) => std::env::set_var(name, value),
+                            None => std::env::remove_var(name),
+                        }
+                    }
+                }
+            }
+        }
+
+        let workspace = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let parent = std::fs::canonicalize(parent.path()).unwrap();
+        let git_common = tempfile::tempdir().unwrap();
+        let git_common = std::fs::canonicalize(git_common.path()).unwrap();
+        let names = ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"];
+        let _restore = EnvRestore(
+            names
+                .iter()
+                .map(|name| (*name, std::env::var_os(name)))
+                .collect(),
+        );
+        for name in names {
+            // SAFETY: this test is serialized and `_restore` restores the env.
+            unsafe { std::env::set_var(name, &parent) };
+        }
+        let allow = names.into_iter().map(str::to_owned).collect();
+        let policy = crate::workspace_policy::WorkspacePolicy::contained(workspace.path())
+            .with_authority_read_deny([parent.clone(), git_common.clone()])
+            .with_authority_write_deny([parent.clone(), git_common.clone()])
+            .with_git_authority_env_deny();
+        let (manifest, _) =
+            build_sandbox_pieces_for_session("git status", Some(&policy), Some(&allow));
+
+        assert!(manifest.fs_read_deny.contains(&parent));
+        assert!(manifest.fs_read_deny.contains(&git_common));
+        assert!(
+            manifest
+                .fs_write_allow
+                .contains(&policy.root().to_path_buf())
+        );
+        for authority in [&parent, &git_common] {
+            assert!(
+                manifest.fs_write_allow.iter().all(|allowed| {
+                    !authority.starts_with(allowed) && !allowed.starts_with(authority)
+                }),
+                "orchestrator authority root leaked into child Bash write grants: {}",
+                authority.display()
+            );
+        }
+        for name in names {
+            assert!(
+                manifest
+                    .env
+                    .iter()
+                    .all(|(candidate, _)| !candidate.eq_ignore_ascii_case(name)),
+                "{name} leaked into child Bash environment"
+            );
+        }
     }
 
     // Live cwd/write behaviour requires a real sandbox backend. Ignored by

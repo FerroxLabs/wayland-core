@@ -70,6 +70,42 @@ struct CountingBackend {
     calls: AtomicUsize,
 }
 
+#[derive(Default)]
+struct CapturingBackend {
+    manifests: Mutex<Vec<SandboxManifest>>,
+    commands: Mutex<Vec<SandboxCommand>>,
+}
+
+#[async_trait]
+impl SandboxBackend for CapturingBackend {
+    async fn execute(
+        &self,
+        manifest: &SandboxManifest,
+        command: SandboxCommand,
+    ) -> wcore_sandbox::Result<SandboxOutput> {
+        self.manifests.lock().unwrap().push(manifest.clone());
+        self.commands.lock().unwrap().push(command);
+        Ok(SandboxOutput {
+            exit_code: 0,
+            stdout: b"captured\n".to_vec(),
+            stderr: Vec::new(),
+            resource_limits: ResourceLimitEnforcement::Enforced,
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "capturing"
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    fn enforces_read_deny(&self) -> bool {
+        true
+    }
+}
+
 impl CountingBackend {
     fn new() -> Self {
         Self {
@@ -125,6 +161,135 @@ async fn ctx_paths_execute_through_injected_session_runtime() {
     assert!(!streamed.is_error, "unexpected error: {}", streamed.content);
     assert!(streamed.content.contains("injected-session-backend"));
     assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+#[serial]
+async fn delegated_mutation_uses_only_owner_checkout_and_private_scratch() {
+    let parent = tempfile::tempdir().unwrap();
+    let transaction = tempfile::tempdir().unwrap();
+    let checkout = transaction.path().join("checkout");
+    let scratch = transaction.path().join("scratch");
+    std::fs::create_dir(&checkout).unwrap();
+    std::fs::create_dir(&scratch).unwrap();
+    let parent = std::fs::canonicalize(parent.path()).unwrap();
+    let checkout = std::fs::canonicalize(checkout).unwrap();
+    let scratch = std::fs::canonicalize(scratch).unwrap();
+    let policy = Arc::new(
+        wcore_tools::workspace_policy::WorkspacePolicy::delegated_mutation(
+            &checkout,
+            &scratch,
+            [parent.clone()],
+        )
+        .unwrap(),
+    );
+    let backend = Arc::new(CapturingBackend::default());
+    let runtime = Arc::new(SandboxRegistry::new(backend.clone()).with_env_passthrough([
+        "GIT_DIR",
+        "GIT_COMMON_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ]));
+    for name in [
+        "GIT_DIR",
+        "GIT_COMMON_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ] {
+        // SAFETY: this test is serialized and removes each value below.
+        unsafe { std::env::set_var(name, &parent) };
+    }
+    let ctx = ToolContext::test_default()
+        .with_sandbox(runtime)
+        .with_workspace(policy);
+    let result = BashTool
+        .execute_with_ctx(json!({"command": "git status"}), &ctx)
+        .await;
+    assert!(!result.is_error, "{}", result.content);
+
+    let manifests = backend.manifests.lock().unwrap();
+    let manifest = manifests.last().unwrap();
+    assert_eq!(
+        manifest.fs_write_allow,
+        vec![checkout.clone(), scratch.clone()]
+    );
+    assert!(manifest.fs_read_deny.contains(&parent));
+    for name in [
+        "GIT_DIR",
+        "GIT_COMMON_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ] {
+        assert!(
+            manifest
+                .env
+                .iter()
+                .all(|(candidate, _)| !candidate.eq_ignore_ascii_case(name)),
+            "{name} leaked into delegated shell"
+        );
+        // SAFETY: paired cleanup for serialized test mutation above.
+        unsafe { std::env::remove_var(name) };
+    }
+    for name in ["TMPDIR", "TMP", "TEMP"] {
+        let value = manifest
+            .env
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+            .map(|(_, value)| value)
+            .unwrap();
+        assert!(std::path::Path::new(value).starts_with(&scratch));
+    }
+    assert_eq!(
+        backend
+            .commands
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .cwd
+            .as_deref(),
+        Some(checkout.as_path())
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn delegated_mutation_refuses_scratch_identity_substitution_before_spawn() {
+    use std::os::unix::fs::symlink;
+
+    let parent = tempfile::tempdir().unwrap();
+    let transaction = tempfile::tempdir().unwrap();
+    let checkout = transaction.path().join("checkout");
+    let scratch = transaction.path().join("scratch");
+    std::fs::create_dir(&checkout).unwrap();
+    std::fs::create_dir(&scratch).unwrap();
+    let policy = Arc::new(
+        wcore_tools::workspace_policy::WorkspacePolicy::delegated_mutation(
+            &checkout,
+            &scratch,
+            [std::fs::canonicalize(parent.path()).unwrap()],
+        )
+        .unwrap(),
+    );
+    std::fs::remove_dir(&scratch).unwrap();
+    symlink(parent.path(), &scratch).unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let ctx = ToolContext::test_default()
+        .with_sandbox(Arc::new(SandboxRegistry::new(backend.clone())))
+        .with_workspace(policy);
+    let result = BashTool
+        .execute_with_ctx(json!({"command": "echo must-not-run"}), &ctx)
+        .await;
+    assert!(result.is_error);
+    assert!(result.content.contains("identity changed"));
+    assert!(backend.manifests.lock().unwrap().is_empty());
 }
 
 /// Path 1 of 4: `execute` — buffered, routed through `SandboxBackend::execute`.
