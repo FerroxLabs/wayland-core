@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+#[cfg_attr(test, allow(clippy::type_complexity))]
 mod lease;
 pub use lease::LeaseOwner;
 use lease::WriterLease;
@@ -36,6 +37,7 @@ pub(crate) use reducer::{
     child_transaction_opening_token_digest, reduce, require_turn_descendants_terminal,
     validate_durable_child_lineage,
 };
+#[cfg_attr(test, allow(clippy::type_complexity))]
 mod snapshot;
 pub use snapshot::{
     LEGACY_SESSION_SNAPSHOT_SCHEMA_VERSION, SESSION_SNAPSHOT_SCHEMA_VERSION, SessionSnapshot,
@@ -231,6 +233,7 @@ struct ParsedJournal {
 }
 
 #[cfg(test)]
+#[allow(clippy::type_complexity)]
 thread_local! {
     static AFTER_JOURNAL_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
         std::cell::RefCell::new(None);
