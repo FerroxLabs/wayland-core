@@ -36,8 +36,8 @@ Progress: [█░░░░░░░░░] 14%
 
 ## Execution Authority
 
-- F00-F19 entered Phase 20 at `97e44910fc6dd4761f1f862dbf54a5a76262cef2` (tree `8d27bd96b476a728d3ebbe0e1583c6488dd5effc`). Accepted 20-01 source is `b9cc6698f2b43a04f1b4deee7064def8f754d9e7` (tree `cf97d5feda6099d39ab6484cc4fcaf06458f15fe`).
-- The planning-control repository records the plan but is not source authority. Execution starts from the clean accepted candidate `b9cc6698f2b43a04f1b4deee7064def8f754d9e7`.
+- F00-F19 entered Phase 20 at `97e44910fc6dd4761f1f862dbf54a5a76262cef2` (tree `8d27bd96b476a728d3ebbe0e1583c6488dd5effc`). Accepted 20-01 source is `626e1d4d3dee9fee7008ad172ec0b4add8f2004e`; accepted 20-02 source is `96afb30aff362ef8f0d4f6f93773eae548d989ee`.
+- The one reconciled source before reopened 20-03 is `94f014d039b8babf3f5926385a3bbc5cb5cf3c41` (tree `49635e1678bd96e42353ab0f7f943ba87497e9d0`). It contains both accepted source lineages, their standard summaries, and the later source repairs in their history. The independently accepted planning successor of `94f014d` is the clean source checkout from which the executor captures `F20_03_EXECUTION_BASE` and tree before Task 1A; no alternate candidate may advance.
 - Standard GSD execution keeps code, fourteen dependency-ordered plans, and normal summaries in one clean source checkout. Fresh non-author review plans are explicit GSD boundaries; repository-local verifiers reject incomplete scope unions, mutable source blobs, and self-referential summary identities.
 - Every plan has nonempty F20 requirement traceability. Source plans produce implementation or hostile-test changes; review plans are fresh-executor, exact-candidate authority boundaries. Later findings route to GSD audit-fix or explicit replanning.
 - Node repair, phase auto-advance, worktree mode, and Phase 20 plan parallelization are disabled. Global build and test gates call the committed-HEAD Hetzner remote-cargo harness, never Cargo on this Mac, once after plan 20-08.

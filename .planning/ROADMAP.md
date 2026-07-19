@@ -7,7 +7,7 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
 ## Execution Rules
 
 - Standard GSD is the phase-state and execution authority. One clean source checkout contains the code, plans, and standard summaries; GitHub only mirrors cross-lane coordination.
-- Exactly one integration candidate advances through one serial execution sequence from accepted source `b9cc6698f2b43a04f1b4deee7064def8f754d9e7`; `depends_on` expresses only genuine product dependencies.
+- Exactly one integration candidate advances through one serial execution sequence from the reconciled source `94f014d039b8babf3f5926385a3bbc5cb5cf3c41` (tree `49635e1678bd96e42353ab0f7f943ba87497e9d0`); it already contains the accepted 20-01 and 20-02 source lineages, their standard summaries, and post-summary repairs. The reopened 20-03 begins only from the independently accepted planning successor of that source; `depends_on` expresses only genuine product dependencies.
 - Phase 20 WIP is one dependency-unlocked product plan. Read-only review may overlap, but product mutation remains serial.
 - Phases 20-23 execute serially. After Phase 23 admission, Phases 24-27 may execute in bounded parallel worktrees; shared protocol/schema/config/lock/fixture seams and final integration remain serial. Phase 28 fans them in.
 - `intel/COMPETITIVE-LEDGER.md`, `intel/FIELD-REGRESSIONS.md`, and `intel/DESKTOP-PROTOCOL-CHECKPOINT.md` are admission controls. D1 must pass before Phase 21 broad execution; D2 must pass by Phase 23 exit.
@@ -36,7 +36,7 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
 ### Phase 20: Transactional Delegated Mutation
 **Goal**: Delegated coding can mutate only an isolated workspace and can affect the parent only through a gated, attributable, reversible integration.
 **Depends on**: None
-**Accepted Source**: F00-F19 entered Phase 20 at `97e44910fc6dd4761f1f862dbf54a5a76262cef2` (tree `8d27bd96b476a728d3ebbe0e1583c6488dd5effc`). The accepted Phase 20 starting candidate is `b9cc6698f2b43a04f1b4deee7064def8f754d9e7` (tree `cf97d5feda6099d39ab6484cc4fcaf06458f15fe`).
+**Accepted Source**: F00-F19 entered Phase 20 at `97e44910fc6dd4761f1f862dbf54a5a76262cef2` (tree `8d27bd96b476a728d3ebbe0e1583c6488dd5effc`). The reconciled source before reopened 20-03 execution is `94f014d039b8babf3f5926385a3bbc5cb5cf3c41` (tree `49635e1678bd96e42353ab0f7f943ba87497e9d0`). It contains accepted 20-01 source `626e1d4d3dee9fee7008ad172ec0b4add8f2004e`, accepted 20-02 source `96afb30aff362ef8f0d4f6f93773eae548d989ee`, both standard summaries, and the later source repairs recorded in their history. The independently accepted plan successor of `94f014d` is captured as `F20_03_EXECUTION_BASE` immediately before Task 1A and is the sole source checkout for all remaining Phase 20 work.
 **Requirements**: F20-01, F20-02, F20-03, F20-04, F20-05, F20-06, F20-GATE-01, F20-GATE-02
 **Success Criteria** (what must be TRUE):
   1. Parallel children can make conflicting edits without overwriting or silently mutating the parent.
@@ -168,7 +168,7 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 20. Transactional Delegated Mutation | 0/8 | Replacement pure-GSD product plans under final independent review; no SUMMARY exists | - |
+| 20. Transactional Delegated Mutation | 2/14 | Plans 20-01 and 20-02 complete; reopened 20-03 is the next serial execution boundary | - |
 | 21. Child Authority and Budget Inheritance | 0/TBD | Not started | - |
 | 22. Supervision, Durable Goals, Fleet, and Loops | 0/TBD | Not started | - |
 | 23. Governed Continuous Personal Agency | 0/TBD | Not started | - |
