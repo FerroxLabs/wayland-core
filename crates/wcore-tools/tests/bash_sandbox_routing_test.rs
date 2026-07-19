@@ -292,6 +292,75 @@ async fn delegated_mutation_refuses_scratch_identity_substitution_before_spawn()
     assert!(backend.manifests.lock().unwrap().is_empty());
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[serial]
+async fn delegated_mutation_live_sandbox_confines_parent_global_tmp_and_symlink_writes() {
+    use std::os::unix::fs::symlink;
+
+    unsafe {
+        std::env::remove_var("WAYLAND_SANDBOX");
+        std::env::remove_var("WAYLAND_ALLOW_NO_SANDBOX");
+    }
+    if !wcore_tools::bash::platform_enforces_read_deny() {
+        return;
+    }
+
+    let parent = tempfile::tempdir().unwrap();
+    let transaction = tempfile::tempdir().unwrap();
+    let checkout = transaction.path().join("checkout");
+    let scratch = transaction.path().join("scratch");
+    std::fs::create_dir(&checkout).unwrap();
+    std::fs::create_dir(&scratch).unwrap();
+    std::fs::create_dir(scratch.join("tmp")).unwrap();
+    std::fs::create_dir(scratch.join("cache")).unwrap();
+    let parent = std::fs::canonicalize(parent.path()).unwrap();
+    let checkout = std::fs::canonicalize(checkout).unwrap();
+    let scratch = std::fs::canonicalize(scratch).unwrap();
+    symlink(&parent, checkout.join("parent-alias")).unwrap();
+    let policy = Arc::new(
+        wcore_tools::workspace_policy::WorkspacePolicy::delegated_mutation(
+            &checkout,
+            &scratch,
+            [parent.clone()],
+        )
+        .unwrap(),
+    );
+    let ctx = ToolContext::test_default().with_workspace(policy);
+
+    let allowed = BashTool
+        .execute_with_ctx(
+            json!({"command": "printf checkout > checkout-ok && printf scratch > \"$TMPDIR/scratch-ok\""}),
+            &ctx,
+        )
+        .await;
+    if allowed.is_error {
+        eprintln!(
+            "SKIP delegated_mutation_live_sandbox_confines_parent_global_tmp_and_symlink_writes: {}",
+            allowed.content
+        );
+        return;
+    }
+    assert!(checkout.join("checkout-ok").is_file());
+    assert!(scratch.join("tmp/scratch-ok").is_file());
+
+    let global_escape =
+        std::env::temp_dir().join(format!("wayland-delegated-escape-{}", std::process::id()));
+    let _ = std::fs::remove_file(&global_escape);
+    for command in [
+        format!("printf escaped > {}/parent-write", parent.display()),
+        "printf escaped > parent-alias/symlink-write".to_owned(),
+        format!("printf escaped > {}", global_escape.display()),
+    ] {
+        let _ = BashTool
+            .execute_with_ctx(json!({"command": command}), &ctx)
+            .await;
+    }
+    assert!(!parent.join("parent-write").exists());
+    assert!(!parent.join("symlink-write").exists());
+    assert!(!global_escape.exists());
+}
+
 /// Path 1 of 4: `execute` — buffered, routed through `SandboxBackend::execute`.
 #[tokio::test]
 #[serial]

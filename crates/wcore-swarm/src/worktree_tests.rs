@@ -268,6 +268,17 @@ async fn assert_isolated_checkout_keeps_git_useful() {
     let manager = WorktreeManager::new_with_workspace_root(fixture.path(), &checkouts)
         .expect("external manager");
     let parent_head = manager.pinned_head().await.expect("pinned head");
+    let parent_config_before = std::fs::read(fixture.path().join(".git/config")).unwrap();
+    let parent_refs_before = fixture_git_output(fixture.path(), &["show-ref"])
+        .await
+        .stdout;
+    let (object_dir, object_file) = parent_head.split_at(2);
+    let parent_object = fixture
+        .path()
+        .join(".git/objects")
+        .join(object_dir)
+        .join(object_file);
+    let parent_object_before = std::fs::read(&parent_object).expect("loose parent commit object");
     let transaction = manager
         .create_isolated_checkout(
             "child-1",
@@ -327,7 +338,47 @@ async fn assert_isolated_checkout_keeps_git_useful() {
         ],
     )
     .await;
+    run_fixture_git(tree, &["config", "child.marker", "true"]).await;
+    run_fixture_git(tree, &["update-ref", "refs/heads/child-private", "HEAD"]).await;
+    let child_hook = tree.join(".git/hooks/pre-commit");
+    std::fs::write(&child_hook, "child-only hook\n").unwrap();
+    assert!(
+        !fixture_git_output(tree, &["reflog", "show", "--all"])
+            .await
+            .stdout
+            .is_empty()
+    );
+
+    let child_parent_object = tree.join(".git/objects").join(object_dir).join(object_file);
+    std::fs::create_dir_all(child_parent_object.parent().unwrap()).unwrap();
+    std::fs::write(&child_parent_object, b"corrupt child object").unwrap();
+    assert!(
+        !fixture_git_output(tree, &["cat-file", "-e", &parent_head])
+            .await
+            .status
+            .success(),
+        "corrupt child object unexpectedly remained valid"
+    );
     assert_eq!(manager.pinned_head().await.unwrap(), parent_head);
+    assert_eq!(std::fs::read(&parent_object).unwrap(), parent_object_before);
+    assert_eq!(
+        std::fs::read(fixture.path().join(".git/config")).unwrap(),
+        parent_config_before
+    );
+    assert_eq!(
+        fixture_git_output(fixture.path(), &["show-ref"])
+            .await
+            .stdout,
+        parent_refs_before
+    );
+    assert!(!fixture.path().join(".git/hooks/pre-commit").exists());
+    assert!(
+        fixture_git_output(fixture.path(), &["fsck", "--full"])
+            .await
+            .status
+            .success(),
+        "child Git mutations damaged the parent repository"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -404,6 +455,39 @@ async fn persisted_reservation_enforces_aggregate_budget_and_owned_cleanup() {
     assert!(error.contains("aggregate workspace budget"), "{error}");
     manager.release_transaction(&first).expect("owned cleanup");
     assert!(!first.root.exists());
+    assert!(foreign.is_dir());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn failed_post_clone_setup_removes_only_the_owned_partial_transaction() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let control = tempfile::tempdir().expect("orchestrator control root");
+    init_fixture_repo(fixture.path()).await;
+    let manager =
+        WorktreeManager::new_with_workspace_root(fixture.path(), &control.path().join("checkouts"))
+            .expect("manager");
+    let head = manager.pinned_head().await.expect("head");
+    let foreign = control.path().join("foreign");
+    std::fs::create_dir(&foreign).unwrap();
+
+    let error = manager
+        .create_isolated_checkout(
+            "child-1",
+            "invalid branch name",
+            &head,
+            WorkspaceCapacity {
+                available_bytes: u64::MAX,
+                safety_margin_bytes: 0,
+                max_transaction_bytes: u64::MAX,
+                max_aggregate_bytes: u64::MAX,
+            },
+        )
+        .await
+        .expect_err("invalid branch must fail after clone")
+        .to_string();
+    assert!(error.contains("isolated Git command failed"), "{error}");
+    assert!(!manager.swarm_root().join("child-1").exists());
     assert!(foreign.is_dir());
 }
 

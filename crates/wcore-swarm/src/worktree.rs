@@ -65,6 +65,29 @@ pub struct TransactionWorkspace {
 
 const RESERVATION_FILE: &str = ".wayland-reservation";
 
+struct TransactionSetupGuard {
+    root: PathBuf,
+    armed: bool,
+}
+
+impl TransactionSetupGuard {
+    fn new(root: PathBuf) -> Self {
+        Self { root, armed: true }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TransactionSetupGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
 const CLEANUP_GRACE: Duration = Duration::from_secs(5);
 const GIT_CAPTURE_LIMITS: CaptureLimits = CaptureLimits {
     stdout_bytes: 1024 * 1024,
@@ -366,6 +389,7 @@ impl WorktreeManager {
         }
 
         self.reject_executable_checkout_config().await?;
+        self.assert_clean().await?;
         self.validate_swarm_root()?;
         let _admission = self.admission_lock.lock().await;
         let closure_bytes = self.transfer_closure_bytes(pinned_head).await?;
@@ -397,6 +421,7 @@ impl WorktreeManager {
         let transaction_root = self.swarm_root.join(worker_id);
         ensure_absent_destination(&transaction_root)?;
         std::fs::create_dir(&transaction_root)?;
+        let setup_guard = TransactionSetupGuard::new(transaction_root.clone());
         make_guard_dir_private(&transaction_root)?;
         let reservation = transaction_root.join(RESERVATION_FILE);
         std::fs::write(&reservation, closure_bytes.to_string())?;
@@ -522,7 +547,7 @@ impl WorktreeManager {
                 "transaction checkout and scratch roots are not disjoint".to_owned(),
             ));
         }
-        Ok(TransactionWorkspace {
+        let workspace = TransactionWorkspace {
             owner: worker_id.to_owned(),
             root: transaction_root,
             checkout,
@@ -531,7 +556,9 @@ impl WorktreeManager {
             head_commit,
             tree,
             reserved_bytes: closure_bytes,
-        })
+        };
+        setup_guard.disarm();
+        Ok(workspace)
     }
 
     async fn transfer_closure_bytes(&self, pinned_head: &str) -> Result<u64> {
