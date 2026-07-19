@@ -33,7 +33,8 @@ pub use reducer::{
     state_payload_digest,
 };
 pub(crate) use reducer::{
-    reduce, require_turn_descendants_terminal, validate_durable_child_lineage,
+    child_transaction_opening_token_digest, reduce, require_turn_descendants_terminal,
+    validate_durable_child_lineage,
 };
 mod snapshot;
 pub use snapshot::{
@@ -206,6 +207,22 @@ pub(crate) struct CommittedJournalAuthority {
     pub(crate) base_snapshot: Option<SessionSnapshot>,
 }
 
+/// Exact committed state observed while the live writer lease is held.
+///
+/// This value is crate-private: public callers cannot turn snapshot-shaped
+/// bytes into journal authority. Transaction openings copy its fields into a
+/// durable event before this locked operation returns.
+pub(crate) struct JournalSnapshotAuthority {
+    pub(crate) session_id: String,
+    pub(crate) binding_schema_version: u32,
+    pub(crate) snapshot_schema_version: u32,
+    pub(crate) cursor: Option<u64>,
+    pub(crate) cursor_checksum: String,
+    pub(crate) state_digest: String,
+    pub(crate) binding_digest: String,
+    pub(crate) durable_authority_generation: String,
+}
+
 struct ParsedJournal {
     entries: Vec<JournalEnvelope>,
     bindings: Vec<SnapshotAuthorityBinding>,
@@ -361,6 +378,64 @@ impl SessionJournal {
         if !should_append(&writer.state, &writer.session_id)? {
             return Ok(None);
         }
+        writer.append(event).map(Some)
+    }
+
+    /// Build and append an event from the exact committed state under one
+    /// uninterrupted writer-authority operation.
+    ///
+    /// The closure may return `None` for an exact idempotent replay. Even that
+    /// path validates the retained snapshot authority before returning.
+    pub(crate) fn append_from_committed_authority<F>(
+        &self,
+        build_event: F,
+    ) -> Result<Option<JournalEnvelope>, JournalError>
+    where
+        F: FnOnce(
+            &ReducedSessionState,
+            &JournalSnapshotAuthority,
+        ) -> Result<Option<SessionEvent>, JournalError>,
+    {
+        let mut writer = self
+            .inner
+            .lock()
+            .map_err(|_| JournalError::WriterPoisoned)?;
+        let committed = writer.committed_authority()?;
+        let snapshot = SessionSnapshot::new(writer.session_id.clone(), committed.state.clone())?;
+        let binding = SnapshotAuthorityBinding::new(&snapshot);
+        let binding_value =
+            serde_json::to_value(&binding).map_err(|source| JournalError::Json {
+                context: "encoding locked snapshot authority binding",
+                source,
+            })?;
+        let binding_digest = state_payload_digest(&binding_value)?;
+        let generation_value = serde_json::json!({
+            "domain": "wayland-core:journal-authority-generation:v1",
+            "session_id": writer.session_id,
+            "journal_schema_version": SESSION_JOURNAL_SCHEMA_VERSION,
+            "snapshot_schema_version": snapshot.schema_version,
+            "cursor": snapshot.cursor,
+            "cursor_checksum": snapshot.cursor_checksum,
+            "state_digest": snapshot.state_digest,
+            "binding_digest": binding_digest,
+            "base_snapshot_digest": committed
+                .base_snapshot
+                .as_ref()
+                .map(|base| base.state_digest.as_str()),
+        });
+        let authority = JournalSnapshotAuthority {
+            session_id: writer.session_id.clone(),
+            binding_schema_version: binding.schema_version,
+            snapshot_schema_version: snapshot.schema_version,
+            cursor: snapshot.cursor,
+            cursor_checksum: snapshot.cursor_checksum,
+            state_digest: snapshot.state_digest,
+            binding_digest,
+            durable_authority_generation: state_payload_digest(&generation_value)?,
+        };
+        let Some(event) = build_event(&committed.state, &authority)? else {
+            return Ok(None);
+        };
         writer.append(event).map(Some)
     }
 
@@ -1202,6 +1277,11 @@ impl JournalWriter {
                 })?;
             self.ensure_current_path_identity()?;
             let parsed = parse_complete_frames(&self.path, &bytes)?;
+            verify_snapshot_authority_head_readonly(
+                &self.path,
+                &parsed.bindings,
+                self.base_snapshot.as_ref(),
+            )?;
             let entries = parsed.entries;
             if let Some(first) = entries.first() {
                 verify_chain_from(
