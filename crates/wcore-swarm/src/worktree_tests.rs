@@ -26,9 +26,10 @@ fn git_commands_clear_ambient_overrides_and_disable_checkout_hooks() {
             .is_some_and(|arg| arg.starts_with("core.hooksPath=")),
         "missing hooks override: {args:?}"
     );
-    assert!(args
-        .windows(2)
-        .any(|pair| pair == ["-c", "core.fsmonitor=false"]));
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["-c", "core.fsmonitor=false"])
+    );
     assert_eq!(
         env.get("GIT_CONFIG_NOSYSTEM").and_then(Option::as_deref),
         Some("1")
@@ -270,30 +271,34 @@ async fn isolated_checkout_keeps_git_useful_without_parent_history_or_authority(
     assert!(transaction.scratch.is_dir());
     assert!(!transaction.scratch.starts_with(tree));
     assert!(!tree.join(".git/objects/info/alternates").exists());
-    assert!(fixture_git_output(&tree, &["remote"])
-        .await
-        .stdout
-        .is_empty());
-    assert!(fixture_git_output(&tree, &["tag", "--list"])
-        .await
-        .stdout
-        .is_empty());
-    let reachable = fixture_git_output(&tree, &["rev-list", "--count", "--all"]).await;
+    assert!(
+        fixture_git_output(tree, &["remote"])
+            .await
+            .stdout
+            .is_empty()
+    );
+    assert!(
+        fixture_git_output(tree, &["tag", "--list"])
+            .await
+            .stdout
+            .is_empty()
+    );
+    let reachable = fixture_git_output(tree, &["rev-list", "--count", "--all"]).await;
     assert_eq!(String::from_utf8_lossy(&reachable.stdout).trim(), "1");
-    let old_commit = fixture_git_output(&tree, &["cat-file", "-e", &secret_commit]).await;
+    let old_commit = fixture_git_output(tree, &["cat-file", "-e", &secret_commit]).await;
     assert!(
         !old_commit.status.success(),
         "parent history leaked into child clone"
     );
 
     std::fs::write(tree.join("README.md"), "child edit\n").unwrap();
-    let status = fixture_git_output(&tree, &["status", "--short"]).await;
+    let status = fixture_git_output(tree, &["status", "--short"]).await;
     assert!(String::from_utf8_lossy(&status.stdout).contains("README.md"));
-    let diff = fixture_git_output(&tree, &["diff", "--", "README.md"]).await;
+    let diff = fixture_git_output(tree, &["diff", "--", "README.md"]).await;
     assert!(String::from_utf8_lossy(&diff.stdout).contains("child edit"));
-    run_fixture_git(&tree, &["add", "README.md"]).await;
+    run_fixture_git(tree, &["add", "README.md"]).await;
     run_fixture_git(
-        &tree,
+        tree,
         &[
             "-c",
             "user.email=child@example.invalid",

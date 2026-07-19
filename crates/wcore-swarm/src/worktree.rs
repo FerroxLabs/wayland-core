@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use wcore_config::shell;
-use wcore_sandbox::process_capture::{capture_bounded_process, CaptureLimits, ProcessCaptureError};
+use wcore_sandbox::process_capture::{CaptureLimits, ProcessCaptureError, capture_bounded_process};
 
 use crate::error::{Result, SwarmError};
 
@@ -334,6 +334,20 @@ impl WorktreeManager {
     /// Git inspection without receiving access to the parent's refs, object
     /// store, hooks, remotes, tags, or history.
     pub async fn create_isolated_checkout(
+        &self,
+        worker_id: &str,
+        branch: &str,
+        pinned_head: &str,
+        capacity: WorkspaceCapacity,
+    ) -> Result<TransactionWorkspace> {
+        Box::pin(self.create_isolated_checkout_inner(worker_id, branch, pinned_head, capacity))
+            .await
+    }
+
+    // Keep the construction future behind one allocation. This operation
+    // carries several bounded process-capture states; inlining all of them in
+    // a caller's async state machine can exhaust the default test-thread stack.
+    async fn create_isolated_checkout_inner(
         &self,
         worker_id: &str,
         branch: &str,
