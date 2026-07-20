@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use wcore_config::config::Config;
 use wcore_protocol::events::WorkflowChildTerminalState;
 use wcore_providers::LlmProvider;
-use wcore_swarm::worktree::WorktreeManager;
+use wcore_swarm::worktree::{TransactionWorkspace, WorktreeManager};
 use wcore_swarm::{
     AgentReport, BlackboardCtx, DEFAULT_SHARD_SIZE, FleetDispatcher, FleetReducer, MeshAgent,
     ShardSummary,
@@ -117,6 +117,12 @@ pub struct ResolvedChildLaunch {
     authority_read_deny: Vec<PathBuf>,
     authority: DurableAuthorityToken,
     parent_cancel: tokio_util::sync::CancellationToken,
+    /// Identity-bound lifecycle handle for a mutating child's standalone
+    /// checkout. It is owned here so the checkout stays live for the child's
+    /// whole execution and terminalizes exactly once when this launch is
+    /// dropped (child terminal, cancellation, or pre-launch failure). `None`
+    /// for a shared read-only child. Never cloned and never leaked.
+    _transaction_workspace: Option<TransactionWorkspace>,
 }
 
 impl ResolvedChildLaunch {
@@ -406,6 +412,11 @@ struct PreparedChildWorkspace {
     evidence: ChildWorkspace,
     root: PathBuf,
     authority_read_deny: Vec<PathBuf>,
+    /// Retained standalone-checkout authority for a mutating child. `None` for a
+    /// shared read-only child (which owns no transaction). When present, this
+    /// handle owns the checkout on disk; dropping it terminalizes the
+    /// transaction exactly once and cleans the checkout.
+    transaction: Option<TransactionWorkspace>,
 }
 
 type WorkspaceAdmissionGate = tokio::sync::Mutex<()>;
@@ -1263,6 +1274,7 @@ impl AgentSpawner {
             workspace,
             parent.as_ref().clone(),
             Vec::new(),
+            None,
         )
     }
 
@@ -1276,7 +1288,12 @@ impl AgentSpawner {
         workspace: ChildWorkspace,
         workspace_root: PathBuf,
         authority_read_deny: Vec<PathBuf>,
+        transaction: Option<TransactionWorkspace>,
     ) -> Result<ResolvedChildLaunch, DurableSpawnerError> {
+        // The retained standalone-checkout handle (`transaction`) is owned by
+        // this call for the duration of validation. Any early `return Err`
+        // below drops it here, rolling back and cleaning the just-opened
+        // transaction before the error propagates.
         let requested_workspace = pre_resolved.requested_workspace;
         if !requested_workspace.permits(workspace.mode) {
             return Err(DurableSpawnerError::EvidenceMismatch(
@@ -1296,6 +1313,7 @@ impl AgentSpawner {
                 if workspace_root != **parent
                     || workspace != shared_child_workspace(parent)?
                     || !authority_read_deny.is_empty()
+                    || transaction.is_some()
                 {
                     return Err(DurableSpawnerError::EvidenceMismatch(
                         "shared workspace evidence",
@@ -1306,10 +1324,15 @@ impl AgentSpawner {
                 let expected_id = format!("isolated-{}", child_id.as_str());
                 let session_root = std::fs::canonicalize(&self.base_config.session.directory)
                     .map_err(|_| DurableSpawnerError::EvidenceMismatch("workspace session root"))?;
+                // The realized child working directory is the `checkout`
+                // subdirectory of the transaction root
+                // (`<checkouts>/<child_id>/checkout`), not the transaction root
+                // itself. Validate against that exact path.
                 let expected_root = session_root
                     .join("delegated-workspaces")
                     .join("checkouts")
-                    .join(child_id.as_str());
+                    .join(child_id.as_str())
+                    .join("checkout");
                 if workspace.workspace_id != expected_id || workspace_root != expected_root {
                     return Err(DurableSpawnerError::EvidenceMismatch(
                         "isolated workspace identity or root",
@@ -1324,6 +1347,16 @@ impl AgentSpawner {
                 {
                     return Err(DurableSpawnerError::EvidenceMismatch(
                         "isolated workspace authority deny roots",
+                    ));
+                }
+                // A mutating launch must carry the exact standalone-checkout
+                // handle allocated for this child; without it there is no
+                // durable opening bound to the checkout on disk. Checked after
+                // the identity/root/deny evidence so a forged workspace is
+                // rejected on the specific evidence it falsified.
+                if transaction.is_none() {
+                    return Err(DurableSpawnerError::EvidenceMismatch(
+                        "isolated workspace transaction authority",
                     ));
                 }
             }
@@ -1348,6 +1381,7 @@ impl AgentSpawner {
             authority_read_deny,
             authority: pre_resolved.authority,
             parent_cancel: pre_resolved.parent_cancel,
+            _transaction_workspace: transaction,
         })
     }
 
@@ -1417,12 +1451,17 @@ impl AgentSpawner {
         let prepared = self
             .prepare_child_workspace(&child_id, pre_resolved.requested_workspace)
             .await?;
+        // Move the retained checkout handle into resolution. If resolution
+        // fails, it drops there and cleans the just-opened transaction; on
+        // success it travels into the returned launch and lives until the child
+        // reaches a terminal state.
         self.resolve_durable_launch_in_workspace(
             pre_resolved,
             child_id,
             prepared.evidence,
             prepared.root,
             prepared.authority_read_deny,
+            prepared.transaction,
         )
     }
 
@@ -1441,6 +1480,7 @@ impl AgentSpawner {
                 evidence: shared_child_workspace(parent)?,
                 root: parent.as_ref().clone(),
                 authority_read_deny: Vec::new(),
+                transaction: None,
             }),
             RequestedChildWorkspace::IsolatedMutation => {
                 let session_root = PathBuf::from(&self.base_config.session.directory);
@@ -1485,25 +1525,48 @@ impl AgentSpawner {
                         wcore_swarm::MAX_RETAINED_WORKTREES
                     )));
                 }
+                // Prove usable storage for this transaction plus the already
+                // retained allocations before creating the standalone checkout.
+                let active_workers = retained.saturating_add(1);
+                let capacity =
+                    manager
+                        .workspace_capacity(active_workers)
+                        .await
+                        .map_err(|error| {
+                            DurableSpawnerError::WorkspacePreparation(error.to_string())
+                        })?;
                 let worker_id = child_id.as_str();
                 let branch = format!("wayland-child/{worker_id}");
-                let expected_root = manager.swarm_root().join(worker_id);
+                // Write-ahead the preparation lease naming the exact working
+                // directory the child will run in — the `checkout` subdirectory
+                // of the transaction root — before that checkout exists.
+                let checkout_root = manager.swarm_root().join(worker_id).join("checkout");
                 write_workspace_preparation_lease(
                     &control_root,
                     child_id,
-                    &expected_root,
+                    &checkout_root,
                     &pinned_head,
                 )?;
-                let root = manager
-                    .create_isolated_checkout(worker_id, &branch, &pinned_head)
+                // `create_isolated_checkout` returns an identity-bound
+                // `TransactionWorkspace` that owns the retained checkout/scratch
+                // authorities and an `Arc<TransactionCleanup>` whose Drop
+                // deletes the checkout. It must therefore be retained for the
+                // whole child lifetime and terminalized exactly once; it is
+                // never a bare path.
+                let workspace = manager
+                    .create_isolated_checkout(worker_id, &branch, &pinned_head, capacity)
                     .await
                     .map_err(|error| {
                         DurableSpawnerError::WorkspacePreparation(error.to_string())
                     })?;
-                let root = std::fs::canonicalize(&root).map_err(|error| {
+                // The realized child working directory is `workspace.checkout`.
+                // If it cannot be canonicalized, `workspace` is dropped on this
+                // error path, rolling back and cleaning the just-opened
+                // transaction before the error propagates.
+                let root = std::fs::canonicalize(&workspace.checkout).map_err(|error| {
                     DurableSpawnerError::WorkspacePreparation(format!(
-                        "created workspace {} could not be canonicalized; preserved for inspection: {error}",
-                        root.display()
+                        "created workspace checkout {} could not be canonicalized; rolled back: {error}",
+                        workspace.checkout.display()
                     ))
                 })?;
                 Ok(PreparedChildWorkspace {
@@ -1513,6 +1576,7 @@ impl AgentSpawner {
                     },
                     root,
                     authority_read_deny: vec![parent.as_ref().clone(), git_common_dir],
+                    transaction: Some(workspace),
                 })
             }
         }
@@ -3184,6 +3248,7 @@ mod crucible_provider_resolution_tests {
                     },
                     dir.path().to_path_buf(),
                     vec![dir.path().to_path_buf()],
+                    None,
                 )
                 .is_err(),
             "an internal caller cannot forge an isolated workspace root"
@@ -3203,6 +3268,7 @@ mod crucible_provider_resolution_tests {
                     },
                     dir.path().to_path_buf(),
                     vec![dir.path().to_path_buf()],
+                    None,
                 )
                 .is_err(),
             "an internal caller cannot forge child/workspace identity"
@@ -3222,6 +3288,7 @@ mod crucible_provider_resolution_tests {
                     },
                     dir.path().to_path_buf(),
                     Vec::new(),
+                    None,
                 )
                 .is_err(),
             "an internal caller cannot omit parent authority deny roots"
