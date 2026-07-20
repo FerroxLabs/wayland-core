@@ -82,6 +82,11 @@ pub struct RetainedWorkspaceAuthority {
     owner: DirectoryAuthority,
     workspace: DirectoryAuthority,
     child_name: String,
+    /// Owner-issued transaction label bound into the durable import journal
+    /// (Task 1D Docker transport). Only retained where the archive module is
+    /// compiled; the lean native path validates it in `new` and discards it.
+    #[cfg(any(feature = "live-docker", test))]
+    transaction_id: String,
 }
 
 /// Opaque, copyable identity for cross-binding a retained directory to
@@ -101,6 +106,9 @@ struct DirectoryIdentity {
     file_id: [u8; 16],
 }
 
+#[path = "directory_authority_archive.rs"]
+#[cfg(any(feature = "live-docker", test))]
+pub(crate) mod archive;
 #[path = "directory_authority_file.rs"]
 mod file;
 #[cfg(windows)]
@@ -723,10 +731,14 @@ impl RetainedWorkspaceAuthority {
                 "retained workspace child identity contradicts owner authority".to_owned(),
             ));
         }
+        #[cfg(not(any(feature = "live-docker", test)))]
+        let _ = transaction_id;
         Ok(Self {
             owner,
             workspace,
             child_name,
+            #[cfg(any(feature = "live-docker", test))]
+            transaction_id,
         })
     }
 

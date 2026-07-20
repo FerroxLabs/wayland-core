@@ -31,6 +31,7 @@ which = "6"
 # to disk; tiny cross-platform dep so it stays unconditional rather than
 # behind a cfg.
 tempfile.workspace = true
+tar.workspace = true
 
 [features]
 default = []
