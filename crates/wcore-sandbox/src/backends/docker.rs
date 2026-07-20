@@ -227,6 +227,11 @@ impl SandboxBackend for DockerBackend {
         true
     }
 
+    #[cfg(feature = "live-docker")]
+    fn owns_descendants_hard(&self) -> bool {
+        true
+    }
+
     #[cfg(not(feature = "live-docker"))]
     fn is_available(&self) -> bool {
         // sandbox-4: when the `live-docker` feature is compiled out, a

@@ -75,16 +75,6 @@ async fn read_bounded(
     }
 }
 
-/// Drain a piped Tokio child without allowing stdout/stderr to exhaust host
-/// memory. The caller retains its process-tree guard; any error (including an
-/// output overflow) returns before disarming that guard, so the whole owned
-/// tree is killed when the execution scope unwinds.
-pub(crate) async fn wait_with_bounded_output(
-    child: &mut tokio::process::Child,
-) -> Result<BoundedChildOutput> {
-    wait_with_bounded_output_on_exit(child, || {}).await
-}
-
 /// Bounded wait variant for callers that own a process group or Job Object.
 /// `on_exit` runs as soon as the direct child exits, before waiting for pipe
 /// EOF, so a background descendant cannot keep the pipes open and perform
@@ -218,6 +208,13 @@ pub trait SandboxBackend: Send + Sync + 'static {
     /// `Workspace` posture. Default `false` — a backend opts in by overriding
     /// AND actually implementing the deny.
     fn enforces_read_deny(&self) -> bool {
+        false
+    }
+
+    /// True only when the backend owns the complete descendant tree even if
+    /// an untrusted child calls `setsid` or `setpgid`. Process-group cleanup
+    /// alone is not hard ownership and must keep the default `false`.
+    fn owns_descendants_hard(&self) -> bool {
         false
     }
 

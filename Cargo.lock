@@ -10129,6 +10129,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
+ "uuid",
  "wcore-types",
  "which 6.0.3",
  "windows-sys 0.59.0",

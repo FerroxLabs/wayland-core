@@ -81,6 +81,10 @@ impl SandboxBackend for BubblewrapBackend {
         true
     }
 
+    fn owns_descendants_hard(&self) -> bool {
+        true
+    }
+
     async fn execute(
         &self,
         manifest: &SandboxManifest,
@@ -140,6 +144,14 @@ impl SandboxBackend for BubblewrapBackend {
         bwrap_argv.push("--clearenv".into());
         bwrap_argv.push("--new-session".into());
 
+        #[cfg(target_os = "linux")]
+        let (mut status_reader, status_writer, status_fd) = bwrap_status_channel()?;
+        #[cfg(target_os = "linux")]
+        {
+            bwrap_argv.push("--info-fd".into());
+            bwrap_argv.push(status_fd.to_string());
+        }
+
         // Minimal filesystem skeleton.
         bwrap_argv.push("--tmpfs".into());
         bwrap_argv.push("/tmp".into());
@@ -186,15 +198,31 @@ impl SandboxBackend for BubblewrapBackend {
         }
 
         // Secret-read-deny overlays, after the positive binds so later-arg-wins
-        // mount ordering shadows them. Caller (secret_deny_paths) emits ONLY
-        // paths under a mounted root, so the parent always exists in the
-        // namespace and the bind cannot fail-spawn. Stat at bind time to pick
-        // file (mask with /dev/null) vs dir (mask with empty tmpfs); a vanished
-        // path is skipped (nothing to read).
+        // mount ordering shadows them. Directory denies use one empty,
+        // read-only bind. A writable tmpfs is not a denial: it hides reads but
+        // lets the child mint replacement authority at the denied pathname.
+        let denied_directory_mask = if manifest
+            .fs_read_deny
+            .iter()
+            .any(|path| std::fs::symlink_metadata(path).is_ok_and(|md| md.is_dir()))
+        {
+            Some(tempfile::tempdir().map_err(|error| {
+                SandboxError::ExecFailed(format!("create read-deny directory mask: {error}"))
+            })?)
+        } else {
+            None
+        };
         for p in &manifest.fs_read_deny {
             match std::fs::symlink_metadata(p) {
                 Ok(md) if md.is_dir() => {
-                    bwrap_argv.push("--tmpfs".into());
+                    let mask = denied_directory_mask
+                        .as_ref()
+                        .expect("directory deny mask was created")
+                        .path()
+                        .to_string_lossy()
+                        .into_owned();
+                    bwrap_argv.push("--ro-bind".into());
+                    bwrap_argv.push(mask);
                     bwrap_argv.push(p.to_string_lossy().into_owned());
                 }
                 Ok(_) => {
@@ -303,6 +331,7 @@ impl SandboxBackend for BubblewrapBackend {
             // instead of leaking it. Mirrors no_sandbox.rs. bwrap's
             // --die-with-parent then tears down the inner sandboxed process.
             .kill_on_drop(true);
+        super::process_tree::isolate(&mut command);
 
         // NOTE: Landlock is deliberately NOT applied around the bwrap backend.
         // A `pre_exec` ruleset is inherited by bwrap and confines bwrap's OWN
@@ -311,8 +340,8 @@ impl SandboxBackend for BubblewrapBackend {
         // non-empty. bwrap's `--unshare-all` + the constructive `--ro-bind`
         // set already provide a deny-by-default filesystem view that is a strict
         // superset of any Landlock allowlist built from the same paths, and the
-        // secret-read-deny enforcement rides on the `--ro-bind /dev/null` /
-        // `--tmpfs` overlays above — not on Landlock. bwrap sets NO_NEW_PRIVS
+        // secret-read-deny enforcement rides on read-only empty directory /
+        // `/dev/null` overlays above — not on Landlock. bwrap sets NO_NEW_PRIVS
         // itself. The `landlock` feature + `bwrap_landlock.rs` remain compiled
         // (exercised by --all-features CI) as the foundation for a future
         // inner-command re-exec shim, but production runs seccomp-only.
@@ -320,6 +349,20 @@ impl SandboxBackend for BubblewrapBackend {
         let mut child = command
             .spawn()
             .map_err(|e| SandboxError::ExecFailed(format!("bwrap spawn failed: {e}")))?;
+        let mut process_tree =
+            super::process_tree::ProcessTreeGuard::new(child.id()).map_err(|error| {
+                SandboxError::ExecFailed(format!("process-tree ownership: {error}"))
+            })?;
+        #[cfg(target_os = "linux")]
+        let mut sandbox_tree = {
+            drop(status_writer);
+            let child_pid = read_bwrap_child_pid(&mut status_reader)?;
+            super::process_tree::ProcessTreeGuard::from_observed_root(child_pid).map_err(
+                |error| {
+                    SandboxError::ExecFailed(format!("sandbox process-tree ownership: {error}"))
+                },
+            )?
+        };
 
         // Now safe to drop the BPF tempfile — bwrap has read the fd into
         // its child setup. Holding it longer wastes a fd until return.
@@ -330,18 +373,21 @@ impl SandboxBackend for BubblewrapBackend {
             .timeout
             .unwrap_or_else(|| std::time::Duration::from_secs(30));
 
-        let wait_fut = super::wait_with_bounded_output(&mut child);
+        let wait_fut = super::wait_with_bounded_output_on_exit(&mut child, || {
+            #[cfg(target_os = "linux")]
+            sandbox_tree.disarm();
+            process_tree.disarm();
+        });
         let output = match tokio::time::timeout(timeout, wait_fut).await {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => {
                 return Err(e);
             }
             Err(_elapsed) => {
-                // `timeout` dropped `wait_fut` on elapse, which drops the
-                // Child it owns. With `kill_on_drop(true)` set above, that
-                // drop reaps the bwrap process; bwrap's --die-with-parent
-                // then tears down the inner namespace tree — no pid escapes
-                // our handle.
+                // Dropping this future arms `ProcessTreeGuard` before the
+                // direct bwrap handle is dropped. Linux descendant discovery
+                // kills the PID-namespace init and its complete tree; the
+                // dedicated outer process group is the final backstop.
                 return Err(SandboxError::Timeout);
             }
         };
@@ -356,6 +402,43 @@ impl SandboxBackend for BubblewrapBackend {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn bwrap_status_channel() -> Result<(
+    std::io::BufReader<std::os::unix::net::UnixStream>,
+    std::os::unix::net::UnixStream,
+    std::os::fd::RawFd,
+)> {
+    use std::os::fd::AsRawFd;
+
+    let (reader, writer) = std::os::unix::net::UnixStream::pair()
+        .map_err(|error| SandboxError::ExecFailed(format!("bwrap status channel: {error}")))?;
+    let fd = writer.as_raw_fd();
+    // SAFETY: F_SETFD only updates flags on the owned writer descriptor.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, 0) } == -1 {
+        return Err(SandboxError::ExecFailed(format!(
+            "bwrap status descriptor: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    reader
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|error| SandboxError::ExecFailed(format!("bwrap status timeout: {error}")))?;
+    Ok((std::io::BufReader::new(reader), writer, fd))
+}
+
+#[cfg(target_os = "linux")]
+fn read_bwrap_child_pid(reader: &mut impl std::io::Read) -> Result<u32> {
+    let mut deserializer = serde_json::Deserializer::from_reader(reader);
+    let status = <serde_json::Value as serde::Deserialize>::deserialize(&mut deserializer)
+        .map_err(|error| SandboxError::ExecFailed(format!("bwrap status JSON: {error}")))?;
+    status
+        .get("child-pid")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 0)
+        .ok_or_else(|| SandboxError::ExecFailed("bwrap status omitted child-pid".to_owned()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,6 +448,39 @@ mod tests {
         let backend = BubblewrapBackend::new();
         // Cannot assert true/false absolutely; just ensure no panic.
         let _ = backend.is_available();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn multiline_bwrap_status_yields_child_pid_without_waiting_for_eof() {
+        struct LiveStatus<'a> {
+            bytes: &'a [u8],
+        }
+
+        impl std::io::Read for LiveStatus<'_> {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                if self.bytes.is_empty() {
+                    return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+                }
+                let count = output.len().min(self.bytes.len());
+                output[..count].copy_from_slice(&self.bytes[..count]);
+                self.bytes = &self.bytes[count..];
+                Ok(count)
+            }
+        }
+
+        let mut status = LiveStatus {
+            bytes: b"{\n  \"child-pid\": 4242\n}\n",
+        };
+        assert_eq!(read_bwrap_child_pid(&mut status).unwrap(), 4242);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn truncated_bwrap_status_fails_closed() {
+        let mut status = std::io::Cursor::new(b"{\n  \"child-pid\": 4242".as_slice());
+        let error = read_bwrap_child_pid(&mut status).unwrap_err();
+        assert!(error.to_string().contains("bwrap status JSON"));
     }
 
     #[tokio::test]
@@ -496,6 +612,40 @@ mod tests {
             "secret bytes must not be readable; got: {:?}",
             String::from_utf8_lossy(&denied.stdout)
         );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "bwrap is Linux-only")]
+    async fn bwrap_denied_directory_is_not_writable() {
+        let backend = BubblewrapBackend::new();
+        if !backend.is_available() {
+            eprintln!("bwrap not available; skipping");
+            return;
+        }
+        let root = tempfile::tempdir().expect("tempdir");
+        let denied = root.path().join("authority");
+        std::fs::create_dir(&denied).unwrap();
+        let target = denied.join("replacement");
+        let manifest = SandboxManifest {
+            fs_write_allow: vec![root.path().to_path_buf()],
+            fs_read_deny: vec![denied],
+            ..Default::default()
+        };
+        let output = backend
+            .execute(
+                &manifest,
+                SandboxCommand {
+                    argv: vec![
+                        "/usr/bin/touch".into(),
+                        target.to_string_lossy().into_owned(),
+                    ],
+                    cwd: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_ne!(output.exit_code, 0, "denied directory accepted a write");
+        assert!(!target.exists());
     }
 
     #[tokio::test]

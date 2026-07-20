@@ -14,12 +14,15 @@ rust-version.workspace = true
 [dependencies]
 wcore-types.workspace = true
 serde       = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 toml.workspace        = true
 thiserror.workspace   = true
 tokio       = { workspace = true, features = ["rt", "macros", "time", "process", "io-util"] }
 tokio-util.workspace  = true
 tracing.workspace     = true
+uuid.workspace        = true
 async-trait.workspace = true
+cap-std = "=3.4.5"
 bollard = { version = "0.17", optional = true, default-features = false, features = ["ssl"] }
 futures = { workspace = true, optional = true }
 which = "6"
@@ -50,6 +53,8 @@ libseccomp = { version = "0.4", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
+  "Wdk_Foundation",
+  "Wdk_Storage_FileSystem",
   "Win32_Foundation",
   "Win32_Security",
   "Win32_Security_Authorization",

@@ -17,10 +17,14 @@
 //! `WAYLAND_ALLOW_NO_SANDBOX=1` opt-in.
 
 pub mod backends;
+pub mod directory_authority;
 pub mod error;
 pub mod manifest;
 pub mod process_capture;
 
+pub use directory_authority::{
+    DirectoryAuthority, DirectoryAuthorityIdentity, DirectoryHandleLoan, RegularFileAuthority,
+};
 pub use error::{Result, SandboxError};
 pub use manifest::{NetworkPolicy, SandboxManifest, SyscallPolicy};
 
@@ -278,12 +282,42 @@ impl SandboxRegistry {
     ) -> Result<SandboxOutput> {
         self.backend.execute(manifest, cmd).await
     }
+
+    /// Validate external filesystem authority at the final registry boundary,
+    /// immediately before the backend receives path-based grants.
+    pub async fn execute_authorized<F>(
+        &self,
+        manifest: &SandboxManifest,
+        cmd: SandboxCommand,
+        authorize: F,
+    ) -> Result<SandboxOutput>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        authorize()?;
+        self.backend.execute(manifest, cmd).await
+    }
     /// Streaming execution — see [`backends::SandboxBackend::execute_streaming`].
     pub fn execute_streaming(
         &self,
         manifest: &SandboxManifest,
         cmd: SandboxCommand,
     ) -> Result<tokio::sync::mpsc::Receiver<SandboxChunk>> {
+        Arc::clone(&self.backend).execute_streaming(manifest, cmd)
+    }
+
+    /// Streaming counterpart to [`Self::execute_authorized`]. Authority is
+    /// checked before the backend receives the manifest or starts its task.
+    pub fn execute_streaming_authorized<F>(
+        &self,
+        manifest: &SandboxManifest,
+        cmd: SandboxCommand,
+        authorize: F,
+    ) -> Result<tokio::sync::mpsc::Receiver<SandboxChunk>>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        authorize()?;
         Arc::clone(&self.backend).execute_streaming(manifest, cmd)
     }
     pub fn backend_name(&self) -> &'static str {
@@ -294,6 +328,9 @@ impl SandboxRegistry {
     }
     pub fn enforces_read_deny(&self) -> bool {
         self.backend.enforces_read_deny()
+    }
+    pub fn owns_descendants_hard(&self) -> bool {
+        self.backend.owns_descendants_hard()
     }
     pub fn bypasses_containment(&self) -> bool {
         self.bypasses_containment
@@ -703,5 +740,93 @@ mod fail_closed_tests {
         assert!(!no_sandbox_opt_in());
         EnvGuard::set_allow(None);
         assert!(!no_sandbox_opt_in());
+    }
+}
+
+#[cfg(test)]
+mod authority_boundary_tests {
+    use super::*;
+    use crate::backends::SandboxBackend;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingBackend(AtomicUsize);
+
+    #[async_trait]
+    impl SandboxBackend for CountingBackend {
+        async fn execute(
+            &self,
+            _manifest: &SandboxManifest,
+            _cmd: SandboxCommand,
+        ) -> Result<SandboxOutput> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(SandboxOutput {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                resource_limits: ResourceLimitEnforcement::Enforced,
+            })
+        }
+
+        fn name(&self) -> &'static str {
+            "authority-counting"
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    fn command() -> SandboxCommand {
+        SandboxCommand {
+            argv: vec!["must-not-run".to_owned()],
+            cwd: None,
+        }
+    }
+
+    fn replace_directory(path: &std::path::Path) {
+        let original = path.with_extension("original");
+        std::fs::rename(path, original).unwrap();
+        std::fs::create_dir(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn buffered_authority_rejects_same_path_replacement_before_backend() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let authority = DirectoryAuthority::open(&root).unwrap();
+        replace_directory(&root);
+        let backend = Arc::new(CountingBackend(AtomicUsize::new(0)));
+        let registry = SandboxRegistry::new(backend.clone());
+
+        let error = registry
+            .execute_authorized(&SandboxManifest::default(), command(), || {
+                authority.validate_path(&root)
+            })
+            .await
+            .expect_err("same-path replacement reached buffered backend");
+
+        assert!(error.to_string().contains("identity changed"), "{error}");
+        assert_eq!(backend.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn streaming_authority_rejects_same_path_replacement_before_backend() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let authority = DirectoryAuthority::open(&root).unwrap();
+        replace_directory(&root);
+        let backend = Arc::new(CountingBackend(AtomicUsize::new(0)));
+        let registry = SandboxRegistry::new(backend.clone());
+
+        let error = registry
+            .execute_streaming_authorized(&SandboxManifest::default(), command(), || {
+                authority.validate_path(&root)
+            })
+            .expect_err("same-path replacement reached streaming backend");
+
+        assert!(error.to_string().contains("identity changed"), "{error}");
+        assert_eq!(backend.0.load(Ordering::SeqCst), 0);
     }
 }
