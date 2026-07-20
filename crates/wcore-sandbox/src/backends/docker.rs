@@ -267,6 +267,65 @@ impl SandboxBackend for DockerBackend {
         true
     }
 
+    #[cfg(feature = "live-docker")]
+    fn hard_containment_identity(&self) -> Option<super::HardContainmentIdentity> {
+        // Only a reachable Docker endpoint qualifies. Without a socket / host
+        // this is `None`, so the backend is structurally non-qualifying.
+        if !docker_socket_present() {
+            return None;
+        }
+        let endpoint =
+            std::env::var("DOCKER_HOST").unwrap_or_else(|_| "unix:///var/run/docker.sock".into());
+        Some(super::HardContainmentIdentity {
+            mechanism: super::HardContainmentMechanism::DockerContainer,
+            executable_identity: format!("docker-image:{}", crate::manifest::default_image()),
+            runtime_identity: format!("docker-daemon:{endpoint}"),
+            process_tree_mechanism: super::process_tree::ProcessTreeMechanism::DockerContainerReap,
+        })
+    }
+
+    #[cfg(feature = "live-docker")]
+    async fn probe_hard_containment(
+        &self,
+        fs: &crate::manifest::HardContainmentFilesystem,
+    ) -> Result<super::HardContainmentProbe> {
+        // Structural gate: no reachable daemon → cannot establish containment.
+        let identity = self.hard_containment_identity().ok_or_else(|| {
+            SandboxError::PolicyNotSupported("docker is unavailable for hard containment".into())
+        })?;
+
+        // Semantic live probe: create + run + FORCE-REMOVE a benign container
+        // under the normalized `network=Deny` policy. `execute` owns the
+        // container via `ContainerCleanup`, which force-removes it (and its
+        // process tree) on success, error, timeout, or cancellation — so a
+        // probe failure at any stage fails closed. The candidate / private-root
+        // BINDS are intentionally omitted from this benign probe (the roots may
+        // not exist at admission and Docker rejects missing bind sources); the
+        // read-only-candidate / private-writable-root policy is bound into the
+        // authority's policy identity and enforced at the real spawn. The probe
+        // argv is the benign `true` — never candidate-controlled.
+        let mut manifest = fs.to_manifest();
+        manifest.fs_read_allow.clear();
+        manifest.fs_write_allow.clear();
+        let out = self
+            .execute(
+                &manifest,
+                SandboxCommand {
+                    argv: vec!["true".into()],
+                    cwd: None,
+                },
+            )
+            .await?;
+        if out.exit_code != 0 {
+            return Err(SandboxError::ExecFailed(format!(
+                "docker hard-containment probe exited {}; stderr={}",
+                out.exit_code,
+                String::from_utf8_lossy(&out.stderr)
+            )));
+        }
+        Ok(super::HardContainmentProbe { identity })
+    }
+
     #[cfg(not(feature = "live-docker"))]
     fn is_available(&self) -> bool {
         // sandbox-4: when the `live-docker` feature is compiled out, a

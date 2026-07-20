@@ -32,6 +32,26 @@ pub fn isolate_std(_command: &mut std::process::Command) {
     }
 }
 
+/// The mechanism that owns and reaps the COMPLETE process tree of a
+/// hard-contained execution.
+///
+/// Deliberately has no ordinary-process-group variant. A Unix process group is
+/// a Dangerous-mode reliability backstop (see [`isolate`]) that an adversarial
+/// child can leave via `setsid`/`setpgid`; it must NEVER by itself qualify as
+/// the hard containment boundary. Only these kernel-backed mechanisms — each
+/// live-probed by its backend — can name the tree owner, and the ordinary
+/// [`ProcessTreeGuard`] helpers below remain purely for cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // per-target: not every variant is constructed on every OS/feature build.
+pub enum ProcessTreeMechanism {
+    /// The bwrap PID-namespace init reaped via `/proc` descendant discovery.
+    LinuxPidNamespaceReap,
+    /// The Docker daemon force-removing the container and its process tree.
+    DockerContainerReap,
+    /// A Windows kill-on-close Job Object.
+    WindowsJobObject,
+}
+
 /// Armed while a direct child is alive. Dropping it kills the dedicated Unix
 /// process group or the Windows Job. A Windows Job is a hard descendant
 /// boundary; see [`isolate`] for the documented Unix limitation.

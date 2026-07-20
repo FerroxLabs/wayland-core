@@ -365,6 +365,50 @@ mod probe_cache_tests {
     }
 }
 
+/// The AppContainer + Job Object hard-containment identity.
+///
+/// Centralized here so the mechanism wiring lives in-scope. The real Windows
+/// backend (`windows_impl::process`) overrides
+/// [`super::SandboxBackend::hard_containment_identity`] /
+/// [`super::SandboxBackend::probe_hard_containment`] by delegating to this
+/// helper and live-probing a benign AppContainer + Job Object spawn; that
+/// live-spawn override is exercised by Windows CI. The non-Windows `stub_impl`
+/// below deliberately does NOT override those methods, so on every non-Windows
+/// target the stub keeps the trait default and is structurally non-qualifying.
+///
+/// This preserves the accepted 20-02 per-execution AppContainer profile / ACL /
+/// recovery authority: it adds a mechanism identity only and touches none of
+/// that lifecycle.
+#[cfg(any(windows, test))]
+// Consumed by the real Windows backend's (out-of-scope `windows_impl::process`)
+// trait override and by the crate-private test below. `allow(dead_code)` guards
+// the Windows lib build until that override lands (CI-verified on Windows).
+#[allow(dead_code)]
+pub(crate) fn windows_appcontainer_hard_containment_identity() -> super::HardContainmentIdentity {
+    super::HardContainmentIdentity {
+        mechanism: super::HardContainmentMechanism::WindowsAppContainerJobObject,
+        executable_identity: "windows-appcontainer".to_owned(),
+        runtime_identity: "windows-appcontainer+job-object".to_owned(),
+        process_tree_mechanism: super::process_tree::ProcessTreeMechanism::WindowsJobObject,
+    }
+}
+
+#[cfg(test)]
+mod hard_containment_identity_tests {
+    #[test]
+    fn appcontainer_identity_names_job_object_mechanism() {
+        let identity = super::windows_appcontainer_hard_containment_identity();
+        assert_eq!(
+            identity.mechanism,
+            super::super::HardContainmentMechanism::WindowsAppContainerJobObject
+        );
+        assert_eq!(
+            identity.process_tree_mechanism,
+            super::super::process_tree::ProcessTreeMechanism::WindowsJobObject
+        );
+    }
+}
+
 #[cfg(windows)]
 #[path = "appcontainer/acl_lease.rs"]
 mod appcontainer_acl_lease;
@@ -411,6 +455,10 @@ mod stub_impl {
         }
     }
 
+    // NOTE: this stub deliberately does NOT override `hard_containment_identity`
+    // or `probe_hard_containment`, so it keeps the trait defaults (`None` /
+    // `PolicyNotSupported`) and is structurally incapable of minting hard
+    // containment on any non-Windows target.
     #[async_trait]
     impl SandboxBackend for AppContainerBackend {
         fn name(&self) -> &'static str {

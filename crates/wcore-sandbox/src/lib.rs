@@ -22,12 +22,16 @@ pub mod error;
 pub mod manifest;
 pub mod process_capture;
 
+pub use backends::HardContainmentMechanism;
 pub use directory_authority::{
     DirectoryAuthority, DirectoryAuthorityIdentity, DirectoryHandleLoan, RegularFileAuthority,
     RetainedWorkspaceAuthority,
 };
 pub use error::{Result, SandboxError};
-pub use manifest::{NetworkPolicy, SandboxManifest, SyscallPolicy};
+pub use manifest::{
+    ContainmentPolicyIdentity, HardContainmentFilesystem, NetworkPolicy, SandboxManifest,
+    SyscallPolicy,
+};
 
 use async_trait::async_trait;
 use std::collections::HashSet;
@@ -446,6 +450,199 @@ impl SandboxRegistry {
             bypasses_containment: true,
             env_passthrough: Arc::new(HashSet::new()),
         }
+    }
+
+    /// Mint a one-use [`HardContainmentAuthority`] for a hard-contained
+    /// execution.
+    ///
+    /// This is the ONLY constructor of the authority. It fails closed unless:
+    /// 1. this registry does not bypass containment (a Dangerous / no-sandbox
+    ///    runtime can never mint), AND
+    /// 2. the selected backend passes a semantic LIVE probe of its EXACT
+    ///    hard-containment mechanism under `fs`'s normalized policy — only the
+    ///    qualifying bubblewrap / docker / AppContainer backends can, because
+    ///    only they can construct the crate-private probe proof.
+    ///
+    /// The minted authority privately binds the backend, executable / runtime
+    /// identity, mechanism, process-tree mechanism, normalized policy identity,
+    /// and the exact spawn parameters. Any later drift refuses execution.
+    pub async fn establish_hard_containment(
+        &self,
+        fs: &HardContainmentFilesystem,
+        cmd: &SandboxCommand,
+    ) -> Result<HardContainmentAuthority> {
+        // An authority runtime that bypasses containment can NEVER mint hard
+        // containment — a boolean/bypass source does not qualify.
+        if self.bypasses_containment {
+            return Err(SandboxError::UnsafeBypassSource);
+        }
+        // Live probe of the exact backend + normalized policy. Non-qualifying
+        // backends fail closed here (default `PolicyNotSupported`).
+        let probe = self.backend.probe_hard_containment(fs).await?;
+        // Cross-check the live probe's identity against the backend's cheap
+        // stable identity, so a backend that probes one mechanism cannot report
+        // another. Absence of a stable identity after a probe fails closed.
+        let cheap = self.backend.hard_containment_identity().ok_or_else(|| {
+            SandboxError::ExecFailed(
+                "backend produced a hard-containment probe but no stable identity".into(),
+            )
+        })?;
+        if cheap != probe.identity {
+            return Err(SandboxError::ExecFailed(
+                "hard-containment probe identity disagreed with the backend identity".into(),
+            ));
+        }
+        Ok(HardContainmentAuthority::mint(
+            self.backend.name(),
+            fs,
+            cmd,
+            probe,
+        ))
+    }
+
+    /// Consume a [`HardContainmentAuthority`] and verify it still binds THIS
+    /// registry's backend, the given normalized policy, and the exact spawn
+    /// parameters. Any drift (backend, executable, runtime, mechanism, policy,
+    /// or spawn parameters) refuses. Consuming the authority makes it one-use.
+    pub fn verify_hard_containment(
+        &self,
+        authority: HardContainmentAuthority,
+        fs: &HardContainmentFilesystem,
+        cmd: &SandboxCommand,
+    ) -> Result<()> {
+        authority.verify_no_drift(&*self.backend, fs, cmd)
+    }
+}
+
+/// Opaque, one-use proof that a specific backend live-probed its exact
+/// hard-containment mechanism under an exact normalized policy, and that the
+/// upcoming spawn matches what was probed.
+///
+/// Structural properties (all load-bearing):
+/// - **Not serializable** (no `serde`) and **not cloneable / copyable** (no
+///   `Clone` / `Copy`): it cannot be persisted, transported, or duplicated.
+/// - **No public constructor:** the only mint is the crate-private [`mint`] fn,
+///   reachable only through [`SandboxRegistry::establish_hard_containment`].
+/// - **One-use:** [`Self::verify_no_drift`] takes `self` by value, so the
+///   authority is consumed on use and cannot be checked (or reused) twice.
+///
+/// It privately binds the backend, executable / runtime identity, mechanism,
+/// process-tree mechanism, normalized policy identity, and exact spawn
+/// parameters captured at mint. This type makes NO gate-result, receipt,
+/// candidate-acceptance, or landing claim — it is solely the containment
+/// authority.
+///
+/// [`mint`]: HardContainmentAuthority::mint
+pub struct HardContainmentAuthority {
+    backend_name: &'static str,
+    mechanism: backends::HardContainmentMechanism,
+    executable_identity: String,
+    runtime_identity: String,
+    process_tree_mechanism: backends::process_tree::ProcessTreeMechanism,
+    policy_identity: manifest::ContainmentPolicyIdentity,
+    spawn_identity: SpawnIdentity,
+}
+
+impl std::fmt::Debug for HardContainmentAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redacted: this authority binds the executable/runtime identity, the
+        // candidate + writable-root paths, and the exact spawn argv/cwd of a
+        // contained execution. Only the non-sensitive backend name and
+        // mechanism are shown so the capability's plan never leaks into logs.
+        f.debug_struct("HardContainmentAuthority")
+            .field("backend", &self.backend_name)
+            .field("mechanism", &self.mechanism)
+            .field("bound", &"<redacted>")
+            .finish()
+    }
+}
+
+/// The exact argv + cwd bound at mint. Compared by value at spawn.
+#[derive(Debug, PartialEq, Eq)]
+struct SpawnIdentity {
+    argv: Vec<String>,
+    cwd: Option<std::path::PathBuf>,
+}
+
+impl SpawnIdentity {
+    fn from_command(cmd: &SandboxCommand) -> Self {
+        Self {
+            argv: cmd.argv.clone(),
+            cwd: cmd.cwd.clone(),
+        }
+    }
+}
+
+impl HardContainmentAuthority {
+    /// Crate-private mint. Not `pub`, so only [`SandboxRegistry`] (in this
+    /// module) can construct the authority. Callers cannot fabricate one.
+    fn mint(
+        backend_name: &'static str,
+        fs: &HardContainmentFilesystem,
+        cmd: &SandboxCommand,
+        probe: backends::HardContainmentProbe,
+    ) -> Self {
+        let identity = probe.identity;
+        Self {
+            backend_name,
+            mechanism: identity.mechanism,
+            executable_identity: identity.executable_identity,
+            runtime_identity: identity.runtime_identity,
+            process_tree_mechanism: identity.process_tree_mechanism,
+            policy_identity: fs.policy_identity(),
+            spawn_identity: SpawnIdentity::from_command(cmd),
+        }
+    }
+
+    /// The hard-containment mechanism this authority is bound to.
+    pub fn mechanism(&self) -> backends::HardContainmentMechanism {
+        self.mechanism
+    }
+
+    /// Consume the authority and refuse on ANY drift between mint and spawn.
+    ///
+    /// Re-derives the backend's cheap identity (no spawn) and the policy /
+    /// spawn identities, comparing each bound field. A mismatch — including a
+    /// backend that no longer offers hard containment — returns a fail-closed
+    /// error naming the field that drifted.
+    pub fn verify_no_drift(
+        self,
+        backend: &dyn backends::SandboxBackend,
+        fs: &HardContainmentFilesystem,
+        cmd: &SandboxCommand,
+    ) -> Result<()> {
+        let refuse = |field: &str| {
+            Err(SandboxError::ExecFailed(format!(
+                "hard containment refused: {field} changed between mint and spawn"
+            )))
+        };
+        if self.backend_name != backend.name() {
+            return refuse("backend");
+        }
+        let identity = backend.hard_containment_identity().ok_or_else(|| {
+            SandboxError::ExecFailed(
+                "hard containment refused: backend no longer offers hard containment".into(),
+            )
+        })?;
+        if identity.mechanism != self.mechanism {
+            return refuse("mechanism");
+        }
+        if identity.executable_identity != self.executable_identity {
+            return refuse("executable identity");
+        }
+        if identity.runtime_identity != self.runtime_identity {
+            return refuse("runtime identity");
+        }
+        if identity.process_tree_mechanism != self.process_tree_mechanism {
+            return refuse("process-tree mechanism");
+        }
+        if fs.policy_identity() != self.policy_identity {
+            return refuse("normalized policy");
+        }
+        if SpawnIdentity::from_command(cmd) != self.spawn_identity {
+            return refuse("spawn parameters");
+        }
+        Ok(())
     }
 }
 
@@ -879,5 +1076,392 @@ mod authority_boundary_tests {
 
         assert!(error.to_string().contains("identity changed"), "{error}");
         assert_eq!(backend.0.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[cfg(test)]
+mod hard_containment_tests {
+    use super::*;
+    use crate::backends::process_tree::ProcessTreeMechanism;
+    use crate::backends::{HardContainmentIdentity, HardContainmentProbe, SandboxBackend};
+
+    /// A crate-private test double standing in for a qualifying backend. It can
+    /// build the crate-private probe/identity types precisely BECAUSE it lives
+    /// inside the crate — an external backend cannot, which is the structural
+    /// seal. This double is never exported and grants no bypass outside the
+    /// crate.
+    struct QualBackend {
+        name: &'static str,
+        exec: String,
+        mechanism: HardContainmentMechanism,
+    }
+
+    impl QualBackend {
+        fn new(name: &'static str, exec: &str) -> Self {
+            Self {
+                name,
+                exec: exec.to_owned(),
+                mechanism: HardContainmentMechanism::BubblewrapPidNamespace,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SandboxBackend for QualBackend {
+        async fn execute(&self, _m: &SandboxManifest, _c: SandboxCommand) -> Result<SandboxOutput> {
+            Ok(SandboxOutput {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                resource_limits: ResourceLimitEnforcement::Enforced,
+            })
+        }
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn hard_containment_identity(&self) -> Option<HardContainmentIdentity> {
+            Some(HardContainmentIdentity {
+                mechanism: self.mechanism,
+                executable_identity: self.exec.clone(),
+                runtime_identity: format!("runtime:{}", self.exec),
+                process_tree_mechanism: ProcessTreeMechanism::LinuxPidNamespaceReap,
+            })
+        }
+        async fn probe_hard_containment(
+            &self,
+            _fs: &HardContainmentFilesystem,
+        ) -> Result<HardContainmentProbe> {
+            Ok(HardContainmentProbe {
+                identity: self.hard_containment_identity().unwrap(),
+            })
+        }
+    }
+
+    /// A backend that keeps a stable `name` but no longer offers hard
+    /// containment (identity `None`) — models a backend whose live mechanism
+    /// vanished between mint and spawn (e.g. the `bwrap` binary was removed). The
+    /// name matches the minted authority, so the backend-name check passes and
+    /// the identity-`None` fail-closed branch is what must refuse.
+    struct VanishedBackend {
+        name: &'static str,
+    }
+
+    #[async_trait]
+    impl SandboxBackend for VanishedBackend {
+        async fn execute(&self, _m: &SandboxManifest, _c: SandboxCommand) -> Result<SandboxOutput> {
+            Ok(SandboxOutput {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                resource_limits: ResourceLimitEnforcement::Enforced,
+            })
+        }
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn hard_containment_identity(&self) -> Option<HardContainmentIdentity> {
+            None
+        }
+    }
+
+    /// A qualifying-looking backend whose live probe fails at a named stage. It
+    /// reports a stable identity, so the failure is the PROBE, not the identity
+    /// cross-check — modeling a process-tree failure stage that must fail closed.
+    struct FailingProbe {
+        stage: &'static str,
+    }
+
+    #[async_trait]
+    impl SandboxBackend for FailingProbe {
+        async fn execute(&self, _m: &SandboxManifest, _c: SandboxCommand) -> Result<SandboxOutput> {
+            Ok(SandboxOutput {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                resource_limits: ResourceLimitEnforcement::Enforced,
+            })
+        }
+        fn name(&self) -> &'static str {
+            "failing-probe"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn hard_containment_identity(&self) -> Option<HardContainmentIdentity> {
+            Some(HardContainmentIdentity {
+                mechanism: HardContainmentMechanism::BubblewrapPidNamespace,
+                executable_identity: "/probe".to_owned(),
+                runtime_identity: "runtime:/probe".to_owned(),
+                process_tree_mechanism: ProcessTreeMechanism::LinuxPidNamespaceReap,
+            })
+        }
+        async fn probe_hard_containment(
+            &self,
+            _fs: &HardContainmentFilesystem,
+        ) -> Result<HardContainmentProbe> {
+            // Each stage maps to the fail-closed error the real backends return
+            // after killing the owned process tree.
+            Err(match self.stage {
+                "timeout" => SandboxError::Timeout,
+                "overflow" => SandboxError::OutputLimitExceeded { limit_bytes: 8 },
+                other => SandboxError::ExecFailed(format!("hard-containment probe {other} failed")),
+            })
+        }
+    }
+
+    fn fs_fixture() -> HardContainmentFilesystem {
+        HardContainmentFilesystem::new(
+            std::path::PathBuf::from("/srv/wl-hard/candidate"),
+            vec![std::path::PathBuf::from("/srv/wl-hard/scratch")],
+        )
+        .expect("fixture policy validates")
+    }
+
+    fn cmd_fixture() -> SandboxCommand {
+        SandboxCommand {
+            argv: vec!["/bin/echo".into(), "hi".into()],
+            cwd: Some(std::path::PathBuf::from("/srv/wl-hard/candidate")),
+        }
+    }
+
+    async fn mint(name: &'static str, exec: &str) -> (SandboxRegistry, HardContainmentAuthority) {
+        let registry = SandboxRegistry::new(Arc::new(QualBackend::new(name, exec)));
+        let authority = registry
+            .establish_hard_containment(&fs_fixture(), &cmd_fixture())
+            .await
+            .expect("qualifying backend must mint");
+        (registry, authority)
+    }
+
+    #[tokio::test]
+    async fn qualifying_backend_mints_and_verifies_with_no_drift() {
+        let (registry, authority) = mint("q", "/a").await;
+        assert_eq!(
+            authority.mechanism(),
+            HardContainmentMechanism::BubblewrapPidNamespace
+        );
+        registry
+            .verify_hard_containment(authority, &fs_fixture(), &cmd_fixture())
+            .expect("no drift must verify");
+    }
+
+    #[tokio::test]
+    async fn spawn_parameter_drift_refuses() {
+        let (registry, authority) = mint("q", "/a").await;
+        let drifted = SandboxCommand {
+            argv: vec!["/bin/echo".into(), "TAMPERED".into()],
+            cwd: Some(std::path::PathBuf::from("/srv/wl-hard/candidate")),
+        };
+        let err = registry
+            .verify_hard_containment(authority, &fs_fixture(), &drifted)
+            .expect_err("argv drift must refuse");
+        assert!(err.to_string().contains("spawn parameters"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn policy_drift_refuses() {
+        let (registry, authority) = mint("q", "/a").await;
+        let other_fs = HardContainmentFilesystem::new(
+            std::path::PathBuf::from("/srv/wl-hard/candidate"),
+            vec![std::path::PathBuf::from("/srv/wl-hard/other-scratch")],
+        )
+        .unwrap();
+        let err = registry
+            .verify_hard_containment(authority, &other_fs, &cmd_fixture())
+            .expect_err("policy drift must refuse");
+        assert!(err.to_string().contains("normalized policy"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn executable_and_runtime_drift_refuses() {
+        // Mint against exec "/a"; verify against a same-named backend whose
+        // executable identity changed to "/b".
+        let (_registry, authority) = mint("q", "/a").await;
+        let drifted_backend = QualBackend::new("q", "/b");
+        let err = authority
+            .verify_no_drift(&drifted_backend, &fs_fixture(), &cmd_fixture())
+            .expect_err("executable drift must refuse");
+        assert!(err.to_string().contains("executable identity"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn backend_drift_refuses() {
+        let (_registry, authority) = mint("q", "/a").await;
+        let other = QualBackend::new("other", "/a");
+        let err = authority
+            .verify_no_drift(&other, &fs_fixture(), &cmd_fixture())
+            .expect_err("backend drift must refuse");
+        assert!(err.to_string().contains("backend"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn non_qualifying_backend_at_spawn_refuses() {
+        // A backend that keeps the minted name but no longer offers hard
+        // containment (identity None) must refuse — a probe-time success cannot
+        // be spent against it. The same name passes the backend-name check, so
+        // the identity-None branch is the one under test.
+        let (_registry, authority) = mint("q", "/a").await;
+        let vanished = VanishedBackend { name: "q" };
+        let err = authority
+            .verify_no_drift(&vanished, &fs_fixture(), &cmd_fixture())
+            .expect_err("non-qualifying spawn backend must refuse");
+        assert!(
+            err.to_string()
+                .contains("no longer offers hard containment"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn authority_debug_is_redacted() {
+        // The opaque authority's Debug must not leak the contained execution's
+        // plan (executable/runtime identity, bound paths, spawn argv/cwd).
+        let (_registry, authority) = mint("q", "/secret/bwrap-path").await;
+        let shown = format!("{authority:?}");
+        assert!(shown.contains("<redacted>"), "{shown}");
+        assert!(
+            !shown.contains("/secret/bwrap-path"),
+            "executable identity leaked: {shown}"
+        );
+        assert!(
+            !shown.contains("runtime:"),
+            "runtime identity leaked: {shown}"
+        );
+        assert!(!shown.contains("/bin/echo"), "spawn argv leaked: {shown}");
+        assert!(!shown.contains("scratch"), "writable root leaked: {shown}");
+        // Non-sensitive discriminants remain for diagnostics.
+        assert!(shown.contains("HardContainmentAuthority"), "{shown}");
+    }
+
+    #[tokio::test]
+    async fn non_qualifying_backends_cannot_mint() {
+        // FailClosed and NoSandbox keep the trait default and structurally
+        // cannot mint.
+        for registry in [
+            SandboxRegistry::new(Arc::new(FailClosedBackend::new())),
+            SandboxRegistry::new(Arc::new(backends::no_sandbox::NoSandboxBackend::new())),
+        ] {
+            let err = registry
+                .establish_hard_containment(&fs_fixture(), &cmd_fixture())
+                .await
+                .expect_err("non-qualifying backend must not mint");
+            assert!(
+                matches!(err, SandboxError::PolicyNotSupported(_)),
+                "{err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bypass_registry_cannot_mint() {
+        use wcore_types::execution_policy::{
+            ApprovalPolicy, BaselineExecutionPolicy, DangerousLaunchRequest, PolicySource,
+            resolve_dangerous_launch,
+        };
+        let baseline =
+            BaselineExecutionPolicy::smart(ApprovalPolicy::Prompt, PolicySource::Default);
+        let grant = resolve_dangerous_launch(
+            &baseline,
+            DangerousLaunchRequest::cli(60, "hard-containment-test"),
+            10_000,
+        )
+        .unwrap();
+        let dangerous = SandboxRegistry::dangerous(&grant);
+        assert!(dangerous.bypasses_containment());
+        let err = dangerous
+            .establish_hard_containment(&fs_fixture(), &cmd_fixture())
+            .await
+            .expect_err("a containment-bypassing runtime must never mint");
+        assert!(matches!(err, SandboxError::UnsafeBypassSource), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn probe_failure_at_every_stage_fails_closed() {
+        // Each stage models a process-tree failure point that must kill the
+        // owned tree and fail closed; the boundary surfaces the fail-closed
+        // error rather than a mint. (The real owned-tree teardown is covered by
+        // the `required_live_*` tests in process_tree.rs.)
+        for stage in [
+            "spawn",
+            "identity",
+            "containment",
+            "cancellation",
+            "timeout",
+            "overflow",
+            "capture",
+            "wait",
+            "descendant-cleanup",
+        ] {
+            let registry = SandboxRegistry::new(Arc::new(FailingProbe { stage }));
+            let err = registry
+                .establish_hard_containment(&fs_fixture(), &cmd_fixture())
+                .await
+                .expect_err("a failed probe stage must fail closed");
+            assert!(
+                matches!(
+                    err,
+                    SandboxError::ExecFailed(_)
+                        | SandboxError::Timeout
+                        | SandboxError::OutputLimitExceeded { .. }
+                ),
+                "stage {stage} produced unexpected error: {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_identity_disagreement_fails_closed() {
+        // A backend whose probe proof disagrees with its cheap identity cannot
+        // mint — the registry cross-checks them.
+        struct Disagree;
+        #[async_trait]
+        impl SandboxBackend for Disagree {
+            async fn execute(
+                &self,
+                _m: &SandboxManifest,
+                _c: SandboxCommand,
+            ) -> Result<SandboxOutput> {
+                unreachable!("execute is never reached for a rejected mint")
+            }
+            fn name(&self) -> &'static str {
+                "disagree"
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn hard_containment_identity(&self) -> Option<HardContainmentIdentity> {
+                Some(HardContainmentIdentity {
+                    mechanism: HardContainmentMechanism::BubblewrapPidNamespace,
+                    executable_identity: "/cheap".to_owned(),
+                    runtime_identity: "runtime:/cheap".to_owned(),
+                    process_tree_mechanism: ProcessTreeMechanism::LinuxPidNamespaceReap,
+                })
+            }
+            async fn probe_hard_containment(
+                &self,
+                _fs: &HardContainmentFilesystem,
+            ) -> Result<HardContainmentProbe> {
+                Ok(HardContainmentProbe {
+                    identity: HardContainmentIdentity {
+                        mechanism: HardContainmentMechanism::DockerContainer,
+                        executable_identity: "/probe".to_owned(),
+                        runtime_identity: "runtime:/probe".to_owned(),
+                        process_tree_mechanism: ProcessTreeMechanism::DockerContainerReap,
+                    },
+                })
+            }
+        }
+        let registry = SandboxRegistry::new(Arc::new(Disagree));
+        let err = registry
+            .establish_hard_containment(&fs_fixture(), &cmd_fixture())
+            .await
+            .expect_err("probe/identity disagreement must fail closed");
+        assert!(err.to_string().contains("disagreed"), "{err}");
     }
 }

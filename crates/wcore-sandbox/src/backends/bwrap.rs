@@ -108,6 +108,59 @@ impl SandboxBackend for BubblewrapBackend {
     ) -> Result<SandboxOutput> {
         self.execute_bound(manifest, cmd, Some(cwd)).await
     }
+
+    fn hard_containment_identity(&self) -> Option<super::HardContainmentIdentity> {
+        // Only a real, resolvable `bwrap` binary qualifies. When bwrap is
+        // absent this is `None`, so the backend is structurally non-qualifying.
+        let path = self.bwrap_path.as_deref()?;
+        Some(super::HardContainmentIdentity {
+            mechanism: super::HardContainmentMechanism::BubblewrapPidNamespace,
+            executable_identity: path.to_owned(),
+            runtime_identity: format!("bubblewrap-pid-namespace:{path}"),
+            process_tree_mechanism:
+                super::process_tree::ProcessTreeMechanism::LinuxPidNamespaceReap,
+        })
+    }
+
+    async fn probe_hard_containment(
+        &self,
+        fs: &crate::manifest::HardContainmentFilesystem,
+    ) -> Result<super::HardContainmentProbe> {
+        // Structural gate: no usable bwrap → cannot establish hard containment.
+        let identity = self.hard_containment_identity().ok_or_else(|| {
+            SandboxError::PolicyNotSupported(
+                "bubblewrap is unavailable for hard containment".into(),
+            )
+        })?;
+
+        // Semantic live probe: actually spawn a PID-namespaced child under the
+        // EXACT normalized policy. `execute_bound` reads the namespaced
+        // child-pid from bwrap's `--info-fd` (failing closed if absent) and owns
+        // the complete tree via `ProcessTreeGuard`, so a probe failure at any
+        // stage (spawn, child-pid read, timeout, output overflow, wait) kills
+        // the owned tree and returns an error here. The probe command is the
+        // benign builtin `true` — NEVER candidate argv — so a failed admission
+        // never runs candidate-controlled code.
+        let manifest = fs.to_manifest();
+        let out = self
+            .execute_bound(
+                &manifest,
+                SandboxCommand {
+                    argv: vec!["true".into()],
+                    cwd: None,
+                },
+                None,
+            )
+            .await?;
+        if out.exit_code != 0 {
+            return Err(SandboxError::ExecFailed(format!(
+                "bubblewrap hard-containment probe exited {}; stderr={}",
+                out.exit_code,
+                String::from_utf8_lossy(&out.stderr)
+            )));
+        }
+        Ok(super::HardContainmentProbe { identity })
+    }
 }
 
 impl BubblewrapBackend {
@@ -785,6 +838,57 @@ mod tests {
             .await
             .expect("required live bwrap admission execution");
         assert_eq!(output.exit_code, 0, "{output:?}");
+    }
+
+    /// Required live acceptance: bubblewrap mints hard containment ONLY after a
+    /// real PID-namespace probe, and the minted authority binds the exact
+    /// backend + normalized policy. Drift in the spawn parameters refuses. Fails
+    /// if bwrap is absent — never skips.
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "bwrap is Linux-only")]
+    async fn required_live_bwrap_hard_containment_mint_and_drift() {
+        let backend = BubblewrapBackend::new();
+        assert!(
+            backend.is_available(),
+            "required live bwrap must be installed and usable"
+        );
+        // A cheap identity is available and names the PID-namespace mechanism.
+        let identity = backend
+            .hard_containment_identity()
+            .expect("bwrap must offer a hard-containment identity");
+        assert_eq!(
+            identity.mechanism,
+            crate::HardContainmentMechanism::BubblewrapPidNamespace
+        );
+
+        // Candidate/roots must be outside global temp/home; place them on a
+        // synthetic absolute tree (existence is not required — bwrap binds them
+        // with `-try` semantics and skips the missing sources).
+        let fs = crate::manifest::HardContainmentFilesystem::new(
+            std::path::PathBuf::from("/srv/wl-hard/candidate"),
+            vec![std::path::PathBuf::from("/srv/wl-hard/scratch")],
+        )
+        .expect("policy validates");
+
+        let registry = crate::SandboxRegistry::new(std::sync::Arc::new(BubblewrapBackend::new()));
+        let cmd = SandboxCommand {
+            argv: vec!["/bin/echo".into(), "hi".into()],
+            cwd: None,
+        };
+        let authority = registry
+            .establish_hard_containment(&fs, &cmd)
+            .await
+            .expect("live bwrap PID-namespace probe must mint hard containment");
+
+        // Drifted argv is refused (fail closed) — this authority is one-use.
+        let drifted = SandboxCommand {
+            argv: vec!["/bin/echo".into(), "TAMPERED".into()],
+            cwd: None,
+        };
+        let err = registry
+            .verify_hard_containment(authority, &fs, &drifted)
+            .expect_err("spawn-parameter drift must refuse");
+        assert!(matches!(err, SandboxError::ExecFailed(_)), "{err:?}");
     }
 
     /// Required live acceptance: `execute_with_cwd_authority` binds the retained

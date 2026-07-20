@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::error::Result;
-use crate::manifest::SandboxManifest;
+use crate::manifest::{HardContainmentFilesystem, SandboxManifest};
 use crate::{
     DirectoryAuthority, RetainedWorkspaceAuthority, SandboxChunk, SandboxCommand, SandboxOutput,
 };
@@ -118,6 +118,82 @@ pub(crate) async fn wait_with_bounded_output_on_exit(
             on_exit.take().expect("exit callback runs once")();
             Ok(BoundedChildOutput { status, stdout, stderr })
         }
+    }
+}
+
+/// The concrete OS mechanism a backend proves it will use for hard
+/// containment.
+///
+/// There is deliberately NO variant for `sandbox-exec`, a bare process group,
+/// the no-sandbox / Dangerous runtime, or a stub: those cannot appear here
+/// because only the three qualifying backends ever construct a
+/// [`HardContainmentIdentity`] (whose fields are crate-private), and only after
+/// a successful live probe of the exact mechanism named below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // per-target: not every variant is constructed on every OS/feature build.
+pub enum HardContainmentMechanism {
+    /// Bubblewrap running the child in its own PID namespace (Linux).
+    BubblewrapPidNamespace,
+    /// A Docker container with the daemon owning the process tree (Linux).
+    DockerContainer,
+    /// A Windows AppContainer child governed by a kill-on-close Job Object.
+    WindowsAppContainerJobObject,
+}
+
+/// Stable, cheap-to-recompute identity of a backend's hard-containment
+/// mechanism.
+///
+/// The fields are `pub(crate)` on purpose: this is the structural seal. An
+/// external crate can implement [`SandboxBackend`] but cannot construct a
+/// `HardContainmentIdentity` (or a [`HardContainmentProbe`]), so no foreign,
+/// spoofed, or non-qualifying backend can ever produce the value the registry
+/// needs to mint a [`crate::HardContainmentAuthority`]. Only the in-crate
+/// bubblewrap / docker / AppContainer backends build one.
+#[derive(Clone, PartialEq, Eq)]
+pub struct HardContainmentIdentity {
+    pub(crate) mechanism: HardContainmentMechanism,
+    /// Identity of the executable/runtime that will host the child (e.g. the
+    /// resolved `bwrap` path, or the Docker image reference).
+    pub(crate) executable_identity: String,
+    /// Identity of the runtime endpoint (e.g. the bwrap mechanism tag, or the
+    /// Docker daemon endpoint). Stable across mint and spawn.
+    pub(crate) runtime_identity: String,
+    /// The process-tree mechanism that will own and reap the child's whole
+    /// tree. An ordinary process group is not representable here.
+    pub(crate) process_tree_mechanism: process_tree::ProcessTreeMechanism,
+}
+
+/// Proof that a backend performed a successful semantic LIVE probe of its exact
+/// hard-containment mechanism under the caller's normalized policy.
+///
+/// Returned only by [`SandboxBackend::probe_hard_containment`] and consumed only
+/// by the registry when minting a [`crate::HardContainmentAuthority`]. Like
+/// [`HardContainmentIdentity`], its field is crate-private so it cannot be
+/// forged from outside the crate.
+pub struct HardContainmentProbe {
+    pub(crate) identity: HardContainmentIdentity,
+}
+
+impl std::fmt::Debug for HardContainmentIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redacted: executable_identity / runtime_identity are the resolved
+        // backend paths/endpoints of a contained execution. Only the mechanism
+        // discriminants are shown.
+        f.debug_struct("HardContainmentIdentity")
+            .field("mechanism", &self.mechanism)
+            .field("process_tree_mechanism", &self.process_tree_mechanism)
+            .field("executable_identity", &"<redacted>")
+            .field("runtime_identity", &"<redacted>")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for HardContainmentProbe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Delegates to the redacted HardContainmentIdentity Debug.
+        f.debug_struct("HardContainmentProbe")
+            .field("identity", &self.identity)
+            .finish()
     }
 }
 
@@ -271,6 +347,45 @@ pub trait SandboxBackend: Send + Sync + 'static {
     /// checkout directly.
     fn binds_workspace_authority(&self) -> bool {
         self.binds_cwd_authority()
+    }
+
+    /// The backend's stable hard-containment identity, or `None` when this
+    /// backend can NEVER provide hard containment.
+    ///
+    /// The default is `None`. A backend qualifies ONLY by overriding this to
+    /// return a [`HardContainmentIdentity`] — which it can construct solely
+    /// because the struct's fields are crate-private. `sandbox-exec`, the
+    /// no-sandbox / Dangerous runtime, the fail-closed backend, every stub, and
+    /// every external backend keep this default and are therefore structurally
+    /// incapable of minting hard containment, not merely refused at runtime.
+    ///
+    /// This is a CHEAP identity check (no spawn); it is what the authority
+    /// re-derives at spawn to detect executable / runtime / mechanism drift.
+    fn hard_containment_identity(&self) -> Option<HardContainmentIdentity> {
+        None
+    }
+
+    /// Run a semantic LIVE probe of this backend's exact hard-containment
+    /// mechanism under `fs`'s normalized policy, returning proof on success.
+    ///
+    /// The probe MUST exercise the real isolation mechanism (spawn a namespaced
+    /// / containerized / job-object child) on a BENIGN internal command — never
+    /// candidate-controlled argv, so a failed admission never runs attacker
+    /// code. On ANY failure (spawn, identity, containment, timeout, output
+    /// overflow, capture/wait, descendant cleanup) the backend MUST kill the
+    /// complete owned process tree and return an error (fail closed).
+    ///
+    /// The default fails closed with `PolicyNotSupported`: a non-qualifying
+    /// backend cannot probe, and — because it cannot construct a
+    /// [`HardContainmentProbe`] — cannot fabricate a success either.
+    async fn probe_hard_containment(
+        &self,
+        _fs: &HardContainmentFilesystem,
+    ) -> Result<HardContainmentProbe> {
+        Err(crate::SandboxError::PolicyNotSupported(format!(
+            "sandbox backend {} cannot establish hard containment",
+            self.name()
+        )))
     }
 
     /// True if this backend cannot run PowerShell (`powershell.exe` / `pwsh.exe`).
