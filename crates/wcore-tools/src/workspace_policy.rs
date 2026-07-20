@@ -157,6 +157,12 @@ pub enum DelegatedWorkspacePolicyError {
     AuthorityOverlap(PathBuf),
 }
 
+/// Map a retained-authority failure while materializing the private scratch
+/// subdirectories into the delegated-workspace error surface.
+fn delegated_scratch_error(error: wcore_sandbox::SandboxError) -> DelegatedWorkspacePolicyError {
+    DelegatedWorkspacePolicyError::Resolve(std::io::Error::other(error.to_string()))
+}
+
 impl WorkspacePolicy {
     /// Local/desktop session on the user's own machine. Roots the sandbox
     /// at `workspace`, allows the workspace + user toolchains/caches so
@@ -318,6 +324,27 @@ impl WorkspacePolicy {
                 scratch.join("tmp").to_string_lossy().into_owned(),
             )
         }));
+
+        // The delegated child's TMPDIR/TMP/TEMP and tool caches resolve UNDER
+        // the private scratch root; those subdirectories must exist and be
+        // usable. Materialize them through the retained scratch authority
+        // (owner-relative openat/mkdirat, never a raw absolute-path reopen) so
+        // legitimate mutation into the private scratch cannot fail with ENOENT.
+        // Only paths already inside the writable scratch grant are created; the
+        // parent/global-temp/symlink/secret denials are unaffected.
+        let scratch_authority =
+            wcore_sandbox::DirectoryAuthority::open(&scratch).map_err(delegated_scratch_error)?;
+        scratch_authority
+            .open_or_create_child_directory("tmp")
+            .map_err(delegated_scratch_error)?;
+        let cache_root = scratch_authority
+            .open_or_create_child_directory("cache")
+            .map_err(delegated_scratch_error)?;
+        for (_, sub) in CACHE_ENV_DIRS {
+            cache_root
+                .open_or_create_child_directory(sub)
+                .map_err(delegated_scratch_error)?;
+        }
 
         Ok(Self {
             root: checkout,

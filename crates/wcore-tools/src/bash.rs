@@ -1,8 +1,7 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use regex::RegexSet;
 use serde_json::{Value, json};
 
 use wcore_config::shell::bash_shell_argv_prefix;

@@ -278,7 +278,11 @@ async fn delegated_mutation_refuses_scratch_identity_substitution_before_spawn()
         )
         .unwrap(),
     );
-    std::fs::remove_dir(&scratch).unwrap();
+    // The delegated_mutation constructor now materializes the private scratch
+    // tmp/cache subtree (owner-relative, so TMPDIR/caches exist for the child),
+    // so the scratch root is no longer empty. Remove it wholesale before
+    // swapping in the identity-substituting symlink this test exercises.
+    std::fs::remove_dir_all(&scratch).unwrap();
     symlink(parent.path(), &scratch).unwrap();
     let backend = Arc::new(CapturingBackend::default());
     let ctx = ToolContext::test_default()
