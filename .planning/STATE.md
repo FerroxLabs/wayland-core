@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 20
 current_phase_name: transactional-delegated-mutation
 status: executing
-stopped_at: Plan 20-03 (isolated mutation substrate) executed, Linux-proven, and SUMMARY recorded at source d343fc72. Plan 20-15 fresh non-author independent review completed with a ZERO-FINDING PASS (review c2e4d59; verify-review-pair + verify-review-result f20-15 both green), admitting plan 20-04. The 20-15 review caught and drove repair of a HIGH (detached-Drop cleanup defeating the checkout-loan quarantine) before admission. Next boundary: plan 20-04.
-last_updated: "2026-07-20T10:08:59.960Z"
+stopped_at: Plans 20-03, 20-15, and 20-04 complete. 20-04 wired the isolation substrate through the production spawner (bootstrap/engine/Spawn-tool/durable), Linux-proven at source 30a2b4f (clippy -D warnings, spawner lib 68 passed, workflow_live_gate_test 12 passed). The remote runtime gate caught two real bugs (unbound transient spawner in non-contained sessions; a .wayland-control off-by-one in the workspace quota) that compile+clippy could not. Next boundary: plan 20-06 (20-06A candidate-seal packet), which depends directly on 20-04.
+last_updated: "2026-07-20T11:36:07.112Z"
 last_activity: 2026-07-20
-last_activity_desc: Plan 20-15 independent review PASS (zero findings) admits 20-04; the review caught+repaired a HIGH cleanup defect in 20-03 (new source d343fc72), re-proven green
+last_activity_desc: Plan 20-04 production spawner wiring complete and Linux-proven at source 30a2b4f; runtime gate caught+fixed 2 real bugs. Next: plan 20-06.
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 18
-  completed_plans: 4
+  completed_plans: 5
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: `.planning/PROJECT.md` (updated 2026-07-19)
 ## Current Position
 
 Phase: 20 (transactional-delegated-mutation) — EXECUTING
-Plan: 5 of 18 (next: 20-04)
+Plan: 6 of 18 (next: 20-06)
 Status: Executing Phase 20
-Last activity: 2026-07-20 — Plan 20-03 executed and Linux-proven; SUMMARY recorded; awaiting 20-15 review
+Last activity: 2026-07-20 — Plan 20-04 production spawner wiring complete and Linux-proven (source 30a2b4f); next plan 20-06
 
-Progress: [██░░░░░░░░] 22%
+Progress: [███░░░░░░░] 28%
 
 ## Execution Authority
 
@@ -49,7 +49,7 @@ Progress: [██░░░░░░░░] 22%
 
 **Velocity:**
 
-- Total plans completed: 4
+- Total plans completed: 5
 - Average duration: Not established
 - Total execution time: Not established
 
@@ -85,5 +85,5 @@ Progress: [██░░░░░░░░] 22%
 ## Session Continuity
 
 Last session: 2026-07-20
-Stopped at: Plans 20-03 and 20-15 complete. 20-03 isolated mutation substrate on pinned-rustfmt-clean base `fda8ba1`, Linux-proven at source `d343fc72`. 20-15 fresh non-author review = ZERO-FINDING PASS (review c2e4d59), admitting 20-04. The 3-lens parallel review + focused re-review caught and drove repair of a HIGH (detached-Drop cleanup defeating the checkout-loan quarantine) and disposed a non-blocking Unix/Windows primitive-parity observation. Next: execute plan 20-04 (dependency order 04,06,09,10,11,12,13,14,05,07,08,16,17,18; Sean hard-stop at 20-18).
+Stopped at: Plans 20-03, 20-15, 20-04 complete (Linux-proven). 20-03 substrate (source d343fc72), 20-15 review ZERO-FINDING PASS (caught+repaired a HIGH), 20-04 production spawner wiring (source 30a2b4f; runtime gate caught+fixed 2 real bugs). Next: plan 20-06 (20-06A candidate-seal packet, depends on 20-04), then dependency order 06,09,10,11,12,13,14,05,07,08,16,17,18; review gates at 09/11/16 + audit 14; Sean hard-stop at 20-18.
 Resume file: None
