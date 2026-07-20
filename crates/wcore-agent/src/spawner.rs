@@ -1,10 +1,15 @@
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::ffi::OsString;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use async_trait::async_trait;
 
 use wcore_config::config::Config;
 use wcore_protocol::events::WorkflowChildTerminalState;
 use wcore_providers::LlmProvider;
+use wcore_swarm::worktree::WorktreeManager;
 use wcore_swarm::{
     AgentReport, BlackboardCtx, DEFAULT_SHARD_SIZE, FleetDispatcher, FleetReducer, MeshAgent,
     ShardSummary,
@@ -15,6 +20,8 @@ use wcore_tools::glob::GlobTool;
 use wcore_tools::grep::GrepTool;
 use wcore_tools::read::ReadTool;
 use wcore_tools::registry::ToolRegistry;
+use wcore_tools::vfs::{RealFs, SandboxedFs, SecretDenyFs};
+use wcore_tools::workspace_policy::WorkspacePolicy;
 use wcore_tools::write::WriteTool;
 use wcore_types::execution_policy::EffectiveExecutionPolicy;
 use wcore_types::message::{FinishReason, TokenUsage};
@@ -78,11 +85,25 @@ struct ResolvedProvider {
     model: Option<String>,
 }
 
+struct PreResolvedChildLaunch {
+    request: SubAgentConfig,
+    overrides: ForkOverrides,
+    provider: Arc<dyn LlmProvider>,
+    provider_id: String,
+    model: String,
+    config: Config,
+    policy: ChildPolicySnapshot,
+    requested_workspace: RequestedChildWorkspace,
+    authority: DurableAuthorityToken,
+    parent_cancel: tokio_util::sync::CancellationToken,
+}
+
 /// Fully resolved execution inputs for one durable child launch.
 ///
 /// The provider and child config are selected once. Durable declaration and
 /// execution consume this value rather than re-reading mutable session state.
 pub struct ResolvedChildLaunch {
+    child_id: ChildId,
     request: SubAgentConfig,
     overrides: ForkOverrides,
     provider: Arc<dyn LlmProvider>,
@@ -92,11 +113,18 @@ pub struct ResolvedChildLaunch {
     policy: ChildPolicySnapshot,
     requested_workspace: RequestedChildWorkspace,
     workspace: ChildWorkspace,
+    workspace_root: PathBuf,
+    authority_read_deny: Vec<PathBuf>,
     authority: DurableAuthorityToken,
     parent_cancel: tokio_util::sync::CancellationToken,
 }
 
 impl ResolvedChildLaunch {
+    #[must_use]
+    pub fn child_id(&self) -> &ChildId {
+        &self.child_id
+    }
+
     #[must_use]
     pub fn provider(&self) -> Arc<dyn LlmProvider> {
         Arc::clone(&self.provider)
@@ -134,12 +162,22 @@ impl ResolvedChildLaunch {
         &self.workspace
     }
 
+    /// Canonical execution root. It is intentionally excluded from durable
+    /// records because host paths can contain user and repository names.
+    #[must_use]
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
     #[must_use]
     pub fn authority(&self) -> &DurableAuthorityToken {
         &self.authority
     }
 
     pub fn validate_record(&self, record: &DurableChildRecord) -> Result<(), DurableSpawnerError> {
+        if record.child_id != self.child_id {
+            return Err(DurableSpawnerError::EvidenceMismatch("child identity"));
+        }
         if record.parent.session_id != self.authority.session_id() {
             return Err(DurableSpawnerError::EvidenceMismatch("parent session"));
         }
@@ -168,8 +206,6 @@ impl ResolvedChildLaunch {
         origin: ChildOrigin,
         parent_call_id: Option<String>,
     ) -> Result<DurableChildRecord, DurableSpawnerError> {
-        let child_id = ChildId::new(format!("child-{}", uuid::Uuid::new_v4().simple()))
-            .map_err(|_| DurableSpawnerError::EvidenceMismatch("child identity"))?;
         let now = crate::durable_spawner::now_unix_ms()?;
         Ok(DurableChildRecord {
             schema_version: DURABLE_CHILD_SCHEMA_VERSION,
@@ -191,7 +227,7 @@ impl ResolvedChildLaunch {
             provider: Some(self.provider_id.clone()),
             model: Some(self.model.clone()),
             workspace: self.workspace.clone(),
-            child_id,
+            child_id: self.child_id.clone(),
             status: DurableChildStatus::Prepared,
             desired_state: ChildDesiredState::Run,
             recovery: ChildRecoveryState::Clean,
@@ -249,25 +285,228 @@ fn child_policy_snapshot(
     })
 }
 
-fn default_child_workspace(
-    requested: RequestedChildWorkspace,
-) -> Result<ChildWorkspace, DurableSpawnerError> {
-    let cwd = std::env::current_dir()
-        .map_err(|_| DurableSpawnerError::EvidenceMismatch("child workspace"))?;
+fn allocate_child_id() -> Result<ChildId, DurableSpawnerError> {
+    ChildId::new(format!("child-{}", uuid::Uuid::new_v4().simple()))
+        .map_err(|_| DurableSpawnerError::EvidenceMismatch("child identity"))
+}
+
+fn shared_child_workspace(parent: &Path) -> Result<ChildWorkspace, DurableSpawnerError> {
     let workspace_digest = crate::session_journal::state_payload_digest(&serde_json::json!({
-        "cwd": cwd.to_string_lossy(),
+        "workspace": parent.to_string_lossy(),
     }))?;
-    let (mode, prefix) = match requested {
-        RequestedChildWorkspace::SharedReadOnly => (ChildWorkspaceMode::SharedReadOnly, "shared"),
-        // Until the workspace-binding slice supplies an isolated workspace,
-        // mutating legacy launches execute in the externally managed cwd. Do
-        // not claim isolation that has not been realized.
-        RequestedChildWorkspace::IsolatedMutation => (ChildWorkspaceMode::External, "external"),
-    };
     Ok(ChildWorkspace {
-        mode,
-        workspace_id: format!("{prefix}-{workspace_digest}"),
+        mode: ChildWorkspaceMode::SharedReadOnly,
+        workspace_id: format!("shared-{workspace_digest}"),
     })
+}
+
+fn write_workspace_preparation_lease(
+    control_root: &Path,
+    child_id: &ChildId,
+    checkout_root: &Path,
+    pinned_head: &str,
+) -> Result<(), DurableSpawnerError> {
+    let leases = control_root.join("leases");
+    std::fs::create_dir_all(&leases).map_err(|error| {
+        DurableSpawnerError::WorkspacePreparation(format!(
+            "could not create workspace lease directory: {error}"
+        ))
+    })?;
+    make_private_directory(control_root)?;
+    make_private_directory(&leases)?;
+    let final_path = leases.join(format!("{}.json", child_id.as_str()));
+    let mut temporary = tempfile::NamedTempFile::new_in(&leases).map_err(|error| {
+        DurableSpawnerError::WorkspacePreparation(format!(
+            "could not create workspace preparation lease: {error}"
+        ))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        temporary
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| {
+                DurableSpawnerError::WorkspacePreparation(format!(
+                    "could not protect workspace preparation lease: {error}"
+                ))
+            })?;
+    }
+    serde_json::to_writer(
+        temporary.as_file_mut(),
+        &serde_json::json!({
+            "schema": "wayland-child-workspace-lease/v1",
+            "child_id": child_id.as_str(),
+            "workspace_id": format!("isolated-{}", child_id.as_str()),
+            "checkout_root": checkout_root,
+            "pinned_head": pinned_head,
+            "state": "preparing"
+        }),
+    )
+    .map_err(|error| {
+        DurableSpawnerError::WorkspacePreparation(format!(
+            "could not encode workspace preparation lease: {error}"
+        ))
+    })?;
+    temporary.flush().map_err(|error| {
+        DurableSpawnerError::WorkspacePreparation(format!(
+            "could not flush workspace preparation lease: {error}"
+        ))
+    })?;
+    temporary.as_file().sync_all().map_err(|error| {
+        DurableSpawnerError::WorkspacePreparation(format!(
+            "could not sync workspace preparation lease: {error}"
+        ))
+    })?;
+    temporary.persist_noclobber(&final_path).map_err(|error| {
+        DurableSpawnerError::WorkspacePreparation(format!(
+            "workspace preparation lease {} already exists or could not be persisted: {}",
+            final_path.display(),
+            error.error
+        ))
+    })?;
+    sync_directory(&leases)?;
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<(), DurableSpawnerError> {
+    #[cfg(unix)]
+    std::fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            DurableSpawnerError::WorkspacePreparation(format!(
+                "could not sync workspace lease directory: {error}"
+            ))
+        })?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn make_private_directory(path: &Path) -> Result<(), DurableSpawnerError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| {
+                DurableSpawnerError::WorkspacePreparation(format!(
+                    "could not protect orchestrator workspace state: {error}"
+                ))
+            },
+        )?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+struct PreparedChildWorkspace {
+    evidence: ChildWorkspace,
+    root: PathBuf,
+    authority_read_deny: Vec<PathBuf>,
+}
+
+type WorkspaceAdmissionGate = tokio::sync::Mutex<()>;
+
+fn workspace_admission_gate(
+    control_root: &Path,
+) -> Result<Arc<WorkspaceAdmissionGate>, DurableSpawnerError> {
+    static GATES: OnceLock<
+        Mutex<std::collections::HashMap<PathBuf, Weak<WorkspaceAdmissionGate>>>,
+    > = OnceLock::new();
+    let mut gates = GATES
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .map_err(|_| {
+            DurableSpawnerError::WorkspacePreparation(
+                "workspace admission registry is unavailable".to_owned(),
+            )
+        })?;
+    gates.retain(|_, gate| gate.strong_count() > 0);
+    if let Some(gate) = gates.get(control_root).and_then(Weak::upgrade) {
+        return Ok(gate);
+    }
+    let gate = Arc::new(WorkspaceAdmissionGate::new(()));
+    gates.insert(control_root.to_path_buf(), Arc::downgrade(&gate));
+    Ok(gate)
+}
+
+fn retained_workspace_allocation_count(
+    leases: &Path,
+    checkouts: &Path,
+    stop_after: usize,
+) -> Result<usize, DurableSpawnerError> {
+    let mut identities = HashSet::<OsString>::new();
+    if leases.exists() {
+        for entry in std::fs::read_dir(leases).map_err(|error| {
+            DurableSpawnerError::WorkspacePreparation(format!(
+                "could not enumerate workspace leases: {error}"
+            ))
+        })? {
+            let entry = entry.map_err(|error| {
+                DurableSpawnerError::WorkspacePreparation(format!(
+                    "could not inspect workspace lease: {error}"
+                ))
+            })?;
+            let metadata = std::fs::symlink_metadata(entry.path()).map_err(|error| {
+                DurableSpawnerError::WorkspacePreparation(format!(
+                    "could not inspect workspace lease metadata: {error}"
+                ))
+            })?;
+            if !metadata.file_type().is_file()
+                || entry.path().extension().and_then(|v| v.to_str()) != Some("json")
+            {
+                return Err(DurableSpawnerError::WorkspacePreparation(format!(
+                    "refused unsafe workspace lease entry: {}",
+                    entry.path().display()
+                )));
+            }
+            let identity = entry
+                .path()
+                .file_stem()
+                .map(OsString::from)
+                .ok_or_else(|| {
+                    DurableSpawnerError::WorkspacePreparation(
+                        "workspace lease has no child identity".to_owned(),
+                    )
+                })?;
+            identities.insert(identity);
+            if identities.len() > stop_after {
+                return Ok(identities.len());
+            }
+        }
+    }
+    if checkouts.exists() {
+        for entry in std::fs::read_dir(checkouts).map_err(|error| {
+            DurableSpawnerError::WorkspacePreparation(format!(
+                "could not enumerate delegated checkouts: {error}"
+            ))
+        })? {
+            let entry = entry.map_err(|error| {
+                DurableSpawnerError::WorkspacePreparation(format!(
+                    "could not inspect delegated checkout: {error}"
+                ))
+            })?;
+            let metadata = std::fs::symlink_metadata(entry.path()).map_err(|error| {
+                DurableSpawnerError::WorkspacePreparation(format!(
+                    "could not inspect delegated checkout metadata: {error}"
+                ))
+            })?;
+            if !metadata.file_type().is_dir() {
+                return Err(DurableSpawnerError::WorkspacePreparation(format!(
+                    "refused unsafe delegated checkout entry: {}",
+                    entry.path().display()
+                )));
+            }
+            identities.insert(entry.file_name());
+            if identities.len() > stop_after {
+                return Ok(identities.len());
+            }
+        }
+    }
+    Ok(identities.len())
 }
 
 /// #661 (fail-loud) — build a [`SubAgentResult`] from a sub-agent's terminal
@@ -444,6 +683,10 @@ pub struct AgentSpawner {
     /// receives this exact `Arc`; spawning must never re-read process-global
     /// sandbox settings or select a different backend mid-session.
     sandbox_runtime: Arc<wcore_sandbox::SandboxRegistry>,
+    /// Canonical parent workspace supplied by Bootstrap. Process-global cwd is
+    /// never session authority: parallel sessions and child execution may
+    /// legitimately have different roots in the same process.
+    parent_workspace: Option<Arc<PathBuf>>,
     /// Immutable outbound-network authority inherited from the parent session.
     /// Child engines must never fall back to a process-global compatibility
     /// policy after the bootstrap task-local scope has exited.
@@ -588,6 +831,7 @@ impl AgentSpawner {
             provider,
             base_config: config,
             sandbox_runtime,
+            parent_workspace: None,
             egress_policy: wcore_egress::default_policy(),
             approval_manager: None,
             bus: None,
@@ -669,6 +913,25 @@ impl AgentSpawner {
         self
     }
 
+    /// Bind the canonical parent workspace selected by Bootstrap.
+    pub fn with_parent_workspace(
+        mut self,
+        workspace: impl AsRef<Path>,
+    ) -> Result<Self, DurableSpawnerError> {
+        let workspace = std::fs::canonicalize(workspace.as_ref()).map_err(|error| {
+            DurableSpawnerError::WorkspacePreparation(format!(
+                "parent workspace is unavailable: {error}"
+            ))
+        })?;
+        if !workspace.is_dir() {
+            return Err(DurableSpawnerError::WorkspacePreparation(
+                "parent workspace is not a directory".to_owned(),
+            ));
+        }
+        self.parent_workspace = Some(Arc::new(workspace));
+        Ok(self)
+    }
+
     /// Bind every spawned child engine to the parent's session-owned egress
     /// policy, including children created after bootstrap has returned.
     pub fn with_egress_policy(mut self, policy: wcore_egress::SharedPolicy) -> Self {
@@ -690,8 +953,14 @@ impl AgentSpawner {
         &self.sandbox_runtime
     }
 
-    fn child_tool_registry(&self, allowed: &[String]) -> ToolRegistry {
-        build_tool_registry(allowed, Arc::clone(&self.sandbox_runtime))
+    fn child_tool_registry(&self, launch: &ResolvedChildLaunch) -> ToolRegistry {
+        build_tool_registry(
+            &launch.overrides.allowed_tools,
+            launch.requested_workspace,
+            launch.workspace_root(),
+            &launch.authority_read_deny,
+            Arc::clone(&self.sandbox_runtime),
+        )
     }
 
     /// Bind the spawner to the parent engine's cancellation token so a host
@@ -974,26 +1243,127 @@ impl AgentSpawner {
         request: SubAgentConfig,
         overrides: ForkOverrides,
     ) -> Result<ResolvedChildLaunch, DurableSpawnerError> {
-        let requested_workspace = overrides.requested_workspace();
-        let workspace = default_child_workspace(requested_workspace)?;
-        self.resolve_durable_launch_in_workspace(request, overrides, workspace)
+        let pre_resolved = self.pre_resolve_durable_launch(request, overrides)?;
+        let requested_workspace = pre_resolved.requested_workspace;
+        if requested_workspace != RequestedChildWorkspace::SharedReadOnly {
+            return Err(DurableSpawnerError::WorkspacePreparation(
+                "mutating children require asynchronous isolated-workspace preparation".to_owned(),
+            ));
+        }
+        let parent = self.parent_workspace.as_ref().ok_or_else(|| {
+            DurableSpawnerError::WorkspacePreparation(
+                "parent workspace authority is not bound".to_owned(),
+            )
+        })?;
+        let workspace = shared_child_workspace(parent)?;
+        let child_id = allocate_child_id()?;
+        self.resolve_durable_launch_in_workspace(
+            pre_resolved,
+            child_id,
+            workspace,
+            parent.as_ref().clone(),
+            Vec::new(),
+        )
     }
 
     /// Resolve a child against a workspace already created by a binding layer.
     /// The supplied value is realized execution evidence, not a request. A
     /// mutating request can therefore never be recorded as shared read-only.
-    pub fn resolve_durable_launch_in_workspace(
+    fn resolve_durable_launch_in_workspace(
         &self,
-        request: SubAgentConfig,
-        overrides: ForkOverrides,
+        pre_resolved: PreResolvedChildLaunch,
+        child_id: ChildId,
         workspace: ChildWorkspace,
+        workspace_root: PathBuf,
+        authority_read_deny: Vec<PathBuf>,
     ) -> Result<ResolvedChildLaunch, DurableSpawnerError> {
-        let parent_cancel = self.active_cancel_token();
-        let authority = self.durable_authority.token()?;
-        let requested_workspace = overrides.requested_workspace();
+        let requested_workspace = pre_resolved.requested_workspace;
         if !requested_workspace.permits(workspace.mode) {
             return Err(DurableSpawnerError::EvidenceMismatch(
                 "workspace does not satisfy requested authority",
+            ));
+        }
+        let workspace_root = std::fs::canonicalize(&workspace_root).map_err(|_| {
+            DurableSpawnerError::EvidenceMismatch("workspace root is not canonical")
+        })?;
+        let parent = self.parent_workspace.as_ref().ok_or_else(|| {
+            DurableSpawnerError::WorkspacePreparation(
+                "parent workspace authority is not bound".to_owned(),
+            )
+        })?;
+        match workspace.mode {
+            ChildWorkspaceMode::SharedReadOnly => {
+                if workspace_root != **parent
+                    || workspace != shared_child_workspace(parent)?
+                    || !authority_read_deny.is_empty()
+                {
+                    return Err(DurableSpawnerError::EvidenceMismatch(
+                        "shared workspace evidence",
+                    ));
+                }
+            }
+            ChildWorkspaceMode::Isolated => {
+                let expected_id = format!("isolated-{}", child_id.as_str());
+                let session_root = std::fs::canonicalize(&self.base_config.session.directory)
+                    .map_err(|_| DurableSpawnerError::EvidenceMismatch("workspace session root"))?;
+                let expected_root = session_root
+                    .join("delegated-workspaces")
+                    .join("checkouts")
+                    .join(child_id.as_str());
+                if workspace.workspace_id != expected_id || workspace_root != expected_root {
+                    return Err(DurableSpawnerError::EvidenceMismatch(
+                        "isolated workspace identity or root",
+                    ));
+                }
+                if !authority_read_deny
+                    .iter()
+                    .any(|path| path == parent.as_ref())
+                    || authority_read_deny.iter().any(|path| {
+                        workspace_root.starts_with(path) || path.starts_with(&workspace_root)
+                    })
+                {
+                    return Err(DurableSpawnerError::EvidenceMismatch(
+                        "isolated workspace authority deny roots",
+                    ));
+                }
+            }
+            ChildWorkspaceMode::External => {
+                return Err(DurableSpawnerError::EvidenceMismatch(
+                    "external workspace is not transactional isolation",
+                ));
+            }
+        }
+        Ok(ResolvedChildLaunch {
+            child_id,
+            request: pre_resolved.request,
+            overrides: pre_resolved.overrides,
+            provider: pre_resolved.provider,
+            provider_id: pre_resolved.provider_id,
+            model: pre_resolved.model,
+            config: pre_resolved.config,
+            policy: pre_resolved.policy,
+            requested_workspace,
+            workspace,
+            workspace_root,
+            authority_read_deny,
+            authority: pre_resolved.authority,
+            parent_cancel: pre_resolved.parent_cancel,
+        })
+    }
+
+    fn pre_resolve_durable_launch(
+        &self,
+        request: SubAgentConfig,
+        overrides: ForkOverrides,
+    ) -> Result<PreResolvedChildLaunch, DurableSpawnerError> {
+        let parent_cancel = self.active_cancel_token();
+        let authority = self.durable_authority.token()?;
+        let requested_workspace = overrides.requested_workspace();
+        if requested_workspace == RequestedChildWorkspace::IsolatedMutation
+            && self.sandbox_runtime.bypasses_containment()
+        {
+            return Err(DurableSpawnerError::WorkspacePreparation(
+                "transactional child isolation requires an enforcing sandbox backend".to_owned(),
             ));
         }
         let ResolvedProvider {
@@ -1021,7 +1391,7 @@ impl AgentSpawner {
             .effective_policy
             .with_runtime_approvals(config.smart_approval_policy());
         let policy = child_policy_snapshot(&runtime_policy)?;
-        Ok(ResolvedChildLaunch {
+        Ok(PreResolvedChildLaunch {
             request,
             overrides,
             provider,
@@ -1030,10 +1400,122 @@ impl AgentSpawner {
             config,
             policy,
             requested_workspace,
-            workspace,
             authority,
             parent_cancel,
         })
+    }
+
+    /// Allocate identity, prepare the realized workspace, and only then
+    /// return a launch eligible for durable declaration.
+    async fn prepare_durable_launch(
+        &self,
+        request: SubAgentConfig,
+        overrides: ForkOverrides,
+    ) -> Result<ResolvedChildLaunch, DurableSpawnerError> {
+        let pre_resolved = self.pre_resolve_durable_launch(request, overrides)?;
+        let child_id = allocate_child_id()?;
+        let prepared = self
+            .prepare_child_workspace(&child_id, pre_resolved.requested_workspace)
+            .await?;
+        self.resolve_durable_launch_in_workspace(
+            pre_resolved,
+            child_id,
+            prepared.evidence,
+            prepared.root,
+            prepared.authority_read_deny,
+        )
+    }
+
+    async fn prepare_child_workspace(
+        &self,
+        child_id: &ChildId,
+        requested: RequestedChildWorkspace,
+    ) -> Result<PreparedChildWorkspace, DurableSpawnerError> {
+        let parent = self.parent_workspace.as_ref().ok_or_else(|| {
+            DurableSpawnerError::WorkspacePreparation(
+                "parent workspace authority is not bound".to_owned(),
+            )
+        })?;
+        match requested {
+            RequestedChildWorkspace::SharedReadOnly => Ok(PreparedChildWorkspace {
+                evidence: shared_child_workspace(parent)?,
+                root: parent.as_ref().clone(),
+                authority_read_deny: Vec::new(),
+            }),
+            RequestedChildWorkspace::IsolatedMutation => {
+                let session_root = PathBuf::from(&self.base_config.session.directory);
+                if !session_root.is_absolute() {
+                    return Err(DurableSpawnerError::WorkspacePreparation(
+                        "session directory must be absolute for delegated workspace retention"
+                            .to_owned(),
+                    ));
+                }
+                std::fs::create_dir_all(&session_root).map_err(|error| {
+                    DurableSpawnerError::WorkspacePreparation(format!(
+                        "could not create session state root: {error}"
+                    ))
+                })?;
+                let session_root = std::fs::canonicalize(&session_root).map_err(|error| {
+                    DurableSpawnerError::WorkspacePreparation(format!(
+                        "could not resolve session state root: {error}"
+                    ))
+                })?;
+                let control_root = session_root.join("delegated-workspaces");
+                let checkouts = control_root.join("checkouts");
+                let manager = WorktreeManager::new_with_workspace_root(parent, &checkouts)
+                    .map_err(|error| {
+                        DurableSpawnerError::WorkspacePreparation(error.to_string())
+                    })?;
+                let pinned_head = manager.pinned_head().await.map_err(|error| {
+                    DurableSpawnerError::WorkspacePreparation(error.to_string())
+                })?;
+                let git_common_dir = manager.git_common_dir().await.map_err(|error| {
+                    DurableSpawnerError::WorkspacePreparation(error.to_string())
+                })?;
+                let admission = workspace_admission_gate(&control_root)?;
+                let _admission_guard = admission.lock().await;
+                let retained = retained_workspace_allocation_count(
+                    &control_root.join("leases"),
+                    &checkouts,
+                    wcore_swarm::MAX_RETAINED_WORKTREES,
+                )?;
+                if retained >= wcore_swarm::MAX_RETAINED_WORKTREES {
+                    return Err(DurableSpawnerError::WorkspacePreparation(format!(
+                        "delegated workspace evidence quota is full: {retained}/{}",
+                        wcore_swarm::MAX_RETAINED_WORKTREES
+                    )));
+                }
+                let worker_id = child_id.as_str();
+                let branch = format!("wayland-child/{worker_id}");
+                let expected_root = manager.swarm_root().join(worker_id);
+                write_workspace_preparation_lease(
+                    &control_root,
+                    child_id,
+                    &expected_root,
+                    &pinned_head,
+                )?;
+                let root = manager
+                    .create_isolated_checkout(worker_id, &branch, &pinned_head)
+                    .await
+                    .map_err(|error| {
+                        DurableSpawnerError::WorkspacePreparation(error.to_string())
+                    })?;
+                let root = std::fs::canonicalize(&root).map_err(|error| {
+                    DurableSpawnerError::WorkspacePreparation(format!(
+                        "created workspace {} could not be canonicalized; preserved for inspection: {error}",
+                        root.display()
+                    ))
+                })?;
+                Ok(PreparedChildWorkspace {
+                    evidence: ChildWorkspace {
+                        mode: ChildWorkspaceMode::Isolated,
+                        workspace_id: format!("isolated-{worker_id}"),
+                    },
+                    root,
+                    authority_read_deny: vec![parent.as_ref().clone(), git_common_dir],
+                })
+            }
+        }
     }
 
     /// Validate and declare against the same generation used during resolve.
@@ -1360,7 +1842,7 @@ impl AgentSpawner {
     ) -> SubAgentResult {
         let name = sub_config.name.clone();
         let terminal_sink = extras.channel_sink.clone();
-        let launch = match self.resolve_durable_launch(sub_config, overrides) {
+        let launch = match self.prepare_durable_launch(sub_config, overrides).await {
             Ok(launch) => launch,
             Err(error) => {
                 let result = SubAgentResult::error(&name, &error.to_string());
@@ -1439,7 +1921,7 @@ impl AgentSpawner {
                 return SubAgentResult::error(&launch.request.name, &error);
             }
         };
-        let tools = self.child_tool_registry(&launch.overrides.allowed_tools);
+        let tools = self.child_tool_registry(&launch);
         let output: Arc<dyn OutputSink> = match extras.channel_sink {
             Some(sink) => sink as Arc<dyn OutputSink>,
             None => Arc::new(NullSink),
@@ -1549,6 +2031,7 @@ impl AgentSpawner {
             provider: self.provider.clone(),
             base_config: self.base_config.clone(),
             sandbox_runtime: Arc::clone(&self.sandbox_runtime),
+            parent_workspace: self.parent_workspace.clone(),
             egress_policy: self.egress_policy.clone(),
             approval_manager: self.approval_manager.clone(),
             bus: self.bus.clone(),
@@ -1803,6 +2286,9 @@ type ToolFactory = fn() -> Box<dyn wcore_tools::Tool>;
 /// Bash/Write/Edit. Destructive tools require explicit opt-in via `allowed`.
 fn build_tool_registry(
     allowed: &[String],
+    requested_workspace: RequestedChildWorkspace,
+    workspace_root: &Path,
+    authority_read_deny: &[PathBuf],
     sandbox_runtime: Arc<wcore_sandbox::SandboxRegistry>,
 ) -> ToolRegistry {
     let all: &[(&str, ToolFactory)] = &[
@@ -1816,6 +2302,18 @@ fn build_tool_registry(
 
     let mut registry = ToolRegistry::new();
     registry.set_sandbox_runtime(sandbox_runtime);
+    let workspace_policy = Arc::new(
+        WorkspacePolicy::contained(workspace_root)
+            .with_authority_read_deny(authority_read_deny.iter().cloned())
+            .with_authority_write_deny(authority_read_deny.iter().cloned())
+            .with_git_authority_env_deny(),
+    );
+    let jail = SandboxedFs::new(
+        SecretDenyFs::new(RealFs, Arc::clone(&workspace_policy)),
+        workspace_root,
+    );
+    registry.set_tool_vfs(Arc::new(jail));
+    registry.set_workspace_policy(workspace_policy);
     for (name, make_tool) in all {
         // Security audit H-7 / M-9: an empty `allowed` list no longer means
         // "register everything". It defaults to a read-only subset so a
@@ -1827,6 +2325,9 @@ fn build_tool_registry(
         } else {
             allowed.iter().any(|a| a.as_str() == *name)
         };
+        let permitted = permitted
+            && (requested_workspace == RequestedChildWorkspace::IsolatedMutation
+                || SHARED_READ_ONLY_CHILD_TOOLS.contains(name));
         if permitted {
             registry.register(make_tool());
         }
@@ -2016,7 +2517,10 @@ mod spawn_task_set_tests {
             provider_label: "test-provider".into(),
             ..Config::default()
         };
-        let spawner = AgentSpawner::new(provider.clone(), config).with_execution_budget(budget);
+        let spawner = AgentSpawner::new(provider.clone(), config)
+            .with_parent_workspace(dir.path())
+            .unwrap()
+            .with_execution_budget(budget);
         bind_test_durable_session(&spawner, dir.path(), "f190020");
 
         let results = spawner
@@ -2049,7 +2553,9 @@ mod spawn_task_set_tests {
             provider_label: "test-provider".into(),
             ..Config::default()
         };
-        let spawner = AgentSpawner::new(provider.clone(), config);
+        let spawner = AgentSpawner::new(provider.clone(), config)
+            .with_parent_workspace(dir.path())
+            .unwrap();
         bind_test_durable_session(&spawner, dir.path(), "f200020");
         let cloned = spawner.clone_for_spawn();
         let first = (0..CHILDREN_PER_CALL)
@@ -2113,7 +2619,10 @@ mod spawn_task_set_tests {
             provider_label: "test-provider".into(),
             ..Config::default()
         };
-        let spawner = AgentSpawner::new(provider.clone(), config).with_cancel(cancel.clone());
+        let spawner = AgentSpawner::new(provider.clone(), config)
+            .with_parent_workspace(dir.path())
+            .unwrap()
+            .with_cancel(cancel.clone());
         bind_test_durable_session(&spawner, dir.path(), "f200021");
         let children = (0..TOTAL_CHILDREN)
             .map(|index| bounded_child(&format!("cancel-{index}")))
@@ -2302,7 +2811,9 @@ mod spawn_task_set_tests {
             provider_label: "test-provider".into(),
             ..Config::default()
         };
-        let spawner = AgentSpawner::new(provider.clone(), config);
+        let spawner = AgentSpawner::new(provider.clone(), config)
+            .with_parent_workspace(dir.path())
+            .unwrap();
         bind_test_durable_session(&spawner, dir.path(), "f190021");
         let child = SubAgentConfig {
             name: "hanging-child".into(),
@@ -2557,6 +3068,8 @@ mod crucible_provider_resolution_tests {
         let pinned: Arc<dyn LlmProvider> = Arc::new(StubProvider);
         let spawner = AgentSpawner::new(parent, Config::default())
             .with_provider_resolver(resolver_mapping(&[("openai", pinned.clone())]))
+            .with_parent_workspace(dir.path())
+            .unwrap()
             .with_durable_session_authority(
                 authority,
                 wcore_types::execution_policy::EffectiveExecutionPolicy::baseline(
@@ -2619,6 +3132,8 @@ mod crucible_provider_resolution_tests {
 
         let parent: Arc<dyn LlmProvider> = Arc::new(StubProvider);
         let spawner = AgentSpawner::new(parent, Config::default())
+            .with_parent_workspace(dir.path())
+            .unwrap()
             .with_durable_session_authority(
                 authority,
                 wcore_types::execution_policy::EffectiveExecutionPolicy::baseline(
@@ -2648,44 +3163,68 @@ mod crucible_provider_resolution_tests {
             allowed_tools: vec!["Write".into()],
             ..ForkOverrides::default()
         };
-        let legacy = spawner
-            .resolve_durable_launch(request.clone(), mutating.clone())
-            .unwrap();
-        assert_eq!(
-            legacy.requested_workspace(),
-            RequestedChildWorkspace::IsolatedMutation
+        assert!(
+            spawner
+                .resolve_durable_launch(request.clone(), mutating.clone())
+                .is_err(),
+            "mutating launch must not fall back to the parent workspace"
         );
-        assert_eq!(legacy.workspace().mode, ChildWorkspaceMode::External);
-        assert!(legacy.workspace().workspace_id.starts_with("external-"));
-        let legacy_record = legacy.durable_record(ChildOrigin::Spawn, None).unwrap();
-        assert_eq!(legacy_record.workspace, legacy.workspace().clone());
 
-        let isolated_workspace = ChildWorkspace {
-            mode: ChildWorkspaceMode::Isolated,
-            workspace_id: "isolated-f20-child".into(),
-        };
-        let isolated = spawner
-            .resolve_durable_launch_in_workspace(
-                request.clone(),
-                mutating.clone(),
-                isolated_workspace.clone(),
-            )
+        let forged_root = spawner
+            .pre_resolve_durable_launch(request.clone(), mutating.clone())
             .unwrap();
-        let isolated_record = isolated.durable_record(ChildOrigin::Spawn, None).unwrap();
-        assert_eq!(isolated_record.workspace, isolated_workspace);
-
         assert!(
             spawner
                 .resolve_durable_launch_in_workspace(
-                    request,
-                    mutating,
+                    forged_root,
+                    ChildId::new("isolated-f20-child").unwrap(),
                     ChildWorkspace {
-                        mode: ChildWorkspaceMode::SharedReadOnly,
-                        workspace_id: "shared-parent".into(),
+                        mode: ChildWorkspaceMode::Isolated,
+                        workspace_id: "isolated-f20-child".into(),
                     },
+                    dir.path().to_path_buf(),
+                    vec![dir.path().to_path_buf()],
                 )
                 .is_err(),
-            "mutating intent must never be realized as shared read-only"
+            "an internal caller cannot forge an isolated workspace root"
+        );
+
+        let forged_id = spawner
+            .pre_resolve_durable_launch(request.clone(), mutating.clone())
+            .unwrap();
+        assert!(
+            spawner
+                .resolve_durable_launch_in_workspace(
+                    forged_id,
+                    ChildId::new("different-f20-child").unwrap(),
+                    ChildWorkspace {
+                        mode: ChildWorkspaceMode::Isolated,
+                        workspace_id: "isolated-f20-child".into(),
+                    },
+                    dir.path().to_path_buf(),
+                    vec![dir.path().to_path_buf()],
+                )
+                .is_err(),
+            "an internal caller cannot forge child/workspace identity"
+        );
+
+        let forged_deny = spawner
+            .pre_resolve_durable_launch(request, mutating)
+            .unwrap();
+        assert!(
+            spawner
+                .resolve_durable_launch_in_workspace(
+                    forged_deny,
+                    ChildId::new("isolated-f20-child").unwrap(),
+                    ChildWorkspace {
+                        mode: ChildWorkspaceMode::Isolated,
+                        workspace_id: "isolated-f20-child".into(),
+                    },
+                    dir.path().to_path_buf(),
+                    Vec::new(),
+                )
+                .is_err(),
+            "an internal caller cannot omit parent authority deny roots"
         );
     }
 
@@ -2752,6 +3291,8 @@ mod crucible_provider_resolution_tests {
 
         let parent: Arc<dyn LlmProvider> = Arc::new(StubProvider);
         let spawner = AgentSpawner::new(parent, Config::default())
+            .with_parent_workspace(dir.path())
+            .unwrap()
             .with_durable_session_authority(
                 authority.clone(),
                 wcore_types::execution_policy::EffectiveExecutionPolicy::baseline(
@@ -2802,7 +3343,7 @@ mod production_durable_spawn_tests {
     use wcore_types::llm::{LlmEvent, LlmRequest};
     use wcore_types::message::{FinishReason, StopReason, TokenUsage};
     use wcore_types::spawner::{
-        ChildDesiredState, ChildOrigin, ChildRecoveryState, DurableChildStatus,
+        ChildDesiredState, ChildOrigin, ChildRecoveryState, ChildWorkspaceMode, DurableChildStatus,
     };
 
     use super::{
@@ -2907,6 +3448,7 @@ mod production_durable_spawn_tests {
     fn bound_spawner(
         provider: Arc<dyn LlmProvider>,
         authority: DurableSessionAuthority,
+        workspace: &std::path::Path,
     ) -> AgentSpawner {
         let config = Config {
             model: "test-model".into(),
@@ -2917,15 +3459,98 @@ mod production_durable_spawn_tests {
             &config.execution_policy,
         );
         AgentSpawner::new(provider, config)
+            .with_parent_workspace(workspace)
+            .unwrap()
             .with_durable_session_authority(authority, policy)
             .unwrap()
     }
 
+    fn bound_spawner_with_session_root(
+        provider: Arc<dyn LlmProvider>,
+        authority: DurableSessionAuthority,
+        workspace: &std::path::Path,
+        session_root: &std::path::Path,
+    ) -> AgentSpawner {
+        let mut config = Config {
+            model: "test-model".into(),
+            provider_label: "test-provider".into(),
+            ..Config::default()
+        };
+        config.session.directory = session_root.display().to_string();
+        let policy = wcore_types::execution_policy::EffectiveExecutionPolicy::baseline(
+            &config.execution_policy,
+        );
+        AgentSpawner::new(provider, config)
+            .with_parent_workspace(workspace)
+            .unwrap()
+            .with_durable_session_authority(authority, policy)
+            .unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn run_git(repo: &std::path::Path, args: &[&str]) {
+        let mut command = wcore_config::shell::shell_command_argv("git", args);
+        command.current_dir(repo);
+        let output = command.output().await.expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn init_git_workspace(repo: &std::path::Path) {
+        run_git(repo, &["init"]).await;
+        run_git(repo, &["config", "user.email", "wayland@example.invalid"]).await;
+        run_git(repo, &["config", "user.name", "Wayland Test"]).await;
+        std::fs::write(repo.join("README.md"), "transaction fixture\n").unwrap();
+        run_git(repo, &["add", "README.md"]).await;
+        run_git(repo, &["commit", "-m", "fixture"]).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    fn prefill_workspace_leases(session_root: &std::path::Path, count: usize) {
+        let leases = session_root.join("delegated-workspaces/leases");
+        std::fs::create_dir_all(&leases).unwrap();
+        for index in 0..count {
+            std::fs::write(leases.join(format!("prefill-{index}.json")), b"{}\n").unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn retained_lease_count(session_root: &std::path::Path) -> usize {
+        std::fs::read_dir(session_root.join("delegated-workspaces/leases"))
+            .unwrap()
+            .count()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn dangerous_sandbox_runtime() -> Arc<wcore_sandbox::SandboxRegistry> {
+        use wcore_types::execution_policy::{
+            ApprovalPolicy, BaselineExecutionPolicy, DangerousLaunchRequest, PolicySource,
+            resolve_dangerous_launch,
+        };
+
+        let baseline =
+            BaselineExecutionPolicy::smart(ApprovalPolicy::Prompt, PolicySource::Default);
+        let grant = resolve_dangerous_launch(
+            &baseline,
+            DangerousLaunchRequest::cli(60, "f20-hostile-bypass"),
+            10_000,
+        )
+        .unwrap();
+        Arc::new(wcore_sandbox::SandboxRegistry::dangerous(&grant))
+    }
+
     #[tokio::test]
     async fn unbound_production_spawn_fails_before_provider_execution() {
+        let dir = tempfile::tempdir().unwrap();
         let provider = ControlledProvider::immediate();
         let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
-        let spawner = AgentSpawner::new(provider_dyn, Config::default());
+        let spawner = AgentSpawner::new(provider_dyn, Config::default())
+            .with_parent_workspace(dir.path())
+            .unwrap();
 
         let result = spawner
             .spawn_one_with_origin(child("unbound"), ChildOrigin::Workflow)
@@ -2937,13 +3562,329 @@ mod production_durable_spawn_tests {
     }
 
     #[tokio::test]
+    async fn mutating_spawn_from_non_git_workspace_fails_before_provider_execution() {
+        let workspace = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let (_manager, _journal, _token) =
+            canonical_binding(&state.path().join("journal"), "f2000001", &authority);
+        let provider = ControlledProvider::immediate();
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let spawner = bound_spawner_with_session_root(
+            provider_dyn,
+            authority,
+            workspace.path(),
+            &state.path().join("sessions"),
+        );
+
+        let result = spawner
+            .spawn_durable(
+                child("non-git-mutator"),
+                ForkOverrides {
+                    allowed_tools: vec!["Write".into()],
+                    ..ForkOverrides::default()
+                },
+                SpawnExtras::default(),
+                ChildOrigin::Workflow,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.text.contains("workspace preparation failed"));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn invalid_provider_fails_before_workspace_identity_or_allocation() {
+        let workspace = tempfile::tempdir().unwrap();
+        init_git_workspace(workspace.path()).await;
+        let state = tempfile::tempdir().unwrap();
+        let sessions = state.path().join("sessions");
+        let authority = DurableSessionAuthority::new();
+        let (_manager, journal, _token) =
+            canonical_binding(&state.path().join("journal"), "f2000101", &authority);
+        let provider = ControlledProvider::immediate();
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let spawner =
+            bound_spawner_with_session_root(provider_dyn, authority, workspace.path(), &sessions);
+        let mut request = child("invalid-provider-mutator");
+        request.provider = Some("missing-provider:model".into());
+
+        let result = spawner
+            .spawn_durable(
+                request,
+                ForkOverrides {
+                    allowed_tools: vec!["Write".into()],
+                    ..ForkOverrides::default()
+                },
+                SpawnExtras::default(),
+                ChildOrigin::Workflow,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(
+            result.text.contains("provider resolution"),
+            "{}",
+            result.text
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert!(!sessions.join("delegated-workspaces").exists());
+        assert!(DurableChildStore::new(journal).list().unwrap().is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn dangerous_sandbox_rejects_transactional_mutation_before_allocation() {
+        let workspace = tempfile::tempdir().unwrap();
+        init_git_workspace(workspace.path()).await;
+        let state = tempfile::tempdir().unwrap();
+        let sessions = state.path().join("sessions");
+        let authority = DurableSessionAuthority::new();
+        let (_manager, journal, _token) =
+            canonical_binding(&state.path().join("journal"), "f2000102", &authority);
+        let provider = ControlledProvider::immediate();
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let spawner =
+            bound_spawner_with_session_root(provider_dyn, authority, workspace.path(), &sessions)
+                .with_sandbox_runtime(dangerous_sandbox_runtime());
+
+        let result = spawner
+            .spawn_durable(
+                child("dangerous-mutator"),
+                ForkOverrides {
+                    allowed_tools: vec!["Write".into()],
+                    ..ForkOverrides::default()
+                },
+                SpawnExtras::default(),
+                ChildOrigin::Workflow,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(
+            result
+                .text
+                .contains("requires an enforcing sandbox backend"),
+            "{}",
+            result.text
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert!(!sessions.join("delegated-workspaces").exists());
+        assert!(DurableChildStore::new(journal).list().unwrap().is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn full_workspace_quota_rejects_without_new_lease_checkout_or_parent_ref() {
+        let workspace = tempfile::tempdir().unwrap();
+        init_git_workspace(workspace.path()).await;
+        let state = tempfile::tempdir().unwrap();
+        let sessions = state.path().join("sessions");
+        prefill_workspace_leases(&sessions, wcore_swarm::MAX_RETAINED_WORKTREES);
+        let authority = DurableSessionAuthority::new();
+        let (_manager, journal, _token) =
+            canonical_binding(&state.path().join("journal"), "f2000103", &authority);
+        let provider = ControlledProvider::immediate();
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let spawner =
+            bound_spawner_with_session_root(provider_dyn, authority, workspace.path(), &sessions);
+        let parent_head = {
+            let mut command =
+                wcore_config::shell::shell_command_argv("git", &["rev-parse", "--verify", "HEAD"]);
+            command.current_dir(workspace.path());
+            String::from_utf8(command.output().await.unwrap().stdout)
+                .unwrap()
+                .trim()
+                .to_owned()
+        };
+
+        let result = spawner
+            .spawn_durable(
+                child("quota-full-mutator"),
+                ForkOverrides {
+                    allowed_tools: vec!["Write".into()],
+                    ..ForkOverrides::default()
+                },
+                SpawnExtras::default(),
+                ChildOrigin::Workflow,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(
+            result.text.contains("evidence quota is full"),
+            "{}",
+            result.text
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            retained_lease_count(&sessions),
+            wcore_swarm::MAX_RETAINED_WORKTREES
+        );
+        assert_eq!(
+            std::fs::read_dir(sessions.join("delegated-workspaces/checkouts"))
+                .unwrap()
+                .count(),
+            0
+        );
+        let mut command =
+            wcore_config::shell::shell_command_argv("git", &["rev-parse", "--verify", "HEAD"]);
+        command.current_dir(workspace.path());
+        let after = String::from_utf8(command.output().await.unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert_eq!(after, parent_head);
+        assert!(DurableChildStore::new(journal).list().unwrap().is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn concurrent_near_cap_admits_exactly_one_retained_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        init_git_workspace(workspace.path()).await;
+        let state = tempfile::tempdir().unwrap();
+        let sessions = state.path().join("sessions");
+        prefill_workspace_leases(
+            &sessions,
+            wcore_swarm::MAX_RETAINED_WORKTREES.saturating_sub(1),
+        );
+        let authority = DurableSessionAuthority::new();
+        let (_manager, journal, _token) =
+            canonical_binding(&state.path().join("journal"), "f2000104", &authority);
+        let provider = ControlledProvider::immediate();
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let spawner =
+            bound_spawner_with_session_root(provider_dyn, authority, workspace.path(), &sessions);
+        let overrides = ForkOverrides {
+            allowed_tools: vec!["Write".into()],
+            ..ForkOverrides::default()
+        };
+
+        let (left, right) = tokio::join!(
+            spawner.prepare_durable_launch(child("near-cap-left"), overrides.clone()),
+            spawner.prepare_durable_launch(child("near-cap-right"), overrides),
+        );
+
+        assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+        let quota_error = left.err().or_else(|| right.err()).unwrap().to_string();
+        assert!(
+            quota_error.contains("evidence quota is full"),
+            "{quota_error}"
+        );
+        assert_eq!(
+            retained_lease_count(&sessions),
+            wcore_swarm::MAX_RETAINED_WORKTREES
+        );
+        assert_eq!(
+            std::fs::read_dir(sessions.join("delegated-workspaces/checkouts"))
+                .unwrap()
+                .count(),
+            1
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert!(DurableChildStore::new(journal).list().unwrap().is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn isolated_workspace_identity_and_lease_survive_failed_declaration() {
+        let workspace = tempfile::tempdir().unwrap();
+        init_git_workspace(workspace.path()).await;
+        let state = tempfile::tempdir().unwrap();
+        let sessions = state.path().join("sessions");
+        let authority = DurableSessionAuthority::new();
+        let (_manager_a, journal_a, _token_a) =
+            canonical_binding(&state.path().join("a"), "f2000002", &authority);
+        let provider = ControlledProvider::immediate();
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let spawner = bound_spawner_with_session_root(
+            provider_dyn,
+            authority.clone(),
+            workspace.path(),
+            &sessions,
+        );
+        let launch = spawner
+            .prepare_durable_launch(
+                child("isolated-mutator"),
+                ForkOverrides {
+                    allowed_tools: vec!["Write".into(), "Bash".into()],
+                    ..ForkOverrides::default()
+                },
+            )
+            .await
+            .expect("prepare isolated workspace");
+        let record = launch
+            .durable_record(ChildOrigin::Workflow, None)
+            .expect("construct durable record");
+
+        assert_eq!(record.child_id, *launch.child_id());
+        assert_eq!(record.workspace, *launch.workspace());
+        assert_eq!(record.workspace.mode, ChildWorkspaceMode::Isolated);
+        assert!(
+            record
+                .workspace
+                .workspace_id
+                .ends_with(launch.child_id().as_str())
+        );
+        assert!(launch.workspace_root().starts_with(&sessions));
+        assert!(!launch.workspace_root().starts_with(workspace.path()));
+        assert!(launch.workspace_root().join(".git").is_dir());
+        launch.validate_record(&record).unwrap();
+        assert_eq!(launch.authority_read_deny.len(), 2);
+        let registry = spawner.child_tool_registry(&launch);
+        assert!(registry.get("Write").is_some());
+        assert!(registry.get("Bash").is_some());
+        let child_policy = registry.workspace_policy().expect("child workspace policy");
+        assert_eq!(child_policy.root(), launch.workspace_root());
+        let writable = child_policy.writable_roots();
+        for authority_root in &launch.authority_read_deny {
+            assert!(
+                writable.iter().all(|allowed| {
+                    !authority_root.starts_with(allowed) && !allowed.starts_with(authority_root)
+                }),
+                "authority root leaked into child write grants: {}",
+                authority_root.display()
+            );
+        }
+
+        let lease = sessions
+            .join("delegated-workspaces/leases")
+            .join(format!("{}.json", launch.child_id().as_str()));
+        let lease_value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&lease).expect("durable workspace lease"))
+                .unwrap();
+        assert_eq!(lease_value["child_id"], launch.child_id().as_str());
+        assert_eq!(lease_value["workspace_id"], record.workspace.workspace_id);
+        assert_eq!(
+            lease_value["checkout_root"],
+            launch.workspace_root().to_string_lossy().as_ref()
+        );
+
+        let (_manager_b, journal_b, _token_b) =
+            canonical_binding(&state.path().join("b"), "f2000003", &authority);
+        let result = spawner
+            .execute_durable_launch(launch, SpawnExtras::default(), ChildOrigin::Workflow)
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.text.contains("authority is stale"));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert!(lease.is_file(), "failed declaration lost workspace locator");
+        assert!(DurableChildStore::new(journal_a).list().unwrap().is_empty());
+        assert!(DurableChildStore::new(journal_b).list().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn production_spawn_commits_exact_origin_and_terminal_result_once() {
         let dir = tempfile::tempdir().unwrap();
         let authority = DurableSessionAuthority::new();
         let (_manager, _journal, token) = canonical_binding(dir.path(), "f1920001", &authority);
         let provider = ControlledProvider::immediate();
         let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
-        let spawner = bound_spawner(provider_dyn, authority.clone());
+        let spawner = bound_spawner(provider_dyn, authority.clone(), dir.path());
 
         let result = spawner
             .spawn_one_with_origin(child("workflow-child"), ChildOrigin::Workflow)
@@ -2972,7 +3913,7 @@ mod production_durable_spawn_tests {
         let authority = DurableSessionAuthority::new();
         let (_manager, _journal, token) = canonical_binding(dir.path(), "f1920006", &authority);
         let template_provider: Arc<dyn LlmProvider> = ControlledProvider::immediate();
-        let template = bound_spawner(template_provider, authority.clone());
+        let template = bound_spawner(template_provider, authority.clone(), dir.path());
         let seat_provider = ControlledProvider::immediate();
         let seat_provider_dyn: Arc<dyn LlmProvider> = seat_provider.clone();
         let seat_config = Config {
@@ -3011,7 +3952,7 @@ mod production_durable_spawn_tests {
             canonical_binding(&dir.path().join("a"), "f1920004", &authority);
         let provider = ControlledProvider::immediate();
         let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
-        let spawner = bound_spawner(provider_dyn, authority.clone());
+        let spawner = bound_spawner(provider_dyn, authority.clone(), dir.path());
 
         // Resolve under A, pause before the exact production admission helper,
         // then switch the shared authority to B. Admission must reject the
@@ -3045,7 +3986,7 @@ mod production_durable_spawn_tests {
         let (started_tx, started_rx) = oneshot::channel();
         let provider = ControlledProvider::blocked(started_tx);
         let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
-        let spawner = bound_spawner(provider_dyn, authority.clone());
+        let spawner = bound_spawner(provider_dyn, authority.clone(), dir.path());
 
         let task = tokio::spawn(async move {
             spawner
@@ -3080,7 +4021,7 @@ mod production_durable_spawn_tests {
         let (started_tx, started_rx) = oneshot::channel();
         let provider = ControlledProvider::blocked(started_tx);
         let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
-        let spawner = Arc::new(bound_spawner(provider_dyn, authority));
+        let spawner = Arc::new(bound_spawner(provider_dyn, authority, dir.path()));
         let supervisor = spawner.durable_child_supervisor().unwrap();
         let task_spawner = Arc::clone(&spawner);
         let task =
@@ -3120,7 +4061,7 @@ mod production_durable_spawn_tests {
             canonical_binding(&dir.path().join("a"), "f192000a", &authority);
         let provider = ControlledProvider::immediate();
         let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
-        let spawner = bound_spawner(provider_dyn, authority.clone());
+        let spawner = bound_spawner(provider_dyn, authority.clone(), dir.path());
         let stale = spawner.durable_child_supervisor().unwrap();
 
         let (_manager_b, _journal_b, _token_b) =
@@ -3147,7 +4088,8 @@ mod production_durable_spawn_tests {
         let mut guard = crate::cancel::SessionRuntimeGuard::new(root);
         let first_turn = tokio_util::sync::CancellationToken::new();
         guard.set_active_turn(first_turn);
-        let spawner = bound_spawner(provider_dyn, authority).with_session_runtime(guard.observer());
+        let spawner = bound_spawner(provider_dyn, authority, dir.path())
+            .with_session_runtime(guard.observer());
         let launch = spawner
             .resolve_durable_launch(child("old-turn-child"), ForkOverrides::default())
             .unwrap();
@@ -3223,7 +4165,14 @@ mod phase7_tests {
     // Bash/Write/Edit.
     #[test]
     fn tc_7_40_build_tool_registry_empty_allowed_is_read_only() {
-        let registry = build_tool_registry(&[], test_sandbox_runtime());
+        let root = tempfile::tempdir().unwrap();
+        let registry = build_tool_registry(
+            &[],
+            RequestedChildWorkspace::SharedReadOnly,
+            root.path(),
+            &[],
+            test_sandbox_runtime(),
+        );
         // Read-only tools ARE registered.
         for name in &["Read", "Grep", "Glob"] {
             assert!(
@@ -3244,8 +4193,12 @@ mod phase7_tests {
     // named in `allowed` (the opt-in path).
     #[test]
     fn tc_7_42_build_tool_registry_destructive_requires_opt_in() {
+        let root = tempfile::tempdir().unwrap();
         let registry = build_tool_registry(
             &["Bash".to_string(), "Write".to_string()],
+            RequestedChildWorkspace::IsolatedMutation,
+            root.path(),
+            &[],
             test_sandbox_runtime(),
         );
         assert!(
@@ -3266,36 +4219,78 @@ mod phase7_tests {
 
     #[test]
     fn tc_7_43_build_tool_registry_filters_to_allowed() {
+        let root = tempfile::tempdir().unwrap();
         let allowed = vec!["Bash".to_string(), "Read".to_string()];
-        let registry = build_tool_registry(&allowed, test_sandbox_runtime());
+        let registry = build_tool_registry(
+            &allowed,
+            RequestedChildWorkspace::IsolatedMutation,
+            root.path(),
+            &[],
+            test_sandbox_runtime(),
+        );
         assert!(registry.get("Bash").is_some());
         assert!(registry.get("Read").is_some());
         assert!(registry.get("Write").is_none());
     }
 
     #[test]
+    fn shared_registry_rejects_explicit_mutating_tools_and_bash() {
+        let root = tempfile::tempdir().unwrap();
+        let requested = vec![
+            "Read".to_owned(),
+            "Write".to_owned(),
+            "Edit".to_owned(),
+            "Bash".to_owned(),
+        ];
+        let registry = build_tool_registry(
+            &requested,
+            RequestedChildWorkspace::SharedReadOnly,
+            root.path(),
+            &[],
+            test_sandbox_runtime(),
+        );
+
+        assert!(registry.get("Read").is_some());
+        for name in ["Write", "Edit", "Bash"] {
+            assert!(registry.get(name).is_none(), "shared child exposed {name}");
+        }
+    }
+
+    #[test]
     fn child_registry_inherits_exact_parent_sandbox_runtime() {
+        let root = tempfile::tempdir().unwrap();
         let runtime = test_sandbox_runtime();
-        let provider: Arc<dyn LlmProvider> =
-            Arc::new(crate::test_utils::ScriptedProvider::new(Vec::new()));
-        let spawner = AgentSpawner::new(provider, Config::default())
-            .with_sandbox_runtime(Arc::clone(&runtime));
-        let registry = spawner.child_tool_registry(&[]);
+        let registry = build_tool_registry(
+            &[],
+            RequestedChildWorkspace::SharedReadOnly,
+            root.path(),
+            &[],
+            Arc::clone(&runtime),
+        );
 
         assert!(Arc::ptr_eq(&runtime, &registry.sandbox_runtime()));
     }
 
     #[test]
     fn cloned_spawner_preserves_exact_parent_sandbox_runtime() {
+        let root = tempfile::tempdir().unwrap();
         let runtime = test_sandbox_runtime();
         let provider: Arc<dyn LlmProvider> =
             Arc::new(crate::test_utils::ScriptedProvider::new(Vec::new()));
         let spawner = AgentSpawner::new(provider, Config::default())
+            .with_parent_workspace(root.path())
+            .unwrap()
             .with_sandbox_runtime(Arc::clone(&runtime));
         let cloned = spawner.clone_for_spawn();
 
         assert!(Arc::ptr_eq(&runtime, spawner.sandbox_runtime()));
         assert!(Arc::ptr_eq(&runtime, cloned.sandbox_runtime()));
+        assert_eq!(spawner.parent_workspace, cloned.parent_workspace);
+        let expected = std::fs::canonicalize(root.path()).unwrap();
+        assert_eq!(
+            cloned.parent_workspace.as_ref().map(|path| path.as_path()),
+            Some(expected.as_path())
+        );
     }
 
     #[test]
@@ -3648,7 +4643,10 @@ mod posture_inheritance_tests {
             provider_label: "test-provider".into(),
             ..Config::default()
         };
-        let spawner = AgentSpawner::new(provider.clone(), config).with_cancel(cancel);
+        let spawner = AgentSpawner::new(provider.clone(), config)
+            .with_parent_workspace(dir.path())
+            .unwrap()
+            .with_cancel(cancel);
         let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
         let active = manager
             .create_for_run(

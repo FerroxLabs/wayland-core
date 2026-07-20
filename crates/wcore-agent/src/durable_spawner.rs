@@ -67,6 +67,8 @@ pub enum DurableSpawnerError {
     TurnCountOverflow,
     #[error("durable child execution evidence mismatch: {0}")]
     EvidenceMismatch(&'static str),
+    #[error("durable child workspace preparation failed: {0}")]
+    WorkspacePreparation(String),
     #[error("durable child result payload is invalid: {0}")]
     InvalidResultPayload(String),
     #[error("durable child {child_id} is already delivered with a different receipt")]
