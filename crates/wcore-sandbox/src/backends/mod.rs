@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use crate::error::Result;
 use crate::manifest::SandboxManifest;
-use crate::{SandboxChunk, SandboxCommand, SandboxOutput};
+use crate::{
+    DirectoryAuthority, RetainedWorkspaceAuthority, SandboxChunk, SandboxCommand, SandboxOutput,
+};
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -216,6 +218,59 @@ pub trait SandboxBackend: Send + Sync + 'static {
     /// alone is not hard ownership and must keep the default `false`.
     fn owns_descendants_hard(&self) -> bool {
         false
+    }
+
+    /// Execute `cmd` with its working directory bound to a retained directory
+    /// authority rather than a re-openable pathname. The default fails closed;
+    /// a real backend opts in by overriding this AND [`Self::binds_cwd_authority`]
+    /// so it reaches the child without reopening the directory's display path.
+    async fn execute_with_cwd_authority(
+        &self,
+        _manifest: &SandboxManifest,
+        _cmd: SandboxCommand,
+        _cwd: DirectoryAuthority,
+    ) -> Result<SandboxOutput> {
+        Err(crate::SandboxError::PolicyNotSupported(format!(
+            "sandbox backend {} cannot bind retained cwd authority",
+            self.name()
+        )))
+    }
+
+    /// Execute against an owner-bound disposable workspace. Native backends bind
+    /// the retained checkout directly; container backends (Task 1D) export and
+    /// import it without an ambient host bind mount. The default delegates to
+    /// [`Self::execute_with_cwd_authority`] using the retained checkout, so a
+    /// backend that binds a cwd authority also carries a workspace authority.
+    ///
+    /// `reauthorize` is re-run by import-capable backends at each trust
+    /// boundary; `cancel` lets a container backend tear its own tree down. The
+    /// native default relies on the backend's own process ownership and manifest
+    /// timeout and therefore consumes neither.
+    async fn execute_with_workspace_authority(
+        &self,
+        manifest: &SandboxManifest,
+        cmd: SandboxCommand,
+        workspace: RetainedWorkspaceAuthority,
+        _max_workspace_bytes: u64,
+        _reauthorize: &(dyn Fn() -> Result<()> + Send + Sync),
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<SandboxOutput> {
+        self.execute_with_cwd_authority(manifest, cmd, workspace.workspace().clone())
+            .await
+    }
+
+    /// True only when [`Self::execute_with_cwd_authority`] reaches the child
+    /// without reopening the directory's display path. Default `false`.
+    fn binds_cwd_authority(&self) -> bool {
+        false
+    }
+
+    /// True only when [`Self::execute_with_workspace_authority`] preserves
+    /// workspace identity for the complete execution. Defaults to
+    /// [`Self::binds_cwd_authority`] because the native path binds the retained
+    /// checkout directly.
+    fn binds_workspace_authority(&self) -> bool {
+        self.binds_cwd_authority()
     }
 
     /// True if this backend cannot run PowerShell (`powershell.exe` / `pwsh.exe`).

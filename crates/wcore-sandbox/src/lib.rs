@@ -24,6 +24,7 @@ pub mod process_capture;
 
 pub use directory_authority::{
     DirectoryAuthority, DirectoryAuthorityIdentity, DirectoryHandleLoan, RegularFileAuthority,
+    RetainedWorkspaceAuthority,
 };
 pub use error::{Result, SandboxError};
 pub use manifest::{NetworkPolicy, SandboxManifest, SyscallPolicy};
@@ -297,6 +298,50 @@ impl SandboxRegistry {
         authorize()?;
         self.backend.execute(manifest, cmd).await
     }
+
+    /// Execute against an owner-bound retained workspace with a hard import
+    /// bound. The command's declared cwd must equal the retained checkout's
+    /// display path, external authority is revalidated, and the retained
+    /// workspace identity is re-proven before the backend receives it. Refuses
+    /// unless the selected backend actually binds workspace authority — there
+    /// is no path-based fallback for delegated mutation.
+    pub async fn execute_with_workspace_authority<F>(
+        &self,
+        manifest: &SandboxManifest,
+        cmd: SandboxCommand,
+        workspace: RetainedWorkspaceAuthority,
+        max_workspace_bytes: u64,
+        authorize: F,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<SandboxOutput>
+    where
+        F: Fn() -> Result<()> + Send + Sync,
+    {
+        if cmd.cwd.as_deref() != Some(workspace.workspace().display_path()) {
+            return Err(SandboxError::PathDenied(
+                "sandbox command cwd does not match retained workspace authority".to_owned(),
+            ));
+        }
+        authorize()?;
+        workspace.validate()?;
+        if !self.backend.binds_workspace_authority() {
+            return Err(SandboxError::PolicyNotSupported(format!(
+                "sandbox backend {} cannot bind retained workspace authority",
+                self.backend.name()
+            )));
+        }
+        self.backend
+            .execute_with_workspace_authority(
+                manifest,
+                cmd,
+                workspace,
+                max_workspace_bytes,
+                &authorize,
+                cancel,
+            )
+            .await
+    }
+
     /// Streaming execution — see [`backends::SandboxBackend::execute_streaming`].
     pub fn execute_streaming(
         &self,
@@ -331,6 +376,12 @@ impl SandboxRegistry {
     }
     pub fn owns_descendants_hard(&self) -> bool {
         self.backend.owns_descendants_hard()
+    }
+    pub fn binds_cwd_authority(&self) -> bool {
+        self.backend.binds_cwd_authority()
+    }
+    pub fn binds_workspace_authority(&self) -> bool {
+        self.backend.binds_workspace_authority()
     }
     pub fn bypasses_containment(&self) -> bool {
         self.bypasses_containment

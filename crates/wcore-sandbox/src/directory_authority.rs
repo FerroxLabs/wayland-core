@@ -70,6 +70,20 @@ pub struct RegularFileAuthority {
     display_path: PathBuf,
 }
 
+/// Owner-bound authority for a disposable delegated-mutation workspace.
+///
+/// The owner directory is retained separately from the workspace child so
+/// every execution, cleanup, and (Task 1D) import decision binds to the exact
+/// retained OS objects rather than re-resolving a mutable pathname. A worker
+/// receives only the `workspace` checkout authority; the parent keeps the
+/// `owner` to prove the child is still the exact object beneath it.
+#[derive(Clone, Debug)]
+pub struct RetainedWorkspaceAuthority {
+    owner: DirectoryAuthority,
+    workspace: DirectoryAuthority,
+    child_name: String,
+}
+
 /// Opaque, copyable identity for cross-binding a retained directory to
 /// external accounting state without cloning its live authority handle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -149,9 +163,15 @@ impl DirectoryAuthority {
     }
 
     /// Duplicate the retained directory descriptor for transfer across one
-    /// Unix process-spawn boundary. The caller must keep the returned file
-    /// alive until the child has consumed the descriptor.
-    #[cfg(unix)]
+    /// process-spawn boundary. The caller must keep the returned file alive
+    /// until the child has consumed the descriptor.
+    ///
+    /// Gated to Linux: its sole consumer is the Bubblewrap backend, which binds
+    /// the inherited descriptor into the sandbox namespace as `/proc/self/fd/N`
+    /// (see `backends::bwrap`). macOS delegates through Docker archive transport
+    /// and Windows through handle-relative operations, neither of which inherits
+    /// this descriptor, so the primitive would be dead code there.
+    #[cfg(target_os = "linux")]
     pub(crate) fn try_clone_inheritable_handle(&self) -> Result<DirectoryHandleLoan> {
         use std::os::fd::AsRawFd;
 
@@ -653,6 +673,82 @@ impl DirectoryAuthority {
     ) -> Result<()> {
         validate_child_name(child_name)?;
         windows::rename_directory_into(self, destination_parent, child_name, replace)
+    }
+}
+
+impl RetainedWorkspaceAuthority {
+    /// Bind an owner directory to one of its direct child workspaces. Both
+    /// authorities must already be retained; `new` proves the child is exactly
+    /// the object the owner currently names, so a later pathname replacement
+    /// cannot redirect execution or cleanup.
+    ///
+    /// `transaction_id` is validated (non-empty, bounded, NUL-free) as an
+    /// owner-issued label. It is not retained by the Task 1A/1B native path;
+    /// the Docker archive transport (Task 1D) re-introduces a stored id when it
+    /// needs a durable recovery-journal key.
+    pub fn new(
+        owner: DirectoryAuthority,
+        workspace: DirectoryAuthority,
+        transaction_id: impl Into<String>,
+    ) -> Result<Self> {
+        let display = workspace.display_path();
+        let parent = display.parent().ok_or_else(|| {
+            SandboxError::PathDenied("retained workspace has no owner parent".to_owned())
+        })?;
+        if parent != owner.display_path() {
+            return Err(SandboxError::PathDenied(
+                "retained workspace is not a direct child of its owner".to_owned(),
+            ));
+        }
+        let child_name = display
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or_else(|| {
+                SandboxError::PathDenied("retained workspace name is not valid Unicode".to_owned())
+            })?
+            .to_owned();
+        validate_child_name(&child_name)?;
+        let transaction_id = transaction_id.into();
+        if transaction_id.is_empty() || transaction_id.len() > 256 || transaction_id.contains('\0')
+        {
+            return Err(SandboxError::PathDenied(
+                "retained workspace transaction ID is invalid".to_owned(),
+            ));
+        }
+        owner.validate_path(owner.display_path())?;
+        workspace.validate_path(display)?;
+        let observed = owner.open_child_directory(&child_name)?;
+        if observed.identity_token() != workspace.identity_token() {
+            return Err(SandboxError::PathDenied(
+                "retained workspace child identity contradicts owner authority".to_owned(),
+            ));
+        }
+        Ok(Self {
+            owner,
+            workspace,
+            child_name,
+        })
+    }
+
+    /// The retained checkout authority a worker is bound to. This is the only
+    /// authority a delegated child receives.
+    pub fn workspace(&self) -> &DirectoryAuthority {
+        &self.workspace
+    }
+
+    /// Re-prove, at a trust boundary, that the owner and its named child are
+    /// still the exact retained objects. Fails closed on any identity drift.
+    pub fn validate(&self) -> Result<()> {
+        self.owner.validate_path(self.owner.display_path())?;
+        self.workspace
+            .validate_path(self.workspace.display_path())?;
+        let observed = self.owner.open_child_directory(&self.child_name)?;
+        if observed.identity_token() != self.workspace.identity_token() {
+            return Err(SandboxError::PathDenied(
+                "retained workspace identity changed beneath its owner".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 

@@ -28,7 +28,7 @@
 use super::SandboxBackend;
 use crate::error::{Result, SandboxError};
 use crate::manifest::{NetworkPolicy, SandboxManifest};
-use crate::{ResourceLimitEnforcement, SandboxCommand, SandboxOutput};
+use crate::{DirectoryAuthority, ResourceLimitEnforcement, SandboxCommand, SandboxOutput};
 use async_trait::async_trait;
 use std::path::Path;
 use std::process::Stdio;
@@ -85,10 +85,37 @@ impl SandboxBackend for BubblewrapBackend {
         true
     }
 
+    /// bwrap binds the retained checkout as `/proc/self/fd/N` inside its mount
+    /// namespace (see [`BubblewrapBackend::execute_bound`]), so `--chdir`
+    /// resolves to the exact retained object rather than a re-openable path.
+    fn binds_cwd_authority(&self) -> bool {
+        true
+    }
+
     async fn execute(
         &self,
         manifest: &SandboxManifest,
         cmd: SandboxCommand,
+    ) -> Result<SandboxOutput> {
+        self.execute_bound(manifest, cmd, None).await
+    }
+
+    async fn execute_with_cwd_authority(
+        &self,
+        manifest: &SandboxManifest,
+        cmd: SandboxCommand,
+        cwd: DirectoryAuthority,
+    ) -> Result<SandboxOutput> {
+        self.execute_bound(manifest, cmd, Some(cwd)).await
+    }
+}
+
+impl BubblewrapBackend {
+    async fn execute_bound(
+        &self,
+        manifest: &SandboxManifest,
+        cmd: SandboxCommand,
+        cwd_authority: Option<DirectoryAuthority>,
     ) -> Result<SandboxOutput> {
         // 1. AllowHosts unsupported: bwrap has no DNS gate.
         if let NetworkPolicy::AllowHosts(_) = manifest.network {
@@ -241,10 +268,54 @@ impl SandboxBackend for BubblewrapBackend {
             bwrap_argv.push(v.clone());
         }
 
-        // Working directory.
-        if let Some(cwd) = &cmd.cwd {
-            bwrap_argv.push("--chdir".into());
-            bwrap_argv.push(cwd.to_string_lossy().into_owned());
+        // Working directory. Delegated execution binds the retained directory
+        // descriptor into the namespace as `/proc/self/fd/N` and chdirs there,
+        // so a pathname replacement between admission and spawn cannot redirect
+        // the working directory; ordinary callers keep the path-based mode. The
+        // inheritable loan is held until this function returns so the descriptor
+        // stays valid while bwrap builds its namespace.
+        #[cfg(target_os = "linux")]
+        let _cwd_handle = {
+            use std::os::fd::AsRawFd;
+            if let Some(authority) = cwd_authority.as_ref() {
+                if cmd.cwd.as_deref() != Some(authority.display_path()) {
+                    return Err(SandboxError::PathDenied(
+                        "bubblewrap cwd does not match retained authority".to_owned(),
+                    ));
+                }
+                let handle = authority.try_clone_inheritable_handle()?;
+                let source = format!("/proc/self/fd/{}", handle.as_raw_fd());
+                let destination = authority.display_path().to_string_lossy().into_owned();
+                bwrap_argv.push("--bind".into());
+                bwrap_argv.push(source);
+                bwrap_argv.push(destination.clone());
+                bwrap_argv.push("--chdir".into());
+                bwrap_argv.push(destination);
+                Some(handle)
+            } else if let Some(cwd) = &cmd.cwd {
+                bwrap_argv.push("--chdir".into());
+                bwrap_argv.push(cwd.to_string_lossy().into_owned());
+                None
+            } else {
+                None
+            }
+        };
+        // bwrap runs only on Linux; on other targets this file compiles as a
+        // stub, so the retained-descriptor bind is unavailable and the retained
+        // authority (if any) is validated for path agreement only.
+        #[cfg(not(target_os = "linux"))]
+        {
+            if let Some(authority) = cwd_authority.as_ref() {
+                if cmd.cwd.as_deref() != Some(authority.display_path()) {
+                    return Err(SandboxError::PathDenied(
+                        "bubblewrap cwd does not match retained authority".to_owned(),
+                    ));
+                }
+            }
+            if let Some(cwd) = &cmd.cwd {
+                bwrap_argv.push("--chdir".into());
+                bwrap_argv.push(cwd.to_string_lossy().into_owned());
+            }
         }
 
         // Resource limits — best-effort via bwrap's --rlimit-as for address
