@@ -1,0 +1,102 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-07-20T00:25:13.783Z",
+  "phase": "20",
+  "phase_name": "transactional-delegated-mutation",
+  "phase_dir": ".planning/phases/20-transactional-delegated-mutation",
+  "plan": 3,
+  "task": 0,
+  "total_tasks": 18,
+  "status": "paused_for_claude_transfer",
+  "completed_tasks": [
+    {
+      "id": 1,
+      "name": "Journal-authoritative child transaction persistence",
+      "status": "done",
+      "commit": "626e1d4d3dee9fee7008ad172ec0b4add8f2004e"
+    },
+    {
+      "id": 2,
+      "name": "Windows AppContainer ACL lifecycle",
+      "status": "done",
+      "commit": "96afb30aff362ef8f0d4f6f93773eae548d989ee"
+    }
+  ],
+  "remaining_tasks": [
+    {"id": 3, "name": "Cross-platform isolated mutation substrate", "status": "not_started"},
+    {"id": 4, "name": "Production spawner propagation", "status": "not_started"},
+    {"id": 5, "name": "Orchestrator transaction propagation", "status": "not_started"},
+    {"id": 6, "name": "Opaque candidate seal", "status": "not_started"},
+    {"id": 7, "name": "Recoverable parent compare-and-swap", "status": "not_started"},
+    {"id": 8, "name": "Complete delegated-mutation lifecycle", "status": "not_started"},
+    {"id": 9, "name": "Independent review of candidate seal", "status": "not_started"},
+    {"id": 10, "name": "Hard containment authority", "status": "not_started"},
+    {"id": 11, "name": "Independent review of containment", "status": "not_started"},
+    {"id": 12, "name": "Gate execution and receipt authority", "status": "not_started"},
+    {"id": 13, "name": "Black-box gate and containment proof", "status": "not_started"},
+    {"id": 14, "name": "Independent integrated audit", "status": "not_started"},
+    {"id": 15, "name": "Independent review of isolation substrate", "status": "not_started"},
+    {"id": 16, "name": "Independent final construction review", "status": "not_started"},
+    {"id": 17, "name": "Prepare exact native-proof request", "status": "not_started"},
+    {"id": 18, "name": "Authorized native and aggregate acceptance", "status": "not_started"}
+  ],
+  "blockers": [
+    {
+      "description": "Review identities are not yet mechanically bound to the actual GSD source and reviewer entries in .planning/agent-history.json.",
+      "type": "technical",
+      "workaround": "Extend verify-review-result.mjs and its hostile tests before accepting the plan."
+    },
+    {
+      "description": "Installed Codex GSD agent definitions are older than .planning/config.json, so the requested model overrides are not baked.",
+      "type": "technical",
+      "workaround": "Reinstall or update the GSD Codex agents, preserving and rechecking the local execute-plan resume-authority correction."
+    }
+  ],
+  "async_jobs": [],
+  "human_actions_pending": [
+    {
+      "action": "Authorize the exact 20-17 pending native-proof digest during plan 20-18.",
+      "context": "This is intentionally deferred until all source construction and independent reviews pass.",
+      "blocking": false
+    }
+  ],
+  "decisions": [
+    {
+      "decision": "Use stock GSD in one clean standalone clone for Phase 20 execution.",
+      "rationale": "Linked worktrees suppress normal GSD state and roadmap tracking.",
+      "phase": "20"
+    },
+    {
+      "decision": "Keep Phase 20 product mutation serial and represent independent reviews as dependency-ordered plans.",
+      "rationale": "The plans share source, schema, lock, and authority seams.",
+      "phase": "20"
+    },
+    {
+      "decision": "Treat every substantiated severity as repair-required.",
+      "rationale": "Repository policy requires zero BLOCKER, CRITICAL, HIGH, MEDIUM, and LOW findings for acceptance.",
+      "phase": "20"
+    }
+  ],
+  "uncommitted_files": [
+    ".planning/PROJECT.md",
+    ".planning/ROADMAP.md",
+    ".planning/phases/20-transactional-delegated-mutation/20-05-PLAN.md",
+    ".planning/phases/20-transactional-delegated-mutation/20-07-PLAN.md",
+    ".planning/phases/20-transactional-delegated-mutation/20-08-PLAN.md",
+    ".planning/phases/20-transactional-delegated-mutation/20-09-PLAN.md",
+    ".planning/phases/20-transactional-delegated-mutation/20-10-PLAN.md",
+    ".planning/phases/20-transactional-delegated-mutation/20-11-PLAN.md",
+    ".planning/phases/20-transactional-delegated-mutation/20-12-PLAN.md",
+    ".planning/phases/20-transactional-delegated-mutation/20-14-PLAN.md",
+    ".planning/phases/20-transactional-delegated-mutation/20-15-PLAN.md",
+    ".planning/phases/20-transactional-delegated-mutation/20-16-PLAN.md",
+    ".planning/phases/20-transactional-delegated-mutation/20-17-PLAN.md",
+    ".planning/phases/20-transactional-delegated-mutation/20-18-PLAN.md",
+    ".planning/scripts/task-base-authority.mjs",
+    ".planning/scripts/test-phase20-proof-scripts.sh",
+    ".planning/scripts/verify-review-result.mjs",
+    ".planning/scripts/verify-task-scope.sh"
+  ],
+  "next_action": "Fix the two remaining MEDIUM plan findings, rerun the complete planning audit, commit the accepted plan, create a clean standalone clone from that commit, and execute 20-03.",
+  "context_notes": "Product execution is 2 of 18 Phase 20 plans. The current planning worktree contains the complete 18-plan successor and hardened authority helpers, but it is WIP and must not be described as accepted until the two remaining findings are fixed. No Cargo may run on this Mac."
+}
