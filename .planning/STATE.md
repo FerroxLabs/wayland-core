@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 20
 current_phase_name: transactional-delegated-mutation
 status: executing
-stopped_at: Plans 20-03, 20-15, 20-04, 20-06, 20-09, and 20-10 complete. 20-06/20-09 delivered+reviewed the 06A candidate seal. 20-10 built the 20-06B source packet — an opaque, one-use HardContainmentAuthority minted only from a semantic LIVE probe of the exact backend + normalized policy (structural pub/pub(crate) seal so foreign backends cannot mint; read-only-candidate + traversal-free private-write filesystem with temp/credential denial; fail-closed process-tree ownership; per-field spawn-time drift refusal; redacted Debug). Linux-proven at source b1de890 (clippy --all-features -D warnings clean; 80 wcore-sandbox lib tests incl. the live required_live bwrap PID-ns probe + traversal/redaction regression tests; check --workspace --all-targets green for downstream SandboxBackend impls). 20-11 round 1 found 2 real gaps (MEDIUM `..`-traversal path-validation bypass, LOW unredacted Debug) — both repaired at source and re-proven before the recorded successor. Main-context cross-audit had earlier caught+fixed a non-compiling super:: path and a wrong-assertion test. Next boundary: plan 20-11 re-review of the exact 06B source b1de890 (profile f20-11).
-last_updated: "2026-07-20T13:45:00.000Z"
+stopped_at: Plans 20-03, 20-15, 20-04, 20-06, 20-09, 20-10, and 20-11 complete. 20-06/20-09 delivered+reviewed the 06A candidate seal. 20-10 built the 20-06B source packet — an opaque, one-use HardContainmentAuthority minted only from a semantic LIVE probe of the exact backend + normalized policy (structural pub/pub(crate) seal so foreign backends cannot mint; read-only-candidate + traversal-free private-write filesystem with temp/credential denial; fail-closed process-tree ownership; per-field spawn-time drift refusal; redacted Debug), Linux-proven at source b1de890. 20-11 = the fresh non-author independent review of the exact 06B source (profile f20-11): zero-finding PASS (checks all_severity/containment_authority/policy_sufficiency), reviewer wayland-f20-11-independent-review ≠ source wayland-f20-10-builder, verify-review-pair.sh + verify-review-result.mjs both green (review 5cd67c5). The review ran TWO rounds — round 1 found+repaired a MEDIUM `..`-traversal path-validation bypass and a LOW unredacted Debug at source, round 2 (on b1de890) verified both fixes and found NO new findings — so 06B is construction-qualified. Next boundary: plan 20-12 (depends on 20-10/06B).
+last_updated: "2026-07-20T14:05:00.000Z"
 last_activity: 2026-07-20
-last_activity_desc: Plan 20-10 06B HardContainmentAuthority built + Linux-proven (source b1de890, after 20-11 round-1 findings repaired). Next: re-dispatch plan 20-11 independent review (f20-11).
+last_activity_desc: Plan 20-11 independent review of 20-06B = zero-finding f20-11 PASS (review 5cd67c5); 06B qualified. Next: plan 20-12.
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 18
-  completed_plans: 8
+  completed_plans: 9
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: `.planning/PROJECT.md` (updated 2026-07-19)
 ## Current Position
 
 Phase: 20 (transactional-delegated-mutation) — EXECUTING
-Plan: 9 of 18 (next: 20-11 re-review)
+Plan: 10 of 18 (next: 20-12)
 Status: Executing Phase 20
-Last activity: 2026-07-20 — Plan 20-10 06B HardContainmentAuthority built + Linux-proven (source b1de890, after 20-11 round-1 findings repaired); next plan 20-11 re-review (f20-11)
+Last activity: 2026-07-20 — Plan 20-11 independent review of 20-06B = zero-finding f20-11 PASS (review 5cd67c5); next plan 20-12
 
-Progress: [████░░░░░░] 44%
+Progress: [█████░░░░░] 50%
 
 ## Execution Authority
 
