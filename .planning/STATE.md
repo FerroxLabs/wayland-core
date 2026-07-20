@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 20
 current_phase_name: transactional-delegated-mutation
 status: executing
-stopped_at: Plans 20-03, 20-15, 20-04, 20-06, 20-09, 20-10, 20-11, and 20-12 complete. 06A candidate seal (20-06/09) + 06B HardContainmentAuthority (20-10/11) both delivered+reviewed. 20-12 built the 06C source packet — parent-owned AuthorizedGateClosureRegistry (SHA-256-sealed closures; unknown/substituted/drifted fail closed pre-spawn) + fail-closed gate state machine (module-private, exact-seal, in-order observed results from a consumed one-use HardContainmentAuthority spawn; live-seal-derived cwd) + opaque guard-owned AcceptedCandidate (owns MOVED still-armed MutationAttemptGuard + CandidateSeal; load-bearing seal-before-guard drop; no pub-ctor/Clone/Serialize) minted only after authoritative durable receipt append/reopen/reduce/match. 8 wcore-agent files (4 new). Linux-proven at source b8a260e: scope-ok paths=8; clippy -p wcore-agent --all-targets --all-features -D warnings clean; ALL 6 hostile process-isolated nextest pairs 1-select/1-unretried-PASS; touched code 71/71 in nextest isolation. The cargo `test --lib` parallel flakiness (20/18 non-deterministic sets, 4 serial) is PRE-EXISTING journal-writer-lease + inherent-parallelism contention in untouched files (engine/session/council/spawn_tool), independently proven across 4 configs — NOT a 20-12 regression (deferred to 20-08 aggregate). 06C makes NO parent-landing/CAS/lifecycle claim. Next boundary: plan 20-13 (depends on 20-12).
-last_updated: "2026-07-20T14:45:00.000Z"
-last_activity: 2026-07-20
-last_activity_desc: Plan 20-12 06C gate-execution+durable-receipt AcceptedCandidate built + Linux-proven (source b8a260e); --lib parallel flakiness proven pre-existing/non-regression. Next: plan 20-13.
+stopped_at: Plans 20-03, 20-15, 20-04, 20-06, 20-09, 20-10, 20-11, 20-12, and 20-13 complete. 06A candidate seal (20-06/09) + 06B HardContainmentAuthority (20-10/11) both delivered+reviewed. 20-13 (06D) added the 3 black-box proof files (source ace4bd2, scope-ok paths=3): live bwrap hard-containment qualification + descendant no-residue, hostile gate-evidence/durable-replay fail-closed, positive host→AcceptedCandidate. All OWNED gates Linux-green (8 focused pairs, 3 integration binaries, swarm/sandbox --lib, clippy 3-crate -D warnings, fmt --all). The windows-gnu cross-check surfaced a PRE-06D regression (bisected: F20-entry 97e4491 CLEAN → pre-06B 1ace696 RED; root cause 20-02 4dcd62a moved windows_impl a module level deeper leaving stale super:: paths + 2 sibling private-field ctors; dead-on-Linux so all Linux-only proofs incl. 20-02 acceptance missed it) — production windows_impl code OUTSIDE 06D scope + OUTSIDE the 06A-06D audited blobs + OUTSIDE the metadata-only chain, ROUTED TO 20-08 with a VALIDATED fix (scratchpad/windows-impl-modpath-fix-for-2008.patch, proven windows-gnu green out-of-chain, cfg(windows)-only/Linux-neutral). Per f20-14 native Windows is deferred, so not blocking 20-14. NOT a 06D defect. Next boundary: plan 20-14 (fresh non-author all-severity audit of 06A-06D). 20-12 built the 06C source packet — parent-owned AuthorizedGateClosureRegistry (SHA-256-sealed closures; unknown/substituted/drifted fail closed pre-spawn) + fail-closed gate state machine (module-private, exact-seal, in-order observed results from a consumed one-use HardContainmentAuthority spawn; live-seal-derived cwd) + opaque guard-owned AcceptedCandidate (owns MOVED still-armed MutationAttemptGuard + CandidateSeal; load-bearing seal-before-guard drop; no pub-ctor/Clone/Serialize) minted only after authoritative durable receipt append/reopen/reduce/match. 8 wcore-agent files (4 new). Linux-proven at source b8a260e: scope-ok paths=8; clippy -p wcore-agent --all-targets --all-features -D warnings clean; ALL 6 hostile process-isolated nextest pairs 1-select/1-unretried-PASS; touched code 71/71 in nextest isolation. The cargo `test --lib` parallel flakiness (20/18 non-deterministic sets, 4 serial) is PRE-EXISTING journal-writer-lease + inherent-parallelism contention in untouched files (engine/session/council/spawn_tool), independently proven across 4 configs — NOT a 20-12 regression (deferred to 20-08 aggregate). 06C makes NO parent-landing/CAS/lifecycle claim. Next boundary: plan 20-13 (depends on 20-12).
+last_updated: "2026-07-21T01:15:00.000Z"
+last_activity: 2026-07-21
+last_activity_desc: Plan 20-13 06D black-box proofs complete (source ace4bd2, all owned gates Linux-green). windows-gnu surfaced a pre-06D windows_impl regression routed to 20-08 (validated patch staged); Windows deferred per f20-14. Next: plan 20-14 audit.
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 18
-  completed_plans: 10
+  completed_plans: 11
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: `.planning/PROJECT.md` (updated 2026-07-19)
 ## Current Position
 
 Phase: 20 (transactional-delegated-mutation) — EXECUTING
-Plan: 11 of 18 (next: 20-13)
+Plan: 12 of 18 (next: 20-14 audit)
 Status: Executing Phase 20
-Last activity: 2026-07-20 — Plan 20-12 06C gate-execution+durable-receipt AcceptedCandidate built + Linux-proven (source b8a260e); next plan 20-13
+Last activity: 2026-07-21 — Plan 20-13 06D black-box proofs complete (source ace4bd2, owned gates Linux-green); windows-gnu regression routed to 20-08 (validated patch); next plan 20-14 audit
 
-Progress: [██████░░░░] 56%
+Progress: [███████░░░] 67%
 
 ## Execution Authority
 
