@@ -716,9 +716,10 @@ async fn resolve_durable_launch_refuses_inline_mutation() {
         "a Write tool must classify as mutation authority"
     );
 
-    let err = spawner
-        .resolve_durable_launch(sub_config("mutant"), mutating)
-        .expect_err("a mutating child must never resolve as a shared inline launch");
+    let err = match spawner.resolve_durable_launch(sub_config("mutant"), mutating) {
+        Ok(_) => panic!("a mutating child must never resolve as a shared inline launch"),
+        Err(error) => error,
+    };
     let message = err.to_string();
     assert!(
         matches!(err, DurableSpawnerError::WorkspacePreparation(_)),
@@ -747,9 +748,10 @@ async fn resolve_durable_launch_without_parent_workspace_authority_is_refused() 
     let spawner = AgentSpawner::new(quiet_provider(), test_config());
     let (spawner, _journal, _root) = bind_test_spawner(spawner);
 
-    let err = spawner
-        .resolve_durable_launch(sub_config("orphan"), ForkOverrides::default())
-        .expect_err("resolution must fail closed without parent workspace authority");
+    let err = match spawner.resolve_durable_launch(sub_config("orphan"), ForkOverrides::default()) {
+        Ok(_) => panic!("resolution must fail closed without parent workspace authority"),
+        Err(error) => error,
+    };
     assert!(
         matches!(
             &err,
@@ -799,9 +801,11 @@ fn with_parent_workspace_rejects_missing_and_non_directory_roots() {
     let dir = tempfile::tempdir().expect("scratch root");
 
     let missing = dir.path().join("does-not-exist");
-    let err = AgentSpawner::new(quiet_provider(), test_config())
-        .with_parent_workspace(&missing)
-        .expect_err("a nonexistent parent workspace must be refused");
+    let err =
+        match AgentSpawner::new(quiet_provider(), test_config()).with_parent_workspace(&missing) {
+            Ok(_) => panic!("a nonexistent parent workspace must be refused"),
+            Err(error) => error,
+        };
     assert!(
         matches!(err, DurableSpawnerError::WorkspacePreparation(_)),
         "missing parent workspace must be a workspace-preparation denial; got: {err}"
@@ -809,9 +813,11 @@ fn with_parent_workspace_rejects_missing_and_non_directory_roots() {
 
     let file = dir.path().join("not-a-dir");
     std::fs::write(&file, b"x").expect("write scratch file");
-    let err = AgentSpawner::new(quiet_provider(), test_config())
-        .with_parent_workspace(&file)
-        .expect_err("a non-directory parent workspace must be refused");
+    let err = match AgentSpawner::new(quiet_provider(), test_config()).with_parent_workspace(&file)
+    {
+        Ok(_) => panic!("a non-directory parent workspace must be refused"),
+        Err(error) => error,
+    };
     assert!(
         matches!(
             &err,
