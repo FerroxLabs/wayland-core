@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 20
 current_phase_name: transactional-delegated-mutation
 status: executing
-stopped_at: The candidate-gate plan is split into executable stock-GSD source and independent-review boundaries; the reopened 20-03 plan is the next incomplete execution boundary.
-last_updated: "2026-07-19T21:15:44.000Z"
+stopped_at: Plan 20-03 (isolated mutation substrate) executed on a pinned-rustfmt-clean base and fully Linux-proven on the committed-head Hetzner harness; its SUMMARY is recorded. The next boundary is plan 20-15, the fresh non-author independent review, which gates 20-04.
+last_updated: "2026-07-20T09:23:24.210Z"
 last_activity: 2026-07-20
-last_activity_desc: Phase 20 gate plan repaired into executable source and independent-review boundaries
+last_activity_desc: Plan 20-03 executed and Linux-proven (scope=41, clippy/fmt green, all required_live receipts pass); SUMMARY recorded; awaiting 20-15 independent review
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 18
-  completed_plans: 2
+  completed_plans: 3
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: `.planning/PROJECT.md` (updated 2026-07-19)
 ## Current Position
 
 Phase: 20 (transactional-delegated-mutation) — EXECUTING
-Plan: 3 of 18
+Plan: 4 of 18 (next: 20-15 independent review)
 Status: Executing Phase 20
-Last activity: 2026-07-20 — Phase 20 gate plan repaired into executable source and independent-review boundaries
+Last activity: 2026-07-20 — Plan 20-03 executed and Linux-proven; SUMMARY recorded; awaiting 20-15 review
 
-Progress: [█░░░░░░░░░] 11%
+Progress: [██░░░░░░░░] 17%
 
 ## Execution Authority
 
@@ -49,7 +49,7 @@ Progress: [█░░░░░░░░░] 11%
 
 **Velocity:**
 
-- Total plans completed: 2
+- Total plans completed: 3
 - Average duration: Not established
 - Total execution time: Not established
 
@@ -84,6 +84,6 @@ Progress: [█░░░░░░░░░] 11%
 
 ## Session Continuity
 
-Last session: 2026-07-19
-Stopped at: The invalid 22-plan chain is removed; the eighteen-plan pure-GSD replacement is undergoing final structural and consistency validation.
+Last session: 2026-07-20
+Stopped at: Plan 20-03 executed on a pinned-rustfmt-clean base (chore(fmt) `fda8ba1`), Linux-proven at source `d343fc72` (scope=41, clippy/fmt/all required_live green), SUMMARY recorded. Next: dispatch plan 20-15 fresh non-author independent review over `fda8ba1..d343fc72`.
 Resume file: None
