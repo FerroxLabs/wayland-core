@@ -741,6 +741,40 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn crucible_spawner_binds_authority_and_cannot_downgrade_mutation() {
+        use wcore_types::spawner::{ForkOverrides, RequestedChildWorkspace};
+        // The CLI constructs the crucible spawner through the same workspace-aware
+        // production path (`govern_standalone_spawner`), so it carries bound
+        // durable-session AND parent-workspace authority before any child runs.
+        let session_root = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.session.directory = session_root.path().join("sessions").display().to_string();
+        let provider = Arc::new(CountingProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let spawner = governed_crucible_spawner(provider.clone(), &config)
+            .expect("bind standalone crucible session authority");
+        assert!(
+            !spawner
+                .durable_session_id()
+                .expect("session authority is bound")
+                .is_empty()
+        );
+        // Authority binding runs no child.
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        // A mutating (Write/Edit) child request classifies as isolated — CLI
+        // construction cannot downgrade mutating work to shared parent access.
+        let mutating = ForkOverrides {
+            allowed_tools: vec!["Write".into(), "Edit".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            mutating.requested_workspace(),
+            RequestedChildWorkspace::IsolatedMutation
+        );
+    }
+
     fn proposal(provider: &str, model: Option<&str>) -> Proposal {
         Proposal {
             provider: provider.to_string(),

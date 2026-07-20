@@ -491,6 +491,41 @@ Workflow(
         assert!(matches!(outcome, Err(WorkflowRunError::StageFailed { .. })));
     }
 
+    #[tokio::test]
+    async fn workflow_spawner_binds_authority_and_cannot_downgrade_mutation() {
+        use wcore_types::spawner::{ForkOverrides, RequestedChildWorkspace};
+        // `workflow run` constructs its spawner through the same workspace-aware
+        // production path (`govern_standalone_spawner`), so it carries bound
+        // durable-session AND parent-workspace authority before any child runs.
+        let session_root = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.session.directory = session_root.path().join("sessions").display().to_string();
+        let provider = Arc::new(CountingProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let spawner =
+            governed_workflow_spawner(provider.clone(), &config, Arc::new(AgentBus::new(8)))
+                .expect("bind standalone workflow session authority");
+        assert!(
+            !spawner
+                .durable_session_id()
+                .expect("session authority is bound")
+                .is_empty()
+        );
+        // Authority binding runs no child.
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        // A mutating (Write/Edit) child request classifies as isolated — CLI
+        // construction cannot downgrade mutating work to shared parent access.
+        let mutating = ForkOverrides {
+            allowed_tools: vec!["Write".into(), "Edit".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            mutating.requested_workspace(),
+            RequestedChildWorkspace::IsolatedMutation
+        );
+    }
+
     #[test]
     fn validate_good_file_ok() {
         let dir = tempfile::tempdir().unwrap();

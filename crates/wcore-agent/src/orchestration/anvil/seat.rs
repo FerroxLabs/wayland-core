@@ -41,6 +41,14 @@ struct ResolvedDriverSeat {
 /// provider (e.g. Flux's routed lane). Auto-approve is forced on the seat
 /// config regardless of the session posture — the human decision happens at
 /// the forge boundary (CLI verb / tool approval), machinery runs inside.
+///
+/// Workspace-authority propagation: the seat is cloned from the session spawner
+/// via [`AgentSpawner::clone_for_resolved_config`], which carries the session's
+/// bound parent-workspace authority (and sandbox runtime) into the seat. The
+/// forge's builder is an isolated-mutation child (Write/Edit tools), so this
+/// bound authority is exactly what lets the production spawner allocate each
+/// candidate's transaction-owned standalone checkout — the seat never launches a
+/// mutating builder against the parent checkout.
 pub async fn materialize_driver_seat(
     anvil: &AnvilConfig,
     session_cfg: &Config,
@@ -65,6 +73,14 @@ pub async fn materialize_driver_seat(
 /// because the best-effort valve provider is unavailable. Governance attaches
 /// inside this function so no executable unbound spawner crosses the public
 /// boundary.
+///
+/// Workspace-authority propagation: governance runs through
+/// [`crate::bootstrap::govern_standalone_spawner`], which binds the parent
+/// repository identity (`with_parent_workspace`) on the seat spawner. That bound
+/// authority is required for the forge to allocate each candidate's
+/// transaction-owned standalone checkout through the production run-and-retain
+/// seam; the caller supplies the enforcing sandbox runtime before running the
+/// forge, so a mutating builder can never run in a shared/parent checkout.
 pub async fn materialize_standalone_driver_seat(
     anvil: &AnvilConfig,
     session_cfg: &Config,

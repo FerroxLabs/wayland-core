@@ -42,11 +42,18 @@ pub fn bind_test_spawner(
     spawner: AgentSpawner,
 ) -> (AgentSpawner, SessionJournal, tempfile::TempDir) {
     let root = tempfile::tempdir().expect("create durable spawner test root");
+    let workspace = root.path().to_string_lossy().into_owned();
     let manager = SessionManager::new(root.path().join("sessions"), 10);
     let active = manager
-        .create_for_run("test-provider", "test-model", "/tmp", None)
+        .create_for_run("test-provider", "test-model", &workspace, None)
         .expect("create canonical durable spawner test session");
     let journal = active.journal.clone();
+    // Bind the parent-workspace authority the production spawner requires before
+    // any child (shared read-only OR isolated mutating) can resolve its
+    // workspace — the same authority the CLI/bootstrap bind in production.
+    let spawner = spawner
+        .with_parent_workspace(root.path())
+        .expect("bind canonical parent workspace");
     spawner
         .bind_durable_session(active.journal, &active.session.id)
         .expect("bind canonical durable spawner test session");

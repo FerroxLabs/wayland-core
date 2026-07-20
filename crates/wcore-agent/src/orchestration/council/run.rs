@@ -704,7 +704,15 @@ mod tests {
             provider_label: "test-provider".into(),
             ..Config::default()
         };
-        let spawner = AgentSpawner::new(counting.clone(), config).with_provider_resolver(resolver);
+        // Council proposers are shared read-only children, so the spawner MUST
+        // carry the parent-workspace authority for them to resolve their
+        // workspace and reach the provider — this is the council leg of the
+        // workspace-authority propagation the CLI binds via
+        // `govern_standalone_spawner`.
+        let spawner = AgentSpawner::new(counting.clone(), config)
+            .with_parent_workspace(dir.path())
+            .unwrap()
+            .with_provider_resolver(resolver);
         bind_test_durable_session(&spawner, dir.path(), "f190023");
 
         let mut r = roster(&["flux:a", "flux:b", "flux:c", "flux:d"]);
@@ -741,7 +749,12 @@ mod tests {
             provider_label: "test-provider".into(),
             ..Config::default()
         };
-        let spawner = AgentSpawner::new(counting.clone(), config).with_provider_resolver(resolver);
+        // See `same_route_bounds_concurrent_spawns`: the council spawner must be
+        // parent-workspace bound so shared read-only proposers resolve and run.
+        let spawner = AgentSpawner::new(counting.clone(), config)
+            .with_parent_workspace(dir.path())
+            .unwrap()
+            .with_provider_resolver(resolver);
         bind_test_durable_session(&spawner, dir.path(), "f190024");
 
         let mut r = roster(&["openai:a", "anthropic:b"]);

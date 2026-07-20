@@ -24,16 +24,25 @@ pub struct ForgeArgs {
     pub task: String,
 }
 
-/// Entry point for `wayland-core forge`.
-pub async fn run_forge(args: ForgeArgs) -> anyhow::Result<()> {
-    let cf = load_merged_config_file(None)?;
-
+/// Admission gate for the forge verb: refuse before any provider/spawner
+/// construction when Anvil is kill-switched off. The denial names the missing
+/// prerequisite (the `[anvil] enabled` switch) and never claims a child ran or
+/// exposes any secret.
+fn ensure_anvil_enabled(cf: &wcore_config::config::ConfigFile) -> anyhow::Result<()> {
     if !cf.anvil.enabled {
         anyhow::bail!(
             "Anvil is disabled (kill-switched). Remove `enabled = false` from \
              `[anvil]` in your config to forge gated tasks."
         );
     }
+    Ok(())
+}
+
+/// Entry point for `wayland-core forge`.
+pub async fn run_forge(args: ForgeArgs) -> anyhow::Result<()> {
+    let cf = load_merged_config_file(None)?;
+
+    ensure_anvil_enabled(&cf)?;
     // No gate pre-check here: an empty `[anvil] gate` means auto-detect (A1.7),
     // and `drive_climb_full` refuses with a precise error if nothing is found.
 
@@ -116,5 +125,37 @@ pub async fn run_forge(args: ForgeArgs) -> anyhow::Result<()> {
             Ok(())
         }
         Err(e) => anyhow::bail!("forge: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wcore_config::config::ConfigFile;
+
+    #[test]
+    fn forge_admitted_when_anvil_enabled() {
+        // Availability, not activity: a default config admits the forge verb so
+        // the workspace-aware production seat can be constructed downstream.
+        let cf = ConfigFile::default();
+        assert!(cf.anvil.enabled, "anvil defaults to available");
+        assert!(ensure_anvil_enabled(&cf).is_ok());
+    }
+
+    #[test]
+    fn forge_denied_before_dispatch_when_kill_switched() {
+        // The kill-switch denies BEFORE any provider/spawner/seat construction.
+        let mut cf = ConfigFile::default();
+        cf.anvil.enabled = false;
+        let err = ensure_anvil_enabled(&cf).expect_err("kill-switch must deny");
+        let message = err.to_string();
+        // Names the missing prerequisite...
+        assert!(message.contains("disabled"));
+        assert!(message.contains("[anvil]"));
+        // ...without exposing secrets or claiming a child ran.
+        let lowered = message.to_lowercase();
+        assert!(!lowered.contains("api_key"));
+        assert!(!lowered.contains("token"));
+        assert!(!lowered.contains("forged"));
     }
 }
