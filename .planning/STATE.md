@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 20
 current_phase_name: transactional-delegated-mutation
 status: executing
-stopped_at: Plans 20-03, 20-15, and 20-04 complete. 20-04 wired the isolation substrate through the production spawner (bootstrap/engine/Spawn-tool/durable), Linux-proven at source 30a2b4f (clippy -D warnings, spawner lib 68 passed, workflow_live_gate_test 12 passed). The remote runtime gate caught two real bugs (unbound transient spawner in non-contained sessions; a .wayland-control off-by-one in the workspace quota) that compile+clippy could not. Next boundary: plan 20-06 (20-06A candidate-seal packet), which depends directly on 20-04.
-last_updated: "2026-07-20T11:36:07.112Z"
+stopped_at: Plans 20-03, 20-15, 20-04, and 20-06 complete. 20-06 built the 20-06A candidate-seal source packet on the 20-04 successor: an opaque, live, non-serializable/non-cloneable CandidateSeal minted only by the accepted 20-03 standalone-checkout capability, with files-only before/after revalidation through the retained directory authority (no git subprocess), adversary-resistant .git inspection (commondir/worktree-config/deny-by-default config allowlist/hook), and a SHA-256 digest of the full git-tree identity (path + owner-exec mode + content). Linux-proven at source 10d7573 (clippy -p wcore-sandbox -p wcore-swarm --all-targets -D warnings clean; test -p wcore-swarm 92 lib + test -p wcore-sandbox 60 passed). The 20-09 independent review ran THREE rounds, each catching real .git/mode false-PASS gaps repaired at source before it passed. Next boundary: plan 20-09 (independent non-author review of 20-06A at 10d7573, profile f20-09).
+last_updated: "2026-07-20T12:28:04.020Z"
 last_activity: 2026-07-20
-last_activity_desc: Plan 20-04 production spawner wiring complete and Linux-proven at source 30a2b4f; runtime gate caught+fixed 2 real bugs. Next: plan 20-06.
+last_activity_desc: Plan 20-06 candidate-seal source packet complete and Linux-proven at source 10d7573 (review-hardened over 3 rounds). Next: plan 20-09 (review 20-06A).
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 18
-  completed_plans: 5
+  completed_plans: 6
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: `.planning/PROJECT.md` (updated 2026-07-19)
 ## Current Position
 
 Phase: 20 (transactional-delegated-mutation) — EXECUTING
-Plan: 6 of 18 (next: 20-06)
+Plan: 7 of 18 (next: 20-09)
 Status: Executing Phase 20
-Last activity: 2026-07-20 — Plan 20-04 production spawner wiring complete and Linux-proven (source 30a2b4f); next plan 20-06
+Last activity: 2026-07-20 — Plan 20-06 candidate-seal source packet complete and Linux-proven (source 10d7573, review-hardened over 3 rounds); next plan 20-09 (review 20-06A)
 
-Progress: [███░░░░░░░] 28%
+Progress: [███░░░░░░░] 33%
 
 ## Execution Authority
 
@@ -49,7 +49,7 @@ Progress: [███░░░░░░░] 28%
 
 **Velocity:**
 
-- Total plans completed: 5
+- Total plans completed: 6
 - Average duration: Not established
 - Total execution time: Not established
 
@@ -85,5 +85,5 @@ Progress: [███░░░░░░░] 28%
 ## Session Continuity
 
 Last session: 2026-07-20
-Stopped at: Plans 20-03, 20-15, 20-04 complete (Linux-proven). 20-03 substrate (source d343fc72), 20-15 review ZERO-FINDING PASS (caught+repaired a HIGH), 20-04 production spawner wiring (source 30a2b4f; runtime gate caught+fixed 2 real bugs). Next: plan 20-06 (20-06A candidate-seal packet, depends on 20-04), then dependency order 06,09,10,11,12,13,14,05,07,08,16,17,18; review gates at 09/11/16 + audit 14; Sean hard-stop at 20-18.
+Stopped at: Plans 20-03, 20-15, 20-04, 20-06 complete (Linux-proven). 20-03 substrate (source d343fc72), 20-15 review ZERO-FINDING PASS (caught+repaired a HIGH), 20-04 production spawner wiring (source 30a2b4f; runtime gate caught+fixed 2 real bugs), 20-06 opaque live CandidateSeal source packet (source 10d7573; clippy clean + 92 wcore-swarm/60 wcore-sandbox tests; 20-09 review ran 3 rounds finding+repairing real .git/mode false-PASS gaps before passing). Next: plan 20-09 (independent non-author review of 20-06A at 10d7573, profile f20-09), then dependency order 10,11,12,13,14,05,07,08,16,17,18; review gates at 09/11/16 + audit 14; Sean hard-stop at 20-18.
 Resume file: None
