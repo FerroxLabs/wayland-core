@@ -108,7 +108,7 @@ fn cleanup_refuses_outstanding_handle_loan_then_retries_same_authority() {
     let authority = DirectoryAuthority::open(&root).unwrap();
     let loan = authority.try_clone_handle().unwrap();
 
-    let (error, authority) = authority.remove_open_dir_all().unwrap_err();
+    let (error, authority) = *authority.remove_open_dir_all().unwrap_err();
     assert!(error.to_string().contains("outstanding authority handles"));
     drop(loan);
     authority.remove_open_dir_all().unwrap();

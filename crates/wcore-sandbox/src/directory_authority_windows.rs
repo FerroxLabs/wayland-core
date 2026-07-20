@@ -424,7 +424,7 @@ pub(super) fn remove_descendants(authority: &DirectoryAuthority) -> Result<()> {
             let identity = handle_directory_identity(&handle, &metadata)?;
             if metadata.is_dir() {
                 let child = directory_authority(authority, &name, handle, identity);
-                child.remove_open_dir_all().map_err(|(error, _)| error)?;
+                child.remove_open_dir_all().map_err(|boxed| boxed.0)?;
             } else if metadata.is_file() {
                 delete_open_object(&handle, &authority.display_path.join(&name), "file")?;
             } else {
@@ -441,7 +441,7 @@ pub(super) fn remove_descendants(authority: &DirectoryAuthority) -> Result<()> {
 
 pub(super) fn remove_open_dir_all(
     authority: DirectoryAuthority,
-) -> std::result::Result<(), (SandboxError, DirectoryAuthority)> {
+) -> std::result::Result<(), Box<(SandboxError, DirectoryAuthority)>> {
     if Arc::strong_count(&authority.handle) != 1
         || Arc::strong_count(&authority.display_path) != 1
         || authority.has_outstanding_handle_loans()
@@ -450,17 +450,17 @@ pub(super) fn remove_open_dir_all(
             "retained Windows directory still has outstanding authority handles: {}",
             authority.display_path.display()
         ));
-        return Err((error, authority));
+        return Err(Box::new((error, authority)));
     }
     if let Err(error) = remove_descendants(&authority) {
-        return Err((error, authority));
+        return Err(Box::new((error, authority)));
     }
     let identity = authority.identity;
     let handle_loans = authority.handle_loans;
     let display_path = Arc::try_unwrap(authority.display_path).expect("strong count checked");
     let handle = Arc::try_unwrap(authority.handle).expect("strong count checked");
     if let Err(error) = delete_open_object(&handle, &display_path, "directory") {
-        return Err((
+        return Err(Box::new((
             error,
             DirectoryAuthority {
                 handle: Arc::new(handle),
@@ -468,7 +468,7 @@ pub(super) fn remove_open_dir_all(
                 display_path: Arc::new(display_path),
                 handle_loans,
             },
-        ));
+        )));
     }
     drop(handle);
     Ok(())
@@ -482,7 +482,7 @@ pub(super) fn remove_empty_child_directory(parent: &DirectoryAuthority, name: &s
             parent.display_path.join(name).display()
         )));
     }
-    remove_open_dir_all(child).map_err(|(error, _)| error)?;
+    remove_open_dir_all(child).map_err(|boxed| boxed.0)?;
     parent.handle.sync_all()?;
     Ok(())
 }

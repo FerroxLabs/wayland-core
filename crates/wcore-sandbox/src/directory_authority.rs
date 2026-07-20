@@ -220,12 +220,12 @@ impl DirectoryAuthority {
             let metadata = handle.metadata()?;
             validate_real_directory(self.display_path(), &metadata)?;
             let identity = handle_directory_identity(&handle, &metadata)?;
-            return Ok(Self {
+            Ok(Self {
                 handle: Arc::new(handle),
                 identity,
                 display_path: Arc::new(self.display_path.join(name)),
                 handle_loans: Arc::new(AtomicUsize::new(0)),
-            });
+            })
         }
         #[cfg(windows)]
         return windows::open_child_directory(self, name);
@@ -253,7 +253,7 @@ impl DirectoryAuthority {
                 names.push(name);
             }
             names.sort();
-            return Ok(names);
+            Ok(names)
         }
         #[cfg(not(any(unix, windows)))]
         Err(SandboxError::PolicyNotSupported(
@@ -289,11 +289,11 @@ impl DirectoryAuthority {
             let metadata = handle.metadata()?;
             validate_real_file(Path::new("<retained child>"), &metadata)?;
             let identity = handle_directory_identity(&handle, &metadata)?;
-            return Ok(RegularFileAuthority {
+            Ok(RegularFileAuthority {
                 handle,
                 identity,
                 display_path: self.display_path.join(name),
-            });
+            })
         }
         #[cfg(windows)]
         {
@@ -500,11 +500,11 @@ impl DirectoryAuthority {
             }
             let metadata = handle.metadata()?;
             let identity = handle_directory_identity(&handle, &metadata)?;
-            return Ok(RegularFileAuthority {
+            Ok(RegularFileAuthority {
                 handle,
                 identity,
                 display_path: self.display_path.join(name),
-            });
+            })
         }
         #[cfg(windows)]
         {
@@ -589,28 +589,28 @@ impl DirectoryAuthority {
     /// Remove this exact retained directory object and all descendants.
     /// Unix delegates to cap-std's open-directory removal, which locates the
     /// directory by the held inode rather than trusting its display path.
-    pub fn remove_open_dir_all(self) -> std::result::Result<(), (SandboxError, Self)> {
+    pub fn remove_open_dir_all(self) -> std::result::Result<(), Box<(SandboxError, Self)>> {
         #[cfg(unix)]
         {
             let duplicate = self
                 .handle
                 .try_clone()
-                .map_err(|error| (error.into(), self.clone()))?;
+                .map_err(|error| Box::new((error.into(), self.clone())))?;
             cap_std::fs::Dir::from_std_file(duplicate)
                 .remove_open_dir_all()
-                .map_err(|error| (error.into(), self))
+                .map_err(|error| Box::new((error.into(), self)))
         }
         #[cfg(windows)]
         {
             windows::remove_open_dir_all(self)
         }
         #[cfg(not(any(unix, windows)))]
-        Err((
+        Err(Box::new((
             SandboxError::PolicyNotSupported(
                 "open-directory cleanup is unsupported on this platform".to_owned(),
             ),
             self,
-        ))
+        )))
     }
 
     /// Remove one empty direct child through this retained parent authority.
@@ -734,6 +734,17 @@ impl RetainedWorkspaceAuthority {
     /// authority a delegated child receives.
     pub fn workspace(&self) -> &DirectoryAuthority {
         &self.workspace
+    }
+
+    /// True while any descendant still holds a duplicate of the retained
+    /// checkout handle — for example a worker that inherited the directory
+    /// descriptor across the sandbox spawn boundary (see `backends::bwrap`).
+    ///
+    /// Terminal cleanup must refuse to remove the checkout while this holds, so
+    /// a live child cannot have its working directory deleted out from under it
+    /// and a same-path replacement cannot be substituted before the loan drops.
+    pub fn checkout_has_outstanding_loans(&self) -> bool {
+        self.workspace.has_outstanding_handle_loans()
     }
 
     /// Re-prove, at a trust boundary, that the owner and its named child are

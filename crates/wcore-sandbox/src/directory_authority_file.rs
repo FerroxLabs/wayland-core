@@ -9,6 +9,12 @@ impl RegularFileAuthority {
         Ok(metadata.len())
     }
 
+    /// Whether the retained file currently has zero bytes. Shares the same
+    /// identity-checked metadata read as [`Self::len`].
+    pub fn is_empty(&self) -> Result<bool> {
+        Ok(self.len()? == 0)
+    }
+
     pub fn read_bounded(&self, max_bytes: u64) -> Result<Vec<u8>> {
         let metadata = self.handle.metadata()?;
         validate_real_file(Path::new("<retained file>"), &metadata)?;
