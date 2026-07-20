@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 20
 current_phase_name: transactional-delegated-mutation
 status: executing
-stopped_at: Plans 20-03, 20-15, 20-04, 20-06, and 20-09 complete. 20-06 built the 20-06A candidate-seal source packet (opaque live CandidateSeal; files-only .git-attacker-hardened revalidation; SHA-256 full git-tree-identity digest), Linux-proven at source 10d7573. 20-09 = the fresh non-author independent review of the exact 06A source (profile f20-09): zero-finding PASS (checks all_severity/candidate_seal_authority/interface_sufficiency), reviewer wayland-f20-09-independent-review ≠ source wayland-f20-06-builder, verify-review-pair.sh + verify-review-result.mjs both green (review 8d66277). The review ran THREE adversarial rounds finding+repairing real .git/mode false-PASS gaps before passing — 06A is construction-qualified. Next boundary: plan 20-10 (depends on 20-06/06A).
-last_updated: "2026-07-20T12:28:04.020Z"
+stopped_at: Plans 20-03, 20-15, 20-04, 20-06, 20-09, and 20-10 complete. 20-06/20-09 delivered+reviewed the 06A candidate seal. 20-10 built the 20-06B source packet — an opaque, one-use HardContainmentAuthority minted only from a semantic LIVE probe of the exact backend + normalized policy (structural pub/pub(crate) seal so foreign backends cannot mint; read-only-candidate + traversal-free private-write filesystem with temp/credential denial; fail-closed process-tree ownership; per-field spawn-time drift refusal; redacted Debug). Linux-proven at source b1de890 (clippy --all-features -D warnings clean; 80 wcore-sandbox lib tests incl. the live required_live bwrap PID-ns probe + traversal/redaction regression tests; check --workspace --all-targets green for downstream SandboxBackend impls). 20-11 round 1 found 2 real gaps (MEDIUM `..`-traversal path-validation bypass, LOW unredacted Debug) — both repaired at source and re-proven before the recorded successor. Main-context cross-audit had earlier caught+fixed a non-compiling super:: path and a wrong-assertion test. Next boundary: plan 20-11 re-review of the exact 06B source b1de890 (profile f20-11).
+last_updated: "2026-07-20T13:45:00.000Z"
 last_activity: 2026-07-20
-last_activity_desc: Plan 20-09 independent review of 20-06A = zero-finding f20-09 PASS (review 8d66277); 06A qualified. Next: plan 20-10.
+last_activity_desc: Plan 20-10 06B HardContainmentAuthority built + Linux-proven (source b1de890, after 20-11 round-1 findings repaired). Next: re-dispatch plan 20-11 independent review (f20-11).
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 18
-  completed_plans: 7
+  completed_plans: 8
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: `.planning/PROJECT.md` (updated 2026-07-19)
 ## Current Position
 
 Phase: 20 (transactional-delegated-mutation) — EXECUTING
-Plan: 8 of 18 (next: 20-10)
+Plan: 9 of 18 (next: 20-11 re-review)
 Status: Executing Phase 20
-Last activity: 2026-07-20 — Plan 20-09 independent review of 20-06A = zero-finding f20-09 PASS (review 8d66277); next plan 20-10
+Last activity: 2026-07-20 — Plan 20-10 06B HardContainmentAuthority built + Linux-proven (source b1de890, after 20-11 round-1 findings repaired); next plan 20-11 re-review (f20-11)
 
-Progress: [████░░░░░░] 39%
+Progress: [████░░░░░░] 44%
 
 ## Execution Authority
 
