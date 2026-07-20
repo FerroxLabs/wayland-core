@@ -748,4 +748,97 @@ mod tests {
             .await;
         assert!(matches!(res, Err(SandboxError::PathDenied(_))));
     }
+
+    /// Required live acceptance: bwrap is installed AND usable, and the backend
+    /// admits for delegated execution (enforces read-deny, owns descendants
+    /// hard, binds retained cwd authority, does not bypass containment). Fails
+    /// if bwrap is absent — never skips.
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "bwrap is Linux-only")]
+    async fn required_live_bwrap_admission() {
+        let backend = BubblewrapBackend::new();
+        assert!(
+            backend.is_available(),
+            "required live bwrap must be installed and usable"
+        );
+        assert!(backend.enforces_read_deny());
+        assert!(backend.owns_descendants_hard());
+        assert!(backend.binds_cwd_authority());
+        let registry = crate::SandboxRegistry::new(std::sync::Arc::new(BubblewrapBackend::new()));
+        assert!(
+            !registry.bypasses_containment(),
+            "delegated bwrap admission must not bypass containment"
+        );
+        assert!(registry.binds_workspace_authority());
+        // Prove real usability, not merely PATH presence.
+        let output = backend
+            .execute(
+                &SandboxManifest {
+                    network: NetworkPolicy::Deny,
+                    ..Default::default()
+                },
+                SandboxCommand {
+                    argv: vec!["true".into()],
+                    cwd: None,
+                },
+            )
+            .await
+            .expect("required live bwrap admission execution");
+        assert_eq!(output.exit_code, 0, "{output:?}");
+    }
+
+    /// Required live acceptance: `execute_with_cwd_authority` binds the retained
+    /// directory object as the child's cwd via `/proc/self/fd/N` + `--chdir`.
+    /// After the authority is retained the parent pathname is swapped for a
+    /// decoy; the child must still see and mutate the RETAINED object, proving
+    /// the fd binding is not redirected by a pathname replacement. Fails if
+    /// bwrap is absent — never skips.
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "bwrap is Linux-only")]
+    async fn required_live_bwrap_retained_cwd_enforcement() {
+        let backend = BubblewrapBackend::new();
+        assert!(
+            backend.is_available(),
+            "required live bwrap must be installed and usable"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let checkout = tmp.path().join("checkout");
+        std::fs::create_dir(&checkout).unwrap();
+        std::fs::write(checkout.join("seed"), b"retained").unwrap();
+        let authority = DirectoryAuthority::open(&checkout).unwrap();
+
+        // Pathname swap AFTER retention: move the real object aside, plant a
+        // decoy at the original path. The retained fd must win.
+        let moved = tmp.path().join("moved");
+        std::fs::rename(&checkout, &moved).unwrap();
+        std::fs::create_dir(&checkout).unwrap();
+        std::fs::write(checkout.join("seed"), b"decoy").unwrap();
+
+        let output = backend
+            .execute_with_cwd_authority(
+                &SandboxManifest {
+                    network: NetworkPolicy::Deny,
+                    ..Default::default()
+                },
+                SandboxCommand {
+                    argv: vec![
+                        "sh".into(),
+                        "-c".into(),
+                        "cat seed; printf bound > marker".into(),
+                    ],
+                    cwd: Some(checkout.clone()),
+                },
+                authority,
+            )
+            .await
+            .expect("required live retained-cwd bwrap execution");
+        assert_eq!(output.exit_code, 0, "{output:?}");
+        // The child read and mutated the RETAINED object, never the decoy.
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "retained");
+        assert_eq!(std::fs::read(moved.join("marker")).unwrap(), b"bound");
+        assert!(
+            !checkout.join("marker").exists(),
+            "child escaped to the swapped-in decoy"
+        );
+    }
 }

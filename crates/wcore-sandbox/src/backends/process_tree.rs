@@ -477,6 +477,15 @@ mod macos_tests {
         .expect_err("vanished root must invalidate attachment");
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     }
+
+    /// Required macOS live acceptance: the owned process tree — including a
+    /// descendant — is reaped by terminal teardown BEFORE workspace cleanup.
+    /// The identity is present and non-skipping; native EXECUTION is validated
+    /// on macOS in plan 20-08.
+    #[test]
+    fn required_live_descendant_teardown_before_workspace_cleanup() {
+        super::assert_descendant_teardown_before_workspace_cleanup();
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -749,6 +758,79 @@ mod linux_tests {
         child.kill().expect("cleanup fixture");
         child.wait().expect("reap fixture");
     }
+
+    /// Required Linux live acceptance: the owned process tree — including a
+    /// descendant — is reaped by terminal teardown BEFORE workspace cleanup
+    /// runs. Fails if a descendant survives teardown.
+    #[test]
+    fn required_live_descendant_teardown_before_workspace_cleanup() {
+        super::assert_descendant_teardown_before_workspace_cleanup();
+    }
+}
+
+/// Spawn an owned tree with a backgrounded descendant, tear the tree down, and
+/// prove the descendant is reaped BEFORE the workspace directory is cleaned up.
+/// Shared by the Linux and macOS `required_live_*` identities.
+#[cfg(all(test, unix))]
+fn assert_descendant_teardown_before_workspace_cleanup() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let pidfile = dir.path().join("descendant.pid");
+    let mut command = std::process::Command::new("sh");
+    command.arg("-c").arg(format!(
+        "sh -c 'echo $$ > \"{}\"; exec sleep 300' & sleep 300",
+        pidfile.display()
+    ));
+    isolate_std(&mut command);
+    let mut child = command.spawn().expect("spawn owned process tree");
+    let mut guard = ProcessTreeGuard::new(Some(child.id())).expect("own the process tree");
+    let descendant = wait_for_recorded_pid(&pidfile);
+    assert!(
+        pid_is_alive(descendant),
+        "owned descendant must be running before teardown"
+    );
+    // Terminal teardown runs BEFORE workspace cleanup.
+    guard.disarm();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        wait_until_pid_gone(descendant, std::time::Duration::from_secs(10)),
+        "owned descendant survived teardown before workspace cleanup"
+    );
+    // Workspace cleanup runs only on a confirmed-reaped tree.
+    drop(dir);
+    assert!(!pid_is_alive(descendant));
+}
+
+#[cfg(all(test, unix))]
+fn wait_for_recorded_pid(path: &std::path::Path) -> libc::pid_t {
+    for _ in 0..1000 {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && let Ok(pid) = text.trim().parse::<libc::pid_t>()
+            && pid > 0
+        {
+            return pid;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("owned descendant never recorded its PID");
+}
+
+#[cfg(all(test, unix))]
+fn pid_is_alive(pid: libc::pid_t) -> bool {
+    // SAFETY: signal 0 only probes for existence/permission; it delivers nothing.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(all(test, unix))]
+fn wait_until_pid_gone(pid: libc::pid_t, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if !pid_is_alive(pid) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    !pid_is_alive(pid)
 }
 
 #[cfg(windows)]

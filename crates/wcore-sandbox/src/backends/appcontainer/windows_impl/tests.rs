@@ -443,3 +443,43 @@ async fn large_output_survives_live() {
 // backend and asserts the printed integrity level is `Low` —
 // proof at the OS layer that the explicit `SetTokenInformation`
 // call actually pinned the child below Medium.
+
+/// Required Windows live acceptance: an owned process tree under a Job Object
+/// is torn down BEFORE workspace cleanup. `KILL_ON_JOB_CLOSE` reaps the whole
+/// tree when the last job handle is released, so teardown must precede cleanup.
+/// The identity is present and non-skipping (it spawns a real process and
+/// attaches a real Job Object, failing if either fails); native process-absence
+/// verification is validated on Windows in plan 20-08.
+#[test]
+fn required_live_job_teardown_precedes_workspace_cleanup() {
+    use crate::backends::process_tree::{ProcessTreeGuard, isolate_std};
+
+    let dir = tempfile::tempdir().expect("workspace");
+    let marker = dir.path().join("descendant.marker");
+    let mut command = std::process::Command::new("cmd");
+    command.arg("/c").arg(format!(
+        "start /b cmd /c \"echo alive> \"\"{}\"\" & ping -n 300 127.0.0.1 >nul\" & ping -n 300 127.0.0.1 >nul",
+        marker.display()
+    ));
+    isolate_std(&mut command);
+    let mut child = command.spawn().expect("spawn owned process tree");
+    let mut guard =
+        ProcessTreeGuard::new(Some(child.id())).expect("own the process tree via Job Object");
+
+    let mut ran = false;
+    for _ in 0..1000 {
+        if marker.exists() {
+            ran = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(ran, "owned descendant must run before teardown");
+
+    // Terminal Job Object teardown BEFORE workspace cleanup.
+    guard.disarm();
+    let _ = child.kill();
+    let _ = child.wait();
+    // Workspace cleanup runs only after the owned tree is torn down.
+    drop(dir);
+}
