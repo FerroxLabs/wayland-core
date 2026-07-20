@@ -390,7 +390,7 @@ Key references in `docs/` (don't duplicate their content here):
 
 When the user corrects your approach, append a one-line rule here before ending the session. Write it concretely ("Always use X for Y"), never abstractly ("be careful with Y"). If an existing line already covers the correction, tighten it instead of adding a new one. Remove lines when the underlying issue goes away (model upgrades, refactors, process changes).
 
-- (empty)
+- When exporting a GSD program for transfer, include the entire milestone, canonical source documents, all phases and requirements, current execution state, and supporting evidence inventory; never export only the active phase unless explicitly requested.
 
 <!-- IJFW-MEMORY-START -->
 Project memory at .ijfw/memory/. Call `ijfw_memory_prelude` for full context.
