@@ -6,10 +6,10 @@ use serde_json::{Value, json};
 use crate::agents::channel_sink::{ChannelSink, SubAgentRelay, SubAgentTerminalRelay};
 use crate::agents::registry::AgentRegistry;
 use crate::output::OutputSink;
-use crate::spawner::{AgentSpawner, SpawnExtras, SubAgentConfig};
+use crate::spawner::{AgentSpawner, ForkOverrides, SpawnExtras, SubAgentConfig};
 use wcore_protocol::events::ToolCategory;
 use wcore_swarm::Topology;
-use wcore_types::spawner::ChildOrigin;
+use wcore_types::spawner::{ChildOrigin, RequestedChildWorkspace};
 use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use wcore_tools::Tool;
@@ -148,6 +148,21 @@ impl Tool for SpawnTool {
         if tasks.is_empty() {
             return ToolResult {
                 content: "No tasks provided".to_string(),
+                is_error: true,
+            };
+        }
+
+        // Spawn children never plumb `allowed_tools`, so the canonical workspace
+        // classification MUST resolve to shared read-only. Consume
+        // `ForkOverrides::requested_workspace` here and fail closed if the Spawn
+        // surface ever resolves to mutation authority, so a shared child can never
+        // silently acquire an isolated-mutation checkout with write-capable tools.
+        if ForkOverrides::default().requested_workspace() != RequestedChildWorkspace::SharedReadOnly
+        {
+            return ToolResult {
+                content: "Spawn requires shared read-only workspace authority, but the \
+                          resolved fork overrides requested mutation authority"
+                    .to_string(),
                 is_error: true,
             };
         }

@@ -256,6 +256,10 @@ pub fn govern_standalone_spawner(
     let durable_authority = crate::durable_spawner::DurableSessionAuthority::new();
     let spawner = spawner
         .with_budget_governance(governance)
+        // Standalone/one-shot spawners resolve child workspaces against the same
+        // parent repository identity as the full bootstrap path — never a global
+        // temporary-directory fallback.
+        .with_parent_workspace(&cwd)?
         .with_durable_session_authority(
             durable_authority.clone(),
             EffectiveExecutionPolicy::baseline(&config.execution_policy),
@@ -2196,6 +2200,11 @@ impl AgentBootstrap {
                 effective_execution_policy.clone(),
             )?
             .with_sandbox_runtime(registry.sandbox_runtime())
+            // Bind the parent repository identity so every child launch resolves
+            // its shared/isolated workspace against this exact session root
+            // instead of a process-global cwd. Mutating children allocate their
+            // standalone checkout relative to this authority.
+            .with_parent_workspace(cwd)?
             .with_egress_policy(Arc::new(
                 self.session_egress_policy
                     .as_ref()

@@ -3986,6 +3986,22 @@ impl AgentEngine {
         &self,
         spawner: crate::spawner::AgentSpawner,
     ) -> crate::spawner::AgentSpawner {
+        // Bind the parent repository identity from this engine's live workspace
+        // policy so a transient child resolves the SAME shared/isolated workspace
+        // authority as the bootstrap spawner. A mutating child then allocates its
+        // standalone checkout relative to this root; the engine never rewrites the
+        // child's working directory back to the parent workspace. When the root is
+        // momentarily unresolvable, keep the unbound spawner (fail-closed at spawn
+        // time) rather than losing the governed handle.
+        let spawner = match self.tools.workspace_policy() {
+            Some(policy) => {
+                let unbound = spawner.clone_for_spawn();
+                spawner
+                    .with_parent_workspace(policy.root())
+                    .unwrap_or(unbound)
+            }
+            None => spawner,
+        };
         let spawner = match self.durable_session_authority.as_ref() {
             Some(authority) => spawner
                 .with_shared_durable_session_authority(authority.clone())
