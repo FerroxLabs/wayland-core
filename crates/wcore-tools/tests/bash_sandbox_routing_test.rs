@@ -361,6 +361,116 @@ async fn delegated_mutation_live_sandbox_confines_parent_global_tmp_and_symlink_
     assert!(!global_escape.exists());
 }
 
+/// Required Linux live acceptance (runs on the Hetzner gate). Real Bash under
+/// the delegated isolated sandbox may mutate ONLY the retained checkout and
+/// private scratch — including from a forked descendant — while every parent,
+/// symlink-alias, global-temp, and inherited-secret read/write is denied.
+/// Non-skipping: it FAILS if the hard read-deny sandbox is unavailable or
+/// bypassed, and FAILS if legitimate isolated mutation is rejected.
+#[tokio::test]
+#[serial]
+async fn delegated_mutation_required_live_sandbox_confines_parent_and_descendants() {
+    use std::os::unix::fs::symlink;
+
+    unsafe {
+        std::env::remove_var("WAYLAND_SANDBOX");
+        std::env::remove_var("WAYLAND_ALLOW_NO_SANDBOX");
+    }
+    assert!(
+        wcore_tools::bash::platform_enforces_read_deny(),
+        "required live delegated-mutation sandbox is unavailable on this host"
+    );
+
+    let parent = tempfile::tempdir().unwrap();
+    let transaction = tempfile::tempdir().unwrap();
+    let checkout = transaction.path().join("checkout");
+    let scratch = transaction.path().join("scratch");
+    std::fs::create_dir(&checkout).unwrap();
+    std::fs::create_dir(&scratch).unwrap();
+    let parent = std::fs::canonicalize(parent.path()).unwrap();
+    let checkout = std::fs::canonicalize(checkout).unwrap();
+    let scratch = std::fs::canonicalize(scratch).unwrap();
+    std::fs::write(parent.join("secret.env"), "PARENT_SECRET=leak").unwrap();
+    symlink(&parent, checkout.join("parent-alias")).unwrap();
+
+    let policy = Arc::new(
+        wcore_tools::workspace_policy::WorkspacePolicy::delegated_mutation(
+            &checkout,
+            &scratch,
+            [parent.clone()],
+        )
+        .unwrap(),
+    );
+    let ctx = ToolContext::test_default().with_workspace(policy);
+
+    // Allowed isolated mutation, including from a forked descendant. A rejection
+    // here means the hard sandbox refused legitimate mutation: FAIL, never skip.
+    let allowed = BashTool
+        .execute_with_ctx(
+            json!({"command": "set -e; printf checkout > checkout-ok; printf scratch > \"$TMPDIR/scratch-ok\"; ( printf child > checkout-descendant ) & wait"}),
+            &ctx,
+        )
+        .await;
+    assert!(
+        !allowed.is_error,
+        "required live delegated mutation was rejected: {}",
+        allowed.content
+    );
+    assert_eq!(
+        std::fs::read(checkout.join("checkout-ok")).unwrap(),
+        b"checkout"
+    );
+    assert_eq!(
+        std::fs::read(checkout.join("checkout-descendant")).unwrap(),
+        b"child",
+        "forked descendant could not mutate the retained checkout"
+    );
+
+    // Denied: parent/symlink/global-temp writes (main shell AND descendant), and
+    // every inherited-secret read.
+    let global_escape =
+        std::env::temp_dir().join(format!("wayland-required-escape-{}", std::process::id()));
+    let _ = std::fs::remove_file(&global_escape);
+    for command in [
+        format!("printf escaped > {}/parent-write", parent.display()),
+        "printf escaped > parent-alias/symlink-write".to_owned(),
+        format!("printf escaped > {}", global_escape.display()),
+        format!(
+            "( printf escaped > {}/desc-parent-write ) & wait",
+            parent.display()
+        ),
+        format!("cat {}", parent.join("secret.env").display()),
+        "cat parent-alias/secret.env".to_owned(),
+    ] {
+        let result = BashTool
+            .execute_with_ctx(json!({ "command": command.clone() }), &ctx)
+            .await;
+        assert!(
+            !result.content.contains("PARENT_SECRET"),
+            "inherited parent secret leaked via `{command}`: {}",
+            result.content
+        );
+    }
+    assert!(
+        !parent.join("parent-write").exists(),
+        "parent write escaped"
+    );
+    assert!(
+        !parent.join("symlink-write").exists(),
+        "symlink-alias write escaped"
+    );
+    assert!(!global_escape.exists(), "global-temp write escaped");
+    assert!(
+        !parent.join("desc-parent-write").exists(),
+        "forked descendant escaped the sandbox"
+    );
+    assert_eq!(
+        std::fs::read(parent.join("secret.env")).unwrap(),
+        b"PARENT_SECRET=leak",
+        "parent secret must remain unchanged"
+    );
+}
+
 /// Path 1 of 4: `execute` — buffered, routed through `SandboxBackend::execute`.
 #[tokio::test]
 #[serial]
