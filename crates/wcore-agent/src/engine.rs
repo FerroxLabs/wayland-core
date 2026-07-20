@@ -3986,21 +3986,40 @@ impl AgentEngine {
         &self,
         spawner: crate::spawner::AgentSpawner,
     ) -> crate::spawner::AgentSpawner {
-        // Bind the parent repository identity from this engine's live workspace
-        // policy so a transient child resolves the SAME shared/isolated workspace
-        // authority as the bootstrap spawner. A mutating child then allocates its
-        // standalone checkout relative to this root; the engine never rewrites the
-        // child's working directory back to the parent workspace. When the root is
-        // momentarily unresolvable, keep the unbound spawner (fail-closed at spawn
+        // Bind the parent repository identity so a transient child resolves the
+        // SAME shared/isolated workspace authority as the bootstrap spawner. A
+        // mutating child then allocates its standalone checkout relative to this
+        // root; the engine never rewrites the child's working directory back to
+        // the parent workspace. A contained session binds from its workspace
+        // policy root; a non-contained session (no policy) still has an
+        // authoritative parent identity — the live session directory (the same
+        // authoritative source the durable-workspace retention path reads via
+        // `base_config.session.directory`). Binding it lets non-contained
+        // transient children resolve SharedReadOnly against the real session
+        // workspace instead of failing "parent workspace authority is not bound".
+        // The session root is materialized on demand exactly as the durable
+        // checkout path does (`prepare_child_workspace`), and only when it is
+        // absolute — a relative directory would resolve against the process cwd,
+        // which must never become a child's parent identity. When the chosen
+        // root is unresolvable, keep the unbound spawner (fail-closed at spawn
         // time) rather than losing the governed handle.
-        let spawner = match self.tools.workspace_policy() {
-            Some(policy) => {
-                let unbound = spawner.clone_for_spawn();
-                spawner
-                    .with_parent_workspace(policy.root())
-                    .unwrap_or(unbound)
+        let spawner = {
+            let unbound = spawner.clone_for_spawn();
+            let parent_root = match self.tools.workspace_policy() {
+                Some(policy) => Some(policy.root().to_path_buf()),
+                None => {
+                    let session_root = std::path::Path::new(self.config.session.directory.as_str());
+                    if session_root.is_absolute() && std::fs::create_dir_all(session_root).is_ok() {
+                        Some(session_root.to_path_buf())
+                    } else {
+                        None
+                    }
+                }
+            };
+            match parent_root {
+                Some(root) => spawner.with_parent_workspace(root).unwrap_or(unbound),
+                None => unbound,
             }
-            None => spawner,
         };
         let spawner = match self.durable_session_authority.as_ref() {
             Some(authority) => spawner

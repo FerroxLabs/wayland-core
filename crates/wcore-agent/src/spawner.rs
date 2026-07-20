@@ -444,6 +444,13 @@ fn workspace_admission_gate(
     Ok(gate)
 }
 
+/// Name of the orchestrator control directory that `WorktreeManager` plants in
+/// its swarm root (the delegated-checkouts root). It is not a child checkout and
+/// must be excluded from retention accounting. Mirrors `wcore_swarm`'s internal
+/// control-directory invariant, which the spawner already depends on when it
+/// composes the `<worker>/checkout` child working directory.
+const SWARM_CONTROL_DIR: &str = ".wayland-control";
+
 fn retained_workspace_allocation_count(
     leases: &Path,
     checkouts: &Path,
@@ -500,6 +507,16 @@ fn retained_workspace_allocation_count(
                     "could not inspect delegated checkout: {error}"
                 ))
             })?;
+            // The checkouts root doubles as the `WorktreeManager` swarm root, so
+            // the orchestrator plants its own control directory
+            // (`.wayland-control`) there alongside child checkouts. It is
+            // infrastructure, not a retained child allocation; the canonical
+            // `WorktreeManager::retained_worker_count` skips it the same way.
+            // Counting it here inflates the quota by one and would reject a
+            // near-cap admission that should be admitted.
+            if entry.file_name().to_str() == Some(SWARM_CONTROL_DIR) {
+                continue;
+            }
             let metadata = std::fs::symlink_metadata(entry.path()).map_err(|error| {
                 DurableSpawnerError::WorkspacePreparation(format!(
                     "could not inspect delegated checkout metadata: {error}"
@@ -3415,7 +3432,7 @@ mod production_durable_spawn_tests {
 
     use super::{
         AgentSpawner, DurableCancelDisposition, DurableSessionAuthority, ForkOverrides,
-        SpawnExtras, SubAgentConfig,
+        SWARM_CONTROL_DIR, SpawnExtras, SubAgentConfig,
     };
     use crate::durable_child::DurableChildStore;
 
@@ -3589,6 +3606,18 @@ mod production_durable_spawn_tests {
     fn retained_lease_count(session_root: &std::path::Path) -> usize {
         std::fs::read_dir(session_root.join("delegated-workspaces/leases"))
             .unwrap()
+            .count()
+    }
+
+    // Count admitted *child* checkouts, excluding the orchestrator control
+    // directory (`.wayland-control`) that WorktreeManager plants in the swarm
+    // root alongside child checkouts.
+    #[cfg(target_os = "linux")]
+    fn child_checkout_count(session_root: &std::path::Path) -> usize {
+        std::fs::read_dir(session_root.join("delegated-workspaces/checkouts"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_str() != Some(SWARM_CONTROL_DIR))
             .count()
     }
 
@@ -3790,12 +3819,12 @@ mod production_durable_spawn_tests {
             retained_lease_count(&sessions),
             wcore_swarm::MAX_RETAINED_WORKTREES
         );
-        assert_eq!(
-            std::fs::read_dir(sessions.join("delegated-workspaces/checkouts"))
-                .unwrap()
-                .count(),
-            0
-        );
+        // The checkouts root doubles as the WorktreeManager swarm root, which
+        // always contains the orchestrator's `.wayland-control` directory once a
+        // manager is constructed (it is planted before the quota check). That is
+        // infrastructure, not a child checkout — the rejection must leave zero
+        // *child* checkouts behind, so exclude the control directory.
+        assert_eq!(child_checkout_count(&sessions), 0);
         let mut command =
             wcore_config::shell::shell_command_argv("git", &["rev-parse", "--verify", "HEAD"]);
         command.current_dir(workspace.path());
@@ -3845,6 +3874,11 @@ mod production_durable_spawn_tests {
             retained_lease_count(&sessions),
             wcore_swarm::MAX_RETAINED_WORKTREES
         );
+        // Exactly one launch was admitted (see the `is_ok` sum above). Both
+        // launch handles are consumed by the `.err()` chain above, so the
+        // admitted child's `TransactionWorkspace` has been dropped and its
+        // checkout removed by transaction cleanup; the only directory remaining
+        // in the swarm root is the orchestrator's `.wayland-control`.
         assert_eq!(
             std::fs::read_dir(sessions.join("delegated-workspaces/checkouts"))
                 .unwrap()
