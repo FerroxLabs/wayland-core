@@ -116,6 +116,27 @@ assert_review_result_rejected wrong-source \
 
 git -C "$tmp" reset -q --hard "$review_sha"
 
+# Regression: an inconsistent (source_sha, source_tree) pair is rejected even
+# when the review JSON matches that wrong tree — the tree must be source_sha^{tree}.
+git -C "$tmp" reset -q --hard "$review_base_sha"
+bogus_tree=ffffffffffffffffffffffffffffffffffffffff
+git -C "$tmp" show "$review_sha:20-06-INTERFACE-REVIEWS.md" \
+  | sed "s/\"source_tree\": \"$source_tree\"/\"source_tree\": \"$bogus_tree\"/" \
+  > "$tmp/20-06-INTERFACE-REVIEWS.md"
+git -C "$tmp" add 20-06-INTERFACE-REVIEWS.md
+git -C "$tmp" commit -qm 'review with matching-but-wrong source tree'
+bogus_tree_review_sha=$(git -C "$tmp" rev-parse HEAD)
+if (
+  cd "$tmp"
+  node "$scripts_dir/verify-review-result.mjs" \
+    "$bogus_tree_review_sha" 20-06-INTERFACE-REVIEWS.md \
+    "$source_sha" "$bogus_tree" f20-15
+) >/dev/null 2>&1; then
+  echo 'review-result verifier accepted a source tree that is not source_sha^{tree}' >&2
+  exit 1
+fi
+git -C "$tmp" reset -q --hard "$review_sha"
+
 printf 'tampered\n' >> "$tmp/source.rs"
 git -C "$tmp" add source.rs
 git -C "$tmp" commit -qm 'tamper reviewed source'
@@ -728,6 +749,34 @@ if (
   bash .planning/scripts/verify-f20-03-scope.sh task
 ) >/dev/null 2>&1; then
   echo 'F20-03 scope verifier accepted a plan that authorized its own mutation' >&2
+  exit 1
+fi
+
+# --- Regression: F20-03 scope gate rejects a source-file -> symlink type change ---
+# A type change (regular file, mode 100644 -> symlink, mode 120000) at an in-scope
+# path stays inside the 41-path canonical set and is neither delete nor rename, so
+# the old `^[DR]` destructive guard let it land. It must now fail closed.
+symlink_repo="$tmp/f20-03-symlink-swap"
+git clone -q --no-hardlinks "$source_repo" "$symlink_repo"
+cp "$scripts_dir/verify-f20-03-scope.sh" "$symlink_repo/.planning/scripts/verify-f20-03-scope.sh"
+cp "$scripts_dir/task-base-authority.mjs" "$symlink_repo/.planning/scripts/task-base-authority.mjs"
+symlink_head=$(git -C "$symlink_repo" rev-parse HEAD)
+symlink_tree=$(git -C "$symlink_repo" rev-parse HEAD^{tree})
+symlink_state="$(git -C "$symlink_repo" rev-parse --absolute-git-dir)/f20-03-accepted-plan"
+printf '%s\n%s\n' "$symlink_head" "$symlink_tree" > "$symlink_state"
+chmod 600 "$symlink_state"
+in_scope_swap="crates/wcore-sandbox/src/backends/appcontainer.rs"
+(
+  cd "$symlink_repo"
+  rm "$in_scope_swap"
+  ln -s /tmp/attacker-shadow.rs "$in_scope_swap"
+  git add "$in_scope_swap"
+)
+if (
+  cd "$symlink_repo"
+  bash .planning/scripts/verify-f20-03-scope.sh task
+) >/dev/null 2>&1; then
+  echo 'F20-03 scope verifier accepted a source-file-to-symlink type change' >&2
   exit 1
 fi
 

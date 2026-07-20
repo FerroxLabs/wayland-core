@@ -76,8 +76,28 @@ LC_ALL=C sort -u "$tmp/actual.unsorted" > "$tmp/actual"
 comm -13 "$tmp/canonical" "$tmp/actual" > "$tmp/outside"
 [[ ! -s "$tmp/outside" ]] || exit 1
 
-awk '$1 ~ /^[DR]/ { print }' "$tmp/status" > "$tmp/destructive"
+# Reject any status that is not a plain add (A) or modify (M): deletion (D),
+# rename (R), copy (C), and type change (T) all fail closed. A type change
+# (regular file -> symlink, mode 120000) would otherwise land past this gate
+# because the path stays in the canonical set and is neither D nor R.
+awk '$1 !~ /^[AM]/ { print }' "$tmp/status" > "$tmp/destructive"
 [[ ! -s "$tmp/destructive" ]] || exit 1
+
+# Belt-and-suspenders: every changed in-scope path must be a regular-file blob
+# (100644/100755) in the resulting tree. This also rejects a NEW in-scope path
+# added directly as a symlink (120000) or gitlink (160000), which surfaces as an
+# add (A) and would pass the status guard above. Deletions are already rejected,
+# so a missing entry here can only be an inconsistency -> fail closed.
+while IFS= read -r scope_path; do
+  [[ -n "$scope_path" ]] || continue
+  if [[ "$mode" == task ]]; then
+    entry_mode=$(git ls-files --stage -- "$scope_path" | awk 'NR==1 {print $1}')
+  else
+    entry_mode=$(git ls-tree "$head_sha" -- "$scope_path" | awk 'NR==1 {print $1}')
+  fi
+  [[ -n "$entry_mode" ]] || exit 1
+  [[ "$entry_mode" == 100644 || "$entry_mode" == 100755 ]] || exit 1
+done < "$tmp/actual"
 
 if [[ "$mode" == final ]]; then
   cmp -s "$tmp/canonical" "$tmp/actual" || exit 1

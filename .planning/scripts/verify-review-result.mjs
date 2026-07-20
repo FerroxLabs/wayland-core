@@ -60,6 +60,18 @@ if (!reviewFile || !profiles[profile]) {
   fail("usage: verify-review-result.mjs <review-commit> <review-file> <source-sha> <source-tree> <f20-09|f20-11|f20-14|f20-15|f20-16>");
 }
 
+// The (source_sha, source_tree) pair must be internally consistent: the tree
+// argument must be exactly source_sha^{tree}. Otherwise a caller could pass an
+// independently-chosen tree that the review JSON then matches, decoupling the
+// asserted tree from the asserted commit.
+const actualSourceTree = execFileSync("git", ["rev-parse", `${sourceSha}^{tree}`], {
+  encoding: "utf8",
+  stdio: ["ignore", "pipe", "pipe"],
+}).trim();
+if (actualSourceTree !== sourceTree) {
+  fail("source tree argument does not match source commit tree");
+}
+
 const bytes = execFileSync("git", ["show", `${reviewCommit}:${reviewFile}`], {
   encoding: "utf8",
   stdio: ["ignore", "pipe", "pipe"],
