@@ -785,3 +785,105 @@ fn set_child_mode(parent: &DirectoryAuthority, name: &str, mode: u32) -> Result<
     let _ = mode;
     file.sync()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_limits() -> DirectoryArchiveLimits {
+        DirectoryArchiveLimits {
+            max_entries: 64,
+            max_bytes: 1 << 20,
+            max_depth: 16,
+        }
+    }
+
+    fn seeded_transaction(owner: &Path) -> (RetainedWorkspaceAuthority, PathBuf) {
+        let checkout = owner.join("checkout");
+        std::fs::create_dir(&checkout).unwrap();
+        std::fs::write(checkout.join("keep"), b"original").unwrap();
+        let root = DirectoryAuthority::open(owner).unwrap();
+        let workspace = root.open_child_directory("checkout").unwrap();
+        let retained = RetainedWorkspaceAuthority::new(root, workspace, "import-rollback").unwrap();
+        (retained, checkout)
+    }
+
+    fn replacement_archive() -> Vec<u8> {
+        let entries = vec![
+            SnapshotEntry::Directory {
+                path: PathBuf::from("dir"),
+                mode: 0o700,
+            },
+            SnapshotEntry::File {
+                path: PathBuf::from("dir").join("file"),
+                mode: 0o600,
+                contents: b"replacement".to_vec(),
+            },
+        ];
+        encode_archive(&entries, "workspace", test_limits()).unwrap()
+    }
+
+    /// A mid-import failure after descendants are removed must roll back to the
+    /// exact original tree and drop the durable journal — no partial state and
+    /// no pending recovery survive.
+    #[test]
+    fn mid_import_failure_rolls_back_to_original_tree() {
+        let owner = tempfile::tempdir().unwrap();
+        let (retained, checkout) = seeded_transaction(owner.path());
+        let archive = replacement_archive();
+        let workspace = retained.workspace().clone();
+
+        // Inject a failure AFTER descendant removal: plant a regular file where
+        // the replacement expects a directory, so directory creation fails
+        // mid-apply and the durable rollback must restore the original tree.
+        let error = retained
+            .replace_from_tar_bounded_with_hook(&archive, "workspace", test_limits(), |stage| {
+                if stage == ImportStage::DescendantsRemoved {
+                    workspace.create_child_file("dir", b"blocker").unwrap();
+                }
+            })
+            .expect_err("mid-import directory conflict must surface");
+        assert!(
+            matches!(error, SandboxError::Io(_) | SandboxError::PathDenied(_)),
+            "{error:?}"
+        );
+        assert_eq!(std::fs::read(checkout.join("keep")).unwrap(), b"original");
+        assert!(!checkout.join("dir").exists());
+        // Rollback removed the durable journal, so no recovery is pending.
+        assert!(!retained.recover_pending_import(test_limits()).unwrap());
+    }
+
+    /// A crash after descendant removal (unwinding past the in-process rollback)
+    /// leaves the workspace empty and a durable journal; `recover_pending_import`
+    /// must restore the original before any observer read is admitted.
+    #[test]
+    fn crash_after_descendant_removal_recovers_original_before_reads() {
+        let owner = tempfile::tempdir().unwrap();
+        let (retained, checkout) = seeded_transaction(owner.path());
+        let archive = replacement_archive();
+
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = retained.replace_from_tar_bounded_with_hook(
+                &archive,
+                "workspace",
+                test_limits(),
+                |stage| {
+                    if stage == ImportStage::DescendantsRemoved {
+                        panic!("simulated crash after descendant removal");
+                    }
+                },
+            );
+        }));
+        assert!(crashed.is_err(), "hook panic must unwind past the rollback");
+        // The workspace is empty (descendants removed) but not repopulated; no
+        // observer may read this partial state.
+        assert!(!checkout.join("keep").exists());
+        assert!(!checkout.join("dir").exists());
+        // Crash recovery consumes the durable journal and restores the original.
+        assert!(retained.recover_pending_import(test_limits()).unwrap());
+        assert_eq!(std::fs::read(checkout.join("keep")).unwrap(), b"original");
+        assert!(!checkout.join("dir").exists());
+        // The journal is consumed exactly once.
+        assert!(!retained.recover_pending_import(test_limits()).unwrap());
+    }
+}
