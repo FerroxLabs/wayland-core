@@ -2,18 +2,18 @@ use super::*;
 use std::time::Duration;
 use windows_sys::Win32::Foundation::WAIT_ABANDONED;
 use windows_sys::Win32::Security::Authorization::{
-    GetSecurityInfo, SetEntriesInAclW, EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_KERNEL_OBJECT,
+    EXPLICIT_ACCESS_W, GRANT_ACCESS, GetSecurityInfo, SE_KERNEL_OBJECT, SetEntriesInAclW,
     TRUSTEE_IS_SID, TRUSTEE_IS_USER,
 };
 use windows_sys::Win32::Security::{
     AllocateAndInitializeSid, FreeSid, GetLengthSid, GetSecurityDescriptorControl,
-    GetTokenInformation, InitializeSecurityDescriptor, IsValidSid, SetSecurityDescriptorControl,
-    SetSecurityDescriptorDacl, SetSecurityDescriptorOwner, TokenUser, OWNER_SECURITY_INFORMATION,
-    SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SE_DACL_PROTECTED, SID_IDENTIFIER_AUTHORITY,
-    TOKEN_QUERY, TOKEN_USER,
+    GetTokenInformation, InitializeSecurityDescriptor, IsValidSid, OWNER_SECURITY_INFORMATION,
+    SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SID_IDENTIFIER_AUTHORITY,
+    SetSecurityDescriptorControl, SetSecurityDescriptorDacl, SetSecurityDescriptorOwner,
+    TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateMutexW, OpenProcessToken, ReleaseMutex, WaitForSingleObject, MUTEX_ALL_ACCESS,
+    CreateMutexW, MUTEX_ALL_ACCESS, OpenProcessToken, ReleaseMutex, WaitForSingleObject,
 };
 
 const MUTATION_LOCK_TIMEOUT: Duration = Duration::from_secs(15);
@@ -203,7 +203,7 @@ fn mutex_name(token_user: &CurrentUserSid) -> String {
 
 impl Drop for MutationLock {
     fn drop(&mut self) {
-        if unsafe { ReleaseMutex(self.0 .0) } == 0 {
+        if unsafe { ReleaseMutex(self.0.0) } == 0 {
             tracing::error!(
                 target: "wcore_sandbox",
                 error = %last_error("ReleaseMutex(AppContainer ACL mutation lock)"),

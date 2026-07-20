@@ -1,8 +1,8 @@
 use serde_json::json;
 use wcore_agent::session_journal::{
-    replay_from_snapshot, replay_state, snapshot_path_for, state_payload_digest, JournalError,
-    SessionEvent, SessionJournal, SessionSnapshot, TurnCompletion,
-    LEGACY_SESSION_SNAPSHOT_SCHEMA_VERSION,
+    JournalError, LEGACY_SESSION_SNAPSHOT_SCHEMA_VERSION, SessionEvent, SessionJournal,
+    SessionSnapshot, TurnCompletion, replay_from_snapshot, replay_state, snapshot_path_for,
+    state_payload_digest,
 };
 
 // Exact schema-v4 bytes emitted by the predecessor journal/snapshot writer.
@@ -239,7 +239,7 @@ fn restart_rejects_public_snapshot_permissions() {
 fn restart_rejects_public_snapshot_dacl() {
     use std::os::windows::fs::OpenOptionsExt as _;
     use std::os::windows::io::AsRawHandle as _;
-    use windows_sys::Win32::Security::Authorization::{SetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetSecurityInfo};
     use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
