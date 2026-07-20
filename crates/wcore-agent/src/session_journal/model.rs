@@ -1002,6 +1002,21 @@ pub struct ChildTransactionState {
     pub receipts: Vec<CommittedChildTransactionReceipt>,
 }
 
+impl ChildTransactionState {
+    /// The digest of the latest committed receipt, if any.
+    ///
+    /// The 20-12 acceptance pipeline reopens the durable state after committing
+    /// its authoritative receipt and matches this against the digest its receipt
+    /// closure computed, so acceptance rests on the durably reduced receipt
+    /// rather than on the in-memory bytes it appended.
+    #[must_use]
+    pub fn latest_receipt_digest(&self) -> Option<&str> {
+        self.receipts
+            .last()
+            .map(|committed| committed.receipt_digest.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryState {
     pub origin: DeliveryOrigin,

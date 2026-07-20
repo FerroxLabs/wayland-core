@@ -49,6 +49,9 @@ pub use crate::durable_spawner::{
     DurableSpawnerPoison,
 };
 
+mod durable_launch;
+mod mutation_workspace;
+
 const CHILD_POLICY_CONTRACT_VERSION: &str = "effective-execution-policy/v1";
 
 /// Narrow host-facing control plane over the canonical bootstrapped child
@@ -129,6 +132,15 @@ impl ResolvedChildLaunch {
     #[must_use]
     pub fn child_id(&self) -> &ChildId {
         &self.child_id
+    }
+
+    /// Take the retained standalone-checkout handle out of this launch so it can
+    /// be moved — never reopened — into a
+    /// [`MutationAttemptGuard`](crate::child_transaction::MutationAttemptGuard)
+    /// for gate acceptance (20-12). A shared read-only launch owns no
+    /// transaction and yields `None`; the remaining launch fields are dropped.
+    pub(crate) fn into_transaction_workspace(self) -> Option<TransactionWorkspace> {
+        self._transaction_workspace
     }
 
     #[must_use]

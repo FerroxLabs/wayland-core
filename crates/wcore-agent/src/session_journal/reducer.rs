@@ -2947,6 +2947,18 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
                     "child transaction {transaction_id} receipt has the wrong opening token"
                 )));
             }
+            // Defense-in-depth at the durable projection boundary (20-12): a
+            // committed acceptance receipt can never carry more gate results than
+            // the orchestrator-owned gate plan authorized. `validate_for_child`
+            // binds each present gate to a plan requirement, but only the
+            // merge-ready dispositions require an exact count; this closes the
+            // count for every disposition so a receipt cannot smuggle extra gate
+            // evidence past reduction.
+            if receipt.gates.len() > transaction.opening.gate_plan.required_gates.len() {
+                return Err(JournalError::InvalidTransition(format!(
+                    "child transaction {transaction_id} receipt carries more gate results than its authorized plan"
+                )));
+            }
             let authority = authority_from_state(transaction)?;
             match project_commit(state, &authority, receipt_digest, receipt)? {
                 CommitProjection::Applied(projection) => {

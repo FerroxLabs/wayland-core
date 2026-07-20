@@ -5,8 +5,13 @@
 
 use std::fmt;
 
+use thiserror::Error;
+use wcore_sandbox::SandboxRegistry;
+use wcore_swarm::worktree::CandidateSeal;
 use wcore_types::child_transaction::{
-    ChildGatePlan, ChildTransactionReceipt, ChildTransactionReducer, ChildTransactionReplay,
+    CHILD_TRANSACTION_RECEIPT_SCHEMA_VERSION, ChildGatePlan, ChildGateReceipt,
+    ChildTransactionDisposition, ChildTransactionReceipt, ChildTransactionReducer,
+    ChildTransactionReplay, ChildTransactionValidationError,
 };
 use wcore_types::spawner::{ChildId, ChildWorkspaceMode};
 
@@ -15,6 +20,17 @@ use crate::session_journal::{
     CommittedChildTransactionReceipt, JournalEnvelope, JournalError, ReducedSessionState,
     SessionEvent, SessionJournal, child_transaction_opening_token_digest,
 };
+
+mod gate_executor;
+mod gates;
+
+pub use gate_executor::{
+    AuthorizedGateClosure, GateClosureError, GateExecutionSubject, GateStageError,
+};
+pub use gates::{AcceptanceError, AcceptedCandidate, MutationAttemptGuard};
+
+use gate_executor::{AuthorizedGateClosureRegistry, GateExecutor, ObservedGateResult};
+use gates::{AcceptanceMachine, SealedCandidateRoot};
 
 /// Opaque proof that the live journal writer durably opened one transaction.
 ///
@@ -435,4 +451,337 @@ fn transaction_error(error: impl fmt::Display) -> JournalError {
 
 fn invalid(message: impl Into<String>) -> JournalError {
     JournalError::InvalidTransition(message.into())
+}
+
+/// A fail-closed refusal anywhere in the gate-execution → durable-receipt →
+/// acceptance pipeline. Every variant keeps the candidate non-landing and
+/// durably diagnosable; none can mint or retain acceptance.
+#[derive(Debug, Error)]
+pub enum MutationAcceptanceError {
+    #[error("child transaction is not durably open")]
+    MissingTransaction,
+    #[error("execution subject does not bind the orchestrator-owned gate plan")]
+    SubjectPlanMismatch,
+    #[error("committed acceptance receipt is not durable")]
+    ReceiptNotDurable,
+    #[error("reopened acceptance receipt does not match the authored bytes")]
+    ReceiptMismatch,
+    #[error(transparent)]
+    Journal(#[from] JournalError),
+    #[error("gate closure authority refused: {0}")]
+    Closure(#[from] GateClosureError),
+    #[error("gate execution refused: {0}")]
+    GateStage(#[from] GateStageError),
+    #[error("acceptance refused: {0}")]
+    Acceptance(#[from] AcceptanceError),
+    #[error("receipt validation failed: {0}")]
+    Validation(#[from] ChildTransactionValidationError),
+}
+
+/// Build the authoritative acceptance receipt from the durable opening plus the
+/// module-private observed gate results. The receipt carries the path-free gate
+/// receipts; command text, host paths, captured output, and environment values
+/// never enter it. The disposition is `Active` — this packet makes no
+/// merge-ready / landing claim.
+fn build_acceptance_receipt(
+    opening: &ChildTransactionOpening,
+    subject: &GateExecutionSubject,
+    observed: &[ObservedGateResult],
+    now_unix_ms: u64,
+) -> ChildTransactionReceipt {
+    let gates: Vec<ChildGateReceipt> = observed
+        .iter()
+        .map(ObservedGateResult::to_gate_receipt)
+        .collect();
+    ChildTransactionReceipt {
+        schema_version: CHILD_TRANSACTION_RECEIPT_SCHEMA_VERSION,
+        transaction_id: opening.transaction_id.clone(),
+        receipt_id: format!("{}-accept-0", opening.transaction_id),
+        receipt_revision: 0,
+        previous_receipt_digest: None,
+        child_id: opening.child_id.clone(),
+        child_declaration_id: opening.child_declaration_id.clone(),
+        child_revision: opening.child_revision,
+        workspace_id: opening.workspace_id.clone(),
+        base_revision: opening.base_revision.clone(),
+        candidate_revision: Some(subject.candidate_revision.clone()),
+        request_digest: opening.request_digest.clone(),
+        policy_digest: opening.policy_digest.clone(),
+        gate_plan_digest: subject.gate_plan_digest.clone(),
+        diff_digest: Some(subject.diff_digest.clone()),
+        gates,
+        disposition: ChildTransactionDisposition::Active,
+        created_at_unix_ms: now_unix_ms,
+        updated_at_unix_ms: now_unix_ms,
+    }
+}
+
+/// The authoritative receipt closure: build the exact canonical bytes,
+/// conditionally append them under transaction authority, reopen the durable
+/// state, reduce, and match the reopened receipt against the authored bytes and
+/// its digest. Any divergence fails closed — acceptance never rests on
+/// in-memory bytes that were not durably reduced.
+fn commit_and_confirm_acceptance_receipt(
+    store: &ChildTransactionStore,
+    authority: &ChildTransactionAuthority,
+    receipt: ChildTransactionReceipt,
+) -> Result<String, MutationAcceptanceError> {
+    let expected = receipt.canonical_digest()?;
+    // Conditionally append under the retained opening authority (idempotent).
+    match store.commit(authority, receipt.clone())? {
+        ChildTransactionWrite::Appended(_) | ChildTransactionWrite::AlreadyCommitted => {}
+    }
+    // Reopen from durable storage and reduce; match the reopened receipt.
+    let reduced = store
+        .inspect(authority.transaction_id())?
+        .ok_or(MutationAcceptanceError::MissingTransaction)?;
+    // The durably reduced latest receipt must be exactly the one we authored.
+    if reduced.latest_receipt_digest() != Some(expected.as_str()) {
+        return Err(MutationAcceptanceError::ReceiptNotDurable);
+    }
+    let committed = reduced
+        .receipts
+        .iter()
+        .find(|committed| committed.receipt_digest == expected)
+        .ok_or(MutationAcceptanceError::ReceiptNotDurable)?;
+    if committed.receipt != receipt {
+        return Err(MutationAcceptanceError::ReceiptMismatch);
+    }
+    Ok(expected)
+}
+
+/// Drive one delegated mutation from parent-observed gate execution to an
+/// [`AcceptedCandidate`], integrating the qualified 06A candidate seal (via the
+/// guard's retained checkout) and the 06B hard containment (via the sandbox
+/// registry) with the accepted 20-04 durable-transaction authority.
+///
+/// The candidate cwd resolves exclusively from the live seal; observed results
+/// come only from consumed live containment spawns; only exact, in-order,
+/// passed, same-subject evidence is accepted; and acceptance exists only after
+/// the authoritative receipt closure confirms the durable receipt. The returned
+/// [`AcceptedCandidate`] owns the original still-armed guard and the seal.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_gate_acceptance(
+    sandbox: &SandboxRegistry,
+    store: &ChildTransactionStore,
+    authority: &ChildTransactionAuthority,
+    subject: &GateExecutionSubject,
+    closures: Vec<AuthorizedGateClosure>,
+    guard: MutationAttemptGuard,
+    seal: CandidateSeal,
+    now_unix_ms: u64,
+) -> Result<AcceptedCandidate, MutationAcceptanceError> {
+    // Reopen the durable opening; the orchestrator-owned gate plan lives there.
+    let state = store
+        .inspect(authority.transaction_id())?
+        .ok_or(MutationAcceptanceError::MissingTransaction)?;
+    let opening = state.opening.clone();
+    let plan = opening.gate_plan.clone();
+
+    // The execution subject MUST bind the orchestrator-owned gate plan.
+    if subject.gate_plan_digest != plan.canonical_digest()? {
+        return Err(MutationAcceptanceError::SubjectPlanMismatch);
+    }
+
+    // Authorize the parent-owned closures and pin each into the registry.
+    let mut registry = AuthorizedGateClosureRegistry::new();
+    for closure in closures {
+        registry.authorize(closure)?;
+    }
+
+    // Execute every gate against the live sealed candidate, in declared order.
+    let candidate = SealedCandidateRoot::new(&guard);
+    let executor = GateExecutor::new(&registry, sandbox);
+    let observed = executor.execute_plan(&plan, subject, &candidate).await?;
+
+    // Only exact, in-order, passed, same-subject evidence may be accepted.
+    AcceptanceMachine::validate_observed(&plan, subject, &observed)?;
+
+    // Build, append, reopen, reduce, and match the authoritative durable receipt.
+    let receipt = build_acceptance_receipt(&opening, subject, &observed, now_unix_ms);
+    let digest = commit_and_confirm_acceptance_receipt(store, authority, receipt)?;
+
+    Ok(AcceptanceMachine::accept(
+        guard,
+        seal,
+        authority.transaction_id().to_owned(),
+        digest,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    use crate::durable_child::DurableChildStore;
+    use wcore_types::child_transaction::ChildGateRequirement;
+    use wcore_types::spawner::{
+        ChildDeliveryState, ChildDesiredState, ChildOrigin, ChildParent, ChildPolicySnapshot,
+        ChildRecoveryState, ChildRequestEvidence, ChildTimestamps, ChildWorkspace,
+        DURABLE_CHILD_SCHEMA_VERSION, DurableChildRecord, DurableChildStatus,
+    };
+
+    fn digest(character: char) -> String {
+        std::iter::repeat_n(character, 64).collect()
+    }
+
+    fn revision(character: char) -> String {
+        std::iter::repeat_n(character, 40).collect()
+    }
+
+    fn gate_plan() -> ChildGatePlan {
+        ChildGatePlan {
+            required_gates: vec![ChildGateRequirement {
+                gate_id: "cargo-test".into(),
+                gate_closure_digest: digest('c'),
+            }],
+        }
+    }
+
+    fn child_record() -> DurableChildRecord {
+        DurableChildRecord {
+            schema_version: DURABLE_CHILD_SCHEMA_VERSION,
+            declaration_id: "declare-child-1".into(),
+            child_id: ChildId::new("child-1").unwrap(),
+            parent: ChildParent {
+                session_id: "session-1".into(),
+                turn_id: None,
+                parent_child_id: None,
+                workflow_run_id: None,
+                graph_node_id: None,
+                parent_call_id: None,
+            },
+            origin: ChildOrigin::Delegate,
+            request: ChildRequestEvidence::redacted(digest('a')),
+            policy_snapshot: ChildPolicySnapshot {
+                contract_version: "effective-execution-policy/v1".into(),
+                exact_digest: digest('b'),
+                posture: "smart".into(),
+                approvals: "on_request".into(),
+                sandbox: "required".into(),
+                source: "session-effective-policy".into(),
+                managed_floor_active: true,
+                dangerous_activation_id_digest: None,
+            },
+            provider: Some("test".into()),
+            model: Some("test-model".into()),
+            workspace: ChildWorkspace {
+                mode: ChildWorkspaceMode::Isolated,
+                workspace_id: "workspace-child-1".into(),
+            },
+            status: DurableChildStatus::Prepared,
+            desired_state: ChildDesiredState::Run,
+            recovery: ChildRecoveryState::Clean,
+            revision: 0,
+            timestamps: ChildTimestamps {
+                created_at_unix_ms: 10,
+                updated_at_unix_ms: 10,
+                queued_at_unix_ms: None,
+                started_at_unix_ms: None,
+                terminal_at_unix_ms: None,
+            },
+            result: None,
+            delivery_target: None,
+            delivery_state: ChildDeliveryState::NotRequired,
+            attempt: 1,
+            retry_of: None,
+            applied_events: BTreeMap::new(),
+        }
+    }
+
+    /// A gate-less genesis acceptance receipt for the child at revision 0. The
+    /// gate-less `Active` disposition keeps the receipt structurally valid while
+    /// this test focuses on the append/reopen/reduce corruption boundary.
+    fn genesis_receipt() -> ChildTransactionReceipt {
+        ChildTransactionReceipt {
+            schema_version: CHILD_TRANSACTION_RECEIPT_SCHEMA_VERSION,
+            transaction_id: "transaction-1".into(),
+            receipt_id: "transaction-1-accept-0".into(),
+            receipt_revision: 0,
+            previous_receipt_digest: None,
+            child_id: ChildId::new("child-1").unwrap(),
+            child_declaration_id: "declare-child-1".into(),
+            child_revision: 0,
+            workspace_id: "workspace-child-1".into(),
+            base_revision: revision('1'),
+            candidate_revision: None,
+            request_digest: digest('a'),
+            policy_digest: digest('b'),
+            gate_plan_digest: gate_plan().canonical_digest().unwrap(),
+            diff_digest: None,
+            gates: Vec::new(),
+            disposition: ChildTransactionDisposition::Active,
+            created_at_unix_ms: 100,
+            updated_at_unix_ms: 100,
+        }
+    }
+
+    fn fixture() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        SessionJournal,
+        DurableChildStore,
+        ChildTransactionStore,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("session.journal");
+        let journal = SessionJournal::open(&path, "session-1").unwrap();
+        let children = DurableChildStore::new(journal.clone());
+        children.declare(child_record()).unwrap();
+        let transactions = ChildTransactionStore::new(journal.clone());
+        (temp, path, journal, children, transactions)
+    }
+
+    /// Proves the authoritative receipt closure: a genuine build → conditional
+    /// append → reopen → reduce → match round-trip succeeds and is idempotent,
+    /// AND a corrupted durable journal is rejected on reopen/reduce — so
+    /// acceptance can never rest on tampered durable evidence.
+    #[test]
+    fn rejects_append_reopen_reduce_corruption() {
+        let (temp, path, journal, children, store) = fixture();
+        let authority = store
+            .open(
+                "transaction-1",
+                ChildId::new("child-1").unwrap(),
+                revision('1'),
+                gate_plan(),
+            )
+            .unwrap();
+        let receipt = genesis_receipt();
+        let expected = receipt.canonical_digest().unwrap();
+
+        // The closure builds, appends, reopens, reduces, and matches.
+        let digest =
+            commit_and_confirm_acceptance_receipt(&store, &authority, receipt.clone()).unwrap();
+        assert_eq!(digest, expected);
+        // Idempotent: an exact retry re-confirms the same durable receipt.
+        let retry =
+            commit_and_confirm_acceptance_receipt(&store, &authority, receipt.clone()).unwrap();
+        assert_eq!(retry, expected);
+
+        // A clean reopen replays the durable receipt exactly once. Every live
+        // journal handle (store, durable-child store, and the writer) must be
+        // dropped first so the exclusive writer lease is released.
+        drop(store);
+        drop(children);
+        drop(journal);
+        let reopened = SessionJournal::open(&path, "session-1").unwrap();
+        let projected = ChildTransactionStore::new(reopened)
+            .inspect("transaction-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(projected.receipts.len(), 1);
+        assert_eq!(projected.receipts[0].receipt_digest, expected);
+
+        // Corrupt the durable journal's final (receipt) frame: reopen + reduce
+        // must fail closed rather than surface a tampered receipt.
+        let original = std::fs::read(&path).unwrap();
+        let mut corrupt = original.clone();
+        *corrupt.last_mut().unwrap() ^= 0xff;
+        let corrupt_path = temp.path().join("corrupt.journal");
+        std::fs::write(&corrupt_path, corrupt).unwrap();
+        assert!(SessionJournal::recovered_state(&corrupt_path).is_err());
+        drop(temp);
+    }
 }
