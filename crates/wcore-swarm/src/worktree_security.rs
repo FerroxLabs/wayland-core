@@ -85,6 +85,56 @@ pub(super) fn reject_option_like_ref(kind: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate a fully-qualified branch ref (`refs/heads/<name>`) for the parent
+/// landing target. Rejects option-like, empty, traversal, trailing-slash, and
+/// metacharacter-bearing names so the ref can never be mistaken for a flag or
+/// escape the branch namespace. Lives here beside the other identifier guards
+/// ([`validate_worker_id`], [`reject_option_like_ref`]) so every argv-facing
+/// name check shares one home.
+pub(super) fn validate_target_ref(target_ref: &str) -> Result<()> {
+    let Some(name) = target_ref.strip_prefix("refs/heads/") else {
+        return Err(SwarmError::WorktreeIo(format!(
+            "target ref {target_ref:?} must be a fully-qualified branch ref"
+        )));
+    };
+    if name.is_empty()
+        || name.starts_with('-')
+        || name.contains("..")
+        || name.contains("//")
+        || name.ends_with('/')
+        || name.bytes().any(|byte| {
+            byte.is_ascii_whitespace()
+                || byte == b'~'
+                || byte == b'^'
+                || byte == b':'
+                || byte == b'?'
+                || byte == b'*'
+                || byte == b'['
+                || byte == b'\\'
+                || byte < 0x20
+        })
+    {
+        return Err(SwarmError::WorktreeIo(format!(
+            "target ref {target_ref:?} is not a safe branch name"
+        )));
+    }
+    Ok(())
+}
+
+/// Derive a filesystem-safe slug from a fully-qualified branch ref for
+/// per-ref lock and quarantine-ref naming.
+pub(super) fn ref_slug(target_ref: &str) -> String {
+    let mut slug = String::with_capacity(target_ref.len());
+    for byte in target_ref.bytes() {
+        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.' {
+            slug.push(byte as char);
+        } else {
+            slug.push('_');
+        }
+    }
+    slug
+}
+
 pub(super) fn validate_worker_id(worker_id: &str) -> Result<()> {
     let mut components = Path::new(worker_id).components();
     let exactly_one_normal = matches!(components.next(), Some(std::path::Component::Normal(_)))

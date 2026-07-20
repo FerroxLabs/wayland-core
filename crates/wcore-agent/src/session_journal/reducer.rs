@@ -215,9 +215,67 @@ fn apply_child_transaction_opened(
             opening_checksum: opening_checksum.to_owned(),
             opening_token_digest,
             receipts: Vec::new(),
+            landing: None,
         },
     );
     Ok(())
+}
+
+/// Validate a landing successor's exact identity.
+fn valid_landing_successor(successor: &LandingSuccessor) -> bool {
+    valid_git_object_id(&successor.landed_commit)
+        && valid_git_object_id(&successor.landed_tree)
+        && successor
+            .quarantine_ref
+            .starts_with("refs/wayland/landing/")
+        && successor.quarantine_ref.len() <= 512
+}
+
+/// Validate a git object id (40 hex sha1 or 64 hex sha256).
+fn valid_git_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Apply one landing lifecycle transition under the durable opening authority.
+///
+/// The transaction must exist and the event's `opening_token_digest` must equal
+/// the transaction's committed opening token, so only an event bound to the
+/// durable opening can drive the lifecycle. `transition` returns `None` for an
+/// exact idempotent replay (no state change) or `Some(record)` for a valid
+/// advance; any invalid transition is rejected fail-closed.
+fn apply_child_transaction_landing<F>(
+    state: &mut ReducedSessionState,
+    transaction_id: &str,
+    opening_token_digest: &str,
+    transition: F,
+) -> Result<(), JournalError>
+where
+    F: FnOnce(&ChildTransactionState) -> Result<Option<LandingRecord>, JournalError>,
+{
+    let transaction = state
+        .child_transactions
+        .get(transaction_id)
+        .ok_or_else(|| missing("child transaction", transaction_id))?;
+    if transaction.opening_token_digest != opening_token_digest {
+        return Err(JournalError::InvalidTransition(format!(
+            "child transaction {transaction_id} landing event has the wrong opening token"
+        )));
+    }
+    if let Some(record) = transition(transaction)? {
+        let mut projection = transaction.clone();
+        projection.landing = Some(record);
+        state
+            .child_transactions
+            .insert(transaction_id.to_owned(), projection);
+    }
+    Ok(())
+}
+
+/// Error for an invalid landing transition.
+fn landing_invalid(transaction_id: &str, detail: &str) -> JournalError {
+    JournalError::InvalidTransition(format!(
+        "child transaction {transaction_id} landing transition rejected: {detail}"
+    ))
 }
 
 fn valid_hook_manifest(slots: &[HookManifestSlot]) -> bool {
@@ -2968,6 +3026,262 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
                 }
                 CommitProjection::Duplicate => {}
             }
+        }
+        SessionEvent::ChildTransactionLandingPrepared {
+            transaction_id,
+            opening_token_digest,
+            subject,
+        } => {
+            apply_child_transaction_landing(state, transaction_id, opening_token_digest, |txn| {
+                if !valid_sha256_digest(&subject.accepted_receipt_digest)
+                    || !valid_sha256_digest(&subject.preimage_digest)
+                    || !valid_sha256_digest(&subject.worktree_digest)
+                {
+                    return Err(landing_invalid(transaction_id, "malformed subject digest"));
+                }
+                if !valid_git_object_id(&subject.expected_commit)
+                    || !valid_git_object_id(&subject.base_commit)
+                    || !valid_git_object_id(&subject.expected_tree)
+                    || !valid_git_object_id(&subject.index_tree)
+                {
+                    return Err(landing_invalid(
+                        transaction_id,
+                        "malformed subject object id",
+                    ));
+                }
+                if !subject.target_ref.starts_with("refs/heads/") || subject.target_ref.len() > 512
+                {
+                    return Err(landing_invalid(transaction_id, "invalid target ref"));
+                }
+                // Accepted-candidate prerequisite: the subject must bind the
+                // transaction's latest committed acceptance receipt.
+                if txn.latest_receipt_digest() != Some(subject.accepted_receipt_digest.as_str()) {
+                    return Err(landing_invalid(
+                        transaction_id,
+                        "landing subject does not bind the accepted receipt",
+                    ));
+                }
+                match &txn.landing {
+                    None => Ok(Some(LandingRecord {
+                        subject: subject.clone(),
+                        state: LandingState::Prepared,
+                    })),
+                    Some(existing)
+                        if existing.subject == *subject
+                            && existing.state == LandingState::Prepared =>
+                    {
+                        Ok(None)
+                    }
+                    Some(_) => Err(landing_invalid(
+                        transaction_id,
+                        "landing already initialized",
+                    )),
+                }
+            })?;
+        }
+        SessionEvent::ChildTransactionLandingRefAdvanced {
+            transaction_id,
+            opening_token_digest,
+            successor,
+        } => {
+            apply_child_transaction_landing(state, transaction_id, opening_token_digest, |txn| {
+                if !valid_landing_successor(successor) {
+                    return Err(landing_invalid(transaction_id, "malformed successor"));
+                }
+                let record = txn
+                    .landing
+                    .as_ref()
+                    .ok_or_else(|| landing_invalid(transaction_id, "no landing prepared"))?;
+                match &record.state {
+                    LandingState::Prepared => Ok(Some(LandingRecord {
+                        subject: record.subject.clone(),
+                        state: LandingState::RefAdvanced {
+                            successor: successor.clone(),
+                        },
+                    })),
+                    LandingState::RefAdvanced { successor: s } if s == successor => Ok(None),
+                    _ => Err(landing_invalid(
+                        transaction_id,
+                        "ref-advanced not valid from current landing state",
+                    )),
+                }
+            })?;
+        }
+        SessionEvent::ChildTransactionLandingProjected {
+            transaction_id,
+            opening_token_digest,
+            successor,
+        } => {
+            apply_child_transaction_landing(state, transaction_id, opening_token_digest, |txn| {
+                if !valid_landing_successor(successor) {
+                    return Err(landing_invalid(transaction_id, "malformed successor"));
+                }
+                let record = txn
+                    .landing
+                    .as_ref()
+                    .ok_or_else(|| landing_invalid(transaction_id, "no landing prepared"))?;
+                match &record.state {
+                    LandingState::RefAdvanced { successor: s } if s == successor => {
+                        Ok(Some(LandingRecord {
+                            subject: record.subject.clone(),
+                            state: LandingState::Projected {
+                                successor: successor.clone(),
+                            },
+                        }))
+                    }
+                    LandingState::Projected { successor: s } if s == successor => Ok(None),
+                    _ => Err(landing_invalid(
+                        transaction_id,
+                        "projection requires a matching ref-advanced state",
+                    )),
+                }
+            })?;
+        }
+        SessionEvent::ChildTransactionLanded {
+            transaction_id,
+            opening_token_digest,
+            successor,
+        } => {
+            apply_child_transaction_landing(state, transaction_id, opening_token_digest, |txn| {
+                if !valid_landing_successor(successor) {
+                    return Err(landing_invalid(transaction_id, "malformed successor"));
+                }
+                let record = txn
+                    .landing
+                    .as_ref()
+                    .ok_or_else(|| landing_invalid(transaction_id, "no landing prepared"))?;
+                match &record.state {
+                    LandingState::Projected { successor: s } if s == successor => {
+                        Ok(Some(LandingRecord {
+                            subject: record.subject.clone(),
+                            state: LandingState::Landed {
+                                successor: successor.clone(),
+                            },
+                        }))
+                    }
+                    LandingState::Landed { successor: s } if s == successor => Ok(None),
+                    _ => Err(landing_invalid(
+                        transaction_id,
+                        "landed requires a verified projection of the same successor",
+                    )),
+                }
+            })?;
+        }
+        SessionEvent::ChildTransactionLandingConflict {
+            transaction_id,
+            opening_token_digest,
+            detail,
+        } => {
+            apply_child_transaction_landing(state, transaction_id, opening_token_digest, |txn| {
+                let record = txn
+                    .landing
+                    .as_ref()
+                    .ok_or_else(|| landing_invalid(transaction_id, "no landing prepared"))?;
+                match &record.state {
+                    LandingState::Prepared => Ok(Some(LandingRecord {
+                        subject: record.subject.clone(),
+                        state: LandingState::Conflict {
+                            detail: detail.clone(),
+                        },
+                    })),
+                    LandingState::Conflict { detail: d } if d == detail => Ok(None),
+                    _ => Err(landing_invalid(
+                        transaction_id,
+                        "conflict is only valid before the target ref advances",
+                    )),
+                }
+            })?;
+        }
+        SessionEvent::ChildTransactionLandingRecoveryRequired {
+            transaction_id,
+            opening_token_digest,
+            detail,
+        } => {
+            apply_child_transaction_landing(state, transaction_id, opening_token_digest, |txn| {
+                let record = txn
+                    .landing
+                    .as_ref()
+                    .ok_or_else(|| landing_invalid(transaction_id, "no landing prepared"))?;
+                match &record.state {
+                    LandingState::Conflict { .. } | LandingState::RolledBack { .. } => {
+                        Err(landing_invalid(
+                            transaction_id,
+                            "recovery not valid after a terminal state",
+                        ))
+                    }
+                    LandingState::RecoveryRequired { detail: d } if d == detail => Ok(None),
+                    LandingState::RecoveryRequired { .. } => Err(landing_invalid(
+                        transaction_id,
+                        "conflicting recovery detail",
+                    )),
+                    _ => Ok(Some(LandingRecord {
+                        subject: record.subject.clone(),
+                        state: LandingState::RecoveryRequired {
+                            detail: detail.clone(),
+                        },
+                    })),
+                }
+            })?;
+        }
+        SessionEvent::ChildTransactionRollbackPrepared {
+            transaction_id,
+            opening_token_digest,
+            successor,
+        } => {
+            apply_child_transaction_landing(state, transaction_id, opening_token_digest, |txn| {
+                if !valid_landing_successor(successor) {
+                    return Err(landing_invalid(transaction_id, "malformed successor"));
+                }
+                let record = txn
+                    .landing
+                    .as_ref()
+                    .ok_or_else(|| landing_invalid(transaction_id, "no landing prepared"))?;
+                match &record.state {
+                    LandingState::Landed { successor: s } if s == successor => {
+                        Ok(Some(LandingRecord {
+                            subject: record.subject.clone(),
+                            state: LandingState::RollbackPrepared {
+                                successor: successor.clone(),
+                            },
+                        }))
+                    }
+                    LandingState::RollbackPrepared { successor: s } if s == successor => Ok(None),
+                    _ => Err(landing_invalid(
+                        transaction_id,
+                        "rollback prepare requires the landed successor",
+                    )),
+                }
+            })?;
+        }
+        SessionEvent::ChildTransactionRolledBack {
+            transaction_id,
+            opening_token_digest,
+            successor,
+        } => {
+            apply_child_transaction_landing(state, transaction_id, opening_token_digest, |txn| {
+                if !valid_landing_successor(successor) {
+                    return Err(landing_invalid(transaction_id, "malformed successor"));
+                }
+                let record = txn
+                    .landing
+                    .as_ref()
+                    .ok_or_else(|| landing_invalid(transaction_id, "no landing prepared"))?;
+                match &record.state {
+                    LandingState::RollbackPrepared { successor: s } if s == successor => {
+                        Ok(Some(LandingRecord {
+                            subject: record.subject.clone(),
+                            state: LandingState::RolledBack {
+                                successor: successor.clone(),
+                            },
+                        }))
+                    }
+                    LandingState::RolledBack { successor: s } if s == successor => Ok(None),
+                    _ => Err(landing_invalid(
+                        transaction_id,
+                        "rolled-back requires a prepared rollback of the same successor",
+                    )),
+                }
+            })?;
         }
         SessionEvent::DeliveryPrepared {
             delivery_id,

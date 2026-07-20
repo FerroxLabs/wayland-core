@@ -360,6 +360,14 @@ impl SessionJournal {
             &event,
             SessionEvent::ChildTransactionOpened { .. }
                 | SessionEvent::ChildTransactionReceiptCommitted { .. }
+                | SessionEvent::ChildTransactionLandingPrepared { .. }
+                | SessionEvent::ChildTransactionLandingRefAdvanced { .. }
+                | SessionEvent::ChildTransactionLandingProjected { .. }
+                | SessionEvent::ChildTransactionLanded { .. }
+                | SessionEvent::ChildTransactionLandingConflict { .. }
+                | SessionEvent::ChildTransactionLandingRecoveryRequired { .. }
+                | SessionEvent::ChildTransactionRollbackPrepared { .. }
+                | SessionEvent::ChildTransactionRolledBack { .. }
         ) {
             return Err(JournalError::InvalidTransition(
                 "child transaction authority events require ChildTransactionStore".to_owned(),

@@ -771,6 +771,52 @@ pub enum SessionEvent {
         receipt_digest: String,
         receipt: ChildTransactionReceipt,
     },
+    /// Parent-landing authority events. Each is minted ONLY through the
+    /// authorized `append_conditionally` path (the public `append` denylist
+    /// rejects them) and is bound to its durable opening token, so neither the
+    /// lower-layer swarm primitive, the child, nor a snapshot-shaped caller can
+    /// mint a landing, recovery, or rollback authority. The reducer validates
+    /// every transition against the exact prior lifecycle state.
+    ChildTransactionLandingPrepared {
+        transaction_id: String,
+        opening_token_digest: String,
+        subject: LandingSubject,
+    },
+    ChildTransactionLandingRefAdvanced {
+        transaction_id: String,
+        opening_token_digest: String,
+        successor: LandingSuccessor,
+    },
+    ChildTransactionLandingProjected {
+        transaction_id: String,
+        opening_token_digest: String,
+        successor: LandingSuccessor,
+    },
+    ChildTransactionLanded {
+        transaction_id: String,
+        opening_token_digest: String,
+        successor: LandingSuccessor,
+    },
+    ChildTransactionLandingConflict {
+        transaction_id: String,
+        opening_token_digest: String,
+        detail: String,
+    },
+    ChildTransactionLandingRecoveryRequired {
+        transaction_id: String,
+        opening_token_digest: String,
+        detail: String,
+    },
+    ChildTransactionRollbackPrepared {
+        transaction_id: String,
+        opening_token_digest: String,
+        successor: LandingSuccessor,
+    },
+    ChildTransactionRolledBack {
+        transaction_id: String,
+        opening_token_digest: String,
+        successor: LandingSuccessor,
+    },
     DeliveryPrepared {
         delivery_id: String,
         origin: DeliveryOrigin,
@@ -991,6 +1037,77 @@ pub struct CommittedChildTransactionReceipt {
     pub child_snapshot: DurableChildRecord,
 }
 
+/// Exact expected parent/candidate identity bound when a landing is prepared,
+/// before the parent-owned compare-and-swap primitive is invoked. Every field
+/// is the value the upper layer requires to still hold at swap time; the
+/// `preimage_digest` binds the whole parent preimage the swarm primitive
+/// computed under its lock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LandingSubject {
+    /// The 06C acceptance receipt digest that authorized this integration.
+    pub accepted_receipt_digest: String,
+    /// The fully-qualified target branch ref the landing advances.
+    pub target_ref: String,
+    /// The commit the accepted candidate was forked from (its base).
+    pub base_commit: String,
+    /// The commit the target ref must currently name (the CAS `<old>`).
+    pub expected_commit: String,
+    /// The tree the expected commit points at.
+    pub expected_tree: String,
+    /// The symbolic ref `HEAD` names, if symbolic.
+    pub symbolic_head: Option<String>,
+    /// The tree the parent index recorded before the swap.
+    pub index_tree: String,
+    /// A digest binding the clean parent worktree status before the swap.
+    pub worktree_digest: String,
+    /// Identity of the parent-owned cross-process landing lock.
+    pub lock_identity: String,
+    /// Digest binding the whole parent preimage the primitive captured.
+    pub preimage_digest: String,
+}
+
+/// The exact successor identity a landing advanced the parent to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LandingSuccessor {
+    pub landed_commit: String,
+    pub landed_tree: String,
+    pub quarantine_ref: String,
+}
+
+/// The reduced lifecycle state of one delegated-mutation landing. Transitions
+/// are validated deterministically by the reducer; each carries the exact
+/// successor identity where one exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum LandingState {
+    /// `LandingPrepared` appended; the CAS primitive has not returned terminal.
+    Prepared,
+    /// The target ref advanced by the exact CAS; projection pending.
+    RefAdvanced { successor: LandingSuccessor },
+    /// Index/worktree projected; final verification pending.
+    Projected { successor: LandingSuccessor },
+    /// Terminal success: ref, symbolic HEAD, index, and worktree all coherent.
+    Landed { successor: LandingSuccessor },
+    /// Rollback authorized while the landed successor is still live.
+    RollbackPrepared { successor: LandingSuccessor },
+    /// The landing was exactly reversed by reverse CAS.
+    RolledBack { successor: LandingSuccessor },
+    /// Fail-closed: parent drift/conflict stopped the landing; no mutation.
+    Conflict { detail: String },
+    /// An inconsistency requires explicit resolution; no foreign overwrite.
+    RecoveryRequired { detail: String },
+}
+
+/// The reduced landing lifecycle for one transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LandingRecord {
+    pub subject: LandingSubject,
+    pub state: LandingState,
+}
+
 /// Deterministic replay projection for one delegated-mutation transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1000,6 +1117,9 @@ pub struct ChildTransactionState {
     pub opening_checksum: String,
     pub opening_token_digest: String,
     pub receipts: Vec<CommittedChildTransactionReceipt>,
+    /// The landing lifecycle, present once a landing has been prepared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<LandingRecord>,
 }
 
 impl ChildTransactionState {
@@ -1014,6 +1134,12 @@ impl ChildTransactionState {
         self.receipts
             .last()
             .map(|committed| committed.receipt_digest.as_str())
+    }
+
+    /// The reduced landing lifecycle state, if a landing has been prepared.
+    #[must_use]
+    pub fn landing_state(&self) -> Option<&LandingState> {
+        self.landing.as_ref().map(|record| &record.state)
     }
 }
 

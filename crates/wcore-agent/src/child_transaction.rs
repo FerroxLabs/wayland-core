@@ -17,17 +17,23 @@ use wcore_types::spawner::{ChildId, ChildWorkspaceMode};
 
 use crate::session_journal::{
     ChildTransactionOpening, ChildTransactionSnapshotBinding, ChildTransactionState,
-    CommittedChildTransactionReceipt, JournalEnvelope, JournalError, ReducedSessionState,
-    SessionEvent, SessionJournal, child_transaction_opening_token_digest,
+    CommittedChildTransactionReceipt, JournalEnvelope, JournalError, LandingSubject,
+    LandingSuccessor, ReducedSessionState, SessionEvent, SessionJournal,
+    child_transaction_opening_token_digest,
 };
 
 mod gate_executor;
 mod gates;
+mod parent;
 
 pub use gate_executor::{
     AuthorizedGateClosure, GateClosureError, GateExecutionSubject, GateStageError,
 };
 pub use gates::{AcceptanceError, AcceptedCandidate, MutationAttemptGuard};
+pub use parent::{
+    ParentLandingAuthorization, ParentLandingAuthorizationError, authorize_and_land,
+    authorize_and_rollback,
+};
 
 use gate_executor::{AuthorizedGateClosureRegistry, GateExecutor, ObservedGateResult};
 use gates::{AcceptanceMachine, SealedCandidateRoot};
@@ -209,6 +215,154 @@ impl ChildTransactionStore {
                 },
             )
             .map(write_result)
+    }
+
+    /// Append one landing-lifecycle authority event under the retained opening
+    /// authority. The event is bound to the durable opening token; the reducer
+    /// validates every transition against the exact prior lifecycle state, and
+    /// the public [`SessionJournal::append`] denylist rejects these events, so
+    /// only this authorized path can mint landing / recovery / rollback
+    /// authority. Retries are idempotent: an event that reduces to no change is
+    /// still fail-closed against reorder, gaps, and post-terminal transitions.
+    fn append_landing_event(
+        &self,
+        authority: &ChildTransactionAuthority,
+        event: SessionEvent,
+    ) -> Result<ChildTransactionWrite, JournalError> {
+        self.validate_storage_identity(authority)?;
+        let validation_authority = authority.clone();
+        self.journal
+            .append_conditionally(event, move |state, session_id| {
+                if session_id != validation_authority.session_id {
+                    return Err(JournalError::SessionMismatch {
+                        expected: validation_authority.session_id.clone(),
+                        found: session_id.to_owned(),
+                    });
+                }
+                validate_retained_authority(state, &validation_authority, false)?;
+                Ok(true)
+            })
+            .map(write_result)
+    }
+
+    pub(crate) fn append_landing_prepared(
+        &self,
+        authority: &ChildTransactionAuthority,
+        subject: LandingSubject,
+    ) -> Result<ChildTransactionWrite, JournalError> {
+        self.append_landing_event(
+            authority,
+            SessionEvent::ChildTransactionLandingPrepared {
+                transaction_id: authority.transaction_id.clone(),
+                opening_token_digest: authority.opening_token_digest.clone(),
+                subject,
+            },
+        )
+    }
+
+    pub(crate) fn append_landing_ref_advanced(
+        &self,
+        authority: &ChildTransactionAuthority,
+        successor: LandingSuccessor,
+    ) -> Result<ChildTransactionWrite, JournalError> {
+        self.append_landing_event(
+            authority,
+            SessionEvent::ChildTransactionLandingRefAdvanced {
+                transaction_id: authority.transaction_id.clone(),
+                opening_token_digest: authority.opening_token_digest.clone(),
+                successor,
+            },
+        )
+    }
+
+    pub(crate) fn append_landing_projected(
+        &self,
+        authority: &ChildTransactionAuthority,
+        successor: LandingSuccessor,
+    ) -> Result<ChildTransactionWrite, JournalError> {
+        self.append_landing_event(
+            authority,
+            SessionEvent::ChildTransactionLandingProjected {
+                transaction_id: authority.transaction_id.clone(),
+                opening_token_digest: authority.opening_token_digest.clone(),
+                successor,
+            },
+        )
+    }
+
+    pub(crate) fn append_landed(
+        &self,
+        authority: &ChildTransactionAuthority,
+        successor: LandingSuccessor,
+    ) -> Result<ChildTransactionWrite, JournalError> {
+        self.append_landing_event(
+            authority,
+            SessionEvent::ChildTransactionLanded {
+                transaction_id: authority.transaction_id.clone(),
+                opening_token_digest: authority.opening_token_digest.clone(),
+                successor,
+            },
+        )
+    }
+
+    pub(crate) fn append_landing_conflict(
+        &self,
+        authority: &ChildTransactionAuthority,
+        detail: String,
+    ) -> Result<ChildTransactionWrite, JournalError> {
+        self.append_landing_event(
+            authority,
+            SessionEvent::ChildTransactionLandingConflict {
+                transaction_id: authority.transaction_id.clone(),
+                opening_token_digest: authority.opening_token_digest.clone(),
+                detail,
+            },
+        )
+    }
+
+    pub(crate) fn append_landing_recovery_required(
+        &self,
+        authority: &ChildTransactionAuthority,
+        detail: String,
+    ) -> Result<ChildTransactionWrite, JournalError> {
+        self.append_landing_event(
+            authority,
+            SessionEvent::ChildTransactionLandingRecoveryRequired {
+                transaction_id: authority.transaction_id.clone(),
+                opening_token_digest: authority.opening_token_digest.clone(),
+                detail,
+            },
+        )
+    }
+
+    pub(crate) fn append_rollback_prepared(
+        &self,
+        authority: &ChildTransactionAuthority,
+        successor: LandingSuccessor,
+    ) -> Result<ChildTransactionWrite, JournalError> {
+        self.append_landing_event(
+            authority,
+            SessionEvent::ChildTransactionRollbackPrepared {
+                transaction_id: authority.transaction_id.clone(),
+                opening_token_digest: authority.opening_token_digest.clone(),
+                successor,
+            },
+        )
+    }
+
+    pub(crate) fn append_rolled_back(
+        &self,
+        authority: &ChildTransactionAuthority,
+        successor: LandingSuccessor,
+    ) -> Result<ChildTransactionWrite, JournalError> {
+        self.append_landing_event(
+            authority,
+            SessionEvent::ChildTransactionRolledBack {
+                transaction_id: authority.transaction_id.clone(),
+                opening_token_digest: authority.opening_token_digest.clone(),
+                successor,
+            },
+        )
     }
 
     pub fn inspect(

@@ -672,7 +672,12 @@ mod candidate;
 mod cleanup;
 #[path = "worktree_manager.rs"]
 mod manager;
+#[path = "worktree/parent.rs"]
+mod parent;
 pub use candidate::CandidateSeal;
+pub use parent::{
+    LandingOutcome, ParentLandingError, ParentPreimage, ParentSuccessor, RollbackHandle,
+};
 
 fn capture_error(context: &str, error: ProcessCaptureError) -> SwarmError {
     SwarmError::WorktreeIo(format!("{context}: {error}"))
