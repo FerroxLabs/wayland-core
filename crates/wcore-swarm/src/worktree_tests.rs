@@ -336,6 +336,611 @@ fn linked_swarm_root_is_rejected_without_touching_target() {
     assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 0);
 }
 
+// --- CandidateSeal: pure helpers (no git required) ---
+
+#[cfg(unix)]
+#[test]
+fn candidate_config_scan_is_deny_by_default() {
+    use super::candidate::scan_config;
+
+    // A fresh-clone-shaped config passes the allowlist.
+    scan_config(
+        "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\
+         \tlogallrefupdates = true\n\tsymlinks = false\n\tignorecase = false\n\
+         \tprecomposeunicode = true\n\tquotepath = false\n\
+         [branch \"main\"]\n\tremote = origin\n\tmerge = refs/heads/main\n\
+         [extensions]\n\tobjectformat = sha1\n",
+    )
+    .expect("benign fresh-clone config must pass");
+
+    // A configured remote is rejected with its own diagnostic.
+    let remote = scan_config("[remote \"origin\"]\n\turl = https://example.invalid\n")
+        .expect_err("configured remote must be rejected");
+    assert!(remote.to_string().contains("configured remote"), "{remote}");
+
+    // Command / relocation / redirect directives are all rejected.
+    for poison in [
+        "[core]\n\thooksPath = ../scratch/hooks\n",
+        "[core]\n\tfsmonitor = /bin/evil\n",
+        "[core]\n\tsshCommand = evil\n",
+        "[core]\n\tpager = evil\n",
+        "[core]\n\teditor = evil\n",
+        "[core]\n\talternateRefsCommand = evil\n",
+        // core is now a deny-by-default allowlist: gitProxy (command exec) and
+        // any unknown core key are rejected outright.
+        "[core]\n\tgitProxy = /x\n",
+        "[core]\n\tsomethingWeird = 1\n",
+        "[filter \"evil\"]\n\tprocess = proc\n",
+        "[filter \"evil\"]\n\tsmudge = smudge\n",
+        "[include]\n\tpath = /etc/hostile\n",
+        "[includeIf \"gitdir:/x/**\"]\n\tpath = /etc/hostile\n",
+        "[alias]\n\tst = !evil\n",
+        "[credential]\n\thelper = evil\n",
+        "[url \"evil:\"]\n\tinsteadOf = https://\n",
+        "[extensions]\n\tworktreeConfig = true\n",
+        // Value-less boolean form of worktreeConfig still means `true`.
+        "[extensions]\n\tworktreeConfig\n",
+    ] {
+        assert!(
+            scan_config(poison).is_err(),
+            "poisoned config accepted: {poison:?}"
+        );
+    }
+
+    // An explicitly-disabled worktreeConfig is not poison.
+    scan_config("[extensions]\n\tworktreeConfig = false\n")
+        .expect("disabled worktreeConfig must pass");
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_manifest_digest_tracks_working_tree_changes() {
+    use super::candidate::manifest_digest;
+
+    let dir = tempfile::tempdir().expect("fixture");
+    std::fs::write(dir.path().join("a.txt"), "one").unwrap();
+    let authority = DirectoryAuthority::open(dir.path()).unwrap().to_sandbox();
+
+    let baseline = manifest_digest(&authority).unwrap();
+    // SHA-256 hex is 64 lowercase hex chars.
+    assert_eq!(baseline.len(), 64, "digest must be SHA-256 hex: {baseline}");
+    assert!(baseline.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_eq!(
+        baseline,
+        manifest_digest(&authority).unwrap(),
+        "manifest digest must be deterministic for an unchanged tree"
+    );
+
+    std::fs::write(dir.path().join("a.txt"), "two").unwrap();
+    let mutated = manifest_digest(&authority).unwrap();
+    assert_ne!(baseline, mutated, "content change must change the digest");
+
+    std::fs::write(dir.path().join("b.txt"), "one").unwrap();
+    let extended = manifest_digest(&authority).unwrap();
+    assert_ne!(mutated, extended, "an added entry must change the digest");
+
+    std::fs::remove_file(dir.path().join("b.txt")).unwrap();
+    let restored = manifest_digest(&authority).unwrap();
+    assert_eq!(
+        restored, mutated,
+        "removing the added entry restores the digest"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_manifest_digest_boundary_cases() {
+    use super::candidate::manifest_digest;
+
+    let dir = tempfile::tempdir().expect("fixture");
+    std::fs::write(dir.path().join("keep.txt"), "keep").unwrap();
+    let authority = DirectoryAuthority::open(dir.path()).unwrap().to_sandbox();
+    let baseline = manifest_digest(&authority).unwrap();
+
+    // An added *empty* subdirectory must perturb the digest.
+    std::fs::create_dir(dir.path().join("emptydir")).unwrap();
+    let with_dir = manifest_digest(&authority).unwrap();
+    assert_ne!(
+        baseline, with_dir,
+        "an added empty subdirectory must perturb"
+    );
+    std::fs::remove_dir(dir.path().join("emptydir")).unwrap();
+    assert_eq!(
+        baseline,
+        manifest_digest(&authority).unwrap(),
+        "removing the empty subdirectory restores the digest"
+    );
+
+    // A regular-file <-> directory replacement at the same name must perturb.
+    std::fs::write(dir.path().join("node"), "file-shape").unwrap();
+    let as_file = manifest_digest(&authority).unwrap();
+    std::fs::remove_file(dir.path().join("node")).unwrap();
+    std::fs::create_dir(dir.path().join("node")).unwrap();
+    let as_dir = manifest_digest(&authority).unwrap();
+    assert_ne!(
+        as_file, as_dir,
+        "a file<->directory type swap at the same path must perturb"
+    );
+
+    // `.git` is excluded from the manifest: planting metadata under it must not
+    // change the digest.
+    std::fs::remove_dir(dir.path().join("node")).unwrap();
+    let clean = manifest_digest(&authority).unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join(".git/config"), "[core]\n").unwrap();
+    assert_eq!(
+        clean,
+        manifest_digest(&authority).unwrap(),
+        "top-level .git must be excluded from the source manifest"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_manifest_digest_binds_executable_bit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::candidate::manifest_digest;
+
+    let dir = tempfile::tempdir().expect("fixture");
+    let file = dir.path().join("script.sh");
+    std::fs::write(&file, "same content").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let authority = DirectoryAuthority::open(dir.path()).unwrap().to_sandbox();
+
+    let non_exec = manifest_digest(&authority).unwrap();
+    // Flip only the exec bit; content and size are unchanged.
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let exec = manifest_digest(&authority).unwrap();
+    assert_ne!(
+        non_exec, exec,
+        "a chmod +x with identical content must perturb the digest (git tree mode)"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_manifest_digest_tracks_git_owner_exec_bit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::candidate::manifest_digest;
+
+    let dir = tempfile::tempdir().expect("fixture");
+    let file = dir.path().join("script.sh");
+    std::fs::write(&file, "same content").unwrap();
+    let authority = DirectoryAuthority::open(dir.path()).unwrap().to_sandbox();
+
+    // Git derives a regular file's tree mode from the OWNER execute bit alone
+    // (100644 vs 100755). A non-owner exec bit is not part of the tree identity,
+    // so 0o644 -> 0o645 keeps git's mode at 100644 and must NOT perturb the digest.
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let plain = manifest_digest(&authority).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o645)).unwrap();
+    let other_exec = manifest_digest(&authority).unwrap();
+    assert_eq!(
+        plain, other_exec,
+        "a non-owner exec bit is not part of git's tree mode and must not perturb the digest"
+    );
+
+    // Adding the OWNER exec bit from a non-canonical mode (0o645 -> 0o745) flips
+    // git's tree mode 100644 -> 100755 and must be detected — the case a raw
+    // `mode & 0o111` mask would silently miss.
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o745)).unwrap();
+    let owner_exec = manifest_digest(&authority).unwrap();
+    assert_ne!(
+        other_exec, owner_exec,
+        "adding the owner exec bit (git 100644 -> 100755) must perturb the digest"
+    );
+}
+
+// --- CandidateSeal: live isolated-checkout scenarios (git-backed) ---
+
+#[cfg(target_os = "linux")]
+async fn seal_run_git(repo: &Path, args: &[&str]) {
+    let mut command = shell::shell_command_argv("git", args);
+    command.current_dir(repo);
+    let output = capture_bounded_process(
+        command,
+        CaptureLimits {
+            stdout_bytes: 64 * 1024,
+            stderr_bytes: 64 * 1024,
+            timeout: Duration::from_secs(5),
+        },
+        None,
+    )
+    .await
+    .expect("fixture git command");
+    assert!(
+        output.status.success(),
+        "fixture git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(target_os = "linux")]
+async fn seal_init_repo(path: &Path) {
+    seal_run_git(path, &["init", "-q", "-b", "main"]).await;
+    std::fs::write(path.join("README.md"), "seed\n").unwrap();
+    seal_run_git(path, &["add", "README.md"]).await;
+    seal_run_git(
+        path,
+        &[
+            "-c",
+            "user.email=swarm-test@example.invalid",
+            "-c",
+            "user.name=Swarm Test",
+            "commit",
+            "-qm",
+            "seed",
+        ],
+    )
+    .await;
+}
+
+/// Build a real isolated checkout and return the tempdirs (kept alive), the
+/// manager, and the transaction workspace.
+#[cfg(target_os = "linux")]
+async fn seal_workspace() -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    WorktreeManager,
+    TransactionWorkspace,
+) {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let control = tempfile::tempdir().expect("orchestrator control root");
+    seal_init_repo(fixture.path()).await;
+    let manager =
+        WorktreeManager::new_with_workspace_root(fixture.path(), &control.path().join("checkouts"))
+            .expect("external manager");
+    let head = manager.pinned_head().await.expect("pinned head");
+    let workspace = manager
+        .create_isolated_checkout(
+            "child-seal",
+            "wayland-child/child-seal",
+            &head,
+            WorkspaceCapacity {
+                available_bytes: u64::MAX,
+                safety_margin_bytes: 0,
+                max_transaction_bytes: u64::MAX,
+                max_aggregate_bytes: u64::MAX,
+            },
+        )
+        .await
+        .expect("isolated checkout");
+    (fixture, control, manager, workspace)
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn candidate_seal_mints_and_revalidates_from_fresh_checkout() {
+    let (_fixture, _control, _manager, workspace) = seal_workspace().await;
+    let seal = workspace
+        .seal_candidate()
+        .expect("mint seal from fresh checkout");
+    seal.revalidate()
+        .expect("fresh checkout is a clean candidate");
+    workspace.cleanup.release().expect("release");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn candidate_seal_revalidates_repeatedly_while_quiescent() {
+    let (_fixture, _control, _manager, workspace) = seal_workspace().await;
+    let seal = workspace.seal_candidate().expect("mint seal");
+    for _ in 0..3 {
+        seal.revalidate()
+            .expect("quiescent checkout revalidates repeatedly");
+    }
+    workspace.cleanup.release().expect("release");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn candidate_seal_revalidation_fails_on_blocked_plumbing_inspection() {
+    let (_fixture, _control, _manager, workspace) = seal_workspace().await;
+    let seal = workspace.seal_candidate().expect("mint seal");
+    // Remove a required plumbing file; the authority-based read fails closed.
+    std::fs::remove_file(workspace.checkout.join(".git/HEAD")).unwrap();
+    let error = seal
+        .revalidate()
+        .expect_err("missing HEAD must fail the inspection closed");
+    assert!(error.to_string().contains("HEAD"), "{error}");
+    workspace.cleanup.release().expect("release");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn candidate_seal_revalidation_detects_source_drift() {
+    let (_fixture, _control, _manager, workspace) = seal_workspace().await;
+    let seal = workspace.seal_candidate().expect("mint seal");
+    std::fs::write(workspace.checkout.join("README.md"), "drifted\n").unwrap();
+    let error = seal
+        .revalidate()
+        .expect_err("working-tree drift must invalidate the seal");
+    assert!(error.to_string().contains("source manifest"), "{error}");
+    workspace.cleanup.release().expect("release");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn candidate_seal_revalidation_detects_repository_substitution() {
+    let (_fixture, _control, _manager, workspace) = seal_workspace().await;
+    let seal = workspace.seal_candidate().expect("mint seal");
+    let moved = workspace.root.join("checkout-original");
+    std::fs::rename(&workspace.checkout, &moved).unwrap();
+    std::fs::create_dir(&workspace.checkout).unwrap();
+    let error = seal
+        .revalidate()
+        .expect_err("same-path repository substitution must fail closed");
+    assert!(error.to_string().contains("identity changed"), "{error}");
+    // Restore so owned cleanup removes the retained transaction root cleanly.
+    std::fs::remove_dir(&workspace.checkout).unwrap();
+    std::fs::rename(&moved, &workspace.checkout).unwrap();
+    workspace.cleanup.release().expect("release");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn candidate_seal_revalidation_rejects_alternate_object_store() {
+    let (_fixture, _control, _manager, workspace) = seal_workspace().await;
+    let seal = workspace.seal_candidate().expect("mint seal");
+    let info = workspace.checkout.join(".git/objects/info");
+    std::fs::create_dir_all(&info).unwrap();
+    std::fs::write(info.join("alternates"), "/some/foreign/objects\n").unwrap();
+    let error = seal
+        .revalidate()
+        .expect_err("alternate object store must fail closed");
+    assert!(
+        error.to_string().contains("alternate object store"),
+        "{error}"
+    );
+    workspace.cleanup.release().expect("release");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn candidate_seal_revalidation_rejects_config_poisoning() {
+    use std::io::Write;
+
+    let (_fixture, _control, _manager, workspace) = seal_workspace().await;
+    let seal = workspace.seal_candidate().expect("mint seal");
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(workspace.checkout.join(".git/config"))
+        .unwrap();
+    writeln!(config, "\n[filter \"evil\"]\n\tprocess = evil-proc").unwrap();
+    drop(config);
+    let error = seal
+        .revalidate()
+        .expect_err("poisoned filter config must fail closed");
+    assert!(
+        error.to_string().contains("disallowed Git configuration"),
+        "{error}"
+    );
+    workspace.cleanup.release().expect("release");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn candidate_seal_revalidation_rejects_planted_hook() {
+    let (_fixture, _control, _manager, workspace) = seal_workspace().await;
+    let seal = workspace.seal_candidate().expect("mint seal");
+    let hooks = workspace.checkout.join(".git/hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::write(hooks.join("pre-commit"), "#!/bin/sh\nexit 0\n").unwrap();
+    let error = seal
+        .revalidate()
+        .expect_err("planted hook must fail closed");
+    assert!(error.to_string().contains("hook"), "{error}");
+    workspace.cleanup.release().expect("release");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn candidate_seal_fails_closed_after_transaction_release() {
+    let (_fixture, _control, _manager, workspace) = seal_workspace().await;
+    let seal = workspace.seal_candidate().expect("mint seal");
+    workspace
+        .cleanup
+        .release()
+        .expect("release the transaction");
+    let error = seal
+        .revalidate()
+        .expect_err("a released transaction grants the seal no authority");
+    assert!(error.to_string().contains("released"), "{error}");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn candidate_seal_cannot_outlive_its_checkout() {
+    let (_fixture, _control, _manager, workspace) = seal_workspace().await;
+    let seal = workspace.seal_candidate().expect("mint seal");
+    let checkout = workspace.checkout.clone();
+    workspace
+        .cleanup
+        .release()
+        .expect("release the transaction");
+    assert!(
+        !checkout.exists(),
+        "owned cleanup must remove the isolated checkout"
+    );
+    assert!(
+        seal.revalidate().is_err(),
+        "the seal must not revalidate once its checkout is gone"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn candidate_seal_rejects_commondir_redirect() {
+    let (_fixture, _control, _manager, workspace) = seal_workspace().await;
+    let seal = workspace.seal_candidate().expect("mint seal");
+    // A planted commondir would make git resolve objects/refs/config elsewhere.
+    std::fs::write(workspace.checkout.join(".git/commondir"), "../evil\n").unwrap();
+    let error = seal
+        .revalidate()
+        .expect_err(".git/commondir redirect must fail closed");
+    assert!(error.to_string().contains("commondir"), "{error}");
+    std::fs::remove_file(workspace.checkout.join(".git/commondir")).unwrap();
+    workspace.cleanup.release().expect("release");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn candidate_seal_rejects_worktree_scoped_config_file() {
+    let (_fixture, _control, _manager, workspace) = seal_workspace().await;
+    let seal = workspace.seal_candidate().expect("mint seal");
+    std::fs::write(
+        workspace.checkout.join(".git/config.worktree"),
+        "[core]\n\thooksPath = ../scratch/h\n",
+    )
+    .unwrap();
+    let error = seal
+        .revalidate()
+        .expect_err(".git/config.worktree must fail closed");
+    assert!(
+        error.to_string().contains("worktree-scoped config"),
+        "{error}"
+    );
+    std::fs::remove_file(workspace.checkout.join(".git/config.worktree")).unwrap();
+    workspace.cleanup.release().expect("release");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn candidate_seal_rejects_worktree_config_extension() {
+    use std::io::Write;
+
+    let (_fixture, _control, _manager, workspace) = seal_workspace().await;
+    let seal = workspace.seal_candidate().expect("mint seal");
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(workspace.checkout.join(".git/config"))
+        .unwrap();
+    writeln!(config, "\n[extensions]\n\tworktreeConfig = true").unwrap();
+    drop(config);
+    let error = seal
+        .revalidate()
+        .expect_err("extensions.worktreeConfig=true must fail closed");
+    assert!(
+        error.to_string().contains("disallowed Git configuration"),
+        "{error}"
+    );
+    workspace.cleanup.release().expect("release");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn candidate_seal_rejects_relocated_hooks_path() {
+    use std::io::Write;
+
+    let (_fixture, _control, _manager, workspace) = seal_workspace().await;
+    let seal = workspace.seal_candidate().expect("mint seal");
+    // Relocate hooks into scratch and plant an executable there. The `.git/hooks`
+    // scan would miss it — the config allowlist must reject core.hooksPath.
+    let relocated = workspace.scratch.join("hooks");
+    std::fs::create_dir_all(&relocated).unwrap();
+    std::fs::write(relocated.join("pre-commit"), "#!/bin/sh\nexit 0\n").unwrap();
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(workspace.checkout.join(".git/config"))
+        .unwrap();
+    writeln!(config, "\n[core]\n\thooksPath = {}", relocated.display()).unwrap();
+    drop(config);
+    let error = seal
+        .revalidate()
+        .expect_err("core.hooksPath relocation must fail closed");
+    assert!(
+        error.to_string().contains("disallowed Git configuration"),
+        "{error}"
+    );
+    workspace.cleanup.release().expect("release");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn candidate_seal_rejects_fsmonitor_program() {
+    use std::io::Write;
+
+    let (_fixture, _control, _manager, workspace) = seal_workspace().await;
+    let seal = workspace.seal_candidate().expect("mint seal");
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(workspace.checkout.join(".git/config"))
+        .unwrap();
+    writeln!(config, "\n[core]\n\tfsmonitor = /bin/evil").unwrap();
+    drop(config);
+    let error = seal
+        .revalidate()
+        .expect_err("core.fsmonitor program must fail closed");
+    assert!(
+        error.to_string().contains("disallowed Git configuration"),
+        "{error}"
+    );
+    workspace.cleanup.release().expect("release");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn candidate_seal_reports_tracked_symlink_clearly() {
+    use std::os::unix::fs::symlink;
+
+    let (_fixture, _control, _manager, workspace) = seal_workspace().await;
+    // Plant a tracked working-tree symlink, then attempt to mint. The walk must
+    // surface a specific "does not support tracked symlinks" error, not a
+    // generic sandbox I/O failure — and never a false PASS.
+    symlink("README.md", workspace.checkout.join("link")).unwrap();
+    let error = workspace
+        .seal_candidate()
+        .expect_err("tracked symlink must be reported, not silently accepted");
+    assert!(error.to_string().contains("tracked symlinks"), "{error}");
+    std::fs::remove_file(workspace.checkout.join("link")).unwrap();
+    workspace.cleanup.release().expect("release");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn candidate_seal_detects_executable_bit_drift_after_mint() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_fixture, _control, _manager, workspace) = seal_workspace().await;
+    let seal = workspace.seal_candidate().expect("mint seal");
+    // Flip only the exec bit of a tracked file — same content and size. The
+    // manifest must now bind mode, so this is drift, not a silent no-op.
+    let tracked = workspace.checkout.join("README.md");
+    let mut perms = std::fs::metadata(&tracked).unwrap().permissions();
+    perms.set_mode(perms.mode() | 0o111);
+    std::fs::set_permissions(&tracked, perms).unwrap();
+    let error = seal
+        .revalidate()
+        .expect_err("a chmod +x after mint must be detected as drift");
+    assert!(error.to_string().contains("source manifest"), "{error}");
+    workspace.cleanup.release().expect("release");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn candidate_seal_rejects_git_proxy_command() {
+    use std::io::Write;
+
+    let (_fixture, _control, _manager, workspace) = seal_workspace().await;
+    let seal = workspace.seal_candidate().expect("mint seal");
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(workspace.checkout.join(".git/config"))
+        .unwrap();
+    writeln!(config, "\n[core]\n\tgitProxy = /bin/evil").unwrap();
+    drop(config);
+    let error = seal
+        .revalidate()
+        .expect_err("core.gitProxy command directive must fail closed");
+    assert!(
+        error.to_string().contains("disallowed Git configuration"),
+        "{error}"
+    );
+    workspace.cleanup.release().expect("release");
+}
+
 #[cfg(target_os = "linux")]
 #[path = "worktree_tests/linux.rs"]
 mod linux;

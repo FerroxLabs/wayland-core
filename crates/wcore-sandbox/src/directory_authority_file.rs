@@ -15,6 +15,32 @@ impl RegularFileAuthority {
         Ok(self.len()? == 0)
     }
 
+    /// Whether the retained file has any executable bit set, read through the
+    /// retained fd (never an ambient path), with the same identity check as
+    /// [`Self::len`].
+    ///
+    /// A git tree records only the executable bit (`100644` vs `100755`), and
+    /// git canonicalizes that from the **owner** execute bit alone
+    /// (`ce_permissions`: `mode & 0o100 ? 0755 : 0644`), so the other
+    /// permission bits are irrelevant and this normalizes to
+    /// `mode & 0o100 != 0`. On non-unix targets the exec bit is not part of the
+    /// filesystem permission model in the same way; it returns `false` (Windows
+    /// support is deferred — the delegated-mutation seal is proven on Linux).
+    pub fn is_executable(&self) -> Result<bool> {
+        let metadata = self.handle.metadata()?;
+        validate_real_file(Path::new("<retained file>"), &metadata)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            Ok(metadata.permissions().mode() & 0o100 != 0)
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(false)
+        }
+    }
+
     pub fn read_bounded(&self, max_bytes: u64) -> Result<Vec<u8>> {
         let metadata = self.handle.metadata()?;
         validate_real_file(Path::new("<retained file>"), &metadata)?;

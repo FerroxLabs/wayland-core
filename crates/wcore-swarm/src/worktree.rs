@@ -615,6 +615,25 @@ impl TransactionWorkspace {
         Ok(())
     }
 
+    /// Mint an opaque, live landing-candidate seal bound to this isolated
+    /// checkout. This is the sole caller-facing entry: it first re-proves
+    /// execution authority (the drift/dirty/identity guard), then hands the
+    /// live retained authorities and resolved commit/tree to the seal's
+    /// crate-private mint, which computes the source manifest and immediately
+    /// revalidates before returning. There is no other constructor, so a seal
+    /// can never be produced over already-drifted state.
+    pub fn seal_candidate(&self) -> Result<CandidateSeal> {
+        self.validate_execution_authority()?;
+        CandidateSeal::mint(
+            &self.owner,
+            &self.authorities.checkout,
+            &self.cleanup,
+            &self.base_commit,
+            &self.head_commit,
+            &self.tree,
+        )
+    }
+
     pub(crate) fn logical_used_bytes(&self) -> Result<u64> {
         self.logical_used_bytes_with_cancel(None)
     }
@@ -647,10 +666,13 @@ const GIT_CAPTURE_LIMITS: CaptureLimits = CaptureLimits {
 };
 const UNSAFE_CHECKOUT_CONFIG: &str =
     r"^(filter\..*\.(clean|smudge|process)|include\.path|includeif\..*\.path)$";
+#[path = "worktree/candidate.rs"]
+mod candidate;
 #[path = "worktree_cleanup.rs"]
 mod cleanup;
 #[path = "worktree_manager.rs"]
 mod manager;
+pub use candidate::CandidateSeal;
 
 fn capture_error(context: &str, error: ProcessCaptureError) -> SwarmError {
     SwarmError::WorktreeIo(format!("{context}: {error}"))

@@ -33,6 +33,8 @@ humantime-serde     = { workspace = true }
 rusqlite            = { workspace = true }
 tempfile             = { workspace = true }
 fd-lock              = { workspace = true }
+# CandidateSeal source-manifest digest — SHA-256, not a 64-bit DefaultHasher.
+sha2                 = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
