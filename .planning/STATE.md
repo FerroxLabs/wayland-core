@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 20
 current_phase_name: transactional-delegated-mutation
 status: executing
-stopped_at: Plans 20-03, 20-15, 20-04, and 20-06 complete. 20-06 built the 20-06A candidate-seal source packet on the 20-04 successor: an opaque, live, non-serializable/non-cloneable CandidateSeal minted only by the accepted 20-03 standalone-checkout capability, with files-only before/after revalidation through the retained directory authority (no git subprocess), adversary-resistant .git inspection (commondir/worktree-config/deny-by-default config allowlist/hook), and a SHA-256 digest of the full git-tree identity (path + owner-exec mode + content). Linux-proven at source 10d7573 (clippy -p wcore-sandbox -p wcore-swarm --all-targets -D warnings clean; test -p wcore-swarm 92 lib + test -p wcore-sandbox 60 passed). The 20-09 independent review ran THREE rounds, each catching real .git/mode false-PASS gaps repaired at source before it passed. Next boundary: plan 20-09 (independent non-author review of 20-06A at 10d7573, profile f20-09).
+stopped_at: Plans 20-03, 20-15, 20-04, 20-06, and 20-09 complete. 20-06 built the 20-06A candidate-seal source packet (opaque live CandidateSeal; files-only .git-attacker-hardened revalidation; SHA-256 full git-tree-identity digest), Linux-proven at source 10d7573. 20-09 = the fresh non-author independent review of the exact 06A source (profile f20-09): zero-finding PASS (checks all_severity/candidate_seal_authority/interface_sufficiency), reviewer wayland-f20-09-independent-review ≠ source wayland-f20-06-builder, verify-review-pair.sh + verify-review-result.mjs both green (review 8d66277). The review ran THREE adversarial rounds finding+repairing real .git/mode false-PASS gaps before passing — 06A is construction-qualified. Next boundary: plan 20-10 (depends on 20-06/06A).
 last_updated: "2026-07-20T12:28:04.020Z"
 last_activity: 2026-07-20
-last_activity_desc: Plan 20-06 candidate-seal source packet complete and Linux-proven at source 10d7573 (review-hardened over 3 rounds). Next: plan 20-09 (review 20-06A).
+last_activity_desc: Plan 20-09 independent review of 20-06A = zero-finding f20-09 PASS (review 8d66277); 06A qualified. Next: plan 20-10.
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 18
-  completed_plans: 6
+  completed_plans: 7
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: `.planning/PROJECT.md` (updated 2026-07-19)
 ## Current Position
 
 Phase: 20 (transactional-delegated-mutation) — EXECUTING
-Plan: 7 of 18 (next: 20-09)
+Plan: 8 of 18 (next: 20-10)
 Status: Executing Phase 20
-Last activity: 2026-07-20 — Plan 20-06 candidate-seal source packet complete and Linux-proven (source 10d7573, review-hardened over 3 rounds); next plan 20-09 (review 20-06A)
+Last activity: 2026-07-20 — Plan 20-09 independent review of 20-06A = zero-finding f20-09 PASS (review 8d66277); next plan 20-10
 
-Progress: [███░░░░░░░] 33%
+Progress: [████░░░░░░] 39%
 
 ## Execution Authority
 
@@ -49,7 +49,7 @@ Progress: [███░░░░░░░] 33%
 
 **Velocity:**
 
-- Total plans completed: 6
+- Total plans completed: 7
 - Average duration: Not established
 - Total execution time: Not established
 
@@ -85,5 +85,5 @@ Progress: [███░░░░░░░] 33%
 ## Session Continuity
 
 Last session: 2026-07-20
-Stopped at: Plans 20-03, 20-15, 20-04, 20-06 complete (Linux-proven). 20-03 substrate (source d343fc72), 20-15 review ZERO-FINDING PASS (caught+repaired a HIGH), 20-04 production spawner wiring (source 30a2b4f; runtime gate caught+fixed 2 real bugs), 20-06 opaque live CandidateSeal source packet (source 10d7573; clippy clean + 92 wcore-swarm/60 wcore-sandbox tests; 20-09 review ran 3 rounds finding+repairing real .git/mode false-PASS gaps before passing). Next: plan 20-09 (independent non-author review of 20-06A at 10d7573, profile f20-09), then dependency order 10,11,12,13,14,05,07,08,16,17,18; review gates at 09/11/16 + audit 14; Sean hard-stop at 20-18.
+Stopped at: Plans 20-03, 20-15, 20-04, 20-06, 20-09 complete (Linux-proven). 20-03 substrate (d343fc72), 20-15 review ZERO-FINDING PASS (repaired a HIGH), 20-04 production spawner (30a2b4f), 20-06 opaque live CandidateSeal source packet (source 10d7573; clippy clean + 92 wcore-swarm/60 wcore-sandbox tests), 20-09 independent non-author review of 20-06A = zero-finding f20-09 PASS (review 8d66277; 3 adversarial rounds repaired real .git/mode false-PASS gaps) → 06A qualified. Next: plan 20-10 (depends on 20-06/06A), then dependency order 11,12,13,14,05,07,08,16,17,18; review gates at 11 (rev 06B)/16 (rev 08) + audit 14; Sean hard-stop at 20-18.
 Resume file: None
