@@ -3,8 +3,74 @@
 use std::path::Path;
 
 use wcore_config::profile::validate_profile_name;
+use wcore_sandbox::DirectoryAuthority as SandboxDirectoryAuthority;
+use wcore_sandbox::DirectoryAuthorityIdentity as SandboxDirectoryAuthorityIdentity;
 
 use crate::error::{Result, SwarmError};
+
+#[derive(Clone, Debug)]
+pub(super) struct DirectoryAuthority(SandboxDirectoryAuthority);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct DirectoryAuthorityIdentity(SandboxDirectoryAuthorityIdentity);
+
+impl DirectoryAuthority {
+    pub(super) fn from_sandbox(authority: SandboxDirectoryAuthority) -> Self {
+        Self(authority)
+    }
+
+    pub(super) fn to_sandbox(&self) -> SandboxDirectoryAuthority {
+        self.0.clone()
+    }
+
+    pub(super) fn identity_token(&self) -> DirectoryAuthorityIdentity {
+        DirectoryAuthorityIdentity(self.0.identity_token())
+    }
+
+    pub(super) fn open(path: &Path) -> Result<Self> {
+        SandboxDirectoryAuthority::open(path)
+            .map(Self)
+            .map_err(|error| SwarmError::DispatchAdmission(error.to_string()))
+    }
+
+    pub(super) fn validate_path(&self, path: &Path) -> Result<()> {
+        self.0
+            .validate_path(path)
+            .map_err(|error| SwarmError::DispatchAdmission(error.to_string()))
+    }
+
+    pub(super) fn try_clone_handle(&self) -> Result<wcore_sandbox::DirectoryHandleLoan> {
+        self.0.try_clone_handle().map_err(Into::into)
+    }
+
+    pub(super) fn open_or_create_child_directory(&self, name: &str) -> Result<Self> {
+        self.0
+            .open_or_create_child_directory(name)
+            .map(Self)
+            .map_err(|error| SwarmError::DispatchAdmission(error.to_string()))
+    }
+
+    pub(super) fn remove_open_dir_all(self) -> std::result::Result<(), (SwarmError, Self)> {
+        self.0.remove_open_dir_all().map_err(|boxed| {
+            let (error, authority) = *boxed;
+            (SwarmError::WorktreeIo(error.to_string()), Self(authority))
+        })
+    }
+
+    /// Rename the exact held Windows directory object beneath a retained
+    /// destination parent.
+    #[cfg(windows)]
+    pub(super) fn rename_into(
+        &self,
+        destination_parent: &Self,
+        child_name: &str,
+        replace: bool,
+    ) -> Result<()> {
+        self.0
+            .rename_into(&destination_parent.0, child_name, replace)
+            .map_err(|error| SwarmError::WorktreeIo(error.to_string()))
+    }
+}
 
 pub(super) fn reject_option_like_ref(kind: &str, value: &str) -> Result<()> {
     if value.is_empty() || value.starts_with('-') {

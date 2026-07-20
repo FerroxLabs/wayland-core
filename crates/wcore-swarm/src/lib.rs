@@ -32,7 +32,8 @@
 //! - `dispatch` REFUSES if the base repo is dirty (collision detection).
 //! - Dispatch admission caps worker processes, retained worktrees, and total
 //!   captured output before any worker is created.
-//! - Each worker gets a fresh worktree at `<repo>/.swarm-worktrees/<id>`.
+//! - Each worker gets a child-owned standalone repository under
+//!   `<repo>/.swarm-worktrees/<id>/checkout`.
 //! - `collect` waits for all workers (already-finished handles in the
 //!   v0.6 implementation; future versions may aggregate streaming output).
 //! - `cleanup` removes ALL worker worktrees. Idempotent.
@@ -174,7 +175,7 @@ pub struct SwarmBrief {
     /// Free-form human label for telemetry (e.g. "implement W7 fixture
     /// builder"). Not interpreted by `wcore-swarm`.
     pub task: String,
-    /// Branch the worker worktrees are created from.
+    /// Ref that must resolve to the current clean checkout's exact HEAD.
     pub base_branch: String,
     /// Branch prefix for each worker; the final branch is
     /// `<worker_branch_prefix>/<worker_id>`.
@@ -240,6 +241,7 @@ pub struct Swarm {
     repo_root: PathBuf,
     manager: WorktreeManager,
     dispatch_gate: Arc<DispatchGate>,
+    terminal_heartbeats: Mutex<HashMap<String, WorkerStatusFile>>,
 }
 
 impl Swarm {
@@ -253,6 +255,7 @@ impl Swarm {
             repo_root,
             manager,
             dispatch_gate,
+            terminal_heartbeats: Mutex::new(HashMap::new()),
         })
     }
 
@@ -262,7 +265,7 @@ impl Swarm {
     }
 
     /// Dispatch `count` workers in parallel using the same `brief`. Each
-    /// gets a unique worker id (`<uuid>-<index>`), a fresh worktree, and a
+    /// gets a unique worker id (`<uuid>-<index>`), a standalone checkout, and a
     /// branch named `<brief.worker_branch_prefix>/<worker_id>`. Returns
     /// the handles in the order the workers complete (race-order may
     /// differ from index order — the caller should not assume).
@@ -298,26 +301,53 @@ impl Swarm {
             _ = cancel.cancelled() => return Ok(Vec::new()),
             result = self.manager.assert_clean() => result?,
         }
+        let pinned_head = self
+            .manager
+            .pinned_dispatch_base(&brief.base_branch)
+            .await?;
+        let capacity = self
+            .manager
+            .workspace_capacity(count.min(MAX_CONCURRENT_WORKERS))
+            .await?;
+        self.manager
+            .assert_dispatch_checkout_fits(&pinned_head, capacity)
+            .await?;
         let mut futs = Vec::with_capacity(count);
         for i in 0..count {
             let worker_id = format!("{}-{}", uuid::Uuid::new_v4().simple(), i);
             let manager_ref = &self.manager;
             let brief_ref = &brief;
-            futs.push(dispatch::run_worker(
+            // Keep each worker state machine on the heap. The dispatch future
+            // otherwise contains one large `run_worker` future inline and can
+            // overflow a small Tokio test/runtime stack before its first
+            // suspension point.
+            futs.push(Box::pin(dispatch::run_worker(
                 manager_ref,
                 worker_id,
                 brief_ref,
                 limits.worker_stream_bytes,
+                &pinned_head,
+                capacity,
                 cancel.clone(),
-            ));
+            )));
         }
         // Keep all admitted workers scheduled while bounding simultaneous
         // worktree creation and subprocess ownership. `buffer_unordered`
         // also makes the documented completion-order result explicit.
-        let handles = futures::stream::iter(futs)
+        let terminals: Vec<dispatch::WorkerTerminal> = futures::stream::iter(futs)
             .buffer_unordered(MAX_CONCURRENT_WORKERS)
             .collect()
             .await;
+        let mut heartbeats = self.terminal_heartbeats.lock().map_err(|_| {
+            SwarmError::DispatchAdmission("terminal heartbeat registry is unavailable".into())
+        })?;
+        let mut handles = Vec::with_capacity(terminals.len());
+        for terminal in terminals {
+            if let Some(heartbeat) = terminal.heartbeat {
+                heartbeats.insert(terminal.handle.worker_id.clone(), heartbeat);
+            }
+            handles.push(terminal.handle);
+        }
         Ok(handles)
     }
 
@@ -325,6 +355,13 @@ impl Swarm {
     /// this is a synchronous transform; async-on-the-surface is reserved
     /// for future aggregation work without breaking M5.6/M5.7 callers.
     pub async fn collect(&self, handles: Vec<WorkerHandle>) -> Result<Vec<SwarmResult>> {
+        let mut heartbeats = self.terminal_heartbeats.lock().map_err(|_| {
+            SwarmError::WorktreeIo("terminal heartbeat registry is unavailable".into())
+        })?;
+        for handle in &handles {
+            heartbeats.remove(&handle.worker_id);
+        }
+        drop(heartbeats);
         collect::ResultCollector::finalize(handles)
     }
 
@@ -349,7 +386,13 @@ impl Swarm {
     /// stdout/stderr; those are only available after [`Self::collect`].
     pub fn worker_status(&self, handle: &WorkerHandle) -> Result<Option<WorkerStatusFile>> {
         let worktree = self.manager.swarm_root().join(&handle.worker_id);
-        heartbeat::read_status(&worktree)
+        if let Some(status) = heartbeat::read_status(&worktree)? {
+            return Ok(Some(status));
+        }
+        let heartbeats = self.terminal_heartbeats.lock().map_err(|_| {
+            SwarmError::WorktreeIo("terminal heartbeat registry is unavailable".into())
+        })?;
+        Ok(heartbeats.get(&handle.worker_id).cloned())
     }
 }
 
@@ -418,12 +461,7 @@ mod dispatch_limit_tests {
             .await
             .unwrap_err();
         assert!(matches!(error, SwarmError::DispatchAdmission(_)));
-        assert_eq!(
-            std::fs::read_dir(swarm.manager.swarm_root())
-                .unwrap()
-                .count(),
-            0
-        );
+        assert_eq!(swarm.manager.retained_worker_count(0).unwrap(), 0);
     }
 
     #[tokio::test]
@@ -448,11 +486,6 @@ mod dispatch_limit_tests {
         let _active = first.dispatch_gate.try_lock().unwrap();
         let error = second.dispatch(brief(), 1).await.unwrap_err();
         assert!(matches!(error, SwarmError::DispatchAdmission(_)));
-        assert_eq!(
-            std::fs::read_dir(second.manager.swarm_root())
-                .unwrap()
-                .count(),
-            0
-        );
+        assert_eq!(second.manager.retained_worker_count(0).unwrap(), 0);
     }
 }
