@@ -37,6 +37,20 @@ use wcore_tools::registry::ToolRegistry;
 use wcore_types::llm::{LlmEvent, LlmRequest};
 use wcore_types::message::{FinishReason, StopReason, TokenUsage};
 
+// Workspace-authority propagation/denial coverage (below) drives the REAL
+// production spawner composition Bootstrap installs on the workflow/spawner
+// path, so the same imports the durable child launch uses are pulled in here.
+use common::bind_test_spawner;
+use wcore_agent::spawner::{
+    AgentSpawner, DurableSpawner, DurableSpawnerError, ForkOverrides, ResolvedChildLaunch,
+    SubAgentConfig,
+};
+use wcore_types::spawner::{
+    ChildDeliveryState, ChildDesiredState, ChildId, ChildOrigin, ChildParent, ChildRecoveryState,
+    ChildRequestEvidence, ChildTimestamps, ChildWorkspace, ChildWorkspaceMode,
+    DURABLE_CHILD_SCHEMA_VERSION, DurableChildRecord, DurableChildStatus, RequestedChildWorkspace,
+};
+
 /// A valid RON workflow with a single agent stage — enough to estimate, emit,
 /// and run end-to-end through the runner.
 const VALID_RON: &str = r#"Workflow(
@@ -554,5 +568,396 @@ async fn live_gate_synthesis_failure_falls_through() {
             .iter()
             .any(|m| m.contains("Couldn't design a workflow")),
         "a failed synthesis must leave a fall-through note; got {infos:?}"
+    );
+}
+
+// ===========================================================================
+// Production-path workspace-authority propagation and denials (f20-04 Task 3)
+//
+// The live workflow gate approves a plan and then runs it through the SAME
+// `AgentSpawner` composition Bootstrap installs for the Spawn / workflow /
+// Crucible / Anvil paths. These tests exercise that REAL spawner — not a
+// mock `Spawner` adapter — end to end through its public durable-launch
+// surface (`resolve_durable_launch`, `spawn_one`, `validate_record`,
+// `declare_resolved_child`), asserting that a delegated workflow child can
+// never read/write the parent workspace, upgrade shared read-only authority
+// to mutation, run against a substituted transaction opening / session
+// generation / parent snapshot, or proceed when the parent-workspace
+// authority is unavailable — and that every refusal happens BEFORE any
+// provider/tool execution and leaves the durable journal untouched.
+//
+// The denials asserted here live in the resolution/allocation/declaration
+// layer, so they are platform-agnostic and run on macOS and the Linux gate
+// alike; the isolated-checkout filesystem/git plumbing is proven separately
+// on the Linux remote gate.
+// ===========================================================================
+
+/// A quiet provider for spawner construction. Workspace-authority denials
+/// resolve before any model turn, so the scripted stream is never consumed.
+fn quiet_provider() -> Arc<dyn LlmProvider> {
+    Arc::new(SequencedProvider::new(vec![]))
+}
+
+/// An unpinned sub-agent request (inherits the spawner's provider), matching
+/// what the workflow runner hands the spawner for a single agent stage.
+fn sub_config(name: &str) -> SubAgentConfig {
+    SubAgentConfig {
+        name: name.to_string(),
+        prompt: "do the delegated work".to_string(),
+        max_turns: 2,
+        max_tokens: 128,
+        system_prompt: None,
+        provider: None,
+        model: None,
+        temperature: None,
+    }
+}
+
+/// A durable child record whose correlation identity faithfully mirrors a
+/// resolved launch. Every hostile test tampers exactly one field of a clone so
+/// the specific `EvidenceMismatch` the validator raises is unambiguous.
+fn faithful_record(launch: &ResolvedChildLaunch, request_digest: String) -> DurableChildRecord {
+    DurableChildRecord {
+        schema_version: DURABLE_CHILD_SCHEMA_VERSION,
+        declaration_id: "declare-workspace-authority".to_string(),
+        child_id: launch.child_id().clone(),
+        parent: ChildParent {
+            session_id: launch.authority().session_id().to_string(),
+            turn_id: None,
+            parent_child_id: None,
+            workflow_run_id: None,
+            graph_node_id: None,
+            parent_call_id: None,
+        },
+        origin: ChildOrigin::Workflow,
+        request: ChildRequestEvidence::redacted(request_digest),
+        policy_snapshot: launch.policy_snapshot().clone(),
+        provider: Some(launch.provider_id().to_string()),
+        model: Some(launch.model().to_string()),
+        workspace: launch.workspace().clone(),
+        status: DurableChildStatus::Prepared,
+        desired_state: ChildDesiredState::Run,
+        recovery: ChildRecoveryState::Clean,
+        revision: 0,
+        timestamps: ChildTimestamps {
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 1,
+            queued_at_unix_ms: None,
+            started_at_unix_ms: None,
+            terminal_at_unix_ms: None,
+        },
+        result: None,
+        delivery_target: None,
+        delivery_state: ChildDeliveryState::NotRequired,
+        attempt: 1,
+        retry_of: None,
+        applied_events: Default::default(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 6. Classification downgrade is impossible: an empty/read-only tool set is
+//    shared read-only, but ANY write-capable or unknown tool is conservatively
+//    isolated-mutation. A shared child can never be mislabelled to acquire an
+//    isolated checkout, and a mutating child can never collapse into shared.
+// ---------------------------------------------------------------------------
+#[test]
+fn fork_overrides_classification_never_downgrades_mutation_to_shared() {
+    let shared = |tools: &[&str]| {
+        ForkOverrides {
+            allowed_tools: tools.iter().map(|t| t.to_string()).collect(),
+            ..ForkOverrides::default()
+        }
+        .requested_workspace()
+    };
+
+    assert_eq!(shared(&[]), RequestedChildWorkspace::SharedReadOnly);
+    assert_eq!(
+        shared(&["Read", "Grep", "Glob"]),
+        RequestedChildWorkspace::SharedReadOnly
+    );
+    // A single write-capable tool forces mutation authority.
+    assert_eq!(
+        shared(&["Read", "Write"]),
+        RequestedChildWorkspace::IsolatedMutation
+    );
+    assert_eq!(shared(&["Edit"]), RequestedChildWorkspace::IsolatedMutation);
+    assert_eq!(shared(&["Bash"]), RequestedChildWorkspace::IsolatedMutation);
+    // An unknown/misspelled tool is conservatively mutation-capable so a new
+    // tool can never silently be treated as shared read-only.
+    assert_eq!(
+        shared(&["totally-unknown-tool"]),
+        RequestedChildWorkspace::IsolatedMutation
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 7. A mutating request is NEVER resolved inline as a shared launch: the
+//    synchronous `resolve_durable_launch` refuses it, preserving a
+//    workspace-authority diagnostic instead of realizing a shared checkout
+//    with write-capable tools. (Isolated mutation requires the asynchronous
+//    standalone-checkout preparation path proven on the Linux gate.)
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn resolve_durable_launch_refuses_inline_mutation() {
+    let dir = tempfile::tempdir().expect("parent workspace root");
+    let spawner = AgentSpawner::new(quiet_provider(), test_config())
+        .with_parent_workspace(dir.path())
+        .expect("bind canonical parent workspace");
+    let (spawner, _journal, _root) = bind_test_spawner(spawner);
+
+    let mutating = ForkOverrides {
+        allowed_tools: vec!["Write".to_string()],
+        ..ForkOverrides::default()
+    };
+    assert_eq!(
+        mutating.requested_workspace(),
+        RequestedChildWorkspace::IsolatedMutation,
+        "a Write tool must classify as mutation authority"
+    );
+
+    let err = spawner
+        .resolve_durable_launch(sub_config("mutant"), mutating)
+        .expect_err("a mutating child must never resolve as a shared inline launch");
+    let message = err.to_string();
+    assert!(
+        matches!(err, DurableSpawnerError::WorkspacePreparation(_)),
+        "mutation refusal must be a workspace-preparation denial; got: {message}"
+    );
+    // The branch depends on the platform sandbox backend: with a non-enforcing
+    // backend `pre_resolve` refuses for lack of containment; with an enforcing
+    // backend the shared-resolver refuses because mutation needs asynchronous
+    // isolated preparation. Either way the diagnostic is preserved.
+    assert!(
+        message.contains("isolated-workspace preparation")
+            || message.contains("enforcing sandbox backend"),
+        "mutating resolve must preserve a workspace-authority diagnostic; got: {message}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 8. Synchronous resolution fails closed when the parent-workspace authority
+//    is unavailable: a durable-bound spawner with NO bound parent workspace
+//    refuses to resolve even a shared read-only child, with a preserved
+//    diagnostic — never a silent fallback to a process-global cwd.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn resolve_durable_launch_without_parent_workspace_authority_is_refused() {
+    // Durable session bound, but `with_parent_workspace` deliberately skipped.
+    let spawner = AgentSpawner::new(quiet_provider(), test_config());
+    let (spawner, _journal, _root) = bind_test_spawner(spawner);
+
+    let err = spawner
+        .resolve_durable_launch(sub_config("orphan"), ForkOverrides::default())
+        .expect_err("resolution must fail closed without parent workspace authority");
+    assert!(
+        matches!(
+            &err,
+            DurableSpawnerError::WorkspacePreparation(message)
+                if message.contains("parent workspace authority is not bound")
+        ),
+        "unbound parent-workspace authority must preserve its diagnostic; got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 9. The async spawn path fails closed at workspace preparation when the
+//    parent-workspace authority is unbound: `spawn_one` reaches
+//    `prepare_child_workspace`, which refuses because BOTH shared and isolated
+//    modes require a bound parent. No child engine/turn or tool ever runs.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn spawn_prepare_child_workspace_fails_closed_without_parent_authority() {
+    let spawner = AgentSpawner::new(quiet_provider(), test_config());
+    let (spawner, _journal, _root) = bind_test_spawner(spawner);
+
+    let result = spawner.spawn_one(sub_config("orphan-spawn")).await;
+    assert!(
+        result.is_error,
+        "a spawn with no bound parent workspace must be a terminal error"
+    );
+    assert_eq!(
+        result.turns, 0,
+        "no child engine/turn may run when workspace authority is unbound"
+    );
+    assert!(
+        result
+            .text
+            .contains("parent workspace authority is not bound"),
+        "the fail-closed diagnostic must be preserved on the result; got: {}",
+        result.text
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 10. Binding a parent workspace itself refuses a missing root or a
+//     non-directory root, so a bogus parent identity can never enter the
+//     spawner in the first place.
+// ---------------------------------------------------------------------------
+#[test]
+fn with_parent_workspace_rejects_missing_and_non_directory_roots() {
+    let dir = tempfile::tempdir().expect("scratch root");
+
+    let missing = dir.path().join("does-not-exist");
+    let err = AgentSpawner::new(quiet_provider(), test_config())
+        .with_parent_workspace(&missing)
+        .expect_err("a nonexistent parent workspace must be refused");
+    assert!(
+        matches!(err, DurableSpawnerError::WorkspacePreparation(_)),
+        "missing parent workspace must be a workspace-preparation denial; got: {err}"
+    );
+
+    let file = dir.path().join("not-a-dir");
+    std::fs::write(&file, b"x").expect("write scratch file");
+    let err = AgentSpawner::new(quiet_provider(), test_config())
+        .with_parent_workspace(&file)
+        .expect_err("a non-directory parent workspace must be refused");
+    assert!(
+        matches!(
+            &err,
+            DurableSpawnerError::WorkspacePreparation(message)
+                if message.contains("not a directory")
+        ),
+        "a file parent root must preserve its diagnostic; got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 11. Correlation identity threads through resolution intact, and any rebind
+//     of the resolved launch to a foreign child identity, parent session
+//     (generation), request opening, provider, model, policy, or workspace
+//     (parent-snapshot substitution) is refused by `validate_record` with a
+//     precise, preserved diagnostic — before any provider/tool execution.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn resolved_child_launch_validates_identity_and_refuses_rebind() {
+    let dir = tempfile::tempdir().expect("parent workspace root");
+    let spawner = AgentSpawner::new(quiet_provider(), test_config())
+        .with_parent_workspace(dir.path())
+        .expect("bind canonical parent workspace");
+    let (spawner, _journal, _root) = bind_test_spawner(spawner);
+
+    let config = sub_config("correlated");
+    let overrides = ForkOverrides::default();
+    let request_digest =
+        DurableSpawner::request_digest(&config, &overrides).expect("request digest");
+    let launch = spawner
+        .resolve_durable_launch(config.clone(), overrides.clone())
+        .expect("a shared read-only child resolves against bound authority");
+
+    // Shared read-only stays shared: the realized workspace is the parent, not
+    // an isolated checkout, and it never carries authority-deny roots.
+    assert_eq!(
+        launch.requested_workspace(),
+        RequestedChildWorkspace::SharedReadOnly
+    );
+    assert_eq!(launch.workspace().mode, ChildWorkspaceMode::SharedReadOnly);
+
+    // Positive: the faithfully-correlated record validates.
+    let faithful = faithful_record(&launch, request_digest.clone());
+    launch
+        .validate_record(&faithful)
+        .expect("a faithfully-correlated record must validate");
+
+    // Foreign child identity (checkout bound to another child).
+    let mut foreign_child = faithful_record(&launch, request_digest.clone());
+    foreign_child.child_id = ChildId::new("child-attacker").unwrap();
+    assert!(matches!(
+        launch.validate_record(&foreign_child),
+        Err(DurableSpawnerError::EvidenceMismatch("child identity"))
+    ));
+
+    // Foreign parent session / generation rebind.
+    let mut foreign_session = faithful_record(&launch, request_digest.clone());
+    foreign_session.parent.session_id = "attacker-session".to_string();
+    assert!(matches!(
+        launch.validate_record(&foreign_session),
+        Err(DurableSpawnerError::EvidenceMismatch("parent session"))
+    ));
+
+    // Substituted transaction opening (request evidence).
+    let mut foreign_request = faithful_record(&launch, request_digest.clone());
+    foreign_request.request =
+        ChildRequestEvidence::redacted(std::iter::repeat_n('9', 64).collect::<String>());
+    assert!(matches!(
+        launch.validate_record(&foreign_request),
+        Err(DurableSpawnerError::EvidenceMismatch("request digest"))
+    ));
+
+    // Provider / model substitution.
+    let mut foreign_provider = faithful_record(&launch, request_digest.clone());
+    foreign_provider.provider = Some("evil-provider".to_string());
+    assert!(matches!(
+        launch.validate_record(&foreign_provider),
+        Err(DurableSpawnerError::EvidenceMismatch("provider"))
+    ));
+
+    let mut foreign_model = faithful_record(&launch, request_digest.clone());
+    foreign_model.model = Some("evil-model".to_string());
+    assert!(matches!(
+        launch.validate_record(&foreign_model),
+        Err(DurableSpawnerError::EvidenceMismatch("model"))
+    ));
+
+    // Policy-snapshot tamper (posture downgrade).
+    let mut foreign_policy = faithful_record(&launch, request_digest.clone());
+    foreign_policy.policy_snapshot.posture = "dangerous".to_string();
+    assert!(matches!(
+        launch.validate_record(&foreign_policy),
+        Err(DurableSpawnerError::EvidenceMismatch("policy snapshot"))
+    ));
+
+    // Parent-snapshot substitution: claim an isolated checkout the shared child
+    // never realized.
+    let mut foreign_workspace = faithful_record(&launch, request_digest);
+    foreign_workspace.workspace = ChildWorkspace {
+        mode: ChildWorkspaceMode::Isolated,
+        workspace_id: "isolated-attacker".to_string(),
+    };
+    assert!(matches!(
+        launch.validate_record(&foreign_workspace),
+        Err(DurableSpawnerError::EvidenceMismatch("workspace"))
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// 12. A declaration carrying substituted workspace evidence is refused at the
+//     journal boundary: `declare_resolved_child` validates under the store lock
+//     and returns an error WITHOUT advancing the durable journal, so a rebind
+//     attempt leaves no persisted child and no parent-state mutation.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn declare_resolved_child_refuses_substituted_workspace_without_journal_write() {
+    let dir = tempfile::tempdir().expect("parent workspace root");
+    let spawner = AgentSpawner::new(quiet_provider(), test_config())
+        .with_parent_workspace(dir.path())
+        .expect("bind canonical parent workspace");
+    let (spawner, journal, _root) = bind_test_spawner(spawner);
+
+    let config = sub_config("declared");
+    let overrides = ForkOverrides::default();
+    let request_digest =
+        DurableSpawner::request_digest(&config, &overrides).expect("request digest");
+    let launch = spawner
+        .resolve_durable_launch(config, overrides)
+        .expect("a shared read-only child resolves against bound authority");
+
+    let before = journal.state().expect("journal state").last_seq;
+
+    let mut substituted = faithful_record(&launch, request_digest);
+    substituted.workspace = ChildWorkspace {
+        mode: ChildWorkspaceMode::Isolated,
+        workspace_id: "isolated-attacker".to_string(),
+    };
+    assert!(
+        spawner
+            .declare_resolved_child(&launch, substituted)
+            .is_err(),
+        "a substituted-workspace declaration must be refused"
+    );
+    assert_eq!(
+        journal.state().expect("journal state").last_seq,
+        before,
+        "a refused declaration must not advance the durable journal"
     );
 }
