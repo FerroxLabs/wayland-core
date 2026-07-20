@@ -166,7 +166,7 @@ impl DirectoryAuthority {
         })
     }
 
-    pub(super) fn has_outstanding_handle_loans(&self) -> bool {
+    pub fn has_outstanding_handle_loans(&self) -> bool {
         self.handle_loans.load(Ordering::Acquire) != 0
     }
 

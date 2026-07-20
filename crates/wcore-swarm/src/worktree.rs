@@ -163,6 +163,7 @@ struct TransactionCleanup {
     owner: String,
     root: PathBuf,
     root_authority: StdMutex<Option<DirectoryAuthority>>,
+    checkout_authority: std::sync::OnceLock<DirectoryAuthority>,
     swarm_root: PathBuf,
     swarm_authority: DirectoryAuthority,
     quarantine_root: PathBuf,
@@ -189,12 +190,27 @@ impl TransactionCleanup {
             })
     }
 
+    pub(super) fn bind_checkout_authority(&self, checkout: DirectoryAuthority) {
+        let _ = self.checkout_authority.set(checkout);
+    }
+
     fn release(&self) -> Result<()> {
         let _release = self.release_lock.lock().map_err(|_| {
             SwarmError::WorktreeIo("transaction cleanup authority is poisoned".to_owned())
         })?;
         if self.released.load(Ordering::Acquire) {
             return Ok(());
+        }
+        if self
+            .checkout_authority
+            .get()
+            .is_some_and(|checkout| checkout.has_outstanding_loans())
+        {
+            return Err(SwarmError::WorktreeIo(
+                "worker descendant still holds the retained checkout descriptor; \
+                 transaction cleanup refused and its reservation held for retry"
+                    .to_owned(),
+            ));
         }
         self.root_authority()?;
         validate_reservation_contents(&self.reservation_authority, self.reserved_bytes)?;

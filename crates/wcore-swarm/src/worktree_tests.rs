@@ -16,6 +16,7 @@ fn test_transaction_cleanup(
         owner: owner.to_owned(),
         root: root.to_path_buf(),
         root_authority: StdMutex::new(Some(root_authority)),
+        checkout_authority: std::sync::OnceLock::new(),
         swarm_root: swarm_root.to_path_buf(),
         swarm_authority: DirectoryAuthority::open(swarm_root).unwrap(),
         quarantine_root: quarantine_root.to_path_buf(),
@@ -102,6 +103,62 @@ fn failed_transaction_cleanup_remains_retryable() {
     std::fs::rename(&original_swarm, &swarm_root).unwrap();
     cleanup.release().expect("retry cleanup");
     assert!(!root.exists());
+    assert!(cleanup.released.load(Ordering::Acquire));
+}
+
+#[cfg(unix)]
+#[test]
+fn release_refuses_while_checkout_loan_outstanding() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let swarm_root = fixture.path().join("swarm");
+    let root = swarm_root.join("worker-loan");
+    let checkout = root.join("checkout");
+    std::fs::create_dir_all(&checkout).unwrap();
+    let quarantine_root = fixture.path().join("control");
+    std::fs::create_dir(&quarantine_root).unwrap();
+    let cleanup = test_transaction_cleanup("worker-loan", &root, &swarm_root, &quarantine_root);
+
+    let checkout_authority = DirectoryAuthority::open(&checkout).unwrap();
+    cleanup.bind_checkout_authority(checkout_authority.clone());
+
+    // Model an escaped worker descendant that still holds the retained checkout
+    // descriptor. The shared loan counter must fail the cleanup closed.
+    let loan = checkout_authority.try_clone_handle().unwrap();
+
+    let error = cleanup
+        .release()
+        .expect_err("cleanup deleted the checkout while a loan was outstanding");
+    assert!(error.to_string().contains("worker descendant"), "{error}");
+    assert!(
+        root.exists(),
+        "fail-closed cleanup deleted the retained transaction root"
+    );
+    assert!(
+        cleanup
+            .active_reservations
+            .lock()
+            .unwrap()
+            .contains_key("worker-loan"),
+        "fail-closed cleanup dropped the capacity reservation"
+    );
+    assert!(!cleanup.released.load(Ordering::Acquire));
+
+    drop(loan);
+    cleanup
+        .release()
+        .expect("cleanup must succeed once the checkout loan is released");
+    assert!(
+        !root.exists(),
+        "retained root survived cleanup after loan drop"
+    );
+    assert!(
+        !cleanup
+            .active_reservations
+            .lock()
+            .unwrap()
+            .contains_key("worker-loan"),
+        "reservation retained after successful cleanup"
+    );
     assert!(cleanup.released.load(Ordering::Acquire));
 }
 

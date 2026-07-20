@@ -43,6 +43,10 @@ impl DirectoryAuthority {
         self.0.try_clone_handle().map_err(Into::into)
     }
 
+    pub(super) fn has_outstanding_loans(&self) -> bool {
+        self.0.has_outstanding_handle_loans()
+    }
+
     pub(super) fn open_or_create_child_directory(&self, name: &str) -> Result<Self> {
         self.0
             .open_or_create_child_directory(name)

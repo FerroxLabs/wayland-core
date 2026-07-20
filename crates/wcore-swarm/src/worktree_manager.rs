@@ -635,6 +635,7 @@ impl WorktreeManager {
                         owner: worker_id.to_owned(),
                         root: transaction_root.clone(),
                         root_authority: StdMutex::new(Some(root_authority)),
+                        checkout_authority: std::sync::OnceLock::new(),
                         swarm_root: self.swarm_root.clone(),
                         swarm_authority,
                         quarantine_root: self.control_root.clone(),
@@ -795,6 +796,7 @@ impl WorktreeManager {
             scratch: DirectoryAuthority::open(&scratch)?,
             reservation: Arc::clone(&cleanup.reservation_authority),
         });
+        cleanup.bind_checkout_authority(authorities.checkout.clone());
         let workspace = TransactionWorkspace {
             owner: worker_id.to_owned(),
             root: transaction_root,
