@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 20
 current_phase_name: transactional-delegated-mutation
 status: executing
-stopped_at: Plans 20-03, 20-15, 20-04, 20-06, 20-09, 20-10, and 20-11 complete. 20-06/20-09 delivered+reviewed the 06A candidate seal. 20-10 built the 20-06B source packet — an opaque, one-use HardContainmentAuthority minted only from a semantic LIVE probe of the exact backend + normalized policy (structural pub/pub(crate) seal so foreign backends cannot mint; read-only-candidate + traversal-free private-write filesystem with temp/credential denial; fail-closed process-tree ownership; per-field spawn-time drift refusal; redacted Debug), Linux-proven at source b1de890. 20-11 = the fresh non-author independent review of the exact 06B source (profile f20-11): zero-finding PASS (checks all_severity/containment_authority/policy_sufficiency), reviewer wayland-f20-11-independent-review ≠ source wayland-f20-10-builder, verify-review-pair.sh + verify-review-result.mjs both green (review 5cd67c5). The review ran TWO rounds — round 1 found+repaired a MEDIUM `..`-traversal path-validation bypass and a LOW unredacted Debug at source, round 2 (on b1de890) verified both fixes and found NO new findings — so 06B is construction-qualified. Next boundary: plan 20-12 (depends on 20-10/06B).
-last_updated: "2026-07-20T14:05:00.000Z"
+stopped_at: Plans 20-03, 20-15, 20-04, 20-06, 20-09, 20-10, 20-11, and 20-12 complete. 06A candidate seal (20-06/09) + 06B HardContainmentAuthority (20-10/11) both delivered+reviewed. 20-12 built the 06C source packet — parent-owned AuthorizedGateClosureRegistry (SHA-256-sealed closures; unknown/substituted/drifted fail closed pre-spawn) + fail-closed gate state machine (module-private, exact-seal, in-order observed results from a consumed one-use HardContainmentAuthority spawn; live-seal-derived cwd) + opaque guard-owned AcceptedCandidate (owns MOVED still-armed MutationAttemptGuard + CandidateSeal; load-bearing seal-before-guard drop; no pub-ctor/Clone/Serialize) minted only after authoritative durable receipt append/reopen/reduce/match. 8 wcore-agent files (4 new). Linux-proven at source b8a260e: scope-ok paths=8; clippy -p wcore-agent --all-targets --all-features -D warnings clean; ALL 6 hostile process-isolated nextest pairs 1-select/1-unretried-PASS; touched code 71/71 in nextest isolation. The cargo `test --lib` parallel flakiness (20/18 non-deterministic sets, 4 serial) is PRE-EXISTING journal-writer-lease + inherent-parallelism contention in untouched files (engine/session/council/spawn_tool), independently proven across 4 configs — NOT a 20-12 regression (deferred to 20-08 aggregate). 06C makes NO parent-landing/CAS/lifecycle claim. Next boundary: plan 20-13 (depends on 20-12).
+last_updated: "2026-07-20T14:45:00.000Z"
 last_activity: 2026-07-20
-last_activity_desc: Plan 20-11 independent review of 20-06B = zero-finding f20-11 PASS (review 5cd67c5); 06B qualified. Next: plan 20-12.
+last_activity_desc: Plan 20-12 06C gate-execution+durable-receipt AcceptedCandidate built + Linux-proven (source b8a260e); --lib parallel flakiness proven pre-existing/non-regression. Next: plan 20-13.
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 18
-  completed_plans: 9
+  completed_plans: 10
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: `.planning/PROJECT.md` (updated 2026-07-19)
 ## Current Position
 
 Phase: 20 (transactional-delegated-mutation) — EXECUTING
-Plan: 10 of 18 (next: 20-12)
+Plan: 11 of 18 (next: 20-13)
 Status: Executing Phase 20
-Last activity: 2026-07-20 — Plan 20-11 independent review of 20-06B = zero-finding f20-11 PASS (review 5cd67c5); next plan 20-12
+Last activity: 2026-07-20 — Plan 20-12 06C gate-execution+durable-receipt AcceptedCandidate built + Linux-proven (source b8a260e); next plan 20-13
 
-Progress: [█████░░░░░] 50%
+Progress: [██████░░░░] 56%
 
 ## Execution Authority
 
