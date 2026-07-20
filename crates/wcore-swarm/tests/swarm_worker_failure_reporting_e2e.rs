@@ -11,7 +11,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use wcore_config::shell;
-use wcore_swarm::{Swarm, SwarmBrief, WorkerStatus};
+use wcore_swarm::{Swarm, SwarmBrief, SwarmResult, WorkerStatus};
 
 #[tokio::test]
 async fn swarm_reports_failed_worker_status_and_succeeding_workers_complete() {
@@ -20,36 +20,10 @@ async fn swarm_reports_failed_worker_status_and_succeeding_workers_complete() {
     // This matches the dispatch_smoke pattern of one brief per repo.
 
     // --- 2 workers that succeed ---
-    let tmp_ok = tempfile::tempdir().unwrap();
-    init_repo(tmp_ok.path()).await;
-    let swarm_ok = Swarm::new(tmp_ok.path()).unwrap();
-    let ok_brief = SwarmBrief {
-        task: "failover-ok".into(),
-        base_branch: "main".into(),
-        worker_branch_prefix: "swarm/failover/ok".into(),
-        worker_command: noop_argv(),
-        timeout: Duration::from_secs(30),
-        env: vec![],
-    };
-    let ok_handles = swarm_ok.dispatch(ok_brief, 2).await.unwrap();
-    let ok_results = swarm_ok.collect(ok_handles).await.unwrap();
-    swarm_ok.cleanup().await.unwrap();
+    let ok_results = Box::pin(run_swarm("ok", noop_argv(), 2)).await;
 
     // --- 1 worker that fails ---
-    let tmp_fail = tempfile::tempdir().unwrap();
-    init_repo(tmp_fail.path()).await;
-    let swarm_fail = Swarm::new(tmp_fail.path()).unwrap();
-    let fail_brief = SwarmBrief {
-        task: "failover-fail".into(),
-        base_branch: "main".into(),
-        worker_branch_prefix: "swarm/failover/fail".into(),
-        worker_command: fail_argv(),
-        timeout: Duration::from_secs(30),
-        env: vec![],
-    };
-    let fail_handles = swarm_fail.dispatch(fail_brief, 1).await.unwrap();
-    let fail_results = swarm_fail.collect(fail_handles).await.unwrap();
-    swarm_fail.cleanup().await.unwrap();
+    let fail_results = Box::pin(run_swarm("fail", fail_argv(), 1)).await;
 
     // The 2 surviving workers must have succeeded.
     assert_eq!(ok_results.len(), 2, "expected 2 successful workers");
@@ -72,6 +46,24 @@ async fn swarm_reports_failed_worker_status_and_succeeding_workers_complete() {
     );
 }
 
+async fn run_swarm(name: &str, worker_command: Vec<String>, count: usize) -> Vec<SwarmResult> {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo(tmp.path()).await;
+    let swarm = Swarm::new(tmp.path()).unwrap();
+    let brief = SwarmBrief {
+        task: format!("failover-{name}"),
+        base_branch: "main".into(),
+        worker_branch_prefix: format!("swarm/failover/{name}"),
+        worker_command,
+        timeout: Duration::from_secs(30),
+        env: vec![],
+    };
+    let handles = swarm.dispatch(brief, count).await.unwrap();
+    let results = swarm.collect(handles).await.unwrap();
+    swarm.cleanup().await.unwrap();
+    results
+}
+
 fn noop_argv() -> Vec<String> {
     if cfg!(windows) {
         vec!["cmd".into(), "/c".into(), "rem".into()]
@@ -92,6 +84,7 @@ async fn init_repo(path: &Path) {
     let cwd = path.to_path_buf();
     run_git(&cwd, &["init", "-q", "-b", "main"]).await;
     std::fs::write(path.join("README.md"), "failover-test\n").unwrap();
+    std::fs::write(path.join(".gitignore"), ".swarm-worktrees/\n").unwrap();
     run_git(&cwd, &["add", "."]).await;
     run_git(
         &cwd,

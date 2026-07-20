@@ -136,6 +136,10 @@ async fn init_repo(path: &Path) {
     let cwd = path.to_path_buf();
     run_git(&cwd, &["init", "-q", "-b", "main"]).await;
     std::fs::write(path.join("README.md"), "swarm-test\n").unwrap();
+    // Swarm::new owns this generated runtime root. Keep it out of the
+    // repository's cleanliness authority, matching real callers and the
+    // dispatch integration fixture.
+    std::fs::write(path.join(".gitignore"), ".swarm-worktrees/\n").unwrap();
     run_git(&cwd, &["add", "."]).await;
     run_git(
         &cwd,
