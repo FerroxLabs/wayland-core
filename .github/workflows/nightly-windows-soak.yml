@@ -18,10 +18,34 @@ on:
   schedule:
     - cron: "30 5 * * *"
   workflow_dispatch:
+    inputs:
+      # Candidate mode: a single Sean-authorized exact-SHA dual-platform F20
+      # native UAT dispatch. When false (the default, and always for the
+      # scheduled cron) the normal Windows soak runs unchanged. When true, ONLY
+      # the exact F20 native jobs run: hosted windows-2022 plus the externally
+      # pinned ephemeral macOS runner, both against the same github.sha, with
+      # caches and issue automation disabled and no secrets.
+      f20_candidate:
+        description: "Run the exact-candidate F20 native UAT jobs only"
+        type: boolean
+        required: false
+        default: false
+      f20_macos_runner_label:
+        description: "Pinned f20-image-<sha256> label for the ephemeral macOS runner (candidate mode)"
+        type: string
+        required: false
+        default: ""
+      f20_request_nonce:
+        description: "Candidate request nonce, propagated verbatim into both native job logs (candidate mode)"
+        type: string
+        required: false
+        default: ""
 
+# Least-privilege default. The scheduled soak's issue-opening step needs
+# issues: write, so that job re-grants it at job scope; the candidate F20 jobs
+# never do — they run with only the workflow-default contents: read.
 permissions:
   contents: read
-  issues: write
 
 concurrency:
   group: nightly-windows-soak
@@ -41,8 +65,13 @@ env:
 jobs:
   windows-soak:
     name: Windows soak (windows-2022)
+    # Skipped in candidate mode — only the exact F20 native jobs run then.
+    if: github.event.inputs.f20_candidate != 'true'
     runs-on: windows-2022
     timeout-minutes: 60
+    permissions:
+      contents: read
+      issues: write
 
     steps:
       # NOTE: when this workflow lands on main, the SHA-pinning sweep
@@ -81,18 +110,6 @@ jobs:
           key: cargo-target-windows-soak-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-target-windows-soak-
-
-      - name: Run exact-candidate F20 AppContainer ACL acceptance
-        shell: pwsh
-        env:
-          EXPECTED_COMMIT: ${{ github.sha }}
-          WAYLAND_F20_NATIVE_ACCEPTANCE: "1"
-        run: |
-          $expectedTree = (git rev-parse "$env:EXPECTED_COMMIT^{tree}").Trim()
-          if ($LASTEXITCODE -ne 0) { throw "resolve expected tree failed" }
-          pwsh scripts/f20-native-windows-proof.ps1 `
-            -ExpectedCommit $env:EXPECTED_COMMIT `
-            -ExpectedTree $expectedTree
 
       - name: Run Windows soak
         shell: pwsh
@@ -170,3 +187,79 @@ jobs:
                 labels: ['windows-soak', 'test-debt'],
               });
             }
+
+  # --------------------------------------------------------------------------
+  # Candidate-mode F20 native UAT jobs.
+  #
+  # These run ONLY on a manual workflow_dispatch with f20_candidate=true — the
+  # single Sean-authorized exact-SHA dispatch. Both jobs run against the same
+  # github.sha, carry the same request nonce, grant only contents: read, receive
+  # no secrets, use no persisted caches, and open no issues. Untrusted dispatch
+  # inputs (nonce, runner label) are landed into env vars first and read via
+  # $env:/$NAME, never interpolated into a run: body.
+  # --------------------------------------------------------------------------
+  f20-windows-candidate:
+    name: F20 native Windows candidate (windows-2022)
+    if: github.event.inputs.f20_candidate == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Run exact-candidate F20 native Windows proof
+        shell: pwsh
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+          F20_REQUEST_NONCE: ${{ github.event.inputs.f20_request_nonce }}
+          WAYLAND_F20_NATIVE_ACCEPTANCE: "1"
+        run: |
+          $expectedTree = (git rev-parse "$env:EXPECTED_COMMIT^{tree}").Trim()
+          if ($LASTEXITCODE -ne 0) { throw "resolve expected tree failed" }
+          pwsh scripts/f20-native-windows-proof.ps1 `
+            -ExpectedCommit $env:EXPECTED_COMMIT `
+            -ExpectedTree $expectedTree `
+            -Nonce $env:F20_REQUEST_NONCE
+
+  f20-macos-candidate:
+    name: F20 native macOS candidate (ephemeral)
+    if: github.event.inputs.f20_candidate == 'true'
+    # Dynamically pinned ephemeral runner. The f20-image-<sha256> label is
+    # supplied by the authorized dispatch input; the runner is idle-selected,
+    # exposes no ambient secrets, and deregisters after this single job.
+    runs-on:
+      - self-hosted
+      - f20-native-macos
+      - f20-ephemeral
+      - f20-no-ambient-secrets
+      - ${{ github.event.inputs.f20_macos_runner_label }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run exact-candidate F20 native macOS proof
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+          F20_REQUEST_NONCE: ${{ github.event.inputs.f20_request_nonce }}
+          WAYLAND_F20_NATIVE_ACCEPTANCE: "1"
+        run: |
+          set -euo pipefail
+          expected_tree="$(git rev-parse "${EXPECTED_COMMIT}^{tree}")"
+          bash scripts/f20-native-macos-proof.sh \
+            --expected-commit "$EXPECTED_COMMIT" \
+            --expected-tree "$expected_tree" \
+            --nonce "$F20_REQUEST_NONCE"

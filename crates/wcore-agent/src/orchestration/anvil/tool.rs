@@ -24,6 +24,7 @@ use wcore_tools::Tool;
 use wcore_tools::context::ToolContext;
 use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
+use super::engine::LandingReport;
 use super::forge::drive_climb_full;
 use crate::output::OutputSink;
 use crate::spawner::AgentSpawner;
@@ -152,13 +153,53 @@ impl ForgeTool {
                 } else {
                     format!("\nnotes: {}", seat.notes.join("; "))
                 };
+                // Surface the ACTUAL parent-owned landing outcome (not a pre-written
+                // "retained for landing" placeholder): the winner was already driven
+                // through the landing lifecycle inside the climb. The user's working
+                // tree is never touched; a landed candidate waits on the
+                // Wayland-owned integration clone for a Desktop-mediated accept.
+                let landing_line = match &outcome.landing {
+                    Some(LandingReport::Landed {
+                        landed_commit,
+                        target_ref,
+                        integration_checkout,
+                    }) => {
+                        let short = landed_commit.get(..12).unwrap_or(landed_commit.as_str());
+                        format!(
+                            "Landed {short} onto {target_ref} in the Wayland-owned integration \
+                             clone at {}; accept it from Wayland Desktop to fast-forward your \
+                             branch. Your working tree was not modified.",
+                            integration_checkout.display()
+                        )
+                    }
+                    Some(LandingReport::Conflict { detail }) => format!(
+                        "Landing conflict — nothing was landed; your tree was not modified: {detail}"
+                    ),
+                    Some(LandingReport::Incomplete { detail }) => format!(
+                        "Landing incomplete — the integration ref advanced but projection did not \
+                         complete; recovery may be required: {detail}"
+                    ),
+                    Some(LandingReport::RolledBack { detail }) => format!(
+                        "Landing was rolled back — no change remains on the integration branch: \
+                         {detail}"
+                    ),
+                    Some(LandingReport::RecoveryRequired { detail }) => format!(
+                        "Landing needs explicit recovery before it can complete; your tree was not \
+                         modified: {detail}"
+                    ),
+                    Some(LandingReport::Failed { detail }) => format!(
+                        "Landing did not run to completion (the climb result stands); your tree was \
+                         not modified: {detail}"
+                    ),
+                    None => "No candidate was landable.".to_string(),
+                };
                 ToolResult {
                     content: format!(
                         "Forged: {stamp} · {passed}/{total} checks · {iters} iteration(s) · \
                          {fires} valve fire(s) · driver seat {seat_label}\nterminal: \
                          {terminal:?}\ncandidate worktree: {worktree}\nreceipt: emitted as an \
-                         authoritative top-level Core event; this summary is inert{notes}\n\nIf verified, review the candidate worktree and \
-                         merge/cherry-pick its branch; the user's tree was not modified.",
+                         authoritative top-level Core event; this summary is inert{notes}\n\n\
+                         {landing_line}",
                         stamp = outcome.stamp,
                         passed = outcome.checks_passed,
                         total = outcome.checks_total,

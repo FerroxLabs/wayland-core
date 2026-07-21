@@ -50,7 +50,7 @@ pub use crate::durable_spawner::{
 };
 
 mod durable_launch;
-mod mutation_workspace;
+pub(crate) mod mutation_workspace;
 
 const CHILD_POLICY_CONTRACT_VERSION: &str = "effective-execution-policy/v1";
 
@@ -939,6 +939,22 @@ impl AgentSpawner {
     /// Return a session-pinned supervisor over every durable child origin.
     pub fn durable_child_supervisor(&self) -> Result<DurableChildSupervisor, DurableSpawnerError> {
         self.durable_authority.supervisor()
+    }
+
+    /// The canonical bound session journal owning this spawner's durable child
+    /// records.
+    ///
+    /// This is the SAME journal a [`ChildTransactionLifecycle`] must be opened
+    /// against: an isolated-mutation winner's child was declared in this journal,
+    /// so its landing transaction can only resolve against this exact durable
+    /// authority (a fresh journal would fail closed on `open`). Fails closed when
+    /// no durable session is bound.
+    ///
+    /// [`ChildTransactionLifecycle`]: crate::child_transaction::ChildTransactionLifecycle
+    pub fn session_journal(&self) -> Result<SessionJournal, DurableSpawnerError> {
+        let token = self.durable_authority.token()?;
+        self.durable_authority
+            .with_store(&token, |store| Ok(store.journal()))
     }
 
     /// Canonical host adapter for creating durable child work.
@@ -2981,6 +2997,32 @@ mod crucible_provider_resolution_tests {
         ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
             Err(ProviderError::Connection("stub".into()))
         }
+    }
+
+    #[tokio::test]
+    async fn session_journal_exposes_the_bound_session_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let spawner = AgentSpawner::new(Arc::new(StubProvider), Config::default())
+            .with_parent_workspace(dir.path())
+            .unwrap();
+
+        // Fail closed before a durable session is bound.
+        assert!(
+            spawner.session_journal().is_err(),
+            "an unbound spawner must not surrender a journal"
+        );
+
+        // After binding, the accessor exposes the journal for EXACTLY the bound
+        // session — the child-transaction lifecycle depends on this identity.
+        super::bind_test_durable_session(&spawner, dir.path(), "f200099");
+        let journal = spawner
+            .session_journal()
+            .expect("bound spawner exposes its session journal");
+        assert_eq!(
+            journal.session_id().unwrap(),
+            spawner.durable_session_id().unwrap(),
+            "session_journal must expose the same session the spawner is bound to"
+        );
     }
 
     /// Test resolver mapping a spec string to a specific provider `Arc`.

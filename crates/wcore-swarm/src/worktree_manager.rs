@@ -248,6 +248,36 @@ impl WorktreeManager {
         self.read_pinned_head().await
     }
 
+    /// The parent repo's current branch — the short symbolic HEAD (e.g. `main`).
+    ///
+    /// A delegated landing advances THIS branch inside the Wayland-owned
+    /// integration clone (surface-for-accept): the landed successor lands on the
+    /// clone's `refs/heads/<branch>`, never touching the user's working tree.
+    /// Fails closed on a detached HEAD (no branch to land onto) and on an
+    /// option-like name (defense-in-depth, since the name flows into a
+    /// `git clone --branch <name>` argv).
+    pub async fn current_branch(&self) -> Result<String> {
+        self.validate_repo_authority()?;
+        let cmd = self.git_command(&["symbolic-ref", "--quiet", "--short", "HEAD"]);
+        let out = capture_bounded_process(cmd, self.capture_limits, None)
+            .await
+            .map_err(|error| capture_error("git symbolic-ref HEAD", error))?;
+        if !out.status.success() {
+            return Err(SwarmError::WorktreeIo(
+                "git symbolic-ref HEAD failed: a detached HEAD has no branch to land onto"
+                    .to_owned(),
+            ));
+        }
+        let branch = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        if branch.is_empty() {
+            return Err(SwarmError::WorktreeIo(
+                "git symbolic-ref HEAD returned an empty branch name".to_owned(),
+            ));
+        }
+        reject_option_like_ref("branch", &branch)?;
+        Ok(branch)
+    }
+
     /// Resolve `base` once and require it to name the current clean checkout.
     ///
     /// Standalone delegated checkouts are constructed from the parent's exact
@@ -818,5 +848,487 @@ impl WorktreeManager {
             )));
         }
         Ok(workspace)
+    }
+
+    /// Create a Wayland-owned standalone integration checkout that the parent
+    /// landing primitive ([`bind_integration_checkout`]) accepts as a durable
+    /// landing target.
+    ///
+    /// Unlike [`create_isolated_checkout`], which mints a private *successor*
+    /// working tree on a fresh branch, this produces the *target* main working
+    /// tree: it clones `branch` from the source repository at `expected_head`
+    /// through the identical `git clone --no-local --no-hardlinks` path, so the
+    /// result is a main checkout with its own object store, an in-tree `.git`
+    /// (`git_dir == common_git_dir`), no alternate object store, and is not a
+    /// linked worktree — exactly the shape `bind_integration_checkout` requires.
+    /// The target branch is checked out (non-detached, clean status) at the
+    /// requested tip, and the returned [`TransactionWorkspace`] retains the
+    /// checkout [`DirectoryAuthority`] plus the reservation/cleanup plumbing the
+    /// landing path relies on. Fails closed on any clone, checkout, or invariant
+    /// error.
+    ///
+    /// [`bind_integration_checkout`]: crate::worktree::WorktreeManager
+    /// [`create_isolated_checkout`]: Self::create_isolated_checkout
+    /// [`DirectoryAuthority`]: wcore_sandbox::DirectoryAuthority
+    pub async fn create_integration_checkout(
+        &self,
+        worker_id: &str,
+        branch: &str,
+        expected_head: &str,
+        capacity: WorkspaceCapacity,
+    ) -> Result<TransactionWorkspace> {
+        Box::pin(self.create_integration_checkout_inner(worker_id, branch, expected_head, capacity))
+            .await
+    }
+
+    async fn create_integration_checkout_inner(
+        &self,
+        worker_id: &str,
+        branch: &str,
+        expected_head: &str,
+        capacity: WorkspaceCapacity,
+    ) -> Result<TransactionWorkspace> {
+        validate_worker_id(worker_id)?;
+        reject_option_like_ref("branch", branch)?;
+        reject_option_like_ref("base", expected_head)?;
+        if !matches!(expected_head.len(), 40 | 64)
+            || !expected_head.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(SwarmError::WorktreeIo(
+                "integration checkout requires an exact commit id".to_owned(),
+            ));
+        }
+
+        self.validate_repo_authority()?;
+        self.reject_executable_checkout_config().await?;
+        self.assert_clean().await?;
+        self.validate_swarm_root()?;
+        let _admission = self.admission_lock.lock().await;
+        let closure_bytes = self.transfer_closure_bytes(expected_head).await?;
+        let checkout_bytes = self.checkout_logical_bytes(expected_head).await?;
+        let initial_bytes = closure_bytes.checked_add(checkout_bytes).ok_or_else(|| {
+            SwarmError::WorktreeIo("initial workspace size overflowed".to_owned())
+        })?;
+        let reserved_bytes = capacity.max_transaction_bytes;
+        let required = reserved_bytes
+            .checked_add(capacity.safety_margin_bytes)
+            .ok_or_else(|| SwarmError::WorktreeIo("workspace capacity overflow".to_owned()))?;
+        if initial_bytes > capacity.max_transaction_bytes {
+            return Err(SwarmError::DispatchAdmission(format!(
+                "workspace requires {initial_bytes} initial bytes ({closure_bytes} Git object bytes plus {checkout_bytes} logical checkout bytes), exceeding transaction budget {}",
+                capacity.max_transaction_bytes
+            )));
+        }
+        let transaction_root = self.swarm_root.join(worker_id);
+        let (checkout, scratch, cleanup) = with_directory_lock(
+            &self.swarm_root,
+            &self.swarm_authority,
+            || {
+                let aggregate = self.reserved_workspace_bytes()?;
+                if aggregate
+                    .checked_add(reserved_bytes)
+                    .is_none_or(|total| total > capacity.max_aggregate_bytes)
+                {
+                    return Err(SwarmError::DispatchAdmission(
+                        "aggregate workspace budget exhausted".to_owned(),
+                    ));
+                }
+                if aggregate
+                    .checked_add(required)
+                    .is_none_or(|total| total > capacity.available_bytes)
+                {
+                    return Err(SwarmError::DispatchAdmission(format!(
+                        "workspace requires {required} bytes with {aggregate} already reserved, but authority proved only {} available bytes",
+                        capacity.available_bytes,
+                    )));
+                }
+                ensure_absent_destination(&transaction_root)?;
+                std::fs::create_dir(&transaction_root)?;
+                let registration = (|| {
+                    make_guard_dir_private(&transaction_root)?;
+                    let root_authority = DirectoryAuthority::open(&transaction_root)?;
+                    let reservation_authority = Arc::new(
+                        root_authority
+                            .to_sandbox()
+                            .create_child_file(
+                                RESERVATION_FILE,
+                                reserved_bytes.to_string().as_bytes(),
+                            )
+                            .map_err(|error| SwarmError::DispatchAdmission(error.to_string()))?,
+                    );
+                    let checkout = transaction_root.join("checkout");
+                    let scratch = transaction_root.join("scratch");
+                    std::fs::create_dir(&scratch)?;
+                    make_guard_dir_private(&scratch)?;
+                    drop(create_private_regular_file(
+                        &transaction_root.join(LEASE_FILE),
+                        b"root-directory-lease\n",
+                    )?);
+                    let lease = ActiveLease::acquire(root_authority.try_clone_handle()?)?;
+                    let swarm_authority = DirectoryAuthority::open(&self.swarm_root)?;
+                    let quarantine_authority = DirectoryAuthority::open(&self.control_root)?;
+                    let root_identity = root_authority.identity_token();
+                    let cleanup = Arc::new(TransactionCleanup {
+                        owner: worker_id.to_owned(),
+                        root: transaction_root.clone(),
+                        root_authority: StdMutex::new(Some(root_authority)),
+                        checkout_authority: std::sync::OnceLock::new(),
+                        swarm_root: self.swarm_root.clone(),
+                        swarm_authority,
+                        quarantine_root: self.control_root.clone(),
+                        quarantine_authority,
+                        reservation_authority,
+                        reserved_bytes,
+                        active_reservations: Arc::clone(&self.active_reservations),
+                        release_lock: StdMutex::new(()),
+                        lease: StdMutex::new(Some(lease)),
+                        released: AtomicBool::new(false),
+                    });
+                    self.active_reservations
+                        .lock()
+                        .map_err(|_| {
+                            SwarmError::WorktreeIo(
+                                "active reservation registry is poisoned".to_owned(),
+                            )
+                        })?
+                        .insert(
+                            worker_id.to_owned(),
+                            ActiveReservation {
+                                root_identity,
+                                authority: Arc::clone(&cleanup.reservation_authority),
+                                bytes: reserved_bytes,
+                            },
+                        );
+                    Ok((checkout, scratch, cleanup))
+                })();
+                if registration.is_err() {
+                    let _ = std::fs::remove_dir_all(&transaction_root);
+                }
+                registration
+            },
+        )?;
+        // The clone boundary must still refer to the directory object retained
+        // at construction, not a same-path replacement.
+        self.validate_repo_authority()?;
+        let source = self.repo_root.to_string_lossy().into_owned();
+        let destination = checkout.to_string_lossy().into_owned();
+        // Clone the target branch through the same object-isolating path
+        // create_isolated_checkout uses (own object store, in-tree .git, no
+        // alternates). Unlike the isolated path we check out the *existing*
+        // branch (no fresh -b branch) so the result is the durable main working
+        // tree the landing primitive re-projects onto.
+        let clone_args = [
+            "clone",
+            "--no-local",
+            "--no-hardlinks",
+            "--depth=1",
+            "--no-tags",
+            "--single-branch",
+            "--branch",
+            branch,
+            "--",
+            source.as_str(),
+            destination.as_str(),
+        ];
+        let clone = Box::pin(capture_bounded_process(
+            self.git_command(&clone_args),
+            self.capture_limits,
+            None,
+        ))
+        .await;
+        let clone = match clone {
+            Ok(output) => output,
+            Err(error) => {
+                cleanup.release()?;
+                return Err(SwarmError::WorktreeIo(format!(
+                    "integration git clone failed: {error}"
+                )));
+            }
+        };
+        if !clone.status.success() {
+            cleanup.release()?;
+            return Err(SwarmError::WorktreeIo(format!(
+                "integration git clone failed: {}",
+                String::from_utf8_lossy(&clone.stderr).trim()
+            )));
+        }
+        make_guard_dir_private(&checkout)?;
+
+        Box::pin(self.run_checkout_git(&checkout, &["remote", "remove", "origin"])).await?;
+
+        // Prove the clone landed the exact requested tip on the target branch,
+        // non-detached, with a clean working tree — the preconditions the
+        // landing primitive enforces before it will bind the checkout.
+        let actual = Box::pin(
+            self.checkout_git_stdout(&checkout, &["rev-parse", "--verify", "HEAD^{commit}"]),
+        )
+        .await?;
+        if actual != expected_head {
+            return Err(SwarmError::WorktreeIo(format!(
+                "integration checkout raced source branch: expected {expected_head}, got {actual}"
+            )));
+        }
+        let head_ref =
+            Box::pin(self.checkout_git_stdout(&checkout, &["symbolic-ref", "HEAD"])).await?;
+        if head_ref != format!("refs/heads/{branch}") {
+            return Err(SwarmError::WorktreeIo(format!(
+                "integration checkout is not on target branch {branch}: HEAD is {head_ref}"
+            )));
+        }
+        let status =
+            Box::pin(self.checkout_git_stdout(&checkout, &["status", "--porcelain"])).await?;
+        if !status.is_empty() {
+            return Err(SwarmError::WorktreeIo(
+                "integration checkout working tree is dirty".to_owned(),
+            ));
+        }
+
+        let common =
+            Box::pin(self.checkout_git_stdout(&checkout, &["rev-parse", "--git-common-dir"]))
+                .await?;
+        let common = PathBuf::from(common);
+        let common = if common.is_absolute() {
+            common
+        } else {
+            checkout.join(common)
+        };
+        let common = std::fs::canonicalize(common)?;
+        if !common.starts_with(&checkout) {
+            return Err(SwarmError::WorktreeIo(format!(
+                "integration checkout Git authority escaped its root: {}",
+                common.display()
+            )));
+        }
+        // A main working tree keeps git_dir == common_git_dir; a linked worktree
+        // does not. bind_integration_checkout refuses the linked case.
+        let git_dir =
+            Box::pin(self.checkout_git_stdout(&checkout, &["rev-parse", "--absolute-git-dir"]))
+                .await?;
+        let git_dir = std::fs::canonicalize(PathBuf::from(git_dir))?;
+        if git_dir != common {
+            return Err(SwarmError::WorktreeIo(
+                "integration checkout is a linked worktree; landing requires the main checkout"
+                    .to_owned(),
+            ));
+        }
+        if common != std::fs::canonicalize(checkout.join(".git"))? {
+            return Err(SwarmError::WorktreeIo(
+                "integration checkout does not own an in-tree .git directory".to_owned(),
+            ));
+        }
+        let alternates = common.join("objects").join("info").join("alternates");
+        if std::fs::symlink_metadata(&alternates).is_ok() {
+            return Err(SwarmError::WorktreeIo(
+                "integration checkout unexpectedly uses an alternate object store".to_owned(),
+            ));
+        }
+        let remotes = Box::pin(self.checkout_git_stdout(&checkout, &["remote"])).await?;
+        if !remotes.is_empty() {
+            return Err(SwarmError::WorktreeIo(
+                "integration checkout retained a remote".to_owned(),
+            ));
+        }
+        let tags = Box::pin(self.checkout_git_stdout(&checkout, &["tag", "--list"])).await?;
+        if !tags.is_empty() {
+            return Err(SwarmError::WorktreeIo(
+                "integration checkout retained tags".to_owned(),
+            ));
+        }
+        let head_commit = Box::pin(
+            self.checkout_git_stdout(&checkout, &["rev-parse", "--verify", "HEAD^{commit}"]),
+        )
+        .await?;
+        let tree = Box::pin(
+            self.checkout_git_stdout(&checkout, &["rev-parse", "--verify", "HEAD^{tree}"]),
+        )
+        .await?;
+        let checkout = std::fs::canonicalize(checkout)?;
+        let scratch = std::fs::canonicalize(scratch)?;
+        let transaction_root = std::fs::canonicalize(transaction_root)?;
+        if !checkout.starts_with(&transaction_root)
+            || !scratch.starts_with(&transaction_root)
+            || checkout.starts_with(&scratch)
+            || scratch.starts_with(&checkout)
+        {
+            return Err(SwarmError::WorktreeIo(
+                "transaction checkout and scratch roots are not disjoint".to_owned(),
+            ));
+        }
+        let authorities = Arc::new(TransactionWorkspaceAuthorities {
+            checkout: DirectoryAuthority::open(&checkout)?,
+            scratch: DirectoryAuthority::open(&scratch)?,
+            reservation: Arc::clone(&cleanup.reservation_authority),
+        });
+        cleanup.bind_checkout_authority(authorities.checkout.clone());
+        let workspace = TransactionWorkspace {
+            owner: worker_id.to_owned(),
+            root: transaction_root,
+            checkout,
+            scratch,
+            base_commit: expected_head.to_owned(),
+            head_commit,
+            tree,
+            reserved_bytes,
+            authorities,
+            cleanup,
+        };
+        let materialized_bytes = workspace.logical_used_bytes()?;
+        if materialized_bytes > workspace.reserved_bytes {
+            let reserved_bytes = workspace.reserved_bytes;
+            workspace.cleanup.release()?;
+            return Err(SwarmError::DispatchAdmission(format!(
+                "materialized workspace uses {materialized_bytes} bytes, exceeding transaction budget {reserved_bytes}"
+            )));
+        }
+        Ok(workspace)
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod integration_checkout_tests {
+    use super::*;
+    use wcore_config::shell;
+
+    async fn run_git(cwd: &Path, args: &[&str]) {
+        let mut command = shell::shell_command_argv("git", args);
+        command.current_dir(cwd);
+        let status = command.status().await.expect("spawn git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    async fn git_stdout(cwd: &Path, args: &[&str]) -> String {
+        let mut command = shell::shell_command_argv("git", args);
+        command.current_dir(cwd);
+        let out = command.output().await.expect("git output");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    async fn init_repo(path: &Path) -> String {
+        run_git(path, &["init", "-q", "-b", "main"]).await;
+        std::fs::write(path.join("README.md"), "integration fixture\n").unwrap();
+        run_git(path, &["add", "."]).await;
+        run_git(
+            path,
+            &[
+                "-c",
+                "user.email=swarm@test.invalid",
+                "-c",
+                "user.name=Swarm Test",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+        )
+        .await;
+        git_stdout(path, &["rev-parse", "HEAD"]).await
+    }
+
+    #[tokio::test]
+    async fn current_branch_reports_symbolic_head_and_fails_closed_on_detached() {
+        let repo = tempfile::tempdir().expect("repo");
+        let head = init_repo(repo.path()).await;
+        let workspace_parent = tempfile::tempdir().expect("workspace parent");
+        let workspace_root = workspace_parent.path().join("cb-swarm");
+        let manager =
+            WorktreeManager::new_with_workspace_root(repo.path(), &workspace_root).unwrap();
+
+        // A normal branch checkout reports its symbolic HEAD.
+        assert_eq!(manager.current_branch().await.unwrap(), "main");
+
+        // A detached HEAD has no branch to land onto → fail closed.
+        run_git(repo.path(), &["checkout", "-q", "--detach", &head]).await;
+        assert!(
+            manager.current_branch().await.is_err(),
+            "a detached HEAD must fail closed"
+        );
+    }
+
+    // A Wayland-owned integration checkout must satisfy every precondition the
+    // 20-07 landing primitive (`bind_integration_checkout`) enforces. The proof
+    // is direct: build the checkout, assert the observable bind requirements,
+    // then hand the exact path to `bind_integration_checkout` and require that
+    // it binds without error.
+    #[tokio::test]
+    async fn integration_checkout_satisfies_bind_requirements() {
+        let repo = tempfile::tempdir().expect("repo");
+        let head = init_repo(repo.path()).await;
+        let workspace_parent = tempfile::tempdir().expect("workspace parent");
+        let workspace_root = workspace_parent.path().join("integration-swarm");
+        let manager =
+            WorktreeManager::new_with_workspace_root(repo.path(), &workspace_root).unwrap();
+
+        let capacity = WorkspaceCapacity {
+            available_bytes: 1024 * 1024 * 1024,
+            safety_margin_bytes: 0,
+            max_transaction_bytes: 64 * 1024 * 1024,
+            max_aggregate_bytes: 64 * 1024 * 1024,
+        };
+        let workspace = manager
+            .create_integration_checkout("integrator", "main", &head, capacity)
+            .await
+            .expect("integration checkout");
+        let checkout = workspace.checkout.clone();
+
+        // Absolute path.
+        assert!(checkout.is_absolute(), "checkout path must be absolute");
+        // In-tree .git, and git_dir == common_git_dir (a main checkout, never a
+        // linked worktree).
+        let git_dir = std::fs::canonicalize(
+            git_stdout(&checkout, &["rev-parse", "--absolute-git-dir"]).await,
+        )
+        .unwrap();
+        let common = std::fs::canonicalize(
+            git_stdout(
+                &checkout,
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(
+            git_dir, common,
+            "must be a main checkout, not a linked worktree"
+        );
+        assert_eq!(
+            common,
+            std::fs::canonicalize(checkout.join(".git")).unwrap(),
+            "must own an in-tree .git"
+        );
+        // No alternate object store.
+        let alternates = common.join("objects").join("info").join("alternates");
+        assert!(
+            std::fs::symlink_metadata(&alternates).is_err(),
+            "must not use an alternate object store"
+        );
+        // Clean working tree, on the expected branch, at the exact requested tip.
+        assert!(
+            git_stdout(&checkout, &["status", "--porcelain"])
+                .await
+                .is_empty(),
+            "working tree must be clean"
+        );
+        assert_eq!(
+            git_stdout(&checkout, &["symbolic-ref", "HEAD"]).await,
+            "refs/heads/main",
+            "must be a non-detached HEAD on the target branch"
+        );
+        assert_eq!(
+            git_stdout(&checkout, &["rev-parse", "HEAD"]).await,
+            head,
+            "must be the exact requested tip"
+        );
+
+        // Strongest proof: the real 20-07 landing primitive accepts it.
+        manager
+            .bind_integration_checkout(&checkout)
+            .await
+            .expect("bind_integration_checkout must accept the Wayland-owned checkout");
+
+        manager.release_transaction(&workspace).unwrap();
     }
 }

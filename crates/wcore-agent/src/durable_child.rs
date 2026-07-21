@@ -38,6 +38,15 @@ impl DurableChildStore {
         Self { journal }
     }
 
+    /// The bound session journal backing this store, cloned. Callers that must
+    /// open a sibling journal-backed store — e.g. the child-transaction
+    /// lifecycle whose `open` resolves a durable child declared in THIS journal —
+    /// share the exact same durable authority rather than a fresh handle.
+    #[must_use]
+    pub(crate) fn journal(&self) -> SessionJournal {
+        self.journal.clone()
+    }
+
     pub fn declare(&self, record: DurableChildRecord) -> Result<DurableChildWrite, JournalError> {
         record
             .validate_declaration()

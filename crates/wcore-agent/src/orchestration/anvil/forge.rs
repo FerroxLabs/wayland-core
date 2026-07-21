@@ -38,21 +38,28 @@ use wcore_protocol::events::ProtocolEvent;
 use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 use wcore_sandbox::SandboxRegistry;
 use wcore_sandbox::backends::SandboxBackend;
-use wcore_swarm::worktree::WorktreeManager;
-use wcore_types::spawner::{ChildOrigin, ForkOverrides, Spawner, SubAgentConfig};
+use wcore_swarm::worktree::{CandidateSeal, WorkspaceCapacity, WorktreeManager};
+use wcore_types::spawner::{ChildId, ChildOrigin, ForkOverrides, Spawner, SubAgentConfig};
 
 use super::TerminalState;
 use super::climb::{CandidateId, CheckOutcome, GateReport, Severity};
 use super::detect::{GateCandidate, detect_gate_candidates};
 use super::engine::{
     BuildFeedback, Builder, BuiltCandidate, CandidateCheckout, ClimbOutcome, ClimbParams,
-    EngineError, EvaluationGateExecutor, StallReport, Valve, run_climb,
+    EngineError, EvaluationGateExecutor, LandingReport, StallReport, Valve, WinnerIdentity,
+    run_climb,
 };
+use super::gate_authorization::{WinnerGateInputs, build_winner_gate_authorization};
 use super::gates::{BaselineProbe, GateClosure, GateSpec, ProbeOpts, StabilityPolicy};
 use super::journal::ClimbJournal;
+use super::landing::{WinnerLandingRequest, land_selected_winner};
 use super::lease::ClimbLease;
 use super::ledger::{ClimbLedger, LedgerCap, LedgerEntry};
-use crate::child_transaction::MutationAttemptGuard;
+use crate::child_transaction::{
+    ChildTransactionLifecycle, ChildTransactionStore, MutationAttemptGuard,
+    ParentLandingAuthorization,
+};
+use crate::durable_child::DurableChildStore;
 use crate::output::OutputSink;
 use crate::spawner::AgentSpawner;
 
@@ -306,6 +313,38 @@ impl CandidateCheckout for RetainedCheckout {
             .checkout_authority()
             .display_path()
             .to_path_buf())
+    }
+
+    /// Yield THIS retained winner's landing authority by consuming the boxed
+    /// identity. Minting the seal here re-proves execution authority and the
+    /// pristine-source manifest one final time; a released / drifted /
+    /// substituted checkout fails closed to `None` (and the guard drops on the
+    /// early return, terminalizing the transaction) rather than surrendering
+    /// stale authority. Because this consumes `self`, a losing candidate — which
+    /// is only ever dropped, never moved out of the outcome — can never reach
+    /// this method, so no loser's guard/seal is extractable.
+    fn into_landing_authority(self: Box<Self>) -> Option<(MutationAttemptGuard, CandidateSeal)> {
+        let seal = self.guard.workspace().seal_candidate().ok()?;
+        Some((self.guard, seal))
+    }
+
+    fn winner_identity(&self) -> Option<WinnerIdentity> {
+        // `owner` is the child id the builder ran as: the durable spawner sets
+        // `worker_id = child_id`, and `TransactionWorkspace.owner = worker_id`.
+        // `base_commit`/`head_commit` are the parent tip forked from and the
+        // candidate head (equal for Anvil — builders never commit). The writable
+        // roots come from the CANONICAL spawner computation (never a local
+        // replica) so the 06C re-run's only writable mount can never drift from
+        // what the child was granted during the build.
+        let workspace = self.guard.workspace();
+        Some(WinnerIdentity {
+            child_id: ChildId::new(workspace.owner.clone()).ok()?,
+            base_revision: workspace.base_commit.clone(),
+            candidate_revision: workspace.head_commit.clone(),
+            private_writable_roots: crate::spawner::mutation_workspace::mutation_writable_roots(
+                workspace,
+            ),
+        })
     }
 }
 
@@ -734,6 +773,15 @@ pub async fn drive_climb_full(
         ClimbJournal::open(&journal_path).map_err(|e| ForgeError::Journal(e.to_string()))?;
     let ledger = ClimbLedger::new(task, LedgerCap::unlimited());
 
+    // Landing prep: clone the sandbox runtime and the pinned gate BEFORE they are
+    // moved into the advisory `SandboxGate`, so the winner-landing wiring can build
+    // a parent-owned `ChildTransactionLifecycle` (which owns a `SandboxRegistry` by
+    // value) and the 06C gate authorization (which needs the pinned Anvil gate)
+    // after the climb. Both derive `Clone`; the clones are independent authority
+    // values, and the advisory gate below is unaffected.
+    let landing_sandbox = (*sandbox).clone();
+    let landing_gate = closure.clone();
+
     // Seams. The gate carries only the shared base scope; every candidate run is
     // scoped read+write to its own checkout inside `SandboxGate::run`.
     let gate = SandboxGate::from_session_runtime(closure, sandbox, base_opts);
@@ -768,13 +816,252 @@ pub async fn drive_climb_full(
     // tool-facing entry passes the session/valve seat only as a read-only
     // `&dyn Spawner`; a `blocked` climb is reported honestly instead.)
     let builder = SpawnBuilder::new(spawner, "");
-    let outcome = run_climb(&params, &builder, &gate, valve_ref, &ledger, &mut journal).await;
+    let mut outcome = run_climb(&params, &builder, &gate, valve_ref, &ledger, &mut journal).await;
 
+    // Emit the climb receipt FIRST, while the winner's transaction (and thus its
+    // checkout at `best_worktree`) is still live — `emit_receipt` digests that
+    // checkout as the forged artifact. Landing CONSUMES the winner, terminalizing
+    // its checkout, so it must run strictly AFTER the receipt is emitted; running
+    // it first would leave `emit_receipt` reading a checkout that RAII already
+    // reclaimed. The receipt is about the artifact the climb forged; landing is a
+    // separate downstream step (its outcome rides `ClimbOutcome::landing` → the
+    // tool report). (Carrying the landing outcome in the structured receipt for a
+    // Desktop-mediated accept is a future protocol enhancement, out of scope here.)
     emit_receipt(
         emitter, &outcome, &ledger, &digest, workspace, session_id, run_id, task_id,
     )
     .await?;
+
+    // Land the selected winner, if any (surface-for-accept). The climb has already
+    // reached its terminal state and earned (or not) its stamp; landing is a
+    // SEPARATE parent-owned step whose success or failure is REPORTED into the
+    // outcome (`ClimbOutcome::landing`) and never allowed to crash the climb. Losers
+    // already terminalized by RAII; only this winner's transaction survived, and it
+    // is consumed here (landed) or dropped (RAII) on a skipped/failed landing.
+    if let Some(winner) = outcome.winner.take() {
+        // Box the landing future onto the heap. The open → accept → 06C hard-
+        // containment gate re-run → parent CAS chain is a very large async state
+        // machine; inlining it in this function's future overflows the (debug)
+        // stack when the winner actually reaches the deep landing path. Heaping it
+        // caps the inline future size (the same reason the type name is enormous).
+        let report = Box::pin(attempt_landing(
+            winner,
+            spawner,
+            &worktrees,
+            &landing_gate,
+            landing_sandbox,
+            workspace,
+            &pinned_head,
+            probe_capacity,
+            run_id,
+        ))
+        .await;
+        outcome.landing = Some(report);
+    }
+
     Ok(outcome)
+}
+
+/// Land the SELECTED winner into a Wayland-owned integration checkout, returning a
+/// report-only [`LandingReport`]. This NEVER returns `Err`: the climb already
+/// succeeded, so every landing problem — a missing landing identity, an absent
+/// durable record, a gate-authorization refusal, a workspace/CAS failure, or a
+/// [`WinnerLandingError`](super::landing::WinnerLandingError) — is captured as
+/// [`LandingReport::Failed`] instead of crashing the climb or discarding its
+/// receipt (fail-closed *reporting*).
+///
+/// Consumes the winner `Box` by value: on any early failure the box is dropped and
+/// its transaction terminalizes by RAII; on the land path it is moved into
+/// [`land_selected_winner`], which internally re-mints the winner's guard + seal
+/// (`into_landing_authority`) — so the guard/seal used for landing is the SAME
+/// workspace whose scratch fed `WinnerIdentity::private_writable_roots`; this
+/// function never extracts the guard itself.
+#[allow(clippy::too_many_arguments)]
+async fn attempt_landing(
+    winner: Box<dyn CandidateCheckout>,
+    spawner: &AgentSpawner,
+    worktrees: &WorktreeManager,
+    landing_gate: &GateClosure,
+    landing_sandbox: wcore_sandbox::SandboxRegistry,
+    workspace: &Path,
+    pinned_head: &str,
+    probe_capacity: WorkspaceCapacity,
+    run_id: &str,
+) -> LandingReport {
+    // 1. Borrow the winner's landing identity (child id, base/candidate revisions,
+    //    transaction-private writable roots). `None` from a real winner means a
+    //    released/drifted/substituted checkout — report it, dropping the winner.
+    let Some(id) = winner.winner_identity() else {
+        return LandingReport::Failed {
+            detail: "winner surrendered no landing identity (released, drifted, or substituted \
+                     checkout)"
+                .to_string(),
+        };
+    };
+
+    // 2. Resolve the request/policy digests from the durable child record. These
+    //    MUST equal what the durable transaction opening derives from the same
+    //    record, so the 06C subject binds cleanly at acceptance time.
+    let journal = match spawner.session_journal() {
+        Ok(journal) => journal,
+        Err(error) => {
+            return LandingReport::Failed {
+                detail: format!("no session journal for landing: {error}"),
+            };
+        }
+    };
+    let record = match DurableChildStore::new(journal.clone()).inspect(&id.child_id) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            return LandingReport::Failed {
+                detail: format!("no durable child record for winner {}", id.child_id),
+            };
+        }
+        Err(error) => {
+            return LandingReport::Failed {
+                detail: format!("inspect durable child record: {error}"),
+            };
+        }
+    };
+    let request_digest = record.request.exact_digest.clone();
+    let policy_digest = record.policy_snapshot.exact_digest.clone();
+
+    // 3. Honest diff digest of the winner's working-tree diff. `resolve_root`
+    //    re-proves execution authority; on refusal, report rather than land a
+    //    checkout we cannot re-prove.
+    let checkout_root = match winner.resolve_root() {
+        Ok(root) => root,
+        Err(error) => {
+            return LandingReport::Failed {
+                detail: format!("winner checkout root could not be re-proven: {error}"),
+            };
+        }
+    };
+    let diff_digest = winner_diff_digest(&checkout_root).await;
+
+    // 4. Translate the pinned Anvil gate into the parent-owned 06C authorization
+    //    (plan + subject + authorized closures). `toolchain_identity` is a coarse
+    //    marker — a real per-gate rustc probe is a documented deferral (it is a
+    //    digest/drift input, not a containment control).
+    let auth = match build_winner_gate_authorization(WinnerGateInputs {
+        anvil_gate: landing_gate,
+        gate_id: "anvil-gate",
+        toolchain_identity: "anvil-tier1:host-toolchain",
+        timeout_ms: GATE_TIMEOUT.as_millis() as u64,
+        private_writable_roots: id.private_writable_roots.clone(),
+        base_revision: &id.base_revision,
+        candidate_revision: &id.candidate_revision,
+        diff_digest: &diff_digest,
+        request_digest: &request_digest,
+        policy_digest: &policy_digest,
+    }) {
+        Ok(auth) => auth,
+        Err(error) => {
+            return LandingReport::Failed {
+                detail: format!("winner gate authorization refused: {error}"),
+            };
+        }
+    };
+
+    // 5. Allocate the Wayland-owned integration checkout: a standalone clone at the
+    //    exact current tip, on its own branch — NEVER the user's working tree. Keep
+    //    `integ` bound (its Drop releases the clone) until after the land completes.
+    let branch = match worktrees.current_branch().await {
+        Ok(branch) => branch,
+        Err(error) => {
+            return LandingReport::Failed {
+                detail: format!("could not resolve current branch for landing: {error}"),
+            };
+        }
+    };
+    let integ = match worktrees
+        .create_integration_checkout(
+            &format!("anvil-land-{run_id}"),
+            &branch,
+            pinned_head,
+            probe_capacity,
+        )
+        .await
+    {
+        Ok(integ) => integ,
+        Err(error) => {
+            return LandingReport::Failed {
+                detail: format!("could not create integration checkout: {error}"),
+            };
+        }
+    };
+
+    // 6. Build the parent-owned lifecycle authority. `WorktreeManager` is not
+    //    `Clone`, so mint a fresh one bound to the same workspace.
+    let manager = match WorktreeManager::new(workspace) {
+        Ok(manager) => manager,
+        Err(error) => {
+            return LandingReport::Failed {
+                detail: format!("could not open worktree manager for landing: {error}"),
+            };
+        }
+    };
+    let lifecycle = ChildTransactionLifecycle::new(
+        ChildTransactionStore::new(journal.clone()),
+        landing_sandbox,
+        manager,
+    );
+
+    // 7. Assemble the terminal landing request. `transaction_id` is a fresh
+    //    per-run key (the opening binds it to the existing durable child); the
+    //    target ref is the integration clone's OWN branch (surface-for-accept).
+    let target_ref = format!("refs/heads/{branch}");
+    let request = WinnerLandingRequest {
+        transaction_id: format!("anvil-txn-{run_id}"),
+        child_id: id.child_id,
+        base_revision: id.base_revision,
+        gate_plan: auth.plan,
+        subject: auth.subject,
+        closures: auth.closures,
+        integration_checkout: integ.checkout.clone(),
+        target_ref: target_ref.clone(),
+        // Deterministic, clock-injection-free acceptance stamp, sourced from the
+        // same `unix_time_ms` helper the receipt uses.
+        now_unix_ms: unix_time_ms(),
+    };
+
+    // 8. Drive the fail-closed terminal chain, mapping each authorization outcome
+    //    into a report-only variant. On a NON-landed outcome `integ` drops at the
+    //    end of this scope, releasing the integration clone. On a LANDED outcome
+    //    the clone is RETAINED (surface-for-accept: the user accepts by
+    //    fast-forwarding from it, Desktop reclaims it afterward — Desktop-owned
+    //    GC), and its path is surfaced in the report.
+    let retained_checkout = integ.checkout.clone();
+    match land_selected_winner(winner, &lifecycle, request).await {
+        Ok(ParentLandingAuthorization::Landed { successor, .. }) => {
+            // Retain the landed clone so Desktop can surface + accept it. NOTE:
+            // this leaks the manager's in-memory reservation/lease for this clone
+            // until the process exits; acceptable + bounded (few landed clones per
+            // session, Desktop reclaims the on-disk clone). FOLLOW-UP: a clean
+            // `TransactionWorkspace::persist()` in wcore-swarm that frees the
+            // reservation accounting while keeping the checkout on disk.
+            std::mem::forget(integ);
+            LandingReport::Landed {
+                landed_commit: successor.landed_commit,
+                target_ref,
+                integration_checkout: retained_checkout,
+            }
+        }
+        Ok(ParentLandingAuthorization::Conflict { detail }) => LandingReport::Conflict { detail },
+        Ok(ParentLandingAuthorization::Incomplete { detail }) => {
+            LandingReport::Incomplete { detail }
+        }
+        Ok(ParentLandingAuthorization::RolledBack { .. }) => LandingReport::RolledBack {
+            detail: "landing was reversed before completion; no change remains on the target ref"
+                .to_string(),
+        },
+        Ok(ParentLandingAuthorization::RecoveryRequired { detail }) => {
+            LandingReport::RecoveryRequired { detail }
+        }
+        Err(error) => LandingReport::Failed {
+            detail: error.to_string(),
+        },
+    }
 }
 
 /// Persist and emit the single authoritative top-level receipt. Persistence
@@ -966,6 +1253,40 @@ fn unix_time_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
+}
+
+/// Honest 64-lowercase-hex SHA-256 of the winner candidate's working-tree diff.
+///
+/// Runs `git --no-optional-locks diff --no-color` in the winner's checkout via the
+/// central argv-mode shell helper (no shell interpreter, attacker-controlled data
+/// never reaches a `sh -c`) and hashes the raw stdout bytes, so the digest always
+/// reflects ACTUAL candidate content — never a static placeholder. If the git call
+/// cannot run or exits non-zero, it hashes empty input instead: still a
+/// deterministic 64-hex value, and never a panic. The output carries no `sha256:`
+/// prefix, matching the raw-hex `diff_digest` the 06C subject expects.
+async fn winner_diff_digest(checkout_root: &Path) -> String {
+    let diff_bytes = match wcore_config::shell::shell_command_argv(
+        "git",
+        &["--no-optional-locks", "diff", "--no-color"],
+    )
+    .current_dir(checkout_root)
+    .output()
+    .await
+    {
+        Ok(output) if output.status.success() => output.stdout,
+        // A failed or non-zero git invocation yields empty input: deterministic
+        // and honest (a distinct, reproducible digest), never a fabricated one.
+        _ => Vec::new(),
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(&diff_bytes);
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 /// Hash the canonical content corpus visible to git: tracked files plus

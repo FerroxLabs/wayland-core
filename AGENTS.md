@@ -257,6 +257,8 @@ just push              # Lint-fix → fmt → auto-commit-fixes → test → git
 
 **Pushing code: always use `just push` instead of `git push`.** It runs lint-fix → fmt → auto-commit-fixes → test → `git push`, preventing CI failures and silently fixing trivial drift before the push. Supports the same arguments as `git push`.
 
+**Sole `just push` exception — Phase 20 terminal UAT ref.** Only the human-authorized Phase 20 terminal UAT helper (`scripts/f20-native-uat-proof.mjs`) may publish the exact, already-focused-proofed and independently reviewed full SHA directly to its exact temporary UAT ref (`refs/f20-native-uat/<full-sha>`) without `just push` — because that publication must carry the reviewed bytes verbatim with no lint/fmt/commit mutation. No other ref, branch, or push may bypass `just push`.
+
 #### One-time setup: install `vx`
 
 The `justfile` and CI workflows route every tool invocation through `vx` ([loonghao/vx](https://github.com/loonghao/vx)) so the Rust + `just` versions pinned in `vx.toml` are used deterministically across local dev and CI. **`just push` won't work without it.**

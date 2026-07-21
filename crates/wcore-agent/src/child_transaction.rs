@@ -4,10 +4,11 @@
 //! children or gates, inspect Git, mutate a parent, merge, or roll back.
 
 use std::fmt;
+use std::path::Path;
 
 use thiserror::Error;
 use wcore_sandbox::SandboxRegistry;
-use wcore_swarm::worktree::CandidateSeal;
+use wcore_swarm::worktree::{CandidateSeal, RollbackHandle, WorktreeManager};
 use wcore_types::child_transaction::{
     CHILD_TRANSACTION_RECEIPT_SCHEMA_VERSION, ChildGatePlan, ChildGateReceipt,
     ChildTransactionDisposition, ChildTransactionReceipt, ChildTransactionReducer,
@@ -761,6 +762,183 @@ pub async fn run_gate_acceptance(
         authority.transaction_id().to_owned(),
         digest,
     ))
+}
+
+/// One coherent surface over the complete parent-side delegated-mutation
+/// lifecycle.
+///
+/// Production engine paths and the hostile end-to-end proof drive a delegated
+/// child mutation ONLY through this type, so no caller re-implements the
+/// transition sequence, skips a pre-effect revalidation, or mints authority the
+/// reducer would refuse. It composes the accepted predecessor primitives into a
+/// single lifecycle:
+///
+/// 1. acquire the authoritative durable snapshot and bind it (`open`), then
+///    revalidate the retained opening BEFORE any workspace allocation;
+/// 2. the caller launches exactly one child into the retained isolated checkout
+///    (the 20-05 [`crate::spawner::AgentSpawner::spawn_builder_into_retained_checkout`]
+///    seam) — a workspace/child/provider/tool is never invoked without this bound
+///    snapshot;
+/// 3. drive ONLY the selected winner through parent-owned gate execution to a
+///    durable [`AcceptedCandidate`] (`accept_selected_winner`), revalidating the
+///    opening again immediately before the gates run;
+/// 4. land the accepted winner coherently, or refuse
+///    (`land` → 20-07 [`authorize_and_land`]);
+/// 5. reverse an exact landing (`rollback` → 20-07 [`authorize_and_rollback`]);
+/// 6. read the durable terminal receipt (`terminal_receipt`).
+///
+/// It is deliberately NOT a second orchestrator or evidence framework: every
+/// method delegates to the exact authorized primitive, and the durable journal
+/// — not this handle — remains the sole authority. Landing is fail-closed
+/// without an accepted candidate: [`authorize_and_land`] refuses unless the
+/// transaction's latest durable receipt is exactly the candidate's acceptance
+/// receipt, so mutation-without-isolation and landing-without-an-accepted-
+/// candidate can never reach the parent compare-and-swap. Cleanup is owned-only:
+/// the winner's still-armed [`MutationAttemptGuard`] and [`CandidateSeal`] the
+/// [`AcceptedCandidate`] carries terminalize exactly that transaction's checkout
+/// on drop, and every losing candidate has already terminalized by RAII before a
+/// winner ever reaches this lifecycle — no foreign state is touched.
+pub struct ChildTransactionLifecycle {
+    store: ChildTransactionStore,
+    sandbox: SandboxRegistry,
+    manager: WorktreeManager,
+}
+
+impl ChildTransactionLifecycle {
+    /// Bind the journal-backed store, the hard-containment sandbox registry, and
+    /// the parent-owned worktree manager into one lifecycle authority.
+    #[must_use]
+    pub fn new(
+        store: ChildTransactionStore,
+        sandbox: SandboxRegistry,
+        manager: WorktreeManager,
+    ) -> Self {
+        Self {
+            store,
+            sandbox,
+            manager,
+        }
+    }
+
+    /// The journal-backed child-transaction store this lifecycle drives.
+    #[must_use]
+    pub fn store(&self) -> &ChildTransactionStore {
+        &self.store
+    }
+
+    /// Acquire the authoritative durable snapshot for one transaction and bind it
+    /// BEFORE any workspace allocation. The opening is revalidated against the
+    /// live journal immediately, so a substituted, stale, or rebound snapshot
+    /// fails closed before the caller launches a child.
+    pub fn open(
+        &self,
+        transaction_id: impl Into<String>,
+        child_id: ChildId,
+        base_revision: impl Into<String>,
+        gate_plan: ChildGatePlan,
+    ) -> Result<ChildTransactionAuthority, JournalError> {
+        let authority = self
+            .store
+            .open(transaction_id, child_id, base_revision, gate_plan)?;
+        self.store.revalidate(&authority)?;
+        Ok(authority)
+    }
+
+    /// Revalidate the retained opening authority before workspace allocation or
+    /// execution. Unrelated journal appends do not change the authority; a
+    /// changed opening, child, or storage identity fails closed.
+    pub fn revalidate(&self, authority: &ChildTransactionAuthority) -> Result<(), JournalError> {
+        self.store.revalidate(authority)
+    }
+
+    /// Drive the SELECTED winner through parent-owned gate execution to a durable
+    /// [`AcceptedCandidate`].
+    ///
+    /// Exactly one winner guard and its seal are passed in; every losing
+    /// candidate has already terminalized by RAII before this call, so only the
+    /// winner ever traverses the parent gate + landing lifecycle. The retained
+    /// opening is revalidated immediately before the gates run, and acceptance
+    /// exists only after the authoritative receipt closure confirms the durable
+    /// receipt.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn accept_selected_winner(
+        &self,
+        authority: &ChildTransactionAuthority,
+        subject: &GateExecutionSubject,
+        closures: Vec<AuthorizedGateClosure>,
+        guard: MutationAttemptGuard,
+        seal: CandidateSeal,
+        now_unix_ms: u64,
+    ) -> Result<AcceptedCandidate, MutationAcceptanceError> {
+        self.store.revalidate(authority)?;
+        run_gate_acceptance(
+            &self.sandbox,
+            &self.store,
+            authority,
+            subject,
+            closures,
+            guard,
+            seal,
+            now_unix_ms,
+        )
+        .await
+    }
+
+    /// Land the accepted winner coherently into the parent.
+    ///
+    /// Fails closed unless the transaction's latest durable receipt is exactly
+    /// the candidate's acceptance receipt — landing-without-an-accepted-candidate
+    /// is refused by the authorization layer. On a coherent landing the journal
+    /// records `LandingPrepared → RefAdvanced → Projected → Landed`; every other
+    /// primitive outcome maps to its identity-matched durable append.
+    pub async fn land(
+        &self,
+        authority: &ChildTransactionAuthority,
+        accepted: &AcceptedCandidate,
+        integration_checkout: &Path,
+        target_ref: &str,
+    ) -> Result<ParentLandingAuthorization, ParentLandingAuthorizationError> {
+        authorize_and_land(
+            &self.store,
+            authority,
+            accepted,
+            &self.manager,
+            integration_checkout,
+            target_ref,
+        )
+        .await
+    }
+
+    /// Exactly reverse a landing.
+    ///
+    /// The reducer requires a durably `Landed` state and the primitive reverses
+    /// ONLY while ref/HEAD/index/worktree still equal the landed successor;
+    /// foreign drift is recorded as recovery-required rather than clobbering
+    /// later work.
+    pub async fn rollback(
+        &self,
+        authority: &ChildTransactionAuthority,
+        integration_checkout: &Path,
+        handle: &RollbackHandle,
+    ) -> Result<ParentLandingAuthorization, ParentLandingAuthorizationError> {
+        authorize_and_rollback(
+            &self.store,
+            authority,
+            &self.manager,
+            integration_checkout,
+            handle,
+        )
+        .await
+    }
+
+    /// The current durable terminal receipt / lifecycle state for a transaction,
+    /// read straight from the journal authority.
+    pub fn terminal_receipt(
+        &self,
+        transaction_id: &str,
+    ) -> Result<Option<ChildTransactionState>, JournalError> {
+        self.store.inspect(transaction_id)
+    }
 }
 
 #[cfg(test)]

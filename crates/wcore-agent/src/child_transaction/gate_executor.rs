@@ -279,7 +279,15 @@ impl ObservedGateResult {
 /// so the cwd can only ever be that of the exact live sealed candidate. It fails
 /// closed if the seal cannot be minted (drift, released transaction, identity
 /// change).
-pub(crate) trait LiveCandidateRoot {
+// `Send + Sync` so a `&dyn LiveCandidateRoot` can be held across the `.await` in
+// `execute_plan` without making the gate-acceptance future `!Send`. Both
+// implementors already satisfy it — the production `SealedCandidateRoot` borrows
+// a `MutationAttemptGuard` (an `Arc`/plain-data `TransactionWorkspace`, already
+// `Send` where the spawner returns it across awaits), and the test fake is plain
+// data. This is required for the Anvil landing (20-08) to compile in the
+// `Send`-required Tool execution context; it is a bound declaration with no
+// behavior change to the 20-14-audited acceptance logic.
+pub(crate) trait LiveCandidateRoot: Send + Sync {
     /// Re-prove liveness/cleanliness and return the sealed checkout root.
     fn resolve_root(&self) -> Result<PathBuf, GateStageError>;
 }

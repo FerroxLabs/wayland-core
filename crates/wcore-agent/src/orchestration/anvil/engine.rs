@@ -22,12 +22,15 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use wcore_swarm::worktree::CandidateSeal;
+use wcore_types::spawner::ChildId;
 
 use super::TerminalState;
 use super::climb::{Acceptance, CandidateId, CheckId, GateReport, evaluate_acceptance};
 use super::gates::StabilityPolicy;
 use super::journal::{ClimbJournal, JournalEntry, JournalKind};
 use super::ledger::{ClimbLedger, LedgerEntry};
+use crate::child_transaction::MutationAttemptGuard;
 
 /// Opaque, live per-candidate checkout identity.
 ///
@@ -49,6 +52,64 @@ pub trait CandidateCheckout: Send + Sync + std::fmt::Debug {
     /// working directory, and it is re-run on every gate invocation and
     /// stability rerun so the subject can never silently change.
     fn resolve_root(&self) -> Result<PathBuf, EngineError>;
+
+    /// Consume this candidate identity, yielding its retained landing authority:
+    /// the still-armed [`MutationAttemptGuard`] plus a freshly minted
+    /// [`CandidateSeal`]. This is the ONLY path that hands a candidate's guard
+    /// and seal into the parent-owned gate + landing lifecycle (06C acceptance →
+    /// 20-07 CAS).
+    ///
+    /// Taken BY VALUE (`self: Box<Self>`) so that ONLY the single selected
+    /// winner — the candidate whose boxed identity is moved out of
+    /// [`ClimbOutcome::winner`] and consumed here — can ever surrender its guard.
+    /// A losing, rejected, or superseded candidate is *dropped*, never consumed,
+    /// so its guard/seal is unreachable and its transaction terminalizes by RAII;
+    /// there is no shared-reference method that could leak a loser's authority.
+    ///
+    /// The default returns `None`: a non-retained checkout (e.g. a test fake)
+    /// owns no landing authority. Only the production retained checkout yields
+    /// `Some`, and even then it fails closed to `None` if the seal cannot be
+    /// re-minted (a released, drifted, or substituted checkout) — the caller MUST
+    /// treat `None` from a real winner as a hard fail-closed refusal, never a
+    /// silent skip that lands nothing while reporting success.
+    fn into_landing_authority(self: Box<Self>) -> Option<(MutationAttemptGuard, CandidateSeal)> {
+        None
+    }
+
+    /// This winner's borrowed landing identity ([`WinnerIdentity`]): the child id
+    /// it ran as, the base commit it forked from, its candidate head, and the
+    /// transaction-private writable roots. Unlike
+    /// [`into_landing_authority`](Self::into_landing_authority) this BORROWS, so
+    /// the caller can assemble the full landing request + gate authorization
+    /// BEFORE consuming the winner's box to surrender its guard + seal.
+    ///
+    /// The default returns `None`: a non-retained checkout (e.g. a test fake)
+    /// carries no durable transaction identity, so it cannot be landed.
+    fn winner_identity(&self) -> Option<WinnerIdentity> {
+        None
+    }
+}
+
+/// The borrowed landing identity of the selected winner — everything the landing
+/// wiring needs to build the durable transaction + the 06C gate authorization
+/// BEFORE consuming the winner's box for its guard + seal. Re-derived from the
+/// retained checkout's live workspace.
+#[derive(Debug, Clone)]
+pub struct WinnerIdentity {
+    /// The child id the builder ran as (== the transaction workspace owner).
+    pub child_id: ChildId,
+    /// The base commit the candidate forked from — the compare-and-swap `<old>`
+    /// the landing must still find on the target ref.
+    pub base_revision: String,
+    /// The candidate's head commit — the acceptance subject's
+    /// `candidate_revision`. Equals `base_revision` for Anvil builders, which
+    /// edit the working tree but never commit.
+    pub candidate_revision: String,
+    /// The transaction-private writable roots the 06C gate re-run may write to
+    /// (the transaction's own scratch) — the ONLY writable mount under hard
+    /// containment. Sourced from the canonical spawner computation so it never
+    /// drifts from what the child was granted during the build.
+    pub private_writable_roots: Vec<PathBuf>,
 }
 
 /// A candidate build the climb produced, bound to its own retained,
@@ -209,6 +270,55 @@ pub struct ClimbOutcome {
     /// [`Self::winner`] for logs/receipts; it is NOT the source of identity and
     /// is never used to reconstruct a candidate.
     pub best_worktree: Option<PathBuf>,
+    /// The parent-owned landing outcome for the selected winner, when a winner
+    /// existed and the landing wiring ran. Report-only: it carries display
+    /// strings extracted from the landing authorization, never an authority
+    /// object. `None` when the climb produced no winner (nothing to land) or the
+    /// caller did not drive a landing. A landing failure is captured here as
+    /// [`LandingReport::Failed`] — it never crashes the climb or alters
+    /// [`Self::terminal`].
+    pub landing: Option<LandingReport>,
+}
+
+/// A report-only summary of the parent-owned landing attempt for the selected
+/// winner.
+///
+/// Every variant carries ONLY display strings lifted from the landing
+/// authorization outcome ([`crate::child_transaction::ParentLandingAuthorization`])
+/// or the failure that stopped it. It holds no guard, seal, rollback handle, or
+/// other authority object, so surfacing it in a receipt/summary can never itself
+/// land, roll back, or otherwise mutate durable state. The landing wiring builds
+/// it fail-closed: any problem becomes [`Self::Failed`] rather than an error that
+/// would discard the already-earned [`ClimbOutcome`].
+#[derive(Debug)]
+pub enum LandingReport {
+    /// The winner landed coherently onto the Wayland-owned integration branch.
+    Landed {
+        /// The landed commit id (surface-for-accept: it lives in the integration
+        /// clone, NOT the user's working tree).
+        landed_commit: String,
+        /// The fully-qualified `refs/heads/<branch>` the commit landed on.
+        target_ref: String,
+        /// The RETAINED Wayland-owned integration clone the commit landed in
+        /// (surface-for-accept): Wayland Desktop surfaces this path, the user
+        /// accepts by fast-forwarding from it, and Desktop reclaims it afterward
+        /// (Desktop-owned GC). The clone persists past the climb precisely so it
+        /// can be accepted — the user's real repository is never touched.
+        integration_checkout: PathBuf,
+    },
+    /// The parent conflicts with the candidate; nothing landed.
+    Conflict { detail: String },
+    /// The ref advanced but projection/verification is incomplete.
+    Incomplete { detail: String },
+    /// The landing was reversed before completion; no change remains.
+    RolledBack { detail: String },
+    /// An inconsistency requires explicit resolution before landing can complete.
+    RecoveryRequired { detail: String },
+    /// The landing attempt failed before or within authorization (a
+    /// [`WinnerLandingError`](super::landing::WinnerLandingError), a missing
+    /// durable record, a gate-authorization refusal, a workspace error, etc.).
+    /// The climb itself is unaffected — the problem is REPORTED, never a crash.
+    Failed { detail: String },
 }
 
 /// The reserved `verified` stamp string.
@@ -480,6 +590,9 @@ fn finish_keepable(
         valve_fires,
         winner: Some(candidate.checkout),
         best_worktree,
+        // The landing wiring in the forge fills this after the climb, when a
+        // winner exists; the engine itself never lands.
+        landing: None,
     }
 }
 
@@ -560,6 +673,8 @@ fn timed_out_from_best(report: &GateReport, iterations: u32, valve_fires: u32) -
         // terminalizes it on scope exit — no winner is retained.
         winner: None,
         best_worktree: None,
+        // No winner, so no landing was attempted.
+        landing: None,
     }
 }
 
@@ -580,6 +695,8 @@ fn terminal_from_best(report: &GateReport, iterations: u32, valve_fires: u32) ->
         // No keepable candidate: the last `best` terminalizes on scope exit.
         winner: None,
         best_worktree: None,
+        // No winner, so no landing was attempted.
+        landing: None,
     }
 }
 
@@ -594,6 +711,8 @@ fn blocked(reason: String) -> ClimbOutcome {
         valve_fires: 0,
         winner: None,
         best_worktree: None,
+        // No winner, so no landing was attempted.
+        landing: None,
     }
 }
 
