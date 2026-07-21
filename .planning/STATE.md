@@ -74,6 +74,7 @@ Progress: [█████████░] 83%
 - The eighteen replacement plans must pass standard GSD plan checking with complete F20 requirement coverage; review-only boundaries must remain fresh-executor, exact-candidate, and mechanically source-immutable.
 - Existing F20 successors have dependency and platform-proof boundaries that must be reconciled into one candidate.
 - Local `pwsh` is absent. Before native Windows UAT, prove a pinned execution environment or separately bound authorized host; do not install or dispatch during planning.
+- **20-17 BLOCKED (2026-07-21):** no qualifying self-hosted runner exists. `FerroxLabs/wayland-core` has only `ferrox-win-msvc` + `SEANDESKTOP` (both Windows, both offline); zero macOS runners; none carry `f20-native-macos`/`f20-ephemeral`/`f20-no-ambient-secrets`/`f20-image-<hash>`. 20-17's runner preflight fails closed. SEAN must bring online (idle) a macOS self-hosted runner with those labels. Independent gap: `scripts/f20-native-uat-proof.mjs` is verifier-only (no `request` writer); request persistence needs an inline mode-0600 no-follow git-private driver (20-17 `files_modified:[]` forbids a tracked script).
 
 ## Deferred Items
 
