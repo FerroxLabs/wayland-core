@@ -209,7 +209,9 @@ fn configured_docker_client() -> std::result::Result<bollard::Docker, bollard::e
         {
             return bollard::Docker::connect_with_socket(
                 &socket.to_string_lossy(),
-                bollard::docker::DEFAULT_TIMEOUT,
+                // bollard's own DEFAULT_TIMEOUT (120s) is a private const with no
+                // public re-export in 0.17.1; inline the same value.
+                120,
                 bollard::API_DEFAULT_VERSION,
             );
         }
