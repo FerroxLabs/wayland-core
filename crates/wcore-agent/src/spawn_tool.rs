@@ -624,7 +624,11 @@ mod durable_topology_origin_tests {
             },
             ..Config::default()
         };
-        let spawner = Arc::new(AgentSpawner::new(Arc::new(ImmediateProvider), config));
+        let spawner = Arc::new(
+            AgentSpawner::new(Arc::new(ImmediateProvider), config)
+                .with_parent_workspace(dir.path())
+                .unwrap(),
+        );
         let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
         let active = manager
             .create_for_run(
@@ -753,7 +757,11 @@ mod partial_failure_rollup_tests {
             },
             ..Config::default()
         };
-        let spawner = Arc::new(AgentSpawner::new(Arc::new(PartialFailProvider), config));
+        let spawner = Arc::new(
+            AgentSpawner::new(Arc::new(PartialFailProvider), config)
+                .with_parent_workspace(dir.path())
+                .unwrap(),
+        );
         bind_test_durable_session(&spawner, dir.path(), "f190022");
         let tool = SpawnTool::new(spawner);
 
