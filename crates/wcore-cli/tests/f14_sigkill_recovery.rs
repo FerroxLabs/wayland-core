@@ -630,7 +630,17 @@ fn journal_frames(bytes: &[u8]) -> Vec<(usize, Value)> {
     let mut offset = 0;
     let mut frame = 1;
     while offset + 12 <= bytes.len() {
-        assert_eq!(&bytes[offset..offset + 4], b"WJ01", "journal frame magic");
+        // A session journal interleaves two frame kinds that share the same
+        // 12-byte header + body + 32-byte digest layout (session_journal.rs
+        // `encode_frame` / `encode_snapshot_authority_frame`): `WJ01` event
+        // envelopes and `WSA1` snapshot-authority bindings. The product parser
+        // (`parse_complete_frames`) accepts both and keeps them in separate
+        // collections. These F14 recovery assertions reason only about event
+        // envelopes, so decode `WJ01` frames and structurally walk past `WSA1`
+        // binding frames.
+        let magic = &bytes[offset..offset + 4];
+        assert!(magic == b"WJ01" || magic == b"WSA1", "journal frame magic");
+        let is_event_frame = magic == b"WJ01";
         let length = u32::from_be_bytes(
             bytes[offset + 4..offset + 8]
                 .try_into()
@@ -641,11 +651,13 @@ fn journal_frames(bytes: &[u8]) -> Vec<(usize, Value)> {
         if body_end + 32 > bytes.len() {
             break;
         }
-        frames.push((
-            frame,
-            serde_json::from_slice(&bytes[body_start..body_end])
-                .expect("decode journal frame JSON"),
-        ));
+        if is_event_frame {
+            frames.push((
+                frame,
+                serde_json::from_slice(&bytes[body_start..body_end])
+                    .expect("decode journal frame JSON"),
+            ));
+        }
         offset = body_end + 32;
         frame += 1;
     }
