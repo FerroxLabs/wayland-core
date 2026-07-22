@@ -111,6 +111,10 @@ if ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 
+# WAYLAND_SANDBOX_LIVE_MACOS is the live-macOS opt-in consumed by the two native
+# sandbox acceptance tests (retained-directory + process-tree). It mirrors the
+# WAYLAND_SANDBOX_LIVE_WINDOWS gate in tests/live_integrity.rs: those tests
+# self-qualify (rather than skip) only when the harness has set this.
 export WAYLAND_SANDBOX_LIVE_MACOS=1
 export WAYLAND_SANDBOX_LIVE_DOCKER=1
 
@@ -133,13 +137,29 @@ run_target() {
     emit_target_marker "$id"
 }
 
-run_target "macos-retained-directory"            -p wcore-sandbox --test live_integrity
-run_target "macos-process-tree"                  -p wcore-sandbox --test hard_process_containment -E 'test(contained_detached_child_exit)'
-run_target "macos-docker-reject-path-replacement" -p wcore-sandbox --test docker_smoke -E 'test(docker_rejects_allow_hosts_policy)'
-run_target "macos-docker-roundtrip-delete"       -p wcore-sandbox --test docker_smoke -E 'test(docker_runs_hello_world)'
-run_target "macos-public-dispatch"               -p wcore-swarm --test dispatch_smoke
-run_target "macos-docker-cancellation"           -p wcore-sandbox --test docker_smoke -E 'test(docker_returns_enforced_resource_limits)'
-run_target "macos-docker-budget"                 -p wcore-swarm --test worker_runtime_limits
+# Feature flags per target:
+#   * wcore-sandbox targets (1,2,3,4,6) all pass the SAME `--features live-docker`
+#     set. The Docker targets (3,4,6) require it because `tests/docker_smoke.rs`
+#     is `#![cfg(feature = "live-docker")]` and compiles to zero tests otherwise;
+#     targets 1,2 carry the identical flag so every `-p wcore-sandbox` invocation
+#     shares one compiled artifact (no per-target recompile).
+#   * wcore-swarm targets (5,7) run delegated Swarm dispatch. On macOS the primary
+#     sandbox-exec backend is NOT a hard-containment backend (owns_descendants_hard
+#     is false), so `select_delegated_backend` (crates/wcore-swarm/src/dispatch.rs)
+#     rejects it and falls back to `DockerBackend::connect()`. That returns
+#     `Err(DockerDisabled)` unless wcore-sandbox's `live-docker` feature is on, so
+#     these targets MUST enable it via the dependency-qualified
+#     `--features wcore-sandbox/live-docker`. The bare `--features live-docker`
+#     name is what errors on `-p wcore-swarm` (swarm defines no own feature by
+#     that name); the `dep/feature` form is valid and enables it on the dependency.
+#   * The `-p wcore-agent` target (8) needs no Docker feature.
+run_target "macos-retained-directory"            -p wcore-sandbox --features live-docker --test live_integrity_macos -E 'test(required_live_macos_retained_directory_confines_writes)'
+run_target "macos-process-tree"                  -p wcore-sandbox --features live-docker --test hard_process_containment_macos -E 'test(required_live_macos_process_tree_contains_descendants)'
+run_target "macos-docker-reject-path-replacement" -p wcore-sandbox --features live-docker --test docker_smoke -E 'test(docker_rejects_allow_hosts_policy)'
+run_target "macos-docker-roundtrip-delete"       -p wcore-sandbox --features live-docker --test docker_smoke -E 'test(docker_runs_hello_world)'
+run_target "macos-public-dispatch"               -p wcore-swarm --features wcore-sandbox/live-docker --test dispatch_smoke -E 'test(required_live_macos_public_dispatch_bash_confines_parent_and_descendants)'
+run_target "macos-docker-cancellation"           -p wcore-sandbox --features live-docker --test docker_smoke -E 'test(docker_returns_enforced_resource_limits)'
+run_target "macos-docker-budget"                 -p wcore-swarm --features wcore-sandbox/live-docker --test workspace_authority -E 'test(required_live_macos_docker_rejects_over_budget_result)'
 run_target "macos-f20-lifecycle"                 -p wcore-agent --test transactional_delegated_mutation_test
 
 # Exactly one final platform acceptance marker, only after all eight targets.
