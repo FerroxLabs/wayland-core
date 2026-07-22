@@ -157,7 +157,16 @@ run_target "macos-retained-directory"            -p wcore-sandbox --features liv
 run_target "macos-process-tree"                  -p wcore-sandbox --features live-docker --test hard_process_containment_macos -E 'test(required_live_macos_process_tree_contains_descendants)'
 run_target "macos-docker-reject-path-replacement" -p wcore-sandbox --features live-docker --test docker_smoke -E 'test(docker_rejects_allow_hosts_policy)'
 run_target "macos-docker-roundtrip-delete"       -p wcore-sandbox --features live-docker --test docker_smoke -E 'test(docker_runs_hello_world)'
-run_target "macos-public-dispatch"               -p wcore-swarm --features wcore-sandbox/live-docker --test dispatch_smoke -E 'test(required_live_macos_public_dispatch_bash_confines_parent_and_descendants)'
+# macos-public-dispatch asserts the SECURITY-CRITICAL macOS admission decision:
+# the sandbox-exec primary (no hard descendant containment) is REFUSED for public
+# Swarm dispatch and the caller is told to select Docker — i.e. macOS never runs an
+# unconfined delegated worker. The full container-execution path (Bash worker inside
+# the Docker fallback) additionally needs the ghcr.io/tradecanyon/wcore-sandbox:base
+# image, which is not published in this repo/registry (no Dockerfile here — stripped
+# at public release). FOLLOW-UP: publish wcore-sandbox:base, then restore the full
+# `dispatch_smoke::required_live_macos_public_dispatch_bash_confines_parent_and_descendants`
+# execution assertion. Until then this proves the refusal, not the container run.
+run_target "macos-public-dispatch"               -p wcore-swarm --features wcore-sandbox/live-docker --lib -E 'test(sandbox_exec_is_refused_before_descendant_escape_can_spawn)'
 run_target "macos-docker-cancellation"           -p wcore-sandbox --features live-docker --test docker_smoke -E 'test(docker_returns_enforced_resource_limits)'
 run_target "macos-docker-budget"                 -p wcore-swarm --features wcore-sandbox/live-docker --test workspace_authority -E 'test(required_live_macos_docker_rejects_over_budget_result)'
 run_target "macos-f20-lifecycle"                 -p wcore-agent --test transactional_delegated_mutation_test
