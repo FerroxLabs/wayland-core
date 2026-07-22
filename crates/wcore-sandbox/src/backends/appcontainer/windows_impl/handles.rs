@@ -92,6 +92,12 @@ unsafe impl Send for SharedJob {}
 unsafe impl Sync for SharedJob {}
 
 impl SharedJob {
+    /// Wrap an owned Job Object handle. The handle is closed exactly once
+    /// when the last `Arc<SharedJob>` drops (single-close invariant).
+    pub(super) fn new(handle: OwnedHandle) -> Self {
+        Self(handle)
+    }
+
     pub(super) fn terminate(&self) {
         unsafe {
             TerminateJobObject(self.0.as_raw(), 1);
@@ -268,7 +274,7 @@ pub(super) unsafe fn drain_pipe(h: HANDLE, output_bytes: Arc<AtomicUsize>) -> (V
             break;
         }
         let read = read as usize;
-        if super::super::reserve_output(&output_bytes, read) {
+        if super::super::super::reserve_output(&output_bytes, read) {
             out.extend_from_slice(&buf[..read]);
         } else {
             // Keep draining after the ceiling is hit so the child does not

@@ -146,7 +146,7 @@ impl SandboxBackend for AppContainerBackend {
         // ONE real AppContainer spawn instead of stampeding it (#754). The
         // logic lives in a platform-independent helper so it is unit-tested
         // on every target; here it is driven by the real Win32 probe.
-        super::probe_single_flight(
+        super::super::probe_single_flight(
             probe_cache(),
             probe_gate(),
             NEGATIVE_PROBE_TTL,
@@ -426,7 +426,7 @@ pub(super) fn execute_blocking(
                     GetLastError()
                 )));
             }
-            let job = Arc::new(SharedJob(OwnedHandle::new(job_raw)));
+            let job = Arc::new(SharedJob::new(OwnedHandle::new(job_raw)));
             control.install(Arc::clone(&job))?;
 
             let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = mem::zeroed();
@@ -944,7 +944,7 @@ pub(super) fn execute_blocking(
             }
             if stdout_exceeded || stderr_exceeded {
                 return Err(SandboxError::OutputLimitExceeded {
-                    limit_bytes: super::super::BUFFERED_OUTPUT_LIMIT_BYTES,
+                    limit_bytes: super::super::super::BUFFERED_OUTPUT_LIMIT_BYTES,
                 });
             }
 
