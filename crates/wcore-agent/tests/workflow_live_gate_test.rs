@@ -40,7 +40,7 @@ use wcore_types::message::{FinishReason, StopReason, TokenUsage};
 // Workspace-authority propagation/denial coverage (below) drives the REAL
 // production spawner composition Bootstrap installs on the workflow/spawner
 // path, so the same imports the durable child launch uses are pulled in here.
-use common::bind_test_spawner;
+use common::{bind_durable_session_only, bind_test_spawner};
 use wcore_agent::spawner::{
     AgentSpawner, DurableSpawner, DurableSpawnerError, ForkOverrides, ResolvedChildLaunch,
     SubAgentConfig,
@@ -746,7 +746,7 @@ async fn resolve_durable_launch_refuses_inline_mutation() {
 async fn resolve_durable_launch_without_parent_workspace_authority_is_refused() {
     // Durable session bound, but `with_parent_workspace` deliberately skipped.
     let spawner = AgentSpawner::new(quiet_provider(), test_config());
-    let (spawner, _journal, _root) = bind_test_spawner(spawner);
+    let (spawner, _journal, _root) = bind_durable_session_only(spawner);
 
     let err = match spawner.resolve_durable_launch(sub_config("orphan"), ForkOverrides::default()) {
         Ok(_) => panic!("resolution must fail closed without parent workspace authority"),
@@ -771,7 +771,7 @@ async fn resolve_durable_launch_without_parent_workspace_authority_is_refused() 
 #[tokio::test]
 async fn spawn_prepare_child_workspace_fails_closed_without_parent_authority() {
     let spawner = AgentSpawner::new(quiet_provider(), test_config());
-    let (spawner, _journal, _root) = bind_test_spawner(spawner);
+    let (spawner, _journal, _root) = bind_durable_session_only(spawner);
 
     let result = spawner.spawn_one(sub_config("orphan-spawn")).await;
     assert!(

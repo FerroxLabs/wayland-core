@@ -60,6 +60,29 @@ pub fn bind_test_spawner(
     (spawner, journal, root)
 }
 
+/// Bind ONLY the durable session, deliberately leaving the parent-workspace
+/// authority UNBOUND. This reconstructs the "durable session bound + no parent
+/// workspace" state that `bind_test_spawner` used to produce before 20-05
+/// (`a528dbc`) made it always bind a parent — so the fail-closed guard tests
+/// (a child must never resolve without a bound parent workspace) can actually
+/// reach that guard. Never add `with_parent_workspace` here.
+pub fn bind_durable_session_only(
+    spawner: AgentSpawner,
+) -> (AgentSpawner, SessionJournal, tempfile::TempDir) {
+    let root = tempfile::tempdir().expect("create durable spawner test root");
+    let workspace = root.path().to_string_lossy().into_owned();
+    let manager = SessionManager::new(root.path().join("sessions"), 10);
+    let active = manager
+        .create_for_run("test-provider", "test-model", &workspace, None)
+        .expect("create canonical durable spawner test session");
+    let journal = active.journal.clone();
+    // parent_workspace deliberately left UNBOUND — that is the whole point.
+    spawner
+        .bind_durable_session(active.journal, &active.session.id)
+        .expect("bind canonical durable spawner test session");
+    (spawner, journal, root)
+}
+
 /// Bind a test spawner when the caller does not inspect the journal directly.
 pub fn bound_test_spawner(spawner: AgentSpawner) -> (AgentSpawner, tempfile::TempDir) {
     let (spawner, _journal, root) = bind_test_spawner(spawner);
