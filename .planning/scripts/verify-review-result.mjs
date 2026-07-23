@@ -26,6 +26,28 @@ const profiles = {
     checks: ["all_severity", "asvs_level_2", "code_review", "phase_validation"],
     deferred: ["native_macos", "native_windows"],
   },
+  // Native-inclusive review profile for the fresh 20-16-role review (20-26):
+  // native_macos and native_windows are required PASS checks and the deferred
+  // set is EMPTY, so the review can only schema-validate once native proof is
+  // green (20-25) — native is NOT deferred here (REQ-native-r13).
+  "f20-native-16": {
+    checks: [
+      "all_severity",
+      "asvs_level_2",
+      "code_review",
+      "native_macos",
+      "native_windows",
+      "phase_validation",
+    ],
+    deferred: [],
+  },
+  // Cross-audit profile for the pre-native cross-audit gate (before hardware
+  // proof): integration/evidence authority is asserted while native remains
+  // legitimately deferred.
+  "f20-native-crossaudit": {
+    checks: ["all_severity", "evidence_integrity", "integration_authority"],
+    deferred: ["native_macos", "native_windows"],
+  },
 };
 
 function fail(message) {
@@ -57,7 +79,7 @@ if (!oid.test(reviewCommit ?? "") || !oid.test(sourceSha ?? "") || !oid.test(sou
   fail("review commit, source commit, and source tree must be exact lowercase object IDs");
 }
 if (!reviewFile || !profiles[profile]) {
-  fail("usage: verify-review-result.mjs <review-commit> <review-file> <source-sha> <source-tree> <f20-09|f20-11|f20-14|f20-15|f20-16>");
+  fail("usage: verify-review-result.mjs <review-commit> <review-file> <source-sha> <source-tree> <f20-09|f20-11|f20-14|f20-15|f20-16|f20-native-16|f20-native-crossaudit>");
 }
 
 // The (source_sha, source_tree) pair must be internally consistent: the tree

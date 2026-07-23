@@ -199,9 +199,22 @@ jobs:
   # $env:/$NAME, never interpolated into a run: body.
   # --------------------------------------------------------------------------
   f20-windows-candidate:
-    name: F20 native Windows candidate (windows-2022)
+    name: F20 native Windows candidate (self-hosted msvc)
     if: github.event.inputs.f20_candidate == 'true'
-    runs-on: windows-2022
+    # AppContainer-capable self-hosted Windows client SKU. The hosted
+    # windows-2022 image reports AppContainerBackend::is_available() == false
+    # (server SKU without the client AppContainer runtime), so the native
+    # hard-containment proof can never run there. These labels select an online
+    # self-hosted msvc runner on a Windows 11 client that provides AppContainer.
+    # Candidate mode still grants only contents: read, receives no secrets, uses
+    # no persisted caches, and opens no issues; runner identity is recorded into
+    # the UAT evidence via the run's runner_id/runner_name (bound by
+    # scripts/f20-native-uat-proof.mjs bindRun).
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+      - msvc
     timeout-minutes: 60
     permissions:
       contents: read

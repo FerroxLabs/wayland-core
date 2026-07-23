@@ -4,9 +4,13 @@
 // authority for the Phase 20 native UAT. This module is CONSTRUCTED here in
 // plan 20-08 and its verifier logic is proved by f20-native-uat-proof.test.mjs.
 // It performs NO push and NO workflow dispatch by itself — those external
-// mutations remain Sean-gated at the terminal plan. This file only provides
-// the pure, side-effect-free verification primitives that a terminal run
-// composes, plus the no-follow exact-byte reader those primitives require.
+// mutations remain Sean-gated at the terminal plan. This file provides the
+// pure verification primitives that a terminal run composes, the no-follow
+// exact-byte reader those primitives require, AND the sole durable request
+// WRITER (persistRequest / the `request` subcommand): the only path that
+// persists the pending request the verifier later reads, giving writer/verifier
+// parity. The writer's only side effect is persisting that Git-private pending
+// request; it still performs no push, dispatch, commit, format, or Cargo run.
 //
 // Design invariants (see 20-08-PLAN.md Task 3 <behavior>):
 //   * Every authority/state object is opened exactly once through a
@@ -24,10 +28,24 @@
 //     once, in order, all bound to the same candidate commit/tree/nonce,
 //     followed by exactly one final platform acceptance marker.
 //
-// No Cargo, format, commit, push, or dispatch action is performed on import
-// or by any exported function. Callers in the terminal plan own those.
+// No Cargo, format, commit, push, or dispatch action is performed on import or
+// by any exported function; the request writer's sole effect is persisting the
+// Git-private pending request. Callers in the terminal plan own push/dispatch.
 
-import { openSync, fstatSync, readSync, closeSync, constants } from 'node:fs';
+import {
+  openSync,
+  fstatSync,
+  readSync,
+  writeSync,
+  fsyncSync,
+  closeSync,
+  mkdirSync,
+  realpathSync,
+  constants,
+} from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const HEX40_OR_64 = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 const NONCE_RE = /^[0-9a-f]{32,64}$/;
@@ -200,6 +218,79 @@ export function reconcileRequest(existing, requested) {
   return existing;
 }
 
+// ---- Durable request WRITER path (writer/verifier parity) ------------------
+// The primitives above READ a persisted pending request; the functions below
+// are the SOLE writer that PERSISTS it, closing the writer/verifier gap so
+// terminal-plan preparation (20-27) durably writes exactly the pending tuple
+// terminal-plan authentication (20-28) later reads. No push and no dispatch is
+// performed here — only the pending request the human-authorized terminal plan
+// consumes is persisted.
+
+// Canonical single-line JSON (fixed field order) + trailing newline. Fixed
+// ordering makes an exact-tuple re-request produce byte-identical content, so
+// idempotent re-writes never perturb the persisted authority bytes.
+const REQUEST_FIELDS = ['kind', 'status', 'candidate', 'commit', 'tree', 'ref', 'runner_label', 'image_label', 'nonce'];
+
+export function serializeRequest(obj) {
+  validateRequest(obj);
+  const canonical = {};
+  for (const key of REQUEST_FIELDS) canonical[key] = obj[key];
+  return JSON.stringify(canonical) + '\n';
+}
+
+// Durably persist canonical `text` to `path` with the same no-follow +
+// regular-file discipline as the reader, mode 0600, and an fsync before close
+// so a crash cannot strand a torn or absent pending request. A symlink at the
+// final path component fails closed (ELOOP under O_NOFOLLOW; the post-open
+// fstat regular-file check backstops fallback platforms lacking O_NOFOLLOW).
+export function writeExactBytesNoFollow(path, text) {
+  const buf = Buffer.from(text, 'utf8');
+  let fd;
+  try {
+    fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | NOFOLLOW, 0o600);
+  } catch (err) {
+    if (err && (err.code === 'ELOOP' || err.code === 'EMLINK')) {
+      fail(`refused to follow symlink at authority path: ${path}`);
+    }
+    throw err;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) fail(`authority path is not a regular file: ${path}`);
+    let written = 0;
+    while (written < buf.length) {
+      written += writeSync(fd, buf, written, buf.length - written);
+    }
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// The request path: durably persist the exact pending native-proof tuple the
+// verifier / proof-checkout paths later read. Exact-tuple idempotent — an
+// identical prior pending request is returned unchanged and re-serialized to
+// byte-identical canonical bytes; a conflicting, malformed, or non-pending
+// existing object fails closed (via reconcileRequest / validateRequest). A
+// symlink or non-regular object at the authority path fails closed. Returns the
+// persisted pending object.
+export function persistRequest(path, requested) {
+  validateRequest(requested);
+  let existing = null;
+  try {
+    existing = parseJsonObject(readExactBytesNoFollow(path));
+  } catch (err) {
+    if (err instanceof ProofError && err.message.startsWith('missing authority artifact')) {
+      existing = null; // first write for this candidate — no prior pending object
+    } else {
+      throw err; // symlink / non-regular / malformed existing object fails closed
+    }
+  }
+  const reconciled = reconcileRequest(existing, requested);
+  writeExactBytesNoFollow(path, serializeRequest(reconciled));
+  return reconciled;
+}
+
 // Exact-response idempotent authorization. Authorizing the same pending
 // request twice yields the identical authorization digest; a different
 // digest for the same request fails closed.
@@ -366,4 +457,59 @@ export function verifyNativeLog(bytes, { platform, commit, tree, nonce }) {
 export function verifyNativeLogFile(path, expected) {
   const bytes = readExactBytesNoFollow(path);
   return verifyNativeLog(bytes, expected);
+}
+
+// ---- request writer subcommand ---------------------------------------------
+// `node f20-native-uat-proof.mjs request '<json-request-tuple>'` durably
+// persists the pending native-proof request into a Git-private authority path
+// (resolved via `git rev-parse --git-path`, never a worktree-tracked file), so
+// terminal-plan preparation writes exactly the object verification later
+// authenticates. Exact-tuple idempotent; malformed input or a conflicting
+// existing request fails closed. Performs NO push and NO dispatch.
+
+// Resolve the Git-private authority path for a candidate's pending request.
+// `git rev-parse --git-path` yields a path under the private git dir (e.g.
+// .git/f20-native-uat/<commit>/request.json), which is never committed.
+function gitPrivateRequestPath(commit) {
+  const out = execFileSync('git', ['rev-parse', '--git-path', `f20-native-uat/${commit}/request.json`], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return out.trim();
+}
+
+function runRequestSubcommand(args) {
+  const json = args[0];
+  if (typeof json !== 'string' || json.length === 0) {
+    fail('request subcommand requires a single JSON request-tuple argument');
+  }
+  let requested;
+  try {
+    requested = JSON.parse(json);
+  } catch {
+    fail('request tuple argument is not valid JSON');
+  }
+  validateRequest(requested);
+  const dest = gitPrivateRequestPath(requested.commit);
+  mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
+  const persisted = persistRequest(dest, requested);
+  process.stdout.write(serializeRequest(persisted));
+}
+
+// Run the CLI only on direct execution, never on import — keeps the module a
+// pure library for the test suite and terminal-plan composition (importing it
+// has no side effect).
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
+  const [, , subcommand, ...rest] = process.argv;
+  try {
+    if (subcommand === 'request') {
+      runRequestSubcommand(rest);
+    } else {
+      process.stderr.write(`unknown subcommand: ${subcommand ?? '(none)'}\n`);
+      process.exit(2);
+    }
+  } catch (err) {
+    process.stderr.write(`${err && err.message ? err.message : err}\n`);
+    process.exit(1);
+  }
 }
