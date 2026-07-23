@@ -23,7 +23,7 @@ use wcore_sandbox::backends::appcontainer::AppContainerBackend;
 use wcore_sandbox::{SandboxCommand, SandboxManifest};
 
 const MARKER: &str = "HEADROOM_R61_GRANT_OK";
-const NATIVE_ACCEPTANCE_CASES: usize = 9;
+const NATIVE_ACCEPTANCE_CASES: usize = 11;
 
 fn require_live_acceptance() {
     assert_eq!(
@@ -41,7 +41,7 @@ fn require_live_acceptance() {
 #[ignore = "zero-execution guard for explicit native Windows acceptance"]
 fn native_acceptance_gate_marker() {
     require_live_acceptance();
-    assert_eq!(NATIVE_ACCEPTANCE_CASES, 9);
+    assert_eq!(NATIVE_ACCEPTANCE_CASES, 11);
 }
 
 /// Seed a unique test dir under `%PUBLIC%` holding a file containing [`MARKER`].
@@ -181,22 +181,34 @@ async fn ungranted_path_is_denied_in_sandbox() {
 async fn granted_path_is_readable_then_revoked() {
     require_live_acceptance();
     let (dir, file) = seed_file("granted");
-    let backend = AppContainerBackend::new();
     let manifest = SandboxManifest {
         timeout: Some(Duration::from_secs(10)),
         fs_read_allow: vec![dir.clone()],
         ..Default::default()
     };
-    let out = backend
-        .execute(&manifest, type_file(&file))
+    // Hold the granted read alive so the grant ACE can be proven PRESENT on the
+    // host DACL *during* the run, then joined for the read result (exit 0 +
+    // content), then proven ABSENT after. Asserting both present-during and
+    // absent-after makes the revoke genuinely falsifiable: a grant that never
+    // applied fails the present-during wait, and a leaked grant fails the
+    // absent-after wait — neither can be masked by an unrelated success.
+    let read_file = file.clone();
+    let read = tokio::spawn(async move {
+        AppContainerBackend::new()
+            .execute(&manifest, type_and_hold(&read_file, 3))
+            .await
+    });
+    wait_until(
+        || has_appcontainer_ace(&dir),
+        "granted read AppContainer ACE present during run",
+    )
+    .await;
+
+    let out = read
         .await
-        .expect("execute");
-
+        .expect("join granted read")
+        .expect("granted read");
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    // Capture the DACL while the file still exists, before cleanup.
-    let acl_after = icacls(&file);
-    let _ = std::fs::remove_dir_all(&dir);
-
     assert_eq!(
         out.exit_code,
         0,
@@ -208,13 +220,22 @@ async fn granted_path_is_readable_then_revoked() {
         "sandbox must read the granted file's content; got stdout={stdout:?}"
     );
     // The grant must be revoked once the spawn finished — no permanent
-    // AppContainer ACE left on the host. icacls renders the package SID either
-    // as the raw `S-1-15-2-…` or a resolved name containing the profile moniker.
+    // AppContainer ACE left on the host.
+    wait_until(
+        || !has_appcontainer_ace(&dir),
+        "granted read grant revoked after run",
+    )
+    .await;
+    // Belt-and-braces: the file's own DACL carries no residual AppContainer ACE.
+    // icacls renders the package SID either as the raw `S-1-15-2-…` or a resolved
+    // name containing the profile moniker.
+    let acl_after = icacls(&file);
     let acl_lower = acl_after.to_lowercase();
     assert!(
         !acl_after.contains("S-1-15-2-") && !acl_lower.contains("wcoresandbox"),
         "AppContainer grant must be revoked after the run (no host ACL leak); icacls:\n{acl_after}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Task 4: A secret file under a granted parent directory is unreadable when
@@ -535,4 +556,108 @@ async fn unrelated_acl_survives_exact_sid_cleanup() {
     );
     assert!(!has_appcontainer_ace(&file));
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Isolation proof (REQ-native-r2 / CONTEXT D4): an explicit DENY ace still
+/// blocks the sandboxed child even when a matching package-SID grant is ALSO
+/// present. Windows evaluates DENY aces before ALLOW, so the DENY must win.
+///
+/// Falsifiable: the file's directory is `fs_read_allow`-granted (so absent the
+/// DENY the child WOULD read it, as `granted_path_is_readable_then_revoked`
+/// proves), and the file itself is `fs_read_deny`-denied. If dropping the
+/// deny-only SIDs in 20-19 had weakened the boundary so a DENY could be
+/// bypassed, this read would succeed (exit 0, MARKER present) and the test
+/// would FAIL.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "explicit native Windows AppContainer acceptance"]
+async fn deny_ace_still_blocks_granted_read() {
+    require_live_acceptance();
+    let (dir, file) = seed_file("deny-wins");
+    let backend = AppContainerBackend::new();
+    // Same target: a package-SID ALLOW grant (via the granted directory) PLUS an
+    // explicit package-SID DENY on the file. The DENY must override the grant.
+    let manifest = SandboxManifest {
+        timeout: Some(Duration::from_secs(10)),
+        fs_read_allow: vec![dir.clone()],
+        fs_read_deny: vec![file.clone()],
+        ..Default::default()
+    };
+    let out = backend
+        .execute(&manifest, type_file(&file))
+        .await
+        .expect("execute");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    // Capture the DACL while the file still exists, before cleanup.
+    let acl_after = icacls(&file);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_ne!(
+        out.exit_code, 0,
+        "an explicit DENY ace must block the read even with a matching grant; \
+         got exit 0 stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains(MARKER),
+        "a DENY-blocked read must not disclose the file's bytes; stdout={stdout:?}"
+    );
+    // Both the ALLOW grant and the DENY ace are revoked after the run — no
+    // permanent AppContainer ACE (grant or deny) left on the host.
+    let acl_lower = acl_after.to_lowercase();
+    assert!(
+        !acl_after.contains("S-1-15-2-") && !acl_lower.contains("wcoresandbox"),
+        "AppContainer grant/deny aces must be revoked after the run; icacls:\n{acl_after}"
+    );
+}
+
+/// Isolation proof (REQ-native-r2 / CONTEXT D4): a file granted ONLY to a
+/// normal SID (`Everyone` / `S-1-1-0`), with NO AppContainer package-SID grant
+/// (no `fs_read_allow`), is STILL denied to the sandboxed child.
+///
+/// This is the load-bearing proof that dropping the deny-only SIDs in 20-19 did
+/// not weaken the sandbox: isolation is intrinsic to the AppContainer package-SID
+/// access model, which ignores normal SIDs for granting. Falsifiable: if the
+/// child could use a normal-SID grant, this read would succeed (exit 0, MARKER)
+/// and the test would FAIL — the exact regression the deny-only marking was
+/// (redundantly) thought to guard against.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "explicit native Windows AppContainer acceptance"]
+async fn normal_sid_only_grant_is_denied() {
+    require_live_acceptance();
+    let (dir, file) = seed_file("normal-sid-only");
+    // Grant the file to a NORMAL sid only (Everyone / S-1-1-0). No package-SID
+    // grant is issued (no fs_read_allow), so the ONLY ACE the child could try to
+    // use is the normal-SID one the AppContainer model must ignore.
+    let grant = std::process::Command::new("icacls")
+        .arg(&file)
+        .args(["/grant", "*S-1-1-0:(R)"])
+        .output()
+        .expect("grant Everyone read ACE");
+    assert!(grant.status.success(), "seed normal-SID grant: {grant:?}");
+
+    let backend = AppContainerBackend::new();
+    let manifest = SandboxManifest {
+        timeout: Some(Duration::from_secs(10)),
+        // Deliberately NO fs_read_allow: prove denial is intrinsic, not a
+        // side effect of withholding a package-SID grant on a shared dir.
+        ..Default::default()
+    };
+    let out = backend
+        .execute(&manifest, type_file(&file))
+        .await
+        .expect("execute");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_ne!(
+        out.exit_code, 0,
+        "a file granted only to a normal SID must stay denied to the AppContainer \
+         child; got exit 0 stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains(MARKER),
+        "a normal-SID-only grant must not disclose bytes to the sandboxed child; \
+         stdout={stdout:?}"
+    );
 }
