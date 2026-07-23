@@ -267,6 +267,40 @@ export const MACOS_TARGETS = [
   'macos-f20-lifecycle',
 ];
 
+// Canonical native-target -> { crate, test, os } expectation (REQ-native-r8).
+// This is the SHARED source of truth for the wrong-OS anti-drift guard: the
+// PowerShell guard in f20-native-windows-proof.ps1 mirrors these `os` fields,
+// and the macOS guard reuses MACOS_TARGET_SOURCES (applied in 20-22). It also
+// records the 20-21 repoint (REQ-native-r7): windows-job-object and
+// windows-hard-process-containment now select the REAL Windows Job-Object tests
+// in crates/wcore-sandbox/tests/hard_process_containment_windows.rs, never the
+// Linux-only Bubblewrap hard_process_containment.rs they were mis-wired to.
+//
+// os semantics:
+//   'windows'/'macos' — an OS-specific native test; its source MUST be cfg-gated
+//                       for that OS (the guard fails closed otherwise).
+//   'any'             — a legitimately cross-platform test (no OS-exclusive gate);
+//                       exempt from the positive-gate requirement.
+export const WINDOWS_TARGET_SOURCES = {
+  'windows-retained-handle': { crate: 'wcore-sandbox', test: 'live_fs_acl', os: 'windows' },
+  'windows-appcontainer-acl': { crate: 'wcore-sandbox', test: 'live_fs_acl', os: 'windows' },
+  'windows-job-object': { crate: 'wcore-sandbox', test: 'hard_process_containment_windows', os: 'windows' },
+  'windows-public-dispatch': { crate: 'wcore-swarm', test: 'dispatch_smoke', os: 'any' },
+  'windows-hard-process-containment': { crate: 'wcore-sandbox', test: 'hard_process_containment_windows', os: 'windows' },
+  'windows-f20-lifecycle': { crate: 'wcore-agent', test: 'transactional_delegated_mutation_test', os: 'any' },
+};
+
+export const MACOS_TARGET_SOURCES = {
+  'macos-retained-directory': { crate: 'wcore-sandbox', test: 'live_integrity_macos', os: 'macos' },
+  'macos-process-tree': { crate: 'wcore-sandbox', test: 'hard_process_containment_macos', os: 'macos' },
+  'macos-docker-reject-path-replacement': { crate: 'wcore-sandbox', test: 'docker_smoke', os: 'any' },
+  'macos-docker-roundtrip-delete': { crate: 'wcore-sandbox', test: 'docker_smoke', os: 'any' },
+  'macos-public-dispatch': { crate: 'wcore-swarm', test: null, os: 'any' },
+  'macos-docker-cancellation': { crate: 'wcore-sandbox', test: 'docker_smoke', os: 'any' },
+  'macos-docker-budget': { crate: 'wcore-swarm', test: 'workspace_authority', os: 'any' },
+  'macos-f20-lifecycle': { crate: 'wcore-agent', test: 'transactional_delegated_mutation_test', os: 'any' },
+};
+
 const FINAL_MARKER = {
   windows: 'F20_NATIVE_WINDOWS_ACCEPTANCE=PASS',
   macos: 'F20_NATIVE_MACOS_ACCEPTANCE=PASS',
