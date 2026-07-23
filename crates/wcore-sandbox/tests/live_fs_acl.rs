@@ -116,15 +116,26 @@ fn cmd_script(script: String) -> SandboxCommand {
 }
 
 fn type_and_hold(file: &Path, seconds: u8) -> SandboxCommand {
+    // `type` proves the granted read; ONLY on its success (`&&`) do we hold the
+    // process alive with the stdin-free `choice` delay (choice tolerates the
+    // sandbox's null stdin, unlike `timeout.exe`, which fails under redirected
+    // stdin), then run `ver` — a builtin that always exits 0 — so the SCRIPT's
+    // exit code reflects the granted READ succeeding, NOT choice's 1-based
+    // selection index (default `Y` => exit 1), which can never be 0. If `type`
+    // is denied, `&&` short-circuits and the script exits with type's non-zero
+    // code, so an exit-0 assertion genuinely gates on the granted read.
     cmd_script(format!(
-        "type \"{}\" & %SystemRoot%\\System32\\choice.exe /T {seconds} /D Y >nul",
+        "type \"{}\" && (%SystemRoot%\\System32\\choice.exe /T {seconds} /D Y >nul & ver >nul)",
         file.display()
     ))
 }
 
 fn echo_temp_and_hold(seconds: u8) -> SandboxCommand {
+    // `echo %TEMP%` then the stdin-free `choice` hold, then `ver` (always exit 0)
+    // so the script exits 0 on success. `choice` alone leaves its 1-based index
+    // (default `Y` => exit 1), which would fail callers that assert exit 0.
     cmd_script(format!(
-        "echo %TEMP% & %SystemRoot%\\System32\\choice.exe /T {seconds} /D Y >nul"
+        "echo %TEMP% & %SystemRoot%\\System32\\choice.exe /T {seconds} /D Y >nul & ver >nul"
     ))
 }
 
@@ -343,12 +354,17 @@ async fn one_execution_grant_never_leaks_to_another_identity() {
         !String::from_utf8_lossy(&b_out.stdout).contains(MARKER),
         "B must not read bytes granted only to A"
     );
+    // A's script exit code now reflects the granted READ succeeding (exit 0 via
+    // `type && … & ver`), not `choice`'s 1-based selection index. Gate on that
+    // read: A must exit 0 AND have actually read the granted bytes.
+    let a_out = a.await.expect("join execution A").expect("execution A");
     assert_eq!(
-        a.await
-            .expect("join execution A")
-            .expect("execution A")
-            .exit_code,
-        0
+        a_out.exit_code, 0,
+        "the granting identity's read must succeed (exit 0), not choice's selection index"
+    );
+    assert!(
+        String::from_utf8_lossy(&a_out.stdout).contains(MARKER),
+        "the granting identity must actually read the granted bytes"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

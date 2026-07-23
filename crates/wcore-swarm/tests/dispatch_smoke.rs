@@ -282,11 +282,12 @@ async fn heartbeat_symlink_cannot_make_parent_disclose_host_data_or_hang() {
 #[tokio::test]
 async fn dispatch_rejects_different_head_repository_replacement() {
     let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("repo");
-    std::fs::create_dir(&repo).unwrap();
+    let container = tmp.path().join("box");
+    let repo = container.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
     init_repo(&repo).await;
     let swarm = Swarm::new(&repo).unwrap();
-    std::fs::rename(&repo, tmp.path().join("original-repo")).unwrap();
+    replace_repo_container(&container, &tmp.path().join("original-box"));
     std::fs::create_dir(&repo).unwrap();
     init_repo_with_contents(&repo, "replacement\n").await;
 
@@ -296,13 +297,14 @@ async fn dispatch_rejects_different_head_repository_replacement() {
 #[tokio::test]
 async fn dispatch_rejects_same_head_repository_replacement() {
     let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().join("repo");
-    std::fs::create_dir(&repo).unwrap();
+    let container = tmp.path().join("box");
+    let repo = container.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
     init_repo(&repo).await;
     let swarm = Swarm::new(&repo).unwrap();
-    let original = tmp.path().join("original-repo");
-    std::fs::rename(&repo, &original).unwrap();
-    let source = original.to_string_lossy().into_owned();
+    let moved = tmp.path().join("original-box");
+    replace_repo_container(&container, &moved);
+    let source = moved.join("repo").to_string_lossy().into_owned();
     let destination = repo.to_string_lossy().into_owned();
     run_git(
         tmp.path(),
@@ -311,6 +313,25 @@ async fn dispatch_rejects_same_head_repository_replacement() {
     .await;
 
     assert_repository_replacement_rejected(&swarm).await;
+}
+
+/// Replace the repository at the SAME pathname with a different on-disk
+/// directory object, WITHOUT renaming the swarm-held `repo` directory itself.
+///
+/// The swarm retains open `DirectoryAuthority` handles on `repo` AND on its
+/// `.swarm-worktrees` control descendants. Windows refuses to rename a
+/// self-held directory that ALSO has open descendants, so renaming `repo`
+/// directly panics with `Os { code: 5, PermissionDenied }` (native-uat-repair
+/// BRIEF §4.E). Renaming the *parent container* — which the swarm does NOT hold
+/// open on itself — is portable: it mirrors the in-tree, non-cfg-gated
+/// `worktree_tests::failed_transaction_cleanup_remains_retryable` pattern
+/// (rename an ancestor whose descendants are held via `FILE_SHARE_DELETE`). The
+/// swarm's retained `repo` handle survives the move, so the caller recreating a
+/// fresh directory at the original `repo` path yields exactly the "same path,
+/// different directory object" condition that `validate_repo_authority` rejects.
+fn replace_repo_container(container: &Path, moved_container: &Path) {
+    std::fs::rename(container, moved_container).unwrap();
+    std::fs::create_dir(container).unwrap();
 }
 
 async fn assert_repository_replacement_rejected(swarm: &Swarm) {
