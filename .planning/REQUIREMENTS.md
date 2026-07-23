@@ -39,6 +39,9 @@ Additive, non-overlapping requirements from `native-uat-repair-BRIEF.md` (SPEC, 
 - [ ] **REQ-native-r10**: Regenerate + commit `Cargo.lock`; reset tainted local tree to pristine `be84bd2`.
 - [ ] **REQ-native-r11**: Windows proof leg runs on an AppContainer-capable self-hosted msvc runner (not hosted `windows-2022`).
 - [ ] **REQ-native-r12**: Repaired candidate passes the full gate sequence: build → cross-audit → Hetzner aggregate → native proof (Win+mac) → fresh 20-16 (native NOT deferred) → 20-17 → Sean-authorized 20-18.
+- [ ] **REQ-native-r13** (audit addendum): every review gate (incl. the fresh 20-16) emits a schema-validated review artifact for EVERY claimed reviewer; no prose-only "reviews" count toward a PASS. (Closes the 20-08/20-16 attestation gap: 4 claimed reviews had no on-disk artifact.)
+- [ ] **REQ-native-r14** (audit addendum): re-prove on real hardware the wcore-sandbox **Windows COMPILE** fix (windows_impl module-path debt) and the **macOS proof-harness test-mapping** fix — the actual recorded 20-18 (2026-07-22) failures — not only the 07-23 AppContainer findings.
+- [ ] **REQ-native-r15** (audit addendum, hard gate): reset the working tree to pristine `be84bd2` (remove the boundary-breaking `process.rs` full-token-swap diagnostic) BEFORE any candidate build; write the real "drop deny-only SIDs" fix fresh under the plan, not salvaged from the diagnostic edit.
 
 ### Phase 21 — Child Authority and Budget Inheritance
 
@@ -143,6 +146,7 @@ Additive, non-overlapping requirements from `native-uat-repair-BRIEF.md` (SPEC, 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | F20-01, F20-02, F20-03, F20-04, F20-05, F20-06, F20-GATE-01, F20-GATE-02 | Phase 20 | In Progress |
+| REQ-native-r1 … REQ-native-r12 (native-UAT repair; sub-clauses refining F20-05 / SC#3) | Phase 20 (native path) | In Progress |
 | F21-01, F21-02, F21-03, F21-04 | Phase 21 | Pending |
 | F22-01, F22-02, F22-03, F22-04, F22-05, F22-06, F22-07 | Phase 22 | Pending |
 | F23-01, F23-02, F23-03, F23-04, F23-05, F23-06 | Phase 23 | Pending |
@@ -159,8 +163,10 @@ Additive, non-overlapping requirements from `native-uat-repair-BRIEF.md` (SPEC, 
 - Mapped to phases: 58
 - Unmapped: 0
 - Duplicate mappings: 0
-- Program controls: 4 total (0 established, 4 open)
+- Program controls: 4 total (0 established, 4 open) — CTRL-01 (`intel/COMPETITIVE-LEDGER.md`) and CTRL-03 (`intel/FIELD-REGRESSIONS.md`) are intentionally cross-cutting/continuous (not single-phase-mapped); CTRL-02/D1 gates broad Phase 21 and CTRL-04/D2 gates Phase 23 exit (`intel/DESKTOP-PROTOCOL-CHECKPOINT.md`).
+- Grand total distinct requirement IDs: 74 (58 F-phase + 4 CTRL + 12 REQ-native).
+- Additive native-UAT repair requirements: 12 (REQ-native-r1 … r12) — sub-clauses refining F20-05 / Phase-20 Success Criterion #3; NOT counted in the 58 (they are acceptance detail, not new scope). Full text: `.planning/intel/inbox-2026-07-23/requirements.md`.
 
 ---
 *Requirements defined: 2026-07-18*
-*Last updated: 2026-07-18 after GSD onboarding and Plan v2 advisory reconciliation*
+*Last updated: 2026-07-23 — native-UAT-repair addendum (R1–R12) ingested + traceability row added; controls unchanged*

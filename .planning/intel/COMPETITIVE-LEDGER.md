@@ -1,4 +1,4 @@
-# Competitive Capability Ledger v1
+# Competitive Capability Ledger v1 — CTRL-01
 
 This control ledger exists before broad execution. It prevents F30 from first discovering product gaps.
 

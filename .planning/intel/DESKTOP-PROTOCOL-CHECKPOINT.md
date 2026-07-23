@@ -1,4 +1,4 @@
-# Core to Desktop Protocol Checkpoints
+# Core to Desktop Protocol Checkpoints — CTRL-02 (D1) + CTRL-04 (D2)
 
 Desktop is the primary GUI/control plane; Core remains the enforcement authority and independently usable CLI/TUI engine. Core cannot claim Desktop behavior from Core tests alone.
 

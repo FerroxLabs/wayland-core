@@ -37,7 +37,7 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
 **Goal**: Delegated coding can mutate only an isolated workspace and can affect the parent only through a gated, attributable, reversible integration.
 **Depends on**: None
 **Accepted Source**: F00-F19 entered Phase 20 at `97e44910fc6dd4761f1f862dbf54a5a76262cef2` (tree `8d27bd96b476a728d3ebbe0e1583c6488dd5effc`). The reconciled source before reopened 20-03 execution is `94f014d039b8babf3f5926385a3bbc5cb5cf3c41` (tree `49635e1678bd96e42353ab0f7f943ba87497e9d0`). It contains accepted 20-01 source `626e1d4d3dee9fee7008ad172ec0b4add8f2004e`, accepted 20-02 source `96afb30aff362ef8f0d4f6f93773eae548d989ee`, both standard summaries, and the later source repairs recorded in their history. The independently accepted plan successor of `94f014d` is captured as `F20_03_EXECUTION_BASE` immediately before Task 1A and is the sole source checkout for all remaining Phase 20 work.
-**Requirements**: F20-01, F20-02, F20-03, F20-04, F20-05, F20-06, F20-GATE-01, F20-GATE-02
+**Requirements**: F20-01, F20-02, F20-03, F20-04, F20-05, F20-06, F20-GATE-01, F20-GATE-02; plus the additive native-UAT repair requirements REQ-native-r1…r12 (refine F20-05 / Success Criterion #3 — the live, currently-blocking remaining Phase-20 scope; full text in `.planning/intel/inbox-2026-07-23/requirements.md` + audit addenda r13–r15 in `AUDIT-2026-07-23.md`)
 **Success Criteria** (what must be TRUE):
   1. Parallel children can make conflicting edits without overwriting or silently mutating the parent.
   2. Stale identity, failed gates, and conflicts stop before merge while preserving usable evidence.
@@ -54,7 +54,7 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
   2. Nested reservation, refund, escalation, approval, cancellation, and result delivery remain attributable to the correct parent/session.
   3. Standalone and host-protocol hostile corpora prove equivalent enforcement.
 **Plans**: TBD
-**Admission prerequisite**: D1 linked Desktop plan and consumer/reducer conformance harness are pinned to the exact Core producer contract before broad Phase 21 execution.
+**Admission prerequisite**: before broad Phase 21 execution — (CTRL-02 / D1) the linked Desktop plan and consumer/reducer conformance harness are pinned to the exact Core producer contract, AND (CTRL-01) the Competitive Capability Ledger has pinned exact Hermes + OpenClaw baselines with F03/F05 evidence mapped.
 
 ### Phase 22: Supervision, Durable Goals, Fleet, and Loops
 **Goal**: Users can supervise durable objectives and work graphs through one restart-safe lifecycle and one loop owner.
@@ -168,7 +168,7 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 20. Transactional Delegated Mutation | 16/18 | 20-01…20-16 complete. Candidate `6937ef6` (tree `6db6fc85`; working commit `be84bd2`); Linux 11509/0, macOS 8/8; 20-16 review CLEAN (native deferred by design). **Native path RED** — 20-18 ran RED on real Windows 11 (2026-07-23). Remaining: native-repair successor (R1–R12) → fresh 20-16 (native NOT deferred) → 20-17 → 20-18 | - |
+| 20. Transactional Delegated Mutation | 16/18 | 20-01…20-16 complete. Candidate `6937ef6` (tree `6db6fc85`; working commit `be84bd2`); Linux `nextest --profile ci` 11509/0 (Hetzner); 20-16 review CLEAN (native deferred by design). **Native path RED/incomplete** — recorded 20-18 ran RED 2026-07-22 vs PRE-repair `5e665ec` (Windows compile + macOS test-mapping failures); repaired `6937ef6` reviewed CLEAN, 20-17 tuple still pending, **no 20-18 vs `6937ef6` yet**; a 2026-07-23 off-plan diagnostic found a deeper AppContainer read/token issue. Windows+macOS native UNPROVEN for `6937ef6`. Remaining: native-repair successor (R1–R12) → fresh 20-16 (native NOT deferred) → 20-17 re-prep → 20-18 | - |
 | 21. Child Authority and Budget Inheritance | 0/TBD | Not started | - |
 | 22. Supervision, Durable Goals, Fleet, and Loops | 0/TBD | Not started | - |
 | 23. Governed Continuous Personal Agency | 0/TBD | Not started | - |
