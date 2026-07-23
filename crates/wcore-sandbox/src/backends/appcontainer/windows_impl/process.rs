@@ -321,31 +321,24 @@ pub(super) fn execute_blocking(
         unsafe {
             // ---- 2. Restricted token ----
             //
-            // SidsToDisable: explicitly mark BUILTIN\Administrators,
-            // BUILTIN\Users, and Authenticated Users as "for deny only" in
-            // the child's token. Without this, an elevated parent leaves
-            // these SIDs enabled, and any resource whose DACL grants those
-            // groups would be reachable by the AppContainer child despite
-            // the AppContainer SID restriction (Chromium / sandboxie use
-            // the same pattern).
-            let admins_sid = allocate_sid([0, 0, 0, 0, 0, 5], &[32, 544])?;
-            let users_sid = allocate_sid([0, 0, 0, 0, 0, 5], &[32, 545])?;
-            let auth_users_sid = allocate_sid([0, 0, 0, 0, 0, 5], &[11])?;
-            let mut sids_to_disable: [SID_AND_ATTRIBUTES; 3] = [
-                SID_AND_ATTRIBUTES {
-                    Sid: admins_sid.as_psid(),
-                    Attributes: 0,
-                },
-                SID_AND_ATTRIBUTES {
-                    Sid: users_sid.as_psid(),
-                    Attributes: 0,
-                },
-                SID_AND_ATTRIBUTES {
-                    Sid: auth_users_sid.as_psid(),
-                    Attributes: 0,
-                },
-            ];
-
+            // No deny-only SIDs. An earlier revision marked
+            // BUILTIN\Administrators, BUILTIN\Users, and Authenticated Users
+            // as "for deny only" (SidsToDisable), mirroring the Chromium /
+            // sandboxie primary-token pattern. On a real AppContainer that
+            // marking is REDUNDANT and actively harmful: containment is
+            // intrinsic to the AppContainer package-SID access model, which
+            // ignores normal SIDs (Everyone/Users/Authenticated Users) for
+            // *granting* — a file granted only to those SIDs is still denied
+            // to the child. So isolation does not depend on the deny-only
+            // marking. Meanwhile that marking broke the package-SID grant
+            // path: it left the child with no usable enabled SID for any
+            // file's DACL, so a sandboxed process could read no file at all —
+            // not even an AppContainer-granted one. The 2026-07-23 hardware
+            // matrix confirmed identical reads exit 0 with the marking OFF and
+            // exit 1 with it ON, while a normal-SID-only grant stayed denied
+            // either way. Passing 0/null for SidsToDisable therefore restores
+            // reads without weakening the sandbox; the child token remains
+            // restricted, low-integrity, and AppContainer-tagged.
             let mut current_token: HANDLE = std::ptr::null_mut();
             if OpenProcessToken(
                 GetCurrentProcess(),
@@ -367,8 +360,8 @@ pub(super) fn execute_blocking(
             if CreateRestrictedToken(
                 current_token.as_raw(),
                 DISABLE_MAX_PRIVILEGE,
-                sids_to_disable.len() as u32,
-                sids_to_disable.as_mut_ptr(),
+                0,
+                ptr::null_mut(),
                 0,
                 ptr::null(),
                 0,

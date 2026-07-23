@@ -410,6 +410,15 @@ fn create_or_open_child_directory(parent: &TrustedRoot, component: &str) -> Resu
 fn create_new_nofollow(root: &TrustedRoot, path: &Path) -> Result<File> {
     validate_child(root, path)?;
     let file = OpenOptions::new()
+        // `access_mode` sets the real CreateFile access (GENERIC_READ|GENERIC_WRITE),
+        // but std's `get_creation_mode` validates the high-level write/append flags
+        // independently of `access_mode`: a `create_new` open with neither `.write(true)`
+        // nor `.append(true)` fails with `InvalidInput` ("creating or truncating a file
+        // requires write or append access") before CreateFileW is ever called, so the
+        // ACL-lease probe file is never created and `is_available()` returns false on
+        // every Windows host. `.write(true)` satisfies that gate; `access_mode` keeps the
+        // effective access exactly GENERIC_READ|GENERIC_WRITE.
+        .write(true)
         .access_mode(GENERIC_READ | GENERIC_WRITE)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)

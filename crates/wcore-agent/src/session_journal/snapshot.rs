@@ -651,9 +651,12 @@ mod windows_snapshot_security {
     fn open_security_handle(file: &File, path: &Path) -> Result<File, JournalError> {
         use std::fs::OpenOptions;
         use std::os::windows::fs::OpenOptionsExt as _;
-        use windows_sys::Win32::Security::{READ_CONTROL, WRITE_DAC};
+        // In windows-sys 0.59, READ_CONTROL and WRITE_DAC are exported from
+        // Win32::Storage::FileSystem (the feature this crate already enables),
+        // not Win32::Security; importing them from Security is E0432 on msvc.
         use windows_sys::Win32::Storage::FileSystem::{
             FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            READ_CONTROL, WRITE_DAC,
         };
 
         super::super::lease::ensure_path_identity(file, path)?;
