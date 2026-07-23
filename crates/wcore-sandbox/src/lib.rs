@@ -115,6 +115,72 @@ pub fn no_sandbox_opt_in() -> bool {
         .unwrap_or(false)
 }
 
+/// Config-sourced toggle for the Windows relaxed-sandbox posture, installed
+/// once at bootstrap from `[tools] windows_relaxed_sandbox` /
+/// `[tools] windows_allow_admin`.
+///
+/// This exists because the desktop host spawns the engine through a curated
+/// environment-variable ALLOWLIST (only a fixed set of names survive the
+/// spawn — see the Electron host's `ENGINE_ENV_ALLOWLIST` / `buildEngineSpawnEnv`).
+/// An operator-set `WAYLAND_WINDOWS_RELAXED_SANDBOX` env var therefore never
+/// reaches the desktop-spawned engine process even though it works for a
+/// CLI/headless invocation, which inherits the full environment. Config is
+/// read from `config.toml` on disk (unaffected by that allowlist), giving the
+/// desktop a reliable channel; the env vars keep precedence for CLI use.
+#[derive(Clone, Copy, Default)]
+struct WindowsRelaxedConfigOverride {
+    relaxed: Option<bool>,
+    allow_admin: Option<bool>,
+}
+
+fn windows_relaxed_config_override() -> &'static RwLock<WindowsRelaxedConfigOverride> {
+    static CFG: OnceLock<RwLock<WindowsRelaxedConfigOverride>> = OnceLock::new();
+    CFG.get_or_init(|| RwLock::new(WindowsRelaxedConfigOverride::default()))
+}
+
+/// Install the config-sourced Windows relaxed-sandbox toggle. Called once at
+/// host bootstrap with the resolved `[tools] windows_relaxed_sandbox` /
+/// `[tools] windows_allow_admin` values. No-op on non-Windows platforms (the
+/// values are simply never consulted there).
+pub fn set_config_windows_relaxed_sandbox(relaxed: Option<bool>, allow_admin: Option<bool>) {
+    let mut guard = match windows_relaxed_config_override().write() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    *guard = WindowsRelaxedConfigOverride {
+        relaxed,
+        allow_admin,
+    };
+}
+
+/// Resolve the effective Windows relaxed-sandbox toggle: the
+/// `WAYLAND_WINDOWS_RELAXED_SANDBOX` env var wins when set (CLI use);
+/// otherwise the config-installed `[tools] windows_relaxed_sandbox` value.
+pub fn windows_relaxed_sandbox_enabled() -> bool {
+    if let Ok(v) = std::env::var("WAYLAND_WINDOWS_RELAXED_SANDBOX") {
+        return v == "1" || v.eq_ignore_ascii_case("true");
+    }
+    windows_relaxed_config_override()
+        .read()
+        .ok()
+        .and_then(|g| g.relaxed)
+        .unwrap_or(false)
+}
+
+/// Resolve the effective Windows admin-escalation opt-in, mirroring
+/// [`windows_relaxed_sandbox_enabled`]. Only takes effect when the relaxed
+/// posture is also active — see the token-creation call site.
+pub fn windows_allow_admin_enabled() -> bool {
+    if let Ok(v) = std::env::var("WAYLAND_WINDOWS_ALLOW_ADMIN") {
+        return v == "1" || v.eq_ignore_ascii_case("true");
+    }
+    windows_relaxed_config_override()
+        .read()
+        .ok()
+        .and_then(|g| g.allow_admin)
+        .unwrap_or(false)
+}
+
 /// Minimum gap between repeated "sandbox degraded" warnings.
 const DEGRADED_WARN_INTERVAL: Duration = Duration::from_secs(60);
 

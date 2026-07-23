@@ -677,6 +677,15 @@ impl AgentBootstrap {
             self.config.tools.allow_no_sandbox,
         );
 
+        // Windows relaxed-sandbox posture: `[tools] windows_relaxed_sandbox` /
+        // `[tools] windows_allow_admin`. Config is the reliable channel for a
+        // desktop-spawned engine — see set_config_windows_relaxed_sandbox's
+        // doc comment for why the corresponding env vars don't reach it.
+        wcore_sandbox::set_config_windows_relaxed_sandbox(
+            self.config.tools.windows_relaxed_sandbox,
+            self.config.tools.windows_allow_admin,
+        );
+
         registry.register(Box::new(wcore_tools::read::ReadTool::new(
             file_cache.clone(),
         )));

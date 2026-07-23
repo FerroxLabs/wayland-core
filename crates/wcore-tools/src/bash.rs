@@ -549,6 +549,43 @@ impl Tool for BashTool {
         "Bash"
     }
 
+    #[cfg(windows)]
+    fn description(&self) -> &str {
+        "Executes a shell command and returns its output.\n\n\
+         IMPORTANT: Do NOT use Bash when a dedicated tool is available:\n\
+         - File search: use Glob (not find or ls)\n\
+         - Content search: use Grep (not grep or rg)\n\
+         - Read files: use Read (not cat, head, or tail)\n\
+         - Edit files: use Edit (not sed or awk)\n\
+         - Write files: use Write (not echo or cat with heredoc)\n\
+         - Web access: the Bash sandbox has NO NETWORK — curl/wget/git-fetch \
+         and other network commands fail (empty output). To read a URL use the \
+         WebFetch tool; to search the web use the `web` tool with operation \
+         \"search\". Do NOT retry with curl/wget.\n\n\
+         # Instructions\n\
+         - Use absolute paths to avoid working directory confusion.\n\
+         - When issuing multiple independent commands, make parallel tool calls \
+         instead of chaining them. Use `&&` only when commands depend on each other.\n\
+         - You may specify an optional timeout in milliseconds (default 120000, max 600000).\n\n\
+         # Windows: PowerShell quoting\n\
+         - Your whole command line is run as `cmd /C <what you write>`. If you \
+         write `powershell -Command \"...\"` with an outer DOUBLE-quoted -Command \
+         argument, cmd's own re-tokenizing of `/C` mangles the nested quotes. You \
+         will see either a PowerShell parse error, or worse, `exit 0` with EMPTY \
+         stdout even though the script never actually ran.\n\
+         - Fix: wrap the -Command argument in SINGLE quotes instead —\n\
+         `powershell -NoProfile -Command 'Write-Output $env:USERPROFILE'` — cmd.exe \
+         does not treat single quotes as special, so nothing gets mangled. Double \
+         quotes are still fine for strings *inside* the single-quoted script body.\n\
+         - For anything longer or with its own single quotes, use \
+         `-EncodedCommand <base64 UTF-16LE>` instead of `-Command`, or write the \
+         script to a file and run `powershell -File script.ps1`.\n\n\
+         # Git safety\n\
+         - Never force push, reset --hard, or use --no-verify unless explicitly asked.\n\
+         - Prefer creating new commits over amending existing ones."
+    }
+
+    #[cfg(not(windows))]
     fn description(&self) -> &str {
         "Executes a shell command and returns its output.\n\n\
          IMPORTANT: Do NOT use Bash when a dedicated tool is available:\n\
@@ -975,6 +1012,25 @@ impl Tool for BashTool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    #[cfg(windows)]
+    fn description_warns_about_powershell_double_quote_mangling() {
+        // Live-reproduced in the app: `cmd /C powershell -Command "..."` either
+        // fails with a PowerShell parse error or silently returns exit 0 with
+        // EMPTY stdout, because cmd's own /C re-tokenizing mangles the nested
+        // double quotes. The single-quote workaround must be in the LLM-facing
+        // description so the agent avoids the trap instead of retrying it.
+        let desc = BashTool.description();
+        assert!(
+            desc.contains("PowerShell quoting"),
+            "Windows description must warn about the cmd /C quoting artifact"
+        );
+        assert!(
+            desc.contains("SINGLE quotes"),
+            "Windows description must recommend the single-quote workaround"
+        );
+    }
 
     #[tokio::test]
     #[serial_test::serial]
