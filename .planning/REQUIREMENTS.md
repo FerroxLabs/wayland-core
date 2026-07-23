@@ -23,6 +23,23 @@
 - [ ] **F20-GATE-01**: Failed, stale, incomplete, malformed, reordered, duplicated, post-terminal, or mismatched candidate gates remain non-landing and preserve durable diagnostics.
 - [ ] **F20-GATE-02**: Only parent-observed execution of the exact live candidate under qualifying hard containment, followed by authoritative receipt append and replay, can create the opaque candidate-acceptance handoff; caller, child, model, and advisory-evaluator claims cannot.
 
+#### Phase 20 Native-UAT Repair (R1–R12)
+
+Additive, non-overlapping requirements from `native-uat-repair-BRIEF.md` (SPEC, ingested 2026-07-23). They refine F20-05 / Success Criterion #3 (native Windows/macOS identities share one authoritative lifecycle) with concrete, hardware-evidenced acceptance. Full text + acceptance in `.planning/intel/inbox-2026-07-23/requirements.md`.
+
+- [ ] **REQ-native-r1**: `AppContainerBackend::is_available()` returns true on real Windows (add `.write(true)` to `storage.rs` `create_new_nofollow`).
+- [ ] **REQ-native-r2**: Sandboxed process reads granted files / denied ungranted, grants revoked, isolation preserved (drop deny-only `SidsToDisable` in `CreateRestrictedToken`).
+- [ ] **REQ-native-r3**: `wcore-agent` compiles on `x86_64-pc-windows-msvc` (`READ_CONTROL`/`WRITE_DAC` from `Win32::Storage::FileSystem`).
+- [ ] **REQ-native-r4**: No Linux/macOS regression (Linux 11509/0; macOS 8/8 hold).
+- [ ] **REQ-native-r5**: `type_and_hold` asserts on granted-read success, not `choice.exe` exit index (stdin-free hold).
+- [ ] **REQ-native-r6**: `dispatch_smoke` Windows-portable (no `fs::rename` of open dir).
+- [ ] **REQ-native-r7**: `windows-job-object`/`windows-hard-process-containment` targets map to REAL Windows Job-Object containment tests (must be authored).
+- [ ] **REQ-native-r8**: Structural guard preventing a native proof target mapping to a wrong-OS test.
+- [ ] **REQ-native-r9**: Re-validate the macOS proof harness against real macOS (8/8 confirmed real + green).
+- [ ] **REQ-native-r10**: Regenerate + commit `Cargo.lock`; reset tainted local tree to pristine `be84bd2`.
+- [ ] **REQ-native-r11**: Windows proof leg runs on an AppContainer-capable self-hosted msvc runner (not hosted `windows-2022`).
+- [ ] **REQ-native-r12**: Repaired candidate passes the full gate sequence: build → cross-audit → Hetzner aggregate → native proof (Win+mac) → fresh 20-16 (native NOT deferred) → 20-17 → Sean-authorized 20-18.
+
 ### Phase 21 — Child Authority and Budget Inheritance
 
 - [ ] **F21-01**: Every child receives the intersection of parent and requested provider, model, tool, filesystem, egress, secret, and approval authority.

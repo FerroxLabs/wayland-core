@@ -1,0 +1,13 @@
+{
+  "source_path": "/Users/seandonahoe/dev/waylandcore-ferrox/.planning/inbox/native-uat-repair-BRIEF.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": true,
+  "title": "BRIEF — Phase 20 Native-UAT Repair (Windows + macOS native proof machinery)",
+  "summary": "Repair specification for the Phase-20 native-UAT blocker: verified defect inventory plus requirements and acceptance for the Windows/macOS native proof machinery.",
+  "scope": ["native UAT harness", "Windows AppContainer sandbox", "macOS native proof", "wcore-sandbox", "wcore-agent", "Phase 20 delegated-mutation"],
+  "cross_refs": [],
+  "locked": false,
+  "precedence": 0,
+  "notes": "Manifest declared SPEC (authoritative); document self-labels PRD/repair brief but manifest override applied. Precedence 0 from MANIFEST_PRECEDENCE."
+}

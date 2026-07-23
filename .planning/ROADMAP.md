@@ -168,7 +168,7 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 20. Transactional Delegated Mutation | 2/18 | Plans 20-01 and 20-02 complete; reopened 20-03 is the next serial execution boundary | - |
+| 20. Transactional Delegated Mutation | 16/18 | 20-01…20-16 complete. Candidate `6937ef6` (tree `6db6fc85`; working commit `be84bd2`); Linux 11509/0, macOS 8/8; 20-16 review CLEAN (native deferred by design). **Native path RED** — 20-18 ran RED on real Windows 11 (2026-07-23). Remaining: native-repair successor (R1–R12) → fresh 20-16 (native NOT deferred) → 20-17 → 20-18 | - |
 | 21. Child Authority and Budget Inheritance | 0/TBD | Not started | - |
 | 22. Supervision, Durable Goals, Fleet, and Loops | 0/TBD | Not started | - |
 | 23. Governed Continuous Personal Agency | 0/TBD | Not started | - |

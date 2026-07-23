@@ -1,0 +1,13 @@
+{
+  "source_path": "/Users/seandonahoe/dev/waylandcore-ferrox/.planning/inbox/MASTER-HANDOFF-phase20-native-parity.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": true,
+  "title": "MASTER HANDOFF — Phase 20: Transactional Delegated Mutation + Cross-Platform Native Parity",
+  "summary": "Consolidated Phase-20 handoff mapping done/to-do/remaining for the transactional delegated-mutation lifecycle and its cross-platform native-parity proof blocker.",
+  "scope": ["Phase 20", "transactional delegated mutation", "wcore-sandbox", "cross-platform native parity", "native UAT proof harness", "Anvil climb"],
+  "cross_refs": [".planning/inbox/native-uat-repair-BRIEF.md", ".planning/STATE.md", ".planning/phases/20-transactional-delegated-mutation/"],
+  "locked": false,
+  "precedence": 2,
+  "notes": ""
+}
