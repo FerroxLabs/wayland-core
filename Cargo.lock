@@ -10118,11 +10118,14 @@ version = "0.12.25"
 dependencies = [
  "async-trait",
  "bollard",
+ "cap-std",
  "futures",
  "landlock",
  "libc",
  "libseccomp",
  "serde",
+ "serde_json",
+ "tar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -10177,11 +10180,14 @@ dependencies = [
 name = "wcore-swarm"
 version = "0.12.25"
 dependencies = [
+ "fd-lock",
  "futures",
  "humantime-serde",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -10192,6 +10198,7 @@ dependencies = [
  "wcore-memory",
  "wcore-sandbox",
  "wcore-types",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
