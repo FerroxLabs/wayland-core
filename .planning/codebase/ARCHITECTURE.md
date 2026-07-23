@@ -1,265 +1,237 @@
-<!-- refreshed: 2026-07-18 -->
+<!-- refreshed: 2026-07-23 -->
 # Architecture
 
-**Analysis Date:** 2026-07-18
+**Analysis Date:** 2026-07-23
 
 ## System Overview
 
 ```text
-┌───────────────────────────────────────────────────────────────────────────┐
-│                              Host Surfaces                                │
-├──────────────────────┬───────────────────────┬────────────────────────────┤
-│ CLI / TUI / REPL     │ JSON-stream / ACP     │ Channels / scheduled work  │
-│ `crates/wcore-cli/`  │ `crates/wcore-        │ `crates/wcore-channels/`   │
-│                      │ protocol/`, `wcore-acp`│ `crates/wcore-cron/`       │
-└──────────┬───────────┴───────────┬───────────┴─────────────┬──────────────┘
-           │                       │                         │
-           └───────────────────────┼─────────────────────────┘
-                                   ▼
-┌───────────────────────────────────────────────────────────────────────────┐
-│                     Agent and Orchestration Runtime                       │
-│ `crates/wcore-agent/src/bootstrap.rs` → `engine.rs` → `orchestration/`    │
-└──────────┬─────────────────┬─────────────────┬────────────────────────────┘
-           │                 │                 │
-           ▼                 ▼                 ▼
-┌──────────────────┐ ┌──────────────────┐ ┌────────────────────────────────┐
-│ Model capability │ │ Action capability│ │ Stateful capability            │
-│ `wcore-providers`│ │ `wcore-tools`    │ │ `wcore-memory`, `wcore-skills`,│
-│                  │ │ `wcore-mcp`      │ │ `wcore-evolve`, `wcore-budget` │
-└─────────┬────────┘ └─────────┬────────┘ └───────────────┬────────────────┘
-          └────────────────────┼───────────────────────────┘
-                               ▼
-┌───────────────────────────────────────────────────────────────────────────┐
-│                  Shared Contracts and Policy Boundaries                   │
-│ `wcore-config` · `wcore-protocol` · `wcore-plugin-api` · `wcore-types`   │
-│ `wcore-egress` · `wcore-permissions` · `wcore-sandbox`                   │
-└──────────┬────────────────────────────────────────────────────────────────┘
-           ▼
-┌───────────────────────────────────────────────────────────────────────────┐
-│ Filesystem state, provider APIs, MCP servers, OS sandboxes, channel APIs  │
-│ Session files: `crates/wcore-agent/src/session.rs` and `session_journal.rs`│
-└───────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│  wcore-cli — CLI binary (`main.rs`), TUI, slash commands, anvil verb │
+│  `crates/wcore-cli/src`                                              │
+└───────────────────────────────┬──────────────────────────────────────┘
+                                 │
+┌───────────────────────────────▼──────────────────────────────────────┐
+│  wcore-agent — Engine, Session, Spawner, Orchestration                │
+│  `crates/wcore-agent/src/engine.rs` (1.2MB), `session.rs`,           │
+│  `spawner.rs`, `bootstrap.rs`, `orchestration/`                      │
+│  Hosts: Anvil (gated forge), Council, Workflow (ForgeFlows/DSL),     │
+│  SessionJournal, ChildTransaction, DurableSpawner                    │
+└──┬──────────┬───────────┬────────────┬────────────┬──────────────────┘
+   │          │           │            │            │
+   ▼          ▼           ▼            ▼            ▼
+┌──────┐ ┌─────────┐ ┌─────────┐ ┌───────────┐ ┌──────────────┐
+│wcore-│ │wcore-   │ │wcore-   │ │wcore-swarm│ │wcore-sandbox │
+│tools │ │providers│ │mcp/     │ │(worktree, │ │(bwrap/       │
+│      │ │(Llm-    │ │skills/  │ │ fleet,    │ │ sandbox-exec/│
+│      │ │Provider)│ │memory   │ │ consensus)│ │ AppContainer)│
+└──┬───┘ └────┬────┘ └────┬────┘ └─────┬─────┘ └──────┬───────┘
+   │          │           │            │              │
+   └──────────┴─────┬─────┴────────────┴──────────────┘
+                     ▼
+┌─────────────────────────────────────────────────────────────┐
+│  wcore-config / wcore-protocol / wcore-egress / wcore-budget │
+│  `crates/wcore-config`, `crates/wcore-protocol`               │
+└───────────────────────────────┬───────────────────────────────┘
+                                 ▼
+┌─────────────────────────────────────────────────────────────┐
+│  wcore-types — provider-neutral data types (zero internal deps)│
+│  `crates/wcore-types/src`                                     │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## Component Responsibilities
 
 | Component | Responsibility | File |
 |-----------|----------------|------|
-| Process host | Parses commands, resolves launch mode, owns Tokio runtime, and selects TUI, REPL, one-shot, or JSON-stream execution | `crates/wcore-cli/src/main.rs` |
-| CLI library | Implements host-facing subcommands and bridges that cannot live in engine-free crates | `crates/wcore-cli/src/lib.rs` |
-| Bootstrap | Builds the session-scoped provider, tool registry, plugins, MCP managers, memory, hooks, channels, budgets, and policy handles | `crates/wcore-agent/src/bootstrap.rs` |
-| Agent engine | Owns conversation state, provider streaming, tool turns, compaction, budgets, cancellation, durable recovery, and output emission | `crates/wcore-agent/src/engine.rs` |
-| Orchestration | Executes tool calls and agent graphs, dynamic workflows, council runs, and Anvil flows over shared spawner seams | `crates/wcore-agent/src/orchestration/` |
-| Provider layer | Converts provider-neutral requests into Anthropic, OpenAI, Bedrock, Vertex, Gemini, Flux, and compatible wire formats | `crates/wcore-providers/src/lib.rs` |
-| Tool layer | Defines the `Tool` contract, registry, workspace policy, built-in actions, and tool result shaping | `crates/wcore-tools/src/lib.rs` |
-| Configuration | Resolves global/project/CLI configuration and centralizes provider compatibility, credentials, shell, and platform behavior | `crates/wcore-config/src/config.rs` |
-| Host protocol | Defines host commands/events, bounded stdin ingestion, approval state, and JSONL emission | `crates/wcore-protocol/src/lib.rs` |
-| Plugin boundary | Exposes mirror types and scoped registrars without importing host implementation crates | `crates/wcore-plugin-api/src/lib.rs` |
-| Session persistence | Stores session mirrors, write-ahead messages, indexes, exclusive run leases, and recovery journals | `crates/wcore-agent/src/session.rs` |
-| Memory and learning | Provides long-term memory, skill discovery/routing, evaluation, and prompt evolution as peer substrates | `crates/wcore-memory/src/lib.rs` |
-| Channels | Defines the transport-neutral channel lifecycle and registers concrete platform adapters | `crates/wcore-channels/src/lib.rs` |
-| Security boundary | Centralizes outbound HTTP policy, approval policy, workspace containment, and platform sandbox execution | `crates/wcore-egress/src/lib.rs` |
+| Engine | Turn loop, streaming, tool dispatch, hook execution | `crates/wcore-agent/src/engine.rs` |
+| Session | Session lifecycle, message history, state persistence | `crates/wcore-agent/src/session.rs` |
+| Spawner | Sub-agent / child process spawning abstraction (`AgentSpawner` trait) used by Anvil, Council, Swarm | `crates/wcore-agent/src/spawner.rs`, `crates/wcore-agent/src/spawner/` |
+| DurableSpawner | Crash-safe spawn with journal-backed resume | `crates/wcore-agent/src/durable_spawner.rs` |
+| SessionJournal | Append-only durable event log; source of truth for turn/tool/budget/hook state, resumability | `crates/wcore-agent/src/session_journal.rs`, `crates/wcore-agent/src/session_journal/` |
+| ChildTransaction | Transactional wrapper around a spawned child's mutation lifecycle | `crates/wcore-agent/src/child_transaction.rs`, `crates/wcore-agent/src/child_transaction/` |
+| Anvil (gated forge) | Native "climb" loop that forges a verified/self-checked candidate against a real executable gate | `crates/wcore-agent/src/orchestration/anvil/` |
+| Council | Multi-advisor proposal/aggregation orchestration (sibling of Anvil) | `crates/wcore-agent/src/orchestration/council/` |
+| Workflow (ForgeFlows) | Declarative RON workflow DSL lowered to `GraphConfig` IR, executed via `WorkflowRunner` | `crates/wcore-agent/src/orchestration/workflow/` |
+| ExecutionGraph | Per-turn graph walker (legacy/test scaffolding path, distinct from Workflow runner) | `crates/wcore-agent/src/orchestration/graph.rs` |
+| wcore-swarm | Worktree isolation, fleet dispatch, consensus/debate, `CandidateSeal` sealing of candidates | `crates/wcore-swarm/src/` |
+| wcore-sandbox | Cross-platform process sandbox backends + `HardContainmentAuthority` minting | `crates/wcore-sandbox/src/lib.rs`, `crates/wcore-sandbox/src/backends/` |
+| wcore-providers | `LlmProvider` trait + Anthropic/OpenAI/Bedrock/Vertex implementations | `crates/wcore-providers/src/` |
+| wcore-tools | Built-in tool trait (`Tool`) + implementations (Read, Write, Edit, Bash, Grep, Glob, Spawn) | `crates/wcore-tools/src/` |
+| wcore-config | Config cascade, `ProviderCompat`, auth, hooks, shell helpers | `crates/wcore-config/src/` |
+| wcore-protocol | JSON stream protocol (events/commands/approval) for host integration (Wayland desktop) | `crates/wcore-protocol/src/` |
 
 ## Pattern Overview
 
-**Overall:** Layered Cargo workspace with ports-and-adapters boundaries and a session-scoped async runtime.
+**Overall:** Layered Cargo workspace with strict downward dependency flow (bottom crates have zero/minimal internal deps; `wcore-agent` is the top engine that composes everything below it into a session/turn loop). Cross-cutting subsystems (sandboxing, provider abstraction, tool dispatch) are implemented as trait objects (`SandboxBackend`, `LlmProvider`, `Tool`, `AgentSpawner`) so `wcore-agent` never hardcodes a specific provider/platform/backend.
 
 **Key Characteristics:**
-- Dependencies flow from host crates through `wcore-agent` into capability crates and shared contracts; add shared behavior at the lowest semantically correct layer in `Cargo.toml`.
-- Provider, tool, memory, channel, output, plugin, and spawning behavior is expressed through traits and registries rather than referenced as concrete implementations by the engine hot path.
-- `AgentBootstrap` is the composition root. Runtime code consumes already-resolved policy and capability handles instead of reconstructing them per turn.
-- JSON-stream contracts remain separate from observability internals; protocol trace payloads use opaque serialized values in `crates/wcore-protocol/src/events.rs`.
-- Durable sessions use an event journal as recovery authority and a session JSON file as the user-facing mirror in `crates/wcore-agent/src/session_journal.rs` and `crates/wcore-agent/src/session.rs`.
+- Strict downward crate dependency graph enforced by convention + `cargo metadata` review (see AGENTS.md crate map); plugin crates (`wayland-*`) go through `wcore-plugin-api` mirror types to avoid leaking `wcore-browser`/`wcore-cua`/`wcore-sandbox` deps into plugins (audit F2 isolation).
+- Provider differences are resolved through the `ProviderCompat` config layer (`wcore-config`), never hardcoded `if base_url.contains(...)` conditionals in provider code.
+- Fail-closed security posture: sandbox dispatch refuses execution (`FailClosedBackend`) unless a real backend is available or the operator opts into `WAYLAND_ALLOW_NO_SANDBOX=1`.
+- Transactional delegated mutation: child/candidate work happens in an isolated checkout (worktree), is sealed (`CandidateSeal`), gated (real executable gate, not self-report), and only then landed into the parent's integration checkout via a CAS-guarded ref update with rollback on failure.
+- Everything durable routes through `SessionJournal` (append-only, JSON-envelope) so crashes recover via idempotent resume rather than re-derivation.
 
 ## Layers
 
-**Host and Transport Layer:**
-- Purpose: Translate terminal, desktop, ACP, channel, cron, and subprocess interactions into engine turns and render engine output.
-- Location: `crates/wcore-cli/`, `crates/wcore-acp/`, `crates/wcore-channels/`, `crates/wcore-channel-*/`, `crates/wcore-cron/`
-- Contains: Process entry points, TUI state/rendering, JSON-stream command loop, ACP transports, channel connectors, and CLI subcommands.
-- Depends on: `wcore-agent`, transport-neutral protocol types, configuration, and capability crates needed by explicit bridges.
-- Used by: End users, the Wayland Desktop host, ACP clients, channel platforms, and schedulers.
+**`wcore-types` (bottom):**
+- Purpose: shared provider-neutral types (`LlmRequest`, `LlmEvent`, `Message`, `ContentBlock`, execution policy types like `DangerousSessionGrant`)
+- Location: `crates/wcore-types/src`
+- Depends on: nothing internal
+- Used by: virtually every other crate
 
-**Agent Runtime Layer:**
-- Purpose: Compose a session and run crash-recoverable model/tool turns.
-- Location: `crates/wcore-agent/src/`
-- Contains: Bootstrap, engine, output sinks, session journal, hooks, orchestration graphs, spawners, channel dispatch, recovery, and tool backends.
-- Depends on: Capability crates and shared contracts below it.
-- Used by: `wcore-cli` and engine-backed host bridges.
+**`wcore-config` / `wcore-protocol` / `wcore-egress` / `wcore-budget` (mid, foundational):**
+- Purpose: configuration cascade + `ProviderCompat` + auth + cross-platform shell helpers (`wcore-config`); JSON-stream protocol events/commands/approval manager for host integration (`wcore-protocol`); single outbound-HTTP chokepoint (`wcore-egress`, `EgressClient`); budget caps + telemetry (`wcore-budget`)
+- Location: `crates/wcore-config`, `crates/wcore-protocol`, `crates/wcore-egress`, `crates/wcore-budget`
+- Depends on: `wcore-types`
+- Used by: providers, tools, agent
 
-**Capability Layer:**
-- Purpose: Implement independently testable model, action, context, learning, communication, and observability capabilities.
-- Location: `crates/wcore-providers/`, `crates/wcore-tools/`, `crates/wcore-mcp/`, `crates/wcore-memory/`, `crates/wcore-skills/`, `crates/wcore-browser/`, `crates/wcore-cua/`, `crates/wcore-observability/`
-- Contains: Provider adapters, built-in tools, MCP client/server transports, memory stores, skill catalogs, browser/CUA backends, and trace sinks.
-- Depends on: `wcore-config`, `wcore-protocol`, `wcore-types`, and narrowly scoped peer crates declared in each manifest.
-- Used by: `wcore-agent`, `wcore-cli`, evaluation harnesses, and plugin host adapters.
+**`wcore-providers` / `wcore-tools` / `wcore-mcp` / `wcore-skills` / `wcore-memory` / `wcore-sandbox` / `wcore-browser` / `wcore-cua` / `wcore-swarm` (mid, capability crates):**
+- Purpose: pluggable capabilities the engine composes — LLM providers, built-in tools, MCP client, skills, long-term memory, process sandboxing, browser/computer-use tool families, worktree-isolated multi-agent dispatch
+- Location: `crates/wcore-providers`, `crates/wcore-tools`, `crates/wcore-mcp`, `crates/wcore-skills`, `crates/wcore-memory`, `crates/wcore-sandbox`, `crates/wcore-browser`, `crates/wcore-cua`, `crates/wcore-swarm`
+- Depends on: `wcore-types`, `wcore-config`, `wcore-protocol` (varies per crate)
+- Used by: `wcore-agent`
 
-**Policy and Shared Contract Layer:**
-- Purpose: Define provider-neutral data, configuration, protocol envelopes, permission decisions, egress controls, and plugin-facing mirror types.
-- Location: `crates/wcore-types/`, `crates/wcore-config/`, `crates/wcore-protocol/`, `crates/wcore-plugin-api/`, `crates/wcore-egress/`, `crates/wcore-permissions/`, `crates/wcore-sandbox/`
-- Contains: `LlmRequest`, `LlmEvent`, messages, execution policy, `ProviderCompat`, protocol commands/events, plugin registrars, and sandbox manifests.
-- Depends on: External Rust libraries and only lower/peer internal crates allowed by the workspace graph.
-- Used by: Every higher runtime and capability layer.
+**`wcore-agent` (top engine):**
+- Purpose: turn loop, session/spawner lifecycle, orchestration (Anvil/Council/Workflow), transactional delegated mutation
+- Location: `crates/wcore-agent/src`
+- Contains: `engine.rs` (turn loop core, largest file in the workspace at 1.2MB), `session.rs`, `spawner.rs`/`spawner/`, `session_journal.rs`/`session_journal/`, `child_transaction.rs`/`child_transaction/`, `orchestration/`
+- Depends on: every mid-layer crate
+- Used by: `wcore-cli`, plugin crates (`wayland-*`) via `wcore-plugin-api` mirrors, host integrations via `wcore-protocol`
 
-**Plugin Layer:**
-- Purpose: Package optional providers and tool families without making plugin crates depend on their host implementations.
-- Location: `crates/wayland-*/`, `crates/wcore-plugin-wasm/`, `crates/wcore-plugin-subprocess/`, `crates/wcore-pluginsrc/`
-- Contains: Static inventory plugins, plugin manifests, mirror specs, WASM/subprocess runtimes, and marketplace-source lowering.
-- Depends on: Primarily `wcore-plugin-api` and protocol/types allowed by the isolation contract.
-- Used by: `PluginLoader` and host adapters in `crates/wcore-agent/src/plugins/`.
-
-**Verification and Evolution Layer:**
-- Purpose: Score behavior, replay traces, exercise real scenarios, evolve prompts, and validate packaged outcomes.
-- Location: `crates/wcore-eval/`, `crates/wcore-eval-scenarios/`, `crates/wcore-evolve/`, `crates/wcore-replay/`, `crates/wcore-fixture-harness/`
-- Contains: Eval gates, scenario drivers, receipts, prompt mutation/retention, trace replay, and customer-shaped fixtures.
-- Depends on: Public capability and protocol surfaces rather than private host state where possible.
-- Used by: CI, release proof, benchmark flows, and developers.
+**`wcore-cli` (top, entry binary):**
+- Purpose: CLI parsing, TUI, slash commands, doctor/migrate/plugin subcommands, the `anvil` verb
+- Location: `crates/wcore-cli/src`
+- Contains: `main.rs` (318.7K — CLI entry + arg wiring), `acp.rs`/`acp_engine.rs` (Agent Client Protocol), `anvil.rs`, `swarm.rs`, `crucible.rs`, `tui/`
+- Depends on: `wcore-agent` and lower layers
+- Used by: end users (binary), Wayland desktop app (via JSON stream protocol, not this crate directly)
 
 ## Data Flow
 
-### Primary Request Path
+### Primary Turn/Request Path
 
-1. `main` activates the selected profile, loads process environment, constructs a multithreaded Tokio runtime, and enters `run` (`crates/wcore-cli/src/main.rs:886`).
-2. `run` resolves config/provenance and launch policy, then selects JSON-stream, TUI, REPL, or one-shot mode (`crates/wcore-cli/src/main.rs:962`, `crates/wcore-config/src/config.rs:2015`).
-3. The chosen host creates an `OutputSink` and calls `AgentBootstrap::build`; bootstrap assembles plugins, built-ins, MCP tools, memory, channels, policies, and provider (`crates/wcore-agent/src/bootstrap.rs:552`).
-4. A host message reaches `AgentEngine::run_with_content`; the engine opens a durable turn, checks recovery and budget authority, appends the user message, and enters `run_inner` (`crates/wcore-agent/src/engine.rs:5978`, `crates/wcore-agent/src/engine.rs:8532`).
-5. `run_inner` builds a provider-neutral `LlmRequest` from the conversation, selected tools, compatibility settings, cache boundaries, and transient context (`crates/wcore-agent/src/engine.rs:9109`).
-6. The selected `LlmProvider` streams `LlmEvent` values; text/thinking is emitted immediately and tool-use blocks are collected (`crates/wcore-agent/src/engine.rs:10131`, `crates/wcore-agent/src/engine.rs:10353`).
-7. Tool calls execute through an `AgentNodeExecutor` and `ExecutionGraph`; approval, budgets, hooks, cancellation, effect receipts, and registry dispatch are applied at this boundary (`crates/wcore-agent/src/engine.rs:11360`, `crates/wcore-agent/src/engine.rs:11420`).
-8. Tool results are appended to conversation state and the provider loop continues until a terminal model event, budget/loop guard, cancellation, or error commits the durable turn and emits stream end (`crates/wcore-agent/src/engine.rs:6093`, `crates/wcore-cli/src/main.rs:4900`).
+1. `wcore-cli/src/main.rs` parses args, constructs the engine/session, invokes `wcore-agent::engine` for a turn.
+2. `Engine` streams from an `LlmProvider` (`crates/wcore-providers/src/lib.rs:135` trait) — provider quirks resolved via `ProviderCompat`, never hardcoded.
+3. Tool calls dispatch through `ToolDispatcher` (`crates/wcore-tools/src/dispatcher.rs:22`) to `Tool` implementations (`crates/wcore-tools/src/lib.rs:319`); shell-executing tools route through `wcore_config::shell` (argv mode for untrusted data, shell-string mode only where semantics require it, e.g. `BashTool`).
+4. Sandboxed tool execution goes through `wcore-sandbox::SandboxBackend::execute` against a per-platform backend (bwrap/Landlock+seccomp on Linux, sandbox-exec on macOS, AppContainer+Job Object on Windows, Docker opt-in); fails closed with `FailClosedBackend` if no real backend is available.
+5. Turn/tool/budget/hook state is durably recorded to `SessionJournal` (`crates/wcore-agent/src/session_journal.rs`) as the turn progresses, enabling idempotent resume after a crash.
 
-### JSON-Stream Host Flow
+### Anvil (Gated Forge) Delegated-Mutation Flow
 
-1. `run_json_stream_mode` creates a `ProtocolWriter`, `ProtocolSink`, and shared `ToolApprovalManager`, then bootstraps a primary long-running engine (`crates/wcore-cli/src/main.rs:4045`).
-2. A bounded dedicated stdin thread parses newline-delimited `ProtocolCommand` values into a Tokio channel (`crates/wcore-protocol/src/reader.rs:72`).
-3. `ProtocolCommand::Message` validates composer attachments and races `engine.run_with_content` against approvals, stop, config, MCP, diagnostics, and host-send commands (`crates/wcore-cli/src/main.rs:4790`).
-4. `ProtocolSink` converts engine callbacks into `ProtocolEvent`; `ProtocolWriter` serializes them through the output pump to stdout (`crates/wcore-agent/src/output/protocol_sink.rs`, `crates/wcore-protocol/src/writer.rs`).
+Entry point: `drive_climb_full` (`crates/wcore-agent/src/orchestration/anvil/forge.rs:628`), the production wiring of the climb loop (probe → gate → surgical → terminal), invoked via the `Forge` tool (`crates/wcore-agent/src/orchestration/anvil/tool.rs`) or the CLI `anvil` verb (`crates/wcore-cli/src/anvil.rs`). Rides the DRIVER rail (mirrors `council::drive_council`), NOT the test-only `GraphConfig`/`ExecutionGraph` walker.
 
-### Plugin and MCP Bootstrap Flow
+1. **Isolated-checkout substrate:** work happens in a `wcore-swarm` worktree (`crates/wcore-swarm/src/worktree.rs`, `worktree/candidate.rs`, `worktree/parent.rs`), giving each climb candidate its own filesystem isolation from the parent integration checkout.
+2. **Production spawner routing:** the climb loop drives an `AgentSpawner` (`crates/wcore-agent/src/spawner.rs`) via `SpawnBuilder`/`SpawnValve` (`forge.rs:361`, `forge.rs:506`) to run the actual candidate-generation work.
+3. **Gate execution:** each candidate is checked against a real executable gate (`SandboxGate`, `forge.rs:159`) — never a self-report — with gate closure pinning and injection fencing enforced in `crates/wcore-agent/src/orchestration/anvil/gates.rs`.
+4. **CandidateSeal:** on success, the candidate's mutation guard is sealed via `CandidateSeal` (`wcore_swarm::worktree::CandidateSeal`, consumed in `engine.rs:75` `into_landing_authority` and `forge.rs:326`) — the ONLY path that hands a candidate's guard to the landing authority.
+5. **Durable receipt / AcceptedCandidate:** the outcome is stamped with a `TerminalState` (`crates/wcore-agent/src/orchestration/anvil/mod.rs`) — `Verified` (real Tier-1 gate), `CriteriaChecked` (Tier-2), `SelfChecked` (Tier-3), or a non-success terminal (`NeedsEscalation`, `Blocked`, `Cancelled`, `TimedOut`, `PermissionDenied`, `CrashedRecovered`, `Superseded`) — persisted through `crates/wcore-agent/src/orchestration/anvil/journal.rs` for crash recovery.
+6. **Parent landing / CAS + rollback:** `land_selected_winner` (`crates/wcore-agent/src/orchestration/anvil/landing.rs:123`) takes a `WinnerLandingRequest` (`landing.rs:65`) and lands the sealed winner into the Wayland-owned integration checkout via the parent's compare-and-swap ref update (`landing.rs:159` comment: "Land into the Wayland-owned integration checkout via the parent CAS"); failure returns `WinnerLandingError` (`landing.rs:94`) and the CAS refusal rolls back cleanly rather than partially landing.
+7. **session_journal integration:** the journal handle is threaded through the forge path (`forge.rs:905`, `spawner.session_journal()`) so the whole climb is crash-recoverable and idempotently resumable.
 
-1. `PluginLoader` discovers statically linked inventory plugins and on-disk manifests; `PluginRunner` captures declared capabilities (`crates/wcore-agent/src/plugins/loader.rs`, `crates/wcore-agent/src/plugins/runner.rs`).
-2. Host registrars translate plugin-api mirror specs into concrete tools, providers, hooks, skills, rules, agents, user models, browser tools, and CUA tools (`crates/wcore-agent/src/plugins/apply.rs`).
-3. Config-declared and plugin-declared MCP servers connect through `McpManager`; advertised MCP tools join the same `ToolRegistry` with collision handling (`crates/wcore-agent/src/bootstrap.rs`, `crates/wcore-mcp/src/tool_proxy.rs`).
-4. The registry refreshes `ToolSearch` after every boot-time capability is present, so the provider sees one authoritative catalog (`crates/wcore-tools/src/registry.rs`).
+**Containment enforcement:** independent of the climb's own gate, any hard-contained execution the climb spawns is authorized by minting a one-use `HardContainmentAuthority` (`crates/wcore-sandbox/src/lib.rs:473` `mint`, consumed at `lib.rs:503`) which binds to and is verified against the specific containment context it was minted for — an Anvil gate result is translated to this parent-owned authorization in `crates/wcore-agent/src/orchestration/anvil/gate_authorization.rs`.
+
+### ForgeFlows (Dynamic Workflows)
+
+1. Declarative RON workflow definitions are parsed via `crates/wcore-agent/src/orchestration/workflow/dsl.rs` / `schema.rs`.
+2. Lowered to the existing `GraphConfig` IR (shared with `orchestration/graph.rs`).
+3. Executed by `WorkflowRunner` (`crates/wcore-agent/src/orchestration/workflow/runner.rs`) driven over the `AgentSpawner`/fleet dispatcher spawner path — explicitly NOT the per-turn `ExecutionGraph` walker. Limits/estimation/pipeline concerns live in `limits.rs`, `estimate.rs`, `pipeline.rs`. See `docs/workflows.md`.
 
 **State Management:**
-- Mutable conversation and per-turn state stays inside one `AgentEngine`; shared registries and policies use `Arc`, locks, atomics, Tokio channels, and cancellation tokens only where concurrent host/tool tasks require them.
-- Persistent sessions use `SessionManager` JSON/index/WAL files and an exclusive `SessionJournal` writer lease; incomplete effects fail closed into recovery/reconciliation (`crates/wcore-agent/src/session.rs`, `crates/wcore-agent/src/session_journal.rs`).
-- Long-term semantic/procedural/user context is accessed through `MemoryApi`; `NullMemory` preserves the same engine contract when memory is disabled (`crates/wcore-memory/src/api.rs`).
-- Host approval state is centralized in one shared `ToolApprovalManager` so CLI/TUI/protocol commands and tool dispatch observe the same mode and pending decisions (`crates/wcore-protocol/src/lib.rs`).
+- Turn/session state: `SessionJournal` (append-only envelopes, `crates/wcore-agent/src/session_journal.rs`).
+- Climb state: `crates/wcore-agent/src/orchestration/anvil/journal.rs` (append-only climb journal, idempotent resume) plus `ledger.rs` (per-task cost ledger, atomic reservation-before-dispatch) and `lease.rs` (per-workspace climb lease preventing interleaved climbs/user edits).
+- Worktree/candidate state: `wcore-swarm` (`worktree_manager.rs`, `worktree_cleanup.rs`, `worktree_security.rs`).
 
 ## Key Abstractions
 
-**`LlmProvider`:**
-- Purpose: Stream provider-neutral `LlmEvent` values for an `LlmRequest`.
-- Examples: `crates/wcore-providers/src/anthropic.rs`, `crates/wcore-providers/src/openai.rs`, `crates/wcore-providers/src/bedrock.rs`
-- Pattern: Async trait adapter selected by config and wrapped for retry/failover/journaling.
+**`LlmProvider` (provider abstraction):**
+- Purpose: represents a single LLM backend's streaming request/response surface
+- Examples: `crates/wcore-providers/src/lib.rs:135` (trait def), provider impls under `crates/wcore-providers/src/`
+- Pattern: object-safe trait (`Send + Sync`); provider quirks resolved through `ProviderCompat` fields set in per-provider default functions (e.g. `openai_defaults()`), never hardcoded conditionals — this is the single most important architectural rule per `AGENTS.md`
 
-**`Tool` and `ToolRegistry`:**
-- Purpose: Publish schemas, availability, effect contracts, execution class, and async execution for built-in and adapted tools.
-- Examples: `crates/wcore-tools/src/lib.rs`, `crates/wcore-tools/src/registry.rs`, `crates/wcore-agent/src/plugins/adapters/plugin_tool_adapter.rs`
-- Pattern: Command registry with collision control, deferred discovery, policy context, and circuit breakers.
+**`Tool` / `ToolDispatcher` (tool execution abstraction):**
+- Purpose: uniform interface for built-in and plugin tools; dispatcher decouples the engine from concrete tool implementations
+- Examples: `crates/wcore-tools/src/lib.rs:319` (`Tool` trait), `crates/wcore-tools/src/dispatcher.rs:22` (`ToolDispatcher` trait), `ToolOutputSink` (`lib.rs:288`)
+- Pattern: trait objects registered into a dispatcher; sandboxed execution delegated to `wcore-sandbox`
 
-**`OutputSink` and `ProtocolEmitter`:**
-- Purpose: Keep engine output independent from terminal, JSON-stream, null, or channel presentation.
-- Examples: `crates/wcore-agent/src/output/mod.rs`, `crates/wcore-agent/src/output/terminal.rs`, `crates/wcore-agent/src/output/protocol_sink.rs`, `crates/wcore-protocol/src/writer.rs`
-- Pattern: Ports-and-adapters output boundary.
+**`SandboxBackend` / `HardContainmentAuthority` (containment abstraction):**
+- Purpose: uniform per-platform process isolation with a fail-closed default and a one-use, context-bound authority token for hard-contained execution
+- Examples: `crates/wcore-sandbox/src/backends/mod.rs` (backend trait + registry), `crates/wcore-sandbox/src/lib.rs:473/503/536` (`mint`/consume/`HardContainmentAuthority` struct)
+- Pattern: `SandboxRegistry` selects `default_for_platform` by `cfg`; `HardContainmentAuthority` is minted once and verified as still bound to the exact context it was minted for before being consumed
 
-**`Config` and `ProviderCompat`:**
-- Purpose: Carry fully resolved launch policy and data-driven provider differences into runtime code.
-- Examples: `crates/wcore-config/src/config.rs`, `crates/wcore-config/src/compat.rs`, `crates/wcore-config/src/resolution_provenance.rs`
-- Pattern: Cascading configuration plus typed compatibility presets; project input may narrow protected settings but cannot silently widen trust.
+**`AgentSpawner` (spawn abstraction):**
+- Purpose: uniform interface for spawning sub-agents/children, used by Anvil, Council, and Swarm/ForgeFlows alike so orchestration logic doesn't special-case the spawn mechanism
+- Examples: `crates/wcore-agent/src/spawner.rs`, `crates/wcore-agent/src/durable_spawner.rs` (crash-safe variant)
+- Pattern: trait object threaded through `SpawnBuilder`/`SpawnValve` (Anvil) and the fleet dispatcher (Swarm/Workflow)
 
-**Plugin mirror registries:**
-- Purpose: Let plugins declare capabilities without importing engine/tool/browser/CUA/MCP implementations.
-- Examples: `crates/wcore-plugin-api/src/registry/`, `crates/wcore-agent/src/plugins/adapters/`, `crates/wayland-browser/src/lib.rs`
-- Pattern: Stable mirror DTOs translated by host-side adapters at the isolation boundary.
-
-**Session authority:**
-- Purpose: Separate user-facing session mirrors from crash-recovery truth and enforce one writer for a live persisted session.
-- Examples: `crates/wcore-agent/src/session.rs`, `crates/wcore-agent/src/session_journal.rs`, `crates/wcore-agent/src/recovery.rs`
-- Pattern: Write-ahead/event journal plus replay and explicit reconciliation.
-
-**Spawner and graph IR:**
-- Purpose: Run direct turns, sub-agents, councils, and declarative workflows through shared budget/cancellation/durability controls.
-- Examples: `crates/wcore-agent/src/spawner.rs`, `crates/wcore-agent/src/orchestration/graph.rs`, `crates/wcore-agent/src/orchestration/workflow/runner.rs`
-- Pattern: Strategy-backed spawner plus graph intermediate representation.
-
-**`Channel`:**
-- Purpose: Normalize platform lifecycle, inbound polling/webhooks, media, reactions, typing, and outbound messages.
-- Examples: `crates/wcore-channels/src/lib.rs`, `crates/wcore-channels/src/manager.rs`, `crates/wcore-channels-registry/src/lib.rs`
-- Pattern: Adapter trait with platform factories and supervised background tasks.
+**`CandidateSeal` / transactional delegated mutation:**
+- Purpose: represents a sealed, gate-verified candidate's mutation guard — the single hand-off point between "candidate produced work in isolation" and "authorized to land into the parent checkout"
+- Examples: `wcore_swarm::worktree::CandidateSeal`, consumed in `crates/wcore-agent/src/orchestration/anvil/engine.rs:75`, `forge.rs:326`; landed via `crates/wcore-agent/src/orchestration/anvil/landing.rs:123`
+- Pattern: guard + seal pair prevents any code path from landing an unsealed (i.e., ungated) candidate
 
 ## Entry Points
 
-**`wayland-core` binary:**
+**CLI binary (`main.rs`):**
 - Location: `crates/wcore-cli/src/main.rs`
-- Triggers: Terminal invocation, desktop child-process launch, scripts, or tests.
-- Responsibilities: Process setup, config and execution-policy resolution, subcommand dispatch, runtime lifecycle, and host-mode selection.
+- Triggers: user invocation of the `wayland-core` / `wl`-style binary
+- Responsibilities: arg parsing, subcommand dispatch (`agent_cmd.rs`, `anvil.rs`, `swarm.rs`, `cron.rs`, `workflow.rs`, `crucible.rs`, etc.), engine/session bootstrap
 
-**CLI library subcommands:**
-- Location: `crates/wcore-cli/src/lib.rs`
-- Triggers: `acp`, `agent`, `auth`, `profile`, `migrate`, `workflow`, `forge`, `crucible`, `cron`, `image`, `fetch`, and related command variants.
-- Responsibilities: Bridge user-facing commands to lower crates without introducing upward dependencies.
+**Anvil CLI verb:**
+- Location: `crates/wcore-cli/src/anvil.rs`
+- Triggers: `wayland-core anvil ...` invocation
+- Responsibilities: materializes a driver seat (`crates/wcore-agent/src/orchestration/anvil/seat.rs`) and calls `drive_climb_full`
 
-**Evaluation binaries:**
-- Location: `crates/wcore-eval/src/bin/`, `crates/wcore-eval-scenarios/src/bin/`, `crates/wcore-evolve/src/bin/`
-- Triggers: Eval, receipt, benchmark, fixture, and evolution commands declared in their `Cargo.toml` files.
-- Responsibilities: Drive public runtime/protocol surfaces and produce scored or signed evidence.
+**Forge tool (in-session):**
+- Location: `crates/wcore-agent/src/orchestration/anvil/tool.rs`
+- Triggers: model-issued tool call during a live agent session
+- Responsibilities: natural language in, receipt out — same underlying `drive_climb_full` path as the CLI verb
 
-**MCP server surface:**
-- Location: `crates/wcore-cli/src/mcp_serve.rs`, `crates/wcore-mcp/src/server.rs`
-- Triggers: `wayland-core mcp-serve` over stdio or SSE.
-- Responsibilities: Expose the engine tool set through MCP with an injected policy gate.
+**JSON stream protocol (host integration):**
+- Location: `crates/wcore-protocol/src/`, consumed by `wcore-agent` output/session layers
+- Triggers: host process (e.g. Wayland desktop Electron app) driving the engine over JSON Lines
+- Responsibilities: structured events/commands/approval flow instead of a TTY
 
-**Standalone plugin examples:**
-- Location: `examples/plugin-wasm-hello/`, `examples/plugin-subprocess-mcp/`
-- Triggers: Independent Cargo builds outside workspace membership.
-- Responsibilities: Demonstrate WASM component and subprocess/MCP plugin packaging.
+**ACP (Agent Client Protocol):**
+- Location: `crates/wcore-cli/src/acp.rs`, `acp_engine.rs`, `acp_roster.rs`
+- Triggers: ACP-speaking host client
+- Responsibilities: alternate host-integration surface parallel to the JSON stream protocol
 
 ## Architectural Constraints
 
-- **Threading:** `main` builds a multithreaded Tokio runtime on a dedicated 32 MiB stack thread; JSON stdin uses one bounded blocking reader thread, async components use Tokio tasks/channels, and blocking libraries such as IMAP use `spawn_blocking` (`crates/wcore-cli/src/main.rs:886`, `crates/wcore-protocol/src/reader.rs`).
-- **Global state:** Resolve active profile/environment before spawning threads; use session-scoped egress, cancellation, approval, workspace policy, and registry handles thereafter. Static plugin discovery uses `inventory`, while runtime plugin handles are retained by the engine (`crates/wcore-agent/src/bootstrap.rs`).
-- **Circular imports:** No known circular internal dependency chain is permitted. Keep `wcore-cli` and `wcore-agent` at the top, plugin implementations behind `wcore-plugin-api`, and shared types in the lowest viable crate (`Cargo.toml`, `crates/wcore-plugin-api/build.rs`).
-- **Provider compatibility:** Put wire quirks in `ProviderCompat` fields/defaults and consume them inside provider request builders (`crates/wcore-config/src/compat.rs`).
-- **Platform behavior:** Centralize shell and platform differences in `wcore-config::shell`; pass attacker-controlled arguments through argv mode (`crates/wcore-config/src/shell.rs`).
-- **Network boundary:** Route in-process outbound HTTP through `wcore-egress`; pass the session policy into late-created clients (`crates/wcore-egress/src/lib.rs`).
-- **Filesystem boundary:** Install one `WorkspacePolicy` in the tool registry and derive file-tool and Bash sandbox behavior from it (`crates/wcore-tools/src/workspace_policy.rs`).
-- **Plugin isolation:** Plugin crates use plugin-api mirror types and must not depend directly on host browser, CUA, MCP, memory, or skills implementations (`crates/wcore-plugin-api/src/lib.rs`).
-- **Cross-platform verification:** Code targets macOS, Linux, and Windows; platform-specific backends live behind centralized APIs and `cfg`-gated modules (`crates/wcore-sandbox/src/backends/`).
+- **Threading:** Async/await (Tokio) throughout; `AgentSpawner`/`DurableSpawner` spawn child processes/tasks, not raw OS threads, for orchestration fan-out; sandbox backends spawn and reap real OS process trees (`crates/wcore-sandbox/src/backends/process_tree.rs`).
+- **Global state:** `SessionJournal` is the closest thing to a durable shared-state singleton, but it is instance-scoped per session/spawner rather than a process-global; no other module-level mutable singletons were observed in the explored subsystems.
+- **Circular imports:** None expected by design — the crate map in `AGENTS.md` mandates strictly downward dependencies; `wcore-plugin-api` is a deliberate isolation boundary (enforced by a `build.rs` lint) so plugin crates (`wayland-*`) cannot pull in `wcore-browser`/`wcore-cua`/`wcore-sandbox` directly.
+- **Isolation boundary:** `wcore-repomap` deliberately has NO internal `wcore-*` deps; `wcore-plugin-api` is capped to `wcore-types`/`wcore-protocol` beyond its own surface.
+- **Fail-closed default:** sandbox execution refuses (does not silently degrade) when no real platform backend is available, unless explicitly overridden with `WAYLAND_ALLOW_NO_SANDBOX=1`.
 
 ## Anti-Patterns
 
-### Hardcoded Provider Detection
+### Hardcoded provider quirks
 
-**What happens:** Provider behavior is selected from a URL/model string inside request code instead of from resolved compatibility data.
-**Why it's wrong:** Compatible endpoints and aliases share wire shapes, so string detection couples runtime behavior to one vendor URL and bypasses profile inheritance.
-**Do this instead:** Add/merge a field in `crates/wcore-config/src/compat.rs`, set provider defaults there, and read it in `crates/wcore-providers/src/`.
+**What happens:** Provider-specific behavior detected via string matching on `base_url` or provider name and branched inline in provider code.
+**Why it's wrong:** Scatters provider knowledge across the codebase, breaks when a provider changes its base URL or a new compatible provider appears, and bypasses the single audited configuration surface.
+**Do this instead:** Add an `Option<T>` field to `ProviderCompat` (`wcore-config`), set its default in the relevant `*_defaults()` function, and read it via `self.compat.field_name` in provider code. See `AGENTS.md` §"No Hardcoded Provider Quirks" for the canonical wrong/right example.
 
-### Plugin-to-Host Dependency Leakage
+### Raw shell spawning / string-interpolated shell commands
 
-**What happens:** A `wayland-*` plugin imports a concrete host crate such as `wcore-browser`, `wcore-cua`, `wcore-mcp`, `wcore-memory`, or `wcore-skills`.
-**Why it's wrong:** It reverses the plugin isolation boundary and makes plugin loading create upward/circular dependency pressure.
-**Do this instead:** Define/use mirror data in `crates/wcore-plugin-api/src/` and translate it in `crates/wcore-agent/src/plugins/adapters/`.
+**What happens:** Calling `Command::new("sh"/"bash"/"cmd")` directly, or building a shell-string command via `format!` with LLM-supplied data interpolated into it.
+**Why it's wrong:** Bypasses the centralized, audited `wcore_config::shell` helpers, is platform-specific, and — when LLM data is interpolated into a shell string — is a shell injection vulnerability (the exact class closed in Wave SA per `SECURITY-v0.2.0.md` BLOCKER #1).
+**Do this instead:** Use `shell_command_argv(program, &[args])` for any command whose arguments include LLM-supplied data (no shell interpreter involved, metacharacters are inert); reserve `shell_command`/`shell_command_builder` (real `sh -c`/`cmd /C`) only for cases that genuinely need shell semantics (e.g. `BashTool`, MCP stdio program-launch, skill `!shell:` directives), and never interpolate untrusted data into that string.
 
 ## Error Handling
 
-**Strategy:** Use typed, matchable errors at crate/public boundaries and contextual propagation in composition/application code; fail closed at security, recovery, and effect-uncertainty boundaries while allowing non-critical optional plugins/channels to log and skip.
+**Strategy:** `thiserror` for public API error types (structured, matchable — e.g. `SandboxError`, `ForgeError`, `WinnerLandingError`, `JournalError`), `anyhow` for internal/application-level propagation. `unwrap()` is forbidden in production code unless the invariant is proven and commented.
 
 **Patterns:**
-- Public crates define `thiserror` enums such as provider, memory, MCP, channel, plugin, sandbox, and protocol errors; callers can classify retryability or policy denial by variant (`crates/wcore-providers/src/lib.rs`, `crates/wcore-memory/src/error.rs`).
-- `wcore-cli` and bootstrap use `anyhow` for multi-layer context and process-level failure reporting (`crates/wcore-cli/src/main.rs`, `crates/wcore-agent/src/bootstrap.rs`).
-- Provider failures stream as `ProviderError`; terminal host failures become `ProtocolEvent::Error` or `OutputSink::emit_error` without discarding durable session state (`crates/wcore-protocol/src/events.rs`).
-- Optional plugin/MCP/channel discovery logs errors and continues only when the failed component is not required for session authority (`crates/wcore-agent/src/bootstrap.rs`).
-- Unknown/running durable tool effects require explicit reconciliation instead of automatic replay (`crates/wcore-agent/src/engine.rs`).
+- Terminal-state enums (e.g. Anvil's `TerminalState`) enumerate every possible exit explicitly rather than allowing a "silent fourth exit" — errors are a first-class outcome, not just a `Result::Err`.
+- Fail-closed defaults for security-sensitive subsystems (sandbox execution, containment authority) rather than fail-open/degrade.
 
 ## Cross-Cutting Concerns
 
-**Logging:** Use `tracing` throughout; `wcore-cli` installs the subscriber, sends headless logs to stderr, and sends TUI logs through a non-blocking file writer (`crates/wcore-cli/src/main.rs:962`, `crates/wcore-observability/src/lib.rs`).
-**Validation:** Deserialize into typed configs/protocol enums, validate paths and workspace trust before execution, sanitize provider tool schemas, and re-check effect/recovery digests at durable boundaries (`crates/wcore-config/src/config.rs`, `crates/wcore-tools/src/path_validation.rs`, `crates/wcore-agent/src/session_journal.rs`).
-**Authentication:** Resolve provider/channel/MCP credential references through `wcore-config` credential/keychain abstractions; keep token values out of long-lived config and protocol payloads (`crates/wcore-config/src/credentials.rs`, `crates/wcore-config/src/keychain.rs`, `crates/wcore-config/src/mcp_cred_refs.rs`).
+**Logging:** Structured via `wcore-observability` (trace schema, span sinks, OTLP exporter) — sits between `wcore-types`/`wcore-config` and `wcore-agent`; the protocol crate stays decoupled from it via opaque `serde_json::Value` payloads.
+**Validation/Safety:** `wcore-safety` provides output validator + PII scrubber primitives, independent of the sandbox layer.
+**Authentication:** Handled in `wcore-config` (auth, hooks) at the mid layer; per-session/channel auth (e.g. OAuth) lives under `crates/wcore-agent/src/oauth/`.
+**Budgeting:** `wcore-budget` (caps/telemetry) at the mid layer plus `crates/wcore-agent/src/budget_authority.rs` and `tool_budget.rs` at the engine layer; Anvil additionally has its own per-task cost ledger (`orchestration/anvil/ledger.rs`).
 
 ---
 
-*Architecture analysis: 2026-07-18*
+*Architecture analysis: 2026-07-23*

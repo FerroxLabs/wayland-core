@@ -1,196 +1,94 @@
 # Testing Patterns
 
-**Analysis Date:** 2026-07-18
+**Analysis Date:** 2026-07-23
 
 ## Test Framework
 
 **Runner:**
-- Rust's built-in test harness executed by cargo-nextest; the repository does not pin a cargo-nextest version, while `justfile` routes execution through the toolchain manager configured in `vx.toml`.
-- Config: `.config/nextest.toml`
+- `cargo nextest` — profiles configured in `.config/nextest.toml` (repo-root-level; not read directly this pass but referenced by `justfile`). All invocations go through `vx` (the pinned toolchain proxy from `vx.toml`).
 
-**Assertion Library:**
-- Use Rust's built-in `assert!`, `assert_eq!`, `assert_ne!`, `matches!`, and `panic!` macros throughout unit and integration tests, as in `crates/wcore-types/src/message.rs` and `crates/wcore-eval-scenarios/tests/fixture_manifest_contract.rs`.
-- Use `rstest` 0.26 for table-driven cases where multiple inputs share one contract, as in `crates/wcore-protocol/tests/commands_test.rs`; the version is declared in `Cargo.toml`.
-
-**Run Commands:**
+**Run Commands (from `justfile`):**
 ```bash
-vx just test                 # Run workspace unit and integration tests with the default nextest profile
-vx just test-one NAME        # Filter to one test name
-vx just test-verbose         # Run with captured output visible
-vx just test-ci              # Run the CI profile without fail-fast
-vx just coverage             # Generate lcov.info with cargo-llvm-cov and nextest
+just test                # nextest, --profile default (local dev, friendly output)
+just test-verbose        # --profile default --no-capture (debug a failing test)
+just test-one NAME       # single test by name: -E 'test(NAME)'
+vx cargo nextest run --workspace --profile ci --no-fail-fast   # CI profile
+just test-e2e            # --profile e2e --test e2e (requires ANTHROPIC_API_KEY/OPENAI_API_KEY)
+just test-e2e-anthropic  # -p wcore-agent --profile e2e --test e2e -E 'test(anthropic)'
+just test-e2e-openai     # -p wcore-agent --profile e2e --test e2e -E 'test(openai)'
+just test-acceptance     # -p wcore-agent --profile e2e --test acceptance (evolution feature validation)
+just desktop-contract-check  # regenerates + rejects contract drift, replays checked corpus
 ```
-All recipes are defined in `justfile`; no watch-mode recipe is configured.
+
+**Do NOT run `cargo`/`clippy`/`nextest` on this Mac worktree.** Per project convention this repo compiles ONLY on the Hetzner self-hosted runner (`hetzner-dsm`, `/root/wayland`) and the CI self-hosted Windows runner (`.github/workflows/ci.yml:45`, `[self-hosted, Windows, X64, msvc]` — chosen over `windows-latest` to avoid a toolchain-drift cascade and to keep a warm `target/` cache). `cargo fmt` is the one exception that does work locally on the Mac.
+
+## nextest Profiles (`.config/nextest.toml`)
+
+**`[profile.default]`** — local dev:
+- `failure-output = "immediate"`, `success-output = "never"`, retries = 1 (absorbs local flakiness).
+- `slow-timeout = { period = "30s", terminate-after = 2 }`, `test-threads = "num-cpus"`.
+- Per-test override: the "full-engine-build cohort" — every test constructing a real `AgentBootstrap` (`bootstrap_*` binaries in `wcore-agent`, `bootstrap_with_ollama_*`, `*_is_registered_in_bootstrap`) or the full tool registry (`registry_inventory_snapshot` in `wcore-cli`) — gets `slow-timeout = 90s` because it legitimately runs 38-55s under load, matching CI's budget instead of false-failing a busy laptop (documented incident: 2026-06-01, a stray busy-loop pushed 10 tests past 60s and fail-fast aborted the whole run).
+
+**`[profile.ci]`**:
+- `failure-output = "immediate-final"`, shows all statuses at the end, retries = 2.
+- `slow-timeout = { period = "90s", terminate-after = 2 }` (bumped from 60s after CI run 25950354044 — Ubuntu cold-cache pushes).
+- Override: `scripted_run_writes_expected_markdown` (W12 tool-token bench) gets 180s/no-retry — shells to a pre-built `tool_token_bench` binary; retrying a slow cargo-run only compounds.
+- Override: `release_binary_*` tests get 180s/no-retry — Windows mandatory file locks make target/ checks slower than Linux/macOS (CI run 25953795604).
+
+**`[profile.e2e]`** — real API calls:
+- `retries = 0` (failures are real), `slow-timeout = 120s`, **`test-threads = 1`** (sequential — avoid hammering provider APIs). Requires live `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`.
+
+**`[profile.eval]`** — used by `wcore-eval-scenarios` (`just eval`):
+- `retries = 2` (absorbs transient provider noise, per cross-audit M-3), `slow-timeout = 300s`, `test-threads = 1` (serialize to avoid cross-provider rate-limit contamination, per cross-audit M-6).
 
 ## Test File Organization
 
-**Location:**
-- Put private-implementation unit tests in an inline `#[cfg(test)] mod tests` beside the code, as in `crates/wcore-types/src/message.rs`, `crates/wcore-memory/src/error.rs`, and `crates/wcore-channel-discord/src/gateway.rs`.
-- Put public API and cross-module integration tests under `crates/<crate>/tests/`, as in `crates/wcore-tools/tests/`, `crates/wcore-protocol/tests/`, and `crates/wcore-cli/tests/`.
-- Put shared integration-test helpers under a local `tests/common/` or `tests/support/` module, as in `crates/wcore-agent/tests/common/mod.rs` and `crates/wcore-cli/tests/support/mod.rs`.
-- Root-level compatibility and engine tests live under `tests/`, with shared utilities in `tests/common/mod.rs`.
-- Put Criterion benchmarks under `crates/<crate>/benches/`, as in `crates/wcore-agent/benches/orchestration_graph_bench.rs` and `crates/wcore-providers/benches/parse_sse_chunk_bench.rs`.
+| Location | What goes there |
+|----------|------------------|
+| Inline `#[cfg(test)]` in each `.rs` file | Unit tests for that module's internal logic |
+| `crates/<crate>/tests/*.rs` | Integration tests for that crate's public API/functional requirements |
 
-**Naming:**
-- Name test functions in `snake_case` after the observable behavior and expected outcome, such as `deserialized_manifest_rejects_tampered_identity_component_and_schema` in `crates/wcore-eval-scenarios/tests/fixture_manifest_contract.rs`.
-- Use `_test.rs` for focused contracts, `_e2e.rs` for multi-component flows, and descriptive contract names without a suffix when clearer; examples include `crates/wcore-tools/tests/git_argv_injection_test.rs`, `crates/wcore-memory/tests/memory_concurrency_e2e.rs`, and `crates/wcore-protocol/tests/recovery_protocol.rs`.
+**Naming (integration tests):** one file per scenario/feature area, descriptive snake_case matching the behavior under test — not the module under test. Examples from `crates/wcore-tools/tests/`:
+- `legacy_execute_path_validation_test.rs`, `file_cache_test.rs`, `sandbox_symlink_test.rs`, `bash_sandbox_routing_test.rs`, `bash_credential_exfil_test.rs`, `git_commit_message.rs`, `edit_write_cache_test.rs`, `cancel_subprocess_test.rs`, `script_e2e.rs`, `tool_description_test.rs`.
 
-**Structure:**
-```
-crates/<crate>/
-├── src/<module>.rs              # implementation + #[cfg(test)] unit module
-├── tests/
-│   ├── common/mod.rs            # optional shared builders/fakes
-│   ├── fixtures/                # optional checked deterministic data
-│   └── <behavior>_test.rs       # public-surface integration target
-└── benches/<benchmark>.rs       # Criterion benchmark target
-```
-Concrete examples are `crates/wcore-agent/src/engine.rs`, `crates/wcore-agent/tests/common/mod.rs`, `crates/wcore-evolve/tests/fixtures/`, and `crates/wcore-agent/benches/orchestration_graph_bench.rs`.
+Note the naming already signals hostile/adversarial coverage as a first-class category, not an afterthought: `bash_credential_exfil_test.rs`, `sandbox_symlink_test.rs`, `legacy_execute_path_validation_test.rs`. Integration tests are written from the spec/functional requirement, not from reading the implementation — per AGENTS.md.
 
-## Test Structure
+**Unit vs integration split:** unit tests (`#[cfg(test)]` inline) target internal logic/code paths; integration tests target functional requirements and the public API surface. Every test must verify a meaningful behavior or edge case — no trivial happy-path-only assertions (AGENTS.md rule).
 
-**Suite Organization:**
-```rust
-#[tokio::test]
-async fn test_engine_text_response_ends_turn() {
-    let provider = Arc::new(MockLlmProvider::with_text_response("Hello, world!"));
-    let mut engine = AgentEngine::new_with_provider(
-        provider,
-        test_config(),
-        ToolRegistry::new(),
-        silent_output(),
-    );
+## Hostile / Adversarial Test Naming Convention
 
-    let result = engine.run("Hi", "").await.expect("engine should succeed");
+Tests that specifically probe security boundaries or malicious/adversarial inputs use explicit `_exfil`, `_bypass`, `_injection`, `_adversarial` naming so their intent is unambiguous at a glance, e.g.:
+- `crates/wcore-tools/tests/bash_credential_exfil_test.rs`
+- `crates/wcore-protocol` — `desktop_contract_adversarial` (referenced in `justfile:48`, run alongside `desktop_contract_corpus` by `just desktop-contract-check`)
+- `crates/wcore-agent/tests/dangerous_lease_e2e_test.rs` (dangerous-mode lease boundary)
 
-    assert_eq!(result.text, "Hello, world!");
-    assert_eq!(result.stop_reason, StopReason::EndTurn);
-    assert_eq!(result.turns, 1);
-}
-```
-This arrange-act-assert shape is used in `tests/engine_test.rs` and the crate-local equivalent `crates/wcore-agent/tests/engine_test.rs`.
+## Native Proof Harnesses (`scripts/`)
 
-**Patterns:**
-- Build only the state needed by a test, perform one behavior, and assert the externally visible result; `crates/wcore-eval-scenarios/tests/fixture_manifest_contract.rs` is a compact reference.
-- Use `#[test]` for synchronous logic and `#[tokio::test]` for async providers, tools, channels, and orchestration, as in `crates/wcore-protocol/tests/commands_test.rs` and `crates/wcore-agent/tests/engine_test.rs`.
-- Use `rstest` `#[case]` inputs for repeated protocol shapes instead of duplicating test bodies, following `crates/wcore-protocol/tests/commands_test.rs`.
-- Isolate filesystem state with `tempfile::tempdir` or `TempDir` and keep the guard alive for the full assertion scope, as in `crates/wcore-agent/tests/common/mod.rs` and `crates/wcore-cli/tests/harness_tui_flow.rs`.
-- Use `serial_test` only for tests that mutate process-global environment, shared config roots, or singleton state; representative uses are in `crates/wcore-config/tests/config_resolution_provenance.rs` and `crates/wcore-agent/tests/bootstrap_test.rs`.
-- Gate platform-specific behavior with `#[cfg(...)]`, following the Unix PTY suite in `crates/wcore-cli/tests/harness_tui_flow.rs` and platform branches in `crates/wcore-eval-scenarios/tests/fixture_manifest_contract.rs`.
-- Include assertion messages for non-obvious invariants and diagnostics, as in `crates/wcore-types/src/message.rs` and `crates/wcore-cli/tests/harness_tui_flow.rs`.
+The workspace supplements Rust tests with standalone native proof scripts that exercise built artifacts end-to-end rather than in-process:
 
-## Mocking
+- `scripts/f20-native-macos-proof.sh` (8.0K) — native macOS proof harness for the F20 feature set.
+- `scripts/f20-native-uat-proof.mjs` (14.5K) + `scripts/f20-native-uat-proof.test.mjs` (11.9K) — Node-based UAT proof harness with its own test file.
+- `scripts/f20-native-windows-proof.ps1` (4.2K) — PowerShell equivalent for Windows.
+- `scripts/wayland-e2e-real-workload.sh` (14.1K) — real-workload e2e smoke against a built binary.
+- `scripts/wayland-e2e-smoke.sh` (9.5K) — lighter e2e smoke script.
+- `scripts/wayland-e2e-windows-soak.ps1` (7.2K) — Windows soak test, referenced by `.github/workflows/nightly-windows-soak.yml`.
+- `scripts/smoke.sh` (5.6K) — general smoke script.
+- `scripts/f11-proof.py` (21.1K) — Python-based proof harness for an earlier phase (F11).
 
-**Framework:** `wiremock` 0.6 for local HTTP boundaries, `mockall` 0.14 for generated trait mocks, `mockito` 1 for focused CLI HTTP tests, plus hand-written trait fakes; dependencies are declared in `Cargo.toml`, `crates/wcore-agent/Cargo.toml`, and `crates/wcore-cli/Cargo.toml`.
-
-**Patterns:**
-```rust
-pub async fn physical_attempt_server() -> wiremock::MockServer {
-    let server = wiremock::MockServer::start().await;
-    wiremock::Mock::given(wiremock::matchers::method("GET"))
-        .respond_with(wiremock::ResponseTemplate::new(200))
-        .mount(&server)
-        .await;
-    server
-}
-```
-The local-server pattern appears in `crates/wcore-agent/tests/common/mod.rs`; provider-specific request and response assertions appear in `crates/wcore-providers/tests/provider_openai_test.rs` and `crates/wcore-providers/tests/provider_anthropic_test.rs`.
-
-**What to Mock:**
-- Replace provider streams with deterministic trait fakes that emit scripted `LlmEvent` sequences, following `MockLlmProvider` in `crates/wcore-agent/tests/common/mod.rs`.
-- Replace external HTTP services with loopback `wiremock` servers and assert method, path, headers, body, retries, and status mapping, following `crates/wcore-providers/tests/provider_openai_test.rs` and `crates/wcore-browser/tests/policy_test.rs`.
-- Use small fake tools, clocks, sinks, and handlers when the test targets orchestration rather than those dependencies, following `MockTool` in `crates/wcore-agent/tests/common/mod.rs` and channel fakes in `crates/wcore-channel-discord/src/lib.rs`.
-
-**What NOT to Mock:**
-- Do not mock pure serialization, validation, policy, or state-transition logic; exercise the real public type directly, as in `crates/wcore-protocol/tests/commands_test.rs`, `crates/wcore-permissions/tests/acl_test.rs`, and `crates/wcore-eval-scenarios/tests/fixture_manifest_contract.rs`.
-- Do not substitute mocks at a packaged-boundary proof: release smoke, PTY, protocol corpus, and packaged evaluator tests drive real binaries or real generated contracts in `crates/wcore-cli/tests/release_binary_smoke.rs`, `crates/wcore-cli/tests/harness_tui_flow.rs`, `crates/wcore-protocol/tests/desktop_contract_corpus.rs`, and `crates/wcore-eval-scenarios/tests/packaged_driver_gate.rs`.
-- Keep default workspace tests offline; real provider, browser, model-download, Docker, and hardware tests remain feature-gated or ignored as configured in `crates/wcore-providers/Cargo.toml`, `crates/wcore-browser/Cargo.toml`, `crates/wcore-memory/tests/bge_local_real.rs`, and `crates/wcore-sandbox/Cargo.toml`.
-
-## Fixtures and Factories
-
-**Test Data:**
-```rust
-fn manifest(values: [char; 6]) -> CompositeFixtureManifest {
-    let bytes = artifacts(values);
-    CompositeFixtureManifest::from_artifacts(
-        &bytes[0], &bytes[1], &bytes[2], &bytes[3], &bytes[4], &bytes[5],
-    )
-}
-```
-Use small deterministic factories to make the changed dimension obvious, following `crates/wcore-eval-scenarios/tests/fixture_manifest_contract.rs`.
-
-**Location:**
-- Keep reusable Rust builders and fakes in the owning suite's `tests/common/` or `tests/support/`, such as `crates/wcore-agent/tests/common/mod.rs` and `crates/wcore-cli/tests/support/mock_llm.rs`.
-- Keep checked static artifacts beneath the owning crate's `tests/fixtures/`, such as `crates/wcore-evolve/tests/fixtures/`, `crates/wcore-repomap/tests/fixtures/`, and `crates/wcore-eval-scenarios/tests/fixtures/`.
-- Resolve fixture paths from `env!("CARGO_MANIFEST_DIR")` or use `include_str!`/`include_bytes!` when compile-time embedding is part of the contract; representative uses are in `crates/wcore-pluginsrc/tests/conformance.rs` and `crates/wcore-eval/tests/corpus_load.rs`.
-- Generate mutable artifacts inside a `tempfile` directory and never depend on a developer home or ambient credentials, following `crates/wcore-cli/tests/harness_tui_flow.rs` and `crates/wcore-config/tests/hermeticity_audit_test.rs`.
+These proof harnesses are invoked from dedicated CI workflows (`.github/workflows/e2e.yml`, `.github/workflows/nightly-windows-soak.yml`) rather than from `cargo nextest` directly — they validate built release/debug binaries against real or simulated workloads, not source-level unit/integration behavior.
 
 ## Coverage
 
-**Requirements:** No numeric line or branch coverage threshold is configured in `justfile` or `.github/workflows/ci.yml`. CI instead enforces formatting, Clippy, workspace nextest, protocol/eval gates, release-binary smoke, packaged-driver proof, and security audit in `.github/workflows/ci.yml`.
+**Tooling:** `cargo llvm-cov nextest` (`justfile:113`): `vx cargo llvm-cov nextest --workspace --profile ci --lcov --output-path lcov.info`.
 
-**View Coverage:**
-```bash
-vx just coverage             # Writes lcov.info via cargo llvm-cov nextest
-```
-The coverage recipe is defined in `justfile`. Mutation testing for selected crates is configured separately in `.github/workflows/mutants-nightly.yml`.
+## Environment / Build Constraints
 
-## Test Types
-
-**Unit Tests:**
-- Test private helpers, parsing, serialization, state transitions, and edge conditions in inline `#[cfg(test)]` modules, following `crates/wcore-types/src/message.rs`, `crates/wcore-memory/src/error.rs`, and `crates/wcore-safety/src/pii.rs`.
-- Exercise boundaries and malformed inputs as well as happy paths; `crates/wcore-eval-scenarios/tests/fixture_manifest_contract.rs` covers tampering, traversal, symlinks, mutation, and round trips.
-
-**Integration Tests:**
-- Test each crate's public surface under `crates/<crate>/tests/`, including protocol contracts in `crates/wcore-protocol/tests/`, tool safety in `crates/wcore-tools/tests/`, and persistence/concurrency in `crates/wcore-memory/tests/`.
-- Test cross-component engine flows with deterministic providers and tools in `crates/wcore-agent/tests/`, using common builders from `crates/wcore-agent/tests/common/mod.rs`.
-- Test generated or golden wire artifacts byte-for-byte where compatibility is the contract, following `crates/wcore-protocol/tests/golden_v0_1_21.rs` and `crates/wcore-observability/tests/golden_trace_v1.rs`.
-
-**E2E Tests:**
-- Use Rust integration targets under `crates/wcore-agent/tests/e2e/`, selected by the explicit `e2e` target in `crates/wcore-agent/Cargo.toml` and the sequential, zero-retry profile in `.config/nextest.toml`.
-- Drive CLI and TUI user flows through the compiled binary, PTY, and deterministic local servers in `crates/wcore-cli/tests/harness_cli_surface.rs`, `crates/wcore-cli/tests/harness_tui_flow.rs`, and `crates/wcore-cli/tests/support/mock_llm.rs`.
-- Keep paid or network-dependent provider tests behind features and credential checks; orchestration is defined in `.github/workflows/e2e.yml` and feature declarations in `crates/wcore-agent/Cargo.toml`.
-- Run deterministic acceptance and evaluation gates through dedicated recipes such as `eval-gate` and `desktop-contract-check` in `justfile`.
-
-## Common Patterns
-
-**Async Testing:**
-```rust
-#[tokio::test]
-async fn test_openai_stream_text_response() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(sse_body, "text/event-stream"))
-        .mount(&server)
-        .await;
-
-    let provider = OpenAIProvider::new(
-        "test-key",
-        &server.uri(),
-        ProviderCompat::openai_defaults(),
-        DebugConfig::default(),
-    );
-    let events = collect_events(provider.stream(&make_request()).await.unwrap()).await;
-    assert_eq!(events.len(), 3, "expected 3 events, got: {:?}", events);
-}
-```
-Use `#[tokio::test]`, await setup and the behavior under test, and let owned guards perform teardown; this pattern is taken from `crates/wcore-providers/tests/provider_openai_test.rs`, with shared async helpers in `crates/wcore-agent/tests/common/mod.rs`.
-
-**Error Testing:**
-```rust
-assert_eq!(
-    tampered.verify(),
-    Err(FixtureManifestError::DigestMismatch),
-);
-
-assert!(matches!(
-    BoundCompositeFixtureManifest::from_artifacts(root.path(), traversal),
-    Err(FixtureManifestError::InvalidArtifactPath { .. })
-));
-```
-Prefer exact enum equality when the full error is stable and `matches!` when only the variant or selected fields matter, following `crates/wcore-eval-scenarios/tests/fixture_manifest_contract.rs`. Use `.expect("specific operation")` in test setup so failures identify the broken precondition, following `crates/wcore-agent/tests/common/mod.rs`.
+- **This repo compiles ONLY on the Hetzner self-hosted runner** (`hetzner-dsm`, path `/root/wayland`) for local dev, and on the self-hosted Windows CI runner for Windows CI — never on the Mac used for planning/mapping work. `cargo fmt` is the sole exception that runs correctly on the Mac.
+- CI matrix (`.github/workflows/ci.yml`) covers macOS, Linux (`ubuntu-latest`), and Windows (`[self-hosted, Windows, X64, msvc]`) — the self-hosted Windows runner keeps a warm `target/` cache and avoids `windows-latest` toolchain drift; a known intermittent issue is a locked-file cleanup on that runner (`ci.yml:69`).
+- E2E and acceptance suites require live provider credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `AWS_PROFILE` + `CLAUDE_CODE_USE_BEDROCK=1`) and are not run as part of the default `just test` path.
+- Additional CI workflows: `bench-regression.yml`, `marketplace-drift.yml`, `mutants-nightly.yml` (mutation testing), `osv-scan.yml` (dependency vuln scan), `release-please.yml`, `release.yml`.
 
 ---
 
-*Testing analysis: 2026-07-18*
+*Testing analysis: 2026-07-23*
+</content>

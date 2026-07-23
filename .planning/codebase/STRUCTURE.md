@@ -1,229 +1,225 @@
-<!-- Refreshed: 2026-07-18 -->
 # Codebase Structure
 
-**Analysis Date:** 2026-07-18
+**Analysis Date:** 2026-07-23
 
 ## Directory Layout
 
-```text
-waylandcore/
-├── .cargo/                         # Cargo configuration and audit policy
-├── .config/                        # Tool configuration, including nextest
-├── .planning/                      # GSD-generated planning and codebase maps
-├── .superpowers/                   # Local workflow state; ignored by Git
-├── crates/                         # Rust workspace crates
-│   ├── wcore-types/                # Provider-neutral shared data types
-│   ├── wcore-compact/              # Context folding and token management
-│   ├── wcore-config/               # Configuration, compatibility, shell helpers
-│   ├── wcore-protocol/             # JSON stream commands, events, and I/O
-│   ├── wcore-plugin-api/           # Stable plugin-facing contracts
-│   ├── wcore-providers/            # Built-in LLM provider implementations
-│   ├── wcore-tools/                # Built-in agent tools and registry
-│   ├── wcore-mcp/                  # Model Context Protocol client
-│   ├── wcore-skills/               # Skill discovery, activation, and execution
-│   ├── wcore-memory/               # Persistent cross-session memory
-│   ├── wcore-agent/                # Agent engine and orchestration
-│   ├── wcore-cli/                  # Main CLI, TUI, and JSON-stream host
-│   ├── wcore-channel-*/            # Individual external channel adapters
-│   ├── wcore-*/                    # Other policy, runtime, and verification crates
-│   └── wayland-*/                  # Loadable first-party plugins
-├── docs/                           # User, architecture, protocol, and security docs
-├── examples/                       # Standalone example projects, excluded from workspace
-├── npm/                            # npm packaging/generation support
-├── scripts/                        # Release, CI, packaging, and maintenance scripts
-├── templates/                      # Project and service templates, excluded from workspace
-├── tests/                          # Workspace-level integration and policy tests
-├── workspace-hack/                 # cargo-hakari feature-unification crate
-├── AGENTS.md                       # Repository operating and architecture rules
-├── Cargo.toml                      # Workspace membership and shared dependencies
-├── Cargo.lock                      # Locked Rust dependency graph
-├── Cross.toml                      # Cross-compilation configuration
-├── clippy.toml                     # Rust lint configuration
-├── deny.toml                       # Dependency policy configuration
-├── justfile                        # Deterministic development and release tasks
-├── rust-toolchain.toml             # Pinned Rust toolchain
-├── vx.toml                         # Pinned tool launcher configuration
-└── vx.lock                         # Locked vx tool versions
+```
+waylandcore-ferrox/
+├── crates/                    # Cargo workspace members (see AGENTS.md crate map)
+│   ├── wcore-types/           # Bottom: provider-neutral shared types, zero internal deps
+│   ├── wcore-compact/         # Context compression (folding, sanitization, tokenization)
+│   ├── wcore-config/          # Config cascade, ProviderCompat, auth, hooks, shell helpers
+│   ├── wcore-protocol/        # JSON stream protocol (events/commands/approval)
+│   ├── wcore-egress/          # Single outbound-HTTP chokepoint (EgressClient)
+│   ├── wcore-plugin-api/      # Plugin trait, PluginContext, scoped registries — isolation boundary
+│   ├── wcore-pluginsrc/       # Marketplace: install-time acquisition + lowering of foreign plugin formats
+│   ├── wcore-plugin-wasm/     # WASM Component Model plugin host (wasmtime + WASI)
+│   ├── wcore-plugin-subprocess/ # Subprocess plugin host (JSON-RPC over stdio)
+│   ├── wcore-providers/       # LlmProvider trait + Anthropic/OpenAI/Bedrock/Vertex impls
+│   ├── wcore-pricing/         # Pricing-as-data catalog (provider x model token rates)
+│   ├── wcore-tools/           # Built-in agent tools (Read, Write, Edit, Bash, Grep, Glob, Spawn)
+│   ├── wcore-user-model/      # User-model backend abstraction (preferences, expertise, style)
+│   ├── wcore-honcho-adapter/  # Honcho adapter for the user-model backend trait
+│   ├── wcore-acp/             # Agent Client Protocol support types
+│   ├── wcore-mcp/             # MCP (Model Context Protocol) client
+│   ├── wcore-skills/          # Skills system (prompt snippets, hooks, permissions)
+│   ├── wcore-eval/            # Acceptance/evaluation gate runner
+│   ├── wcore-eval-scenarios/  # Scenario-level eval harness against real binary + LLM APIs
+│   ├── wcore-evolve/          # GEPA evolution loop (child generation, scoring, retention)
+│   ├── wcore-replay/          # Session-trace replay + diff for debugging
+│   ├── wcore-budget/          # Budget caps + telemetry
+│   ├── wcore-sandbox/         # Container/OS-isolated tool execution (bwrap/sandbox-exec/AppContainer/Docker)
+│   ├── wcore-memory/          # Long-term cross-session memory
+│   ├── wcore-permissions/     # Multi-actor ACL + bearer token (Team Mode foundation)
+│   ├── wcore-observability/   # Trace schema, span sinks, OTLP exporter, prompt-cache discipline
+│   ├── wcore-repomap/         # Aider-style symbol extractor + codebase index (NO internal wcore-* deps)
+│   ├── wcore-agent/           # TOP: engine, session, orchestration (Anvil/Council/Workflow)
+│   ├── wcore-agents-pack/     # Built-in agent pack (embedded TOML manifests for --agent=<name>)
+│   ├── wcore-dispatch/        # Generic DecisionRouter trait + Thompson-sampling scorer
+│   ├── wcore-channels/        # Channel runtime — trait + lifecycle + config loader
+│   ├── wcore-channel-slack/   # Production Slack adapter
+│   ├── wcore-channel-telegram/# Production Telegram Bot API adapter
+│   ├── wcore-channel-discord/ # Production Discord adapter (REST + Gateway WebSocket)
+│   ├── wcore-channel-sms/     # Twilio SMS adapter
+│   ├── wcore-channel-email/   # SMTP/IMAP email adapter
+│   ├── wcore-channel-whatsapp/# WhatsApp Cloud API adapter
+│   ├── wcore-channel-signal/  # signal-cli subprocess adapter
+│   ├── wcore-channel-imessage/# macOS-only AppleScript/osascript adapter
+│   ├── wcore-channel-matrix/  # Matrix send-only MVP adapter
+│   ├── wcore-channel-msteams/ # MS Teams Bot Framework adapter
+│   ├── wcore-channels-registry/# Per-platform factory dispatch + on-disk auto-registration
+│   ├── wcore-cli/             # TOP: CLI binary entry point
+│   ├── wcore-browser/         # Multi-backend browser tool family (Camoufox/chromiumoxide/Browserbase)
+│   ├── wcore-cua/             # Multi-platform computer-use tool family
+│   ├── wcore-swarm/           # Worktree-isolated multi-agent dispatch (fleet, consensus, mesh)
+│   ├── wcore-cron/            # Memory-resident scheduled triggers (slash/channel/skill targets)
+│   ├── wcore-safety/          # Output validator + PII scrubber primitives
+│   ├── wcore-fixture-harness/ # Customer-fixture catalog + replay harness
+│   ├── wayland-ollama/        # PLUGIN: Ollama local-inference provider
+│   ├── wayland-browser/       # PLUGIN: BrowserToolSpec mirror (no wcore-browser dep)
+│   ├── wayland-cua/           # PLUGIN: CuaToolSpec mirror (no wcore-cua dep)
+│   ├── wayland-ijfw/          # PLUGIN: anchor plugin exercising every register_* surface
+│   ├── wayland-honcho/        # PLUGIN: Honcho user-model plugin shell
+│   └── workspace-hack/        # cargo-hakari generated feature-unification crate
+├── docs/                      # Design docs, subsystem references (providers.md, tools.md, workflows.md, ...)
+├── examples/                  # Standalone plugin examples
+├── templates/                 # `cargo generate` scaffolds (.liquid files)
+├── scripts/                   # Dev/CI helper scripts
+├── tests/                     # Workspace-level integration/e2e tests
+├── npm/                       # npm packaging for distribution
+├── .planning/                 # Ferrox planning artifacts (this document lives here)
+├── .github/                   # CI workflows
+├── Cargo.toml                 # Workspace manifest (member list + workspace deps)
+├── Cargo.lock
+├── justfile                   # `just push` = lint-fix → fmt → auto-commit-fixes → test → git push
+├── vx.toml / vx.lock          # Pinned toolchain versions (Rust + just) via `vx`
+├── clippy.toml / deny.toml    # Lint config, dependency audit config
+├── rust-toolchain.toml        # Rust toolchain pin
+└── AGENTS.md / CLAUDE.md       # Operating instructions (AGENTS.md canonical, CLAUDE.md imports it)
 ```
 
 ## Directory Purposes
 
-**`crates/`:** Cargo workspace implementation. Each child is independently packaged and normally contains `Cargo.toml`, `src/`, and optional `tests/`, `benches/`, `data/`, `contracts/`, or `fixtures/` directories.
+**`crates/wcore-agent/src/`:**
+- Purpose: the engine — turn loop, session management, spawning, orchestration
+- Contains: `engine.rs` (1.2MB, turn-loop core — largest file in the repo), `session.rs`, `spawner.rs`/`spawner/`, `session_journal.rs`/`session_journal/` (durable event log), `child_transaction.rs`/`child_transaction/` (transactional child mutation lifecycle), `bootstrap.rs`, `hooks/`, `plan/`, `plugins/`, `oauth/`, `slash/`, `output/`, `tool_backends/`, `compact/`, `agents/`, `auto_skill/`
+- Key files: `crates/wcore-agent/src/engine.rs`, `crates/wcore-agent/src/session_journal.rs`, `crates/wcore-agent/src/spawner.rs`, `crates/wcore-agent/src/orchestration/mod.rs`
 
-The foundation and policy layer contains:
+**`crates/wcore-agent/src/orchestration/`:**
+- Purpose: hosts the three orchestration subsystems that coordinate multi-step/multi-agent work
+- Contains:
+  - `anvil/` — the native gated-forge engine: `climb.rs` (decision core), `detect.rs` (gate auto-detection), `engine.rs` (climb loop over injected seams), `forge.rs` (production wiring: sandbox gate + spawn builder + `drive_climb_full`), `gate_authorization.rs` (Anvil gate → parent-owned gate authorization translation), `gates.rs` (gate closure pinning, probe, injection fencing, flake policy), `journal.rs` (append-only climb journal), `landing.rs` (production landing orchestrator: winner → open → accept → land), `lease.rs` (per-workspace climb lease), `ledger.rs` (per-task cost ledger), `seat.rs` (driver-seat materialization), `tool.rs` (session-level Forge tool)
+  - `council/` — multi-advisor proposal orchestration: `advisor.rs`, `aggregator.rs`, `assembler.rs`/`assembler_log.rs`, `driver.rs`, `gate.rs`, `plan_card.rs`, `proposal.rs`, `resolver.rs`, `roster.rs`, `run.rs`, `spend.rs`
+  - `workflow/` — ForgeFlows (Dynamic Workflows) declarative RON engine: `dsl.rs`, `schema.rs`, `pipeline.rs`, `runner.rs`, `limits.rs`, `estimate.rs`, `meta.rs`, `error.rs`
+  - `graph.rs` — the legacy/test-only per-turn `ExecutionGraph` walker (distinct from `WorkflowRunner`)
+  - `intent.rs`, `monitor.rs`, `node_executor.rs`, `template_routing.rs`, `templates.rs`, `f13_durability_tests.rs`
+- Key files: `crates/wcore-agent/src/orchestration/anvil/forge.rs`, `crates/wcore-agent/src/orchestration/anvil/landing.rs`, `crates/wcore-agent/src/orchestration/workflow/runner.rs`
 
-- `crates/wcore-types/` — provider-neutral messages, requests, events, tools, usage, and shared identifiers. It is the lowest common dependency.
-- `crates/wcore-compact/` — context sanitization, folding, token estimation, and compression algorithms.
-- `crates/wcore-config/` — configuration resolution, provider compatibility presets, authentication configuration, and centralized cross-platform shell helpers.
-- `crates/wcore-protocol/` — JSON Lines host protocol types, bounded input, output emission, approval coordination, and checked-in protocol contracts.
-- `crates/wcore-plugin-api/` — plugin traits, registration mirrors, and the dependency-isolation boundary used by first-party and third-party plugins.
-- `crates/wcore-egress/`, `crates/wcore-permissions/`, `crates/wcore-safety/`, and `crates/wcore-sandbox/` — outbound-network, authorization, safety, and process-containment policy.
+**`crates/wcore-sandbox/src/`:**
+- Purpose: cross-platform process-isolated tool execution + containment authority
+- Contains: `lib.rs` (registry, `HardContainmentAuthority` mint/consume), `backends/` (per-platform: `bwrap.rs`/`bwrap_landlock.rs`/`bwrap_seccomp.rs` for Linux, `sandbox_exec.rs` for macOS, `appcontainer.rs`/`appcontainer/` for Windows including `acl_lease/` and `windows_impl/`, `docker.rs` opt-in, `no_sandbox.rs`, `process_tree.rs`), `directory_authority.rs`/`directory_authority_file.rs`/`directory_authority_archive.rs`/`directory_authority_windows.rs` (filesystem authority abstraction), `manifest.rs` (`SandboxManifest`, policies), `process_capture.rs`, `error.rs`, `bin/il_probe.rs`
+- Key files: `crates/wcore-sandbox/src/lib.rs`, `crates/wcore-sandbox/src/backends/mod.rs`
 
-The runtime and capability layer contains:
+**`crates/wcore-swarm/src/`:**
+- Purpose: worktree-isolated multi-agent dispatch — the substrate Anvil/Council candidates execute inside
+- Contains: `worktree.rs`/`worktree/` (`candidate.rs` — `CandidateSeal`; `parent.rs` — parent checkout authority), `worktree_manager.rs`, `worktree_cleanup.rs`, `worktree_security.rs`, `fleet.rs` (fleet dispatch), `dispatch.rs`, `consensus.rs`, `debate.rs`, `mesh.rs`, `topology.rs`, `bridge.rs`, `collect.rs`, `reduce.rs`, `scorer.rs`, `heartbeat.rs`, `audit.rs`
+- Key files: `crates/wcore-swarm/src/worktree/candidate.rs`, `crates/wcore-swarm/src/worktree/parent.rs`, `crates/wcore-swarm/src/fleet.rs`
 
-- `crates/wcore-agent/` — the composition root, agent loop, session lifecycle, execution graphs, workflows, fleets, delegation, and runtime policy enforcement.
-- `crates/wcore-providers/` — Anthropic, OpenAI-compatible, Bedrock, Vertex, and related provider adapters behind `LlmProvider`.
-- `crates/wcore-tools/` — tool trait, registry, and built-in Read, Write, Edit, Bash, Grep, Glob, Spawn, Git, and supporting tools.
-- `crates/wcore-mcp/` — MCP transports, server discovery, tool bridging, and lifecycle.
-- `crates/wcore-skills/` — skill loading, conditional activation, permissions, hooks, and shell expansion.
-- `crates/wcore-memory/` — persistent memory stores, extraction, retrieval, consolidation, and project/user context.
-- `crates/wcore-observability/` — trace schema, span sinks, OTLP export, and prompt-cache observability.
-- `crates/wcore-repomap/` — isolated repository symbol extraction and indexing with no internal `wcore-*` dependency.
-- `crates/wcore-browser/` and `crates/wcore-cua/` — browser automation and cross-platform computer-use backends.
-- `crates/wcore-budget/`, `crates/wcore-pricing/`, and `crates/wcore-user-model/` — cost controls, pricing data, and user-model behavior.
+**`crates/wcore-cli/src/`:**
+- Purpose: CLI binary entry point and all user-facing subcommands
+- Contains: `main.rs` (arg parsing + wiring, 318.7K), `lib.rs`, `anvil.rs` (Anvil CLI verb), `swarm.rs`, `cron.rs`, `workflow.rs`, `crucible.rs`, `acp.rs`/`acp_engine.rs`/`acp_roster.rs` (Agent Client Protocol), `auth.rs`, `provider_keys.rs`, `profile.rs`/`profile_router.rs`, `self_update.rs`, `runtime_diagnostics.rs`, `crash_sentinel.rs`, `mcp_serve.rs`, `init.rs`, `agent_cmd.rs`, `budget_grants.rs`, `attachments.rs`, `fetch.rs`, `image.rs`, subdirectories `doctor/`, `migrate/`, `plugin/`, `tui/`
+- Key files: `crates/wcore-cli/src/main.rs`, `crates/wcore-cli/src/anvil.rs`
 
-The host and orchestration layer contains:
-
-- `crates/wcore-cli/` — executable entry point, argument parsing, interactive TUI, one-shot operation, JSON-stream server, and host command dispatch.
-- `crates/wcore-acp/` — Agent Client Protocol integration.
-- `crates/wcore-agents-pack/`, `crates/wcore-dispatch/`, `crates/wcore-swarm/`, and `crates/wcore-cron/` — packaged agents, dispatch, multi-agent execution, and scheduled work.
-- `crates/wcore-channels/` and `crates/wcore-channels-registry/` — common channel contracts and runtime registration.
-- `crates/wcore-channel-discord/`, `crates/wcore-channel-email/`, `crates/wcore-channel-imessage/`, `crates/wcore-channel-matrix/`, `crates/wcore-channel-msteams/`, `crates/wcore-channel-signal/`, `crates/wcore-channel-slack/`, `crates/wcore-channel-sms/`, `crates/wcore-channel-telegram/`, and `crates/wcore-channel-whatsapp/` — external transport adapters.
-
-Plugin implementations are separated from the core spine:
-
-- `crates/wayland-browser/` and `crates/wayland-cua/` — plugin packages that expose browser and CUA capabilities through mirror types in `wcore-plugin-api`.
-- `crates/wayland-ollama/` — Ollama local-inference provider plugin.
-- `crates/wayland-ijfw/` — IJFW anchor plugin exercising plugin registration surfaces.
-- `crates/wayland-honcho/` and `crates/wcore-honcho-adapter/` — Honcho plugin and adapter integration.
-- `crates/wcore-plugin-wasm/`, `crates/wcore-plugin-subprocess/`, and `crates/wcore-pluginsrc/` — alternate plugin runtimes and plugin-source management.
-
-Verification and evolution crates are kept distinct from the production engine:
-
-- `crates/wcore-eval/` and `crates/wcore-eval-scenarios/` — acceptance gates, scenario runners, evidence, and threshold enforcement.
-- `crates/wcore-evolve/` — GEPA generation, scoring, mutation, and retention loop.
-- `crates/wcore-replay/` and `crates/wcore-fixture-harness/` — deterministic replay and fixture-driven verification support.
-
-**`docs/`:** Checked-in documentation. Top-level references such as `docs/architecture.md`, `docs/providers.md`, `docs/tools.md`, `docs/skills.md`, `docs/mcp.md`, `docs/advanced.md`, and `docs/json-stream-protocol.md` describe the public system. Design, audit, security, and migration material lives in named subdirectories or topic files under this directory.
-
-**`examples/`:** Standalone example crates and configurations. Root `Cargo.toml` excludes `examples/**`, so examples do not automatically participate in workspace builds.
-
-**`templates/`:** Checked-in project/service templates. Root `Cargo.toml` excludes `templates/**`; treat their manifests and generated source independently from workspace members.
-
-**`tests/`:** Cross-crate tests for workspace policies and end-to-end behavior that do not belong to one crate's public integration-test surface.
-
-**`scripts/`:** Operational automation for CI, release, packaging, installation, and maintenance. Inspect the script and its callers before changing it because these paths often encode platform and distribution assumptions.
-
-**`npm/`:** Source used to generate or package the npm distribution layer; it is not a Rust workspace crate.
-
-**`workspace-hack/`:** `cargo-hakari`-managed feature-unification crate. Its manifest and source explicitly require regeneration via `cargo hakari generate` rather than manual edits.
-
-**`.planning/`:** Generated GSD project state and codebase maps. It is ignored by Git in the current repository and is not runtime source.
-
-**`.cargo/` and `.config/`:** Tool-specific configuration that applies across crates, including Cargo and nextest behavior.
+**`docs/`:**
+- Purpose: hand-maintained subsystem reference docs
+- Contains: `getting-started.md`, `providers.md`, `tools.md`, `skills.md`, `mcp.md`, `advanced.md`, `json-stream-protocol.md`, `troubleshooting.md`, `workflows.md`, `design/` (dated design docs, e.g. `2026-07-12-anvil-native-gated-forge-design.md`)
 
 ## Key File Locations
 
 **Entry Points:**
-
-- `crates/wcore-cli/src/main.rs` — primary `wayland` executable; selects one-shot, TUI, JSON stream, bootstrap, and utility subcommands.
-- `crates/wcore-cli/src/lib.rs` — reusable CLI-facing modules exposed to the executable and tests.
-- `crates/wcore-eval/src/bin/` — evaluation command entry points.
-- `crates/wcore-eval-scenarios/src/bin/` — scenario-runner entry points.
-- `crates/wcore-evolve/src/bin/` — evolution-loop command entry points.
-- `crates/wayland-*/src/lib.rs` — first-party plugin library entry points.
+- `crates/wcore-cli/src/main.rs`: CLI binary entry point
+- `crates/wcore-cli/src/anvil.rs`: Anvil CLI verb entry
+- `crates/wcore-agent/src/orchestration/anvil/tool.rs`: in-session Forge tool entry
+- `crates/wcore-cli/src/acp.rs`: Agent Client Protocol entry surface
 
 **Configuration:**
-
-- `Cargo.toml` — authoritative workspace member list, dependency versions, profiles, lints, and package metadata.
-- `Cargo.lock` — resolved Rust dependencies; update only through Cargo workflows.
-- `rust-toolchain.toml` — pinned compiler/toolchain channel.
-- `vx.toml` and `vx.lock` — deterministic tool launcher declarations and lock state.
-- `justfile` — repository-standard lint, format, test, release, and push tasks.
-- `.cargo/config.toml` — shared Cargo configuration.
-- `.config/nextest.toml` — nextest execution profiles.
-- `Cross.toml` — cross-compilation target configuration.
-- `clippy.toml` and `deny.toml` — lint and dependency-policy settings.
-- `crates/wcore-config/src/config.rs` — runtime configuration model and resolution logic.
-- `crates/wcore-config/src/compat.rs` — provider-specific behavior expressed as `ProviderCompat` data instead of provider-name conditionals.
-- `AGENTS.md` — repository constraints, crate map, verification rules, and platform boundaries.
+- `Cargo.toml`: workspace member list (with inline dated comments explaining why each crate exists — treat these comments as authoritative provenance)
+- `crates/wcore-config/src/`: runtime config cascade, `ProviderCompat`
+- `rust-toolchain.toml`, `vx.toml`/`vx.lock`: toolchain pins
 
 **Core Logic:**
-
-- `crates/wcore-agent/src/bootstrap.rs` — runtime composition root that binds providers, tools, plugins, MCP, skills, memory, channels, policies, and the engine.
-- `crates/wcore-agent/src/engine.rs` — primary agent loop, provider streaming, tool-use handling, session updates, and graph execution.
-- `crates/wcore-agent/src/orchestration/` — workflows, execution graphs, fleets, spawning, and higher-level orchestration.
-- `crates/wcore-agent/src/session.rs` — active session and session-manager lifecycle.
-- `crates/wcore-agent/src/session_journal.rs` — durable session journal models, append/recovery behavior, leases, snapshots, and reduction.
-- `crates/wcore-tools/src/lib.rs` and `crates/wcore-tools/src/registry.rs` — built-in tool surface and lookup/dispatch registry.
-- `crates/wcore-providers/src/lib.rs` — `LlmProvider` abstraction and provider construction.
-- `crates/wcore-protocol/src/commands.rs` and `crates/wcore-protocol/src/events.rs` — host-to-core commands and core-to-host events.
-- `crates/wcore-protocol/src/reader.rs` and `crates/wcore-protocol/src/writer.rs` — bounded JSON input and serialized event output.
-- `crates/wcore-plugin-api/src/lib.rs` — plugin-facing API boundary and exported registration contracts.
-- `crates/wcore-config/src/shell.rs` — centralized cross-platform process construction; use argv mode for attacker-controlled arguments.
+- `crates/wcore-agent/src/engine.rs`: turn loop core
+- `crates/wcore-agent/src/session_journal.rs`: durable event log
+- `crates/wcore-agent/src/orchestration/anvil/forge.rs`: gated-forge production wiring, `drive_climb_full`
+- `crates/wcore-agent/src/orchestration/anvil/landing.rs`: parent CAS landing + rollback
+- `crates/wcore-sandbox/src/lib.rs`: containment authority mint/consume
 
 **Testing:**
-
-- `crates/<crate>/tests/` — public integration tests for an individual crate.
-- Inline `#[cfg(test)]` modules under `crates/<crate>/src/` — unit tests for module internals.
-- `tests/` — workspace-wide integration, policy, and compatibility tests.
-- `crates/wcore-protocol/contracts/` — checked-in protocol contract fixtures that protect host compatibility.
-- `crates/wcore-eval/data/` and `crates/wcore-eval-scenarios/` — evaluation definitions, expected evidence, and scenario verification.
-- `crates/wcore-fixture-harness/` and `crates/wcore-replay/` — reusable deterministic test infrastructure.
-- `crates/*/benches/` — benchmarks owned by the crate containing the measured code.
+- Inline `#[cfg(test)]` modules per file (e.g. `crates/wcore-sandbox/src/backends/appcontainer/acl_lease/tests.rs`, `windows_impl/tests.rs`, `docker_tests.rs`)
+- `crates/<crate>/tests/`: integration tests (e.g. `crates/wcore-agent/tests/orchestration_test.rs`, `workflow_runner_test.rs`, `dangerous_lease_e2e_test.rs`, `hooks_test.rs`, `json_stream_approval_test.rs`)
+- `crates/wcore-swarm/src/worktree_tests.rs`/`worktree_tests/linux.rs`: platform-conditional worktree tests
+- `crates/wcore-fixture-harness/`: customer-fixture catalog + replay harness
+- `crates/wcore-eval-scenarios/`: scenario-level eval harness against the real binary + real LLM APIs
 
 ## Naming Conventions
 
-**Files:**
+**Crates:**
+- `wcore-*` prefix for internal library crates (bottom/mid/top layers)
+- `wayland-*` prefix for plugin crates that go through `wcore-plugin-api` mirror types
+- `workspace-hack` is the sole exception (cargo-hakari generated)
 
-- Rust modules use `snake_case.rs`; multi-file modules use a matching `snake_case/` directory with `mod.rs` or an explicitly declared root module.
-- Library and binary roots use Cargo conventions: `src/lib.rs`, `src/main.rs`, and `src/bin/<name>.rs`.
-- Integration tests use descriptive `snake_case.rs` names under `tests/`; several suites use a `_test.rs` suffix where that is already the local pattern.
-- Public Rust types and traits use `PascalCase`; functions, methods, fields, variables, and modules use `snake_case`; constants use `SCREAMING_SNAKE_CASE`.
-- Documentation uses descriptive lowercase kebab-case filenames such as `json-stream-protocol.md`; established uppercase audit/release artifacts retain their existing convention.
+**Files:**
+- Snake_case module files matching their primary type/concern (e.g. `session_journal.rs`, `child_transaction.rs`)
+- When a single file exceeds ~1000 lines it grows a same-named directory (e.g. `session_journal.rs` + `session_journal/`, `spawner.rs` + `spawner/`, `child_transaction.rs` + `child_transaction/`) with submodules split by responsibility (e.g. `session_journal/model.rs`, `session_journal/lease.rs`)
+- Test files: `*_test.rs` or `*_tests.rs` suffix in `tests/`; inline `#[cfg(test)] mod tests` or a dedicated `tests.rs` sibling within `src/`
 
 **Directories:**
+- Organized by domain responsibility (e.g. `orchestration/anvil/`, `orchestration/council/`, `orchestration/workflow/`), not by type (no generic `models/`/`utils/` catch-alls at the orchestration level)
+- Per-platform backend code lives under `backends/` with one file per platform/mechanism (e.g. `bwrap.rs`, `sandbox_exec.rs`, `appcontainer.rs`, `docker.rs`)
 
-- Workspace crates use kebab-case Cargo package names. Core crates start with `wcore-`; first-party loadable plugins start with `wayland-`.
-- Rust module directories use `snake_case` to match module names.
-- Each crate owns its tests and fixtures when they validate that crate; only truly cross-workspace checks belong in root `tests/`.
-- New provider, channel, or plugin code should follow the existing neighboring crate/module naming rather than introducing a parallel taxonomy.
+**Types:**
+- PascalCase struct/enum/trait names describing the domain concept directly (e.g. `HardContainmentAuthority`, `CandidateSeal`, `TerminalState`, `WinnerLandingRequest`)
+- Error enums named `<Domain>Error` (e.g. `ForgeError`, `WinnerLandingError`, `SandboxError`, `JournalError`)
 
 ## Where to Add New Code
 
-**New Feature:**
+**New orchestration subsystem (sibling of Anvil/Council/Workflow):**
+- Add a new module under `crates/wcore-agent/src/orchestration/<name>/` with its own `mod.rs`; wire it into `crates/wcore-agent/src/orchestration/mod.rs`
+- Tests: `crates/wcore-agent/tests/<name>_test.rs` for integration, inline `#[cfg(test)]` for unit tests
 
-- Add provider-neutral data first in `crates/wcore-types/` only when multiple higher layers need it; otherwise keep the type in the lowest owning crate.
-- Add a built-in LLM provider or request/response translation in `crates/wcore-providers/`. Express provider differences in `crates/wcore-config/src/compat.rs`, then cover both the preset and serialized request behavior with tests.
-- Add a built-in tool in `crates/wcore-tools/src/`, register it through the existing registry/bootstrap path, and place public behavior tests in `crates/wcore-tools/tests/`.
-- Add agent-loop, delegation, graph, fleet, or workflow behavior in `crates/wcore-agent/src/` under the matching domain module. Keep provider-format conversion out of this crate.
-- Add a host command or event in `crates/wcore-protocol/src/commands.rs` or `events.rs`, update the relevant checked-in contracts, then wire dispatch/emission in `crates/wcore-cli/src/main.rs` and host adapters that consume it.
-- Add runtime configuration in `crates/wcore-config/`; centralize any new operating-system behavior there rather than scattering `cfg` or raw shell selection across call sites.
-- Add memory, skill, MCP, browser, CUA, sandbox, pricing, or observability behavior to its existing dedicated `wcore-*` crate and integrate it in `wcore-agent` bootstrap only where composition is required.
+**New Anvil piece (gate type, landing behavior, etc.):**
+- Extend the relevant existing file under `crates/wcore-agent/src/orchestration/anvil/` (`gates.rs` for gate logic, `landing.rs` for landing/CAS behavior, `forge.rs` for spawn wiring) rather than creating a new crate
+- Any new sandbox containment primitive belongs in `crates/wcore-sandbox`, not in `wcore-agent`
 
-**New Component/Module:**
+**New LLM provider:**
+- Add an implementation crate module under `crates/wcore-providers/src/` implementing `LlmProvider` (`crates/wcore-providers/src/lib.rs:135`)
+- Provider-specific quirks go into `ProviderCompat` (`wcore-config`), never hardcoded in the provider file — see AGENTS.md §"No Hardcoded Provider Quirks"
 
-- Prefer a focused module inside the existing owning crate. Create a new workspace crate only when the component has an independent dependency boundary, public contract, and more than a single shared helper.
-- Add a new external channel as `crates/wcore-channel-<service>/`, implement the contracts from `crates/wcore-channels/`, and register it through `crates/wcore-channels-registry/` and the agent bootstrap path.
-- Add a first-party plugin as `crates/wayland-<name>/`. Depend on mirror contracts in `wcore-plugin-api`; do not make plugin crates reach upward into browser, CUA, agent, or CLI internals.
-- Add plugin host bindings in `crates/wcore-agent/` only when a mirror contract must be connected to a concrete core backend without breaking plugin isolation.
-- Add verification binaries, scenarios, or acceptance gates to `wcore-eval`, `wcore-eval-scenarios`, `wcore-replay`, or `wcore-fixture-harness` according to whether the artifact is a gate, scenario, replay, or fixture.
+**New built-in tool:**
+- Add to `crates/wcore-tools/src/` implementing the `Tool` trait (`crates/wcore-tools/src/lib.rs:319`); register with the `ToolDispatcher`
+- If the tool needs process isolation, delegate execution to `wcore-sandbox::SandboxBackend` rather than spawning directly
+
+**New chat channel adapter:**
+- Add a new `crates/wcore-channel-<platform>/` crate implementing the `Channel` trait from `wcore-channels`; register via `wcore-channels-registry`'s on-disk auto-registration
+
+**New sandbox backend (new platform/mechanism):**
+- Add under `crates/wcore-sandbox/src/backends/<name>.rs` implementing `SandboxBackend`; wire selection into `default_for_platform` (`crates/wcore-sandbox/src/backends/mod.rs`) behind the appropriate `cfg`
+
+**Plugin-facing capability:**
+- Extend `crates/wcore-plugin-api` mirror types first, then implement the real capability in the corresponding `wcore-*` crate and bind it in `wcore-agent` (see `HostBrowserRegistrar`/`HostCuaRegistrar` pattern) — never add a direct `wcore-browser`/`wcore-cua`/`wcore-sandbox` dependency to a `wayland-*` plugin crate (audit F2)
 
 **Utilities:**
-
-- Put cross-platform paths, process launching, permissions, and environment handling in `crates/wcore-config/` when they are configuration/platform concerns.
-- Put provider-neutral shared model types in `crates/wcore-types/` and context-compression helpers in `crates/wcore-compact/`.
-- Keep a utility local to its single caller's crate until a second real consumer establishes a shared responsibility; do not create a crate or public abstraction for speculative reuse.
-- Put operational automation in `scripts/` and deterministic developer task composition in `justfile`; do not embed release operations in product code.
+- Shared cross-platform helpers (paths, shell execution) belong in `wcore-config` (already hosts `wcore_config::shell`)
+- If functionality is needed by 2+ crates, extract to the lowest existing crate in the dependency graph where it semantically belongs — never duplicate across crates, never create a new crate for one shared function
 
 ## Special Directories
 
-**`.planning/`:** Generated by GSD workflows. It is ignored by Git and contains planning state rather than product code. Generated: Yes. Committed: No.
+**`workspace-hack/`:**
+- Purpose: cargo-hakari generated crate that unifies feature flags across the workspace to speed up builds
+- Generated: Yes (regenerated by `cargo hakari generate`)
+- Committed: Yes
 
-**`.superpowers/`:** Local workflow/runtime state. It is ignored by Git. Generated: Yes. Committed: No.
+**`.planning/`:**
+- Purpose: Ferrox planning artifacts (phase plans, codebase maps — this document's home)
+- Generated: Partially (docs like this one are generated by mapper agents; phase plans are human/agent-authored)
+- Committed: Yes
 
-**`target/`:** Cargo build output when builds are run. It is ignored and must never be treated as source evidence. Generated: Yes. Committed: No.
+**`templates/`:**
+- Purpose: `cargo generate` scaffolds (`.liquid` files that intentionally do not parse as Rust)
+- Generated: No (hand-authored templates)
+- Committed: Yes
 
-**`workspace-hack/`:** Feature-unification crate managed by `cargo-hakari`. Regenerate its manifest/source through `cargo hakari generate`; do not edit generated dependency content manually. Generated: Yes. Committed: Yes.
+**`examples/`:**
+- Purpose: standalone plugin examples, kept out of the main crate graph
+- Generated: No
+- Committed: Yes
 
-**`crates/wcore-protocol/contracts/`:** Versioned compatibility contracts for the JSON-stream surface. Update deliberately with protocol changes. Generated: No. Committed: Yes.
-
-**`crates/wcore-eval/data/` and scenario fixture directories:** Versioned evaluation inputs and expected evidence. Treat them as executable acceptance artifacts, not scratch output. Generated: No. Committed: Yes.
-
-**`templates/` and `examples/`:** Checked-in source artifacts intentionally excluded from the root Cargo workspace. Changes require their own validation because normal workspace commands do not prove them. Generated: No. Committed: Yes.
-
-**`docs/`:** Checked-in public and internal documentation. Architecture claims should be reconciled with current code and manifests before being repeated. Generated: No. Committed: Yes.
+**`.github/`:**
+- Purpose: CI workflow definitions
+- Generated: No
+- Committed: Yes
 
 ---
 
-*Structure analysis: 2026-07-18*
+*Structure analysis: 2026-07-23*
