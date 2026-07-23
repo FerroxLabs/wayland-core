@@ -297,7 +297,9 @@ pub(super) fn clamp_timeout_ms(d: Duration) -> u32 {
 
 /// RAII: delete the proc-thread attribute list.
 pub(super) struct AttrListGuard {
-    list: LPPROC_THREAD_ATTRIBUTE_LIST,
+    // `pub(super)` so the `process` sibling module can construct the guard via
+    // struct literal (E0451: the field was private, matching the SharedJob fix).
+    pub(super) list: LPPROC_THREAD_ATTRIBUTE_LIST,
 }
 impl Drop for AttrListGuard {
     fn drop(&mut self) {
