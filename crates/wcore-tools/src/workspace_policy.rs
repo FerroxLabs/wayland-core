@@ -128,6 +128,26 @@ impl WorkspacePolicy {
                 writable_extra.push(home.join(sub));
             }
         }
+        // Windows: keep $HOME OUT of the read allowlist. The AppContainer
+        // backend materializes each fs_read_allow root as an inheritable
+        // (OI)(CI) ACE via SetNamedSecurityInfoW, which synchronously
+        // propagates the ACE — and its post-spawn revoke — across the entire
+        // subtree. Rooted at the user profile that is two O(profile-size) ACL
+        // rewrites per spawn: on real profiles (dev caches, node_modules,
+        // venvs) each pass takes tens of seconds, so every Bash command blows
+        // its timeout ("sandbox child timed out"). Worse, a crash between
+        // grant and revoke strands the per-PID AppContainer ACE on the profile
+        // root, and unresolvable AppContainer SIDs in a DACL crash Chromium's
+        // sandbox bootstrap — bricking unrelated Electron/Chromium apps
+        // installed under the profile (electron/electron#51761). The workspace
+        // root and the toolchain caches in `writable_extra` remain granted, so
+        // builds and installs still work; reads outside those roots are denied
+        // (which is the sandbox posture the other platforms' home-read never
+        // weakened anyway: bwrap/sandbox-exec bind $HOME read-only for free,
+        // with none of the DACL cost or blast radius).
+        #[cfg(windows)]
+        let readable_extra: Vec<PathBuf> = Vec::new();
+        #[cfg(not(windows))]
         let readable_extra: Vec<PathBuf> = dirs::home_dir().into_iter().collect();
 
         // Compute readable_canon from the same locals readable_roots() uses.
@@ -605,7 +625,28 @@ fn canon(p: PathBuf) -> PathBuf {
 
 fn scratch_dirs() -> Vec<PathBuf> {
     let tmp = std::env::temp_dir();
-    vec![canon(tmp)]
+    // Windows: grant a dedicated scratch SUBDIR of %TEMP%, never the whole
+    // host temp tree. The AppContainer backend stamps each writable/readable
+    // root with an inheritable (OI)(CI) ACE per spawn (and revokes it after),
+    // and SetNamedSecurityInfoW propagates that ACE across every child object.
+    // A months-old %TEMP% holds tens of thousands of files, so that propagation
+    // measured ~17s per grant → every Bash command blew its timeout
+    // ("sandbox child timed out"). The child's own TEMP/TMP is already remapped
+    // to the AppContainer package storage, so the host-temp grant only needs to
+    // cover a bounded scratch area, not the accumulated junk drawer. The
+    // dedicated subdir is created on demand and stays small, so its ACL pass is
+    // effectively free. Unix binds /tmp as a namespace mount (no per-file ACL
+    // cost), so it keeps granting the whole temp dir as before.
+    #[cfg(windows)]
+    {
+        let scratch = tmp.join("wayland-scratch");
+        let _ = std::fs::create_dir_all(&scratch);
+        vec![canon(scratch)]
+    }
+    #[cfg(not(windows))]
+    {
+        vec![canon(tmp)]
+    }
 }
 
 /// #657 (Overwatch ruling, Sean-confirmed): the Bash network posture for a
@@ -661,6 +702,68 @@ mod tests {
         );
         // Trusted reuses the user's global caches — no redirect.
         assert!(p.cache_env().is_empty());
+    }
+
+    #[test]
+    fn trusted_local_excludes_home_from_readable_roots_on_windows() {
+        // On Windows, granting $HOME as an fs_read_allow root makes the
+        // AppContainer backend rewrite an inheritable ACE across the ENTIRE
+        // user profile per spawn (O(profile size)), which times out every Bash
+        // command, and a crash between grant and revoke leaks the per-PID
+        // AppContainer ACE onto the profile root — bricking unrelated
+        // Chromium/Electron apps (electron/electron#51761). $HOME must NOT be a
+        // readable root on Windows. The workspace root + toolchain caches still
+        // are, so builds keep working. On Unix the read-only bind is free, so
+        // $HOME stays granted there.
+        let dir = tempfile::tempdir().unwrap();
+        let p = WorkspacePolicy::trusted_local(dir.path());
+        let roots = p.readable_roots();
+        if let Some(home) = dirs::home_dir() {
+            let home_granted = roots.iter().any(|r| *r == home);
+            if cfg!(windows) {
+                assert!(
+                    !home_granted,
+                    "the user profile root must not be a readable sandbox root on Windows; roots={roots:?}"
+                );
+            } else {
+                assert!(
+                    home_granted,
+                    "home should remain a readable root on non-Windows platforms; roots={roots:?}"
+                );
+            }
+        }
+        // The workspace root is always readable regardless of platform.
+        assert!(roots.iter().any(|r| r == p.root()));
+    }
+
+    #[test]
+    fn scratch_dir_is_a_temp_subdir_not_whole_temp_on_windows() {
+        // On Windows, granting all of %TEMP% means an inheritable-ACE
+        // propagation across every accumulated temp file per spawn (~17s on a
+        // real profile) — it times out every Bash command. scratch_dirs() must
+        // return a bounded subdir, never std::env::temp_dir() itself. On Unix
+        // the whole temp dir is fine (bind mount, no per-file ACL cost).
+        let dirs = scratch_dirs();
+        let temp = canon(std::env::temp_dir());
+        if cfg!(windows) {
+            assert!(
+                !dirs.contains(&temp),
+                "scratch_dirs must not grant the whole %TEMP% on Windows; got {dirs:?}"
+            );
+            assert!(
+                dirs.iter().all(|d| d.starts_with(&temp)),
+                "the scratch dir must live under %TEMP%; got {dirs:?}"
+            );
+            assert!(
+                dirs.iter().any(|d| d.ends_with("wayland-scratch")),
+                "expected a dedicated wayland-scratch subdir; got {dirs:?}"
+            );
+        } else {
+            assert!(
+                dirs.contains(&temp),
+                "on Unix scratch_dirs keeps the whole temp dir; got {dirs:?}"
+            );
+        }
     }
 
     #[test]

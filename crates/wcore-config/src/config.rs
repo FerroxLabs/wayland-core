@@ -835,6 +835,30 @@ pub struct ToolsConfig {
     /// precedence for back-compat. Defaults to off (fail closed).
     #[serde(default)]
     pub allow_no_sandbox: Option<bool>,
+    /// Windows only: use a medium-integrity restricted token + Job Object
+    /// instead of the full AppContainer for `trusted_local` sessions. The
+    /// AppContainer's Low-integrity restricted token blocks image
+    /// initialization for msys/git-bash (`ls`, `pwd`), PowerShell, and Node
+    /// scripts (`npm`) — verified: none of them run under the strict
+    /// AppContainer, all of them run under this posture. Trade-off: there is
+    /// no AppContainer SID to scope filesystem writes to, so containment is
+    /// resource limits (Job Object) + no-admin/no-privileges (restricted
+    /// token) + the network policy, not filesystem confinement. Mirrors
+    /// `WAYLAND_WINDOWS_RELAXED_SANDBOX`; the env var takes precedence when
+    /// set, but a desktop-spawned engine does not receive operator env vars
+    /// (see `ENGINE_ENV_ALLOWLIST` in the Electron host), so config is the
+    /// reliable channel there. No-op on non-Windows platforms.
+    #[serde(default)]
+    pub windows_relaxed_sandbox: Option<bool>,
+    /// Windows only: voluntary admin escalation, effective ONLY together with
+    /// `windows_relaxed_sandbox`. Runs the sandboxed child with the parent
+    /// (unrestricted) token instead of a restricted one, so the child ends up
+    /// with admin rights if and only if the Wayland host process itself was
+    /// launched elevated — identical to running any CLI tool from an admin
+    /// terminal. Off does NOT silently grant admin even on an elevated host.
+    /// Mirrors `WAYLAND_WINDOWS_ALLOW_ADMIN`.
+    #[serde(default)]
+    pub windows_allow_admin: Option<bool>,
 }
 
 impl Default for ToolsConfig {
@@ -848,6 +872,8 @@ impl Default for ToolsConfig {
             env_passthrough: Vec::new(),
             sandbox: None,
             allow_no_sandbox: None,
+            windows_relaxed_sandbox: None,
+            windows_allow_admin: None,
         }
     }
 }
@@ -3412,6 +3438,15 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
             sandbox: project.tools.sandbox.or(global.tools.sandbox),
             // GHSA-8r7g: tighten-only (see clamp above).
             allow_no_sandbox: clamped_allow_no_sandbox,
+            // Project overrides global, same pattern as the sandbox toggle.
+            windows_relaxed_sandbox: project
+                .tools
+                .windows_relaxed_sandbox
+                .or(global.tools.windows_relaxed_sandbox),
+            windows_allow_admin: project
+                .tools
+                .windows_allow_admin
+                .or(global.tools.windows_allow_admin),
         }
     } else {
         ToolsConfig {
@@ -3427,6 +3462,14 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
             sandbox: project.tools.sandbox.or(global.tools.sandbox),
             // GHSA-8r7g: tighten-only (see clamp above).
             allow_no_sandbox: clamped_allow_no_sandbox,
+            windows_relaxed_sandbox: project
+                .tools
+                .windows_relaxed_sandbox
+                .or(global.tools.windows_relaxed_sandbox),
+            windows_allow_admin: project
+                .tools
+                .windows_allow_admin
+                .or(global.tools.windows_allow_admin),
         }
     };
 

@@ -455,6 +455,45 @@ mod windows_impl {
         format!("WCoreSandbox-{}", std::process::id())
     }
 
+    /// Relaxed Windows sandbox posture for `trusted_local` sessions: a
+    /// restricted token (Administrators + privileges dropped) inside the Job
+    /// Object, at the parent's integrity, WITHOUT the AppContainer capability
+    /// or the forced Low integrity level.
+    ///
+    /// Why it exists: the AppContainer's deny-by-default read model and Low
+    /// integrity level block the DLL/runtime initialization of msys (git-bash,
+    /// `ls`, `pwd`), Node scripts (`npm`), `git init`, and PowerShell — so a
+    /// trusted local agent cannot run its own toolchain. Measured: every one of
+    /// those runs under this posture and none run under AppContainer. The
+    /// tradeoff is that filesystem writes are no longer scoped to the workspace
+    /// (there is no AppContainer SID to scope them to); containment is provided
+    /// by the Job Object (resources), the restricted token (no admin / no
+    /// privileges), and the network policy. This is opt-in and intended ONLY
+    /// for the user's own machine (`WorkspacePolicy::trusted_local`); untrusted
+    /// / remote (`contained`) sessions keep the full AppContainer.
+    ///
+    /// Gated by `WAYLAND_WINDOWS_RELAXED_SANDBOX=1` (or `=true`). The host wires
+    /// it on for trusted-local desktop sessions.
+    /// Delegates to the crate-level resolver, which checks
+    /// `WAYLAND_WINDOWS_RELAXED_SANDBOX` first (CLI use — the env var reaches
+    /// a directly-launched process) then the config-installed
+    /// `[tools] windows_relaxed_sandbox` (desktop use — env vars set by the
+    /// operator do NOT reach the desktop-spawned engine, since the Electron
+    /// host filters child-process env through a fixed allowlist; config.toml
+    /// is not subject to that filter).
+    fn relaxed_windows_sandbox() -> bool {
+        crate::windows_relaxed_sandbox_enabled()
+    }
+
+    /// Opt-in to voluntary admin escalation. Only takes effect together with
+    /// [`relaxed_windows_sandbox`]. See the token-creation site for the exact
+    /// semantics (unrestricted parent token ⇒ admin only if the host is
+    /// elevated). Same env-var-then-config resolution as
+    /// [`relaxed_windows_sandbox`].
+    fn admin_escalation_opt_in() -> bool {
+        crate::windows_allow_admin_enabled()
+    }
+
     fn profile_name_w() -> Vec<u16> {
         widen(&profile_name_str())
     }
@@ -580,6 +619,55 @@ mod windows_impl {
         )
     }
 
+    /// Turn a `\\?\C:\…` verbatim-disk path into the plain `C:\…` form that
+    /// `cmd.exe` accepts as a working directory. Any other spelling (already
+    /// plain, verbatim-UNC, device) is returned unchanged. This only rewrites
+    /// the string; it names the identical filesystem object.
+    fn strip_verbatim_disk_prefix(p: &std::path::Path) -> std::path::PathBuf {
+        if !is_verbatim_disk_path(p) {
+            return p.to_path_buf();
+        }
+        let s = p.as_os_str().to_string_lossy();
+        // `\\?\C:\rest` → `C:\rest`. is_verbatim_disk_path guarantees the shape.
+        match s.strip_prefix(r"\\?\") {
+            Some(rest) => std::path::PathBuf::from(rest),
+            None => p.to_path_buf(),
+        }
+    }
+
+    /// Resolve a bare `powershell` / `pwsh` / `bash` / `sh` to its absolute
+    /// path for the relaxed posture, where these shells actually load. Returns
+    /// the widened path, or `None` if it cannot be located (then the caller
+    /// falls through to the strict rejection). Search order: PowerShell's
+    /// canonical System32 location first, then `PATH`. Only reached under
+    /// `relaxed_windows_sandbox()`, so a `PATH` search is acceptable here.
+    fn resolve_relaxed_shell(program: &str, _shell: BareShell) -> Option<Vec<u16>> {
+        let lname = program.to_ascii_lowercase();
+        if lname == "powershell" || lname == "powershell.exe" {
+            if let Some(sysroot) = std::env::var_os("SystemRoot") {
+                let p = std::path::Path::new(&sysroot)
+                    .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+                if p.is_file() {
+                    return Some(widen_os(p.as_os_str()));
+                }
+            }
+        }
+        let fname = if lname.ends_with(".exe") {
+            program.to_string()
+        } else {
+            format!("{program}.exe")
+        };
+        if let Some(path) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&path) {
+                let cand = dir.join(&fname);
+                if cand.is_file() {
+                    return Some(widen_os(cand.as_os_str()));
+                }
+            }
+        }
+        None
+    }
+
     /// Resolve a program reference into an absolute UTF-16 path suitable for
     /// `lpApplicationName`. Hard-fails on any failure — the caller must
     /// propagate the error rather than fall back to a NULL `lpApplicationName`
@@ -645,6 +733,20 @@ mod windows_impl {
                     return Err(SandboxError::ExecFailed(format!(
                         "argv[0] {program:?} is unreadable: {e}"
                     )));
+                }
+            }
+        }
+        // In the relaxed posture (medium integrity, no AppContainer) PowerShell
+        // and git-bash DO load — their .NET/GAC and msys-2.0.dll init only failed
+        // because of the AppContainer's Low-IL restricted token. Resolve the bare
+        // shell to its canonical absolute path so it can run. (The strict
+        // AppContainer path below still rejects them with a descriptive error.)
+        if relaxed_windows_sandbox() {
+            if let Some(shell @ (BareShell::PowerShell | BareShell::Unsupported)) =
+                classify_bare_shell(program)
+            {
+                if let Some(abs) = resolve_relaxed_shell(program, shell) {
+                    return Ok(abs);
                 }
             }
         }
@@ -1083,10 +1185,12 @@ mod windows_impl {
         }
 
         /// PowerShell (`powershell.exe` / `pwsh.exe`) cannot load .NET / GAC
-        /// assemblies under the Low-integrity restricted token (STATUS_DLL_NOT_FOUND,
-        /// 0xC0000135). See FerroxLabs/wayland#413 / #324.
+        /// assemblies under the AppContainer's Low-integrity restricted token
+        /// (STATUS_DLL_NOT_FOUND, 0xC0000135). See FerroxLabs/wayland#413 / #324.
+        /// In the relaxed posture there is no AppContainer / Low-IL, so
+        /// PowerShell loads normally and must NOT be downgraded to cmd.
         fn blocks_powershell(&self) -> bool {
-            true
+            !relaxed_windows_sandbox()
         }
 
         /// Real-spawn availability probe.
@@ -1285,12 +1389,32 @@ mod windows_impl {
                         "cwd {p:?} must be absolute"
                     )));
                 }
-                Some(widen_os(p.as_os_str()))
+                // Strip the `\\?\` verbatim-disk prefix. `WorkspacePolicy`
+                // canonicalizes its root (`std::fs::canonicalize`), which on
+                // Windows yields the extended-length form `\\?\C:\…`.
+                // CreateProcessAsUserW accepts it, but `cmd.exe` treats a
+                // `\\`-prefixed cwd as an unsupported UNC path, prints
+                // "CMD.EXE was started with the above path as the current
+                // directory. UNC paths are not supported. Defaulting to Windows
+                // directory.", and silently switches its working directory to
+                // `C:\Windows`. From there the AppContainer can neither find the
+                // user's files (breaking every relative-path command) nor spawn
+                // children cleanly (STATUS_DLL_INIT_FAILED, 0xC0000142). The
+                // stripped drive path names the exact same directory — the ACL
+                // grant is on the object, not the spelling — so isolation is
+                // unchanged. Non-verbatim paths pass through untouched.
+                Some(widen_os(strip_verbatim_disk_prefix(p).as_os_str()))
             }
             None => None,
         };
 
         let app_name_w = resolve_program(&cmd.argv[0])?;
+
+        // Relaxed posture (trusted_local): medium integrity, no AppContainer
+        // capability — so msys/bash/PowerShell/git-init/npm can run. Computed
+        // once; consulted at the token IL, attribute-list, and integrity-
+        // assertion steps below.
+        let relaxed = relaxed_windows_sandbox();
 
         unsafe {
             // ---- 1. AppContainer SID ----
@@ -1373,30 +1497,27 @@ mod windows_impl {
 
             // ---- 2. Restricted token ----
             //
-            // SidsToDisable: explicitly mark BUILTIN\Administrators,
-            // BUILTIN\Users, and Authenticated Users as "for deny only" in
-            // the child's token. Without this, an elevated parent leaves
-            // these SIDs enabled, and any resource whose DACL grants those
-            // groups would be reachable by the AppContainer child despite
-            // the AppContainer SID restriction (Chromium / sandboxie use
-            // the same pattern).
+            // SidsToDisable: mark BUILTIN\Administrators "for deny only" in the
+            // child's token, so an elevated parent doesn't let the sandboxed
+            // child reach admin-granted resources.
+            //
+            // We deliberately do NOT disable BUILTIN\Users / Authenticated Users
+            // here, even though tighter isolation would. Many System32 DLLs
+            // grant read/execute via BUILTIN\Users but NOT via
+            // ALL APPLICATION PACKAGES; marking Users deny-only makes those DLLs
+            // unreadable, so EVERY external executable (whoami, git, node, …)
+            // dies at image initialization with STATUS_DLL_NOT_FOUND
+            // (0xC0000135) — verified by A/B measurement. Only cmd built-ins
+            // survive (their DLLs are KnownDlls, section-mapped, no disk read).
+            // The real isolation boundary remains the AppContainer package SID +
+            // Low integrity level + fs_read_deny DENY ACEs; the child already
+            // retained the user's own SID regardless, so keeping Users usable is
+            // a minor relaxation in exchange for a functioning sandbox.
             let admins_sid = allocate_sid([0, 0, 0, 0, 0, 5], &[32, 544])?;
-            let users_sid = allocate_sid([0, 0, 0, 0, 0, 5], &[32, 545])?;
-            let auth_users_sid = allocate_sid([0, 0, 0, 0, 0, 5], &[11])?;
-            let mut sids_to_disable: [SID_AND_ATTRIBUTES; 3] = [
-                SID_AND_ATTRIBUTES {
-                    Sid: admins_sid.as_psid(),
-                    Attributes: 0,
-                },
-                SID_AND_ATTRIBUTES {
-                    Sid: users_sid.as_psid(),
-                    Attributes: 0,
-                },
-                SID_AND_ATTRIBUTES {
-                    Sid: auth_users_sid.as_psid(),
-                    Attributes: 0,
-                },
-            ];
+            let mut sids_to_disable: [SID_AND_ATTRIBUTES; 1] = [SID_AND_ATTRIBUTES {
+                Sid: admins_sid.as_psid(),
+                Attributes: 0,
+            }];
 
             let mut current_token: HANDLE = std::ptr::null_mut();
             if OpenProcessToken(
@@ -1416,11 +1537,38 @@ mod windows_impl {
             }
             let current_token = OwnedHandle::new(current_token);
             let mut restricted_raw: HANDLE = std::ptr::null_mut();
+            // Voluntary admin escalation (relaxed posture only, opt-in via
+            // WAYLAND_WINDOWS_ALLOW_ADMIN=1): duplicate the parent token
+            // UNRESTRICTED — no dropped privileges, Administrators NOT
+            // deny-only. The child then has exactly the parent's rights, which
+            // means admin ONLY IF the Wayland host itself was launched elevated
+            // (identical to running Claude Code / any tool from an elevated
+            // terminal). Without the flag, the token stays restricted
+            // (DISABLE_MAX_PRIVILEGE + Administrators deny-only) so an elevated
+            // host does NOT silently hand admin to the agent. Honored only under
+            // the relaxed posture; the strict AppContainer path ignores it.
+            let allow_admin = relaxed && admin_escalation_opt_in();
+            let (crt_flags, crt_count, crt_ptr) = if allow_admin {
+                (0u32, 0u32, ptr::null_mut())
+            } else {
+                (
+                    DISABLE_MAX_PRIVILEGE,
+                    sids_to_disable.len() as u32,
+                    sids_to_disable.as_mut_ptr(),
+                )
+            };
+            if allow_admin {
+                tracing::warn!(
+                    target: "wcore_sandbox",
+                    "WAYLAND_WINDOWS_ALLOW_ADMIN: sandbox child runs with the host's \
+                     UNRESTRICTED token (admin iff the host is elevated)"
+                );
+            }
             if CreateRestrictedToken(
                 current_token.as_raw(),
-                DISABLE_MAX_PRIVILEGE,
-                sids_to_disable.len() as u32,
-                sids_to_disable.as_mut_ptr(),
+                crt_flags,
+                crt_count,
+                crt_ptr,
                 0,
                 ptr::null(),
                 0,
@@ -1457,12 +1605,19 @@ mod windows_impl {
             // size has zero downside.
             let label_size = (mem::size_of::<TOKEN_MANDATORY_LABEL>() as u32)
                 + GetLengthSid(low_il_sid.as_psid() as _);
-            if SetTokenInformation(
-                restricted_token.as_raw(),
-                TokenIntegrityLevel,
-                &label as *const _ as *const _,
-                label_size,
-            ) == 0
+            // Relaxed posture keeps the child at the parent's (medium)
+            // integrity: forcing Low integrity is one half of what blocks
+            // msys/bash/PowerShell image init (the AppContainer being the other
+            // half). The restricted token (no admin / no privileges) + Job
+            // Object remain the containment.
+            let exp_no_low_il = relaxed;
+            if !exp_no_low_il
+                && SetTokenInformation(
+                    restricted_token.as_raw(),
+                    TokenIntegrityLevel,
+                    &label as *const _ as *const _,
+                    label_size,
+                ) == 0
             {
                 return Err(SandboxError::ExecFailed(format!(
                     "SetTokenInformation(IntegrityLevel=Low): {:#x}",
@@ -1610,8 +1765,12 @@ mod windows_impl {
             // inherited by the child despite their SECURITY_ATTRIBUTES.
             let mut handle_list: [HANDLE; 2] = [stdout_w.as_raw(), stderr_w.as_raw()];
 
+            // Relaxed posture (trusted_local): no AppContainer capability, so
+            // the attribute list carries only the HANDLE_LIST (sized 1, not 2).
+            let attr_count: u32 = if relaxed { 1 } else { 2 };
+
             let mut attr_size: usize = 0;
-            InitializeProcThreadAttributeList(ptr::null_mut(), 2, 0, &mut attr_size);
+            InitializeProcThreadAttributeList(ptr::null_mut(), attr_count, 0, &mut attr_size);
             if attr_size == 0 {
                 return Err(SandboxError::ExecFailed(
                     "InitializeProcThreadAttributeList sizing returned 0".into(),
@@ -1619,7 +1778,7 @@ mod windows_impl {
             }
             let mut attr_buf: Vec<u8> = vec![0u8; attr_size];
             let attr_list: LPPROC_THREAD_ATTRIBUTE_LIST = attr_buf.as_mut_ptr() as _;
-            if InitializeProcThreadAttributeList(attr_list, 2, 0, &mut attr_size) == 0 {
+            if InitializeProcThreadAttributeList(attr_list, attr_count, 0, &mut attr_size) == 0 {
                 return Err(SandboxError::ExecFailed(format!(
                     "InitializeProcThreadAttributeList: {:#x}",
                     GetLastError()
@@ -1627,15 +1786,16 @@ mod windows_impl {
             }
             let _attr_guard = AttrListGuard { list: attr_list };
 
-            if UpdateProcThreadAttribute(
-                attr_list,
-                0,
-                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
-                &mut sec_caps as *mut _ as _,
-                mem::size_of::<SECURITY_CAPABILITIES>(),
-                ptr::null_mut(),
-                ptr::null(),
-            ) == 0
+            if !relaxed
+                && UpdateProcThreadAttribute(
+                    attr_list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
+                    &mut sec_caps as *mut _ as _,
+                    mem::size_of::<SECURITY_CAPABILITIES>(),
+                    ptr::null_mut(),
+                    ptr::null(),
+                ) == 0
             {
                 return Err(SandboxError::ExecFailed(format!(
                     "UpdateProcThreadAttribute(SECURITY_CAPABILITIES): {:#x}",
@@ -1830,7 +1990,7 @@ mod windows_impl {
                 il_rid = format!("{il_rid:#x}"),
                 "child token integrity level"
             );
-            if il_rid != SECURITY_MANDATORY_LOW_RID {
+            if !exp_no_low_il && il_rid != SECURITY_MANDATORY_LOW_RID {
                 TerminateProcess(process.as_raw(), 1);
                 return Err(SandboxError::ExecFailed(format!(
                     "AppContainer child token integrity level is {il_rid:#x}; \
@@ -2446,6 +2606,28 @@ mod windows_impl {
             // A plain drive path is Prefix::Disk, not VerbatimDisk; it is
             // accepted by acl_path_is_safe via the is_absolute branch instead.
             assert!(!is_verbatim_disk_path(std::path::Path::new(r"C:\plain")));
+        }
+
+        #[test]
+        fn strip_verbatim_disk_prefix_normalizes_cwd_for_cmd() {
+            // `\\?\C:\…` (what canonicalize yields) → `C:\…` so cmd.exe accepts
+            // it as a working directory instead of treating it as UNC and
+            // defaulting to C:\Windows.
+            assert_eq!(
+                strip_verbatim_disk_prefix(std::path::Path::new(r"\\?\C:\Users\X1B\ws")),
+                std::path::PathBuf::from(r"C:\Users\X1B\ws")
+            );
+            // Already-plain paths pass through untouched.
+            assert_eq!(
+                strip_verbatim_disk_prefix(std::path::Path::new(r"C:\Users\X1B\ws")),
+                std::path::PathBuf::from(r"C:\Users\X1B\ws")
+            );
+            // Verbatim-UNC is NOT verbatim-disk and must be left alone (the `\\`
+            // prefix stays, so the UNC/device guards still apply to it).
+            assert_eq!(
+                strip_verbatim_disk_prefix(std::path::Path::new(r"\\?\UNC\server\share")),
+                std::path::PathBuf::from(r"\\?\UNC\server\share")
+            );
         }
 
         #[test]
