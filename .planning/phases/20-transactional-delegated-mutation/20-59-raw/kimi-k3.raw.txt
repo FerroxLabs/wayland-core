@@ -1,0 +1,645 @@
+• The user wants an adversarial audit. I should verify the claims against the actual repo. The working directory is waylandcore-ferrox. I need to check the sealed SHA 8a1d2d84 and the diff. Let me actually verify the claims with tools before emitting JSON.
+
+  Let me check git state and the file.
+
+• Verifying the sealed tree and delta claims against the actual checkout.c1fe79fe4a6d68a536078be4887343a82b5fce38
+commit
+commit
+
+
+.planning/phases/20-transactional-delegated-mutation/20-50-SUMMARY.md
+.planning/phases/20-transactional-delegated-mutation/20-51-SUMMARY.md
+.planning/phases/20-transactional-delegated-mutation/20-52-CROSS-AUDIT.md
+.planning/phases/20-transactional-delegated-mutation/20-52-SUMMARY.md
+.planning/phases/20-transactional-delegated-mutation/20-52-raw/audit-context.shared.txt
+.planning/phases/20-transactional-delegated-mutation/20-52-raw/codex-sol.raw.txt
+.planning/phases/20-transactional-delegated-mutation/20-52-raw/gemini-pro.raw.txt
+.planning/phases/20-transactional-delegated-mutation/20-52-raw/kimi-k3.raw.txt
+.planning/phases/20-transactional-delegated-mutation/20-53-PLAN.md
+.planning/phases/20-transactional-delegated-mutation/20-54-PLAN.md
+.planning/phases/20-transactional-delegated-mutation/20-55-PLAN.md
+.planning/phases/20-transactional-delegated-mutation/20-56-PLAN.md
+.planning/phases/20-transactional-delegated-mutation/20-57-PLAN.md
+.planning/phases/20-transactional-delegated-mutation/20-58-PLAN.md
+.planning/phases/20-transactional-delegated-mutation/20-59-PLAN.md
+crates/wcore-sandbox/tests/hard_process_containment_windows.rs
+---
+ .../20-50-SUMMARY.md                               |  133 +
+ .../20-51-SUMMARY.md                               |  154 +
+ .../20-52-CROSS-AUDIT.md                           |  257 ++
+ .../20-52-SUMMARY.md                               |  199 ++
+ .../20-52-raw/audit-context.shared.txt             |  279 ++
+ .../20-52-raw/codex-sol.raw.txt                    | 3412 ++++++++++++++++++++
+ .../20-52-raw/gemini-pro.raw.txt                   |  173 +
+ .../20-52-raw/kimi-k3.raw.txt                      |  557 ++++
+ .../20-53-PLAN.md                                  |   24 +-
+ .../20-54-PLAN.md                                  |   18 +-
+ .../20-55-PLAN.md                                  |   12 +-
+ .../20-56-PLAN.md                                  |   10 +-
+ .../20-57-PLAN.md                                  |  148 +
+ .../20-58-PLAN.md                                  |  129 +
+ .../20-59-PLAN.md                                  |  124 +
+ .../tests/hard_process_containment_windows.rs      |   63 +-
+ 16 files changed, 5650 insertions(+), 42 deletions(-)
+• The brief claims "repair delta = ONE file, +53/-10" — but actually the diff includes .planning docs too (5650 insertions). However the brief says "NO Cargo.toml, NO Cargo.lock, NO workflow, NO command.rs, NO worktree_manager.rs change (verified by name-only diff)". That's technically true — the only code file changed is the test file. The planning docs are also changed. The brief says "ONE file, +53/-10" for the repair delta — but stat shows 63 changed lines in the test file and the delta also includes planning docs. Is that a discrepancy worth a finding? The brief's scope is "Windows-only test-hardening delta". The +53/-10 vs actual 63 lines changed in the file — let me check: "63 +-" means insertions+deletions = 63. Brief claims +53/-10 = 63 total. OK consistent.
+
+  So the code delta is indeed one file. Planning docs are artifacts, not code. The claim "ONE file" refers to the code repair delta. Slight imprecision but not a defect in code. I'll note it as none/low.
+
+  Now examine the actual diff and file.diff --git a/crates/wcore-sandbox/tests/hard_process_containment_windows.rs b/crates/wcore-sandbox/tests/hard_process_containment_windows.rs
+index 1455271d..a264d727 100644
+--- a/crates/wcore-sandbox/tests/hard_process_containment_windows.rs
++++ b/crates/wcore-sandbox/tests/hard_process_containment_windows.rs
+@@ -106,6 +106,11 @@ fn unique_tag(label: &str) -> String {
+ /// `powershell.exe` — whose own command line contains `tag` — is NOT itself a
+ /// match (its image is `powershell.exe`, not `cmd.exe`). That structurally
+ /// avoids a self-match without needing to know the query's own PID.
++///
++/// Fails CLOSED: a non-success `powershell` exit, or a `.Count` that does not
++/// parse on a success exit, is a hard test failure (panic) — never silently read
++/// as a passing count. A post-close query failure therefore cannot satisfy a
++/// reap `wait_until(... == 0)` without evidence.
+ fn tagged_cmd_count(tag: &str) -> usize {
+     let out = Command::new("powershell")
+         .args([
+@@ -119,10 +124,17 @@ fn tagged_cmd_count(tag: &str) -> usize {
+         ])
+         .output()
+         .expect("query host processes via CIM");
+-    String::from_utf8_lossy(&out.stdout)
+-        .trim()
+-        .parse()
+-        .unwrap_or(0)
++    assert!(
++        out.status.success(),
++        "tagged_cmd_count CIM query failed (exit {:?}): {}",
++        out.status.code(),
++        String::from_utf8_lossy(&out.stderr).trim()
++    );
++    let stdout = String::from_utf8_lossy(&out.stdout);
++    let text = stdout.trim();
++    text.parse().unwrap_or_else(|err| {
++        panic!("tagged_cmd_count could not parse CIM .Count output {text:?}: {err}")
++    })
+ }
+ 
+ /// Return the ProcessIds of the `choice.exe` idlers spawned by THIS test's
+@@ -146,6 +158,13 @@ fn tagged_cmd_count(tag: &str) -> usize {
+ /// empty regardless of a leaked survivor — the post-close survivor check is
+ /// therefore done by fixed ProcessId via [`surviving_captured_choice_pids`],
+ /// NOT by re-running this parent-scoped query.
++///
++/// Fails CLOSED: a non-success `powershell` exit is a hard test failure (panic),
++/// and each whitespace-separated token is parsed with a panicking parse, so a
++/// malformed token fails the test rather than being silently dropped. A
++/// LEGITIMATE empty result (no descendants yet on a success exit) still yields an
++/// empty `Vec`, because `split_whitespace()` over empty stdout produces no
++/// tokens — the valid zero-descendants case is preserved.
+ fn tagged_choice_descendant_pids(tag: &str) -> Vec<u32> {
+     let out = Command::new("powershell")
+         .args([
+@@ -163,9 +182,20 @@ fn tagged_choice_descendant_pids(tag: &str) -> Vec<u32> {
+         ])
+         .output()
+         .expect("query this test's tagged choice descendant PIDs via CIM");
+-    String::from_utf8_lossy(&out.stdout)
++    assert!(
++        out.status.success(),
++        "tagged_choice_descendant_pids CIM query failed (exit {:?}): {}",
++        out.status.code(),
++        String::from_utf8_lossy(&out.stderr).trim()
++    );
++    let stdout = String::from_utf8_lossy(&out.stdout);
++    stdout
+         .split_whitespace()
+-        .filter_map(|s| s.parse::<u32>().ok())
++        .map(|s| {
++            s.parse::<u32>().unwrap_or_else(|err| {
++                panic!("tagged_choice_descendant_pids could not parse ProcessId token {s:?}: {err}")
++            })
++        })
+         .collect()
+ }
+ 
+@@ -181,6 +211,12 @@ fn tagged_choice_descendant_pids(tag: &str) -> Vec<u32> {
+ ///     different, non-captured PID and is excluded.
+ ///
+ /// An empty `pids` slice yields 0 without issuing a malformed filter.
++///
++/// Fails CLOSED: past the legitimate empty-set short-circuit, a non-success
++/// `powershell` exit, or a `.Count` that does not parse on a success exit, is a
++/// hard test failure (panic) — never silently read as a passing survivor count.
++/// A post-close query failure therefore cannot satisfy the reap
++/// `wait_until(... == 0)` without evidence.
+ fn surviving_captured_choice_pids(pids: &[u32]) -> usize {
+     if pids.is_empty() {
+         return 0;
+@@ -203,10 +239,17 @@ fn surviving_captured_choice_pids(pids: &[u32]) -> usize {
+         ])
+         .output()
+         .expect("query survival of captured choice PIDs via CIM");
+-    String::from_utf8_lossy(&out.stdout)
+-        .trim()
+-        .parse()
+-        .unwrap_or(0)
++    assert!(
++        out.status.success(),
++        "surviving_captured_choice_pids CIM query failed (exit {:?}): {}",
++        out.status.code(),
++        String::from_utf8_lossy(&out.stderr).trim()
++    );
++    let stdout = String::from_utf8_lossy(&out.stdout);
++    let text = stdout.trim();
++    text.parse().unwrap_or_else(|err| {
++        panic!("surviving_captured_choice_pids could not parse CIM .Count output {text:?}: {err}")
++    })
+ }
+ 
+ /// Poll `predicate` up to `deadline_secs`, panicking with `message` on timeout.
+Diff matches the brief. Now verify full-file static facts at the sealed tree.128:        out.status.success(),
+186:        out.status.success(),
+243:        out.status.success(),
+---
+135:    text.parse().unwrap_or_else(|err| {
+195:            s.parse::<u32>().unwrap_or_else(|err| {
+250:    text.parse().unwrap_or_else(|err| {
+---
+filter_map done
+---
+98:        .unwrap_or(0);
+---
+13://! Every test is `#![cfg(windows)]` + `#[ignore]` and self-qualifies (rather
+32:#![cfg(windows)]
+---
+221:    if pids.is_empty() {
+455:        peak > 0,
+459:        peak <= SANDBOX_ACTIVE_PROCESS_LIMIT,
+464:        peak < attempts,
+469:        !captured_pids.is_empty(),
+---
+48:/// mirrored from `windows_impl/command.rs::SANDBOX_ACTIVE_PROCESS_LIMIT`. It is
+53:const SANDBOX_ACTIVE_PROCESS_LIMIT: usize = 512;
+397:    let attempts = SANDBOX_ACTIVE_PROCESS_LIMIT + 32;
+432:        if pids.len() >= SANDBOX_ACTIVE_PROCESS_LIMIT / 2 {
+459:        peak <= SANDBOX_ACTIVE_PROCESS_LIMIT,
+461:         {SANDBOX_ACTIVE_PROCESS_LIMIT}"
+---
+278:    let _ = Command::new("taskkill")
+---
+339:async fn job_close_reaps_detached_descendant_with_no_residue() {
+499:async fn breakaway_is_denied() {
+551:async fn qualified_hard_containment_backend_preflight() {
+All line claims match exactly. Now check observer usage contexts — where tagged_cmd_count is used in wait_until, whether a failed query can map to passing. Also check for any residual path: e.g. `.output().expect(...)` only catches spawn failure; asserts handle query failure. Check other observers/readers of Command output in the file that might feed assertions — e.g. spawn of choice, peak computation uses captured pids (from tagged_choice_descendant_pids which now panics). Check for other `.output()` calls and their handling.125:        .output()
+183:        .output()
+240:        .output()
+280:        .output();
+---
+114:fn tagged_cmd_count(tag: &str) -> usize {
+129:        "tagged_cmd_count CIM query failed (exit {:?}): {}",
+136:        panic!("tagged_cmd_count could not parse CIM .Count output {text:?}: {err}")
+159:/// therefore done by fixed ProcessId via [`surviving_captured_choice_pids`],
+168:fn tagged_choice_descendant_pids(tag: &str) -> Vec<u32> {
+187:        "tagged_choice_descendant_pids CIM query failed (exit {:?}): {}",
+196:                panic!("tagged_choice_descendant_pids could not parse ProcessId token {s:?}: {err}")
+220:fn surviving_captured_choice_pids(pids: &[u32]) -> usize {
+244:        "surviving_captured_choice_pids CIM query failed (exit {:?}): {}",
+251:        panic!("surviving_captured_choice_pids could not parse CIM .Count output {text:?}: {err}")
+359:        || tagged_cmd_count(&observed_tag) >= 1,
+373:        || tagged_cmd_count(&residue_tag) == 0,
+426:        let pids = tagged_choice_descendant_pids(&tag);
+435:            let overshoot = tagged_choice_descendant_pids(&tag);
+481:        || surviving_captured_choice_pids(&captured_pids) == 0,
+518:        || tagged_cmd_count(&observed_tag) >= 2,
+532:        || tagged_cmd_count(&residue_tag) == 0,
+601:        || tagged_cmd_count(&residue_tag) == 0,
+All 4 `.output()` calls: 3 in observers (now fail-closed), 1 in reap_stray_choice (taskkill, best-effort, `let _ =`). Observer usage sites: L373, L481, L532, L601 are `wait_until(observer == 0)` reap checks — now the observer panics on query failure, so panic inside wait_until's predicate propagates (wait_until polls predicate; panic aborts test — fail closed). L359/L518 are `>= 1`/`>= 2` presence checks — a query failure now panics instead of returning 0, which previously would fail the presence check (fail-safe direction anyway) — fine.
+
+  Wait — one subtle point: L359 `tagged_cmd_count(&observed_tag) >= 1` — this is a "did it spawn" check. If the query genuinely returns 0 legitimately (parse of "0" succeeds), fine. If the count legitimately is 0, wait_until times out and panics. OK.
+
+  Adversarial check #5: any legitimate empty/zero case now wrongly panicking?
+  - tagged_cmd_count: `.Count` on empty result set. PowerShell `(...).Count` on an empty array returns 0 — prints "0". Parses fine. On success exit, stdout "0" parses to 0 — legitimate zero works. What if stdout is empty on success? `@(...).Count` always prints a number (0 for empty). So empty stdout on success would be anomalous → panic is correct (fail-closed).
+  - tagged_choice_descendant_pids: empty stdout on success → split_whitespace → empty vec — preserved, documented. Legit.
+  - surviving_captured_choice_pids: same as tagged_cmd_count, plus the pids.is_empty() short-circuit preserved.
+
+  One more consideration: does `.Count` output include trailing whitespace/newline? trim handles. Could PowerShell emit anything extra like a header? The queries use `Write-Output`/`(...).Count`? Let me look at the actual query strings to double check that malformed-token panics can't hit legit output (e.g. ProcessId query printing multiple columns). Let me read the query bodies.}
+
+/// Count host processes (UNSANDBOXED — this runs on the host, not in the
+/// AppContainer) that are `cmd.exe` AND whose command line carries `tag`.
+///
+/// The CIM `-Filter "Name='cmd.exe'"` runs at the provider, so the querying
+/// `powershell.exe` — whose own command line contains `tag` — is NOT itself a
+/// match (its image is `powershell.exe`, not `cmd.exe`). That structurally
+/// avoids a self-match without needing to know the query's own PID.
+///
+/// Fails CLOSED: a non-success `powershell` exit, or a `.Count` that does not
+/// parse on a success exit, is a hard test failure (panic) — never silently read
+/// as a passing count. A post-close query failure therefore cannot satisfy a
+/// reap `wait_until(... == 0)` without evidence.
+fn tagged_cmd_count(tag: &str) -> usize {
+    let out = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "@(Get-CimInstance Win32_Process -Filter \"Name='cmd.exe'\" | \
+                 Where-Object {{ $_.CommandLine -like '*{tag}*' }}).Count"
+            ),
+        ])
+        .output()
+        .expect("query host processes via CIM");
+    assert!(
+        out.status.success(),
+        "tagged_cmd_count CIM query failed (exit {:?}): {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let text = stdout.trim();
+    text.parse().unwrap_or_else(|err| {
+        panic!("tagged_cmd_count could not parse CIM .Count output {text:?}: {err}")
+    })
+}
+
+/// Return the ProcessIds of the `choice.exe` idlers spawned by THIS test's
+/// fan-out, scoped to the test's own tagged process tree rather than host-wide
+/// by image name.
+///
+/// A bare `choice.exe` idler cannot carry an injected tag on its own command
+/// line (choice rejects the extra argument), but the top-level sandbox `cmd`
+/// that runs the fan-out script DOES carry a unique `rem {tag}` — and every
+/// `start "" /b choice` idler is a direct child of that cmd, so its
+/// `ParentProcessId` is the tagged cmd's `ProcessId`. Selecting only choice
+/// processes whose parent is this test's tagged cmd means a concurrent
+/// `choice`-spawning target on the same runner (e.g. `live_fs_acl`) cannot
+/// pollute the capture.
+///
+/// This is the ALIVE-phase half of a two-phase reap check: the returned PIDs
+/// are captured WHILE the tagged parent cmd is still alive (during the
+/// peak-sampling window), and the `ParentProcessId` scope is what makes that
+/// capture immune to a concurrent `choice`-spawning target. Once the job closes
+/// the tagged parent is dead, so this parent-scoped query would go structurally
+/// empty regardless of a leaked survivor — the post-close survivor check is
+/// therefore done by fixed ProcessId via [`surviving_captured_choice_pids`],
+/// NOT by re-running this parent-scoped query.
+///
+/// Fails CLOSED: a non-success `powershell` exit is a hard test failure (panic),
+/// and each whitespace-separated token is parsed with a panicking parse, so a
+/// malformed token fails the test rather than being silently dropped. A
+/// LEGITIMATE empty result (no descendants yet on a success exit) still yields an
+/// empty `Vec`, because `split_whitespace()` over empty stdout produces no
+/// tokens — the valid zero-descendants case is preserved.
+fn tagged_choice_descendant_pids(tag: &str) -> Vec<u32> {
+    let out = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "$parents=@(Get-CimInstance Win32_Process -Filter \"Name='cmd.exe'\" | \
+                 Where-Object {{ $_.CommandLine -like '*{tag}*' }} | \
+                 Select-Object -ExpandProperty ProcessId); \
+                 @(Get-CimInstance Win32_Process -Filter \"Name='choice.exe'\" | \
+                 Where-Object {{ $parents -contains $_.ParentProcessId }} | \
+                 Select-Object -ExpandProperty ProcessId)"
+            ),
+        ])
+        .output()
+        .expect("query this test's tagged choice descendant PIDs via CIM");
+    assert!(
+        out.status.success(),
+        "tagged_choice_descendant_pids CIM query failed (exit {:?}): {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    stdout
+        .split_whitespace()
+        .map(|s| {
+            s.parse::<u32>().unwrap_or_else(|err| {
+                panic!("tagged_choice_descendant_pids could not parse ProcessId token {s:?}: {err}")
+            })
+        })
+        .collect()
+}
+
+/// Count how many of the `pids` fan-out `choice.exe` ProcessIds are STILL alive,
+/// matched by fixed `ProcessId` intersected with image `choice.exe`.
+///
+/// This is the POST-CLOSE half of the two-phase reap check. Because it filters
+/// on the exact PIDs captured while the tagged parent was alive — not on the
+/// now-dead tagged parent, and not host-wide by image name — it is:
+///   * non-vacuous — a leaked/orphaned captured `choice` (same PID, still
+///     `choice.exe`) is counted, so a survivor stays detectable; and
+///   * not host-wide-flaky — a concurrent target's `choice.exe` carries a
+///     different, non-captured PID and is excluded.
+///
+/// An empty `pids` slice yields 0 without issuing a malformed filter.
+///
+/// Fails CLOSED: past the legitimate empty-set short-circuit, a non-success
+/// `powershell` exit, or a `.Count` that does not parse on a success exit, is a
+/// hard test failure (panic) — never silently read as a passing survivor count.
+/// A post-close query failure therefore cannot satisfy the reap
+/// `wait_until(... == 0)` without evidence.
+fn surviving_captured_choice_pids(pids: &[u32]) -> usize {
+    if pids.is_empty() {
+        return 0;
+    }
+    let pid_list = pids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let out = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "$pids=@({pid_list}); \
+                 @(Get-CimInstance Win32_Process -Filter \"Name='choice.exe'\" | \
+                 Where-Object {{ $pids -contains $_.ProcessId }}).Count"
+            ),
+        ])
+        .output()
+        .expect("query survival of captured choice PIDs via CIM");
+    assert!(
+        out.status.success(),
+        "surviving_captured_choice_pids CIM query failed (exit {:?}): {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let text = stdout.trim();
+    text.parse().unwrap_or_else(|err| {
+        panic!("surviving_captured_choice_pids could not parse CIM .Count output {text:?}: {err}")
+    })
+}
+
+/// Poll `predicate` up to `deadline_secs`, panicking with `message` on timeout.
+/// Mirrors the `wait_until` helper in `live_fs_acl.rs`.
+fn wait_until(mut predicate: impl FnMut() -> bool, deadline_secs: u64, message: &str) {
+    let deadline = Instant::now() + Duration::from_secs(deadline_secs);
+    while Instant::now() < deadline {
+        if predicate() {
+Now adversarial points:
+
+  1. All three observers fail closed. Any residual path mapping query failure → passing value? `.output().expect()` catches spawn failure. Non-success exit → panic. Success exit with unparseable → panic. Success exit with "0" → legitimate 0. The wait_until predicate panics → panic propagates (predicate is FnMut called in the same thread) → test fails. Good.
+
+  One subtlety: a panic inside `wait_until`'s predicate — panics propagate; no catch_unwind. Fine.
+
+  2. Empty `.Count` on success: `@(...).Count` always emits a number — 0 for empty — so no legitimate empty stdout for .Count queries. tagged_choice_descendant_pids: empty result → no tokens → empty Vec, legitimate.
+
+  Adversarial nuance for observer 2: PowerShell error stream. With `-Command`, non-terminating errors (e.g. Get-CimInstance failing? that's terminating-ish?) — a non-terminating error writes to stderr but exit code may still be 0. Could a query partially fail with exit 0 and produce wrong-but-parseable output? E.g. the second Get-CimInstance fails non-terminating → output empty → empty Vec → at L435 overshoot check... At L426 `pids = tagged_choice_descendant_pids(&tag)` used to sample peak; if query partially failed and returned empty, pids.len() < 256/2 → panic via assert at 432 (`pids.len() >= SANDBOX_ACTIVE_PROCESS_LIMIT / 2`)? Let me check lines 420-440. Also L469 `!captured_pids.is_empty()`. So empty captures are caught downstream. That's defense in depth, fine.
+
+  But note: the exit-code semantics of powershell -Command with non-terminating errors — powershell exits 0 unless the error is terminating. A CIM failure is typically a terminating error in script context? Get-CimInstance failure is an error record; in `-Command` mode, if the last statement errors, exit code is 1? Actually PowerShell exit code with -Command: 0 if the last command succeeded, 1 if it threw. Non-terminating errors in the middle don't set exit code. E.g. `$parents=@(Get-CimInstance ...)` fails non-terminating → $parents empty → second query returns nothing → empty Vec with exit 0. That yields empty capture → downstream asserts (!captured_pids.is_empty(), pids.len() >= limit/2) would catch it in the fan-out test. But observer 2 is also used at L435 for overshoot: `let overshoot = tagged_choice_descendant_pids(&tag);` — what's asserted on overshoot? Let me check. If overshoot is only used in `peak` computation... need to look.
+
+  This is a theoretical residual: a partial query failure with exit 0 that yields parseable-but-wrong output can't be detected by any parse-level check — but that's inherent to any observer; the 20-52 finding was about failure→passing mapping, and exit-0-with-garbage now panics if unparseable. If it's parseable but wrong (e.g. count of 0 printed while processes exist) — that's a query semantics issue, not a fail-open observer bug; .Count of a failed pipeline... `($null | Where-Object {...}).Count` → 0. Hmm: if `Get-CimInstance Win32_Process -Filter "Name='cmd.exe'"` errors non-terminating (returns nothing, writes error to stderr, exit 0 because last statement succeeded?), then `.Count` = 0 printed → observer returns 0 → wait_until(==0) satisfied without evidence! Is that plausible? In `-Command` mode, exit code is 0 if no unhandled terminating error. A non-terminating error mid-pipeline: `@(Get-CimInstance ... | Where-Object {...}).Count` — if Get-CimInstance emits a non-terminating error, pipeline continues with empty input, .Count = 0, script succeeds, exit 0. Get-CimInstance errors are typically... CIM cmdlets write non-terminating errors by default? Get-CimInstance failures (e.g. access denied, provider failure) are terminating? Documentation: Get-CimInstance writes an error record; by default ErrorActionPreference is Continue → non-terminating. So this is a real theoretical residual fail-open path: CIM provider hiccup → non-terminating error on stderr, exit 0, ".Count" = 0 → reap check passes without evidence.
+
+  However — is this in scope and severe enough? The 20-52 finding class was "query failure read as 0". The repair closes exit!=0 and unparseable stdout, but not the "exit 0 + stderr error record + stdout 0" case. Severity: this requires CIM to partially fail while PowerShell still exits 0. On a healthy runner, CIM failures are rare; and the test environment is a controlled CI runner. Also stderr would contain the error — the observer doesn't check stderr emptiness. A stricter fail-closed would assert stderr is empty too. I'd rate this LOW (residual, requires partial CIM failure with success exit; previous audit class was about spawn/exit failure). As an adversarial auditor I should surface it. Does it block? The instruction: "PASS only if zero findings at any severity except the two deferred native checks." A low finding → findings.low=1 → BLOCK? That seems harsh but the schema says "PASS only if zero findings at any severity". Hmm — "Emit ONE JSON object. PASS only if zero findings at any severity except the two deferred native checks." So if I record a low finding, disposition must be BLOCK. I must decide whether the residual is a genuine finding or theoretical noise.
+
+  Let me think harder about PowerShell behavior: with `-Command`, if a statement emits a non-terminating error and the overall script completes, exit code is 0. Yes. Get-CimInstance: errors like "access denied" are terminating? Actually many CIM cmdlets throw terminating errors on failure to connect. For a filter query against local Win32_Process, failure modes: WMI service hiccup → error record. I believe Get-CimInstance writes non-terminating errors per default... Actually, testing knowledge: `Get-CimInstance Win32_Process -Filter "Name='x'"` on a machine where WMI fails produces an error and, in a script, continues. With -Command, powershell.exe exit code: historically, PowerShell exits 0 even if errors occurred, unless $LASTEXITCODE set or terminating unhandled error. So the residual is real but conditional on a WMI partial failure. The previous panel's finding was about the same theoretical class realized differently. The repair addresses exactly what the finding named (status check + panicking parse). The stderr-with-exit-0 edge is a refinement. As Kimi K3 adversarial: report it as LOW, result FAIL for that evidence item? That forces BLOCK per the rule. Hmm.
+
+  "Default REFUTE/BLOCK if uncertain." But also honesty: is the edge case significant enough to block a test-hardening delta? Consider also observer 2's overshoot usage — check L420-445 to see if empty-vec-with-exit-0 can cause a false pass anywhere. Let me read the main test body around 380-490.
+
+  Also check: `-NonInteractive` and `-NoProfile` present — good. Another possible NEW defect: `text.parse()` type inference — `usize` from return type; ok. The panic messages use inline format args `{text:?}` — Rust 2021, fine.
+
+  Also, possible issue: `assert!(out.status.success(), ...)` panics — but this runs inside `wait_until` predicate closure; panic unwinds through wait_until — fine, test fails.
+
+  One more possible NEW defect (#5): `tagged_cmd_count` used at L359/L518 as `>= 1` / `>= 2` presence checks during the ALIVE phase. If the CIM query fails transiently mid-test (previously returned 0 → predicate false → wait_until retries until deadline → flaky failure). Now: panic immediately on transient failure — no retry tolerance. That's arguably intended fail-closed, but it converts transient-query-failure retries into immediate hard failures. Slight robustness tradeoff, but fail-closed is the point. Not a defect per the audit's own standard.
+
+  Let me read lines 380-490 and 500-620 to verify preserved assertions and observer use contexts./// ActiveProcessLimit: a fan-out beyond the Job Object's active-process cap is
+/// bounded — the job refuses to admit more than the cap of concurrently-live
+/// processes, so a runaway fork cannot exceed it.
+///
+/// The parent attempts to detach `cap + margin` bare `choice` idlers, then holds
+/// itself alive so the admitted set is concurrently observable. The host-side
+/// image count (baseline-subtracted) must plateau at or below the cap and STAY
+/// BELOW the attempted count — proving excess spawns were rejected by the limit,
+/// not merely slow to start. An unbounded job would let the delta approach the
+/// attempted count and this test would FAIL. After the job closes every idler is
+/// reaped back to the baseline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "explicit native Windows Job-Object containment acceptance"]
+async fn active_process_cap_is_enforced() {
+    require_live_windows();
+    reap_stray_choice();
+    let tag = unique_tag("cap");
+    let attempts = SANDBOX_ACTIVE_PROCESS_LIMIT + 32;
+    // Prefix the script with a `rem {tag}` so the top-level sandbox cmd — the
+    // direct parent of every `start "" /b` choice idler — carries this test's
+    // unique tag on its command line. The host-side count is then scoped to
+    // choice.exe whose ParentProcessId is THIS test's tagged cmd (no host-wide
+    // image baseline), so a concurrent choice-spawning target cannot pollute it.
+    // Fan out `attempts` detached long idlers, then hold the parent ~25s so the
+    // admitted set is concurrently alive and observable, then exit 0 (`exit /b 0`).
+    let script = format!(
+        "rem {tag} & for /L %i in (1,1,{attempts}) do @start \"\" /b {} & {} & exit /b 0",
+        choice_hold(90),
+        choice_hold(25),
+    );
+
+    let run = tokio::spawn(async move {
+        AppContainerBackend::new()
+            .execute(&manifest(120), cmd_script(script))
+            .await
+    });
+
+    // Sample the live PID set (already scoped to this test's tagged tree) while
+    // the fan-out is held, tracking its peak and capturing the peak PID set so
+    // the post-close reap check can re-verify those exact ProcessIds by fixed
+    // PID — the parent-scoped query goes structurally empty once the tagged
+    // parent dies at job close.
+    let mut peak = 0usize;
+    let mut captured_pids: Vec<u32> = Vec::new();
+    let watch_deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < watch_deadline {
+        let pids = tagged_choice_descendant_pids(&tag);
+        if pids.len() > peak {
+            peak = pids.len();
+            captured_pids = pids.clone();
+        }
+        // Once we have clearly observed a large admitted set we can stop early.
+        if pids.len() >= SANDBOX_ACTIVE_PROCESS_LIMIT / 2 {
+            // keep sampling briefly to catch any overshoot past the cap
+            std::thread::sleep(Duration::from_millis(500));
+            let overshoot = tagged_choice_descendant_pids(&tag);
+            if overshoot.len() > peak {
+                peak = overshoot.len();
+                captured_pids = overshoot;
+            }
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    let out = run
+        .await
+        .expect("join fan-out execution")
+        .expect("fan-out execution returns");
+    assert_eq!(
+        out.exit_code, 0,
+        "parent must exit cleanly after the fan-out"
+    );
+
+    assert!(
+        peak > 0,
+        "fan-out never admitted any descendant — the test did not exercise the cap"
+    );
+    assert!(
+        peak <= SANDBOX_ACTIVE_PROCESS_LIMIT,
+        "active-process cap breached: observed {peak} concurrent descendants > cap \
+         {SANDBOX_ACTIVE_PROCESS_LIMIT}"
+    );
+    assert!(
+        peak < attempts,
+        "fan-out was not capped: observed {peak} of {attempts} attempted — the limit \
+         admitted every spawn"
+    );
+    assert!(
+        !captured_pids.is_empty(),
+        "peak PID set was not captured — the post-close reap check would be vacuous"
+    );
+
+    // After the job closes, re-check the EXACT fan-out `choice` PIDs captured
+    // while the tagged parent was alive, by fixed ProcessId intersected with
+    // image `choice.exe`. This is non-vacuous (a leaked/orphaned captured
+    // survivor is still counted) and not host-wide-flaky (a concurrent target's
+    // `choice.exe` carries a different, non-captured PID). The parent-scoped
+    // query cannot be reused — the tagged parent is dead once `run.await`
+    // returned.
+    wait_until(
+This is all preserved. Now, consider the exit-0-with-stderr residual more carefully for the .Count observers: if `Get-CimInstance` writes a non-terminating error (e.g., WMI provider hiccup), the pipeline yields empty, `.Count` prints 0, exit code 0 → observer returns 0 → `wait_until(==0)` satisfied without evidence. The repair does not check stderr. This is a genuine residual fail-open path of the SAME class (query failure → passing 0), though narrower: requires non-terminating CIM error rather than hard query failure. The 20-52 finding named the class "fail-OPEN observer: a broken query is read as '0 survivors = reaped'". A broken query that PowerShell reports only via stderr with exit 0 is still a broken query read as 0.
+
+  But hold on — is that actually PowerShell behavior? With `powershell -Command "...script..."`, the exit code: if the script completes (even with non-terminating errors), exit code is 0. Get-CimInstance failures: many are terminating errors actually (CIM cmdlets throw terminating errors for connection failures). Hmm. Honestly, Get-CimInstance against a broken WMI typically throws a terminating error (COMException), which in -Command mode → exit code 1. Non-terminating per-item errors happen with pipeline input of multiple computers etc. For a local query, failure to connect to WMI is a terminating error → exit 1 → caught by the new assert. So the residual is quite narrow, arguably theoretical. Given uncertainty: "Default REFUTE/BLOCK if uncertain" — but also "zero findings at any severity" is the PASS bar.
+
+  I need to weigh: do I record this as a low finding (→ BLOCK) or PASS with a note? The instruction structure suggests the delta is expected to be clean. Adversarial duty: the residual exists only if non-terminating CIM errors with exit 0 can occur — plausible but speculative; and even then, for observer 2 (PID list), an empty-vec result during the watch loop is caught by `peak > 0` and `!captured_pids.is_empty()` asserts — those are downstream fail-safes that prevent vacuous reap proof. For the .Count observers (1 and 3), at L373/L532/L601 (`tagged_cmd_count(residue_tag) == 0`) and L481 (`surviving_captured_choice_pids == 0`): these are residue checks — `residue_tag` counts cmd.exe processes with the tag. If WMI non-terminatingly fails with exit 0 → prints 0 → false pass. Same for observer 3: `.Count` over a failed Get-CimInstance prints 0 → false pass. So the residual applies where it matters (reap checks), but requires: WMI/CIM fails non-terminatingly AND PowerShell exits 0 AND stderr ignored.
+
+  Actually wait — one more consideration. There's also the possibility that the choice.exe query at observer 3: `$pids=@(...); @(Get-CimInstance ... | Where-Object {...}).Count`. If Get-CimInstance emits a non-terminating error record to stderr and continues, output is 0. Yes.
+
+  I'll report this as LOW severity, result FAIL on one evidence item, and per the stated rule disposition must be BLOCK... but is that right? "PASS only if zero findings at any severity except the two deferred native checks." If I honestly have a low finding, BLOCK. But blocking a sound repair on a theoretical PowerShell edge feels like over-blocking; yet the brief explicitly says "Default REFUTE/BLOCK if uncertain." Hmm, but the previous 20-52 panel BLOCKED f0dd5b6d on a similar class. As Kimi K3 adversarial auditor with "default BLOCK if uncertain," and I am uncertain about PowerShell's exit-code semantics for non-terminating CIM errors... The honest adversarial call: the dominant failure modes (spawn failure, non-zero exit, empty/malformed stdout) are closed. The remaining path requires a non-terminating error + exit 0, which for local CIM queries generally manifests as terminating errors (exit 1) — PowerShell's default for cmdlet-thrown errors in -Command mode. Actually, let me settle: Get-CimInstance with a failing WMI service: it writes an ErrorRecord. Is it terminating? Empirically, `Get-CimInstance` errors are non-terminating by default (like most Get-* cmdlets processing pipeline items)? For a single local query with a total provider failure, the cmdlet throws a terminating error I believe. I genuinely can't verify without a Windows box — and native_windows is deferred.
+
+  Given the audit instruction "Default REFUTE/BLOCK if uncertain" and a statically-identifiable (not runtime-dependent) observation: the observers do NOT check stderr, so any exit-0-with-error-record output is trusted. This is statically provable from the code. Severity low (narrow trigger). I'll record it as a low finding and set disposition accordingly.
+
+  Hmm, but wait — the required schema's per-observer fields: observer_X_failclosed PASS|FAIL. Does the residual make observer_1 "FAIL"? The observer fails closed for non-success exit and unparseable stdout; the residual is an exit-0 parseable-but-wrong case. I'd mark observers PASS (they meet the fail-closed bar as specified) and record the stderr/exit-0 edge as a low finding under evidence with result FAIL... Then checks.all_severity = FAIL, findings.low = 1, disposition BLOCK.
+
+  Actually, let me reconsider whether this is fair or noise. The audit questions: #1 "Is there ANY residual path that maps a query failure to a passing value?" — this invites exactly this analysis. The honest answer: yes, a theoretical one (exit 0 + non-terminating CIM error + stderr unchecked). Reporting PASS on question 1 would be me missing it again — the brief notes Kimi MISSED the 20-52 finding. Better to surface it. But should it block? The rule is explicit: zero findings at any severity for PASS. A low finding → BLOCK per the letter. However, I can also judge that a non-terminating-error-with-exit-0 case yields stdout "0" — but actually, hold on: when a cmdlet writes a non-terminating error in -Command mode, is the error text written to stdout or stderr? Error stream → stderr. Stdout would just be "0". So yes, parseable 0.
+
+  One counterpoint: `require_live_windows()` and the environment — these tests run #[ignore] on demand; a human runs them; a WMI-hiccup false-green on a manual acceptance run is low impact.
+
+  Decision: report LOW finding, checks.all_severity FAIL, disposition BLOCK, with precise reasoning. That's the adversarial mandate. But let me double-check other prosecute items first:
+
+  #2 preserved verbatim — verified L455/459/464/469, L221, sibling tests unchanged (they're in the file and diff touched only the three observer regions + doc comments). Diff shows only the three hunks. PASS.
+
+  #3 full-file sweep: unwrap_or(0) only at L98 unique_tag; filter_map none; reap_stray_choice best-effort with `let _ =`. Any third fail-open observer? Only 4 .output() calls; the 4th is taskkill cleanup. PASS.
+
+  Also check: does unique_tag's unwrap_or(0) matter? SystemTime before UNIX_EPOCH → nanos 0 → tag collision risk across concurrent tests? `unique_tag` — let me look at line 90-100 to confirm it's benign (duration_since(UNIX_EPOCH).map(...).unwrap_or(0)). Even if 0, tag includes label; collision only if clock broken. Benign. Also there might be additional entropy (process id?). Check quickly.
+
+  #4 guardrails: name-only diff shows no command.rs/worktree_manager.rs changes; but the diff DID include .planning docs (the brief said "ONE file" — the brief also said "NO Cargo.toml... change (verified by name-only diff)" which is true; the brief's "repair delta = ONE file" is imprecise re planning docs, but planning docs are audit artifacts, not code. Should I flag the imprecision? The candidate tuple binding claims the delta is one file; in reality it's one CODE file plus 15 .planning markdown files. Evidence integrity check: the brief itself acknowledged... no, it said "ONE file, +53/-10". The actual full diffstat: test file 63 lines (+53/-10 = 63, consistent) plus planning docs. Since the planning docs are evidence artifacts of the audit trail, not code, and the brief's no-Cargo/no-workflow claims hold, I'd call evidence_integrity PASS but note the understatement. Actually the brief's "NO ... change (verified by name-only diff)" enumerates code files only; planning docs additions don't weaken any assertion. Fine — note as none-severity remark or low? I'll mention it in evidence as informational (severity none, result PASS).
+
+  #5 new defects: 
+  - Panicking parse on `.Count`: `@(...).Count` always prints integer on success → no legit panic. OK.
+  - Observer 2: empty stdout on success → empty vec legit. Malformed token panics — ProcessId expand prints only digits. OK.
+  - Observer 3: pids.is_empty() short-circuit preserved. OK.
+  - One more: `assert!` inside observers during the alive-phase watch loop (L426) — if CIM query transiently fails mid-loop, previously returned empty vec → loop continues; now panic → immediate test failure instead of retry. Fail-closed by design; arguably reduces tolerance to transient WMI hiccups during the ALIVE phase. This is a behavior change toward flakiness on transient failures. Low/informational; it's the intended hardening direction. Could fold into the same low finding or mention.
+
+  Also #1 nuance: wait_until with panicking predicate — panic propagates and fails test. Good.
+
+  Guardrail checks: command.rs / worktree_manager.rs untouched — PASS (verified by name-only diff). I can also confirm no changes to .github workflows: name-only showed none. OK.
+
+  Let me quickly view unique_tag L90-100 and confirm.        cwd: None,
+    }
+}
+
+/// A per-run unique token, embedded in a detached descendant's command line so
+/// a host-side liveness query can identify EXACTLY this test's tree and nothing
+/// else, even under a shared-process runner.
+fn unique_tag(label: &str) -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("wcore_r7_{label}_{}_{seq}_{nanos}", std::process::id())
+}
+---
+fn choice_hold(seconds: u32) -> String {
+    format!("%SystemRoot%\\System32\\choice.exe /T {seconds} /D Y >nul")
+}
+
+/// Best-effort host-side cleanup of any residual `choice.exe` this test's
+/// fan-out spawned, so a failed assertion cannot leak idlers into later runs.
+/// Runs unsandboxed; ignores errors.
+fn reap_stray_choice() {
+    let _ = Command::new("taskkill")
+        .args(["/F", "/IM", "choice.exe", "/T"])
+        .output();
+}
+
+#[test]
+#[ignore = "zero-execution guard for explicit native Windows containment acceptance"]
+fn native_containment_gate_marker() {
+    require_live_windows();
+    assert_eq!(NATIVE_CONTAINMENT_CASES, 5);
+}
+
+/// Exit-code fidelity through the Job-Object-wrapped execution on BOTH terminal
+/// paths, plus a falsifiable descendant-reaping wall-clock bound.
+///
+/// The script detaches a 45s `choice` idler (which inherits the child's stdout
+/// pipe) and then exits with the declared code. On a backend that owns the
+/// descendant tree, the direct child's exit triggers `TerminateJobObject`,
+/// which kills the detached idler, EOFs the pipe, and lets `execute` return
+/// promptly with the EXACT declared exit code. A non-owning backend would leave
+/// the idler holding the pipe, so the drain would block ~45s (well past the 20s
+/// bound) or hit the 60s manifest timeout — either way this test FAILS.
+#[tokio::test(flavor = "current_thread")]
+unique_tag has pid + counter + label entropy — nanos fallback to 0 is benign. Confirmed.
+
+  All verification done. Now compose the JSON. Decision on the residual: exit-0 + non-terminating CIM error → stderr unchecked → parseable "0" → wait_until satisfied without evidence. Statically provable that stderr is not consulted on the success path. Trigger requires PowerShell to exit 0 despite a CIM error record — plausible for non-terminating errors, unverifiable here (native deferred). Severity: LOW (narrow trigger, #[ignore]d manual acceptance test, downstream `peak > 0` / `!captured_pids.is_empty()` guards protect observer-2's capture path but NOT the .Count reap checks at L373/481/532/601).
+
+  Per the schema's explicit rule — "PASS only if zero findings at any severity" — a low finding forces disposition BLOCK, checks.all_severity FAIL.
+
+  Observer-level fields: the three observers each implement status-assert + panicking parse as specified → PASS each (the residual is a cross-cutting stderr/exit-0 edge, not a missing fail-closed mechanism). I'll mark the three observer fields PASS and carry the residual as the low finding with result FAIL in evidence, and set "fullfile_sweep_no_third_failopen" — the sweep itself confirmed no third observer of the same class; the stderr edge is a refinement of the SAME three observers. Mark PASS for the sweep (no additional fail-open observer exists), FAIL for the residual evidence item.
+
+  checks: all_severity FAIL (one low), evidence_integrity PASS (all brief claims verified; note delta also carries .planning artifacts, brief's "ONE file" refers to code), integration_authority PASS (guardrails untouched, deferral boundary respected).
+
+  Disposition: BLOCK — on the letter of the rule. Hmm, let me think once more whether honesty permits PASS... The audit question 1 asks "Is there ANY residual path that maps a query failure to a passing value?" A rigorous answer: the dominant ones are closed; one narrow path remains (exit-0 + stderr error record). If I answer "no residual" I'd be repeating the 20-52 miss. The mandate says default BLOCK if uncertain. I'll BLOCK with the low finding, clearly scoped so the repair is trivial (assert stderr empty, or check `-ErrorAction Stop` in the query so any error becomes terminating → non-zero exit). Actually simplest fix: add `-ErrorAction Stop`... for Get-CimInstance, appending `-ErrorAction Stop` makes errors terminating → exit 1 → caught. That's a one-line-per-query fix. Good to suggest in the claim text.
+
+  reviewer_id: "kimi-k3". reviewer_kind "external-cli" as given.
+
+  Build evidence array: each claim with severity/result. Include PASS items too.
+
+• {
+    "schema": "f20-native-crossaudit.kimi-k3",
+    "source_sha": "8a1d2d84403c77a11c4cf6807b8bbafaaf5e8b8e",
+    "source_tree": "c1fe79fe4a6d68a536078be4887343a82b5fce38",
+    "reviewer_id": "kimi-k3",
+    "reviewer_kind": "external-cli",
+    "deferred": ["native_macos", "native_windows"],
+    "checks": { "all_severity": "FAIL", "evidence_integrity": "PASS", "integration_authority": "PASS" },
+    "findings": { "blocker": 0, "critical": 0, "high": 0, "medium": 0, "low": 1 },
+    "observer_1_tagged_cmd_count_failclosed": "PASS",
+    "observer_2_tagged_choice_descendant_pids_failclosed": "PASS",
+    "observer_3_surviving_captured_choice_pids_failclosed": "PASS",
+    "assertions_preserved_verbatim": "PASS",
+    "fullfile_sweep_no_third_failopen": "PASS",
+    "finding_2_cmd_classifier_holds": "PASS",
+    "guardrail_A_admission_budget": "PASS",
+    "guardrail_B_quoting_layer_only": "PASS",
+    "evidence": [
+      { "claim": "Tree binding verified: git rev-parse 8a1d2d84^{tree} == c1fe79fe4a6d68a536078be4887343a82b5fce38; both 8a1d2d84 and f0dd5b6d exist as commits in this checkout.", "severity": "none", "result": "PASS" },
+      { "claim": "Code delta is exactly one file (crates/wcore-sandbox/tests/hard_process_containment_windows.rs, +53/-10) with no Cargo.toml/Cargo.lock/.github/command.rs/worktree_manager.rs change. NOTE: the full name-only diff also carries 15 .planning/ markdown artifacts (20-5x summaries/plans/raw audit logs) — audit-trail docs, not code; the brief's 'ONE file' is accurate only for the code delta.", "severity": "none", "result": "PASS" },
+      { "claim": "Observer 1 tagged_cmd_count (L114-138): asserts out.status.success() with stderr in the panic message (L127-132), then panicking parse via unwrap_or_else (L135-137). No unwrap_or(0) residual. A failed or unparseable .Count query now hard-fails instead of feeding wait_until(==0) at L373/L532/L601.", "severity": "none", "result": "PASS" },
+      { "claim": "Observer 2 tagged_choice_descendant_pids (L168-200): status assert (L185-190) plus per-token panicking parse replacing filter_map(...ok()) (L194-198); grep confirms zero filter_map remaining in file. Legitimate empty stdout on success exit still yields empty Vec via split_whitespace — the valid zero-descendants case is preserved, and downstream guards (peak > 0 L455, pids.len() >= cap/2 L432, !captured_pids.is_empty() L469) prevent a vacuous capture from proving anything.", "severity": "none", "result": "PASS" },
+      { "claim": "Observer 3 surviving_captured_choice_pids (L220-253): if pids.is_empty() { return 0; } short-circuit preserved verbatim (L221); past it, status assert (L242-247) + panicking parse (L249-252). A post-close query failure can no longer satisfy wait_until(... == 0) at L481.", "severity": "none", "result": "PASS" },
+      { "claim": "Assertions preserved verbatim: peak > 0 (L455), peak <= SANDBOX_ACTIVE_PROCESS_LIMIT=512 (L459, const L53), peak < attempts (L464, attempts=cap+32 L397), !captured_pids.is_empty() (L469), exit-0 assert (L448-451), all reap_stray_choice trailers, and sibling tests job_close_reaps_detached_descendant_with_no_residue (L339), breakaway_is_denied (L499), qualified_hard_containment_backend_preflight (L551) — diff hunks touch only the three observer bodies and their doc comments; nothing weakened under cover of hardening.", "severity": "none", "result": "PASS" },
+      { "claim": "Full-file sweep: exactly 3x out.status.success() (L128/186/243), exactly 3x panicking parse (L135/195/250), only 4 .output() call sites — the fourth is reap_stray_choice's `let _ = taskkill` (L278-281), intentional best-effort cleanup unchanged. Sole remaining unwrap_or(0) is L98 in unique_tag (UNIX_EPOCH nanos fallback); tag uniqueness is independently carried by process id + AtomicU64 counter + label, so the fallback is benign. No third fail-open observer of the 20-52 class exists.", "severity": "none", "result": "PASS" },
+      { "claim": "Guardrails hold by absence of change: name-only diff contains no command.rs (Finding-2 resolved_program_is_cmd classifier), no worktree_manager.rs (#A DispatchAdmission budget), no quoting-layer (#B) files, no workflow files. This one-file test delta cannot have altered them.", "severity": "none", "result": "PASS" },
+      { "claim": "No new wrong-panic defect: @(...).Count emits a bare integer on any success exit (0 for an empty set), so the panicking parse cannot fire on a legitimate zero; observer 2's empty-success case yields an empty Vec by construction; observer 3's legitimate empty-set case returns 0 before any query is issued.", "severity": "none", "result": "PASS" },
+      { "claim": "RESIDUAL (low): on the success path none of the three observers inspects stderr. A CIM query that emits a NON-terminating error record (stderr) while powershell -Command still exits 0 yields stdout '0' (Count observers) or an empty token stream (PID observer) — both parse cleanly, so wait_until(observer==0) at L373/L481/L532/L601 can still be satisfied without evidence. This is a narrower survivor of the exact 20-52 class ('broken query read as 0 survivors'): the hard failure modes (spawn failure, non-zero exit, empty/malformed stdout) are closed, but the exit-0-with-error-record mode is not. The downstream peak/capture asserts protect observer 2's capture path but NOT the .Count reap checks. Trigger requires WMI/CIM to partially fail with exit 0 — not runtime-verifiable here (native_windows deferred) — hence low, not higher. Trivial fix: add -ErrorAction Stop to each Get-CimInstance (any error becomes terminating => exit 1 => caught by the new assert), or assert stderr is empty on the success path.", "severity": "low", "result": "FAIL" }
+    ],
+    "disposition": "BLOCK"
+  }
+
+To resume this session: kimi -r session_52159622-f2e9-4f86-9a95-de94c317afb6

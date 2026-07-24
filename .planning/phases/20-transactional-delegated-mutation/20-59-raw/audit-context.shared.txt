@@ -1,0 +1,139 @@
+PRE-NATIVE CROSS-AUDIT — adversarial code review of a Windows-only test-hardening delta.
+Respond with a STRICT JSON object only (no prose outside the JSON). Default to REFUTE / BLOCK if uncertain.
+
+## Candidate under audit (bind every claim to this exact tuple)
+- repo: wayland-core (Rust workspace), branch plan/f20-unified-audit-repair, standalone checkout.
+- sealed source_sha: 8a1d2d84403c77a11c4cf6807b8bbafaaf5e8b8e
+- sealed source_tree: c1fe79fe4a6d68a536078be4887343a82b5fce38  (git rev-parse 8a1d2d84^{tree} == this; VERIFIED)
+- predecessor (20-52-BLOCKED, sealed): f0dd5b6d312af616f268f96f34c3bc9fc962c4d2 (tree ac76c87b318ee4ba8c34927dea23e40e63fd0776)
+- repair delta = git diff f0dd5b6d 8a1d2d84 : ONE file, +53/-10:
+    crates/wcore-sandbox/tests/hard_process_containment_windows.rs   (a #![cfg(windows)] test file)
+  NO Cargo.toml, NO Cargo.lock, NO workflow, NO command.rs, NO worktree_manager.rs change (verified by name-only diff).
+
+## Why this delta exists — the 20-52 BLOCK finding it must close
+The 20-52 FOUR-WAY panel (Codex 5.6 Sol MEDIUM + internal Claude adversarial LOW concurring; Gemini + Kimi MISSED it)
+BLOCKED the prior candidate f0dd5b6d on ONE real, statically-provable finding: a RESIDUAL reap-OBSERVER false-green.
+The host-side query observers in the test each ended in `String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)`
+(or `filter_map(|s| s.parse().ok())`) with NO `out.status.success()` check. `.output().expect(...)` only catches a SPAWN
+failure, not a QUERY failure. So on a post-close CIM/PowerShell query FAILURE (empty/malformed stdout), the observer
+returned 0 (or an empty Vec), which SATISFIED `wait_until(|| observer(...) == 0, 30s)` on the first poll and reported the
+process-reap containment property PROVEN WITHOUT EVIDENCE. This is a fail-OPEN observer: a broken query is read as
+"0 survivors = reaped". Three observers shared this class: tagged_cmd_count, surviving_captured_choice_pids (the two the
+finding named), and tagged_choice_descendant_pids (the filter_map(...ok()) sibling of the same class).
+
+## The 20-57 repair delta (the ACTUAL diff to prosecute)
+```
+--- a/crates/wcore-sandbox/tests/hard_process_containment_windows.rs
++++ b/crates/wcore-sandbox/tests/hard_process_containment_windows.rs
+@@ tagged_cmd_count @@
+-    String::from_utf8_lossy(&out.stdout)
+-        .trim()
+-        .parse()
+-        .unwrap_or(0)
++    assert!(
++        out.status.success(),
++        "tagged_cmd_count CIM query failed (exit {:?}): {}",
++        out.status.code(),
++        String::from_utf8_lossy(&out.stderr).trim()
++    );
++    let stdout = String::from_utf8_lossy(&out.stdout);
++    let text = stdout.trim();
++    text.parse().unwrap_or_else(|err| {
++        panic!("tagged_cmd_count could not parse CIM .Count output {text:?}: {err}")
++    })
+@@ tagged_choice_descendant_pids @@
+-    String::from_utf8_lossy(&out.stdout)
++    assert!(
++        out.status.success(),
++        "tagged_choice_descendant_pids CIM query failed (exit {:?}): {}",
++        out.status.code(),
++        String::from_utf8_lossy(&out.stderr).trim()
++    );
++    let stdout = String::from_utf8_lossy(&out.stdout);
++    stdout
+         .split_whitespace()
+-        .filter_map(|s| s.parse::<u32>().ok())
++        .map(|s| {
++            s.parse::<u32>().unwrap_or_else(|err| {
++                panic!("tagged_choice_descendant_pids could not parse ProcessId token {s:?}: {err}")
++            })
++        })
+         .collect()
+@@ surviving_captured_choice_pids @@
+     if pids.is_empty() {
+         return 0;                       // legitimate empty-set short-circuit, KEPT VERBATIM
+     }
+     ... query ...
+-    String::from_utf8_lossy(&out.stdout)
+-        .trim()
+-        .parse()
+-        .unwrap_or(0)
++    assert!(
++        out.status.success(),
++        "surviving_captured_choice_pids CIM query failed (exit {:?}): {}",
++        out.status.code(),
++        String::from_utf8_lossy(&out.stderr).trim()
++    );
++    let stdout = String::from_utf8_lossy(&out.stdout);
++    let text = stdout.trim();
++    text.parse().unwrap_or_else(|err| {
++        panic!("surviving_captured_choice_pids could not parse CIM .Count output {text:?}: {err}")
++    })
+```
+
+## Full-file static facts at the sealed tree (independently grep-verified, cite/challenge these)
+- `out.status.success()` appears exactly 3x (L128, L186, L243) — one per observer.
+- `unwrap_or_else(|err| panic!...)` appears exactly 3x (L135, L195, L250) — one panicking parse per observer.
+- `filter_map` : NONE remaining in the file.
+- `unwrap_or(0)` : exactly 1 occurrence (L98), inside `unique_tag`, the SystemTime UNIX_EPOCH nanos fallback that seeds a
+  tag suffix — NOT a query observer.
+- `reap_stray_choice()` : `let _ = Command::new("taskkill")...output();` — intentional best-effort cleanup, unchanged.
+- Preserved VERBATIM: `if pids.is_empty() { return 0; }` (L221), `peak > 0` (L455), `peak <= SANDBOX_ACTIVE_PROCESS_LIMIT`
+  (L459, =512), `peak < attempts` (L464), `!captured_pids.is_empty()` (L469), all reap_stray_choice trailers.
+- Sibling tests present & unchanged: job_close_reaps_detached_descendant_with_no_residue (L339), breakaway_is_denied (L499),
+  qualified_hard_containment_backend_preflight (L551).
+- Guardrails untouched by absence of change: command.rs (Finding-2 cmd classifier resolved_program_is_cmd),
+  worktree_manager.rs (#A DispatchAdmission budget), all boundary primitives (#B quoting-layer-only) — NONE are in the diff.
+
+## Deferred (only)
+native_macos, native_windows compile+runtime behavior — the file is #![cfg(windows)]; NEITHER macOS NOR Hetzner Linux
+compiles a line of it. That is proven at the rebound native gate 20-53, NOT here. Everything else (static code review of
+the delta, all-severity findings, evidence integrity, integration authority) is IN SCOPE and must be prosecuted now.
+
+## Prosecute adversarially (answer each)
+1. Do ALL THREE query observers now FAIL CLOSED — each asserting out.status.success() and panicking on a non-success exit;
+   the two .Count observers panicking on empty/unparseable stdout (no parse().unwrap_or(0)=>0); the PID-list reader
+   panicking on a malformed token (no filter_map(...ok()) swallow) — so NO `wait_until(observer==0)` reap check can be
+   satisfied by a FAILED query? Is there ANY residual path that maps a query failure to a passing value?
+2. Is EVERY panel-confirmed-sound assertion preserved VERBATIM (captured-PID reap logic, !captured_pids.is_empty(),
+   peak/cap/below-attempts/exit-0, the `if pids.is_empty(){return 0;}` short-circuit, the 3 sibling tests) with NO
+   assertion weakened under cover of "hardening"?
+3. Full-file sweep: is the ONLY remaining unwrap_or(0) the benign unique_tag nanos fallback, and reap_stray_choice still
+   best-effort? Is there any THIRD fail-open observer of the same class that a re-audit could surface?
+4. Do the Finding-2 command.rs cmd classifier and the 20-43 #A (DispatchAdmission budget) / #B (quoting-layer-only)
+   isolation guardrails still hold — untouched by this one-file delta?
+5. Any NEW defect introduced by the hardening itself (e.g. a legitimate empty/zero case now wrongly panicking; a success
+   exit with genuinely-empty stdout on the .Count observers)?
+
+## Required JSON response schema (emit EXACTLY this shape, filling values)
+{
+  "schema": "<YOUR ASSIGNED SCHEMA KEY>",
+  "source_sha": "8a1d2d84403c77a11c4cf6807b8bbafaaf5e8b8e",
+  "source_tree": "c1fe79fe4a6d68a536078be4887343a82b5fce38",
+  "reviewer_id": "<your model id>",
+  "reviewer_kind": "external-cli",
+  "deferred": ["native_macos", "native_windows"],
+  "checks": { "all_severity": "PASS|FAIL", "evidence_integrity": "PASS|FAIL", "integration_authority": "PASS|FAIL" },
+  "findings": { "blocker": 0, "critical": 0, "high": 0, "medium": 0, "low": 0 },
+  "observer_1_tagged_cmd_count_failclosed": "PASS|FAIL",
+  "observer_2_tagged_choice_descendant_pids_failclosed": "PASS|FAIL",
+  "observer_3_surviving_captured_choice_pids_failclosed": "PASS|FAIL",
+  "assertions_preserved_verbatim": "PASS|FAIL",
+  "fullfile_sweep_no_third_failopen": "PASS|FAIL",
+  "finding_2_cmd_classifier_holds": "PASS|FAIL",
+  "guardrail_A_admission_budget": "PASS|FAIL",
+  "guardrail_B_quoting_layer_only": "PASS|FAIL",
+  "evidence": [ { "claim": "...", "severity": "none|low|medium|high|critical|blocker", "result": "PASS|FAIL" } ],
+  "disposition": "PASS|BLOCK"
+}
+Emit ONE JSON object. PASS only if zero findings at any severity except the two deferred native checks.
