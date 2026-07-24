@@ -22,6 +22,12 @@ native proof + a set of real defects (compile, sandbox boundary, test/harness bu
    boundary; prove a genuine DENY still blocks and a normal-SID-only grant is still denied. (confirmed at exit)
 5. NO cargo/clippy/nextest on the Mac — Hetzner + self-hosted msvc + ephemeral macOS runners only; fmt/node OK.
    (confirmed at exit)
+   AMENDMENT (2026-07-24, after 20-25 native RED): ONE narrow carve-out — a compile-only
+   `cargo check -p wcore-sandbox --features live-docker --tests` on the Mac (type-check only, no test
+   run, no Docker) is sanctioned as a pre-dispatch gate in 20-29/20-32 to catch macOS-only compile
+   errors BEFORE spending a scarce Sean-authorized native run (20-25 burned a run on exactly such an
+   E0599). Fail-safe: if the check cannot run on the Mac, the gate blocks rather than emitting a false
+   green. No other Mac cargo build/clippy/nextest is permitted.
 6. Sean-only: native-proof dispatch + exact-tuple 20-18 authorization (prior digest spent/void). (confirmed at exit)
 7. Never claim native proof from cross-compilation or source inspection — real-hardware runs only. (confirmed at exit)
 </decisions>
