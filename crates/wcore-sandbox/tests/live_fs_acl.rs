@@ -126,30 +126,37 @@ fn cmd_script(script: String) -> SandboxCommand {
 
 fn type_and_hold(file: &Path, seconds: u8) -> SandboxCommand {
     // `type` proves the granted read; ONLY on its success (`&&`) do we hold the
-    // process alive with the stdin-free `choice` delay (choice tolerates the
-    // sandbox's null stdin, unlike `timeout.exe`, which fails under redirected
-    // stdin), then force a deterministic exit 0 with `exit /b 0`. NOT `ver`:
-    // `ver` PRINTS the OS version but does NOT reset ERRORLEVEL, so on real
-    // hardware `choice`'s residual 1-based selection index (default `Y` => 1)
-    // survived as the `cmd /c` exit code and the exit-0 assertion FAILED at
-    // 20-32. `exit /b 0` actually SETS the process exit code to 0, so the
-    // SCRIPT's exit code reflects the granted READ succeeding, not choice's
-    // selection index. If `type` is denied, `&&` short-circuits and the script
-    // exits with type's non-zero code, so an exit-0 assertion genuinely gates on
-    // the granted read.
+    // process alive so the grant ACE can be observed PRESENT during the run,
+    // then force a deterministic exit 0 with `exit /b 0`. The hold is
+    // `waitfor.exe`: it blocks waiting for a signal named `wlhold` that never
+    // arrives and times out after `{seconds}`. Unlike `choice.exe` — which
+    // exits INSTANTLY (~26ms) under the sandbox's NULL stdin, so the intended
+    // present-during-run hold never actually held — `waitfor` is independent of
+    // stdin/console/network and is present on the target box. NOT `ping
+    // 127.0.0.1`: the AppContainer is built with zero network capability
+    // (process.rs:544-545), so loopback is unreachable. `exit /b 0` SETS the
+    // script exit code to 0, so the exit code reflects the granted READ
+    // succeeding, not `waitfor`'s residual timeout ERRORLEVEL. If `type` is
+    // denied, `&&` short-circuits and the script exits with type's non-zero
+    // code, so an exit-0 assertion genuinely gates on the granted read.
     cmd_script(format!(
-        "type \"{}\" && (%SystemRoot%\\System32\\choice.exe /T {seconds} /D Y >nul & exit /b 0)",
+        "type \"{}\" && (waitfor.exe /t {seconds} wlhold >nul 2>&1 & exit /b 0)",
         file.display()
     ))
 }
 
 fn echo_temp_and_hold(seconds: u8) -> SandboxCommand {
-    // `echo %TEMP%` then the stdin-free `choice` hold, then `exit /b 0` to force a
-    // deterministic exit 0 on success. NOT `ver`: `ver` prints the version but
-    // does NOT reset ERRORLEVEL, so `choice`'s residual 1-based index (default
-    // `Y` => 1) would survive as the exit code and fail callers that assert exit 0.
+    // `echo %TEMP%` then the stdin-free `waitfor` hold, then `exit /b 0` to force
+    // a deterministic exit 0 on success. `waitfor.exe` blocks on a signal named
+    // `wlhold` that never arrives and times out after `{seconds}`. Unlike
+    // `choice.exe` — which exits INSTANTLY under the sandbox's NULL stdin so the
+    // intended hold never held — `waitfor` is independent of
+    // stdin/console/network and is present on the box. NOT `ping 127.0.0.1`: the
+    // AppContainer has zero network capability (process.rs:544-545), so loopback
+    // is unreachable. `exit /b 0` SETS the exit code to 0 so callers that assert
+    // exit 0 see the echo's success, not `waitfor`'s residual timeout ERRORLEVEL.
     cmd_script(format!(
-        "echo %TEMP% & %SystemRoot%\\System32\\choice.exe /T {seconds} /D Y >nul & exit /b 0"
+        "echo %TEMP% & waitfor.exe /t {seconds} wlhold >nul 2>&1 & exit /b 0"
     ))
 }
 
@@ -390,12 +397,13 @@ async fn one_execution_grant_never_leaks_to_another_identity() {
         "B must not read bytes granted only to A"
     );
     // A's script exit code now reflects the granted READ succeeding (exit 0 via
-    // `type && … & exit /b 0`), not `choice`'s 1-based selection index. Gate on
-    // that read: A must exit 0 AND have actually read the granted bytes.
+    // `type && … & exit /b 0`), not the `waitfor` hold's residual timeout
+    // ERRORLEVEL. Gate on that read: A must exit 0 AND have actually read the
+    // granted bytes.
     let a_out = a.await.expect("join execution A").expect("execution A");
     assert_eq!(
         a_out.exit_code, 0,
-        "the granting identity's read must succeed (exit 0), not choice's selection index"
+        "the granting identity's read must succeed (exit 0), not the hold primitive's residual exit code"
     );
     assert!(
         String::from_utf8_lossy(&a_out.stdout).contains(MARKER),
