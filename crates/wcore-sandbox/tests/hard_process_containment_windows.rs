@@ -125,19 +125,28 @@ fn tagged_cmd_count(tag: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// Count the `choice.exe` idlers spawned by THIS test's fan-out, scoped to the
-/// test's own tagged process tree rather than host-wide by image name.
+/// Return the ProcessIds of the `choice.exe` idlers spawned by THIS test's
+/// fan-out, scoped to the test's own tagged process tree rather than host-wide
+/// by image name.
 ///
 /// A bare `choice.exe` idler cannot carry an injected tag on its own command
 /// line (choice rejects the extra argument), but the top-level sandbox `cmd`
 /// that runs the fan-out script DOES carry a unique `rem {tag}` — and every
 /// `start "" /b choice` idler is a direct child of that cmd, so its
-/// `ParentProcessId` is the tagged cmd's `ProcessId`. Counting only choice
+/// `ParentProcessId` is the tagged cmd's `ProcessId`. Selecting only choice
 /// processes whose parent is this test's tagged cmd means a concurrent
 /// `choice`-spawning target on the same runner (e.g. `live_fs_acl`) cannot
-/// pollute the count — closing the host-wide-image-count flake (watch-item d2)
-/// without weakening any containment assertion.
-fn tagged_choice_descendant_count(tag: &str) -> usize {
+/// pollute the capture.
+///
+/// This is the ALIVE-phase half of a two-phase reap check: the returned PIDs
+/// are captured WHILE the tagged parent cmd is still alive (during the
+/// peak-sampling window), and the `ParentProcessId` scope is what makes that
+/// capture immune to a concurrent `choice`-spawning target. Once the job closes
+/// the tagged parent is dead, so this parent-scoped query would go structurally
+/// empty regardless of a leaked survivor — the post-close survivor check is
+/// therefore done by fixed ProcessId via [`surviving_captured_choice_pids`],
+/// NOT by re-running this parent-scoped query.
+fn tagged_choice_descendant_pids(tag: &str) -> Vec<u32> {
     let out = Command::new("powershell")
         .args([
             "-NoProfile",
@@ -148,11 +157,52 @@ fn tagged_choice_descendant_count(tag: &str) -> usize {
                  Where-Object {{ $_.CommandLine -like '*{tag}*' }} | \
                  Select-Object -ExpandProperty ProcessId); \
                  @(Get-CimInstance Win32_Process -Filter \"Name='choice.exe'\" | \
-                 Where-Object {{ $parents -contains $_.ParentProcessId }}).Count"
+                 Where-Object {{ $parents -contains $_.ParentProcessId }} | \
+                 Select-Object -ExpandProperty ProcessId)"
             ),
         ])
         .output()
-        .expect("query this test's tagged choice descendants via CIM");
+        .expect("query this test's tagged choice descendant PIDs via CIM");
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .filter_map(|s| s.parse::<u32>().ok())
+        .collect()
+}
+
+/// Count how many of the `pids` fan-out `choice.exe` ProcessIds are STILL alive,
+/// matched by fixed `ProcessId` intersected with image `choice.exe`.
+///
+/// This is the POST-CLOSE half of the two-phase reap check. Because it filters
+/// on the exact PIDs captured while the tagged parent was alive — not on the
+/// now-dead tagged parent, and not host-wide by image name — it is:
+///   * non-vacuous — a leaked/orphaned captured `choice` (same PID, still
+///     `choice.exe`) is counted, so a survivor stays detectable; and
+///   * not host-wide-flaky — a concurrent target's `choice.exe` carries a
+///     different, non-captured PID and is excluded.
+///
+/// An empty `pids` slice yields 0 without issuing a malformed filter.
+fn surviving_captured_choice_pids(pids: &[u32]) -> usize {
+    if pids.is_empty() {
+        return 0;
+    }
+    let pid_list = pids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let out = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "$pids=@({pid_list}); \
+                 @(Get-CimInstance Win32_Process -Filter \"Name='choice.exe'\" | \
+                 Where-Object {{ $pids -contains $_.ProcessId }}).Count"
+            ),
+        ])
+        .output()
+        .expect("query survival of captured choice PIDs via CIM");
     String::from_utf8_lossy(&out.stdout)
         .trim()
         .parse()
@@ -321,18 +371,29 @@ async fn active_process_cap_is_enforced() {
             .await
     });
 
-    // Sample the live count (already scoped to this test's tagged tree) while
-    // the fan-out is held, tracking its peak.
+    // Sample the live PID set (already scoped to this test's tagged tree) while
+    // the fan-out is held, tracking its peak and capturing the peak PID set so
+    // the post-close reap check can re-verify those exact ProcessIds by fixed
+    // PID — the parent-scoped query goes structurally empty once the tagged
+    // parent dies at job close.
     let mut peak = 0usize;
+    let mut captured_pids: Vec<u32> = Vec::new();
     let watch_deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < watch_deadline {
-        let delta = tagged_choice_descendant_count(&tag);
-        peak = peak.max(delta);
+        let pids = tagged_choice_descendant_pids(&tag);
+        if pids.len() > peak {
+            peak = pids.len();
+            captured_pids = pids.clone();
+        }
         // Once we have clearly observed a large admitted set we can stop early.
-        if delta >= SANDBOX_ACTIVE_PROCESS_LIMIT / 2 {
+        if pids.len() >= SANDBOX_ACTIVE_PROCESS_LIMIT / 2 {
             // keep sampling briefly to catch any overshoot past the cap
             std::thread::sleep(Duration::from_millis(500));
-            peak = peak.max(tagged_choice_descendant_count(&tag));
+            let overshoot = tagged_choice_descendant_pids(&tag);
+            if overshoot.len() > peak {
+                peak = overshoot.len();
+                captured_pids = overshoot;
+            }
             break;
         }
         std::thread::sleep(Duration::from_millis(250));
@@ -361,13 +422,22 @@ async fn active_process_cap_is_enforced() {
         "fan-out was not capped: observed {peak} of {attempts} attempted — the limit \
          admitted every spawn"
     );
+    assert!(
+        !captured_pids.is_empty(),
+        "peak PID set was not captured — the post-close reap check would be vacuous"
+    );
 
-    // Everything this test spawned is reaped once the job closes (the count is
-    // already scoped to this test's tagged tree, so "back to baseline" is zero).
+    // After the job closes, re-check the EXACT fan-out `choice` PIDs captured
+    // while the tagged parent was alive, by fixed ProcessId intersected with
+    // image `choice.exe`. This is non-vacuous (a leaked/orphaned captured
+    // survivor is still counted) and not host-wide-flaky (a concurrent target's
+    // `choice.exe` carries a different, non-captured PID). The parent-scoped
+    // query cannot be reused — the tagged parent is dead once `run.await`
+    // returned.
     wait_until(
-        || tagged_choice_descendant_count(&tag) == 0,
+        || surviving_captured_choice_pids(&captured_pids) == 0,
         30,
-        "fan-out descendants reaped after job close",
+        "fan-out descendants reaped after job close (by captured PID)",
     );
     reap_stray_choice();
 }
