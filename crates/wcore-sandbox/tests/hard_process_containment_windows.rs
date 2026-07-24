@@ -31,12 +31,13 @@
 
 #![cfg(windows)]
 
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use wcore_sandbox::backends::SandboxBackend;
 use wcore_sandbox::backends::appcontainer::AppContainerBackend;
+use wcore_sandbox::backends::SandboxBackend;
 use wcore_sandbox::{SandboxCommand, SandboxManifest};
 
 /// The number of authored Job-Object containment acceptance cases. Kept in
@@ -86,9 +87,13 @@ fn cmd_script(script: String) -> SandboxCommand {
     }
 }
 
-/// A per-run unique token, embedded in a detached descendant's command line so
-/// a host-side liveness query can identify EXACTLY this test's tree and nothing
-/// else, even under a shared-process runner.
+/// A per-run unique token. It is stamped as the sandbox top-level cmd's window
+/// TITLE and reused as the per-test PID-handshake filename (see
+/// [`anchor_prologue`] / [`read_handshake_anchor`]), so a host-side liveness
+/// query can identify EXACTLY this test's tree and nothing else, even under a
+/// shared-process runner — WITHOUT relying on `Win32_Process.CommandLine`, which
+/// is NULL for the Low-IL AppContainer restricted-token processes the sandbox
+/// spawns.
 fn unique_tag(label: &str) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -99,24 +104,118 @@ fn unique_tag(label: &str) -> String {
     format!("wcore_r7_{label}_{}_{seq}_{nanos}", std::process::id())
 }
 
+/// The per-test PID-handshake filename, derived from the unique `tag`. It lives
+/// under `%TEMP%`, which the backend remaps into
+/// `%LOCALAPPDATA%\Packages\<profile>\AC\Temp` via command.rs `build_env_block`
+/// — so the file is AppContainer-writable from inside the sandbox and readable
+/// from the host at the corresponding lease temp location.
+fn handshake_name(tag: &str) -> String {
+    format!("{tag}.hs")
+}
+
+/// Sandbox-side prologue that PUBLISHES the PID handshake. Prepended as the FIRST
+/// action of the top-level sandbox cmd (before any descendant is spawned): it
+/// stamps the console with the unique `tag` as its window title, then writes its
+/// OWN `tasklist` CSV row — carrying its `ProcessId` — into the per-test
+/// handshake file in the remapped `%TEMP%`.
+///
+/// Why not PowerShell's `$PID`: the AppContainer Low-IL restricted token cannot
+/// load .NET/GAC assemblies, so `powershell.exe` fails to launch INSIDE the
+/// sandbox (backend `blocks_powershell()==true`, STATUS_DLL_NOT_FOUND). A
+/// `tasklist` filtered by the unique window title is the pure-cmd equivalent that
+/// runs under the restricted token. `imagename eq cmd.exe` excludes the
+/// `tasklist.exe` child (which inherits the same console title), so the row
+/// written is the anchor cmd's alone; running it BEFORE the fan-out means no
+/// descendant cmd yet shares the title either.
+fn anchor_prologue(tag: &str) -> String {
+    let hs = handshake_name(tag);
+    format!(
+        "title {tag}& tasklist /fo csv /nh /fi \"imagename eq cmd.exe\" \
+         /fi \"windowtitle eq {tag}\" > \"%TEMP%\\{hs}\""
+    )
+}
+
+/// Resolve the host-visible path of this test's PID handshake. The backend picks
+/// the AppContainer profile name per lease at runtime, so the exact
+/// `Packages\<profile>\AC\Temp` directory is not known a priori; the host scans
+/// every `%LOCALAPPDATA%\Packages\*\AC\Temp\<hs>` and returns the first match.
+/// The unique `tag` in `<hs>` guarantees at most this test's own file matches.
+fn handshake_host_path(hs: &str) -> Option<PathBuf> {
+    let local = std::env::var_os("LOCALAPPDATA")?;
+    let packages = PathBuf::from(local).join("Packages");
+    for entry in std::fs::read_dir(&packages).ok()?.flatten() {
+        let candidate = entry.path().join("AC").join("Temp").join(hs);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Read the anchor `ProcessId` the sandbox published to the PID handshake — the
+/// CommandLine-free replacement for the NULL `Win32_Process.CommandLine`
+/// predicate (Class D). This is the fixed identity the two alive-phase observers
+/// key on, mirroring [`surviving_captured_choice_pids`], which already keys on a
+/// fixed `ProcessId`.
+///
+/// Returns `None` WHILE the file does not yet exist — the anchor prologue has not
+/// run — a legitimate "not observed yet" that keeps the alive-phase poll waiting.
+/// Fails CLOSED once the file IS present: an unreadable file, an empty file, or an
+/// unparseable `ProcessId` column PANICS rather than silently yielding "no anchor"
+/// (which would make the observers vacuously report an empty / zero tree and let a
+/// reap check pass without evidence).
+fn read_handshake_anchor(tag: &str) -> Option<u32> {
+    let hs = handshake_name(tag);
+    let path = handshake_host_path(&hs)?;
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("PID handshake {path:?} present but unreadable: {err}"));
+    let row = content
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_else(|| panic!("PID handshake {path:?} present but empty"));
+    // `tasklist /fo csv /nh` row: "Image Name","PID","Session Name",... — the
+    // ProcessId is column index 1. A leading Mem-Usage comma (e.g. "5,000 K")
+    // sits in a LATER column, so column 1 is unaffected by it.
+    let pid_field = row
+        .split(',')
+        .nth(1)
+        .unwrap_or_else(|| panic!("PID handshake row missing the ProcessId column: {row:?}"));
+    let pid = pid_field
+        .trim()
+        .trim_matches('"')
+        .parse::<u32>()
+        .unwrap_or_else(|err| {
+            panic!("PID handshake ProcessId column {pid_field:?} does not parse: {err}")
+        });
+    Some(pid)
+}
+
 /// Count host processes (UNSANDBOXED — this runs on the host, not in the
-/// AppContainer) that are `cmd.exe` AND whose command line carries `tag`.
+/// AppContainer) that are this test's own live sandbox descendants: `choice.exe`
+/// whose `ParentProcessId` is the anchor cmd read from the PID handshake.
 ///
-/// The CIM `-Filter "Name='cmd.exe'"` runs at the provider, so the querying
-/// `powershell.exe` — whose own command line contains `tag` — is NOT itself a
-/// match (its image is `powershell.exe`, not `cmd.exe`). That structurally
-/// avoids a self-match without needing to know the query's own PID.
+/// This NO LONGER keys on `Win32_Process.CommandLine`. CommandLine is NULL for
+/// the Low-IL AppContainer restricted-token processes the sandbox spawns (NULL
+/// even from SYSTEM context, so it fails on the CI runner too), so the old
+/// `CommandLine -like '*{tag}*'` predicate never matched and the observer timed
+/// out (Class D). Identifying by fixed `ParentProcessId` (from the handshake)
+/// intersected with image `Name` is the same WMI-readable shape
+/// [`surviving_captured_choice_pids`] already uses. The querying `powershell.exe`
+/// is not itself a match — its image is `powershell.exe`, not `choice.exe`.
 ///
-/// Fails CLOSED at BOTH layers. PowerShell layer: `$ErrorActionPreference='Stop'`
-/// + `-ErrorAction Stop` on the CIM query + a leading `trap` that exits
-/// non-zero escalate any non-terminating CIM/PowerShell query error to a
-/// TERMINATING error that exits `powershell.exe` non-zero, so a failed query can
-/// never print `@(...).Count == '0'` at exit 0. Rust layer (preserved): a
-/// non-success `powershell` exit, or a `.Count` that does not parse on a success
-/// exit, is a hard test failure (panic) — never silently read as a passing count.
-/// A post-close query failure therefore cannot satisfy a reap
-/// `wait_until(... == 0)` without evidence.
+/// Returns 0 WHILE the handshake is not yet published (anchor prologue has not
+/// run) — the alive poll keeps waiting. Once a query IS issued it fails CLOSED at
+/// BOTH layers. PowerShell layer: `$ErrorActionPreference='Stop'` + `-ErrorAction
+/// Stop` on the CIM query + a leading `trap` that exits non-zero escalate any
+/// non-terminating CIM/PowerShell query error to a TERMINATING error that exits
+/// `powershell.exe` non-zero, so a failed query can never print
+/// `@(...).Count == '0'` at exit 0. Rust layer (preserved): a non-success
+/// `powershell` exit, or a `.Count` that does not parse on a success exit, is a
+/// hard test failure (panic) — never silently read as a passing count.
 fn tagged_cmd_count(tag: &str) -> usize {
+    let Some(anchor) = read_handshake_anchor(tag) else {
+        return 0;
+    };
     let out = Command::new("powershell")
         .args([
             "-NoProfile",
@@ -124,12 +223,12 @@ fn tagged_cmd_count(tag: &str) -> usize {
             "-Command",
             &format!(
                 "$ErrorActionPreference='Stop'; trap {{ exit 1 }}; \
-                 @(Get-CimInstance Win32_Process -ErrorAction Stop -Filter \"Name='cmd.exe'\" | \
-                 Where-Object {{ $_.CommandLine -like '*{tag}*' }}).Count"
+                 @(Get-CimInstance Win32_Process -ErrorAction Stop \
+                 -Filter \"Name='choice.exe' AND ParentProcessId={anchor}\").Count"
             ),
         ])
         .output()
-        .expect("query host processes via CIM");
+        .expect("query this test's live sandbox descendants via CIM");
     assert!(
         out.status.success(),
         "tagged_cmd_count CIM query failed (exit {:?}): {}",
@@ -144,41 +243,43 @@ fn tagged_cmd_count(tag: &str) -> usize {
 }
 
 /// Return the ProcessIds of the `choice.exe` idlers spawned by THIS test's
-/// fan-out, scoped to the test's own tagged process tree rather than host-wide
-/// by image name.
+/// fan-out, scoped to the test's own tree by the anchor cmd's fixed
+/// `ProcessId` (read from the PID handshake) rather than host-wide by image name.
 ///
-/// A bare `choice.exe` idler cannot carry an injected tag on its own command
-/// line (choice rejects the extra argument), but the top-level sandbox `cmd`
-/// that runs the fan-out script DOES carry a unique `rem {tag}` — and every
-/// `start "" /b choice` idler is a direct child of that cmd, so its
-/// `ParentProcessId` is the tagged cmd's `ProcessId`. Selecting only choice
-/// processes whose parent is this test's tagged cmd means a concurrent
+/// Every `start "" /b <choice>` idler is a direct child of the top-level sandbox
+/// cmd, so its `ParentProcessId` is the anchor's `ProcessId`. Selecting only
+/// choice processes whose parent is this test's anchor means a concurrent
 /// `choice`-spawning target on the same runner (e.g. `live_fs_acl`) cannot
-/// pollute the capture.
+/// pollute the capture. This replaces the previous
+/// `Win32_Process.CommandLine -like '*{tag}*'` lookup of the parent cmd, which
+/// never matched because CommandLine is NULL for the AppContainer processes
+/// (Class D) — the anchor now comes from the handshake instead.
 ///
-/// This is the ALIVE-phase half of a two-phase reap check: the returned PIDs
-/// are captured WHILE the tagged parent cmd is still alive (during the
-/// peak-sampling window), and the `ParentProcessId` scope is what makes that
-/// capture immune to a concurrent `choice`-spawning target. Once the job closes
-/// the tagged parent is dead, so this parent-scoped query would go structurally
-/// empty regardless of a leaked survivor — the post-close survivor check is
-/// therefore done by fixed ProcessId via [`surviving_captured_choice_pids`],
-/// NOT by re-running this parent-scoped query.
+/// This is the ALIVE-phase half of a two-phase reap check: the returned PIDs are
+/// captured WHILE the anchor cmd is still alive (during the peak-sampling
+/// window), and the `ParentProcessId` scope is what makes that capture immune to
+/// a concurrent `choice`-spawning target. Once the job closes the anchor is dead,
+/// so this parent-scoped query would go structurally empty regardless of a leaked
+/// survivor — the post-close survivor check is therefore done by fixed ProcessId
+/// via [`surviving_captured_choice_pids`], NOT by re-running this parent-scoped
+/// query.
 ///
 /// Fails CLOSED at BOTH layers. PowerShell layer: `$ErrorActionPreference='Stop'`
-/// + `-ErrorAction Stop` on BOTH CIM queries + a leading `trap` that
-/// exits non-zero escalate any non-terminating CIM error to a TERMINATING error
-/// that exits `powershell.exe` non-zero — so a query error can no longer yield an
-/// empty token stream at exit 0. This resolves the empty-vs-error ambiguity: with
-/// the error escalation an empty stdout can ONLY mean a genuine
-/// success-with-no-descendants (still a valid empty `Vec`), never a swallowed
-/// query failure. Rust layer (preserved): a non-success `powershell` exit is a
-/// hard test failure (panic), and each whitespace-separated token is parsed with a
-/// panicking parse, so a malformed token fails the test rather than being silently
-/// dropped. A LEGITIMATE empty result (no descendants yet on a success exit) still
-/// yields an empty `Vec`, because `split_whitespace()` over empty stdout produces
-/// no tokens — the valid zero-descendants case is preserved.
+/// + `-ErrorAction Stop` on the CIM query + a leading `trap` that exits non-zero
+/// escalate any non-terminating CIM error to a TERMINATING error that exits
+/// `powershell.exe` non-zero — so a query error can no longer yield an empty token
+/// stream at exit 0. This resolves the empty-vs-error ambiguity: with the error
+/// escalation an empty stdout can ONLY mean a genuine success-with-no-descendants
+/// (still a valid empty `Vec`), never a swallowed query failure. Rust layer
+/// (preserved): a non-success `powershell` exit is a hard test failure (panic),
+/// and each whitespace-separated token is parsed with a panicking parse, so a
+/// malformed token fails the test rather than being silently dropped. A LEGITIMATE
+/// empty result (no descendants yet, or the handshake not yet published) still
+/// yields an empty `Vec`.
 fn tagged_choice_descendant_pids(tag: &str) -> Vec<u32> {
+    let Some(anchor) = read_handshake_anchor(tag) else {
+        return Vec::new();
+    };
     let out = Command::new("powershell")
         .args([
             "-NoProfile",
@@ -186,11 +287,8 @@ fn tagged_choice_descendant_pids(tag: &str) -> Vec<u32> {
             "-Command",
             &format!(
                 "$ErrorActionPreference='Stop'; trap {{ exit 1 }}; \
-                 $parents=@(Get-CimInstance Win32_Process -ErrorAction Stop -Filter \"Name='cmd.exe'\" | \
-                 Where-Object {{ $_.CommandLine -like '*{tag}*' }} | \
-                 Select-Object -ExpandProperty ProcessId); \
-                 @(Get-CimInstance Win32_Process -ErrorAction Stop -Filter \"Name='choice.exe'\" | \
-                 Where-Object {{ $parents -contains $_.ParentProcessId }} | \
+                 @(Get-CimInstance Win32_Process -ErrorAction Stop \
+                 -Filter \"Name='choice.exe' AND ParentProcessId={anchor}\" | \
                  Select-Object -ExpandProperty ProcessId)"
             ),
         ])
@@ -211,6 +309,33 @@ fn tagged_choice_descendant_pids(tag: &str) -> Vec<u32> {
             })
         })
         .collect()
+}
+
+/// Peak-sample the live `choice.exe` descendants of this test's anchor WHILE the
+/// job is held open, returning the largest PID set observed (captured while the
+/// anchor cmd is still alive). Requires at least `min_expected` concurrently live
+/// so the captured set is non-empty and the post-close reap check via
+/// [`surviving_captured_choice_pids`] is non-vacuous; panics (fail-closed) if that
+/// many are never observed within `deadline_secs`, rather than returning an empty
+/// set that would let the reap pass without evidence.
+fn capture_alive_choice_pids(tag: &str, min_expected: usize, deadline_secs: u64) -> Vec<u32> {
+    let deadline = Instant::now() + Duration::from_secs(deadline_secs);
+    let mut peak: Vec<u32> = Vec::new();
+    while Instant::now() < deadline {
+        let pids = tagged_choice_descendant_pids(tag);
+        if pids.len() > peak.len() {
+            peak = pids;
+        }
+        if peak.len() >= min_expected {
+            return peak;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!(
+        "timed out capturing >= {min_expected} live choice descendants of the anchor \
+         (peak observed {})",
+        peak.len()
+    );
 }
 
 /// Count how many of the `pids` fan-out `choice.exe` ProcessIds are STILL alive,
@@ -346,23 +471,26 @@ async fn contained_detached_child_exit() {
 /// Job Object closes — asserted by an explicit host-side liveness query, not
 /// merely by the parent's own exit.
 ///
-/// The parent detaches a tagged `cmd` grandchild that idles 60s, then holds
-/// itself alive ~8s so the grandchild can be observed RUNNING mid-flight. When
-/// the parent exits, `execute` returns and the Job Object closes: the grandchild
-/// — despite its 60s idle still having ~50s to run — must be terminated. If the
-/// job did not own it, the grandchild would survive and the post-close query
-/// would keep finding it, so `wait_until(count == 0)` would time out and FAIL.
+/// The parent detaches a `choice` idler (a direct child of the anchor) that
+/// idles 60s, then holds itself alive ~8s so the idler can be observed RUNNING
+/// mid-flight (and its ProcessId captured). When the parent exits, `execute`
+/// returns and the Job Object closes: the idler — despite its 60s idle still
+/// having ~50s to run — must be terminated. If the job did not own it, the idler
+/// would survive and the post-close fixed-ProcessId survivor query would keep
+/// finding it, so `wait_until(surviving == 0)` would time out and FAIL.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "explicit native Windows Job-Object containment acceptance"]
 async fn job_close_reaps_detached_descendant_with_no_residue() {
     require_live_windows();
     let tag = unique_tag("residue");
-    // Detached grandchild `cmd` carries `tag` (via a no-op `rem`) then idles 60s;
-    // the parent holds ~8s so the grandchild is observable before job close.
+    // The top-level cmd publishes its ProcessId to the PID handshake, detaches a
+    // choice idler that idles 60s (a direct child of the anchor), then holds ~8s
+    // so the idler is observable before job close.
     let script = format!(
-        "start \"\" /b %ComSpec% /c \"rem {tag} & {}\" & {} & exit /b 0",
-        choice_hold(60),
-        choice_hold(8),
+        "{prologue}& start \"\" /b {idle} & {parent} & exit /b 0",
+        prologue = anchor_prologue(&tag),
+        idle = choice_hold(60),
+        parent = choice_hold(8),
     );
 
     let run = tokio::spawn(async move {
@@ -371,13 +499,15 @@ async fn job_close_reaps_detached_descendant_with_no_residue() {
             .await
     });
 
-    // The detached grandchild (and the still-alive parent) carry the tag.
-    let observed_tag = tag.clone();
+    // Observe the detached idler running before job close (count-based observer).
     wait_until(
-        || tagged_cmd_count(&observed_tag) >= 1,
+        || tagged_cmd_count(&tag) >= 1,
         20,
         "detached descendant running before job close",
     );
+    // Capture the detached idler (plus the parent's own hold) by fixed ProcessId
+    // WHILE the anchor is alive, so the post-close reap check is non-vacuous.
+    let captured = capture_alive_choice_pids(&tag, 2, 20);
 
     let out = run
         .await
@@ -385,10 +515,16 @@ async fn job_close_reaps_detached_descendant_with_no_residue() {
         .expect("contained execution returns");
     assert_eq!(out.exit_code, 0, "parent must exit cleanly (exit /b 0)");
 
-    // After the Job Object closes, the detached 60s grandchild must be gone.
-    let residue_tag = tag.clone();
+    assert!(
+        !captured.is_empty(),
+        "peak PID set was not captured — the post-close reap check would be vacuous"
+    );
+
+    // After the Job Object closes, the detached 60s idler must be gone — checked
+    // by the EXACT captured ProcessIds, since the anchor is dead and the
+    // parent-scoped query would go structurally empty regardless of a survivor.
     wait_until(
-        || tagged_cmd_count(&residue_tag) == 0,
+        || surviving_captured_choice_pids(&captured) == 0,
         30,
         "detached descendant reaped with no residue after job close",
     );
@@ -413,17 +549,19 @@ async fn active_process_cap_is_enforced() {
     reap_stray_choice();
     let tag = unique_tag("cap");
     let attempts = SANDBOX_ACTIVE_PROCESS_LIMIT + 32;
-    // Prefix the script with a `rem {tag}` so the top-level sandbox cmd — the
-    // direct parent of every `start "" /b` choice idler — carries this test's
-    // unique tag on its command line. The host-side count is then scoped to
-    // choice.exe whose ParentProcessId is THIS test's tagged cmd (no host-wide
-    // image baseline), so a concurrent choice-spawning target cannot pollute it.
-    // Fan out `attempts` detached long idlers, then hold the parent ~25s so the
-    // admitted set is concurrently alive and observable, then exit 0 (`exit /b 0`).
+    // Prefix the script with the anchor prologue so the top-level sandbox cmd —
+    // the direct parent of every `start "" /b` choice idler — publishes its own
+    // ProcessId to the PID handshake. The host-side count is then scoped to
+    // choice.exe whose ParentProcessId is THIS test's anchor (no host-wide image
+    // baseline, and no dependency on the NULL AppContainer CommandLine), so a
+    // concurrent choice-spawning target cannot pollute it. Fan out `attempts`
+    // detached long idlers, then hold the parent ~25s so the admitted set is
+    // concurrently alive and observable, then exit 0 (`exit /b 0`).
     let script = format!(
-        "rem {tag} & for /L %i in (1,1,{attempts}) do @start \"\" /b {} & {} & exit /b 0",
-        choice_hold(90),
-        choice_hold(25),
+        "{prologue}& for /L %i in (1,1,{attempts}) do @start \"\" /b {idle} & {parent} & exit /b 0",
+        prologue = anchor_prologue(&tag),
+        idle = choice_hold(90),
+        parent = choice_hold(25),
     );
 
     let run = tokio::spawn(async move {
@@ -507,20 +645,23 @@ async fn active_process_cap_is_enforced() {
 /// detached descendant CANNOT escape the Job Object — it is reaped on job close
 /// rather than surviving independently of the parent.
 ///
-/// The parent detaches two tagged `cmd` idlers (each idling 60s) — the shape a
-/// process would use to outlive its parent — then holds ~8s so both are
-/// observed alive. On job close both must die: if breakaway were permitted, a
-/// detached idler would survive the ~52s remainder of its idle and the
-/// post-close query would still find it, failing `wait_until(count == 0)`.
+/// The parent detaches two `choice` idlers (direct children of the anchor, each
+/// idling 60s) — the shape a process would use to outlive its parent — then holds
+/// ~8s so both are observed alive and their ProcessIds captured. On job close
+/// both must die: if breakaway were permitted, a detached idler would survive the
+/// ~52s remainder of its idle and the post-close fixed-ProcessId survivor query
+/// would still find it, failing `wait_until(surviving == 0)`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "explicit native Windows Job-Object containment acceptance"]
 async fn breakaway_is_denied() {
     require_live_windows();
     let tag = unique_tag("breakaway");
+    // Two detached choice idlers (direct children of the anchor) — the shape a
+    // process would use to outlive its parent — plus the parent's own ~8s hold.
+    // The anchor prologue publishes the parent's ProcessId to the PID handshake.
     let script = format!(
-        "start \"\" /b %ComSpec% /c \"rem {tag} & {hold}\" & \
-         start \"\" /b %ComSpec% /c \"rem {tag} & {hold}\" & {parent} & exit /b 0",
-        tag = tag,
+        "{prologue}& start \"\" /b {hold} & start \"\" /b {hold} & {parent} & exit /b 0",
+        prologue = anchor_prologue(&tag),
         hold = choice_hold(60),
         parent = choice_hold(8),
     );
@@ -531,11 +672,19 @@ async fn breakaway_is_denied() {
             .await
     });
 
-    let observed_tag = tag.clone();
+    // Observe both detached breakaway candidates running before job close
+    // (count-based observer).
     wait_until(
-        || tagged_cmd_count(&observed_tag) >= 2,
+        || tagged_cmd_count(&tag) >= 2,
         20,
         "both detached breakaway candidates running before job close",
+    );
+    // Capture the two detached breakaway candidates (plus the parent's hold) by
+    // fixed ProcessId while the anchor is alive, so the reap check is non-vacuous.
+    let captured = capture_alive_choice_pids(&tag, 3, 20);
+    assert!(
+        captured.len() >= 2,
+        "both detached breakaway candidates must be observed alive before job close"
     );
 
     let out = run
@@ -544,10 +693,10 @@ async fn breakaway_is_denied() {
         .expect("contained execution returns");
     assert_eq!(out.exit_code, 0, "parent must exit cleanly (exit /b 0)");
 
-    // No detached child broke away: the job reaped both on close.
-    let residue_tag = tag.clone();
+    // No detached child broke away: the job reaped both on close — checked by the
+    // EXACT captured ProcessIds, since the anchor is dead post-close.
     wait_until(
-        || tagged_cmd_count(&residue_tag) == 0,
+        || surviving_captured_choice_pids(&captured) == 0,
         30,
         "no detached child broke away from the Job Object",
     );
@@ -564,7 +713,7 @@ async fn breakaway_is_denied() {
 /// (`owns_descendants_hard` / `enforces_read_deny` / `blocks_powershell`) and
 /// then drives one benign contained command to confirm the Job-Object pipeline
 /// is live end to end.
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "explicit native Windows Job-Object containment acceptance"]
 async fn qualified_hard_containment_backend_preflight() {
     require_live_windows();
@@ -598,25 +747,44 @@ async fn qualified_hard_containment_backend_preflight() {
 
     // A detached descendant is reaped on job close even for this preflight shape,
     // confirming the qualification is descendant-hard, not just a self-report.
+    // The anchor prologue publishes the parent's ProcessId to the PID handshake;
+    // the detached choice idler is a direct child of the anchor.
     let tag = unique_tag("preflight");
     let script = format!(
-        "start \"\" /b %ComSpec% /c \"rem {tag} & {}\" & {} & exit /b 0",
-        choice_hold(45),
-        choice_hold(6),
+        "{prologue}& start \"\" /b {idle} & {parent} & exit /b 0",
+        prologue = anchor_prologue(&tag),
+        idle = choice_hold(45),
+        parent = choice_hold(6),
     );
     let started = Instant::now();
-    let held = backend
-        .execute(&manifest(60), cmd_script(script))
+    let run = tokio::spawn(async move {
+        AppContainerBackend::new()
+            .execute(&manifest(60), cmd_script(script))
+            .await
+    });
+    // Observe the detached idler running before job close (count-based observer).
+    wait_until(
+        || tagged_cmd_count(&tag) >= 1,
+        20,
+        "preflight detached descendant running before job close",
+    );
+    // Capture the detached idler by fixed ProcessId while the anchor is alive.
+    let captured = capture_alive_choice_pids(&tag, 2, 20);
+    let held = run
         .await
+        .expect("join preflight detached-descendant execution")
         .expect("preflight detached-descendant execution returns");
     assert_eq!(held.exit_code, 0);
     assert!(
         started.elapsed() < Duration::from_secs(20),
         "preflight detached descendant leaked — hard containment not owned"
     );
-    let residue_tag = tag.clone();
+    assert!(
+        !captured.is_empty(),
+        "preflight peak PID set was not captured — the reap check would be vacuous"
+    );
     wait_until(
-        || tagged_cmd_count(&residue_tag) == 0,
+        || surviving_captured_choice_pids(&captured) == 0,
         30,
         "preflight detached descendant reaped with no residue",
     );
