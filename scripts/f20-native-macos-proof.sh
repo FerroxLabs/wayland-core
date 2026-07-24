@@ -111,6 +111,32 @@ if ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 
+# ---- Docker test-image provisioning (fail-closed) ----------------------------
+#
+# The macOS docker targets execute REAL containers, so every image they use MUST
+# be present on a fresh ephemeral runner BEFORE any target runs. Otherwise the
+# first docker target (macos-docker-roundtrip-delete -> docker_smoke.rs
+# `docker_runs_hello_world`, which `.await.unwrap()`s) HARD-fails on
+# `404: No such image` — the exact 20-32 macOS RED — and the soft-skip targets
+# would silently pass on the same 404 without exercising the daemon.
+#
+# Source of truth for the image set (duplicate-with-pointer, mirroring the
+# SANDBOX_ACTIVE_PROCESS_LIMIT convention in hard_process_containment_windows.rs
+# — do NOT fragile-parse Rust). Derived from ALL docker-touching macOS targets:
+#   * crates/wcore-sandbox/tests/docker_smoke.rs       image "alpine:3.19"
+#     (targets macos-docker-reject-path-replacement / -roundtrip-delete / -cancellation)
+#   * crates/wcore-swarm/tests/workspace_authority.rs  image "alpine:3.19"
+#     (target macos-docker-budget)
+# Both sources hardcode the same single image today; if a future divergence adds
+# another image, extend this list to match or the runner will 404 mid-proof.
+DOCKER_TEST_IMAGES=("alpine:3.19")
+for image in "${DOCKER_TEST_IMAGES[@]}"; do
+    if ! docker pull "$image" >/dev/null; then
+        echo "native macOS acceptance requires docker image $image (docker pull failed)" >&2
+        exit 1
+    fi
+done
+
 # WAYLAND_SANDBOX_LIVE_MACOS is the live-macOS opt-in consumed by the two native
 # sandbox acceptance tests (retained-directory + process-tree). It mirrors the
 # WAYLAND_SANDBOX_LIVE_WINDOWS gate the Windows live-acceptance tests use: those
