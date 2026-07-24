@@ -222,6 +222,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The self-hosted SEANDESKTOP runner's checkout dir is owned by
+      # BUILTIN\Administrators while the service runs as NT AUTHORITY\NETWORK
+      # SERVICE, so git aborts every command with "detected dubious ownership"
+      # before the proof can start. Trust the checkout for this single-tenant,
+      # contents:read, no-secrets candidate job. Must run before any git call.
+      - name: Trust the candidate checkout for git
+        shell: pwsh
+        run: git config --global --add safe.directory '*'
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -262,6 +271,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # Defensive parity with the Windows candidate job: a freshly re-registered
+      # ephemeral macOS runner's checkout-dir ownership is unproven, so trust it
+      # for this single-tenant, contents:read, no-secrets job before any git
+      # call. Harmless no-op when ownership already matches.
+      - name: Trust the candidate checkout for git
+        shell: bash
+        run: git config --global --add safe.directory '*'
 
       - name: Run exact-candidate F20 native macOS proof
         shell: bash
