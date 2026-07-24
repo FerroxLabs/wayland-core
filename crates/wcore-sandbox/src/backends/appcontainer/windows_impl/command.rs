@@ -135,7 +135,9 @@ pub(super) fn quote_cmd_payload(payload: &str) -> String {
 }
 
 /// True when a resolved `lpApplicationName` (NUL-terminated UTF-16, as
-/// returned by [`resolve_program`]) names `cmd.exe`. Used to decide whether the
+/// returned by [`resolve_program`]) has `cmd.exe` as its exact FINAL PATH
+/// COMPONENT (case-insensitive) — NOT a bare suffix, so a name like
+/// `notcmd.exe`/`foocmd.exe` does not match. Used to decide whether the
 /// `/c`/`/k` payload needs the cmd-aware quoting above rather than the general
 /// CRT [`quote_arg`] rules. Matching the RESOLVED program (not the raw
 /// `argv[0]`) is deliberate: bare `cmd`/`cmd.exe` is pinned to
@@ -146,9 +148,15 @@ pub(super) fn resolved_program_is_cmd(app_name_w: &[u16]) -> bool {
         .iter()
         .position(|&c| c == 0)
         .unwrap_or(app_name_w.len());
-    String::from_utf16_lossy(&app_name_w[..end])
-        .to_ascii_lowercase()
-        .ends_with("cmd.exe")
+    // Windows `Path` treats both `\` and `/` as separators, so `file_name`
+    // isolates the true final component of the `System32\cmd.exe` resolution or
+    // any absolute path the caller passed; equality (not a suffix) rejects
+    // `notcmd.exe`.
+    let decoded = String::from_utf16_lossy(&app_name_w[..end]).to_ascii_lowercase();
+    std::path::Path::new(&decoded)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "cmd.exe")
 }
 
 /// Classification of a bare (non-absolute) `argv[0]`. Only `cmd` is
