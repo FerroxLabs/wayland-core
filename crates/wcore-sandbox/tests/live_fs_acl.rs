@@ -124,39 +124,31 @@ fn cmd_script(script: String) -> SandboxCommand {
     }
 }
 
+// waitfor.exe / timeout.exe / ping / choice.exe all exit in <80ms under the
+// Low-IL AppContainer restricted token (console/DLL/network deps fail to load),
+// so none actually held. A `for /L` loop is a cmd BUILTIN — no child image, no
+// DLL, no stdin, no network — the only primitive that holds under this sandbox
+// (hardware-verified). It MUST stay bare: a parenthesized `(for /L ...)` fails
+// to parse under `cmd /d /s /c` (instant exit 1). Command-line form uses single
+// `%i` (NOT `%%i`). Iterations are capped so the hold is ~2s on reference
+// hardware — above the 50ms present-poll, below the 10s manifest timeout —
+// rather than a machine-timed value that could overrun the timeout on slow CI.
+fn hold_iterations(seconds: u8) -> u64 {
+    4_000_000 * u64::from(seconds).clamp(1, 2)
+}
+
 fn type_and_hold(file: &Path, seconds: u8) -> SandboxCommand {
-    // `type` proves the granted read; ONLY on its success (`&&`) do we hold the
-    // process alive so the grant ACE can be observed PRESENT during the run,
-    // then force a deterministic exit 0 with `exit /b 0`. The hold is
-    // `waitfor.exe`: it blocks waiting for a signal named `wlhold` that never
-    // arrives and times out after `{seconds}`. Unlike `choice.exe` — which
-    // exits INSTANTLY (~26ms) under the sandbox's NULL stdin, so the intended
-    // present-during-run hold never actually held — `waitfor` is independent of
-    // stdin/console/network and is present on the target box. NOT `ping
-    // 127.0.0.1`: the AppContainer is built with zero network capability
-    // (process.rs:544-545), so loopback is unreachable. `exit /b 0` SETS the
-    // script exit code to 0, so the exit code reflects the granted READ
-    // succeeding, not `waitfor`'s residual timeout ERRORLEVEL. If `type` is
-    // denied, `&&` short-circuits and the script exits with type's non-zero
-    // code, so an exit-0 assertion genuinely gates on the granted read.
     cmd_script(format!(
-        "type \"{}\" && (waitfor.exe /t {seconds} wlhold >nul 2>&1 & exit /b 0)",
-        file.display()
+        "type \"{}\" && for /L %i in (1,1,{}) do @rem",
+        file.display(),
+        hold_iterations(seconds),
     ))
 }
 
 fn echo_temp_and_hold(seconds: u8) -> SandboxCommand {
-    // `echo %TEMP%` then the stdin-free `waitfor` hold, then `exit /b 0` to force
-    // a deterministic exit 0 on success. `waitfor.exe` blocks on a signal named
-    // `wlhold` that never arrives and times out after `{seconds}`. Unlike
-    // `choice.exe` — which exits INSTANTLY under the sandbox's NULL stdin so the
-    // intended hold never held — `waitfor` is independent of
-    // stdin/console/network and is present on the box. NOT `ping 127.0.0.1`: the
-    // AppContainer has zero network capability (process.rs:544-545), so loopback
-    // is unreachable. `exit /b 0` SETS the exit code to 0 so callers that assert
-    // exit 0 see the echo's success, not `waitfor`'s residual timeout ERRORLEVEL.
     cmd_script(format!(
-        "echo %TEMP% & waitfor.exe /t {seconds} wlhold >nul 2>&1 & exit /b 0"
+        "echo %TEMP% & for /L %i in (1,1,{}) do @rem",
+        hold_iterations(seconds),
     ))
 }
 
@@ -396,10 +388,10 @@ async fn one_execution_grant_never_leaks_to_another_identity() {
         !String::from_utf8_lossy(&b_out.stdout).contains(MARKER),
         "B must not read bytes granted only to A"
     );
-    // A's script exit code now reflects the granted READ succeeding (exit 0 via
-    // `type && … & exit /b 0`), not the `waitfor` hold's residual timeout
-    // ERRORLEVEL. Gate on that read: A must exit 0 AND have actually read the
-    // granted bytes.
+    // A's script exit code reflects the granted READ succeeding (exit 0 via
+    // `type && for /L … do @rem`): the `&&` gates the hold on the read, and the
+    // `for /L` busy-loop completes with exit 0. Gate on that read: A must exit 0
+    // AND have actually read the granted bytes.
     let a_out = a.await.expect("join execution A").expect("execution A");
     assert_eq!(
         a_out.exit_code, 0,
