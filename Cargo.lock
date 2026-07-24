@@ -10180,6 +10180,7 @@ dependencies = [
 name = "wcore-swarm"
 version = "0.12.25"
 dependencies = [
+ "dunce",
  "fd-lock",
  "futures",
  "humantime-serde",
