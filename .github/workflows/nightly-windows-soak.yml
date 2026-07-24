@@ -215,7 +215,7 @@ jobs:
       - Windows
       - X64
       - msvc
-    timeout-minutes: 60
+    timeout-minutes: 90
     permissions:
       contents: read
 
@@ -239,57 +239,58 @@ jobs:
         with:
           tool: cargo-nextest
 
-      - name: Run exact-candidate F20 native Windows proof
+      # DIAGNOSTIC MODE (throwaway branch f20-win-diag-*, NOT acceptance).
+      # Runs ALL 6 Windows native targets from f20-native-windows-proof.ps1 in a
+      # single step with --no-fail-fast and continue-on-error, so ONE run surfaces
+      # every compile error and every runtime failure at once instead of the
+      # acceptance proof's stop-at-first-target behavior. This step always exits 0;
+      # real per-target pass/fail is emitted as DIAG lines and the final summary.
+      - name: DIAGNOSTIC - run all Windows native targets (no-fail-fast)
         shell: pwsh
-        env:
-          EXPECTED_COMMIT: ${{ github.sha }}
-          F20_REQUEST_NONCE: ${{ github.event.inputs.f20_request_nonce }}
-          WAYLAND_F20_NATIVE_ACCEPTANCE: "1"
         run: |
-          $expectedTree = (git rev-parse "$env:EXPECTED_COMMIT^{tree}").Trim()
-          if ($LASTEXITCODE -ne 0) { throw "resolve expected tree failed" }
-          pwsh scripts/f20-native-windows-proof.ps1 `
-            -ExpectedCommit $env:EXPECTED_COMMIT `
-            -ExpectedTree $expectedTree `
-            -Nonce $env:F20_REQUEST_NONCE
+          $ErrorActionPreference = 'Continue'
+          $env:WAYLAND_F20_NATIVE_ACCEPTANCE = '1'
+          $env:WAYLAND_SANDBOX_LIVE_WINDOWS = '1'
 
-  f20-macos-candidate:
-    name: F20 native macOS candidate (ephemeral)
-    if: github.event.inputs.f20_candidate == 'true'
-    # Dynamically pinned ephemeral runner. The f20-image-<sha256> label is
-    # supplied by the authorized dispatch input; the runner is idle-selected,
-    # exposes no ambient secrets, and deregisters after this single job.
-    runs-on:
-      - self-hosted
-      - f20-native-macos
-      - f20-ephemeral
-      - f20-no-ambient-secrets
-      - ${{ github.event.inputs.f20_macos_runner_label }}
-    timeout-minutes: 90
-    permissions:
-      contents: read
+          Write-Host "DIAG toolchain:"
+          & rustc --version
+          & cargo --version
+          & cargo nextest --version
 
-    steps:
-      - uses: actions/checkout@v4
+          $targets = @(
+            @{ id = 'windows-retained-handle';         args = @('-p','wcore-sandbox','--test','live_fs_acl','-E','test(one_execution_grant_never_leaks_to_another_identity)') },
+            @{ id = 'windows-appcontainer-acl';        args = @('-p','wcore-sandbox','--test','live_fs_acl','-E','test(granted_path_is_readable_then_revoked)') },
+            @{ id = 'windows-job-object';              args = @('-p','wcore-sandbox','--test','hard_process_containment_windows','-E','test(/contained_detached_child_exit|job_close_reaps_detached_descendant_with_no_residue|active_process_cap_is_enforced|breakaway_is_denied/)') },
+            @{ id = 'windows-public-dispatch';         args = @('-p','wcore-swarm','--test','dispatch_smoke') },
+            @{ id = 'windows-hard-process-containment';args = @('-p','wcore-sandbox','--test','hard_process_containment_windows','-E','test(qualified_hard_containment_backend_preflight)') },
+            @{ id = 'windows-f20-lifecycle';           args = @('-p','wcore-agent','--test','transactional_delegated_mutation_test') }
+          )
 
-      # Defensive parity with the Windows candidate job: a freshly re-registered
-      # ephemeral macOS runner's checkout-dir ownership is unproven, so trust it
-      # for this single-tenant, contents:read, no-secrets job before any git
-      # call. Harmless no-op when ownership already matches.
-      - name: Trust the candidate checkout for git
-        shell: bash
-        run: git config --global --add safe.directory '*'
+          # Preliminary compile-only pass across all involved crates so every
+          # E0599-class compile error surfaces up front, independent of the runs.
+          Write-Host "==== DIAG COMPILE-ONLY (--no-run) START ===="
+          & cargo nextest run --no-run --run-ignored all -p wcore-sandbox -p wcore-swarm -p wcore-agent
+          $compileExit = $LASTEXITCODE
+          Write-Host "==== DIAG COMPILE-ONLY exit=$compileExit ===="
 
-      - name: Run exact-candidate F20 native macOS proof
-        shell: bash
-        env:
-          EXPECTED_COMMIT: ${{ github.sha }}
-          F20_REQUEST_NONCE: ${{ github.event.inputs.f20_request_nonce }}
-          WAYLAND_F20_NATIVE_ACCEPTANCE: "1"
-        run: |
-          set -euo pipefail
-          expected_tree="$(git rev-parse "${EXPECTED_COMMIT}^{tree}")"
-          bash scripts/f20-native-macos-proof.sh \
-            --expected-commit "$EXPECTED_COMMIT" \
-            --expected-tree "$expected_tree" \
-            --nonce "$F20_REQUEST_NONCE"
+          $results = @()
+          foreach ($t in $targets) {
+            Write-Host "==== DIAG TARGET START id=$($t.id) ===="
+            $nextestArgs = @('nextest','run','--no-fail-fast','--run-ignored','all','--no-tests=fail') + $t.args + @('--nocapture')
+            Write-Host "DIAG cmd: cargo $($nextestArgs -join ' ')"
+            & cargo @nextestArgs
+            $code = $LASTEXITCODE
+            Write-Host "==== DIAG TARGET RESULT id=$($t.id) exit=$code ===="
+            $results += [pscustomobject]@{ id = $t.id; exit = $code }
+          }
+
+          Write-Host "==================== DIAG SUMMARY ===================="
+          Write-Host ("DIAG compile-only exit={0} {1}" -f $compileExit, $(if ($compileExit -eq 0) { 'OK' } else { 'COMPILE-FAIL' }))
+          foreach ($r in $results) {
+            $verdict = if ($r.exit -eq 0) { 'PASS' } else { 'FAIL' }
+            Write-Host ("DIAG target={0} exit={1} {2}" -f $r.id, $r.exit, $verdict)
+          }
+          Write-Host "====================================================="
+
+          # Diagnostic step must never abort the run; verdicts are in the DIAG lines.
+          exit 0
