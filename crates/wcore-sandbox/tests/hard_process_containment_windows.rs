@@ -46,10 +46,20 @@ const NATIVE_CONTAINMENT_CASES: usize = 5;
 /// The active-process cap the Windows backend installs on the Job Object,
 /// mirrored from `windows_impl/command.rs::SANDBOX_ACTIVE_PROCESS_LIMIT`. It is
 /// `pub(super)` (crate-internal), so an integration test cannot import it; the
-/// value is duplicated here with this pointer to its source of truth. The cap
-/// test asserts a fan-out beyond it is bounded, which fails closed if the two
-/// ever drift apart on hardware.
+/// value is duplicated here as the EXPECTED production value for the source-grep
+/// static assertion in [`active_process_cap_is_enforced`], which fails CLOSED if
+/// production ever drops or changes the cap (test-intent vs. production-wiring
+/// drift).
 const SANDBOX_ACTIVE_PROCESS_LIMIT: usize = 512;
+
+/// The tiny active-process cap [`active_process_cap_is_enforced`] installs to
+/// prove the Job-Object `ActiveProcessLimit` primitive at a fast, deterministic
+/// scale: `TEST_JOB_CAP` suspended children are admitted and the next one is
+/// rejected with `ERROR_NOT_ENOUGH_QUOTA`. Deliberately small so the cap is
+/// reachable in microseconds without the ~2s-per-spawn Low-IL AppContainer cost;
+/// it is tied to the real production cap of `SANDBOX_ACTIVE_PROCESS_LIMIT` (512)
+/// by a source-grep, not by scale.
+const TEST_JOB_CAP: u32 = 4;
 
 fn require_live_windows() {
     assert_eq!(
@@ -535,114 +545,228 @@ async fn job_close_reaps_detached_descendant_with_no_residue() {
     reap_stray_descendants();
 }
 
-/// ActiveProcessLimit: a fan-out beyond the Job Object's active-process cap is
-/// bounded — the job refuses to admit more than the cap of concurrently-live
-/// processes, so a runaway fork cannot exceed it.
+/// ActiveProcessLimit: a Windows Job Object configured with
+/// `JOB_OBJECT_LIMIT_ACTIVE_PROCESS` refuses to admit more than its
+/// `ActiveProcessLimit` concurrently-live processes — the exact OS primitive the
+/// production AppContainer sandbox installs in `windows_impl/process.rs`
+/// (`ActiveProcessLimit = SANDBOX_ACTIVE_PROCESS_LIMIT` under
+/// `JOB_OBJECT_LIMIT_ACTIVE_PROCESS`) to bound a runaway fork.
 ///
-/// The parent attempts to detach `cap + margin` bare `choice` idlers, then holds
-/// itself alive so the admitted set is concurrently observable. The host-side
-/// image count (baseline-subtracted) must plateau at or below the cap and STAY
-/// BELOW the attempted count — proving excess spawns were rejected by the limit,
-/// not merely slow to start. An unbounded job would let the delta approach the
-/// attempted count and this test would FAIL. After the job closes every idler is
-/// reaped back to the baseline.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// WHY this is a DIRECT primitive assertion, not an end-to-end fan-out through
+/// the sandbox: an end-to-end 512-concurrent cap test THROUGH the AppContainer is
+/// infeasible on real hardware. Sandboxed process CREATION under the Low-IL
+/// AppContainer restricted token is hardware-measured on SEANDESKTOP (i9-13900KF)
+/// at ~2s each, so the former `SANDBOX_ACTIVE_PROCESS_LIMIT + 32 = 544` serial
+/// descendant spawns cannot complete inside `manifest(120)` — the old test
+/// deterministically failed at ~120.5s with `Err(Timeout)`, in isolation and
+/// under load. It was also VACUOUS: because per-spawn latency (~2s) is as long as
+/// the hold, the peak concurrent descendant count measured = 1, so the fan-out
+/// never accumulated toward the 512 cap at all.
+///
+/// The redesign proves the SAME primitive `process.rs` relies on, at a small,
+/// fast, deterministic scale. It builds a Job Object with a tiny `TEST_JOB_CAP`
+/// `ActiveProcessLimit`, admits exactly `TEST_JOB_CAP` plain SUSPENDED children
+/// (kernel accounting via `JobObjectBasicAccountingInformation` confirms the
+/// count), then proves the (cap+1)th `AssignProcessToJobObject` is REJECTED with
+/// `ERROR_NOT_ENOUGH_QUOTA` and accounting stays at the cap — an assertion that
+/// FAILS if the cap were absent or unenforced (non-vacuous). Children are created
+/// suspended and never resumed, so no image executes and the ~2s AppContainer
+/// spawn cost never applies; the whole test runs in well under a second. A
+/// source-grep static assertion ties this small-scale primitive to the real
+/// production wiring (the 512 cap in `command.rs`, installed in `process.rs`), so
+/// drift between test intent and production fails closed. (The Linux Bubblewrap
+/// counterpart bounds the same runaway-fork surface with a cgroup pids limit;
+/// noted here in prose only.)
+#[test]
 #[ignore = "explicit native Windows Job-Object containment acceptance"]
-async fn active_process_cap_is_enforced() {
+fn active_process_cap_is_enforced() {
     require_live_windows();
-    reap_stray_descendants();
-    let attempts = SANDBOX_ACTIVE_PROCESS_LIMIT + 32;
-    // The host-side count is scoped to cmd.exe whose ParentProcessId is THIS test's
-    // anchor (the top-level sandbox cmd, resolved by its PPID == this test process),
-    // so no host-wide image baseline and no dependency on the NULL AppContainer
-    // CommandLine — a concurrent cmd-spawning target cannot pollute it. Fan out
-    // `attempts` detached `for /L` idlers, then hold the anchor with an INLINE
-    // `for /L` so the admitted set is concurrently alive and observable, then exit 0.
-    //
-    // The OUTER fan-out loop uses `%k` (not `%i`): its per-iteration substitution
-    // would otherwise clobber the inner `%i` inside each descendant's own
-    // `cmd /d /s /c "for /L %i ..."`, breaking the nested hold. The outer body never
-    // references its own loop variable, so `%k` vs `%i` is invisible to it.
-    let script = format!(
-        "for /L %k in (1,1,{attempts}) do @start \"\" /b {idle} & {parent} & exit /b 0",
-        idle = descendant_hold(90),
-        parent = inline_hold(25),
+
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_NOT_ENOUGH_QUOTA, GetLastError};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
+        JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    };
+    use windows_sys::Win32::System::Threading::{
+        CREATE_NO_WINDOW, CREATE_SUSPENDED, CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW,
+        TerminateProcess,
+    };
+
+    // --- Static tie to production (fail-closed on drift) -----------------------
+    // The small-scale primitive below is only meaningful if production still
+    // installs the SAME ActiveProcessLimit primitive. Assert command.rs still
+    // declares the 512 cap and process.rs still installs it under
+    // JOB_OBJECT_LIMIT_ACTIVE_PROCESS. Any drift fails this test CLOSED.
+    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/backends/appcontainer/windows_impl");
+    let command_src = std::fs::read_to_string(src_root.join("command.rs"))
+        .expect("read production command.rs for the cap drift-guard");
+    let process_src = std::fs::read_to_string(src_root.join("process.rs"))
+        .expect("read production process.rs for the cap drift-guard");
+    let expect_cap_decl =
+        format!("SANDBOX_ACTIVE_PROCESS_LIMIT: u32 = {SANDBOX_ACTIVE_PROCESS_LIMIT}");
+    assert!(
+        command_src.contains(&expect_cap_decl),
+        "drift: command.rs no longer declares `{expect_cap_decl}` — the small-scale Job-Object \
+         cap proof is untethered from production"
+    );
+    assert!(
+        process_src.contains("ActiveProcessLimit = SANDBOX_ACTIVE_PROCESS_LIMIT"),
+        "drift: process.rs no longer installs `ActiveProcessLimit = SANDBOX_ACTIVE_PROCESS_LIMIT`"
+    );
+    assert!(
+        process_src.contains("JOB_OBJECT_LIMIT_ACTIVE_PROCESS"),
+        "drift: process.rs no longer sets `JOB_OBJECT_LIMIT_ACTIVE_PROCESS` on the Job Object"
     );
 
-    let run = tokio::spawn(async move {
-        AppContainerBackend::new()
-            .execute(&manifest(120), cmd_script(script))
-            .await
+    // Benign child image: %ComSpec% (cmd.exe), fallback %SystemRoot%\System32\cmd.exe.
+    let comspec = std::env::var_os("ComSpec").unwrap_or_else(|| {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        std::ffi::OsString::from(format!(r"{root}\System32\cmd.exe"))
     });
+    let image: Vec<u16> = std::path::Path::new(&comspec)
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
 
-    // Sample the live PID set (already scoped to this test's tagged tree) while
-    // the fan-out is held, tracking its peak and capturing the peak PID set so
-    // the post-close reap check can re-verify those exact ProcessIds by fixed
-    // PID — the parent-scoped query goes structurally empty once the tagged
-    // parent dies at job close.
-    let mut peak = 0usize;
-    let mut captured_pids: Vec<u32> = Vec::new();
-    let watch_deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < watch_deadline {
-        let pids = live_descendant_pids();
-        if pids.len() > peak {
-            peak = pids.len();
-            captured_pids = pids.clone();
-        }
-        // Once we have clearly observed a large admitted set we can stop early.
-        if pids.len() >= SANDBOX_ACTIVE_PROCESS_LIMIT / 2 {
-            // keep sampling briefly to catch any overshoot past the cap
-            std::thread::sleep(Duration::from_millis(500));
-            let overshoot = live_descendant_pids();
-            if overshoot.len() > peak {
-                peak = overshoot.len();
-                captured_pids = overshoot;
-            }
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(250));
+    // Spawn a plain child SUSPENDED (never resumed → no image runs, no ~2s cost).
+    // Nested `unsafe fn` so both the admit loop and the overflow spawn share it.
+    unsafe fn spawn_suspended(image: *const u16) -> PROCESS_INFORMATION {
+        let mut si: STARTUPINFOW = std::mem::zeroed();
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+        let ok = CreateProcessW(
+            image,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            CREATE_SUSPENDED | CREATE_NO_WINDOW,
+            std::ptr::null(),
+            std::ptr::null(),
+            &si,
+            &mut pi,
+        );
+        assert!(
+            ok != 0,
+            "CreateProcessW(cmd.exe, suspended) failed: {:#x}",
+            GetLastError()
+        );
+        pi
     }
 
-    let out = run
-        .await
-        .expect("join fan-out execution")
-        .expect("fan-out execution returns");
-    assert_eq!(
-        out.exit_code, 0,
-        "parent must exit cleanly after the fan-out"
-    );
+    unsafe {
+        // (1) Job Object with the production hardening flags plus a tiny cap.
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        assert!(
+            !job.is_null(),
+            "CreateJobObjectW failed: {:#x}",
+            GetLastError()
+        );
 
-    assert!(
-        peak > 0,
-        "fan-out never admitted any descendant — the test did not exercise the cap"
-    );
-    assert!(
-        peak <= SANDBOX_ACTIVE_PROCESS_LIMIT,
-        "active-process cap breached: observed {peak} concurrent descendants > cap \
-         {SANDBOX_ACTIVE_PROCESS_LIMIT}"
-    );
-    assert!(
-        peak < attempts,
-        "fan-out was not capped: observed {peak} of {attempts} attempted — the limit \
-         admitted every spawn"
-    );
-    assert!(
-        !captured_pids.is_empty(),
-        "peak PID set was not captured — the post-close reap check would be vacuous"
-    );
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        limits.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        limits.BasicLimitInformation.ActiveProcessLimit = TEST_JOB_CAP;
+        assert!(
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as _,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) != 0,
+            "SetInformationJobObject(ExtendedLimit) failed: {:#x}",
+            GetLastError()
+        );
 
-    // After the job closes, re-check the EXACT fan-out `cmd.exe` PIDs captured
-    // while the anchor was alive, by fixed ProcessId intersected with image
-    // `cmd.exe`. This is non-vacuous (a leaked/orphaned captured survivor is still
-    // counted) and not host-wide-flaky (a concurrent target's `cmd.exe` carries a
-    // different, non-captured PID). The parent-scoped query cannot be reused — the
-    // anchor is dead once `run.await` returned.
-    wait_until(
-        || surviving_captured_descendant_pids(&captured_pids) == 0,
-        30,
-        "fan-out descendants reaped after job close (by captured PID)",
-    );
-    reap_stray_descendants();
+        // (2) Admit exactly TEST_JOB_CAP suspended children; each assign succeeds.
+        let mut assigned: Vec<PROCESS_INFORMATION> = Vec::with_capacity(TEST_JOB_CAP as usize);
+        for i in 0..TEST_JOB_CAP {
+            let pi = spawn_suspended(image.as_ptr());
+            let ok = AssignProcessToJobObject(job, pi.hProcess);
+            assert!(
+                ok != 0,
+                "AssignProcessToJobObject #{} (within cap) failed: {:#x}",
+                i + 1,
+                GetLastError()
+            );
+            assigned.push(pi);
+        }
+
+        // (3) Kernel accounting confirms the suspended children occupy the cap.
+        let mut acct: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = std::mem::zeroed();
+        assert!(
+            QueryInformationJobObject(
+                job,
+                JobObjectBasicAccountingInformation,
+                &mut acct as *mut _ as _,
+                std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            ) != 0,
+            "QueryInformationJobObject(BasicAccounting) failed: {:#x}",
+            GetLastError()
+        );
+        assert_eq!(
+            acct.ActiveProcesses, TEST_JOB_CAP,
+            "job accounting must show exactly TEST_JOB_CAP ({TEST_JOB_CAP}) active suspended \
+             children, saw {}",
+            acct.ActiveProcesses
+        );
+
+        // (4) NON-VACUOUS CORE: the (cap+1)th assignment is rejected by the cap
+        //     with ERROR_NOT_ENOUGH_QUOTA; accounting stays at the cap. This
+        //     assertion FAILS if the cap were absent or unenforced.
+        let overflow = spawn_suspended(image.as_ptr());
+        let overflow_ok = AssignProcessToJobObject(job, overflow.hProcess);
+        let overflow_err = GetLastError();
+        assert_eq!(
+            overflow_ok, 0,
+            "the (cap+1)th AssignProcessToJobObject must be REJECTED by the ActiveProcessLimit, \
+             but it succeeded — the cap is not enforced"
+        );
+        assert_eq!(
+            overflow_err, ERROR_NOT_ENOUGH_QUOTA,
+            "the (cap+1)th assignment must fail with ERROR_NOT_ENOUGH_QUOTA (job active-process \
+             limit), saw GetLastError()={overflow_err:#x}"
+        );
+
+        let mut acct_after: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = std::mem::zeroed();
+        assert!(
+            QueryInformationJobObject(
+                job,
+                JobObjectBasicAccountingInformation,
+                &mut acct_after as *mut _ as _,
+                std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            ) != 0,
+            "QueryInformationJobObject(BasicAccounting) recheck failed: {:#x}",
+            GetLastError()
+        );
+        assert_eq!(
+            acct_after.ActiveProcesses, TEST_JOB_CAP,
+            "the rejected overflow process must never enter the job; accounting must stay at \
+             TEST_JOB_CAP ({TEST_JOB_CAP}), saw {}",
+            acct_after.ActiveProcesses
+        );
+
+        // (5) Cleanup — no leaked processes/handles. The overflow child is NOT in
+        //     the job (assignment rejected), so KILL_ON_JOB_CLOSE will not reap
+        //     it: terminate it explicitly. The assigned suspended children ARE in
+        //     the job, so closing the job handle reaps them via KILL_ON_JOB_CLOSE.
+        TerminateProcess(overflow.hProcess, 1);
+        CloseHandle(overflow.hThread);
+        CloseHandle(overflow.hProcess);
+        for pi in &assigned {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
+        CloseHandle(job);
+    }
 }
 
 /// Breakaway denial: with `BREAKAWAY_OK`/`SILENT_BREAKAWAY_OK` cleared, a
