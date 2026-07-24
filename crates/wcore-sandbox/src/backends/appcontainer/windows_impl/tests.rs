@@ -8,6 +8,16 @@ use super::*;
 
 use super::*;
 
+// Compile-debt restore: the `#[cfg(test)]` bodies below reference these types
+// by name but the glob imports above do not re-export them (a `use` is private
+// to its module). Import them from their real crate module paths so this module
+// builds on msvc. `#![allow(unused_imports)]` above tolerates any that a given
+// case does not touch.
+use crate::SandboxCommand;
+use crate::error::SandboxError;
+use crate::manifest::{NetworkPolicy, SandboxManifest};
+use std::sync::Arc;
+
 #[test]
 fn cancellation_guard_is_sticky_unless_disarmed() {
     let cancelled = Arc::new(JobControl::default());

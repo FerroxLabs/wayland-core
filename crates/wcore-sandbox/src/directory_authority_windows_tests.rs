@@ -9,9 +9,14 @@
 
 use super::windows::*;
 use super::*;
+use crate::error::SandboxError;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
-use windows_sys::Win32::Storage::FileSystem::{FILE_ID_BOTH_DIR_INFORMATION, FILE_RENAME_INFO};
+// `FILE_ID_BOTH_DIR_INFORMATION` lives in the Wdk namespace in windows-sys 0.59
+// (feature `Wdk_Storage_FileSystem`), matching production `directory_authority_
+// windows.rs`; only `FILE_RENAME_INFO` is a Win32 Storage::FileSystem type.
+use windows_sys::Wdk::Storage::FileSystem::FILE_ID_BOTH_DIR_INFORMATION;
+use windows_sys::Win32::Storage::FileSystem::FILE_RENAME_INFO;
 
 fn inject_create_failure(stage: Option<CreateValidationStage>) {
     CREATE_VALIDATION_FAILURE.with(|failure| failure.set(stage));
