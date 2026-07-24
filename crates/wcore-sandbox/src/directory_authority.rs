@@ -331,37 +331,11 @@ impl DirectoryAuthority {
         validate_child_name(name)?;
         let temporary = format!(".wayland-write-{}", uuid::Uuid::new_v4().simple());
         let temporary_authority = self.create_child_file(&temporary, contents)?;
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
-            use std::ffi::CString;
-            use std::os::fd::AsRawFd;
-
-            let source = CString::new(temporary.as_str()).expect("UUID name contains no NUL");
-            let destination = CString::new(name).map_err(|_| {
-                SandboxError::PathDenied("authority child name contains NUL".to_owned())
-            })?;
-            // SAFETY: both source and destination are one validated direct
-            // child beneath the retained parent.
-            if unsafe {
-                libc::renameat(
-                    self.handle.as_raw_fd(),
-                    source.as_ptr(),
-                    self.handle.as_raw_fd(),
-                    destination.as_ptr(),
-                )
-            } != 0
-            {
-                let publish = SandboxError::Io(std::io::Error::last_os_error());
-                return match self.remove_child_file(&temporary, temporary_authority) {
-                    Ok(()) => Err(publish),
-                    Err(cleanup) => Err(SandboxError::ExecFailed(format!(
-                        "authority publish failed ({publish}); exact temporary cleanup also failed ({cleanup})"
-                    ))),
-                };
-            }
-        }
-        #[cfg(windows)]
-        {
+            // Publish through the unified handle-relative file rename. Overwrite
+            // semantics (replace=true) preserve the historical inline renameat
+            // behaviour on unix and match the existing Windows publish branch.
             if let Err(publish) = temporary_authority.rename_into(self, name, true) {
                 return match self.remove_child_file(&temporary, temporary_authority) {
                     Ok(()) => Err(publish),
@@ -670,9 +644,14 @@ impl DirectoryAuthority {
         Ok(())
     }
 
-    /// Rename the exact held Windows directory object beneath an already-held
+    /// Rename the exact held directory object beneath an already-held
     /// destination parent, never whichever object occupies either pathname.
-    #[cfg(windows)]
+    ///
+    /// Both the current source name and the destination name resolve only
+    /// through the retained destination-parent handle (never the ambient
+    /// `display_path` namespace), the source child's identity is re-proven
+    /// against the held object before the rename, and `replace = false` fails
+    /// closed when the target already exists.
     pub fn rename_into(
         &self,
         destination_parent: &DirectoryAuthority,
@@ -680,7 +659,37 @@ impl DirectoryAuthority {
         replace: bool,
     ) -> Result<()> {
         validate_child_name(child_name)?;
-        windows::rename_directory_into(self, destination_parent, child_name, replace)
+        #[cfg(windows)]
+        {
+            windows::rename_directory_into(self, destination_parent, child_name, replace)
+        }
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+
+            let source_name = retained_child_name(self.display_path())?;
+            // Re-prove, through the retained destination parent, that the source
+            // name still resolves to the exact held object before renaming
+            // (mirrors the open_child_directory + identity-token check pattern).
+            let observed = destination_parent.open_child_directory(source_name)?;
+            if observed.identity_token() != self.identity_token() {
+                return Err(identity_changed(
+                    self.display_path(),
+                    "before the retained directory was renamed",
+                ));
+            }
+            let parent_fd = destination_parent.handle.as_raw_fd();
+            renameat_child(parent_fd, source_name, parent_fd, child_name, replace)?;
+            destination_parent.handle.sync_all()?;
+            Ok(())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (destination_parent, child_name, replace);
+            Err(SandboxError::PolicyNotSupported(
+                "relative rename is unsupported on this platform".to_owned(),
+            ))
+        }
     }
 }
 
@@ -785,6 +794,125 @@ fn validate_child_name(name: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Derive and validate the single trailing component of a retained authority's
+/// display path, used only as the handle-relative source name for a rename. The
+/// name is resolved through the retained parent descriptor, never this path.
+#[cfg(unix)]
+fn retained_child_name(display_path: &Path) -> Result<&str> {
+    let name = display_path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or_else(|| {
+            SandboxError::PathDenied(
+                "retained authority name is not a valid Unicode component".to_owned(),
+            )
+        })?;
+    validate_child_name(name)?;
+    Ok(name)
+}
+
+/// Rename one validated direct child from `source_parent` to `destination_parent`
+/// entirely through retained parent descriptors. `replace = false` uses the OS
+/// no-replace primitive so it fails closed when the target already exists.
+#[cfg(unix)]
+fn renameat_child(
+    source_parent: std::os::fd::RawFd,
+    source_name: &str,
+    destination_parent: std::os::fd::RawFd,
+    destination_name: &str,
+    replace: bool,
+) -> Result<()> {
+    use std::ffi::CString;
+
+    let source = CString::new(source_name)
+        .map_err(|_| SandboxError::PathDenied("authority child name contains NUL".to_owned()))?;
+    let destination = CString::new(destination_name)
+        .map_err(|_| SandboxError::PathDenied("authority child name contains NUL".to_owned()))?;
+    if replace {
+        // SAFETY: both names are validated single components resolved only
+        // through the retained parent descriptors.
+        let code = unsafe {
+            libc::renameat(
+                source_parent,
+                source.as_ptr(),
+                destination_parent,
+                destination.as_ptr(),
+            )
+        };
+        if code != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(())
+    } else {
+        renameat_no_replace(source_parent, &source, destination_parent, &destination)
+    }
+}
+
+/// Handle-relative no-replace rename. Linux uses `renameat2(RENAME_NOREPLACE)`
+/// and Apple targets use `renameatx_np(RENAME_EXCL)`; both fail closed when the
+/// destination already exists. Other unix targets refuse rather than silently
+/// falling back to a clobbering rename.
+#[cfg(all(unix, target_os = "linux"))]
+fn renameat_no_replace(
+    source_parent: std::os::fd::RawFd,
+    source: &std::ffi::CStr,
+    destination_parent: std::os::fd::RawFd,
+    destination: &std::ffi::CStr,
+) -> Result<()> {
+    // SAFETY: validated single components resolved only through the retained
+    // parent descriptors; RENAME_NOREPLACE prevents clobbering an existing name.
+    let code = unsafe {
+        libc::renameat2(
+            source_parent,
+            source.as_ptr(),
+            destination_parent,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if code != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, target_vendor = "apple"))]
+fn renameat_no_replace(
+    source_parent: std::os::fd::RawFd,
+    source: &std::ffi::CStr,
+    destination_parent: std::os::fd::RawFd,
+    destination: &std::ffi::CStr,
+) -> Result<()> {
+    // SAFETY: validated single components resolved only through the retained
+    // parent descriptors; RENAME_EXCL prevents clobbering an existing name.
+    let code = unsafe {
+        libc::renameatx_np(
+            source_parent,
+            source.as_ptr(),
+            destination_parent,
+            destination.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if code != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_vendor = "apple"))))]
+fn renameat_no_replace(
+    source_parent: std::os::fd::RawFd,
+    source: &std::ffi::CStr,
+    destination_parent: std::os::fd::RawFd,
+    destination: &std::ffi::CStr,
+) -> Result<()> {
+    let _ = (source_parent, source, destination_parent, destination);
+    Err(SandboxError::PolicyNotSupported(
+        "no-replace rename is unsupported on this unix target".to_owned(),
+    ))
 }
 
 fn identity_changed(path: &Path, when: &str) -> SandboxError {

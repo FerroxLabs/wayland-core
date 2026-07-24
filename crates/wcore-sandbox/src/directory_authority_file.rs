@@ -130,7 +130,11 @@ impl RegularFileAuthority {
         })
     }
 
-    #[cfg(windows)]
+    /// Rename the exact held regular-file object beneath a retained target
+    /// parent. The source name resolves only through the target-parent handle,
+    /// the held file's identity is re-proven before the rename, and
+    /// `replace = false` fails closed when the target already exists. Durability
+    /// is the caller's responsibility (the atomic publish syncs the parent).
     pub(super) fn rename_into(
         &self,
         target_parent: &DirectoryAuthority,
@@ -138,6 +142,33 @@ impl RegularFileAuthority {
         replace: bool,
     ) -> Result<()> {
         validate_child_name(name)?;
-        windows::rename_file_into(self, target_parent, name, replace)
+        #[cfg(windows)]
+        {
+            windows::rename_file_into(self, target_parent, name, replace)
+        }
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+
+            let source_name = retained_child_name(self.display_path())?;
+            // Re-prove, through the retained target parent, that the source name
+            // still resolves to the exact held file object before renaming.
+            let observed = target_parent.open_child_file(source_name)?;
+            if observed.identity != self.identity {
+                return Err(file_identity_changed(
+                    self.display_path(),
+                    "before the retained file was renamed",
+                ));
+            }
+            let parent_fd = target_parent.handle.as_raw_fd();
+            renameat_child(parent_fd, source_name, parent_fd, name, replace)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (target_parent, name, replace);
+            Err(SandboxError::PolicyNotSupported(
+                "relative rename is unsupported on this platform".to_owned(),
+            ))
+        }
     }
 }
