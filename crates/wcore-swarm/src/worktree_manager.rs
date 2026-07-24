@@ -73,8 +73,19 @@ impl WorktreeManager {
             SwarmError::WorktreeIo("orchestrator worktree root has no parent".to_owned())
         })?;
         std::fs::create_dir_all(workspace_parent)?;
+        // De-verbatimize every canonicalized root, exactly as `new` does: on
+        // Windows `std::fs::canonicalize` returns a `\\?\C:\...` verbatim path,
+        // and a verbatim `swarm_root` reaches the PowerShell capacity probe where
+        // `[IO.DriveInfo]::new` throws on the `\\?\C:\` drive root. `dunce::simplified`
+        // strips the `\\?\` prefix for real drive-letter paths and is a no-op on
+        // unix and for genuine UNC/device paths, so Linux is unaffected. Keeping
+        // all three roots simplified preserves the parent-equality checks below
+        // and lets the `DirectoryAuthority` (and the `swarm_root` that
+        // `new_with_workspace_authority` inherits from it) carry a plain path.
         let workspace_parent = std::fs::canonicalize(workspace_parent)?;
+        let workspace_parent = dunce::simplified(&workspace_parent).to_path_buf();
         let repo_root = std::fs::canonicalize(repo_root)?;
+        let repo_root = dunce::simplified(&repo_root).to_path_buf();
         if workspace_parent.starts_with(&repo_root) || repo_root.starts_with(&workspace_parent) {
             return Err(SwarmError::WorktreeIo(format!(
                 "orchestrator worktree root must not overlap repository {}",
@@ -84,6 +95,7 @@ impl WorktreeManager {
         ensure_real_directory(workspace_root)?;
         make_guard_dir_private(workspace_root)?;
         let swarm_root = std::fs::canonicalize(workspace_root)?;
+        let swarm_root = dunce::simplified(&swarm_root).to_path_buf();
         if swarm_root.parent() != Some(workspace_parent.as_path()) {
             return Err(SwarmError::WorktreeIo(format!(
                 "refused worktree root outside orchestrator directory: {}",
@@ -428,8 +440,11 @@ impl WorktreeManager {
         // args after `-Command` as script text, so any weird path character (a
         // `\\?\` verbatim prefix, `&`, `(`, spaces) breaks the probe with a
         // ParserError. Reading `$env:WCORE_SWARM_PROBE_ROOT` removes that reparse
-        // class entirely. `swarm_root` is already de-verbatimized at the
-        // canonicalize site, so `[IO.DriveInfo]::new` receives a plain drive root.
+        // class entirely. Every constructor de-verbatimizes `swarm_root` at its
+        // canonicalize site (`new`, `new_with_workspace_root`, and by inheritance
+        // `new_with_workspace_authority`), so `[IO.DriveInfo]::new` receives a
+        // plain drive root rather than a `\\?\C:\` verbatim path that would make
+        // it throw a non-terminating `ArgumentException` (exit 0, empty stdout).
         const SCRIPT: &str = "$root=[IO.Path]::GetPathRoot($env:WCORE_SWARM_PROBE_ROOT); $drive=[IO.DriveInfo]::new($root); [Console]::Out.Write($drive.AvailableFreeSpace)";
         let root = self.swarm_root.to_string_lossy().into_owned();
         let mut command = shell::shell_command_argv(
@@ -446,14 +461,23 @@ impl WorktreeManager {
                 String::from_utf8_lossy(&output.stderr).trim()
             )));
         }
-        String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse::<u64>()
-            .map_err(|_| {
-                SwarmError::DispatchAdmission(
-                    "workspace capacity probe returned invalid available bytes".into(),
-                )
-            })
+        // A PowerShell non-terminating error (e.g. `[IO.DriveInfo]::new` throwing
+        // an ArgumentException) yields exit 0 with empty stdout, which would
+        // otherwise reach `parse::<u64>()` and masquerade as "invalid bytes".
+        // Treat empty output as a distinct probe failure so the real cause is
+        // legible rather than mislabeled as an unparseable value.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let trimmed = stdout.trim();
+        if trimmed.is_empty() {
+            return Err(SwarmError::DispatchAdmission(
+                "workspace capacity probe produced no output".into(),
+            ));
+        }
+        trimmed.parse::<u64>().map_err(|_| {
+            SwarmError::DispatchAdmission(
+                "workspace capacity probe returned unparseable available bytes".into(),
+            )
+        })
     }
 
     #[cfg(not(any(unix, windows)))]
