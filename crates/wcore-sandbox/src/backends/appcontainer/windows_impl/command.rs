@@ -110,6 +110,47 @@ pub(super) fn quote_arg(arg: &str) -> String {
     out
 }
 
+/// Quote the `/c`/`/k` payload of a `cmd.exe` invocation for the RAW command
+/// line `cmd.exe` re-reads.
+///
+/// `cmd.exe /s /c` (and the bare `/c` the availability probe uses) does NOT
+/// consume the MSVC-CRT-parsed argv for its payload: with `/s` it strips only
+/// the FIRST and LAST quote of the raw remainder after `/c` and executes the
+/// rest VERBATIM. So [`quote_arg`]'s CRT escaping (`"` -> `\"`) leaks the
+/// backslash-escaped quotes into the executed text — `type "path"` becomes
+/// `type \"path\"` and fails `ERROR_INVALID_NAME`, and every `start "" /b …`
+/// containment payload mangles identically. The correct spelling wraps the
+/// payload in a single outer double-quote pair and passes its inner quotes
+/// through untouched: `/s` strips exactly the outer pair, leaving the script's
+/// embedded quotes intact. This is a quoting-layer fix only — argv discipline
+/// is preserved (the payload is still one argv entry the caller supplied, not a
+/// `format!`-interpolated shell string), and the sandbox token / Job Object /
+/// AppContainer ACL boundary is untouched.
+pub(super) fn quote_cmd_payload(payload: &str) -> String {
+    let mut out = String::with_capacity(payload.len() + 2);
+    out.push('"');
+    out.push_str(payload);
+    out.push('"');
+    out
+}
+
+/// True when a resolved `lpApplicationName` (NUL-terminated UTF-16, as
+/// returned by [`resolve_program`]) names `cmd.exe`. Used to decide whether the
+/// `/c`/`/k` payload needs the cmd-aware quoting above rather than the general
+/// CRT [`quote_arg`] rules. Matching the RESOLVED program (not the raw
+/// `argv[0]`) is deliberate: bare `cmd`/`cmd.exe` is pinned to
+/// `System32\cmd.exe` and an absolute path is validated as-is, so this reflects
+/// the actual image that will parse the command line.
+pub(super) fn resolved_program_is_cmd(app_name_w: &[u16]) -> bool {
+    let end = app_name_w
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(app_name_w.len());
+    String::from_utf16_lossy(&app_name_w[..end])
+        .to_ascii_lowercase()
+        .ends_with("cmd.exe")
+}
+
 /// Classification of a bare (non-absolute) `argv[0]`. Only `cmd` is
 /// runnable under the Low-integrity restricted-token AppContainer; every
 /// other shell is recognized solely so the resolver can return a clear,

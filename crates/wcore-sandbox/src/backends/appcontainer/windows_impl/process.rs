@@ -610,10 +610,35 @@ pub(super) fn execute_blocking(
             sinfo.lpAttributeList = attr_list;
 
             // ---- 8. Command line + env block ----
+            // When the resolved program is cmd.exe, its `/c`/`/k` payload must be
+            // quoted for cmd's RAW-command-line re-read (single outer pair, inner
+            // quotes verbatim), NOT with the MSVC CRT `\"` escaping quote_arg
+            // emits — cmd /s strips only the outer pair and would otherwise run
+            // the backslash-escaped quotes literally (`type \"path\"` ->
+            // ERROR_INVALID_NAME). Every other argv entry keeps the CRT quoting.
+            // Quoting-layer only: the token / Job / ACL boundary is unchanged.
+            let cmd_payload_idx = if resolved_program_is_cmd(&app_name_w) {
+                cmd.argv
+                    .iter()
+                    .position(|a| {
+                        let flag = a.to_ascii_lowercase();
+                        flag == "/c" || flag == "/k"
+                    })
+                    .map(|flag_idx| flag_idx + 1)
+            } else {
+                None
+            };
             let cmdline: String = cmd
                 .argv
                 .iter()
-                .map(|a| quote_arg(a))
+                .enumerate()
+                .map(|(idx, a)| {
+                    if Some(idx) == cmd_payload_idx {
+                        quote_cmd_payload(a)
+                    } else {
+                        quote_arg(a)
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(" ");
             let mut cmdline_w: Vec<u16> = widen(&cmdline);
