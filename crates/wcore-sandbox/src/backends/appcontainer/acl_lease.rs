@@ -38,8 +38,8 @@ use windows_sys::Win32::Foundation::{
     INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
-    DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, SE_FILE_OBJECT,
-    SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN,
+    EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, SE_FILE_OBJECT, SetEntriesInAclW,
+    SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN,
 };
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
@@ -47,7 +47,8 @@ use windows_sys::Win32::Security::Isolation::{
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACCESS_DENIED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION,
     AclSizeInformation, DACL_SECURITY_INFORMATION, DeleteAce, EqualSid, FreeSid, GetAce,
-    GetAclInformation, GetLengthSid, IsValidSid,
+    GetAclInformation, GetLengthSid, IsValidSid, PROTECTED_DACL_SECURITY_INFORMATION,
+    UNPROTECTED_DACL_SECURITY_INFORMATION,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, SYNCHRONIZE,
@@ -522,14 +523,18 @@ unsafe fn apply_intents(intents: &[AclIntent], sid: *mut core::ffi::c_void) -> R
         if !path.exists() {
             continue;
         }
-        let mode = match intent.kind {
-            IntentKind::Allow => GRANT_ACCESS,
-            IntentKind::Deny => DENY_ACCESS,
+        let outcome = match intent.kind {
+            IntentKind::Allow => {
+                let access = unsafe { explicit_access_for_sid(sid, intent.mask, GRANT_ACCESS) };
+                unsafe { apply_explicit_access(path, &access) }
+            }
+            // AppContainer ignores a DENY ace against its own package SID, so a
+            // deny is enforced by REMOVING every package-SID ALLOW and
+            // protecting the DACL — never by adding an (inert) DENY ace.
+            IntentKind::Deny => unsafe { apply_protected_deny(path) },
         };
-        let access = unsafe { explicit_access_for_sid(sid, intent.mask, mode) };
-        if let Err(error) = unsafe { apply_explicit_access(path, &access) } {
-            let cleanup_paths: Vec<_> = applied.iter().map(|item| Path::new(&item.path)).collect();
-            unsafe { remove_and_verify_exact_sid(&cleanup_paths, sid)? };
+        if let Err(error) = outcome {
+            unsafe { revoke_intents(&applied, sid)? };
             return Err(error);
         }
         applied.push(intent);
@@ -542,12 +547,8 @@ unsafe fn cleanup_locked(
     lease: &LeaseFile,
     sid: *mut core::ffi::c_void,
 ) -> Result<()> {
-    let paths: Vec<_> = lease
-        .intents
-        .iter()
-        .map(|intent| Path::new(&intent.path))
-        .collect();
-    unsafe { remove_and_verify_exact_sid(&paths, sid)? };
+    let intents: Vec<&AclIntent> = lease.intents.iter().collect();
+    unsafe { revoke_intents(&intents, sid)? };
 
     let mut cleanup = lease.clone();
     cleanup.state = LeaseState::AclRevoked;
@@ -682,6 +683,30 @@ fn owner_is_live(lease: &LeaseFile) -> Result<bool> {
         WAIT_OBJECT_0 => Ok(false),
         _ => Err(last_error("WaitForSingleObject(ACL lease owner)")),
     }
+}
+
+/// Symmetric revoke for both intent kinds. Grants are removed first (their
+/// exact-SID ALLOW aces), then deny targets are un-protected — so a
+/// now-ungranted parent is not momentarily re-inherited onto a deny child
+/// before its protection is cleared. Denial was enforced by package-ALLOW
+/// removal + `PROTECTED_DACL_SECURITY_INFORMATION`, so revoke restores
+/// inheritance and leaves no residual protection or grant on the host,
+/// preserving the Phase-20 no-residual invariant.
+unsafe fn revoke_intents(intents: &[&AclIntent], sid: *mut core::ffi::c_void) -> Result<()> {
+    let paths: Vec<&Path> = intents
+        .iter()
+        .map(|intent| Path::new(&intent.path))
+        .collect();
+    unsafe { remove_and_verify_exact_sid(&paths, sid)? };
+    for intent in intents {
+        if intent.kind == IntentKind::Deny {
+            let path = Path::new(&intent.path);
+            if path.exists() {
+                unsafe { restore_unprotected_dacl(path)? };
+            }
+        }
+    }
+    Ok(())
 }
 
 unsafe fn remove_and_verify_exact_sid(paths: &[&Path], sid: *mut core::ffi::c_void) -> Result<()> {
@@ -880,6 +905,135 @@ unsafe fn apply_explicit_access(path: &Path, access: &EXPLICIT_ACCESS_W) -> Resu
         )));
     }
     Ok(())
+}
+
+/// Enforce an `fs_read_deny` intent the only way Windows AppContainer honors.
+///
+/// The lowbox access check ignores a DENY ace against the container's OWN
+/// package SID (hardware-proven at 20-53: a canonically ordered DENY→ALLOW
+/// DACL was read straight through, secret disclosed, exit 0), so a package
+/// DENY ace is INERT. Instead we strip every AppContainer-package
+/// (`S-1-15-2-…`) ALLOW ace from the target — both explicit and the one
+/// inherited from a granted parent — and set
+/// `PROTECTED_DACL_SECURITY_INFORMATION` so no inheritable package ALLOW can
+/// re-apply. AppContainer ignores normal SIDs when granting, so the child is
+/// denied by ABSENCE of a package grant (hardware-proven: exit 1, "Access is
+/// denied."). Denial never comes from re-enabling a deny-only SID — that path
+/// caused the "sandbox can read no file" regression an earlier native fix
+/// closed. A denied FILE and a denied DIRECTORY are each protected per-object.
+unsafe fn apply_protected_deny(path: &Path) -> Result<()> {
+    let (mut path_w, dacl, _sd_guard) = unsafe { read_dacl(path)? };
+    if dacl.is_null() {
+        // A NULL DACL grants everyone (including the package) full access and
+        // cannot be protected into a denial. Fail closed rather than leave the
+        // deny silently ineffective.
+        return Err(exec_error(format!(
+            "cannot enforce AppContainer deny on NULL-DACL target {}",
+            path.display()
+        )));
+    }
+    let count = unsafe { ace_count(dacl)? };
+    for index in (0..count).rev() {
+        let mut ace = ptr::null_mut();
+        if unsafe { GetAce(dacl, index, &mut ace) } == 0 || ace.is_null() {
+            return Err(last_error("GetAce(AppContainer deny strip)"));
+        }
+        let header = unsafe { &*(ace as *const ACE_HEADER) };
+        if header.AceType != ACCESS_ALLOWED_ACE_TYPE {
+            continue;
+        }
+        let ace_sid: *const core::ffi::c_void =
+            unsafe { &(*(ace as *const ACCESS_ALLOWED_ACE)).SidStart as *const u32 as _ };
+        if unsafe { IsValidSid(ace_sid as _) } == 0 {
+            return Err(exec_error(format!(
+                "invalid SID in DACL for {}",
+                path.display()
+            )));
+        }
+        if unsafe { is_app_package_sid(ace_sid) } && unsafe { DeleteAce(dacl, index) } == 0 {
+            return Err(last_error("DeleteAce(AppContainer package ALLOW)"));
+        }
+    }
+    // Always protect, even when no explicit package ALLOW was present: the
+    // protection is what severs an inheritable package ALLOW on the granted
+    // parent from re-applying to this target.
+    let rc = unsafe {
+        SetNamedSecurityInfoW(
+            path_w.as_mut_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            dacl,
+            ptr::null_mut(),
+        )
+    };
+    if rc != 0 {
+        return Err(exec_error(format!(
+            "SetNamedSecurityInfoW protected deny for {}: {rc:#x}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Symmetric revoke of [`apply_protected_deny`]: clear
+/// `PROTECTED_DACL_SECURITY_INFORMATION` so the target is governed by
+/// inheritance again. The current (normal-SID) DACL is written back with
+/// `UNPROTECTED_DACL_SECURITY_INFORMATION`; Windows drops the
+/// inheritance-flagged entries and re-propagates from the parent. Because the
+/// enclosing grant is removed earlier in the same revoke pass, the target ends
+/// with no package grant and no residual protection. A denied DIRECTORY is
+/// un-protected per-object, matching the per-object protection in apply.
+unsafe fn restore_unprotected_dacl(path: &Path) -> Result<()> {
+    let (mut path_w, dacl, _sd_guard) = unsafe { read_dacl(path)? };
+    if dacl.is_null() {
+        // Nothing was protected (a protected target always carries a non-null
+        // DACL); never write a NULL DACL, which would grant everyone access.
+        return Ok(());
+    }
+    let rc = unsafe {
+        SetNamedSecurityInfoW(
+            path_w.as_mut_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            dacl,
+            ptr::null_mut(),
+        )
+    };
+    if rc != 0 {
+        return Err(exec_error(format!(
+            "SetNamedSecurityInfoW unprotect deny for {}: {rc:#x}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// True when `sid` is an AppContainer package SID (`S-1-15-2-…`): identifier
+/// authority 15 (`SECURITY_APP_PACKAGE_AUTHORITY`) with first sub-authority 2
+/// (`SECURITY_APP_PACKAGE_BASE_RID`). The raw SID layout is read directly
+/// because windows-sys 0.59 does not expose the `GetSidSubAuthority`
+/// accessors; `IsValidSid` has already bounded the readable length.
+unsafe fn is_app_package_sid(sid: *const core::ffi::c_void) -> bool {
+    if sid.is_null() || unsafe { IsValidSid(sid as _) } == 0 {
+        return false;
+    }
+    // SID layout: [Revision:1][SubAuthorityCount:1][IdentifierAuthority:6 BE]
+    //             [SubAuthority0:4 LE] … A valid SID is at least 8 bytes; with
+    // SubAuthorityCount >= 1 the first sub-authority (12 bytes total) is
+    // guaranteed present and readable.
+    let header = unsafe { std::slice::from_raw_parts(sid as *const u8, 8) };
+    if header[1] == 0 {
+        return false;
+    }
+    if header[2..8] != [0, 0, 0, 0, 0, 15] {
+        return false;
+    }
+    let full = unsafe { std::slice::from_raw_parts(sid as *const u8, 12) };
+    u32::from_le_bytes([full[8], full[9], full[10], full[11]]) == 2
 }
 
 struct LocalFreeGuard(*mut core::ffi::c_void);
