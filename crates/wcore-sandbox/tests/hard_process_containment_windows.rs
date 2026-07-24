@@ -106,6 +106,11 @@ fn unique_tag(label: &str) -> String {
 /// `powershell.exe` — whose own command line contains `tag` — is NOT itself a
 /// match (its image is `powershell.exe`, not `cmd.exe`). That structurally
 /// avoids a self-match without needing to know the query's own PID.
+///
+/// Fails CLOSED: a non-success `powershell` exit, or a `.Count` that does not
+/// parse on a success exit, is a hard test failure (panic) — never silently read
+/// as a passing count. A post-close query failure therefore cannot satisfy a
+/// reap `wait_until(... == 0)` without evidence.
 fn tagged_cmd_count(tag: &str) -> usize {
     let out = Command::new("powershell")
         .args([
@@ -119,10 +124,17 @@ fn tagged_cmd_count(tag: &str) -> usize {
         ])
         .output()
         .expect("query host processes via CIM");
-    String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .parse()
-        .unwrap_or(0)
+    assert!(
+        out.status.success(),
+        "tagged_cmd_count CIM query failed (exit {:?}): {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let text = stdout.trim();
+    text.parse().unwrap_or_else(|err| {
+        panic!("tagged_cmd_count could not parse CIM .Count output {text:?}: {err}")
+    })
 }
 
 /// Return the ProcessIds of the `choice.exe` idlers spawned by THIS test's
@@ -146,6 +158,13 @@ fn tagged_cmd_count(tag: &str) -> usize {
 /// empty regardless of a leaked survivor — the post-close survivor check is
 /// therefore done by fixed ProcessId via [`surviving_captured_choice_pids`],
 /// NOT by re-running this parent-scoped query.
+///
+/// Fails CLOSED: a non-success `powershell` exit is a hard test failure (panic),
+/// and each whitespace-separated token is parsed with a panicking parse, so a
+/// malformed token fails the test rather than being silently dropped. A
+/// LEGITIMATE empty result (no descendants yet on a success exit) still yields an
+/// empty `Vec`, because `split_whitespace()` over empty stdout produces no
+/// tokens — the valid zero-descendants case is preserved.
 fn tagged_choice_descendant_pids(tag: &str) -> Vec<u32> {
     let out = Command::new("powershell")
         .args([
@@ -163,9 +182,20 @@ fn tagged_choice_descendant_pids(tag: &str) -> Vec<u32> {
         ])
         .output()
         .expect("query this test's tagged choice descendant PIDs via CIM");
-    String::from_utf8_lossy(&out.stdout)
+    assert!(
+        out.status.success(),
+        "tagged_choice_descendant_pids CIM query failed (exit {:?}): {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    stdout
         .split_whitespace()
-        .filter_map(|s| s.parse::<u32>().ok())
+        .map(|s| {
+            s.parse::<u32>().unwrap_or_else(|err| {
+                panic!("tagged_choice_descendant_pids could not parse ProcessId token {s:?}: {err}")
+            })
+        })
         .collect()
 }
 
@@ -181,6 +211,12 @@ fn tagged_choice_descendant_pids(tag: &str) -> Vec<u32> {
 ///     different, non-captured PID and is excluded.
 ///
 /// An empty `pids` slice yields 0 without issuing a malformed filter.
+///
+/// Fails CLOSED: past the legitimate empty-set short-circuit, a non-success
+/// `powershell` exit, or a `.Count` that does not parse on a success exit, is a
+/// hard test failure (panic) — never silently read as a passing survivor count.
+/// A post-close query failure therefore cannot satisfy the reap
+/// `wait_until(... == 0)` without evidence.
 fn surviving_captured_choice_pids(pids: &[u32]) -> usize {
     if pids.is_empty() {
         return 0;
@@ -203,10 +239,17 @@ fn surviving_captured_choice_pids(pids: &[u32]) -> usize {
         ])
         .output()
         .expect("query survival of captured choice PIDs via CIM");
-    String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .parse()
-        .unwrap_or(0)
+    assert!(
+        out.status.success(),
+        "surviving_captured_choice_pids CIM query failed (exit {:?}): {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let text = stdout.trim();
+    text.parse().unwrap_or_else(|err| {
+        panic!("surviving_captured_choice_pids could not parse CIM .Count output {text:?}: {err}")
+    })
 }
 
 /// Poll `predicate` up to `deadline_secs`, panicking with `message` on timeout.
