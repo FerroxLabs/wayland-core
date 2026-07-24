@@ -234,7 +234,7 @@ async fn job_close_reaps_detached_descendant_with_no_residue() {
     // Detached grandchild `cmd` carries `tag` (via a no-op `rem`) then idles 60s;
     // the parent holds ~8s so the grandchild is observable before job close.
     let script = format!(
-        "start \"\" /b %ComSpec% /c \"rem {tag} & {}\" & {} & ver >nul",
+        "start \"\" /b %ComSpec% /c \"rem {tag} & {}\" & {} & exit /b 0",
         choice_hold(60),
         choice_hold(8),
     );
@@ -257,7 +257,7 @@ async fn job_close_reaps_detached_descendant_with_no_residue() {
         .await
         .expect("join contained execution")
         .expect("contained execution returns");
-    assert_eq!(out.exit_code, 0, "parent must exit cleanly (ver => 0)");
+    assert_eq!(out.exit_code, 0, "parent must exit cleanly (exit /b 0)");
 
     // After the Job Object closes, the detached 60s grandchild must be gone.
     let residue_tag = tag.clone();
@@ -288,9 +288,9 @@ async fn active_process_cap_is_enforced() {
     let baseline = image_count("choice.exe");
     let attempts = SANDBOX_ACTIVE_PROCESS_LIMIT + 32;
     // Fan out `attempts` detached long idlers, then hold the parent ~25s so the
-    // admitted set is concurrently alive and observable, then exit 0 (`ver`).
+    // admitted set is concurrently alive and observable, then exit 0 (`exit /b 0`).
     let script = format!(
-        "for /L %i in (1,1,{attempts}) do @start \"\" /b {} & {} & ver >nul",
+        "for /L %i in (1,1,{attempts}) do @start \"\" /b {} & {} & exit /b 0",
         choice_hold(90),
         choice_hold(25),
     );
@@ -366,7 +366,7 @@ async fn breakaway_is_denied() {
     let tag = unique_tag("breakaway");
     let script = format!(
         "start \"\" /b %ComSpec% /c \"rem {tag} & {hold}\" & \
-         start \"\" /b %ComSpec% /c \"rem {tag} & {hold}\" & {parent} & ver >nul",
+         start \"\" /b %ComSpec% /c \"rem {tag} & {hold}\" & {parent} & exit /b 0",
         tag = tag,
         hold = choice_hold(60),
         parent = choice_hold(8),
@@ -389,7 +389,7 @@ async fn breakaway_is_denied() {
         .await
         .expect("join contained execution")
         .expect("contained execution returns");
-    assert_eq!(out.exit_code, 0, "parent must exit cleanly (ver => 0)");
+    assert_eq!(out.exit_code, 0, "parent must exit cleanly (exit /b 0)");
 
     // No detached child broke away: the job reaped both on close.
     let residue_tag = tag.clone();
@@ -447,7 +447,7 @@ async fn qualified_hard_containment_backend_preflight() {
     // confirming the qualification is descendant-hard, not just a self-report.
     let tag = unique_tag("preflight");
     let script = format!(
-        "start \"\" /b %ComSpec% /c \"rem {tag} & {}\" & {} & ver >nul",
+        "start \"\" /b %ComSpec% /c \"rem {tag} & {}\" & {} & exit /b 0",
         choice_hold(45),
         choice_hold(6),
     );
