@@ -65,8 +65,17 @@ fn icacls(path: &Path) -> String {
 }
 
 fn has_appcontainer_ace(path: &Path) -> bool {
+    // Match ONLY the raw AppContainer package-SID prefix `s-1-15-2-`. The former
+    // `wcore-` substring disjunct was unconditionally true: `icacls <path>`
+    // echoes the seed-dir path (`wcore-r61-<pid>-<tag>`, produced by `seed_file`)
+    // in every line of its output, so every absent/revoke check built on this
+    // detector was unfalsifiable. Matching only the raw package SID mirrors the
+    // belt-and-braces present/absent assertions at lines 240/297/613 (which
+    // negate both `S-1-15-2-` and the resolved `wcoresandbox` profile rendering).
+    // While a grant is live the ephemeral package SID renders as raw
+    // `S-1-15-2-…`, so present-checks still pass.
     let acl = icacls(path).to_ascii_lowercase();
-    acl.contains("s-1-15-2-") || acl.contains("wcore-")
+    acl.contains("s-1-15-2-")
 }
 
 fn lease_profiles() -> BTreeSet<String> {
