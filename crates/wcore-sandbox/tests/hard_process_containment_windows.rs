@@ -125,23 +125,38 @@ fn tagged_cmd_count(tag: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// Count host processes with the given image name (UNSANDBOXED host query).
-/// Used by the active-process-cap test, whose detached descendants are bare
-/// `choice.exe` idlers (choice rejects an injected tag argument), so they are
-/// counted by image with a baseline subtracted by the caller.
-fn image_count(image: &str) -> usize {
-    let out = Command::new("tasklist")
-        .args(["/FI", &format!("IMAGENAME eq {image}"), "/NH", "/FO", "CSV"])
+/// Count the `choice.exe` idlers spawned by THIS test's fan-out, scoped to the
+/// test's own tagged process tree rather than host-wide by image name.
+///
+/// A bare `choice.exe` idler cannot carry an injected tag on its own command
+/// line (choice rejects the extra argument), but the top-level sandbox `cmd`
+/// that runs the fan-out script DOES carry a unique `rem {tag}` — and every
+/// `start "" /b choice` idler is a direct child of that cmd, so its
+/// `ParentProcessId` is the tagged cmd's `ProcessId`. Counting only choice
+/// processes whose parent is this test's tagged cmd means a concurrent
+/// `choice`-spawning target on the same runner (e.g. `live_fs_acl`) cannot
+/// pollute the count — closing the host-wide-image-count flake (watch-item d2)
+/// without weakening any containment assertion.
+fn tagged_choice_descendant_count(tag: &str) -> usize {
+    let out = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "$parents=@(Get-CimInstance Win32_Process -Filter \"Name='cmd.exe'\" | \
+                 Where-Object {{ $_.CommandLine -like '*{tag}*' }} | \
+                 Select-Object -ExpandProperty ProcessId); \
+                 @(Get-CimInstance Win32_Process -Filter \"Name='choice.exe'\" | \
+                 Where-Object {{ $parents -contains $_.ParentProcessId }}).Count"
+            ),
+        ])
         .output()
-        .expect("enumerate host processes via tasklist");
-    let text = String::from_utf8_lossy(&out.stdout);
-    if text.contains("No tasks") {
-        return 0;
-    }
-    let needle = image.to_ascii_lowercase();
-    text.lines()
-        .filter(|line| line.to_ascii_lowercase().contains(&needle))
-        .count()
+        .expect("query this test's tagged choice descendants via CIM");
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0)
 }
 
 /// Poll `predicate` up to `deadline_secs`, panicking with `message` on timeout.
@@ -285,12 +300,17 @@ async fn job_close_reaps_detached_descendant_with_no_residue() {
 async fn active_process_cap_is_enforced() {
     require_live_windows();
     reap_stray_choice();
-    let baseline = image_count("choice.exe");
+    let tag = unique_tag("cap");
     let attempts = SANDBOX_ACTIVE_PROCESS_LIMIT + 32;
+    // Prefix the script with a `rem {tag}` so the top-level sandbox cmd — the
+    // direct parent of every `start "" /b` choice idler — carries this test's
+    // unique tag on its command line. The host-side count is then scoped to
+    // choice.exe whose ParentProcessId is THIS test's tagged cmd (no host-wide
+    // image baseline), so a concurrent choice-spawning target cannot pollute it.
     // Fan out `attempts` detached long idlers, then hold the parent ~25s so the
     // admitted set is concurrently alive and observable, then exit 0 (`exit /b 0`).
     let script = format!(
-        "for /L %i in (1,1,{attempts}) do @start \"\" /b {} & {} & exit /b 0",
+        "rem {tag} & for /L %i in (1,1,{attempts}) do @start \"\" /b {} & {} & exit /b 0",
         choice_hold(90),
         choice_hold(25),
     );
@@ -301,17 +321,18 @@ async fn active_process_cap_is_enforced() {
             .await
     });
 
-    // Sample the live delta while the fan-out is held, tracking its peak.
+    // Sample the live count (already scoped to this test's tagged tree) while
+    // the fan-out is held, tracking its peak.
     let mut peak = 0usize;
     let watch_deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < watch_deadline {
-        let delta = image_count("choice.exe").saturating_sub(baseline);
+        let delta = tagged_choice_descendant_count(&tag);
         peak = peak.max(delta);
         // Once we have clearly observed a large admitted set we can stop early.
         if delta >= SANDBOX_ACTIVE_PROCESS_LIMIT / 2 {
             // keep sampling briefly to catch any overshoot past the cap
             std::thread::sleep(Duration::from_millis(500));
-            peak = peak.max(image_count("choice.exe").saturating_sub(baseline));
+            peak = peak.max(tagged_choice_descendant_count(&tag));
             break;
         }
         std::thread::sleep(Duration::from_millis(250));
@@ -341,11 +362,12 @@ async fn active_process_cap_is_enforced() {
          admitted every spawn"
     );
 
-    // Everything is reaped back to baseline once the job closes.
+    // Everything this test spawned is reaped once the job closes (the count is
+    // already scoped to this test's tagged tree, so "back to baseline" is zero).
     wait_until(
-        || image_count("choice.exe") <= baseline,
+        || tagged_choice_descendant_count(&tag) == 0,
         30,
-        "fan-out descendants reaped back to baseline after job close",
+        "fan-out descendants reaped after job close",
     );
     reap_stray_choice();
 }

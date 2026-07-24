@@ -113,3 +113,22 @@ test-threads = 1
 
 [profile.eval.junit]
 path = "target/nextest/eval/junit.xml"
+
+# ── Native Windows live-containment serialization (F20-43, belt-and-braces) ──
+# The `#![cfg(windows)]` `#[ignore]`d native containment / ACL acceptance
+# targets both spawn `choice.exe` idlers on the self-hosted msvc runner. The
+# containment count is already scoped to each test's own tagged process tree
+# (by ParentProcessId), so correctness does not depend on this group — it is a
+# defense-in-depth measure that serializes the two `choice`-spawning targets so
+# they never overlap on one runner. `platform = 'cfg(windows)'` restricts the
+# override to Windows targets: on Linux (the Hetzner aggregate, `--profile ci`)
+# these files compile to empty binaries and the override does not apply, so the
+# 11509/0/48 aggregate is untouched. Concurrency only — no test or selector is
+# added or removed.
+[test-groups]
+native-windows-live = { max-threads = 1 }
+
+[[profile.default.overrides]]
+platform = 'cfg(windows)'
+filter = 'binary(/hard_process_containment_windows/) or binary(/live_fs_acl/)'
+test-group = 'native-windows-live'
