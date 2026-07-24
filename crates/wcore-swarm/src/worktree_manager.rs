@@ -6,11 +6,18 @@ impl WorktreeManager {
     /// Construct a new manager for `repo_root`. Creates the
     /// `.swarm-worktrees/` directory if it does not exist.
     pub fn new(repo_root: &Path) -> Result<Self> {
+        // De-verbatimize the canonicalized roots: on Windows `std::fs::canonicalize`
+        // returns a `\\?\C:\...` verbatim path, which the PowerShell capacity probe
+        // (and downstream git invocations that inherit the root) cannot consume.
+        // `dunce::simplified` strips the `\\?\` prefix for real drive-letter paths and
+        // is a no-op on unix and for genuine UNC/device paths, so Linux is unaffected.
         let repo_root = std::fs::canonicalize(repo_root)?;
+        let repo_root = dunce::simplified(&repo_root).to_path_buf();
         let repo_authority = DirectoryAuthority::open(&repo_root)?;
         let swarm_root = repo_root.join(".swarm-worktrees");
         ensure_real_directory(&swarm_root)?;
         let swarm_root = std::fs::canonicalize(&swarm_root)?;
+        let swarm_root = dunce::simplified(&swarm_root).to_path_buf();
         let swarm_authority = DirectoryAuthority::open(&swarm_root)?;
         if swarm_root.parent() != Some(repo_root.as_path()) {
             return Err(SwarmError::WorktreeIo(format!(
@@ -416,24 +423,23 @@ impl WorktreeManager {
 
     #[cfg(windows)]
     async fn available_workspace_bytes(&self) -> Result<u64> {
-        const SCRIPT: &str = "$root=[IO.Path]::GetPathRoot($args[0]); $drive=[IO.DriveInfo]::new($root); [Console]::Out.Write($drive.AvailableFreeSpace)";
+        // Transport the probe root out-of-band via an environment variable rather
+        // than as a trailing `-Command` argument. PowerShell re-parses trailing
+        // args after `-Command` as script text, so any weird path character (a
+        // `\\?\` verbatim prefix, `&`, `(`, spaces) breaks the probe with a
+        // ParserError. Reading `$env:WCORE_SWARM_PROBE_ROOT` removes that reparse
+        // class entirely. `swarm_root` is already de-verbatimized at the
+        // canonicalize site, so `[IO.DriveInfo]::new` receives a plain drive root.
+        const SCRIPT: &str = "$root=[IO.Path]::GetPathRoot($env:WCORE_SWARM_PROBE_ROOT); $drive=[IO.DriveInfo]::new($root); [Console]::Out.Write($drive.AvailableFreeSpace)";
         let root = self.swarm_root.to_string_lossy().into_owned();
-        let output = capture_bounded_process(
-            shell::shell_command_argv(
-                "powershell.exe",
-                &[
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    SCRIPT,
-                    root.as_str(),
-                ],
-            ),
-            self.capture_limits,
-            None,
-        )
-        .await
-        .map_err(|error| capture_error("workspace capacity probe", error))?;
+        let mut command = shell::shell_command_argv(
+            "powershell.exe",
+            &["-NoProfile", "-NonInteractive", "-Command", SCRIPT],
+        );
+        command.env("WCORE_SWARM_PROBE_ROOT", root.as_str());
+        let output = capture_bounded_process(command, self.capture_limits, None)
+            .await
+            .map_err(|error| capture_error("workspace capacity probe", error))?;
         if !output.status.success() {
             return Err(SwarmError::DispatchAdmission(format!(
                 "workspace capacity probe failed: {}",

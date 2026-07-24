@@ -35,6 +35,10 @@ tempfile             = { workspace = true }
 fd-lock              = { workspace = true }
 # CandidateSeal source-manifest digest — SHA-256, not a 64-bit DefaultHasher.
 sha2                 = { workspace = true }
+# De-verbatimize canonicalized Windows roots (`\\?\C:\...` -> `C:\...`) so the
+# capacity probe and downstream git invocations receive a plain drive-letter
+# path. No-op on unix. Already resolved in Cargo.lock (transitive) — no new crate.
+dunce                = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
