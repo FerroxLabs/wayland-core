@@ -107,10 +107,15 @@ fn unique_tag(label: &str) -> String {
 /// match (its image is `powershell.exe`, not `cmd.exe`). That structurally
 /// avoids a self-match without needing to know the query's own PID.
 ///
-/// Fails CLOSED: a non-success `powershell` exit, or a `.Count` that does not
-/// parse on a success exit, is a hard test failure (panic) — never silently read
-/// as a passing count. A post-close query failure therefore cannot satisfy a
-/// reap `wait_until(... == 0)` without evidence.
+/// Fails CLOSED at BOTH layers. PowerShell layer: `$ErrorActionPreference='Stop'`
+/// + `-ErrorAction Stop` on the CIM query + a leading `trap` that exits
+/// non-zero escalate any non-terminating CIM/PowerShell query error to a
+/// TERMINATING error that exits `powershell.exe` non-zero, so a failed query can
+/// never print `@(...).Count == '0'` at exit 0. Rust layer (preserved): a
+/// non-success `powershell` exit, or a `.Count` that does not parse on a success
+/// exit, is a hard test failure (panic) — never silently read as a passing count.
+/// A post-close query failure therefore cannot satisfy a reap
+/// `wait_until(... == 0)` without evidence.
 fn tagged_cmd_count(tag: &str) -> usize {
     let out = Command::new("powershell")
         .args([
@@ -118,7 +123,8 @@ fn tagged_cmd_count(tag: &str) -> usize {
             "-NonInteractive",
             "-Command",
             &format!(
-                "@(Get-CimInstance Win32_Process -Filter \"Name='cmd.exe'\" | \
+                "$ErrorActionPreference='Stop'; trap {{ exit 1 }}; \
+                 @(Get-CimInstance Win32_Process -ErrorAction Stop -Filter \"Name='cmd.exe'\" | \
                  Where-Object {{ $_.CommandLine -like '*{tag}*' }}).Count"
             ),
         ])
@@ -159,12 +165,19 @@ fn tagged_cmd_count(tag: &str) -> usize {
 /// therefore done by fixed ProcessId via [`surviving_captured_choice_pids`],
 /// NOT by re-running this parent-scoped query.
 ///
-/// Fails CLOSED: a non-success `powershell` exit is a hard test failure (panic),
-/// and each whitespace-separated token is parsed with a panicking parse, so a
-/// malformed token fails the test rather than being silently dropped. A
-/// LEGITIMATE empty result (no descendants yet on a success exit) still yields an
-/// empty `Vec`, because `split_whitespace()` over empty stdout produces no
-/// tokens — the valid zero-descendants case is preserved.
+/// Fails CLOSED at BOTH layers. PowerShell layer: `$ErrorActionPreference='Stop'`
+/// + `-ErrorAction Stop` on BOTH CIM queries + a leading `trap` that
+/// exits non-zero escalate any non-terminating CIM error to a TERMINATING error
+/// that exits `powershell.exe` non-zero — so a query error can no longer yield an
+/// empty token stream at exit 0. This resolves the empty-vs-error ambiguity: with
+/// the error escalation an empty stdout can ONLY mean a genuine
+/// success-with-no-descendants (still a valid empty `Vec`), never a swallowed
+/// query failure. Rust layer (preserved): a non-success `powershell` exit is a
+/// hard test failure (panic), and each whitespace-separated token is parsed with a
+/// panicking parse, so a malformed token fails the test rather than being silently
+/// dropped. A LEGITIMATE empty result (no descendants yet on a success exit) still
+/// yields an empty `Vec`, because `split_whitespace()` over empty stdout produces
+/// no tokens — the valid zero-descendants case is preserved.
 fn tagged_choice_descendant_pids(tag: &str) -> Vec<u32> {
     let out = Command::new("powershell")
         .args([
@@ -172,10 +185,11 @@ fn tagged_choice_descendant_pids(tag: &str) -> Vec<u32> {
             "-NonInteractive",
             "-Command",
             &format!(
-                "$parents=@(Get-CimInstance Win32_Process -Filter \"Name='cmd.exe'\" | \
+                "$ErrorActionPreference='Stop'; trap {{ exit 1 }}; \
+                 $parents=@(Get-CimInstance Win32_Process -ErrorAction Stop -Filter \"Name='cmd.exe'\" | \
                  Where-Object {{ $_.CommandLine -like '*{tag}*' }} | \
                  Select-Object -ExpandProperty ProcessId); \
-                 @(Get-CimInstance Win32_Process -Filter \"Name='choice.exe'\" | \
+                 @(Get-CimInstance Win32_Process -ErrorAction Stop -Filter \"Name='choice.exe'\" | \
                  Where-Object {{ $parents -contains $_.ParentProcessId }} | \
                  Select-Object -ExpandProperty ProcessId)"
             ),
@@ -212,11 +226,15 @@ fn tagged_choice_descendant_pids(tag: &str) -> Vec<u32> {
 ///
 /// An empty `pids` slice yields 0 without issuing a malformed filter.
 ///
-/// Fails CLOSED: past the legitimate empty-set short-circuit, a non-success
-/// `powershell` exit, or a `.Count` that does not parse on a success exit, is a
-/// hard test failure (panic) — never silently read as a passing survivor count.
-/// A post-close query failure therefore cannot satisfy the reap
-/// `wait_until(... == 0)` without evidence.
+/// Fails CLOSED at BOTH layers. PowerShell layer: `$ErrorActionPreference='Stop'`
+/// + `-ErrorAction Stop` on the CIM query + a leading `trap` that exits
+/// non-zero escalate any non-terminating CIM error to a TERMINATING error that
+/// exits `powershell.exe` non-zero, so a failed query can never print
+/// `@(...).Count == '0'` at exit 0. Rust layer (preserved): past the legitimate
+/// empty-set short-circuit, a non-success `powershell` exit, or a `.Count` that
+/// does not parse on a success exit, is a hard test failure (panic) — never
+/// silently read as a passing survivor count. A post-close query failure therefore
+/// cannot satisfy the reap `wait_until(... == 0)` without evidence.
 fn surviving_captured_choice_pids(pids: &[u32]) -> usize {
     if pids.is_empty() {
         return 0;
@@ -232,8 +250,8 @@ fn surviving_captured_choice_pids(pids: &[u32]) -> usize {
             "-NonInteractive",
             "-Command",
             &format!(
-                "$pids=@({pid_list}); \
-                 @(Get-CimInstance Win32_Process -Filter \"Name='choice.exe'\" | \
+                "$ErrorActionPreference='Stop'; trap {{ exit 1 }}; $pids=@({pid_list}); \
+                 @(Get-CimInstance Win32_Process -ErrorAction Stop -Filter \"Name='choice.exe'\" | \
                  Where-Object {{ $pids -contains $_.ProcessId }}).Count"
             ),
         ])
