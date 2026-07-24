@@ -286,12 +286,22 @@ async fn dispatch_rejects_different_head_repository_replacement() {
     let repo = container.join("repo");
     std::fs::create_dir_all(&repo).unwrap();
     init_repo(&repo).await;
+    // Retaining the swarm keeps an open directory handle on `repo` alive for the
+    // whole test — the hold that forces the Windows OS refusal below.
     let swarm = Swarm::new(&repo).unwrap();
-    replace_repo_container(&container, &tmp.path().join("original-box"));
-    std::fs::create_dir(&repo).unwrap();
-    init_repo_with_contents(&repo, "replacement\n").await;
+    let moved = tmp.path().join("original-box");
 
-    assert_repository_replacement_rejected(&swarm).await;
+    if cfg!(windows) {
+        // The retained `repo` handle makes a path-based rename of its ancestor
+        // `container` physically impossible, so the same-path substitution below
+        // can never arise. This OS refusal is the stronger guarantee.
+        assert_ancestor_rename_os_refused(&container, &moved);
+    } else {
+        replace_repo_container(&container, &moved);
+        std::fs::create_dir(&repo).unwrap();
+        init_repo_with_contents(&repo, "replacement\n").await;
+        assert_repository_replacement_rejected(&swarm).await;
+    }
 }
 
 #[tokio::test]
@@ -301,37 +311,74 @@ async fn dispatch_rejects_same_head_repository_replacement() {
     let repo = container.join("repo");
     std::fs::create_dir_all(&repo).unwrap();
     init_repo(&repo).await;
+    // Retaining the swarm keeps an open directory handle on `repo` alive for the
+    // whole test — the hold that forces the Windows OS refusal below.
     let swarm = Swarm::new(&repo).unwrap();
     let moved = tmp.path().join("original-box");
-    replace_repo_container(&container, &moved);
-    let source = moved.join("repo").to_string_lossy().into_owned();
-    let destination = repo.to_string_lossy().into_owned();
-    run_git(
-        tmp.path(),
-        &["clone", "-q", "--no-local", "--", &source, &destination],
-    )
-    .await;
 
-    assert_repository_replacement_rejected(&swarm).await;
+    if cfg!(windows) {
+        // Same OS-refusal guarantee as the different-HEAD case: with `repo` held
+        // open, the ancestor `container` cannot be renamed, so no same-HEAD
+        // clone can be swapped in at the original path.
+        assert_ancestor_rename_os_refused(&container, &moved);
+    } else {
+        replace_repo_container(&container, &moved);
+        let source = moved.join("repo").to_string_lossy().into_owned();
+        let destination = repo.to_string_lossy().into_owned();
+        run_git(
+            tmp.path(),
+            &["clone", "-q", "--no-local", "--", &source, &destination],
+        )
+        .await;
+        assert_repository_replacement_rejected(&swarm).await;
+    }
 }
 
 /// Replace the repository at the SAME pathname with a different on-disk
-/// directory object, WITHOUT renaming the swarm-held `repo` directory itself.
+/// directory object, WITHOUT renaming the swarm-held `repo` directory itself
+/// (UNIX ONLY — see [`assert_ancestor_rename_os_refused`] for the Windows arm).
 ///
 /// The swarm retains open `DirectoryAuthority` handles on `repo` AND on its
-/// `.swarm-worktrees` control descendants. Windows refuses to rename a
-/// self-held directory that ALSO has open descendants, so renaming `repo`
-/// directly panics with `Os { code: 5, PermissionDenied }` (native-uat-repair
-/// BRIEF §4.E). Renaming the *parent container* — which the swarm does NOT hold
-/// open on itself — is portable: it mirrors the in-tree, non-cfg-gated
-/// `worktree_tests::failed_transaction_cleanup_remains_retryable` pattern
-/// (rename an ancestor whose descendants are held via `FILE_SHARE_DELETE`). The
-/// swarm's retained `repo` handle survives the move, so the caller recreating a
-/// fresh directory at the original `repo` path yields exactly the "same path,
-/// different directory object" condition that `validate_repo_authority` rejects.
+/// `.swarm-worktrees` control descendants. On Unix those handles bind to the
+/// directory *inode*, so renaming the ancestor `container` out and recreating a
+/// fresh directory at the original `repo` path succeeds, yielding exactly the
+/// "same path, different directory object" condition that the software
+/// `validate_repo_authority` check rejects.
+///
+/// On Windows this ancestor rename is instead OS-REFUSED with
+/// `Os { code: 5, PermissionDenied }`: FILE_SHARE_DELETE authorizes renaming the
+/// held object ITSELF via a handle-based op, but never a path-based rename of an
+/// ancestor while a descendant handle is open. The substitution is therefore
+/// physically impossible while handles are held — a stronger guarantee than the
+/// software check — so callers route the Windows case through
+/// [`assert_ancestor_rename_os_refused`] and this helper runs on Unix only.
 fn replace_repo_container(container: &Path, moved_container: &Path) {
     std::fs::rename(container, moved_container).unwrap();
     std::fs::create_dir(container).unwrap();
+}
+
+/// Windows OS-refusal counterpart to [`replace_repo_container`].
+///
+/// With the swarm holding an open handle on `repo` (opened
+/// `GENERIC_READ|GENERIC_WRITE|DELETE`, shared
+/// `FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE`), a path-based rename of
+/// the ANCESTOR `container` is refused by the OS with `PermissionDenied`
+/// (Os code 5). That makes the "same path, different directory object"
+/// substitution impossible to even construct while handles are held — strictly
+/// stronger than the Unix software `validate_repo_authority` defense. The
+/// assertion is non-vacuous: were the handle-hold absent, the rename would
+/// succeed and `expect_err` would fail the test.
+///
+/// Compiled on all platforms (statically referenced from the `cfg!(windows)`
+/// arm of the dispatch tests) but only executed on Windows.
+fn assert_ancestor_rename_os_refused(container: &Path, moved_container: &Path) {
+    let error = std::fs::rename(container, moved_container)
+        .expect_err("Windows must refuse renaming an ancestor of a swarm-held directory");
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied,
+        "expected OS-level PermissionDenied renaming a swarm-held ancestor, got {error:?}"
+    );
 }
 
 async fn assert_repository_replacement_rejected(swarm: &Swarm) {

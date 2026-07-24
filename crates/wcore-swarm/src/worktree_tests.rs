@@ -87,23 +87,48 @@ fn failed_transaction_cleanup_remains_retryable() {
     let original_swarm = fixture.path().join("swarm-original");
     let cleanup = test_transaction_cleanup("worker-retry", &root, &swarm_root, &quarantine_root);
 
-    std::fs::rename(&swarm_root, &original_swarm).unwrap();
-    std::fs::create_dir(&swarm_root).unwrap();
-    let first = cleanup
-        .release()
-        .expect_err("replaced control root accepted");
-    assert!(first.to_string().contains("identity changed"), "{first}");
-    assert!(
-        original_swarm.join("worker-retry").exists(),
-        "failed cleanup discarded owned evidence"
-    );
-    assert!(!cleanup.released.load(Ordering::Acquire));
+    if cfg!(windows) {
+        // The cleanup retains open handles on `swarm_root` and its `worker-retry`
+        // descendant (opened with FILE_SHARE_DELETE). On Windows a path-based
+        // rename of `swarm_root` while a descendant handle is open is OS-refused
+        // with `PermissionDenied` — FILE_SHARE_DELETE only authorizes renaming
+        // the held object itself by handle, not a path-based ancestor rename. The
+        // replaced-control-root substitution that `release()`'s identity check
+        // defends against on Unix therefore cannot arise; the OS guarantee is
+        // strictly stronger. Prove the refusal, then that the un-substituted
+        // transaction still releases cleanly and stays retryable.
+        let error = std::fs::rename(&swarm_root, &original_swarm)
+            .expect_err("Windows must refuse renaming a swarm-held control root");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "expected OS-level PermissionDenied renaming the held control root, got {error:?}"
+        );
+        assert!(!cleanup.released.load(Ordering::Acquire));
+        cleanup
+            .release()
+            .expect("cleanup of the un-substituted control root");
+        assert!(!root.exists());
+        assert!(cleanup.released.load(Ordering::Acquire));
+    } else {
+        std::fs::rename(&swarm_root, &original_swarm).unwrap();
+        std::fs::create_dir(&swarm_root).unwrap();
+        let first = cleanup
+            .release()
+            .expect_err("replaced control root accepted");
+        assert!(first.to_string().contains("identity changed"), "{first}");
+        assert!(
+            original_swarm.join("worker-retry").exists(),
+            "failed cleanup discarded owned evidence"
+        );
+        assert!(!cleanup.released.load(Ordering::Acquire));
 
-    std::fs::remove_dir(&swarm_root).unwrap();
-    std::fs::rename(&original_swarm, &swarm_root).unwrap();
-    cleanup.release().expect("retry cleanup");
-    assert!(!root.exists());
-    assert!(cleanup.released.load(Ordering::Acquire));
+        std::fs::remove_dir(&swarm_root).unwrap();
+        std::fs::rename(&original_swarm, &swarm_root).unwrap();
+        cleanup.release().expect("retry cleanup");
+        assert!(!root.exists());
+        assert!(cleanup.released.load(Ordering::Acquire));
+    }
 }
 
 #[cfg(unix)]
@@ -172,22 +197,48 @@ fn transaction_cleanup_preserves_same_path_replacement() {
     let quarantine_root = fixture.path().join("control");
     std::fs::create_dir(&quarantine_root).unwrap();
     let cleanup = test_transaction_cleanup("worker-replaced", &root, &swarm_root, &quarantine_root);
-    std::fs::rename(&root, &moved).unwrap();
-    std::fs::create_dir(&root).unwrap();
-    std::fs::write(root.join("replacement-receipt"), "preserve-me\n").unwrap();
 
-    cleanup
-        .release()
-        .expect("handle-bound cleanup should remove only the opened transaction");
-    assert_eq!(
-        std::fs::read_to_string(root.join("replacement-receipt")).unwrap(),
-        "preserve-me\n"
-    );
-    assert!(
-        !moved.exists(),
-        "owned transaction was not cleaned by handle"
-    );
-    assert!(cleanup.released.load(Ordering::Acquire));
+    if cfg!(windows) {
+        // The cleanup holds an open handle on the transaction `root` (opened with
+        // FILE_SHARE_DELETE). On Windows a path-based rename of that held root is
+        // OS-refused with `PermissionDenied`, so the "same path, different
+        // directory object" replacement this test guards against on Unix cannot
+        // be constructed while the handle is held — a guarantee strictly stronger
+        // than the handle-bound identity check. Prove the refusal, then that the
+        // un-substituted transaction still releases cleanly by handle.
+        let error = std::fs::rename(&root, &moved)
+            .expect_err("Windows must refuse renaming a swarm-held transaction root");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "expected OS-level PermissionDenied renaming the held root, got {error:?}"
+        );
+        cleanup
+            .release()
+            .expect("handle-bound cleanup of the un-substituted root");
+        assert!(
+            !root.exists(),
+            "owned transaction was not cleaned by handle"
+        );
+        assert!(cleanup.released.load(Ordering::Acquire));
+    } else {
+        std::fs::rename(&root, &moved).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("replacement-receipt"), "preserve-me\n").unwrap();
+
+        cleanup
+            .release()
+            .expect("handle-bound cleanup should remove only the opened transaction");
+        assert_eq!(
+            std::fs::read_to_string(root.join("replacement-receipt")).unwrap(),
+            "preserve-me\n"
+        );
+        assert!(
+            !moved.exists(),
+            "owned transaction was not cleaned by handle"
+        );
+        assert!(cleanup.released.load(Ordering::Acquire));
+    }
 }
 
 #[test]
@@ -203,6 +254,10 @@ fn transaction_cleanup_never_deletes_swap_after_validation() {
     let root_authority = DirectoryAuthority::open(&root).unwrap();
     let quarantine_authority = DirectoryAuthority::open(&quarantine_root).unwrap();
 
+    // Records that the mid-validation race hook actually fired (and, on Windows,
+    // that the OS refused the swap) so the post-cleanup assertions below are
+    // never vacuously satisfied by a hook that silently no-op'd.
+    let swap_refused = AtomicBool::new(false);
     let result = remove_transaction_root_inner(
         &swarm_root,
         &swarm_authority,
@@ -212,22 +267,57 @@ fn transaction_cleanup_never_deletes_swap_after_validation() {
         &quarantine_root,
         &quarantine_authority,
         || {
-            std::fs::rename(&root, &moved).unwrap();
-            std::fs::create_dir(&root).unwrap();
-            std::fs::write(root.join("replacement-receipt"), "preserve-race\n").unwrap();
+            if cfg!(windows) {
+                // `root_authority` holds `root` open with FILE_SHARE_DELETE, so a
+                // path-based rename of the held root is OS-refused mid-validation.
+                // The swap can never happen while the handle is held — stronger
+                // than the handle-bound identity check the Unix arm exercises.
+                let error = std::fs::rename(&root, &moved)
+                    .expect_err("Windows must refuse renaming the handle-held transaction root");
+                assert_eq!(
+                    error.kind(),
+                    std::io::ErrorKind::PermissionDenied,
+                    "expected OS-level PermissionDenied on the mid-validation swap, got {error:?}"
+                );
+                swap_refused.store(true, Ordering::Release);
+            } else {
+                std::fs::rename(&root, &moved).unwrap();
+                std::fs::create_dir(&root).unwrap();
+                std::fs::write(root.join("replacement-receipt"), "preserve-race\n").unwrap();
+            }
         },
     );
     result.expect("handle-bound cleanup should ignore the replacement pathname");
-    assert_eq!(
-        std::fs::read_to_string(root.join("replacement-receipt")).unwrap(),
-        "preserve-race\n"
-    );
-    assert_eq!(
-        std::fs::read_dir(&quarantine_root).unwrap().count(),
-        0,
-        "cleanup left the replacement or placeholder in control storage"
-    );
-    assert!(!moved.exists(), "owned original was not deleted by handle");
+
+    if cfg!(windows) {
+        assert!(
+            swap_refused.load(Ordering::Acquire),
+            "the mid-validation swap hook did not run"
+        );
+        // The OS refusal means no substituted directory ever existed at `root`;
+        // the handle-bound cleanup removed the real, un-swapped transaction root.
+        assert!(
+            !root.exists(),
+            "handle-bound cleanup left the real root behind"
+        );
+        assert!(!moved.exists(), "no swap should exist to move aside");
+        assert_eq!(
+            std::fs::read_dir(&quarantine_root).unwrap().count(),
+            0,
+            "cleanup left residue in control storage"
+        );
+    } else {
+        assert_eq!(
+            std::fs::read_to_string(root.join("replacement-receipt")).unwrap(),
+            "preserve-race\n"
+        );
+        assert_eq!(
+            std::fs::read_dir(&quarantine_root).unwrap().count(),
+            0,
+            "cleanup left the replacement or placeholder in control storage"
+        );
+        assert!(!moved.exists(), "owned original was not deleted by handle");
+    }
 }
 
 #[test]
