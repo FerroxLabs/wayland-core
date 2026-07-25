@@ -35,7 +35,7 @@ impl WorktreeManager {
         let control_root = swarm_root.join(CONTROL_DIR);
         ensure_real_directory(&control_root)?;
         make_guard_dir_private(&control_root)?;
-        let control_root = std::fs::canonicalize(control_root)?;
+        let control_root = normalized_root(&control_root)?;
         Ok(Self {
             swarm_parent: repo_root.clone(),
             repo_root,
@@ -150,6 +150,7 @@ impl WorktreeManager {
         let control_authority = swarm_authority.open_or_create_child_directory(CONTROL_DIR)?;
         let control_root = swarm_root.join(CONTROL_DIR);
         control_authority.validate_path(&control_root)?;
+        let control_root = normalized_root(&control_root)?;
         Ok(Self {
             repo_root,
             repo_authority,
@@ -215,10 +216,12 @@ impl WorktreeManager {
         self.validate_swarm_root()?;
         let mut count = 0_usize;
         for entry in std::fs::read_dir(&self.swarm_root)? {
-            let path = entry?.path();
-            if path == self.control_root {
+            let entry = entry?;
+            // Name equality, never path equality or canonicalization: see `reserved_workspace_bytes`.
+            if entry.file_name().as_os_str() == std::ffi::OsStr::new(CONTROL_DIR) {
                 continue;
             }
+            let path = entry.path();
             if !is_real_directory_entry(&path)? {
                 return Err(SwarmError::WorktreeIo(format!(
                     "refused non-directory worktree entry during admission: {}",

@@ -68,7 +68,17 @@ impl WorktreeManager {
         let mut total = 0_u64;
         for entry in std::fs::read_dir(&self.swarm_root)? {
             let entry = entry?;
-            if entry.path() == self.control_root {
+            // Name equality, not full-path equality: every `read_dir` entry here
+            // is by construction a DIRECT child of `swarm_root`, and the control
+            // directory is by construction that root's child named by the
+            // constant, so the two tests are exactly equivalent — including for a
+            // hostile entry literally carrying that name, which the previous code
+            // also skipped. Keying on the name makes the test independent of the
+            // path representation, so a future re-split cannot silently reopen
+            // the miscount. Never canonicalize an entry inside this loop: that
+            // would resolve a planted symlink BEFORE `is_real_directory_entry`
+            // gets to refuse it.
+            if entry.file_name().as_os_str() == std::ffi::OsStr::new(CONTROL_DIR) {
                 continue;
             }
             if !is_real_directory_entry(&entry.path())? {
@@ -170,10 +180,13 @@ impl WorktreeManager {
                 for entry in std::fs::read_dir(&self.swarm_root)? {
                     match entry {
                         Ok(entry) => {
-                            let path = entry.path();
-                            if path == self.control_root {
+                            // Name equality, never path equality or
+                            // canonicalization: see `reserved_workspace_bytes`.
+                            let name = entry.file_name();
+                            if name.as_os_str() == std::ffi::OsStr::new(CONTROL_DIR) {
                                 continue;
                             }
+                            let path = entry.path();
                             match is_real_directory_entry(&path) {
                                 Ok(true) => entries.push(path),
                                 Ok(false) => failures.push(format!(
@@ -307,7 +320,10 @@ impl WorktreeManager {
 
         for entry in std::fs::read_dir(&self.swarm_root)? {
             match entry {
-                Ok(entry) if entry.path() == self.control_root => {}
+                // Name equality, never path equality or canonicalization: see
+                // `reserved_workspace_bytes`.
+                Ok(entry) if entry.file_name().as_os_str() == std::ffi::OsStr::new(CONTROL_DIR) => {
+                }
                 Ok(entry) => failures.push(format!(
                     "residual worktree path: {}",
                     entry.path().display()
