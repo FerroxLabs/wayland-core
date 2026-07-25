@@ -374,30 +374,59 @@ gh auth switch --user FerroxLabs
 
 gh workflow run nightly-windows-soak.yml \
   -R FerroxLabs/wayland-core \
-  --ref f20a-candidate-50cf00b3 \
+  --ref f20a-harness-39d30e55 \
   -f f20_candidate=true \
   -f f20_expected_sha=50cf00b327891d218b910b216720b604a97c1dc5 \
   -f f20_request_nonce=ee5abe5c631da42945ba002da1e771c4b7ee009ffda84ce35868e33f80a6f715 \
   -f f20_macos_runner_label=f20-image-1d05364078523334605249687228ffec79964b7ecf731d7c9512b40e67fd1a64
 ```
 
-### How each formerly-unresolved input was closed
+### The two refs, and why `--ref` is NOT the candidate tag
 
-**`--ref` (was B3 — seal drift at the dispatch boundary).** `workflow_dispatch`
-accepts a branch or a tag, never a raw SHA, and `plan/f20-unified-audit-repair`
-has advanced well past the seal. An **annotated tag** now pins the candidate
-immutably:
+A tag alone does **not** close B3, and this is the single most important
+correction in this update.
+
+**GitHub always reads the workflow DEFINITION from the ref passed to
+`workflow_dispatch`.** Measured: the workflow as sealed at `50cf00b3` declares
+only `f20_candidate`, `f20_macos_runner_label`, `f20_request_nonce` —
 
 ```
-refs/tags/f20a-candidate-50cf00b3      -> d4849e42d9f847feb269404414c0f4e4dc480f12  (tag object)
-refs/tags/f20a-candidate-50cf00b3^{}   -> 50cf00b327891d218b910b216720b604a97c1dc5  (sealed commit)
-tree                                    = dc0a5c0c346477a080c868f07566e2fad923dd29
+git show f20a-candidate-50cf00b3:.github/workflows/nightly-windows-soak.yml | grep 'f20_.*:'
+  28:      f20_candidate:
+  33:      f20_macos_runner_label:
+  38:      f20_request_nonce:
 ```
 
-Only the tag was pushed. Verified on the remote via
-`git ls-remote --tags gh` and `gh api repos/FerroxLabs/wayland-core/commits/f20a-candidate-50cf00b3`
-(→ `50cf00b3…`). The tag is a valid `--ref` target, so the dispatch is now
-bound to the exact sealed tree.
+So `--ref f20a-candidate-50cf00b3` would run the **tautological** pre-fix
+workflow and would reject `-f f20_expected_sha=…` outright as an unexpected
+input. Dispatching from a ref that *does* carry the fix would instead check out
+that ref's tip rather than the candidate. Both halves are needed, and they must
+come from **two different refs**:
+
+| Role | Ref | Resolves to | Supplies |
+|------|-----|-------------|----------|
+| Dispatch harness | `f20a-harness-39d30e55` | `39d30e559276126cb7a8f92ed743ed93bad0679d` | the **workflow definition** (fixed, non-tautological) |
+| Candidate seal | `f20a-candidate-50cf00b3` | `50cf00b327891d218b910b216720b604a97c1dc5` | the **tree that is actually proven**, via `f20_expected_sha` |
+
+`crates/` and `scripts/` at `39d30e55` are **byte-identical** to the sealed
+candidate (`git diff --quiet 50cf00b3 39d30e55 -- crates scripts` → 0); only
+`.github/` and `.planning/` differ. So the harness ref changes the workflow
+plumbing and nothing that is under proof.
+
+Both are annotated tags, pushed as tags only, verified on the remote:
+
+```
+refs/tags/f20a-candidate-50cf00b3^{}  -> 50cf00b327891d218b910b216720b604a97c1dc5   (tree dc0a5c0c…)
+refs/tags/f20a-harness-39d30e55^{}    -> 39d30e559276126cb7a8f92ed743ed93bad0679d
+```
+
+The candidate tag remains load-bearing even though it is not the `--ref`: it is
+the only remote ref keeping `50cf00b3` reachable, which is what makes
+`actions/checkout` able to fetch that raw SHA at all. Previously the seal lived
+only in a local `refs/f20a/candidate`. Demonstrated live: pushing two further
+commits advanced the branch to `39d30e55` while
+`gh api …/commits/f20a-candidate-50cf00b3` still returned `50cf00b3…` — the
+exact drift B3 described, now inert.
 
 **`f20_expected_sha` (new input — closes the tautology B3 also exposed).**
 Both candidate jobs previously set `EXPECTED_COMMIT: ${{ github.sha }}` and then
@@ -409,6 +438,18 @@ dispatch input, assert it against the real checkout in a dedicated
 toolchain or proof work, and pass it through as `EXPECTED_COMMIT`. A malformed,
 empty, or mismatched value fails the job closed. The existing nonce mechanism is
 untouched.
+
+Both candidate jobs additionally pin `actions/checkout` to
+`ref: ${{ github.event.inputs.f20_expected_sha }}`, so the dispatch ref supplies
+only the workflow and never the proven tree. The scheduled `windows-soak` and
+`windows-live-acceptance` jobs keep their default checkouts.
+
+The bash assertion was executed verbatim (extracted from the shipped YAML) with
+four inputs — it exits **1** on a wrong SHA (the real drift case: authorized
+`50cf00b3…` vs checkout `d398fa9a…`), **1** on empty, **1** on uppercase hex, and
+**0** only on an exact match. The PowerShell mirror could not be executed (no
+`pwsh` on the macOS host); its `throw`-fails-the-job mechanism is the same one
+the pre-existing adjacent step at `:398` already relies on.
 
 **`f20_macos_runner_label` (was B2 — no macOS runner existed).** This Mac
 (`Darwin arm64`, macOS 26.3 build 25D125) is registered as runner **id 27**,
