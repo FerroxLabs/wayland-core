@@ -178,12 +178,12 @@ impl SandboxBackend for AppContainerBackend {
         cmd: SandboxCommand,
         cwd: DirectoryAuthority,
     ) -> Result<SandboxOutput> {
-        if let Some(declared) = cmd.cwd.as_deref() {
-            if declared != cwd.display_path() {
-                return Err(SandboxError::PathDenied(
-                    "sandbox command cwd does not match the retained cwd authority".to_owned(),
-                ));
-            }
+        if let Some(declared) = cmd.cwd.as_deref()
+            && declared != cwd.display_path()
+        {
+            return Err(SandboxError::PathDenied(
+                "sandbox command cwd does not match the retained cwd authority".to_owned(),
+            ));
         }
         // The lease is acquired BEFORE the pathname reaches CreateProcess and
         // is held across the whole execution, so there is no window in which the
