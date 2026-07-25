@@ -339,6 +339,95 @@ impl DirectoryAuthority {
         ))
     }
 
+    /// Open an EXISTING regular-file advisory-lock target beneath this retained
+    /// directory, resolved through the retained handle.
+    ///
+    /// The returned handle is intended SOLELY as an advisory-lock target: the
+    /// caller wraps it in `fd_lock::RwLock`. It must be a regular file —
+    /// Windows byte-range locking is undefined on directory objects and fails
+    /// with `ERROR_INVALID_PARAMETER` for every access and share mode. See
+    /// `windows::open_child_lock_file` for the measured finding.
+    ///
+    /// A missing lock file surfaces as a not-found error rather than being
+    /// created, so a caller probing for an absent lock can treat that as
+    /// "unheld" without mutating a directory it is merely observing.
+    ///
+    /// The result is a [`DirectoryHandleLoan`] accounted against THIS
+    /// directory's `handle_loans` counter (the same counter
+    /// [`Self::try_clone_handle`] increments) even though the handle it carries
+    /// is the child file. That is deliberate and load-bearing: it keeps
+    /// [`Self::remove_open_dir_all`] refusing while a lock is held, exactly as
+    /// it does for a cloned directory handle today.
+    pub fn open_child_lock_file(&self, name: &str) -> Result<DirectoryHandleLoan> {
+        validate_child_name(name)?;
+        let handle = self.open_lock_file_handle(name, false)?;
+        Ok(self.loan_child_handle(handle))
+    }
+
+    /// Open-or-create a regular-file advisory-lock target beneath this retained
+    /// directory, resolved through the retained handle.
+    ///
+    /// Identical to [`Self::open_child_lock_file`] except that an absent target
+    /// is created (private `0o600` on unix). The same loan accounting applies:
+    /// the returned [`DirectoryHandleLoan`] increments THIS directory's
+    /// `handle_loans` counter, so a directory whose lock file is currently held
+    /// still refuses destructive removal.
+    pub fn open_or_create_child_lock_file(&self, name: &str) -> Result<DirectoryHandleLoan> {
+        validate_child_name(name)?;
+        let handle = self.open_lock_file_handle(name, true)?;
+        Ok(self.loan_child_handle(handle))
+    }
+
+    /// One home for the platform split behind both lock-file accessors, so
+    /// `wcore-swarm` carries no `#[cfg]` for this.
+    fn open_lock_file_handle(&self, name: &str, create: bool) -> Result<File> {
+        #[cfg(unix)]
+        {
+            use std::ffi::CString;
+            use std::os::fd::{AsRawFd, FromRawFd};
+
+            let name_c = CString::new(name).map_err(|_| {
+                SandboxError::PathDenied("authority child name contains NUL".to_owned())
+            })?;
+            let mut flags = libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+            if create {
+                flags |= libc::O_CREAT;
+            }
+            // SAFETY: the retained parent descriptor scopes this no-follow open
+            // to one validated direct child. The mode argument is ignored by
+            // the kernel unless O_CREAT is set.
+            let fd =
+                unsafe { libc::openat(self.handle.as_raw_fd(), name_c.as_ptr(), flags, 0o600) };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            // SAFETY: successful openat returned one fresh owned descriptor.
+            Ok(unsafe { File::from_raw_fd(fd) })
+        }
+        #[cfg(windows)]
+        {
+            windows::open_child_lock_file(self, name, create)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (name, create);
+            Err(SandboxError::PolicyNotSupported(
+                "relative lock-file open is unsupported on this platform".to_owned(),
+            ))
+        }
+    }
+
+    /// Account one child handle against THIS directory's loan counter. Shared
+    /// by both lock-file accessors so the destructive-removal refusal has a
+    /// single definition.
+    fn loan_child_handle(&self, handle: File) -> DirectoryHandleLoan {
+        self.handle_loans.fetch_add(1, Ordering::AcqRel);
+        DirectoryHandleLoan {
+            handle,
+            loans: Arc::clone(&self.handle_loans),
+        }
+    }
+
     /// Read one optional direct child through retained parent authority.
     pub fn read_child_bounded(&self, name: &str, max_bytes: u64) -> Result<Option<Vec<u8>>> {
         let authority = match self.open_child_file(name) {

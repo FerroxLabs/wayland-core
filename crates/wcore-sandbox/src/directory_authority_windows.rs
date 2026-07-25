@@ -11,7 +11,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
     FILE_CREATE, FILE_DIRECTORY_FILE, FILE_ID_BOTH_DIR_INFORMATION, FILE_NON_DIRECTORY_FILE,
-    FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+    FILE_OPEN, FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
     FileIdBothDirectoryInformation, NtCreateFile, NtQueryDirectoryFile,
 };
 use windows_sys::Win32::Foundation::{
@@ -44,6 +44,12 @@ enum RelativeIntent {
     ReadOnly,
     Mutate,
     Create,
+    /// Open an EXISTING regular-file advisory-lock target. Surfaces a not-found
+    /// error so a caller probing an unheld lock never mutates the directory it
+    /// is merely observing.
+    LockOpen,
+    /// Open-or-create a regular-file advisory-lock target.
+    LockOpenOrCreate,
 }
 
 pub(super) fn open_directory(path: &Path) -> std::io::Result<File> {
@@ -224,6 +230,50 @@ pub(super) fn open_child_file(
         identity,
         display_path: parent.display_path.join(name),
     })
+}
+
+/// Open a REGULAR-FILE advisory-lock target beneath a retained directory,
+/// handle-relative.
+///
+/// WHY THIS EXISTS — measured on Windows 11 (10.0.26200.8875, NTFS), do not
+/// re-derive: **Windows byte-range locking is UNDEFINED on directory objects.**
+/// `LockFileEx(<directory HANDLE>, LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, ..)`
+/// returns FALSE with `GetLastError() == 87 (ERROR_INVALID_PARAMETER)` for
+/// EVERY access mode and share mode tried — `GENERIC_READ|GENERIC_WRITE|DELETE`,
+/// `GENERIC_READ|GENERIC_WRITE`, and `GENERIC_READ` alike, all shared
+/// read/write/delete — while the same call on a REGULAR-FILE handle succeeds.
+/// Rust maps error 87 to [`std::io::ErrorKind::InvalidInput`]. No access-mode
+/// change can fix it; the object type is the whole story.
+///
+/// `fd-lock` (4.0.4, `src/sys/windows/rw_lock.rs::write`) calls `LockFileEx`
+/// directly, so EVERY advisory lock in this workspace MUST target a regular
+/// file. Retargeting any caller of this primitive at a directory handle does
+/// not fail loudly at review time — it silently disables Windows mutual
+/// exclusion, which is exactly how the defect this closes survived for the
+/// project's entire life.
+///
+/// The child is resolved through the parent's RETAINED handle
+/// (`NtCreateFile` with `RootDirectory = parent.handle`), never by
+/// re-resolving a pathname, so a swap of the parent directory between an
+/// identity proof and lock acquisition cannot redirect the lock.
+///
+/// `create = false` opens an existing target only and surfaces a not-found
+/// error; `create = true` opens-or-creates it.
+pub(super) fn open_child_lock_file(
+    parent: &DirectoryAuthority,
+    name: &str,
+    create: bool,
+) -> Result<File> {
+    open_relative(
+        parent,
+        name,
+        RelativeKind::File,
+        if create {
+            RelativeIntent::LockOpenOrCreate
+        } else {
+            RelativeIntent::LockOpen
+        },
+    )
 }
 
 pub(super) fn create_child_directory(
@@ -579,6 +629,29 @@ fn open_relative(
                 "Windows cannot create an authority with an unknown type".to_owned(),
             ));
         }
+        // `LockFileEx` needs read or write access on the handle it locks, and
+        // nothing else. The DELETE right is DELIBERATELY WITHHELD: this handle
+        // never destroys the sentinel — removal happens through the parent's
+        // ordinary descendant cleanup, which opens its own handle — and 20-72
+        // proved on this hardware that a retained DELETE right is a real
+        // functional hazard on Windows directories (it denies the chdir
+        // `SetCurrentDirectory` performs). Least privilege here is a decision,
+        // not an oversight.
+        (RelativeKind::File, RelativeIntent::LockOpen | RelativeIntent::LockOpenOrCreate) => {
+            GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE
+        }
+        // A lock target is a regular file BY CONSTRUCTION. Silently accepting a
+        // directory here is the exact defect this intent exists to close, so
+        // refuse explicitly rather than hand the locking layer an object on
+        // which byte-range locking is undefined.
+        (
+            RelativeKind::Directory | RelativeKind::Any,
+            RelativeIntent::LockOpen | RelativeIntent::LockOpenOrCreate,
+        ) => {
+            return Err(SandboxError::ExecFailed(
+                "Windows advisory locks require a regular-file target".to_owned(),
+            ));
+        }
     };
     let type_options = match kind {
         RelativeKind::Directory => FILE_DIRECTORY_FILE,
@@ -597,10 +670,12 @@ fn open_relative(
                 RelativeKind::File | RelativeKind::Any => FILE_ATTRIBUTE_NORMAL,
             },
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            if matches!(intent, RelativeIntent::Create) {
-                FILE_CREATE
-            } else {
-                FILE_OPEN
+            match intent {
+                RelativeIntent::Create => FILE_CREATE,
+                RelativeIntent::LockOpenOrCreate => FILE_OPEN_IF,
+                RelativeIntent::ReadOnly | RelativeIntent::Mutate | RelativeIntent::LockOpen => {
+                    FILE_OPEN
+                }
             },
             FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT | type_options,
             std::ptr::null(),
