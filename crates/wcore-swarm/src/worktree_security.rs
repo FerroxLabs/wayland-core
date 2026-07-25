@@ -49,10 +49,6 @@ impl DirectoryAuthority {
             .map_err(|error| SwarmError::DispatchAdmission(error.to_string()))
     }
 
-    pub(super) fn try_clone_handle(&self) -> Result<wcore_sandbox::DirectoryHandleLoan> {
-        self.0.try_clone_handle().map_err(Into::into)
-    }
-
     /// Open an EXISTING regular-file advisory-lock target beneath this retained
     /// directory. The rationale lives at
     /// `wcore_sandbox::DirectoryAuthority::open_child_lock_file`.

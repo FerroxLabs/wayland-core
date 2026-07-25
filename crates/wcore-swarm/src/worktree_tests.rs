@@ -76,6 +76,102 @@ fn retained_reservation_rejects_same_inode_truncate_and_rewrite() {
     assert!(error.to_string().contains("changed"), "{error}");
 }
 
+/// A held transaction lease must be observable as held by an INDEPENDENT
+/// observer, and must stop being observable once released.
+///
+/// The second `DirectoryAuthority` is what makes this non-vacuous: it holds a
+/// genuinely separate open file description on unix and a genuinely separate
+/// handle on Windows, so it observes the lease rather than its own lock. A
+/// probe through the holder's own handle would prove nothing.
+///
+/// The invariant asserted is exclusion-then-release, never any particular
+/// failure shape. This is the regression guard against retargeting the lease at
+/// a directory handle: on Windows byte-range locking is undefined on directory
+/// objects so acquisition itself would fail, and on unix the lock would be
+/// taken on a different object than this probe inspects.
+#[test]
+fn transaction_lease_is_mutually_exclusive() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let root = fixture.path().join("worker-lease");
+    std::fs::create_dir(&root).unwrap();
+    let holder = DirectoryAuthority::open(&root).unwrap();
+    let probe = DirectoryAuthority::open(&root).unwrap();
+
+    let mut lease = ActiveLease::acquire(transaction_lease_handle(&holder).unwrap())
+        .expect("the transaction lease must be acquirable");
+    assert!(
+        transaction_is_active(&probe, &root).unwrap(),
+        "an independently opened authority did not observe the held transaction lease"
+    );
+
+    lease.close();
+    assert!(
+        !transaction_is_active(&probe, &root).unwrap(),
+        "the transaction lease was still reported held after it was released"
+    );
+}
+
+/// While a critical section holds the swarm sentinel, an INDEPENDENT attempt to
+/// take that sentinel must observe contention, and must succeed once the
+/// critical section ends.
+///
+/// As above, the separately opened authority is what makes the assertion
+/// non-vacuous. The only error condition inspected is the would-block
+/// contention signal, which is evidence that exclusion held — never the shape
+/// of any platform's failure. The release half is the strong guard: if a lock
+/// were ever retargeted at a directory handle again, acquisition on Windows
+/// would fail outright and this test would go red.
+///
+/// Every wait is bounded, so a side that never arrives fails the test instead
+/// of blocking the runner.
+#[test]
+fn swarm_lock_is_mutually_exclusive() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let swarm_root = fixture.path().join("swarm");
+    std::fs::create_dir(&swarm_root).unwrap();
+
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let held_root = swarm_root.clone();
+    let critical_section = std::thread::spawn(move || {
+        let authority = DirectoryAuthority::open(&held_root).unwrap();
+        with_directory_lock(&held_root, &authority, || {
+            ready_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the observer never released the critical section");
+            Ok(())
+        })
+        .expect("the swarm sentinel must be acquirable");
+    });
+
+    ready_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the critical section never reported holding the swarm sentinel");
+
+    let probe = DirectoryAuthority::open(&swarm_root).unwrap();
+    let mut contended = fd_lock::RwLock::new(swarm_lock_handle(&probe).unwrap());
+    let contention = contended
+        .try_write()
+        .err()
+        .expect("the swarm sentinel was acquirable while a critical section held it");
+    assert_eq!(
+        contention.kind(),
+        ErrorKind::WouldBlock,
+        "expected a contention signal from the held swarm sentinel, got {contention:?}"
+    );
+    drop(contended);
+
+    release_tx.send(()).unwrap();
+    critical_section.join().expect("critical section thread");
+
+    let mut released = fd_lock::RwLock::new(swarm_lock_handle(&probe).unwrap());
+    assert!(
+        released.try_write().is_ok(),
+        "the swarm sentinel stayed locked after its critical section ended"
+    );
+}
+
 #[test]
 fn failed_transaction_cleanup_remains_retryable() {
     let fixture = tempfile::tempdir().expect("fixture");
@@ -88,14 +184,16 @@ fn failed_transaction_cleanup_remains_retryable() {
     let cleanup = test_transaction_cleanup("worker-retry", &root, &swarm_root, &quarantine_root);
 
     if cfg!(windows) {
-        // The cleanup retains open handles on `swarm_root` and its `worker-retry`
-        // descendant (opened with FILE_SHARE_DELETE). On Windows a path-based
-        // rename of `swarm_root` while a descendant handle is open is OS-refused
-        // with `PermissionDenied` — FILE_SHARE_DELETE only authorizes renaming
-        // the held object itself by handle, not a path-based ancestor rename. The
-        // replaced-control-root substitution that `release()`'s identity check
-        // defends against on Unix therefore cannot arise; the OS guarantee is
-        // strictly stronger. Prove the refusal, then that the un-substituted
+        // The cleanup retains open handles on `swarm_root` AND on its
+        // `worker-retry` DESCENDANT, and the descendant handle is the entire
+        // cause of the refusal below. Measured Windows rename rule: ANY open
+        // handle to a descendant — of any kind, at any desired access, under any
+        // share mode — blocks renaming ANY ancestor with ERROR_ACCESS_DENIED,
+        // which Rust maps to `PermissionDenied`. Share mode does not enter into
+        // it; a handle on an object never blocks renaming THAT object when the
+        // share mode admits delete. The replaced-control-root substitution that
+        // `release()`'s identity check defends against on Unix therefore cannot
+        // arise here. Prove the refusal, then that the un-substituted
         // transaction still releases cleanly and stays retryable.
         let error = std::fs::rename(&swarm_root, &original_swarm)
             .expect_err("Windows must refuse renaming a swarm-held control root");
@@ -148,7 +246,7 @@ fn release_refuses_while_checkout_loan_outstanding() {
 
     // Model an escaped worker descendant that still holds the retained checkout
     // descriptor. The shared loan counter must fail the cleanup closed.
-    let loan = checkout_authority.try_clone_handle().unwrap();
+    let loan = checkout_authority.to_sandbox().try_clone_handle().unwrap();
 
     let error = cleanup
         .release()
@@ -199,13 +297,26 @@ fn transaction_cleanup_preserves_same_path_replacement() {
     let cleanup = test_transaction_cleanup("worker-replaced", &root, &swarm_root, &quarantine_root);
 
     if cfg!(windows) {
-        // The cleanup holds an open handle on the transaction `root` (opened with
-        // FILE_SHARE_DELETE). On Windows a path-based rename of that held root is
-        // OS-refused with `PermissionDenied`, so the "same path, different
-        // directory object" replacement this test guards against on Unix cannot
-        // be constructed while the handle is held — a guarantee strictly stronger
-        // than the handle-bound identity check. Prove the refusal, then that the
-        // un-substituted transaction still releases cleanly by handle.
+        // FIXTURE COUPLING, stated so it cannot be lost: this refusal depends on
+        // `test_transaction_cleanup` writing RESERVATION_FILE into `root` and
+        // RETAINING a `RegularFileAuthority` on it. That open DESCENDANT is what
+        // refuses the rename, by the measured Windows rule that any open handle
+        // to a descendant blocks renaming any ancestor with ERROR_ACCESS_DENIED.
+        // It is NOT the share mode: a handle on an object never blocks renaming
+        // THAT object when the share mode admits delete, and the root handle
+        // does admit it. Drop the reservation file from the fixture and this
+        // assertion silently flips to failing.
+        //
+        // Unlike `transaction_cleanup_never_deletes_swap_after_validation`, the
+        // swap is NOT constructible here: `TransactionCleanup` structurally
+        // requires the `reservation_authority` field and `release()` validates
+        // it, so the descendant handle cannot be dropped without dropping the
+        // transaction. That is a fixture limitation, not a coverage hole — the
+        // same-path-replacement software defense IS exercised on Windows by that
+        // now-unified test, whose fixture holds no descendant handle at all.
+        //
+        // Prove the refusal, then that the un-substituted transaction still
+        // releases cleanly by handle.
         let error = std::fs::rename(&root, &moved)
             .expect_err("Windows must refuse renaming a swarm-held transaction root");
         assert_eq!(
@@ -241,6 +352,28 @@ fn transaction_cleanup_preserves_same_path_replacement() {
     }
 }
 
+/// Handle-bound cleanup must delete the retained transaction OBJECT, never
+/// whatever directory occupies its former pathname after a mid-validation swap.
+///
+/// ONE body runs on BOTH platforms, and the swap is genuinely constructible on
+/// Windows for a specific, checkable reason: this fixture opens NO descendant
+/// handle inside the transaction root — only a `DirectoryAuthority` on the root
+/// OBJECT itself. By the measured Windows rename rule, a handle on an object
+/// never blocks renaming THAT object provided the share mode admits delete, and
+/// the retained handle does admit it. (It is an open handle to a DESCENDANT
+/// that blocks renaming an ancestor, and this fixture has none — which is
+/// exactly what `transaction_cleanup_preserves_same_path_replacement` cannot
+/// arrange.)
+///
+/// What the assertions then exercise is the SOFTWARE defense, not an OS
+/// guarantee: destructive cleanup enumerates through the RETAINED handle
+/// (`NtQueryDirectoryFile` on Windows, the held descriptor on unix), opens each
+/// child handle-relative (`NtCreateFile` with `RootDirectory =
+/// authority.handle`) and disposes it by handle
+/// (`SetFileInformationByHandle`). Nothing re-resolves the pathname, so the
+/// handle follows the OBJECT wherever the pathname now points: the substituted
+/// directory at the original pathname survives untouched with its replacement
+/// receipt readable, and the moved original is deleted.
 #[test]
 fn transaction_cleanup_never_deletes_swap_after_validation() {
     let fixture = tempfile::tempdir().expect("fixture");
@@ -254,10 +387,6 @@ fn transaction_cleanup_never_deletes_swap_after_validation() {
     let root_authority = DirectoryAuthority::open(&root).unwrap();
     let quarantine_authority = DirectoryAuthority::open(&quarantine_root).unwrap();
 
-    // Records that the mid-validation race hook actually fired (and, on Windows,
-    // that the OS refused the swap) so the post-cleanup assertions below are
-    // never vacuously satisfied by a hook that silently no-op'd.
-    let swap_refused = AtomicBool::new(false);
     let result = remove_transaction_root_inner(
         &swarm_root,
         &swarm_authority,
@@ -267,57 +396,23 @@ fn transaction_cleanup_never_deletes_swap_after_validation() {
         &quarantine_root,
         &quarantine_authority,
         || {
-            if cfg!(windows) {
-                // `root_authority` holds `root` open with FILE_SHARE_DELETE, so a
-                // path-based rename of the held root is OS-refused mid-validation.
-                // The swap can never happen while the handle is held — stronger
-                // than the handle-bound identity check the Unix arm exercises.
-                let error = std::fs::rename(&root, &moved)
-                    .expect_err("Windows must refuse renaming the handle-held transaction root");
-                assert_eq!(
-                    error.kind(),
-                    std::io::ErrorKind::PermissionDenied,
-                    "expected OS-level PermissionDenied on the mid-validation swap, got {error:?}"
-                );
-                swap_refused.store(true, Ordering::Release);
-            } else {
-                std::fs::rename(&root, &moved).unwrap();
-                std::fs::create_dir(&root).unwrap();
-                std::fs::write(root.join("replacement-receipt"), "preserve-race\n").unwrap();
-            }
+            std::fs::rename(&root, &moved).unwrap();
+            std::fs::create_dir(&root).unwrap();
+            std::fs::write(root.join("replacement-receipt"), "preserve-race\n").unwrap();
         },
     );
     result.expect("handle-bound cleanup should ignore the replacement pathname");
 
-    if cfg!(windows) {
-        assert!(
-            swap_refused.load(Ordering::Acquire),
-            "the mid-validation swap hook did not run"
-        );
-        // The OS refusal means no substituted directory ever existed at `root`;
-        // the handle-bound cleanup removed the real, un-swapped transaction root.
-        assert!(
-            !root.exists(),
-            "handle-bound cleanup left the real root behind"
-        );
-        assert!(!moved.exists(), "no swap should exist to move aside");
-        assert_eq!(
-            std::fs::read_dir(&quarantine_root).unwrap().count(),
-            0,
-            "cleanup left residue in control storage"
-        );
-    } else {
-        assert_eq!(
-            std::fs::read_to_string(root.join("replacement-receipt")).unwrap(),
-            "preserve-race\n"
-        );
-        assert_eq!(
-            std::fs::read_dir(&quarantine_root).unwrap().count(),
-            0,
-            "cleanup left the replacement or placeholder in control storage"
-        );
-        assert!(!moved.exists(), "owned original was not deleted by handle");
-    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("replacement-receipt")).unwrap(),
+        "preserve-race\n"
+    );
+    assert_eq!(
+        std::fs::read_dir(&quarantine_root).unwrap().count(),
+        0,
+        "cleanup left the replacement or placeholder in control storage"
+    );
+    assert!(!moved.exists(), "owned original was not deleted by handle");
 }
 
 #[test]
