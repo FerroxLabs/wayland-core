@@ -62,6 +62,23 @@ impl Drop for DirectoryHandleLoan {
     }
 }
 
+/// An OS-enforced pin on the NAME of a retained directory object, released when
+/// this value is dropped.
+///
+/// DELIBERATELY NOT A [`DirectoryHandleLoan`]. A loan records that a DESCENDANT
+/// still holds a duplicate of the retained handle — a worker that inherited the
+/// directory descriptor across the spawn boundary — and terminal cleanup refuses
+/// while one is outstanding. This lease is held by the PARENT for the duration
+/// of one bound execution and is never handed to the child, so counting it as a
+/// loan would misreport who holds the workspace.
+#[cfg(windows)]
+#[derive(Debug)]
+pub(crate) struct DirectoryNameLease {
+    /// The handle's LIFETIME is the pin. It is never read, only dropped.
+    #[allow(dead_code)]
+    handle: File,
+}
+
 /// Retained identity and bytes for an authority-bearing regular file.
 #[derive(Debug)]
 pub struct RegularFileAuthority {
@@ -142,6 +159,22 @@ impl DirectoryAuthority {
     /// distinction exists.
     pub fn open_observational(path: &Path) -> Result<Self> {
         Self::open_inner_with(path, open_directory_observational, || {})
+    }
+
+    /// Pin this retained directory's NAME for as long as the returned lease
+    /// lives, so a pathname-form bind of a child's working directory cannot be
+    /// redirected to a different object while the child runs.
+    ///
+    /// Windows only, and deliberately so: it exists because `CreateProcess`
+    /// takes a pathname rather than a handle and Windows has no `fchdir`. Unix
+    /// binds the descriptor itself (see [`Self::bind_command_cwd`]) and needs no
+    /// pin. See `windows::acquire_name_lease` for the measured enforcement
+    /// basis and for why this fails closed on a delete-bearing authority.
+    #[cfg(windows)]
+    pub(crate) fn acquire_name_lease(&self) -> Result<DirectoryNameLease> {
+        Ok(DirectoryNameLease {
+            handle: windows::acquire_name_lease(self)?,
+        })
     }
 
     fn open_inner(path: &Path, hook: impl FnOnce()) -> Result<Self> {

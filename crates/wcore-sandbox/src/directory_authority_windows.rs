@@ -124,6 +124,95 @@ pub(super) fn open_directory_observational(path: &Path) -> std::io::Result<File>
     options.open(path)
 }
 
+/// Acquire an OS-ENFORCED PIN ON THE RETAINED DIRECTORY'S NAME, held for as
+/// long as the returned handle lives.
+///
+/// WHY THIS EXISTS. `CreateProcess` takes `lpCurrentDirectory` as a PATHNAME,
+/// not a HANDLE, and Windows has no `fchdir`, so the Linux mechanism — hand the
+/// retained descriptor into the child and chdir to it — has no equivalent here.
+/// A path-form bind is only sound if the pathname CANNOT be redirected to a
+/// different object while the child runs. This handle is what makes that true.
+///
+/// HOW IT PINS, and why the retained authority handle does not. Windows share
+/// arbitration refuses a new open whose desired access is not permitted by the
+/// share mode of every handle already open on the object. Renaming or unlinking
+/// an object requires opening it with `DELETE`. The retained authority is opened
+/// `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`, so it permits that
+/// `DELETE` open and pins the OBJECT (the object stays alive and every
+/// handle-relative operation keeps reaching it) but NOT the NAME. This lease
+/// requests a share-arbitrated access (`GENERIC_READ`) while OMITTING
+/// `FILE_SHARE_DELETE`, so while it is held every rename and every unlink of the
+/// pinned name is refused by the KERNEL.
+///
+/// MEASURED ON SEANDESKTOP (NTFS), against the retained OBSERVATIONAL checkout
+/// authority the delegated dispatch path actually produces:
+/// - external rename of the pinned name: REFUSED, sharing violation;
+/// - external unlink of the pinned name: REFUSED, sharing violation;
+/// - `CreateProcess(lpCurrentDirectory = display path)`: succeeds, and the file
+///   the child creates is visible THROUGH the retained handle — so the child
+///   provably operated on the retained object;
+/// - after the lease drops, rename and the ordinary destructive cleanup both
+///   succeed again, so the pin costs nothing outside the bound execution.
+///
+/// NO PATHNAME IS RESOLVED HERE. The open is HANDLE-RELATIVE — `RootDirectory`
+/// is the retained handle and `ObjectName` is empty — which is the NT "reopen
+/// this exact object" form. A pathname-based reopen would be the very
+/// re-resolution this lease exists to make safe.
+///
+/// FAILS CLOSED BY CONSTRUCTION. If the retained authority already holds
+/// `DELETE` (an authority opened through [`open_directory`] rather than
+/// [`open_directory_observational`]), this open is refused: the lease's share
+/// mode would have to permit the `DELETE` the existing handle was granted, and
+/// it deliberately does not. The caller must surface that refusal, never spawn
+/// unpinned.
+pub(super) fn acquire_name_lease(authority: &DirectoryAuthority) -> Result<File> {
+    let unicode_name = UNICODE_STRING {
+        Length: 0,
+        MaximumLength: 0,
+        Buffer: std::ptr::null_mut(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: authority.handle.as_raw_handle().cast(),
+        ObjectName: &unicode_name,
+        Attributes: 0,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let mut status_block = zeroed_status_block();
+    let mut handle: HANDLE = std::ptr::null_mut();
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            // GENERIC_READ is share-arbitrated, which is the whole point: an
+            // attributes-only open requests none of read/write/delete, so it
+            // neither is checked against nor contributes to share arbitration,
+            // and was MEASURED to deliver NO pin at all.
+            GENERIC_READ | SYNCHRONIZE,
+            &attributes,
+            &mut status_block,
+            std::ptr::null(),
+            FILE_ATTRIBUTE_DIRECTORY,
+            // The omission of FILE_SHARE_DELETE IS the pin. Do not widen it.
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_OPEN,
+            FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT | FILE_DIRECTORY_FILE,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status < 0 {
+        return Err(ntstatus_error(status).into());
+    }
+    if handle.is_null() {
+        return Err(SandboxError::ExecFailed(
+            "NtCreateFile succeeded without returning a name-lease handle".to_owned(),
+        ));
+    }
+    // SAFETY: NtCreateFile returned a fresh owned handle on success.
+    Ok(unsafe { File::from_raw_handle(handle) })
+}
+
 pub(super) fn open_regular_file(path: &Path) -> std::io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
 

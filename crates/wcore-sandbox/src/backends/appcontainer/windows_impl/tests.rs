@@ -525,3 +525,123 @@ fn required_live_job_teardown_precedes_workspace_cleanup() {
     // Workspace cleanup runs only after the owned tree is torn down.
     drop(dir);
 }
+
+/// ANTI-SWAP REGRESSION PROOF for the Windows retained-cwd binding.
+///
+/// WHICH MECHANISM THIS PROVES: the OS-enforced NAME PIN established by
+/// [`bind_retained_cwd`] — a handle-relative reopen of the retained object whose
+/// share mode omits `FILE_SHARE_DELETE`, held for the whole bound execution.
+/// `CreateProcess` accepts only a pathname, so the binding is sound only while
+/// that pathname cannot be redirected; this test constructs the redirection the
+/// guarantee exists to defeat and proves the child still operated on the object
+/// the authority retained.
+///
+/// IT FAILS IF THE BINDING IS EVER DOWNGRADED TO AN UNGUARDED PATHNAME
+/// RE-RESOLVE, in two independent ways:
+/// - part one: with the bind held, the substitution SUCCEEDS instead of being
+///   refused, and the child's artifact is then absent from the retained object;
+/// - part two: `execute_with_cwd_authority` stops refusing an authority whose
+///   name cannot be pinned, i.e. it spawned without establishing the pin.
+///
+/// IT ASSERTS THE INVARIANT, NEVER AN ERROR SHAPE. No error code, error kind or
+/// numeric OS status appears in any assertion: encoding today's failure shape
+/// would enshrine it. What is asserted is that the retained object is what the
+/// child worked in.
+///
+/// It spawns an ordinary child rather than an AppContainer one, so it always
+/// runs — it is never skipped by the live-acceptance environment gate, and can
+/// therefore never report a vacuous green.
+#[tokio::test]
+async fn windows_retained_cwd_bind_survives_a_pathname_substitution() {
+    use crate::DirectoryAuthority;
+
+    let owner_dir = tempfile::tempdir().expect("owner");
+    let workspace = owner_dir.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let decoy = owner_dir.path().join("decoy");
+    std::fs::create_dir(&decoy).expect("decoy");
+
+    // The delegated dispatch path retains its checkout observationally; that is
+    // the authority this binding receives in production.
+    let authority = DirectoryAuthority::open_observational(&workspace).expect("retain workspace");
+
+    // ---- part one: the bind defeats the substitution, and the child lands in
+    // ---- the RETAINED object.
+    let (lease, bound) = bind_retained_cwd(&authority).expect("pin the retained workspace name");
+
+    // The substitution the guarantee exists to defeat: redirect the bound
+    // pathname at a different directory object. Both redirection primitives are
+    // attempted — rename the bound name away, and unlink it so a decoy could be
+    // recreated in its place.
+    let moved = owner_dir.path().join("workspace-moved");
+    let renamed = std::fs::rename(&workspace, &moved).is_ok();
+    let unlinked = std::fs::remove_dir(&workspace).is_ok();
+    assert!(
+        !renamed && !unlinked,
+        "the bound working-directory name was redirected while the bind was held \
+         (renamed={renamed}, unlinked={unlinked}) — the binding is no longer pinned \
+         and has degraded to an unguarded pathname re-resolve"
+    );
+
+    // Bind by path exactly as the production spawn does, and have the child
+    // write a marker into whatever object that pathname reaches.
+    let status = std::process::Command::new("cmd")
+        .args(["/d", "/s", "/c", "echo bound>marker.txt"])
+        .current_dir(&bound)
+        .status()
+        .expect("spawn the bound child");
+    assert!(status.success(), "the bound child must run");
+
+    // THE INVARIANT: the marker is reachable THROUGH THE RETAINED HANDLE, so the
+    // child operated on the object the authority retained — not on a substitute
+    // installed at the same pathname.
+    let retained_entries = authority.child_names().expect("enumerate retained object");
+    assert!(
+        retained_entries.iter().any(|name| name == "marker.txt"),
+        "the child's artifact is absent from the RETAINED object (saw {retained_entries:?}) — \
+         the child worked somewhere other than the retained workspace"
+    );
+    assert!(
+        std::fs::read_dir(&decoy)
+            .expect("enumerate decoy")
+            .next()
+            .is_none(),
+        "the child wrote into the decoy object — the pathname was redirected"
+    );
+    drop(lease);
+
+    // ---- part two: the production entry point refuses when the name cannot be
+    // ---- pinned, rather than spawning against a re-resolvable pathname.
+    //
+    // A DELETE-bearing authority cannot be pinned: the lease's share mode would
+    // have to permit the delete access that handle was already granted, and it
+    // deliberately does not. If `execute_with_cwd_authority` ever stops
+    // establishing the pin, this call stops failing.
+    let unpinnable =
+        DirectoryAuthority::open(&decoy).expect("retain decoy as a mutating authority");
+    let refusal = AppContainerBackend::new()
+        .execute_with_cwd_authority(
+            &SandboxManifest {
+                timeout: Some(Duration::from_secs(10)),
+                ..Default::default()
+            },
+            SandboxCommand {
+                argv: vec![
+                    "cmd.exe".into(),
+                    "/c".into(),
+                    "echo unbound>escaped.txt".into(),
+                ],
+                cwd: Some(decoy.clone()),
+            },
+            unpinnable,
+        )
+        .await;
+    assert!(
+        refusal.is_err(),
+        "an authority whose name cannot be pinned must be refused, not spawned unbound"
+    );
+    assert!(
+        !decoy.join("escaped.txt").exists(),
+        "the refused execution still ran a child against the unpinned pathname"
+    );
+}

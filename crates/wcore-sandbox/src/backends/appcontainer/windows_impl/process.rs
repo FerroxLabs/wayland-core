@@ -4,9 +4,10 @@
 use super::super::super::SandboxBackend;
 use super::super::appcontainer_acl_lease::ExecutionIdentity;
 use super::super::{NEGATIVE_PROBE_TTL, ProbeCache};
+use crate::directory_authority::DirectoryNameLease;
 use crate::error::{Result, SandboxError};
 use crate::manifest::{NetworkPolicy, SandboxManifest};
-use crate::{ResourceLimitEnforcement, SandboxCommand, SandboxOutput};
+use crate::{DirectoryAuthority, ResourceLimitEnforcement, SandboxCommand, SandboxOutput};
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -158,6 +159,45 @@ impl SandboxBackend for AppContainerBackend {
         true
     }
 
+    /// True because [`Self::execute_with_cwd_authority`] establishes an
+    /// OS-ENFORCED PIN on the retained directory's name before the pathname is
+    /// used, and holds it for the whole execution — see [`bind_retained_cwd`].
+    /// It is NOT true because a pathname is re-resolved; if the pin cannot be
+    /// established the execution is refused rather than spawned unbound.
+    ///
+    /// `binds_workspace_authority` is deliberately NOT overridden: the trait
+    /// derives it from this predicate, and a second independent answer is how
+    /// the two drift apart.
+    fn binds_cwd_authority(&self) -> bool {
+        true
+    }
+
+    async fn execute_with_cwd_authority(
+        &self,
+        manifest: &SandboxManifest,
+        cmd: SandboxCommand,
+        cwd: DirectoryAuthority,
+    ) -> Result<SandboxOutput> {
+        if let Some(declared) = cmd.cwd.as_deref() {
+            if declared != cwd.display_path() {
+                return Err(SandboxError::PathDenied(
+                    "sandbox command cwd does not match the retained cwd authority".to_owned(),
+                ));
+            }
+        }
+        // The lease is acquired BEFORE the pathname reaches CreateProcess and
+        // is held across the whole execution, so there is no window in which the
+        // bound name can be redirected.
+        let (lease, bound) = bind_retained_cwd(&cwd)?;
+        let bound_cmd = SandboxCommand {
+            argv: cmd.argv,
+            cwd: Some(bound),
+        };
+        let output = self.execute(manifest, bound_cmd).await;
+        drop(lease);
+        output
+    }
+
     async fn execute(
         &self,
         manifest: &SandboxManifest,
@@ -199,6 +239,50 @@ impl SandboxBackend for AppContainerBackend {
         cancellation.disarm();
         result
     }
+}
+
+/// Bind a child's working directory to a RETAINED directory object on a
+/// platform whose process-creation API accepts only a pathname.
+///
+/// The order of the three steps below is the guarantee, and it is not
+/// rearrangeable:
+///
+/// 1. **PIN THE NAME FIRST.** [`DirectoryAuthority::acquire_name_lease`] opens
+///    the retained object handle-relatively — no pathname is resolved — with a
+///    share mode that omits `FILE_SHARE_DELETE`. While that handle lives the
+///    kernel refuses every rename and every unlink of the pinned name. Measured
+///    on SEANDESKTOP against the retained observational checkout authority the
+///    delegated dispatch path produces; see `windows::acquire_name_lease`.
+/// 2. **PROVE THE PIN LANDED ON THE RIGHT NAME.** The lease pins whatever name
+///    the object currently carries, so if the object had ALREADY been renamed
+///    away from its display path, the display path would now name a decoy.
+///    `validate_path` re-proves that the display path still resolves to exactly
+///    the retained object, AFTER the pin exists.
+/// 3. **ONLY THEN BIND BY PATH.** Everything after step 2 is inside the pin, so
+///    there is no residual window: a substitution cannot be performed between
+///    the proof and the child's first filesystem operation, because the OS
+///    refuses it for as long as the returned lease is held.
+///
+/// FAILS CLOSED. Any failure returns an error; there is no unbound-spawn
+/// fallback. In particular a delete-bearing authority (opened through
+/// `DirectoryAuthority::open` rather than `open_observational`) cannot be
+/// pinned, and is refused rather than silently bound to a re-resolvable path.
+///
+/// This function is the single place the binding is established. A downgrade to
+/// an unguarded pathname re-resolve means deleting it, which is what the
+/// anti-swap regression test in this module's `tests` is written to catch.
+pub(super) fn bind_retained_cwd(
+    cwd: &DirectoryAuthority,
+) -> Result<(DirectoryNameLease, std::path::PathBuf)> {
+    let bound = cwd.display_path().to_path_buf();
+    let lease = cwd.acquire_name_lease().map_err(|error| {
+        SandboxError::PathDenied(format!(
+            "AppContainer could not pin the retained working-directory name {}: {error}",
+            bound.display()
+        ))
+    })?;
+    cwd.validate_path(&bound)?;
+    Ok((lease, bound))
 }
 
 pub(super) fn probe_appcontainer_available() -> bool {
