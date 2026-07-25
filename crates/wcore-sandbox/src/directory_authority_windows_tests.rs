@@ -12,11 +12,16 @@ use super::*;
 use crate::error::SandboxError;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
-// `FILE_ID_BOTH_DIR_INFORMATION` lives in the Wdk namespace in windows-sys 0.59
+// Both raw layout types these tests measure — `FILE_ID_BOTH_DIR_INFORMATION`
+// and `FILE_RENAME_INFORMATION` — live in the Wdk namespace in windows-sys 0.59
 // (feature `Wdk_Storage_FileSystem`), matching production `directory_authority_
-// windows.rs`; only `FILE_RENAME_INFO` is a Win32 Storage::FileSystem type.
-use windows_sys::Wdk::Storage::FileSystem::FILE_ID_BOTH_DIR_INFORMATION;
-use windows_sys::Win32::Storage::FileSystem::FILE_RENAME_INFO;
+// windows.rs`. The rename type is the NT one because the handle-relative rename
+// is an `NtSetInformationFile` call: the Win32 `FILE_RENAME_INFO` wrapper class
+// rejects a HANDLE in `RootDirectory` (os error 87) and is no longer used
+// anywhere in this crate.
+use windows_sys::Wdk::Storage::FileSystem::{
+    FILE_ID_BOTH_DIR_INFORMATION, FILE_RENAME_INFORMATION,
+};
 
 fn inject_create_failure(stage: Option<CreateValidationStage>) {
     CREATE_VALIDATION_FAILURE.with(|failure| failure.set(stage));
@@ -236,6 +241,46 @@ fn windows_handle_relative_rename_stays_bound_to_target_parent() {
 
     assert!(moved_target.join("landed").is_dir());
     assert!(!target_path.join("landed").exists());
+}
+
+/// The same held-handle guarantee as the sibling directory proof above, but for
+/// the FILE publish path — which is the one `atomic_write_child` (and therefore
+/// the production heartbeat status mirror, the swarm rename API and the archive
+/// rollback) actually travels. The sibling test only covers directory sources,
+/// so without this the production path had no anti-swap proof at all.
+///
+/// What it guards: the destination parent is resolved by the RETAINED HANDLE and
+/// never by pathname. The target directory's pathname is renamed away and a
+/// decoy is recreated at the original path BEFORE the publish, so a rename that
+/// re-resolved the destination by name would land in the decoy. This test fails
+/// the moment anyone reintroduces the `RootDirectory = NULL` + full-pathname
+/// form that a probe showed "working" (see `rename_handle_into`).
+///
+/// Asserts on the invariant — WHERE the object landed — never on an OS error
+/// code.
+#[test]
+fn windows_handle_relative_file_publish_stays_bound_to_target_parent() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("source");
+    let target_path = temp.path().join("target");
+    let moved_target = temp.path().join("moved-target");
+    std::fs::create_dir(&source_path).unwrap();
+    std::fs::create_dir(&target_path).unwrap();
+    let source_parent = DirectoryAuthority::open(&source_path).unwrap();
+    let target = DirectoryAuthority::open(&target_path).unwrap();
+    let payload = b"published-through-the-held-handle";
+    let source = source_parent.create_child_file("pending", payload).unwrap();
+
+    // Swap the destination's PATHNAME out from under the held handle and put a
+    // decoy back at the original path.
+    std::fs::rename(&target_path, &moved_target).unwrap();
+    std::fs::create_dir(&target_path).unwrap();
+
+    source.rename_into(&target, "landed", false).unwrap();
+
+    assert_eq!(std::fs::read(moved_target.join("landed")).unwrap(), payload);
+    assert!(!target_path.join("landed").exists());
+    assert!(!source_path.join("pending").exists());
 }
 
 #[test]
@@ -458,8 +503,7 @@ fn rename_buffer_includes_full_structure_and_rejects_overflow() {
     let name_bytes = 12;
     assert_eq!(
         rename_buffer_len(name_bytes).unwrap(),
-        std::mem::size_of::<windows_sys::Win32::Storage::FileSystem::FILE_RENAME_INFO>()
-            + name_bytes
+        std::mem::size_of::<FILE_RENAME_INFORMATION>() + name_bytes
     );
     assert!(rename_buffer_len(usize::MAX).is_err());
 }
