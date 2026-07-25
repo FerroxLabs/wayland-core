@@ -551,9 +551,13 @@ mod windows_snapshot_security {
         aces: &[(AceKind, windows_sys::Win32::Security::PSID)],
     ) -> std::io::Result<PrivateAcl> {
         use windows_sys::Win32::Security::{
-            ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, AddAccessDeniedAceEx,
-            GetLengthSid, InitializeAcl,
+            ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, GetLengthSid,
+            InitializeAcl,
         };
+        // `AceKind::Deny` and its match arm are both `cfg(test)`, so this is
+        // unreachable in a non-test build and must carry the same gate.
+        #[cfg(test)]
+        use windows_sys::Win32::Security::AddAccessDeniedAceEx;
         use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
 
         let mut bytes = std::mem::size_of::<ACL>();
@@ -1113,10 +1117,18 @@ fn replace_file_atomically_inner(
     Ok(persisted)
 }
 
-pub(super) fn sync_parent_directory(path: &Path) -> Result<(), JournalError> {
+/// Fsync the directory containing `_path` so a preceding rename is durable.
+///
+/// `_path` is unused on Windows: NTFS exposes no directory-fsync equivalent —
+/// `FlushFileBuffers` requires a handle opened for write access, which
+/// `CreateFile` will not grant on a directory — so this is a deliberate no-op
+/// there and journal renames rely on NTFS metadata journalling instead. That
+/// is a weaker durability guarantee than the Unix path provides; recorded in
+/// BACKLOG rather than changed here.
+pub(super) fn sync_parent_directory(_path: &Path) -> Result<(), JournalError> {
     #[cfg(unix)]
     {
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let parent = _path.parent().unwrap_or_else(|| Path::new("."));
         File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(|source| JournalError::Io {

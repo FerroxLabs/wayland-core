@@ -630,7 +630,7 @@ impl SessionJournal {
             ));
         }
         let path = self.effect_checkpoint_path(digest)?;
-        let mut metadata = std::fs::symlink_metadata(&path).map_err(|source| JournalError::Io {
+        let metadata = std::fs::symlink_metadata(&path).map_err(|source| JournalError::Io {
             path: path.clone(),
             source,
         })?;
@@ -649,6 +649,10 @@ impl SessionJournal {
         #[cfg(unix)]
         {
             use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+            // Only the hard-link recheck below reassigns it, and that path is
+            // Unix-only — so the mutable binding is shadowed here rather than
+            // declared above, where Windows would carry a needless `mut`.
+            let mut metadata = metadata;
             if metadata.nlink() > 1 {
                 remove_stale_checkpoint_temps(
                     path.parent().expect("checkpoint path has a parent"),
