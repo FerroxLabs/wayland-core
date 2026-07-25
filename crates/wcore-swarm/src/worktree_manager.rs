@@ -602,9 +602,11 @@ impl WorktreeManager {
     ///   modification. An untracked file, an addition, a deletion, a rename, a
     ///   copy, an unmerged path or a type change refuses immediately, exactly as
     ///   before — the relaxation cannot reach them;
-    /// * it then re-asks git with `--ignore-cr-at-eol`, in both directions
-    ///   (worktree-vs-index and index-vs-HEAD). If **any** difference survives
-    ///   that, the checkout is dirty and is refused with the original report;
+    /// * it then re-asks git with `--ignore-cr-at-eol --quiet`, in both
+    ///   directions (worktree-vs-index and index-vs-HEAD), and reads the exit
+    ///   code. If **any** difference survives that — or git does not exit
+    ///   cleanly — the checkout is dirty and is refused with the original
+    ///   report;
     /// * every hostile-config defence is unchanged: the second pass runs through
     ///   the same [`Self::git_command`], so `GIT_CONFIG_NOSYSTEM`, the emptied
     ///   system/global config, `GIT_ATTR_NOSYSTEM`, the disabled hooks path, the
@@ -661,17 +663,24 @@ impl WorktreeManager {
                 _ => return Ok(false),
             }
         }
+        // The predicate is `--quiet`'s EXIT CODE, not the contents of a
+        // `--name-only` listing. Measured on both hosts: with an LF index and a
+        // CRLF working tree, `git diff --ignore-cr-at-eol --name-only` prints
+        // nothing under git 2.54.0.windows.1 but still prints the path under git
+        // 2.43.0 on Linux — even though `--stat` is empty there, so no hunk
+        // survives. Whether the ignore flags are folded back into the pathname
+        // listing is a git-version detail; `--exit-code` (which `--quiet`
+        // implies) reports the compared content on both, 0 for no surviving
+        // difference and 1 for one. Anything other than exactly 0 — including a
+        // git error — keeps the checkout dirty.
         for args in [
-            ["diff", "--ignore-cr-at-eol", "--name-only"].as_slice(),
-            ["diff", "--cached", "--ignore-cr-at-eol", "--name-only"].as_slice(),
+            ["diff", "--ignore-cr-at-eol", "--quiet"].as_slice(),
+            ["diff", "--cached", "--ignore-cr-at-eol", "--quiet"].as_slice(),
         ] {
             let out = capture_bounded_process(self.git_command(args), self.capture_limits, None)
                 .await
                 .map_err(|error| capture_error("git diff", error))?;
-            if !out.status.success() {
-                return Ok(false);
-            }
-            if !String::from_utf8_lossy(&out.stdout).trim().is_empty() {
+            if out.status.code() != Some(0) {
                 return Ok(false);
             }
         }
