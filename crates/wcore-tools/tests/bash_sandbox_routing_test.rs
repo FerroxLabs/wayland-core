@@ -371,6 +371,16 @@ async fn delegated_mutation_live_sandbox_confines_parent_global_tmp_and_symlink_
 /// symlink-alias, global-temp, and inherited-secret read/write is denied.
 /// Non-skipping: it FAILS if the hard read-deny sandbox is unavailable or
 /// bypassed, and FAILS if legitimate isolated mutation is rejected.
+///
+/// `#[cfg(unix)]` because the body uses `std::os::unix::fs::symlink`, which does
+/// not exist on Windows: without this gate the whole `bash_sandbox_routing_test`
+/// binary fails to compile on Windows with E0433, taking every other test in the
+/// file down with it (found by the 20A-01 `cargo build --locked --workspace
+/// --all-targets` compile probe on real Windows hardware). The gate is `unix`,
+/// not `target_os = "linux"`, deliberately: `unix` is the minimum that fixes the
+/// compile error and it leaves this test running on macOS exactly as it does
+/// today, so a macOS result stays reportable rather than being gated away.
+#[cfg(unix)]
 #[tokio::test]
 #[serial]
 async fn delegated_mutation_required_live_sandbox_confines_parent_and_descendants() {
