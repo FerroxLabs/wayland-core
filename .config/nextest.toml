@@ -1,3 +1,15 @@
+# TEST-THREAD STACK SIZE lives in `.cargo/config.toml`, NOT here.
+#
+# Do not re-add an `[env]` table to this file. cargo-nextest has NO top-level
+# `[env]` key: 0.9.138 responds with
+#   `warning: in config file .config/nextest.toml, ignoring unknown
+#    configuration key: env`
+# and the variable never reaches the test process — measured on SEANDESKTOP, a
+# 3 MiB probe thread still overflowed with the table present. nextest sources
+# test environment from CARGO's configuration (see nextest_runner::cargo_config::
+# env), so `.cargo/config.toml` is the only config-file mechanism that works.
+# The full stack-size rationale is recorded there.
+
 [profile.default]
 # Local dev: friendly output, show failures immediately
 failure-output = "immediate"

@@ -919,8 +919,26 @@ fn main() -> anyhow::Result<ExitCode> {
             // order shuts down the runtime first; signal shutdown additionally
             // drops the root future before returning from block_on.
             let _bundled_skill_cleanup = BundledSkillTmpCleanup;
+            // The entry thread above carries a large explicit stack, but the
+            // runtime built inside it spawns WORKER threads at the platform
+            // default, so every `tokio::spawn`ed task runs on a 2 MiB stack on
+            // Windows. `WorktreeManager::create_isolated_checkout` is reached in
+            // production from the agent's spawner, its durable-launch path, the
+            // anvil forge and the child-transaction gates, and it drives the same
+            // chain of large futures that overflows in tests.
+            //
+            // HONEST FRAMING: the production path was NOT observed to overflow.
+            // What WAS measured is that the nearest path's headroom is under
+            // 256 KiB over this same 2 MiB default (a full-suite sweep: unset
+            // (2 MiB) -> 4 aborts, 2359296 (2.25 MiB) -> 0). This is
+            // defense-in-depth against a measured-narrow margin, NOT a repair for
+            // a reproduced production crash. 8 MiB matches the unix main-thread
+            // default and stays small enough that a genuinely unbounded recursion
+            // still overflows, so it cannot mask a runaway. The cost is virtual
+            // address-space RESERVE, not commit — negligible on 64-bit.
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
+                .thread_stack_size(8 * 1024 * 1024)
                 .build()?;
             runtime.block_on(run_until_shutdown(run(), shutdown_signal()))
         })
