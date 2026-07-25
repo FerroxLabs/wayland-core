@@ -22,14 +22,34 @@ use std::sync::{Arc, Barrier};
 use windows_sys::Wdk::Storage::FileSystem::{
     FILE_ID_BOTH_DIR_INFORMATION, FILE_RENAME_INFORMATION,
 };
+// The attribute constants the fabricated parser fixtures write. Production
+// reaches these through its own module-level import; a glob over `super::
+// windows::*` does not re-export another module's private `use`, so they are
+// imported here directly.
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY,
+};
 
 fn inject_create_failure(stage: Option<CreateValidationStage>) {
     CREATE_VALIDATION_FAILURE.with(|failure| failure.set(stage));
 }
 
-fn write_directory_entry(buffer: &mut [u8], start: usize, next: u32, name: &str) -> usize {
+/// Fabricate one `FILE_ID_BOTH_DIR_INFORMATION` record.
+///
+/// `attributes` is written EXPLICITLY rather than left to the buffer's zero
+/// fill, so the parser's attribute read is genuinely exercised by these
+/// hand-written buffers and a regression that read the wrong offset would show
+/// up here rather than only in a live enumeration.
+fn write_directory_entry(
+    buffer: &mut [u8],
+    start: usize,
+    next: u32,
+    name: &str,
+    attributes: u32,
+) -> usize {
     let header = std::mem::offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileName);
     let name_length_offset = std::mem::offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileNameLength);
+    let attributes_offset = std::mem::offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileAttributes);
     let wide = name.encode_utf16().collect::<Vec<_>>();
     let name_bytes = wide.len() * std::mem::size_of::<u16>();
     let length = header + name_bytes;
@@ -40,6 +60,11 @@ fn write_directory_entry(buffer: &mut [u8], start: usize, next: u32, name: &str)
             .add(start)
             .cast::<u32>()
             .write_unaligned(next);
+        buffer
+            .as_mut_ptr()
+            .add(start + attributes_offset)
+            .cast::<u32>()
+            .write_unaligned(attributes);
         buffer
             .as_mut_ptr()
             .add(start + name_length_offset)
@@ -452,6 +477,69 @@ fn created_directory_rolls_back_every_post_create_validation_failure() {
     }
 }
 
+/// A READ-ONLY FILE child must not block destructive removal.
+///
+/// This is the exact case the original diagnosis missed. Git writes loose
+/// objects and packfiles at mode 444, so read-only children are the NORMAL case
+/// in every checkout — not an edge case.
+///
+/// The bit whose loss this catches: `FILE_GENERIC_WRITE` appearing in the
+/// `(File, Mutate)` access arm. A mode-444 child is refused AT THE OPEN with os
+/// error 5 when write is requested, so widening that arm to match the directory
+/// arm makes every read-only child un-removable. Windows-only because unix
+/// removal goes through cap-std relative to the descriptor and has no per-handle
+/// access mask, so this arm has no unix analogue.
+///
+/// Asserts on the invariant (removal succeeds, the tree is gone), never on an OS
+/// error code.
+#[test]
+fn windows_destructive_removal_succeeds_through_a_read_only_file_child() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    let child = root.join("packfile");
+    std::fs::write(&child, b"read-only like git writes them").unwrap();
+    let mut permissions = std::fs::metadata(&child).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&child, permissions).unwrap();
+    assert!(
+        std::fs::metadata(&child).unwrap().permissions().readonly(),
+        "the fixture must actually be read-only for this proof to mean anything"
+    );
+
+    let authority = DirectoryAuthority::open(&root).unwrap();
+    authority.remove_descendants().unwrap();
+
+    assert!(!child.exists());
+    assert!(authority.child_names().unwrap().is_empty());
+}
+
+/// A DIRECTORY child must not block destructive removal either.
+///
+/// The bit whose loss this catches: `FILE_GENERIC_WRITE` disappearing from the
+/// `(Directory, Mutate)` access arm. The cleanup recursion terminates in
+/// `FlushFileBuffers` on the directory handle, which demands write access, so
+/// narrowing that arm to match the file arm makes every directory child
+/// un-removable. Together with the sibling read-only-file proof above, this
+/// pins BOTH ends of the impossibility that forced the kind to become precise.
+/// Windows-only for the same reason as its sibling.
+#[test]
+fn windows_destructive_removal_succeeds_through_a_directory_child() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(root.join("empty")).unwrap();
+    std::fs::create_dir_all(root.join("nested").join("inner")).unwrap();
+    std::fs::write(root.join("nested").join("inner").join("leaf"), b"leaf").unwrap();
+
+    let authority = DirectoryAuthority::open(&root).unwrap();
+    authority.remove_descendants().unwrap();
+
+    assert!(!root.join("empty").exists());
+    assert!(!root.join("nested").exists());
+    assert!(authority.child_names().unwrap().is_empty());
+}
+
 #[test]
 fn directory_information_larger_than_supplied_buffer_fails_closed() {
     assert!(checked_information_length(4097, 4096).is_err());
@@ -462,19 +550,32 @@ fn directory_information_larger_than_supplied_buffer_fails_closed() {
 fn unaligned_directory_entry_is_copied_before_utf16_decoding() {
     let header = std::mem::offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileName);
     let mut storage = vec![0_u8; 1 + header + 16];
-    let returned = write_directory_entry(&mut storage, 1, 0, "proof");
-    let mut names = Vec::new();
+    let returned = write_directory_entry(
+        &mut storage,
+        1,
+        0,
+        "proof",
+        FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY,
+    );
+    let mut entries = Vec::new();
 
-    parse_directory_entries(unsafe { storage.as_ptr().add(1) }, returned, &mut names).unwrap();
+    parse_directory_entries(unsafe { storage.as_ptr().add(1) }, returned, &mut entries).unwrap();
 
-    assert_eq!(names, ["proof"]);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "proof");
+    // The attribute word is read from an UNALIGNED record too, and it is the
+    // field the cleanup walk derives each child's open kind from.
+    assert_eq!(
+        entries[0].attributes,
+        FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY
+    );
 }
 
 #[test]
 fn misaligned_next_directory_entry_offset_fails_closed() {
     let header = std::mem::offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileName);
     let mut storage = vec![0_u8; header * 2 + 32];
-    let first_length = write_directory_entry(&mut storage, 0, 0, "first");
+    let first_length = write_directory_entry(&mut storage, 0, 0, "first", FILE_ATTRIBUTE_NORMAL);
     let bad_next = (first_length.next_multiple_of(8) + 4) as u32;
     assert_eq!(bad_next % 8, 4);
     unsafe { storage.as_mut_ptr().cast::<u32>().write_unaligned(bad_next) };
@@ -488,12 +589,18 @@ fn directory_name_cannot_cross_its_current_entry_boundary() {
     let header = std::mem::offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileName);
     let next = (header + 8).next_multiple_of(8);
     let mut storage = vec![0_u8; next + header + 32];
-    write_directory_entry(&mut storage, 0, next as u32, "name-that-crosses-boundary");
+    write_directory_entry(
+        &mut storage,
+        0,
+        next as u32,
+        "name-that-crosses-boundary",
+        FILE_ATTRIBUTE_DIRECTORY,
+    );
 
-    let mut names = Vec::new();
-    assert!(parse_directory_entries(storage.as_ptr(), storage.len(), &mut names).is_err());
+    let mut entries = Vec::new();
+    assert!(parse_directory_entries(storage.as_ptr(), storage.len(), &mut entries).is_err());
     assert!(
-        names.is_empty(),
+        entries.is_empty(),
         "invalid entry must not produce partial names"
     );
 }
