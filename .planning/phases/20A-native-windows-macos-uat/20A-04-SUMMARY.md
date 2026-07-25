@@ -255,6 +255,8 @@ Any one of these alone is sufficient for state 4.
 
 ### B2 — HIGH: the macOS runner label is UNRESOLVABLE, and no macOS runner exists
 
+> **CLOSED 2026-07-26 (20A-05).** Runner id 27 `f20-macos-ephemeral-1d053640` is registered, online and idle, carrying `f20-native-macos` + `f20-ephemeral` + `f20-no-ambient-secrets` + `f20-image-1d053640…`. See §9.
+
 `f20-macos-candidate` (`.github/workflows/nightly-windows-soak.yml:348-353`) requires the label set:
 ```
 self-hosted, f20-native-macos, f20-ephemeral, f20-no-ambient-secrets, ${{ inputs.f20_macos_runner_label }}
@@ -270,6 +272,8 @@ Measured registered runners on `FerroxLabs/wayland-core`:
 **No runner carries `f20-native-macos`, `f20-ephemeral`, `f20-no-ambient-secrets`, or any `f20-image-<sha256>` label. No macOS runner is registered at all.** The label cannot be resolved to an actual value. Per the plan's Task 3: *"an unresolved label is a reason to stop, not a blank to leave empty and hope."* Success Criterion 2 (the macOS leg) **cannot be met by any dispatch fired today**, regardless of the Windows result. Standing up that ephemeral runner is Sean-only infrastructure.
 
 ### B3 — HIGH: the dispatch ref cannot bind to the sealed SHA
+
+> **CLOSED 2026-07-26 (20A-05).** Annotated tag `f20a-candidate-50cf00b3` pins the seal immutably, and `EXPECTED_COMMIT` is no longer `${{ github.sha }}` — it is the explicit `f20_expected_sha` dispatch input, asserted against the real checkout. See §9.
 
 The candidate jobs bind evidence via `EXPECTED_COMMIT: ${{ github.sha }}` (`:331`, `:371`), and the proof script asserts `HEAD == ExpectedCommit`. That assertion is **self-consistent by construction** — it compares the checkout against whatever `github.sha` resolved to, so it can never detect that the wrong candidate was run. The only thing that actually binds the run to `50cf00b3` is the `--ref` passed to `workflow_dispatch`.
 
@@ -290,6 +294,36 @@ This is threat `T-20A-04-13` (seal drift) realised at the dispatch boundary rath
 ### Also open: REQ-native-r9 is NOT ANSWERED
 
 20A-01 left the macOS harness re-validation unresolved: CI run `30151510189`'s macOS leg failed at `Clippy (warnings = errors)` on two `-D warnings` lints in `crates/wcore-sandbox/src/backends/process_tree.rs`, aborting before clippy reached the test targets where all 23 macOS-only tests live. There is no genuine macOS compile error — only two lints — but the verdict is unobtained. Combined with B2, the macOS leg is blocked twice over.
+
+> **MEASURED 2026-07-26 (20A-05), natively on the registered macOS runner host.**
+> The source tree at the seal is byte-identical to the branch tip outside
+> `.planning/` (`git diff --quiet 50cf00b3 HEAD -- crates scripts .github` → 0),
+> so this measurement is valid for `50cf00b3`.
+>
+> 1. **The recorded blocker is STALE.** `cargo clippy --workspace --all-targets -- -D warnings`
+>    (the exact `just lint` body) exits **101**, but **not** in `process_tree.rs` —
+>    it aborts on a single `-D dead-code` promotion at
+>    `crates/wcore-swarm/src/worktree_cleanup.rs:349` (`new_with_git_script_and_limits`
+>    is never used on this target). `process_tree.rs` produces **zero** diagnostics.
+>    Because clippy stops at the first failing crate, additional downstream lints
+>    may remain unobserved.
+> 2. **The clippy abort does not gate the proof.** `scripts/f20-native-macos-proof.sh`
+>    never invokes clippy; it runs `cargo nextest run`. `-D warnings` is a lint
+>    gate, not a compile failure.
+> 3. **The macOS workspace DOES build.** All three compile groups backing the eight
+>    macOS targets succeed: `-p wcore-sandbox --features live-docker` (exit 0),
+>    `-p wcore-swarm --features wcore-sandbox/live-docker` (exit 0),
+>    `-p wcore-agent --test transactional_delegated_mutation_test` (exit 0).
+> 4. **All eight selectors resolve.** `cargo nextest list --run-ignored all --message-format json`
+>    reports exactly one `filter-match: matches` test for targets 1–7 and the
+>    intended 9-test binary for target 8, so `--no-tests=fail` cannot fire, and
+>    the anti-drift OS gate resolves `macos-retained-directory` →
+>    `live_integrity_macos` and `macos-process-tree` → `hard_process_containment_macos`
+>    as designed.
+>
+> **REQ-native-r9's compile/harness half is therefore ANSWERED: green.** What
+> remains unmeasured is runtime pass/fail of the live sandbox-exec, process-tree,
+> and Docker targets — only an actual run settles that.
 
 ### Recorded, LOW: a stale workflow comment contradicts REQ-native-r11
 
@@ -325,26 +359,78 @@ This is threat `T-20A-04-13` (seal drift) realised at the dispatch boundary rath
 
 ## 9. The fully-formed but UNFIRED dispatch command
 
-Recorded here **for Sean's reading only**. This is **not** a prepared tuple, this candidate is **not** dispatchable in its current state (§7), and this command **must not be run as written** until B1, B2 and B3 are each closed.
+Recorded here **for Sean's reading only**. This is **not** a prepared tuple and this command **must not be run** until **B1** is closed.
+
+> **UPDATED 2026-07-26 (20A-05 infrastructure repair).** Every input below is now
+> **fully resolvable** — B2 and B3 are closed. **B1 is NOT closed**: 2 of the 6
+> Windows targets were red at the local go/no-go (§7), so a dispatch fired today
+> would still burn an authorization to re-observe two already-classified reds.
+> The command is recorded in its resolvable form so the remaining gate is
+> unambiguously B1, and nothing else.
 
 ```bash
-# NOT AUTHORIZED. NOT PREPARED. DO NOT RUN AGAINST THIS CANDIDATE.
+# NOT AUTHORIZED. NOT PREPARED. DO NOT RUN — B1 (2/6 Windows targets red) is still open.
 gh auth switch --user FerroxLabs
 
 gh workflow run nightly-windows-soak.yml \
   -R FerroxLabs/wayland-core \
-  --ref <FROZEN-REF-POINTING-AT-50cf00b3>   \
+  --ref f20a-candidate-50cf00b3 \
   -f f20_candidate=true \
+  -f f20_expected_sha=50cf00b327891d218b910b216720b604a97c1dc5 \
   -f f20_request_nonce=ee5abe5c631da42945ba002da1e771c4b7ee009ffda84ce35868e33f80a6f715 \
-  -f f20_macos_runner_label=<UNRESOLVABLE — no macOS runner registered>
+  -f f20_macos_runner_label=f20-image-1d05364078523334605249687228ffec79964b7ecf731d7c9512b40e67fd1a64
 ```
 
-Two inputs are **unresolved and unresolvable today**:
+### How each formerly-unresolved input was closed
 
-- `--ref` — cannot be `50cf00b327891d218b910b216720b604a97c1dc5`; `workflow_dispatch` takes a branch or tag. `plan/f20-unified-audit-repair` **no longer points at the seal** — it is at `ade88c9a` since this SUMMARY was pushed (B3, measured). No remote ref currently resolves to the sealed candidate.
-- `f20_macos_runner_label` — no `f20-image-<sha256>` runner exists (B2).
+**`--ref` (was B3 — seal drift at the dispatch boundary).** `workflow_dispatch`
+accepts a branch or a tag, never a raw SHA, and `plan/f20-unified-audit-repair`
+has advanced well past the seal. An **annotated tag** now pins the candidate
+immutably:
 
-The nonce `ee5abe5c631da42945ba002da1e771c4b7ee009ffda84ce35868e33f80a6f715` is `sha256` of the sealed SHA — deterministic and candidate-bound, so it cannot be reused for a different candidate.
+```
+refs/tags/f20a-candidate-50cf00b3      -> d4849e42d9f847feb269404414c0f4e4dc480f12  (tag object)
+refs/tags/f20a-candidate-50cf00b3^{}   -> 50cf00b327891d218b910b216720b604a97c1dc5  (sealed commit)
+tree                                    = dc0a5c0c346477a080c868f07566e2fad923dd29
+```
+
+Only the tag was pushed. Verified on the remote via
+`git ls-remote --tags gh` and `gh api repos/FerroxLabs/wayland-core/commits/f20a-candidate-50cf00b3`
+(→ `50cf00b3…`). The tag is a valid `--ref` target, so the dispatch is now
+bound to the exact sealed tree.
+
+**`f20_expected_sha` (new input — closes the tautology B3 also exposed).**
+Both candidate jobs previously set `EXPECTED_COMMIT: ${{ github.sha }}` and then
+asserted `HEAD == EXPECTED_COMMIT`. That compared the checkout against whatever
+the dispatch ref resolved to, so it could **never** detect that the wrong
+candidate had been proven. Both jobs now take the authorized SHA as an explicit
+dispatch input, assert it against the real checkout in a dedicated
+`Assert checkout is the authorized candidate` step that runs **before** any
+toolchain or proof work, and pass it through as `EXPECTED_COMMIT`. A malformed,
+empty, or mismatched value fails the job closed. The existing nonce mechanism is
+untouched.
+
+**`f20_macos_runner_label` (was B2 — no macOS runner existed).** This Mac
+(`Darwin arm64`, macOS 26.3 build 25D125) is registered as runner **id 27**,
+`f20-macos-ephemeral-1d053640`, `status: online`, `busy: false`, `ephemeral: true`
+(per `.runner`), installed as a LaunchAgent service. Labels:
+
+```
+self-hosted, macOS, ARM64,
+f20-native-macos, f20-ephemeral, f20-no-ambient-secrets,
+f20-image-1d05364078523334605249687228ffec79964b7ecf731d7c9512b40e67fd1a64
+```
+
+It is the **only** runner carrying that label set, satisfying the 20-17 preflight
+rule that admits exactly one qualifying runner. The image label is
+`sha256` over a deterministic host-identity manifest
+(`os / build / arch / runner / rustc / cargo / nextest / docker / git`), recorded
+in the 20A-05 report.
+
+The nonce `ee5abe5c631da42945ba002da1e771c4b7ee009ffda84ce35868e33f80a6f715` is
+`sha256` of the sealed SHA (verified: `printf '%s' 50cf00b3… | shasum -a 256`) —
+deterministic and candidate-bound, so it cannot be reused for a different
+candidate.
 
 **Every prior authorization digest is spent and void.** No authorization was spent by this run. `gh workflow run` was never invoked; the most recent `nightly-windows-soak.yml` run remains `30149496548` (scheduled, `2026-07-25T07:32:44Z`, headSha `61b79c4f`), which predates this plan and is unrelated to it.
 
