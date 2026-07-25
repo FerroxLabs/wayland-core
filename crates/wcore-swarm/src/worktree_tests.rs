@@ -815,6 +815,65 @@ async fn seal_workspace() -> (
     (fixture, control, manager, workspace)
 }
 
+/// A NEED_WORK_TREE git subcommand must still be able to chdir into the
+/// repository root while `WorktreeManager`s hold their repository authority.
+///
+/// Windows failure mode this exists for: a retained directory handle carrying
+/// the `DELETE` access right blocks `SetCurrentDirectory` into that directory,
+/// so git's in-process chdir inside `setup_work_tree()` fails and `git status`
+/// dies with `fatal: this operation must be run in a work tree`. That made
+/// `assert_clean` refuse unconditionally once a manager existed, which gates
+/// dispatch, isolated checkout and integration checkout alike. The assertion
+/// below is on the INVARIANT (success), never on that message, so it survives a
+/// reworded git error and still fails if the DELETE bit is reintroduced.
+///
+/// The Linux-plus-Windows gate is deliberate and is not a dodge of the
+/// Windows-specific requirement: `seal_run_git` and `seal_init_repo` carry the
+/// same gate, so a `#[cfg(windows)]`-only test could not compile against them
+/// without duplicating a git fixture, and the assertion is a universal
+/// invariant that costs nothing to hold on Linux while guarding the unix path
+/// against a future regression in the shared observational shim.
+#[cfg(any(target_os = "linux", windows))]
+#[tokio::test]
+async fn git_status_succeeds_in_repo_root_while_manager_is_alive() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let control = tempfile::tempdir().expect("orchestrator control root");
+    seal_init_repo(fixture.path()).await;
+    // `WorktreeManager::new` creates its swarm root INSIDE the repository, so
+    // without this commit the working tree would be untracked-dirty and
+    // `assert_clean` would report `DirtyCheckout` for a reason unrelated to the
+    // chdir defect under test.
+    std::fs::write(fixture.path().join(".gitignore"), ".swarm-worktrees/\n").unwrap();
+    seal_run_git(fixture.path(), &["add", ".gitignore"]).await;
+    seal_run_git(
+        fixture.path(),
+        &[
+            "-c",
+            "user.email=swarm-test@example.invalid",
+            "-c",
+            "user.name=Swarm Test",
+            "commit",
+            "-qm",
+            "ignore swarm worktrees",
+        ],
+    )
+    .await;
+
+    let in_repo_manager = WorktreeManager::new(fixture.path()).expect("in-repo manager");
+    let external_manager =
+        WorktreeManager::new_with_workspace_root(fixture.path(), &control.path().join("checkouts"))
+            .expect("external manager");
+
+    // Both managers stay alive across both assertions, so this also covers two
+    // repository authorities retained on one repository root.
+    in_repo_manager.assert_clean().await.expect(
+        "a NEED_WORK_TREE git subcommand must chdir into the repository root while the in-repo manager holds its repository authority",
+    );
+    external_manager.assert_clean().await.expect(
+        "a NEED_WORK_TREE git subcommand must chdir into the repository root while the external-workspace manager holds its repository authority",
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn candidate_seal_mints_and_revalidates_from_fresh_checkout() {
