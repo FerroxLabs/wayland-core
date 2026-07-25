@@ -796,8 +796,9 @@ impl WorktreeManager {
         } else {
             checkout.join(common)
         };
-        let common = std::fs::canonicalize(common)?;
-        if !common.starts_with(&checkout) {
+        let common = normalized_root(&common)?;
+        let checkout_root = normalized_root(&checkout)?;
+        if !common.starts_with(&checkout_root) {
             return Err(SwarmError::WorktreeIo(format!(
                 "isolated checkout Git authority escaped its root: {}",
                 common.display()
@@ -1125,8 +1126,9 @@ impl WorktreeManager {
         } else {
             checkout.join(common)
         };
-        let common = std::fs::canonicalize(common)?;
-        if !common.starts_with(&checkout) {
+        let common = normalized_root(&common)?;
+        let checkout_root = normalized_root(&checkout)?;
+        if !common.starts_with(&checkout_root) {
             return Err(SwarmError::WorktreeIo(format!(
                 "integration checkout Git authority escaped its root: {}",
                 common.display()
@@ -1137,14 +1139,14 @@ impl WorktreeManager {
         let git_dir =
             Box::pin(self.checkout_git_stdout(&checkout, &["rev-parse", "--absolute-git-dir"]))
                 .await?;
-        let git_dir = std::fs::canonicalize(PathBuf::from(git_dir))?;
+        let git_dir = normalized_root(Path::new(&git_dir))?;
         if git_dir != common {
             return Err(SwarmError::WorktreeIo(
                 "integration checkout is a linked worktree; landing requires the main checkout"
                     .to_owned(),
             ));
         }
-        if common != std::fs::canonicalize(checkout.join(".git"))? {
+        if common != normalized_root(&checkout.join(".git"))? {
             return Err(SwarmError::WorktreeIo(
                 "integration checkout does not own an in-tree .git directory".to_owned(),
             ));
