@@ -683,10 +683,14 @@ fn map_io_err(e: std::io::Error) -> SubprocessPluginError {
 
 #[cfg(test)]
 mod tests {
+    // Both are consumed only by `mcp_bridge_env_clear_blocks_secret_vars`,
+    // which is `cfg(unix)` because it asserts POSIX env-clear semantics.
+    #[cfg(unix)]
     use std::collections::HashMap;
 
     use super::mcp_call_params;
     use serde_json::json;
+    #[cfg(unix)]
     use wcore_config::shell::McpStdioLaunchContext;
     use wcore_plugin_api::tool::PluginToolEffectIdentity;
 

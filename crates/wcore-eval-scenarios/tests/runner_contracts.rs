@@ -4,8 +4,13 @@ use std::time::Duration;
 
 use wcore_eval_scenarios::assertions::Assertion;
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
-use wcore_eval_scenarios::runner::{Failure, run_with_binary, run_with_binary_in_environment};
+use wcore_eval_scenarios::runner::{Failure, run_with_binary};
+// Only the cgroup-migration test below builds a hostile fixture environment,
+// and it is Linux-only.
+#[cfg(target_os = "linux")]
+use wcore_eval_scenarios::runner::run_with_binary_in_environment;
 use wcore_eval_scenarios::scenario::{Category, Scenario, Turn};
+#[cfg(target_os = "linux")]
 use wcore_eval_scenarios::tempenv;
 
 #[cfg(target_os = "linux")]
@@ -229,8 +234,8 @@ async fn assert_owned_orphan_cleaned(
     }
     assert!(
         cleaned,
-        "owned descendant pid={} still listens on 127.0.0.1:{}",
-        state.pid, state.port
+        "owned descendant pid={} still listens on 127.0.0.1:{} (last published heartbeat {})",
+        state.pid, state.port, state.heartbeat
     );
     if result.execution.containment_authoritative {
         assert!(

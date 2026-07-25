@@ -304,7 +304,11 @@ async fn tc_10_13_dir_permission_0700() {
         },
     );
     let skills = catalog.prepare_bundled_skills().await;
-    let dir = PathBuf::from(
+    // `_dir` because only the POSIX mode assertion below consumes it; the
+    // Windows equivalent is the handle-bound DACL proof in
+    // `tc_10_28_*`/`tc_10_29_*`. The `expect` still runs on every platform,
+    // so a failed extraction fails this test everywhere.
+    let _dir = PathBuf::from(
         skills[0]
             .skill_root
             .as_deref()
@@ -313,7 +317,7 @@ async fn tc_10_13_dir_permission_0700() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(&dir).unwrap();
+        let meta = std::fs::metadata(&_dir).unwrap();
         assert_eq!(
             meta.permissions().mode() & 0o777,
             0o700,
@@ -338,7 +342,8 @@ async fn tc_10_14_file_permission_0600() {
         },
     );
     let skills = catalog.prepare_bundled_skills().await;
-    let dir = PathBuf::from(
+    // `_dir`: see `tc_10_13_dir_permission_0700` above.
+    let _dir = PathBuf::from(
         skills[0]
             .skill_root
             .as_deref()
@@ -347,7 +352,7 @@ async fn tc_10_14_file_permission_0600() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let fmeta = std::fs::metadata(dir.join("file.md")).unwrap();
+        let fmeta = std::fs::metadata(_dir.join("file.md")).unwrap();
         assert_eq!(
             fmeta.permissions().mode() & 0o777,
             0o600,
