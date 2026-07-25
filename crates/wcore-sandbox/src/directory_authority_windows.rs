@@ -34,11 +34,22 @@ pub(super) struct DirectoryCaseSensitiveInfo {
     pub(super) flags: u32,
 }
 
+/// The kind of object a handle-relative open targets.
+///
+/// There is deliberately NO "unknown" variant. Every relative open in this
+/// module knows the object's type before it opens it — the cleanup walk carries
+/// the kind out of the directory enumeration — and the kind selects both the
+/// access mask and the `FILE_DIRECTORY_FILE` / `FILE_NON_DIRECTORY_FILE` option
+/// that makes the KERNEL enforce the type at open. An unknown kind could only be
+/// served by the union of two incompatible masks (a directory child requires
+/// write because cleanup flushes; a read-only file child forbids it because the
+/// open is refused), so its absence is a fail-closed CONSTRUCTION: a future
+/// caller that wants one has to add it back deliberately and answer the rights
+/// question, rather than silently inheriting an over-broad grant.
 #[derive(Clone, Copy)]
 enum RelativeKind {
     Directory,
     File,
-    Any,
 }
 
 #[derive(Clone, Copy)]
@@ -247,6 +258,9 @@ pub(super) fn open_child_file(
 /// `open_child_file` uses cannot delete and is refused with os error 5. The
 /// mutate profile deliberately withholds the WRITE bit (see the access match),
 /// which is what also lets a read-only file be removed.
+///
+/// Gated to match its only caller's configuration (see the portable wrapper).
+#[cfg(any(feature = "live-docker", test))]
 pub(super) fn open_child_file_for_removal(
     parent: &DirectoryAuthority,
     name: &str,
@@ -804,23 +818,6 @@ fn open_relative(
         // flushes the directory handle, and no single mask satisfies both — which
         // is exactly why `remove_descendants` now passes a PRECISE kind.
         (RelativeKind::File, RelativeIntent::Mutate) => FILE_GENERIC_READ | DELETE | SYNCHRONIZE,
-        (RelativeKind::Any, RelativeIntent::ReadOnly) => FILE_GENERIC_READ | SYNCHRONIZE,
-        // REFUSED, not granted. Since the cleanup walk carries the enumerated
-        // kind, nothing in this crate asks for a mutate open without knowing the
-        // object's type (grep-verified: `remove_descendants` was the sole
-        // unknown-kind mutate caller). Leaving a live grant nobody calls would
-        // let a future caller silently inherit the union of two incompatible
-        // masks; refusing makes it fail closed instead.
-        (RelativeKind::Any, RelativeIntent::Mutate) => {
-            return Err(SandboxError::ExecFailed(
-                "Windows cannot mutate an authority with an unknown type".to_owned(),
-            ));
-        }
-        (RelativeKind::Any, RelativeIntent::Create) => {
-            return Err(SandboxError::ExecFailed(
-                "Windows cannot create an authority with an unknown type".to_owned(),
-            ));
-        }
         // `LockFileEx` needs read or write access on the handle it locks, and
         // nothing else. The DELETE right is DELIBERATELY WITHHELD: this handle
         // never destroys the sentinel — removal happens through the parent's
@@ -836,10 +833,7 @@ fn open_relative(
         // directory here is the exact defect this intent exists to close, so
         // refuse explicitly rather than hand the locking layer an object on
         // which byte-range locking is undefined.
-        (
-            RelativeKind::Directory | RelativeKind::Any,
-            RelativeIntent::LockOpen | RelativeIntent::LockOpenOrCreate,
-        ) => {
+        (RelativeKind::Directory, RelativeIntent::LockOpen | RelativeIntent::LockOpenOrCreate) => {
             return Err(SandboxError::ExecFailed(
                 "Windows advisory locks require a regular-file target".to_owned(),
             ));
@@ -848,7 +842,6 @@ fn open_relative(
     let type_options = match kind {
         RelativeKind::Directory => FILE_DIRECTORY_FILE,
         RelativeKind::File => FILE_NON_DIRECTORY_FILE,
-        RelativeKind::Any => 0,
     };
     let status = unsafe {
         NtCreateFile(
@@ -859,7 +852,7 @@ fn open_relative(
             std::ptr::null(),
             match kind {
                 RelativeKind::Directory => FILE_ATTRIBUTE_DIRECTORY,
-                RelativeKind::File | RelativeKind::Any => FILE_ATTRIBUTE_NORMAL,
+                RelativeKind::File => FILE_ATTRIBUTE_NORMAL,
             },
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             match intent {
@@ -987,7 +980,7 @@ pub(super) fn parse_directory_entries(
         let entry_name_end = header.checked_add(name_bytes).ok_or_else(|| {
             SandboxError::ExecFailed("Windows directory name length overflowed".to_owned())
         })?;
-        if name_bytes % std::mem::size_of::<u16>() != 0
+        if !name_bytes.is_multiple_of(std::mem::size_of::<u16>())
             || name_bytes
                 > returned.checked_sub(name_start).ok_or_else(|| {
                     SandboxError::ExecFailed("Windows directory name offset overflowed".to_owned())
@@ -1000,7 +993,7 @@ pub(super) fn parse_directory_entries(
         if next != 0
             && (next < header
                 || next > remaining
-                || next % 8 != 0
+                || !next.is_multiple_of(8)
                 || entry_name_end > next
                 || offset.checked_add(next).is_none())
         {

@@ -348,6 +348,12 @@ impl DirectoryAuthority {
     /// which read-only is sufficient. Windows sets a delete disposition on the
     /// FILE's own handle, so that handle must carry `DELETE` — the read-only
     /// profile `open_child_file` uses is refused with os error 5.
+    ///
+    /// Gated to the configurations that compile its ONLY caller — the `archive`
+    /// module, which is itself `cfg(any(feature = "live-docker", test))`. This
+    /// is configuration-correct gating, NOT dead code: removing it would break
+    /// the crash-recovery journal cleanup wherever that module does build.
+    #[cfg(any(feature = "live-docker", test))]
     pub(super) fn open_child_file_for_removal(&self, name: &str) -> Result<RegularFileAuthority> {
         validate_child_name(name)?;
         #[cfg(windows)]
@@ -1073,19 +1079,22 @@ fn file_identity_changed(path: &Path, when: &str) -> SandboxError {
 }
 
 fn open_directory(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
-    }
     #[cfg(windows)]
     {
-        return windows::open_directory(path);
+        windows::open_directory(path)
     }
-    options.open(path)
+    #[cfg(not(windows))]
+    {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
+        }
+        options.open(path)
+    }
 }
 
 /// Open the authority root without requesting delete access, for an authority
@@ -1114,19 +1123,22 @@ fn open_directory_observational(path: &Path) -> std::io::Result<File> {
 }
 
 fn open_regular_file(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
     #[cfg(windows)]
     {
-        return windows::open_regular_file(path);
+        windows::open_regular_file(path)
     }
-    options.open(path)
+    #[cfg(not(windows))]
+    {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        options.open(path)
+    }
 }
 
 fn validate_real_directory(path: &Path, metadata: &std::fs::Metadata) -> Result<()> {
@@ -1158,7 +1170,7 @@ fn is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
         use std::os::windows::fs::MetadataExt;
 
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
     #[cfg(not(windows))]
     false

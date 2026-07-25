@@ -358,12 +358,12 @@ impl BubblewrapBackend {
         // authority (if any) is validated for path agreement only.
         #[cfg(not(target_os = "linux"))]
         {
-            if let Some(authority) = cwd_authority.as_ref() {
-                if cmd.cwd.as_deref() != Some(authority.display_path()) {
-                    return Err(SandboxError::PathDenied(
-                        "bubblewrap cwd does not match retained authority".to_owned(),
-                    ));
-                }
+            if let Some(authority) = cwd_authority.as_ref()
+                && cmd.cwd.as_deref() != Some(authority.display_path())
+            {
+                return Err(SandboxError::PathDenied(
+                    "bubblewrap cwd does not match retained authority".to_owned(),
+                ));
             }
             if let Some(cwd) = &cmd.cwd {
                 bwrap_argv.push("--chdir".into());
