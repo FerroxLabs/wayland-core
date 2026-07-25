@@ -502,8 +502,33 @@ fn fixture_argv(name: &str) -> Vec<String> {
 #[test]
 #[ignore = "subprocess fixture"]
 fn standalone_authority_fixture() {
-    let checkout = std::env::current_dir().unwrap().canonicalize().unwrap();
-    let child_git = checkout.join(".git").canonicalize().unwrap();
+    // WHY THIS RUNS INSIDE THE CONTAINMENT WITHOUT `std::fs::canonicalize`.
+    //
+    // A delegated worker's filesystem grant set is exactly its own checkout and
+    // its own scratch, and nothing else. Measured on SEANDESKTOP under the real
+    // AppContainer restricted token: the checkout itself opens for zero-access,
+    // read-attributes and generic-read, stats and enumerates — while EVERY
+    // ancestor of it, up to and including `C:\`, is `Access is denied`.
+    //
+    // `canonicalize` cannot survive that, and must not. On Windows it opens the
+    // object (which succeeds) and then calls `GetFinalPathNameByHandleW` with
+    // `VOLUME_NAME_DOS`, which has to resolve the volume back to a drive letter
+    // through the volume root — an object the containment deliberately withholds
+    // — so it returns ERROR_ACCESS_DENIED. Resolving the volume namespace is a
+    // capability a contained worker is not supposed to have; a fixture that
+    // needs it is asserting against the sandbox rather than through it.
+    //
+    // The two checks below replace `canonicalize(...).starts_with(checkout)` and
+    // are STRICTLY STRONGER than it:
+    //   * the old form accepted a `.git` FILE holding a `gitdir:` redirect at
+    //     the parent repository — canonicalizing a regular file inside the
+    //     checkout still yields a path inside the checkout, so `starts_with`
+    //     passed. `is_dir()` on the un-followed metadata refuses it.
+    //   * a symlink or NTFS junction at `.git` is refused WITHOUT following it,
+    //     which is the escape `canonicalize` existed here to catch.
+    let checkout = std::env::current_dir().unwrap();
+    let child_git = checkout.join(".git");
+    let child_git_kind = std::fs::symlink_metadata(&child_git).unwrap();
     let parent_git = std::path::PathBuf::from(std::env::var("WCORE_SWARM_PARENT_GIT").unwrap());
     let sibling = std::path::PathBuf::from(std::env::var("WCORE_SWARM_SIBLING").unwrap());
     let credential = std::path::PathBuf::from(std::env::var("WCORE_SWARM_DENIED_FILE").unwrap());
@@ -512,7 +537,14 @@ fn standalone_authority_fixture() {
         .expect("transaction root")
         .join(".wayland-reservation");
 
-    assert!(child_git.starts_with(&checkout));
+    assert!(
+        child_git_kind.is_dir(),
+        "child .git must be a real in-tree directory, not a `gitdir:` redirect file"
+    );
+    assert!(
+        !child_git_kind.file_type().is_symlink(),
+        "child .git must not be a symlink or junction escaping the checkout"
+    );
     assert_ne!(child_git, parent_git);
     assert!(child_git.join("objects").is_dir());
     assert!(!child_git.join("objects/info/alternates").exists());
