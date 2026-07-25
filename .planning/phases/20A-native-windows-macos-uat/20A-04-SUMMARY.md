@@ -273,7 +273,17 @@ Measured registered runners on `FerroxLabs/wayland-core`:
 
 The candidate jobs bind evidence via `EXPECTED_COMMIT: ${{ github.sha }}` (`:331`, `:371`), and the proof script asserts `HEAD == ExpectedCommit`. That assertion is **self-consistent by construction** — it compares the checkout against whatever `github.sha` resolved to, so it can never detect that the wrong candidate was run. The only thing that actually binds the run to `50cf00b3` is the `--ref` passed to `workflow_dispatch`.
 
-GitHub's `workflow_dispatch` `ref` accepts a **branch or tag name**, not an arbitrary commit SHA. Today `plan/f20-unified-audit-repair` happens to point at `50cf00b3` on both the local and the remote (verified: remote `.object.sha` = `50cf00b327891d218b910b216720b604a97c1dc5`). **The moment any commit lands on that branch — including this SUMMARY — `github.sha` stops being the sealed SHA, and a dispatch would silently prove a different candidate while every in-run assertion still passed.**
+GitHub's `workflow_dispatch` `ref` accepts a **branch or tag name**, not an arbitrary commit SHA. At seal time `plan/f20-unified-audit-repair` pointed at `50cf00b3` on both the local and the remote (verified: remote `.object.sha` = `50cf00b327891d218b910b216720b604a97c1dc5`). **The moment any commit lands on that branch, `github.sha` stops being the sealed SHA, and a dispatch would silently prove a different candidate while every in-run assertion still passed.**
+
+**This is now measured, not predicted.** Pushing this SUMMARY advanced the branch:
+
+```
+50cf00b3..ade88c9a  plan/f20-unified-audit-repair -> plan/f20-unified-audit-repair
+remote .object.sha  = ade88c9aa4b8151d868b329bed515f16f228bf17
+refs/f20a/candidate = 50cf00b327891d218b910b216720b604a97c1dc5
+```
+
+A dispatch with `--ref plan/f20-unified-audit-repair` fired right now would run against `ade88c9a`, **not** the sealed candidate — and would report a clean self-consistent PASS while proving the wrong tree. `refs/f20a/candidate` still holds the seal locally; nothing on the remote does.
 
 This is threat `T-20A-04-13` (seal drift) realised at the dispatch boundary rather than at the local gate. `refs/f20a/candidate` protects the local record; it does **not** protect the dispatch. Binding a dispatch to `50cf00b3` requires a tag or a frozen branch pointing exactly at it — and creating a tag is itself a Sean gate.
 
@@ -331,7 +341,7 @@ gh workflow run nightly-windows-soak.yml \
 
 Two inputs are **unresolved and unresolvable today**:
 
-- `--ref` — cannot be `50cf00b327891d218b910b216720b604a97c1dc5`; `workflow_dispatch` takes a branch or tag. `plan/f20-unified-audit-repair` points at the seal *right now* but stops doing so the moment this SUMMARY commits (B3).
+- `--ref` — cannot be `50cf00b327891d218b910b216720b604a97c1dc5`; `workflow_dispatch` takes a branch or tag. `plan/f20-unified-audit-repair` **no longer points at the seal** — it is at `ade88c9a` since this SUMMARY was pushed (B3, measured). No remote ref currently resolves to the sealed candidate.
 - `f20_macos_runner_label` — no `f20-image-<sha256>` runner exists (B2).
 
 The nonce `ee5abe5c631da42945ba002da1e771c4b7ee009ffda84ce35868e33f80a6f715` is `sha256` of the sealed SHA — deterministic and candidate-bound, so it cannot be reused for a different candidate.
