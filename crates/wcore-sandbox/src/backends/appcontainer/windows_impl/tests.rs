@@ -470,12 +470,38 @@ async fn large_output_survives_live() {
 fn required_live_job_teardown_precedes_workspace_cleanup() {
     use crate::backends::process_tree::{ProcessTreeGuard, isolate_std};
 
+    use std::os::windows::process::CommandExt;
+
     let dir = tempfile::tempdir().expect("workspace");
     let marker = dir.path().join("descendant.marker");
+
+    // WHAT THE OLD FORM DID WRONG. It embedded the marker's ABSOLUTE PATH inside
+    // an already-quoted argument using doubled quotes
+    // (`cmd /c "echo alive> ""C:\...\descendant.marker"" & ..."`) and passed it
+    // through `Command::arg`, which applies std's `CommandLineToArgvW` quoting
+    // ON TOP of the cmd escaping. Quote parity broke and cmd.exe reported the
+    // whole string as a command name:
+    //   '"echo alive> ""C:\...marker"" & ping ..."' is not recognized ...
+    //
+    // THE REPAIR REMOVES THE NESTING RATHER THAN ESCAPING IT HARDER. The child's
+    // working directory is the temp directory, so the marker is a BARE relative
+    // name with no path and no quotes, and the line is handed to cmd verbatim
+    // via `raw_arg` so std does not re-quote it. The polling below still uses the
+    // absolute path, unchanged.
+    //
+    // The detach and hold primitives are the ones `tests/hard_process_
+    // containment_windows.rs` measured: `start ""` gives `start` an empty title
+    // so it cannot consume the program token, `/b` keeps it in this console,
+    // `/d` disables AutoRun, `/s` makes each cmd take everything between its
+    // first and last quote literally, and the hold is a BARE `for /L` cmd
+    // builtin — every external exe (ping/choice/timeout) exits in ~80 ms under a
+    // Low-IL restricted token, and a parenthesized `(for /L ...)` fails to parse
+    // under `cmd /d /s /c`. Single `%i`, not batch `%%i`.
+    let hold = "for /L %i in (1,1,8000000) do @rem";
     let mut command = std::process::Command::new("cmd");
-    command.arg("/c").arg(format!(
-        "start /b cmd /c \"echo alive> \"\"{}\"\" & ping -n 300 127.0.0.1 >nul\" & ping -n 300 127.0.0.1 >nul",
-        marker.display()
+    command.current_dir(dir.path());
+    command.raw_arg(format!(
+        "/d /s /c \"start \"\" /b cmd /d /s /c \"echo alive>descendant.marker & {hold}\" & {hold}\""
     ));
     isolate_std(&mut command);
     let mut child = command.spawn().expect("spawn owned process tree");
