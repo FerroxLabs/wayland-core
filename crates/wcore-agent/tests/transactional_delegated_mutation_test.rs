@@ -157,10 +157,27 @@ fn init_repo(repo: &Path) {
 /// Build a clean, Wayland-owned integration checkout: a real Git clone of the
 /// source the parent-landing primitive accepts (a bare/dirty repo would be
 /// rejected by design).
+///
+/// MINTED THE WAY PRODUCTION MINTS IT. `WorktreeManager::create_integration_checkout`
+/// clones through `WorktreeManager::git_command`, which unconditionally forces
+/// `core.autocrlf=false` (`worktree_cleanup.rs`), so the checkout it produces is
+/// written in the same representation the landing later judges it in. A bare
+/// `git clone` here inherits ambient config instead — and Git for Windows ships
+/// `core.autocrlf=true` in its SYSTEM config, so on Windows the clone smudged
+/// every LF blob to CRLF on disk while the index kept LF. The landing's scrubbed
+/// `git status` (which sees `autocrlf` unset, i.e. false, because
+/// `GIT_CONFIG_NOSYSTEM=1` strips the system value) then read the freshly-minted
+/// checkout as ` M README.md` and refused to land into a "dirty" tree.
+///
+/// Forcing the same value here makes the fixture mint a production-shaped
+/// checkout. It relaxes nothing: the landing still judges the tree under its own
+/// scrub, and a genuinely dirty tree is still refused.
 fn clone_integration(source: &Path, destination: &Path) {
     run_git(
         source,
         &[
+            "-c",
+            "core.autocrlf=false",
             "clone",
             "--",
             &source.to_string_lossy(),
