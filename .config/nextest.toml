@@ -85,6 +85,38 @@ filter = 'test(/release_binary_/)'
 slow-timeout = { period = "180s", terminate-after = 2 }
 retries = 0
 
+# `packaged_f04_run_is_repeatable_and_content_addressed` drives the sealed F04
+# artifact through TWO complete packaged runs and then cross-checks every
+# content-addressed digest between them. It is genuinely long, not hung.
+#
+# MEASURED, not assumed (hetzner-dsm, 96 cores, warm cache, 60565c53, the test
+# alone in its process with nothing else scheduled):
+#     run 1: `test result: ok. 1 passed ... finished in 188.43s`
+#     run 2: `test result: ok. 1 passed ... finished in 188.03s`
+#     wall 3:08, user 185.02s, sys 3.34s → ~98% of ONE core for the whole run
+# It PASSES in isolation. Both spawned `wayland-core` children live under two
+# seconds each (2s process sampling caught each exactly once); the cost is
+# in-process work in the test, not a stalled child, and every wait in the
+# harness is already bounded (30s scenario guard, 5s child reap, 5s cgroup
+# drain). So THIS TEST NEEDS ~188s; the global CI budget kills at
+# 90s × 2 = 180s, which it crosses by ~8s even with zero contention. That is
+# the entire failure: it was terminated ~4% short of finishing.
+#
+# Override set to 120s × 4 = 480s hard kill — 2.55× the measured 188s, enough
+# headroom for a contended scheduler slot. `period` is deliberately set BELOW
+# the measured runtime rather than above it, so nextest still prints the
+# "running for over 120 seconds" notice on every run and the cost stays
+# visible in the log instead of being silently absorbed.
+#
+# `retries` is deliberately NOT set to 0 here (unlike the two overrides above).
+# Those two shell out to `cargo`, so a retry re-pays a build; this one does
+# not, and leaving the CI default keeps it identical to every other test.
+#
+# The global slow-timeout is untouched.
+[[profile.ci.overrides]]
+filter = 'test(=packaged_f04_run_is_repeatable_and_content_addressed)'
+slow-timeout = { period = "120s", terminate-after = 4 }
+
 [profile.ci.junit]
 path = "target/nextest/ci/junit.xml"
 
