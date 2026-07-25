@@ -22,14 +22,29 @@ on:
       # Candidate mode: a single Sean-authorized exact-SHA dual-platform F20
       # native UAT dispatch. When false (the default, and always for the
       # scheduled cron) the normal Windows soak runs unchanged. When true, ONLY
-      # the exact F20 native jobs run: hosted windows-2022 plus the externally
-      # pinned ephemeral macOS runner, both against the same github.sha, with
+      # the exact F20 native jobs run: the self-hosted AppContainer-capable
+      # Windows client runner plus the pinned ephemeral macOS runner, both
+      # asserted against the same explicitly authorized f20_expected_sha, with
       # caches and issue automation disabled and no secrets.
       f20_candidate:
         description: "Run the exact-candidate F20 native UAT jobs only"
         type: boolean
         required: false
         default: false
+      # Explicit candidate binding (20A-05). Previously both candidate jobs set
+      # EXPECTED_COMMIT: ${{ github.sha }} and then asserted HEAD == EXPECTED_COMMIT.
+      # That assertion was TAUTOLOGICAL — it compared the checkout against whatever
+      # the dispatch ref happened to resolve to, so it could never detect that the
+      # WRONG candidate had been proven. Because workflow_dispatch's `ref` accepts
+      # only a branch or a tag (never a raw SHA), any movement of the dispatched
+      # branch silently retargets the proof while every in-run check still passes.
+      # The authorized candidate SHA is now supplied explicitly here and asserted
+      # against the real checkout; a mismatch fails the job closed.
+      f20_expected_sha:
+        description: "Exact 40-lowercase-hex candidate commit the checkout MUST equal (candidate mode). Dispatch --ref must be a tag/branch that resolves to this SHA."
+        type: string
+        required: false
+        default: ""
       f20_macos_runner_label:
         description: "Pinned f20-image-<sha256> label for the ephemeral macOS runner (candidate mode)"
         type: string
@@ -317,6 +332,25 @@ jobs:
         shell: pwsh
         run: git config --global --add safe.directory '*'
 
+      # Non-tautological candidate binding. Fails closed BEFORE any toolchain or
+      # proof work when the checkout is not the explicitly authorized candidate.
+      - name: Assert checkout is the authorized candidate
+        shell: pwsh
+        env:
+          F20_EXPECTED_SHA: ${{ github.event.inputs.f20_expected_sha }}
+          DISPATCH_RESOLVED_SHA: ${{ github.sha }}
+        run: |
+          $expected = "$env:F20_EXPECTED_SHA".Trim()
+          if ($expected -cnotmatch '^[0-9a-f]{40}$') {
+            throw "f20_expected_sha must be exactly 40 lowercase hex characters; got '$expected'"
+          }
+          $actual = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "git rev-parse HEAD failed" }
+          Write-Host "authorized_candidate=$expected checkout_head=$actual dispatch_resolved=$env:DISPATCH_RESOLVED_SHA"
+          if ($actual -cne $expected) {
+            throw "wrong candidate: checkout HEAD is $actual, authorized candidate is $expected"
+          }
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -328,7 +362,7 @@ jobs:
       - name: Run exact-candidate F20 native Windows proof
         shell: pwsh
         env:
-          EXPECTED_COMMIT: ${{ github.sha }}
+          EXPECTED_COMMIT: ${{ github.event.inputs.f20_expected_sha }}
           F20_REQUEST_NONCE: ${{ github.event.inputs.f20_request_nonce }}
           WAYLAND_F20_NATIVE_ACCEPTANCE: "1"
         run: |
@@ -366,10 +400,32 @@ jobs:
         shell: bash
         run: git config --global --add safe.directory '*'
 
+      # Non-tautological candidate binding — bash mirror of the Windows job's
+      # assertion. Fails closed BEFORE the proof when the checkout is not the
+      # explicitly authorized candidate.
+      - name: Assert checkout is the authorized candidate
+        shell: bash
+        env:
+          F20_EXPECTED_SHA: ${{ github.event.inputs.f20_expected_sha }}
+          DISPATCH_RESOLVED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          expected="${F20_EXPECTED_SHA}"
+          if ! printf '%s' "$expected" | LC_ALL=C grep -Eq '^[0-9a-f]{40}$'; then
+            echo "f20_expected_sha must be exactly 40 lowercase hex characters; got '$expected'" >&2
+            exit 1
+          fi
+          actual="$(git rev-parse HEAD)"
+          echo "authorized_candidate=$expected checkout_head=$actual dispatch_resolved=$DISPATCH_RESOLVED_SHA"
+          if [ "$actual" != "$expected" ]; then
+            echo "wrong candidate: checkout HEAD is $actual, authorized candidate is $expected" >&2
+            exit 1
+          fi
+
       - name: Run exact-candidate F20 native macOS proof
         shell: bash
         env:
-          EXPECTED_COMMIT: ${{ github.sha }}
+          EXPECTED_COMMIT: ${{ github.event.inputs.f20_expected_sha }}
           F20_REQUEST_NONCE: ${{ github.event.inputs.f20_request_nonce }}
           WAYLAND_F20_NATIVE_ACCEPTANCE: "1"
         run: |
