@@ -149,13 +149,15 @@ impl ProcessTree {
     pub(crate) fn configure(
         &self,
         command: &mut Command,
-        executable: Option<&PreparedExecutable>,
+        // Underscore-named because only the cgroup backend consumes it; on
+        // every non-Linux target the match arm that reads it is compiled out.
+        _executable: Option<&PreparedExecutable>,
     ) -> io::Result<()> {
         command.kill_on_drop(true);
         match &self.backend {
             #[cfg(target_os = "linux")]
             Backend::Cgroup(cgroup) => {
-                cgroup.configure(command, executable.and_then(PreparedExecutable::raw_fd))
+                cgroup.configure(command, _executable.and_then(PreparedExecutable::raw_fd))
             }
             #[cfg(unix)]
             Backend::ProcessGroup => {
@@ -170,10 +172,12 @@ impl ProcessTree {
         }
     }
 
-    pub(crate) fn prepare_workspace(&self, cwd: &Path) -> io::Result<()> {
+    // `_cwd` for the same reason as `configure`'s `_executable`: only the
+    // cgroup arm reads it, and that arm is Linux-only.
+    pub(crate) fn prepare_workspace(&self, _cwd: &Path) -> io::Result<()> {
         match &self.backend {
             #[cfg(target_os = "linux")]
-            Backend::Cgroup(cgroup) => cgroup.prepare_workspace(cwd),
+            Backend::Cgroup(cgroup) => cgroup.prepare_workspace(_cwd),
             _ => Ok(()),
         }
     }
@@ -221,7 +225,7 @@ impl ProcessTree {
         let process_group = false;
         let tree_error = self.kill_tree().err();
         let child_kill_error = child.start_kill().err();
-        let reap_error = self.reap_child(child).await.err();
+        let reap_error = reap_child(child).await.err();
         let child_kill_error = reap_error.as_ref().and(child_kill_error);
         let verify_error = if process_group {
             // The leader's unreaped PID anchored the group while SIGKILL was
@@ -333,21 +337,32 @@ impl ProcessTree {
     async fn abort_failed_bind(&mut self, child: &mut Child) -> io::Result<()> {
         let tree_error = self.kill_tree().err();
         let child_kill_error = child.start_kill().err();
-        let reap_error = self.reap_child(child).await.err();
+        let reap_error = reap_child(child).await.err();
         let child_kill_error = reap_error.as_ref().and(child_kill_error);
         let verify_error = self.finish_cleanup().await.err();
         combine_cleanup_errors(tree_error, child_kill_error, reap_error, verify_error)
     }
+}
 
-    async fn reap_child(&self, child: &mut Child) -> io::Result<()> {
-        match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(error)) => Err(error),
-            Err(_) => Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "direct evaluator child was not reaped within 5 seconds",
-            )),
-        }
+/// Reap the direct child.
+///
+/// Deliberately takes NO `ProcessTree` receiver: it reaps the `Child` handed to
+/// it and reads no tree state. The receiver it used to take was never read, and
+/// on Windows it was actively harmful — holding `&ProcessTree` across this
+/// `await` made the enclosing futures require `ProcessTree: Sync`, which
+/// `Backend::WindowsJob(WindowsJob(HANDLE))` does not satisfy, so every
+/// `tokio::spawn` of an evaluator session failed to compile (E0277). Dropping
+/// the unused receiver removes the `Sync` requirement at its source rather than
+/// asserting `unsafe impl Sync` for a raw Win32 Job Object handle. Do not
+/// reintroduce a `&self` parameter here.
+async fn reap_child(child: &mut Child) -> io::Result<()> {
+    match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "direct evaluator child was not reaped within 5 seconds",
+        )),
     }
 }
 
@@ -455,6 +470,12 @@ impl UnixProcessGroup {
     }
 }
 
+// Gated to match its callers exactly. `prepare()` reads it under
+// `target_os = "linux"` and under `all(not(linux), not(windows))`, and
+// `pty_capture` (itself `cfg(unix)`) reads it too — so every caller is
+// non-Windows. On Windows the Job Object backend is unconditionally
+// authoritative, nothing consults the override, and the item is genuinely dead.
+#[cfg(not(windows))]
 pub(crate) fn authoritative_required() -> bool {
     std::env::var_os("WCORE_EVAL_REQUIRE_CONTAINMENT").is_some_and(|value| {
         let value = value.to_string_lossy();
@@ -623,12 +644,12 @@ mod windows {
             }
             let mut found = None;
             loop {
-                if entry.th32OwnerProcessID == pid {
-                    if found.replace(entry.th32ThreadID).is_some() {
-                        return Err(io::Error::other(
-                            "suspended evaluator child unexpectedly had multiple threads",
-                        ));
-                    }
+                // `&&` short-circuits, so `replace` still runs only for threads
+                // owned by `pid` — identical to the nested form it replaces.
+                if entry.th32OwnerProcessID == pid && found.replace(entry.th32ThreadID).is_some() {
+                    return Err(io::Error::other(
+                        "suspended evaluator child unexpectedly had multiple threads",
+                    ));
                 }
                 // SAFETY: clear stale state so end-of-snapshot is distinguishable
                 // from a real enumeration failure.

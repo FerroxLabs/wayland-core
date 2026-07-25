@@ -269,7 +269,7 @@ fn open_local_image(path: &Path) -> Result<File, String> {
                 path.display()
             ));
         }
-        return Ok(file);
+        Ok(file)
     }
 
     #[cfg(not(any(unix, windows)))]

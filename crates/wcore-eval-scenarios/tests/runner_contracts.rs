@@ -130,11 +130,18 @@ fn process_exists(pid: u32) -> bool {
 #[cfg(windows)]
 fn process_exists(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
-    use windows_sys::Win32::System::Threading::{OpenProcess, SYNCHRONIZE, WaitForSingleObject};
+    // `PROCESS_SYNCHRONIZE`, not the bare `SYNCHRONIZE`: windows-sys 0.59 does
+    // not export a standalone `SYNCHRONIZE` from `Win32::System::Threading` at
+    // all (its only `SYNCHRONIZE` lives in `Win32::Storage::FileSystem`, typed
+    // `FILE_ACCESS_RIGHTS`). `PROCESS_SYNCHRONIZE` is the same 0x0010_0000 bit
+    // typed as `PROCESS_ACCESS_RIGHTS`, which is what `OpenProcess` takes.
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
 
     // SAFETY: the handle is used only for a zero-time liveness query and is
     // closed on every successful OpenProcess path.
-    let process = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
     if process.is_null() {
         return false;
     }
@@ -174,13 +181,15 @@ async fn emergency_kill_owned_orphan(state: OrphanState) {
     #[cfg(windows)]
     {
         use windows_sys::Win32::Foundation::CloseHandle;
+        // See `process_exists` above for why this is `PROCESS_SYNCHRONIZE`.
         use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_TERMINATE, SYNCHRONIZE, TerminateProcess, WaitForSingleObject,
+            OpenProcess, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess,
+            WaitForSingleObject,
         };
 
         // SAFETY: the fixture PID names a test-owned process. The handle is
         // bounded-waited and closed on the only successful-open path.
-        let process = unsafe { OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, 0, state.pid) };
+        let process = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, state.pid) };
         if !process.is_null() {
             unsafe {
                 TerminateProcess(process, 1);

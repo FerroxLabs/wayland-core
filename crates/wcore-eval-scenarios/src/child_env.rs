@@ -19,16 +19,27 @@ pub(crate) struct ChildEnvironment {
     vault_passphrase: String,
 }
 
+/// RAII handle on the parent's copy of the vault channel.
+///
+/// The callers' explicit `drop(vault_guard)` immediately after `spawn` is the
+/// point at which the parent surrenders the vault material, so the `Drop` impl
+/// is deliberately UNCONDITIONAL. Gating it on `cfg(unix)` left the Windows
+/// build with a `Drop`-less type, which made that load-bearing `drop()` call a
+/// silent no-op the compiler flagged as `clippy::drop_non_drop`. Keeping the
+/// impl on every platform keeps the release point meaningful everywhere; only
+/// the descriptor close inside it is Unix-specific.
 pub(crate) struct VaultGuard {
     #[cfg(unix)]
     fd: std::os::unix::io::RawFd,
 }
 
-#[cfg(unix)]
 impl Drop for VaultGuard {
     fn drop(&mut self) {
-        // SAFETY: the guard uniquely owns the parent's copy of this descriptor.
-        let _ = unsafe { libc::close(self.fd) };
+        #[cfg(unix)]
+        {
+            // SAFETY: the guard uniquely owns the parent's copy of this descriptor.
+            let _ = unsafe { libc::close(self.fd) };
+        }
     }
 }
 
@@ -206,8 +217,8 @@ fn controlled_path() -> OsString {
     {
         let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
         let root = PathBuf::from(root);
-        return std::env::join_paths([root.join("System32"), root])
-            .unwrap_or_else(|_| r"C:\Windows\System32;C:\Windows".into());
+        std::env::join_paths([root.join("System32"), root])
+            .unwrap_or_else(|_| r"C:\Windows\System32;C:\Windows".into())
     }
     #[cfg(not(windows))]
     {

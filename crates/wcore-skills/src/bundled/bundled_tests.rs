@@ -604,9 +604,14 @@ fn open_windows_acl_subject(path: &Path, directory: bool) -> std::fs::File {
 fn assert_windows_owner_only_dacl<T: std::os::windows::io::AsRawHandle>(handle: &T) {
     use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
     use windows_sys::Win32::Security::{
-        ACCESS_ALLOWED_ACE, ACCESS_ALLOWED_ACE_TYPE, ACL, DACL_SECURITY_INFORMATION, EqualSid,
-        GetAce, GetSecurityDescriptorControl, OWNER_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED,
+        ACCESS_ALLOWED_ACE, ACL, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
+        GetSecurityDescriptorControl, OWNER_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED,
     };
+    // windows-sys 0.59 exports the ACE type constants from
+    // `Win32::System::SystemServices`, not `Win32::Security`. Note rustc's
+    // `help` for the old path is wrong — it suggests `ACCESS_ALLOWED_ACE`,
+    // which is the ACE STRUCT, not its type discriminant.
+    use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
 
     let mut owner: PSID = std::ptr::null_mut();
     let mut dacl: *mut ACL = std::ptr::null_mut();
@@ -655,8 +660,10 @@ fn assert_windows_owner_only_dacl<T: std::os::windows::io::AsRawHandle>(handle: 
     );
     let ace = raw_ace.cast::<ACCESS_ALLOWED_ACE>();
     // SAFETY: GetAce returned the sole ACE in the valid DACL.
+    // `ACE_HEADER::AceType` is `u8`; the constant is exported as `u32`. The
+    // cast is width-only and cannot change the compared value.
     assert_eq!(
-        unsafe { (*ace).Header.AceType },
+        u32::from(unsafe { (*ace).Header.AceType }),
         ACCESS_ALLOWED_ACE_TYPE,
         "sole DACL entry must be an allow ACE"
     );

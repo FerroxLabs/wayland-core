@@ -101,7 +101,19 @@ impl DirectoryAuthority {
     /// against `NtSetInformationFile`; this is the swarm-side API that repair
     /// restores, and deleting it would destroy the surface the fix exists to
     /// make usable.
+    ///
+    /// 20A-02 measured the follow-through and it is NOT there: at this SHA the
+    /// repaired primitive still has no swarm-side caller, so `-D warnings` on
+    /// the Windows leg turns this into a hard build failure. `expect` rather
+    /// than `allow` is deliberate — `unfulfilled_lint_expectation` fires the
+    /// moment a caller lands, forcing this attribute to be deleted then instead
+    /// of silently outliving the gap. Recorded as a finding; wiring the caller
+    /// is a behaviour change and belongs to the plan that needs the surface.
     #[cfg(windows)]
+    #[expect(
+        dead_code,
+        reason = "20-75 restored this Windows-only API; its caller was never wired. Remove this attribute with the caller."
+    )]
     pub(super) fn rename_into(
         &self,
         destination_parent: &Self,

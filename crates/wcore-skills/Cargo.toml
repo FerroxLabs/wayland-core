@@ -48,6 +48,9 @@ windows-sys = { version = "0.59", features = [
   "Win32_Security_Authorization",
   "Win32_Storage_FileSystem",
   "Win32_System_IO",
+  # Exports ACCESS_ALLOWED_ACE_TYPE, which windows-sys 0.59 moved out of
+  # Win32_Security. Needed by the DACL assertions in bundled_tests.rs.
+  "Win32_System_SystemServices",
   "Win32_System_Threading",
 ] }
 

@@ -222,7 +222,6 @@ fn terminate_process_tree(
     #[cfg(target_os = "macos")]
     if let Some(group) = mac_group {
         group.signal_group(libc::SIGKILL).ok();
-        return;
     }
     // SAFETY: `isolate` created a dedicated group whose ID is the child PID. A
     // negative PID targets only that group. Reaping the group on both future
@@ -400,6 +399,16 @@ impl MacProcessIdentity {
         })
     }
 
+    /// Identity-checked kill of this exact process generation.
+    ///
+    /// `cfg(test)` because production has no caller: `signal_group` addresses
+    /// the whole group in one syscall (which is why it guards with
+    /// `still_matches` itself), and `MacProcessGroupAuthority::drop` reaps the
+    /// sentinel with a raw `kill` that is safe for a different reason — the
+    /// sentinel is an unreaped child, so its PID cannot be recycled before the
+    /// `waitpid` that follows. Gated rather than deleted so
+    /// `identity_drift_never_signals_foreign_process` keeps proving the guard.
+    #[cfg(test)]
     fn signal(&self, signal: libc::c_int) {
         if self.still_matches() {
             // SAFETY: the immediately preceding proc_pidinfo identity check
