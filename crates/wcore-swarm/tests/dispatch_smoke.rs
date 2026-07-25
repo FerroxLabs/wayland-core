@@ -5,6 +5,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use wcore_config::shell;
+use wcore_swarm::worktree::WorktreeManager;
 use wcore_swarm::{Swarm, SwarmBrief, WorkerStatus};
 
 #[tokio::test]
@@ -292,10 +293,12 @@ async fn dispatch_rejects_different_head_repository_replacement() {
     let moved = tmp.path().join("original-box");
 
     if cfg!(windows) {
-        // The retained `repo` handle makes a path-based rename of its ancestor
-        // `container` physically impossible, so the same-path substitution below
-        // can never arise. This OS refusal is the stronger guarantee.
-        assert_ancestor_rename_os_refused(&container, &moved);
+        // Under this topology the swarm retains a handle on a directory INSIDE
+        // `repo`, so the ancestor `container` cannot be renamed and the
+        // substitution below is unconstructible VIA THIS CONSTRUCTION. The
+        // software defense itself is proved on both platforms by
+        // `repository_replaced_at_same_pathname_is_refused_by_retained_authority`.
+        assert_rename_refused_by_open_descendant(&container, &moved);
     } else {
         replace_repo_container(&container, &moved);
         std::fs::create_dir(&repo).unwrap();
@@ -317,10 +320,11 @@ async fn dispatch_rejects_same_head_repository_replacement() {
     let moved = tmp.path().join("original-box");
 
     if cfg!(windows) {
-        // Same OS-refusal guarantee as the different-HEAD case: with `repo` held
-        // open, the ancestor `container` cannot be renamed, so no same-HEAD
-        // clone can be swapped in at the original path.
-        assert_ancestor_rename_os_refused(&container, &moved);
+        // Same descendant-handle refusal as the different-HEAD case: the swarm
+        // retains a handle inside `repo`, so the ancestor `container` cannot be
+        // renamed and no same-HEAD clone can be swapped in at the original path
+        // VIA THIS CONSTRUCTION.
+        assert_rename_refused_by_open_descendant(&container, &moved);
     } else {
         replace_repo_container(&container, &moved);
         let source = moved.join("repo").to_string_lossy().into_owned();
@@ -336,7 +340,8 @@ async fn dispatch_rejects_same_head_repository_replacement() {
 
 /// Replace the repository at the SAME pathname with a different on-disk
 /// directory object, WITHOUT renaming the swarm-held `repo` directory itself
-/// (UNIX ONLY — see [`assert_ancestor_rename_os_refused`] for the Windows arm).
+/// (UNIX ONLY — see [`assert_rename_refused_by_open_descendant`] for the
+/// Windows arm).
 ///
 /// The swarm retains open `DirectoryAuthority` handles on `repo` AND on its
 /// `.swarm-worktrees` control descendants. On Unix those handles bind to the
@@ -346,12 +351,14 @@ async fn dispatch_rejects_same_head_repository_replacement() {
 /// `validate_repo_authority` check rejects.
 ///
 /// On Windows this ancestor rename is instead OS-REFUSED with
-/// `Os { code: 5, PermissionDenied }`: FILE_SHARE_DELETE authorizes renaming the
-/// held object ITSELF via a handle-based op, but never a path-based rename of an
-/// ancestor while a descendant handle is open. The substitution is therefore
-/// physically impossible while handles are held — a stronger guarantee than the
-/// software check — so callers route the Windows case through
-/// [`assert_ancestor_rename_os_refused`] and this helper runs on Unix only.
+/// `Os { code: 5, PermissionDenied }` — because a `.swarm-worktrees` DESCENDANT
+/// handle is open inside `repo`, not because of any share-mode property. The
+/// substitution is unconstructible VIA THIS ANCESTOR CONSTRUCTION for THIS
+/// topology; it is not impossible in general. The software defense is proved on
+/// both platforms by
+/// [`repository_replaced_at_same_pathname_is_refused_by_retained_authority`],
+/// whose out-of-repository swarm root leaves no descendant handle inside
+/// `repo`.
 fn replace_repo_container(container: &Path, moved_container: &Path) {
     std::fs::rename(container, moved_container).unwrap();
     std::fs::create_dir(container).unwrap();
@@ -359,25 +366,91 @@ fn replace_repo_container(container: &Path, moved_container: &Path) {
 
 /// Windows OS-refusal counterpart to [`replace_repo_container`].
 ///
-/// With the swarm holding an open handle on `repo` (opened
-/// `GENERIC_READ|GENERIC_WRITE|DELETE`, shared
-/// `FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE`), a path-based rename of
-/// the ANCESTOR `container` is refused by the OS with `PermissionDenied`
-/// (Os code 5). That makes the "same path, different directory object"
-/// substitution impossible to even construct while handles are held — strictly
-/// stronger than the Unix software `validate_repo_authority` defense. The
-/// assertion is non-vacuous: were the handle-hold absent, the rename would
-/// succeed and `expect_err` would fail the test.
+/// MEASURED WINDOWS RENAME RULE, which this assertion depends on: ANY open
+/// handle to a DESCENDANT — of any kind, at any desired access, under any share
+/// mode — blocks renaming ANY ancestor with `ERROR_ACCESS_DENIED`, which Rust
+/// maps to `PermissionDenied`. Desired access and share mode are irrelevant to
+/// that outcome. Conversely a handle on an OBJECT never blocks renaming that
+/// object at all when the share mode admits delete, so the refusal here is
+/// caused entirely by the `.swarm-worktrees` handle the swarm retains INSIDE
+/// `repo` — nothing about the `repo` handle itself.
+///
+/// The assertion is non-vacuous: were the descendant hold absent, the rename
+/// would succeed and `expect_err` would fail the test. What it does NOT prove
+/// is that the substitution is impossible in general — only that this ancestor
+/// construction cannot build it under this topology.
 ///
 /// Compiled on all platforms (statically referenced from the `cfg!(windows)`
 /// arm of the dispatch tests) but only executed on Windows.
-fn assert_ancestor_rename_os_refused(container: &Path, moved_container: &Path) {
+fn assert_rename_refused_by_open_descendant(container: &Path, moved_container: &Path) {
     let error = std::fs::rename(container, moved_container)
-        .expect_err("Windows must refuse renaming an ancestor of a swarm-held directory");
+        .expect_err("Windows must refuse renaming an ancestor of a swarm-held descendant");
     assert_eq!(
         error.kind(),
         std::io::ErrorKind::PermissionDenied,
-        "expected OS-level PermissionDenied renaming a swarm-held ancestor, got {error:?}"
+        "expected OS-level PermissionDenied renaming an ancestor of an open descendant, got {error:?}"
+    );
+}
+
+/// The SOFTWARE defense — `validate_repo_authority` ->
+/// `DirectoryAuthority::validate_path` — must refuse a repository replaced at
+/// the SAME pathname by a different directory object. Ungated: the invariant is
+/// universal, and unix is where this stands as the permanent guard.
+///
+/// TOPOLOGY IS THE ENTIRE POINT, and it is why this test exists separately from
+/// the two dispatch replacement tests above. `Swarm::new` builds its manager
+/// through `WorktreeManager::new`, which places the swarm root at
+/// `<repo>/.swarm-worktrees` and RETAINS an authority on it — a live DESCENDANT
+/// handle INSIDE the repository. By the measured rename rule an open descendant
+/// handle blocks renaming any ancestor, so under that topology neither `repo`
+/// nor any ancestor of it can be renamed on Windows and the substitution cannot
+/// be constructed at all.
+///
+/// `WorktreeManager::new_with_workspace_root` instead places the swarm root
+/// under a SEPARATE directory outside the repository. The only handle the
+/// manager then holds inside `repo` is `repo_authority` on the repository
+/// OBJECT itself, and a handle on an object never blocks renaming that object
+/// when the share mode admits delete. The substitution therefore becomes
+/// constructible and the software defense is genuinely exercised — on Windows
+/// as well as unix.
+///
+/// Plan 20-72 converted `repo_authority` to a read-only observational open.
+/// That does not affect this analysis: desired access is irrelevant to renaming
+/// the object itself.
+///
+/// This test is the replacement for the software-defense coverage that the
+/// Windows arms of the two dispatch replacement tests lost when commit
+/// `334f264d` traded it for an OS-behaviour assertion.
+#[tokio::test]
+async fn repository_replaced_at_same_pathname_is_refused_by_retained_authority() {
+    let repo_home = tempfile::tempdir().unwrap();
+    let repo = repo_home.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    init_repo(&repo).await;
+
+    let workspace_home = tempfile::tempdir().unwrap();
+    let workspace_root = workspace_home.path().join("orchestrator-workspaces");
+    let manager = WorktreeManager::new_with_workspace_root(&repo, &workspace_root).unwrap();
+
+    // The retained authority accepts the un-substituted repository, so the
+    // refusal below cannot be blamed on an unrelated precondition.
+    manager
+        .retained_worker_count(8)
+        .expect("the un-substituted repository must satisfy its retained authority");
+
+    let moved = repo_home.path().join("original-repo");
+    std::fs::rename(&repo, &moved)
+        .expect("renaming the repository OBJECT itself must be permitted with no descendant held");
+    std::fs::create_dir(&repo).unwrap();
+
+    let error = manager
+        .retained_worker_count(8)
+        .expect_err("same-pathname repository replacement was accepted");
+    assert!(
+        error
+            .to_string()
+            .contains("directory identity changed after authority was retained"),
+        "{error}"
     );
 }
 
