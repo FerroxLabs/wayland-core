@@ -315,3 +315,126 @@ workspace's NAME (which closes the 15 red Windows tests and two red native proof
 **lose** the constructibility of the anti-swap regression proof on the rename DESTINATION.
 
 No production code has been written. `crates/` is unmodified in the repo and on the box.
+
+---
+
+## 7. THE TRADE IS UNNECESSARY — the pin CAN be scoped, and §2.7 was measured against the wrong authority
+
+**Status of §6: SUPERSEDED. No trade needs authorizing.** §2.7 concluded "the pin cannot be
+scoped" from a probe run against the AS-SHIPPED **mutating** authority (`DirectoryAuthority::
+open`, access `GR|GW|DELETE`). But the authority the AppContainer bind actually receives is the
+**OBSERVATIONAL** checkout authority (`DirectoryAuthority::open_observational`, access
+`GENERIC_READ` only) opened at `wcore-swarm/src/worktree_manager.rs:960` — the shape §2.7 never
+tested. Against that authority the lease OPENS and PINS. §2.7's finding was correct for the
+handle shape it probed and does not generalise to the one the bind uses.
+
+Measured with a Rust probe compiled into `wcore-sandbox` on `SEANDESKTOP` @ `3e3e6903`, calling
+the real production functions. Verbatim probe output:
+
+```
+===== 20A-02 SCOPED-NARROWING PROBE =====
+F1 OP0  open_observational_pinned(workspace)   => OPENED
+F1 OP1a external rename of retained NAME      => REFUSED err=Some(32) (PINNED)
+F1 OP1b external unlink of retained NAME      => REFUSED err=Some(32) (PINNED)
+F1 OP2  RetainedWorkspaceAuthority::new       => FAILED io: ... (os error 32)
+F1 OP3a CreateProcess(cwd=display_path)       => Ok(Some(0))
+F1 OP3b child_names THROUGH RETAINED HANDLE   => Ok(["proof.txt"])
+F1 OP4  after drop, owner.remove_descendants  => OK
+F2 OP0  RetainedWorkspaceAuthority::new       => OK (before lease)
+F2 OP1  name lease (handle-relative, R|W)     => OPENED
+F2 OP2a external rename of retained NAME      => REFUSED err=Some(32) (PINNED)
+F2 OP2b external unlink of retained NAME      => REFUSED err=Some(32) (PINNED)
+F2 OP3a ws.validate_path UNDER LEASE          => OK
+F2 OP3b RetainedWorkspaceAuthority::validate  => FAILED io: ... (os error 32)
+F2 OP4a CreateProcess(cwd=display_path)       => Ok(Some(0))
+F2 OP4b child_names THROUGH RETAINED HANDLE   => Ok(["proof.txt"])
+F2 OP5  second substitution attempt           => REFUSED err=Some(32) (PINNED)
+F2 OP6a after lease drop, external rename     => SUCCEEDED (NO PIN)
+F2 OP6b after lease drop, remove_descendants  => OK
+=========================================
+```
+
+### 7.1 FORM 1 — a narrowed variant open used ONLY for the workspace authority
+
+`open_observational_pinned` (share `READ|WRITE`, no `FILE_SHARE_DELETE`) used only for the
+delegated workspace; every other open unchanged.
+
+- The NAME pin is OS-enforced: external rename and external unlink both `err=32`.
+- `CreateProcess(cwd = display_path)` succeeds and the child's write is visible through the
+  RETAINED handle.
+- **BUT `RetainedWorkspaceAuthority::new` FAILS `err=32`.** Its identity re-proof calls
+  `owner.open_child_directory(child_name)`, whose `RelativeIntent::Mutate` arm requests `DELETE`
+  (`directory_authority_windows.rs:805-807`); the narrowed workspace handle's share mode refuses
+  it. **DOES NOT QUALIFY** — it breaks the workspace-authority constructor.
+
+### 7.2 FORM 2 — a process-lifetime NAME LEASE at the bind site — **QUALIFIES**
+
+The same Mechanism-A pin, acquired at a strictly smaller scope: a SECOND handle on the retained
+object, opened HANDLE-RELATIVELY (`RootDirectory` = retained handle, empty `ObjectName`, so no
+pathname is resolved), access `GENERIC_READ | SYNCHRONIZE`, share `READ|WRITE`. Held only for the
+duration of one bound execution. This is the mechanism `bind_command_cwd`'s pre-existing error
+message already named verbatim ("without a process-lifetime name lease").
+
+| Measurement | Result |
+|---|---|
+| lease opens against the observational checkout authority | **OPENED** (§2.7's refusal was against a DELETE-bearing authority) |
+| external rename of the bound NAME, lease held | **REFUSED `err=32`** |
+| external unlink of the bound NAME, lease held | **REFUSED `err=32`** |
+| second substitution attempt, lease held | **REFUSED `err=32`** |
+| `RetainedWorkspaceAuthority::new`, before the lease | **OK** — production ordering (dispatch constructs it, the registry validates it, only then does the backend take the lease) |
+| `DirectoryAuthority::validate_path` under the lease | **OK** — this is what `validate_execution_authority` and the 20 ms heartbeat mirror use |
+| `CreateProcess(cwd = display_path)` under the lease | **OK**, exit 0 |
+| the child's artifact read back THROUGH the retained handle | `["proof.txt"]` — the child provably operated on the RETAINED object |
+| after the lease drops: external rename | succeeds again — the pin is scoped to the bound execution |
+| after the lease drops: `remove_descendants` | **OK** — destructive cleanup unaffected |
+
+`RetainedWorkspaceAuthority::validate()` is refused while the lease is held, for the same
+`DELETE`-request reason as Form 1. It is NOT on the bound path: `SandboxRegistry::
+execute_with_workspace_authority` calls it at `lib.rs:330`, BEFORE the backend receives the
+workspace, and the native backend never re-invokes `reauthorize`. The two things that do run
+during execution — `mirror_heartbeat` and the `WorkspaceMonitor` scan — use
+`validate_execution_authority` (path-metadata `validate_path`, measured OK) plus relative child
+reads and read-only enumeration.
+
+### 7.3 The three decision-rule measurements
+
+| | Question | Result |
+|---|---|---|
+| **(a)** | Is the NAME pin OS-enforced on the workspace with every other open unchanged? | **YES** — rename `err=32`, unlink `err=32`, both refused; child provably lands in the retained object |
+| **(b)** | Do all 6 previously-broken tests pass? | **YES**, all 6 by name — see below |
+| **(c)** | Does the `wcore-sandbox` suite return to its baseline? | **YES** — 136 run / 136 passed / 0 failed / 45 skipped (baseline 135/135/0/45, +1 = the new anti-swap regression test) |
+
+The six tests, run by name on `SEANDESKTOP` at the sealed SHA:
+
+```
+PASS authority_boundary_tests::buffered_authority_rejects_same_path_replacement_before_backend
+PASS authority_boundary_tests::streaming_authority_rejects_same_path_replacement_before_backend
+PASS directory_authority::tests::retained_parent_routes_children_after_path_replacement
+PASS directory_authority::tests::windows_handle_relative_rename_stays_bound_to_target_parent
+PASS directory_authority::tests::windows_handle_relative_file_publish_stays_bound_to_target_parent
+PASS directory_authority::tests::windows_command_cwd_stays_bound_to_renamed_directory_object
+PASS backends::appcontainer::windows_impl::tests::windows_retained_cwd_bind_survives_a_pathname_substitution
+```
+
+**Not one existing test was modified, re-gated, `#[ignore]`d or deleted.** The two guards on the
+`RootDirectory = NULL` pathname-form rename defect stay exactly as they were, and keep passing.
+Because the pin lives only inside one bound execution, no `open_*` function changes its share
+mode and there is no global blast radius at all.
+
+### 7.4 Verdict
+
+**Mechanism A, scoped as a process-lifetime name lease: QUALIFIES.** The anti-swap property is
+enforced by the OPERATING SYSTEM, not by our own re-check. There is **no residual window**: the
+lease is taken before the pathname reaches `CreateProcess`, the display path is re-proven against
+the retained object AFTER the pin exists, and the pin holds until the child has exited.
+
+The R1 residual recorded in §2.8 — six tests unconstructible, two of them the only regression
+guard on the `RootDirectory = NULL` rename form — **does not apply to this scoping and is
+withdrawn.** R2 ("the pin cannot be reduced by scoping") is **disproved**: it can, and this is
+how. R3 stands: every rule here was measured on this box's default NTFS volume; ReFS, FAT and
+SMB workspaces are unproven.
+
+Mechanisms B and C remain `NOT-EVALUATED-NOT-NEEDED`.
+
+Probes were throwaway. `git status --porcelain` is EMPTY on the box and in the repo at the end of
+the measurement; no probe reached production code.
