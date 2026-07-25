@@ -525,11 +525,19 @@ impl WorktreeManager {
         }
         let root = std::fs::canonicalize(integration_checkout)
             .map_err(|error| ParentLandingError::UnownedCheckout(error.to_string()))?;
+        #[cfg(windows)]
+        crate::handle_probe::dump_handles_on(&root, "C BEFORE DirectoryAuthority::open");
         let authority = DirectoryAuthority::open(&root)
             .map_err(|error| ParentLandingError::UnownedCheckout(error.to_string()))?;
+        #[cfg(windows)]
+        crate::handle_probe::dump_handles_on(&root, "C AFTER DirectoryAuthority::open");
         authority
             .validate_path(&root)
             .map_err(|error| ParentLandingError::UnownedCheckout(error.to_string()))?;
+
+        // TEMPORARY 20-75 workstream C instrumentation.
+        #[cfg(windows)]
+        crate::handle_probe::dump_handles_on(&root, "C bind_integration_checkout pre-git");
 
         // The checkout must be the main working tree of its own repository.
         let inside = self

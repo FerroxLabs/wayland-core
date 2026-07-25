@@ -57,6 +57,8 @@ pub mod debate;
 pub mod dispatch;
 pub mod error;
 pub mod fleet;
+#[cfg(windows)]
+mod handle_probe;
 pub mod heartbeat;
 pub mod mesh;
 pub mod reduce;
