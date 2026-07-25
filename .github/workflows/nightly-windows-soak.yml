@@ -321,7 +321,16 @@ jobs:
       contents: read
 
     steps:
+      # Check out the AUTHORIZED CANDIDATE, not the dispatch ref. GitHub always
+      # reads the workflow DEFINITION from the ref passed to workflow_dispatch,
+      # and that ref must therefore be a branch/tag that already carries this
+      # file. Pinning the checkout to f20_expected_sha decouples the two: the
+      # dispatch ref supplies only the workflow, while the proven tree is the
+      # exact authorized commit. The assertion step below still fails closed if
+      # this checkout did not land on it.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.f20_expected_sha }}
 
       # The self-hosted SEANDESKTOP runner's checkout dir is owned by
       # BUILTIN\Administrators while the service runs as NT AUTHORITY\NETWORK
@@ -390,7 +399,11 @@ jobs:
       contents: read
 
     steps:
+      # Check out the AUTHORIZED CANDIDATE, not the dispatch ref — see the
+      # rationale on the Windows candidate job's checkout above.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.f20_expected_sha }}
 
       # Defensive parity with the Windows candidate job: a freshly re-registered
       # ephemeral macOS runner's checkout-dir ownership is unproven, so trust it
