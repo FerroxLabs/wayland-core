@@ -14,14 +14,16 @@
 
 ### Phase 20 — Transactional Delegated Mutation
 
-- [ ] **F20-01**: Delegated work is classified as read-only/shared or mutating/isolated before execution.
-- [ ] **F20-02**: An unmerged child cannot mutate the parent workspace, configuration, repository metadata, or protected state.
-- [ ] **F20-03**: Conflicting child edits stop for explicit resolution; failed gates cannot merge and preserve diagnostic evidence.
-- [ ] **F20-04**: Workspace creation, journal state, receipts, candidate gates, parent compare-and-swap, cleanup, and rollback are one coherent lifecycle.
-- [ ] **F20-05**: Snapshot authority and Windows AppContainer identity fail closed on stale, ambiguous, or unowned state.
-- [ ] **F20-06**: The accepted F20 successor is integrated into the one admitted candidate with exact focused and aggregate evidence.
-- [ ] **F20-GATE-01**: Failed, stale, incomplete, malformed, reordered, duplicated, post-terminal, or mismatched candidate gates remain non-landing and preserve durable diagnostics.
-- [ ] **F20-GATE-02**: Only parent-observed execution of the exact live candidate under qualifying hard containment, followed by authoritative receipt append and replay, can create the opaque candidate-acceptance handoff; caller, child, model, and advisory-evaluator claims cannot.
+All eight complete against ONE exact SHA — `01a5b0ae459c9d5088cfd7e41271a5d4ece1b9bb` (tree `4a5247ca804a88c5fc621402d5e55a3dab10e8a5`, branch `plan/f20-unified-audit-repair`), proved on `hetzner-dsm:/root/wayland` with a clean working tree on 2026-07-25. `cargo build --locked --workspace --all-features` exit 0; `cargo nextest run --profile ci --no-fail-fast` exit 0 — `11519 tests run: 11519 passed (1 slow, 3 flaky), 48 skipped`, zero failed, zero timed out. Evidence: `phases/20-transactional-delegated-mutation/20-56-evidence/{build,test}-01a5b0ae-GREEN.log.gz`. The native Windows/macOS path is Phase 20A and is NOT claimed here.
+
+- [x] **F20-01**: Delegated work is classified as read-only/shared or mutating/isolated before execution.
+- [x] **F20-02**: An unmerged child cannot mutate the parent workspace, configuration, repository metadata, or protected state.
+- [x] **F20-03**: Conflicting child edits stop for explicit resolution; failed gates cannot merge and preserve diagnostic evidence.
+- [x] **F20-04**: Workspace creation, journal state, receipts, candidate gates, parent compare-and-swap, cleanup, and rollback are one coherent lifecycle.
+- [x] **F20-05**: Snapshot authority and Windows AppContainer identity fail closed on stale, ambiguous, or unowned state.
+- [x] **F20-06**: The accepted F20 successor is integrated into the one admitted candidate with exact focused and aggregate evidence.
+- [x] **F20-GATE-01**: Failed, stale, incomplete, malformed, reordered, duplicated, post-terminal, or mismatched candidate gates remain non-landing and preserve durable diagnostics.
+- [x] **F20-GATE-02**: Only parent-observed execution of the exact live candidate under qualifying hard containment, followed by authoritative receipt append and replay, can create the opaque candidate-acceptance handoff; caller, child, model, and advisory-evaluator claims cannot.
 
 #### Phase 20 Native-UAT Repair (R1–R12)
 
@@ -145,7 +147,7 @@ Additive, non-overlapping requirements from `native-uat-repair-BRIEF.md` (SPEC, 
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| F20-01, F20-02, F20-03, F20-04, F20-05, F20-06, F20-GATE-01, F20-GATE-02 | Phase 20 | In Progress |
+| F20-01, F20-02, F20-03, F20-04, F20-05, F20-06, F20-GATE-01, F20-GATE-02 | Phase 20 | Complete @ `01a5b0ae` |
 | REQ-native-r1 … REQ-native-r12 (native-UAT repair; sub-clauses refining F20-05 / SC#3) | Phase 20 (native path) | In Progress |
 | F21-01, F21-02, F21-03, F21-04 | Phase 21 | Pending |
 | F22-01, F22-02, F22-03, F22-04, F22-05, F22-06, F22-07 | Phase 22 | Pending |
