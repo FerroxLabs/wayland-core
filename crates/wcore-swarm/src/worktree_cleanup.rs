@@ -358,7 +358,13 @@ impl WorktreeManager {
         Ok(manager)
     }
 
-    #[cfg(test)]
+    /// Gated to the configuration that compiles its callers, NOT deleted. All
+    /// four call sites live in `worktree_tests/linux.rs`, which is itself
+    /// `cfg(target_os = "linux")`, so this is dead on Windows and very much
+    /// alive on Linux — removing it would break the Linux test build. The gate
+    /// mirrors the sibling `new_with_git_script_and_limits` above, which uses
+    /// the same `cfg(all(test, ..))` shape for the same reason.
+    #[cfg(all(test, target_os = "linux"))]
     pub(super) fn set_ambient_git_env(&mut self, key: &str, value: impl Into<std::ffi::OsString>) {
         self.ambient_git_env.push((key.to_string(), value.into()));
     }

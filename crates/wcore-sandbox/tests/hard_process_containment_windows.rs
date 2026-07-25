@@ -636,26 +636,43 @@ fn active_process_cap_is_enforced() {
 
     // Spawn a plain child SUSPENDED (never resumed → no image runs, no ~2s cost).
     // Nested `unsafe fn` so both the admit loop and the overflow spawn share it.
+    /// # Safety
+    ///
+    /// `image` must point at a NUL-terminated, live UTF-16 executable path that
+    /// outlives the call.
     unsafe fn spawn_suspended(image: *const u16) -> PROCESS_INFORMATION {
-        let mut si: STARTUPINFOW = std::mem::zeroed();
+        // SAFETY: both structures are plain C layout with no padding invariants
+        // and no reference or pointer field that an all-zero pattern would
+        // invalidate, so the all-zero bit pattern is a valid value for each.
+        let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-        let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
-        let ok = CreateProcessW(
-            image,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-            CREATE_SUSPENDED | CREATE_NO_WINDOW,
-            std::ptr::null(),
-            std::ptr::null(),
-            &si,
-            &mut pi,
-        );
+        // SAFETY: as above — `PROCESS_INFORMATION` is a plain C struct of two
+        // handles and two IDs, for which all-zero is a valid initial value.
+        let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: `image` upholds this function's documented contract (a live,
+        // NUL-terminated UTF-16 path). The command line is null, every optional
+        // attribute pointer is null, and `si` and `pi` are live, correctly sized
+        // locals that outlive the call and are written only by this callee.
+        let ok = unsafe {
+            CreateProcessW(
+                image,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                CREATE_SUSPENDED | CREATE_NO_WINDOW,
+                std::ptr::null(),
+                std::ptr::null(),
+                &si,
+                &mut pi,
+            )
+        };
         assert!(
             ok != 0,
             "CreateProcessW(cmd.exe, suspended) failed: {:#x}",
-            GetLastError()
+            // SAFETY: `GetLastError` reads this thread's last-error slot and has
+            // no preconditions.
+            unsafe { GetLastError() }
         );
         pi
     }

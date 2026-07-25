@@ -2,6 +2,11 @@
 
 use std::io::Write;
 use std::path::Path;
+// Every `Arc` use in this file sits inside a `cfg(target_os = "linux")` or
+// `cfg(target_os = "macos")` test, so the import is genuinely unused on Windows
+// and genuinely REQUIRED on the other two. Gate it to its callers'
+// configuration rather than deleting it, which would break both of those builds.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
