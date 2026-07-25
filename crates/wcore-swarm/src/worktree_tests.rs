@@ -1349,3 +1349,53 @@ async fn transaction_workspace_paths_share_manager_representation() {
 #[cfg(target_os = "linux")]
 #[path = "worktree_tests/linux.rs"]
 mod linux;
+
+/// A chdir-requiring git subcommand must still succeed inside a checkout while
+/// the workspace authorities are alive.
+///
+/// Companion to 20-72's repository-root regression test — same shape, same
+/// reasoning, different directory. A retained directory handle carrying the
+/// DELETE right makes `SetCurrentDirectory` fail with a sharing violation, and
+/// `git -C <checkout>` chdirs IN-PROCESS (MSYS `chdir()`), so a DELETE-bearing
+/// checkout authority breaks every checkout-scoped git invocation with
+/// "cannot change to ...: Permission denied" — while `CreateProcess` with an
+/// explicit `lpCurrentDirectory` to the same directory still succeeds, which is
+/// why this hid for so long.
+///
+/// Fails before the observational conversion, and fails again the moment a
+/// chdir-blocking access right returns to a directory git must enter.
+#[test]
+fn checkout_git_chdir_succeeds_while_workspace_authorities_are_alive() {
+    let fixture = tempfile::tempdir().unwrap();
+    let checkout = fixture.path().join("checkout");
+    std::fs::create_dir_all(&checkout).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q", "."])
+            .current_dir(&checkout)
+            .status()
+            .expect("git init must run")
+            .success(),
+        "fixture repository must initialize"
+    );
+
+    // Hold the authority exactly as a live transaction workspace does.
+    let checkout_authority = DirectoryAuthority::open_observational(&checkout).unwrap();
+
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&checkout)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .expect("git rev-parse must run");
+
+    assert!(
+        output.status.success(),
+        "git -C must chdir into the checkout while the authority is held: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The handle is still held, so identity is still bound to the retained
+    // object rather than re-resolved by pathname.
+    checkout_authority.validate_path(&checkout).unwrap();
+}

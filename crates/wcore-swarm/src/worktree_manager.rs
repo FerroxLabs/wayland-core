@@ -926,7 +926,38 @@ impl WorktreeManager {
             ));
         }
         let authorities = Arc::new(TransactionWorkspaceAuthorities {
-            checkout: DirectoryAuthority::open(&checkout)?,
+            // workstream C branch (i) — OBSERVATIONAL OPEN. Measured on
+            // SEANDESKTOP, not inherited. A retained DELETE right makes
+            // `SetCurrentDirectory` fail with a sharing violation, and
+            // `git -C <checkout>` chdirs IN-PROCESS (MSYS `chdir()`), so a
+            // DELETE-bearing checkout authority made every checkout-scoped git
+            // invocation fail with "cannot change to ...: Permission denied".
+            //
+            // Determination 2: representation is INCIDENTAL, not causal — with
+            // NO handle held, `git -C` succeeded with BOTH the verbatim
+            // `\\?\C:\...` and the plain drive-letter form. Determination 3:
+            // the checkout authority's complete consumer set is
+            // `heartbeat::read_status_authorized` (relative child read),
+            // `logical_tree_bytes` (read-only enumeration), `validate_path`
+            // (identity), `CandidateSeal::mint` (manifest read), the loan-count
+            // check in `TransactionCleanup::release`, and four `display_path()`
+            // reads — NOTHING deletes, renames, creates a child or flushes
+            // through it; the transaction root's destruction runs through the
+            // ROOT authority's own recursion. Determination 4: the traverse
+            // falsifier was tested directly rather than inherited from 20-72 —
+            // through an observational handle, relative child reads, directory
+            // enumeration, relative directory opens, identity checks and nested
+            // reads ALL succeed.
+            //
+            // ANTI-SWAP IS UNCHANGED: the handle stays CONTINUOUSLY held, so
+            // identity still survives a rename and no re-resolution window is
+            // opened — byte-for-byte the property it had before. Widening this
+            // back to `open` reintroduces the chdir refusal for every git
+            // invocation scoped to this checkout, INCLUDING those made by CHILD
+            // processes: the sharing conflict is system-wide, so a handle held
+            // in the manager process denies a worker process's chdir just as
+            // effectively.
+            checkout: DirectoryAuthority::open_observational(&checkout)?,
             scratch: DirectoryAuthority::open(&scratch)?,
             reservation: Arc::clone(&cleanup.reservation_authority),
         });
@@ -1269,7 +1300,38 @@ impl WorktreeManager {
             ));
         }
         let authorities = Arc::new(TransactionWorkspaceAuthorities {
-            checkout: DirectoryAuthority::open(&checkout)?,
+            // workstream C branch (i) — OBSERVATIONAL OPEN. Measured on
+            // SEANDESKTOP, not inherited. A retained DELETE right makes
+            // `SetCurrentDirectory` fail with a sharing violation, and
+            // `git -C <checkout>` chdirs IN-PROCESS (MSYS `chdir()`), so a
+            // DELETE-bearing checkout authority made every checkout-scoped git
+            // invocation fail with "cannot change to ...: Permission denied".
+            //
+            // Determination 2: representation is INCIDENTAL, not causal — with
+            // NO handle held, `git -C` succeeded with BOTH the verbatim
+            // `\\?\C:\...` and the plain drive-letter form. Determination 3:
+            // the checkout authority's complete consumer set is
+            // `heartbeat::read_status_authorized` (relative child read),
+            // `logical_tree_bytes` (read-only enumeration), `validate_path`
+            // (identity), `CandidateSeal::mint` (manifest read), the loan-count
+            // check in `TransactionCleanup::release`, and four `display_path()`
+            // reads — NOTHING deletes, renames, creates a child or flushes
+            // through it; the transaction root's destruction runs through the
+            // ROOT authority's own recursion. Determination 4: the traverse
+            // falsifier was tested directly rather than inherited from 20-72 —
+            // through an observational handle, relative child reads, directory
+            // enumeration, relative directory opens, identity checks and nested
+            // reads ALL succeed.
+            //
+            // ANTI-SWAP IS UNCHANGED: the handle stays CONTINUOUSLY held, so
+            // identity still survives a rename and no re-resolution window is
+            // opened — byte-for-byte the property it had before. Widening this
+            // back to `open` reintroduces the chdir refusal for every git
+            // invocation scoped to this checkout, INCLUDING those made by CHILD
+            // processes: the sharing conflict is system-wide, so a handle held
+            // in the manager process denies a worker process's chdir just as
+            // effectively.
+            checkout: DirectoryAuthority::open_observational(&checkout)?,
             scratch: DirectoryAuthority::open(&scratch)?,
             reservation: Arc::clone(&cleanup.reservation_authority),
         });
