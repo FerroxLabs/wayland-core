@@ -513,9 +513,15 @@ fn mirror_heartbeat(workspace: &TransactionWorkspace) -> Result<(), String> {
 
 /// Whether a worker descendant still holds a duplicate of the retained checkout
 /// directory descriptor (inherited across the sandbox spawn boundary). Rebuilds
-/// the owner-bound retained authority to query the shared loan counter; any
-/// identity failure returns `false` so the caller falls through to
-/// `release_transaction`, which independently re-validates and fails closed.
+/// the owner-bound retained authority to query the shared loan counter.
+///
+/// The two failure arms are deliberately asymmetric. A root-authority failure is
+/// a PROVEN identity failure, so it returns `false` and the caller falls through
+/// to `release_transaction`, which independently re-validates and fails closed on
+/// the same condition — flipping it would strand every already-drifted
+/// transaction. A refused `RetainedWorkspaceAuthority::new` proves nothing: the
+/// absence of a loan could not be established, so it returns `true` and the
+/// caller quarantines the transaction with its reservation held for retry.
 fn checkout_loan_outstanding(workspace: &TransactionWorkspace, worker_id: &str) -> bool {
     let Ok(root_authority) = workspace.root_authority() else {
         return false;
@@ -525,7 +531,7 @@ fn checkout_loan_outstanding(workspace: &TransactionWorkspace, worker_id: &str) 
         workspace.checkout_authority(),
         format!("{worker_id}:{}", workspace.reserved_bytes),
     ) else {
-        return false;
+        return true;
     };
     retained.checkout_has_outstanding_loans()
 }

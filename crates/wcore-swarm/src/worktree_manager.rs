@@ -6,18 +6,17 @@ impl WorktreeManager {
     /// Construct a new manager for `repo_root`. Creates the
     /// `.swarm-worktrees/` directory if it does not exist.
     pub fn new(repo_root: &Path) -> Result<Self> {
-        // De-verbatimize the canonicalized roots: on Windows `std::fs::canonicalize`
-        // returns a `\\?\C:\...` verbatim path, which the PowerShell capacity probe
-        // (and downstream git invocations that inherit the root) cannot consume.
-        // `dunce::simplified` strips the `\\?\` prefix for real drive-letter paths and
-        // is a no-op on unix and for genuine UNC/device paths, so Linux is unaffected.
-        let repo_root = std::fs::canonicalize(repo_root)?;
-        let repo_root = dunce::simplified(&repo_root).to_path_buf();
+        // De-verbatimize the canonicalized roots: on Windows a bare
+        // `std::fs::canonicalize` returns a `\\?\C:\...` verbatim path, which the
+        // PowerShell capacity probe (and downstream git invocations that inherit
+        // the root) cannot consume. The shared helper strips the `\\?\` prefix for
+        // real drive-letter paths and is a no-op on unix and for genuine
+        // UNC/device paths, so Linux is unaffected.
+        let repo_root = normalized_root(repo_root)?;
         let repo_authority = DirectoryAuthority::open(&repo_root)?;
         let swarm_root = repo_root.join(".swarm-worktrees");
         ensure_real_directory(&swarm_root)?;
-        let swarm_root = std::fs::canonicalize(&swarm_root)?;
-        let swarm_root = dunce::simplified(&swarm_root).to_path_buf();
+        let swarm_root = normalized_root(&swarm_root)?;
         let swarm_authority = DirectoryAuthority::open(&swarm_root)?;
         if swarm_root.parent() != Some(repo_root.as_path()) {
             return Err(SwarmError::WorktreeIo(format!(
@@ -74,18 +73,17 @@ impl WorktreeManager {
         })?;
         std::fs::create_dir_all(workspace_parent)?;
         // De-verbatimize every canonicalized root, exactly as `new` does: on
-        // Windows `std::fs::canonicalize` returns a `\\?\C:\...` verbatim path,
-        // and a verbatim `swarm_root` reaches the PowerShell capacity probe where
-        // `[IO.DriveInfo]::new` throws on the `\\?\C:\` drive root. `dunce::simplified`
-        // strips the `\\?\` prefix for real drive-letter paths and is a no-op on
-        // unix and for genuine UNC/device paths, so Linux is unaffected. Keeping
-        // all three roots simplified preserves the parent-equality checks below
-        // and lets the `DirectoryAuthority` (and the `swarm_root` that
-        // `new_with_workspace_authority` inherits from it) carry a plain path.
-        let workspace_parent = std::fs::canonicalize(workspace_parent)?;
-        let workspace_parent = dunce::simplified(&workspace_parent).to_path_buf();
-        let repo_root = std::fs::canonicalize(repo_root)?;
-        let repo_root = dunce::simplified(&repo_root).to_path_buf();
+        // Windows a bare `std::fs::canonicalize` returns a `\\?\C:\...` verbatim
+        // path, and a verbatim `swarm_root` reaches the PowerShell capacity probe
+        // where `[IO.DriveInfo]::new` throws on the `\\?\C:\` drive root. The
+        // shared helper strips the `\\?\` prefix for real drive-letter paths and
+        // is a no-op on unix and for genuine UNC/device paths, so Linux is
+        // unaffected. Keeping all three roots simplified preserves the
+        // parent-equality checks below and lets the `DirectoryAuthority` (and the
+        // `swarm_root` that `new_with_workspace_authority` inherits from it) carry
+        // a plain path.
+        let workspace_parent = normalized_root(workspace_parent)?;
+        let repo_root = normalized_root(repo_root)?;
         if workspace_parent.starts_with(&repo_root) || repo_root.starts_with(&workspace_parent) {
             return Err(SwarmError::WorktreeIo(format!(
                 "orchestrator worktree root must not overlap repository {}",
@@ -94,8 +92,7 @@ impl WorktreeManager {
         }
         ensure_real_directory(workspace_root)?;
         make_guard_dir_private(workspace_root)?;
-        let swarm_root = std::fs::canonicalize(workspace_root)?;
-        let swarm_root = dunce::simplified(&swarm_root).to_path_buf();
+        let swarm_root = normalized_root(workspace_root)?;
         if swarm_root.parent() != Some(workspace_parent.as_path()) {
             return Err(SwarmError::WorktreeIo(format!(
                 "refused worktree root outside orchestrator directory: {}",
@@ -446,6 +443,35 @@ impl WorktreeManager {
         })
     }
 
+    /// Derive the drive root (e.g. `C:\`) the capacity probe needs from the
+    /// stored workspace root's own `Prefix` component, in Rust rather than by
+    /// asking PowerShell to parse the transported path. The de-verbatimizing
+    /// strip is CONDITIONAL, so a long, reserved-name or non-UTF-8 workspace path
+    /// can legitimately still be verbatim; reading the prefix accepts both forms.
+    /// A root with no drive-letter prefix (a UNC or device path, where
+    /// `DriveInfo` does not apply) fails CLOSED with a legible admission error.
+    #[cfg(windows)]
+    fn probe_drive_root(&self) -> Result<String> {
+        use std::path::{Component, Prefix};
+
+        let letter = match self.swarm_root.components().next() {
+            Some(Component::Prefix(prefix)) => match prefix.kind() {
+                Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => letter,
+                _ => {
+                    return Err(SwarmError::DispatchAdmission(
+                        "workspace capacity probe requires a drive-letter workspace root".into(),
+                    ));
+                }
+            },
+            _ => {
+                return Err(SwarmError::DispatchAdmission(
+                    "workspace capacity probe requires a drive-letter workspace root".into(),
+                ));
+            }
+        };
+        Ok(format!("{}:\\", (letter as char).to_ascii_uppercase()))
+    }
+
     #[cfg(windows)]
     async fn available_workspace_bytes(&self) -> Result<u64> {
         // Transport the probe root out-of-band via an environment variable rather
@@ -458,13 +484,13 @@ impl WorktreeManager {
         // `new_with_workspace_authority`), so `[IO.DriveInfo]::new` receives a
         // plain drive root rather than a `\\?\C:\` verbatim path that would make
         // it throw a non-terminating `ArgumentException` (exit 0, empty stdout).
-        const SCRIPT: &str = "$root=[IO.Path]::GetPathRoot($env:WCORE_SWARM_PROBE_ROOT); $drive=[IO.DriveInfo]::new($root); [Console]::Out.Write($drive.AvailableFreeSpace)";
-        let root = self.swarm_root.to_string_lossy().into_owned();
+        const SCRIPT: &str = "$drive=[IO.DriveInfo]::new($env:WCORE_SWARM_PROBE_ROOT); [Console]::Out.Write($drive.AvailableFreeSpace)";
+        let drive_root = self.probe_drive_root()?;
         let mut command = shell::shell_command_argv(
             "powershell.exe",
             &["-NoProfile", "-NonInteractive", "-Command", SCRIPT],
         );
-        command.env("WCORE_SWARM_PROBE_ROOT", root.as_str());
+        command.env("WCORE_SWARM_PROBE_ROOT", drive_root.as_str());
         let output = capture_bounded_process(command, self.capture_limits, None)
             .await
             .map_err(|error| capture_error("workspace capacity probe", error))?;
