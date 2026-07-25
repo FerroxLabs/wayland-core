@@ -1399,3 +1399,67 @@ fn checkout_git_chdir_succeeds_while_workspace_authorities_are_alive() {
     // object rather than re-resolved by pathname.
     checkout_authority.validate_path(&checkout).unwrap();
 }
+
+/// A chdir-requiring git subcommand must still succeed inside a BOUND
+/// INTEGRATION CHECKOUT while that checkout's landing authority is alive.
+///
+/// Third member of the family started by 20-72 (repository root) and continued
+/// by 20-74 (dispatch-side checkout) — same shape, same reasoning, the landing
+/// directory instead. `bind_integration_checkout` opened the checkout root with
+/// the full mutating profile and then stored it in `IntegrationCheckout` for the
+/// entire landing lifecycle, so every `landing_git_command`'s `git -C <root>` —
+/// starting with the `rev-parse --is-inside-work-tree` inside the bind itself —
+/// failed with "cannot change to ...: Permission denied".
+///
+/// A live own-process handle enumeration on SEANDESKTOP measured exactly ONE
+/// handle on the checkout at failure time, granted `0x0013019f` (DELETE set),
+/// and zero immediately before the open — which is what identified this
+/// acquisition rather than any other candidate.
+///
+/// Fails before the observational conversion, and fails again the moment a
+/// chdir-blocking access right returns to a directory git must enter on the
+/// landing path.
+#[test]
+fn landing_git_chdir_succeeds_while_the_integration_checkout_authority_is_alive() {
+    let fixture = tempfile::tempdir().unwrap();
+    let checkout = fixture.path().join("integration");
+    std::fs::create_dir_all(&checkout).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q", "."])
+            .current_dir(&checkout)
+            .status()
+            .expect("git init must run")
+            .success(),
+        "fixture repository must initialize"
+    );
+    // The landing canonicalizes before opening, so the test binds the same
+    // representation the production path does.
+    let root = std::fs::canonicalize(&checkout).unwrap();
+
+    // Hold the authority exactly as `bind_integration_checkout` does, and keep
+    // it held across the git call exactly as `IntegrationCheckout` does.
+    let landing_authority = DirectoryAuthority::open_observational(&root).unwrap();
+
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .expect("git rev-parse must run");
+
+    assert!(
+        output.status.success(),
+        "git -C must chdir into the bound integration checkout while its landing authority is held: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "true",
+        "the bind's own work-tree probe must report the checkout"
+    );
+
+    // The handle is still held, so the landing's identity witness is still bound
+    // to the retained object rather than re-resolved by pathname.
+    landing_authority.validate_path(&root).unwrap();
+}

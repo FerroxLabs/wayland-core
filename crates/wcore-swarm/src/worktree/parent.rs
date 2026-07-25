@@ -190,7 +190,10 @@ fn reject_target_ref(target_ref: &str) -> LandingResult<()> {
 pub(super) struct IntegrationCheckout {
     /// Canonical absolute checkout root.
     root: PathBuf,
-    /// Retained authority over the checkout root (identity + no-follow opens).
+    /// Retained IDENTITY WITNESS over the checkout root, held continuously for
+    /// the whole landing. Its only consumer is `assert_parent_unchanged`, which
+    /// calls `validate_path`; it performs no relative opens and no mutation, so
+    /// it is acquired observationally (see the acquisition site).
     authority: DirectoryAuthority,
     /// Canonical absolute common Git directory.
     common_git_dir: PathBuf,
@@ -525,7 +528,41 @@ impl WorktreeManager {
         }
         let root = std::fs::canonicalize(integration_checkout)
             .map_err(|error| ParentLandingError::UnownedCheckout(error.to_string()))?;
-        let authority = DirectoryAuthority::open(&root)
+        // 20-75 workstream C — OBSERVATIONAL OPEN, on OBSERVED evidence.
+        //
+        // OBSERVATION (live own-process handle enumeration on SEANDESKTOP at the
+        // moment of failure; Sysinternals `handle.exe` is not installed on the
+        // box, so an `NtQueryObject`-based probe was used instead). Immediately
+        // BEFORE this line: ZERO handles open on the checkout root. Immediately
+        // AFTER it: exactly ONE, granted `0x0013019f` =
+        // DELETE|READ_CONTROL|SYNCHRONIZE|FILE_READ_DATA|FILE_WRITE_DATA|
+        // FILE_APPEND_DATA|FILE_READ_EA|FILE_WRITE_EA|FILE_READ_ATTRIBUTES|
+        // FILE_WRITE_ATTRIBUTES. At the failing `git rev-parse
+        // --is-inside-work-tree` eight lines below: still that same single
+        // handle. So this open was the SOLE handle on the checkout, and every
+        // other swept candidate — `RetainedWorkspaceAuthority::new`/`::validate`,
+        // the objects-dir authorities, the transaction-root/swarm/control/
+        // quarantine authorities, the recursive `open_child_directory` walks,
+        // every `to_sandbox()`/`try_clone_handle()` loan and the agent-side
+        // spawner paths — was RULED OUT BY MEASUREMENT, not by argument.
+        //
+        // MECHANISM (inherited from 20-72/20-74, not re-derived): a retained
+        // DELETE right makes `SetCurrentDirectory` fail with a sharing
+        // violation, and `git -C <root>` chdirs IN-PROCESS, so every landing git
+        // call below failed with "cannot change to ...: Permission denied".
+        //
+        // CONSUMER CLASSIFICATION: `IntegrationCheckout::authority` has exactly
+        // ONE consumer in the entire crate — `assert_parent_unchanged` calls
+        // `validate_path(&target.root)`. It is an IDENTITY WITNESS ONLY: nothing
+        // deletes, renames, creates a child, enumerates or flushes through it.
+        // Identity is FileId/volume-based and needs only read access, so the
+        // capability is dropped rather than the lifetime scoped.
+        //
+        // ANTI-SWAP IS UNCHANGED. The handle is still acquired here and held
+        // CONTINUOUSLY for the whole landing, so no release/re-acquire window is
+        // opened and `validate_path` still fails closed on a swap, rename or
+        // same-path replacement.
+        let authority = DirectoryAuthority::open_observational(&root)
             .map_err(|error| ParentLandingError::UnownedCheckout(error.to_string()))?;
         authority
             .validate_path(&root)
