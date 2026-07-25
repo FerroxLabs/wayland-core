@@ -53,6 +53,28 @@ impl DirectoryAuthority {
         self.0.try_clone_handle().map_err(Into::into)
     }
 
+    /// Open an EXISTING regular-file advisory-lock target beneath this retained
+    /// directory. The rationale lives at
+    /// `wcore_sandbox::DirectoryAuthority::open_child_lock_file`.
+    pub(super) fn open_child_lock_file(
+        &self,
+        name: &str,
+    ) -> Result<wcore_sandbox::DirectoryHandleLoan> {
+        self.0.open_child_lock_file(name).map_err(lock_file_error)
+    }
+
+    /// Open-or-create a regular-file advisory-lock target beneath this retained
+    /// directory. The rationale lives at
+    /// `wcore_sandbox::DirectoryAuthority::open_or_create_child_lock_file`.
+    pub(super) fn open_or_create_child_lock_file(
+        &self,
+        name: &str,
+    ) -> Result<wcore_sandbox::DirectoryHandleLoan> {
+        self.0
+            .open_or_create_child_lock_file(name)
+            .map_err(lock_file_error)
+    }
+
     pub(super) fn has_outstanding_loans(&self) -> bool {
         self.0.has_outstanding_handle_loans()
     }
@@ -83,6 +105,17 @@ impl DirectoryAuthority {
         self.0
             .rename_into(&destination_parent.0, child_name, replace)
             .map_err(|error| SwarmError::WorktreeIo(error.to_string()))
+    }
+}
+
+/// Preserve the OS error kind when a lock-file open fails, so a caller probing
+/// an absent lock file can still distinguish "not found" (nobody holds it) from
+/// a real failure. Every other sandbox refusal keeps the admission shape the
+/// sibling accessors use.
+fn lock_file_error(error: wcore_sandbox::SandboxError) -> SwarmError {
+    match error {
+        wcore_sandbox::SandboxError::Io(error) => SwarmError::Io(error),
+        other => SwarmError::DispatchAdmission(other.to_string()),
     }
 }
 

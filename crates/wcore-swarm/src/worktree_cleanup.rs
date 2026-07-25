@@ -170,7 +170,12 @@ impl WorktreeManager {
     /// all failures and every residual path. Idempotent when the root is empty.
     pub async fn cleanup_all(&self, escalation: &CancellationToken) -> Result<()> {
         self.validate_swarm_root()?;
-        let _cleanup_lock = ActiveLease::acquire(self.swarm_authority.try_clone_handle()?)?;
+        // The SAME sentinel `with_directory_lock` takes, so full cleanup still
+        // serializes against every admission critical section. This lock is on
+        // the SWARM authority; the two checkout-registration leases are on their
+        // TRANSACTION-ROOT authorities. Collapsing them onto one sentinel would
+        // deadlock cleanup against the transaction it is trying to remove.
+        let _cleanup_lock = ActiveLease::acquire(swarm_lock_handle(&self.swarm_authority)?)?;
         let deadline = tokio::time::Instant::now() + CLEANUP_GRACE;
         let mut failures = Vec::new();
         let mut entries = Vec::new();

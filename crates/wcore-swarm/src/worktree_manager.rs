@@ -753,11 +753,14 @@ impl WorktreeManager {
                     let scratch = transaction_root.join("scratch");
                     std::fs::create_dir(&scratch)?;
                     make_guard_dir_private(&scratch)?;
-                    drop(create_private_regular_file(
-                        &transaction_root.join(LEASE_FILE),
-                        b"root-directory-lease\n",
-                    )?);
-                    let lease = ActiveLease::acquire(root_authority.try_clone_handle()?)?;
+                    // The lease is taken on the LEASE_FILE that the transaction
+                    // derivation opens-or-creates, never on the transaction-root
+                    // DIRECTORY object: Windows byte-range locking is undefined
+                    // on a directory handle. The separate create-and-drop of the
+                    // lease file is gone because the lease handle now creates it.
+                    // The loan is still accounted against this root's counter, so
+                    // `remove_open_dir_all` keeps refusing while the lease is held.
+                    let lease = ActiveLease::acquire(transaction_lease_handle(&root_authority)?)?;
                     let swarm_authority = DirectoryAuthority::open(&self.swarm_root)?;
                     let quarantine_authority = DirectoryAuthority::open(&self.control_root)?;
                     let root_identity = root_authority.identity_token();
@@ -1067,11 +1070,14 @@ impl WorktreeManager {
                     let scratch = transaction_root.join("scratch");
                     std::fs::create_dir(&scratch)?;
                     make_guard_dir_private(&scratch)?;
-                    drop(create_private_regular_file(
-                        &transaction_root.join(LEASE_FILE),
-                        b"root-directory-lease\n",
-                    )?);
-                    let lease = ActiveLease::acquire(root_authority.try_clone_handle()?)?;
+                    // The lease is taken on the LEASE_FILE that the transaction
+                    // derivation opens-or-creates, never on the transaction-root
+                    // DIRECTORY object: Windows byte-range locking is undefined
+                    // on a directory handle. The separate create-and-drop of the
+                    // lease file is gone because the lease handle now creates it.
+                    // The loan is still accounted against this root's counter, so
+                    // `remove_open_dir_all` keeps refusing while the lease is held.
+                    let lease = ActiveLease::acquire(transaction_lease_handle(&root_authority)?)?;
                     let swarm_authority = DirectoryAuthority::open(&self.swarm_root)?;
                     let quarantine_authority = DirectoryAuthority::open(&self.control_root)?;
                     let root_identity = root_authority.identity_token();

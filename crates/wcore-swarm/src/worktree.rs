@@ -6,9 +6,7 @@
 //! is set with `.current_dir(...)` on the returned `tokio::process::Command`.
 
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, mpsc};
@@ -101,6 +99,21 @@ type ActiveReservationRegistry = Arc<StdMutex<HashMap<String, ActiveReservation>
 const RESERVATION_FILE: &str = ".wayland-reservation";
 const LEASE_FILE: &str = ".wayland-active-lease";
 const CONTROL_DIR: &str = ".wayland-control";
+/// The swarm-root advisory-lock sentinel, resolved beneath [`CONTROL_DIR`].
+///
+/// MIGRATION CONSEQUENCE, decided and accepted: the on-disk lock artifact moved
+/// from the swarm-root DIRECTORY object to this regular file on EVERY platform,
+/// because a platform split would leave the Windows mechanism unexercisable by
+/// any Linux-CI test — precisely the condition that hid the original defect.
+/// During a unix version-skew window a process running an older build (locking
+/// the directory) and one running this build (locking this sentinel) will NOT
+/// interlock. The blast radius is bounded to admission serialization and
+/// aggregate capacity accounting; it weakens NO authority proof, because
+/// `validate_swarm_root`, `validate_repo_authority`, every `DirectoryAuthority`
+/// identity check and the reservation receipts are all lock-independent and
+/// still fail closed. Windows has no compatibility surface to preserve — the
+/// lock never engaged there at all — so the skew is unix-only.
+const SWARM_LOCK_FILE: &str = ".wayland-swarm-lock";
 const WORKSPACE_SAFETY_MARGIN_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_TRANSACTION_WORKSPACE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_AGGREGATE_WORKSPACE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
@@ -326,13 +339,58 @@ impl std::fmt::Debug for TransactionWorkspace {
     }
 }
 
+/// The ONE derivation of the swarm-root advisory-lock target.
+///
+/// Every swarm-root critical section — all three [`with_directory_lock`]
+/// callers AND `cleanup_all`'s lease — resolves this exact sentinel, so
+/// admission and full cleanup still exclude each other exactly as they did when
+/// they all locked the shared swarm-root directory object. Splitting this into
+/// two derivations would silently dissolve that interlock.
+///
+/// The sentinel lives INSIDE [`CONTROL_DIR`], and that placement is
+/// LOAD-BEARING, not tidiness: four production loops enumerate the swarm root's
+/// direct children and skip only the control directory —
+/// `reserved_workspace_bytes`, `cleanup_all`, `retained_worker_count` and
+/// `sandbox_read_denies` — and the first three hard-`Err` through
+/// `is_real_directory_entry` on any non-directory child. A sentinel placed
+/// directly under the swarm root would therefore break admission accounting,
+/// cleanup and the residual sweep. Moving it out requires changing those four
+/// loops first.
+///
+/// The control directory is opened with the open-or-create form deliberately:
+/// `TransactionCleanup::release` reaches here through a `swarm_authority` that
+/// unit-test fixtures open on a bare temporary directory with no control
+/// directory present, so an open-only form would fail cleanup for a reason
+/// unrelated to locking.
+fn swarm_lock_handle(authority: &DirectoryAuthority) -> Result<DirectoryHandleLoan> {
+    authority
+        .open_or_create_child_directory(CONTROL_DIR)?
+        .open_or_create_child_lock_file(SWARM_LOCK_FILE)
+}
+
+/// The ONE derivation of a transaction's lease target.
+///
+/// This is the file the code already created and then immediately discarded
+/// without ever locking it, so [`LEASE_FILE`]'s name is now accurate and
+/// [`transaction_is_active`] finally means what it says. The returned loan is
+/// accounted against the transaction root's own counter, so a root whose lease
+/// is held still refuses `remove_open_dir_all`.
+fn transaction_lease_handle(authority: &DirectoryAuthority) -> Result<DirectoryHandleLoan> {
+    authority.open_or_create_child_lock_file(LEASE_FILE)
+}
+
 fn with_directory_lock<T>(
     path: &Path,
     authority: &DirectoryAuthority,
     action: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     authority.validate_path(path)?;
-    let file = authority.try_clone_handle()?;
+    // The lock target MUST be a regular file: Windows byte-range locking is
+    // undefined on directory objects and `fd-lock` calls `LockFileEx` directly.
+    // The sentinel is resolved through the retained handle rather than by
+    // re-resolving a pathname, so a swap of the directory between the identity
+    // proofs bracketing this critical section cannot redirect the lock.
+    let file = swarm_lock_handle(authority)?;
     let mut lock = fd_lock::RwLock::new(file);
     let _guard = loop {
         match lock.write() {
@@ -343,28 +401,6 @@ fn with_directory_lock<T>(
     };
     authority.validate_path(path)?;
     action()
-}
-
-fn create_private_regular_file(path: &Path, contents: &[u8]) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    let mut file = options.open(path)?;
-    file.write_all(contents)?;
-    file.sync_all()?;
-    Ok(file)
 }
 
 fn remove_transaction_root(
@@ -449,7 +485,18 @@ fn remove_transaction_root_inner_with_hooks(
 
 fn transaction_is_active(authority: &DirectoryAuthority, path: &Path) -> Result<bool> {
     authority.validate_path(path)?;
-    let file = authority.try_clone_handle()?;
+    // Probe the SAME target `transaction_lease_handle` locks, through the
+    // OPEN-ONLY constructor so the probe is non-mutating: it runs over foreign
+    // and legacy transaction roots during capacity accounting and cleanup, and
+    // creating a lease file inside a directory it is merely observing would be
+    // a side effect. "No lease file" correctly means "nobody holds the lease",
+    // which is exactly the disposition the surrounding code already assumes on
+    // its other not-found paths.
+    let file = match authority.open_child_lock_file(LEASE_FILE) {
+        Ok(file) => file,
+        Err(SwarmError::Io(error)) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
     let mut lock = fd_lock::RwLock::new(file);
     match lock.try_write() {
         Ok(_guard) => Ok(false),
