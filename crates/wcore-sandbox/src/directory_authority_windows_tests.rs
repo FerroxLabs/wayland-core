@@ -481,3 +481,36 @@ fn windows_command_cwd_stays_bound_to_renamed_directory_object() {
     assert!(moved.is_dir());
     assert!(original.is_dir());
 }
+
+/// Destructive removal must succeed through a DIRECTORY child.
+///
+/// Guards the `(RelativeKind::Any, RelativeIntent::Mutate)` access arm. That
+/// open cannot know the child's kind until the handle exists, so it must carry
+/// `FILE_GENERIC_WRITE`: when the child resolves to a directory,
+/// `remove_descendants` wraps the handle in a `DirectoryAuthority` and the
+/// recursion terminates in `sync_all()` — `FlushFileBuffers` — which demands
+/// write access. Trim that bit back and this test fails with
+/// `ERROR_ACCESS_DENIED` (os error 5).
+///
+/// An EMPTY DIRECTORY child is the minimal reproducer a bisecting probe
+/// identified: an empty root and a lone file child both already succeeded.
+///
+/// Windows-only because the arm has no unix analogue — unix removal goes
+/// through `unlinkat` relative to the descriptor and carries no per-handle
+/// access mask. Asserts the invariant (removal succeeds, the tree is gone),
+/// never an OS error code.
+#[test]
+fn windows_destructive_removal_succeeds_through_a_directory_child() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(root.join("empty-child")).unwrap();
+
+    let authority = DirectoryAuthority::open(&root).unwrap();
+    if let Err(failure) = authority.remove_open_dir_all() {
+        let (error, _authority) = *failure;
+        panic!("destructive removal must succeed through a directory child: {error}");
+    }
+
+    assert!(!root.exists(), "the retained root must be gone");
+}

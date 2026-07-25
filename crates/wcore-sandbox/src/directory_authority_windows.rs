@@ -620,8 +620,36 @@ fn open_relative(
         (RelativeKind::Directory, RelativeIntent::Create | RelativeIntent::Mutate) => {
             FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE | SYNCHRONIZE
         }
-        (RelativeKind::File | RelativeKind::Any, RelativeIntent::Mutate) => {
-            FILE_GENERIC_READ | DELETE | SYNCHRONIZE
+        // Kept deliberately narrow. This pairing has NO caller today (the only
+        // Mutate call sites are the Directory one in `remove_open_dir_all` and
+        // the unknown-kind one in `remove_descendants`), so keeping it at
+        // read+delete costs nothing and stops a future caller silently
+        // inheriting the widened unknown-kind grant below.
+        (RelativeKind::File, RelativeIntent::Mutate) => FILE_GENERIC_READ | DELETE | SYNCHRONIZE,
+        // Unknown kind: the object's type is NOT knowable until the handle
+        // exists, so the grant must cover every kind the handle can turn out to
+        // be. The union over {File, Directory} of the Mutate rights is exactly
+        // the Directory/Mutate arm's set above — this receives that union and
+        // nothing beyond it.
+        //
+        // FILE_GENERIC_WRITE is LOAD-BEARING, not decorative: when the child
+        // turns out to be a DIRECTORY, `remove_descendants` wraps this handle in
+        // a `DirectoryAuthority` and the recursion terminates in
+        // `authority.handle.sync_all()` — `FlushFileBuffers` — which requires
+        // write access. Trimming the write bit back reintroduces
+        // `ERROR_ACCESS_DENIED` (os error 5) on EVERY directory child; a
+        // bisecting probe isolated it to exactly that case (empty root and a
+        // lone file child both already succeeded).
+        //
+        // ACCEPTED COST, recorded so it is visible at review rather than
+        // discovered later: a FILE child opened through this path now carries
+        // write access it never exercises, and cleanup of such a file
+        // additionally requires its other openers to have granted
+        // FILE_SHARE_WRITE — so a file held elsewhere with only share-read plus
+        // share-delete, previously deletable, will now fail with a sharing
+        // violation.
+        (RelativeKind::Any, RelativeIntent::Mutate) => {
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE | SYNCHRONIZE
         }
         (RelativeKind::Any, RelativeIntent::ReadOnly) => FILE_GENERIC_READ | SYNCHRONIZE,
         (RelativeKind::Any, RelativeIntent::Create) => {
