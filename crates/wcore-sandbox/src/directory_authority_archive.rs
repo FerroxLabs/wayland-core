@@ -157,7 +157,14 @@ impl RetainedWorkspaceAuthority {
     }
 
     fn remove_journal(&self) -> Result<()> {
-        let authority = self.owner.open_child_file(IMPORT_JOURNAL)?;
+        // Removal-capable access is REQUIRED here. The sibling path consumes the
+        // authority `create_child_file` returned, which already carries DELETE;
+        // this crash-recovery path re-opens the journal instead, and a plain
+        // read-only open cannot be deleted through on Windows. Getting this
+        // wrong left the journal on disk forever, so every later import refused
+        // with "already active or requires exclusive recovery" — crash recovery
+        // could never complete.
+        let authority = self.owner.open_child_file_for_removal(IMPORT_JOURNAL)?;
         self.remove_journal_authority(authority)
     }
 

@@ -339,6 +339,27 @@ impl DirectoryAuthority {
         ))
     }
 
+    /// Open one direct regular-file child with the access `remove_child_file`
+    /// requires in order to destroy it.
+    ///
+    /// The two platforms delete through different objects, so they need
+    /// different access. Unix unlinks through the PARENT descriptor
+    /// (`unlinkat`), leaving the file authority a pure identity witness for
+    /// which read-only is sufficient. Windows sets a delete disposition on the
+    /// FILE's own handle, so that handle must carry `DELETE` — the read-only
+    /// profile `open_child_file` uses is refused with os error 5.
+    pub(super) fn open_child_file_for_removal(&self, name: &str) -> Result<RegularFileAuthority> {
+        validate_child_name(name)?;
+        #[cfg(windows)]
+        {
+            windows::open_child_file_for_removal(self, name)
+        }
+        #[cfg(not(windows))]
+        {
+            self.open_child_file(name)
+        }
+    }
+
     /// Open an EXISTING regular-file advisory-lock target beneath this retained
     /// directory, resolved through the retained handle.
     ///
@@ -468,6 +489,13 @@ impl DirectoryAuthority {
         Ok(())
     }
 
+    /// Destroy one direct regular-file child through its still-open authority.
+    ///
+    /// `authority` MUST have been opened with removal-capable access — either
+    /// from `create_child_file` or from `open_child_file_for_removal`. On
+    /// Windows the delete is a disposition set on that handle and is refused
+    /// with os error 5 if it lacks `DELETE`; a plain `open_child_file` authority
+    /// is NOT sufficient there, even though it is on unix.
     fn remove_child_file(&self, name: &str, authority: RegularFileAuthority) -> Result<()> {
         validate_child_name(name)?;
         let path = self.display_path.join(name);

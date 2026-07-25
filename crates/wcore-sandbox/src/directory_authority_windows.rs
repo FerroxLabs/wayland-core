@@ -236,7 +236,30 @@ pub(super) fn open_child_file(
     parent: &DirectoryAuthority,
     name: &str,
 ) -> Result<RegularFileAuthority> {
-    let handle = open_relative(parent, name, RelativeKind::File, RelativeIntent::ReadOnly)?;
+    open_child_file_with(parent, name, RelativeIntent::ReadOnly)
+}
+
+/// Open a regular-file child with the access `remove_child_file` needs to
+/// DESTROY it.
+///
+/// On Windows a file is deleted through a disposition set on the FILE's own
+/// handle, so that handle must carry `DELETE`; the read-only profile
+/// `open_child_file` uses cannot delete and is refused with os error 5. The
+/// mutate profile deliberately withholds the WRITE bit (see the access match),
+/// which is what also lets a read-only file be removed.
+pub(super) fn open_child_file_for_removal(
+    parent: &DirectoryAuthority,
+    name: &str,
+) -> Result<RegularFileAuthority> {
+    open_child_file_with(parent, name, RelativeIntent::Mutate)
+}
+
+fn open_child_file_with(
+    parent: &DirectoryAuthority,
+    name: &str,
+    intent: RelativeIntent,
+) -> Result<RegularFileAuthority> {
+    let handle = open_relative(parent, name, RelativeKind::File, intent)?;
     let metadata = handle.metadata()?;
     validate_real_file(Path::new("<retained child>"), &metadata)?;
     let identity = handle_directory_identity(&handle, &metadata)?;
