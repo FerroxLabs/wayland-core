@@ -4,7 +4,27 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    branches:
+      - main
+      # 20A-01 Wiring A. Before this line, `ci.yml` fired ONLY on
+      # `pull_request → main` / `push → main`, so a long-lived working branch
+      # with no open PR went through CI zero times:
+      # `gh run list -R FerroxLabs/wayland-core --branch plan/f20-unified-audit-repair`
+      # returned `[]`, and the last ci.yml run of ANY kind was 2026-07-13.
+      # The macOS leg and the self-hosted Windows leg had therefore never
+      # COMPILED this tree — which is how a Windows-fatal E0433 in
+      # crates/wcore-tools/tests/bash_sandbox_routing_test.rs (20A-01 F-01)
+      # sat on the branch undetected behind an 11,519-test Linux-only green.
+      #
+      # `workflow_dispatch` was considered first and rejected: GitHub only
+      # exposes that trigger for workflows already present on the DEFAULT
+      # branch, and ci.yml on `main` has no such trigger, so a dispatch
+      # against this ref cannot fire. Naming the branch in `push` is the only
+      # route that actually runs, and it needs no change to `main`.
+      #
+      # Transient: drop this entry when the branch merges. The job matrix,
+      # runner labels, concurrency group and test commands are untouched.
+      - plan/f20-unified-audit-repair
 
 permissions:
   contents: read

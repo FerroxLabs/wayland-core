@@ -189,6 +189,92 @@ jobs:
             }
 
   # --------------------------------------------------------------------------
+  # 20A-01 Wiring C — the native Windows live-acceptance ignored set.
+  #
+  # crates/wcore-sandbox/tests/live_fs_acl.rs holds twelve Windows-only
+  # #[ignore]d ACL tests; before 20A-01 exactly TWO of them were named by any
+  # runner anywhere (f20-native-windows-proof.ps1's canonical six-target array).
+  # The other ten ran NOWHERE — including deny_ace_still_blocks_granted_read and
+  # normal_sid_only_grant_is_denied, the two that would have caught the
+  # fs_read_deny silent no-op. crates/wcore-sandbox/tests/hard_process_containment_windows.rs
+  # likewise had an unselected native_containment_gate_marker. A security test
+  # with no runner is not a control.
+  #
+  # This job is deliberately NOT the native proof. f20-native-windows-proof.ps1
+  # is untouched: verifyNativeLog in scripts/f20-native-uat-proof.mjs fails
+  # closed on any target marker outside its canonical six, on any duplicate and
+  # on any reorder, so adding targets there would make the six-target proof fail
+  # closed on its own new markers, and widening the selector on
+  # windows-retained-handle / windows-appcontainer-acl would load two
+  # certified-green targets with ten never-executed tests. That array is
+  # 20A-04's verified invariant.
+  #
+  # Self-hosted, not windows-2022: the hosted image is a server SKU reporting
+  # AppContainerBackend::is_available() == false (the same reason the
+  # f20-windows-candidate job below runs self-hosted), so these tests can only
+  # execute on an AppContainer-capable Windows client. Skipped in candidate mode
+  # so a Sean-authorized f20_candidate dispatch still runs ONLY the two exact
+  # F20 native jobs.
+  #
+  # NOTE (20A-01 BACKLOG M6): this job shares the self-hosted box with ci.yml's
+  # Windows leg and with 20A-02/03/04 measurements. Nothing serializes them; if a
+  # measurement produces an inexplicable result, check contention first.
+  windows-live-acceptance:
+    name: Windows live-acceptance ignored set (self-hosted msvc)
+    if: github.event.inputs.f20_candidate != 'true'
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+      - msvc
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same rationale as the candidate job below: the self-hosted checkout dir
+      # is owned by BUILTIN\Administrators while the runner service is
+      # NT AUTHORITY\NETWORK SERVICE, so git aborts on "dubious ownership".
+      - name: Trust the checkout for git
+        shell: pwsh
+        run: git config --global --add safe.directory '*'
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Run the native Windows live-acceptance ignored set
+        shell: pwsh
+        env:
+          # `only` runs PHASE L alone — the windows-2022 job above already
+          # covers phases F/G/H, so this box is not asked to repeat them.
+          # The soak script sets WAYLAND_SANDBOX_LIVE_WINDOWS itself, in the
+          # trap-safe PowerShell form, and hard-fails if the value did not take
+          # effect byte-exactly. It is NOT set here: the `cmd` form
+          # `set VAR=value && ...` appends a trailing space that Rust reads
+          # verbatim, which would make every one of these tests skip or fail
+          # for the wrong reason and report a vacuous result.
+          WAYLAND_SOAK_LIVE_ACCEPTANCE: only
+          LOCAL_RESULTS_DIR: ${{ github.workspace }}\windows-live-acceptance-results
+        run: |
+          pwsh scripts/wayland-e2e-windows-soak.ps1
+
+      - name: Upload live-acceptance logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-live-acceptance-logs-${{ github.run_id }}
+          path: windows-live-acceptance-results/
+          retention-days: 14
+          if-no-files-found: warn
+
+  # --------------------------------------------------------------------------
   # Candidate-mode F20 native UAT jobs.
   #
   # These run ONLY on a manual workflow_dispatch with f20_candidate=true — the
