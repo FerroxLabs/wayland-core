@@ -449,13 +449,25 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "@echo off\r\n:loop\r\necho x>>\"{}\"\r\n\"{}\" /t 1 /d y /n >nul\r\ngoto loop\r\n",
-                heartbeat.display(),
+                "@echo off\r\n:loop\r\necho x>>heartbeat.txt\r\n\"{}\" /t 1 /d y /n >nul\r\ngoto loop\r\n",
                 choice.display()
             ),
         )
         .expect("write process-tree heartbeat script");
-        let nested = format!("\"{}\" /d /c \"{}\"", cmd.display(), script.display());
+        // The nested command line carries NO quotes and NO absolute paths. The
+        // previous form embedded two quoted absolute paths
+        // (`"<cmd.exe>" /d /c "<script>"`); passing that through the argv vector
+        // let std's `CommandLineToArgvW` quoting escape the inner quotes as
+        // `\"`, which cmd.exe does not understand, so the inner shell never
+        // launched and the heartbeat was never written. Setting the child's
+        // working directory to the temp directory lets both the script and its
+        // output file be BARE relative names, which removes the nesting instead
+        // of escaping it harder. `cmd` resolves through PATH.
+        //
+        // Two process levels are RETAINED deliberately: the reaped descendant is
+        // the inner shell, so collapsing this to a single level would delete the
+        // property the test exists to prove.
+        let nested = "cmd /d /c heartbeat.cmd".to_owned();
         let backend = Arc::new(NoSandboxBackend::new());
         let rx = backend
             .execute_streaming(
@@ -468,7 +480,7 @@ mod tests {
                         "/c".into(),
                         nested,
                     ],
-                    cwd: None,
+                    cwd: Some(dir.path().to_path_buf()),
                 },
             )
             .expect("spawn nested Windows command");
