@@ -743,8 +743,24 @@ mod windows_snapshot_security {
 
     #[cfg(test)]
     impl OwnedSid {
+        /// Read-only view of the SID, for the ACE builders and comparisons.
         fn sid(&self) -> windows_sys::Win32::Security::PSID {
             self.buffer.as_ptr().cast_mut().cast()
+        }
+
+        /// Writable view, for the ONE caller that hands the buffer to
+        /// `CreateWellKnownSid` to be FILLED IN.
+        ///
+        /// This exists because the previous code obtained that write pointer
+        /// from `sid(&self)` — deriving a `*mut` from a shared borrow via
+        /// `cast_mut()` and then letting the kernel write through it. That is
+        /// undefined behaviour under the aliasing model, and it also made the
+        /// owning binding look immutable to the compiler, which is what
+        /// surfaced as a `unused_mut` lint error rather than as the aliasing
+        /// bug it actually was. Deriving the pointer from `&mut self` restores
+        /// the real provenance and makes the binding's `mut` meaningful.
+        fn sid_mut(&mut self) -> windows_sys::Win32::Security::PSID {
+            self.buffer.as_mut_ptr().cast()
         }
     }
 
@@ -778,8 +794,12 @@ mod windows_snapshot_security {
         let mut sid = OwnedSid {
             buffer: vec![0usize; words],
         };
-        // SAFETY: the aligned buffer is writable for needed bytes.
-        if unsafe { CreateWellKnownSid(kind, std::ptr::null_mut(), sid.sid(), &mut needed) } == 0 {
+        // SAFETY: the aligned buffer is writable for needed bytes, and the
+        // pointer is derived from `&mut sid` so the kernel's write does not
+        // alias through a shared borrow.
+        if unsafe { CreateWellKnownSid(kind, std::ptr::null_mut(), sid.sid_mut(), &mut needed) }
+            == 0
+        {
             return Err(std::io::Error::last_os_error());
         }
         Ok(sid)

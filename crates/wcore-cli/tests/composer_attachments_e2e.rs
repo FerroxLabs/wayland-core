@@ -31,6 +31,37 @@ fn jpeg_bytes(tail: u8) -> Vec<u8> {
     bytes
 }
 
+/// Attachment rejection cases whose fixture is a NON-REGULAR file.
+///
+/// Symlinks and FIFOs are Unix concepts with no Windows analogue reachable
+/// from a portable test, so the Windows arm contributes no cases. It returns an
+/// empty vector rather than being `#[cfg]`-ed away at the call site so the
+/// caller's `invalid` binding stays genuinely mutable on every target.
+#[cfg(unix)]
+fn non_regular_file_cases(fixture_dir: &Path, png: &Path) -> Vec<(&'static str, String)> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::symlink;
+
+    let symlink_path = fixture_dir.join("symlink.png");
+    symlink(png, &symlink_path).unwrap();
+
+    let fifo = fixture_dir.join("fifo.png");
+    let fifo_c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    // SAFETY: the CString is a valid pathname for this isolated fixture.
+    assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+
+    vec![
+        ("symlink", symlink_path.to_string_lossy().into_owned()),
+        ("fifo", fifo.to_string_lossy().into_owned()),
+    ]
+}
+
+#[cfg(not(unix))]
+fn non_regular_file_cases(_fixture_dir: &Path, _png: &Path) -> Vec<(&'static str, String)> {
+    Vec::new()
+}
+
 fn write_config(home: &Path, base_url: &str) {
     std::fs::write(
         home.join("config.toml"),
@@ -147,7 +178,7 @@ fn packaged_json_stream_ingests_images_on_active_provider_and_rejects_bad_files(
         .join("..")
         .join("first.png");
 
-    let mut invalid = vec![
+    let mut invalid: Vec<(&str, String)> = vec![
         ("missing", missing.to_string_lossy().into_owned()),
         ("directory", directory.to_string_lossy().into_owned()),
         ("oversized", oversized.to_string_lossy().into_owned()),
@@ -159,22 +190,13 @@ fn packaged_json_stream_ingests_images_on_active_provider_and_rejects_bad_files(
         ("unc", r"\\server\share\image.png".into()),
     ];
 
-    #[cfg(unix)]
-    {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt as _;
-        use std::os::unix::fs::symlink;
-
-        let symlink_path = fixture_dir.path().join("symlink.png");
-        symlink(&png, &symlink_path).unwrap();
-        invalid.push(("symlink", symlink_path.to_string_lossy().into_owned()));
-
-        let fifo = fixture_dir.path().join("fifo.png");
-        let fifo_c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
-        // SAFETY: the CString is a valid pathname for this isolated fixture.
-        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
-        invalid.push(("fifo", fifo.to_string_lossy().into_owned()));
-    }
+    // The symlink and FIFO cases have no Windows analogue, so the extra cases
+    // are produced by a platform helper that returns an EMPTY vector there.
+    // Extending unconditionally keeps `invalid` genuinely mutable on every
+    // target; a `#[cfg(unix)]` push block instead leaves the binding's `mut`
+    // unused on Windows, which is a real `unused_mut` lint error under
+    // `-D warnings` and must not be papered over with an `#[allow]`.
+    invalid.extend(non_regular_file_cases(fixture_dir.path(), &png));
 
     for (msg_id, path) in invalid {
         send_message(&mut stdin, &frames, msg_id, "reject this", vec![path]);

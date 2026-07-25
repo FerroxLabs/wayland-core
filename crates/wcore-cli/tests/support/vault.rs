@@ -12,9 +12,22 @@ pub struct VaultGuard {
     fd: Option<RawFd>,
 }
 
-#[cfg(unix)]
+/// The `impl Drop` is UNCONDITIONAL on purpose; only its body is platform
+/// specific.
+///
+/// The Windows arm of `VaultGuard` owns no descriptor, handle or allocation —
+/// it carries the passphrase in the child's environment instead — so there is
+/// genuinely nothing to release there. But gating the whole `impl` on `unix`
+/// makes the type non-`Drop` on Windows, and every `drop(guard)` call site in
+/// the integration tests then becomes a `clippy::drop_non_drop` error. The
+/// honest repair is for the guard to BE `Drop` on both platforms, so the call
+/// sites keep expressing "the guard's life ends here" and stay identical
+/// across targets. Suppressing the lint at the call sites instead would hide a
+/// real future leak: if the Windows arm ever acquires an owned resource, the
+/// `#[allow]` would silently swallow the very warning that should fire.
 impl Drop for VaultGuard {
     fn drop(&mut self) {
+        #[cfg(unix)]
         if let Some(fd) = self.fd {
             // SAFETY: this guard uniquely owns the parent descriptor.
             let _ = unsafe { libc::close(fd) };

@@ -3481,14 +3481,21 @@ mod production_durable_spawn_tests {
     use wcore_types::llm::{LlmEvent, LlmRequest};
     use wcore_types::message::{FinishReason, StopReason, TokenUsage};
     use wcore_types::spawner::{
-        ChildDesiredState, ChildOrigin, ChildRecoveryState, ChildWorkspaceMode, DurableChildStatus,
+        ChildDesiredState, ChildOrigin, ChildRecoveryState, DurableChildStatus,
     };
 
     use super::{
         AgentSpawner, DurableCancelDisposition, DurableSessionAuthority, ForkOverrides,
-        SWARM_CONTROL_DIR, SpawnExtras, SubAgentConfig,
+        SpawnExtras, SubAgentConfig,
     };
+    // Consumed only by the `#[cfg(target_os = "linux")]` isolated-checkout
+    // fixtures and assertions further down this module, so the imports carry
+    // the same gate rather than an `#[allow(unused_imports)]`.
+    #[cfg(target_os = "linux")]
+    use super::SWARM_CONTROL_DIR;
     use crate::durable_child::DurableChildStore;
+    #[cfg(target_os = "linux")]
+    use wcore_types::spawner::ChildWorkspaceMode;
 
     struct ControlledProvider {
         calls: AtomicUsize,

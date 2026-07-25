@@ -236,9 +236,18 @@ pub enum AcceptanceError {
 
 #[cfg(test)]
 mod tests {
+    // EVERY item in this module exists to serve the single
+    // `#[cfg(target_os = "linux")]` test below, so each carries the same gate.
+    // Without it the imports and both fixture helpers are dead code on Windows
+    // and macOS, which is four `-D warnings` errors on those legs. Matching the
+    // gate to the sole consumer is the honest fix; blanket `#[allow(dead_code)]`
+    // would also swallow a genuinely orphaned helper later.
+    #[cfg(target_os = "linux")]
     use super::*;
+    #[cfg(target_os = "linux")]
     use wcore_swarm::worktree::WorktreeManager;
 
+    #[cfg(target_os = "linux")]
     async fn run_git(repo: &std::path::Path, args: &[&str]) {
         let mut command = wcore_config::shell::shell_command_argv("git", args);
         command.current_dir(repo);
@@ -250,6 +259,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     async fn init_repo(repo: &std::path::Path) {
         run_git(repo, &["init"]).await;
         run_git(repo, &["config", "user.email", "wayland@example.invalid"]).await;

@@ -255,7 +255,11 @@ fn run_after_journal_read_hook(path: &Path) {
     });
 }
 
-#[cfg(test)]
+// The RUNNER below stays `#[cfg(test)]` because the write path invokes it on
+// every target; only this SETTER is Unix-exclusive, because its two callers are
+// `#[cfg(unix)]` tests. Gating the setter to match its callers is what keeps
+// the Windows leg free of a `dead_code` error without an `#[allow]`.
+#[cfg(all(test, unix))]
 fn set_after_snapshot_authority_write_hook(hook: impl FnOnce(&Path) + 'static) {
     AFTER_SNAPSHOT_AUTHORITY_WRITE_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }

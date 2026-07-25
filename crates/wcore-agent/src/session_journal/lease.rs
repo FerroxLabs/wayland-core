@@ -125,7 +125,9 @@ thread_local! {
         std::cell::RefCell::new(None);
 }
 
-#[cfg(test)]
+// Only the setter is Unix-exclusive: its single caller is a `#[cfg(unix)]`
+// test, while the runner below is invoked by the lock path on every target.
+#[cfg(all(test, unix))]
 pub(super) fn set_after_lease_lock_hook(hook: impl FnOnce(&Path) + 'static) {
     AFTER_LEASE_LOCK_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
