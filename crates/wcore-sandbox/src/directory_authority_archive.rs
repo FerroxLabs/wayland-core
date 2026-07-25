@@ -781,17 +781,41 @@ fn file_mode(file: &RegularFileAuthority) -> Result<u32> {
     }
 }
 
+/// Apply an archived file's recorded mode, where the platform has one.
+///
+/// WINDOWS IS A NO-OP BY CONSTRUCTION, AND THE FLUSH MUST NOT RUN THERE.
+/// `file_mode` fabricates a constant `0o600` off unix, so there is no mode
+/// information to carry and nothing for this function to apply. The flush that
+/// used to run unconditionally could never succeed on Windows: `open_child_file`
+/// opens with `RelativeIntent::ReadOnly` (`FILE_GENERIC_READ | SYNCHRONIZE`,
+/// deliberately no write bit), and `FlushFileBuffers` on a handle without write
+/// access is refused with os error 5. This is the crate's ONLY `sync()` on a
+/// read-only-opened regular file — every other `sync()` is on a
+/// `DirectoryAuthority` opened for mutation — so the hazard is closed here and
+/// nowhere else.
+///
+/// The flush is not load-bearing on Windows either: the contents reached disk
+/// through `atomic_write_child`, which creates and writes the private sibling
+/// and then syncs the destination parent after the handle-relative publish.
+///
+/// This defect was INVISIBLE until the handle-relative rename was repaired —
+/// the archive import and rollback paths failed earlier, with os error 87, and
+/// never reached this call.
 fn set_child_mode(parent: &DirectoryAuthority, name: &str, mode: u32) -> Result<()> {
-    let file = parent.open_child_file(name)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+
+        let file = parent.open_child_file(name)?;
         file.handle
             .set_permissions(std::fs::Permissions::from_mode(mode & 0o777))?;
+        file.sync()
     }
     #[cfg(not(unix))]
-    let _ = mode;
-    file.sync()
+    {
+        let _ = (parent, name, mode);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
