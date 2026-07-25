@@ -151,10 +151,10 @@ fn swarm_lock_is_mutually_exclusive() {
 
     let probe = DirectoryAuthority::open(&swarm_root).unwrap();
     let mut contended = fd_lock::RwLock::new(swarm_lock_handle(&probe).unwrap());
-    let contention = contended
-        .try_write()
-        .err()
-        .expect("the swarm sentinel was acquirable while a critical section held it");
+    let contention = match contended.try_write() {
+        Ok(_) => panic!("the swarm sentinel was acquirable while a critical section held it"),
+        Err(error) => error,
+    };
     assert_eq!(
         contention.kind(),
         ErrorKind::WouldBlock,
