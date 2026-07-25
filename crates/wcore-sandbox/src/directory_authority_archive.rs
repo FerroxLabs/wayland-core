@@ -44,6 +44,14 @@ impl SnapshotEntry {
 
 impl DirectoryAuthority {
     /// Serialize a tree without reopening the retained root pathname.
+    ///
+    /// Gated to its only caller's configuration, NOT deleted. It is reached from
+    /// `RetainedWorkspaceAuthority::export_tar_bounded` below (itself
+    /// `cfg(feature = "live-docker")`) and from the Docker backend's
+    /// `execute_with_workspace_authority`, which is gated the same way. Without
+    /// that feature the archive module still compiles under `cfg(test)`, so the
+    /// method looks dead when it is simply never compiled alongside its caller.
+    #[cfg(feature = "live-docker")]
     pub(crate) fn export_tar_bounded(
         &self,
         prefix: &str,
@@ -101,6 +109,11 @@ impl RetainedWorkspaceAuthority {
         Ok(true)
     }
 
+    /// Gated to its only caller's configuration, NOT deleted: the Docker
+    /// backend's import path, which is `cfg(feature = "live-docker")`. The
+    /// in-crate tests drive `replace_from_tar_bounded_with_hook` instead, which
+    /// is why this wrapper alone appears unused in a plain test build.
+    #[cfg(feature = "live-docker")]
     pub(crate) fn replace_from_tar_bounded(
         &self,
         archive: &[u8],
