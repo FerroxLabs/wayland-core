@@ -969,6 +969,113 @@ async fn git_status_succeeds_in_repo_root_while_manager_is_alive() {
     );
 }
 
+/// F-EOL-2 REGRESSION GUARD for [`WorktreeManager::assert_clean`].
+///
+/// THE DEFECT IT CLOSES: `repo_root` is the USER'S OWN repository, which Wayland
+/// does not mint. `git_command`'s hostile-config scrub (`GIT_CONFIG_NOSYSTEM=1`
+/// plus emptied system/global config) also strips Git for Windows' system-level
+/// `core.autocrlf=true`, so the dirtiness test compares literal bytes. Every
+/// normally-cloned Windows repository without a normalizing `.gitattributes`
+/// therefore has a CRLF working tree against an LF index and was refused
+/// dispatch on a pristine tree, naming files the user never touched.
+///
+/// THE TWO THINGS IT ASSERTS, AND WHY BOTH ARE NEEDED:
+/// * a checkout whose only difference is carriage returns is accepted — without
+///   this the false positive returns;
+/// * every OTHER kind of dirt is still refused — a real content change carried
+///   alongside the carriage returns, an untracked file, and a deletion. Without
+///   these the "fix" would be a blinding of the collision-detection gate that
+///   prevents the v0.2.2 dirty-worker incident, which is the failure mode this
+///   guard exists to make impossible.
+///
+/// DETERMINISTIC ON BOTH PLATFORMS. The carriage returns are written as literal
+/// bytes and every fixture `git add` forces `core.autocrlf=false`, so the test
+/// reproduces the Windows smudge shape on Linux too and never depends on the
+/// host's ambient configuration — it cannot silently degrade into a no-op on a
+/// machine whose `core.autocrlf` happens to differ.
+#[cfg(any(target_os = "linux", windows))]
+#[tokio::test]
+async fn assert_clean_accepts_line_ending_only_dirt_and_still_refuses_every_other_kind() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let control = tempfile::tempdir().expect("orchestrator control root");
+    seal_init_repo(fixture.path()).await;
+    std::fs::write(fixture.path().join(".gitignore"), ".swarm-worktrees/\n").unwrap();
+    seal_run_git(fixture.path(), &["add", ".gitignore"]).await;
+    seal_run_git(
+        fixture.path(),
+        &[
+            "-c",
+            "user.email=swarm-test@example.invalid",
+            "-c",
+            "user.name=Swarm Test",
+            "commit",
+            "-qm",
+            "ignore swarm worktrees",
+        ],
+    )
+    .await;
+
+    let manager =
+        WorktreeManager::new_with_workspace_root(fixture.path(), &control.path().join("checkouts"))
+            .expect("manager");
+    let readme = fixture.path().join("README.md");
+    manager
+        .assert_clean()
+        .await
+        .expect("precondition: the freshly committed checkout is clean");
+
+    // 1. Worktree-only carriage returns (porcelain ` M`) — the false positive.
+    std::fs::write(&readme, b"seed\r\n").unwrap();
+    manager.assert_clean().await.expect(
+        "a working tree differing from its index only by carriage returns must not be refused",
+    );
+
+    // 2. The same difference, staged (porcelain `M `).
+    seal_run_git(
+        fixture.path(),
+        &["-c", "core.autocrlf=false", "add", "README.md"],
+    )
+    .await;
+    manager
+        .assert_clean()
+        .await
+        .expect("an index differing from HEAD only by carriage returns must not be refused");
+
+    // 3. A REAL content change must still be refused even while carriage
+    //    returns are present — the relaxation must not swallow it.
+    std::fs::write(&readme, b"seed\r\nreal edit\r\n").unwrap();
+    manager
+        .assert_clean()
+        .await
+        .expect_err("a real content change must still be refused on a CRLF working tree");
+
+    // 4. An untracked file must be refused before the second pass is even
+    //    consulted.
+    std::fs::write(&readme, b"seed\r\n").unwrap();
+    seal_run_git(
+        fixture.path(),
+        &["-c", "core.autocrlf=false", "add", "README.md"],
+    )
+    .await;
+    manager
+        .assert_clean()
+        .await
+        .expect("precondition: only carriage-return dirt remains");
+    std::fs::write(fixture.path().join("stray.txt"), "untracked\n").unwrap();
+    manager
+        .assert_clean()
+        .await
+        .expect_err("an untracked file must still be refused");
+
+    // 5. A deleted tracked file must still be refused.
+    std::fs::remove_file(fixture.path().join("stray.txt")).unwrap();
+    std::fs::remove_file(&readme).unwrap();
+    manager
+        .assert_clean()
+        .await
+        .expect_err("a deleted tracked file must still be refused");
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn candidate_seal_mints_and_revalidates_from_fresh_checkout() {

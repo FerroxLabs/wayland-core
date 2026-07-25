@@ -579,6 +579,47 @@ impl WorktreeManager {
     ///
     /// This is the collision-detection gate that prevents the v0.2.2
     /// incident (dirty worker contaminating main).
+    ///
+    /// # Why this one gate has a second pass, and no other dirtiness check does
+    ///
+    /// `repo_root` is the **user's own repository**, which Wayland does not mint
+    /// and therefore cannot guarantee the on-disk representation of. Everywhere
+    /// else the swarm judges a tree, that tree was created by
+    /// [`Self::git_command`] itself — same scrub in, same scrub out — so a
+    /// literal byte comparison is exactly right and is left untouched.
+    ///
+    /// Here it is not. [`Self::git_command`] sets `GIT_CONFIG_NOSYSTEM=1` and
+    /// empties the system/global config to defeat hostile configuration; that
+    /// also strips Git for Windows' system-level `core.autocrlf=true`, so git
+    /// compares literal bytes. A repository the user cloned normally on Windows,
+    /// with no normalizing `.gitattributes`, therefore has a CRLF working tree
+    /// against an LF index and reads as modified on a pristine tree — dispatch
+    /// refused, naming files the user never touched.
+    ///
+    /// The second pass adjudicates that, and only that:
+    ///
+    /// * it runs **only** when every reported entry is a plain tracked-file
+    ///   modification. An untracked file, an addition, a deletion, a rename, a
+    ///   copy, an unmerged path or a type change refuses immediately, exactly as
+    ///   before — the relaxation cannot reach them;
+    /// * it then re-asks git with `--ignore-cr-at-eol`, in both directions
+    ///   (worktree-vs-index and index-vs-HEAD). If **any** difference survives
+    ///   that, the checkout is dirty and is refused with the original report;
+    /// * every hostile-config defence is unchanged: the second pass runs through
+    ///   the same [`Self::git_command`], so `GIT_CONFIG_NOSYSTEM`, the emptied
+    ///   system/global config, `GIT_ATTR_NOSYSTEM`, the disabled hooks path, the
+    ///   disabled fsmonitor and the forced `core.autocrlf=false` all still apply.
+    ///   Nothing is read back from the user's configuration, so no hostile value
+    ///   can steer the decision.
+    ///
+    /// **Accepted trade-off, stated explicitly:** a working tree whose *only*
+    /// uncommitted change is line-ending flips is now judged clean, so a worker
+    /// may be dispatched over it. That is the price of not refusing every normal
+    /// Windows checkout, and it is strictly narrower than the alternatives
+    /// considered: forcing `core.autocrlf=input` would newly false-positive on
+    /// every repository that legitimately commits CRLF, and judging the tree
+    /// under the user's own configuration would re-admit exactly the hostile
+    /// config this scrub exists to exclude.
     pub async fn assert_clean(&self) -> Result<()> {
         self.reject_executable_checkout_config().await?;
         let cmd = self.git_command(&["status", "--porcelain"]);
@@ -592,10 +633,49 @@ impl WorktreeManager {
             )));
         }
         let stdout = String::from_utf8_lossy(&out.stdout);
-        if !stdout.trim().is_empty() {
-            return Err(SwarmError::DirtyCheckout(stdout.trim().to_string()));
+        let reported = stdout.trim();
+        if reported.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        if self.reported_dirt_is_line_endings_only(reported).await? {
+            return Ok(());
+        }
+        Err(SwarmError::DirtyCheckout(reported.to_string()))
+    }
+
+    /// Second pass for [`Self::assert_clean`]: is every reported entry a
+    /// line-ending-only difference on an already-tracked file?
+    ///
+    /// FAILS CLOSED at every step. A status code that is not a plain
+    /// modification, a git invocation that does not exit zero, or any surviving
+    /// difference all return `false`, which keeps the checkout dirty.
+    async fn reported_dirt_is_line_endings_only(&self, reported: &str) -> Result<bool> {
+        // Porcelain v1 prefixes each entry with a two-character XY code. Only a
+        // modification of a tracked file can be an end-of-line artifact:
+        // `??` (untracked), `A`/`D`/`R`/`C`/`T` (add, delete, rename, copy,
+        // type change), `!` (ignored) and any unmerged `U`/`AA`/`DD` state are
+        // real dirt and must keep refusing.
+        for line in reported.lines() {
+            match line.as_bytes() {
+                [b' ', b'M', ..] | [b'M', b' ', ..] | [b'M', b'M', ..] => {}
+                _ => return Ok(false),
+            }
+        }
+        for args in [
+            ["diff", "--ignore-cr-at-eol", "--name-only"].as_slice(),
+            ["diff", "--cached", "--ignore-cr-at-eol", "--name-only"].as_slice(),
+        ] {
+            let out = capture_bounded_process(self.git_command(args), self.capture_limits, None)
+                .await
+                .map_err(|error| capture_error("git diff", error))?;
+            if !out.status.success() {
+                return Ok(false);
+            }
+            if !String::from_utf8_lossy(&out.stdout).trim().is_empty() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Create a fresh worktree at `<swarm_root>/<worker_id>` on a new
