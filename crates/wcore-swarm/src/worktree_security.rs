@@ -35,6 +35,14 @@ impl DirectoryAuthority {
             .map_err(|error| SwarmError::DispatchAdmission(error.to_string()))
     }
 
+    /// Acquire an identity-witness authority that requests no delete access.
+    /// The rationale lives at `wcore_sandbox::DirectoryAuthority::open_observational`.
+    pub(super) fn open_observational(path: &Path) -> Result<Self> {
+        SandboxDirectoryAuthority::open_observational(path)
+            .map(Self)
+            .map_err(|error| SwarmError::DispatchAdmission(error.to_string()))
+    }
+
     pub(super) fn validate_path(&self, path: &Path) -> Result<()> {
         self.0
             .validate_path(path)

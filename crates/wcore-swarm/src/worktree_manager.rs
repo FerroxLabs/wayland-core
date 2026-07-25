@@ -13,7 +13,7 @@ impl WorktreeManager {
         // real drive-letter paths and is a no-op on unix and for genuine
         // UNC/device paths, so Linux is unaffected.
         let repo_root = normalized_root(repo_root)?;
-        let repo_authority = DirectoryAuthority::open(&repo_root)?;
+        let repo_authority = DirectoryAuthority::open_observational(&repo_root)?;
         let swarm_root = repo_root.join(".swarm-worktrees");
         ensure_real_directory(&swarm_root)?;
         let swarm_root = normalized_root(&swarm_root)?;
@@ -116,7 +116,7 @@ impl WorktreeManager {
         workspace_authority: wcore_sandbox::DirectoryAuthority,
     ) -> Result<Self> {
         let repo_root = normalized_root(repo_root)?;
-        let repo_authority = DirectoryAuthority::open(&repo_root)?;
+        let repo_authority = DirectoryAuthority::open_observational(&repo_root)?;
         let swarm_root = normalized_root(workspace_authority.display_path())?;
         if !swarm_root.is_absolute() {
             return Err(SwarmError::WorktreeIo(
@@ -178,6 +178,18 @@ impl WorktreeManager {
 
     /// Revalidate that the pathname still names the repository directory held
     /// when this manager was constructed.
+    ///
+    /// This function is the ONLY consumer of `repo_authority`: the repository
+    /// authority is an identity witness and never mutates, deletes, renames or
+    /// creates beneath the root. It is therefore acquired observationally, and
+    /// that is load-bearing rather than incidental — every manager git
+    /// invocation sets `current_dir(&self.repo_root)` (see
+    /// `worktree_cleanup::git_command`), and on Windows a retained handle
+    /// carrying the DELETE access right blocks the in-process chdir that
+    /// NEED_WORK_TREE subcommands such as `status` perform inside
+    /// `setup_work_tree()`. Reintroducing the mutating open here fails 10
+    /// Windows tests, starting with `assert_clean`, which gates dispatch,
+    /// isolated checkout and integration checkout alike.
     pub(crate) fn validate_repo_authority(&self) -> Result<()> {
         self.repo_authority.validate_path(&self.repo_root)
     }
