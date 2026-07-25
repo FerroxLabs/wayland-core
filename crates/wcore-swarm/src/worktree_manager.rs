@@ -199,10 +199,20 @@ impl WorktreeManager {
             workspace.root.join(RESERVATION_FILE),
             workspace.root.join(LEASE_FILE),
         ];
+        // Both the worker's own transaction root and the control directory are
+        // direct children of `swarm_root`, so compare child NAMES: a full-path
+        // test denied the worker its OWN root while its checkout sat in
+        // fs_read_allow. Fail closed if the root has no name to compare.
+        let workspace_name = workspace.root.file_name().ok_or_else(|| {
+            SwarmError::WorktreeIo("transaction root has no directory name".to_owned())
+        })?;
         for entry in std::fs::read_dir(&self.swarm_root)? {
-            let path = entry?.path();
-            if path != workspace.root && path != self.control_root {
-                denied.push(path);
+            let entry = entry?;
+            let name = entry.file_name();
+            if name.as_os_str() != workspace_name
+                && name.as_os_str() != std::ffi::OsStr::new(CONTROL_DIR)
+            {
+                denied.push(entry.path());
             }
         }
         Ok(denied)
@@ -672,6 +682,12 @@ impl WorktreeManager {
                 std::fs::create_dir(&transaction_root)?;
                 let registration = (|| {
                     make_guard_dir_private(&transaction_root)?;
+                    // One representation for everything derived below: the root
+                    // authority, the checkout/scratch joins, the lease file and
+                    // TransactionCleanup.root. The checkout authority is opened on
+                    // a path from this same derivation, which is what makes
+                    // RetainedWorkspaceAuthority::new's parent-equality proof hold.
+                    let transaction_root = normalized_root(&transaction_root)?;
                     let root_authority = DirectoryAuthority::open(&transaction_root)?;
                     let reservation_authority = Arc::new(
                         root_authority
@@ -843,9 +859,9 @@ impl WorktreeManager {
             self.checkout_git_stdout(&checkout, &["rev-parse", "--verify", "HEAD^{tree}"]),
         )
         .await?;
-        let checkout = std::fs::canonicalize(checkout)?;
-        let scratch = std::fs::canonicalize(scratch)?;
-        let transaction_root = std::fs::canonicalize(transaction_root)?;
+        let checkout = normalized_root(&checkout)?;
+        let scratch = normalized_root(&scratch)?;
+        let transaction_root = normalized_root(&transaction_root)?;
         if !checkout.starts_with(&transaction_root)
             || !scratch.starts_with(&transaction_root)
             || checkout.starts_with(&scratch)
@@ -980,6 +996,12 @@ impl WorktreeManager {
                 std::fs::create_dir(&transaction_root)?;
                 let registration = (|| {
                     make_guard_dir_private(&transaction_root)?;
+                    // One representation for everything derived below: the root
+                    // authority, the checkout/scratch joins, the lease file and
+                    // TransactionCleanup.root. The checkout authority is opened on
+                    // a path from this same derivation, which is what makes
+                    // RetainedWorkspaceAuthority::new's parent-equality proof hold.
+                    let transaction_root = normalized_root(&transaction_root)?;
                     let root_authority = DirectoryAuthority::open(&transaction_root)?;
                     let reservation_authority = Arc::new(
                         root_authority
@@ -1177,9 +1199,9 @@ impl WorktreeManager {
             self.checkout_git_stdout(&checkout, &["rev-parse", "--verify", "HEAD^{tree}"]),
         )
         .await?;
-        let checkout = std::fs::canonicalize(checkout)?;
-        let scratch = std::fs::canonicalize(scratch)?;
-        let transaction_root = std::fs::canonicalize(transaction_root)?;
+        let checkout = normalized_root(&checkout)?;
+        let scratch = normalized_root(&scratch)?;
+        let transaction_root = normalized_root(&transaction_root)?;
         if !checkout.starts_with(&transaction_root)
             || !scratch.starts_with(&transaction_root)
             || checkout.starts_with(&scratch)
