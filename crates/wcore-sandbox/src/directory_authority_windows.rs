@@ -28,8 +28,8 @@ const OBJ_CASE_INSENSITIVE: u32 = 0x40;
 pub(super) const FILE_CS_FLAG_CASE_SENSITIVE_DIR: u32 = 0x1;
 
 #[repr(C)]
-struct DirectoryCaseSensitiveInfo {
-    flags: u32,
+pub(super) struct DirectoryCaseSensitiveInfo {
+    pub(super) flags: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -727,7 +727,7 @@ fn directory_authority(
     }
 }
 
-fn checked_information_length(information: usize, capacity: usize) -> Result<usize> {
+pub(super) fn checked_information_length(information: usize, capacity: usize) -> Result<usize> {
     if information > capacity {
         return Err(SandboxError::ExecFailed(format!(
             "Windows reported {information} directory bytes for a {capacity}-byte buffer"
@@ -736,7 +736,7 @@ fn checked_information_length(information: usize, capacity: usize) -> Result<usi
     Ok(information)
 }
 
-fn parse_directory_entries(
+pub(super) fn parse_directory_entries(
     buffer: *const u8,
     returned: usize,
     names: &mut Vec<String>,
@@ -810,7 +810,7 @@ fn parse_directory_entries(
     Ok(())
 }
 
-fn validate_windows_child_name(name: &str) -> Result<()> {
+pub(super) fn validate_windows_child_name(name: &str) -> Result<()> {
     validate_child_name(name)?;
     if name.chars().any(|character| {
         character <= '\u{1f}'

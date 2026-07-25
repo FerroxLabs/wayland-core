@@ -513,7 +513,15 @@ fn reject_hard_link(file: &RegularFileAuthority, path: &Path) -> Result<()> {
         {
             return Err(std::io::Error::last_os_error().into());
         }
-        if unsafe { info.assume_init() }.NumberOfLinks > 1 {
+        // windows-sys spells this field with the Hungarian `n` prefix. The
+        // non-prefixed spelling used here never compiled: this module is gated
+        // `#[cfg(any(feature = "live-docker", test))]`, so `--features
+        // live-docker` has NEVER built on Windows and the Windows half of this
+        // hard-link guard has never existed in a compiled binary (the `#[cfg(unix)]`
+        // branch above is correct and always has been). That is a production
+        // defect, not test debt. Same spelling as `wcore-agent/src/session_journal/
+        // lease.rs` and `backends/appcontainer/acl_lease/storage.rs`.
+        if unsafe { info.assume_init() }.nNumberOfLinks > 1 {
             return Err(SandboxError::PathDenied(format!(
                 "authority archive rejected hard-linked file: {}",
                 path.display()

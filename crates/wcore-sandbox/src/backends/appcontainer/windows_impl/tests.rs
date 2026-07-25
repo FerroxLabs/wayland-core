@@ -13,10 +13,16 @@ use super::*;
 // to its module). Import them from their real crate module paths so this module
 // builds on msvc. `#![allow(unused_imports)]` above tolerates any that a given
 // case does not touch.
+use crate::ResourceLimitEnforcement;
 use crate::SandboxCommand;
 use crate::error::SandboxError;
 use crate::manifest::{NetworkPolicy, SandboxManifest};
 use std::sync::Arc;
+use std::time::Duration;
+// Trait-in-scope import, NOT a type import: `execute` and `is_available` are
+// `SandboxBackend` trait methods on `AppContainerBackend`, and the calls below
+// do not resolve without the trait in scope. Do not remove as "unused".
+use crate::backends::SandboxBackend;
 
 #[test]
 fn cancellation_guard_is_sticky_unless_disarmed() {

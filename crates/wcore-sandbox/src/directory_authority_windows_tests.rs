@@ -52,6 +52,10 @@ fn write_directory_entry(buffer: &mut [u8], start: usize, next: u32, name: &str)
 }
 
 fn set_directory_case_sensitive(handle: &File) {
+    // `as_raw_handle` is an extension-trait method on `std::fs::File`; the trait
+    // must be in scope at the call site below. Kept local to this fn (rather
+    // than at module scope) because this is its only use.
+    use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
         FileCaseSensitiveInfo, SetFileInformationByHandle,
     };
