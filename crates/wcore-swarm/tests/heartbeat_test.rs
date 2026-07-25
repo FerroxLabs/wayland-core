@@ -197,3 +197,61 @@ fn writer_then_reader_roundtrip() {
     );
     assert_eq!(s2.step.as_deref(), Some("second"));
 }
+
+/// PRODUCTION DURABILITY PROOF for the heartbeat status mirror.
+///
+/// `dispatch::mirror_heartbeat` reads the worker's status from the checkout and
+/// republishes it to the transaction root through
+/// `DirectoryAuthority::atomic_write_child`, whose Windows implementation is the
+/// handle-relative rename primitive. Until 20-75 that primitive had NEVER worked
+/// on Windows (os error 87), so the mirror write ALWAYS failed there — a
+/// production durability defect, not test debt. Nothing caught it because the
+/// only status-file probe in this file (`probe_any_worker_status`) is reachable
+/// solely from the `#[cfg(unix)]` end-to-end test, and `writer_then_reader_
+/// roundtrip` above exercises the plain in-place write rather than the retained
+/// authority publish.
+///
+/// This test drives the exact production shape on EVERY platform: encode a
+/// status read from a checkout directory, publish it under the production
+/// `STATUS_FILE` name through a retained root authority, and read it back. It is
+/// deliberately NOT cfg-gated — the gap it closes is precisely that the mirror
+/// had no Windows coverage.
+#[test]
+fn heartbeat_mirror_publishes_through_a_retained_root_authority() {
+    let tmp = tempfile::tempdir().unwrap();
+    let checkout = tmp.path().join("checkout");
+    let root = tmp.path().join("root");
+    std::fs::create_dir(&checkout).unwrap();
+    std::fs::create_dir(&root).unwrap();
+
+    // Source side: the worker's own heartbeat, exactly as the checkout holds it.
+    wcore_swarm::heartbeat::HeartbeatWriter::new(&checkout)
+        .write(Some("mirrored-step"))
+        .unwrap();
+    let status = wcore_swarm::heartbeat::read_status(&checkout)
+        .unwrap()
+        .expect("heartbeat present in the checkout before mirroring");
+    let encoded = serde_json::to_vec(&status).unwrap();
+
+    // Mirror side: the retained-authority publish `mirror_heartbeat` performs.
+    let root_authority = wcore_sandbox::DirectoryAuthority::open(&root).unwrap();
+    root_authority
+        .atomic_write_child(wcore_swarm::heartbeat::STATUS_FILE, &encoded)
+        .expect("the production heartbeat mirror write must succeed on this platform");
+
+    let mirrored = wcore_swarm::heartbeat::read_status(&root)
+        .unwrap()
+        .expect("mirrored heartbeat must be readable from the transaction root");
+    assert_eq!(mirrored.step.as_deref(), Some("mirrored-step"));
+    assert_eq!(mirrored.last_alive_at, status.last_alive_at);
+
+    // The publish must leave no private temporary behind: `atomic_write_child`
+    // renames its unguessable sibling into place, so the root holds exactly the
+    // status file.
+    let residue = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy() != wcore_swarm::heartbeat::STATUS_FILE)
+        .count();
+    assert_eq!(residue, 0, "atomic publish must leave no temporary behind");
+}
