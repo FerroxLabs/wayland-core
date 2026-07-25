@@ -23,6 +23,10 @@ use wcore_sandbox::{DirectoryHandleLoan, RegularFileAuthority};
 
 use crate::error::{Result, SwarmError};
 
+#[path = "worktree_paths.rs"]
+mod paths;
+use paths::normalized_root;
+
 #[path = "worktree_security.rs"]
 mod security;
 use security::{

@@ -116,9 +116,9 @@ impl WorktreeManager {
         repo_root: &Path,
         workspace_authority: wcore_sandbox::DirectoryAuthority,
     ) -> Result<Self> {
-        let repo_root = std::fs::canonicalize(repo_root)?;
+        let repo_root = normalized_root(repo_root)?;
         let repo_authority = DirectoryAuthority::open(&repo_root)?;
-        let swarm_root = workspace_authority.display_path().to_path_buf();
+        let swarm_root = normalized_root(workspace_authority.display_path())?;
         if !swarm_root.is_absolute() {
             return Err(SwarmError::WorktreeIo(
                 "orchestrator worktree capability must have an absolute display path".to_owned(),

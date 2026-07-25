@@ -8,6 +8,8 @@ use wcore_sandbox::DirectoryAuthorityIdentity as SandboxDirectoryAuthorityIdenti
 
 use crate::error::{Result, SwarmError};
 
+use super::normalized_root;
+
 #[derive(Clone, Debug)]
 pub(super) struct DirectoryAuthority(SandboxDirectoryAuthority);
 
@@ -169,7 +171,13 @@ pub(super) fn ensure_real_directory(path: &Path) -> Result<()> {
 
 pub(super) fn ensure_unchanged_real_directory(path: &Path, parent: &Path) -> Result<()> {
     validate_real_directory(path, &std::fs::symlink_metadata(path)?)?;
-    let canonical = std::fs::canonicalize(path)?;
+    // Re-derive through the SHARED helper, not a bare canonicalize: `path` and
+    // `parent` are the stored roots, which are produced by that same helper.
+    // Both operands of a root comparison must come from one definition or this
+    // check is unfalsifiable on Windows — a bare canonicalize yields a verbatim
+    // `\\?\C:\...` path that never equals a plain stored root, so the swap
+    // detection below would refuse every caller instead of only a real swap.
+    let canonical = normalized_root(path)?;
     if canonical != path || canonical.parent() != Some(parent) {
         return Err(SwarmError::WorktreeIo(format!(
             "refused changed worktree root: {}",
