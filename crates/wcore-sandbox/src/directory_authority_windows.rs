@@ -166,8 +166,21 @@ pub(super) fn open_child_directory(
     Ok(directory_authority(parent, name, handle, identity))
 }
 
+/// Name-only projection of `child_entries`.
+///
+/// Kept as a projection rather than a second `NtQueryDirectoryFile` loop so the
+/// crate has exactly ONE directory-enumeration implementation.
 pub(super) fn child_names(parent: &DirectoryAuthority) -> Result<Vec<String>> {
-    let mut names = Vec::new();
+    Ok(child_entries(parent)?
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect())
+}
+
+/// Enumerate the parent's children with the attribute word the kernel reported
+/// for each, sorted and deduplicated by name.
+pub(super) fn child_entries(parent: &DirectoryAuthority) -> Result<Vec<DirectoryEntry>> {
+    let mut entries = Vec::new();
     let mut restart_scan = 1;
     let mut storage = vec![0_usize; 64 * 1024 / std::mem::size_of::<usize>()];
 
@@ -211,12 +224,12 @@ pub(super) fn child_names(parent: &DirectoryAuthority) -> Result<Vec<String>> {
             }
             break;
         }
-        parse_directory_entries(storage.as_ptr().cast(), returned, &mut names)?;
+        parse_directory_entries(storage.as_ptr().cast(), returned, &mut entries)?;
     }
 
-    names.sort();
-    names.dedup();
-    Ok(names)
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    entries.dedup_by(|left, right| left.name == right.name);
+    Ok(entries)
 }
 
 pub(super) fn open_child_file(
@@ -611,13 +624,36 @@ pub(super) fn rename_buffer_len(name_bytes: usize) -> Result<usize> {
 
 pub(super) fn remove_descendants(authority: &DirectoryAuthority) -> Result<()> {
     loop {
-        let names = child_names(authority)?;
-        if names.is_empty() {
+        let entries = child_entries(authority)?;
+        if entries.is_empty() {
             break;
         }
-        for name in names {
-            let handle =
-                open_relative(authority, &name, RelativeKind::Any, RelativeIntent::Mutate)?;
+        for entry in entries {
+            // PRECISE KIND, NOT `Any`. No single static access mask can serve
+            // both child kinds, measured on this hardware: a DIRECTORY child
+            // REQUIRES `FILE_GENERIC_WRITE` (this recursion terminates in
+            // `authority.handle.sync_all()`, i.e. `FlushFileBuffers`, which
+            // demands write access), while a READ-ONLY FILE child FORBIDS it
+            // (the open itself is refused with os error 5). Git writes loose
+            // objects and packfiles at mode 444, so read-only children are the
+            // NORMAL case in every checkout. Asking for the union produced the
+            // second failure and was reverted; the kind is made precise instead.
+            //
+            // TWO LAYERS, DELIBERATELY. The enumerated attribute is an
+            // OBSERVATION taken before the open; the opened handle's metadata
+            // below is the TRUTH after it. Passing a precise kind makes the
+            // KERNEL refuse the open outright if the object's type changed
+            // between enumeration and open (the open carries
+            // `FILE_DIRECTORY_FILE` or `FILE_NON_DIRECTORY_FILE`), which is a
+            // strengthening — it does NOT replace the post-open type check, the
+            // identity read or the reparse refusal, all of which stay below.
+            let kind = if entry.is_directory() {
+                RelativeKind::Directory
+            } else {
+                RelativeKind::File
+            };
+            let name = entry.name;
+            let handle = open_relative(authority, &name, kind, RelativeIntent::Mutate)?;
             let metadata = handle.metadata()?;
             if is_symlink_or_reparse(&metadata) {
                 return Err(SandboxError::PathDenied(format!(
@@ -732,10 +768,31 @@ fn open_relative(
         (RelativeKind::Directory, RelativeIntent::Create | RelativeIntent::Mutate) => {
             FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE | SYNCHRONIZE
         }
-        (RelativeKind::File | RelativeKind::Any, RelativeIntent::Mutate) => {
-            FILE_GENERIC_READ | DELETE | SYNCHRONIZE
-        }
+        // THE ABSENCE OF THE WRITE BIT HERE IS LOAD-BEARING. Measured on this
+        // hardware against a mode-444 child: `FILE_GENERIC_READ | DELETE |
+        // SYNCHRONIZE` OPENS successfully and the extended disposition (with its
+        // ignore-read-only flag) then deletes it, whereas
+        // `FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE | SYNCHRONIZE` FAILS
+        // AT THE OPEN with os error 5. Git writes loose objects and packfiles
+        // read-only, so this is the common path in every checkout, not an edge
+        // case. Adding the write bit here to match the directory arm was
+        // attempted, traded one os-5 for another, and was reverted. Do not
+        // re-add it: the directory arm needs write because the cleanup recursion
+        // flushes the directory handle, and no single mask satisfies both — which
+        // is exactly why `remove_descendants` now passes a PRECISE kind.
+        (RelativeKind::File, RelativeIntent::Mutate) => FILE_GENERIC_READ | DELETE | SYNCHRONIZE,
         (RelativeKind::Any, RelativeIntent::ReadOnly) => FILE_GENERIC_READ | SYNCHRONIZE,
+        // REFUSED, not granted. Since the cleanup walk carries the enumerated
+        // kind, nothing in this crate asks for a mutate open without knowing the
+        // object's type (grep-verified: `remove_descendants` was the sole
+        // unknown-kind mutate caller). Leaving a live grant nobody calls would
+        // let a future caller silently inherit the union of two incompatible
+        // masks; refusing makes it fail closed instead.
+        (RelativeKind::Any, RelativeIntent::Mutate) => {
+            return Err(SandboxError::ExecFailed(
+                "Windows cannot mutate an authority with an unknown type".to_owned(),
+            ));
+        }
         (RelativeKind::Any, RelativeIntent::Create) => {
             return Err(SandboxError::ExecFailed(
                 "Windows cannot create an authority with an unknown type".to_owned(),
@@ -848,13 +905,33 @@ pub(super) fn checked_information_length(information: usize, capacity: usize) ->
     Ok(information)
 }
 
+/// One enumerated directory child: its name and the attribute word the kernel
+/// reported for it.
+///
+/// The attributes are an OBSERVATION taken before any handle is opened. They are
+/// used only to select the KIND the subsequent open requests; the opened
+/// handle's own metadata remains the truth, and both the post-open type check
+/// and the reparse refusal in `remove_descendants` still apply.
+#[derive(Clone, Debug)]
+pub(super) struct DirectoryEntry {
+    pub(super) name: String,
+    pub(super) attributes: u32,
+}
+
+impl DirectoryEntry {
+    fn is_directory(&self) -> bool {
+        self.attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+    }
+}
+
 pub(super) fn parse_directory_entries(
     buffer: *const u8,
     returned: usize,
-    names: &mut Vec<String>,
+    entries: &mut Vec<DirectoryEntry>,
 ) -> Result<()> {
     let header = std::mem::offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileName);
     let name_length_offset = std::mem::offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileNameLength);
+    let attributes_offset = std::mem::offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileAttributes);
     let mut offset = 0_usize;
     loop {
         let remaining = returned.checked_sub(offset).ok_or_else(|| {
@@ -869,6 +946,18 @@ pub(super) fn parse_directory_entries(
         let next = unsafe { entry.cast::<u32>().read_unaligned() } as usize;
         let name_bytes =
             unsafe { entry.add(name_length_offset).cast::<u32>().read_unaligned() } as usize;
+        // IN-BOUNDS BY A GUARD THAT ALREADY EXISTS. `attributes_offset` is a
+        // FIXED offset within the fixed part of the record (x64: 56) and is
+        // STRICTLY LESS than `header`, which is `offset_of!(.., FileName)` (x64:
+        // 104). The `remaining < header` refusal above has already proven that
+        // at least `header` bytes of this record are present, so a 4-byte read
+        // at `attributes_offset` lands strictly inside a region that guard
+        // covers. This read therefore adds NO new bounds risk and the overflow
+        // guard below needs no change. Read unaligned, exactly as
+        // `NextEntryOffset` and `FileNameLength` above are, because a
+        // fabricated buffer must never make us construct a misaligned
+        // reference.
+        let attributes = unsafe { entry.add(attributes_offset).cast::<u32>().read_unaligned() };
         let name_start = offset.checked_add(header).ok_or_else(|| {
             SandboxError::ExecFailed("Windows directory name offset overflowed".to_owned())
         })?;
@@ -912,7 +1001,7 @@ pub(super) fn parse_directory_entries(
         })?;
         if name != "." && name != ".." {
             validate_windows_child_name(&name)?;
-            names.push(name);
+            entries.push(DirectoryEntry { name, attributes });
         }
         if next == 0 {
             break;
