@@ -41,6 +41,7 @@ use wcore_sandbox::process_capture::{CaptureLimits, CapturedOutput, capture_boun
 use wcore_sandbox::{DirectoryAuthority as SandboxDirectoryAuthority, SandboxError};
 
 use super::CandidateSeal;
+use super::normalized_root;
 use super::security::{DirectoryAuthority, ref_slug, reject_option_like_ref, validate_target_ref};
 use super::{TransactionWorkspace, WorktreeManager};
 use crate::error::{Result, SwarmError};
@@ -526,7 +527,15 @@ impl WorktreeManager {
                 "integration checkout path must be absolute".to_owned(),
             ));
         }
-        let root = std::fs::canonicalize(integration_checkout)
+        // The crate's ONE worktree path representation, not a bare
+        // `std::fs::canonicalize`. On Windows a bare canonicalize yields a
+        // verbatim `\\?\C:\...` path; every path below is either handed to
+        // git-for-Windows (whose MSYS layer cannot parse `\\?\`, failing with
+        // `fatal: not a git repository: '\\?\C:\...\.git'`) or compared against
+        // another path produced by the same helper. Both operands of every
+        // comparison in this function therefore share this one derivation —
+        // see `worktree_paths.rs` for why partial application is the hazard.
+        let root = normalized_root(integration_checkout)
             .map_err(|error| ParentLandingError::UnownedCheckout(error.to_string()))?;
         // 20-75 workstream C — OBSERVATIONAL OPEN, on OBSERVED evidence.
         //
@@ -586,9 +595,9 @@ impl WorktreeManager {
                 &["rev-parse", "--path-format=absolute", "--git-common-dir"],
             )
             .await?;
-        let git_dir = std::fs::canonicalize(PathBuf::from(git_dir.trim()))
+        let git_dir = normalized_root(Path::new(git_dir.trim()))
             .map_err(|error| ParentLandingError::UnownedCheckout(error.to_string()))?;
-        let common_git_dir = std::fs::canonicalize(PathBuf::from(common_git_dir.trim()))
+        let common_git_dir = normalized_root(Path::new(common_git_dir.trim()))
             .map_err(|error| ParentLandingError::UnownedCheckout(error.to_string()))?;
         // A linked worktree has git_dir != common_git_dir; refuse it — the main
         // repository's HEAD/index/worktree are the durable landing target.
@@ -603,7 +612,7 @@ impl WorktreeManager {
                 "integration checkout does not own an in-tree .git directory".to_owned(),
             ));
         }
-        let objects_dir = std::fs::canonicalize(common_git_dir.join("objects"))
+        let objects_dir = normalized_root(&common_git_dir.join("objects"))
             .map_err(|error| ParentLandingError::UnownedCheckout(error.to_string()))?;
         let alternates = objects_dir.join("info").join("alternates");
         if std::fs::symlink_metadata(&alternates).is_ok() {
@@ -1287,9 +1296,15 @@ impl WorktreeManager {
             } else if let Some(branch) = line.strip_prefix("branch ") {
                 let branch = branch.trim();
                 if branch == target_ref {
+                    // BOTH operands of this comparison must come from the same
+                    // derivation: `target.root` is produced by `normalized_root`,
+                    // so a bare `std::fs::canonicalize` here would render the two
+                    // sides differently on Windows (`\\?\C:\...` vs `C:\...`),
+                    // make `is_self` unconditionally false, and refuse every
+                    // landing whose own checkout holds the target branch.
                     let is_self = current_path
                         .as_ref()
-                        .and_then(|path| std::fs::canonicalize(path).ok())
+                        .and_then(|path| normalized_root(path).ok())
                         .is_some_and(|canonical| canonical == target.root);
                     if !is_self {
                         return Err(ParentLandingError::UnownedCheckout(format!(
