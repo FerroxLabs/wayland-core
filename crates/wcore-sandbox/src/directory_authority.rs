@@ -988,10 +988,12 @@ fn open_directory(path: &Path) -> std::io::Result<File> {
 fn open_directory_observational(path: &Path) -> std::io::Result<File> {
     #[cfg(windows)]
     {
-        return windows::open_directory_observational(path);
+        windows::open_directory_observational(path)
     }
     #[cfg(not(windows))]
-    open_directory(path)
+    {
+        open_directory(path)
+    }
 }
 
 fn open_regular_file(path: &Path) -> std::io::Result<File> {
