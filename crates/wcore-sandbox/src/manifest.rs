@@ -328,6 +328,26 @@ fn denied_location(path: &Path) -> Option<&'static str> {
     None
 }
 
+/// Absolute fixture root for hard-containment policy tests, in this crate's one
+/// place so no test re-derives it.
+///
+/// `HardContainmentFilesystem::new` requires an ABSOLUTE candidate, and
+/// absoluteness is platform-defined: `/srv/wl-hard` is absolute on unix but NOT
+/// on Windows, where `Path::is_absolute` demands a drive or UNC prefix. The
+/// literal was unix-shaped because this crate's test targets had never compiled
+/// on Windows, so these cases had never executed there. The guard under test is
+/// correct on both platforms — only the fixture was wrong — so this fixes the
+/// fixture and leaves every assertion intact. The path is never created on disk;
+/// all of these cases are pure policy validation.
+#[cfg(test)]
+pub(crate) fn hard_fixture_root() -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(r"C:\srv\wl-hard")
+    } else {
+        PathBuf::from("/srv/wl-hard")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,34 +389,20 @@ mod tests {
 
     #[test]
     fn hard_containment_filesystem_is_read_only_candidate_plus_private_writes() {
+        let root = hard_fixture_root();
         let fs = HardContainmentFilesystem::new(
-            PathBuf::from("/srv/wl-hard/candidate"),
-            vec![
-                PathBuf::from("/srv/wl-hard/scratch"),
-                PathBuf::from("/srv/wl-hard/cache"),
-            ],
+            root.join("candidate"),
+            vec![root.join("scratch"), root.join("cache")],
         )
         .expect("policy must validate");
         let m = fs.to_manifest();
         // Candidate is the sole read mount; it is NOT writable.
-        assert_eq!(
-            m.fs_read_allow,
-            vec![PathBuf::from("/srv/wl-hard/candidate")]
-        );
-        assert!(
-            !m.fs_write_allow
-                .contains(&PathBuf::from("/srv/wl-hard/candidate"))
-        );
+        assert_eq!(m.fs_read_allow, vec![root.join("candidate")]);
+        assert!(!m.fs_write_allow.contains(&root.join("candidate")));
         // Only the private roots are writable, and network is denied — there is
         // no bypass field to widen this.
-        assert!(
-            m.fs_write_allow
-                .contains(&PathBuf::from("/srv/wl-hard/scratch"))
-        );
-        assert!(
-            m.fs_write_allow
-                .contains(&PathBuf::from("/srv/wl-hard/cache"))
-        );
+        assert!(m.fs_write_allow.contains(&root.join("scratch")));
+        assert!(m.fs_write_allow.contains(&root.join("cache")));
         assert_eq!(m.network, NetworkPolicy::Deny);
     }
 
@@ -479,28 +485,20 @@ mod tests {
 
     #[test]
     fn policy_identity_is_order_independent() {
+        let root = hard_fixture_root();
         let a = HardContainmentFilesystem::new(
-            PathBuf::from("/srv/wl-hard/candidate"),
-            vec![
-                PathBuf::from("/srv/wl-hard/scratch"),
-                PathBuf::from("/srv/wl-hard/cache"),
-            ],
+            root.join("candidate"),
+            vec![root.join("scratch"), root.join("cache")],
         )
         .unwrap();
         let b = HardContainmentFilesystem::new(
-            PathBuf::from("/srv/wl-hard/candidate"),
-            vec![
-                PathBuf::from("/srv/wl-hard/cache"),
-                PathBuf::from("/srv/wl-hard/scratch"),
-            ],
+            root.join("candidate"),
+            vec![root.join("cache"), root.join("scratch")],
         )
         .unwrap();
         assert_eq!(a.policy_identity(), b.policy_identity());
-        let c = HardContainmentFilesystem::new(
-            PathBuf::from("/srv/wl-hard/candidate"),
-            vec![PathBuf::from("/srv/wl-hard/scratch")],
-        )
-        .unwrap();
+        let c = HardContainmentFilesystem::new(root.join("candidate"), vec![root.join("scratch")])
+            .unwrap();
         assert_ne!(a.policy_identity(), c.policy_identity());
     }
 }

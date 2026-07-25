@@ -1215,18 +1215,20 @@ mod hard_containment_tests {
         }
     }
 
+    // Platform-absolute fixture root; see `manifest::hard_fixture_root` for why
+    // the previous unix-shaped literal could never validate on Windows.
+    use crate::manifest::hard_fixture_root;
+
     fn fs_fixture() -> HardContainmentFilesystem {
-        HardContainmentFilesystem::new(
-            std::path::PathBuf::from("/srv/wl-hard/candidate"),
-            vec![std::path::PathBuf::from("/srv/wl-hard/scratch")],
-        )
-        .expect("fixture policy validates")
+        let root = hard_fixture_root();
+        HardContainmentFilesystem::new(root.join("candidate"), vec![root.join("scratch")])
+            .expect("fixture policy validates")
     }
 
     fn cmd_fixture() -> SandboxCommand {
         SandboxCommand {
             argv: vec!["/bin/echo".into(), "hi".into()],
-            cwd: Some(std::path::PathBuf::from("/srv/wl-hard/candidate")),
+            cwd: Some(hard_fixture_root().join("candidate")),
         }
     }
 
@@ -1256,7 +1258,7 @@ mod hard_containment_tests {
         let (registry, authority) = mint("q", "/a").await;
         let drifted = SandboxCommand {
             argv: vec!["/bin/echo".into(), "TAMPERED".into()],
-            cwd: Some(std::path::PathBuf::from("/srv/wl-hard/candidate")),
+            cwd: Some(hard_fixture_root().join("candidate")),
         };
         let err = registry
             .verify_hard_containment(authority, &fs_fixture(), &drifted)
@@ -1268,8 +1270,8 @@ mod hard_containment_tests {
     async fn policy_drift_refuses() {
         let (registry, authority) = mint("q", "/a").await;
         let other_fs = HardContainmentFilesystem::new(
-            std::path::PathBuf::from("/srv/wl-hard/candidate"),
-            vec![std::path::PathBuf::from("/srv/wl-hard/other-scratch")],
+            hard_fixture_root().join("candidate"),
+            vec![hard_fixture_root().join("other-scratch")],
         )
         .unwrap();
         let err = registry
