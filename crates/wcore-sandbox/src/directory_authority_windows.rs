@@ -63,6 +63,48 @@ pub(super) fn open_directory(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
+/// Open a directory handle that requests NO delete access, for an authority
+/// that only witnesses identity.
+///
+/// Measured on Windows: a handle carrying the `DELETE` access right blocks
+/// `SetCurrentDirectory` into that directory with a sharing violation.
+/// `SetCurrentDirectory` deliberately opens its target without sharing delete,
+/// so the current directory of a running process cannot be removed underneath
+/// it; any outstanding DELETE-bearing handle therefore denies the chdir. MSYS
+/// and Cygwin `chdir()` inherit that failure, so every git subcommand flagged
+/// NEED_WORK_TREE (`status` among them) dies inside `setup_work_tree()` with
+/// `fatal: this operation must be run in a work tree` — while `rev-parse` and
+/// `config`, which never chdir, succeed against the same directory. Dropping
+/// only the `DELETE` bit makes the chdir succeed; the share mode and the path
+/// representation are not involved.
+///
+/// That is why this function exists: widening it back to the mutating access
+/// mode of [`open_directory`] reintroduces a 10-test Windows failure across the
+/// swarm dispatch, collision and worker-runtime suites. It mirrors the
+/// observational reasoning already recorded for `open_regular_file` below.
+///
+/// An authority acquired through this open is an IDENTITY WITNESS ONLY.
+/// Destructive and relative-child operations on it are outside its contract and
+/// fail closed with an OS access error rather than succeeding silently.
+///
+/// `FILE_FLAG_BACKUP_SEMANTICS` is mandatory to obtain a directory handle at
+/// all, and `FILE_FLAG_OPEN_REPARSE_POINT` is preserved so a reparse point at
+/// the pathname opens the link itself and is then refused by
+/// `validate_real_directory`.
+pub(super) fn open_directory_observational(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let mut options = OpenOptions::new();
+    options
+        .access_mode(GENERIC_READ)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(
+            windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS
+                | windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+        );
+    options.open(path)
+}
+
 pub(super) fn open_regular_file(path: &Path) -> std::io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
 

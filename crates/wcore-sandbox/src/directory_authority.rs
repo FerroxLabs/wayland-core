@@ -126,12 +126,38 @@ impl DirectoryAuthority {
         Self::open_inner(path, || {})
     }
 
+    /// Acquire authority for IDENTITY VALIDATION ONLY, on a handle that does
+    /// not request delete access, for a directory that a child process must be
+    /// able to make its current directory.
+    ///
+    /// Every identity guarantee of [`Self::open`] is retained: the handle is
+    /// still retained for the authority's lifetime, acquisition still performs
+    /// the before/held/after agreement check, and [`Self::validate_path`] still
+    /// fails closed on a swap, rename or same-path replacement. Identity is
+    /// FileId/volume-based and needs only read access.
+    ///
+    /// Destructive and relative-child operations are OUTSIDE this contract and
+    /// fail closed with an OS access error. See
+    /// `windows::open_directory_observational` for the measured reason this
+    /// distinction exists.
+    pub fn open_observational(path: &Path) -> Result<Self> {
+        Self::open_inner_with(path, open_directory_observational, || {})
+    }
+
     fn open_inner(path: &Path, hook: impl FnOnce()) -> Result<Self> {
+        Self::open_inner_with(path, open_directory, hook)
+    }
+
+    fn open_inner_with(
+        path: &Path,
+        opener: fn(&Path) -> std::io::Result<File>,
+        hook: impl FnOnce(),
+    ) -> Result<Self> {
         let before_metadata = std::fs::symlink_metadata(path)?;
         validate_real_directory(path, &before_metadata)?;
         let before = path_directory_identity(path, &before_metadata)?;
         hook();
-        let handle = open_directory(path)?;
+        let handle = opener(path)?;
         let handle_metadata = handle.metadata()?;
         validate_real_directory(path, &handle_metadata)?;
         let held = handle_directory_identity(&handle, &handle_metadata)?;
@@ -945,6 +971,29 @@ fn open_directory(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
+/// Open the authority root without requesting delete access, for an authority
+/// that only witnesses identity and whose directory a child process must be
+/// able to make its current directory.
+///
+/// On Windows this is a genuinely different open: see
+/// `windows::open_directory_observational` for the measured chdir/DELETE-bit
+/// finding that requires it.
+///
+/// Off Windows this delegates to [`open_directory`], and that is NOT a stubbed
+/// no-op: the unix handle is already opened read-only (`read(true)` plus
+/// `O_DIRECTORY | O_NOFOLLOW`) because unix mutation goes through `*at`
+/// syscalls relative to the descriptor and unix has no per-handle delete right
+/// at all. There is therefore no access distinction to make off Windows, and
+/// unix executes the byte-identical `open` it executes today.
+fn open_directory_observational(path: &Path) -> std::io::Result<File> {
+    #[cfg(windows)]
+    {
+        return windows::open_directory_observational(path);
+    }
+    #[cfg(not(windows))]
+    open_directory(path)
+}
+
 fn open_regular_file(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -1027,7 +1076,13 @@ fn path_directory_identity(
     path: &Path,
     _metadata: &std::fs::Metadata,
 ) -> Result<DirectoryIdentity> {
-    let handle = open_directory(path)?;
+    // This probe is purely OBSERVATIONAL: the handle is used for nothing but
+    // reading `FILE_ID_INFO`, so it must never re-acquire delete access.
+    // `validate_path_inner` calls this twice per validation and validation runs
+    // on essentially every worktree-manager operation, so a transient
+    // DELETE-bearing handle here would intermittently block a concurrent git
+    // chdir in another worker under parallel dispatch.
+    let handle = open_directory_observational(path)?;
     windows::identity(&handle)
 }
 
