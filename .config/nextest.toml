@@ -1,3 +1,44 @@
+# File-wide test-process environment. Applies to every profile (`default`, `ci`,
+# `e2e`, `eval`) — it is deliberately NOT a profile detail.
+#
+# WHY: five wcore-swarm tests aborted on Windows with 0xC00000FD
+# (STATUS_STACK_OVERFLOW). This is NOT unbounded recursion — a stack-size sweep
+# over the full suite measured: unset (2 MiB) -> 4 aborts; 2359296 (2.25 MiB) ->
+# 0; 4194304 -> 0; 33554432 -> 0. An unbounded recursion would overflow at EVERY
+# size, so the requirement is BOUNDED at roughly 256 KiB above the 2 MiB default.
+# The overflowing thread is the libtest-spawned TEST thread (its name is the test
+# name), and because these are plain current-thread `#[tokio::test]`s driven by
+# `block_on` on that same thread, RUST_MIN_STACK governs it.
+#
+# VALUE RATIONALE: 8 MiB matches the unix main-thread default (which is why this
+# class only bites on Windows) and is ~4x the 2.25 MiB that measurably sufficed,
+# while staying small enough that the guard keeps meaning — a genuinely unbounded
+# recursion still overflows at 8 MiB, so raising this cannot mask a runaway.
+# Raising it to 32 MiB or beyond WOULD begin masking runaways and is refused.
+#
+# COVERAGE ASSESSMENT: this does NOT cover bare `cargo test`. That is acceptable
+# because every gate path routes through nextest — `justfile` `test:` runs
+# `vx cargo nextest run --workspace --profile default`, `test-ci:` runs
+# `vx cargo nextest run --workspace --profile ci --no-fail-fast`, `push` depends
+# on `test`, and `ci.yml` runs `vx just test-ci`. Bare `cargo test` is a
+# developer convenience, not a gate. (Re-verified against the justfile.)
+#
+# `.cargo/config.toml` `[env]` was REJECTED as the alternative: it would set the
+# variable for every cargo-driven process in the workspace — build scripts,
+# `cargo run`, the CLI binary itself — a far wider blast radius than the test
+# harness, to buy coverage of a non-gate path. (The repo has no
+# `.cargo/config.toml` at all today.)
+#
+# MEASUREMENT TRAP — do not "simplify" this to a shell assignment: in `cmd`,
+# `set VAR=value && cmd2` assigns "value " WITH A TRAILING SPACE, and
+# `std::thread::min_stack()` parses with `.parse().ok()`, which fails on trailing
+# whitespace and SILENTLY falls back to 2 MiB. Measured on SEANDESKTOP: with the
+# unquoted `set` form a 3 MiB probe thread still overflowed exactly as with no
+# variable set at all, while `$env:RUST_MIN_STACK='8388608'` survived. Never take
+# a successful assignment as proof the value applied.
+[env]
+RUST_MIN_STACK = "8388608"
+
 [profile.default]
 # Local dev: friendly output, show failures immediately
 failure-output = "immediate"
