@@ -91,6 +91,16 @@ impl DirectoryAuthority {
 
     /// Rename the exact held Windows directory object beneath a retained
     /// destination parent.
+    ///
+    /// DO NOT DELETE THIS AS DEAD CODE. Until 20-75 it had no live caller for
+    /// one reason only: the primitive beneath it — the crate's sole
+    /// handle-relative rename in `wcore-sandbox` — had NEVER worked on Windows
+    /// (`SetFileInformationByHandle` + `FileRenameInfo` rejects a HANDLE in
+    /// `RootDirectory` with os error 87). Its dead-code appearance was a SYMPTOM
+    /// of that defect, not a reason to remove it. 20-75 repaired the primitive
+    /// against `NtSetInformationFile`; this is the swarm-side API that repair
+    /// restores, and deleting it would destroy the surface the fix exists to
+    /// make usable.
     #[cfg(windows)]
     pub(super) fn rename_into(
         &self,

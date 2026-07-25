@@ -11,12 +11,13 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
     FILE_CREATE, FILE_DIRECTORY_FILE, FILE_ID_BOTH_DIR_INFORMATION, FILE_NON_DIRECTORY_FILE,
-    FILE_OPEN, FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
-    FileIdBothDirectoryInformation, NtCreateFile, NtQueryDirectoryFile,
+    FILE_OPEN, FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION,
+    FILE_RENAME_INFORMATION_0, FILE_SYNCHRONOUS_IO_NONALERT, FileIdBothDirectoryInformation,
+    FileRenameInformation, NtCreateFile, NtQueryDirectoryFile, NtSetInformationFile,
 };
 use windows_sys::Win32::Foundation::{
     GENERIC_READ, GENERIC_WRITE, HANDLE, RtlNtStatusToDosError, STATUS_BUFFER_OVERFLOW,
-    STATUS_BUFFER_TOO_SMALL, STATUS_NO_MORE_FILES, UNICODE_STRING,
+    STATUS_BUFFER_TOO_SMALL, STATUS_NO_MORE_FILES, STATUS_PENDING, UNICODE_STRING,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
@@ -449,50 +450,104 @@ pub(super) fn rename_directory_into(
     Ok(())
 }
 
+/// Rename the exact object behind `source` to `name` beneath the RETAINED
+/// `target_parent` handle. The destination parent is named ONLY by that handle;
+/// no pathname is ever placed in the rename's name field.
+///
+/// WHY THE NT CALL AND NOT THE WIN32 WRAPPER. A probe isolating a single
+/// variable proved, on this hardware, that `SetFileInformationByHandle` with the
+/// Win32 `FileRenameInfo` class REJECTS a Win32 HANDLE in `RootDirectory`:
+///
+///   PROBE[A RootDirectory=<Win32 HANDLE>, relative name] -> FAILED os error 87
+///   PROBE[B RootDirectory=NULL, full destination path]   -> SUCCEEDED
+///
+/// Same access rights, same buffer, same layout (`sizeof=24`,
+/// `offsetof(FileName)=20`). Because this is the crate's ONLY handle-relative
+/// rename, that defect silently disabled `atomic_write_child` — and with it the
+/// production heartbeat status mirror, the swarm directory-rename API and the
+/// authority archive import/rollback path — for the whole life of the Windows
+/// port. `NtSetInformationFile` with `FileRenameInformation` genuinely honours a
+/// `RootDirectory` handle, which is why it is used here.
+///
+/// THE FORM PROBE B SHOWED WORKING IS FORBIDDEN HERE. `RootDirectory = NULL`
+/// with a full destination PATHNAME in `FileName` re-resolves the destination BY
+/// PATHNAME at rename time. That destroys exactly the anti-swap/TOCTOU guarantee
+/// the entire retained-handle design exists to provide: an attacker who
+/// substitutes the destination directory between the identity proof and the
+/// rename would have the rename land in the SUBSTITUTED directory. The
+/// destination must stay named by a held handle that can never be re-resolved.
+/// Anyone reaching for the pathname form to "make it simpler" would be trading a
+/// security property for a syntax preference. If the NT call ever stops working,
+/// the correct outcome is a reported failure, never a fallback to the pathname
+/// form.
 fn rename_handle_into(
     source: &File,
     target_parent: &DirectoryAuthority,
     name: &str,
     replace: bool,
 ) -> Result<()> {
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_RENAME_INFO, FILE_RENAME_INFO_0, FileRenameInfo, SetFileInformationByHandle,
-    };
-
     validate_windows_child_name(name)?;
     let name: Vec<u16> = std::ffi::OsStr::new(name).encode_wide().collect();
+    // `FileNameLength` is the BYTE length of the UTF-16 name, NOT a code-unit
+    // count, and the name is NOT NUL-terminated.
     let name_bytes = name
         .len()
         .checked_mul(std::mem::size_of::<u16>())
         .ok_or_else(|| SandboxError::ExecFailed("Windows path length overflowed".to_owned()))?;
     let bytes = rename_buffer_len(name_bytes)?;
+    // The `usize` element type is what supplies the 8-byte alignment the
+    // `RootDirectory` HANDLE field requires. A `u8` allocation would leave the
+    // handle write below unaligned and unsound.
     let mut storage = vec![0_usize; bytes.div_ceil(std::mem::size_of::<usize>())];
-    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-    unsafe {
-        (*info).Anonymous = FILE_RENAME_INFO_0 {
+    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+    let name_length = u32::try_from(name_bytes)
+        .map_err(|_| SandboxError::ExecFailed("Windows path is too long".to_owned()))?;
+    let buffer_length = u32::try_from(bytes)
+        .map_err(|_| SandboxError::ExecFailed("Windows rename buffer is too large".to_owned()))?;
+    let mut status_block = zeroed_status_block();
+    // SAFETY: `info` points at `storage`, a live `usize`-aligned allocation of at
+    // least `rename_buffer_len(name_bytes)` bytes — the fixed
+    // `FILE_RENAME_INFORMATION` header plus exactly `name_bytes` of trailing
+    // name — so every field write and the `name.len()`-code-unit copy into the
+    // trailing array stay inside that allocation. `name` and `storage` are
+    // distinct allocations, so the copy cannot overlap. Both handles are owned
+    // by live `File` values, and `storage` and `status_block` outlive the call,
+    // which is synchronous (see the pending-status refusal below).
+    let status = unsafe {
+        (*info).Anonymous = FILE_RENAME_INFORMATION_0 {
             ReplaceIfExists: u8::from(replace),
         };
         (*info).RootDirectory = target_parent.handle.as_raw_handle().cast();
-        (*info).FileNameLength = u32::try_from(name_bytes)
-            .map_err(|_| SandboxError::ExecFailed("Windows path is too long".to_owned()))?;
+        (*info).FileNameLength = name_length;
         std::ptr::copy_nonoverlapping(name.as_ptr(), (*info).FileName.as_mut_ptr(), name.len());
-        if SetFileInformationByHandle(
+        NtSetInformationFile(
             source.as_raw_handle().cast(),
-            FileRenameInfo,
+            &mut status_block,
             info.cast(),
-            u32::try_from(bytes).map_err(|_| {
-                SandboxError::ExecFailed("Windows rename buffer is too large".to_owned())
-            })?,
-        ) == 0
-        {
-            return Err(std::io::Error::last_os_error().into());
-        }
+            buffer_length,
+            FileRenameInformation,
+        )
+    };
+    if status < 0 {
+        return Err(ntstatus_error(status).into());
+    }
+    // STATUS_PENDING is NON-NEGATIVE, so it would otherwise fall through as
+    // success while the rename has NOT happened. Every handle this primitive is
+    // handed today is opened `FILE_SYNCHRONOUS_IO_NONALERT`, but a future
+    // asynchronous handle would silently report a publish that never occurred.
+    // Refuse it explicitly rather than inherit that.
+    if status == STATUS_PENDING {
+        return Err(SandboxError::ExecFailed(
+            "Windows handle-relative rename returned asynchronously; \
+             this primitive requires a synchronous handle"
+                .to_owned(),
+        ));
     }
     Ok(())
 }
 
 pub(super) fn rename_buffer_len(name_bytes: usize) -> Result<usize> {
-    std::mem::size_of::<windows_sys::Win32::Storage::FileSystem::FILE_RENAME_INFO>()
+    std::mem::size_of::<FILE_RENAME_INFORMATION>()
         .checked_add(name_bytes)
         .ok_or_else(|| SandboxError::ExecFailed("Windows rename buffer overflowed".to_owned()))
 }
