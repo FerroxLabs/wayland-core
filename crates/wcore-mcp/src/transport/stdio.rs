@@ -50,6 +50,13 @@ pub struct StdioTransport {
     /// Stable process-group identity captured at spawn. `Child::id()` becomes
     /// `None` after the direct wrapper exits, while grandchildren can still
     /// be alive, so cleanup must not depend on consulting it later.
+    ///
+    /// Unix-only, matching its three readers and the `cfg(unix)`
+    /// `cmd.process_group(0)` that gives it meaning. Windows has no process
+    /// group to signal — descendant cleanup there is `kill_on_drop` plus the
+    /// Job Object — so on Windows this field was written at spawn and never
+    /// read again.
+    #[cfg(unix)]
     process_group_id: Option<u32>,
     next_id: AtomicU64,
     /// Pending request→response channels, keyed by JSON-RPC id.
@@ -458,6 +465,7 @@ impl StdioTransport {
         let mut child = cmd
             .spawn()
             .map_err(|e| McpError::Transport(format!("Failed to spawn '{}': {}", command, e)))?;
+        #[cfg(unix)]
         let process_group_id = child.id();
 
         let stdin = child
@@ -488,6 +496,7 @@ impl StdioTransport {
         Ok(Self {
             stdin: Mutex::new(BufWriter::new(stdin)),
             child: Mutex::new(child),
+            #[cfg(unix)]
             process_group_id,
             next_id: AtomicU64::new(1),
             pending,
