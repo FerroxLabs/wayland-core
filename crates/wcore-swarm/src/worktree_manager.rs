@@ -78,10 +78,12 @@ impl WorktreeManager {
         // where `[IO.DriveInfo]::new` throws on the `\\?\C:\` drive root. The
         // shared helper strips the `\\?\` prefix for real drive-letter paths and
         // is a no-op on unix and for genuine UNC/device paths, so Linux is
-        // unaffected. Keeping all three roots simplified preserves the
-        // parent-equality checks below and lets the `DirectoryAuthority` (and the
-        // `swarm_root` that `new_with_workspace_authority` inherits from it) carry
-        // a plain path.
+        // unaffected. The invariant is NOT that these roots end up plain — the
+        // strip is conditional — but that BOTH operands of every root comparison
+        // are produced by that one derivation, including in
+        // `new_with_workspace_authority`, which re-derives the inherited display
+        // path through the same helper. The checks below therefore hold whether
+        // or not the strip was actually applied.
         let workspace_parent = normalized_root(workspace_parent)?;
         let repo_root = normalized_root(repo_root)?;
         if workspace_parent.starts_with(&repo_root) || repo_root.starts_with(&workspace_parent) {
@@ -247,6 +249,16 @@ impl WorktreeManager {
 
     /// Resolve the parent repository's common Git administration directory
     /// under the same scrubbed Git environment used for worktree operations.
+    ///
+    /// The result is deliberately NOT routed through the shared path helper.
+    /// This is the one swarm-exported path `wcore-agent/src/spawner.rs` consumes
+    /// WITHOUT re-canonicalizing (`:1557`), comparing it there against spawner's
+    /// own verbatim `workspace_root` to build the deny-root overlap evidence
+    /// (`:1385-1390`). Normalizing it would render the two operands differently
+    /// and make both `starts_with` directions of that check unconditionally
+    /// false — a new fail-open of exactly the class the shared representation
+    /// closes. The exclusion is principled rather than an omission: this path is
+    /// never stored on the manager, it is freshly resolved and exported.
     pub async fn git_common_dir(&self) -> Result<PathBuf> {
         self.reject_executable_checkout_config().await?;
         let cmd = self.git_command(&["rev-parse", "--git-common-dir"]);
@@ -479,11 +491,12 @@ impl WorktreeManager {
         // args after `-Command` as script text, so any weird path character (a
         // `\\?\` verbatim prefix, `&`, `(`, spaces) breaks the probe with a
         // ParserError. Reading `$env:WCORE_SWARM_PROBE_ROOT` removes that reparse
-        // class entirely. Every constructor de-verbatimizes `swarm_root` at its
-        // canonicalize site (`new`, `new_with_workspace_root`, and by inheritance
-        // `new_with_workspace_authority`), so `[IO.DriveInfo]::new` receives a
-        // plain drive root rather than a `\\?\C:\` verbatim path that would make
-        // it throw a non-terminating `ArgumentException` (exit 0, empty stdout).
+        // class entirely. The probe no longer depends on the stored root's
+        // rendering at all: `probe_drive_root` derives the drive root from that
+        // path's own `Prefix` component and fails closed on a non-drive-letter
+        // root, so `[IO.DriveInfo]::new` always receives a plain `C:\` rather than
+        // a `\\?\C:\` verbatim path that would make it throw a non-terminating
+        // `ArgumentException` (exit 0, empty stdout).
         const SCRIPT: &str = "$drive=[IO.DriveInfo]::new($env:WCORE_SWARM_PROBE_ROOT); [Console]::Out.Write($drive.AvailableFreeSpace)";
         let drive_root = self.probe_drive_root()?;
         let mut command = shell::shell_command_argv(
