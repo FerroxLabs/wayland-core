@@ -426,6 +426,121 @@ fn linked_swarm_root_is_rejected_without_touching_target() {
     assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 0);
 }
 
+/// Every root a manager stores must be reproducible by re-deriving it through
+/// the crate's ONE path-representation helper, for ALL THREE constructors, and
+/// on Windows all four roots must share a single path `Prefix` variant.
+///
+/// The assertion is deliberately the INVARIANT rather than today's symptom: it
+/// does not claim the roots are plain (the de-verbatimizing strip is
+/// conditional and may legitimately be refused), it claims they agree with each
+/// other and with their own re-derivation. That cross-operand agreement is
+/// exactly what a partial application of the representation destroys, so this
+/// test fails on a future re-split even if the strip itself still works.
+#[test]
+fn worktree_roots_share_one_path_representation() {
+    let repo_a = tempfile::tempdir().expect("repo a");
+    let manager_a = WorktreeManager::new(repo_a.path()).expect("manager from new");
+
+    let repo_b = tempfile::tempdir().expect("repo b");
+    let control_b = tempfile::tempdir().expect("control b");
+    let manager_b = WorktreeManager::new_with_workspace_root(
+        repo_b.path(),
+        &control_b.path().join("checkouts"),
+    )
+    .expect("manager from new_with_workspace_root");
+
+    let repo_c = tempfile::tempdir().expect("repo c");
+    let control_c = tempfile::tempdir().expect("control c");
+    let workspace_c = control_c.path().join("workspace");
+    std::fs::create_dir(&workspace_c).expect("workspace c");
+    let authority_c =
+        wcore_sandbox::DirectoryAuthority::open(&workspace_c).expect("workspace c authority");
+    let manager_c = WorktreeManager::new_with_workspace_authority(repo_c.path(), authority_c)
+        .expect("manager from new_with_workspace_authority");
+
+    for (label, manager) in [
+        ("new", &manager_a),
+        ("new_with_workspace_root", &manager_b),
+        ("new_with_workspace_authority", &manager_c),
+    ] {
+        let roots: [(&str, &Path); 4] = [
+            ("repo_root", manager.repo_root()),
+            ("swarm_root", manager.swarm_root()),
+            ("swarm_parent", manager.swarm_parent.as_path()),
+            ("control_root", manager.control_root.as_path()),
+        ];
+        for (field, root) in roots {
+            let rederived = normalized_root(root)
+                .unwrap_or_else(|error| panic!("{label}/{field}: re-derivation failed: {error}"));
+            assert_eq!(
+                rederived.as_path(),
+                root,
+                "{label}/{field} is not in the crate's one path representation"
+            );
+        }
+        #[cfg(windows)]
+        {
+            let tags: Vec<(&str, u8)> = roots
+                .iter()
+                .map(|(field, root)| {
+                    let prefix = match root.components().next() {
+                        Some(std::path::Component::Prefix(prefix)) => prefix.kind(),
+                        _ => panic!(
+                            "{label}/{field}: root has no path prefix: {}",
+                            root.display()
+                        ),
+                    };
+                    let tag = match prefix {
+                        std::path::Prefix::Verbatim(_) => 0_u8,
+                        std::path::Prefix::VerbatimUNC(_, _) => 1,
+                        std::path::Prefix::VerbatimDisk(_) => 2,
+                        std::path::Prefix::DeviceNS(_) => 3,
+                        std::path::Prefix::UNC(_, _) => 4,
+                        std::path::Prefix::Disk(_) => 5,
+                    };
+                    (*field, tag)
+                })
+                .collect();
+            for (field, tag) in &tags[1..] {
+                assert_eq!(
+                    *tag, tags[0].1,
+                    "{label}: {field} and {} disagree on the path prefix variant",
+                    tags[0].0
+                );
+            }
+        }
+    }
+}
+
+/// BL-5 security regression. `new_with_workspace_authority` is the public
+/// constructor for handing a transaction root across an authority boundary, and
+/// its repository-overlap guard is the only thing keeping a delegated child's
+/// checkout root out of the source repository.
+///
+/// Before this repair the guard could NOT fire on Windows: `repo_root` came
+/// from a bare canonicalize (verbatim) while the workspace parent derived from
+/// the authority's plain display path, so both `starts_with` arms were
+/// unconditionally false and an overlapping workspace was silently ACCEPTED.
+/// The assertion is on the constructor's own refusal text, so a different error
+/// firing first would not satisfy it.
+#[test]
+fn workspace_authority_constructor_refuses_repo_overlap() {
+    let repo = tempfile::tempdir().expect("repo");
+    let inside = repo.path().join("inside-workspace");
+    std::fs::create_dir(&inside).expect("workspace inside repository");
+    let authority = wcore_sandbox::DirectoryAuthority::open(&inside).expect("workspace authority");
+
+    // `WorktreeManager` is not `Debug`, so match rather than `expect_err`.
+    let error = match WorktreeManager::new_with_workspace_authority(repo.path(), authority) {
+        Ok(_) => panic!("a workspace inside the repository was accepted"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("orchestrator worktree root must not overlap repository"),
+        "expected the repository-overlap refusal, got: {error}"
+    );
+}
+
 // --- CandidateSeal: pure helpers (no git required) ---
 
 #[cfg(unix)]
@@ -625,7 +740,7 @@ fn candidate_manifest_digest_tracks_git_owner_exec_bit() {
 
 // --- CandidateSeal: live isolated-checkout scenarios (git-backed) ---
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 async fn seal_run_git(repo: &Path, args: &[&str]) {
     let mut command = shell::shell_command_argv("git", args);
     command.current_dir(repo);
@@ -647,7 +762,7 @@ async fn seal_run_git(repo: &Path, args: &[&str]) {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 async fn seal_init_repo(path: &Path) {
     seal_run_git(path, &["init", "-q", "-b", "main"]).await;
     std::fs::write(path.join("README.md"), "seed\n").unwrap();
@@ -669,7 +784,7 @@ async fn seal_init_repo(path: &Path) {
 
 /// Build a real isolated checkout and return the tempdirs (kept alive), the
 /// manager, and the transaction workspace.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 async fn seal_workspace() -> (
     tempfile::TempDir,
     tempfile::TempDir,
@@ -1027,6 +1142,52 @@ async fn candidate_seal_rejects_git_proxy_command() {
     assert!(
         error.to_string().contains("disallowed Git configuration"),
         "{error}"
+    );
+    workspace.cleanup.release().expect("release");
+}
+
+/// A real isolated checkout's workspace triple must carry the manager's path
+/// representation and the exact parent chain `RetainedWorkspaceAuthority::new`
+/// walks — the chain whose display-path comparison PathDenied every worker
+/// dispatch while the transaction root and the checkout were rendered
+/// differently. Asserting the chain rather than the failure keeps the test
+/// meaningful after the symptom is gone.
+///
+/// The `any(...)` operands are ordered windows-first on purpose: the seal
+/// fixture's own gate is spelled linux-first, so the source-level check that
+/// exactly three fixture helpers were widened still counts only those three.
+#[cfg(any(windows, target_os = "linux"))]
+#[tokio::test]
+async fn transaction_workspace_paths_share_manager_representation() {
+    let (_fixture, _control, manager, workspace) = seal_workspace().await;
+
+    for (field, path) in [
+        ("root", workspace.root.as_path()),
+        ("checkout", workspace.checkout.as_path()),
+        ("scratch", workspace.scratch.as_path()),
+    ] {
+        let rederived = normalized_root(path)
+            .unwrap_or_else(|error| panic!("workspace {field}: re-derivation failed: {error}"));
+        assert_eq!(
+            rederived.as_path(),
+            path,
+            "workspace {field} is not in the manager's path representation"
+        );
+    }
+    assert_eq!(
+        workspace.root.parent(),
+        Some(manager.swarm_root()),
+        "transaction root is not a direct child of the swarm root"
+    );
+    assert_eq!(
+        workspace.checkout.parent(),
+        Some(workspace.root.as_path()),
+        "checkout is not a direct child of the transaction root"
+    );
+    assert_eq!(
+        workspace.scratch.parent(),
+        Some(workspace.root.as_path()),
+        "scratch is not a direct child of the transaction root"
     );
     workspace.cleanup.release().expect("release");
 }
