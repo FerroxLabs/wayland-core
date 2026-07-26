@@ -523,3 +523,272 @@ Also open, non-blocking: the 30 Windows failures F-09 unmasked (18 in `session_j
 **Commits:** none made by this run at the time of writing.
 
 ## Self-Check: PASSED
+
+---
+
+# 12. FINAL CONSOLIDATION — 2026-07-26 (supersedes §6, §7/B1, §9)
+
+Everything in §1–§11 above was measured at the **now-stale** seal `50cf00b3`.
+This section is the authoritative record. Where it conflicts with anything
+above, **this section wins**.
+
+## 12.1 The final tip
+
+| Field | Value |
+|-------|-------|
+| Branch | `plan/f20-unified-audit-repair` |
+| **Final SHA** | `9821ef7603ac1e687b600cda591af1657c883484` |
+| **Final tree** | `0a1267a990f3b512782916b6ed26501d0db39222` |
+| **Nonce** | `96c91107636c4eaca9130969369b2309ee6dd6582cc4e9e1a7a45e0fb8ec92cf` |
+| Nonce derivation | `printf '%s' 9821ef7603ac1e687b600cda591af1657c883484 \| shasum -a 256` |
+| Pinned ref | `refs/f20a/candidate` → `9821ef76…` (was `50cf00b3…`) |
+| **Seal tag** | `f20a-candidate-9821ef76` → `48601e469b3a3fca524811cc37e0a6ce6841e457` → `9821ef76…` |
+
+Tip confirmed identical on all four places, tree clean everywhere:
+
+| Where | Path | HEAD | `git status --porcelain` |
+|-------|------|------|--------------------------|
+| Mac | `/Users/seandonahoe/dev/waylandcore-ferrox` | `9821ef76…` | only untracked `.planning/` churn (`TEST-AUDIT.md`, `config.json.pre-loopfix.bak`, `debug/`) |
+| `gh` remote | `FerroxLabs/wayland-core` | `9821ef76…` | — (fetched via `gh`, never `origin`) |
+| Hetzner | `hetzner-dsm:/root/wayland` | `9821ef76…` | **empty** |
+| Windows | `SeanD@seandesktop:C:\ferrox-win` | `9821ef76…` | **empty**, incl. `--untracked-files=all` |
+
+## 12.2 Six-target proof RE-RUN at the final tip — 6/6 PASS
+
+Re-run was mandatory: the prior 6/6 was at `f4803e1e`/`f09a53c`, and five
+`session_journal` commits landed afterwards touching `crates/wcore-agent`,
+which `windows-f20-lifecycle` exercises.
+
+Run on SEANDESKTOP on a **verified-idle box** (0 `cargo`/`rustc`/`link`
+processes, CPU 3%). The in-progress CI run `30182036233` was holding the
+self-hosted Windows runner with `Build (x86_64-pc-windows-msvc)` and
+`Build (aarch64-pc-windows-msvc)`; the proof was **not** started until both
+jobs completed and the runner went idle. No workflow was dispatched.
+
+```
+WAYLAND_F20_NATIVE_ACCEPTANCE=1
+scripts/f20-native-windows-proof.ps1
+  -ExpectedCommit 9821ef7603ac1e687b600cda591af1657c883484
+  -ExpectedTree   0a1267a990f3b512782916b6ed26501d0db39222
+  -Nonce          96c91107636c4eaca9130969369b2309ee6dd6582cc4e9e1a7a45e0fb8ec92cf
+```
+
+| # | Target | Result | Detail |
+|---|--------|--------|--------|
+| 1 | `windows-retained-handle` | **PASS** | 1 test run: 1 passed, 11 skipped |
+| 2 | `windows-appcontainer-acl` | **PASS** | 1 test run: 1 passed, 11 skipped |
+| 3 | `windows-job-object` | **PASS** | 4 tests run: 4 passed, 2 skipped |
+| 4 | `windows-public-dispatch` | **PASS** | 10 tests run: **10 passed**, 0 skipped |
+| 5 | `windows-hard-process-containment` | **PASS** | 1 test run: 1 passed, 5 skipped |
+| 6 | `windows-f20-lifecycle` | **PASS** | 9 tests run: 9 passed, 0 skipped |
+
+Final marker emitted exactly once, after all six:
+
+```
+F20_NATIVE_WINDOWS_ACCEPTANCE=PASS commit=9821ef7603ac1e687b600cda591af1657c883484 tree=0a1267a990f3b512782916b6ed26501d0db39222 nonce=96c91107636c4eaca9130969369b2309ee6dd6582cc4e9e1a7a45e0fb8ec92cf
+PROOF_EXIT=0
+```
+
+Every one of the six `F20_NATIVE_TARGET=PASS` lines carries
+`commit=9821ef76… tree=0a1267a9… nonce=96c91107…`, so the log is bound to this
+exact candidate and this exact request.
+
+**§7/B1 is CLOSED.** Targets 4 and 6, red at `50cf00b3`, are green at `9821ef76`.
+
+### `$targets` byte-identity, re-proved at the final tip
+
+```
+git diff --exit-code -- scripts/f20-native-windows-proof.ps1   → exit 0 (no diff)
+git show f20a-candidate-9821ef76:scripts/f20-native-windows-proof.ps1 | diff - scripts/…  → IDENTICAL
+```
+
+The `$targets` array is byte-identical to the sealed version; no target was
+added, removed, reordered, or reselected.
+
+## 12.3 The seal — ONE tag, both roles
+
+`f20a-candidate-50cf00b3` and `f20a-harness-39d30e55` are **stale** and
+superseded.
+
+§9 needed two refs only because the workflow fix post-dated the seal. At
+`9821ef76` the fix and the candidate source are **in the same tree**, so one
+tag serves both roles. Verified directly from the tag object, not the worktree:
+
+```
+git show f20a-candidate-9821ef76:.github/workflows/nightly-windows-soak.yml
+  f20_candidate:        (line 29)
+  f20_expected_sha:     (line 43)   ← the fix
+  f20_macos_runner_label: (line 48)
+  f20_request_nonce:    (line 53)
+  "Assert checkout is the authorized candidate"          × 2  (both candidate jobs)
+  ref: ${{ github.event.inputs.f20_expected_sha }}       × 2  (both checkouts pinned)
+```
+
+So `--ref f20a-candidate-9821ef76` supplies the **fixed, non-tautological
+workflow definition** AND resolves to the **exact proven tree**. The two-ref
+split described in §9 no longer applies.
+
+Pushed to `gh` (tag only; no branch force, no merge, no PR):
+
+```
+git push gh refs/tags/f20a-candidate-9821ef76
+ * [new tag]  f20a-candidate-9821ef76 -> f20a-candidate-9821ef76
+
+git ls-remote --tags gh 'refs/tags/f20a*'
+48601e469b3a3fca524811cc37e0a6ce6841e457  refs/tags/f20a-candidate-9821ef76
+9821ef7603ac1e687b600cda591af1657c883484  refs/tags/f20a-candidate-9821ef76^{}
+```
+
+## 12.4 THE UNFIRED DISPATCH COMMAND
+
+Every input below is fully resolvable and verified. **B1, B2 and B3 are all
+closed.** This command has **NOT** been run.
+
+```bash
+# UNFIRED. Sean's authorization only. Firing this burns one authorization.
+gh auth switch --user FerroxLabs
+
+gh workflow run nightly-windows-soak.yml \
+  -R FerroxLabs/wayland-core \
+  --ref f20a-candidate-9821ef76 \
+  -f f20_candidate=true \
+  -f f20_expected_sha=9821ef7603ac1e687b600cda591af1657c883484 \
+  -f f20_request_nonce=96c91107636c4eaca9130969369b2309ee6dd6582cc4e9e1a7a45e0fb8ec92cf \
+  -f f20_macos_runner_label=f20-image-1d05364078523334605249687228ffec79964b7ecf731d7c9512b40e67fd1a64
+```
+
+Resolvability of each input, verified:
+
+| Input | Value | Verified |
+|-------|-------|----------|
+| `--ref` | `f20a-candidate-9821ef76` | tag exists on `gh`, dereferences to `9821ef76…`, and carries the fixed workflow |
+| `f20_expected_sha` | `9821ef76…` | 40 lowercase hex; equals the tag's commit, so the pinned checkout satisfies both assert steps |
+| `f20_request_nonce` | `96c91107…` | 64 lowercase hex; `sha256(final-sha)`; matches the proof script's `^[0-9a-f]{32,64}$` |
+| `f20_macos_runner_label` | `f20-image-1d053640…1a64` | runner id **27**, `f20-macos-ephemeral-1d053640`, macOS/ARM64, **status online, busy false** |
+
+## 12.5 Four-suite Windows baseline at the final tip (SEANDESKTOP)
+
+`WAYLAND_SANDBOX_LIVE_WINDOWS=1`, box idle (CPU 6%, no compilers), tree clean,
+`HEAD` = `9821ef76…` before and after. Actual numbers:
+
+| # | Command | Result |
+|---|---------|--------|
+| 1 | `cargo nextest run -p wcore-sandbox --no-fail-fast` | **136 run: 131 passed, 5 failed, 45 skipped** (exit 100) |
+| 2 | `cargo nextest run -p wcore-swarm --no-fail-fast` | **91 run: 84 passed, 7 failed, 6 skipped** (exit 100) |
+| 3 | `cargo nextest run -p wcore-agent --test transactional_delegated_mutation_test --run-ignored all --no-fail-fast` | **9 run: 9 passed, 0 skipped** (exit 0) |
+| 4 | `cargo nextest run -p wcore-swarm --test dispatch_smoke --no-fail-fast` | **7 run: 3 passed, 4 failed, 3 skipped** (exit 100) |
+
+Suite 1 failures (all `wcore-sandbox::live_integrity`):
+`live_cmd_runs_when_allowlist_has_missing_path`,
+`live_cmd_builtin_runs_under_hardened_sandbox`,
+`live_lsa_dependent_tool_fails_under_hardened_sandbox`,
+`live_future_drop_reaps_descendant_job_tree`,
+`live_runaway_command_is_bounded_by_timeout`.
+
+Suite 2 failures: `dispatch_smoke::malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic`,
+`dispatch_smoke::public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state`,
+`dispatch_smoke::required_live_windows_public_dispatch_refuses_bash_worker_and_preserves_parent_and_sibling_state`,
+`dispatch_smoke::dispatches_4_noop_workers_in_parallel`,
+`worker_runtime_limits::timeout_releases_workspace_and_capacity_before_return`,
+`worker_runtime_limits::multi_worker_output_exhaustion_fails_without_retaining_buffers`,
+`swarm_worker_failure_reporting_e2e::swarm_reports_failed_worker_status_and_succeeding_workers_complete`.
+
+Suite 4 failures: the four `dispatch_smoke` tests above.
+
+### Why suite-mode reds do NOT contradict the 6/6 proof — measured, not asserted
+
+`dispatch_smoke::public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state`
+**passes in the proof and fails in the plain suite.** The mechanism was measured:
+
+- The proof invokes the target with `--run-ignored all … --nocapture`. `--nocapture`
+  makes nextest run **serially**; the transcript shows strictly sequential
+  `START (1/10) → PASS (1/10) → START (2/10) → …` with no interleaving, and
+  **10 tests run: 10 passed**.
+- The plain suite has no `--nocapture`, so nextest runs tests **in parallel**.
+  These tests spawn real sandboxed worker subprocesses; under concurrent spawns
+  the backend probe degrades and `admit_delegated_backend`
+  (`crates/wcore-swarm/src/dispatch.rs:33`) rejects with the exact text:
+
+  ```
+  status: Failed("sandbox backend fail_closed cannot enforce delegated read denial")
+  ```
+
+  i.e. `registry.backend_name()` == `fail_closed` — the hardened backend was not
+  selected, so the test correctly refuses to proceed. This is the same
+  contention sensitivity already flagged for this host, now with its precise
+  cause recorded, and it is **not** a regression from the `session_journal`
+  commits.
+
+**The acceptance gate is the six-target proof, not the plain suites.** No source,
+test, `scripts/f20-native-windows-proof.ps1`, or `crates/wcore-swarm/src/dispatch.rs`
+was modified to obtain these numbers.
+
+> Method note: an initial measurement added `--run-ignored all` to suites 1, 2
+> and 4 as well. That is **wrong** and its numbers are discarded — it force-runs
+> `*_fixture` helper tests (`standalone_authority_fixture`,
+> `flood_worker_fixture`, `capacity_registration_fixture`, …) that exist only to
+> be spawned as child processes by their parent test, and which fail by design
+> when executed directly (visible as ~0.006 s failures). The table above is the
+> corrected run using exactly the specified commands.
+
+## 12.6 Linux aggregate at the final tip (Hetzner)
+
+Host pinned and verified: `HEAD` `9821ef76…` / tree `0a1267a9…` **before and
+after** the run, `git status --porcelain --untracked-files=all` empty. Fetched
+with `git fetch origin plan/f20-unified-audit-repair` (the pinned refspec would
+otherwise miss this branch). Load average 5.77 on 96 cores at start.
+
+```
+cargo build --locked --workspace --all-features     → BUILD_EXIT=0
+cargo nextest run --profile ci --no-fail-fast       → NEXTEST_EXIT=0
+Summary [187.312s] 11520 tests run: 11520 passed (1 slow, 1 flaky), 48 skipped
+```
+
+**11520 run, 11520 passed.** This is **better** than the expected baseline: the
+3 previously non-passing tests did not reproduce. The two 60 s timeouts were
+contention artefacts — the earlier measurement ran at load average ~78, this one
+at ~5.8 — and the load-flake
+(`wcore-cli::deterministic_openai_loop::packaged_core_cancels_an_active_stream`)
+retried green (`FLAKY 3/3`).
+
+## 12.7 Known-red items that are NOT proof targets and do NOT gate acceptance
+
+| Item | Status at final tip | Note |
+|------|---------------------|------|
+| `wcore-sandbox::live_integrity::live_future_drop_reaps_descendant_job_tree` | **RED** (reproduced) | Windows; deterministic. Escalated: every remaining fix changes what the sandbox permits. Not a proof target. |
+| `wcore-agent` `snapshot.rs::windows_private_dacl_accepts_restrictive_deny_ace` | RED | `WRITE_DAC` reopen error 5. Fails identically at the parent commit. Unit tests in `crates/wcore-agent/src/session_journal/snapshot.rs` — **not** reached by any of the four suites (hence absent from §12.5). |
+| `wcore-agent` `snapshot.rs::windows_private_dacl_rejects_null_empty_and_broad_allow` | RED | as above |
+| `wcore-swarm::worker_runtime_limits::multi_worker_output_exhaustion_fails_without_retaining_buffers` | **RED** (reproduced) | ~35 s against a 20 s budget. The timeout is deliberately **NOT** raised. |
+| The 3 pre-existing Linux non-passing tests | **NOT REPRODUCED** | Full Linux aggregate was 11520/11520 on a quiet box (§12.6). |
+| Additional `live_integrity` reds (4) + `wcore-swarm` parallel-mode reds (6) | RED in plain suite mode only | Cause measured in §12.5: `fail_closed` backend under parallel sandboxed spawns. Green under the proof's serial execution. |
+
+### Known caveat in the evidence chain — the `f20-no-ambient-secrets` label is NOT accurate
+
+Runner id 27 (`f20-macos-ephemeral-1d053640`) advertises the label
+`f20-no-ambient-secrets`. **On this host that label is inaccurate and must not
+be relied on.** The runner executes as Sean's own user, with reach over
+`~/.ssh`, `~/.aws`, and an unlocked login keychain. What *is* true is that **no
+GitHub secrets are exposed** to the candidate jobs. The label overstates the
+isolation; record it as a known caveat, not as a proven property.
+
+## 12.8 Bounds honoured
+
+- No Rust source, no test, no `scripts/f20-native-windows-proof.ps1`, no
+  `crates/wcore-swarm/src/dispatch.rs` modified — `$targets` byte-identity
+  proved twice (§12.2).
+- No failing test fixed; every red reported as-is.
+- **No `gh workflow run` fired.** No main push, no merge, no PR, no release, no
+  issue closure. Only the branch (already present) and the new **tag** touched `gh`.
+- `origin` in `waylandcore-ferrox` (a stale local worktree) was never fetched or
+  reset against; all remote operations used `gh` explicitly.
+- No `AGENTS.md` or `.ijfw` churn staged.
+
+## Self-Check (§12): PASSED
+
+- Final SHA/tree/nonce — computed and quoted verbatim; nonce re-derivable via the printed command.
+- Six-target result — all six `F20_NATIVE_TARGET=PASS` lines plus the single terminal `F20_NATIVE_WINDOWS_ACCEPTANCE=PASS` and `PROOF_EXIT=0` quoted verbatim from the SEANDESKTOP transcript.
+- Tag — `git push` output and `git ls-remote --tags gh` quoted verbatim; dual-role verified by reading the workflow **out of the tag object**.
+- `$targets` — `git diff --exit-code` exit 0 and a tag-vs-worktree `diff` quoted verbatim.
+- Four-suite baseline — nextest `Summary` lines and per-test failure names quoted verbatim; the discarded first attempt disclosed rather than hidden.
+- Linux aggregate — `Summary` line and both exit codes quoted verbatim; HEAD pinned and re-verified after the run.
+- Runner label — `gh api .../actions/runners` JSON read directly.
