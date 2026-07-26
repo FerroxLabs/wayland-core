@@ -1,0 +1,530 @@
+crates/wcore-agent/src/bootstrap.rs                |  31 +++
+ crates/wcore-agent/src/engine.rs                   |  19 +-
+ crates/wcore-agent/src/policy_gate.rs              |  64 +++++
+ crates/wcore-agent/src/spawner.rs                  |  34 +++
+ crates/wcore-agent/tests/acceptance/helpers.rs     |   2 +
+ crates/wcore-agent/tests/common/mod.rs             |   1 +
+ crates/wcore-agent/tests/e2e/anthropic.rs          |   1 +
+ crates/wcore-agent/tests/e2e/compaction.rs         |   1 +
+ crates/wcore-agent/tests/e2e/openai.rs             |   1 +
+ .../tests/policy_gate_inheritance_test.rs          | 261 +++++++++++++++++++++
+ crates/wcore-config/src/config.rs                  | 121 ++++++++++
+ docs/getting-started.md                            |   8 +
+ 12 files changed, 541 insertions(+), 3 deletions(-)
+
+--- Changes ---
+
+crates/wcore-agent/src/bootstrap.rs
+  @@ -2190,11 +2190,24 @@ impl AgentBootstrap {
+  +        // F21-02-03: the session tool ACL. Resolved BEFORE `self.config` is
+  +        // moved into the engine below, and handed to BOTH the engine and the
+  +        // spawner from this single value so the parent and every child it
+  +        // launches are governed by the same grant set. `None` (`[tools]
+  +        // permitted` unset) installs no gate at all — byte-identical to the
+  +        // pre-F21 engine.
+  +        let session_policy_gate = self
+  +            .config
+  +            .tools
+  +            .permitted
+  +            .as_deref()
+  +            .map(crate::policy_gate::PolicyGate::from_permitted_tools);
+           let mut spawner_builder = session_budget
+               .govern_spawner(
+                   crate::spawner::AgentSpawner::new(provider.clone(), self.config.clone()),
+                   session_runtime.active_turn_token(),
+               )
+  +            .with_policy_gate(session_policy_gate.clone())
+               .with_durable_session_authority(
+                   durable_session_authority.clone(),
+                   effective_execution_policy.clone(),
+  @@ -2631,6 +2644,13 @@ impl AgentBootstrap {
+  +        // F21-02-03: install the session tool ACL resolved above. This is the
+  +        // first production caller of `set_policy_gate` — before it, both engine
+  +        // constructors hard-coded `policy_gate: None` and the gate could never
+  +        // run outside a test.
+  +        if let Some(gate) = session_policy_gate {
+  +            engine.set_policy_gate(gate);
+  +        }
+           if let Some(manager) = self.approval_manager.take() {
+               engine.set_approval_manager(manager);
+           }
+  @@ -3401,7 +3421,18 @@ impl AgentBootstrap {
+  +        // F21-02-03: resolve the session tool ACL the same way `build()` does,
+  +        // before `config` is moved, so the test-mode engine exercises the real
+  +        // gate-installation seam instead of a divergent one.
+  +        let session_policy_gate = config
+  +            .tools
+  +            .permitted
+  +            .as_deref()
+  +            .map(crate::policy_gate::PolicyGate::from_permitted_tools);
+           let mut engine = AgentEngine::new_with_provider(provider, config, registry, sink_arc);
+  +        if let Some(gate) = session_policy_gate {
+  +            engine.set_policy_gate(gate);
+  +        }
+           engine.set_test_sink_handle(handle.clone());
+           (engine, handle)
+       }
+  +31 -0
+
+crates/wcore-agent/src/engine.rs
+  @@ -4027,6 +4027,13 @@ impl AgentEngine {
+  +        // F21-02-03: a transient spawner (workflow / council / crucible) is
+  +        // still this session's spawner, so it carries this session's tool ACL.
+  +        // Reading it off `self` — rather than off the caller's builder chain —
+  +        // is what makes the inheritance transitive: a child engine that was
+  +        // handed the parent's gate re-publishes exactly that gate to its own
+  +        // transient children.
+  +        let spawner = spawner.with_policy_gate(self.policy_gate.clone());
+           if let Some(authority) = self.budget_authority.as_ref() {
+               let governance = crate::spawner::SpawnerBudgetGovernance::from_authority(
+                   Arc::clone(authority),
+  @@ -4058,9 +4065,15 @@ impl AgentEngine {
+  -    /// without invoking the tool. Call from `AgentBootstrap` when the
+  -    /// session config requests permissions enforcement; omit entirely to
+  -    /// preserve v0.6.0 open-gate behaviour.
+  +    /// without invoking the tool. Omit entirely to preserve v0.6.0
+  +    /// open-gate behaviour.
+  +    ///
+  +    /// F21-02-03: `AgentBootstrap` calls this whenever `[tools] permitted`
+  +    /// is set, and hands the SAME gate to the session's `AgentSpawner`, so
+  +    /// the installed gate also bounds every child. An engine that was itself
+  +    /// created as a child re-publishes its gate to its own transient
+  +    /// spawners via `govern_transient_spawner`, which is what makes the
+  +    /// restriction hold at arbitrary depth.
+       pub fn set_policy_gate(&mut self, gate: crate::policy_gate::PolicyGate) {
+           self.policy_gate = Some(gate);
+       }
+  +16 -3
+
+crates/wcore-agent/src/policy_gate.rs
+  @@ -15,6 +15,24 @@
+  +//! ## F21-02-03 — how a gate reaches production
+  +//!
+  +//! Until Phase 21 the gate had no production constructor on the agent
+  +//! path at all: `AgentEngine::set_policy_gate` had zero callers, both
+  +//! engine constructors hard-coded `policy_gate: None`, and the whole
+  +//! mechanism was therefore unreachable (fail-open by absence). The
+  +//! session tool ACL `[tools] permitted` closes that: `AgentBootstrap`
+  +//! turns it into a gate via [`PolicyGate::from_permitted_tools`],
+  +//! installs it on the session engine, and hands the same gate to the
+  +//! `AgentSpawner` so **every child inherits it**. A child therefore
+  +//! cannot invoke a tool its parent was not permitted, at any depth.
+  +//!
+  +//! When `[tools] permitted` is unset there is no gate — deliberately.
+  +//! The Phase-21 requirement is that a child cannot *widen* a parent's
+  +//! restriction; a session with no declared restriction has nothing to
+  +//! widen, and `PolicyEngine` is explicit-grant-only, so synthesising a
+  +//! default gate would deny every tool in every existing session.
+  +//!
+   //! ## Actor resolution
+   //!
+   //! Top-level (main-agent) tool calls use the gate's configured
+  @@ -62,6 +80,29 @@ impl PolicyGate {
+  +    /// F21-02-03 — build the session gate from `[tools] permitted`.
+  +    ///
+  +    /// Produces one `Invoke` grant per named tool for the session's
+  +    /// default actor. An empty slice yields a gate with zero grants,
+  +    /// which denies every tool — that is the honest reading of
+  +    /// `permitted = []` and the reason the config field is an `Option`:
+  +    /// "no ACL" is `None`, never an empty list.
+  +    ///
+  +    /// Tool names are matched exactly by `PolicyEngine::check`, so a
+  +    /// misspelt entry silently denies rather than silently grants.
+  +    pub fn from_permitted_tools(permitted: &[String]) -> Self {
+  +        let actor = Actor::User("default".into());
+  +        let mut engine = PolicyEngine::new();
+  +        for tool in permitted {
+  +            engine.grant(wcore_permissions::Permission {
+  +                actor: actor.clone(),
+  +                resource: Resource::Tool(tool.clone()),
+  +                action: Action::Invoke,
+  +            });
+  +        }
+  +        Self::new(Arc::new(engine), actor)
+  +    }
+  +
+       /// Check whether the dispatching actor may invoke `tool_name`.
+       ///
+       /// `source_agent = Some(name)` when the call comes from a spawned
+  @@ -126,6 +167,29 @@ mod tests {
+  +    #[test]
+  +    fn from_permitted_tools_grants_exactly_the_named_tools() {
+  +        let gate = PolicyGate::from_permitted_tools(&["Read".into(), "Grep".into()]);
+  +        assert!(gate.check_tool("Read", None).is_ok());
+  +        assert!(gate.check_tool("Grep", None).is_ok());
+  +        assert!(
+  +            gate.check_tool("Bash", None).is_err(),
+  +            "a tool outside `[tools] permitted` must be denied"
+  +        );
+  +        assert!(
+  +            gate.check_tool("read", None).is_err(),
+  +            "tool names are matched exactly — a misspelling must deny, not grant"
+  +        );
+  +    }
+  +
+  +    #[test]
+  +    fn from_permitted_tools_with_an_empty_list_denies_everything() {
+  +        // `permitted = []` is a deliberate deny-all; "no ACL" is expressed by
+  +        // the config field being `None`, never by an empty list.
+  +        let gate = PolicyGate::from_permitted_tools(&[]);
+  +        assert!(gate.check_tool("Read", None).is_err());
+  +    }
+  +
+       #[test]
+       fn sub_agent_grant_allows_named_agent_only() {
+           let gate = gate_with_grants(vec![Permission {
+  +64 -0
+
+crates/wcore-agent/src/spawner.rs
+  @@ -731,6 +731,14 @@ pub struct AgentSpawner {
+  +    /// F21-02-03 — the parent session's tool ACL, inherited by every child
+  +    /// engine this spawner launches. `None` means the parent declared no
+  +    /// ACL, so there is no restriction for a child to widen. When `Some`,
+  +    /// the child engine is gated by the SAME gate as the parent, so a child
+  +    /// can never invoke a tool the parent was not permitted — including
+  +    /// grandchildren, because the child engine's own transient spawners read
+  +    /// the gate back off `AgentEngine::policy_gate`.
+  +    child_policy_gate: Option<crate::policy_gate::PolicyGate>,
+       /// Shared live posture authority for host-backed sessions. Read only when
+       /// deriving a child config so runtime de-escalation applies to descendants
+       /// that have not started yet.
+  @@ -873,6 +881,7 @@ impl AgentSpawner {
+  +            child_policy_gate: None,
+               approval_manager: None,
+               bus: None,
+               cancel: tokio_util::sync::CancellationToken::new(),
+  @@ -995,6 +1004,17 @@ impl AgentSpawner {
+  +    /// F21-02-03 — bind every spawned child engine to the parent session's
+  +    /// tool ACL. Mirrors [`Self::with_egress_policy`]: the authority is
+  +    /// captured from the parent once and applied to children created at any
+  +    /// later point, so a child cannot outlive or out-scope the restriction.
+  +    ///
+  +    /// `None` is a no-op (the parent declared no ACL).
+  +    pub fn with_policy_gate(mut self, gate: Option<crate::policy_gate::PolicyGate>) -> Self {
+  +        self.child_policy_gate = gate;
+  +        self
+  +    }
+  +
+       /// Bind child posture derivation to the host session's live manager.
+       pub fn with_approval_manager(
+           mut self,
+  @@ -2045,6 +2065,13 @@ impl AgentSpawner {
+  +        // F21-02-03: inherit the parent's tool ACL. Without this the child
+  +        // engine is constructed with `policy_gate: None` and silently regains
+  +        // every tool its own registry happens to hold — a widening of the
+  +        // parent's authority.
+  +        if let Some(gate) = self.child_policy_gate.clone() {
+  +            engine.set_policy_gate(gate);
+  +        }
+           engine.set_cancel_token(child_cancel);
+           engine.set_initial_reasoning_effort(launch.overrides.effort.clone());
+   
+  @@ -2142,6 +2169,12 @@ impl AgentSpawner {
+  +            // CRITICAL (F21-02-03): the tool ACL MUST be carried into every
+  +            // cloned spawner. The fleet/parallel/council paths all launch
+  +            // their children from `clone_for_spawn()` copies; dropping it
+  +            // here would let exactly those children escape the parent's
+  +            // permitted-tool set.
+  +            child_policy_gate: self.child_policy_gate.clone(),
+               approval_manager: self.approval_manager.clone(),
+               bus: self.bus.clone(),
+               cancel: self.cancel.clone(),
+  @@ -4543,6 +4576,7 @@ mod posture_inheritance_tests {
+  +                permitted: None,
+               },
+               ..Default::default()
+           }
+  +34 -0
+
+crates/wcore-agent/tests/acceptance/helpers.rs
+  @@ -100,6 +100,7 @@ pub fn openai_config(api_key: &str) -> Config {
+  +            permitted: None,
+           },
+           session: SessionConfig {
+               enabled: false,
+  @@ -140,6 +141,7 @@ pub fn bedrock_config() -> Config {
+  +            permitted: None,
+           },
+           session: SessionConfig {
+               enabled: false,
+  +2 -0
+
+crates/wcore-agent/tests/common/mod.rs
+  @@ -407,6 +407,7 @@ pub fn test_config() -> Config {
+  +            permitted: None,
+           },
+           session: SessionConfig {
+               enabled: false,
+  +1 -0
+
+crates/wcore-agent/tests/e2e/anthropic.rs
+  @@ -44,6 +44,7 @@ fn anthropic_config(api_key: &str) -> Config {
+  +            permitted: None,
+           },
+           session: SessionConfig {
+               enabled: false,
+  +1 -0
+
+crates/wcore-agent/tests/e2e/compaction.rs
+  @@ -54,6 +54,7 @@ fn openai_config(api_key: &str) -> Config {
+  +            permitted: None,
+           },
+           session: SessionConfig {
+               enabled: false,
+  +1 -0
+
+crates/wcore-agent/tests/e2e/openai.rs
+  @@ -43,6 +43,7 @@ fn openai_config(api_key: &str) -> Config {
+  +            permitted: None,
+           },
+           session: SessionConfig {
+               enabled: false,
+  +1 -0
+
+crates/wcore-agent/tests/policy_gate_inheritance_test.rs
+  @@ -0,0 +1,261 @@
+  +//! F21-02-03 — the session tool ACL must REACH a spawned child.
+  +//!
+  +//! `policy_gate_wired_test.rs` proves the gate is consulted once it is
+  +//! present on an `AgentExecutorConfig`. It never proves the gate can get
+  +//! there in the first place. Phase 21 measured the gap: `set_policy_gate`
+  +//! had zero callers workspace-wide, both `AgentEngine` constructors
+  +//! hard-coded `policy_gate: None`, and `AgentSpawner` never handed a gate
+  +//! to a child engine — so a parent's tool ACL stopped at the parent.
+  +//!
+  +//! These tests drive the real `AgentSpawner` → child `AgentEngine` path
+  +//! with a provider that makes the child issue a genuine `Read` tool call
+  +//! against a real file, then reads back what the child's own turn saw.
+  +//! With the ACL inherited the child sees a policy denial; without it the
+  +//! child reads the file's contents.
+  +
+  +use std::sync::Arc;
+  +use std::sync::atomic::{AtomicUsize, Ordering};
+  +
+  +use async_trait::async_trait;
+  +use serde_json::json;
+  +use tokio::sync::mpsc;
+  +use wcore_agent::policy_gate::PolicyGate;
+  +use wcore_agent::spawner::AgentSpawner;
+  +use wcore_config::config::{Config, SessionConfig, ToolsConfig};
+  +use wcore_providers::{LlmProvider, ProviderError};
+  +use wcore_types::llm::{LlmEvent, LlmRequest};
+  +use wcore_types::message::{ContentBlock, FinishReason, StopReason, TokenUsage};
+  +use wcore_types::spawner::SubAgentConfig;
+  +
+  +/// The exact bytes the child would obtain if — and only if — its `Read`
+  +/// call actually executed.
+  +const CANARY: &str = "F21-02-03-CHILD-READ-CANARY";
+  +
+  +/// Turn 1: call `Read` on `path`. Turn 2+: echo back whatever the tool
+  +/// result carried, so the child's final text IS the dispatch outcome.
+  +///
+  +/// This is the observation channel: a `SubAgentResult` normally reports
+  +/// only the child's prose, and a policy denial is delivered to the child's
+  +/// model as a tool result, not to the spawning caller.
+  +struct ReadThenEchoProvider {
+  +    path: String,
+  +    turns: AtomicUsize,
+  +}
+  +
+  +impl ReadThenEchoProvider {
+  +    fn new(path: impl Into<String>) -> Self {
+  +        Self {
+  +            path: path.into(),
+  +            turns: AtomicUsize::new(0),
+  +        }
+  +    }
+  +}
+  +
+  +#[async_trait]
+  +impl LlmProvider for ReadThenEchoProvider {
+  +    async fn stream(
+  +        &self,
+  +        request: &LlmRequest,
+  +    ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+  +        let (tx, rx) = mpsc::channel(4);
+  +        let first_turn = self.turns.fetch_add(1, Ordering::SeqCst) == 0;
+  +        if first_turn {
+  +            tx.send(LlmEvent::ToolUse {
+  +                id: "child-read-1".into(),
+  +                name: "Read".into(),
+  +                input: json!({ "file_path": self.path }),
+  +                extra: None,
+  +            })
+  +            .await
+  +            .expect("tool-use event send");
+  +            tx.send(LlmEvent::Done {
+  +                stop_reason: StopReason::ToolUse,
+  +                finish_reason: FinishReason::from_stop_reason(StopReason::ToolUse),
+  +                usage: TokenUsage::default(),
+  +            })
+  +            .await
+  +            .expect("done event send");
+  +            return Ok(rx);
+  +        }
+  +
+  +        // Echo the most recent tool result verbatim.
+  +        let seen = request
+  +            .messages
+  +            .iter()
+  +            .rev()
+  +            .flat_map(|message| message.content.iter().rev())
+  +            .find_map(|block| match block {
+  +                ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+  +                _ => None,
+  +            })
+  +            .unwrap_or_else(|| "NO-TOOL-RESULT".to_string());
+  +        tx.send(LlmEvent::TextDelta(seen))
+  +            .await
+  +            .expect("text event send");
+  +        tx.send(LlmEvent::Done {
+  +            stop_reason: StopReason::EndTurn,
+  +            finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
+  +            usage: TokenUsage::default(),
+  +        })
+  +        .await
+  ... (161 lines truncated)
+  +261 -0
+
+crates/wcore-config/src/config.rs
+  @@ -970,6 +970,26 @@ pub struct ToolsConfig {
+  +    /// F21-02-03 — session tool ACL (`[tools] permitted = ["Read", "Grep"]`).
+  +    ///
+  +    /// This is a CAPABILITY restriction, not an approval posture: it is the
+  +    /// exhaustive set of tool names this session — and every sub-agent it
+  +    /// spawns, at any depth — may invoke. It is unrelated to `allow_list`,
+  +    /// which only decides which already-permitted tools skip the approval
+  +    /// prompt.
+  +    ///
+  +    /// * `None` (the default) — no ACL. Behaviour is byte-identical to the
+  +    ///   pre-F21 engine: the registry alone decides what exists.
+  +    /// * `Some(names)` — `wcore_agent::policy_gate::PolicyGate` is installed
+  +    ///   on the session engine and inherited by every child, so a tool
+  +    ///   outside `names` is denied before dispatch. `Some(vec![])` denies
+  +    ///   every tool.
+  +    ///
+  +    /// Merge is tighten-only (see `merge_config`): a project config may only
+  +    /// narrow the global list, never add a name the user's global config did
+  +    /// not permit.
+  +    #[serde(default)]
+  +    pub permitted: Option<Vec<String>>,
+   }
+   
+   impl Default for ToolsConfig {
+  @@ -983,6 +1003,7 @@ impl Default for ToolsConfig {
+  +            permitted: None,
+           }
+       }
+   }
+  @@ -4016,6 +4037,25 @@ fn merge_config_files_with_trust(
+  +    // F21-02-03: `permitted` is the session tool ACL — the set of tools the
+  +    // session and every child it spawns may invoke at all. Like `allow_list`
+  +    // it is clamped tighten-only, but the sentinel differs: `None` means "no
+  +    // ACL", so an EMPTY intersection is a legitimate deny-all and must not
+  +    // collapse back to `None`. A project may narrow the global list (or
+  +    // introduce one where global had none); it can never add a name global
+  +    // did not permit.
+  +    let clamped_permitted: Option<Vec<String>> =
+  +        match (&global.tools.permitted, &project.tools.permitted) {
+  +            (global_acl, None) => global_acl.clone(),
+  +            (None, project_acl) => project_acl.clone(),
+  +            (Some(global_acl), Some(project_acl)) => Some(
+  +                project_acl
+  +                    .iter()
+  +                    .filter(|tool| global_acl.contains(tool))
+  +                    .cloned()
+  +                    .collect(),
+  +            ),
+  +        };
+       let tools = if project.tools.allow_list != default_allow_list() || project.tools.auto_approve {
+           ToolsConfig {
+               auto_approve: clamped_auto_approve,
+  @@ -4035,6 +4075,8 @@ fn merge_config_files_with_trust(
+  +            // F21-02-03: tighten-only (see clamp above).
+  +            permitted: clamped_permitted,
+           }
+       } else {
+           ToolsConfig {
+  @@ -4050,6 +4092,8 @@ fn merge_config_files_with_trust(
+  +            // F21-02-03: tighten-only (see clamp above).
+  +            permitted: clamped_permitted,
+           }
+       };
+   
+  @@ -4365,6 +4409,10 @@ fn restrict_untrusted_project_config(project: ConfigFile) -> ConfigFile {
+  +    // F21-02-03: the session tool ACL can only reduce power — the merge
+  +    // intersects it with the global list, so an untrusted repository may
+  +    // narrow the permitted set but never widen it.
+  +    restricted.tools.permitted = project.tools.permitted;
+   
+       // A repository may tighten egress and disable Anvil, but cannot add an
+       // origin, command gate, provider, MCP server, hook or executable skill
+  @@ -5687,6 +5735,79 @@ mod tests {
+  +    /// F21-02-03: the session tool ACL is tighten-only across the
+  +    /// global/project merge, and `None` (no ACL) must never be confused with
+  +    /// `Some(vec![])` (deny everything).
+  +    #[test]
+  +    fn permitted_tool_acl_merges_tighten_only() {
+  +        let acl = |names: &[&str]| ToolsConfig {
+  +            permitted: Some(names.iter().map(|n| (*n).to_string()).collect()),
+  +            ..Default::default()
+  +        };
+  +
+  +        // A project may not add a tool the global config did not permit.
+  +        let merged = merge_config_files(
+  +            ConfigFile {
+  +                tools: acl(&["Read", "Grep"]),
+  +                ..Default::default()
+  +            },
+  +            ConfigFile {
+  +                tools: acl(&["Read", "Bash"]),
+  +                ..Default::default()
+  +            },
+  +        );
+  +        assert_eq!(
+  +            merged.tools.permitted,
+  +            Some(vec!["Read".to_string()]),
+  +            "project must only narrow the global ACL, never add Bash"
+  +        );
+  +
+  +        // A disjoint project list is a legitimate deny-all, NOT "no ACL".
+  +        let merged = merge_config_files(
+  +            ConfigFile {
+  +                tools: acl(&["Read"]),
+  +                ..Default::default()
+  +            },
+  +            ConfigFile {
+  +                tools: acl(&["Bash"]),
+  +                ..Default::default()
+  +            },
+  +        );
+  +        assert_eq!(
+  +            merged.tools.permitted,
+  +            Some(Vec::new()),
+  +            "an empty intersection must stay an ACL that denies everything"
+  +        );
+  +
+  +        // A project may introduce an ACL where global had none (narrowing).
+  +        let merged = merge_config_files(
+  +            ConfigFile::default(),
+  +            ConfigFile {
+  +                tools: acl(&["Read"]),
+  +                ..Default::default()
+  +            },
+  +        );
+  +        assert_eq!(merged.tools.permitted, Some(vec!["Read".to_string()]));
+  +
+  +        // Neither side declaring one leaves the session unrestricted.
+  +        let merged = merge_config_files(ConfigFile::default(), ConfigFile::default());
+  +        assert_eq!(merged.tools.permitted, None);
+  +
+  +        // An untrusted project keeps its narrowing through the restriction
+  +        // filter (it can only reduce power).
+  +        let merged = merge_config_files(
+  +            ConfigFile {
+  +                tools: acl(&["Read", "Grep"]),
+  +                ..Default::default()
+
+... (more changes truncated)
+  +112 -0
+[full diff: rtk git diff --no-compact]
