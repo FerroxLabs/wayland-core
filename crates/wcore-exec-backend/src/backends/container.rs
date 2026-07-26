@@ -206,6 +206,8 @@ impl ExecutionBackend for ContainerBackend {
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let mut command = wcore_config::shell::shell_command_argv("docker", &borrowed);
+        // Null stdin, never inherited — see the note in backends/local.rs.
+        command.stdin(std::process::Stdio::null());
         command.stdout(std::process::Stdio::piped());
         command.stderr(std::process::Stdio::piped());
         let wall = std::time::Duration::from_millis(task.resources.wall_time_ms);

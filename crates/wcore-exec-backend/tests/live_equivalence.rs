@@ -36,13 +36,12 @@ async fn the_same_task_normalizes_equal_across_every_available_backend() {
             ));
             continue;
         }
-        // ONE deterministic task definition, byte-identical per backend except
-        // for the ids, which are excluded from the normalized body.
-        let task = reference_task(
-            &format!("equiv-{id}"),
-            &format!("equiv-nonce-{id}"),
-            reference_budget(),
-        );
+        // ONE deterministic task definition, byte-identical on every backend
+        // INCLUDING its id and nonce. The task id is NOT excluded from the
+        // normalized body — it is part of what four backends running the same
+        // task must agree on — so suffixing it per backend would silently turn
+        // one equivalence claim into four unrelated runs.
+        let task = reference_task("equiv-reference", "equiv-reference-nonce", reference_budget());
         match reference.backend.execute(&task).await {
             Ok(receipt) => {
                 receipt

@@ -367,26 +367,73 @@ impl ExecutionBackend for SshBackend {
 }
 
 /// Constant remote scanner. The nonce arrives as `$1`, never as script text.
+///
+/// TWO defects found by the live cancellation run on 2026-07-26 are fixed
+/// here, and both were false answers rather than crashes — the class that
+/// survives a green test suite:
+///
+/// 1. THE SCANNER FOUND ITSELF. The nonce travels on this very script's own
+///    argv, so `ps | grep <nonce>` matched `sh -s -- <nonce>` — the scan's own
+///    process. Every scan reported one orphan that did not exist, which is
+///    worse than useless: a scanner that always cries orphan is a scanner
+///    nobody reads. Self and children are now excluded by pid.
+/// 2. THE SCANNER COULD NOT SEE THE REAL WORK. The work runs as the task's own
+///    argv (`sleep 120`), which does not contain the nonce anywhere, so a
+///    genuine orphan would have been INVISIBLE. The runner records the session
+///    leader in `$root/.pid`, so the scan now checks that pid for liveness as
+///    its primary signal and keeps the `ps` sweep as a secondary one for a
+///    stray that escaped the session.
 const REMOTE_SCAN: &str = r#"
 set -u
 nonce="$1"
-ps -eo pid,args 2>/dev/null | grep -F -- "$nonce" | grep -v -F -- "grep" || true
+self=$$
+root="${TMPDIR:-/tmp}/wayland-f25-$nonce"
+# Primary signal: the session leader this nonce's runner recorded.
+if [ -f "$root/.pid" ]; then
+  pid=$(cat "$root/.pid" 2>/dev/null || echo "")
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    echo "session-leader $pid still alive for nonce $nonce"
+  fi
+fi
+# Secondary sweep for a stray that left the session, excluding this scan's own
+# process and its children.
+ps -eo pid,ppid,args 2>/dev/null \
+  | grep -F -- "$nonce" \
+  | grep -v -F -- "grep" \
+  | awk -v s="$self" '$1 != s && $2 != s' \
+  || true
 "#;
 
 /// Constant remote killer. Signals the remote SESSION, not the connection.
+///
+/// The same self-match defect applied here: the original `pkill -f <nonce>`
+/// matched this script's own `sh -s -- <nonce>` argv and killed the killer
+/// mid-run, which is why the live run reported `remote kill failed:` with an
+/// EMPTY stderr while the work had in fact died. A cleanup that reports
+/// failure when it succeeded trains the reader to ignore it.
 const REMOTE_KILL: &str = r#"
 set -u
 nonce="$1"
+self=$$
 root="${TMPDIR:-/tmp}/wayland-f25-$nonce"
 if [ -f "$root/.pid" ]; then
-  pid=$(cat "$root/.pid")
-  kill -TERM "-$pid" 2>/dev/null || true
-  sleep 1
-  kill -KILL "-$pid" 2>/dev/null || true
+  pid=$(cat "$root/.pid" 2>/dev/null || echo "")
+  if [ -n "$pid" ]; then
+    kill -TERM "-$pid" 2>/dev/null || true
+    sleep 1
+    kill -KILL "-$pid" 2>/dev/null || true
+  fi
 fi
-pkill -KILL -f -- "$nonce" 2>/dev/null || true
+# Sweep any stray that left the session, never this script or its children.
+for p in $(ps -eo pid,ppid,args 2>/dev/null \
+             | grep -F -- "$nonce" \
+             | grep -v -F -- "grep" \
+             | awk -v s="$self" '$1 != s && $2 != s {print $1}'); do
+  kill -KILL "$p" 2>/dev/null || true
+done
 rm -rf "$root" 2>/dev/null || true
 echo "remote-kill-issued"
+exit 0
 "#;
 
 async fn remote_exec(target: &str, script: &str, argument: &str) -> std::result::Result<String, String> {
@@ -492,9 +539,37 @@ mod tests {
             "without its own session the remote work survives a cancellation"
         );
         assert!(
-            REMOTE_KILL.contains(r#"kill -KILL "-$pid""#),
+            REMOTE_KILL.contains(r#"kill -TERM "-$pid""#),
             "cancellation must signal the remote process GROUP, not one pid"
         );
+    }
+
+    #[test]
+    fn the_remote_scan_and_kill_exclude_their_own_process() {
+        // Found live on 2026-07-26: the nonce travels on these scripts' own
+        // argv, so an unguarded `ps | grep <nonce>` matches the scan itself.
+        // The scan then always reports one orphan that does not exist, and the
+        // killer kills itself mid-run and reports a failure that did not happen.
+        for script in [REMOTE_SCAN, REMOTE_KILL] {
+            assert!(
+                script.contains("self=$$"),
+                "the script must know its own pid to exclude itself"
+            );
+            assert!(
+                script.contains(r#"'$1 != s && $2 != s"#),
+                "the script must exclude its own pid and its children from the match"
+            );
+        }
+    }
+
+    #[test]
+    fn the_scan_can_see_work_whose_argv_does_not_carry_the_nonce() {
+        // The second live defect: the task's own argv (`sleep 120`) contains
+        // no nonce, so a pure `ps | grep <nonce>` sweep could never have found
+        // a genuine orphan. The recorded session leader is the primary signal.
+        assert!(REMOTE_RUNNER.contains(r#"echo "$child" > "$root/.pid""#));
+        assert!(REMOTE_SCAN.contains(r#""$root/.pid""#));
+        assert!(REMOTE_SCAN.contains("session-leader"));
     }
 
     #[test]

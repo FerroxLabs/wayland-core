@@ -171,6 +171,13 @@ impl ExecutionBackend for LocalBackend {
         // as literal bytes.
         let mut command = wcore_config::shell::shell_command_argv(&program, &args);
         command.current_dir(&workdir);
+        // Null stdin, NOT inherited. An inherited stdin lets the task's child
+        // consume bytes from whatever is feeding the caller — measured live on
+        // 2026-07-26, where a `bash -s` operator script was being read from
+        // stdin and the first task swallowed the rest of it. A task's input
+        // arrives as workspace bytes; it has no business reading the operator's
+        // terminal.
+        command.stdin(std::process::Stdio::null());
         command.stdout(std::process::Stdio::piped());
         command.stderr(std::process::Stdio::piped());
         command.env("WAYLAND_TASK_NONCE", &task.nonce);
