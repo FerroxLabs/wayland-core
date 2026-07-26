@@ -4,7 +4,8 @@ plan: "04"
 subsystem: infra
 tags: [windows, macos, native-uat, appcontainer, candidate-seal, dispatch-gate, sean-gate]
 status: complete
-termination_state: 4
+termination_state: 1
+termination_state_history: "4 (blocked upstream, 2026-07-25 at seal 50cf00b3) -> 1 (complete, 2026-07-26 at seal 9821ef76 after Sean-authorized dispatch 30184651330). Sections 1-11 record state 4 verbatim as history; section 13 is authoritative."
 
 requires:
   - phase: 20A-native-windows-macos-uat
@@ -33,20 +34,30 @@ key-decisions:
   - "Did not fix, re-gate, ignore or re-time any red, and did not touch $targets — proven byte-identical to the sealed tree by blob hash"
 
 metrics:
-  duration: "~50 min"
-  completed: 2026-07-25
-  targets_green: 4
-  targets_red: 2
-  requirements_completed: 0
+  duration: "~50 min (initial) + closeout"
+  completed: 2026-07-26
+  targets_green: 14
+  targets_red: 0
+  requirements_completed: 11
+  requirements_open: 4
+  sealed_sha: 9821ef7603ac1e687b600cda591af1657c883484
+  sealed_tree: 0a1267a990f3b512782916b6ed26501d0db39222
+  dispatched_run: 30184651330
 ---
 
 # Phase 20A Plan 04: Native Proof Candidate Seal Summary
 
-Six-target native Windows proof measured end to end on SEANDESKTOP at the sealed SHA: **4 GREEN, 2 RED**. Both reds classify to previously-recorded classes; neither is NEW. Plan terminates in **state 4 (blocked upstream)**. No dispatch fired, no requirement completed, no authorization spent.
+**FINAL (2026-07-26):** dispatch `30184651330` fired on Sean's authorization against sealed SHA `9821ef76…` and returned `completed/success`. `F20_NATIVE_WINDOWS_ACCEPTANCE=PASS` (6/6 targets) and `F20_NATIVE_MACOS_ACCEPTANCE=PASS` (8/8 targets), same commit/tree/nonce. All three Phase 20A Success Criteria met; **Phase 20A is COMPLETE.** 11 of 15 `REQ-native-*` requirements complete, 4 left explicitly open. **See §13 — it supersedes §1, §8, §9 and §12.4.**
+
+*Everything below until §12 was written at the earlier seal `50cf00b3` and is retained as history.* Six-target native Windows proof measured end to end on SEANDESKTOP at that seal: **4 GREEN, 2 RED**. Both reds classified to previously-recorded classes; neither was NEW. The plan terminated at that point in **state 4 (blocked upstream)** — no dispatch fired, no requirement completed, no authorization spent.
 
 ---
 
-## 1. Termination state
+## 1. Termination state — SUPERSEDED BY §13 (kept as history)
+
+> **Superseded 2026-07-26.** This was the state at seal `50cf00b3`. The dispatch
+> was later authorized and fired at seal `9821ef76` (run `30184651330`, green on
+> both platforms). Effective terminal state is **1 — complete**. Read §13.
 
 **State 4 — Blocked upstream. Do not seal for dispatch, do not spend the authorization.**
 
@@ -331,7 +342,13 @@ This is threat `T-20A-04-13` (seal drift) realised at the dispatch boundary rath
 
 ---
 
-## 8. Requirement completion status
+## 8. Requirement completion status — SUPERSEDED BY §13.6 (kept as history)
+
+> **Superseded 2026-07-26.** These were the dispositions when no run had been
+> dispatched. Run `30184651330` now completes 11 of the 15 (r1, r3, r4, r5, r6,
+> r7, r9, r10, r11, r14, r15) and leaves 4 explicitly open (r2, r8, r12, r13).
+> The authoritative table is §13.6, and the per-requirement evidence lives in
+> `.planning/REQUIREMENTS.md`.
 
 **ZERO requirements completed.** Evidence was accepted from no dispatched run, because no run was dispatched.
 
@@ -357,7 +374,12 @@ This is threat `T-20A-04-13` (seal drift) realised at the dispatch boundary rath
 
 ---
 
-## 9. The fully-formed but UNFIRED dispatch command
+## 9. The fully-formed but UNFIRED dispatch command — SUPERSEDED BY §13.1 (kept as history)
+
+> **Superseded 2026-07-26.** This §9 command targeted the now-stale seal
+> `50cf00b3` and needed a two-ref split. §12.4 replaced it with a one-tag form at
+> `9821ef76`, and **§13.1 records that command as actually FIRED** — run
+> `30184651330`, green. Nothing in §9 is live.
 
 Recorded here **for Sean's reading only**. This is **not** a prepared tuple and this command **must not be run** until **B1** is closed.
 
@@ -639,7 +661,12 @@ git ls-remote --tags gh 'refs/tags/f20a*'
 9821ef7603ac1e687b600cda591af1657c883484  refs/tags/f20a-candidate-9821ef76^{}
 ```
 
-## 12.4 THE UNFIRED DISPATCH COMMAND
+## 12.4 THE UNFIRED DISPATCH COMMAND — SUPERSEDED BY §13.1: IT WAS FIRED
+
+> **Superseded 2026-07-26.** The command below was subsequently authorized by
+> Sean and run **verbatim, once** → run `30184651330`, `completed/success`, both
+> acceptance markers PASS. The "has NOT been run" statement was true when
+> written and is false now. See §13.1.
 
 Every input below is fully resolvable and verified. **B1, B2 and B3 are all
 closed.** This command has **NOT** been run.
@@ -792,3 +819,289 @@ isolation; record it as a known caveat, not as a proven property.
 - Four-suite baseline — nextest `Summary` lines and per-test failure names quoted verbatim; the discarded first attempt disclosed rather than hidden.
 - Linux aggregate — `Summary` line and both exit codes quoted verbatim; HEAD pinned and re-verified after the run.
 - Runner label — `gh api .../actions/runners` JSON read directly.
+
+---
+
+# 13. DISPATCH FIRED — Phase 20A CLOSED — 2026-07-26
+
+> **This section supersedes §1 (termination state 4), §8 (zero requirements
+> completed), §9 (the unfired command) and §12.4 (the unfired command).** Those
+> sections are kept verbatim as history: they were true when written, and the
+> record of *why* the dispatch was withheld for three candidates is worth more
+> than a tidy file. Where §13 conflicts with anything above it, **§13 wins.**
+>
+> The plan's frontmatter still reads `termination_state: 4`. That was the state
+> the plan terminated in. The *phase* did not end there — Sean authorized the
+> dispatch afterwards and it was fired on his instruction. **Effective terminal
+> state: 1 — complete.**
+
+## 13.1 The fired dispatch
+
+The command recorded as UNFIRED in §12.4 was run verbatim, once, on Sean's
+explicit authorization.
+
+| Field | Value |
+|-------|-------|
+| Workflow | `nightly-windows-soak` |
+| **Run id** | **`30184651330`** |
+| URL | `https://github.com/FerroxLabs/wayland-core/actions/runs/30184651330` |
+| Event | `workflow_dispatch` |
+| `--ref` | `f20a-candidate-9821ef76` (annotated tag → `48601e46…` → commit `9821ef76…`) |
+| Status / conclusion | `completed` / **`success`** |
+| headSha | `9821ef7603ac1e687b600cda591af1657c883484` |
+| Started → finished | `2026-07-26T02:30:03Z` → `2026-07-26T02:48:08Z` (18m 05s) |
+| `f20_expected_sha` | `9821ef7603ac1e687b600cda591af1657c883484` |
+| `f20_request_nonce` | `96c91107636c4eaca9130969369b2309ee6dd6582cc4e9e1a7a45e0fb8ec92cf` |
+| `f20_macos_runner_label` | `f20-image-1d05364078523334605249687228ffec79964b7ecf731d7c9512b40e67fd1a64` |
+
+Independently re-verified at closeout via `gh` (account `FerroxLabs`), not
+carried forward from the dispatching session:
+
+```
+gh api repos/FerroxLabs/wayland-core/git/refs/tags/f20a-candidate-9821ef76
+  → tag object 48601e469b3a3fca524811cc37e0a6ce6841e457
+gh api repos/FerroxLabs/wayland-core/git/tags/48601e46…
+  → object.sha 9821ef7603ac1e687b600cda591af1657c883484   (type: commit)
+  → message declares Tree 0a1267a9…  Nonce 96c91107…
+git rev-parse refs/f20a/candidate
+  → 9821ef7603ac1e687b600cda591af1657c883484
+git cat-file -p 9821ef76… | head -1
+  → tree 0a1267a990f3b512782916b6ed26501d0db39222
+```
+
+Sealed SHA, `refs/f20a/candidate`, the tag object and the run's `headSha` all
+agree. The tree in the commit object matches the tree in the tag message and the
+tree in every marker.
+
+> `refs/f20a/candidate` exists **locally only** — `gh api …/git/matching-refs/f20a`
+> returns `[]`. That is by design (the tag is the remote-durable seal), and it is
+> recorded here so nobody looks for a remote `refs/f20a/*` and concludes it was
+> deleted.
+
+## 13.2 Jobs — what ran, what was skipped
+
+| Job | id | Conclusion |
+|-----|----|-----------|
+| F20 native macOS candidate (ephemeral) | `89747992986` | **success** |
+| F20 native Windows candidate (self-hosted msvc) | `89747993276` | **success** |
+| Windows soak (windows-2022) | `89747993117` | skipped — `if: inputs.f20_candidate != 'true'` |
+| Windows live-acceptance ignored set (self-hosted msvc) | `89747993309` | skipped — `if: inputs.f20_candidate != 'true'` |
+
+Both skips are by construction in candidate mode, not failures. **The second
+skip has a consequence** — see REQ-native-r2 in §13.6.
+
+**Runners actually used** (from the job logs, not from labels):
+
+```
+Windows: Runner name 'ferrox-win-msvc'              Machine name 'SEANDESKTOP'
+macOS:   Runner name 'f20-macos-ephemeral-1d053640' Machine name 'Seans-MacBook-Pro'
+```
+
+Both jobs ran the `Assert checkout is the authorized candidate` step with
+`F20_EXPECTED_SHA: 9821ef7603ac1e687b600cda591af1657c883484` **before** any
+toolchain install or proof work, and both pinned `actions/checkout` to that SHA.
+The tautology B3 identified is closed in the fired run, not merely in the YAML.
+
+## 13.3 Acceptance markers — both PASS, same commit/tree/nonce
+
+```
+F20_NATIVE_WINDOWS_ACCEPTANCE=PASS commit=9821ef7603ac1e687b600cda591af1657c883484 tree=0a1267a990f3b512782916b6ed26501d0db39222 nonce=96c91107636c4eaca9130969369b2309ee6dd6582cc4e9e1a7a45e0fb8ec92cf
+F20_NATIVE_MACOS_ACCEPTANCE=PASS   commit=9821ef7603ac1e687b600cda591af1657c883484 tree=0a1267a990f3b512782916b6ed26501d0db39222 nonce=96c91107636c4eaca9130969369b2309ee6dd6582cc4e9e1a7a45e0fb8ec92cf
+```
+
+Windows marker at `02:34:04Z` (job log line 1446), macOS marker at `02:47:56Z`
+(job log line 1085). Each of the fourteen `F20_NATIVE_TARGET=PASS` lines carries
+the same three bindings, so no target's evidence can have come from a different
+tree or a different request.
+
+## 13.4 Per-target results — 6 Windows + 8 macOS, all PASS
+
+### Windows (job `89747993276`, `ferrox-win-msvc` / SEANDESKTOP)
+
+| # | Target | Result | Tests | Named tests that passed |
+|---|--------|--------|-------|--------------------------|
+| 1 | `windows-retained-handle` | **PASS** | 1 run / 1 passed / 11 skipped (2.044s) | `live_fs_acl::one_execution_grant_never_leaks_to_another_identity` |
+| 2 | `windows-appcontainer-acl` | **PASS** | 1 run / 1 passed / 11 skipped (2.056s) | `live_fs_acl::granted_path_is_readable_then_revoked` |
+| 3 | `windows-job-object` | **PASS** | 4 run / 4 passed / 2 skipped (10.230s) | `active_process_cap_is_enforced`, `breakaway_is_denied`, `contained_detached_child_exit`, `job_close_reaps_detached_descendant_with_no_residue` |
+| 4 | `windows-public-dispatch` | **PASS** | 10 run / **10 passed** / 0 skipped (11.983s) | `dispatch_rejects_different_head_repository_replacement`, `dispatch_rejects_same_head_repository_replacement`, `dispatches_4_noop_workers_in_parallel`, `malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic`, `malformed_heartbeat_fixture`, `public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state`, `repository_replaced_at_same_pathname_is_refused_by_retained_authority`, `repository_replacement_must_not_execute`, `required_live_windows_public_dispatch_refuses_bash_worker_and_preserves_parent_and_sibling_state`, `standalone_authority_fixture` |
+| 5 | `windows-hard-process-containment` | **PASS** | 1 run / 1 passed / 5 skipped (4.718s) | `qualified_hard_containment_backend_preflight` |
+| 6 | `windows-f20-lifecycle` | **PASS** | 9 run / **9 passed** / 0 skipped (26.251s) | all nine `transactional_delegated_mutation_test` cases incl. `happy_path_open_accept_land_receipt_then_rollback` and `restart_replays_landed_state_from_disk` |
+
+Targets 4 and 6 — the two that were RED at `50cf00b3` (§6.2, §6.3) — are green
+here, on a runner, in a dispatched run. §7/B1 is closed by measurement, twice
+now (locally in §12.2, and in CI here).
+
+### macOS (job `89747992986`, `f20-macos-ephemeral-1d053640` / Seans-MacBook-Pro)
+
+| # | Target | Result | Test that ran |
+|---|--------|--------|---------------|
+| 1 | `macos-retained-directory` | **PASS** (0.065s) | `wcore-sandbox::live_integrity_macos required_live_macos_retained_directory_confines_writes` |
+| 2 | `macos-process-tree` | **PASS** (0.132s) | `wcore-sandbox::hard_process_containment_macos required_live_macos_process_tree_contains_descendants` |
+| 3 | `macos-docker-reject-path-replacement` | **PASS** (0.019s) | `wcore-sandbox::docker_smoke docker_rejects_allow_hosts_policy` |
+| 4 | `macos-docker-roundtrip-delete` | **PASS** (0.232s) | `wcore-sandbox::docker_smoke docker_runs_hello_world` |
+| 5 | `macos-public-dispatch` | **PASS** (0.023s) | `wcore-swarm dispatch::tests::sandbox_exec_is_refused_before_descendant_escape_can_spawn` |
+| 6 | `macos-docker-cancellation` | **PASS** (0.206s) | `wcore-sandbox::docker_smoke docker_returns_enforced_resource_limits` |
+| 7 | `macos-docker-budget` | **PASS** (0.227s) | `wcore-swarm::workspace_authority required_live_macos_docker_rejects_over_budget_result` |
+| 8 | `macos-f20-lifecycle` | **PASS** | `wcore-agent::transactional_delegated_mutation_test` — 9 run / 9 passed |
+
+Every macOS target resolves to a real, named, OS-appropriate test. Target 1 in
+particular resolves to `live_integrity_macos`, **not** the Windows-only
+retained-handle test it once pointed at — the r14 mapping fix, proven by
+execution.
+
+## 13.5 Phase 20A Success Criteria — all three met
+
+| # | Criterion | Met by |
+|---|-----------|--------|
+| 1 | Six-target native Windows proof passes on the certified self-hosted runner against one exact sealed candidate | 6/6 PASS on `ferrox-win-msvc`, every marker bound to `9821ef76`/`0a1267a9`/`96c91107` |
+| 2 | The macOS leg passes against that same exact candidate | 8/8 PASS, identical commit/tree/nonce triple |
+| 3 | Native evidence is bound to one newly dispatched, Sean-authorized run — never inferred from source, cross-compilation, Linux proof, or a reused run | Run `30184651330`, `workflow_dispatch`, created 2026-07-26T02:30:03Z, fired once on Sean's explicit instruction. Not a re-read of a prior run; the previous soak run was `30149496548` (scheduled, headSha `61b79c4f`). |
+
+**Phase 20A is COMPLETE.**
+
+## 13.6 Requirement dispositions bound to run `30184651330`
+
+Full per-requirement evidence is written into `.planning/REQUIREMENTS.md`. Tally
+and reasoning:
+
+**COMPLETE — 11:**
+
+| Req | Proving evidence (not "present at the SHA" — actually exercised) |
+|-----|------------------------------------------------------------------|
+| r1 | `require_live_acceptance()`/`require_live_windows()` **hard-assert** `AppContainerBackend::new().is_available()`. Four targets (1, 2, 3, 5) run through those guards and PASS. A false `is_available()` fails the assert. |
+| r3 | Target 6 compiled and executed `-p wcore-agent --test transactional_delegated_mutation_test` on msvc, 9/9. E0432 cannot survive a linked, executed binary. |
+| r4 | macOS 8/8 in this run. Linux half from §12.6 (`--locked` build exit 0; 11520/11520) — **not** part of this run, and no compressed log retained. Disclosed, not glossed. |
+| r5 | The acceptance's exact test, `one_execution_grant_never_leaks_to_another_identity`, PASS 2.043s. |
+| r6 | The acceptance's exact test, `dispatch_rejects_different_head_repository_replacement`, PASS 0.121s — no Os code 5. |
+| r7 | Target 3's four Job-Object tests cover the four named mechanisms (cap, breakaway, exit fidelity, KILL_ON_JOB_CLOSE reaping with no residue); target 5's preflight asserts `owns_descendants_hard` / `enforces_read_deny` / `blocks_powershell` and drives a live contained command. |
+| r9 | All 8 macOS targets real and green; each named above. |
+| r10 | `Cargo.lock` committed in the sealed tree (blob `60bcfb50…`, `+9` vs `be84bd2`, named deps resolve); `--locked` build exit 0 on Hetzner. This run does not use `--locked` — noted. |
+| r11 | `Runner name: 'ferrox-win-msvc'`, `Machine name: 'SEANDESKTOP'`; the hosted `windows-2022` job was skipped. |
+| r14 | Windows compile half: `windows_impl` tree executed real tests on msvc. macOS half: `macos-retained-directory` → `live_integrity_macos::required_live_macos_retained_directory_confines_writes` PASS. |
+| r15 | `be84bd2` is a verified ancestor of `0e8e6c1d`, the single fresh 3-file commit landing r1+r2+r3. At the seal, `process.rs` is `CreateRestrictedToken(…, DISABLE_MAX_PRIVILEGE, 0, null, …)` — no token swap. Both jobs re-asserted `HEAD == 9821ef76…` in-run. |
+
+**OPEN — 4.** None of these is a red test. Each is a path that was never
+exercised, and saying so is the point.
+
+| Req | Why it stays open |
+|-----|-------------------|
+| **r2** | 1 of 3 acceptance clauses proven. `granted_path_is_readable_then_revoked` PASS (grant ACE present-during, exit 0 + MARKER, ACE absent-after) and `one_execution_grant_never_leaks_to_another_identity` PASS. But the acceptance also requires "a genuine DENY ace still blocks" (`deny_ace_still_blocks_granted_read`) and "a file granted only to normal SIDs is still denied" (`normal_sid_only_grant_is_denied`). Neither is in the six targets. Their only runner is the `windows-live-acceptance` job, gated `if: inputs.f20_candidate != 'true'` (`nightly-windows-soak.yml:239`) — **skipped by construction in candidate mode**. 20A-01 wired these ten orphaned ACL tests into exactly that job, so they still have no observed green at the sealed SHA. |
+| **r8** | The wrong-OS anti-drift guard RAN — `Assert-TargetOsGate` before every Windows target, the shell mirror before every macOS target — and admitted all six OS-specific targets without firing. But the acceptance is that a target mapped to the **wrong** OS is *rejected*, and that direction has never been demonstrated. `scripts/f20-native-uat-proof.test.mjs` (34 cases) covers marker parsing/ordering/nonce/publication; it has no wrong-OS case. Admitting correct mappings is not proof of rejection. |
+| **r12** | Native leg closed (build + Hetzner aggregate + Win/mac proof, one SHA, one authorized run). Not closed: there is **no fresh 20-16 at `9821ef76`**. The only 20-16 is bound to `6937ef61…` / tree `6db6fc85` and its own key-decisions name `native_macos` and `native_windows` as "the only deferred checks" — exactly the deferral r12 forbids. `20-17` is likewise bound to that older SHA. None of these clauses is in Phase 20A's Success Criteria, so the phase closes; r12 does not. |
+| **r13** | No review gate ran against `9821ef76`, so no artifact exists for this candidate. The pre-existing gap is also still measurable: `20-16-SUMMARY.md` claims **two** reviewers (`wayland-f20-16-repair-review`, `wayland-f20-16-adversarial-confirmer`); its sole artifact `20-08-INDEPENDENT-REVIEW.md` (schema `wayland-core.phase20-independent-review.v1`) carries **one** `reviewer_id`. Recording a PASS here is what r13 exists to forbid. |
+
+## 13.7 KNOWN-RED, NON-GATING — recorded so nobody rediscovers them
+
+None of the following is a proof target. None gates acceptance. All are recorded
+as-is; **nothing was fixed, ignored, re-gated, re-timed or deleted to reach the
+green above.**
+
+1. **`wcore-sandbox::live_integrity::live_future_drop_reaps_descendant_job_tree`** — Windows,
+   **deterministic** (reproduces every time, not flaky). Escalated rather than
+   fixed because every candidate fix changes *what the sandbox permits* — i.e.
+   the remedy is a security-semantics decision, not a bug fix. Not a proof
+   target.
+
+2. **`wcore-agent` `session_journal/snapshot.rs::windows_private_dacl_accepts_restrictive_deny_ace`**
+   and **`::windows_private_dacl_rejects_null_empty_and_broad_allow`** — both RED
+   on `WRITE_DAC` reopen **error 5**. They fail **identically at the parent
+   commit**, so they are not a regression from this candidate. They are *unit*
+   tests inside `snapshot.rs` and are **not reached by any of the four suites**
+   in §12.5 — which is why they do not appear in those numbers. Their absence
+   from the suite tables is not an oversight; it is the reason this note exists.
+
+3. **`wcore-swarm::worker_runtime_limits::multi_worker_output_exhaustion_fails_without_retaining_buffers`**
+   — takes **~35s against a 20s budget**. The timeout was **deliberately NOT
+   raised.** Raising it is the exact "engineered green" this phase refuses.
+
+4. **`required_live_windows_public_dispatch_bash_confines_parent_and_descendants`**
+   — **bash cannot run under AppContainer at all.** msys/bash requires
+   `\BaseNamedObjects`, which AppContainer confines *by construction*. There is
+   no fix that keeps both properties. The test was therefore rewritten to assert
+   the **real fail-closed contract** — it now ships as
+   `required_live_windows_public_dispatch_refuses_bash_worker_and_preserves_parent_and_sibling_state`
+   and PASSES in this run (target 4, test 9/10). Recorded here because the old
+   name still appears in older documents and reads like an unexplained
+   disappearance.
+
+5. **Parallel-load degradation of `admit_delegated_backend`.** Under concurrent
+   sandboxed spawns the backend probe degrades and
+   `admit_delegated_backend` (`crates/wcore-swarm/src/dispatch.rs:33`) rejects
+   with `sandbox backend fail_closed cannot enforce delegated read denial` —
+   `registry.backend_name()` resolves to `fail_closed`. **The proof passes
+   because `--nocapture` forces nextest to run serially**, which the transcript
+   confirms (strict `START (n/10) → PASS (n/10)` with no interleaving). This is
+   **fail-closed, therefore safe** — it refuses rather than proceeding
+   unsandboxed. But it is honest to say: **concurrent dispatch degrades under
+   load**, and the green depends on serialisation. Cause measured, not asserted
+   (§12.5).
+
+Also still open and non-gating: the four additional plain-suite `live_integrity`
+reds and six `wcore-swarm` parallel-mode reds (same cause as item 5); the 30
+Windows failures F-09 unmasked (18 in `session_journal`), un-baselined.
+
+## 13.8 FOLLOW-UPS for the next candidate — recorded, deliberately NOT fixed here
+
+Both are real defects. Neither is fixed in this closeout, because this closeout
+changes nothing outside `.planning/`.
+
+**F1 — the proof script's unconditional `docker pull`.**
+`scripts/f20-native-macos-proof.sh:134` runs `docker pull "$image"` with no
+prior `docker image inspect` check. On a host with the image already present
+this is a pointless network round-trip that also touches the credential store —
+and it is **why the macOS leg failed four times on a locked keychain** before
+the run that finally went green. Fix: probe `docker image inspect "$image"`
+first and only `docker pull` on a miss. Low risk, high annoyance-reduction.
+
+**F2 — the `f20-no-ambient-secrets` runner label is inaccurate on this host.**
+Runner id 27 (`f20-macos-ephemeral-1d053640`) advertises
+`f20-no-ambient-secrets`, but the job log shows `Machine name: 'Seans-MacBook-Pro'`
+and the runner executes **as Sean's own user**, with reach over `~/.ssh`,
+`~/.aws`, and an unlocked login keychain. What *is* true: no GitHub Actions
+secrets are exposed to the candidate jobs. What is **not** true: the absence of
+ambient credentials. A label that overstates isolation is worse than no label,
+because downstream gates may key on it. **The real fix is a dedicated macOS
+runner account** (separate user, no keychain, no `~/.ssh`, no `~/.aws`) — not a
+relabel. Until then, treat that label as aspirational and cite this note.
+
+## 13.9 Bounds honoured by this closeout
+
+- Files changed: **only** under `.planning/` —
+  `REQUIREMENTS.md`, `ROADMAP.md`,
+  `phases/20A-native-windows-macos-uat/20A-04-SUMMARY.md`,
+  `phases/20A-native-windows-macos-uat/.continue-here.md`.
+  Nothing in `crates/`, `scripts/`, or `.github/`.
+- **No workflow dispatched by this closeout.** Run `30184651330` was fired
+  earlier on Sean's instruction; this section records it. No push to main, no
+  merge, no PR, no new tag, no release, no issue closure.
+- `origin` in `waylandcore-ferrox` (a stale local worktree) was never fetched or
+  reset against. Every remote read used `gh` explicitly, under
+  `gh auth switch --user FerroxLabs`.
+- No `AGENTS.md` or `.ijfw` churn staged. No `Co-Authored-By`.
+- Nothing was recorded as green that could not be re-derived from the run at
+  closeout time; four requirements were left **open** rather than ticked.
+
+## Self-Check (§13): PASSED
+
+Every claim in §13 was re-derived at closeout from primary sources, not copied
+from the dispatching session:
+
+- Run metadata (`conclusion`, `event`, `headSha`, timestamps, job ids/conclusions)
+  — `gh run view 30184651330 --json …`, read directly.
+- Both acceptance markers and all fourteen per-target markers — pulled from
+  `gh api repos/FerroxLabs/wayland-core/actions/jobs/{89747993276,89747992986}/logs`
+  and grepped verbatim.
+- Per-test PASS names and timings — extracted from the same two job logs.
+- Runner identity — `Runner name` / `Machine name` lines from the job logs, not
+  from the runner registry.
+- Seal chain (tag → tag object → commit → tree) — `gh api …/git/refs/tags/…`,
+  `gh api …/git/tags/…`, `git cat-file -p`, `git rev-parse refs/f20a/candidate`.
+- Target→test mappings — read out of `scripts/f20-native-windows-proof.ps1:83-88`
+  and `scripts/f20-native-macos-proof.sh:286-302`.
+- The r1 assertion chain — read out of `live_fs_acl.rs:29-38` and
+  `hard_process_containment_windows.rs:64-74`.
+- The r2 skip cause — read out of `nightly-windows-soak.yml:238-282`.
+- The r12/r13 gaps — read out of `20-16-SUMMARY.md` frontmatter and
+  `20-08-INDEPENDENT-REVIEW.md`.
+- The r15 lineage — `git merge-base --is-ancestor be84bd2 0e8e6c1d` → yes;
+  `git show --stat 0e8e6c1d`.
