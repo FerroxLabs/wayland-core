@@ -1498,6 +1498,12 @@ fn host_request_surface_not_expressible(what: &str, needles: &[&str], why: &str)
 /// A bootstrapped parent — the production object graph the protocol front-end
 /// runs on — plus the loopback provider it talks to.
 struct HostSession {
+    /// The bootstrapped engine, HELD. Dropping it is terminal for every clone
+    /// of the session root token (`SessionRuntimeGuard::drop`), so a probe that
+    /// let it fall out of scope would see its host child cancelled before
+    /// reaching a provider turn — an absence, recorded as if it were a refusal.
+    /// That is the same vacuity class F-V2 names, one layer up.
+    _engine: wcore_agent::engine::AgentEngine,
     _home: TempDir,
     root: PathBuf,
     host_children: wcore_agent::spawner::HostChildController,
@@ -1611,6 +1617,7 @@ fn host_session(
         .map_err(|error| error.to_string())?;
 
     Ok(HostSession {
+        _engine: result.engine,
         _home: home,
         root,
         host_children: result.host_children.clone(),
