@@ -151,6 +151,33 @@ and voice corpora were never built.
    document-degradation premise, and the generation advisory. Each one is work
    correctly NOT done.
 
+## One thing I got wrong, recorded so it is not repeated
+
+To establish whether 39 full-suite failures were mine or pre-existing, I built a
+second full `target/` tree on `hetzner-dsm`. That filled the last of a shared
+1.8 TB disk on which five other phases were building concurrently, and the
+control run died with `rustc-LLVM ERROR: IO failure on output stream: No space
+left on device`.
+
+The 39 failures turned out to be caused by the same exhaustion — they are
+`wcore-agent` delegated-mutation and `wcore-swarm` worktree tests that admit on
+free disk and correctly failed closed with
+`DispatchAdmission("... only 0 bytes are available")` while `df` read
+`0 100% /`. None is in a crate this phase touched, and re-running the two
+changed crates after freeing space gave 2132/2132.
+
+I removed the extra tree and pruned `target/debug`, returning **129 GB**. But
+between roughly the time the box hit 100% and the time I freed it, **any other
+phase's capacity-admitting test on that box would have failed for the same
+reason and would have looked like a regression in its own work.** If a
+concurrent phase reports unexplained `DispatchAdmission` or worktree-landing
+failures in that window, this is the cause.
+
+The rule this earns: **on a shared build box, check `df` before creating a
+second target tree, and prefer a narrower control** — running the specific
+failing tests at the base commit in an existing tree, rather than building a
+whole second workspace to answer one question.
+
 ## What a successor should do first
 
 1. Land `.planning/SEAM-REQUESTS/27.md` SR-27-1..3. Criterion 2 is one small

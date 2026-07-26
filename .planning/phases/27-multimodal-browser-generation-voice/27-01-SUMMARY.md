@@ -133,7 +133,43 @@ on strengthened assertions. Fifteen tests were added (thirteen in
 `cargo clippy --workspace --all-targets --all-features -- -D warnings`: **clean,
 exit 0.** `cargo fmt --all -- --check`: clean.
 
-Full-workspace `nextest --profile ci` was **NOT** run.
+### The full-workspace run, and why its result is NOT usable
+
+`cargo nextest run --profile ci --no-fail-fast` was attempted and returned
+**11582 run, 11543 passed, 39 failed, 48 skipped**.
+
+**Those 39 failures are disk-exhaustion artifacts and are NOT attributable to
+this change.** The failure text says so directly:
+
+```
+capacity: DispatchAdmission("dispatch requires 9126805504 bytes for 1 active
+workers, 0 bytes already reserved, and its safety margin, but only 0 bytes are
+available")
+```
+
+`df -h /root` at that moment: **`1.8T 1.7T 0 100% /`**. Every one of the 39 is
+in `wcore-agent` delegated-mutation, `wcore-swarm` worktree, or
+`wcore-cli::deterministic_openai_loop` — paths that admit on free disk capacity
+and correctly fail closed when there is none. **The product's capacity gate was
+working; the box had no space.** Not one failure is in `wcore-tools` or
+`wcore-providers`, the only two crates this change touches.
+
+**I caused the exhaustion.** Building a second full `target/` tree on
+`hetzner-dsm` to establish a control filled the last of a shared disk on which
+five other phases were building at the same time. That control run itself died
+with `rustc-LLVM ERROR: IO failure on output stream: No space left on device`,
+which is how the cause was identified. The extra tree was removed and
+`target/debug` was pruned, returning **129 GB** to the box; the proven release
+binary was preserved at `/root/f27-wayland-core-2ecdfdf5`.
+
+After freeing space, `nextest --profile ci -p wcore-tools -p wcore-providers`
+was re-run on a healthy disk: **2132 run, 2132 passed, 3 skipped, exit 0.**
+
+**The full-workspace suite result is recorded as NOT ESTABLISHED.** It was
+deliberately not re-run: reproducing it needs roughly 150 GB of rebuild on a
+box that is still at 93% with five concurrent phases proving on it, and
+repeating the harm I had just cleaned up to obtain a number is a bad trade.
+Whoever integrates should run it on a box with headroom.
 
 ## Deliberate wording changes
 
