@@ -291,3 +291,26 @@ inherited descriptors).
 The 21-02 Task 2 gate runs `grep -cF "$s"` with `$s='--json-stream'` and
 `'--no-tui'`; grep parses the pattern as an option and exits non-zero. The check
 needs `-e`. Applies to any future plan reusing that gate shape.
+
+---
+
+## From 21-03 — triage of the corpus reds (2026-07-26)
+
+Logged by `21-03-REPAIR-SET.md`. Non-blocking, per the amended phase rule that
+MEDIUM and below go to BACKLOG and do not gate execution.
+
+### F21-02-10 — a pre-existing flaky cancellation test, excluded from the 21-03 repair budget · MEDIUM
+
+**Non-blocking. PRE-EXISTING — not a Phase 21 defect.**
+`wcore-cli::deterministic_openai_loop packaged_core_cancels_an_active_stream`
+failed all three tries in 21-02's first full aggregate run under corpus load, and
+passed in isolation and on the re-run at the recorded SHA.
+`.planning/TEST-AUDIT.md:171` already records it as flaky 2/3 and notes that the
+`ci` profile's `retries=2` is what turns it green. 21-03 excluded it from its
+bounded repair set under the known-red exclusion rule rather than spending the
+budget on a red another pass had already triaged. Corpus case:
+`21-02-CORPUS-RESULTS.md` `FINDING :: F21-02-10`.
+
+Observation worth keeping for whoever picks it up: the child-authority corpus
+adds 22 live binary spawns to the aggregate and plausibly tipped a
+timing-sensitive cancellation test rather than exposing a new one.
