@@ -392,6 +392,87 @@ export const MACOS_TARGET_SOURCES = {
   'macos-f20-lifecycle': { crate: 'wcore-agent', test: 'transactional_delegated_mutation_test', os: 'any' },
 };
 
+// ---- wrong-OS anti-drift guard (REQ-native-r8) ------------------------------
+//
+// The rule the two production guards enforce before a target runs —
+// Assert-TargetOsGate in scripts/f20-native-windows-proof.ps1 and
+// assert_target_os_gate in scripts/f20-native-macos-proof.sh — expressed once
+// here, over the SAME canonical map (WINDOWS_TARGET_SOURCES /
+// MACOS_TARGET_SOURCES) those guards mirror. Encoding the rule beside the map it
+// governs is what makes it falsifiable off a native runner: the production
+// guards' REJECTION direction is otherwise only reachable on the real hardware
+// mid-proof, which is exactly why it had never been demonstrated.
+//
+// The defect it closes: a native proof target silently mapped to a test gated
+// for a DIFFERENT OS (the 07-22 macOS failure — `macos-retained-directory`
+// pointed at the Windows-only `#![cfg(windows)]` retained-handle test; and the
+// two Windows containment targets pointed at the Linux-only Bubblewrap test).
+// Such a target "passes" or "skips" without ever proving the platform property.
+//
+// Gate on cfg ATTRIBUTES (`#[cfg…]` / `#![cfg…]`) only, never on prose: these
+// test files legitimately name a foreign `#![cfg(windows)]` in doc comments when
+// documenting the cross-platform mirror, and a comment is not a compilation gate.
+const FOREIGN_OS_CANDIDATES = [
+  'linux',
+  'windows',
+  'macos',
+  'android',
+  'ios',
+  'freebsd',
+  'netbsd',
+  'openbsd',
+  'dragonfly',
+];
+
+export function cfgAttributeLines(sourceText) {
+  return String(sourceText)
+    .split('\n')
+    .filter((line) => /^\s*#!?\[/.test(line) && line.includes('cfg'))
+    .join('\n');
+}
+
+// Assert one target -> source mapping. `os: 'any'` (a legitimately
+// cross-platform test) is exempt; an OS-specific target's source MUST be
+// affirmatively cfg-gated for its own OS and MUST NOT be gated for a foreign
+// one. Throws ProofError — never returns false — so a caller cannot ignore it.
+export function assertTargetOsGate({ target, os, sourcePath, sourceText }) {
+  if (os === 'any') return;
+  if (os !== 'windows' && os !== 'macos') {
+    fail(`anti-drift: target ${target} declares an unknown os=${os}`);
+  }
+  const cfgs = cfgAttributeLines(sourceText);
+
+  // Positive gate (load-bearing): a wrong-OS or ungated source cannot prove
+  // ${os} containment.
+  const positive =
+    os === 'windows'
+      ? /cfg\(\s*windows\s*\)/.test(cfgs) || /target_os\s*=\s*"windows"/.test(cfgs)
+      : /target_os\s*=\s*"macos"/.test(cfgs);
+  if (!positive) {
+    fail(`anti-drift: target ${target} declares os=${os} but its selected test source is not cfg-gated for ${os}: ${sourcePath}`);
+  }
+
+  // Negative gate: a source affirmatively cfg-gated to a DIFFERENT OS must never
+  // back this target (defense in depth beyond the positive check).
+  for (const other of FOREIGN_OS_CANDIDATES) {
+    if (other === os) continue;
+    if (new RegExp(`target_os\\s*=\\s*"${other}"`).test(cfgs)) {
+      fail(`anti-drift: target ${target} (os=${os}) selects a test source cfg-gated for ${other}: ${sourcePath}`);
+    }
+  }
+  // `cfg(unix)` is foreign to Windows only — macOS is a unix.
+  if (os === 'windows' && /cfg\(\s*unix\s*\)/.test(cfgs)) {
+    fail(`anti-drift: windows target ${target} selects a unix-gated test source: ${sourcePath}`);
+  }
+}
+
+// Repository-relative source path a target's { crate, test } resolves to.
+// `test: null` means the target selects by `--lib`/function name and has no
+// `--test <binary>` file; only 'any' targets do that, and they are exempt.
+export function targetSourcePath({ crate, test }) {
+  return test === null || test === undefined ? null : `crates/${crate}/tests/${test}.rs`;
+}
+
 const FINAL_MARKER = {
   windows: 'F20_NATIVE_WINDOWS_ACCEPTANCE=PASS',
   macos: 'F20_NATIVE_MACOS_ACCEPTANCE=PASS',

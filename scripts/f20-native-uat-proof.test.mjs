@@ -8,9 +8,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, symlinkSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, symlinkSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   ProofError,
@@ -22,8 +23,12 @@ import {
   bindRun,
   verifyNativeLog,
   verifyNativeLogFile,
+  assertTargetOsGate,
+  targetSourcePath,
   WINDOWS_TARGETS,
   MACOS_TARGETS,
+  WINDOWS_TARGET_SOURCES,
+  MACOS_TARGET_SOURCES,
 } from './f20-native-uat-proof.mjs';
 
 const COMMIT = 'a'.repeat(40);
@@ -212,6 +217,119 @@ test('verifyNativeLog rejects a nonce drift between targets and expectation', ()
       nonce: 'd'.repeat(32),
     }),
     ProofError,
+  );
+});
+
+// ---- wrong-OS anti-drift guard (REQ-native-r8) ------------------------------
+//
+// The guard's ADMISSION direction is exercised on every native dispatch (it
+// admitted all six OS-specific targets in run 30184651330). Its REJECTION
+// direction — the acceptance clause — had no case anywhere. These drive it.
+
+const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
+
+function realSource(entry) {
+  const rel = targetSourcePath(entry);
+  return { sourcePath: rel, sourceText: readFileSync(join(REPO_ROOT, rel), 'utf8') };
+}
+
+function isAntiDrift(re) {
+  return (e) => e instanceof ProofError && re.test(e.message);
+}
+
+test('assertTargetOsGate admits every OS-specific target against its real source', () => {
+  const osSpecific = [...Object.entries(WINDOWS_TARGET_SOURCES), ...Object.entries(MACOS_TARGET_SOURCES)].filter(
+    ([, entry]) => entry.os !== 'any',
+  );
+  // Non-vacuity: the canonical maps must actually declare OS-specific targets —
+  // four Windows, two macOS, the exact six the native dispatch admitted.
+  assert.equal(osSpecific.length, 6);
+  for (const [target, entry] of osSpecific) {
+    assert.doesNotThrow(() => assertTargetOsGate({ target, os: entry.os, ...realSource(entry) }));
+  }
+});
+
+test('assertTargetOsGate rejects a windows target mapped to a macOS-gated source', () => {
+  // The wrong-OS mapping in the Windows direction: windows-appcontainer-acl
+  // (os=windows) claimed to be backed by the macOS-only process-tree test.
+  const wrong = realSource(MACOS_TARGET_SOURCES['macos-process-tree']);
+  assert.throws(
+    () => assertTargetOsGate({ target: 'windows-appcontainer-acl', os: 'windows', ...wrong }),
+    isAntiDrift(/^anti-drift: target windows-appcontainer-acl declares os=windows but its selected test source is not cfg-gated for windows: crates\/wcore-sandbox\/tests\/hard_process_containment_macos\.rs$/),
+  );
+});
+
+test('assertTargetOsGate rejects a macOS target mapped to a windows-gated source', () => {
+  // The exact 07-22 macOS failure: macos-retained-directory pointed at the
+  // Windows-only `#![cfg(windows)]` retained-handle test, which compiles to
+  // zero tests on macOS.
+  const wrong = realSource(WINDOWS_TARGET_SOURCES['windows-retained-handle']);
+  assert.throws(
+    () => assertTargetOsGate({ target: 'macos-retained-directory', os: 'macos', ...wrong }),
+    isAntiDrift(/^anti-drift: target macos-retained-directory declares os=macos but its selected test source is not cfg-gated for macos: crates\/wcore-sandbox\/tests\/live_fs_acl\.rs$/),
+  );
+});
+
+test('assertTargetOsGate rejects an OS-specific target mapped to an ungated source', () => {
+  assert.throws(
+    () =>
+      assertTargetOsGate({
+        target: 'windows-job-object',
+        os: 'windows',
+        sourcePath: 'crates/wcore-sandbox/tests/ungated.rs',
+        sourceText: '#[test]\nfn t() {}\n',
+      }),
+    isAntiDrift(/not cfg-gated for windows/),
+  );
+});
+
+test('assertTargetOsGate rejects a windows-gated source that also carries a foreign OS gate', () => {
+  // Negative gate, reached only after the positive gate passes.
+  assert.throws(
+    () =>
+      assertTargetOsGate({
+        target: 'windows-job-object',
+        os: 'windows',
+        sourcePath: 'crates/wcore-sandbox/tests/dual.rs',
+        sourceText: '#![cfg(windows)]\n#[cfg(target_os = "linux")]\nfn t() {}\n',
+      }),
+    isAntiDrift(/^anti-drift: target windows-job-object \(os=windows\) selects a test source cfg-gated for linux: /),
+  );
+});
+
+test('assertTargetOsGate rejects a source whose only cfg mention is prose, not an attribute', () => {
+  // A doc comment is not a compilation gate; a guard satisfied by prose would
+  // admit exactly the wrong-OS mapping it exists to reject.
+  assert.throws(
+    () =>
+      assertTargetOsGate({
+        target: 'windows-retained-handle',
+        os: 'windows',
+        sourcePath: 'crates/wcore-sandbox/tests/prose.rs',
+        sourceText: '//! Mirrors the #![cfg(windows)] retained-handle test.\n#[test]\nfn t() {}\n',
+      }),
+    isAntiDrift(/not cfg-gated for windows/),
+  );
+});
+
+test('assertTargetOsGate exempts a cross-platform target and refuses an unknown os', () => {
+  assert.doesNotThrow(() =>
+    assertTargetOsGate({
+      target: 'windows-public-dispatch',
+      os: 'any',
+      sourcePath: 'crates/wcore-swarm/tests/dispatch_smoke.rs',
+      sourceText: '#[test]\nfn t() {}\n',
+    }),
+  );
+  assert.throws(
+    () =>
+      assertTargetOsGate({
+        target: 'windows-job-object',
+        os: 'solaris',
+        sourcePath: 'x.rs',
+        sourceText: '#![cfg(target_os = "solaris")]\n',
+      }),
+    isAntiDrift(/^anti-drift: target windows-job-object declares an unknown os=solaris$/),
   );
 });
 
