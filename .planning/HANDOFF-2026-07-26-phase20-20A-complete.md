@@ -102,3 +102,49 @@ Phase 20 was reconciled 74 → 18 live plans; 56 archived (never deleted) under 
 4. Realistic ceiling ~4x. Wall clock is dominated by compile+test on real hardware.
 
 **Do NOT:** create new Phase-20 plans, resume the archived native chain plan-by-plan, or revert the amended termination rules.
+
+---
+
+## 7. ADDENDUM — 2026-07-26, session end. READ THIS FIRST ON RESUME.
+
+### 7.1 A correction that matters
+Commit `64f74c47`'s message claims it committed the loop-fix config. **It did not** — the `git add` was a silent no-op because the file already matched HEAD. Sean's config edits had been reverted by a `checkout -f`/`reset --hard` during the 20A agent runs, so committed state was still `security_block_on=low` (a LOW finding blocks advancement — the exact 74-plan loop rule) and `parallelization.enabled=false, max_concurrent_agents=1`.
+
+**Actually fixed and verified in commit `ba692338`:** `security_block_on=high`, `auto_advance=true`, `granularity=standard`, `inline_plan_threshold=3`, `discuss_mode=discuss`, `parallelization.enabled/plan_level=true`, `max_concurrent_agents=6`, `skip_checkpoints=false` (checkpoints are the anti-drift gates — keep them).
+**Lesson: after any config/rule commit, verify with `git show HEAD:<path>`, not `git status`.**
+
+### 7.2 CI fan-out blocker — fixed (`440000f2`)
+`concurrency.cancel-in-progress` was unconditionally `true`, so two branches pushing concurrently **cancel each other's CI runs**. A 24-27 parallel fan-out would have silently lost coverage rather than failing loudly. Now `${{ github.event_name == 'pull_request' }}`.
+
+### 7.3 Peer baseline sources
+`/Users/seandonahoe/dev/resources/` holds `hermes-agent/`, `openclaw/`, `gemini-cli/`, `grok-build/` — read-only reference checkouts. **`hermes-agent` and `openclaw` are exactly the two baselines CTRL-01 must pin.** Pin from their `Cargo.toml`/`package.json`/tag/`git rev-parse HEAD` and cite the source; a commit SHA is a valid exact pin.
+
+### 7.4 In flight at session end (3 parallel agents)
+1. **CTRL-01** — pin the competitive ledger (D1 half #1).
+2. **r2 + r8 sweep** — r2: run `deny_ace_still_blocks_granted_read` + `normal_sid_only_grant_is_denied` on hardware and fix their wiring (they are gated OFF in candidate mode at `nightly-windows-soak.yml:239`); r8: add a wrong-OS *rejection* case to `scripts/f20-native-uat-proof.test.mjs`.
+3. **Phase 21 planning** — `ferrox-planner`, 4-plan cap, into `.planning/phases/21-child-authority-and-budget-inheritance/`.
+Check for their commits on the branch before redoing any of it.
+
+### 7.5 THE ORCHESTRATION RECIPE — this is the acceleration
+The bottleneck was serial hand-dispatch, not the Factory. The Factory discipline is the *per-item* pipeline; parallelism is *across* items. Run Factory stages concurrently via the Workflow tool, using the real Factory agents:
+
+```js
+pipeline(plans,
+  p       => agent(planBrief(p),   {agentType: 'ferrox-planner',       phase: 'Plan'}),
+  plan    => agent(checkBrief(plan),{agentType: 'ferrox-plan-checker', phase: 'Check'}),
+  checked => agent(execBrief(checked),{agentType: 'ferrox-executor',   phase: 'Execute'})
+)
+```
+No barrier between stages — plan B is checked while plan A executes. Every gate still fires.
+
+**Capacity actually available (was underused):** Hetzner (`hetzner-dsm:/root/wayland`, full 11520-test aggregate in ~194s), **TWO** Windows runners — `SEANDESKTOP` *and* `ferrox-win-msvc`, the latter idle the entire 20A effort — and this Mac (registered ephemeral macOS runner, re-register per dispatch). Give each concurrent agent its **own worktree** per host: concurrent compile load on one shared box corrupted a proof run.
+
+**Do NOT buy DigitalOcean capacity yet.** Compute was not the bottleneck (194s for the full Linux suite). Measure where the pipeline queues first; if it queues on Windows compile, Linux droplets are the wrong purchase.
+
+### 7.6 Execution order (unchanged, dependencies are content-real)
+`D1 → 21 → 22 → 23A → 23B/D2 → {24,25,26,27 bounded parallel} → 28 → 29 → 30`.
+21→22→23 cannot be parallelised: Phase 22 SC#1 emits the canonical fixtures that Phase 23's D2 exit gate replays, and Phase 23 SC#5 needs Phase 21's inheritance model.
+**D1 is two gates:** CTRL-01 (ledger, in flight) AND CTRL-02/D1 (linked Desktop plan + consumer/reducer conformance harness). **The Desktop half cannot be closed from this repo** — the Core producer side is done and CI-enforced; the consumer side lives in the Desktop repo. Phase 21 *planning* is not gated; only broad execution is.
+
+### 7.7 Before the 24-27 fan-out, serialise these seams
+`Cargo.lock` + workspace `Cargo.toml`; `crates/wcore-config/src/config.rs` (**325 KB single file**, all four phases need keys); `crates/wcore-protocol/src/contract/generate.rs` (`CONTRACT_MINOR` + `GENERATOR_VERSION`); `contracts/desktop/v1/manifest.json` (byte-exact — concurrent regeneration conflicts deterministically); `.github/workflows/ci.yml`; `.config/nextest.toml`; `session_journal*`.
