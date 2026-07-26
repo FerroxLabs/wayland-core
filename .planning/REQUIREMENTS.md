@@ -7,7 +7,7 @@
 
 ### Program Admission Controls
 
-- [ ] **CTRL-01**: A schema-complete versioned capability/maturity ledger with pinned Hermes/OpenClaw baselines exists before Phase 21 and is refreshed at every admitted phase; F30 independently reviews it.
+- [x] **CTRL-01**: A schema-complete versioned capability/maturity ledger with pinned Hermes/OpenClaw baselines exists before Phase 21 and is refreshed at every admitted phase; F30 independently reviews it. — **ESTABLISHED 2026-07-26** (`d06a6051`). Baselines pinned from the real peer trees: Hermes 0.17.0 @ `dbe734beff0caf5e8ee2acbe4277db7f6cf84a21`, OpenClaw 2026.6.2 @ `11a0ad10e91a50d5a0e636494eea4d7ad3eaf9fc`. All 10 ledger rows dispositioned with F03/F05 evidence mapped; zero `UNPINNED`/`PENDING` remain. Two carried limitations are tracked and non-blocking: re-run the F05 capability gate against `delegate_isolation` at `9821ef76` (owner Phase 21), and runtime trials (owner Phase 30, by design). Ledger: `.planning/intel/COMPETITIVE-LEDGER.md`.
 - [ ] **CTRL-02**: D1 publishes a pinned Core producer contract, linked Desktop plan, and real consumer/reducer conformance suite before Phase 21 broad execution.
 - [ ] **CTRL-03**: New packaged/customer evidence enters a live regression register and cannot be silently settled by older source/test acceptance.
 - [ ] **CTRL-04**: D2 freezes the durable Core producer protocol and passes canonical serialized fixtures through the real Desktop consumer/reducer before Phase 23 exits.
@@ -175,7 +175,7 @@ Both candidate jobs ran the `Assert checkout is the authorized candidate` step w
 - Mapped to phases: 58
 - Unmapped: 0
 - Duplicate mappings: 0
-- Program controls: 4 total (0 established, 4 open) — CTRL-01 (`intel/COMPETITIVE-LEDGER.md`) and CTRL-03 (`intel/FIELD-REGRESSIONS.md`) are intentionally cross-cutting/continuous (not single-phase-mapped); CTRL-02/D1 gates broad Phase 21 and CTRL-04/D2 gates Phase 23 exit (`intel/DESKTOP-PROTOCOL-CHECKPOINT.md`).
+- Program controls: 4 total (1 established, 3 open) — **CTRL-01 established 2026-07-26** (`intel/COMPETITIVE-LEDGER.md`, commit `d06a6051`). CTRL-03 (`intel/FIELD-REGRESSIONS.md`) remains intentionally cross-cutting/continuous (not single-phase-mapped); CTRL-02/D1 gates broad Phase 21 and CTRL-04/D2 gates Phase 23 exit (`intel/DESKTOP-PROTOCOL-CHECKPOINT.md`).
 - Grand total distinct requirement IDs: 77 (58 F-phase + 4 CTRL + 15 REQ-native).
 - Additive native-UAT repair requirements: 15 (REQ-native-r1 … r12 plus audit addenda r13–r15) — sub-clauses refining F20-05 / Phase-20 Success Criterion #3, owned by Phase 20A; NOT counted in the 58 (they are acceptance detail, not new scope). Status at Phase 20A close: **11 complete, 4 open** (r2, r8, r12, r13). Full text: `.planning/intel/inbox-2026-07-23/requirements.md`; addenda in `AUDIT-2026-07-23.md`.
 
