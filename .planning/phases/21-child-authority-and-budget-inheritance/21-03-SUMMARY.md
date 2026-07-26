@@ -113,6 +113,33 @@ gate requires "re-pinning D1 section 3" — and
 section 3, and pins no digests at all. The satisfiable parts (`digest`, `check`,
 record) were done; the D1 clause names something that does not exist.
 
+> ### CORRECTION (2026-07-26, post-verification) — both claims above are wrong
+>
+> Phase 21 verification raised this as finding **F-V1 (HIGH)**
+> (`VERIFICATION.md` §6). Both halves of item 2 are retracted:
+>
+> 1. **"only the source-provenance fingerprint" moved is false.** `fixture_digest`
+>    moved too — `42f142ab…` → `0704cd43…` at `a412aba7`. The move is mechanical
+>    (the descriptor is embedded in `events/ready.json` and three adversarial
+>    negotiation vectors, all of which are inside the 151-file fixture set), but
+>    `fixture_digest` is the digest that gets its own named negotiation failure
+>    (`FixtureDigestMismatch`) and the one a Desktop consumer/reducer conformance
+>    harness replays against. Its move was disclosed nowhere in this phase.
+> 2. **"the D1 clause names something that does not exist" is false — wrong
+>    document was inspected.** The gate's "D1 §3" means
+>    `.planning/intel/D1-CORE-PRODUCER-CONTRACT.md`, which has a `## 3. Digests`
+>    section pinning all three values. The clause was satisfiable all along.
+>
+> **Discharged 2026-07-26.** `D1-CORE-PRODUCER-CONTRACT.md` is now at revision 2:
+> pinned SHA `a412aba7`, both moved digests re-pinned, and a new §3.0 publishes the
+> move as an explicit contract bump with before/after values, cause commit, and
+> Desktop impact. Re-proved on `hetzner-dsm:/root/wayland-p21` with the canonical
+> Rust tool — `wcore-contract digest` EXIT=0 and `wcore-contract check` EXIT=0
+> (*"Desktop contract corpus is current"*), plus `cargo nextest run -p
+> wcore-protocol --no-fail-fast` 302/302. The `check` leg is the load-bearing one:
+> it re-derives the corpus from the generator sources, so the corpus is proved
+> neither stale nor hand-edited.
+
 ## Blast radius — measured, not described
 
 Each candidate applied alone in a throwaway Hetzner worktree created from the
@@ -225,6 +252,17 @@ The shipped binary was observed emitting its real `ready` frame carrying
 `"source_inputs_digest":"sha256:9d5928b4…"` and the **unchanged**
 `"schema_digest":"sha256:e5d1744a…"` — live proof that the re-pin is provenance,
 not wire.
+
+> **CORRECTION (2026-07-26).** This paragraph cites two of the three digests and
+> omits the one that also moved. The same `ready` frames carry
+> `"fixture_digest":"sha256:0704cd43…"`, up from `sha256:42f142ab…`. Counted over
+> the transcripts: `21-03-t3-linux.log` has 11 occurrences of each of the three
+> post-repair values and zero of the pre-repair ones; `21-03-t3-windows.log` the
+> same; `21-02-t3-linux.log` (pre-repair) has 11 × `42f142ab…` and 11 ×
+> `d8b1a8b5…`. So *"the re-pin is provenance, not wire"* is right about
+> `schema_digest` and wrong as stated: `fixture_digest` is a negotiated wire field
+> with its own fail-closed error, and it moved. See
+> `.planning/intel/D1-CORE-PRODUCER-CONTRACT.md` §3.0 and §3.2 leg C.
 
 ## Closure — the honest verdict
 

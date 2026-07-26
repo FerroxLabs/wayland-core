@@ -1,5 +1,8 @@
 # D1 — Core Producer Contract (CORE HALF)
 
+**Revision 2 — 2026-07-26. Contract bump: `fixture_digest` and `source_inputs_digest` moved.
+Any pin taken against revision 1 must be updated. See [§3.0](#30-contract-bump-record).**
+
 **Status: the CORE half of D1 is complete. D1 itself is NOT complete.**
 
 `.planning/intel/DESKTOP-PROTOCOL-CHECKPOINT.md` defines D1 as two obligations:
@@ -21,34 +24,44 @@ is a Core-side receipt. D1 flips from "blocked" to "Desktop lane has everything 
 
 Everything in this document describes exactly one tree state.
 
+> ### ⚠ CONTRACT BUMP — 2026-07-26
+>
+> **The corpus moved. Two of the three digests in [§3](#3-digests) changed.** Any Desktop pin
+> taken against the previous revision of this document (`b6936299`, digests `42f142ab…` /
+> `d8b1a8b5…`) **will now fail negotiation** with `FixtureDigestMismatch` and
+> `SourceInputsDigestMismatch`. Re-pin to the values in [§3](#3-digests).
+> Full before/after and cause: [§3.0](#30-contract-bump-record).
+
 | | |
 |---|---|
-| **Pinned SHA** | `b6936299d9c3a7d3110e9ba03c36e5debe965b85` |
+| **Pinned SHA** | `a412aba754b1bab5cd5764ed8e0d8502c9ee4020` |
 | Commit | `chore(protocol): re-pin Desktop contract provenance digests` |
-| Authored | 2026-07-25 20:00:17 +0700 |
+| Authored | 2026-07-26 20:36:26 +0700 |
 | Repository | `FerroxLabs/wayland-core` |
 | Branch observed | `plan/f20-unified-audit-repair` |
-| Observation HEAD | `2cc1a285ffd3f3b0fb41b177bd9a1317654cb350` (2026-07-26) |
+| Observation HEAD | `1058965e5717facc1af2b4e25179d80818ec0f58` (2026-07-26 21:49:27 +0700) |
+| Supersedes | `b6936299d9c3a7d3110e9ba03c36e5debe965b85` (revision 1 of this document) |
 
-**Why the pin is `b6936299` and not the observation HEAD.** This checkout is shared by
-concurrently running agents; HEAD moved during authoring. `b6936299` is the last commit that
+**Why the pin is `a412aba7` and not the observation HEAD.** This checkout is shared by
+concurrently running agents; HEAD moves during authoring. `a412aba7` is the last commit that
 touched *any* contract-relevant path — the 40 generator source inputs or the 156-file corpus.
-All contract-relevant paths are byte-identical between `b6936299`, the observation HEAD, and
+All contract-relevant paths are byte-identical between `a412aba7`, the observation HEAD, and
 the working tree, verified by:
 
 ```bash
-git diff --stat b6936299d9c3a7d3110e9ba03c36e5debe965b85 HEAD -- \
-  crates/wcore-protocol/contracts <the 40 SOURCE_INPUTS paths>
+git diff --stat a412aba754b1bab5cd5764ed8e0d8502c9ee4020 HEAD -- \
+  crates/wcore-protocol/contracts/desktop/v1 <the 40 SOURCE_INPUTS paths>
 # → no output (byte-identical)
-git diff --stat b6936299d9c3a7d3110e9ba03c36e5debe965b85 -- <same paths>
+git diff --stat a412aba754b1bab5cd5764ed8e0d8502c9ee4020 -- <same paths>
 # → no output (working tree also byte-identical)
 ```
 
-The corpus commit (`b6936299`, 2026-07-25 20:00) is **later than** the last commit touching
-any generator source input (`a1085597`, 2026-07-25 17:22). The corpus is therefore not stale
-relative to its inputs, and [§3](#3-digests) proves it independently.
+The corpus commit (`a412aba7`, 2026-07-26 20:36:26) is **later than** the last commit touching
+any generator source input (`e0cae85e`, 2026-07-26 20:35:17). The corpus is therefore not stale
+relative to its inputs, and [§3](#3-digests) proves it independently — this time with the
+authoritative Cargo `check` leg, not by argument.
 
-Desktop pins against `b6936299` **or** any later Core commit whose `ready.contract` descriptor
+Desktop pins against `a412aba7` **or** any later Core commit whose `ready.contract` descriptor
 still reports the three digests in [§3](#3-digests). The digests, not the SHA, are the real
 compatibility boundary — a Core commit that changes neither sources nor corpus is contract-identical.
 
@@ -118,14 +131,86 @@ exists. Building UI that requires these to arrive is unsupported at v1.8.
 
 ## 3. Digests
 
-**All three digests below were computed by this author from the actual files. None are copied
-on trust from the manifest — each was recomputed independently and then compared.**
+**All three digests below are backed by three independent legs
+([§3.2](#32-reproduction--exact-commands-run-exact-output)): the canonical Rust tool on the
+authoritative Linux host, a toolchain-free recompute from the actual files, and the real
+`ready` frame the shipped binary emitted on Linux and Windows. Three constructions, same three
+values. None are copied on trust from the manifest.**
 
-| Digest | Value |
+| Digest | Value | vs revision 1 |
+|---|---|---|
+| `fixture_digest` | `sha256:0704cd43a86e52da86af093f9f90c0877328e53c154bec9fddf93d24fd3d7209` | **CHANGED** |
+| `schema_digest` | `sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54` | unchanged |
+| `source_inputs_digest` | `sha256:9d5928b47f0cf9430e57786af498f9c297a36ace1572bc964776f25a0be0f5f5` | **CHANGED** |
+
+### 3.0 Contract bump record
+
+This is an **explicit contract bump**, published as one. The corpus moved; it is not being
+re-pinned silently.
+
+| Digest | Before (revision 1, `b6936299`) | After (revision 2, `a412aba7`) |
+|---|---|---|
+| `fixture_digest` | `sha256:42f142abf6e534e0bcb33ef7e6d9ec00c53c57938fa467f46d643d9e80e451e4` | `sha256:0704cd43a86e52da86af093f9f90c0877328e53c154bec9fddf93d24fd3d7209` |
+| `schema_digest` | `sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54` | *(unchanged)* |
+| `source_inputs_digest` | `sha256:d8b1a8b5645707225bdaafea617452fe1cf2f99556be53d7dcd35891d5e92f28` | `sha256:9d5928b47f0cf9430e57786af498f9c297a36ace1572bc964776f25a0be0f5f5` |
+
+**What moved, when, and by which commit.**
+
+| | |
 |---|---|
-| `fixture_digest` | `sha256:42f142abf6e534e0bcb33ef7e6d9ec00c53c57938fa467f46d643d9e80e451e4` |
-| `schema_digest` | `sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54` |
-| `source_inputs_digest` | `sha256:d8b1a8b5645707225bdaafea617452fe1cf2f99556be53d7dcd35891d5e92f28` |
+| Cause commit | `e0cae85ea34436e6690a2534ece6db4e0c2829aa` — `fix(types): ratchet child-sourced approval requests`, 2026-07-26 20:35:17 +0700 |
+| File changed | `crates/wcore-types/src/execution_policy.rs` (+82 lines) — entry 17 of the 40 in `manifest.json` → `source_inputs`, i.e. a **generator source input** |
+| Regeneration commit | `a412aba754b1bab5cd5764ed8e0d8502c9ee4020` — `chore(protocol): re-pin Desktop contract provenance digests`, 2026-07-26 20:36:26 +0700 |
+| Corpus files rewritten | 5 — `manifest.json`, `events/ready.json`, `adversarial/events/{version,schema,fixture}-mismatch.jsonl` |
+
+**Why `fixture_digest` moved even though no fixture's *semantics* changed.**
+`source_inputs_digest` is embedded in the emitted `contract` descriptor, and that descriptor is
+serialized into `events/ready.json` plus the three adversarial negotiation vectors. Those four
+files are inside the 151-file fixture set, so a source-provenance change propagates
+mechanically into `fixture_digest`. The propagation is mechanical, but the **consequence is
+not cosmetic**: `fixture_digest` is the digest [§4](#4-negotiation--the-fail-closed-handshake)
+step 6 maps to its own named error (`FixtureDigestMismatch`), and it is the digest a Desktop
+consumer/reducer conformance harness replays against.
+
+**Sequence of contract revisions on this branch**, from `manifest.json` at each commit:
+
+| Commit | `fixture_digest` | `source_inputs_digest` | `schema_digest` |
+|---|---|---|---|
+| `6937ef61~1` | `37a6c511…` | `17b8671e…` | `e5d1744a…` |
+| `6937ef61` | `f71d2851…` | `7bbf7f34…` | `e5d1744a…` |
+| `48b9518b` | `794bc0b8…` | `f6032969…` | `e5d1744a…` |
+| `b6936299` (rev 1 pin) | `42f142ab…` | `d8b1a8b5…` | `e5d1744a…` |
+| `a412aba7` (rev 2 pin) | `0704cd43…` | `9d5928b4…` | `e5d1744a…` |
+| `HEAD` `1058965e` | `0704cd43…` | `9d5928b4…` | `e5d1744a…` |
+
+Reproduce with:
+
+```bash
+for c in 6937ef61~1 6937ef61 48b9518b b6936299 a412aba7 HEAD; do
+  printf '%-12s ' "$c"
+  git show "$c:crates/wcore-protocol/contracts/desktop/v1/manifest.json" \
+    | python3 -c 'import json,sys; m=json.load(sys.stdin); print(m["fixture_digest"], m["source_inputs_digest"], m["schema_digest"])'
+done
+```
+
+`schema_digest` has not moved across any of these — the wire *schema* is stable; only the
+provenance fingerprint and the four descriptor-bearing fixtures moved.
+
+**Desktop impact.** Per [§4](#4-negotiation--the-fail-closed-handshake) step 6, a pin against
+revision 1 fails closed with two distinct errors: `FixtureDigestMismatch` and
+`SourceInputsDigestMismatch`. `minor` is still `8`; the corpus minor was **not** incremented,
+because generator version and schema are unchanged and the corpus is a regeneration of the same
+`1.8` wire surface, not a new one. Desktop must therefore re-pin on digests, not infer
+compatibility from `minor`. This is exactly the case [§9](#9-what-the-desktop-lane-must-still-supply)
+item 11 asks Desktop to have a named policy for.
+
+**Why this record exists.** The Phase 21 admission panel's authorization carried a binding
+clause won by the losing dissent: *no repair may move the 40 generator source inputs or the
+156-file corpus without re-running `wcore-contract digest`+`check` and re-pinning D1 §3 as an
+explicit contract bump.* The repair (`e0cae85e`) moved a source input; the regeneration
+(`a412aba7`) moved the corpus; revision 1 of this document was left pinning the pre-repair
+values. Phase 21 verification raised that as finding **F-V1 (HIGH)**. This revision discharges
+the clause.
 
 ### 3.1 Digest algorithm
 
@@ -148,19 +233,50 @@ Inputs per digest:
   and the value is re-serialized as canonical JSON (recursively key-sorted, compact
   separators, one trailing `\n`).
 
-### 3.2 Reproduction — exact command run, exact output
+### 3.2 Reproduction — exact commands run, exact output
 
-The canonical Rust reproduction is
-`cargo run -p wcore-protocol --bin wcore-contract -- digest`
-(`crates/wcore-protocol/src/bin/wcore-contract.rs`). **This author did NOT run it** — the
-authoring machine (macOS) has no Rust toolchain, and per project policy Cargo must not be run
-there. Authoritative Cargo proof runs on `hetzner-dsm:/root/wayland`.
+Two independent legs. Leg A is the canonical Rust tool on the authoritative Linux host; leg B
+is a toolchain-free reimplementation on the authoring machine. They agree on all three values.
 
-Instead the digests were reproduced independently, from the working-tree files, with a
-toolchain-free reimplementation of `digest_named_bytes`. Script:
+#### Leg A — canonical Rust tool (authoritative)
+
+Host `hetzner-dsm`, phase-dedicated worktree `/root/wayland-p21`, detached at the observation
+HEAD, `git status --short` empty, `cargo 1.95.0 (f2d3ce0bd 2026-03-21)`.
+
+```bash
+cd /root/wayland-p21 && git rev-parse HEAD
+# 1058965e5717facc1af2b4e25179d80818ec0f58
+/root/.cargo/bin/cargo run -q -p wcore-protocol --bin wcore-contract -- digest
+```
+
+Verbatim output:
+
+```
+fixture_digest=sha256:0704cd43a86e52da86af093f9f90c0877328e53c154bec9fddf93d24fd3d7209
+schema_digest=sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54
+source_inputs_digest=sha256:9d5928b47f0cf9430e57786af498f9c297a36ace1572bc964776f25a0be0f5f5
+generator=wcore-desktop-contract-gen/11
+EXIT=0
+```
+
+The `check` leg is the one that matters most — it regenerates every artifact in memory from the
+generator sources and compares byte-for-byte against the checked-in corpus, so it proves the
+corpus is neither stale relative to its inputs nor hand-edited:
+
+```bash
+/root/.cargo/bin/cargo run -q -p wcore-protocol --bin wcore-contract -- check
+```
+
+```
+Desktop contract corpus is current (wcore-desktop-contract-gen/11)
+EXIT=0
+```
+
+#### Leg B — toolchain-free recompute (independent construction)
+
+`digest_named_bytes` and the `fixtures_digest` normalization reimplemented in Python, reading
+the working-tree files directly. No Rust, no cargo, no trust in the manifest. Script:
 `scratchpad/verify_digests.py` (session scratchpad, not committed).
-
-Command:
 
 ```bash
 cd /Users/seandonahoe/dev/waylandcore-ferrox && python3 verify_digests.py
@@ -170,8 +286,8 @@ Verbatim output:
 
 ```
 source_inputs_digest  files=40
-  computed: sha256:d8b1a8b5645707225bdaafea617452fe1cf2f99556be53d7dcd35891d5e92f28
-  manifest: sha256:d8b1a8b5645707225bdaafea617452fe1cf2f99556be53d7dcd35891d5e92f28
+  computed: sha256:9d5928b47f0cf9430e57786af498f9c297a36ace1572bc964776f25a0be0f5f5
+  manifest: sha256:9d5928b47f0cf9430e57786af498f9c297a36ace1572bc964776f25a0be0f5f5
   MATCH: True
 
 schema_digest  files=3
@@ -180,20 +296,52 @@ schema_digest  files=3
   MATCH: True
 
 fixture_digest  files=151
-  computed: sha256:42f142abf6e534e0bcb33ef7e6d9ec00c53c57938fa467f46d643d9e80e451e4
-  manifest: sha256:42f142abf6e534e0bcb33ef7e6d9ec00c53c57938fa467f46d643d9e80e451e4
+  computed: sha256:0704cd43a86e52da86af093f9f90c0877328e53c154bec9fddf93d24fd3d7209
+  manifest: sha256:0704cd43a86e52da86af093f9f90c0877328e53c154bec9fddf93d24fd3d7209
   MATCH: True
 
 corpus_tree_digest (all 156 files, not in manifest)
-  computed: sha256:8b519511a12637cd7c54b0eb24450c8e1e2f13b06d1d919f016a5faedcbd617d
+  computed: sha256:9c90f7a73d6118c99295846baaa5da7c56d3c1a406405f58245637b461d58295
 
 declared fixture count: 151 | recomputed: 151
 OVERALL: PASS
 ```
 
-**What this proves:** the checked-in `manifest.json` (and therefore the `ready.contract`
-descriptor Core emits) is byte-consistent with the checked-in generator sources and the
-checked-in corpus at the pinned SHA. The corpus is not stale and was not hand-edited.
+(At revision 1 this `corpus_tree_digest` read `sha256:8b519511a1…`; it moved with the corpus.)
+
+#### Leg C — what the shipped binary actually emitted
+
+Legs A and B are tool output. Leg C is the real `wayland-core` binary's `ready` frame, taken
+from Phase 21's own live transcripts. Every occurrence of all three digests in the post-repair
+run, on both platforms:
+
+```bash
+cd .planning/phases/21-child-authority-and-budget-inheritance/evidence
+grep -o 'fixture_digest[^,]*'      21-03-t3-linux.log | sort | uniq -c
+grep -o 'source_inputs_digest[^,]*' 21-03-t3-linux.log | sort | uniq -c
+grep -o 'schema_digest[^,]*'        21-03-t3-linux.log | sort | uniq -c
+```
+
+```
+  11 fixture_digest":"sha256:0704cd43a86e52da86af093f9f90c0877328e53c154bec9fddf93d24fd3d7209"
+  11 source_inputs_digest":"sha256:9d5928b47f0cf9430e57786af498f9c297a36ace1572bc964776f25a0be0f5f5"
+  11 schema_digest":"sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54"
+```
+
+Same three values in `21-03-t3-windows.log` (11 occurrences each; that transcript hard-wraps
+long lines, so the fixture and schema values appear truncated at a column boundary — the
+unwrapped prefixes match exactly and no other value appears).
+
+The pre-repair transcript `21-02-t3-linux.log` shows the revision-1 values in the same place —
+11 × `42f142ab…` and 11 × `d8b1a8b5…`, zero occurrences of the new values. That is the bump,
+observed at the wire, from the two runs that bracket it.
+
+**What this proves:** the checked-in `manifest.json` — and therefore the `ready.contract`
+descriptor Core emits — is byte-consistent with the checked-in generator sources and the
+checked-in corpus at the pinned SHA. Leg A's `check` proves the corpus re-derives from its
+generator sources; leg B proves the same three values under a second, independent
+implementation of the digest algorithm; leg C proves the shipped binary emits exactly these
+values on both Linux and Windows. The corpus is not stale and was not hand-edited.
 
 ### 3.3 Plain-tool digests (no Rust, no Python)
 
@@ -205,11 +353,11 @@ shasum -a 256 manifest.json schema/*.json events/ready.json events/execution_pol
 ```
 
 ```
-03b1fedfca8aa4e5ec0f8c1aefc92670b769393441c0fb0e6fba9f0124d187de  manifest.json
+8827fb5ec092323cc940122b9f684264d4c150652f7e75fdf77a2c9be84e96d7  manifest.json         ← CHANGED at a412aba7 (was 03b1fedf…)
 d1e1036fe944a8af58618daa8a95ad994b7a4d4f07c46b6ad7ea44296ca12e5a  schema/core-event.schema.json
 161054163449922c549e671d527ee186c7e0d89fdadfd5ef86aa0193722b0709  schema/host-command.schema.json
 e5d9803e90779834bae99ccf1e62d7a82b4ebf519ec4ac096ee68e2186de9a56  schema/producer-complete.schema.json
-ccbc87c254d53228528557bbe399dcaa3353e86063f91cc2a258c2632adaa219  events/ready.json
+ef560477b3480b47087927163955a25f2e189e015e69449ee5f0169f97a502a3  events/ready.json     ← CHANGED at a412aba7 (was ccbc87c2…)
 d5a1c7fde15448891a543f0bb996bd0bf8592d5729404618ba5e09f304ca2bac  events/execution_policy.json
 258d04495ed9b80059e771577db66a071b5a3c0cbae7a351f5cfebae0560f054  DEFERRED.md
 ```
@@ -219,11 +367,23 @@ Whole-corpus pin over all 156 files:
 ```bash
 cd crates/wcore-protocol/contracts/desktop/v1
 find . -type f | sed 's|^\./||' | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256
-# → a39c13794669e1afca2218ddf3437ba967b4dceb25d9c7e669974358495821e6  -
+# → dcaef42c8e03ad902341ed69c2cc48bd057a2747340c1ae4925c700bb908b4e5  -
 ```
 
-Note this `a39c1379…` value is a *convenience* pin using a different construction than
-`digest_named_bytes`; it is not the `fixture_digest` and must not be compared to it.
+**CHANGED at `a412aba7`** — at revision 1 this read
+`a39c13794669e1afca2218ddf3437ba967b4dceb25d9c7e669974358495821e6`. It moved for the same
+mechanical reason `fixture_digest` did: `manifest.json` and `events/ready.json` are two of the
+156 files, and both carry the descriptor.
+
+Reproduced on both hosts, same value: macOS with `shasum -a 256`, and `hetzner-dsm` with
+`sha256sum` substituted for `shasum -a 256` (GNU coreutils has no `shasum`; the digests are
+identical).
+
+Note this `dcaef42c…` value is a *convenience* pin using a different construction than
+`digest_named_bytes`; it is not the `fixture_digest` and must not be compared to it. The
+`digest_named_bytes`-construction whole-corpus value is `9c90f7a7…`, in
+[§3.2](#leg-b--toolchain-free-recompute-independent-construction). Neither is emitted in
+`ready.contract`; both are integrity conveniences only.
 
 ---
 
@@ -518,6 +678,15 @@ do not block) — **both are fixed in this change**. The remaining four are logg
 editing: still `OVERALL: PASS`, all three digests identical, and `git status --porcelain crates`
 still empty.
 
+> **Revision 2 scoping note.** The sentence above is about *this section's own edits* and is
+> still true of them. It is **not** a claim that the digests never moved: they did, at
+> `a412aba7`, for an unrelated reason ([§3.0](#30-contract-bump-record)). Re-verified at
+> revision 2: `docs/json-stream-protocol.md` is still absent from the 40 `source_inputs`
+> (`grep 'docs/\|\.md'` over the `source_inputs` list → 0 matches), so editing it still cannot
+> move a digest. Revision 2 *did* have to edit that file: the F-1 fix embedded truncated
+> descriptor values (`sha256:42f1…`, `sha256:d8b1…`) that the bump made stale. They now read
+> `sha256:0704…` and `sha256:9d59…`.
+
 ### F-1 (HIGH — FIXED) `ready` documented without its two required fields
 
 `docs/json-stream-protocol.md` §1.1 showed a `ready` example and field table with **no
@@ -668,12 +837,18 @@ forbids Cargo there) and correctly recorded its evidence as cited-from-source ra
 observed. That gap is now closed by an actual run on the authoritative Linux host:
 
 ```
-host    : hetzner-dsm:/root/wayland
-HEAD    : b6936299d9c3a7d3110e9ba03c36e5debe965b85   (the pinned contract SHA)
+host    : hetzner-dsm:/root/wayland-p21          (phase-dedicated worktree)
+HEAD    : 1058965e5717facc1af2b4e25179d80818ec0f58
+          contract-relevant paths byte-identical to the pinned SHA a412aba7
 worktree: clean (git status --porcelain = 0 lines)
 command : cargo nextest run -p wcore-protocol --no-fail-fast
 result  : 302 tests run: 302 passed, 0 skipped   (EXIT=0)
+date    : 2026-07-26
 ```
+
+Re-run at revision 2. Revision 1 recorded the same shape at `b6936299` (302/302). The corpus
+moved between the two ([§3.0](#30-contract-bump-record)); the run above is against the moved
+corpus, not carried over.
 
 Included in that run and passing: `desktop_contract_corpus::checked_corpus_matches_real_serializers_byte_for_byte`,
 `::manifest_ready_and_schema_titles_share_one_contract_identity`,
@@ -700,7 +875,9 @@ to prove consumer replay and UI/control behavior; both receipts are required for
 whole-Wayland claim.
 
 1. **A linked Desktop plan** in the Wayland Desktop repository, referencing pinned SHA
-   `b6936299d9c3a7d3110e9ba03c36e5debe965b85` and the three digests in [§3](#3-digests).
+   `a412aba754b1bab5cd5764ed8e0d8502c9ee4020` and the three digests in [§3](#3-digests).
+   **If a draft of this plan already pins `b6936299` and its digests, it must be re-pinned** —
+   see [§3.0](#30-contract-bump-record).
 2. **A host conformance suite** that replays the **serialized** corpus at
    `crates/wcore-protocol/contracts/desktop/v1/` through the **real Desktop consumer/reducer**.
    The checkpoint is explicit that deserialization alone is insufficient — the reducer must
@@ -748,12 +925,29 @@ Desktop-blocked rather than Core-blocked.
 
 ## 10. Provenance of this document
 
+### Revision 2 — 2026-07-26 (current)
+
+| | |
+|---|---|
+| Revised | 2026-07-26 |
+| Reason | **Contract bump.** Phase 21 verification finding F-V1 (HIGH): the corpus moved during the 21-03 repair and §3 still pinned the pre-repair values |
+| Checkout | `/Users/seandonahoe/dev/waylandcore-ferrox`, branch `plan/f20-unified-audit-repair` |
+| Pinned SHA | `a412aba754b1bab5cd5764ed8e0d8502c9ee4020` |
+| Observation HEAD | `1058965e5717facc1af2b4e25179d80818ec0f58` |
+| Digests | Two independent constructions ([§3.2](#32-reproduction--exact-commands-run-exact-output)): canonical Rust `wcore-contract digest` on `hetzner-dsm`, and a toolchain-free recompute on the authoring machine. Both agree; both match the manifest |
+| Cargo | **RUN** — `hetzner-dsm:/root/wayland-p21` (phase-dedicated worktree, `/root/.cargo/bin/cargo`). `wcore-contract digest` EXIT=0, `wcore-contract check` EXIT=0 (`corpus is current`), `cargo nextest run -p wcore-protocol --no-fail-fast` 302/302 EXIT=0 |
+| Code changes | None. This revision edits only `.planning/intel/D1-CORE-PRODUCER-CONTRACT.md`; no file under `crates/` was touched and no digest was caused to change by it |
+| Sections changed | §1 (pin + bump banner), §3 (digest table), §3.0 (new — bump record), §3.2 (real Cargo output), §3.3 (plain-tool pins), §8 (re-run receipt), §9 item 1, §10 |
+
+### Revision 1 — 2026-07-26 (superseded)
+
 | | |
 |---|---|
 | Authored | 2026-07-26 |
 | Checkout | `/Users/seandonahoe/dev/waylandcore-ferrox`, branch `plan/f20-unified-audit-repair` |
 | Pinned SHA | `b6936299d9c3a7d3110e9ba03c36e5debe965b85` |
 | Observation HEAD | `2cc1a285ffd3f3b0fb41b177bd9a1317654cb350` |
-| Digests | Independently recomputed from working-tree files; all three matched the manifest ([§3.2](#32-reproduction--exact-command-run-exact-output)) |
+| Digests | Independently recomputed from working-tree files; all three matched the manifest as of that SHA |
 | Cargo | **NOT RUN** — no toolchain on the authoring machine; project policy forbids it there |
 | Code changes | `docs/json-stream-protocol.md` only (F-1, F-2, F-4 fixes + Overview callout). No file under `crates/` was modified; no digest changed |
+| Superseded because | The 21-03 repair (`e0cae85e` → `a412aba7`) moved a generator source input and regenerated the corpus, moving two of the three digests |

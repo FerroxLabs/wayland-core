@@ -54,9 +54,9 @@ Emitted once after initialization completes. Client MUST wait for this before se
     "major": 1,
     "minor": 8,
     "generator": "wcore-desktop-contract-gen/11",
-    "fixture_digest": "sha256:42f1...",
+    "fixture_digest": "sha256:0704...",
     "schema_digest": "sha256:e5d1...",
-    "source_inputs_digest": "sha256:d8b1...",
+    "source_inputs_digest": "sha256:9d59...",
     "capabilities": { "contract_negotiation": "available" }
   },
   "execution_policy": {
