@@ -227,16 +227,40 @@ jobs:
   # Self-hosted, not windows-2022: the hosted image is a server SKU reporting
   # AppContainerBackend::is_available() == false (the same reason the
   # f20-windows-candidate job below runs self-hosted), so these tests can only
-  # execute on an AppContainer-capable Windows client. Skipped in candidate mode
-  # so a Sean-authorized f20_candidate dispatch still runs ONLY the two exact
-  # F20 native jobs.
+  # execute on an AppContainer-capable Windows client. (An SSH logon to the same
+  # box is NOT such an environment either: a non-interactive session-0 SSH logon
+  # reports AppContainerBackend::is_available() == false, so every one of these
+  # tests fails its gate there regardless of correctness — measured 2026-07-26 on
+  # SEANDESKTOP against the CI-certified-green granted_path_is_readable_then_revoked.
+  # These tests can only be observed through the runner service.)
   #
   # NOTE (20A-01 BACKLOG M6): this job shares the self-hosted box with ci.yml's
   # Windows leg and with 20A-02/03/04 measurements. Nothing serializes them; if a
   # measurement produces an inexplicable result, check contention first.
+  #
+  # CANDIDATE-MODE WIRING (REQ-native-r2 closeout). This job was previously
+  # skipped by `if: github.event.inputs.f20_candidate != 'true'`, which made it
+  # the ONLY runner of deny_ace_still_blocks_granted_read and
+  # normal_sid_only_grant_is_denied AND excluded it from the one dispatch mode
+  # that proves a candidate — so those two ACL tests had no observed green at
+  # any sealed SHA. It now runs in BOTH modes:
+  #   * non-candidate (cron / plain dispatch): unchanged behaviour. The candidate
+  #     job is skipped, so `!cancelled()` alone admits this job.
+  #   * candidate: runs AFTER f20-windows-candidate succeeds. `needs:` is what
+  #     serializes the two — both target the SAME single self-hosted box, and
+  #     concurrent compile load has previously corrupted a proof run (HANDOFF
+  #     trap 9), so this job must never run alongside the six-target proof.
+  # The six-target proof itself is untouched: f20-native-windows-proof.ps1 and
+  # its canonical $targets array are not modified, this job emits no
+  # F20_NATIVE_* markers (it runs the soak script's PHASE L), and it writes to a
+  # separate log/artifact that verifyNativeLog never reads.
   windows-live-acceptance:
     name: Windows live-acceptance ignored set (self-hosted msvc)
-    if: github.event.inputs.f20_candidate != 'true'
+    needs: f20-windows-candidate
+    if: >-
+      ${{ !cancelled()
+      && (github.event.inputs.f20_candidate != 'true'
+      || needs.f20-windows-candidate.result == 'success') }}
     runs-on:
       - self-hosted
       - Windows
@@ -247,7 +271,14 @@ jobs:
       contents: read
 
     steps:
+      # In candidate mode, pin the checkout to the AUTHORIZED CANDIDATE SHA so
+      # this job's ACL evidence binds to the same tree the six-target proof
+      # certifies. In non-candidate mode f20_expected_sha is the empty string,
+      # which actions/checkout treats exactly as "not supplied" (the default
+      # ref for the event) — the pre-existing behaviour.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.f20_expected_sha }}
 
       # Same rationale as the candidate job below: the self-hosted checkout dir
       # is owned by BUILTIN\Administrators while the runner service is
@@ -255,6 +286,26 @@ jobs:
       - name: Trust the checkout for git
         shell: pwsh
         run: git config --global --add safe.directory '*'
+
+      # Candidate-mode only: the same non-tautological binding the candidate
+      # jobs perform. Fails closed BEFORE any toolchain work if this checkout is
+      # not the explicitly authorized candidate.
+      - name: Assert checkout is the authorized candidate
+        if: github.event.inputs.f20_candidate == 'true'
+        shell: pwsh
+        env:
+          F20_EXPECTED_SHA: ${{ github.event.inputs.f20_expected_sha }}
+        run: |
+          $expected = "$env:F20_EXPECTED_SHA".Trim()
+          if ($expected -cnotmatch '^[0-9a-f]{40}$') {
+            throw "f20_expected_sha must be exactly 40 lowercase hex characters; got '$expected'"
+          }
+          $actual = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "git rev-parse HEAD failed" }
+          Write-Host "authorized_candidate=$expected checkout_head=$actual"
+          if ($actual -cne $expected) {
+            throw "wrong candidate: checkout HEAD is $actual, authorized candidate is $expected"
+          }
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
