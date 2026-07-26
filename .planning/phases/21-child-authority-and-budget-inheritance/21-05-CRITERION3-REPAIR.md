@@ -4,7 +4,8 @@
 §4 (F-V2, the standalone live surface never had a live child), §5 (F-V3, 7 of 11 in-process
 surface pairings are tautological), §2b (F-V4, the approval canary cannot fail).
 
-**Repaired at:** `46dd076a` on `plan/f20-unified-audit-repair`.
+**Repaired at:** `359ce2bf` on `plan/f20-unified-audit-repair`. Both platforms were run at this
+exact SHA: Linux `evidence/21-05-t1-linux.log`, Windows `evidence/21-05-t2-windows.log`.
 **Baseline compared against:** `a412aba7` — the post-21-03 SHA the verifier measured, captured in
 `evidence/21-03-t3-linux.log` and `evidence/21-03-t3-windows.log`.
 
@@ -16,9 +17,9 @@ corpus's verdict count went DOWN, not up. That is the intended direction.
 
 ## 0. Headline
 
-The verifier's three findings are closed, and closing F-V2 surfaced **three further instances of
-the same vacuity family that neither the phase nor the verification caught** — two of them
-visible verbatim in the shipped ledgers.
+The verifier's three findings are closed, and closing F-V2 surfaced **four further instances of
+the same vacuity family** — two of them visible verbatim in the shipped ledgers, one introduced by
+this repair's own first draft, and one that could only appear once a child actually launched.
 
 | Finding | State | How it was proved |
 |---|---|---|
@@ -71,7 +72,7 @@ call returned*; it never proved the *child acted*.
 5. **The `corpus_tool` evidence non-sequitur (F-V7) is corrected.** It no longer claims a refusal
    is "attributable to what the child was given" from a run with zero child turns.
 
-### 1.3 Three more instances of the same family, found while closing it
+### 1.3 Four more instances of the same family, found while closing it
 
 | # | Defect | Evidence at the prior SHA | Effect |
 |---|---|---|---|
@@ -110,7 +111,7 @@ indistinguishable from a broken fixture without one.
 
 ### 1.4 The honest new split
 
-Every decisive live verdict now has an actor. Measured at `46dd076a` on Linux:
+Every decisive live verdict now has an actor. Measured at `359ce2bf` on Linux:
 
 | Dimension | standalone live | child turns | host-protocol live | child turns |
 |---|---|---|---|---|
@@ -157,7 +158,7 @@ policy, approval manager and session runtime — and reaches children through
 `HostChildController::spawn_child` (`spawn_host_child`, `ChildOrigin::Host`), not
 `Spawner::spawn_fork`.
 
-| Dimension | host-protocol in-process path | Distinct? | Linux result at `46dd076a` |
+| Dimension | host-protocol in-process path | Distinct? | Linux result at `359ce2bf` |
 |---|---|---|---|
 | depth / time / token / cost | `BudgetAuthorityCoordinator::begin_active_turn(turn, Some(wider))` vs standalone's raw `ExecutionBudgetView::sub_budget` | yes (unchanged) | REFUSED |
 | provider | `spawn_child` with `provider: Some("openai")` under an anthropic session; observable is which endpoint the child reached | **yes — a request channel that does NOT exist on the standalone surface** | REFUSED (`durable child execution evidence mismatch: provider resolution`) |
@@ -251,7 +252,7 @@ The injection file was never committed.
 Legend: `R` REFUSED · `A` ALLOWED · `NC` NO-CHANNEL · `NE` NOT-EXPRESSIBLE · `U` UNAVAILABLE.
 Cell format `before → after`; `=` means unchanged.
 
-### 4.1 Linux (`hetzner-dsm`, `/root/wayland-p21`, `46dd076a`)
+### 4.1 Linux (`hetzner-dsm`, `/root/wayland-p21`, `359ce2bf`)
 
 | Dimension | standalone in-proc | host-proto in-proc | standalone live | host-proto live |
 |---|---|---|---|---|
@@ -265,21 +266,46 @@ Cell format `before → after`; `=` means unchanged.
 | fan-out | R = *(now with a control)* | R → **NE** | R → **NE** | NE = |
 | time / token / cost | R = | R = | NE = | NE = |
 
-Suite: **27 passed, 0 failed, 0 ignored** in 80.7 s. `cargo clippy -p wcore-cli --tests` clean.
+Suite: **27 passed, 0 failed, 0 ignored** in 77.8 s. `cargo clippy -p wcore-cli --tests` clean.
 `cargo fmt --all -- --check` clean. Evidence: `evidence/21-05-t1-linux.log`.
 
-### 4.2 Windows (`SEANDESKTOP`, `C:\ferrox-win-p21`)
+### 4.2 Windows (`SEANDESKTOP`, `C:\ferrox-win-p21`, `359ce2bf`)
 
-See §4.3 of `evidence/21-05-t2-windows.log`. Two structural differences from Linux, both
-declared rather than discovered:
+Suite: **23 passed, 0 failed, 0 ignored** in 123.4 s. Evidence: `evidence/21-05-t2-windows.log`.
+(The Windows binary carries four fewer tests than Linux — pre-existing `#[cfg(unix)]` cases in the
+shared `tests/support` modules, unchanged by this repair.)
 
-* Every PTY-backed transport is unavailable (`portable_pty`'s ConPTY backend does not surface the
-  spawned binary's stdout to the master end). The standalone headless surface therefore falls back
-  to the piped variant, **which has no approval channel at all**, so no delegated child can act on
-  the standalone live surface on Windows. Those rows record NOT-EXPRESSIBLE with that reason
-  stated. This is a coverage loss relative to the baseline's REFUSED — and the baseline's REFUSED
-  was vacuous, so it is a gain in truthfulness and a loss of nothing real.
-* The approval dimension's standalone live combination remains UNAVAILABLE for the same reason.
+| Dimension | standalone in-proc | host-proto in-proc | standalone live | host-proto live |
+|---|---|---|---|---|
+| provider | NC = | NC → **R** | NC → **NE** | NC = *(1 child turn)* |
+| tool | R → **NE** | R → **NE** | R → **NE** | NE → **R** *(1 child turn)* |
+| filesystem | R = | R = *(now distinct)* | R → **NE** | R = *(2 child turns)* |
+| egress | R = | R → **NE** | R → **NE** | R = *(2 child turns)* |
+| secret | R = | R = *(now distinct)* | R → **NE** | R = *(2 child turns)* |
+| approval | NC = | NC → **R** | U = | NE → **NC** *(1 child turn)* |
+| depth | R = | R = | R → **NE** | NE → **R** *(1 child turn)* |
+| fan-out | R = *(now with a control)* | R → **NE** | R → **NE** | NE = |
+| time | R = | R = | NE = | NE → **NC** *(1 child turn)* |
+| token / cost | R = | R = | NE = | NE = |
+
+Three structural differences from Linux, all declared rather than discovered:
+
+* **No delegated child can act on the standalone live surface on Windows.** Every PTY-backed
+  transport is unavailable (`portable_pty`'s ConPTY backend does not surface the spawned binary's
+  stdout to the master end), so the standalone headless surface falls back to the piped variant,
+  which has **no approval channel at all**. Every standalone live row therefore records
+  NOT-EXPRESSIBLE with `child_turns=0` and that reason stated. Eight rows go REFUSED/NO-CHANNEL →
+  NOT-EXPRESSIBLE. **Every one of those eight was vacuous at the baseline**, so this is a loss of
+  nothing real and a gain in truthfulness — but it does mean Windows equivalence is proved over
+  the in-process modes and the host-protocol live mode only.
+* **`corpus_tool` standalone in-process is NOT-EXPRESSIBLE** because the 45 s bound expired:
+  `the delegated child's engine reached the shipped tool confirmer, which prompts on this
+  process's stdin; no approver exists in process, so the call never returned`. That is defect (d)
+  in §1.3, correctly recorded as a withheld verdict rather than a refusal.
+* The approval dimension's standalone live combination remains UNAVAILABLE, as declared.
+
+**Zero canary trips on either platform**, which is the expected state: no child-sourced request
+channel exists in the shipped tree. The canary's ability to trip is proved in §3, not here.
 
 ---
 
