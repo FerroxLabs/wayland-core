@@ -390,6 +390,20 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
 
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
+    // stderr is drained too. A run that produced no provider call usually says
+    // why on stderr, and a transcript that omits it turns a diagnosable failure
+    // into an unexplained absence.
+    let stderr = child.stderr.take().expect("stderr");
+    let stderr_sink = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_sink);
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if let Ok(mut buffer) = stderr_writer.lock() {
+                buffer.push_str(&line);
+                buffer.push('\n');
+            }
+        }
+    });
     let _ = writeln!(
         stdin,
         "{{\"type\":\"message\",\"msg_id\":\"1\",\"content\":\"delegate the task\"}}"
@@ -479,7 +493,8 @@ fn run_headless(world: &LiveWorld) -> LiveRun {
     match output {
         Ok(output) => {
             let transcript = format!(
-                "{}{}",
+                "exit status {:?}\n--- stdout ---\n{}--- stderr ---\n{}",
+                output.status.code(),
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
@@ -822,7 +837,7 @@ fn live_probe(entry: &CorpusEntry, transport: LiveTransport) -> ProbeResult {
 
 fn head(text: &str) -> String {
     let flat: String = text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
-    let cut: String = flat.chars().take(240).collect();
+    let cut: String = flat.chars().take(900).collect();
     format!("transcript head: {cut}")
 }
 
