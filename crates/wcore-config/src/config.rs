@@ -4372,6 +4372,28 @@ fn restrict_untrusted_project_config(project: ConfigFile) -> ConfigFile {
     restricted.security.enabled = project.security.enabled;
     restricted.anvil.enabled = project.anvil.enabled;
 
+    // F23A-01-H1: `skills_lifecycle = false` is an authority boundary (see the
+    // `ObservabilityFileConfig` doc comment), and dropping it here made it fail
+    // OPEN — an untrusted workspace is the default state of any freshly cloned
+    // or freshly created project, so an operator's written opt-out silently
+    // re-defaulted to `true` and the agent kept drafting skills from that
+    // project's traffic into the GLOBAL skills directory. Measured live against
+    // the shipped binary: untrusted + project `false` advertised the drafting
+    // capability `ready`, while the same tree after `--trust-workspace`
+    // correctly advertised it `unavailable`.
+    //
+    // Only an explicit `false` is carried forward. `Some(true)` is deliberately
+    // NOT preserved: the merge below ANDs the two sources, so a project `true`
+    // could never grant anything, but forwarding only the restricting value
+    // keeps this allowlist's "project may narrow, never grant" rule true by
+    // construction rather than by a downstream operator. An untrusted
+    // repository can therefore suppress lifecycle drafting for its own
+    // workspace and nothing else — a strictly smaller denial than the
+    // `read_only` and `max_turns` narrowing this same function already honours.
+    if project.observability.skills_lifecycle == Some(false) {
+        restricted.observability.skills_lifecycle = Some(false);
+    }
+
     if !project.providers.is_empty()
         || !project.profiles.is_empty()
         || !project.mcp.servers.is_empty()
@@ -7264,6 +7286,58 @@ skills_lifecycle = true
         assert!(
             !project_false.observability.resolved_skills_lifecycle(),
             "global absence must not erase a project opt-out"
+        );
+    }
+
+    /// F23A-01-H1 regression.
+    ///
+    /// Every pre-existing `skills_lifecycle` merge test above goes through
+    /// `merge_config_files`, which hardcodes `project_trusted = true`. The
+    /// untrusted path — which is the DEFAULT state of any freshly created or
+    /// freshly cloned project — was never covered, so a green suite coexisted
+    /// with a product that ignored the operator's project-level opt-out. This
+    /// test drives `merge_config_files_with_trust` directly so the untrusted
+    /// configuration is proved rather than assumed.
+    #[test]
+    fn untrusted_project_skills_lifecycle_opt_out_survives_restriction() {
+        // The failing shape: global on (or absent), project explicitly off,
+        // workspace not trusted. Before the fix this resolved to `true`.
+        for global in [None, Some(true)] {
+            let merged = merge_config_files_with_trust(
+                lifecycle_config(global, false),
+                lifecycle_config(Some(false), false),
+                false,
+            );
+            assert!(
+                !merged.observability.resolved_skills_lifecycle(),
+                "an untrusted project's explicit skills_lifecycle=false must survive \
+                 the untrusted-config restriction (global={global:?}); dropping it makes \
+                 a documented authority boundary fail OPEN"
+            );
+        }
+
+        // The restriction stays one-directional: an untrusted project must not
+        // be able to turn the lifecycle ON against a global opt-out.
+        let cannot_grant = merge_config_files_with_trust(
+            lifecycle_config(Some(false), false),
+            lifecycle_config(Some(true), false),
+            false,
+        );
+        assert!(
+            !cannot_grant.observability.resolved_skills_lifecycle(),
+            "an untrusted project must never be able to grant the lifecycle"
+        );
+
+        // Absence on both sides still yields the smart default, so the fix did
+        // not turn the feature off for everyone who never configured it.
+        let both_absent = merge_config_files_with_trust(
+            lifecycle_config(None, false),
+            lifecycle_config(None, false),
+            false,
+        );
+        assert!(
+            both_absent.observability.resolved_skills_lifecycle(),
+            "the smart default must survive when neither source configures lifecycle"
         );
     }
 
