@@ -17,6 +17,12 @@ use wcore_exec_backend::contract::ExecutionTask;
 use wcore_exec_backend::receipt::ExecutionReceipt;
 use wcore_exec_backend::{reference_backend_named, reference_backends};
 
+/// The built-in deterministic reference task's identity. Fixed, not derived
+/// from the backend, because Success Criterion 1 is an EQUIVALENCE claim about
+/// one task and not a reach claim about four.
+const REFERENCE_TASK_ID: &str = "f25-reference";
+const REFERENCE_TASK_NONCE: &str = "f25-reference-nonce";
+
 #[derive(Args, Debug)]
 pub struct BackendArgs {
     #[command(subcommand)]
@@ -178,11 +184,20 @@ fn load_task(path: Option<&std::path::Path>, backend: &str) -> Result<ExecutionT
             task.validate()?;
             Ok(task)
         }
-        None => Ok(reference_task(
-            &format!("ref-{backend}"),
-            &format!("ref-nonce-{backend}"),
-            reference_budget(),
-        )),
+        // THE SAME task, byte for byte, on every backend — including its id
+        // and nonce. Suffixing the id per backend would make four runs four
+        // DIFFERENT tasks, and the equivalence diff would then be comparing
+        // things that were never supposed to be equal. That exact mistake was
+        // made and caught by the first live run on 2026-07-26, which reported
+        // DIVERGENT on `task` and `events` while every content digest matched.
+        None => {
+            let _ = backend;
+            Ok(reference_task(
+                REFERENCE_TASK_ID,
+                REFERENCE_TASK_NONCE,
+                reference_budget(),
+            ))
+        }
     }
 }
 
