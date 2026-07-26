@@ -370,11 +370,16 @@ fn secure_private_snapshot_file(_file: &File, path: &Path) -> Result<(), Journal
     })
 }
 
-#[cfg(test)]
-pub(super) fn write_private_snapshot_fixture(
-    path: &Path,
-    bytes: &[u8],
-) -> Result<(), JournalError> {
+/// Write a fixture file carrying the same privacy the journal writer installs.
+///
+/// Exposed for this crate's integration tests. `std::fs::write` plus a Unix
+/// `chmod` is not portable here: on Windows the created file inherits the
+/// directory's DACL, which `validate_private_snapshot_file` correctly rejects
+/// as `SnapshotUnsafePermissions`. Fixtures must therefore go through the same
+/// platform-specific hardening as real snapshots (mode 0600 on Unix, a
+/// protected owner-only DACL on Windows).
+#[doc(hidden)]
+pub fn write_private_snapshot_fixture(path: &Path, bytes: &[u8]) -> Result<(), JournalError> {
     let mut file = File::create(path).map_err(|source| JournalError::Io {
         path: path.to_path_buf(),
         source,

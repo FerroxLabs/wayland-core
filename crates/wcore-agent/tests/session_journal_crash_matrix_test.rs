@@ -10,20 +10,17 @@ use wcore_agent::session_journal::{
     ProviderAttemptNotStartedReason, ProviderAttemptPurpose, ProviderStreamEvent,
     ReducedSessionState, SessionEvent, SessionJournal, SessionSnapshot, StoredToolInput,
     ToolNotStartedReason, ToolResolution, ToolResolutionSource, ToolUnknownReason, replay_state,
-    snapshot_path_for, state_payload_digest,
+    snapshot_path_for, state_payload_digest, write_private_snapshot_fixture,
 };
 use wcore_types::tool::ToolEffectContract;
 
 const SESSION_ID: &str = "crash-matrix-session";
 
 fn write_private_snapshot(path: &std::path::Path, bytes: impl AsRef<[u8]>) {
-    std::fs::write(path, bytes).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    }
+    // Must install the same privacy the journal writer does on every platform:
+    // on Windows a plain `std::fs::write` inherits the directory DACL, which
+    // the snapshot authority checks correctly reject.
+    write_private_snapshot_fixture(path, bytes.as_ref()).unwrap();
 }
 
 const FRAME_HEADER_BYTES: usize = 12;

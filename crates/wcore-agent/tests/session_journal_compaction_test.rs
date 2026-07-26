@@ -2,7 +2,7 @@ use serde_json::json;
 use wcore_agent::session_journal::{
     JournalError, LEGACY_SESSION_SNAPSHOT_SCHEMA_VERSION, SessionEvent, SessionJournal,
     SessionSnapshot, TurnCompletion, replay_from_snapshot, replay_state, snapshot_path_for,
-    state_payload_digest,
+    state_payload_digest, write_private_snapshot_fixture,
 };
 
 // Exact schema-v4 bytes emitted by the predecessor journal/snapshot writer.
@@ -17,14 +17,10 @@ fn write_snapshot_fixture(path: impl AsRef<std::path::Path>, snapshot: &SessionS
 }
 
 fn write_private_file(path: impl AsRef<std::path::Path>, bytes: impl AsRef<[u8]>) {
-    let path = path.as_ref();
-    std::fs::write(path, bytes).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    }
+    // Must install the same privacy the journal writer does on every platform:
+    // on Windows a plain `std::fs::write` inherits the directory DACL, which
+    // the snapshot authority checks correctly reject.
+    write_private_snapshot_fixture(path.as_ref(), bytes.as_ref()).unwrap();
 }
 
 fn authority_head_path(journal_path: &std::path::Path) -> std::path::PathBuf {

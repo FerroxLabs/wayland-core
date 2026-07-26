@@ -41,7 +41,7 @@ pub(crate) use reducer::{
 mod snapshot;
 pub use snapshot::{
     LEGACY_SESSION_SNAPSHOT_SCHEMA_VERSION, SESSION_SNAPSHOT_SCHEMA_VERSION, SessionSnapshot,
-    load_snapshot, snapshot_path_for,
+    load_snapshot, snapshot_path_for, write_private_snapshot_fixture,
 };
 use snapshot::{SnapshotAuthorityBinding, SnapshotAuthorityHead};
 
