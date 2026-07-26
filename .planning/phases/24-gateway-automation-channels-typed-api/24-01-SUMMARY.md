@@ -211,11 +211,40 @@ No CRITICAL findings. The one HIGH is fixed.
   script emitted, in `24-01-decision-evidence/`. Scratch checkout
   `C:\f24-01-probe` removed; absence confirmed; no stray processes left.
 
-**Windows CI clippy was NOT run.** The Windows arms of `pidlock.rs` and
-`service.rs` (`LockFileEx`, `OpenProcess`, `creation_flags`) have never been
-compiled. Windows CI runs clippy `-D warnings` BEFORE tests, so a lint
-failure there means the tests never run. This is a real unverified surface
-and the most likely place this branch breaks.
+### Real Windows verification (added after the above, commit `8b582851`)
+
+The gap named above — "the Windows arms have never been compiled" — was
+closed rather than left standing. The crate has zero internal `wcore-*`
+dependencies, so it compiles standalone against the same crates.io versions
+the workspace pins; that made a real Windows run affordable without touching
+the phase's measurement checkout `C:\ferrox-win`. Scratch directory
+`C:\f24-gw-check` removed afterwards; absence confirmed.
+
+**It found a genuine Windows-only red.** `is_registerable_binary` was
+asserted against `/opt/x/wayland-core`, which has no prefix component on
+Windows, so `Path::is_absolute()` reports false there and the assertion
+failed. This is exactly the class AGENTS.md names: a hardcoded Unix path is
+fine for pure string work and needs a per-platform variant the moment it
+reaches `is_absolute()`. Fixed, and the trap that actually matters on that
+platform was added while there — a drive-RELATIVE path (`C:wayland-core.exe`)
+looks absolute and is not, resolving against the drive's current directory,
+which is precisely the substitution the function exists to refuse.
+
+On `SEANDESKTOP`, after the fix: **42 tests green** (18 unit, 7
+`ledger_exactly_once`, 9 `lifecycle_contract`, 8 `pidlock_hostile`) and
+**clippy `-D warnings` clean**. The pidlock suite is the one that counts: it
+exercises actual `LockFileEx` MANDATORY locking, so the one-byte sentinel,
+the unblocked status reader, the verbatim-prefix stripping and the
+representation-insensitive home comparison are proved on the platform whose
+semantics they were written for, rather than inferred from Linux.
+
+Linux re-verified green after the edit; `cargo fmt --all -- --check` clean.
+
+**Still not compiled on Windows:** the `wcore-cli` change (the `cron.rs`
+detach flags). It compiles on Linux, where the `#[cfg(windows)]` block is
+inert, so the `creation_flags` call itself is unbuilt. The flag VALUES are
+pinned by a test that does run on Windows, and the identical flag set was
+measured working in the probe, but the call site is unverified.
 
 ## Self-Check
 

@@ -104,12 +104,19 @@ died the moment that session returned, and nothing reported it.
 
 **Still broken / unverified, in priority order.**
 
-1. **The Windows arms of the new code have never been compiled.**
-   `pidlock.rs`'s `LockFileEx`/`OpenProcess` and `service.rs`'s
-   `creation_flags` path are `#[cfg(windows)]` and Windows CI was not run.
-   Windows CI runs clippy `-D warnings` BEFORE tests, so a lint failure
-   means the tests never run. **This is the most likely place this branch
-   breaks and it should be the integrator's first check.**
+1. ~~**The Windows arms of the new code have never been compiled.**~~
+   **CLOSED (`8b582851`).** `wcore-gateway` was compiled, linted and tested
+   on real Windows: 42 tests green including the 8 hostile pidlock cases
+   against actual `LockFileEx` mandatory locking, clippy `-D warnings`
+   clean. It found one genuine Windows-only red — a `/opt/...` literal
+   passed to `is_absolute()`, which is false on Windows — now fixed with a
+   per-family assertion plus the drive-relative trap that was missing.
+   **Residual:** the `wcore-cli` `cron.rs` `creation_flags` CALL SITE is
+   still unbuilt on Windows (the crate was only built on Linux, where that
+   block is inert). The flag values are pinned by a test that does run on
+   Windows and the identical set was measured working in the probe, but the
+   call site itself is unverified. That remains the integrator's first
+   check.
 2. **Criterion 5's recovery clause is unmeasured for the authorized Windows
    mechanism.** Task Scheduler's restart-on-failure is capped and delayed,
    and is genuinely weaker than an SCM recovery policy. The panel asserted
