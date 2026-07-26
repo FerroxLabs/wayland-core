@@ -19,6 +19,14 @@
 - **Activation**: `wayland-core --json-stream [other flags]`
 - **Lifecycle**: One process per conversation; process stays alive for multi-turn
 
+> **Normative source.** This document is prose guidance. The machine-readable,
+> digest-pinned producer contract in `crates/wcore-protocol/contracts/desktop/v1/`
+> (JSON Schemas, canonical fixtures, adversarial vectors, `manifest.json`) is the
+> normative wire definition and is byte-checked in CI by `wcore-contract check`.
+> It currently covers 18 commands and 49 events; this document does not yet
+> narrate every one of them. Where the two differ, the corpus wins — and the
+> difference is a documentation bug worth reporting.
+
 ## 1. Agent → Client Events (stdout)
 
 Every line is a JSON object with a `type` field.
@@ -30,24 +38,56 @@ Emitted once after initialization completes. Client MUST wait for this before se
 ```json
 {
   "type": "ready",
-  "version": "0.2.0",
+  "version": "0.12.25",
   "session_id": "a1b2c3",
   "capabilities": {
     "tool_approval": true,
     "thinking": true,
     "effort": false,
     "effort_levels": [],
-    "modes": ["default", "auto_edit", "yolo"],
+    "modes": ["default", "auto_edit", "force"],
     "current_mode": "default",
     "mcp": true
+  },
+  "contract": {
+    "name": "wayland-desktop-core",
+    "major": 1,
+    "minor": 8,
+    "generator": "wcore-desktop-contract-gen/11",
+    "fixture_digest": "sha256:42f1...",
+    "schema_digest": "sha256:e5d1...",
+    "source_inputs_digest": "sha256:d8b1...",
+    "capabilities": { "contract_negotiation": "available" }
+  },
+  "execution_policy": {
+    "critical": true,
+    "contract_version": "1.0",
+    "revision": 0,
+    "reason": "launch",
+    "effective_at_unix_ms": 1721000000000,
+    "policy": {
+      "posture": "smart",
+      "approvals": "prompt",
+      "sandbox": "required",
+      "source": "desktop_local_launch",
+      "managed_floor_active": false
+    }
   }
 }
 ```
+
+`contract` and `execution_policy` are **required**. The reference host observer
+(`wcore_protocol::contract::HostContractObserver`) fails closed before
+negotiation when either is absent or malformed, and `ready` must be the first
+line on the stream. See the pinned corpus at
+`crates/wcore-protocol/contracts/desktop/v1/` for the byte-exact shape.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `version` | string | Protocol version (semver) |
 | `session_id` | string? | Session ID (omitted when sessions are disabled in config) |
+| `contract` | object | Pinned producer-contract descriptor. Required. Host compares `name`, `major`, `minor`, `generator` and all three digests against its own pin and fails closed on any mismatch |
+| `execution_policy` | object | Launch policy snapshot at `revision` 0 with `reason` `launch` or `resume`. Required. Same envelope as the `execution_policy` event (§1.1a) |
 | `capabilities.tool_approval` | bool | Whether agent supports pause-and-wait tool approval |
 | `capabilities.thinking` | bool | Whether current provider supports extended thinking |
 | `capabilities.effort` | bool | Whether current provider supports reasoning_effort |
@@ -55,6 +95,9 @@ Emitted once after initialization completes. Client MUST wait for this before se
 | `capabilities.modes` | string[] | Available approval modes for `set_mode` command |
 | `capabilities.current_mode` | string | Currently active approval mode |
 | `capabilities.mcp` | bool | Whether MCP tools are available |
+| `capabilities.memory_enabled` | bool (W0) | Long-term cross-session memory is active |
+| `capabilities.online_evolution` | bool (W0) | Online GEPA evolution is active |
+| `capabilities.user_model_backend` | string (W0) | Backend serving the user-selected model (e.g. `local`) |
 | `capabilities.streaming_tools` | bool (W0) | Engine will emit `tool_chunk` events for streaming tool results (W7) |
 | `capabilities.sub_agent_traces` | bool (W0) | Engine will emit `sub_agent_event` with `parent_call_id` (W7) |
 | `capabilities.cost_attribution` | bool (W0) | Engine will emit per-turn/session `cost` events (W6) |
@@ -85,20 +128,44 @@ mint authority.
 ```json
 {
   "type": "execution_policy",
+  "critical": true,
+  "contract_version": "1.0",
+  "revision": 1,
+  "reason": "mode_change",
+  "effective_at_unix_ms": 1721000000100,
   "policy": {
     "posture": "smart",
-    "approvals": "bypass",
+    "approvals": "auto_edit",
     "sandbox": "required",
-    "source": "desktop_local_launch",
+    "source": "protocol",
     "managed_floor_active": false
   }
 }
 ```
 
+All six top-level fields are **required**. `critical` is always `true`: this is
+an authority-critical sub-contract, so a contract-aware host that does not
+understand the event or its `contract_version` major must fail closed rather
+than drop it. `contract_version` is the execution-policy sub-contract version
+(currently `1.0`; only major `1` is accepted).
+
+`revision` is session-monotonic. It starts at `0` in the `ready` snapshot
+(`reason` `launch` or `resume`) and advances by exactly one for every accepted
+policy change whose serialized `policy` bytes actually changed — an accepted
+no-op `set_mode` therefore does **not** consume a revision. `reason` is
+`launch`, `mode_change`, `resume`, or `expiry`. `effective_at_unix_ms` is
+audit/display evidence only; monotonic runtime deadlines remain the authority
+for dangerous-session expiry.
+
+Reducer rules (`wcore_protocol::execution_policy::ExecutionPolicySequence`):
+a byte-identical repeat of the current revision is an idempotent `Duplicate`; a
+same-revision snapshot with different bytes, a gapped or stale revision, an
+unsupported `contract_version` major, and `critical: false` all fail closed.
+
 `posture` is `smart`, `managed`, or `dangerous`. `approvals` is `prompt`,
-`auto_edit`, or `bypass`; `sandbox` is `required` or `bypass`. Dangerous events
-also carry `dangerous_activation_id` and `dangerous_expires_at_unix_ms`.
-Unknown hosts must drop this additive event under the Host Decoder Contract.
+`auto_edit`, or `bypass`; `sandbox` is `required` or `bypass`. Dangerous
+snapshots also carry `dangerous_activation_id` and
+`dangerous_expires_at_unix_ms`; non-dangerous snapshots must omit both.
 
 ### 1.1b `workspace_policy`
 
