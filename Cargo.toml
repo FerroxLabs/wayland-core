@@ -124,6 +124,11 @@ members = [
     # v0.8.1 U7: cron scheduler — memory-resident scheduled triggers with
     # 3 target types (slash command, channel message, skill invocation).
     "crates/wcore-cron",
+    # Phase 24 plan 24-01: persistent gateway runtime — lifecycle state
+    # machine, Windows-safe pid lock, drain, and the exactly-once delivery
+    # ledger. Mid layer: depends downward only and must never reach
+    # wcore-agent. Consumed by 24-02 (automation) and 24-03 (support bundle).
+    "crates/wcore-gateway",
     # v0.6.1 H2: output validator + PII scrubber primitives (R8 + Sec5).
     "crates/wcore-safety",
     # v0.6.5 Task 3.1: subprocess plugin host (JSON-RPC over stdio,
@@ -203,6 +208,9 @@ wcore-channel-msteams  = { path = "crates/wcore-channel-msteams" }
 # hand-wire the 7 channel crates.
 wcore-channels-registry = { path = "crates/wcore-channels-registry" }
 wcore-cron             = { path = "crates/wcore-cron" }
+# Phase 24 plan 24-01: the persistent gateway runtime. 24-02 consumes its
+# lifecycle states and delivery ledger; 24-03 consumes its support bundle.
+wcore-gateway          = { path = "crates/wcore-gateway" }
 wcore-safety        = { path = "crates/wcore-safety" }
 # v0.6.5 Task 1.5 — wcore-agent host-side adapter reifies the user-model
 # plugin shell. Same host↑plugin dep asymmetry as wcore-browser/wcore-cua.
