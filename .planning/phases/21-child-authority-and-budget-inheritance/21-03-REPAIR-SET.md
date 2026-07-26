@@ -275,18 +275,144 @@ DELIVERABILITY-SUBSET :: FITS :: 2 :: F21-02-01 and F21-02-02 only, with F21-02-
 
 ## 3. Blast radius, measured
 
-Populated by Task 2 Step 1. Every candidate applied ALONE in the throwaway
-Hetzner worktree `/root/wayland-p21-probe`, reverted between candidates, each
-emitting its own verdict line into
-`evidence/21-03-t2-blastradius.log`.
+Every candidate was applied ALONE at the exact file and symbol Task 1 named, in
+the throwaway Hetzner worktree `/root/wayland-p21-probe` created from the triage
+commit and **deleted afterwards**, reverted between candidates so each is
+measured alone. Baseline and post-change counts over the five crates the three
+seams touch: `wcore-agent`, `wcore-types`, `wcore-permissions`, `wcore-protocol`,
+`wcore-budget`. Full transcript: `evidence/21-03-t2-blastradius.log`.
+
+```
+BLAST-RADIUS :: F21-02-01 :: WIDE :: 3421 :: 3420 :: -1
+BLAST-RADIUS :: F21-02-02 :: WIDE :: 3421 :: 3420 :: -1
+BLAST-RADIUS :: F21-02-03 :: WIDE :: 3421 :: 3398 :: -23
+```
+
+**Read the composition, not the label.** Baseline 3421 passed with ONE
+pre-existing non-passing test unrelated to all three candidates
+(`wcore-agent::workflow_limits_test fix1_dispatch_budget_aborts_with_partial_result`,
+a 60s timeout under concurrent build load that passed on a separate quiet run).
+
+- **F21-02-01 — 1 verdict-changing test**, and it is only
+  `wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte`.
+  `source_inputs_digest` moved `d8b1a8b5…` → `9c7b98e2…`. **No functional test
+  changed verdict.**
+- **F21-02-02 — 1 verdict-changing test**, the same contract pin.
+  `source_inputs_digest` moved `d8b1a8b5…` → `5b0263bc…`. **No functional test
+  changed verdict**, which independently CORROBORATES the corpus's NO-CHANNEL
+  measurement: nothing in production constructs `PolicySource::Child`.
+- **F21-02-03 — 23 verdict-changing tests**: the contract pin plus **22
+  functional tests** across `dangerous_lease_e2e_test` (2),
+  `engine::audit_2026_05_22_tests` (4), `execution_posture_e2e_test` (1),
+  `json_stream_approval_test` (3), `output_compaction_test` (2),
+  `runaway_loop_test` (5), `typed_execution_policy_e2e_test` (3) and
+  `w9_1_skill_drafting_per_turn` (2). This is the deny-by-default catastrophe
+  arriving as a number: turning the gate on with an empty grant list stops tool
+  dispatch across the engine.
+
+Nothing returned BREAKS-BUILD, so no candidate was disqualified on that ground.
+
+**The contract-pin cost, measured rather than feared.** The baseline digest
+`sha256:d8b1a8b5…` matches the checked-in fixture exactly, so the tree is
+in-contract and any SOURCE_INPUT edit moves it. `schema_digest` did NOT move for
+any candidate — only the source-provenance fingerprint. `git log` over
+`crates/wcore-protocol/contracts/desktop/v1/` shows 16 regenerations, three of
+them titled verbatim `chore(protocol): re-pin Desktop contract provenance
+digests`, and commit `b6936299`'s message documents this exact situation and its
+resolution. The repo ships `just desktop-contract-check` and a
+`wcore-contract generate` subcommand for it. The pin failure is therefore
+**established routine maintenance with a documented procedure**, not a wire
+break.
+
+**A defect in the binding constraint itself, recorded not resolved.** The
+admission gate requires "re-pinning D1 section 3 as an explicit contract bump".
+`.planning/intel/DESKTOP-PROTOCOL-CHECKPOINT.md` is four paragraphs, **has no
+section 3, and pins no digests at all**. That clause names a thing that does not
+exist; the digests it is about live in this repo's own contract corpus. The
+satisfiable parts of the constraint — re-run `digest`, run `check`, record the
+new digests — are honoured by this plan. D1's own closing sentence reads: "Both
+receipts are required for a whole-Wayland claim; neither blocks Core-only engine
+claims outside the shared contract."
 
 ## 4. The panel
 
-Populated by Task 2 Steps 2-5.
+One shared bundle (`21-03-t2-panel/panel-prompt.txt`, 24276 bytes) carrying the
+question verbatim, all four options in rotated order with pros and cons copied
+unaltered, the full triage table with both change-class flags, the two crate
+headers quoted from source, the deliverability estimate and every probe verdict
+line. Each member's response captured verbatim, stdout and stderr together.
+
+```
+PANEL-VOTE :: codex-sol :: authorize-partial :: codex-sol.raw.txt
+PANEL-VOTE :: gemini-pro :: authorize-partial :: gemini-pro.raw.txt
+PANEL-VOTE :: kimi-k3 :: authorize-partial :: kimi-k3.raw.txt
+PANEL-VOTE :: claude-adversarial :: disprove-and-correct :: claude-adversarial.raw.txt
+PANEL-DECISION :: authorize-partial :: MAJORITY
+PANEL-RATIONALE :: Three of four members independently selected authorize-partial on one shared bundle, a strict 3-1 majority over the adversarial member's disprove-and-correct, so the basis is MAJORITY and no evidentiary tiebreak was required. The set-level choice was never close: authorize-full requires F21-02-03, whose probe measured 22 functional tests changing verdict because PolicyEngine::check is deny-by-default over an empty grant list, and whose useful form needs a grant-inheritance model in a crate whose header states it deliberately has none - the change census OOP-2 routed out of this phase. decline-all discards a measured, functionally contained repair for a cost the repository already pays as routine maintenance three commits running. disprove-and-correct is unavailable as a matter of rule, because the plan permits DISPROVE only where the triage proposed it and the triage proposed FIX for all three. What WAS close, and what the per-finding rows below turn on, is the split inside authorize-partial. gemini-pro and kimi-k3 authorized both F21-02-01 and F21-02-02. codex-sol authorized only F21-02-02 and declined F21-02-01, on the ground that the proposed bootstrap.rs wiring covers one production spawner construction site while several others remain fail-open. That claim was NOT taken on the panel's word - it was independently re-verified against the live tree, and it is TRUE: crates/wcore-cli/src/workflow.rs:173 and crates/wcore-cli/src/crucible.rs:36 have no cfg(test) attribute anywhere above them, and crates/wcore-agent/src/engine.rs:12061 and crates/wcore-agent/src/orchestration/anvil/seat.rs:91 are likewise production. At all four, parent_tool_authority stays None and the intersection is skipped, so the candidate closes one of five doors. Worse, three of those four construct their spawner from a Config with no parent ToolRegistry in scope, so there is nothing available there to intersect against without making parent tool authority a first-class concept across the spawner API - an architecture change, not a wiring line, and not one that fits a two-iteration cap. The per-finding outcome therefore follows the verified evidence rather than the headcount, which is what a measured panel is for. BLAST-RADIUS-ACCEPTED: F21-02-02 is authorized at a measured radius of exactly 1 verdict-changing test, TESTS_BEFORE=3421 TESTS_AFTER=3420, and that one test is the Desktop contract provenance pin rather than any functional test. That cost is worth paying because the repository's own history discharges it as routine - three recent commits titled chore(protocol) re-pin Desktop contract provenance digests, a documented just desktop-contract-check target, and schema_digest unmoved - while the benefit is converting a property that currently holds only by the absence of a request channel into one that holds by enforcement, which is the precise vacuity Phase 21 was created to eliminate.
+PANEL-DISSENT :: disprove-and-correct :: The adversarial member made the case nobody else would: that F21-02-02 is textbook DISPROVE on the plan's own definition, because three independent measurements agree the input cannot be constructed - the corpus records NO-CHANNEL on all eight combinations, PolicySource::Child has no production constructor, and the probe changed zero functional tests - so repairing it ships a real wire-provenance bump for a defect nothing can reach. It did not carry for two reasons the member itself recorded. Phase 21 exists precisely because the property holds VACUOUSLY; treating unreachability as the defence inverts the phase's purpose and would forbid ever converting a vacuous property into an enforced one. And the plan permits DISPROVE only over a finding the triage proposed DISPROVE for, so selecting it here would be authorizing a corpus edit over a finding triaged FIX - the exact forgery the RED-over-GREEN rule names.
+PANEL-DISSENT :: authorize-full :: Argued by no member. Recorded with the reason it could not be argued: its own cons make it available only if the deliverability estimate says the set fits two iterations, and the triage said EXCEEDS before the probe ran, after which the probe measured F21-02-03 at 22 functional tests changing verdict. Choosing it would have been a waiver dressed as a verdict.
+PANEL-DISSENT :: decline-all :: Argued by no member, and rejected explicitly by three. Its strongest form is that with F21-02-01 declined, the phase closes with two of three HIGH findings open anyway, so the marginal value of the one remaining repair is small against a Desktop contract bump the consumer lane cannot renegotiate from this checkout. It did not carry because the bump is provenance-only with schema_digest unmoved, the repository discharges that class of change as routine maintenance, and F21-02-02 is the one finding in the set whose repair is both measured functionally inert and squarely on the phase's stated purpose.
+```
+
+### Independence caveat, recorded because concealing it would be worse
+
+The four captures were written into the same directory the members were invoked
+from. `gemini-pro` touched no sibling file (0 references). `kimi-k3` observed
+that the sibling captures existed and **explicitly declined to read them**,
+stating so in its transcript. `codex-sol` ran a ripgrep across the parent
+directory that surfaced both `gemini-pro.raw.txt:127` — gemini's position
+paragraph — and `21-03-PLAN.md` including this task's own gate scripts. Its
+set-level vote is therefore **not independent** and is recorded as such.
+
+Two things bound the damage, and neither is offered as an excuse. `codex-sol`
+reached a per-finding conclusion that DIFFERS from gemini's, so it did not
+simply copy. And the fact its dissent turns on — four unwired production spawner
+construction sites — was re-verified directly against the live source tree
+before being acted on, so the decision rests on ground truth rather than on a
+vote that may have been contaminated. Even discarding `codex-sol`'s vote
+entirely, `authorize-partial` still leads 2-1 and remains the modal position.
+The procedure defect is real and belongs in any future plan's panel setup: give
+each member its own working directory.
 
 ## 5. Authorization, per finding
 
-Populated by Task 2 Step 4.
+```
+AUTHORIZED :: F21-02-01 :: DECLINED
+AUTHORIZED :: F21-02-02 :: FIX
+AUTHORIZED :: F21-02-03 :: DECLINED
+AUTHORIZED :: F21-02-04 :: BACKLOG
+AUTHORIZED :: F21-02-05 :: BACKLOG
+AUTHORIZED :: F21-02-06 :: BACKLOG
+AUTHORIZED :: F21-02-07 :: BACKLOG
+AUTHORIZED :: F21-02-08 :: BACKLOG
+AUTHORIZED :: F21-02-09 :: BACKLOG
+AUTHORIZED :: F21-02-10 :: BACKLOG
+```
+
+**F21-02-01 — DECLINED, and it stays honestly open.** Not because the finding is
+wrong; it is confirmed by the product's own unit test. Because the repair Task 1
+designed does not close it. `parent_tool_authority` wired at `bootstrap.rs`
+leaves the intersection skipped at `crates/wcore-cli/src/workflow.rs:173`,
+`crates/wcore-cli/src/crucible.rs:36`, `crates/wcore-agent/src/engine.rs:12061`
+and `crates/wcore-agent/src/orchestration/anvil/seat.rs:91`, and three of those
+four have no parent `ToolRegistry` in scope to intersect against at all.
+Shipping it would place a fail-open guard at one caller and leave the seam
+reachable through four other production routes — which the plan's own
+"REPAIR AT THE SEAM THE CENSUS NAMED, NOT WHEREVER IT IS EASIEST" rule forbids
+by name, and which reproduces the exact PolicyGate fail-open shape this same
+decision is declining one finding later. Closing it properly requires making
+parent tool authority a first-class concept across the spawner API so every
+construction site must supply it — an architecture change that was not on the
+table at this checkpoint and does not fit the two-iteration cap. **21-04 must
+state this as an explicit exception: Success Criterion 1 cannot be claimed for
+the tool dimension.**
+
+**F21-02-02 — FIX.** The only production change this plan ships. Measured radius
+1, and that one is the provenance pin.
+
+**F21-02-03 — DECLINED, and it stays honestly open.** 22 functional tests, a
+deny-by-default engine, and an inheritance model in a crate that declares it has
+none. **21-04 must state this as an explicit exception.**
 
 ## 6. Post-repair delta
 

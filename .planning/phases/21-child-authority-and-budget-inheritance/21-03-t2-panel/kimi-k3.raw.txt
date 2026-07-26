@@ -1,0 +1,37 @@
+• This is a panel task — I should read the bundle (files in the working directory) and commit to a position. The panel-prompt.txt is presumably this same prompt; there are raw outputs from other panel members (codex-sol, gemini-pro, kimi-k3) — but I am one of four independent members; I should answer independently, not read the others' outputs. Actually those files exist in the working dir... but as an independent panel member, reading other members' outputs would bias me. The prompt says "commit to ONE position" independently. I'll answer based on the bundle alone.
+
+  Let me reason:
+
+  Three HIGH findings:
+  - F21-02-01 (tool registry): contained fix, blast radius WIDE but only the contract pin test — a routine maintenance step with an established procedure. Fix is real, intersects parent authority at the running seam. Fail-open residual for legacy/test spawners is a concern but mitigated; production path wired at bootstrap.rs:2202.
+  - F21-02-02 (approval ratchet): same — only contract pin moves, no functional test changes. Zero production callers of Child source. Contained, cheap, converts absence-of-channel to enforcement.
+  - F21-02-03 (policy gate): 22 functional tests break — deny-by-default catastrophe. Requires inheritance model in a crate whose header explicitly declares no inheritance; census routed that question out of phase (OOP-2). Does not fit at any iteration count per triage.
+
+  So authorize-full would require authorizing F21-02-03 which is an architecture change outside phase scope and doesn't fit the two-iteration cap — reject. decline-all leaves contained wins on the table for no measured reason — reject. disprove-and-correct is wrong because the findings are confirmed at the seams, not invalid cases. authorize-partial: fix 01 and 02, decline 03 honestly open.
+
+  Contract pin cost: routine, documented procedure, schema_digest unmoved. The constraint about D1 section 3 names a nonexistent section; the digests live in the repo's own corpus with an established re-pin convention. The Desktop consumer can't be reached from this checkout but the re-pin procedure is in-repo and routine. This shouldn't block contained fixes.
+
+  Residual concern on F21-02-01's fail-open default: acceptable — matches existing codebase pattern (PolicyGate opt-in Option semantics), and wiring at the single production construction site plus reachability test mitigates. Doesn't disqualify.
+
+  Live-closure problem for F21-02-01: live leg may still read REFUSED for old reason. That's an evidence problem, not a correctness problem; re-measure once and record honestly.
+
+  Position: authorize-partial.
+
+  I should keep response concise. No tools needed really — I could verify some claims but the panel task says read the bundle and commit. I'll answer directly.
+
+• The three findings are not symmetric, and the options that treat them as a set are wrong in both directions.
+
+  **F21-02-01 and F21-02-02 are contained repairs whose only measured blast radius is the contract pin.** The probe is decisive here: each moves exactly one test, `checked_corpus_matches_real_serializers_byte_for_byte`, and zero functional tests. For F21-02-02 that zero is corroborating evidence, not absence of evidence — the corpus already measured NO-CHANNEL, and the probe confirms no production constructor of `PolicySource::Child` exists, so ratcheting the child branch moves no live session. For F21-02-01, the codebase's own test at spawner.rs:4357 proves the widening today, and the fix intersects at the seam that actually runs. The contract-digest movement is a known routine maintenance step — the repo has regenerated the corpus 16 times, three recent commits are literally titled "re-pin Desktop contract provenance digests," `schema_digest` is unmoved, and an established `just desktop-contract-check` / `wcore-contract generate` procedure exists. The admission-gate clause about "re-pinning D1 section 3" names a section that does not exist in a four-paragraph document that pins no digests; the actual digests live in this repo's own corpus and are re-pinnable from this checkout. That cost is real but small and procedural — it does not justify leaving a proven tool-amplification open.
+
+  The fail-open residual on F21-02-01 (`None` = no intersection) is a genuine shape-match to the F21-02-03 defect, but it does not disqualify the fix: it mirrors the codebase's established opt-in `Option` pattern, the production path is wired at the single construction site (bootstrap.rs:2202), and a reachability test guards it. The live-closure problem is an evidence-scheduling problem — re-measure once, record the live leg honestly as REFUSED-for-the-old-reason if the git-repo fixture doesn't land — not a reason to refuse a seam repair proven by the project's own test.
+
+  **F21-02-03 is why I'm rejecting authorize-full.** Its measured blast radius is 22 functional tests across six suites — the deny-by-default catastrophe arriving as a number. Making the gate reachable without that requires a grant-inheritance model in a crate whose header explicitly declares "no inheritance" as scope, and the census already routed that question out of Phase 21 as OOP-2. Authorizing it inside a two-iteration cap would be shipping an architecture change under time pressure, and the triage's own estimate says it doesn't fit at any iteration count. Since build_tool_registry is the mechanism that actually runs for the tool dimension, once F21-02-01 lands the intersection exists where it matters; F21-02-03's remainder is a second, unused expression of the same property — correctly declined, honestly open, with its evidence on the record.
+
+  **I'm also rejecting decline-all and disprove-and-correct.** Decline-all abandons two contained, measured repairs for a cost (one routine re-pin) the repo already pays regularly — that's engineering a red where a green is cheap and true. Disprove-and-correct is unavailable: both fixable findings were CONFIRMED at their named seams, one executably on both platforms; correcting the case instead of the defect would be exactly the forgery the RED-over-GREEN rule forbids.
+
+  Success Criterion 1 then closes with a stated exception in 21-04, which is a decision on the record, not a gap.
+
+  BUNDLE=2d5a3d550dcd1e117b03249f6a5e20b66360f64b
+  PANEL_POSITION=authorize-partial
+
+To resume this session: kimi -r session_b788b0d8-a227-4f71-84d6-ec4f1a5fa26a

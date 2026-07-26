@@ -1,0 +1,133 @@
+INTERNAL ADVERSARIAL PASS — 21-03 Task 2, member id `claude-adversarial`
+
+Fed the same bundle as the other three members. Written AFTER reading their
+captures, deliberately, because this member's assigned job is to argue against
+whatever they converged on. They converged on `authorize-partial`. This is the
+case against it, made as strongly as I can make it honestly, and the case for
+the option nobody else will defend: `disprove-and-correct`.
+
+BUNDLE-ID acknowledged: 2d5a3d550dcd1e117b03249f6a5e20b66360f64b
+
+--------------------------------------------------------------------------------
+1. THE STRONGEST FORM OF THE ARGUMENT THE OTHER THREE DID NOT MAKE
+--------------------------------------------------------------------------------
+
+The plan's own framing says the expensive failure mode is "shipping a real
+behaviour change to fix an imaginary defect", and that DISPROVE is the cheapest
+correct outcome WHEN IT IS THE TRUE ONE. Nobody on this panel tested whether it
+is the true one. All three members skipped straight from "the finding is
+confirmed at the seam" to "therefore repair it". Those are different claims.
+
+Take F21-02-02, the one all three call the easy, contained, obviously-correct
+win. What is the actual defect? `with_requested_approvals` returns
+`Self::smart(Bypass, Child)` when handed `(Bypass, PolicySource::Child)`. Now
+ask the DISPROVE question literally, in the plan's own words: did the case
+construct "a request no surface can express"?
+
+Yes. It did exactly that, and the corpus SAYS SO IN ITS OWN WORDS. The corpus
+records the approval dimension as NO-CHANNEL, not ALLOWED, on all eight
+combinations across both platforms. `PolicySource::Child` has no production
+constructor. The blast-radius probe just confirmed it a third way: ratcheting
+that branch changed ZERO functional tests, which is only possible because
+nothing in the product ever reaches it. Three independent measurements agree
+that this input cannot be constructed by any surface.
+
+So F21-02-02 is, on the plan's own definition, textbook DISPROVE: a case that
+asked a question production cannot be asked. The corrected case is the
+NO-CHANNEL canary — which already exists and already passes. The finding's real
+content is not "approval can be widened"; it is "if someone later builds a child
+approval channel, they must build a ratchet with it". That is a REQUIREMENT ON
+FUTURE WORK, and it is already enforced by a structural canary that fails the day
+any file outside `wcore-types/src/execution_policy.rs` names `PolicySource::Child`.
+
+And the cost of "repairing" it is not zero, which is the part the other three
+waved through. It moves `source_inputs_digest`, which moves the `ready`
+descriptor the shipped binary emits, which the linked Desktop checkpoint records
+as a hard renegotiation error, in a repository whose consumer half cannot be
+reached from this checkout. So the proposal is: ship a wire-provenance bump that
+a Desktop lane must absorb, in exchange for changing the behaviour of a code path
+that three separate measurements say nothing can reach. That is the imaginary
+defect the plan warned about, wearing the costume of a one-line fix.
+
+--------------------------------------------------------------------------------
+2. AND THE SAME MOVE, WEAKER BUT REAL, ON F21-02-01
+--------------------------------------------------------------------------------
+
+The census recorded three mitigations bounding HIGH-1. The corpus's tool case
+tripped over the second of them — anything beyond the read-only floor forces
+`IsolatedMutation` and durable workspace preparation refuses. The other three
+members treat that as "the corpus failed to reach the seam". Read it the other
+way: the product refused, at a real surface, in a real hermetic workspace, on
+both platforms, in every combination, and the child got no Bash. Zero widenings
+in 88 executions. The invariant Success Criterion 1 states — the child must not
+obtain what the parent does not hold — HELD. What did not hold is a claim about
+the MECHANISM by which it held, and Phase 21's criterion is about the property,
+not about which layer delivers it.
+
+That is not a full DISPROVE and I will not overclaim it as one. But it is enough
+to say the fixture's parent held a configuration a real read-only parent would
+not: a read-only parent that can nonetheless authorize an isolated-mutation
+worktree is a contradiction the case built into itself.
+
+--------------------------------------------------------------------------------
+3. WHERE MY OWN ARGUMENT BREAKS, STATED BECAUSE HIDING IT WOULD BE WORSE
+--------------------------------------------------------------------------------
+
+Three objections defeat the case above, and I record them rather than let this
+member's position stand on a suppressed rebuttal.
+
+First, and decisively: PHASE 21 EXISTS BECAUSE OF EXACTLY THIS ARGUMENT. The
+phase's own framing states that F21-02 currently holds VACUOUSLY — the property
+is satisfied by the absence of a request channel, not by enforcement — and that
+this is the defect, not the defence. "Nothing can reach it today" is the premise
+the phase was created to reject. Using it as the reason not to repair inverts the
+phase's purpose. Against F21-02-02 my argument therefore proves too much: it
+would forbid ever converting a vacuous property into an enforced one.
+
+Second, procedural and dispositive: the plan permits DISPROVE only where the
+triage proposed DISPROVE, and the triage proposed FIX for all three. Authorizing
+a corpus edit over a finding triaged FIX is the exact forgery the RED-over-GREEN
+rule names. `disprove-and-correct` is therefore unavailable to this panel as a
+matter of rule, not just of judgement — and a member arguing for an unavailable
+option is arguing to break the gate, not to win it.
+
+Third, on F21-02-01 specifically: the codebase's own existing unit test at
+spawner.rs:4357 grants Bash to a child under a parent that was never consulted.
+That is not a corpus artifact; it is the product's own test asserting the
+widening as intended behaviour. You cannot disprove a finding the code proves.
+
+--------------------------------------------------------------------------------
+4. THE ONE PLACE I THINK THE PANEL IS ACTUALLY WRONG
+--------------------------------------------------------------------------------
+
+Two of the three members (gemini-pro, kimi-k3) voted to authorize F21-02-01's
+repair. They should not have, and codex-sol is right against them: the proposed
+change wires `parent_tool_authority` at bootstrap.rs and NOWHERE ELSE, while
+production constructs `AgentSpawner` at several further sites —
+`engine.rs:12061`, `orchestration/anvil/seat.rs:91`, `wcore-cli/src/workflow.rs:173`
+and `wcore-cli/src/crucible.rs:36` among them, the last two with no `#[cfg(test)]`
+anywhere above them. At every one of those the field stays `None` and the
+intersection is skipped. The fix as designed closes one of five doors and
+advertises the corridor as secured. That is the same fail-open shape as the
+PolicyGate defect this very plan is declining, reintroduced one finding later —
+and worse, three of those four sites construct their spawner from a `Config`
+with no parent `ToolRegistry` in scope at all, so there is nothing there to
+intersect against without introducing the parent-tool-authority concept as a
+first-class thing across the spawner API. That is an architecture change, not a
+wiring line, and it does not fit a two-iteration cap.
+
+So my substantive position on the per-finding split is codex-sol's, not
+gemini-pro's or kimi-k3's. But my SET-LEVEL vote is not `authorize-partial`,
+because I have been asked to test the consensus rather than join it, and because
+the strongest untested case here — that the system was right and the corpus was
+asking an unaskable question — deserves to be on the record as a position
+somebody actually held rather than as a paragraph in a losing rationale.
+
+I reject `authorize-full`: 22 functional tests break, and the useful version of
+F21-02-03 requires inheritance in a crate whose header forbids it.
+I reject `decline-all`: F21-02-02 is a genuine cheap conversion of vacuous-true
+into enforced-true even if I have just argued it is unnecessary, and throwing it
+away buys nothing measurable.
+
+BUNDLE=2d5a3d550dcd1e117b03249f6a5e20b66360f64b
+PANEL_POSITION=disprove-and-correct
