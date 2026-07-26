@@ -416,4 +416,140 @@ none. **21-04 must state this as an explicit exception.**
 
 ## 6. Post-repair delta
 
-Populated by Task 3.
+Measured at the exact repaired SHA `a412aba754b1bab5cd5764ed8e0d8502c9ee4020`,
+asserted on each host before any build step. Every count below is stated against
+what `21-02-CORPUS-RESULTS.md` actually measured, never against a number written
+in a plan.
+
+### Files changed under `crates/` since the phase base `dd02a624`
+
+The four corpus files 21-02 created, plus this plan's one production edit and the
+five files the provenance re-pin regenerates. Named here because Task 3's gate
+requires every changed path to appear in the authorized repair set.
+
+```
+crates/wcore-cli/tests/child_authority_corpus.rs
+crates/wcore-cli/tests/child_authority_corpus/cases.rs
+crates/wcore-cli/tests/child_authority_corpus/live.rs
+crates/wcore-cli/tests/child_authority_corpus/surfaces.rs
+crates/wcore-types/src/execution_policy.rs
+crates/wcore-protocol/contracts/desktop/v1/manifest.json
+crates/wcore-protocol/contracts/desktop/v1/events/ready.json
+crates/wcore-protocol/contracts/desktop/v1/adversarial/events/fixture-mismatch.jsonl
+crates/wcore-protocol/contracts/desktop/v1/adversarial/events/schema-mismatch.jsonl
+crates/wcore-protocol/contracts/desktop/v1/adversarial/events/version-mismatch.jsonl
+```
+
+The first four were changed by 21-02, not by this plan. This plan changed
+`crates/wcore-types/src/execution_policy.rs` (the authorized repair) and the
+five regenerated contract files (the mandated re-pin). **No file belonging to a
+DECLINED finding was touched.**
+
+### The measurement that actually moved
+
+The corpus harness drives the real resolver on every run and prints its
+observation. The same extraction over both transcripts:
+
+```
+21-02 (before) :: resolver measurement (non-managed parent at Prompt, child request Bypass): posture Smart, approvals Bypass, source Child, managed false
+21-03 (after)  :: resolver measurement (non-managed parent at Prompt, child request Bypass): posture Smart, approvals Prompt, source Child, managed false
+```
+
+A child-sourced `Bypass` no longer replaces a `Prompt` parent. That is the whole
+of what this plan repaired, and it is observed by the independent harness rather
+than asserted by the repair.
+
+### Per-case delta
+
+Every one of the eleven corpus cases holds the outcome 21-02 measured, on both
+platforms, in all four combinations. **Zero regressions and zero new widenings.**
+The one row that moved is the approval mechanism, and it moved in the intended
+direction while keeping its outcome label.
+
+```
+DELTA :: corpus_approval :: NOT-EXPRESSIBLE (in-process NO-CHANNEL, resolver yields Bypass) :: NOT-EXPRESSIBLE (in-process NO-CHANNEL, resolver now yields Prompt)
+DELTA :: corpus_provider :: NO-CHANNEL :: NO-CHANNEL
+DELTA :: corpus_tool :: NOT-EXPRESSIBLE :: NOT-EXPRESSIBLE
+DELTA :: corpus_filesystem :: REFUSED :: REFUSED
+DELTA :: corpus_egress :: REFUSED :: REFUSED
+DELTA :: corpus_secret :: REFUSED :: REFUSED
+DELTA :: corpus_depth :: REFUSED :: REFUSED
+DELTA :: corpus_fan_out :: NOT-EXPRESSIBLE :: NOT-EXPRESSIBLE
+DELTA :: corpus_time :: NOT-EXPRESSIBLE :: NOT-EXPRESSIBLE
+DELTA :: corpus_token :: NOT-EXPRESSIBLE :: NOT-EXPRESSIBLE
+DELTA :: corpus_cost :: NOT-EXPRESSIBLE :: NOT-EXPRESSIBLE
+```
+
+### Live re-verification
+
+Every row records the exact invocation, the mode the run PROVED it landed in,
+the observable, and the platform. Modes are proved as 21-02 proved them:
+json-stream by the `ready` frame nothing else emits, headless by the process
+terminating on its own with no such frame, tui by rendered chrome on a real PTY.
+
+```
+LIVE :: corpus_approval :: linux :: json-stream :: wayland-core --json-stream --provider anthropic (stdin: one message command; hermetic WAYLAND_HOME) :: .planning/phases/21-child-authority-and-budget-inheritance/evidence/21-03-t3-linux.log
+LIVE :: corpus_approval :: linux :: tui :: wayland-core (bare, attached to a real PTY; hermetic WAYLAND_HOME) :: .planning/phases/21-child-authority-and-budget-inheritance/evidence/21-03-t3-linux.log
+LIVE :: corpus_filesystem :: linux :: json-stream :: wayland-core --json-stream --provider anthropic (stdin: one message command; hermetic WAYLAND_HOME) :: .planning/phases/21-child-authority-and-budget-inheritance/evidence/21-03-t3-linux.log
+LIVE :: corpus_secret :: linux :: headless :: wayland-core --no-tui --provider anthropic "delegate the task" (hermetic WAYLAND_HOME) :: .planning/phases/21-child-authority-and-budget-inheritance/evidence/21-03-t3-linux.log
+LIVE :: corpus_approval :: windows :: json-stream :: wayland-core --json-stream --provider anthropic (stdin: one message command; hermetic WAYLAND_HOME) :: .planning/phases/21-child-authority-and-budget-inheritance/evidence/21-03-t3-windows.log
+LIVE :: corpus_tool :: windows :: headless :: wayland-core --no-tui --provider anthropic "delegate the task" (hermetic WAYLAND_HOME) :: .planning/phases/21-child-authority-and-budget-inheritance/evidence/21-03-t3-windows.log
+```
+
+**The shipped binary was observed emitting the re-pinned descriptor.** The
+`corpus_approval` json-stream transcript captures the real `ready` frame with
+`"source_inputs_digest":"sha256:9d5928b4…"` and
+`"schema_digest":"sha256:e5d1744a…"` — the new provenance and the UNCHANGED
+schema, live, out of the actual binary. That is direct live evidence that the
+re-pin is a provenance bump and not a wire change.
+
+### Closure — and the honest verdict on it
+
+```
+CLOSURE :: F21-02-02 :: NOT-CLOSED :: green :: red
+```
+
+**F21-02-02's in-process leg is green and its live leg is NOT.** The repair is
+correct, landed at the census seam, and is proved by the harness's own resolver
+observation flipping `Bypass` to `Prompt` and by two new tests passing on both
+platforms. But the plan's closure rule is that a repair is closed only when the
+shipped binary is observed REFUSING the actual widening at a surface a user
+touches, and that did not happen and cannot happen: the approval dimension is
+`NOT-EXPRESSIBLE` on every live combination because **no shipped surface offers
+a child a way to request an approval posture at all**. That is the corpus's own
+finding F21-02-04/F21-02-05 class, unchanged by this repair.
+
+The gate's vocabulary offers only `green` or `red` for the live leg, and
+`NOT-EXPRESSIBLE` is recorded as **red** deliberately. It was not observed
+failing — it could not be observed at all. Recording it green would claim live
+closure this plan did not earn, and the plan's own rule exists precisely to stop
+that. So: the repair ships, the property is now enforced rather than vacuous,
+and its live closure is honestly OPEN. 21-04 must not report F21-02-02 as closed
+on a live surface.
+
+### Residuals and regressions
+
+No new regression. The Hetzner aggregate at the repaired SHA ran
+**11545 tests: 11545 passed (1 slow, 2 flaky), 48 skipped**, against 21-02's
+`11543 passed (1 slow, 1 flaky)` — the +2 are this plan's two new ratchet tests.
+Workspace clippy `--all-targets -- -D warnings` is clean. The corpus suite is
+23/23 on Linux and 19/19 on Windows, matching 21-02 exactly.
+
+Two flaky-then-passing tests, both pre-existing and neither targeted here:
+`wcore-cli::deterministic_openai_loop packaged_core_cancels_an_active_stream`
+(FLAKY 3/3 — already recorded as corpus finding F21-02-10 and at
+`TEST-AUDIT.md:171`) and `wcore-cli::harness_tui_flow
+agent_turn_streams_mock_assistant_text_into_the_transcript` (FLAKY 2/3, passed on
+retry, not in the 21-02 measurement). The second is **named and not annotated
+away**: it is a retry-flake under aggregate load, it did not fail the run, it is
+in no file this plan touched, and it is routed to BACKLOG rather than repaired,
+because repairing an untargeted flake is exactly the unbounded-scope move the
+phase rules forbid.
+
+### Iterations used
+
+**ONE of the two permitted.** A single edit-build-run cycle on real hardware
+produced a clean ordered gate on both platforms. The first Hetzner invocation
+aborted before building because the worktree still held the generated contract
+files uncommitted; that is a host-hygiene fix, not an edit-build-run repair
+cycle, and it is not counted as an iteration.
