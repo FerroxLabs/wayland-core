@@ -90,6 +90,11 @@ wayland-honcho.workspace      = true
 
 tokio.workspace       = true
 futures.workspace     = true
+# Journal error paths are reported in one representation on every entry
+# point: `dunce::simplified` converts the verbatim `\\?\` form that
+# `std::fs::canonicalize` returns on Windows back to the ordinary form
+# whenever that is safe. Same helper wcore-swarm uses for worktree roots.
+dunce                 = "1"
 
 serde.workspace       = true
 serde_json.workspace  = true

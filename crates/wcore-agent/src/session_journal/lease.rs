@@ -138,6 +138,26 @@ fn unlock_authority(_file: &File) -> std::io::Result<()> {
     ))
 }
 
+/// Canonicalize a directory into the representation this crate reports.
+///
+/// `std::fs::canonicalize` returns a verbatim `\\?\` path on Windows. Storing
+/// that form makes the writer path (`SessionJournal::open`, which normalizes)
+/// and the read-only paths (`replay`, `recovered_state`, which do not) report
+/// two different pathnames for the same file, so callers cannot compare or
+/// display journal error paths reliably. `dunce::simplified` converts back to
+/// the ordinary form whenever that is safe, and deliberately leaves the
+/// verbatim prefix in place when it is not - reserved DOS names, over-long
+/// components, and non-Unicode paths still need it.
+///
+/// On Unix this is exactly `std::fs::canonicalize`.
+pub(super) fn canonical_simplified_dir(directory: &Path) -> Result<PathBuf, JournalError> {
+    let canonical = std::fs::canonicalize(directory).map_err(|source| JournalError::Io {
+        path: directory.to_path_buf(),
+        source,
+    })?;
+    Ok(dunce::simplified(&canonical).to_path_buf())
+}
+
 pub(super) fn normalized_path(path: &Path) -> Result<PathBuf, JournalError> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -169,10 +189,7 @@ pub(super) fn normalized_path(path: &Path) -> Result<PathBuf, JournalError> {
         path: parent.to_path_buf(),
         source,
     })?;
-    let canonical_parent = std::fs::canonicalize(parent).map_err(|source| JournalError::Io {
-        path: parent.to_path_buf(),
-        source,
-    })?;
+    let canonical_parent = canonical_simplified_dir(parent)?;
     let Some(file_name) = absolute.file_name() else {
         return Err(JournalError::Io {
             path: path.to_path_buf(),

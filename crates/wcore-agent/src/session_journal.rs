@@ -907,6 +907,11 @@ impl SessionStorageLease {
         let journal_parent = self.journal_path.parent().ok_or_else(|| {
             JournalError::InvalidTransition("session journal has no parent".to_owned())
         })?;
+        // Both operands must be in the same representation: on Windows a raw
+        // `canonicalize` yields a verbatim `\\?\` path while the leased journal
+        // path is stored simplified, and comparing the two forms would reject
+        // every legitimate retirement.
+        let journal_parent = dunce::simplified(journal_parent);
         let session_parent = canonical_existing_parent(session_path)?;
         let wal_parent = canonical_existing_parent(wal_path)?;
         let expected_journal_name = format!("{}.journal", self.session_id);
@@ -934,10 +939,7 @@ fn canonical_existing_parent(path: &Path) -> Result<PathBuf, JournalError> {
     let parent = path.parent().ok_or_else(|| {
         JournalError::InvalidTransition("session retirement path has no parent".to_owned())
     })?;
-    std::fs::canonicalize(parent).map_err(|source| JournalError::Io {
-        path: parent.to_path_buf(),
-        source,
-    })
+    lease::canonical_simplified_dir(parent)
 }
 
 fn require_path_absent(path: &Path) -> Result<(), JournalError> {

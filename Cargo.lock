@@ -9112,6 +9112,7 @@ dependencies = [
  "criterion",
  "crossterm",
  "dirs",
+ "dunce",
  "ed25519-dalek",
  "flate2",
  "futures",
