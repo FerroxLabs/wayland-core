@@ -1,0 +1,7 @@
+• Grade: NOT-MET. Tool dimension is confirmed absent and open, repairs declined; several dimensions hold only by absence of channel, not enforcement.
+
+• NOT-MET
+
+  The criterion is universal — "cannot widen ANY provider, tool, filesystem, egress, secret, approval, depth, fan-out, time, token, or cost restriction" — and the tool dimension is affirmatively falsified: `build_tool_registry` registers Bash without consulting the parent registry, the fix was declined, and four production spawner sites remain fail-open (three with no parent registry in scope at all). That is a proven, open counterexample, not a gap in measurement. Additionally, the PolicyGate — the designated enforcement mechanism — is dead code with zero `set_policy_gate` callers and every agent-path initialiser `None`, so even the intended gate is fail-open. On top of that, provider, approval, and the `Some(..)` legs of depth/time/token/cost hold only because no shipped surface offers a child a request channel — that is vacuous satisfaction, not enforcement, and the approval closure is recorded NOT-CLOSED for exactly that reason. A vacuously-true property plus one affirmed violation cannot be graded MET, and "exceptions" would swallow the tool violation, so MET-WITH-STATED-EXCEPTIONS is also unsupportable.
+
+To resume this session: kimi -r session_971f9170-11f8-4c00-9692-45e5f01acef0

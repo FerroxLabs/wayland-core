@@ -70,6 +70,19 @@ refused. That is real and it is not nothing. It is also not eleven.
 plan was written to avoid.** A criterion that says *any* is not satisfied by
 *most*.
 
+**Cross-audited, because this is the phase's most consequential call.**
+`21-04-t3-panel/PANEL.md` records the four-way panel: `codex-sol`,
+`gemini-3.1-pro` and `kimi-k3` each returned `NOT-MET` independently, and the
+internal adversarial pass argued the strongest available case for
+`MET-WITH-STATED-EXCEPTIONS` — that the middle verdict becomes unreachable if any
+open exception forces failure, that no amplification was ever OBSERVED, and that
+Criteria 2 and 3 carry named gaps too. It lost on one point that is checkable
+from `ROADMAP.md:79` without the panel: Criterion 1 is the only one of the three
+that carries a universal over an ENUMERATED list, and its enumeration contains a
+member the product's own unit test falsifies. Criteria 2 and 3 have gaps in
+PROOF; Criterion 1 has a guard confirmed absent. The panel's unanimity is
+discounted in the record because all three members received the same framing.
+
 ### Criterion 2 — MET WITH STATED EXCEPTIONS
 
 Measured in this plan. Six lifecycle events, every case with at least two

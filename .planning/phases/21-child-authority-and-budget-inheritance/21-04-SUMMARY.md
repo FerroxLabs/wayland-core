@@ -212,6 +212,16 @@ channel rather than by enforcement. Grading this MET-WITH-EXCEPTIONS would be th
 narrowing this plan exists to avoid: a criterion that says *any* is not satisfied
 by *most*.
 
+**Cross-audited** (`21-04-t3-panel/PANEL.md`).
+`PANEL-DECISION :: NOT-MET :: UNANIMOUS-ON-THE-EXTERNAL-LEGS`. `codex-sol`,
+`gemini-3.1-pro` and `kimi-k3` each returned NOT-MET independently; the internal
+adversarial pass argued for MET-WITH-STATED-EXCEPTIONS on three non-frivolous
+grounds and lost on one that needs no panel: Criterion 1 is the only one of the
+three carrying a universal over an ENUMERATED list, and its enumeration contains
+a member the product's own unit test falsifies. Criteria 2 and 3 have gaps in
+PROOF; Criterion 1 has a guard confirmed absent. The unanimity is discounted in
+the panel record because all three members received the same framing.
+
 `CRITERION :: 2 :: MET-WITH-STATED-EXCEPTIONS` — five of six events CORRECT in
 process on both platforms, zero misattributions, delivery proved live on the
 wire; excepted by F21-04-01, F21-04-02 and the Windows TUI gap.
