@@ -1,0 +1,17 @@
+RUN_SHA=3e951f486293e974d9eb0bd5461b68729cdc2e91
+   Compiling wcore-cli v0.12.25 (/root/wayland-p21/crates/wcore-cli)
+warning: field `dimension` is never read
+   --> crates/wcore-cli/tests/child_authority_corpus/surfaces.rs:185:9
+    |
+184 | pub struct Execution {
+    |            --------- field in this struct
+185 |     pub dimension: Dimension,
+    |         ^^^^^^^^^
+    |
+    = note: `Execution` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `wcore-cli` (test "child_authority_corpus") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.60s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
