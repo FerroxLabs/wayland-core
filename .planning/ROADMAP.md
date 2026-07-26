@@ -79,7 +79,7 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
   1. A child cannot widen any provider, tool, filesystem, egress, secret, approval, depth, fan-out, time, token, or cost restriction.
   2. Nested reservation, refund, escalation, approval, cancellation, and result delivery remain attributable to the correct parent/session.
   3. Standalone and host-protocol hostile corpora prove equivalent enforcement.
-**Plans**: TBD
+**Plans**: 21-01 (admission gate + eleven-dimension authority census, blocking), 21-02 (dual-surface hostile corpus), 21-03 (triage + authorized repair, blocking), 21-04 (attribution + phase verdict)
 **Admission prerequisite**: before broad Phase 21 execution — (CTRL-02 / D1) the linked Desktop plan and consumer/reducer conformance harness are pinned to the exact Core producer contract, AND (CTRL-01) the Competitive Capability Ledger has pinned exact Hermes + OpenClaw baselines with F03/F05 evidence mapped.
 
 ### Phase 22: Supervision, Durable Goals, Fleet, and Loops
@@ -92,7 +92,7 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
   3. Direct, ForgeFlows, Fleet, Council, and Anvil terminate through one canonical Goal transition with no nested verification/retry owner.
   4. Session-local fixed/dynamic, event-driven, and manual loops remain bounded across reconnect, preemption, missed intervals, and resume; persistent scheduling is deferred explicitly to Phase 24.
   5. Existing journal compatibility is proved or migrated explicitly without silently invalidating F12 behavior.
-**Plans**: TBD
+**Plans**: 22-01, 22-02, 22-03, 22-04
 
 ### Phase 23: Governed Continuous Personal Agency
 **Goal**: The agent can pursue verified outcomes over time, learn safely, and let users inspect, correct, recover, and control that state.
@@ -130,7 +130,7 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
   2. Nodes pair, advertise capability, revoke, recover offline, and handle mixed versions without losing authority attribution.
   3. Plugins can be scaffolded, tested, signed, installed, approved, inspected, updated, rolled back, removed, published, and recovered.
   4. Compromised keys/plugins/backends and denied secret/egress paths fail closed with no orphaned execution.
-**Plans**: TBD
+**Plans**: 25-01, 25-02, 25-03, 25-04
 
 ### Phase 26: Migration, Export, Backup, and Restore
 **Goal**: Users can move, preserve, and restore Wayland state without executing imported content or leaking secrets.
