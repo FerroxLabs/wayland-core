@@ -1107,10 +1107,31 @@ fn replace_file_atomically_inner(
     // writer authority across the atomic rename and makes hard-link aliases
     // contend on the journal data itself, not only on its pathname sentinel.
     super::lease::lock_data_file(temp.as_file(), path)?;
-    let persisted = temp.persist(path).map_err(|error| JournalError::Io {
+    // Publish with `std::fs::rename`, not `NamedTempFile::persist`.
+    //
+    // `persist` is `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` on Windows, and
+    // that legacy primitive fails with ERROR_ACCESS_DENIED whenever the
+    // destination still has an open handle. This journal deliberately holds its
+    // own destination open: the locked data inode *is* the writer authority, so
+    // closing it to publish would open the authority gap this replacement
+    // exists to prevent. `std::fs::rename` issues the POSIX-semantics rename
+    // instead, which replaces an open destination exactly like the `rename(2)`
+    // this contract is written against on Unix.
+    //
+    // `keep` performs the remainder of `persist`'s work - it clears
+    // FILE_ATTRIBUTE_TEMPORARY so the published file is not left marked
+    // temporary - and hands back the still-open handle.
+    let (persisted, temporary_path) = temp.keep().map_err(|error| JournalError::Io {
         path: path.to_path_buf(),
         source: error.error,
     })?;
+    if let Err(source) = std::fs::rename(&temporary_path, path) {
+        let _ = std::fs::remove_file(&temporary_path);
+        return Err(JournalError::Io {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
     if private {
         super::lease::ensure_path_identity(&persisted, path)?;
         validate_private_snapshot_file(&persisted, path)?;
