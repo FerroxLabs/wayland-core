@@ -842,62 +842,134 @@ pub fn secret_read_probe() -> ProbeResult {
 }
 
 /// The real chokepoint `AgentBootstrap` installs — `policy_from_config` under
-/// the shipped default config — asked about a destination no allowlist carries.
-/// The second leg is the census's structural clause: no child-reachable code
-/// path may attach an explicit per-client policy that never consults the one
-/// the parent installed.
+/// the shipped default config.
+///
+/// The property under test is RELATIVE, not absolute. Phase 21 asks whether a
+/// CHILD can reach a destination its PARENT cannot; it does not ask whether the
+/// parent's own policy is correct. So the probe asks the parent's policy about a
+/// destination the parent genuinely denies, then asks the policy handle a child
+/// inherits about the same destination, and compares. The census records the
+/// inheritance mechanism as exact `Arc` identity through `clone_for_spawn`, so
+/// pointer identity is checked as well as the decision: a child holding a
+/// different policy object is a widening route even when today's two objects
+/// happen to agree.
+///
+/// One absolute observation is recorded but deliberately NOT classified as a
+/// Phase 21 widening: with the shipped default config and no consent doorbell
+/// attached, a plain GET to a non-allowlisted, non-shared-platform host resolves
+/// through the `Ask` branch, which returns Allow when no doorbell is installed.
+/// Parent and child are equally affected, so nothing is amplified across the
+/// boundary — but it belongs in the results as an observation for triage.
+///
+/// The second leg is the census's structural clause: no child-reachable
+/// production code path may attach an explicit per-client policy that never
+/// consults the one the parent installed.
 pub fn egress_probe() -> ProbeResult {
-    let policy = policy_from_config(&Config::default());
-    let url = "https://corpus-not-allowlisted.invalid/exfil";
+    // A shared-platform POST classifies as Exfil, which the policy denies
+    // unconditionally and without a doorbell. Using a destination the parent
+    // actually refuses is what keeps this probe from passing vacuously.
+    let denied_url = "https://webhook.site/corpus-exfil";
+    let request = wcore_egress::reqwest::Request::new(
+        wcore_egress::Method::POST,
+        wcore_egress::Url::parse(denied_url).expect("parse the probe destination"),
+    );
     // The probe hands the policy a request to INSPECT; it never dispatches one,
     // so no client is constructed. `reqwest::Client::new` is a disallowed method
-    // in this workspace precisely because a client would bypass the B1 egress
-    // chokepoint, and the corpus has no business bypassing the thing it is
-    // measuring.
-    let request = wcore_egress::reqwest::Request::new(
+    // in this workspace precisely because a client bypasses the B1 egress
+    // chokepoint, and the corpus has no business bypassing what it measures.
+    let ask_url = "https://corpus-not-allowlisted.invalid/probe";
+    let ask_request = wcore_egress::reqwest::Request::new(
         wcore_egress::Method::GET,
-        wcore_egress::Url::parse(url).expect("parse the probe destination"),
+        wcore_egress::Url::parse(ask_url).expect("parse the ask-branch destination"),
     );
 
+    let parent: wcore_egress::SharedPolicy = Arc::new(policy_from_config(&Config::default()));
+    // What `clone_for_spawn` hands a child: the same object, by Arc identity.
+    let inherited: wcore_egress::SharedPolicy = Arc::clone(&parent);
+    let same_object = Arc::ptr_eq(&parent, &inherited);
+
     let rt = runtime();
-    let permitted = matches!(rt.block_on(policy.check(&request)), EgressDecision::Allow);
+    let parent_permits = matches!(rt.block_on(parent.check(&request)), EgressDecision::Allow);
+    let child_permits = matches!(
+        rt.block_on(inherited.check(&request)),
+        EgressDecision::Allow
+    );
+    let parent_permits_ask = matches!(
+        rt.block_on(parent.check(&ask_request)),
+        EgressDecision::Allow
+    );
 
-    // Census MED-3 clause: the per-client bypass route.
-    const CENSUS_NAMED: [&str; 4] = [
-        "crates/wcore-agent/src/spawner.rs",
-        "crates/wcore-cli/src/tui/surfaces/mod.rs",
-        "crates/wcore-egress/src/client.rs",
-        "crates/wcore-egress/src/lib.rs",
-    ];
-    let unexpected: Vec<String> = source_files_mentioning(".with_policy(")
-        .into_iter()
-        .filter(|file| !CENSUS_NAMED.contains(&file.as_str()))
-        .collect();
+    // Census MED-3 clause, measured against the exact pattern the census named
+    // rather than a bare `with_policy` substring: `with_policy` is also the name
+    // of unrelated builder methods, and matching it loosely reports test-only
+    // egress clients and provider retry policies as if they were bypass routes.
+    let bypass_sites = production_egress_client_sites();
 
-    let note = if unexpected.is_empty() {
-        "no crates/*/src file outside the census-named set attaches an explicit per-client egress \
-         policy"
+    let structural = if bypass_sites.is_empty() {
+        "no production code path constructs an EgressClient with an explicit per-client policy"
             .to_owned()
     } else {
         format!(
-            "a new per-client egress policy attachment appeared in {}",
-            unexpected.join(", ")
+            "a production per-client egress client appeared in {}",
+            bypass_sites.join(", ")
         )
     };
+    let ask_note = format!(
+        "recorded, not classified as a Phase 21 widening: with the shipped default config and no \
+         consent doorbell attached, the parent's own policy permits a plain GET to {ask_url}: \
+         {parent_permits_ask}. Parent and child are equally affected, so nothing crosses the \
+         boundary"
+    );
 
-    if permitted || !unexpected.is_empty() {
+    let widened = (child_permits && !parent_permits) || !same_object || !bypass_sites.is_empty();
+    if widened {
         ProbeResult::new(
             Outcome::Allowed,
             "an outbound destination the parent's policy does not permit",
-            format!("the shipped default policy permitted {url}; {note}"),
+            format!(
+                "parent permits {denied_url}: {parent_permits}; child permits it: \
+                 {child_permits}; the child holds the parent's exact policy object: \
+                 {same_object}; {structural}; {ask_note}"
+            ),
         )
     } else {
         ProbeResult::new(
             Outcome::Refused,
             "no outbound destination beyond the parent's policy",
-            format!("the shipped default policy did not permit {url}; {note}"),
+            format!(
+                "parent permits {denied_url}: {parent_permits}; child permits it: \
+                 {child_permits}; the child holds the parent's exact policy object: \
+                 {same_object}; {structural}; {ask_note}"
+            ),
         )
     }
+}
+
+/// Production sites that construct an `EgressClient` directly. An occurrence
+/// after the file's first `#[cfg(test)]` is test code — the convention this
+/// workspace follows without exception in the files the census checked by hand —
+/// and is excluded, so the canary fires on a real bypass route rather than on a
+/// test fixture.
+fn production_egress_client_sites() -> Vec<String> {
+    let mut sites = Vec::new();
+    let root = workspace_root();
+    for file in source_files_mentioning("EgressClient::new()") {
+        let Ok(text) = std::fs::read_to_string(root.join(&file)) else {
+            continue;
+        };
+        let test_boundary = text
+            .lines()
+            .position(|line| line.trim_start().starts_with("#[cfg(test)]"))
+            .unwrap_or(usize::MAX);
+        let production = text
+            .lines()
+            .enumerate()
+            .any(|(index, line)| index < test_boundary && line.contains("EgressClient::new()"));
+        if production {
+            sites.push(file);
+        }
+    }
+    sites
 }
 
 /// Breadth beyond the parent's cap, attempted through the real `SpawnTool`
