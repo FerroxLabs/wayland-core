@@ -1,0 +1,40 @@
+[package]
+name = "wcore-gateway"
+description = "Persistent Wayland-Core gateway runtime: lifecycle, pid lock, drain, and the exactly-once delivery ledger (F24-01)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# Phase 24 plan 24-01. Mid-layer crate: it may depend on wcore-types,
+# wcore-config, wcore-protocol, wcore-cron and wcore-channels, and it must NOT
+# depend on the top-layer wcore-agent crate — that would invert the dependency
+# graph described in AGENTS.md. The operator-facing verb surface lives in
+# crates/wcore-cli/src/gateway.rs and drives this crate.
+
+[dependencies]
+chrono = { workspace = true }
+dirs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# The single-instance lock is taken with `flock`/`LockFileEx` rather than
+# `fcntl`: fcntl record locks are owned by the PROCESS, so a second launch
+# inside one process would be silently admitted and the exclusion test
+# could never go red. See crates/wcore-gateway/src/pidlock.rs.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

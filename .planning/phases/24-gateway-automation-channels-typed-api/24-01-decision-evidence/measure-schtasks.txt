@@ -1,0 +1,23 @@
+probe schtasks host=SEANDESKTOP user=seand
+#< CLIXML
+probe schtasks now=2026-07-26T22:46:37.5472808+07:00
+probe schtasks --- create (onlogon) ---
+probe schtasks create> SUCCESS: The scheduled task "F24ProbeTask" has successfully been created.
+probe schtasks create rc=0
+probe schtasks --- query ---
+probe schtasks query> TaskName:                             \F24ProbeTask
+probe schtasks query> Status:                               Ready
+probe schtasks query> Logon Mode:                           Interactive only
+probe schtasks query> Task To Run:                          C:\f24-01-probe\f24probe.exe child C:\f24-01-probe\hb-schtasks.txt
+probe schtasks query> Run As User:                          seand
+probe schtasks query> Schedule Type:                        At logon time
+probe schtasks --- run ---
+probe schtasks run> SUCCESS: Attempted to run the scheduled task "F24ProbeTask".
+probe schtasks run rc=0
+probe schtasks heartbeat-after-run lines=119
+probe schtasks delete> SUCCESS: The scheduled task "F24ProbeTask" was successfully deleted.
+probe schtasks post-delete-query> ERROR: The system cannot find the file specified.
+probe schtasks post-delete-query> System.Management.Automation.RemoteException
+probe schtasks VERDICT: the task registered, ran, and its process wrote 119 beats from a session-independent parent
+PROBE schtasks RESULT=survives RC=0
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.PSCustomObject</T><T>System.Object</T></TN><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj><Obj S="progress" RefId="1"><TNRef RefId="0" /><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj></Objs>

@@ -9558,6 +9558,7 @@ dependencies = [
  "wcore-cron",
  "wcore-egress",
  "wcore-eval-scenarios",
+ "wcore-gateway",
  "wcore-mcp",
  "wcore-memory",
  "wcore-permissions",
@@ -9793,6 +9794,21 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "wcore-gateway"
+version = "0.12.25"
+dependencies = [
+ "chrono",
+ "dirs",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

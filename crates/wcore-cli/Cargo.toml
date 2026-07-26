@@ -107,6 +107,10 @@ axum = "0.7"
 wcore-swarm = { path = "../wcore-swarm" }
 # v0.8.1 U7: `cron` subcommand wires `wcore-cron` into the CLI.
 wcore-cron  = { path = "../wcore-cron" }
+# Phase 24 plan 24-01: the persistent gateway runtime. The scheduler daemon
+# takes its Windows process-creation flags from this crate so the workspace
+# has ONE definition of what "detached" means, measured rather than guessed.
+wcore-gateway = { path = "../wcore-gateway" }
 # F-089: `models list` subcommand reads the bundled pricing catalog to
 # enumerate known provider/model ids without a live API call.
 wcore-pricing.workspace = true

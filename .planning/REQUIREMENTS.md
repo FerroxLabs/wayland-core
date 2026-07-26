@@ -138,11 +138,23 @@ grading in `.planning/phases/23B-continuous-agency/23B-PHASE-DISPOSITION.md`.
 
 ### Phase 24 — Gateway, Automation, Channels, and Typed API
 
-- [ ] **F24-01**: One persistent gateway runtime provides install/start/stop/restart/status/doctor/logs/drain, profile isolation, active-turn visibility, graceful recovery, and native service management.
-- [ ] **F24-02**: The automation plane supports one-shot, interval, cron, natural-language authoring, commitments/heartbeat, hooks/webhooks/polling, history, retry, continuation, and bounded delivery.
-- [ ] **F24-03**: The channel framework proves setup/auth probes, pairing/access, thread/group binding, profile/agent routing, media normalization, edit/delete/reaction, idempotent outbound delivery, reconnect/reload, and health.
-- [ ] **F24-04**: A typed API/App SDK provides authenticated roles, idempotent commands, ordered/gap-aware events, compatibility negotiation, remote clients, logs, health, and a redacted support bundle.
-- [ ] **F24-05**: Setup-to-recovery and kill/reconnect/delivery journeys pass on native macOS, Linux, and Windows without lost or duplicate work.
+**Execution disposition, 2026-07-26.** Phase 24 was dispatched as four plans
+(24-01 wave 1; 24-02 and 24-03 wave 2; 24-04 wave 3). **Only 24-01 was
+executed, and it did not reach its own Complete state.** 24-02, 24-03 and
+24-04 were not started. Every requirement below is therefore recorded with
+an explicit INCOMPLETE disposition naming the unmet clauses, rather than
+left as an unannotated open box — the evidence does not support completing
+any of them, and 24-04 (the only plan that may mark Phase-24 requirements
+complete) never ran. Branch carrying the work:
+`worktree-wf_b7d743bd-954-4`. Evidence:
+`phases/24-gateway-automation-channels-typed-api/24-01-SUMMARY.md` and
+`24-01-GATEWAY-CONTRACT.md`.
+
+- [ ] **F24-01**: One persistent gateway runtime provides install/start/stop/restart/status/doctor/logs/drain, profile isolation, active-turn visibility, graceful recovery, and native service management. — **INCOMPLETE. Partial evidence recorded.** MET: a persistent runtime exists as the mid-layer `wcore-gateway` crate with a lifecycle state machine whose every illegal transition is refused by name; a Windows-safe single-instance lock answering all four documented Windows defect classes; active-turn and pending-delivery counts in a machine-readable status projection; ordered drain distinguishing clean from forced; a native service abstraction with one implementation per OS family and a single platform-selection point; and one HIGH defect found by hardware measurement and fixed (the Windows detach branch set no creation flags, so the scheduler daemon died with its session — 1 of 600 heartbeats). UNMET CLAUSES, each named: (a) **install/start/stop/restart/status/doctor/logs/drain do not exist on the shipped binary** — `crates/wcore-cli/src/gateway.rs` was not written and the registration sites `wcore-cli/src/{lib,main}.rs` were fenced for this wave (SEAM-24-01); (b) **graceful recovery is unproven** — no service was installed, killed and recovered on any platform; (c) **native service management is generated but never executed** — no `launchctl`/`systemctl`/`schtasks` invocation from this crate has reached a real registry; (d) **profile isolation is asserted structurally, not exercised** — no per-profile child was supervised through the gateway.
+- [ ] **F24-02**: The automation plane supports one-shot, interval, cron, natural-language authoring, commitments/heartbeat, hooks/webhooks/polling, history, retry, continuation, and bounded delivery. — **INCOMPLETE. No evidence.** Plan 24-02 was not executed. Every clause is unmet: no scheduling lease, no trigger vocabulary beyond the pre-existing cron expression, no retry, no bounded history beyond the pre-existing ring buffer, no continuation, no natural-language authoring. The persistent scheduling that Phase 22 Success Criterion 4 explicitly deferred to Phase 24 **remains deferred and is now overdue**.
+- [ ] **F24-03**: The channel framework proves setup/auth probes, pairing/access, thread/group binding, profile/agent routing, media normalization, edit/delete/reaction, idempotent outbound delivery, reconnect/reload, and health. — **INCOMPLETE. One clause has partial upstream support.** Plan 24-03 was not executed. All clauses unmet. The single exception worth recording: **idempotent outbound delivery** now has a durable substrate — 24-01's exactly-once ledger, with the compatibility decision recorded (the key lives in the ledger, not on the serialized outbound message, because that struct rejects unknown fields) — but nothing in `wcore-channels` is routed through it.
+- [ ] **F24-04**: A typed API/App SDK provides authenticated roles, idempotent commands, ordered/gap-aware events, compatibility negotiation, remote clients, logs, health, and a redacted support bundle. — **INCOMPLETE. No evidence.** Plan 24-03 (which owns this requirement) was not executed. `crates/wcore-acp` gained no `roles.rs`, `idempotency.rs`, `cursor.rs` or `negotiate.rs`, and no support bundle exists, redacted or otherwise.
+- [ ] **F24-05**: Setup-to-recovery and kill/reconnect/delivery journeys pass on native macOS, Linux, and Windows without lost or duplicate work. — **INCOMPLETE. No evidence.** Plan 24-04 was not executed. No journey driver, no receipt schema, no receipt on any platform. The "without lost or duplicate work" property is proved only at unit level inside `wcore-gateway` against an in-process independent sink — that is not a journey and must not be read as one.
 
 ### Phase 25 — Remote Reach, Nodes, and Plugin Lifecycle
 
@@ -219,7 +231,7 @@ grading in `.planning/phases/23B-continuous-agency/23B-PHASE-DISPOSITION.md`.
 | F21-01, F21-02, F21-03, F21-04 | Phase 21 | **All four Open** — adjudicated at `21-04-PHASE-VERDICT.md` §3, base `f2d186f6`. Criterion 1 NOT MET (tool authority confirmed absent and DECLINED); Criteria 2 and 3 MET WITH STATED EXCEPTIONS. Six HIGH findings open: F21-02-01, F21-02-03, F21-02-02's live closure, F21-04-01, F21-04-02, F21-04-03. No seal claimed. |
 | F22-01, F22-02, F22-03, F22-04, F22-05, F22-06, F22-07 | Phase 22 | Pending |
 | F23-01, F23-02, F23-03, F23-04, F23-05, F23-06 | Phase 23 | Pending |
-| F24-01, F24-02, F24-03, F24-04, F24-05 | Phase 24 | Pending |
+| F24-01, F24-02, F24-03, F24-04, F24-05 | Phase 24 | **All five Open, with explicit incomplete dispositions** — only plan 24-01 of four executed, and it did not reach its own Complete state. F24-01 has partial evidence (runtime, lock, ledger, drain, service abstraction, one HIGH Windows defect fixed on hardware measurement) with four named unmet clauses. F24-02/03/04/05 have no evidence: plans 24-02, 24-03 and 24-04 were not started. Branch `worktree-wf_b7d743bd-954-4`; evidence `phases/24-.../24-01-SUMMARY.md`. |
 | F25-01, F25-02, F25-03, F25-04, F25-05 | Phase 25 | Pending |
 | F26-01, F26-02, F26-03, F26-04, F26-05 | Phase 26 | Pending |
 | F27-01, F27-02, F27-03, F27-04, F27-05 | Phase 27 | Pending |

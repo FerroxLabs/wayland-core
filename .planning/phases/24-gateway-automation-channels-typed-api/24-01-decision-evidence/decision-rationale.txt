@@ -1,0 +1,97 @@
+DECISION: win-scheduled-task
+F24-01 Task 3, decided 2026-07-26 on measurement taken on SEANDESKTOP.
+
+This is the MAJORITY position — 4 of 4 members picked it — so no
+MINORITY-POSITION-ADOPTED clause applies, and the panel was not tied so no
+EVIDENTIARY-TIEBREAK applies. What follows is why the measurement, not the
+count, is what carries it.
+
+WHAT THE PROBES ESTABLISHED
+
+1. The existing Windows detach path is BROKEN, and this is now a measured
+   product defect rather than a prediction. The non-Unix spawn branch in
+   crates/wcore-cli/src/cron.rs sets no creation flags; its child wrote 1 of
+   600 heartbeats and was gone. Windows OpenSSH kills session children
+   through a Job Object, and the child was inside it. Severity HIGH: every
+   `cron daemon` ever started over a remote session on Windows died the
+   moment that session returned, and nothing reported it.
+
+2. The fix is measured, single-variable. The SAME binary spawned with
+   DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB
+   wrote 600 of 600 beats and exited normally. CREATE_BREAKAWAY_FROM_JOB is
+   the load-bearing flag: without it the child stays in the OpenSSH job
+   object regardless of console or process group.
+
+3. SCM survival was NOT demonstrated. Registration is available here
+   (`sc create` rc=0; the remote session reports elevated, so registration
+   is not gated in this environment), but `sc start` returned 1053 — the
+   image never answered the service control handshake. A plain console
+   executable cannot, and no handshake-capable binary exists anywhere in
+   this workspace. The binding rule therefore excludes win-service-scm, and
+   it excludes it for the right reason: the option's central claim, "survives
+   console close by construction because the SCM owns it", was never seen.
+
+4. Scheduled-task survival IS demonstrated, and was demonstrated twice —
+   the second time only because the first was not good enough. The first
+   probe slept inside its own ssh session and read the heartbeat there,
+   which measures "the task runs", not "the process outlives the session".
+   That hole is recorded in decision-dissent.txt and in panel-internal.txt.
+   A fifth probe (`measure-schtasks-survival.txt`) registered, ran, DELETED
+   the task registration, exited so the session ended, and observed from a
+   later separate session: beats advanced 49 -> 89, one live process. The
+   property is now measured on purpose rather than noticed by accident.
+
+WHY NOT THE OTHER AVAILABLE OPTIONS
+
+win-detached-only was available on the measurement and is rejected on the
+criterion. It fixes the spawn and nothing else: no install, no status, no
+platform-owned restart. Criterion 5 requires the platform's OWN mechanism to
+bring the runtime back after a hard kill, and detached-only has no
+resurrection mechanism at all — it cannot close that criterion by
+construction. It is not discarded, though: the detach flags are a
+PREREQUISITE defect fix under the chosen option, because a scheduled task
+whose process still dies with its launching context has gained nothing.
+
+win-defer was available and is rejected because two mechanisms measured
+usable. Deferring with usable evidence in hand would be recording a gap
+that does not exist.
+
+THE COST ACCEPTED, IN THE OPTION'S OWN TERMS
+
+"It does not start before login, so a headless or unattended box behaves
+differently from the Unix families and that difference must be documented
+rather than discovered." Accepted and documented here. The mitigating fact,
+which the SCM option's symmetry argument obscures, is that BOTH Unix
+families ship per-USER units — a per-user launchd agent and a per-user
+systemd user unit — and neither of those starts before login either. SCM
+would have made Windows the only family that runs pre-login and the only one
+demanding elevation, which is asymmetry introduced in the name of symmetry.
+
+"Task registration and query go through an external command-line tool,
+which is a weaker contract than a typed platform interface and needs its
+output parsed carefully." Accepted. The mitigation is that every schtasks
+invocation goes through wcore_config::shell in ARGV mode, never a shell
+string, so no operator- or LLM-supplied value is ever interpolated into a
+command line (threat T-24-01-01), and every parse of its output is anchored
+on a field name rather than a column offset.
+
+OPEN RISK CARRIED FORWARD, NOT CLOSED HERE
+
+Task Scheduler's restart-on-failure is capped in count and delayed in time,
+and it is genuinely weaker than an SCM recovery policy. The three external
+members asserted equivalence; they are not equivalent. Criterion 5 demands
+that the platform's own mechanism bring the runtime back after a hard kill
+that allows no drain, and NOTHING measured in this task shows that it does.
+24-04 must exercise it live and report honestly if it does not, rather than
+restarting the gateway from the journey script and calling that recovery.
+
+NARROW, NAMED EXECUTION DEPENDENCY ON SEAN — NOT A DECISION GATE
+
+The chosen mechanism needs no elevation for a per-user task, so there is no
+install-time elevation dependency. What 24-04 will need at Sean's own
+keyboard is an INTERACTIVE LOGON on SEANDESKTOP: the registration this probe
+produced is `Logon Mode: Interactive only`, and its process therefore starts
+only when a user is logged on. Every measurement here worked because that
+box has an interactive session. This is an execution dependency for the
+Windows leg of the 24-04 journey, it is narrow, and it does not reopen this
+task. The choice is final.
