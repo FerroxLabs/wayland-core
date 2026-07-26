@@ -7,6 +7,7 @@ pub mod compact;
 pub mod crucible;
 pub mod execution_policy;
 pub mod file_state;
+pub mod goal;
 pub mod llm;
 pub mod message;
 pub mod model_aliases;
