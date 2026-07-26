@@ -174,10 +174,15 @@ function Invoke-LiveAcceptancePhase {
     foreach ($suite in $liveSuites) {
         $log = Join-Path $ResultsDir "L-$($suite.id).log"
         $nextestArgs = @('nextest', 'run', '--run-ignored', 'all', '--no-tests=fail', '--no-fail-fast') + $suite.args + @('--nocapture')
-        $suiteExit = & {
-            cargo @nextestArgs 2>&1 | Tee-Object -FilePath $log
-            $LASTEXITCODE
-        }
+        # Read $LASTEXITCODE AFTER the pipeline, never as the last statement of a
+        # `$x = & { … }` block: Tee-Object passes every line through, so such a
+        # block returns an ARRAY of (all output lines + the exit code), and
+        # `if ($array -ne 0)` is an array FILTER whose non-empty result is always
+        # truthy. That made this phase report failure on a fully green run — as
+        # measured in job 89752739969, where all 12 live_fs_acl and all 6
+        # hard_process_containment_windows tests passed and PHASE L still failed.
+        cargo @nextestArgs 2>&1 | Tee-Object -FilePath $log
+        $suiteExit = $LASTEXITCODE
         if ($suiteExit -ne 0) {
             Write-Fail "live-acceptance suite $($suite.id) failed with exit code $suiteExit"
             $failed += $suite.id
@@ -239,10 +244,11 @@ if ($LiveAcceptance -eq "only") {
 # -----------------------------------------------------------------------------
 Write-Phase "PHASE F — cargo build --release -p wcore-cli"
 $BuildLog = Join-Path $ResultsDir "F-build.log"
-$buildExit = & {
-    cargo build --release -p wcore-cli 2>&1 | Tee-Object -FilePath $BuildLog
-    $LASTEXITCODE
-}
+# Same exit-code capture rule as PHASE L below: read $LASTEXITCODE after the
+# pipeline, not as the trailing value of a `& { … }` block (which returns the
+# piped output as well, making every comparison an always-true array filter).
+cargo build --release -p wcore-cli 2>&1 | Tee-Object -FilePath $BuildLog
+$buildExit = $LASTEXITCODE
 if ($buildExit -ne 0) {
     Write-Fail "release build failed with exit code $buildExit"
     exit $buildExit
@@ -278,17 +284,15 @@ Write-Phase "PHASE G — cargo nextest on representative crates"
 # this list to shorten the run — a timeout is a finding, not a reason to
 # uncover 105 tests again.
 $NextestLog = Join-Path $ResultsDir "G-nextest.log"
-$nextestExit = & {
-    cargo nextest run `
-        -p wcore-cron `
-        -p wcore-config `
-        -p wcore-providers `
-        -p wcore-tools `
-        -p wcore-swarm `
-        -p wcore-sandbox `
-        2>&1 | Tee-Object -FilePath $NextestLog
-    $LASTEXITCODE
-}
+cargo nextest run `
+    -p wcore-cron `
+    -p wcore-config `
+    -p wcore-providers `
+    -p wcore-tools `
+    -p wcore-swarm `
+    -p wcore-sandbox `
+    2>&1 | Tee-Object -FilePath $NextestLog
+$nextestExit = $LASTEXITCODE
 if ($nextestExit -ne 0) {
     Write-Fail "nextest failed with exit code $nextestExit"
     exit $nextestExit
