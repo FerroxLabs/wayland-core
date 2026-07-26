@@ -21,6 +21,33 @@ const FORBIDDEN_CORE_IMPORTS: &[&str] = &[
     "wcore-evolve",
     "wcore-observability",
     "wcore-repomap",
+    // F25-01 (2026-07-26). This crate carries real execution authority AND a
+    // credentialed network transport (ssh, and a cloud control plane holding a
+    // bearer token). It is precisely what audit finding F2 forbids a plugin
+    // from reaching, so a plugin describes an execution backend through
+    // `ExecutionBackendSpec` and the host adapter in wcore-agent translates it
+    // after `initialize()` returns. Without this entry the lint would have
+    // silently permitted the dependency the mirror exists to avoid.
+    "wcore-exec-backend",
+    //
+    // DELIBERATELY ABSENT: `wcore-sandbox`.
+    //
+    // The F25-01 plan asserted that its omission was an unnoticed hole. It is
+    // measured NOT to be. `wcore-plugin-api/Cargo.toml` carries
+    // `wcore-sandbox.workspace = true` as an explicit M5.1 SECURITY-ALLOWLISTED
+    // dependency, annotated as such in the manifest, because `PluginContext`
+    // hands plugins a `SandboxRegistry` HANDLE (`context.rs`, field `sandbox`)
+    // so a `requires_sandbox = true` tool can be contained at all. Adding
+    // `wcore-sandbox` to this list fails the build of the existing tree
+    // immediately — verified 2026-07-26 on hetzner-dsm, build.rs exit 101.
+    //
+    // The distinction that makes both decisions correct: `wcore-sandbox` is
+    // handed over as a CONSTRAINING capability (it can only narrow what a
+    // plugin may do), whereas `wcore-exec-backend` would be an ENABLING one
+    // (off-box execution plus a credential). Reversing the M5.1 allowlist is a
+    // real architectural question and it belongs to whoever owns that
+    // decision, not to a phase that happened to walk past it. Recorded in the
+    // 25-01 SUMMARY as a finding rather than silently forced through.
     "libloading",
     "wasmtime",
     "wasmer",

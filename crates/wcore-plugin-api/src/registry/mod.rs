@@ -6,6 +6,10 @@ pub mod browser;
 pub mod config;
 // W8c.2 F.8: ScopedCuaRegistry for the wayland-cua plugin shell.
 pub mod cua;
+// F25-01: ScopedExecutionBackendRegistry for plugin-supplied execution
+// backends. Mirror only — the real backend lives in wcore-exec-backend, which
+// FORBIDDEN_CORE_IMPORTS now bans from this crate.
+pub mod execution_backends;
 pub mod hooks;
 pub mod logger;
 pub mod mcp;

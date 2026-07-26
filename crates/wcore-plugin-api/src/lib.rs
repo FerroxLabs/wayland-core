@@ -37,6 +37,11 @@ pub mod bundled_skill_spec;
 // against this api-crate-local type; the host adapter in wcore-cua
 // translates into a concrete `CuaTool`.
 pub mod cua_spec;
+// F25-01 — `ExecutionBackendSpec` mirror of the wcore-exec-backend contract.
+// Plugin shells describe an execution backend against this api-crate-local
+// type; the host adapter in wcore-agent translates it into a real backend
+// after initialize() returns.
+pub mod execution_backend_spec;
 pub mod mcp_server_spec;
 pub mod memory_spec;
 pub mod rule_spec;
@@ -73,6 +78,9 @@ pub use agent_manifest::AgentManifest;
 pub use browser_spec::{BrowserOpSpec, BrowserPolicySpec, BrowserProviderHint, BrowserToolSpec};
 pub use bundled_skill_spec::BundledSkillSpec;
 pub use cua_spec::{CuaOpSpec, CuaPolicySpec, CuaToolSpec};
+pub use execution_backend_spec::{
+    ExecutionBackendKind, ExecutionBackendSpec, ExecutionLimitsSpec, ExecutionSecretChannel,
+};
 pub use mcp_server_spec::{McpServerSpec, McpTransport};
 pub use memory_spec::{MemoryItem, MemoryQuery, Partition};
 pub use rule_spec::{RuleScope, RuleSpec};
