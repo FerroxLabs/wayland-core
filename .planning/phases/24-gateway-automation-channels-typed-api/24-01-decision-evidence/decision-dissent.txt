@@ -1,0 +1,60 @@
+DISSENT — F24-01 Task 3. The losing arguments in their own terms.
+
+The panel was unanimous, so no member dissented. That makes recording the
+losing arguments MORE important, not less: a unanimous panel is the one
+most likely to have agreed too fast, and the record below is what a later
+reader needs in order to reopen this if the risk in it lands.
+
+ARGUMENT FOR win-service-scm, in its own terms, and it is the strongest
+option on paper. It is the platform's own answer to a persistent background
+runtime. It starts before login, survives console close BY CONSTRUCTION
+rather than by flag hygiene, restarts under the platform's own recovery
+policy, and is inspectable with the tools a Windows operator already uses
+every day — services.msc, `sc query`, the event log. It is the closest
+structural match to a launch agent and a systemd unit, so the three families
+would stay one contract with one implementation each rather than two
+contracts and a special case.
+
+Its defeat here was NOT a judgement that it is the wrong mechanism. It was
+disqualified because a sixty-line console probe returned 1053 — a fact about
+the probe, not about the mechanism. That is a category error worth naming
+plainly: probe design should not pick architecture. The counter-argument
+that carried, and it is narrower than the vote made it look, is only this:
+the option's central property was never observed, and making it observable
+means writing a service-control handshake and reconciling the drain budget
+against the service stop timeout — substantial work the plan does not budget
+and the option's own cons already name. If someone later builds a
+handshake-capable binary, this decision deserves to be revisited on the
+merits rather than treated as settled.
+
+ARGUMENT FOR win-detached-only, in its own terms. It is the smallest change
+that fixes something genuinely broken. The measurement proved the current
+spawn is a real defect, and correcting the creation flags stands on its own
+regardless of which registration model is chosen later — it is the only part
+of this decision that is certainly right. Committing to a registration model
+now, on one afternoon of probing, risks locking the phase to schtasks when
+the evidence really only supports "the flags fix works".
+
+Its defeat: Criterion 1 says NATIVE SERVICE LIFECYCLE, and Criterion 5 needs
+the PLATFORM to bring the runtime back after a hard kill. A process an
+operator restarts by hand at every logon is neither.
+
+ARGUMENT FOR win-defer, in its own terms. Nothing is built on an
+unauthorized mechanism and the gap stays visible in the record instead of
+being absorbed into an implementation detail. Given how thin the evidence
+under schtasks was BEFORE the fifth probe was run, deferral would have been
+the defensible answer at the moment the three external members voted.
+
+Its defeat: by the time the decision was written, two mechanisms had
+measured usable. Deferring with usable evidence in hand records a gap that
+does not exist.
+
+THE OBJECTION THAT NEARLY CHANGED THE OUTCOME, recorded because it says
+something about the panel rather than about the options. The `schtasks`
+transcript the three external members were given did NOT measure survival
+past session end — its twelve-second observation window sat inside the
+spawning session. All three read it as proof of a "session-independent
+parent". A panel that misreads one artifact three ways in the same direction
+is one vote counted three times, and the conclusion survived only because
+the missing probe was run afterwards. Anyone re-reading this decision should
+weight the four captures by what each MEASURED, not by the tally.

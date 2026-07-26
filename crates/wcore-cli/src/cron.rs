@@ -461,15 +461,39 @@ async fn daemon_cmd(store: &FileCronStore) -> Result<()> {
 
     #[cfg(not(unix))]
     let child = {
-        std::process::Command::new(&current_exe)
-            .args(["cron", "daemon"])
+        let mut cmd = std::process::Command::new(&current_exe);
+        cmd.args(["cron", "daemon"])
             .env("WAYLAND_CRON_DAEMON_CHILD", "1")
             .env("WAYLAND_HOME", wayland_home.to_string_lossy().as_ref())
             .stdin(std::process::Stdio::null())
             .stdout(log_file.try_clone().context("log file clone")?)
-            .stderr(log_file)
-            .spawn()
-            .context("failed to spawn daemon child")?
+            .stderr(log_file);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            // F24-01 Task 3, MEASURED on SEANDESKTOP 2026-07-26. This branch
+            // previously set NO creation flags while its Unix sibling above
+            // calls process_group(0) (setsid). A probe compiled with rustc on
+            // the box, spawning through this exact std::process::Command path
+            // and then exiting as this function does, wrote 1 of 600
+            // heartbeats and was gone: the child stayed inside the launching
+            // session's job object and died with it. The SAME probe with these
+            // three flags wrote 600 of 600 and exited normally. One variable.
+            //
+            // CREATE_BREAKAWAY_FROM_JOB is the load-bearing one. Detaching the
+            // console and leaving the process group is not enough on their own
+            // — Windows OpenSSH reaps session children through a Job Object,
+            // and only a breakaway leaves it.
+            //
+            // Evidence: 24-01-GATEWAY-CONTRACT.md, probes `detach-baseline`
+            // and `detached-flags`.
+            cmd.creation_flags(
+                wcore_gateway::service::DETACHED_PROCESS
+                    | wcore_gateway::service::CREATE_NEW_PROCESS_GROUP
+                    | wcore_gateway::service::CREATE_BREAKAWAY_FROM_JOB,
+            );
+        }
+        cmd.spawn().context("failed to spawn daemon child")?
     };
 
     let child_pid = child.id();

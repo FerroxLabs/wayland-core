@@ -1,0 +1,12 @@
+observer name=detached-flags heartbeat=C:\f24-01-probe\hb-flags.txt terminal=600#< CLIXML
+
+observer host=SEANDESKTOP user=seand
+observer now=2026-07-26T22:42:03.9124925+07:00
+observer read#1 lines=600
+observer read#1 tail=beat 599 pid 20120 at 1785080509638
+observer read#2 lines=600
+observer read#2 tail=beat 599 pid 20120 at 1785080509638
+observer live f24probe processes=0
+observer VERDICT: heartbeat is at the TERMINAL beat count - the child ran its whole course and exited normally, so it outlived the session that spawned it
+PROBE detached-flags RESULT=survives RC=0
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.PSCustomObject</T><T>System.Object</T></TN><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj><Obj S="progress" RefId="1"><TNRef RefId="0" /><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj></Objs>

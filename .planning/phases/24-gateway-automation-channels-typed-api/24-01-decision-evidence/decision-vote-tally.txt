@@ -1,0 +1,4 @@
+member=codex pick=win-scheduled-task
+member=gemini pick=win-scheduled-task
+member=kimi pick=win-scheduled-task
+member=internal pick=win-scheduled-task

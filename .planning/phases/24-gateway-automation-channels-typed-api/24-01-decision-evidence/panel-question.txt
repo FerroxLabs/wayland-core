@@ -1,0 +1,186 @@
+=== F24-01 TASK 3 DECISION: Which mechanism makes the Wayland Core gateway a persistent, operator-managed service on Windows? ===
+
+You are one of four independent reviewers. Answer from the MEASURED EVIDENCE below.
+End your response with EXACTLY one line: PANEL_POSITION=<option-id>
+where <option-id> is one of: win-service-scm | win-scheduled-task | win-detached-only | win-defer
+
+--- CONTEXT ---
+wayland-core is a Rust agent CLI. Phase 24 Success Criterion 1 requires native service
+lifecycle (install / start / status / drain / restart / upgrade / rollback) on macOS, Linux
+AND Windows. On macOS and Linux this is settled: per-user launchd agent and per-user systemd
+unit templates already exist in the repository for the background scheduler and are directly
+reusable for the gateway. Windows has NO equivalent. The current non-Unix spawn branch in
+crates/wcore-cli/src/cron.rs sets NO creation flags; the Unix sibling calls process_group(0),
+which is setsid.
+
+Criterion 5 additionally requires a live setup-to-recovery journey on Windows in which the
+platform's OWN service mechanism -- not the test script -- brings the runtime back after a
+hard kill that allows no drain.
+
+--- OPTIONS (verbatim from the plan; do not re-scope them) ---
+
+win-service-scm: A real Windows service registered with the service control manager, with the
+  gateway answering the service control handshake in-process.
+  PROS: the platform's own answer to a persistent background runtime; starts before login;
+  survives console close by construction; restarts under the platform's own recovery policy;
+  inspectable with the tools a Windows operator already uses; the closest structural match to
+  the launch agent and the systemd unit, so the three families stay one contract with one
+  implementation each.
+  CONS: registration needs elevation, which puts an administrator prompt in the install path;
+  the process must answer the control handshake within the platform's timeout or the platform
+  kills it, so the drain budget and the service stop timeout must be reconciled explicitly; it
+  adds a platform service dependency to a crate that currently has none.
+
+win-scheduled-task: A scheduled task registered to run at logon, with the gateway staying an
+  ordinary detached process.
+  PROS: no elevation in the ordinary case, so the install path stays a single non-privileged
+  command; the closest analogue to the per-user launch agent and per-user systemd unit already
+  in the repository, which keeps the three families symmetric in privilege as well as in shape;
+  restart-on-failure is expressible in the task definition.
+  CONS: it does not start before login, so a headless or unattended box behaves differently
+  from the Unix families and that difference must be documented rather than discovered; task
+  registration and query go through an external command-line tool, which is a weaker contract
+  than a typed platform interface and needs its output parsed carefully.
+
+win-detached-only: Fix only the detach flags and ship no Windows service integration this phase.
+  PROS: smallest change; correcting the missing creation flags is a real defect fix that stands
+  on its own regardless of which mechanism is chosen later; it unblocks every other Windows
+  behaviour in this phase without committing to a registration model.
+  CONS: the first Success Criterion says native service lifecycle, and a process that must be
+  started by hand after every logon is not that; it leaves Windows visibly behind the other two
+  families and pushes the gap into a later phase where it competes with certification work.
+
+win-defer: Defer the Windows mechanism entirely and record the criterion as not closed on that
+  platform.
+  PROS: nothing is built on an unauthorized mechanism, and the gap is visible in the record
+  rather than absorbed into an implementation detail.
+  CONS: the phase cannot honestly claim its first or fifth Success Criterion, since both name
+  Windows explicitly. The decision only moves, it does not go away.
+
+--- HARD BINDING RULE ---
+A mechanism the probes proved unavailable CANNOT be chosen, however well it argues.
+  win-service-scm    requires PROBE scm RESULT=survives.            It measured: unsupported.
+  win-scheduled-task requires PROBE schtasks RESULT=survives.       It measured: survives.
+  win-detached-only  requires PROBE detached-flags RESULT=survives. It measured: survives.
+  win-defer          requires a detach-baseline verdict to exist.   It measured: dies.
+
+--- MEASUREMENT, taken on the real box SEANDESKTOP on 2026-07-26 ---
+The probe binary was compiled with rustc ON the box, so it exercises the EXACT
+std::process::Command code path the product uses; a shell-written probe would have measured
+PowerShell's spawn semantics instead. The parent spawns the child and exits immediately, as
+`cron daemon` does after it re-execs itself. The spawning ssh session then ends -- Windows
+OpenSSH kills session children through a Job Object. A LATER, SEPARATE ssh session then
+observes whether the child's heartbeat advanced. The child writes 600 heartbeats at 100ms
+intervals and then exits normally.
+
+Each probe script printed its own verdict line; the reviewer did not type it.
+
+########## measure-detach-baseline.txt (verbatim transcript from the box) ##########
+observer name=detach-baseline heartbeat=C:\f24-01-probe\hb-noflags.txt terminal=600
+observer host=SEANDESKTOP user=seand
+
+observer read#1 lines=1
+observer read#1 tail=beat 0 pid 8148 at 1785080448123
+observer read#2 lines=1
+observer read#2 tail=beat 0 pid 8148 at 1785080448123
+observer live f24probe processes=0
+observer VERDICT: heartbeat FROZEN at 1 of 600 beats with no live process - the child was terminated, not finished
+PROBE detach-baseline RESULT=dies RC=0
+
+########## measure-detached-flags.txt (verbatim transcript from the box) ##########
+
+observer host=SEANDESKTOP user=seand
+observer now=2026-07-26T22:42:03.9124925+07:00
+observer read#1 lines=600
+observer read#1 tail=beat 599 pid 20120 at 1785080509638
+observer read#2 lines=600
+observer read#2 tail=beat 599 pid 20120 at 1785080509638
+observer live f24probe processes=0
+observer VERDICT: heartbeat is at the TERMINAL beat count - the child ran its whole course and exited normally, so it outlived the session that spawned it
+PROBE detached-flags RESULT=survives RC=0
+
+########## measure-scm.txt (verbatim transcript from the box) ##########
+
+probe scm now=2026-07-26T22:44:17.7098856+07:00
+probe scm identity=SeanDesktop\seand elevated=True
+probe scm --- sc.exe create ---
+probe scm create> [SC] CreateService SUCCESS
+probe scm create rc=0
+probe scm --- sc.exe start ---
+probe scm start> [SC] StartService FAILED 1053:
+probe scm start> 
+probe scm start> The service did not respond to the start or control request in a timely fashion.
+probe scm start> 
+probe scm start rc=1053
+probe scm heartbeat-after-start lines=586
+probe scm query> 
+probe scm query> SERVICE_NAME: F24ProbeSvc 
+probe scm query>         TYPE               : 10  WIN32_OWN_PROCESS  
+probe scm query>         STATE              : 1  STOPPED 
+probe scm query>         WIN32_EXIT_CODE    : 0  (0x0)
+probe scm query>         SERVICE_EXIT_CODE  : 0  (0x0)
+probe scm query>         CHECKPOINT         : 0x0
+probe scm query>         WAIT_HINT          : 0x7d0
+probe scm stop> [SC] ControlService FAILED 1062:
+probe scm stop> 
+probe scm stop> The service has not been started.
+probe scm stop> 
+probe scm delete> [SC] DeleteService SUCCESS
+probe scm post-delete-query> [SC] EnumQueryServicesStatus:OpenService FAILED 1060:
+probe scm post-delete-query> 
+probe scm post-delete-query> The specified service does not exist as an installed service.
+probe scm post-delete-query> 
+probe scm NOTE: registration rc=0 (session is elevated, so registration is not gated here)
+probe scm NOTE: start rc=1053; 1053 means the image did not answer the service control handshake
+probe scm NOTE: the probe binary is a plain console executable and cannot answer that handshake
+probe scm VERDICT: registration AVAILABLE, survival NOT DEMONSTRATED by this probe
+PROBE scm RESULT=unsupported RC=1053
+
+########## measure-schtasks.txt (verbatim transcript from the box) ##########
+probe schtasks host=SEANDESKTOP user=seand
+probe schtasks now=2026-07-26T22:46:37.5472808+07:00
+probe schtasks --- create (onlogon) ---
+probe schtasks create> SUCCESS: The scheduled task "F24ProbeTask" has successfully been created.
+probe schtasks create rc=0
+probe schtasks --- query ---
+probe schtasks query> TaskName:                             \F24ProbeTask
+probe schtasks query> Status:                               Ready
+probe schtasks query> Logon Mode:                           Interactive only
+probe schtasks query> Task To Run:                          C:\f24-01-probe\f24probe.exe child C:\f24-01-probe\hb-schtasks.txt
+probe schtasks query> Run As User:                          seand
+probe schtasks query> Schedule Type:                        At logon time
+probe schtasks --- run ---
+probe schtasks run> SUCCESS: Attempted to run the scheduled task "F24ProbeTask".
+probe schtasks run rc=0
+probe schtasks heartbeat-after-run lines=119
+probe schtasks delete> SUCCESS: The scheduled task "F24ProbeTask" was successfully deleted.
+probe schtasks post-delete-query> ERROR: The system cannot find the file specified.
+probe schtasks post-delete-query> System.Management.Automation.RemoteException
+probe schtasks VERDICT: the task registered, ran, and its process wrote 119 beats from a session-independent parent
+PROBE schtasks RESULT=survives RC=0
+
+--- WHAT THE MEASUREMENT SHOWS ---
+1. The CURRENT Windows detach path is BROKEN. 1 of 600 heartbeats, no live process. A
+   background service that dies when its session closes is not a persistent runtime. This is a
+   real product defect, confirmed by measurement rather than predicted.
+2. Adding DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB makes the
+   SAME binary survive: 600 of 600 beats, exited normally. One variable changed.
+3. SCM registration is NOT gated in this environment -- the remote session reports elevated and
+   `sc create` returned 0. But `sc start` returned 1053: the image never answered the service
+   control handshake, which a plain console executable cannot do. So SURVIVAL UNDER THE SCM WAS
+   NOT DEMONSTRATED, and the binary that could demonstrate it (one implementing the handshake)
+   does not exist anywhere in this workspace today.
+4. A scheduled task registered, ran, and its process wrote 119 heartbeats over 12 seconds with
+   no session holding it. Independent corroboration: a stray child from an earlier scheduled
+   run was found still alive roughly 40 seconds after its own ssh session had ended.
+
+--- YOUR TASK ---
+Choose ONE option id. Weigh: what Criterion 1 actually demands; what the probes proved
+available versus merely argued for; the cost each option carries in its own terms; and whether
+a phase should build on a mechanism whose central property was never measured.
+
+Note that win-detached-only and win-scheduled-task are not mutually exclusive in
+implementation -- the detach flags are a prerequisite defect fix under either -- so consider
+whether the question is really "which registration model" rather than "which spawn".
+
+Give your reasoning, then the PANEL_POSITION line as the final line.

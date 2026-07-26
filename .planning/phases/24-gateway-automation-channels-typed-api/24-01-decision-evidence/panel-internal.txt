@@ -1,0 +1,108 @@
+INTERNAL ADVERSARIAL PASS — F24-01 Task 3
+Written to argue AGAINST the position codex, gemini and kimi converged on
+(win-scheduled-task), not to ratify it. Author: the executing agent.
+
+The three external members agreed within minutes and for the same reason:
+the binding rule knocked out win-service-scm, and among what was left only
+schtasks had a registration model. That is a process of elimination
+dressed as a decision, and elimination arguments are exactly where a panel
+is weakest. Four objections, strongest first.
+
+OBJECTION 1 — THE CONSENSUS'S OWN EVIDENCE DID NOT MEASURE THE PROPERTY IT
+CLAIMED. This is the serious one.
+
+The `schtasks` probe registered a task, ran it, slept twelve seconds INSIDE
+its own ssh session, and read 119 heartbeats there. Every one of those
+beats was written while the spawning session was still alive. What that
+measures is "the task runs". The property the option needs is "the process
+outlives the session that started it" — and the probe never left the
+session, so it never tested that. The transcript's only evidence for
+survival-past-session-end was a stray child found alive forty seconds after
+its session had ended, which was discovered by accident while cleaning up.
+Accidental evidence is not evidence: nobody designed the conditions, nobody
+controlled the variables, and it was noticed rather than measured.
+
+All three external members read that transcript and called it proof of a
+"session-independent parent". None of them noticed the observation window
+sat inside the session. A panel that misreads the same artifact three ways
+in the same direction is not three votes; it is one vote counted three
+times.
+
+DISPOSITION: this objection was ACCEPTED and then CLOSED BY MEASUREMENT
+rather than by argument. A fifth probe was run: register, run, delete the
+task registration, exit so the ssh session ends, and observe from a LATER,
+SEPARATE session — the identical shape the two detach probes use.
+Result (`measure-schtasks-survival.txt`): beats advanced 49 → 89 across the
+two reads, one live process, with the task registration already deleted.
+The property is now measured on purpose. The objection stands as a
+criticism of how the consensus was reached; it no longer stands as a
+criticism of the conclusion.
+
+OBJECTION 2 — "INTERACTIVE ONLY" IS NOT A SERVICE, AND THE PROBE SHOWED IT.
+The task the probe actually registered came back `Logon Mode: Interactive
+only`, `Run As User: seand`. On a headless or unattended box that runtime
+does not start at all. Criterion 1 says NATIVE SERVICE LIFECYCLE. A
+mechanism that requires a human to be logged in is closer to
+win-detached-only than the consensus admits — it differs mainly in who
+types the start command, not in whether the platform owns the process.
+
+The counter, and it is a real one: the two families this must stay
+symmetric with are BOTH per-user. The repository ships a per-user launchd
+AGENT and a per-user systemd USER unit, not a system daemon and not a
+system service. Both of those also do not start before login. Choosing SCM
+would make Windows the ONLY family that runs pre-login and the only one
+that demands elevation — that is asymmetry introduced in the name of
+symmetry. The honest statement is that "starts before login" is a property
+NO family has today, and the Windows option that preserves that shape is
+the scheduled task. This objection therefore reduces to a documentation
+requirement, not a mechanism defect, and it is recorded as an accepted cost.
+
+OBJECTION 3 — SCM WAS DISQUALIFIED BY A PROBE ARTIFACT, NOT BY A PROPERTY
+OF THE MECHANISM. The 1053 means a sixty-line console executable did not
+answer the service control handshake. Of course it did not; it was never
+written to. That is a fact about the probe, not about whether wayland-core
+could implement the handshake — and letting probe design pick the
+architecture is a category error. The binding rule was supposed to stop the
+panel arguing its way to an unavailable mechanism; here it may have stopped
+it choosing an available one that simply was not built yet.
+
+This is the objection I find hardest to dismiss, and I do not dismiss it. I
+narrow it. The rule's purpose is to stop a phase committing to a property
+it has not seen. Whether wayland-core CAN become a Windows service is not
+in doubt; whether it does so inside THIS plan's declared files, with the
+drain budget reconciled against the service stop timeout, is a substantial
+piece of unbuilt work — and the option's own cons say so. Choosing SCM here
+would mean the phase's Windows lifecycle rests on something not written,
+not measured, and not budgeted. Choosing the scheduled task means it rests
+on something measured twice. The rule reaches the right answer even though
+the reasoning the three members gave for it was too quick.
+
+OBJECTION 4 — RESTART-ON-FAILURE IS NOT SERVICE RECOVERY, AND CRITERION 5
+ASKS FOR RECOVERY. Criterion 5 requires the platform's OWN mechanism to
+bring the runtime back after a hard kill that allows no drain. Task
+Scheduler's restart-on-failure is capped in count, delayed in time, and
+keyed off the action's exit — it is genuinely weaker than an SCM recovery
+policy. The consensus asserted equivalence; it is not equivalent.
+
+DISPOSITION: this is a REAL residual risk and it is NOT closed by anything
+measured here. It is recorded as an open risk carried into 24-04, whose
+journey must actually kill the gateway and confirm the scheduler — not the
+journey script — brings it back. If it does not, Criterion 5 does not close
+on Windows and that must be reported rather than engineered around. I am
+recording this rather than letting the decision absorb it.
+
+CONCLUSION OF THE ADVERSARIAL PASS
+I set out to argue against win-scheduled-task and could not sustain it on
+the merits. Objection 1 was real and was closed by running the probe that
+should have been run first. Objection 2 reduces to a documented cost that
+the Unix families already pay. Objection 3 is a fair criticism of the
+panel's reasoning that nonetheless lands on the same answer. Objection 4 is
+a genuine unclosed risk that belongs in the record and in 24-04's scope, not
+in the mechanism choice.
+
+The one thing I will not concede to the consensus is its confidence. Three
+members read a transcript that did not show what they said it showed. The
+conclusion survived only because the missing measurement was taken
+afterwards.
+
+PANEL_POSITION=win-scheduled-task

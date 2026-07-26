@@ -9558,6 +9558,7 @@ dependencies = [
  "wcore-cron",
  "wcore-egress",
  "wcore-eval-scenarios",
+ "wcore-gateway",
  "wcore-mcp",
  "wcore-memory",
  "wcore-permissions",

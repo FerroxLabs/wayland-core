@@ -14,6 +14,7 @@ pub mod drain;
 pub mod ledger;
 pub mod lifecycle;
 pub mod pidlock;
+pub mod service;
 
 use std::path::PathBuf;
 
