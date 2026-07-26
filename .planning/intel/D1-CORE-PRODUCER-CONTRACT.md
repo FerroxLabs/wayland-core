@@ -661,12 +661,35 @@ durable Desktop replay across restart, and the persistent Anvil artifact-mutatio
 `DEFERRED.md` names the last two as `anvil_desktop_replay_reducer` and
 `anvil_persistent_mutation_watcher`.
 
-**Compile/test status at this SHA: NOT VERIFIED BY THIS AUTHOR.** No Rust toolchain on the
-authoring machine, and project policy forbids running Cargo there. All Core-side evidence
-above is cited from checked-in test source, not from an observed green run. Authoritative
-Linux proof runs on `hetzner-dsm:/root/wayland`. **A green `cargo nextest run -p wcore-protocol`
-on the pinned SHA should be attached before Desktop treats §8 as a receipt rather than a
-citation.**
+**Compile/test status at this SHA: VERIFIED GREEN — §8 is a receipt, not a citation.**
+
+The author of §8 could not run Cargo (no toolchain on the authoring machine; project policy
+forbids Cargo there) and correctly recorded its evidence as cited-from-source rather than
+observed. That gap is now closed by an actual run on the authoritative Linux host:
+
+```
+host    : hetzner-dsm:/root/wayland
+HEAD    : b6936299d9c3a7d3110e9ba03c36e5debe965b85   (the pinned contract SHA)
+worktree: clean (git status --porcelain = 0 lines)
+command : cargo nextest run -p wcore-protocol --no-fail-fast
+result  : 302 tests run: 302 passed, 0 skipped   (EXIT=0)
+```
+
+Included in that run and passing: `desktop_contract_corpus::checked_corpus_matches_real_serializers_byte_for_byte`,
+`::manifest_ready_and_schema_titles_share_one_contract_identity`,
+`::every_json_artifact_is_canonical_and_lf_terminated`,
+`::generated_schemas_reject_malformed_authority_types_and_enums`,
+`::malformed_durable_child_fixtures_are_rejected`, and
+`::producer_complete_schema_keeps_current_and_non_desktop_variants_visible`.
+
+Those are the tests that bind this document's claims to the real serializers, so the corpus
+Desktop consumes is proved byte-identical to what Core actually emits at this SHA — not merely
+consistent with a checked-in manifest.
+
+Note on environment: `cargo` is not on the PATH of a non-login shell on `hetzner-dsm`. Use
+`/root/.cargo/bin/cargo` or export `PATH=/root/.cargo/bin:$PATH` explicitly; a bare `cargo`
+over `ssh` fails with `cargo: not found` / exit 127, which is a PATH artifact and not a
+build failure.
 
 ---
 
