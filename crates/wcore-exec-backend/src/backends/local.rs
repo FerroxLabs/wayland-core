@@ -190,7 +190,9 @@ impl ExecutionBackend for LocalBackend {
         }
 
         let child = command.spawn().map_err(|e| {
-            ExecError::Exec(format!("could not spawn '{program}' for the local backend: {e}"))
+            ExecError::Exec(format!(
+                "could not spawn '{program}' for the local backend: {e}"
+            ))
         })?;
         let pid = child.id();
 

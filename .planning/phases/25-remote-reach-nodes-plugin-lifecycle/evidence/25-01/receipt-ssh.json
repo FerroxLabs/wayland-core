@@ -1,14 +1,14 @@
 {
   "schema": "wayland.execution-backend-receipt",
   "schema_version": 1,
-  "body_sha256": "beceac0c4bf8c5af7b3c04438e475a515a689ba5f897db93cc9961e8359cd3dc",
+  "body_sha256": "37328ce90493b4b946dfd72bcd7c47a3cf435a54997b276a7ee48b6d0839584e",
   "body": {
     "protocol_version": 1,
     "backend": {
       "backend_id": "ssh",
-      "instance_id": "e726e46df27a4868852174c3a57ca8d8",
+      "instance_id": "37f314c11f1b4dd48e9189ccb1d0b8a2",
       "version": "0.12.25",
-      "key_id": "60f51cec519712f82f779d957cd47185b48de99be52cd25e2a81557e4a695eef"
+      "key_id": "63b113fe020b9fcb7810b3c0310d33ff1f6694343887c1413aaf1aeb95bc8b13"
     },
     "transport": {
       "kind": "ssh",
@@ -78,9 +78,9 @@
       "kind": "success"
     },
     "timing": {
-      "started_unix_ms": 1785082416534,
-      "finished_unix_ms": 1785082416799,
-      "wall_ms": 265
+      "started_unix_ms": 1785083678731,
+      "finished_unix_ms": 1785083678937,
+      "wall_ms": 206
     },
     "hibernation": {
       "kind": "not_applicable"
@@ -90,7 +90,7 @@
   },
   "attestation": {
     "algorithm": "ed25519",
-    "key_id": "60f51cec519712f82f779d957cd47185b48de99be52cd25e2a81557e4a695eef",
-    "signature_base64": "u/Z2ARZcVrJgezrCDJMIZvfwSDKxyZl53HoREjYF1A6oBSvbTS6ESnMbhEktxwhcRsmy101tfhCczOSy644TAQ=="
+    "key_id": "63b113fe020b9fcb7810b3c0310d33ff1f6694343887c1413aaf1aeb95bc8b13",
+    "signature_base64": "7y/VOdCbujAoViIB+Q7s/cov3kX3XBhiR86pKBMC+J4NNmYDp823akCOzJy5Huj0+6LqoOIMBRTcEHGIJk1IBQ=="
   }
 }

@@ -129,8 +129,8 @@ async fn list(json: bool) -> Result<()> {
         return Ok(());
     }
     println!(
-        "{:<10} {:<10} {:<12} {:<22} {}",
-        "BACKEND", "KIND", "AVAILABLE", "PROBE BASIS", "DETAIL"
+        "{:<10} {:<10} {:<12} {:<22} DETAIL",
+        "BACKEND", "KIND", "AVAILABLE", "PROBE BASIS"
     );
     for row in &rows {
         println!(
@@ -202,8 +202,9 @@ fn load_task(path: Option<&std::path::Path>, backend: &str) -> Result<ExecutionT
 }
 
 async fn execute(backend: &str, task_path: Option<&std::path::Path>, out: &PathBuf) -> Result<()> {
-    let reference = reference_backend_named(backend, reference_budget())?
-        .ok_or_else(|| anyhow!("unknown backend '{backend}' (try: local, container, ssh, cloud)"))?;
+    let reference = reference_backend_named(backend, reference_budget())?.ok_or_else(|| {
+        anyhow!("unknown backend '{backend}' (try: local, container, ssh, cloud)")
+    })?;
     let task = load_task(task_path, backend)?;
 
     let availability = reference.backend.availability().await;
@@ -226,12 +227,18 @@ async fn execute(backend: &str, task_path: Option<&std::path::Path>, out: &PathB
 
     println!("task:        {}", receipt.body.task.task_id);
     println!("backend:     {}", receipt.body.backend.backend_id);
-    println!("transport:   {:?} via {}", receipt.body.transport.kind, receipt.body.transport.endpoint);
+    println!(
+        "transport:   {:?} via {}",
+        receipt.body.transport.kind, receipt.body.transport.endpoint
+    );
     println!("terminal:    {:?}", receipt.body.terminal);
     println!("input sha:   {}", receipt.body.task.input_sha256);
     println!("workspace:   {}", receipt.body.task.workspace_sha256);
     if let Some(artifact) = &receipt.body.artifact {
-        println!("artifact:    {} {} ({} bytes)", artifact.name, artifact.sha256, artifact.bytes);
+        println!(
+            "artifact:    {} {} ({} bytes)",
+            artifact.name, artifact.sha256, artifact.bytes
+        );
     }
     println!("hibernation: {:?}", receipt.body.hibernation);
     println!("wall ms:     {}", receipt.body.timing.wall_ms);
@@ -245,10 +252,10 @@ async fn cancel(task_id: &str, backend: Option<&str>) -> Result<()> {
     let mut errors = Vec::new();
     for reference in &backends {
         let id = &reference.backend.capabilities().backend_id;
-        if let Some(only) = backend {
-            if only != id {
-                continue;
-            }
+        if let Some(only) = backend
+            && only != id
+        {
+            continue;
         }
         match reference.backend.cancel(task_id).await {
             Ok(observation) => {
@@ -314,7 +321,9 @@ fn verify_receipt(path: &PathBuf) -> Result<()> {
     println!("backend:   {}", receipt.body.backend.backend_id);
     println!("key id:    {}", receipt.body.backend.key_id);
     println!("terminal:  {:?}", receipt.body.terminal);
-    println!("INTEGRITY: OK — body digest, event ordering, single terminal event and internal consistency all hold.");
+    println!(
+        "INTEGRITY: OK — body digest, event ordering, single terminal event and internal consistency all hold."
+    );
     println!(
         "IDENTITY:  NOT ESTABLISHED by this command. A receipt cannot authenticate itself: \
          verifying identity requires a verifying key the caller already pinned, which a receipt \
@@ -351,10 +360,20 @@ fn diff(paths: &[PathBuf]) -> Result<()> {
     println!("\nEXPECTED-DIVERGENT fields (excluded from the normalized body by design):");
     for receipt in &receipts {
         for (name, value) in receipt.body.divergent_fields() {
-            println!("  {:<10} {:<22} {}", receipt.body.backend.backend_id, name, value);
+            println!(
+                "  {:<10} {:<22} {}",
+                receipt.body.backend.backend_id, name, value
+            );
         }
     }
-    println!("\nNORMALIZED DIFF: {}", if equivalent { "EQUIVALENT" } else { "DIVERGENT" });
+    println!(
+        "\nNORMALIZED DIFF: {}",
+        if equivalent {
+            "EQUIVALENT"
+        } else {
+            "DIVERGENT"
+        }
+    );
     if !equivalent {
         println!("differing normalized fields: {}", differing.join(", "));
         println!(

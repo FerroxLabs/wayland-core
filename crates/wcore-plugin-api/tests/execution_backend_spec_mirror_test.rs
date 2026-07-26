@@ -159,10 +159,18 @@ fn a_host_refusal_propagates_and_does_not_mark_the_plugin_registered() {
         fail_with: Some("host says no".into()),
     };
     let mut registry = ScopedExecutionBackendRegistry::new(&binding, &mut host).unwrap();
-    assert!(registry.register_execution_backend(spec("my-vendor")).is_err());
+    assert!(
+        registry
+            .register_execution_backend(spec("my-vendor"))
+            .is_err()
+    );
     // Having been refused, the plugin may try again — the slot was not
     // consumed by a registration that never happened.
-    assert!(registry.register_execution_backend(spec("my-vendor")).is_err());
+    assert!(
+        registry
+            .register_execution_backend(spec("my-vendor"))
+            .is_err()
+    );
 }
 
 #[test]

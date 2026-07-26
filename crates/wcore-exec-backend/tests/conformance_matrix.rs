@@ -95,5 +95,9 @@ async fn the_local_backend_is_always_exercised_because_it_needs_nothing_external
         "the local backend depends on nothing external and must always be exercised: {:?}",
         report.unavailable_reason
     );
-    assert!(report.passed(), "local conformance failures: {:#?}", report.failures());
+    assert!(
+        report.passed(),
+        "local conformance failures: {:#?}",
+        report.failures()
+    );
 }

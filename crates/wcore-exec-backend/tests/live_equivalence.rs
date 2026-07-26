@@ -41,7 +41,11 @@ async fn the_same_task_normalizes_equal_across_every_available_backend() {
         // normalized body — it is part of what four backends running the same
         // task must agree on — so suffixing it per backend would silently turn
         // one equivalence claim into four unrelated runs.
-        let task = reference_task("equiv-reference", "equiv-reference-nonce", reference_budget());
+        let task = reference_task(
+            "equiv-reference",
+            "equiv-reference-nonce",
+            reference_budget(),
+        );
         match reference.backend.execute(&task).await {
             Ok(receipt) => {
                 receipt

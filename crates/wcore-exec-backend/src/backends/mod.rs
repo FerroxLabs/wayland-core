@@ -20,9 +20,9 @@ use crate::contract::{
 use crate::error::{ExecError, Result};
 use crate::policy::EffectivePolicy;
 use crate::receipt::{
-    ArtifactEvidence, BackendIdentity, EventKind, ExecutionReceipt, OutputChannel, PROTOCOL_VERSION,
-    ReceiptBody, ReceiptEvent, ReceiptSigner, TaskEvidence, TerminalStatus, Timing, Transport,
-    sha256,
+    ArtifactEvidence, BackendIdentity, EventKind, ExecutionReceipt, OutputChannel,
+    PROTOCOL_VERSION, ReceiptBody, ReceiptEvent, ReceiptSigner, TaskEvidence, TerminalStatus,
+    Timing, Transport, sha256,
 };
 
 /// What a transport actually produced. Every backend reduces its own world to
@@ -49,7 +49,11 @@ pub fn pre_acceptance_denial(
     let requested = task.resources;
     let limit = capabilities.limits;
     if requested.cpu_millis > limit.cpu_millis {
-        return Some((ResourceKind::CpuMillis, requested.cpu_millis, limit.cpu_millis));
+        return Some((
+            ResourceKind::CpuMillis,
+            requested.cpu_millis,
+            limit.cpu_millis,
+        ));
     }
     if requested.memory_bytes > limit.memory_bytes {
         return Some((

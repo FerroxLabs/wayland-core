@@ -62,9 +62,7 @@ pub(crate) mod b64 {
         serializer.serialize_str(&BASE64.encode(bytes))
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Vec<u8>, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
         let encoded = String::deserialize(deserializer)?;
         BASE64
             .decode(encoded.as_bytes())
@@ -114,7 +112,10 @@ pub fn reference_backends(limits: ResourceBudget) -> Result<Vec<ReferenceBackend
 
 /// Build one reference backend by name. Returns `None` for an unknown name so
 /// the CLI can report the valid set rather than guessing.
-pub fn reference_backend_named(name: &str, limits: ResourceBudget) -> Result<Option<ReferenceBackend>> {
+pub fn reference_backend_named(
+    name: &str,
+    limits: ResourceBudget,
+) -> Result<Option<ReferenceBackend>> {
     let found = reference_backends(limits)?
         .into_iter()
         .find(|b| b.backend.capabilities().backend_id == name);

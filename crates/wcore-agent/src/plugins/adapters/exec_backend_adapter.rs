@@ -33,7 +33,10 @@ impl ExecutionBackendRegistrar for HostExecutionBackendRegistrar {
             ));
         }
         if self.specs.iter().any(|s| s.backend_id == spec.backend_id) {
-            return Err(format!("duplicate execution backend id: {}", spec.backend_id));
+            return Err(format!(
+                "duplicate execution backend id: {}",
+                spec.backend_id
+            ));
         }
         self.specs.push(spec);
         Ok(())

@@ -1,14 +1,14 @@
 {
   "schema": "wayland.execution-backend-receipt",
   "schema_version": 1,
-  "body_sha256": "05a0b4291d3444d30e4269e17b465f719cc72f57e03109904608e77b83052fd9",
+  "body_sha256": "93143eed2815e38b49f3e605260256892deb69c1bed4094159e7369f40526231",
   "body": {
     "protocol_version": 1,
     "backend": {
       "backend_id": "local",
-      "instance_id": "e726e46df27a4868852174c3a57ca8d8",
+      "instance_id": "37f314c11f1b4dd48e9189ccb1d0b8a2",
       "version": "0.12.25",
-      "key_id": "6d25df6df5b8eb8f553861ee820a8be02181dbe5e305f8d267e77ab58c68c2cb"
+      "key_id": "7158df91edb7e74b2be799df20ea1455194ef15cce23d32fc6a0c0bf67faee77"
     },
     "transport": {
       "kind": "local",
@@ -78,8 +78,8 @@
       "kind": "success"
     },
     "timing": {
-      "started_unix_ms": 1785082394897,
-      "finished_unix_ms": 1785082394898,
+      "started_unix_ms": 1785083678025,
+      "finished_unix_ms": 1785083678026,
       "wall_ms": 1
     },
     "hibernation": {
@@ -90,7 +90,7 @@
   },
   "attestation": {
     "algorithm": "ed25519",
-    "key_id": "6d25df6df5b8eb8f553861ee820a8be02181dbe5e305f8d267e77ab58c68c2cb",
-    "signature_base64": "3P+JI5cHwphDybfnyuZe0RQHdWpjt0PtyGixcFr/IkJO64lkr+1lEuh3+AUZa4QDqXLWS2bnc2CyxMt0ZOx4Bw=="
+    "key_id": "7158df91edb7e74b2be799df20ea1455194ef15cce23d32fc6a0c0bf67faee77",
+    "signature_base64": "Cch1LsnYNa7SjX3SoZI8cmJsI3/pdsjqspYZd+qhnttfDJliska41If/wXESbvHje3yjSSjNXvFeymVz98I8Aw=="
   }
 }

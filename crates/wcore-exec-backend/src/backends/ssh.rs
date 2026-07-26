@@ -35,7 +35,9 @@ use crate::receipt::{BackendIdentity, ExecutionReceipt, ReceiptSigner};
 use crate::registry::{self, LiveTask, now_unix_ms};
 
 use super::local::{cancel_marker_taken, instance_id, write_cancel_marker};
-use super::{RunOutcome, denial_receipt, load_or_create_seed, outcome_receipt, pre_acceptance_denial};
+use super::{
+    RunOutcome, denial_receipt, load_or_create_seed, outcome_receipt, pre_acceptance_denial,
+};
 
 pub const BACKEND_ID: &str = "ssh";
 pub const TARGET_ENV: &str = "WAYLAND_EXEC_SSH_TARGET";
@@ -91,20 +93,22 @@ impl SshBackend {
     }
 
     fn require_target(&self) -> Result<&str> {
-        self.target.as_deref().ok_or_else(|| ExecError::Unavailable {
-            backend_id: BACKEND_ID.into(),
-            detail: format!("{TARGET_ENV} is not set, so there is no remote host to reach"),
-        })
+        self.target
+            .as_deref()
+            .ok_or_else(|| ExecError::Unavailable {
+                backend_id: BACKEND_ID.into(),
+                detail: format!("{TARGET_ENV} is not set, so there is no remote host to reach"),
+            })
     }
 }
 
 fn ssh_base_args(target: &str) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
-    if let Ok(config) = std::env::var(CONFIG_ENV) {
-        if !config.trim().is_empty() {
-            args.push("-F".into());
-            args.push(config);
-        }
+    if let Ok(config) = std::env::var(CONFIG_ENV)
+        && !config.trim().is_empty()
+    {
+        args.push("-F".into());
+        args.push(config);
     }
     args.extend([
         "-o".to_string(),
@@ -307,7 +311,9 @@ impl ExecutionBackend for SshBackend {
         let killed = remote_kill(&target, &entry.nonce).await;
         let residual = match remote_scan(&target, &entry.nonce).await {
             Ok(found) => found,
-            Err(detail) => vec![format!("could not re-enumerate the remote process table: {detail}")],
+            Err(detail) => vec![format!(
+                "could not re-enumerate the remote process table: {detail}"
+            )],
         };
         registry::forget(task_id)?;
         Ok(CleanupObservation {
@@ -436,7 +442,11 @@ echo "remote-kill-issued"
 exit 0
 "#;
 
-async fn remote_exec(target: &str, script: &str, argument: &str) -> std::result::Result<String, String> {
+async fn remote_exec(
+    target: &str,
+    script: &str,
+    argument: &str,
+) -> std::result::Result<String, String> {
     if target.is_empty() {
         return Err("no ssh target recorded for this task".into());
     }

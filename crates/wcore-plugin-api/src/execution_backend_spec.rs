@@ -88,6 +88,17 @@ impl ExecutionBackendSpec {
         if self.backend_id.is_empty() || self.backend_id.len() > 128 {
             return Some("backend_id must be 1..=128 bytes".into());
         }
+        // A leading '-' would be parsed by clap as a FLAG, not a value, so a
+        // plugin could name itself `--task` and change the meaning of an
+        // operator's command line. Caught by the mirror test, which is exactly
+        // what that test is for.
+        if self.backend_id.starts_with('-') {
+            return Some(
+                "backend_id must not start with '-' — it becomes a CLI argument value and a \
+                 leading dash would be parsed as a flag"
+                    .into(),
+            );
+        }
         if !self
             .backend_id
             .chars()
@@ -100,11 +111,15 @@ impl ExecutionBackendSpec {
             );
         }
         if !self.limits.is_valid() {
-            return Some("every limit field must be non-zero; a zero is invalid, not unlimited".into());
+            return Some(
+                "every limit field must be non-zero; a zero is invalid, not unlimited".into(),
+            );
         }
         for name in &self.credential_env {
             if name.contains('=') || name.is_empty() {
-                return Some(format!("credential_env entry '{name}' is not a variable NAME"));
+                return Some(format!(
+                    "credential_env entry '{name}' is not a variable NAME"
+                ));
             }
         }
         // A plugin must not be able to shadow a built-in reference backend and

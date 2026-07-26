@@ -35,7 +35,9 @@ use crate::receipt::{BackendIdentity, ExecutionReceipt, ReceiptSigner};
 use crate::registry::{self, LiveTask, now_unix_ms};
 
 use super::local::{cancel_marker_taken, instance_id, write_cancel_marker};
-use super::{RunOutcome, denial_receipt, load_or_create_seed, outcome_receipt, pre_acceptance_denial};
+use super::{
+    RunOutcome, denial_receipt, load_or_create_seed, outcome_receipt, pre_acceptance_denial,
+};
 
 pub const BACKEND_ID: &str = "cloud";
 pub const TOKEN_ENV: &str = "WAYLAND_F25_CLOUD_TOKEN";
@@ -319,7 +321,10 @@ impl ExecutionBackend for CloudBackend {
         let created: MachineSummary = serde_json::from_str(&body)
             .map_err(|e| ExecError::Transport(format!("unparseable machine create: {e}")))?;
         let machine_id = created.id.clone();
-        transitions.push(format!("created:{}", read_state(&credential, &machine_id).await));
+        transitions.push(format!(
+            "created:{}",
+            read_state(&credential, &machine_id).await
+        ));
 
         registry::record(&LiveTask {
             task_id: task.task_id.clone(),
@@ -337,13 +342,13 @@ impl ExecutionBackend for CloudBackend {
             credential.app, machine_id
         );
         let _ = Self::api_get(&credential, &wait_path).await;
-        transitions.push(format!("started:{}", read_state(&credential, &machine_id).await));
+        transitions.push(format!(
+            "started:{}",
+            read_state(&credential, &machine_id).await
+        ));
 
         // 3. The HIBERNATION transition. Condition C1: `suspend`, not `stop`.
-        let suspend_path = format!(
-            "/apps/{}/machines/{}/suspend",
-            credential.app, machine_id
-        );
+        let suspend_path = format!("/apps/{}/machines/{}/suspend", credential.app, machine_id);
         let suspend_result = Self::api_post(&credential, &suspend_path).await;
         let hibernation = match suspend_result {
             Ok((status, _)) if (200..300).contains(&status) => {
@@ -351,10 +356,12 @@ impl ExecutionBackend for CloudBackend {
                 transitions.push(format!("suspended:{observed}"));
                 // 4. Resume, and read the state back rather than inferring it
                 //    from the request that asked for it.
-                let start_path =
-                    format!("/apps/{}/machines/{}/start", credential.app, machine_id);
+                let start_path = format!("/apps/{}/machines/{}/start", credential.app, machine_id);
                 let _ = Self::api_post(&credential, &start_path).await;
-                transitions.push(format!("resumed:{}", read_state(&credential, &machine_id).await));
+                transitions.push(format!(
+                    "resumed:{}",
+                    read_state(&credential, &machine_id).await
+                ));
                 HibernationObservation::Observed {
                     transitions: transitions.clone(),
                 }
@@ -466,9 +473,7 @@ impl ExecutionBackend for CloudBackend {
                 backend_id: BACKEND_ID.into(),
                 kind: BackendKind::Cloud,
                 nonce: nonce.into(),
-                method: format!(
-                    "GET /apps/<app>/machines?metadata.{NONCE_METADATA_KEY}=<nonce>"
-                ),
+                method: format!("GET /apps/<app>/machines?metadata.{NONCE_METADATA_KEY}=<nonce>"),
                 found,
                 enumerated: true,
             }),

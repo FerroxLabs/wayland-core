@@ -25,10 +25,7 @@ pub enum ExecError {
     CredentialAbsent { backend_id: String, env: String },
 
     #[error("task {task_id} is not known to backend {backend_id}")]
-    UnknownTask {
-        backend_id: String,
-        task_id: String,
-    },
+    UnknownTask { backend_id: String, task_id: String },
 
     #[error("execution failed: {0}")]
     Exec(String),

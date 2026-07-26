@@ -51,7 +51,9 @@ impl ConformanceReport {
             out.push_str(&format!(
                 "backend {}: UNEXERCISED — {}\n",
                 self.backend_id,
-                self.unavailable_reason.as_deref().unwrap_or("no reason given")
+                self.unavailable_reason
+                    .as_deref()
+                    .unwrap_or("no reason given")
             ));
             return out;
         }
@@ -140,10 +142,7 @@ pub async fn run_conformance(
     // be a real probe rather than an assumption.
     checks.push(check(
         "availability reports a real probe basis",
-        !matches!(
-            availability.probe,
-            crate::contract::ProbeBasis::ProbeFailed
-        ),
+        !matches!(availability.probe, crate::contract::ProbeBasis::ProbeFailed),
         format!("{:?}: {}", availability.probe, availability.detail),
     ));
 
@@ -243,7 +242,10 @@ pub async fn run_conformance(
     let ceiling = backend.capabilities().limits;
     let impossible = ResourceBudget::new(
         ceiling.cpu_millis,
-        ceiling.memory_bytes.saturating_mul(1024).max(ceiling.memory_bytes + 1),
+        ceiling
+            .memory_bytes
+            .saturating_mul(1024)
+            .max(ceiling.memory_bytes + 1),
         ceiling.wall_time_ms,
         ceiling.output_bytes,
     )
@@ -297,16 +299,15 @@ pub async fn run_conformance(
     );
     match backend.execute(&over_budget).await {
         Ok(receipt) => {
-            let denied_after_acceptance = matches!(
-                receipt.body.events[0].event,
-                EventKind::TaskAccepted { .. }
-            ) && matches!(
-                receipt.body.terminal,
-                TerminalStatus::ResourceDenied {
-                    resource: ResourceKind::OutputBytes,
-                    ..
-                }
-            );
+            let denied_after_acceptance =
+                matches!(receipt.body.events[0].event, EventKind::TaskAccepted { .. })
+                    && matches!(
+                        receipt.body.terminal,
+                        TerminalStatus::ResourceDenied {
+                            resource: ResourceKind::OutputBytes,
+                            ..
+                        }
+                    );
             checks.push(check(
                 "an over-budget artifact is denied AFTER acceptance against one shared output budget",
                 denied_after_acceptance,

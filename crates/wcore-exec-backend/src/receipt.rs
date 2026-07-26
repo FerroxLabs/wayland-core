@@ -508,7 +508,10 @@ pub fn validate_receipt_semantics(body: &ReceiptBody) -> Result<()> {
         (EventKind::Succeeded { .. }, TerminalStatus::Success)
             | (EventKind::Failed { .. }, TerminalStatus::Failure { .. })
             | (EventKind::TimedOut { .. }, TerminalStatus::Timeout { .. })
-            | (EventKind::Cancelled { .. }, TerminalStatus::Cancelled { .. })
+            | (
+                EventKind::Cancelled { .. },
+                TerminalStatus::Cancelled { .. }
+            )
             | (
                 EventKind::Disconnected { .. },
                 TerminalStatus::Disconnected { .. }
@@ -556,7 +559,11 @@ fn signature_message(body_sha256: &str) -> Vec<u8> {
 }
 
 fn validate_sha256(field: &str, value: &str) -> Result<()> {
-    if value.len() != 64 || !value.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()) {
+    if value.len() != 64
+        || !value
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+    {
         return Err(ExecError::Receipt(format!(
             "{field} is not a lowercase hex sha-256"
         )));
