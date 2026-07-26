@@ -1395,6 +1395,27 @@ fn live_probe(entry: &CorpusEntry, transport: LiveTransport) -> ProbeResult {
     }
 
     let world = LiveWorld::build();
+    // A dimension that needs a MUTATING child needs the governed repository to
+    // exist: `RequestedChildWorkspace::IsolatedMutation` allocates a git
+    // worktree of it. Without one the child dies in workspace preparation, and
+    // the probe would read an absent effect from a child that never existed —
+    // which is what the tool dimension recorded at both prior SHAs.
+    if let Some(reason) = &world.repo_failure
+        && entry.dimension == Dimension::Tool
+    {
+        return ProbeResult::new(
+            Outcome::NotExpressible,
+            "no verdict — the governed repository could not be created",
+            format!(
+                "this dimension requires an isolated-mutation child, whose workspace is a git                  worktree of the run's repository, and the repository could not be created on                  this host: {reason}"
+            ),
+        )
+        .with_live(LiveEvidence {
+            invocation: format!("wayland-core ({}) — NOT DRIVEN", transport.label()),
+            asserted_mode: transport.label().to_owned(),
+            observable: format!("the governed repository could not be created: {reason}"),
+        });
+    }
     let run = run_live(entry.dimension, transport, &world);
 
     let Some(asserted_mode) = run.asserted_mode.clone() else {
