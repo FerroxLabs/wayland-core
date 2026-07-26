@@ -76,6 +76,17 @@ const EGRESS_SENTINEL: &str = "CORPUS_EGRESS_SENTINEL_2c8a";
 /// a throwaway store inside a tempdir that is deleted when the run ends.
 const CORPUS_VAULT_PASSPHRASE: &str = "child-authority-corpus-ephemeral-vault";
 
+/// Wall-clock budget for ONE live run. Two live runs happen per corpus case and
+/// the harness runs under nextest's 30s slow line with terminate-after 2, so the
+/// pair must finish inside roughly 55 seconds or the case is killed mid-run and
+/// records nothing at all.
+///
+/// This is a bound on the harness, not a loosened gate: a run that exceeds it is
+/// killed and recorded as producing no verdict, which the anti-vacuity gate then
+/// reports as NOT-EXPRESSIBLE. Nothing is ever counted as a refusal because it
+/// ran out of time.
+const LIVE_RUN_BUDGET: Duration = Duration::from_secs(18);
+
 /// The shipped binary under test. Cargo guarantees it is built before this
 /// integration test runs.
 fn binary() -> &'static str {
@@ -431,7 +442,7 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
     let mut transcript = String::new();
     let mut saw_ready = false;
     let mut saw_stream_end = false;
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + LIVE_RUN_BUDGET;
     while Instant::now() < deadline {
         match rx.recv_timeout(Duration::from_millis(250)) {
             Ok(line) => {
@@ -495,35 +506,92 @@ fn run_headless(world: &LiveWorld) -> LiveRun {
         .current_dir(world.root());
     pty::harden_child_env(&mut command, world.root());
     let vault = vault::configure_process(&mut command);
-    let output = command
+    let spawned = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output();
+        .spawn();
     drop(vault);
 
-    match output {
-        Ok(output) => {
-            let transcript = format!(
-                "exit status {:?}\n--- stdout ---\n{}--- stderr ---\n{}",
-                output.status.code(),
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let landed_headless = !transcript.contains("\"type\":\"ready\"");
-            LiveRun {
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(error) => {
+            return LiveRun {
                 invocation,
-                asserted_mode: landed_headless.then(|| LiveTransport::Headless.label().to_owned()),
-                transcript,
+                asserted_mode: None,
+                transcript: format!("the binary could not be spawned: {error}"),
                 provider_requests: 0,
-            }
+            };
         }
-        Err(error) => LiveRun {
-            invocation,
-            asserted_mode: None,
-            transcript: format!("the binary could not be spawned: {error}"),
-            provider_requests: 0,
-        },
+    };
+
+    let streams = collect_streams(&mut child);
+    // A bounded wait rather than `output()`, which has none: an unbounded
+    // headless run is killed by the test runner mid-case and records nothing.
+    let deadline = Instant::now() + LIVE_RUN_BUDGET;
+    let mut status = None;
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(exit)) => {
+                status = Some(exit);
+                break;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(_) => break,
+        }
+    }
+    let terminated_on_its_own = status.is_some();
+    if !terminated_on_its_own {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let (stdout, stderr) = streams.join();
+    let transcript = format!(
+        "exit status {:?}, terminated on its own: {terminated_on_its_own}\n--- stdout ---\n\
+         {stdout}--- stderr ---\n{stderr}"
+    );
+
+    // The headless mode proof: the binary ran to completion on its own (the
+    // full-screen TUI never would) and emitted no json-stream `ready` frame.
+    let landed_headless = terminated_on_its_own && !transcript.contains("\"type\":\"ready\"");
+    LiveRun {
+        invocation,
+        asserted_mode: landed_headless.then(|| LiveTransport::Headless.label().to_owned()),
+        transcript,
+        provider_requests: 0,
+    }
+}
+
+/// Drain a child's stdout and stderr on their own threads so neither pipe can
+/// fill and wedge the child while the caller is waiting on a deadline.
+struct Streams {
+    out: std::thread::JoinHandle<String>,
+    err: std::thread::JoinHandle<String>,
+}
+
+impl Streams {
+    fn join(self) -> (String, String) {
+        (
+            self.out.join().unwrap_or_default(),
+            self.err.join().unwrap_or_default(),
+        )
+    }
+}
+
+fn collect_streams(child: &mut std::process::Child) -> Streams {
+    let stdout = child.stdout.take().expect("stdout");
+    let stderr = child.stderr.take().expect("stderr");
+    Streams {
+        out: std::thread::spawn(move || {
+            let mut buffer = String::new();
+            let _ = std::io::Read::read_to_string(&mut BufReader::new(stdout), &mut buffer);
+            buffer
+        }),
+        err: std::thread::spawn(move || {
+            let mut buffer = String::new();
+            let _ = std::io::Read::read_to_string(&mut BufReader::new(stderr), &mut buffer);
+            buffer
+        }),
     }
 }
 
@@ -557,7 +625,7 @@ fn run_tui(world: &LiveWorld) -> LiveRun {
         120,
         &[("WAYLAND_VAULT_PASSPHRASE", CORPUS_VAULT_PASSPHRASE)],
     );
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + LIVE_RUN_BUDGET;
     let mut booted = false;
     while Instant::now() < deadline {
         let screen = terminal.screen_text();
@@ -570,7 +638,7 @@ fn run_tui(world: &LiveWorld) -> LiveRun {
 
     if booted {
         terminal.send(b"delegate the task\r");
-        std::thread::sleep(Duration::from_secs(6));
+        std::thread::sleep(Duration::from_secs(8));
     }
     let transcript = terminal.screen_text();
     terminal.quit();
