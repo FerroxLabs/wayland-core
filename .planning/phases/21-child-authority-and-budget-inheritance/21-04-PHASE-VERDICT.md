@@ -161,7 +161,7 @@ without one. The section above described the *first* exception (what the set was
 and missed the *load-bearing* one (that half of it had no actor). That was the
 error, and it is this document's error, not the verifier's.
 
-#### What equivalence is proved OVER at `46dd076a`
+#### What equivalence is proved OVER at `359ce2bf`
 
 The repair is recorded in `21-05-CRITERION3-REPAIR.md`. Restated as the clause
 this criterion is now graded against:
@@ -297,7 +297,7 @@ they are read.
    return on its VACUOUS census verdict, so in the exact scenario it exists for —
    a channel appears AND is live-exploitable — every assertion in the harness
    passed. The paragraph above was the most important claim in this document and
-   it was false. Repaired at `46dd076a`
+   it was false. Repaired at `359ce2bf`
    (`assert_no_channel_canaries_stayed_intact`, checked BEFORE the equivalence
    pair, on two independent triggers and independent of census verdict). Proved
    by injecting a production file naming the child-sourced policy request type
