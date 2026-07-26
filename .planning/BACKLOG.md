@@ -141,3 +141,91 @@ $ /usr/bin/git diff --stat c39f7254 ce9a11a6 -- crates/ .github/ scripts/ justfi
 Identical code trees. The measurements attributed to `c39f7254` were taken on exactly
 the tree the box was standing on. Labelling artefact, not a measurement hazard. No
 action; recorded so nobody re-litigates it.
+
+---
+
+## From 21-01 (Phase 21 admission gate + eleven-dimension authority census)
+
+All entries below were surfaced by the 21-01 authority census
+(`.planning/phases/21-child-authority-and-budget-inheritance/21-01-AUTHORITY-CENSUS.md`),
+measured at SHA `3d80f14662c3df9bd63aeb7ecffc144fe643a553`. The census's four HIGH
+findings are NOT here — per the rules they must be fixed or disproved, and they live in
+the census and are corpus targets for 21-02.
+
+### MED-1 — the interactive TUI is not drivable on Windows · MEDIUM · NON-BLOCKING
+
+`crates/wcore-eval-scenarios/src/pty_capture.rs` carries `#![cfg(unix)]` at line 63. Its
+module header states that `portable_pty`'s Windows ConPTY backend "does not surface the
+spawned binary's stdout to the master end in headless CI (the vt100 parser stays empty
+and every wait hits its timeout)", with `crates/wcore-cli/tests/harness_tui_flow.rs` as
+the in-repo precedent.
+
+**Why non-blocking.** No Phase 21 dimension's *only* live surface is the TUI. The
+approval dimension's PTY leg is Linux/macOS-only; its `--json-stream` leg covers Windows.
+Recorded here rather than left for 21-03 to discover when the Windows run is due.
+
+### MED-2 — parent/child permit contention on one shared semaphore · MEDIUM · NON-BLOCKING
+
+`active_child_permits` is a single `Semaphore::new(MAX_CONCURRENT_WORKERS)` (=20) carried
+into every child spawner by `Arc::clone` (`crates/wcore-agent/src/spawner.rs:2168`). A
+parent holds a permit while awaiting its own children, and those children draw from the
+same 20. Twenty parents awaiting children can therefore starve the pool.
+
+**Why non-blocking, and why it is explicitly OUT of Phase 21's property.** This is a
+liveness/deadlock hazard, not an authority amplification. Phase 21's Success Criterion 1
+is about a child *widening* a restriction; sharing the pool is what makes fan-out
+non-wideable in the first place. Fixing this must not be done by giving children their
+own pool, which would create the amplification the phase exists to prevent.
+
+### MED-3 — `EgressClient::new().with_policy(..)` is a public bypass route · MEDIUM · NON-BLOCKING
+
+`EgressClient::new().with_policy(..)` attaches an explicit per-client policy that consults
+neither the process-global `OnceLock` (`wcore_egress::install_global_policy`) nor the
+task-scoped policy `AgentBootstrap::build` installs via `with_default_policy`.
+
+**Measured, and this is why it is only MEDIUM.** Every occurrence in the workspace was
+checked and **all are inside `#[cfg(test)]` modules** — including the two that look
+production at first glance, `crates/wcore-agent/src/spawner.rs:3134` and
+`crates/wcore-cli/src/tui/surfaces/mod.rs:4870` (the enclosing `#[cfg(test)]` opens at
+`spawner.rs:2962` and `surfaces/mod.rs:3396`). No production site uses it today. It is an
+API-shaped hazard, not an open widening route. A lint, `#[doc(hidden)]`, or test-only
+gating would close it.
+
+### LOW-1 — `with_reason_state` falls back to rendering the leaf state · LOW · NON-BLOCKING
+
+`crates/wcore-budget/src/execution.rs:641-653` walks leaf-then-ancestors looking for a
+state whose `check_state` equals the reason, and falls back to rendering the **leaf** when
+none matches — so `limit_for` can report a child's own possibly-wider limit.
+
+**Inert today, and answered by search rather than inference.** All five production
+`limit_for` call sites (`cancel.rs:467`, `engine.rs:10841`, `engine.rs:11858`,
+`spawner.rs:1180`, `spawner.rs:1204`) render the `BudgetExceeded` payload only *after* the
+decision was taken by `first_exceeded_reason()` — directly, or via
+`MonitorAction::CancelBudget { reason }` which originates at
+`orchestration/monitor.rs:182`. Because the caller has already selected the reason,
+`with_reason_state` walks in the same order and finds the same state; the fallback branch
+is not taken. **No admission or budgeting decision anywhere reads `limit_for`.** Recorded
+so it is not rediscovered as a new finding.
+
+### OOP-1 — `delegate_isolation` F05 identity has not been re-gated · MEDIUM · OUT-OF-PHASE
+
+`.planning/intel/COMPETITIVE-LEDGER.md` assigns Phase 21 the carried limitation "re-run
+the F05 capability activation gate against the `delegate_isolation` identity at
+`9821ef76` and record the result", because AUTH-* carries an `Unavailable: isolation not
+enforced` negative that Phase 20 may already have cleared.
+
+**Why out-of-phase.** That is an F05 capability-gate re-run, not an authority-inheritance
+proof. None of the four Phase 21 plans has a task for it and the four-plan cap forbids
+adding one. Owner to be reassigned by Sean.
+
+### OOP-2 — `wcore-permissions` has no inheritance model by design · MEDIUM · OUT-OF-PHASE
+
+`crates/wcore-permissions/src/policy.rs`'s own header states the crate's scope is explicit
+grants only, with no role hierarchy and no inheritance — directly against F21-01's
+"intersection of parent and requested authority" wording.
+
+**Why out-of-phase.** Giving that crate an inheritance model is a design change well beyond
+this phase's four plans. Phase 21 proves the property at the seams that actually run (the
+budget rollup, the spawn seam, the egress chokepoint, the policy resolver) and records the
+permissions crate's shape rather than reshaping it. See census HIGH-3 for the separate,
+in-phase question of whether `PolicyGate` is reachable at all.

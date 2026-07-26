@@ -1,0 +1,125 @@
+INTERNAL ADVERSARIAL PANEL MEMBER — non-author, prompted to REFUTE the leading
+position on the evidence, defaulting to refuted when uncertain.
+
+Leading position at the time of writing: the other three members (codex-sol,
+gemini-pro, kimi-k3) all picked `proceed-scope-limited`. My job is not to ratify
+that. It is to find the argument they did not make and see whether it holds.
+
+I have found one, and I think it is stronger than any argument any of the three
+raised against themselves. All three nominated the same self-counter — "ROADMAP.md
+line 83 says 'before broad Phase 21 execution' with no carve-out" — and all three
+dismissed it the same way, by leaning on the checkpoint's last sentence. Three
+identical self-counters, identically dismissed, is a sign the panel converged on a
+framing rather than on evidence. Here is the argument outside that framing.
+
+--------------------------------------------------------------------------------
+1. THE MEASUREMENT ANSWERED A DIFFERENT QUESTION FROM THE ONE THE OPTION POSES
+--------------------------------------------------------------------------------
+
+The `cons` of `proceed-scope-limited`, quoted from the bundle, is: "the risk is that
+a corpus built before the producer contract is pinned encodes a contract that later
+changes, so any protocol-surface case may need re-proving."
+
+The four legs measured that the contract has not changed AS OF commit 3d80f146. That
+is a statement about the past. The option's risk is a statement about the future:
+will the contract change between now and Desktop's adoption of it? A STABLE reading
+today is consistent with both answers, so it does not discharge the risk. All three
+members treated `MEASURED :: contract-drift :: STABLE` as though it did. Codex wrote
+that the measurements "remove the stated contract-drift reason to halt Core-only
+work." They do not. They remove the reason to believe drift has ALREADY happened.
+
+--------------------------------------------------------------------------------
+2. AND THE AUTHORIZED WORK IS ITSELF THE MOST LIKELY CAUSE OF THE DRIFT
+--------------------------------------------------------------------------------
+
+This is the part none of the three saw, and it is visible in the bundle they were
+all given.
+
+HIGH-4 is `with_requested_approvals` in `EffectiveExecutionPolicy`. The bundle also
+records, from D1, that the Desktop contract corpus carries `execution_policy` as a
+versioned SUB-CONTRACT, that the corpus contains an `execution_policy` event fixture
+and a family of adversarial policy vectors, and that the contract's
+`source_inputs_digest` is taken over the generator's Rust source inputs.
+
+Chain the two. Plan 21-03 is authorized — by all three members — to repair HIGH-4.
+Repairing HIGH-4 means changing `EffectiveExecutionPolicy` approval resolution. If
+that type or its serialization is among the generator's source inputs, the repair
+changes `source_inputs_digest`; if the fixtures move, it changes `fixture_digest`;
+either changes the `ready.contract` descriptor the running binary emits — which the
+LIVE-READY leg just proved is the byte-exact thing Desktop would pin. And D1 records
+that a `minor` mismatch is a HARD renegotiation error, not a tolerated upgrade.
+
+So the panel has authorized, as the safe Core-internal work, precisely the repair
+most likely to move the contract that the same panel just certified as stable. The
+measurement did not merely answer the wrong question — it was used to license the
+activity that falsifies it. "Core-internal seam" and "contract-relevant surface" are
+not disjoint categories, and the three converging members treated them as if they
+were. Only kimi-k3 came near it, with a one-clause constraint that no repair may
+change the serialized contract surface — offered as an afterthought, not as the
+reason the whole scope limit needs teeth.
+
+--------------------------------------------------------------------------------
+3. THE CHECKPOINT'S LAST SENTENCE DOES NOT SAY WHAT THE PANEL READ IT TO SAY
+--------------------------------------------------------------------------------
+
+"Both receipts are required for a whole-Wayland claim; neither blocks Core-only
+engine claims outside the shared contract."
+
+The carve-out has TWO qualifiers, and the panel used one. A claim must be Core-only
+AND outside the shared contract. All three members established the first qualifier —
+the HIGH findings are Core-internal seams — and then treated the second as satisfied
+by the first. It is not. Phase 21's own Success Criterion 3 is: "Standalone and
+host-protocol hostile corpora prove equivalent enforcement." The host-protocol
+surface IS the shared contract. A criterion that is definitionally about the shared
+contract cannot be carved out by a clause excluding claims outside it. One of Phase
+21's three Success Criteria is inside the gate by construction, and the same document
+warns, in the same section, that "Issue coordination is not completion" — a caution
+against exactly this kind of generous reading.
+
+--------------------------------------------------------------------------------
+4. AGAINST THE OTHER TWO OPTIONS BY NAME
+--------------------------------------------------------------------------------
+
+`proceed-broad` is refuted and I do not defend it. CTRL-02 measured NOT-OPEN. The
+option's own `cons` state that a single NOT-OPEN verdict removes it. Selecting it
+would be a waiver dressed as a verdict, and its `pros` — "the gate's stated condition
+is met" — is a false premise on this evidence.
+
+`proceed-scope-limited` I have argued against above. I will state its best feature
+fairly: its `pros` claim that "the corpus and harness in 21-02 are largely
+independent of the Desktop consumer contract" is TRUE, and it is the single strongest
+thing in its favour. Building a corpus against a producer contract does not require
+the consumer to exist. If the scope limit genuinely quarantined the contract surface
+from repair, my objection in §2 would collapse and I would be close to conceding.
+
+`hold` is what the standard actually says. Its `pros` are understated in the bundle:
+the census — the real deliverable of 21-01, and the thing that took the work — ships
+either way. So `hold` costs the project nothing that has already been done, and it
+avoids spending 21-02's corpus-construction effort against a contract that 21-03 is
+authorized to move. Its `cons` — a stall propagating to phases 22 and 23 — is real
+but is a schedule cost, not a correctness cost, and the panel has been weighting a
+schedule cost against a correctness risk without saying so.
+
+--------------------------------------------------------------------------------
+5. WHERE THIS LEAVES ME, HONESTLY
+--------------------------------------------------------------------------------
+
+I am required to default to refuted when uncertain, and I am not certain the
+majority is wrong. My §3 argument is the weakest of the three: SC3's host-protocol
+leg is the Core PRODUCER surface, and the producer half of the contract is the half
+that IS discharged, so a reasonable reader can say the producer-side corpus is
+outside the missing receipt's scope. I concede that. My §1 and §2 arguments I do not
+concede — they are unanswered by any of the three transcripts, and §2 in particular
+identifies a concrete mechanism by which the authorized work invalidates the
+measurement that authorized it.
+
+I therefore refuse to ratify. If the executor commits to `proceed-scope-limited`
+anyway on a 3-1 count, the minimum this dissent obliges is that the scope limit is
+not a label but a constraint with an executable consequence: plan 21-03 must not land
+any repair that changes the 40 generator source inputs or the 156-file corpus without
+re-running `wcore-contract digest` and `check`, re-pinning D1 section 3, and
+recording the new digests as a contract bump. Without that clause the majority's own
+measurement stops meaning anything the day 21-03 lands.
+
+BUNDLE=3d80f14662c3df9bd63aeb7ecffc144fe643a553
+PANEL_POSITION=hold
