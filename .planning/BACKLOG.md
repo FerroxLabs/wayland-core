@@ -229,3 +229,65 @@ this phase's four plans. Phase 21 proves the property at the seams that actually
 budget rollup, the spawn seam, the egress chokepoint, the policy resolver) and records the
 permissions crate's shape rather than reshaping it. See census HIGH-3 for the separate,
 in-phase question of whether `PolicyGate` is reachable at all.
+
+---
+
+## From 21-02 — dual-surface hostile-child corpus (2026-07-26)
+
+Measured at SHA `4a3dd3756efec29f91fa99ce4a68500c485adc1f` on `hetzner-dsm` and
+`SeanD@seandesktop`. Full table and evidence: `21-02-CORPUS-RESULTS.md`. The
+three HIGH findings from that run are NOT here — they are 21-03's, per the
+amended rule.
+
+### F21-02-04 — live coverage gap: tool and approval · MEDIUM
+
+Any toolset beyond the read-only floor classifies as
+`RequestedChildWorkspace::IsolatedMutation`, and durable workspace preparation
+refuses in a hermetic non-repository workspace (`durable child workspace
+preparation failed: worktree io: orchestrator worktree root must not overlap
+repository`). Neither dimension can therefore be observed at the live surface
+without a fixture that is a real repository whose worktree root does not overlap
+it. Both are recorded NOT-EXPRESSIBLE on at least one live combination rather
+than counted as refusals.
+
+### F21-02-05 — live coverage gap: the budget trio · MEDIUM
+
+No shipped surface carries a child-fillable budget field, so a child
+budget-widening REQUEST cannot be issued through the product at all; and the
+seeded caps tight enough to make the parent envelope bind refuse the parent's own
+first turn before any provider call. `time`, `token` and `cost` are
+NOT-EXPRESSIBLE on both live combinations. The in-process seam carries the
+evidence and the NO-CHANNEL canary carries the future.
+
+### F21-02-06 — egress Ask branch fails open with no doorbell · MEDIUM
+
+With the shipped default config and no consent doorbell attached,
+`AgentEgressPolicy::resolve_ask` returns `EgressDecision::Allow`
+(`egress/policy.rs:93-97`), so the parent's own policy permits a plain GET to a
+non-allowlisted, non-shared-platform host. **Deliberately NOT a Phase 21
+widening**: parent and child are equally affected and the child holds the
+parent's exact policy object by `Arc` identity, so nothing crosses the authority
+boundary. Recorded for triage by whoever owns the egress posture.
+
+### F21-02-07 — the census and plans write a `-p` flag that does not exist · LOW
+
+`wayland-core` has no `-p`. `crates/wcore-cli/src/main.rs:537-539` declares the
+prompt as a `trailing_var_arg` positional, so every option must precede it. The
+21-01 `LIVESURFACE` rows and the 21-02 plan both write
+`wayland-core -p "<prompt>"`. Fix the wording wherever it is reused.
+
+### F21-02-08 — a hermetic live run needs an ephemeral vault · LOW
+
+Under a hermetic `WAYLAND_HOME` with no vault passphrase the binary refuses with
+`Session persistence authority unavailable: secure recovery storage is
+unavailable`, and every turn fails before reaching a provider. Not a defect — an
+environment requirement any future live harness must honour.
+`crates/wcore-cli/tests/support/vault.rs` provides both transports (FD for std
+children, env for PTY children, because `portable-pty` closes arbitrary
+inherited descriptors).
+
+### F21-02-09 — a plan gate is broken for two of its own literals · LOW
+
+The 21-02 Task 2 gate runs `grep -cF "$s"` with `$s='--json-stream'` and
+`'--no-tui'`; grep parses the pattern as an option and exits non-zero. The check
+needs `-e`. Applies to any future plan reusing that gate shape.
