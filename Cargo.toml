@@ -47,6 +47,10 @@ members = [
     "crates/wcore-budget",
     # M5.1: container-isolated tool execution (Docker behind `live-docker` feature).
     "crates/wcore-sandbox",
+    # F25-01: provider-neutral execution-backend contract (local / container /
+    # ssh / one hibernating cloud machine). COMPOSES wcore-sandbox containment
+    # and wcore-egress; never depends on wcore-agent or wcore-cli.
+    "crates/wcore-exec-backend",
     "crates/wcore-memory",
     # Wave B2: multi-actor ACL + bearer token (Team Mode foundation).
     "crates/wcore-permissions",
@@ -178,6 +182,7 @@ wcore-budget        = { path = "crates/wcore-budget" }
 wcore-pricing       = { path = "crates/wcore-pricing" }
 wcore-permissions   = { path = "crates/wcore-permissions" }
 wcore-sandbox       = { path = "crates/wcore-sandbox" }
+wcore-exec-backend  = { path = "crates/wcore-exec-backend" }
 wcore-memory        = { path = "crates/wcore-memory" }
 wcore-observability = { path = "crates/wcore-observability" }
 wcore-repomap       = { path = "crates/wcore-repomap" }
