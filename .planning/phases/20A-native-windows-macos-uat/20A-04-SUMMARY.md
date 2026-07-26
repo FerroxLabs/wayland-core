@@ -983,6 +983,11 @@ and reasoning:
 **OPEN — 4.** None of these is a red test. Each is a path that was never
 exercised, and saying so is the point.
 
+> **Superseded in part by §13.10 (post-seal sweep, 2026-07-26): r2 and r8 are
+> now CLOSED on hardware evidence; r12 and r13 remain open exactly as written
+> below.** The r2/r8 rows are kept verbatim as the seal-time record — they state
+> correctly what was and was not proven by run `30184651330`.
+
 | Req | Why it stays open |
 |-----|-------------------|
 | **r2** | 1 of 3 acceptance clauses proven. `granted_path_is_readable_then_revoked` PASS (grant ACE present-during, exit 0 + MARKER, ACE absent-after) and `one_execution_grant_never_leaks_to_another_identity` PASS. But the acceptance also requires "a genuine DENY ace still blocks" (`deny_ace_still_blocks_granted_read`) and "a file granted only to normal SIDs is still denied" (`normal_sid_only_grant_is_denied`). Neither is in the six targets. Their only runner is the `windows-live-acceptance` job, gated `if: inputs.f20_candidate != 'true'` (`nightly-windows-soak.yml:239`) — **skipped by construction in candidate mode**. 20A-01 wired these ten orphaned ACL tests into exactly that job, so they still have no observed green at the sealed SHA. |
@@ -1105,3 +1110,235 @@ from the dispatching session:
   `20-08-INDEPENDENT-REVIEW.md`.
 - The r15 lineage — `git merge-base --is-ancestor be84bd2 0e8e6c1d` → yes;
   `git show --stat 0e8e6c1d`.
+
+---
+
+## 13.10 POST-SEAL SWEEP (2026-07-26) — r2 and r8 CLOSED, two harness defects found
+
+Bounded sweep of the two cheap open requirements. Nothing about the seal,
+the tag, or run `30184651330` changes; this section only adds evidence.
+
+**Product identity to the seal.** Every observation below was made at commit
+`2cc1a285ffd3f3b0fb41b177bd9a1317654cb350`, not literally `9821ef76`.
+`git diff 9821ef76 2cc1a285 -- crates/ Cargo.lock Cargo.toml` is **empty** —
+the product tree under test is byte-identical to the sealed tree. Everything
+that differs is CI/harness: `.github/workflows/nightly-windows-soak.yml`,
+`scripts/wayland-e2e-windows-soak.ps1`, `scripts/f20-native-uat-proof.mjs`,
+`scripts/f20-native-uat-proof.test.mjs` (plus an unrelated `ci.yml` change
+from a concurrent lane).
+
+### 13.10.1 The `$targets` invariant — re-proved, untouched
+
+```
+git diff --exit-code -- scripts/f20-native-windows-proof.ps1   ->  exit 0, zero output
+```
+
+`scripts/f20-native-windows-proof.ps1` was never edited. No target was added to
+it, so `verifyNativeLog`'s fail-closed set of six canonical markers, their order
+and their uniqueness are all unchanged. The two ACL tests were wired through a
+**different** job, which emits no `F20_NATIVE_*` marker at all.
+
+### 13.10.2 r2 — the two DENY tests, PASS on real Windows
+
+Trap first, because it nearly produced a false RED: **these tests cannot be
+observed over SSH.** A non-interactive session-0 SSH logon to `SEANDESKTOP`
+(`whoami=seand`, `SessionId=0`, `UserInteractive=False`) reports
+`AppContainerBackend::is_available() == false`, so every test in the file panics
+at `live_fs_acl.rs:34` regardless of correctness. Established by control, not
+assumed: the CI-certified-green `granted_path_is_readable_then_revoked` fails
+identically over SSH at the sealed SHA. Only the runner service is a valid
+environment.
+
+Observed through the runner, run **`30186873948`**, job **`89753061944`**,
+`Runner name: 'ferrox-win-msvc'`, `Machine name: 'SEANDESKTOP'`,
+job conclusion **`success`**:
+
+```
+· WAYLAND_SANDBOX_LIVE_WINDOWS=[1] (len=1)
+✓ live-acceptance flag proven effective (exactly '1', no trailing space)
+        PASS [   0.210s] ( 3/12) wcore-sandbox::live_fs_acl deny_ace_still_blocks_granted_read
+        PASS [   0.235s] ( 6/12) wcore-sandbox::live_fs_acl normal_sid_only_grant_is_denied
+     Summary [  15.282s] 12 tests run: 12 passed, 0 skipped
+     Summary [  15.157s] 6 tests run: 6 passed, 0 skipped
+✓ live-acceptance suite live_fs_acl passed
+✓ live-acceptance suite hard_process_containment_windows passed
+✓ PHASE L complete (live_fs_acl + hard_process_containment_windows ignored sets)
+═══ WINDOWS LIVE-ACCEPTANCE SOAK: PASS ═══
+```
+
+Reproduced one run earlier (`30186743564`, job `89752739969`): the same two tests
+PASS at 0.192s / 0.192s, `12 tests run: 12 passed (1 flaky)`. **The flake is
+recorded, not swept:** `concurrent_allow_and_deny_identities_do_not_interfere`
+FAILED try 1 (`ordinary allow identity must retain access`, 0.250s) and PASSED
+try 2 under nextest retry. It is green in `30186873948` without a retry. Not one
+of the two r2 tests, not a proof target, and nothing was re-timed or re-gated for
+it — it is logged here so nobody rediscovers it.
+
+### 13.10.3 r2 — the wiring, repaired
+
+`windows-live-acceptance` was gated `if: github.event.inputs.f20_candidate != 'true'`,
+making it the sole runner of these two tests *and* excluding it from the only
+dispatch mode that proves a candidate. It now runs in both modes:
+
+- **candidate:** `needs: f20-windows-candidate` and
+  `if: !cancelled() && (inputs.f20_candidate != 'true' || needs.f20-windows-candidate.result == 'success')`.
+  `needs:` is load-bearing — both jobs target the SAME self-hosted box, and
+  concurrent compile load has corrupted a proof run before, so this job must
+  never run alongside the six-target proof. Its checkout is pinned to
+  `f20_expected_sha` and it re-asserts `HEAD` against it, so its ACL evidence
+  binds to the tree the proof certifies.
+- **non-candidate:** `f20-windows-candidate` is skipped, `!cancelled()` admits
+  this job, and an empty `f20_expected_sha` is what `actions/checkout` already
+  treats as "not supplied" — pre-existing behaviour.
+
+Verified in run `30186873948`: `F20 native Windows candidate` **skipped**,
+`Windows live-acceptance` **success**. **Caveat, not glossed:** the candidate-mode
+branch is verified by review plus a real non-candidate dispatch; no candidate
+dispatch has been fired since, so that branch has not itself executed.
+
+### 13.10.4 DEFECT FOUND — the soak harness could never report success
+
+The first dispatch ran every test green and still failed:
+
+```
+✗ live-acceptance suite live_fs_acl failed with exit code <the entire compile+test log> 0
+✗ PHASE L failed: live_fs_acl, hard_process_containment_windows
+```
+
+while the same log carried `12 tests run: 12 passed` and `6 tests run: 6 passed`.
+
+Root cause is the exit-code capture idiom, used at three sites (phases F, G, L):
+
+```powershell
+$exit = & { cargo … 2>&1 | Tee-Object -FilePath $log; $LASTEXITCODE }
+```
+
+`Tee-Object` passes every line through, so the block returns an **array** of all
+output lines plus the exit code, and `if ($exit -ne 0)` is an array **filter**
+whose non-empty result is always truthy. Measured on `SEANDESKTOP` pwsh 7.6.3
+against a command that exits 0 with two output lines:
+
+```
+BROKEN_FORM: type=Object[] count=3 verdict=REPORTS_FAILURE
+FIXED_FORM:  type=Int32 value=0  verdict=reports_success
+FIXED_FORM_ON_REAL_FAILURE: value=3 verdict=REPORTS_FAILURE
+```
+
+Fixed by reading `$LASTEXITCODE` after the pipeline. The third line is the point:
+the fix still fails closed on a real non-zero exit — a phase that could never
+report success merely becomes able to. This affected phases F and G too, i.e. the
+whole nightly Windows soak was structurally incapable of reporting green.
+
+### 13.10.5 r8 — both PRODUCTION guards driven to rejection
+
+The guards themselves were driven, extracted **verbatim**; neither proof script
+was modified or executed.
+
+**Windows** — `Assert-TargetOsGate` + `Get-TargetTestSource` AST-extracted from
+`scripts/f20-native-windows-proof.ps1` in the sealed checkout
+(`CHECKOUT_HEAD=9821ef7603ac1e687b600cda591af1657c883484`,
+`SOURCE_SHA256=a79d2ed47c4a97f16051c12ef9941e1afb97c61f0afdc334a3c8be79e163bbc6`,
+lines 101-111 and 113-162), pwsh 7.6.3 on `SEANDESKTOP`:
+
+```
+CONTROL  windows-appcontainer-acl -> live_fs_acl (os=windows): ADMITTED (no throw)
+WRONG-OS windows-appcontainer-acl -> hard_process_containment_macos (os=windows): REJECTED ->
+  anti-drift: target windows-appcontainer-acl (os=windows) selects a test source cfg-gated for macos: …\hard_process_containment_macos.rs
+WRONG-OS windows-job-object -> hard_process_containment (Linux bwrap, os=windows): REJECTED ->
+  anti-drift: target windows-job-object declares os=windows but its selected test source is not cfg-gated for windows (a wrong-OS or ungated test cannot prove windows containment): …\hard_process_containment.rs
+```
+
+**macOS** — `assert_target_os_gate` extracted verbatim from
+`scripts/f20-native-macos-proof.sh` (`SOURCE_SHA256=267582272bc57b078b2f13a875485e80d1fd641b35a5bb5289000e4f7cbd5236`):
+
+```
+CONTROL  macos-process-tree -> hard_process_containment_macos (os=macos): ADMITTED (exit 0)
+WRONG-OS macos-retained-directory -> live_fs_acl (Windows-only, os=macos): REJECTED (exit 1) ->
+  anti-drift: macos target macos-retained-directory source is not cfg-gated for macos: …/live_fs_acl.rs
+WRONG-OS macos-process-tree -> hard_process_containment_windows (os=macos): REJECTED (exit 1) ->
+  anti-drift: macos target macos-process-tree source is not cfg-gated for macos: …/hard_process_containment_windows.rs
+```
+
+The second macOS case is the exact 07-22 failure, run backwards: the mapping that
+once shipped is now refused before cargo starts.
+
+### 13.10.6 r8 — the durable regression
+
+`scripts/f20-native-uat-proof.test.mjs`: **34 → 41 cases**. The rule is expressed
+once beside the canonical map it governs (`assertTargetOsGate` over
+`WINDOWS_TARGET_SOURCES` / `MACOS_TARGET_SOURCES`, the same map both production
+guards mirror), because off a native runner the guards' rejection path is
+otherwise unreachable. Seven new cases: admission of all six real OS-specific
+target sources (so the guard cannot pass by rejecting everything), wrong-OS in
+both directions, an ungated source, a foreign gate alongside a correct one, a cfg
+named only in prose, and an unknown `os`.
+
+Non-vacuity proven by mutation, not asserted:
+
+| Mutation | Result |
+|---|---|
+| positive gate forced true | `not ok 21, 22, 23, 25` — 4 fail |
+| foreign-OS negative gate skipped | `not ok 24` — 1 fail |
+| cfg filter widened to whole file text (prose counts) | `not ok 21, 25` — 2 fail |
+| none (restored) | 41 pass, 0 fail |
+
+### 13.10.7 FINDING recorded, deliberately NOT fixed — prose-satisfiable positive gate
+
+The Windows rejection above fired on the **negative** gate, not the positive one.
+`hard_process_containment_macos.rs:13` is a doc comment reading
+``//! (`#![cfg(windows)]`): on other platforms the file compiles to zero tests.``
+and its only real cfg attribute is `#![cfg(target_os = "macos")]` at line 17. The
+PowerShell guard matches whole file text, so **prose satisfied its positive
+`cfg(windows)` check**; only the foreign-`target_os` check caught the mapping.
+
+Consequence: an **ungated** source whose comments mention `cfg(windows)` would
+pass the positive gate, carry no foreign `target_os`, and be **admitted** as a
+Windows OS-specific target. The bash mirror is immune — it filters to `#[cfg…]`
+attribute lines first (`f20-native-macos-proof.sh:226`), and the new
+`assertTargetOsGate` does the same.
+
+Not fixed here: the fix lives in `scripts/f20-native-windows-proof.ps1`, which
+this sweep is required to leave with a zero diff. Recorded as a follow-up for the
+next candidate — adopt the attribute-line filter in `Assert-TargetOsGate`.
+
+### 13.10.8 Bounds honoured by this sweep
+
+- `scripts/f20-native-windows-proof.ps1`: **zero diff**, `$targets` byte-identical.
+- `crates/wcore-swarm/src/dispatch.rs`: untouched. No `crates/` file changed at all.
+- Nothing weakened to reach green: no assertion relaxed, no `#[ignore]`, no
+  `#[allow]`, no re-gate, no deleted test, no raised timeout. The one behavioural
+  change to a gate (`$LASTEXITCODE` capture) was proven to still fail closed on a
+  real non-zero exit before it was committed.
+- Two dispatches fired, both on `plan/f20-unified-audit-repair`, both cancelled
+  after the job of interest completed. No push to main, no merge, no PR, no tag,
+  no release, no issue closure. `origin` (stale local worktree) never used; all
+  remote work via `gh` under `gh auth switch --user FerroxLabs`.
+- `.planning/intel/` untouched (a concurrent lane owns it). No `AGENTS.md` or
+  `.ijfw` churn staged. No `Co-Authored-By`.
+- Repair iterations used: **1 of 2** (the soak exit-code fix, then re-proved).
+
+### 13.10.9 Disposition
+
+| Req | Was | Now |
+|---|---|---|
+| r2 | OPEN — 1 of 3 clauses | **COMPLETE** — 3 of 3, both DENY tests PASS on `SEANDESKTOP`, wiring repaired |
+| r8 | OPEN — rejection never shown | **COMPLETE** — both production guards rejected with the specific error; 7 regression cases, mutation-proven |
+| r12 | OPEN | OPEN — unchanged, out of scope for this sweep |
+| r13 | OPEN | OPEN — unchanged, out of scope for this sweep |
+
+## Self-Check (§13.10): PASSED
+
+- Both ACL PASS lines and the suite summaries — read from
+  `gh api …/actions/jobs/89753061944/logs`, ANSI-stripped, verbatim.
+- Job conclusion and runner identity — `gh api …/runs/30186873948/jobs` and the
+  `Runner name` / `Machine name` lines in the job log.
+- Product-tree identity — `git diff 9821ef76 2cc1a285 -- crates/ Cargo.lock Cargo.toml`,
+  empty output.
+- `$targets` invariant — `git diff --exit-code -- scripts/f20-native-windows-proof.ps1`, exit 0.
+- Guard rejections — captured stdout of harnesses that AST-extract / `sed`-extract
+  the production functions; source SHA256 and extracted line numbers printed by
+  the harnesses themselves.
+- Mutation results — four `node --test` runs, pass/fail counts read from the TAP
+  summary, file restored from a pre-mutation copy and re-run green.
+- The SSH-unavailability trap — reproduced against the CI-certified-green control
+  test before any conclusion was drawn.
