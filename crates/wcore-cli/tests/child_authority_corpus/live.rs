@@ -431,6 +431,10 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
     let _ = writeln!(stdin, "{{\"type\":\"stop\"}}");
     let _ = child.kill();
     let _ = child.wait();
+    if let Ok(buffer) = stderr_sink.lock() {
+        transcript.push_str("--- stderr ---\n");
+        transcript.push_str(&buffer);
+    }
 
     LiveRun {
         invocation,
