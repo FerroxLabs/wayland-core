@@ -48,7 +48,7 @@ use wcore_agent::test_utils::ScriptedProvider;
 use wcore_budget::execution::{ExecutionBudget, ExecutionBudgetView};
 use wcore_budget::tracker::BudgetCap;
 use wcore_config::config::Config;
-use wcore_egress::{EgressDecision, EgressPolicy};
+use wcore_egress::EgressDecision;
 use wcore_providers::LlmProvider;
 use wcore_tools::Tool;
 use wcore_tools::delegate::DelegateTool;
