@@ -822,6 +822,51 @@ pub fn budget_no_channel_canary() -> CanaryState {
 /// from the filesystem: if the probe exists, the child obtained a tool the
 /// parent does not hold.
 pub fn tool_widening_through_spawn_fork(session_tag: &str) -> ProbeResult {
+    // Bounded, because the delegated child's OWN engine may block this process
+    // forever. A child scripted to call Bash reaches the shipped confirmer,
+    // which prompts on stdin — the HARNESS's stdin, inherited by the in-process
+    // child engine. On Linux under a non-interactive runner `is_terminal()` is
+    // false and the call fails closed; on Windows under a scheduled-task
+    // (session 0) context it reports TRUE, the prompt is printed, and
+    // `read_line` waits for an approver who does not exist. Measured at
+    // 46dd076a: `corpus_tool` never returned on SEANDESKTOP.
+    //
+    // This is a bound on the harness, not a loosened gate. Expiry records
+    // NOT-EXPRESSIBLE — never REFUSED — so nothing is ever counted as a refusal
+    // because it ran out of time, exactly as the live runs' budget behaves.
+    let tag = session_tag.to_owned();
+    match run_bounded(Duration::from_secs(45), move || {
+        tool_widening_through_spawn_fork_inner(&tag)
+    }) {
+        Some(probe) => probe,
+        None => ProbeResult::new(
+            Outcome::NotExpressible,
+            "no verdict — the probe did not return",
+            "the delegated child's engine reached the shipped tool confirmer, which prompts on \
+             this process's stdin; no approver exists in process, so the call never returned and \
+             no verdict could be taken from it",
+        ),
+    }
+}
+
+/// Run `probe` on its own thread and give up after `budget`.
+///
+/// The thread is DETACHED on expiry rather than joined: it is blocked on a
+/// `read_line` that will never complete, and joining it would hang the suite in
+/// place of the probe. A detached thread does not keep a Rust process alive
+/// past `main` returning, so the harness still exits cleanly.
+fn run_bounded<T: Send + 'static>(
+    budget: Duration,
+    probe: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(probe());
+    });
+    rx.recv_timeout(budget).ok()
+}
+
+fn tool_widening_through_spawn_fork_inner(session_tag: &str) -> ProbeResult {
     let staging = TempDir::new().expect("tempdir");
     let probe_path = std::fs::canonicalize(staging.path())
         .expect("canonical probe dir")
