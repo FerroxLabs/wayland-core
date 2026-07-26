@@ -16,6 +16,8 @@ pub mod agent_registrar;
 pub mod browser_adapter;
 // Wave CU: host-side CUA-spec → real `CuaTool` reifier.
 pub mod cua_adapter;
+// F25-01: host-side capture for plugin-declared execution backends.
+pub mod exec_backend_adapter;
 pub mod hook_registrar;
 pub mod mcp_registrar;
 // v0.6.4 Task 1.1 — host-side `PluginTool` → real `wcore_tools::Tool`

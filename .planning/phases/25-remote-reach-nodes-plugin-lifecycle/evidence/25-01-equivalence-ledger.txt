@@ -1,0 +1,17 @@
+F25-SC1-LOCAL-RUN: PASS host=hetzner-dsm evidence=25-01/receipt-local.json
+F25-SC1-CONTAINER-RUN: PASS host=hetzner-dsm evidence=25-01/receipt-container.json
+F25-SC1-SSH-RUN: PASS host=hetzner-dsm evidence=25-01/receipt-ssh.json
+F25-SC1-CLOUD-RUN: NOT-RUN host=hetzner-dsm evidence=25-01/run-cloud.txt reason=no Fly credential exists on any proof host; WAYLAND_F25_CLOUD_TOKEN and WAYLAND_F25_CLOUD_ORG are both absent and an agent cannot fund an org or mint a token. The backend is implemented and fails closed with an explicit unavailable verdict; it never falls back.
+F25-SC1-LOCAL-CANCEL: CANCELLED host=hetzner-dsm evidence=25-01/cancellation-transcript.txt
+F25-SC1-CONTAINER-CANCEL: CANCELLED host=hetzner-dsm evidence=25-01/cancellation-transcript.txt
+F25-SC1-SSH-CANCEL: CANCELLED host=hetzner-dsm evidence=25-01/cancellation-transcript.txt
+F25-SC1-CLOUD-CANCEL: NOT-RUN host=hetzner-dsm evidence=25-01/run-cloud.txt reason=the cloud leg never started, so there was nothing to cancel; the same absent credential blocks both.
+F25-SC1-NORMALIZED-DIFF: EQUIVALENT differing_fields=none evidence=25-01-normalized-diff.txt
+F25-SC1-VERDICT: NOT-MET reason=Success Criterion 1 names FOUR surfaces including one hibernating cloud backend. Three ran and diffed to equivalence. The cloud leg is UNEXERCISED. The criterion is therefore NOT MET.
+F25-SC1-SSH-TARGET: CONTAINERIZED-SSHD host=hetzner-dsm detail=a disposable sshd container on the same physical host — separate network namespace, filesystem and process table, but NOT a separate machine. It proves the transport and remote-session cancellation; it does NOT prove the cross-machine case.
+F25-01-DEFECT-1: FIXED stdin was inherited by task children, which let the first task consume the operator script feeding the caller's stdin. Now Stdio::null on local and container.
+F25-01-DEFECT-2: FIXED the remote orphan scanner matched its own ssh invocation, reporting one orphan on every scan that did not exist.
+F25-01-DEFECT-3: FIXED the remote killer matched and killed itself mid-run via `pkill -f <nonce>`, reporting `remote kill failed:` with empty stderr while the work had in fact died.
+F25-01-DEFECT-4: FIXED the remote scan could not see the real work at all — the task's own argv carries no nonce, so a genuine orphan would have been invisible. The recorded session leader is now the primary signal.
+F25-01-DEFECT-5: FIXED the first equivalence run suffixed the task id per backend, so four runs were four DIFFERENT tasks; the diff correctly reported DIVERGENT on `task` and `events` while every content digest matched.
+F25-01-FINDING-1: PLAN-CORRECTED the plan asserted `wcore-sandbox` was missing from FORBIDDEN_CORE_IMPORTS by oversight. It is an intentional M5.1 security-allowlisted dependency that `PluginContext` needs; adding it fails the build (build.rs exit 101, measured). Only `wcore-exec-backend` was added.

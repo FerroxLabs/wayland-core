@@ -1,0 +1,76 @@
+PANEL-CMD: internal adversarial pass, fed 25-01-panel-prompt.txt verbatim, arguing AGAINST the emerging consensus
+
+I walked into this believing fly-machines, because the plan itself labelled it Recommended and because
+the integration shape was pre-fixed in a way that flatters it. The other three panel members have now
+all returned fly-machines. That unanimity is exactly the condition under which an adversarial pass is
+worth running, so I am arguing against it on the evidence, engaging ec2-hibernate and no-cloud by name.
+
+ARGUMENT 1 — THE DECISIVE VARIABLE IS NOT ERGONOMICS, IT IS WHETHER THE LEG EVER RUNS.
+Every pro the consensus cites for fly-machines is an implementation-convenience pro: bearer token,
+plain JSON, no SDK, cheap labels. Those are real, and they are also nearly free on e2b-sandboxes and
+recoverable on ec2-hibernate. None of them moves the number that actually decides whether Success
+Criterion 1 is MET or NOT MET, which is: does a usable credential exist inside this execution window?
+Measured on hetzner-dsm on 2026-07-26, the answer for every vendor is no:
+  FLY_API_TOKEN: absent
+  WAYLAND_F25_CLOUD_TOKEN: absent
+  WAYLAND_F25_CLOUD_ORG: absent
+  E2B_API_KEY: absent
+  AWS_ACCESS_KEY_ID: absent
+  ~/.aws/credentials: absent
+  ~/.fly/config.yml: absent
+So on the measurement that matters, the four options are TIED at zero, and the consensus has decided a
+tie on ergonomics. That is a legitimate tiebreak, but the panel should say so out loud rather than
+present fly-machines as if it wins on the criterion the phase is actually graded on.
+
+ARGUMENT 2 — THE CASE FOR ec2-hibernate IS STRONGER THAN THE PANEL ALLOWED, ON THE PANEL'S OWN MEASUREMENT.
+Measurement 1 dismantled the usual objection to ec2-hibernate: aws-sigv4 is already pinned at =1.4.3,
+aws-credential-types / aws-config / aws-sdk-sts are all already present for the Bedrock provider, and
+aws-sdk-ec2 is absent from the lockfile, so EC2 is reachable with zero new crates. Two consequences the
+consensus glossed:
+  (a) EC2 is the ONLY option where the phase's own criterion word — "hibernating" — is a literal,
+      documented instance state with true RAM persistence. Fly's "suspend" is the nearest analogue and
+      Fly's more commonly exercised idle behaviour is auto-STOP, which is a cold restart, not
+      hibernation. Choosing fly-machines and then attesting `stop` transitions would satisfy the letter
+      of a REST call while quietly weakening the word the Success Criterion uses. codex saw this and
+      said so — it explicitly conditioned its fly vote on using `suspend`, NOT `stop`. That condition is
+      load-bearing and it is the single most likely place this decision silently degrades.
+  (b) AWS is the account Sean is most likely to already hold, which under Argument 1 is the only lever
+      with any chance of moving the leg from UNEXERCISED to RUN.
+The honest counter, which I record because it defeats (b) rather than because it is convenient: even if
+an AWS credential existed on some host, USING Sean's real production AWS credential is inside this
+program's reserved set, and a mis-scoped EC2 credential's blast radius is categorically larger than a
+scratch Fly deploy token's. So (b) collapses. (a) does not collapse, and it survives as a binding
+condition on the committed option rather than as a reason to switch.
+
+ARGUMENT 3 — THE STANDING ASYMMETRY IS DOING MORE WORK THAN IT CAN BEAR, AND no-cloud DESERVED A REAL HEARING.
+Three panel members recited the asymmetry ("building the path costs nothing if the token never
+arrives") almost verbatim from the prompt. That is a prompt echo, not an independent finding, and the
+prompt was written by the same plan that pre-labelled fly-machines as Recommended. The asymmetry is not
+actually free: an unexercised cloud backend is untested production code carrying credential handling
+and a network transport, and untested credential-handling code is precisely the class that Phase 20A's
+TEST-AUDIT found 283 instances of. Shipping it unexercised imports a maintenance and security
+liability that no-cloud does not.
+The reason I still do not commit to no-cloud: the liability is bounded and disclosed. The backend
+fails closed with an explicit unavailable verdict when the credential is absent, it is reachable only
+through an operator-invoked subcommand, and the conformance harness exercises every non-network code
+path in it. Bounded, disclosed, and one token from proof beats a forfeited criterion. no-cloud loses,
+but it loses on that reasoning, not on the prompt's slogan.
+
+ARGUMENT 4 — WHAT I CANNOT REFUTE.
+e2b-sandboxes returned the cleanest unauthenticated 401 of the three and has the most literal
+pause/resume. Its defeat rests on a judgement — "SDK-first products move their raw HTTP surface" —
+that I did not measure and cannot measure inside this window. I record that as an unmeasured premise
+carried by the majority, not as a fact.
+
+POSITION.
+I do not switch the outcome, and I want to be precise about why, because "the adversarial pass agreed"
+is usually a sign the adversarial pass was theatre. I attack the consensus's REASONING and I sustain
+two attacks: the panel decided on ergonomics a question that is tied at zero on the criterion that
+grades it, and the panel underweighted that Fly's ordinary idle behaviour is stop-not-suspend. Neither
+attack identifies a different option that is better on the graded criterion — ec2-hibernate's one
+genuine advantage is neutralised by the reserved-credential rule, and no-cloud forfeits a criterion to
+avoid a bounded, disclosed liability. So the committed option should stand, WITH the condition codex
+named made binding: the reference hibernation transition is `suspend`, and an implementation that can
+only observe `stop` must record that it did not observe hibernation.
+
+PANEL_POSITION=fly-machines

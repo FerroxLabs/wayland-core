@@ -1,0 +1,11 @@
+F25-PANEL-CODEX: RECOMMENDS fly-machines evidence=25-01-panel-codex.txt
+F25-PANEL-GEMINI: RECOMMENDS fly-machines evidence=25-01-panel-gemini.txt
+F25-PANEL-KIMI: RECOMMENDS fly-machines evidence=25-01-panel-kimi.txt
+F25-PANEL-CLAUDE-ADVERSARIAL: RECOMMENDS fly-machines evidence=25-01-panel-claude-adversarial.txt
+F25-CLOUD-LIVETEST-DEPS: SATISFIABLE option=fly-machines evidence=25-01-livetest-deps.txt
+F25-CLOUD-LIVETEST-REACH: REACHABLE option=fly-machines host=hetzner-dsm evidence=25-01-livetest-reach-linux.txt
+F25-CLOUD-LIVETEST-WINDOWS-PARITY: PARITY option=fly-machines host=SeanDesktop evidence=25-01-livetest-reach-windows.txt
+F25-CLOUD-DECISION: CHOSEN fly-machines basis=majority dissent=25-01-panel-dissent.txt rationale=25-01-CLOUD-BACKEND-DECISION.md
+F25-CLOUD-RESERVED: SEAN-ONLY item=credential env=WAYLAND_F25_CLOUD_TOKEN,WAYLAND_F25_CLOUD_ORG blocking=false
+F25-CLOUD-CONDITION-C1: SUSPEND-NOT-STOP the reference hibernation transition is suspend; an implementation observing only stop must record that it did not observe hibernation
+F25-CLOUD-CONDITION-C2: SC1-EXPECTED-NOT-MET the cloud leg is expected UNEXERCISED in this window because no vendor credential exists on any proof host

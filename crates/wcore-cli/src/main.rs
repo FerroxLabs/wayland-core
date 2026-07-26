@@ -721,6 +721,9 @@ enum TopCmd {
     /// free / paid-but-uncleared Flux key returns an `upgrade_required`
     /// message — web_fetch is a paid-only capability.
     Fetch(wcore_cli::fetch::FetchArgs),
+    /// F25-01: execution backends — list / probe / run / cancel / orphans /
+    /// receipt verify / diff across local, container, ssh and cloud.
+    Backend(wcore_cli::backend::BackendArgs),
     /// Manage isolated profiles — each is an independent `WAYLAND_HOME`-rooted
     /// home with its own config, credentials, memory, and skills.
     Profile {
@@ -1357,6 +1360,13 @@ async fn run() -> anyhow::Result<ExitCode> {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(e) => {
                     eprintln!("wayland-core fetch: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
+            TopCmd::Backend(args) => match wcore_cli::backend::run(args).await {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core backend: {e:#}");
                     Ok(ExitCode::FAILURE)
                 }
             },

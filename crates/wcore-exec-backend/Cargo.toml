@@ -1,0 +1,42 @@
+[package]
+name = "wcore-exec-backend"
+description = "Provider-neutral execution-backend contract (F25-01) — capabilities, policy, secrets, artifacts, limits, cancellation, attestation, receipts, lifecycle health"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# Mid-tier: this crate COMPOSES containment and egress, it does not replace
+# either. It must never depend on wcore-agent or wcore-cli.
+wcore-config  = { workspace = true }
+wcore-sandbox = { workspace = true }
+wcore-egress  = { workspace = true }
+
+tokio         = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+async-trait   = { workspace = true }
+thiserror     = { workspace = true }
+sha2          = { workspace = true }
+ed25519-dalek = { workspace = true }
+base64        = { workspace = true }
+rand          = { workspace = true }
+tracing       = { workspace = true }
+uuid          = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[[test]]
+name = "conformance_matrix"
+path = "tests/conformance_matrix.rs"
+
+[[test]]
+name = "live_equivalence"
+path = "tests/live_equivalence.rs"

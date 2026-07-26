@@ -1,0 +1,56 @@
+LEG 2 — UNAUTHENTICATED REACHABILITY AND API SHAPE
+HOST: hetzner-dsm (Ubuntu-2404-noble-amd64-base) — the authoritative Linux build/proof host
+DATE: 2026-07-26
+METHOD: one unauthenticated HTTPS GET per vendor, 20-second cap, NO credential sent.
+        Body written to a file and the status read from curl's own -w '%{http_code}', so the
+        status is never thrown away by a pipeline.
+COMMAND SHAPE: curl -sS -m 20 -o /tmp/b.bin -w "%{http_code}" -D /tmp/h.txt "<url>"
+
+=== fly-machines
+URL: https://api.machines.dev/v1/apps
+STATUS: 404
+CT: content-type: text/plain; charset=utf-8
+BODY200: 404 page not found
+CORRECTION RECORDED: the bare collection route without an org_slug is not a documented route. The
+documented routes were then measured and are recorded below. This correction is recorded rather
+than quietly dropped, because a 404 on a first attempt is exactly the kind of measurement that
+gets silently rerun until it agrees with the preferred answer.
+
+URL: https://api.machines.dev/v1/apps?org_slug=personal
+STATUS: 401
+CT: content-type: application/json; charset=utf-8
+BODY200: {"error":"Authenticate: token validation error"}
+
+URL: https://api.machines.dev/v1/apps/wayland-f25-probe/machines
+STATUS: 401
+CT: content-type: application/json; charset=utf-8
+BODY200: {"error":"Authenticate: token validation error"}
+
+VERDICT fly-machines: REACHABLE. Structured JSON 401 on both documented routes, including the
+per-app machines collection that the orphan scan will enumerate. Plain HTTPS, no SDK, no redirect.
+The error body is a flat JSON object with a single "error" string — that is the exact shape the
+client must parse for a failure.
+
+=== e2b-sandboxes
+URL: https://api.e2b.dev/sandboxes
+STATUS: 401
+CT: content-type: application/json; charset=utf-8
+BODY200: {"code":401,"message":"authorization header is missing"}
+VERDICT e2b-sandboxes: REACHABLE. Structured JSON 401 with a numeric code and a message. Cleanest
+error body of the three.
+
+=== ec2-hibernate
+URL: https://ec2.us-east-1.amazonaws.com/?Action=DescribeInstances&Version=2016-11-15
+STATUS: 400
+CT: Content-Type: text/xml;charset=UTF-8
+BODY200: <?xml version="1.0" encoding="UTF-8"?><Response><Errors><Error><Code>MissingParameter</Code><Message>The request must contain the parameter AWSAccessKeyId</Message></Error></Errors><RequestID>4c8cee1...
+VERDICT ec2-hibernate: REACHABLE, but the error surface is XML, not JSON. The workspace has no XML
+parser in [workspace.dependencies], so every EC2 response would need hand-rolled parsing or a new
+crate — and a new crate is a termination state. This is a REAL, MEASURED strike against
+ec2-hibernate that the plan's own option text did not anticipate, and it is stronger than the
+dependency argument the plan expected to be decisive.
+
+OVERALL: no connection failure, no HTML body, no redirect onto an SDK-only surface for any of the
+three. All three are drivable by a wcore-egress client from the authoritative host. The only
+measured discriminator is response encoding: JSON for fly-machines and e2b-sandboxes, XML for
+ec2-hibernate.

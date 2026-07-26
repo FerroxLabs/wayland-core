@@ -1,0 +1,100 @@
+=== CANCELLATION LEG ===
+Ubuntu-2404-noble-amd64-base
+2026-07-26T16:19:31Z
+
+=== CANCEL local ===
+--- pre-cancel orphan scan for the nonce
+local      enumerated=true  found=1 via live-task registry crossed with the real process table
+local      enumerated=true  found=1 via live-task registry crossed with the real process table
+--- cancel, issued from a SECOND process
+backend:  local
+task:     f25-cancel
+method:   SIGKILL to the child's own process group, then re-read the process table
+residual: none — the cleanup was verified by re-enumeration
+CANCEL_local_EXIT=0
+RUN_local_AFTER_CANCEL_EXIT=0
+--- run output
+task:        f25-cancel
+backend:     local
+transport:   Local via localhost
+terminal:    Cancelled { reason: "operator cancelled" }
+input sha:   4f8983e6329e84fc61530f87c18731077691222cb5157842d1a36079328fb40d
+workspace:   135fe548909dbb50c097395dc322808f0f1848879cd11673cb932c8757f85f77
+hibernation: NotApplicable
+wall ms:     6338
+receipt:     /root/f25-evidence/receipt-cancel-local.json
+--- terminal status in the receipt
+--- REAL process table, after cancellation
+no matching local process
+--- post-cancel orphan scan (all backends)
+local      enumerated=true  found=0 via live-task registry crossed with the real process table
+container  enumerated=true  found=0 via docker ps -a --filter label=wayland.task.nonce=<nonce>
+ssh        enumerated=true  found=0 via remote `ps -eo pid,args` filtered on the task nonce
+cloud      enumerated=false found=0 via backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+
+0 orphan(s) found; 1 surface(s) could NOT be enumerated. An un-enumerated surface is not a clean surface — a scan that could not run must never be read as zero orphans.
+
+=== CANCEL container ===
+--- pre-cancel orphan scan for the nonce
+container  enumerated=true  found=1 via docker ps -a --filter label=wayland.task.nonce=<nonce>
+container  enumerated=true  found=1 via docker ps -a --filter label=wayland.task.nonce=<nonce>
+--- cancel, issued from a SECOND process
+backend:  container
+task:     f25-cancel
+method:   docker rm -f, then docker ps -a --filter label=wayland.task.nonce=<nonce> re-read
+residual: none — the cleanup was verified by re-enumeration
+CANCEL_container_EXIT=0
+RUN_container_AFTER_CANCEL_EXIT=0
+--- run output
+task:        f25-cancel
+backend:     container
+transport:   Container via wayland-f25-f25-cancel
+terminal:    Cancelled { reason: "operator cancelled" }
+input sha:   4f8983e6329e84fc61530f87c18731077691222cb5157842d1a36079328fb40d
+workspace:   135fe548909dbb50c097395dc322808f0f1848879cd11673cb932c8757f85f77
+hibernation: NotApplicable
+wall ms:     6482
+receipt:     /root/f25-evidence/receipt-cancel-container.json
+--- terminal status in the receipt
+--- REAL process table, after cancellation
+(empty above means no container carries the nonce)
+--- post-cancel orphan scan (all backends)
+local      enumerated=true  found=0 via live-task registry crossed with the real process table
+container  enumerated=true  found=0 via docker ps -a --filter label=wayland.task.nonce=<nonce>
+ssh        enumerated=true  found=0 via remote `ps -eo pid,args` filtered on the task nonce
+cloud      enumerated=false found=0 via backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+
+0 orphan(s) found; 1 surface(s) could NOT be enumerated. An un-enumerated surface is not a clean surface — a scan that could not run must never be read as zero orphans.
+
+=== CANCEL ssh ===
+--- pre-cancel orphan scan for the nonce
+ssh        enumerated=true  found=2 via remote `ps -eo pid,args` filtered on the task nonce
+ssh        enumerated=true  found=2 via remote `ps -eo pid,args` filtered on the task nonce
+--- cancel, issued from a SECOND process
+backend:  ssh
+task:     f25-cancel
+method:   second ssh connection kills the remote session carrying the nonce (remote-kill-issued), then the remote process table is re-read
+residual: none — the cleanup was verified by re-enumeration
+CANCEL_ssh_EXIT=0
+RUN_ssh_AFTER_CANCEL_EXIT=0
+--- run output
+task:        f25-cancel
+backend:     ssh
+transport:   Ssh via f25-ssh-target
+terminal:    Cancelled { reason: "operator cancelled" }
+input sha:   4f8983e6329e84fc61530f87c18731077691222cb5157842d1a36079328fb40d
+workspace:   135fe548909dbb50c097395dc322808f0f1848879cd11673cb932c8757f85f77
+hibernation: NotApplicable
+wall ms:     6338
+receipt:     /root/f25-evidence/receipt-cancel-ssh.json
+--- terminal status in the receipt
+--- REAL process table, after cancellation
+no matching REMOTE process
+--- post-cancel orphan scan (all backends)
+local      enumerated=true  found=0 via live-task registry crossed with the real process table
+container  enumerated=true  found=0 via docker ps -a --filter label=wayland.task.nonce=<nonce>
+ssh        enumerated=true  found=0 via remote `ps -eo pid,args` filtered on the task nonce
+cloud      enumerated=false found=0 via backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+
+0 orphan(s) found; 1 surface(s) could NOT be enumerated. An un-enumerated surface is not a clean surface — a scan that could not run must never be read as zero orphans.
+
