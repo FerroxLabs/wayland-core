@@ -945,15 +945,35 @@ pub fn egress_probe() -> ProbeResult {
     }
 }
 
-/// Production sites that construct an `EgressClient` directly. An occurrence
-/// after the file's first `#[cfg(test)]` is test code — the convention this
-/// workspace follows without exception in the files the census checked by hand —
-/// and is excluded, so the canary fires on a real bypass route rather than on a
-/// test fixture.
+/// Production sites that attach an EXPLICIT per-client egress policy — the
+/// exact route the census recorded as MED-3: `EgressClient::new().with_policy(..)`
+/// never consults the process-global `OnceLock` or the task-scoped policy the
+/// parent installed.
+///
+/// Three exclusions, each of which the census applied by hand and each of which
+/// a looser scan gets wrong:
+///
+/// * `crates/wcore-egress/` is the crate that DEFINES `with_policy`; its own
+///   definition and re-export are not call sites.
+/// * A file named `tests.rs`, or one under a `tests/` directory, is a whole-file
+///   test module declared `#[cfg(test)] mod tests;` by its parent, so it carries
+///   no inner `#[cfg(test)]` line to key on.
+/// * Within every other file, an occurrence after the first `#[cfg(test)]` is
+///   inside a test module.
+///
+/// Constructing an `EgressClient` is NOT itself a bypass — it is the sanctioned
+/// route through the B1 chokepoint, and 10 production files legitimately do it.
+/// Only the explicit per-client policy attachment is the hazard.
 fn production_egress_client_sites() -> Vec<String> {
     let mut sites = Vec::new();
     let root = workspace_root();
-    for file in source_files_mentioning("EgressClient::new()") {
+    for file in source_files_mentioning(".with_policy(") {
+        if file.starts_with("crates/wcore-egress/")
+            || file.ends_with("/tests.rs")
+            || file.contains("/tests/")
+        {
+            continue;
+        }
         let Ok(text) = std::fs::read_to_string(root.join(&file)) else {
             continue;
         };
@@ -964,7 +984,7 @@ fn production_egress_client_sites() -> Vec<String> {
         let production = text
             .lines()
             .enumerate()
-            .any(|(index, line)| index < test_boundary && line.contains("EgressClient::new()"));
+            .any(|(index, line)| index < test_boundary && line.contains(".with_policy("));
         if production {
             sites.push(file);
         }
