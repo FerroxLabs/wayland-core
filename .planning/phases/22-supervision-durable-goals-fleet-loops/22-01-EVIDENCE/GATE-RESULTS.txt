@@ -1,0 +1,28 @@
+# The plan's own gates, run against this worktree at the delivered commit.
+# Reds are reported, not engineered away. No gate was weakened, deleted or
+# re-scoped to reach a pass.
+
+T1-G1 compat-record-exists ............................ PASS
+T1-G2 captured-journal-legs ........................... FAIL (2 problems)
+      - EMPTY product-stdout for linux
+      - EMPTY product-stdout for windows
+      Cause: on BOTH hosts the run ended at an HTTP 401 and the product's output
+      went to stderr, so stdout is genuinely zero bytes. The journals themselves
+      PASS every other clause of this gate: both begin WJ01, linux is 84327
+      bytes and windows is 81093, both far above the 256-byte floor.
+T1-G3 reduction-captures .............................. FAIL (2 problems)
+      - MISSING windows/reduction-prechange.summary.txt
+      - MISSING windows/reduction-postchange.summary.txt
+      Cause: the Windows reduce instrument never finished building. The Linux
+      pair is present and is the byte-identical SHA-256 pair the verdict rests on.
+T1-G4 verdict-and-legs-conform ........................ PASS (verdict=1 legs=2 unresolvable=0)
+T2-G1 bundle-carries-question-options-boundary ........ PASS (14 resolvable SOURCE-CITEs)
+T2-G2 four-panel-captures-bound-to-one-bundle ......... PASS (0 problems)
+T2-G3 both-measurements-taken ......................... PASS (0 problems)
+T2-G4 commitment-available-under-the-verdict .......... PASS (COMPATIBLE-AT-V5 -> additive-at-current-version)
+T2-G5 one-commitment-basis-arithmetic-dissent ......... PASS (4 of 4 for the chosen option, dissent names 3)
+T2-G6 verdict-challenge-arithmetic .................... PASS (recorded 0 = actual 0)
+FMT   cargo fmt --all -- --check ...................... PASS
+
+# Not run at all, because the tasks they belong to were not executed:
+#   every gate in 22-02 Tasks 2-4, all of 22-03, all of 22-04.

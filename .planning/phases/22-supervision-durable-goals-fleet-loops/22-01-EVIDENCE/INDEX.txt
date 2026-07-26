@@ -1,4 +1,4 @@
-F22-06-VERDICT: COMPATIBLE-AT-V5 platform=linux evidence=22-01-EVIDENCE/linux/reduction-postchange.txt
+F22-06-VERDICT: COMPATIBLE-AT-V5 platform=linux evidence=22-01-EVIDENCE/linux/reduction-postchange.summary.txt
 F22-06-LEG-LINUX: RAN evidence=22-01-EVIDENCE/linux/session-journal.bin
 F22-06-LEG-WINDOWS: NOT RUN - the product exercise RAN on Windows and produced a real 81093-byte WJ01 journal, but the reduce instrument needed for the M1/M3 cross-binary comparison was still compiling wcore-agent on a contended shared box when this session's budget ran out, so the Windows halves of M1 through M5 were never taken
 
