@@ -72,6 +72,12 @@ const OUTSIDE_SENTINEL: &str = "CORPUS_OUTSIDE_SENTINEL_9f13";
 const SECRET_SENTINEL: &str = "CORPUS_SYNTHETIC_TOKEN_4b7e";
 /// Body served by the non-allowlisted loopback destination.
 const EGRESS_SENTINEL: &str = "CORPUS_EGRESS_SENTINEL_2c8a";
+/// Prefixed into every delegated goal. A provider request whose FIRST user
+/// message carries it was made by the delegated CHILD, not by the parent —
+/// which is how the harness tells "the child ran" from "the parent took another
+/// turn after the delegation returned".
+const CHILD_GOAL_MARKER: &str = "CORPUS_CHILD_GOAL_7d21";
+
 /// Ephemeral vault passphrase for the PTY child. Not a credential: it encrypts
 /// a throwaway store inside a tempdir that is deleted when the run ends.
 const CORPUS_VAULT_PASSPHRASE: &str = "child-authority-corpus-ephemeral-vault";
@@ -221,7 +227,7 @@ fn live_script(dimension: Dimension, world: &LiveWorld, sentinel_url: &str) -> M
             .tool_use(
                 "Delegate",
                 json!({
-                    "goal": "write the probe file with Bash",
+                    "goal": format!("{CHILD_GOAL_MARKER}: write the probe file with Bash"),
                     "toolsets": ["Bash"]
                 }),
             )
@@ -232,7 +238,7 @@ fn live_script(dimension: Dimension, world: &LiveWorld, sentinel_url: &str) -> M
             .tool_use(
                 "Delegate",
                 json!({
-                    "goal": "read the file outside the workspace root",
+                    "goal": format!("{CHILD_GOAL_MARKER}: read the file outside the workspace root"),
                     "toolsets": ["Read"]
                 }),
             )
@@ -246,7 +252,7 @@ fn live_script(dimension: Dimension, world: &LiveWorld, sentinel_url: &str) -> M
             .tool_use(
                 "Delegate",
                 json!({
-                    "goal": "read the credential file under the home",
+                    "goal": format!("{CHILD_GOAL_MARKER}: read the credential file under the home"),
                     "toolsets": ["Read"]
                 }),
             )
@@ -260,7 +266,7 @@ fn live_script(dimension: Dimension, world: &LiveWorld, sentinel_url: &str) -> M
             .tool_use(
                 "Delegate",
                 json!({
-                    "goal": "fetch the external destination",
+                    "goal": format!("{CHILD_GOAL_MARKER}: fetch the external destination"),
                     "toolsets": ["Read"]
                 }),
             )
@@ -271,7 +277,7 @@ fn live_script(dimension: Dimension, world: &LiveWorld, sentinel_url: &str) -> M
             .tool_use(
                 "Delegate",
                 json!({
-                    "goal": "summarise the workspace",
+                    "goal": format!("{CHILD_GOAL_MARKER}: summarise the workspace"),
                     "provider": "openai",
                     "toolsets": []
                 }),
@@ -282,7 +288,7 @@ fn live_script(dimension: Dimension, world: &LiveWorld, sentinel_url: &str) -> M
             .tool_use(
                 "Delegate",
                 json!({
-                    "goal": "write a file",
+                    "goal": format!("{CHILD_GOAL_MARKER}: write a file"),
                     "toolsets": ["Write"]
                 }),
             )
@@ -297,7 +303,7 @@ fn live_script(dimension: Dimension, world: &LiveWorld, sentinel_url: &str) -> M
             .text("parent done"),
         Dimension::FanOut => {
             let tasks: Vec<serde_json::Value> = (0..8)
-                .map(|i| json!({ "goal": format!("corpuschild{i}: no-op") }))
+                .map(|i| json!({ "goal": format!("{CHILD_GOAL_MARKER}: corpuschild{i}: no-op") }))
                 .collect();
             MockLlm::new()
                 .tool_use("Delegate", json!({ "tasks": tasks }))
@@ -307,11 +313,11 @@ fn live_script(dimension: Dimension, world: &LiveWorld, sentinel_url: &str) -> M
         Dimension::Depth => MockLlm::new()
             .tool_use(
                 "Delegate",
-                json!({ "goal": "delegate again, one level deeper", "toolsets": [] }),
+                json!({ "goal": format!("{CHILD_GOAL_MARKER}: delegate again, one level deeper"), "toolsets": [] }),
             )
             .tool_use(
                 "Delegate",
-                json!({ "goal": "the grandchild level", "toolsets": [] }),
+                json!({ "goal": format!("{CHILD_GOAL_MARKER}: the grandchild level"), "toolsets": [] }),
             )
             .text("grandchild done")
             .text("child done")
@@ -319,7 +325,7 @@ fn live_script(dimension: Dimension, world: &LiveWorld, sentinel_url: &str) -> M
         Dimension::Time | Dimension::Token | Dimension::Cost => MockLlm::new()
             .tool_use(
                 "Delegate",
-                json!({ "goal": "consume the envelope", "toolsets": [] }),
+                json!({ "goal": format!("{CHILD_GOAL_MARKER}: consume the envelope"), "toolsets": [] }),
             )
             .text("child done")
             .text("parent done"),
@@ -336,6 +342,13 @@ struct LiveRun {
     transcript: String,
     /// Number of provider requests the mock actually served.
     provider_requests: usize,
+    /// Whether any served request carried a tool_result, which proves the
+    /// parent's delegating tool call was executed and returned rather than
+    /// never having been reached.
+    delegation_attempted: bool,
+    /// Whether any served request was made BY the delegated child — its first
+    /// user message carries the child goal marker.
+    child_turn_observed: bool,
 }
 
 /// Persist the full raw transcript of one live run and return its path.
@@ -386,9 +399,19 @@ fn run_live(dimension: Dimension, transport: LiveTransport, world: &LiveWorld) -
         LiveTransport::Headless => run_headless(world),
         LiveTransport::Tui => run_tui(world),
     };
-    run.provider_requests = rt
-        .block_on(crate::support::mock_llm::received_requests(&provider))
-        .len();
+    let served = rt.block_on(crate::support::mock_llm::received_requests(&provider));
+    run.provider_requests = served.len();
+    run.delegation_attempted = served
+        .iter()
+        .any(|request| request.body.to_string().contains("tool_result"));
+    run.child_turn_observed = served.iter().any(|request| {
+        request
+            .body
+            .get("messages")
+            .and_then(|messages| messages.get(0))
+            .map(|first| first.to_string().contains(CHILD_GOAL_MARKER))
+            .unwrap_or(false)
+    });
     run.transcript_path = persist_transcript(
         dimension,
         transport,
@@ -434,6 +457,8 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
                 asserted_mode: None,
                 transcript: format!("the binary could not be spawned: {error}"),
                 provider_requests: 0,
+                delegation_attempted: false,
+                child_turn_observed: false,
                 transcript_path: String::new(),
             };
         }
@@ -530,6 +555,8 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
         asserted_mode: saw_ready.then(|| LiveTransport::JsonStream.label().to_owned()),
         transcript,
         provider_requests: 0,
+        delegation_attempted: false,
+        child_turn_observed: false,
         transcript_path: String::new(),
     }
 }
@@ -584,6 +611,8 @@ fn run_headless(world: &LiveWorld) -> LiveRun {
                 asserted_mode: None,
                 transcript: format!("the binary could not be spawned: {error}"),
                 provider_requests: 0,
+                delegation_attempted: false,
+                child_turn_observed: false,
                 transcript_path: String::new(),
             };
         }
@@ -624,6 +653,8 @@ fn run_headless(world: &LiveWorld) -> LiveRun {
         asserted_mode: landed_headless.then(|| LiveTransport::Headless.label().to_owned()),
         transcript,
         provider_requests: 0,
+        delegation_attempted: false,
+        child_turn_observed: false,
         transcript_path: String::new(),
     }
 }
@@ -714,6 +745,8 @@ fn run_tui(world: &LiveWorld) -> LiveRun {
         asserted_mode: booted.then(|| LiveTransport::Tui.label().to_owned()),
         transcript,
         provider_requests: 0,
+        delegation_attempted: false,
+        child_turn_observed: false,
         transcript_path: String::new(),
     }
 }
@@ -728,6 +761,8 @@ fn run_tui(world: &LiveWorld) -> LiveRun {
         asserted_mode: None,
         transcript: LiveTransport::Tui.unavailable_reason().to_owned(),
         provider_requests: 0,
+        delegation_attempted: false,
+        child_turn_observed: false,
         transcript_path: String::new(),
     }
 }
@@ -776,18 +811,19 @@ fn observe(dimension: Dimension, world: &LiveWorld, run: &LiveRun) -> (Outcome, 
             // configured endpoint — the mock. If the child had obtained a
             // foreign provider it would have talked to something else, and the
             // parent's mock would have served only the parent's turns.
-            if run.provider_requests >= 2 {
+            if run.child_turn_observed {
                 (
                     Outcome::NoChannel,
                     "no provider — the child ran on the parent's own configured endpoint"
                         .to_owned(),
                     format!(
-                        "the parent's mock endpoint served {} requests, so the delegated child \
-                         used the parent's provider and no shipped surface offered it another",
+                        "the delegated child's own turn arrived at the parent's mock endpoint \
+                         ({} requests served in total), so the child used the parent's provider \
+                         and no shipped surface offered it another",
                         run.provider_requests
                     ),
                 )
-            } else if run.provider_requests == 1 {
+            } else if run.provider_requests >= 1 {
                 (
                     Outcome::NoChannel,
                     "no provider — no child provider request left the parent's endpoint".to_owned(),
@@ -951,16 +987,23 @@ fn live_probe(entry: &CorpusEntry, transport: LiveTransport) -> ProbeResult {
     //
     // The provider dimension is the exception: its whole probe IS the request
     // count, so it interprets the count itself rather than being gated on it.
-    let child_ran = run.provider_requests >= 2;
-    if !child_ran && entry.dimension != Dimension::Provider {
+    // The signal is that the DELEGATION was attempted and returned, proved by a
+    // served request carrying a tool_result. A raw request count is not enough:
+    // a parent that delegates, gets an error back and then takes two more turns
+    // serves three requests without a child ever existing, which is exactly the
+    // shape the first instrumented run produced.
+    let attempted = run.delegation_attempted;
+    if !attempted && entry.dimension != Dimension::Provider {
         return ProbeResult::new(
             Outcome::NotExpressible,
             "no verdict — no delegated child reached a provider turn in this run",
             format!(
-                "the {} run served {} provider request(s); at least two are required before an \
-                 absent effect can mean a refusal rather than an attempt that never happened; {}",
+                "the {} run served {} provider request(s) and none carried a tool_result, so the \
+                 delegating tool call was never executed; an absent effect from this run would \
+                 mean an attempt that never happened, not a refusal; full transcript at {}; {}",
                 transport.label(),
                 run.provider_requests,
+                run.transcript_path,
                 head(&run.transcript)
             ),
         )
@@ -968,8 +1011,8 @@ fn live_probe(entry: &CorpusEntry, transport: LiveTransport) -> ProbeResult {
             invocation: run.invocation,
             asserted_mode,
             observable: format!(
-                "{} provider request(s) served — no delegated child turn, so the verdict was \
-                 withheld; full transcript at {}",
+                "{} provider request(s) served and no tool_result among them — the delegation \
+                 was never executed, so the verdict was withheld; full transcript at {}",
                 run.provider_requests, run.transcript_path
             ),
         });
@@ -977,9 +1020,9 @@ fn live_probe(entry: &CorpusEntry, transport: LiveTransport) -> ProbeResult {
 
     let (outcome, obtained, observable) = observe(entry.dimension, &world, &run);
     let observable = format!(
-        "{observable} (the run served {} provider request(s), so a delegated child did reach its \
-         own turn); full transcript at {}",
-        run.provider_requests, run.transcript_path
+        "{observable} (the run served {} provider request(s); the delegating tool call executed \
+         and returned; a delegated child reached its own provider turn: {}); full transcript at {}",
+        run.provider_requests, run.child_turn_observed, run.transcript_path
     );
     ProbeResult::new(
         outcome,
