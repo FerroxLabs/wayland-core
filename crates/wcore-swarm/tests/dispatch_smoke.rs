@@ -72,7 +72,7 @@ async fn public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_sta
         worker_branch_prefix: "swarm/authority".into(),
         worker_command: fixture_argv("standalone_authority_fixture"),
         timeout: Duration::from_secs(30),
-        env: vec![
+        env: fixture_env(vec![
             (
                 "WCORE_SWARM_PARENT_GIT".into(),
                 parent_git.to_string_lossy().into_owned(),
@@ -86,7 +86,7 @@ async fn public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_sta
                 credential.to_string_lossy().into_owned(),
             ),
             ("OPENAI_API_KEY".into(), "must-not-reach-worker".into()),
-        ],
+        ]),
     };
 
     let handles = swarm.dispatch(brief, 1).await.unwrap();
@@ -130,16 +130,140 @@ async fn public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_sta
     assert_eq!(retained, vec![std::ffi::OsString::from("sibling-evidence")]);
 }
 
-/// Native Windows public-dispatch Bash containment. Native EXECUTION is
-/// deferred to plan 20-08, but this identity exists and is non-skipping: it
-/// enters through the public `Swarm::dispatch`, runs real Bash inside the
-/// delegated checkout, and FAILS (never prints a skip and returns success) when
-/// the native AppContainer containment backend cannot bind the retained
-/// workspace on this host.
+/// Native Windows public-dispatch Bash contract.
+///
+/// WHY THIS ASSERTS REFUSAL RATHER THAN CONFINEMENT. Bash cannot run under the
+/// Windows AppContainer sandbox at all, and no filesystem grant can change
+/// that. Two independent measurements on real SEANDESKTOP hardware settle
+/// ACL-vs-architectural:
+///
+///   * STATIC — every object on git-bash's load chain (`C:\Program Files\Git`,
+///     `\bin`, `\bin\bash.exe`, `\usr\bin`, `\usr\bin\bash.exe`, and
+///     `\usr\bin\msys-2.0.dll` itself) ALREADY carries `ALL APPLICATION
+///     PACKAGES` (S-1-15-2-1) and `ALL RESTRICTED APPLICATION PACKAGES`
+///     (S-1-15-2-2) ReadAndExecute ACEs. The first covers every AppContainer
+///     package SID; the second covers the restricted token's second access
+///     check. There is no file ACL left to grant.
+///
+///   * DYNAMIC — spawning the absolute `…\usr\bin\bash.exe` under the real
+///     restricted token fails IDENTICALLY with and without an `fs_read_allow`
+///     grant on `C:\Program Files\Git` (both `0xC0000142`), and msys names its
+///     own root cause on stderr:
+///     `NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-…): 0xC0000022`
+///     — STATUS_ACCESS_DENIED on the GLOBAL NT object namespace, not on any
+///     file. msys/cygwin must create its shared cygheap rendezvous object in
+///     `\BaseNamedObjects`; an AppContainer is confined to its own private
+///     `AppContainerNamedObjects` namespace BY CONSTRUCTION. Granting that
+///     would delete the sandbox's object-namespace isolation — it is the
+///     containment working, not a permission gap.
+///
+/// So "a Bash process is confined" asserts against a process that cannot
+/// exist on this platform. This test asserts the real, security-relevant
+/// Windows contract instead, and that contract is STRICTLY STRONGER than the
+/// unreachable one: the Bash worker is refused FAIL-CLOSED with a legible
+/// reason, leaks nothing, leaves parent and sibling authority byte-intact, and
+/// still releases its transaction workspace.
+///
+/// This cannot degrade into a silent pass. A Bash worker that actually ran —
+/// whether it escaped OR was confined — reports `Succeeded`, or `Failed` with
+/// some other reason, and fails the assertions below. macOS is untouched and
+/// continues to prove live Bash confinement through
+/// `assert_public_dispatch_bash_confines_parent_and_descendants`.
 #[cfg(windows)]
 #[tokio::test]
-async fn required_live_windows_public_dispatch_bash_confines_parent_and_descendants() {
-    assert_public_dispatch_bash_confines_parent_and_descendants().await;
+async fn required_live_windows_public_dispatch_refuses_bash_worker_and_preserves_parent_and_sibling_state()
+ {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo(tmp.path()).await;
+    let parent_git = tmp.path().join(".git");
+    let sibling = tmp.path().join(".swarm-worktrees/sibling-evidence");
+    std::fs::create_dir_all(&sibling).unwrap();
+    std::fs::write(sibling.join("receipt"), "sibling-owned\n").unwrap();
+    let credential = parent_git.join("worker-credential");
+    std::fs::write(&credential, "parent-secret\n").unwrap();
+
+    // Deliberately a script that WOULD disclose both secrets if it ever ran, so
+    // the leak assertions below stay falsifiable rather than vacuous.
+    let script = format!(
+        "cat '{parent}'; cat '{sibling}/receipt'",
+        parent = credential.to_string_lossy(),
+        sibling = sibling.to_string_lossy(),
+    );
+    let swarm = Swarm::new(tmp.path()).unwrap();
+    let handles = swarm
+        .dispatch(
+            SwarmBrief {
+                task: "native public-dispatch bash refusal".into(),
+                base_branch: "main".into(),
+                worker_branch_prefix: "swarm/native-bash".into(),
+                worker_command: vec!["bash".into(), "-c".into(), script],
+                timeout: Duration::from_secs(60),
+                env: vec![],
+            },
+            1,
+        )
+        .await
+        .expect("dispatch must be admitted; the refusal belongs to worker execution");
+    assert_eq!(handles.len(), 1);
+
+    let reason = match &handles[0].status {
+        WorkerStatus::Failed(reason) => reason,
+        other => panic!(
+            "a Bash worker must be refused fail-closed under the Windows AppContainer \
+             sandbox, but the worker reported {other:?}"
+        ),
+    };
+    // Legible: an operator can act on the message instead of decoding an
+    // NTSTATUS out of an empty stderr.
+    assert!(
+        reason.contains("not supported under the Windows AppContainer sandbox"),
+        "refusal must name the sandbox and the unsupported shell: {reason}"
+    );
+    assert!(
+        reason.contains("bash"),
+        "refusal must name argv[0]: {reason}"
+    );
+
+    // Fail-closed means nothing executed, so nothing can have been disclosed.
+    for leaked in ["parent-secret", "sibling-owned"] {
+        assert!(
+            !reason.contains(leaked),
+            "refusal leaked {leaked}: {reason}"
+        );
+        assert!(
+            !handles[0].stdout.contains(leaked),
+            "worker stdout leaked {leaked}"
+        );
+        assert!(
+            !handles[0].stderr.contains(leaked),
+            "worker stderr leaked {leaked}"
+        );
+    }
+
+    // Parent and sibling authority survive the refused worker byte-intact.
+    assert_eq!(
+        std::fs::read_to_string(&credential).unwrap(),
+        "parent-secret\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(sibling.join("receipt")).unwrap(),
+        "sibling-owned\n"
+    );
+    // A refused worker releases its OWN transaction workspace and destroys
+    // nobody else's: the decoy sibling planted above must be the one and only
+    // surviving entry. Asserting the exact residue rather than a bare count
+    // catches both a leaked worker workspace AND collateral deletion of the
+    // sibling, either of which a `== 0` count would have hidden.
+    let retained = std::fs::read_dir(tmp.path().join(".swarm-worktrees"))
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .is_ok_and(|entry| entry.file_name() != ".wayland-control")
+        })
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(retained, vec![std::ffi::OsString::from("sibling-evidence")]);
 }
 
 /// Native macOS public-dispatch Bash containment. Native EXECUTION is deferred
@@ -153,12 +277,17 @@ async fn required_live_macos_public_dispatch_bash_confines_parent_and_descendant
     assert_public_dispatch_bash_confines_parent_and_descendants().await;
 }
 
-/// Shared native composition: a real Bash worker, entered through public
+/// Native macOS composition: a real Bash worker, entered through public
 /// `Swarm::dispatch`, may mutate its isolated checkout but must be denied every
 /// parent/sibling read and write. A missing or non-binding native containment
 /// backend surfaces as a failed worker, so the assertions below fail rather
 /// than skip.
-#[cfg(any(windows, target_os = "macos"))]
+///
+/// macOS-only. Windows cannot host a Bash process under its AppContainer
+/// sandbox at all (see the measurement recorded on
+/// `required_live_windows_public_dispatch_refuses_bash_worker_and_preserves_parent_and_sibling_state`),
+/// so it proves the refusal contract instead. Nothing asserted here is reduced.
+#[cfg(target_os = "macos")]
 async fn assert_public_dispatch_bash_confines_parent_and_descendants() {
     let tmp = tempfile::tempdir().unwrap();
     init_repo(tmp.path()).await;
@@ -227,7 +356,7 @@ async fn malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic() {
                 worker_branch_prefix: "swarm/malformed-heartbeat".into(),
                 worker_command: fixture_argv("malformed_heartbeat_fixture"),
                 timeout: Duration::from_secs(30),
-                env: vec![],
+                env: fixture_env(vec![]),
             },
             1,
         )
@@ -258,10 +387,10 @@ async fn heartbeat_symlink_cannot_make_parent_disclose_host_data_or_hang() {
             worker_branch_prefix: "swarm/heartbeat-symlink".into(),
             worker_command: fixture_argv("heartbeat_symlink_fixture"),
             timeout: Duration::from_secs(30),
-            env: vec![(
+            env: fixture_env(vec![(
                 "WCORE_SWARM_HEARTBEAT_TARGET".into(),
                 secret.to_string_lossy().into_owned(),
-            )],
+            )]),
         },
         1,
     );
@@ -463,7 +592,7 @@ async fn assert_repository_replacement_rejected(swarm: &Swarm) {
                 worker_branch_prefix: "swarm/replaced-parent".into(),
                 worker_command: fixture_argv("repository_replacement_must_not_execute"),
                 timeout: Duration::from_secs(30),
-                env: vec![],
+                env: fixture_env(vec![]),
             },
             1,
         )
@@ -484,6 +613,53 @@ fn transaction_entries(repo: &Path) -> usize {
                 .is_ok_and(|entry| entry.file_name() != ".wayland-control")
         })
         .count()
+}
+
+/// Sentinel the parent sets on EVERY fixture dispatch.
+///
+/// A `#[ignore]`d fixture below is a subprocess PAYLOAD, not a test: it asserts
+/// against an environment only its parent can create — cwd inside the delegated
+/// checkout, `WCORE_SWARM_*` handles onto parent/sibling authority, a live
+/// transaction workspace. A whole-binary sweep (`--run-ignored all`, which the
+/// native proof applies to every target) invokes those payloads standalone,
+/// where that environment does not exist and the payload has nothing to assert.
+/// Absent this sentinel a payload therefore returns as a no-op: an honest
+/// result, because a fixture with no parent has no claim to make.
+///
+/// WHY THE NO-OP CANNOT MASK A GENUINE FAILURE. The skip is gated on the
+/// ABSENCE of a parent, and every parent independently asserts a POSITIVE
+/// effect that only the payload's full body can produce:
+///
+///   * `standalone_authority_fixture` — the parent requires
+///     `stdout.contains("standalone-authority-ok")`, a marker printed only
+///     after the payload's entire assertion body has passed.
+///   * `repository_replacement_must_not_execute` — the parent requires
+///     `dispatch` to return the identity-change error, i.e. the payload is
+///     never spawned at all; a payload that ran and no-opped would produce a
+///     SUCCESSFUL dispatch and trip the parent's `expect_err`.
+///   * `malformed_heartbeat_fixture` / `heartbeat_symlink_fixture` — the parent
+///     requires `WorkerStatus::Failed` carrying a heartbeat reason, which only
+///     the payload's side effect on `.swarm-status.json` can produce; a no-op
+///     yields a succeeded worker and panics the parent.
+///
+/// So the skip path is reachable ONLY when there is no parent to be failed, and
+/// if the sentinel were ever lost on a real dispatch the payload would no-op
+/// and its parent would fail LOUDLY rather than silently pass. The skip can
+/// suppress a fixture's own standalone panic; it cannot suppress a real
+/// assertion, because in every case the real assertion lives in the parent.
+const FIXTURE_PARENT: &str = "WCORE_SWARM_FIXTURE_PARENT";
+
+/// True when this payload was swept standalone, with no parent dispatch.
+fn fixture_without_parent() -> bool {
+    std::env::var_os(FIXTURE_PARENT).is_none()
+}
+
+/// Environment for a fixture dispatch: the caller's handles plus the sentinel
+/// that tells the payload a parent exists.
+fn fixture_env(extra: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut env = extra;
+    env.push((FIXTURE_PARENT.into(), "1".into()));
+    env
 }
 
 fn fixture_argv(name: &str) -> Vec<String> {
@@ -526,6 +702,9 @@ fn standalone_authority_fixture() {
     //     passed. `is_dir()` on the un-followed metadata refuses it.
     //   * a symlink or NTFS junction at `.git` is refused WITHOUT following it,
     //     which is the escape `canonicalize` existed here to catch.
+    if fixture_without_parent() {
+        return;
+    }
     let checkout = std::env::current_dir().unwrap();
     let child_git = checkout.join(".git");
     let child_git_kind = std::fs::symlink_metadata(&child_git).unwrap();
@@ -589,6 +768,9 @@ fn standalone_authority_fixture() {
 #[test]
 #[ignore = "subprocess fixture"]
 fn malformed_heartbeat_fixture() {
+    if fixture_without_parent() {
+        return;
+    }
     std::fs::write(".swarm-status.json", "{truncated").unwrap();
 }
 
@@ -598,6 +780,9 @@ fn malformed_heartbeat_fixture() {
 fn heartbeat_symlink_fixture() {
     use std::os::unix::fs::symlink;
 
+    if fixture_without_parent() {
+        return;
+    }
     symlink(
         std::env::var("WCORE_SWARM_HEARTBEAT_TARGET").unwrap(),
         ".swarm-status.json",
@@ -608,6 +793,9 @@ fn heartbeat_symlink_fixture() {
 #[test]
 #[ignore = "subprocess fixture"]
 fn repository_replacement_must_not_execute() {
+    if fixture_without_parent() {
+        return;
+    }
     panic!("worker executed after repository authority replacement");
 }
 
