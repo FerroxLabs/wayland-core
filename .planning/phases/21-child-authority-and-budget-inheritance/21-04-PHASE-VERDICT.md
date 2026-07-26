@@ -32,14 +32,14 @@ CRITERION :: 1 :: NOT-MET :: A child cannot widen any provider, tool, filesystem
 CRITERION :: 2 :: MET-WITH-STATED-EXCEPTIONS :: Nested reservation, refund, escalation, approval, cancellation, and result delivery remain attributable to the correct parent/session.
 CRITERION :: 3 :: NOT-MET :: Standalone and host-protocol hostile corpora prove equivalent enforcement.
 
-AMENDED :: 2026-07-26 :: CRITERION 3 :: MET-WITH-STATED-EXCEPTIONS -> NOT-MET :: at 46dd076a, per VERIFICATION.md F-V2/F-V3 and the repair recorded in 21-05-CRITERION3-REPAIR.md
+AMENDED :: 2026-07-26 :: CRITERION 3 :: MET-WITH-STATED-EXCEPTIONS -> NOT-MET :: at 359ce2bf, per VERIFICATION.md F-V2/F-V3 and the repair recorded in 21-05-CRITERION3-REPAIR.md
 
 EVIDENCE-LIVE :: 1 :: .planning/phases/21-child-authority-and-budget-inheritance/21-02-CORPUS-RESULTS.md :: eleven dimensions driven on both platforms in four surface/mode combinations; filesystem, egress and secret REFUSED live on Linux and Windows; provider NO-CHANNEL; tool, approval, depth, fan-out, time, token and cost NOT-EXPRESSIBLE on at least one live combination -- SUPERSEDED, see EVIDENCE-LIVE :: 4: every decisive STANDALONE live verdict in this row came from a run with zero child provider turns
-EVIDENCE-LIVE :: 4 :: .planning/phases/21-child-authority-and-budget-inheritance/21-05-CRITERION3-REPAIR.md :: at 46dd076a, twelve of fourteen decisive live rows carry one or two delegated child provider turns on BOTH surfaces; tool, filesystem, secret, egress and depth REFUSED live with a real actor; provider and approval NO-CHANNEL with a real actor; fan-out and time/token/cost NOT-EXPRESSIBLE live
+EVIDENCE-LIVE :: 4 :: .planning/phases/21-child-authority-and-budget-inheritance/21-05-CRITERION3-REPAIR.md :: at 359ce2bf, all fourteen decisive live rows on Linux carry one or two delegated child provider turns on BOTH surfaces; tool, filesystem, secret, egress and depth REFUSED live with a real actor; provider and approval NO-CHANNEL with a real actor; fan-out and time/token/cost NOT-EXPRESSIBLE live
 EVIDENCE-LIVE :: 1 :: .planning/phases/21-child-authority-and-budget-inheritance/21-03-REPAIR-SET.md :: the one authorized repair recorded CLOSURE :: F21-02-02 :: NOT-CLOSED on its live leg, because no shipped surface offers a child any way to request an approval posture
 EVIDENCE-LIVE :: 2 :: .planning/phases/21-child-authority-and-budget-inheritance/21-04-ATTRIBUTION-RESULTS.md :: six lifecycle events, two siblings each, three generations for escalation and delivery; five of six CORRECT at the real in-process seam on both platforms; zero MISATTRIBUTED anywhere; per-sibling parent_call_id observed on the real wire in every run where the sibling pair survived
 EVIDENCE-LIVE :: 3 :: .planning/phases/21-child-authority-and-budget-inheritance/21-02-CORPUS-RESULTS.md :: the standalone and host-protocol surfaces reached the same enforcement verdict on every decisive dimension, asserted structurally by assert_surface_equivalence rather than compared by eye -- QUALIFIED: for 7 of 11 dimensions the two drivers called the SAME function, so the assertion could not have failed on them; see 21-05-CRITERION3-REPAIR.md section 2
-EVIDENCE-LIVE :: 5 :: .planning/phases/21-child-authority-and-budget-inheritance/21-05-CRITERION3-REPAIR.md :: at 46dd076a the host-protocol driver reaches 9 of 11 dimensions through the production AgentBootstrap + HostChildController path; the remaining 2 record NOT-EXPRESSIBLE with the SubAgentConfig field set as evidence, read by exhaustive destructuring so a new child-request field cannot reach the product without the record being revisited
+EVIDENCE-LIVE :: 5 :: .planning/phases/21-child-authority-and-budget-inheritance/21-05-CRITERION3-REPAIR.md :: at 359ce2bf the host-protocol driver reaches 9 of 11 dimensions through the production AgentBootstrap + HostChildController path; the remaining 2 record NOT-EXPRESSIBLE with the SubAgentConfig field set as evidence, read by exhaustive destructuring so a new child-request field cannot reach the product without the record being revisited
 
 ### Criterion 1 — NOT MET
 
@@ -175,7 +175,7 @@ this criterion is now graded against:
 > provider its parent does not hold, or an approval posture weaker than its
 > parent's — on **Linux**.
 
-That clause is now true, checked, and non-vacuous: twelve of fourteen decisive
+That clause is now true, checked, and non-vacuous: all fourteen decisive
 live rows carry one or two child provider turns, and the two surfaces are driven
 through genuinely different object graphs (production `AgentBootstrap` +
 `HostChildController` against a bare `AgentSpawner` + `spawn_fork`).

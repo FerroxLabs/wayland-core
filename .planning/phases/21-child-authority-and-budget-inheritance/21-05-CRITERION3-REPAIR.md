@@ -24,7 +24,7 @@ this repair's own first draft, and one that could only appear once a child actua
 
 | Finding | State | How it was proved |
 |---|---|---|
-| F-V2 — no live child on the standalone surface | **CLOSED** | 12 of 14 decisive live rows now carry 1–2 delegated child provider turns, on both surfaces. The root cause was a product fact, not a harness preference. |
+| F-V2 — no live child on the standalone surface | **CLOSED** | ALL 14 decisive live rows on Linux now carry 1–2 delegated child provider turns, on both surfaces. On Windows the 8 host-protocol-live decisive rows do; the standalone-live surface has no actor there and every row records NOT-EXPRESSIBLE rather than a refusal. The root cause was a product fact, not a harness preference. |
 | F-V3 — 7/11 pairings tautological | **CLOSED for 9, WITHHELD for 2** | The host-protocol driver is rebuilt on the production `AgentBootstrap` + `HostChildController` path. Where that surface genuinely cannot express a widening the verdict is withheld with the request type's field set as evidence. |
 | F-V4 — the approval canary cannot fail | **CLOSED** | Proved by injection against the real product: the suite goes red as `NO-CHANNEL CANARY TRIPPED`, and green again the moment the injected channel is removed. Four permanent tests pin the same behaviour as data. |
 
@@ -345,7 +345,7 @@ Every claim in this document that can be checked mechanically, checked:
 | `#[ignore]` not raised | `git grep -c '#\[ignore' 1058965e` vs `HEAD` under `crates/` | 128 → 128 |
 | `#[allow]` not raised | same | 176 → 176 |
 | No assertion, test, ignore, allow, panic or timeout deleted | `git diff 1058965e..HEAD -- crates/ \| grep '^-' \| grep -E 'assert\|#\[test\]\|#\[ignore\|#\[allow\|panic!\|timeout\|Duration::from'` | empty |
-| Every decisive live row has an actor (Linux) | `child provider turn(s) arrived` counts per row | 12 of 14 decisive rows at 1–2 turns; the 2 without are recorded NOT-EXPRESSIBLE |
+| Every decisive live row has an actor (Linux) | `child provider turn(s) arrived` counts per decisive row | **14 of 14** at 1–2 turns; every row with no actor is recorded NOT-EXPRESSIBLE, never REFUSED |
 | The canary can fail | injection run on `hetzner-dsm` | `NO-CHANNEL CANARY TRIPPED`, `1 failed`; green again on removal |
 | No canary is currently tripped | `CANARY ::` rows in both logs | 0 on both platforms |
 
