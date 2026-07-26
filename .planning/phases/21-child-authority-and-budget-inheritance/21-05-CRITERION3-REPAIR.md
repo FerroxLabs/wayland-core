@@ -78,6 +78,24 @@ call returned*; it never proved the *child acted*.
 | a | `Config::default()` carries an EMPTY model; `resolve_durable_launch` (`spawner.rs:1465`) fails closed on one | `child text: durable child execution evidence mismatch: resolved model` — `21-03-t3-linux.log:12154`, standalone in-process tool row, recorded **REFUSED** | every in-process child died before existing |
 | b | the isolated-mutation checkout root is derived under `<session.directory>`, and `WorktreeManager::new_with_workspace_root` refuses when its parent overlaps the repository; the fixture nested the session directory inside the workspace | `durable child workspace preparation failed: worktree io: orchestrator worktree root must not overlap repository` | every MUTATING child died before existing, on both the in-process and live paths |
 | c | `AgentEngine`'s drop is terminal for every clone of the session root token (`SessionRuntimeGuard::drop`) | `durable child cancelled before completion` | a host child spawned from a dropped bootstrap result is cancelled before its first provider turn |
+| d | an in-process delegated child's engine reaches the shipped tool confirmer, which prompts on the **harness's own stdin** | `[tool] Bash({...})` / `Allow? [y]es / [n]o / [a]lways / [q]uit >` then no further output — `p21-tool-only.log: TIMEOUT_300s` | on Windows under a scheduled task, `corpus_tool` never returns |
+
+**Defect (d) is NEW and was created by closing F-V2**, which is the honest way to
+describe it: it could not have appeared while no in-process child ever launched.
+Once the tool probe's child actually runs, the child engine inherits the test
+process's stdin. On a Linux non-interactive runner `io::stdin().is_terminal()` is
+false and `confirm.rs` fails closed — the documented behaviour. Under a Windows
+scheduled task (session 0) it reports **true**, the prompt is printed, and
+`read_line` waits for an approver who does not exist. Measured directly: a
+`corpus_tool`-only Windows run was killed at a hard 300 s bound with the prompt
+as its last output.
+
+The probe is now bounded on its own thread (45 s), and **expiry records
+NOT-EXPRESSIBLE, never REFUSED** — the same discipline the live runs' budget
+already had. Nothing about the confirmer was changed, no posture was bypassed,
+and the gate is still exercised. Whether `is_terminal()` reporting true for a
+session-0 process with no console is itself a product defect is left open here;
+it is outside this repair's scope and is recorded rather than fixed.
 
 (a) and (b) are both **visible verbatim in the shipped 21-02 and 21-03 ledgers on both platforms**,
 underneath a recorded `REFUSED`. (c) was introduced by this repair's own first draft and is
