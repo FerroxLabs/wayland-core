@@ -9,9 +9,10 @@ exact SHA: Linux `evidence/21-05-t1-linux.log`, Windows `evidence/21-05-t2-windo
 **Baseline compared against:** `a412aba7` — the post-21-03 SHA the verifier measured, captured in
 `evidence/21-03-t3-linux.log` and `evidence/21-03-t3-windows.log`.
 
-**Nothing was weakened.** No `#[ignore]`, no `#[allow]`, no deleted or re-gated test, no raised
-pre-existing timeout, no relaxed pre-existing assertion. Five NEW assertions were added and the
-corpus's verdict count went DOWN, not up. That is the intended direction.
+**Nothing was weakened, checked mechanically.** `#[ignore]` under `crates/` 128 → 128. `#[allow` 176 → 176. `git diff 1058965e..HEAD -- crates/` removes **zero** lines matching
+`assert`, `#[test]`, `#[ignore`, `#[allow`, `panic!`, `timeout` or `Duration::from`. Four new
+tests and seven new assertion sites were added, and the corpus's decisive-verdict count went
+DOWN, not up. That is the intended direction.
 
 ---
 
@@ -327,3 +328,29 @@ it:
 4. **fan-out live is undetermined**, on both platforms and both surfaces.
 5. **F-V1 (the stale D1 §3 digest pins), F-V5, F-V6 and F-V8 are untouched** — they are outside the
    scope of this repair and remain open exactly as `VERIFICATION.md` records them.
+
+---
+
+## 6. Self-check
+
+Every claim in this document that can be checked mechanically, checked:
+
+| Claim | Check | Result |
+|---|---|---|
+| Both platforms run at one pinned SHA | `head -1` of both evidence logs | `SHA=359ce2bf…` on both |
+| Linux suite green | `evidence/21-05-t1-linux.log` | `27 passed; 0 failed; 0 ignored` in 77.8 s, `EXIT=0` |
+| Windows suite green | `evidence/21-05-t2-windows.log` | `23 passed; 0 failed; 0 ignored` in 123.4 s, `EXIT=0` |
+| Format clean | `cargo fmt --all -- --check` (Mac and Hetzner) | rc 0, `FMT_CLEAN` recorded in the Linux log |
+| Lint clean | `cargo clippy -p wcore-cli --tests` on Hetzner | no warnings from this crate's test target |
+| `#[ignore]` not raised | `git grep -c '#\[ignore' 1058965e` vs `HEAD` under `crates/` | 128 → 128 |
+| `#[allow]` not raised | same | 176 → 176 |
+| No assertion, test, ignore, allow, panic or timeout deleted | `git diff 1058965e..HEAD -- crates/ \| grep '^-' \| grep -E 'assert\|#\[test\]\|#\[ignore\|#\[allow\|panic!\|timeout\|Duration::from'` | empty |
+| Every decisive live row has an actor (Linux) | `child provider turn(s) arrived` counts per row | 12 of 14 decisive rows at 1–2 turns; the 2 without are recorded NOT-EXPRESSIBLE |
+| The canary can fail | injection run on `hetzner-dsm` | `NO-CHANNEL CANARY TRIPPED`, `1 failed`; green again on removal |
+| No canary is currently tripped | `CANARY ::` rows in both logs | 0 on both platforms |
+
+**One process note against my own instructions.** `VERIFICATION.md` was untracked and marked
+*"Not committed — left to the orchestrator."* It was swept into commit `677a7660` by a directory-
+wide `git add` of the phase folder. The add is byte-identical to the file on disk — no content of
+mine, nothing of another agent's overwritten — but it was not mine to commit and is recorded here
+rather than quietly rewritten out of a shared branch's history.
