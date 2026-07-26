@@ -1,0 +1,28 @@
+F22-06-VERDICT: COMPATIBLE-AT-V5 platform=linux evidence=22-01-EVIDENCE/linux/reduction-postchange.summary.txt
+F22-06-LEG-LINUX: RAN evidence=22-01-EVIDENCE/linux/session-journal.bin
+F22-06-LEG-WINDOWS: NOT RUN - the product exercise RAN on Windows and produced a real 81093-byte WJ01 journal, but the reduce instrument needed for the M1/M3 cross-binary comparison was still compiling wcore-agent on a contended shared box when this session's budget ran out, so the Windows halves of M1 through M5 were never taken
+
+# Task 1 live exercise, Linux
+LINUX-JOURNAL: 22-01-EVIDENCE/linux/session-journal.bin 84327 bytes magic=WJ01 session=9aa64ad04744
+LINUX-JOURNAL-COMPANIONS: 22-01-EVIDENCE/linux/session-journal.snapshot 22-01-EVIDENCE/linux/session-journal.authority
+LINUX-PRODUCT-STDOUT: 22-01-EVIDENCE/linux/product-stdout.txt 0 bytes - RED, the run ended at an HTTP 401 from the provisioned key and its output went to stderr
+LINUX-PRODUCT-STDERR: 22-01-EVIDENCE/linux/product-stderr.txt
+LINUX-EVENT-TYPES: 9 distinct real durable types, tool_execution_* NOT among them - RED, no tool frame was reachable without a working credential
+
+# Task 1 single-variable measurements, Linux
+M0-EXHAUSTIVE-REDUCER: a new SessionEvent variant does not compile until an explicit apply_event arm exists (reducer.rs:1656, no wildcard)
+M1-ENUM-GREW-NOTHING-WRITTEN: IDENTICAL sha256=ff13b6eca8314114b5d96ced5c5142c512a0295113499f5824a25a34002faf56 evidence=22-01-EVIDENCE/linux/reduction-postchange.txt
+M2-WROTE-ONE-PROBE-FRAME: prefix IDENTICAL, only last_seq 12->13 and last_checksum moved evidence=22-01-EVIDENCE/linux/reduction-postchange-with-probe.txt
+M3-OLD-BINARY-ON-NEW-JOURNAL: FAILS CLOSED exit=3 stdout_lines=0 evidence=22-01-EVIDENCE/linux/reduction-prechange-on-probe.err
+M4-SNAPSHOT-AUTHORITY-BINDING: pre-change snapshot accepted by post-change binary, reduction identical evidence=22-01-EVIDENCE/linux/reduction-postchange-pristine.txt
+M5-WRITER-LEASE-ACROSS-RESTART-LINUX: released on drop, two sequential opens succeeded evidence=22-01-EVIDENCE/linux/lease-restart-2.txt
+
+# Task 1 live exercise, Windows
+WINDOWS-JOURNAL: 22-01-EVIDENCE/windows/session-journal.bin 81093 bytes magic=WJ01 session=ee110c384533
+WINDOWS-BINARY: C:\p22-target\release\wayland-core.exe 87730176 bytes, built from detached worktree C:\p22 at 2ecdfdf54ff7fda920eec7d068337006e5da4ee4
+WINDOWS-PRODUCT-STDOUT: 22-01-EVIDENCE/windows/product-stdout.txt 0 bytes - RED, same 401 class as Linux
+WINDOWS-WRITER-LOCK: ee110c384533.journal.writer.lock present, 0 bytes, taken and left behind by the run
+WINDOWS-SECOND-RUN: a second product invocation against the same session directory succeeded in opening a NEW durable session (3bfbd515ba33.journal, 80778 bytes), which shows the process did not wedge the directory but does NOT prove the lease on the FIRST journal was released - that is the observation still owed
+
+# Task 2 decision
+F22-06-PANEL-UNANIMOUS: 4 of 4 additive-at-current-version, 0 unsound verdict votes evidence=22-01-EVIDENCE/decision/decision-ledger.txt

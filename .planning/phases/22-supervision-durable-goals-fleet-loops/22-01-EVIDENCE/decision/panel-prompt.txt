@@ -1,0 +1,200 @@
+You are one of four independent auditors on a durable-storage migration decision
+for a Rust CLI agent (wayland-core). Answer from the evidence below only.
+
+=====================================================================
+THE QUESTION
+=====================================================================
+How do Goal, Task and Wait durable records enter the accepted F12 session journal?
+
+=====================================================================
+THE THREE OPTIONS (presented in rotated order; the order carries no prior)
+=====================================================================
+
+OPTION id: explicit-versioned-migration
+NAME: Bump the journal schema version and ship an explicit migration with a
+proven read path for both the old and the new version
+PROS: Makes the change visible in the wire format, which is honest when the
+change is not actually transparent; the crate already has the machinery — a
+legacy constant, a reader that admits exactly two versions, a regression guard
+and a frozen legacy event list — so this is an established pattern rather than a
+new one
+CONS: Every existing journal becomes a migration subject and the migration must
+be proven on both platforms, not just written; the legacy event list must be
+frozen again at the new boundary and getting that wrong silently admits a new
+event into an old frame; this is the expensive option and it is only correct if
+Task 1 showed the additive path is not transparent
+
+OPTION id: escalate
+NAME: Escalate — the records cannot be carried without invalidating accepted F12
+behavior and neither option above preserves it
+PROS: Refuses to ship a silent rewrite of accepted durable-state behavior, which
+is precisely what the phase requirement forbids; leaves the decision visible
+instead of buried in a reducer
+CONS: Phase 22 stops here: the kernel is the foundation of the other three plans
+and none of them can proceed without it
+
+OPTION id: additive-at-current-version
+NAME: Add Goal, Task and Wait variants at the current schema version, with no
+version bump — available only if Task 1 returned COMPATIBLE-AT-V5
+PROS: No migration for any existing user; existing journals keep replaying to
+exactly the state they replay to today, proven cross-binary rather than argued;
+matches the in-source note that reserves new variants for this version; the
+smallest possible change to an accepted, security-bearing subsystem
+CONS: An older binary reading a newer journal fails closed rather than degrading,
+so a user who downgrades gets a hard refusal — acceptable, but it must be
+documented rather than discovered; the version number stops distinguishing "has
+Goal records" from "does not", so anything that needs to know must ask the content
+
+=====================================================================
+TASK 1's RECORDED VERDICT AND THE EVIDENCE BEHIND IT
+=====================================================================
+
+RECORDED VERDICT: COMPATIBLE-AT-V5
+
+How it was measured. A REAL session journal was produced by the shipped release
+binary built at commit 2ecdfdf54ff7fda920eec7d068337006e5da4ee4 on Linux
+(hetzner-dsm), from a real product invocation against a throwaway profile — not
+synthesized by a test helper. The file is 84,327 bytes, begins with the WJ01
+frame magic, and carries 9 distinct real durable event types: session_imported,
+turn_started, turn_failed, conversation_message_committed,
+provider_attempt_prepared_v2, provider_attempt_started,
+provider_attempt_finished_v2, budget_authority_committed (5 frames), and
+checkpoint_committed. A companion .snapshot and .journal.authority were written
+by that same pre-change binary.
+
+Then ONE variable moved at a time, each observation recorded with its command:
+
+M0 (compile-time observation). Adding a variant to `SessionEvent` does not
+compile until an explicit arm is added to the reducer's `apply_event` match at
+crates/wcore-agent/src/session_journal/reducer.rs:1656. The match is exhaustive;
+there is no wildcard. A new durable record therefore cannot enter the enum
+without a deliberate reduction decision.
+
+M1 (the enum grew; nothing was written with it). The SAME journal file was
+reduced by the pre-change binary and by a binary whose SessionEvent had one extra
+inert probe variant. Both reductions were serialized to canonical JSON:
+  pre-change  SHA256 ff13b6eca8314114b5d96ced5c5142c512a0295113499f5824a25a34002faf56
+  post-change SHA256 ff13b6eca8314114b5d96ced5c5142c512a0295113499f5824a25a34002faf56
+Byte-identical. Growing the enum does not perturb decoding or reduction of frames
+that already exist.
+
+M2 (the post-change binary WRITES one probe frame, then re-reads the whole file).
+The append succeeded at seq=13 with a fresh chain checksum. Re-reducing the whole
+file with the post-change binary succeeded. Diffing that reduction against the
+pre-probe reduction by the same binary, the ONLY differences are `last_seq`
+(12 -> 13) and `last_checksum` — i.e. the chain head. With those two fields
+removed, the reductions are byte-identical. The pre-existing prefix is untouched,
+the chain still validates, and the version boundary admits the new frame at v5.
+
+M3 (the probe-bearing journal taken BACK to the pre-change binary). The
+pre-change binary FAILS CLOSED: exit code 3, ZERO bytes of reduced state on
+stdout, and an explicit error naming the cause —
+  "session journal ... has a corrupt complete frame 15: unknown variant
+   `p22_probe`, expected one of `session_imported`, ... `delivery_finished`"
+This is the outcome the determination wanted to distinguish. A forward-
+incompatible read that fails closed is correct. A forward-incompatible read that
+succeeded with a silently truncated reduction would have been a CRITICAL finding;
+it was measured NOT to occur.
+
+M4 (snapshot authority binding across the change). The reduce path loads the
+companion snapshot and verifies its authority head. A snapshot + authority file
+written by the PRE-change binary was read by the POST-change binary: exit 0,
+empty stderr, and the resulting reduction is the byte-identical one from M1. The
+snapshot version pairing admits the change.
+
+M5 (writer authority lease across a restart, Linux). Two sequential opens of the
+same journal by two separate processes both succeeded (seq=2 then seq=3),
+i.e. the writer lease is released on drop rather than leaked.
+
+WHAT WOULD HAVE REFUTED THE VERDICT, and did not happen:
+ - M1 producing two different SHA256s (the enum alone perturbing existing frames).
+ - M2 changing anything in the reduction other than the chain head.
+ - M3 exiting 0 with a partial reduction (silent truncation on version skew).
+ - M4 rejecting a pre-change snapshot.
+
+MEASURED LIMITATIONS OF THE EVIDENCE — state these plainly in your answer if you
+think they matter:
+ (a) The live product run did NOT reach a tool call. The provisioned Anthropic
+     API key on the Linux host returns HTTP 401 ("API key is invalid"), so the
+     run terminated at the provider attempt. The journal therefore contains no
+     `tool_execution_*` frames. Supplying a working credential is reserved to the
+     repository owner and was not done. The corpus does contain the full turn,
+     provider-attempt, budget-authority, checkpoint and conversation lifecycle.
+ (b) At the time this bundle was assembled the WINDOWS leg was still building
+     (a cold release build of wcore-agent on a contended box). The Windows
+     observation — where the writer lease implementation is platform-gated and
+     byte-range lock semantics are mandatory rather than advisory, a recorded
+     prior defect class — is therefore NOT yet in this bundle. Judge whether the
+     Linux-only evidence is sufficient to support COMPATIBLE-AT-V5, and say so
+     explicitly.
+
+=====================================================================
+THE SOURCE BOUNDARY, READ FROM THE FILE AT EXECUTION TIME
+=====================================================================
+SOURCE-CITE: crates/wcore-agent/src/session_journal.rs:48 [journal schema constant] pub const SESSION_JOURNAL_SCHEMA_VERSION: u32 = 5;
+SOURCE-CITE: crates/wcore-agent/src/session_journal.rs:49 [journal legacy companion] pub const LEGACY_SESSION_JOURNAL_SCHEMA_VERSION: u32 = 4;
+SOURCE-CITE: crates/wcore-agent/src/session_journal.rs:62 [envelope unknown-field posture] #[serde(deny_unknown_fields)]
+SOURCE-CITE: crates/wcore-agent/src/session_journal.rs:2129 [reader admitting exactly two versions] fn validate_journal_schema_for_reader(found: u32) -> Result<(), JournalError> {
+SOURCE-CITE: crates/wcore-agent/src/session_journal.rs:2140 [schema-regression guard] fn reject_schema_regression(previous: Option<u32>, found: u32) -> Result<(), JournalError> {
+SOURCE-CITE: crates/wcore-agent/src/session_journal.rs:2150 [event-schema boundary enforcer] fn enforce_event_schema_boundary(body: &[u8], schema_version: u32) -> Result<(), JournalError> {
+SOURCE-CITE: crates/wcore-agent/src/session_journal.rs:2179 [typed sibling of the boundary enforcer] fn enforce_typed_event_schema_boundary(envelope: &JournalEnvelope) -> Result<(), JournalError> {
+SOURCE-CITE: crates/wcore-agent/src/session_journal.rs:2190 [in-source note above the frozen list] // Frozen at the v4 boundary. New event variants belong to v5+ and must never
+SOURCE-CITE: crates/wcore-agent/src/session_journal.rs:2192 [frozen legacy event-type list] const LEGACY_EVENT_TYPES: &[&str] = &[
+SOURCE-CITE: crates/wcore-agent/src/session_journal.rs:2279 [re-encode-and-compare guard] pub(super) fn reject_dropped_typed_fields(
+SOURCE-CITE: crates/wcore-agent/src/session_journal/snapshot.rs:9 [snapshot schema constant] pub const SESSION_SNAPSHOT_SCHEMA_VERSION: u32 = 5;
+SOURCE-CITE: crates/wcore-agent/src/session_journal/snapshot.rs:10 [snapshot legacy companion] pub const LEGACY_SESSION_SNAPSHOT_SCHEMA_VERSION: u32 = 4;
+SOURCE-CITE: crates/wcore-agent/src/session_journal/model.rs:488 [the durable event enum the records would join] pub enum SessionEvent {
+SOURCE-CITE: crates/wcore-agent/src/session_journal/model.rs:1166 [the reduced state whose equality IS the compatibility claim] pub struct ReducedSessionState {
+LEGACY-EVENT-TYPES-COUNT: 49
+
+Note: SessionEvent is an internally-tagged serde enum (`#[serde(tag = "type",
+rename_all = "snake_case")]`) and is `#[non_exhaustive]`. JournalEnvelope carries
+`#[serde(deny_unknown_fields)]`. Every frame is SHA-256 chained.
+`enforce_event_schema_boundary` applies its frozen 49-name allow-list ONLY when
+the frame declares schema_version == 4; v5 frames are not checked against it.
+
+=====================================================================
+THE MIGRATION SURFACE, MEASURED (the expensive option's price)
+=====================================================================
+MACHINERY: legacy journal schema constant PRESENT: yes session_journal.rs:49
+MACHINERY: reader admitting exactly two versions PRESENT: yes session_journal.rs:2129
+MACHINERY: schema-regression guard PRESENT: yes session_journal.rs:2140
+MACHINERY: frozen legacy event-type list PRESENT: yes session_journal.rs:2192 (49 entries)
+All four claimed pieces are present; the "established pattern" pro survives.
+
+MIGRATION-SUBJECT-FILES: 4
+MIGRATION-SUBJECT-OCCURRENCES: 32
+(files declaring the LEGACY journal or snapshot version)
+
+LIVE PROBE, run on hetzner-dsm in a scratch checkout and reverted. Exactly one
+thing changed: SESSION_JOURNAL_SCHEMA_VERSION 5 -> 6. No new variant, no other
+edit. Then `cargo nextest run -p wcore-agent --test session_journal_test --test
+session_journal_crash_matrix_test --test session_journal_compaction_test
+--no-fail-fast`. The tool's own summary line:
+  Summary [3.373s] 76 tests run: 73 passed, 3 failed, 0 skipped
+The three reds are all version-boundary assertions:
+  checksum_sequence_previous_and_schema_tampering_fail_closed
+  public_replay_boundary_enforces_forward_only_schema_history
+  unreleased_v3_journal_schema_is_explicitly_rejected_before_event_decode
+MIGRATION-COST-PROBE: failing_tests=3 total_tests=76 commit=2ecdfdf54ff7fda920eec7d068337006e5da4ee4
+
+So the expensive option is cheaper than its cons paragraph implies: a bounded,
+well-understood 3-test repair set. Cost does not disqualify it. The decision
+turns on whether a migration is NEEDED.
+
+=====================================================================
+WHAT YOU MUST ANSWER
+=====================================================================
+Answer BOTH questions, each with at least a substantial paragraph of reasoning:
+
+1. WHICH OPTION should be authorized? Consider that a wrong "additive" choice is
+   not revertible — the artifact that would be wrong is a user's on-disk journal,
+   and undoing it is itself a migration.
+
+2. IS TASK 1's VERDICT SOUND — does the evidence above actually support
+   COMPATIBLE-AT-V5, or does it overreach? Engage specifically with limitations
+   (a) and (b).
+
+End your reply with exactly these two lines and nothing after them:
+PANEL_POSITION=<one of: additive-at-current-version, explicit-versioned-migration, escalate>
+VERDICT_SOUND=<yes or no>

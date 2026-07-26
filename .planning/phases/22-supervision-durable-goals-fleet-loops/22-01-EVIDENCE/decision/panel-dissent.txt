@@ -1,0 +1,78 @@
+# Dissent record — 22-01 Task 2
+# Preserved because deletion is the easy failure here, and a decision with the
+# losing arguments removed is not auditable.
+
+## The losing option: explicit-versioned-migration
+
+STRONGEST ARGUMENT ANY MEMBER MADE FOR IT (internal adversarial pass, and echoed
+in weaker form by codex): the version number is what tells a reader what content
+model to expect. Under `additive-at-current-version` two journals both stamped
+v5 can differ materially — one written before Goal records existed, one after —
+and anything that needs to distinguish them must scan the content of an
+append-only chain rather than read a header. Secondarily: M3 showed the
+pre-change binary reporting a version-skewed journal as `corrupt complete frame
+15`. Under `explicit-versioned-migration` the same user would get
+`UnsupportedSchema { found: 6, supported: 5 }` — a diagnosis instead of an
+accusation. And the migration probe measured the option's price at only 3 of 76
+tests, so the cheap option's main advantage over it had just evaporated.
+
+WHY THAT ARGUMENT DID NOT CARRY. The option's own `cons` paragraph states the
+condition: "this is the expensive option and it is only correct if Task 1 showed
+the additive path is not transparent". Task 1 measured the opposite with a
+byte-identical SHA-256 over the reduced state (M1) and a prefix-identical
+reduction after an append (M2). The header-cannot-distinguish argument is real
+but argues for a content-level capability marker, not for burning a version
+number and turning 32 occurrences across 4 files plus every existing user's
+journal into migration subjects. The corrupt-versus-unsupported argument is a
+DIAGNOSTICS defect, and the proportionate response is to improve the error
+message, not to bump the schema — it is filed to BACKLOG as a MEDIUM below. And
+a bump introduces a new risk the option's own cons names: the 49-entry
+`LEGACY_EVENT_TYPES` list would have to be re-frozen at a new boundary, and
+getting that wrong "silently admits a new event into an old frame".
+
+## The losing option: escalate
+
+STRONGEST ARGUMENT ANY MEMBER MADE FOR IT (internal adversarial pass): the live
+corpus contains no `tool_execution_*` frame because the provisioned key returns
+401, and the tool region is the densest, most deeply nested part of the reduced
+state; and the Windows leg was not in the bundle at panel time while the writer
+lease is `#[cfg(unix)]`-gated with a recorded prior defect class about mandatory
+byte-range locks. A determination that names two platforms and measures one is
+strictly a one-platform determination.
+
+WHY THAT ARGUMENT DID NOT CARRY. The `escalate` option is defined as "the records
+cannot be carried without invalidating accepted F12 behavior". M1 and M2 falsified
+"cannot be carried" directly. Voting escalate on a measured negative is not
+caution, it is refusing to read the instrument. Kimi added the sharpest form of
+the counter: the COMPATIBLE-AT-V5 question is a SCHEMA question about serde
+decode, exhaustive reduction and the version-gated boundary check, all of which
+are platform-independent Rust compiled from one source; the Windows gap belongs
+to a different claim (writer-lease correctness across restart) whose outcome
+cannot logically flip the version decision.
+
+## Arguments made AGAINST the option that was committed to
+
+- (adversarial, codex) An older binary reading a newer journal fails closed with
+  a message that says "corrupt". Accepted as a real user-facing defect and filed
+  to BACKLOG rather than dismissed.
+- (adversarial) `SESSION_JOURNAL_SCHEMA_VERSION` stops implying a content model.
+  Accepted; the mitigation is an explicit content-level marker, recorded as a
+  constraint on Task 3 rather than as a reason to choose differently.
+- (adversarial, kimi) The corpus has no tool frames. Accepted as a named
+  limitation of the determination. Task 3's Test 6 stores this exact corpus as a
+  permanent regression fixture, and the limitation is carried into the SUMMARY
+  rather than being closed silently.
+
+## VERDICT_SOUND=no objections
+
+There were none: all four members answered `VERDICT_SOUND=yes`. Two of the four
+(the internal adversarial pass and kimi) qualified their yes, and those
+qualifications are preserved here because a qualified yes that gets recorded as a
+bare yes is how a limitation disappears:
+
+- The evidence supports the verdict as a SCHEMA verdict. It does not by itself
+  support the full two-platform durability story the plan's verdict language
+  implies.
+- M5 (writer lease across restart) was measured on Linux only. Windows is a
+  separate, still-open observation.
+- Task 3 must not close F22-06 on Linux-only evidence.

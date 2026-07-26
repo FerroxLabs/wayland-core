@@ -1,0 +1,6 @@
+REDUCTION-SUMMARY for reduction-postchange-pristine.txt
+sha256=89cd958a9d09848178665c2edfa7980aaa061783a71b521e6b54b0cda063d5f3
+non_empty_lines=107
+bytes=    2880
+verbatim_bytes_retained_at=reduction-postchange-pristine.txt.gz
+not_committed_plaintext_because=the dump contains SHA-256 field digests that the repository gitleaks ratchet matches as generic-api-key; the guard was not weakened

@@ -1,0 +1,13 @@
+• This is an audit question. I should answer from the evidence. There are also evidence files in the working directory (panel-codex.txt, source-boundary.txt, migration-surface.txt) but the prompt says answer from evidence below only. I could quickly check the files to verify consistency — but the instruction says "Answer from the evidence below only." I'll answer directly.
+
+  My analysis: COMPATIBLE-AT-V5 is well-supported. M1-M5 demonstrate the key properties. Additive option is appropriate since the in-source note explicitly reserves new variants for v5. The frozen list only applies to v4 frames, so no refreeze needed. Version bump not needed; the migration probe shows it's bounded cost but unnecessary.
+
+  Limitations: (a) no tool_execution frames — does that matter? The compatibility claim is about enum growth and frame decode/reduction, not about specific event content. The reducer exhaustiveness (M0) is the guarantee that applies to all variants; tool frames behave the same as other frames. So (a) doesn't materially weaken. (b) Windows leg missing — writer lease is platform-gated, byte-range locks mandatory on Windows. But the compatibility question (does adding variants at v5 preserve replay of existing journals) is platform-independent — it's serde/decoder logic, cross-compiled. The Windows risk is about the writer lease, which is orthogonal to schema versioning; M5 measured lease release on Linux. However, AGENTS.md learning says live testing on Windows matters and the lease semantics differ. But does it affect the verdict COMPATIBLE-AT-V5? The verdict is about schema compatibility, not lease behavior. Still, honest answer: verdict sound for the compatibility question, with the caveat that the Windows lease observation is a separate durability concern that should be completed before ship but does not change the version decision. I'd say VERDICT_SOUND=yes.
+
+  Also address Q1's non-revertibility: wrong additive choice would be bad, but the evidence directly measures the failure modes (M3 fails closed, M1 byte-identical). The in-source note at line 2190 explicitly says new variants belong to v5+ — so the design intent supports additive. The documented downgrade hard-refusal is acceptable.
+
+  Position: additive-at-current-version. Verdict sound: yes.
+
+  Write two substantial paragraphs.
+
+To resume this session: kimi -r session_6cd9930b-999b-45a5-a6d8-854e99b47c2d
