@@ -284,8 +284,14 @@ pub fn run(args: SessionArgs) -> anyhow::Result<ExitCode> {
                 );
                 for item in &report_.outstanding_reconcile {
                     println!(
-                        "F23_SESSION=show_reconcile_item id={} tool_execution={} tool={} turn={} reason={}",
-                        report_.id, item.tool_execution_id, item.tool, item.turn_id, item.reason
+                        "F23_SESSION=show_reconcile_item id={} kind={} ref={} tool={} turn={} reason={} resolvable={}",
+                        report_.id,
+                        item.kind.as_str(),
+                        item.tool_execution_id,
+                        item.tool,
+                        item.turn_id,
+                        item.reason,
+                        item.operator_resolvable
                     );
                 }
                 ExitCode::SUCCESS
@@ -448,8 +454,13 @@ pub fn run(args: SessionArgs) -> anyhow::Result<ExitCode> {
                 Ok(items) => {
                     for item in &items {
                         println!(
-                            "F23_SESSION=reconcile_item id={id} tool_execution={} tool={} turn={} reason={}",
-                            item.tool_execution_id, item.tool, item.turn_id, item.reason
+                            "F23_SESSION=reconcile_item id={id} kind={} ref={} tool={} turn={} reason={} resolvable={}",
+                            item.kind.as_str(),
+                            item.tool_execution_id,
+                            item.tool,
+                            item.turn_id,
+                            item.reason,
+                            item.operator_resolvable
                         );
                     }
                     println!("F23_SESSION=reconcile id={id} outstanding={}", items.len());

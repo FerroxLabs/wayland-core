@@ -1,0 +1,60 @@
+F23_01_PROVENANCE=ok platform=linux sha=15971d1b9f2fad79a87f89939e3c2d7e60558f9a
+F23_01_SEED=ok id=aaaaf12f77104c3ca039 nonce=f12f77104c3ca039
+F23_01_VERB=list platform=linux status=PASS exit=0 nonce=f12f77104c3ca039
+F23_01_VERB=search platform=linux status=PASS exit=0 nonce=f12f77104c3ca039
+F23_01_VERB=search-miss platform=linux status=PASS exit=0 nonce=f12f77104c3ca039
+  expected exit 0, observed 1  (show)
+  expected token 'F23_SESSION=show id=aaaaf12f77104c3ca039' absent from stdout (show)
+
+  --- transcript tail (show) ---
+# invocation: /root/wayland-p23b/target/release/wayland-core session --dir /tmp/tmp.zZIvgiB0c7/home/sessions --workspace /tmp/tmp.zZIvgiB0c7/ws show aaaaf12f77104c3ca039
+wayland-core session: journal '/tmp/tmp.zZIvgiB0c7/home/sessions/aaaaf12f77104c3ca039.journal' could not be read: journal checksum mismatch at sequence 16
+
+# exit: 1
+F23_01_VERB=show platform=linux status=FAIL exit=1 nonce=f12f77104c3ca039
+F23_01_VERB=checkpoint platform=linux status=PASS exit=0 nonce=f12f77104c3ca039
+F23_01_VERB=rewind platform=linux status=PASS exit=0 nonce=f12f77104c3ca039
+F23_01_REWIND_BYTES_EQUAL=true
+F23_01_REWIND_LATER_FILE_REMOVED=true
+F23_01_VERB=fork platform=linux status=PASS exit=0 nonce=f12f77104c3ca039
+F23_01_FORK_PARENT_BYTES_EQUAL=true
+F23_01_VERB=show-fork platform=linux status=PASS exit=0 nonce=f12f77104c3ca039
+  expected exit 3, observed 1  (retry)
+  --- transcript tail (retry) ---
+F23_01_VERB=retry platform=linux status=FAIL exit=1 nonce=f12f77104c3ca039
+# invocation: /root/wayland-p23b/target/release/wayland-core session --dir /tmp/tmp.zZIvgiB0c7/home/sessions --workspace /tmp/tmp.zZIvgiB0c7/ws retry aaaaf12f77104c3ca039 turn-absent-f12f77104c3ca039
+wayland-core session: journal '/tmp/tmp.zZIvgiB0c7/home/sessions/aaaaf12f77104c3ca039.journal' could not be read: journal checksum mismatch at sequence 16
+
+# exit: 1
+  expected exit 0, observed 1  (export)
+  expected token 'F23_SESSION=export' absent from stdout (export)
+
+  --- transcript tail (export) ---
+F23_01_VERB=export platform=linux status=FAIL exit=1 nonce=f12f77104c3ca039
+F23_01_EXPORT_NONCE_OCCURRENCES=0
+# invocation: /root/wayland-p23b/target/release/wayland-core session --dir /tmp/tmp.zZIvgiB0c7/home/sessions --workspace /tmp/tmp.zZIvgiB0c7/ws export aaaaf12f77104c3ca039 --out /tmp/tmp.zZIvgiB0c7/export.json
+wayland-core session: journal '/tmp/tmp.zZIvgiB0c7/home/sessions/aaaaf12f77104c3ca039.journal' could not be read: journal checksum mismatch at sequence 16
+
+# exit: 1
+F23_01_VERB=retain platform=linux status=PASS exit=0 nonce=f12f77104c3ca039
+F23_01_VERB=retain-expired platform=linux status=PASS exit=0 nonce=f12f77104c3ca039
+  expected exit 0, observed 1  (reconcile)
+  expected token 'F23_SESSION=reconcile' absent from stdout (reconcile)
+
+  --- transcript tail (reconcile) ---
+F23_01_VERB=reconcile platform=linux status=FAIL exit=1 nonce=f12f77104c3ca039
+# invocation: /root/wayland-p23b/target/release/wayland-core session --dir /tmp/tmp.zZIvgiB0c7/home/sessions --workspace /tmp/tmp.zZIvgiB0c7/ws reconcile aaaaf12f77104c3ca039
+wayland-core session: journal '/tmp/tmp.zZIvgiB0c7/home/sessions/aaaaf12f77104c3ca039.journal' could not be read: journal checksum mismatch at sequence 16
+
+# exit: 1
+scripts/f23-session-operator-drive.sh: line 268: 3014862 Killed                  ( while true; do
+    nc -l -p "$HANG_PORT" > /dev/null 2>&1 || sleep 1;
+done )
+F23_01_D2_FIXTURE_INTERRUPTED=true
+F23_01_D2_REFUSAL_OBSERVED=true
+F23_01_D2_RECONCILE_ITEMS_REPORTED=1
+F23_01_D2_RECONCILE_RESOLVED=1
+F23_01_VERB=cancel platform=linux status=PASS exit=0 nonce=f12f77104c3ca039
+F23_01_D2_RESOLVED_PERSISTS_ACROSS_RESTART=true
+F23_01_D2_CONTINUE_UNBLOCKED=true
+F23_01_DRIVE=FAIL platform=linux nonce=f12f77104c3ca039 failures=4

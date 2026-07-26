@@ -35,8 +35,8 @@ use sha2::{Digest, Sha256};
 
 use crate::session::{Session, SessionManager, SessionMeta};
 use crate::session_journal::{
-    JournalError, ReducedSessionState, SessionEvent, SessionJournal, ToolEffectState,
-    ToolResolution, ToolResolutionSource, TurnCompletion,
+    ExternalEffectState, HookPhaseState, JournalError, ReducedSessionState, SessionEvent,
+    SessionJournal, ToolEffectState, ToolResolution, ToolResolutionSource, TurnCompletion,
 };
 
 /// Key under which a fork records its parent in [`Session::extra`].
@@ -109,15 +109,56 @@ pub enum RetentionState {
     Expired { until: DateTime<Utc> },
 }
 
-/// One outstanding unknown-effect item an operator can resolve.
+/// Which class of turn descendant an outstanding item belongs to.
+///
+/// The reducer refuses `TurnCancelled` while ANY descendant of the turn is
+/// nonterminal, and it checks five classes, not one
+/// (`require_turn_descendants_terminal`). Projecting only tool executions —
+/// as the first cut of this module did — made `reconcile` report
+/// `outstanding=0` on a session `cancel` then refused, which reproduces the
+/// exact dead end defect D2 describes. The projection therefore covers every
+/// class the reducer gates on, even where the CLI cannot yet resolve one.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconcileKind {
+    ToolExecution,
+    ProviderAttempt,
+    Approval,
+    HookPhase,
+    Child,
+}
+
+impl ReconcileKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ToolExecution => "tool_execution",
+            Self::ProviderAttempt => "provider_attempt",
+            Self::Approval => "approval",
+            Self::HookPhase => "hook_phase",
+            Self::Child => "child",
+        }
+    }
+}
+
+/// One outstanding nonterminal item blocking a turn from reaching a terminal
+/// state, and therefore blocking `cancel` and `--continue`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReconcileItem {
+    pub kind: ReconcileKind,
+    /// Journal id of the descendant: a tool execution id, provider attempt id,
+    /// approval id, hook phase id or child id.
     pub tool_execution_id: String,
     pub turn_id: String,
+    /// Tool name for a tool execution; the descendant class otherwise. Never
+    /// tool arguments or output.
     pub tool: String,
-    /// The reducer's own reason string for the unknown state. Typed state,
-    /// not tool arguments or output.
+    /// The reducer's own typed reason for the nonterminal state.
     pub reason: String,
+    /// Whether `reconcile --resolve` can dispose of this item today. An item
+    /// this surface cannot resolve is still REPORTED, because a silent
+    /// omission is what made the original defect undiagnosable.
+    pub operator_resolvable: bool,
 }
 
 /// What [`inspect`] reports for one session.
@@ -235,22 +276,126 @@ fn read_journal_state(manager: &SessionManager, id: &str) -> Result<Option<Reduc
         .map_err(|source| SessionLifecycleError::Journal { path, source })
 }
 
-fn outstanding_items(state: &ReducedSessionState) -> Vec<ReconcileItem> {
+/// Did this provider attempt durably record any streamed provider bytes?
+///
+/// If it did, a terminal receipt must carry a response digest recomputed from
+/// those exact bytes, which is engine-only knowledge. If it did not, the
+/// reducer accepts a `Cancelled` terminal with no digest.
+fn attempt_has_stream_events(state: &ReducedSessionState, attempt_id: &str) -> bool {
     state
-        .tools
-        .iter()
-        .filter(|(_, tool)| tool.effect.requires_reconciliation())
-        .map(|(id, tool)| ReconcileItem {
+        .streams
+        .values()
+        .filter(|stream| stream.attempt_id == attempt_id)
+        .any(|stream| stream.batches.iter().any(|batch| !batch.is_empty()))
+}
+
+/// Project every nonterminal turn descendant the reducer gates `TurnCancelled`
+/// on, across all five classes it checks. Anything reported here blocks
+/// `cancel` and therefore blocks `--continue`.
+fn outstanding_items(state: &ReducedSessionState) -> Vec<ReconcileItem> {
+    let mut items = Vec::new();
+
+    for (id, tool) in &state.tools {
+        let nonterminal = matches!(
+            tool.effect,
+            ToolEffectState::Prepared | ToolEffectState::Running | ToolEffectState::Unknown { .. }
+        );
+        if !nonterminal {
+            continue;
+        }
+        items.push(ReconcileItem {
+            kind: ReconcileKind::ToolExecution,
             tool_execution_id: id.clone(),
             turn_id: tool.turn_id.clone(),
             tool: tool.tool.clone(),
             reason: match &tool.effect {
                 ToolEffectState::Unknown { reason, .. } => format!("{reason:?}"),
-                ToolEffectState::Running => "Running".to_owned(),
                 other => format!("{other:?}"),
             },
-        })
-        .collect()
+            // Only an Unknown tool takes `ToolExecutionResolved`; the reducer's
+            // `require_tool_unknown` refuses it from Prepared or Running.
+            operator_resolvable: matches!(tool.effect, ToolEffectState::Unknown { .. }),
+        });
+    }
+
+    for (id, attempt) in &state.provider_attempts {
+        if !matches!(
+            attempt.effect,
+            ExternalEffectState::Prepared | ExternalEffectState::Unknown
+        ) {
+            continue;
+        }
+        items.push(ReconcileItem {
+            kind: ReconcileKind::ProviderAttempt,
+            tool_execution_id: id.clone(),
+            turn_id: attempt.turn_id.clone(),
+            tool: "provider_attempt".to_owned(),
+            reason: format!("{:?}", attempt.effect),
+            // An attempt is operator-resolvable when a terminal receipt can be
+            // written WITHOUT knowledge only the engine holds. The reducer
+            // accepts a `Cancelled` terminal — V1 or dispatch-correlated V2 —
+            // as long as the attempt has no durable stream events, because
+            // then no response digest has to be reproduced. An attempt that
+            // DID stream bytes needs a digest recomputed from those bytes, so
+            // it stays engine-only and is reported as such rather than hidden.
+            operator_resolvable: !attempt_has_stream_events(state, id),
+        });
+    }
+
+    for (id, approval) in &state.approvals {
+        if approval.resolution.is_some() {
+            continue;
+        }
+        items.push(ReconcileItem {
+            kind: ReconcileKind::Approval,
+            tool_execution_id: id.clone(),
+            turn_id: String::new(),
+            tool: "approval".to_owned(),
+            reason: "PendingApproval".to_owned(),
+            operator_resolvable: false,
+        });
+    }
+
+    for (id, phase) in &state.hook_phases {
+        if matches!(
+            phase.state,
+            HookPhaseState::Consumed { .. }
+                | HookPhaseState::NotStarted { .. }
+                | HookPhaseState::NotApplicable
+                | HookPhaseState::AbandonedUnknown
+        ) {
+            continue;
+        }
+        items.push(ReconcileItem {
+            kind: ReconcileKind::HookPhase,
+            tool_execution_id: id.clone(),
+            turn_id: phase.turn_id.clone(),
+            tool: "hook_phase".to_owned(),
+            reason: format!("{:?}", phase.state),
+            operator_resolvable: false,
+        });
+    }
+
+    for (id, child) in &state.children {
+        if child.durable.is_some()
+            || !matches!(
+                child.effect,
+                ExternalEffectState::Prepared | ExternalEffectState::Unknown
+            )
+        {
+            continue;
+        }
+        items.push(ReconcileItem {
+            kind: ReconcileKind::Child,
+            tool_execution_id: id.clone(),
+            turn_id: child.turn_id.clone(),
+            tool: "child".to_owned(),
+            reason: format!("{:?}", child.effect),
+            operator_resolvable: false,
+        });
+    }
+
+    items
 }
 
 fn interrupted_turns(state: &ReducedSessionState) -> Vec<String> {
@@ -655,38 +800,129 @@ pub fn reconcile_resolve(
             id: format!("{id} (journal)"),
         });
     }
+    // Which class does this id belong to? A crash interrupts a provider
+    // dispatch at least as often as a tool call, so resolving only tool
+    // executions leaves the common case stuck.
+    let state = SessionJournal::recovered_state(&path).map_err(|source| {
+        SessionLifecycleError::Journal {
+            path: path.clone(),
+            source,
+        }
+    })?;
+    let item = outstanding_items(&state)
+        .into_iter()
+        .find(|item| item.tool_execution_id == tool_execution_id)
+        .ok_or_else(|| SessionLifecycleError::NotFound {
+            id: format!("{id}/{tool_execution_id}"),
+        })?;
+    if !item.operator_resolvable {
+        return Err(SessionLifecycleError::RefusedByAuthority {
+            reason: format!(
+                "{} {tool_execution_id} is in state {} — this state has no operator-writable receipt; \
+                 only the engine can mint one because the receipt must carry the exact dispatch it proved",
+                item.kind.as_str(),
+                item.reason
+            ),
+        });
+    }
+
     let journal = SessionJournal::open(&path, id.to_owned()).map_err(|source| {
         SessionLifecycleError::Journal {
             path: path.clone(),
             source,
         }
     })?;
-    let resolution = match resolution {
-        OperatorResolution::Succeeded => ToolResolution::Succeeded {
-            result: serde_json::Value::Null,
-        },
-        // `Cancelled` is the honest reason: the operator is asserting the
-        // effect never began, and the cause of record is the interruption they
-        // are reconciling — not a policy or budget denial that never happened.
-        OperatorResolution::NotStarted => ToolResolution::NotStarted {
-            reason: crate::session_journal::ToolNotStartedReason::Cancelled {
-                reason: format!("resolved as not-started by operator {operator_id}"),
-            },
-        },
-        OperatorResolution::Failed => ToolResolution::Failed {
-            error: "resolved as failed by operator".to_owned(),
-            result: None,
-        },
+
+    let event = match item.kind {
+        ReconcileKind::ToolExecution => {
+            let resolution = match resolution {
+                OperatorResolution::Succeeded => ToolResolution::Succeeded {
+                    result: serde_json::Value::Null,
+                },
+                // `Cancelled` is the honest reason: the operator is asserting
+                // the effect never began, and the cause of record is the
+                // interruption they are reconciling — not a policy or budget
+                // denial that never happened.
+                OperatorResolution::NotStarted => ToolResolution::NotStarted {
+                    reason: crate::session_journal::ToolNotStartedReason::Cancelled {
+                        reason: format!("resolved as not-started by operator {operator_id}"),
+                    },
+                },
+                OperatorResolution::Failed => ToolResolution::Failed {
+                    error: format!("resolved as failed by operator {operator_id}"),
+                    result: None,
+                },
+            };
+            SessionEvent::ToolExecutionResolved {
+                tool_execution_id: tool_execution_id.to_owned(),
+                resolution,
+                source: ToolResolutionSource::Operator {
+                    operator_id: operator_id.to_owned(),
+                },
+                evidence: serde_json::json!({ "source": "wayland-core session reconcile" }),
+            }
+        }
+        // A provider attempt has two operator-writable terminal receipts, and
+        // which one applies is decided by the state the crash left, not by the
+        // operator: a PREPARED attempt was never dispatched, so it takes
+        // `ProviderAttemptNotStarted`; an UNKNOWN attempt was dispatched and
+        // its outcome was never observed, so it takes
+        // `ProviderAttemptFinished { Cancelled }`. Claiming Succeeded is
+        // impossible here and the reducer refuses it — a successful attempt
+        // must have a finished stream, which a crashed dispatch does not have.
+        //
+        // NOTE the fidelity limit, recorded rather than hidden: unlike
+        // `ToolExecutionResolved`, the provider-attempt receipts carry no
+        // `source` field, so the journal does not record that a HUMAN, rather
+        // than the engine, asserted this outcome. Filed as 23B-M3.
+        ReconcileKind::ProviderAttempt => {
+            let attempt = state
+                .provider_attempts
+                .get(tool_execution_id)
+                .ok_or_else(|| SessionLifecycleError::NotFound {
+                    id: format!("{id}/{tool_execution_id}"),
+                })?;
+            match (&attempt.effect, attempt.dispatch_id.as_ref()) {
+                (ExternalEffectState::Prepared, None) => SessionEvent::ProviderAttemptNotStarted {
+                    attempt_id: tool_execution_id.to_owned(),
+                    reason: crate::session_journal::ProviderAttemptNotStartedReason::Cancelled {
+                        reason: format!("resolved as not-started by operator {operator_id}"),
+                    },
+                },
+                (ExternalEffectState::Prepared, Some(dispatch_id)) => {
+                    SessionEvent::ProviderAttemptNotStartedV2 {
+                        attempt_id: tool_execution_id.to_owned(),
+                        dispatch_id: dispatch_id.clone(),
+                        reason:
+                            crate::session_journal::ProviderAttemptNotStartedReason::Cancelled {
+                                reason: format!(
+                                    "resolved as not-started by operator {operator_id}"
+                                ),
+                            },
+                    }
+                }
+                (_, None) => SessionEvent::ProviderAttemptFinished {
+                    attempt_id: tool_execution_id.to_owned(),
+                    outcome: crate::session_journal::CompletionOutcome::Cancelled,
+                    response_digest: None,
+                },
+                (_, Some(dispatch_id)) => SessionEvent::ProviderAttemptFinishedV2 {
+                    attempt_id: tool_execution_id.to_owned(),
+                    dispatch_id: dispatch_id.clone(),
+                    outcome: crate::session_journal::CompletionOutcome::Cancelled,
+                    response_digest: None,
+                },
+            }
+        }
+        other => {
+            return Err(SessionLifecycleError::RefusedByAuthority {
+                reason: format!("{} items are not operator-resolvable", other.as_str()),
+            });
+        }
     };
+
     journal
-        .append(SessionEvent::ToolExecutionResolved {
-            tool_execution_id: tool_execution_id.to_owned(),
-            resolution,
-            source: ToolResolutionSource::Operator {
-                operator_id: operator_id.to_owned(),
-            },
-            evidence: serde_json::json!({ "source": "wayland-core session reconcile" }),
-        })
+        .append(event)
         .map_err(|source| SessionLifecycleError::Journal {
             path: path.clone(),
             source,
@@ -716,6 +952,10 @@ pub fn cancel(manager: &SessionManager, id: &str) -> Result<Vec<String>> {
             source,
         }
     })?;
+    // The reducer refuses `TurnCancelled` while any descendant is nonterminal,
+    // across five classes. Refuse here first, with the blocking items named, so
+    // the operator gets exit code 5 and an actionable list rather than an
+    // opaque "invalid journal state transition" from deep inside the reducer.
     let outstanding = outstanding_items(&state);
     if !outstanding.is_empty() {
         return Err(SessionLifecycleError::OutstandingReconcile {
