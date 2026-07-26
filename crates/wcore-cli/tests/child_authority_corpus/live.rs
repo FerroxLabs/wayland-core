@@ -880,7 +880,12 @@ fn run_tui(world: &LiveWorld) -> LiveRun {
             world.root().display()
         ),
         asserted_mode: None,
-        transcript: LiveTransport::Tui.unavailable_reason().to_owned(),
+        transcript: format!(
+            "{}; the ephemeral vault passphrase this transport supplies elsewhere ({} bytes) is \
+             never reached on this platform",
+            LiveTransport::Tui.unavailable_reason(),
+            CORPUS_VAULT_PASSPHRASE.len()
+        ),
         provider_requests: 0,
         delegation_attempted: false,
         child_turns: 0,
