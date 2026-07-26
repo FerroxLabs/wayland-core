@@ -546,8 +546,9 @@ fn run_headless(world: &LiveWorld) -> LiveRun {
         let _ = child.wait();
     }
     let (stdout, stderr) = streams.join();
+    let code = status.and_then(|exit| exit.code());
     let transcript = format!(
-        "exit status {:?}, terminated on its own: {terminated_on_its_own}\n--- stdout ---\n\
+        "exit status {code:?}, terminated on its own: {terminated_on_its_own}\n--- stdout ---\n\
          {stdout}--- stderr ---\n{stderr}"
     );
 
