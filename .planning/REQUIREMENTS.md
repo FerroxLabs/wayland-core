@@ -65,6 +65,17 @@ Both candidate jobs ran the `Assert checkout is the authorized candidate` step w
 - [ ] **F21-03**: Approval, escalation, cancellation, reservation, refund, and result delivery remain attributable to the correct parent/session actor.
 - [ ] **F21-04**: Hostile child tests prove no authority or resource amplification across standalone and host protocol paths.
 
+**Adjudication at the close of plan 21-04** (`21-04-PHASE-VERDICT.md` §3, base
+SHA `f2d186f6`). All four are left OPEN — an explicit incomplete disposition,
+not an unfinished one. Three of the four are open on LIVE-evidence grounds
+rather than on in-process failure; no requirement here is marked complete on
+in-process evidence alone.
+
+- **F21-01 — OPEN.** The tool dimension of the intersection is confirmed absent (`build_tool_registry` registers a requested tool without consulting the parent) and F21-02-01 is DECLINED and open at Sean's authorization; provider intersection has no request channel to intersect. Marking this complete would claim an intersection the product does not compute.
+- **F21-02 — OPEN.** Depth, time, token and cost refuse at the in-process ancestor-rollup seam, but all four were NOT-EXPRESSIBLE on both live combinations because no shipped surface carries a child-fillable budget field. The property holds in part by absence of a request channel.
+- **F21-03 — OPEN.** Five of six lifecycle events attribute correctly at the real seam on both platforms with zero misattributions, and result delivery is proved correct live on the shipped wire. Refund across a crash is UNPROVEN (F21-04-02) and four of six events have no per-child observable on the host protocol at all (F21-04-01).
+- **F21-04 — OPEN.** The hostile corpora ran on both surfaces and both platforms and found no amplification on any dimension they could express, but tool authority stays confirmed-absent and DECLINED, and F21-04-03 shows two parallel `Spawn` siblings failing outright on the shipped binary.
+
 ### Phase 22 — Supervision, Durable Goals, Fleet, and Loops
 
 - [ ] **F22-01**: CLI, TUI, and host clients can start, list, inspect, log, steer, pause, cancel, resume, retry, and acknowledge child results through versioned commands/events.
@@ -164,7 +175,7 @@ Both candidate jobs ran the `Assert checkout is the authorized candidate` step w
 | REQ-native-r1, r3, r4, r5, r6, r7, r9, r10, r11, r14, r15 | Phase 20A | Complete @ `9821ef76` (run `30184651330`) |
 | REQ-native-r2, r8 | Phase 20A | Complete @ `2cc1a285` — post-seal sweep 2026-07-26. `crates/` tree byte-identical to `9821ef76`. r2: both deny clauses PASS on `SEANDESKTOP` (run `30186873948`, job `89753061944`). r8: both production guards driven to rejection with the specific error, plus 7 regression cases. |
 | REQ-native-r12, r13 | Phase 20A | **Open** — unexercised acceptance clauses, not failing tests; see per-requirement notes above. Phase 20A closed COMPLETE on its three Success Criteria without them. |
-| F21-01, F21-02, F21-03, F21-04 | Phase 21 | Pending |
+| F21-01, F21-02, F21-03, F21-04 | Phase 21 | **All four Open** — adjudicated at `21-04-PHASE-VERDICT.md` §3, base `f2d186f6`. Criterion 1 NOT MET (tool authority confirmed absent and DECLINED); Criteria 2 and 3 MET WITH STATED EXCEPTIONS. Six HIGH findings open: F21-02-01, F21-02-03, F21-02-02's live closure, F21-04-01, F21-04-02, F21-04-03. No seal claimed. |
 | F22-01, F22-02, F22-03, F22-04, F22-05, F22-06, F22-07 | Phase 22 | Pending |
 | F23-01, F23-02, F23-03, F23-04, F23-05, F23-06 | Phase 23 | Pending |
 | F24-01, F24-02, F24-03, F24-04, F24-05 | Phase 24 | Pending |

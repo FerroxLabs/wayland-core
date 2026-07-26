@@ -1,0 +1,217 @@
+﻿BEGIN 2026-07-26T21:26:16.2537853+07:00
+git : From https://github.com/FerroxLabs/wayland-core
+At C:\ferrox-win-p21-run.ps1:5 char:1
++ git fetch origin plan/f20-unified-audit-repair 2>&1 | Out-File -Appen ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (From https://gi...bs/wayland-core:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ * branch            plan/f20-unified-audit-repair -> FETCH_HEAD
+git : Previous HEAD position was a412aba chore(protocol): re-pin Desktop contract provenance digests
+At C:\ferrox-win-p21-run.ps1:6 char:1
++ git checkout --detach f2d186f6c3e77b99961171632fbbfce5c5b5d776 2>&1 | ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Previous HEAD p...venance digests:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+HEAD is now at f2d186f test(21-04): make an absent sibling diagnosable, not silent
+RUN_SHA=f2d186f6c3e77b99961171632fbbfce5c5b5d776
+cargo.exe :     Checking wcore-protocol v0.12.25 (C:\ferrox-win-p21\crates\wcore-protocol)
+At C:\ferrox-win-p21-run.ps1:9 char:1
++ & $cargo clippy -p wcore-cli --all-targets -- -D warnings 2>&1 | Out- ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Checking wc...wcore-protocol):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Checking wcore-sandbox v0.12.25 (C:\ferrox-win-p21\crates\wcore-sandbox)
+    Checking wcore-config v0.12.25 (C:\ferrox-win-p21\crates\wcore-config)
+   Compiling wcore-cli v0.12.25 (C:\ferrox-win-p21\crates\wcore-cli)
+    Checking wcore-plugin-api v0.12.25 (C:\ferrox-win-p21\crates\wcore-plugin-api)
+    Checking wcore-observability v0.12.25 (C:\ferrox-win-p21\crates\wcore-observability)
+    Checking wcore-channels v0.12.25 (C:\ferrox-win-p21\crates\wcore-channels)
+    Checking wcore-providers v0.12.25 (C:\ferrox-win-p21\crates\wcore-providers)
+    Checking wcore-pricing v0.12.25 (C:\ferrox-win-p21\crates\wcore-pricing)
+    Checking wcore-replay v0.12.25 (C:\ferrox-win-p21\crates\wcore-replay)
+    Checking wcore-acp v0.12.25 (C:\ferrox-win-p21\crates\wcore-acp)
+    Checking wcore-eval-scenarios v0.12.25 (C:\ferrox-win-p21\crates\wcore-eval-scenarios)
+    Checking wcore-memory v0.12.25 (C:\ferrox-win-p21\crates\wcore-memory)
+    Checking wcore-agents-pack v0.12.25 (C:\ferrox-win-p21\crates\wcore-agents-pack)
+    Checking wayland-honcho v0.12.25 (C:\ferrox-win-p21\crates\wayland-honcho)
+    Checking wcore-plugin-wasm v0.12.25 (C:\ferrox-win-p21\crates\wcore-plugin-wasm)
+    Checking wayland-browser v0.12.25 (C:\ferrox-win-p21\crates\wayland-browser)
+    Checking wayland-cua v0.12.25 (C:\ferrox-win-p21\crates\wayland-cua)
+    Checking wcore-pluginsrc v0.12.25 (C:\ferrox-win-p21\crates\wcore-pluginsrc)
+    Checking wcore-channel-sms v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-sms)
+    Checking wcore-channel-signal v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-signal)
+    Checking wcore-channel-telegram v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-telegram)
+    Checking wcore-channel-whatsapp v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-whatsapp)
+    Checking wcore-channel-discord v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-discord)
+    Checking wcore-channel-msteams v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-msteams)
+    Checking wcore-channel-slack v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-slack)
+    Checking wcore-channel-email v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-email)
+    Checking wcore-channel-matrix v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-matrix)
+    Checking wcore-dispatch v0.12.25 (C:\ferrox-win-p21\crates\wcore-dispatch)
+    Checking wcore-honcho-adapter v0.12.25 (C:\ferrox-win-p21\crates\wcore-honcho-adapter)
+    Checking wcore-channels-registry v0.12.25 (C:\ferrox-win-p21\crates\wcore-channels-registry)
+    Checking wcore-tools v0.12.25 (C:\ferrox-win-p21\crates\wcore-tools)
+    Checking wcore-swarm v0.12.25 (C:\ferrox-win-p21\crates\wcore-swarm)
+    Checking wayland-ollama v0.12.25 (C:\ferrox-win-p21\crates\wayland-ollama)
+    Checking wcore-mcp v0.12.25 (C:\ferrox-win-p21\crates\wcore-mcp)
+    Checking wcore-cua v0.12.25 (C:\ferrox-win-p21\crates\wcore-cua)
+    Checking wcore-browser v0.12.25 (C:\ferrox-win-p21\crates\wcore-browser)
+    Checking wcore-skills v0.12.25 (C:\ferrox-win-p21\crates\wcore-skills)
+    Checking wcore-plugin-subprocess v0.12.25 (C:\ferrox-win-p21\crates\wcore-plugin-subprocess)
+    Checking wcore-eval v0.12.25 (C:\ferrox-win-p21\crates\wcore-eval)
+    Checking wcore-evolve v0.12.25 (C:\ferrox-win-p21\crates\wcore-evolve)
+    Checking wcore-agent v0.12.25 (C:\ferrox-win-p21\crates\wcore-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.41s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report 
+future-incompatibilities --id 1`
+CLIPPY_CLEAN
+cargo.exe :    Compiling wcore-cli v0.12.25 (C:\ferrox-win-p21\crates\wcore-cli)
+At C:\ferrox-win-p21-run.ps1:12 char:1
++ & $cargo build -p wcore-cli --bin wayland-core 2>&1 | Out-File -Appen ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling wc...ates\wcore-cli):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 29.25s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report 
+future-incompatibilities --id 1`
+LIVE_BINARY_RUNS
+cargo.exe :    Compiling wcore-cli v0.12.25 (C:\ferrox-win-p21\crates\wcore-cli)
+At C:\ferrox-win-p21-run.ps1:16 char:1
++ & $cargo nextest run -p wcore-cli --test child_attribution_corpus --n ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling wc...ates\wcore-cli):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.53s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report 
+future-incompatibilities --id 1`
+
+ Nextest run ID e9c9147c-3166-4818-bd3b-5bbb09e41801 with nextest profile: default
+    Starting 16 tests across 1 binary
+        PASS [   0.018s] ( 1/16) wcore-cli::child_attribution_corpus corpus_table_covers_every_lifecycle_event
+        PASS [   0.024s] ( 2/16) wcore-cli::child_attribution_corpus every_case_runs_at_least_two_siblings
+        PASS [   0.027s] ( 3/16) wcore-cli::child_attribution_corpus 
+support::mock_llm::self_tests::text_fixture_is_parser_conformant
+        PASS [   0.029s] ( 4/16) wcore-cli::child_attribution_corpus 
+every_invariant_states_an_attribution_and_names_no_error_shape
+        PASS [   0.033s] ( 5/16) wcore-cli::child_attribution_corpus 
+the_rendered_screen_surface_declares_its_unavailability
+        PASS [   0.035s] ( 6/16) wcore-cli::child_attribution_corpus 
+support::mock_llm::self_tests::truncated_stream_is_detected
+        PASS [   0.037s] ( 7/16) wcore-cli::child_attribution_corpus 
+support::mock_llm::self_tests::every_builder_body_is_parser_conformant
+        PASS [   0.039s] ( 8/16) wcore-cli::child_attribution_corpus 
+support::mock_llm::self_tests::tool_use_fixture_is_parser_conformant
+        PASS [   0.042s] ( 9/16) wcore-cli::child_attribution_corpus the_corpus_carries_a_crash_and_restart_case
+        PASS [   0.154s] (10/16) wcore-cli::child_attribution_corpus the_ttl_reaper_cancels_only_the_expired_sibling
+        PASS [  21.656s] (11/16) wcore-cli::child_attribution_corpus attribution_cancellation
+        PASS [  21.716s] (12/16) wcore-cli::child_attribution_corpus attribution_refund
+        PASS [  21.717s] (13/16) wcore-cli::child_attribution_corpus attribution_escalation
+        PASS [  21.720s] (14/16) wcore-cli::child_attribution_corpus attribution_approval
+        PASS [  21.801s] (15/16) wcore-cli::child_attribution_corpus attribution_delivery
+        PASS [  21.803s] (16/16) wcore-cli::child_attribution_corpus attribution_reservation
+
+     Summary [  21.804s] 16 tests run: 16 passed, 0 skipped
+NEXTEST_EXIT=0
+### approval.rows
+CASE :: attribution_approval :: approval :: windows :: NOT-OBSERVABLE
+TOPOLOGY :: attribution_approval :: siblings 2 :: generations 2 :: crash-and-restart false :: human-visible-surface rendered-screen
+MODE :: attribution_approval :: windows :: in-process :: CORRECT :: wcore_agent::approval::ApprovalBridge::request_with_id + resolve_by_correlation :: two siblings raised approvals; answering sibling A's reported true; sibling A's outcome is Ok(ApprovalOutcome { approved: true, modifications: None }) and sibling B's is Err(Empty); 2 approval(s) were outstanding before the answer and 1 after    the answer resolved only the sibling it was given for and left the other outstanding
+MODE :: attribution_approval :: windows :: json-stream :: NOT-OBSERVABLE :: sibling A took 0 provider turn(s) and sibling B took 0, so the two-sibling topology this case requires never existed in the run and no attribution verdict may be taken from it; 1 provider request(s) were served; the Spawn tool reported: 2 of 2 sub-agent(s) failed or terminated early.
+
+## corpus-sib-alpha [ERROR]
+budget authority is permanently faulted: invalid journal state transition: budget authority prior cursor does not match the current journal head
+[turns: 0 | tokens: 0 in / 0 out]
+
+---
+
+## corpus-sib-beta [ERROR]
+Sub-agent error: Session persistence authority unavailable: budget journal operation failed: invalid journal st; full transcript at C:\ferrox-win-p21\target\tmp\child-attribution-corpus\transcripts\attribution_approval-json-stream.txt
+LIVE :: attribution_approval :: windows :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmp6OPKQJ) :: C:\ferrox-win-p21\target\tmp\child-attribution-corpus\transcripts\attribution_approval-json-stream.txt
+MODE :: attribution_approval :: windows :: tui :: UNAVAILABLE :: the interactive TUI is not drivable on Windows: portable_pty's ConPTY backend does not surface the spawned binary's stdout to the master end, so pty_capture.rs is #![cfg(unix)] and support/pty.rs inherits the gate
+LIVE :: attribution_approval :: windows :: tui :: wayland-core  (bare, on a PTY)    DECLARED UNAVAILABLE on this platform :: 
+### cancellation.rows
+CASE :: attribution_cancellation :: cancellation :: windows :: NOT-OBSERVABLE
+TOPOLOGY :: attribution_cancellation :: siblings 2 :: generations 2 :: crash-and-restart false :: human-visible-surface rendered-screen
+MODE :: attribution_cancellation :: windows :: in-process :: CORRECT :: wcore_agent::durable_child::DurableChildStore::transition (RequestCancel) + inspect :: after cancelling only sibling alpha: alpha desired_state Cancel / status Running; beta desired_state Run / status Running    the cancellation stopped only the sibling it was directed at
+MODE :: attribution_cancellation :: windows :: json-stream :: NOT-OBSERVABLE :: sibling A took 0 provider turn(s) and sibling B took 0, so the two-sibling topology this case requires never existed in the run and no attribution verdict may be taken from it; 1 provider request(s) were served; the Spawn tool reported: 2 of 2 sub-agent(s) failed or terminated early.
+
+## corpus-sib-alpha [ERROR]
+budget authority is permanently faulted: invalid journal state transition: budget authority prior cursor does not match the current journal head
+[turns: 0 | tokens: 0 in / 0 out]
+
+---
+
+## corpus-sib-beta [ERROR]
+budget journal operation failed: invalid journal state transition: budget authority prior cursor does not match; full transcript at C:\ferrox-win-p21\target\tmp\child-attribution-corpus\transcripts\attribution_cancellation-json-stream.txt
+LIVE :: attribution_cancellation :: windows :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpGxXop6) :: C:\ferrox-win-p21\target\tmp\child-attribution-corpus\transcripts\attribution_cancellation-json-stream.txt
+MODE :: attribution_cancellation :: windows :: tui :: UNAVAILABLE :: the interactive TUI is not drivable on Windows: portable_pty's ConPTY backend does not surface the spawned binary's stdout to the master end, so pty_capture.rs is #![cfg(unix)] and support/pty.rs inherits the gate
+LIVE :: attribution_cancellation :: windows :: tui :: wayland-core  (bare, on a PTY)    DECLARED UNAVAILABLE on this platform :: 
+### delivery.rows
+CASE :: attribution_delivery :: result delivery :: windows :: NOT-OBSERVABLE
+TOPOLOGY :: attribution_delivery :: siblings 2 :: generations 3 :: crash-and-restart false :: human-visible-surface wire
+MODE :: attribution_delivery :: windows :: in-process :: CORRECT :: wcore_agent::durable_child::DurableChildStore::transition (DeliveryStarted / DeliveryDelivered) over ChildDeliveryTarget :: after delivering only grandchild alpha-one: alpha-one Delivered { receipt_digest: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" } to Some(ParentChild { child_id: ChildId("corpus-attr-alpha") }); its sibling grandchild alpha-two Pending to Some(ParentChild { child_id: ChildId("corpus-attr-alpha") }); child alpha Pending to Some(SessionOutbox); child beta Pending to Some(SessionOutbox)    the delivery landed only on the descendant that produced the result, including against a sibling bound for the identical target
+MODE :: attribution_delivery :: windows :: json-stream :: NOT-OBSERVABLE :: sibling A took 0 provider turn(s) and sibling B took 0, so the two-sibling topology this case requires never existed in the run and no attribution verdict may be taken from it; 1 provider request(s) were served; the Spawn tool reported: 2 of 2 sub-agent(s) failed or terminated early.
+
+## corpus-sib-alpha [ERROR]
+budget authority is permanently faulted: invalid journal state transition: budget authority prior cursor does not match the current journal head
+[turns: 0 | tokens: 0 in / 0 out]
+
+---
+
+## corpus-sib-beta [ERROR]
+budget journal operation failed: invalid journal state transition: budget authority prior cursor does not match; full transcript at C:\ferrox-win-p21\target\tmp\child-attribution-corpus\transcripts\attribution_delivery-json-stream.txt
+LIVE :: attribution_delivery :: windows :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpx1NR2b) :: C:\ferrox-win-p21\target\tmp\child-attribution-corpus\transcripts\attribution_delivery-json-stream.txt
+### escalation.rows
+CASE :: attribution_escalation :: escalation :: windows :: NOT-OBSERVABLE
+TOPOLOGY :: attribution_escalation :: siblings 2 :: generations 3 :: crash-and-restart false :: human-visible-surface wire
+MODE :: attribution_escalation :: windows :: in-process :: CORRECT :: wcore_budget::tracker::BudgetTracker::extend_session + effective_session_limits :: grandchild A exhausted its envelope and its extension reported Ok(()); A's effective limits were (Some(1000), Some(1.0)) before and (Some(1500), Some(2.0)) after; the sibling grandchild's were (Some(1000), Some(1.0)) before and (Some(1000), Some(1.0)) after, and a second extension attempt on the sibling reported Err(NoExhaustedBudget)    the escalation widened only the descendant that exhausted its envelope and left the sibling neither widened nor unblocked
+MODE :: attribution_escalation :: windows :: json-stream :: NOT-OBSERVABLE :: sibling A took 0 provider turn(s) and sibling B took 0, so the two-sibling topology this case requires never existed in the run and no attribution verdict may be taken from it; 1 provider request(s) were served; the Spawn tool reported: 2 of 2 sub-agent(s) failed or terminated early.
+
+## corpus-sib-alpha [ERROR]
+budget authority is permanently faulted: invalid journal state transition: budget authority prior cursor does not match the current journal head
+[turns: 0 | tokens: 0 in / 0 out]
+
+---
+
+## corpus-sib-beta [ERROR]
+budget journal operation failed: invalid journal state transition: budget authority prior cursor does not match; full transcript at C:\ferrox-win-p21\target\tmp\child-attribution-corpus\transcripts\attribution_escalation-json-stream.txt
+LIVE :: attribution_escalation :: windows :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpgAZ5MZ) :: C:\ferrox-win-p21\target\tmp\child-attribution-corpus\transcripts\attribution_escalation-json-stream.txt
+### refund.rows
+CASE :: attribution_refund :: refund :: windows :: NOT-OBSERVABLE
+TOPOLOGY :: attribution_refund :: siblings 2 :: generations 2 :: crash-and-restart true :: human-visible-surface wire
+MODE :: attribution_refund :: windows :: in-process :: NOT-OBSERVABLE :: BudgetAuthorityCoordinator::bind over a SessionJournal, dropped and rebound, then BudgetTracker::release :: across the restart, sibling A's books read (0, 0.0) before the refund and (0, 0.0) after; sibling B's read (0, 0.0) before and (0, 0.0) after; the release reported false    the reservation handle did not resolve after the rebind, so no refund occurred and there was no attribution to observe
+MODE :: attribution_refund :: windows :: json-stream :: NOT-OBSERVABLE :: sibling A took 0 provider turn(s) and sibling B took 0, so the two-sibling topology this case requires never existed in the run and no attribution verdict may be taken from it; 1 provider request(s) were served; the Spawn tool reported: 2 of 2 sub-agent(s) failed or terminated early.
+
+## corpus-sib-alpha [ERROR]
+budget authority is permanently faulted: invalid journal state transition: budget authority prior cursor does not match the current journal head
+[turns: 0 | tokens: 0 in / 0 out]
+
+---
+
+## corpus-sib-beta [ERROR]
+budget journal operation failed: invalid journal state transition: budget authority prior cursor does not match; full transcript at C:\ferrox-win-p21\target\tmp\child-attribution-corpus\transcripts\attribution_refund-json-stream.txt
+LIVE :: attribution_refund :: windows :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpqhOyC4) :: C:\ferrox-win-p21\target\tmp\child-attribution-corpus\transcripts\attribution_refund-json-stream.txt
+### reservation.rows
+CASE :: attribution_reservation :: reservation :: windows :: NOT-OBSERVABLE
+TOPOLOGY :: attribution_reservation :: siblings 2 :: generations 2 :: crash-and-restart false :: human-visible-surface wire
+MODE :: attribution_reservation :: windows :: in-process :: CORRECT :: wcore_budget::tracker::BudgetTracker::reserve + reserved_totals :: sibling A reserved 100 tokens / $0.10 and its books read 100 tokens / $0.1000; sibling B reserved 250 / $0.25 and its books read 250 tokens / $0.2500    each reservation landed on the sibling that made it and on no other
+MODE :: attribution_reservation :: windows :: json-stream :: NOT-OBSERVABLE :: sibling A took 0 provider turn(s) and sibling B took 0, so the two-sibling topology this case requires never existed in the run and no attribution verdict may be taken from it; 1 provider request(s) were served; the Spawn tool reported: 2 of 2 sub-agent(s) failed or terminated early.
+
+## corpus-sib-alpha [ERROR]
+budget authority is permanently faulted: invalid journal state transition: budget authority prior cursor does not match the current journal head
+[turns: 0 | tokens: 0 in / 0 out]
+
+---
+
+## corpus-sib-beta [ERROR]
+budget journal operation failed: invalid journal state transition: budget authority prior cursor does not match; full transcript at C:\ferrox-win-p21\target\tmp\child-attribution-corpus\transcripts\attribution_reservation-json-stream.txt
+LIVE :: attribution_reservation :: windows :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpGtjbyQ) :: C:\ferrox-win-p21\target\tmp\child-attribution-corpus\transcripts\attribution_reservation-json-stream.txt
+DONE 2026-07-26T21:27:46.0877873+07:00

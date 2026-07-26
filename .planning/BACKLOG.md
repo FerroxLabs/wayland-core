@@ -314,3 +314,52 @@ budget on a red another pass had already triaged. Corpus case:
 Observation worth keeping for whoever picks it up: the child-authority corpus
 adds 22 live binary spawns to the aggregate and plausibly tipped a
 timing-sensitive cancellation test rather than exposing a new one.
+
+---
+
+## From 21-04 — the attribution corpus (2026-07-26)
+
+Logged by `21-04-ATTRIBUTION-RESULTS.md` §8. Non-blocking, per the amended phase
+rule that MEDIUM and below go to BACKLOG and do not gate execution. The HIGH
+findings from the same pass (F21-04-01, F21-04-02, F21-04-03) are NOT here —
+they are open to Sean in `21-04-PHASE-VERDICT.md` §4.
+
+### F21-04-04 — `ChildDeliveryTarget::ParentTurn` is unexercised by the attribution corpus · MEDIUM
+
+The journal reducer refuses a declaration carrying `ParentTurn` unless
+`parent.turn_id` names a turn the journal has actually seen
+(`session_journal/reducer.rs:1597`), and the corpus declares children directly
+rather than through a live turn. `SessionOutbox` and `ParentChild { child_id }`
+were both exercised, the latter with two sibling grandchildren bound for the
+IDENTICAL target — the hardest form, since delivering one must not mark the other
+delivered. `ParentTurn` is recorded unexercised rather than faked with a synthetic
+turn, which would have proved attribution against a fixture instead of against
+the product. Closing this needs a corpus that drives a real turn.
+
+### F21-04-05 — `BudgetTracker::charge` does not block an exhausted session · LOW
+
+`charge` records usage and returns the cap error but does not add the session to
+the blocked set; only the admission paths do (`tracker.rs:910/921/932/951` for
+`reserve_turn`, `:1038-1083` for `settle_turn`). An escalation therefore cannot
+be requested after charging past a cap, only after being refused admission. Not a
+defect — `extend_session` gating on `NoExhaustedBudget` is deliberate — but the
+asymmetry is undocumented and cost the 21-04 harness one repair iteration. A
+doc-comment on `charge` naming the blocking path would close it.
+
+### F21-04-06 — `StreamEnd` is emitted per assistant stream, not per turn · LOW
+
+Any live driver that treats `stream_end` as "the turn is over" will kill the
+process while spawned children are still working and then record their absence as
+if the topology never existed. 21-04's first instrumented run did exactly that,
+and the resulting rows looked like clean negatives. Recorded so the next live
+harness does not rediscover it; a note in the json-stream protocol doc would
+close it.
+
+### windows-tui — approval and cancellation are unprovable as a human sees them on Windows · MEDIUM
+
+`crates/wcore-eval-scenarios/src/pty_capture.rs` is `#![cfg(unix)]` because
+portable_pty's Windows ConPTY backend does not surface the spawned binary's
+stdout to the master end, and `crates/wcore-cli/tests/support/pty.rs` inherits the
+gate. Every human-visible property is provable on Linux and macOS only. Carried
+forward from 21-02's identical limitation at the same severity; it stays open
+until the PTY driver supports ConPTY.

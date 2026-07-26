@@ -1,0 +1,124 @@
+RUN_SHA=f2d186f6c3e77b99961171632fbbfce5c5b5d776
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+LIVE_BINARY_RUNS
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID e6b360a9-0a4d-4f66-b0bb-2dc67abaa3f2 with nextest profile: default
+    Starting 20 tests across 1 binary
+        PASS [   0.006s] ( 1/20) wcore-cli::child_attribution_corpus support::mock_llm::self_tests::every_builder_body_is_parser_conformant
+        PASS [   0.007s] ( 2/20) wcore-cli::child_attribution_corpus every_case_runs_at_least_two_siblings
+        PASS [   0.007s] ( 3/20) wcore-cli::child_attribution_corpus support::mock_llm::self_tests::text_fixture_is_parser_conformant
+        PASS [   0.008s] ( 4/20) wcore-cli::child_attribution_corpus support::mock_llm::self_tests::tool_use_fixture_is_parser_conformant
+        PASS [   0.009s] ( 5/20) wcore-cli::child_attribution_corpus corpus_table_covers_every_lifecycle_event
+        PASS [   0.023s] ( 6/20) wcore-cli::child_attribution_corpus support::proving_ground::record::tests::redact_multiple_keys_in_one_string
+        PASS [   0.023s] ( 7/20) wcore-cli::child_attribution_corpus support::proving_ground::record::tests::redact_leaves_normal_text_alone
+        PASS [   0.023s] ( 8/20) wcore-cli::child_attribution_corpus the_rendered_screen_surface_declares_its_unavailability
+        PASS [   0.024s] ( 9/20) wcore-cli::child_attribution_corpus support::mock_llm::self_tests::truncated_stream_is_detected
+        PASS [   0.024s] (10/20) wcore-cli::child_attribution_corpus the_corpus_carries_a_crash_and_restart_case
+        PASS [   0.024s] (11/20) wcore-cli::child_attribution_corpus support::proving_ground::record::tests::redact_openai_key
+        PASS [   0.024s] (12/20) wcore-cli::child_attribution_corpus support::proving_ground::record::tests::redact_xai_key
+        PASS [   0.025s] (13/20) wcore-cli::child_attribution_corpus every_invariant_states_an_attribution_and_names_no_error_shape
+        PASS [   0.148s] (14/20) wcore-cli::child_attribution_corpus the_ttl_reaper_cancels_only_the_expired_sibling
+        PASS [   2.333s] (15/20) wcore-cli::child_attribution_corpus attribution_refund
+        PASS [   2.356s] (16/20) wcore-cli::child_attribution_corpus attribution_reservation
+        PASS [   2.360s] (17/20) wcore-cli::child_attribution_corpus attribution_delivery
+        PASS [  20.035s] (18/20) wcore-cli::child_attribution_corpus attribution_escalation
+        SLOW [> 30.000s] (─────) wcore-cli::child_attribution_corpus attribution_approval
+        SLOW [> 30.000s] (─────) wcore-cli::child_attribution_corpus attribution_cancellation
+        PASS [  38.906s] (19/20) wcore-cli::child_attribution_corpus attribution_cancellation
+        PASS [  39.002s] (20/20) wcore-cli::child_attribution_corpus attribution_approval
+────────────
+     Summary [  39.003s] 20 tests run: 20 passed (2 slow), 0 skipped
+=== LEDGER ===
+CASE :: attribution_approval :: approval :: linux :: NOT-OBSERVABLE
+TOPOLOGY :: attribution_approval :: siblings 2 :: generations 2 :: crash-and-restart false :: human-visible-surface rendered-screen
+MODE :: attribution_approval :: linux :: in-process :: CORRECT :: wcore_agent::approval::ApprovalBridge::request_with_id + resolve_by_correlation :: two siblings raised approvals; answering sibling A's reported true; sibling A's outcome is Ok(ApprovalOutcome { approved: true, modifications: None }) and sibling B's is Err(Empty); 2 approval(s) were outstanding before the answer and 1 after — the answer resolved only the sibling it was given for and left the other outstanding
+MODE :: attribution_approval :: linux :: json-stream :: NOT-OBSERVABLE :: sibling A took 0 provider turn(s) and sibling B took 0, so the two-sibling topology this case requires never existed in the run and no attribution verdict may be taken from it; 1 provider request(s) were served; the Spawn tool reported: 2 of 2 sub-agent(s) failed or terminated early.
+
+## corpus-sib-alpha [ERROR]
+Sub-agent error: Session persistence authority unavailable: budget journal operation failed: invalid journal state transition: budget authority prior cursor does not match the current journal head
+[turns: 0 | tokens: 0 in / 0 out]
+
+---
+
+## corpus-sib-beta [ERROR]
+budget authority is permanently faulted: invalid journal st; full transcript at /root/wayland-p21/target/tmp/child-attribution-corpus/transcripts/attribution_approval-json-stream.txt
+LIVE :: attribution_approval :: linux :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=/tmp/.tmprMYbYS) :: /root/wayland-p21/target/tmp/child-attribution-corpus/transcripts/attribution_approval-json-stream.txt
+MODE :: attribution_approval :: linux :: tui :: CORRECT :: the rendered screen names both siblings distinctly, so a human can tell which nested actor a approval belongs to; the rendered screen names sibling A: true, sibling B: true; the run served 3 provider request(s) (1 from sibling A, 1 from sibling B); full transcript at /root/wayland-p21/target/tmp/child-attribution-corpus/transcripts/attribution_approval-tui.txt
+LIVE :: attribution_approval :: linux :: tui :: wayland-core  (bare, attached to a real PTY; WAYLAND_HOME=/tmp/.tmp5tH8PB) :: /root/wayland-p21/target/tmp/child-attribution-corpus/transcripts/attribution_approval-tui.txt
+CASE :: attribution_cancellation :: cancellation :: linux :: NOT-OBSERVABLE
+TOPOLOGY :: attribution_cancellation :: siblings 2 :: generations 2 :: crash-and-restart false :: human-visible-surface rendered-screen
+MODE :: attribution_cancellation :: linux :: in-process :: CORRECT :: wcore_agent::durable_child::DurableChildStore::transition (RequestCancel) + inspect :: after cancelling only sibling alpha: alpha desired_state Cancel / status Running; beta desired_state Run / status Running — the cancellation stopped only the sibling it was directed at
+MODE :: attribution_cancellation :: linux :: json-stream :: NOT-OBSERVABLE :: sibling A took 0 provider turn(s) and sibling B took 0, so the two-sibling topology this case requires never existed in the run and no attribution verdict may be taken from it; 1 provider request(s) were served; the Spawn tool reported: 2 of 2 sub-agent(s) failed or terminated early.
+
+## corpus-sib-alpha [ERROR]
+Sub-agent error: Session persistence authority unavailable: budget journal operation failed: invalid journal state transition: budget authority prior cursor does not match the current journal head
+[turns: 0 | tokens: 0 in / 0 out]
+
+---
+
+## corpus-sib-beta [ERROR]
+budget authority is permanently faulted: invalid journal st; full transcript at /root/wayland-p21/target/tmp/child-attribution-corpus/transcripts/attribution_cancellation-json-stream.txt
+LIVE :: attribution_cancellation :: linux :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=/tmp/.tmpHDWbTV) :: /root/wayland-p21/target/tmp/child-attribution-corpus/transcripts/attribution_cancellation-json-stream.txt
+MODE :: attribution_cancellation :: linux :: tui :: NOT-OBSERVABLE :: sibling A took 0 provider turn(s) and sibling B took 0, so the two-sibling topology this case requires never existed in the run and no attribution verdict may be taken from it; 1 provider request(s) were served; the Spawn tool reported: no tool failure was reported; full transcript at /root/wayland-p21/target/tmp/child-attribution-corpus/transcripts/attribution_cancellation-tui.txt
+LIVE :: attribution_cancellation :: linux :: tui :: wayland-core  (bare, attached to a real PTY; WAYLAND_HOME=/tmp/.tmpw6SZy4) :: /root/wayland-p21/target/tmp/child-attribution-corpus/transcripts/attribution_cancellation-tui.txt
+CASE :: attribution_delivery :: result delivery :: linux :: CORRECT
+TOPOLOGY :: attribution_delivery :: siblings 2 :: generations 3 :: crash-and-restart false :: human-visible-surface wire
+MODE :: attribution_delivery :: linux :: in-process :: CORRECT :: wcore_agent::durable_child::DurableChildStore::transition (DeliveryStarted / DeliveryDelivered) over ChildDeliveryTarget :: after delivering only grandchild alpha-one: alpha-one Delivered { receipt_digest: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" } to Some(ParentChild { child_id: ChildId("corpus-attr-alpha") }); its sibling grandchild alpha-two Pending to Some(ParentChild { child_id: ChildId("corpus-attr-alpha") }); child alpha Pending to Some(SessionOutbox); child beta Pending to Some(SessionOutbox) — the delivery landed only on the descendant that produced the result, including against a sibling bound for the identical target
+MODE :: attribution_delivery :: linux :: json-stream :: CORRECT :: sibling A's result reached only ["spawn:0:anon"] and sibling B's only ["spawn:1:anon"], two distinct parent_call_ids, so neither result landed on the other sibling's key; the run served 3 provider request(s) (1 from sibling A, 1 from sibling B) and produced 2 distinct parent_call_id(s) ["spawn:0:anon", "spawn:1:anon"] with agent names ["corpus-sib-alpha", "corpus-sib-beta"]; full transcript at /root/wayland-p21/target/tmp/child-attribution-corpus/transcripts/attribution_delivery-json-stream.txt
+LIVE :: attribution_delivery :: linux :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=/tmp/.tmpOLIOYc) :: /root/wayland-p21/target/tmp/child-attribution-corpus/transcripts/attribution_delivery-json-stream.txt
+CASE :: attribution_escalation :: escalation :: linux :: NOT-OBSERVABLE
+TOPOLOGY :: attribution_escalation :: siblings 2 :: generations 3 :: crash-and-restart false :: human-visible-surface wire
+MODE :: attribution_escalation :: linux :: in-process :: CORRECT :: wcore_budget::tracker::BudgetTracker::extend_session + effective_session_limits :: grandchild A exhausted its envelope and its extension reported Ok(()); A's effective limits were (Some(1000), Some(1.0)) before and (Some(1500), Some(2.0)) after; the sibling grandchild's were (Some(1000), Some(1.0)) before and (Some(1000), Some(1.0)) after, and a second extension attempt on the sibling reported Err(NoExhaustedBudget) — the escalation widened only the descendant that exhausted its envelope and left the sibling neither widened nor unblocked
+MODE :: attribution_escalation :: linux :: json-stream :: NOT-OBSERVABLE :: sibling A took 0 provider turn(s) and sibling B took 0, so the two-sibling topology this case requires never existed in the run and no attribution verdict may be taken from it; 1 provider request(s) were served; the Spawn tool reported: 2 of 2 sub-agent(s) failed or terminated early.
+
+## corpus-sib-alpha [ERROR]
+budget authority is permanently faulted: invalid journal state transition: budget authority prior cursor does not match the current journal head
+[turns: 0 | tokens: 0 in / 0 out]
+
+---
+
+## corpus-sib-beta [ERROR]
+budget journal operation failed: invalid journal state transition: budget authority prior cursor does not match; full transcript at /root/wayland-p21/target/tmp/child-attribution-corpus/transcripts/attribution_escalation-json-stream.txt
+LIVE :: attribution_escalation :: linux :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=/tmp/.tmpAY5zvJ) :: /root/wayland-p21/target/tmp/child-attribution-corpus/transcripts/attribution_escalation-json-stream.txt
+CASE :: attribution_refund :: refund :: linux :: NOT-OBSERVABLE
+TOPOLOGY :: attribution_refund :: siblings 2 :: generations 2 :: crash-and-restart true :: human-visible-surface wire
+MODE :: attribution_refund :: linux :: in-process :: NOT-OBSERVABLE :: BudgetAuthorityCoordinator::bind over a SessionJournal, dropped and rebound, then BudgetTracker::release :: across the restart, sibling A's books read (0, 0.0) before the refund and (0, 0.0) after; sibling B's read (0, 0.0) before and (0, 0.0) after; the release reported false — the reservation handle did not resolve after the rebind, so no refund occurred and there was no attribution to observe
+MODE :: attribution_refund :: linux :: json-stream :: NOT-OBSERVABLE :: the host protocol exposes no per-child observable for refund: ProtocolCommand carries only a whole-turn Stop, BudgetExceeded carries reason/observed/limit and no actor, and ChannelSink relays only text, thinking, stream lifecycle, error and info. What this run DID show is that the two siblings stayed separable on the wire: true. That is not this event's attribution and is not recorded as if it were; the run served 3 provider request(s) (1 from sibling A, 1 from sibling B) and produced 2 distinct parent_call_id(s) ["spawn:0:anon", "spawn:1:anon"] with agent names ["corpus-sib-alpha", "corpus-sib-beta"]; full transcript at /root/wayland-p21/target/tmp/child-attribution-corpus/transcripts/attribution_refund-json-stream.txt
+LIVE :: attribution_refund :: linux :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=/tmp/.tmp8quThe) :: /root/wayland-p21/target/tmp/child-attribution-corpus/transcripts/attribution_refund-json-stream.txt
+CASE :: attribution_reservation :: reservation :: linux :: NOT-OBSERVABLE
+TOPOLOGY :: attribution_reservation :: siblings 2 :: generations 2 :: crash-and-restart false :: human-visible-surface wire
+MODE :: attribution_reservation :: linux :: in-process :: CORRECT :: wcore_budget::tracker::BudgetTracker::reserve + reserved_totals :: sibling A reserved 100 tokens / $0.10 and its books read 100 tokens / $0.1000; sibling B reserved 250 / $0.25 and its books read 250 tokens / $0.2500 — each reservation landed on the sibling that made it and on no other
+MODE :: attribution_reservation :: linux :: json-stream :: NOT-OBSERVABLE :: the host protocol exposes no per-child observable for reservation: ProtocolCommand carries only a whole-turn Stop, BudgetExceeded carries reason/observed/limit and no actor, and ChannelSink relays only text, thinking, stream lifecycle, error and info. What this run DID show is that the two siblings stayed separable on the wire: true. That is not this event's attribution and is not recorded as if it were; the run served 3 provider request(s) (1 from sibling A, 1 from sibling B) and produced 2 distinct parent_call_id(s) ["spawn:0:anon", "spawn:1:anon"] with agent names ["corpus-sib-alpha", "corpus-sib-beta"]; full transcript at /root/wayland-p21/target/tmp/child-attribution-corpus/transcripts/attribution_reservation-json-stream.txt
+LIVE :: attribution_reservation :: linux :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=/tmp/.tmpDp1eEy) :: /root/wayland-p21/target/tmp/child-attribution-corpus/transcripts/attribution_reservation-json-stream.txt
+=== FULL AGGREGATE ===
+        SKIP [         ] (───────────) wcore-memory::hybrid_retriever_perf_test binary_size_baseline
+        SKIP [         ] (───────────) wcore-memory::hybrid_retriever_perf_test hybrid_retriever_perf_p95_under_100ms
+        SKIP [         ] (───────────) wcore-permissions::threat_model_coverage t1_plugin_manifest_cannot_claim_system_actor
+        SKIP [         ] (───────────) wcore-plugin-wasm::wasm_real_execute real_component_execute_round_trip
+        SKIP [         ] (───────────) wcore-sandbox::backend_integration appcontainer_execute_trivial_command_returns_exit_zero
+        SKIP [         ] (───────────) wcore-sandbox::backend_integration sandbox_exec_execute_echo_returns_exit_zero
+        SKIP [         ] (───────────) wcore-skills watcher_tests::diag_basic_event_received
+        SKIP [         ] (───────────) wcore-skills watcher_tests::diag_multi_thread_event_received
+        SKIP [         ] (───────────) wcore-swarm::dispatch_smoke heartbeat_symlink_fixture
+        SKIP [         ] (───────────) wcore-swarm::dispatch_smoke malformed_heartbeat_fixture
+        SKIP [         ] (───────────) wcore-swarm::dispatch_smoke repository_replacement_must_not_execute
+        SKIP [         ] (───────────) wcore-swarm::dispatch_smoke standalone_authority_fixture
+        SKIP [         ] (───────────) wcore-swarm::worker_runtime_limits descendant_worker_fixture
+        SKIP [         ] (───────────) wcore-swarm::worker_runtime_limits flood_worker_fixture
+        SKIP [         ] (───────────) wcore-swarm::worker_runtime_limits many_entry_worker_fixture
+        SKIP [         ] (───────────) wcore-swarm::worker_runtime_limits parent_worker_fixture
+        SKIP [         ] (───────────) wcore-swarm::worker_runtime_limits sleeping_worker_fixture
+        SKIP [         ] (───────────) wcore-swarm::worker_runtime_limits workspace_growth_fixture
+        SKIP [         ] (───────────) wcore-swarm::workspace_authority capacity_registration_fixture
+        SKIP [         ] (───────────) wcore-tools bash::tests::bash_runs_inside_workspace_with_policy
+        SKIP [         ] (───────────) wcore-tools bash::tests::live_local_egress_on_channel_egress_blocked
+        SKIP [         ] (───────────) wcore-tools kubectl_tool::tests::execute_version_against_live_kubectl
+        SLOW [ 185.960s] (11565/11565) wcore-cli::deterministic_openai_loop packaged_f04_run_is_repeatable_and_content_addressed
+   FLAKY 2/3 [   3.328s] ( 7690/11565) wcore-agent::dangerous_lease_e2e_test dangerous_expiry_cancels_production_streaming_bash_process_tree
+   FLAKY 3/3 [   3.131s] (11513/11565) wcore-cli::deterministic_openai_loop packaged_core_cancels_an_active_stream
+AGGREGATE_RERUN_SHA=f2d186f6c3e77b99961171632fbbfce5c5b5d776
+     Summary [ 189.835s] 11565 tests run: 11565 passed (1 slow, 3 flaky), 48 skipped
