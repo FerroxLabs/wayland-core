@@ -329,11 +329,32 @@ fn live_script(dimension: Dimension, world: &LiveWorld, sentinel_url: &str) -> M
 /// What one live run produced.
 struct LiveRun {
     invocation: String,
+    /// Where the full raw transcript of this run was written.
+    transcript_path: String,
     /// `Some` only when the run PROVED which mode it landed in.
     asserted_mode: Option<String>,
     transcript: String,
     /// Number of provider requests the mock actually served.
     provider_requests: usize,
+}
+
+/// Persist the full raw transcript of one live run and return its path.
+///
+/// The recorded row carries only a head; the boot frame sequence alone exceeds
+/// it. A verdict whose supporting transcript cannot be read afterwards is a
+/// claim, not evidence, so every run's bytes land on disk next to the ledger.
+fn persist_transcript(dimension: Dimension, transport: LiveTransport, body: &str) -> String {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("child-authority-corpus")
+        .join("transcripts");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!(
+        "corpus_{}-{}.txt",
+        dimension.case_id(),
+        transport.label()
+    ));
+    let _ = std::fs::write(&path, body);
+    path.to_string_lossy().into_owned()
 }
 
 /// Drive one live run and prove its mode.
@@ -368,6 +389,14 @@ fn run_live(dimension: Dimension, transport: LiveTransport, world: &LiveWorld) -
     run.provider_requests = rt
         .block_on(crate::support::mock_llm::received_requests(&provider))
         .len();
+    run.transcript_path = persist_transcript(
+        dimension,
+        transport,
+        &format!(
+            "invocation: {}\nprovider requests served: {}\nasserted mode: {:?}\n\n{}",
+            run.invocation, run.provider_requests, run.asserted_mode, run.transcript
+        ),
+    );
     run
 }
 
@@ -405,6 +434,7 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
                 asserted_mode: None,
                 transcript: format!("the binary could not be spawned: {error}"),
                 provider_requests: 0,
+                transcript_path: String::new(),
             };
         }
     };
@@ -500,6 +530,7 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
         asserted_mode: saw_ready.then(|| LiveTransport::JsonStream.label().to_owned()),
         transcript,
         provider_requests: 0,
+        transcript_path: String::new(),
     }
 }
 
@@ -553,6 +584,7 @@ fn run_headless(world: &LiveWorld) -> LiveRun {
                 asserted_mode: None,
                 transcript: format!("the binary could not be spawned: {error}"),
                 provider_requests: 0,
+                transcript_path: String::new(),
             };
         }
     };
@@ -592,6 +624,7 @@ fn run_headless(world: &LiveWorld) -> LiveRun {
         asserted_mode: landed_headless.then(|| LiveTransport::Headless.label().to_owned()),
         transcript,
         provider_requests: 0,
+        transcript_path: String::new(),
     }
 }
 
@@ -681,6 +714,7 @@ fn run_tui(world: &LiveWorld) -> LiveRun {
         asserted_mode: booted.then(|| LiveTransport::Tui.label().to_owned()),
         transcript,
         provider_requests: 0,
+        transcript_path: String::new(),
     }
 }
 
@@ -694,6 +728,7 @@ fn run_tui(world: &LiveWorld) -> LiveRun {
         asserted_mode: None,
         transcript: LiveTransport::Tui.unavailable_reason().to_owned(),
         provider_requests: 0,
+        transcript_path: String::new(),
     }
 }
 
@@ -934,8 +969,8 @@ fn live_probe(entry: &CorpusEntry, transport: LiveTransport) -> ProbeResult {
             asserted_mode,
             observable: format!(
                 "{} provider request(s) served — no delegated child turn, so the verdict was \
-                 withheld",
-                run.provider_requests
+                 withheld; full transcript at {}",
+                run.provider_requests, run.transcript_path
             ),
         });
     }
@@ -943,8 +978,8 @@ fn live_probe(entry: &CorpusEntry, transport: LiveTransport) -> ProbeResult {
     let (outcome, obtained, observable) = observe(entry.dimension, &world, &run);
     let observable = format!(
         "{observable} (the run served {} provider request(s), so a delegated child did reach its \
-         own turn)",
-        run.provider_requests
+         own turn); full transcript at {}",
+        run.provider_requests, run.transcript_path
     );
     ProbeResult::new(
         outcome,
