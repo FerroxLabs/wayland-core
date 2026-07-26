@@ -1,6 +1,6 @@
 {
   "mode": "autonomous",
-  "runtime": "codex",
+  "runtime": "claude",
   "granularity": "standard",
   "workflow": {
     "research": false,
@@ -55,5 +55,12 @@
   "project_code": "WCF",
   "phase_id_convention": "sequential",
   "agent_skills": {},
-  "claude_md_path": "./CLAUDE.md"
+  "claude_md_path": "./CLAUDE.md",
+  "model_overrides": {
+    "ferrox-executor": "sonnet",
+    "ferrox-verifier": "opus",
+    "ferrox-plan-checker": "opus",
+    "ferrox-code-reviewer": "opus",
+    "ferrox-security-auditor": "opus"
+  }
 }
