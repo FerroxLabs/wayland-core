@@ -1213,6 +1213,125 @@ mod tests {
             .unwrap();
     }
 
+    /// Restart reconciliation must decide each SIBLING's reservation on that
+    /// sibling's own evidence, and must post the consequence to that sibling's
+    /// books only.
+    ///
+    /// Two siblings hold in-flight reservations across the same crash and are
+    /// owed opposite outcomes: sibling A's physical send is journalled, so its
+    /// admitted maximum must be charged; sibling B's never started, so its
+    /// reservation must be refunded outright. The failure this pins is the one
+    /// a single-session restart test cannot see — a restart that charges the
+    /// wrong sibling, refunds the wrong sibling, or applies one sibling's
+    /// disposition to both. It also pins the durability claim itself: the
+    /// reservations are read back out of the journal FILE, after the crash and
+    /// before any rebind, so "the reservations were not persisted" and "the
+    /// reservations were persisted and then deliberately reconciled" cannot be
+    /// confused for one another.
+    #[test]
+    fn restart_reconciliation_posts_each_siblings_outcome_to_that_sibling_alone() {
+        const SIBLING_A: &str = "parent/child-alpha";
+        const SIBLING_B: &str = "parent/child-beta";
+
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        baseline(&journal);
+        let mut first =
+            BudgetAuthorityCoordinator::bind(config(Some(journal.clone()), 100)).unwrap();
+        start_turn(&journal, &mut first);
+
+        // Sibling A: the send reached the provider, so the crash must not give
+        // its money back.
+        first
+            .reserve_provider_dispatch("dispatch-alpha", SIBLING_A, 60, 20, 1.0)
+            .unwrap()
+            .unwrap();
+        append_successful_dispatch(&journal, "dispatch-alpha", "attempt-alpha");
+        // Sibling B: no attempt is ever journalled, so the crash owes it a
+        // refund. The amounts differ from A's on every axis, so a disposition
+        // applied to the wrong sibling produces different numbers than a
+        // correct one rather than the same ones.
+        first
+            .reserve_provider_dispatch("dispatch-beta", SIBLING_B, 30, 10, 0.5)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            first
+                .inspect(|tracker, _| (
+                    tracker.reserved_totals(SIBLING_A),
+                    tracker.reserved_totals(SIBLING_B)
+                ))
+                .unwrap(),
+            ((80, 1.0), (40, 0.5))
+        );
+        drop(first);
+
+        // The crash has happened. Before anything rebinds, reload the durable
+        // authority straight out of the journal: both reservations are still
+        // there, on their own siblings, at their own amounts.
+        let durable = journal
+            .state()
+            .unwrap()
+            .budget_authority
+            .expect("the crashed process committed a durable budget authority");
+        assert_eq!(
+            durable
+                .provider_reservations
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["dispatch-alpha", "dispatch-beta"]
+        );
+        let persisted = BudgetTracker::from_snapshot_with_current_caps(
+            durable.provider_tracker.clone(),
+            BudgetCap::builder()
+                .per_session_tokens(100)
+                .per_session_usd(10.0)
+                .build(),
+        )
+        .unwrap();
+        assert_eq!(persisted.reserved_totals(SIBLING_A), (80, 1.0));
+        assert_eq!(persisted.reserved_totals(SIBLING_B), (40, 0.5));
+
+        let restored = BudgetAuthorityCoordinator::bind(config(Some(journal), 100)).unwrap();
+
+        // Sibling A is charged its admitted maximum, and sibling B's refund
+        // does not reduce it.
+        assert_eq!(
+            restored
+                .inspect(|tracker, _| tracker.session_totals(SIBLING_A))
+                .unwrap(),
+            (80, 1.0)
+        );
+        // Sibling B is refunded: nothing reserved and, critically, nothing
+        // charged. Sibling A's settlement did not land here.
+        assert_eq!(
+            restored
+                .inspect(|tracker, _| tracker.session_totals(SIBLING_B))
+                .unwrap(),
+            (0, 0.0)
+        );
+        assert_eq!(
+            restored
+                .inspect(|tracker, _| (
+                    tracker.reserved_totals(SIBLING_A),
+                    tracker.reserved_totals(SIBLING_B)
+                ))
+                .unwrap(),
+            ((0, 0.0), (0, 0.0))
+        );
+
+        // Exactly one settlement, carrying exactly sibling A's numbers. A
+        // reconciliation that settled both, or that settled B instead of A,
+        // reports a different count or different amounts here.
+        let reconciliation = restored.restored_reservation_reconciliation();
+        assert_eq!(reconciliation.reservations_settled, 1);
+        assert_eq!(reconciliation.input_tokens_charged, 60);
+        assert_eq!(reconciliation.output_tokens_charged, 20);
+        assert!((reconciliation.cost_usd_charged - 1.0).abs() < 1e-9);
+    }
+
     #[test]
     fn restart_releases_dispatch_reservation_when_no_send_started() {
         let dir = tempfile::tempdir().unwrap();
