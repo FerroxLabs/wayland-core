@@ -851,8 +851,26 @@ impl SessionManager {
         ))
     }
 
-    fn journal_path(&self, session_id: &str) -> PathBuf {
+    pub(crate) fn journal_path(&self, session_id: &str) -> PathBuf {
         self.directory.join(format!("{session_id}.journal"))
+    }
+
+    /// The directory this manager reads and writes.
+    ///
+    /// Exposed so an operator verb can name the store in a structured error
+    /// (F23-02) instead of reporting a failure with no location.
+    #[must_use]
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    /// The on-disk file backing one session id.
+    ///
+    /// Exposed for the same reason as [`Self::directory`]: an operator-facing
+    /// error about a corrupt session is only actionable if it names the file.
+    #[must_use]
+    pub fn session_file_path(&self, id: &str) -> PathBuf {
+        self.session_path_by_id(id)
     }
 
     #[cfg(test)]

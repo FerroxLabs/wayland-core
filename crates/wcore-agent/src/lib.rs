@@ -95,6 +95,9 @@ pub mod resilient_reporter;
 pub mod rollback_tool;
 pub mod session;
 pub mod session_journal;
+// F23-02 (Phase 23B) — operator verbs over the session substrate: search,
+// inspect, fork, retry, export, retain, reconcile and cancel.
+pub mod session_lifecycle;
 // v0.9.0 W1 B7 — in-process live state surfaces for wayland_status +
 // wayland_telemetry_query tools (introspection backend reads from this).
 pub mod session_state;
