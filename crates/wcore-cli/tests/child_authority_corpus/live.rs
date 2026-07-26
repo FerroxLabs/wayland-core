@@ -960,7 +960,7 @@ fn live_probe(entry: &CorpusEntry, transport: LiveTransport) -> ProbeResult {
 
 fn head(text: &str) -> String {
     let flat: String = text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
-    let cut: String = flat.chars().take(900).collect();
+    let cut: String = flat.chars().take(3000).collect();
     format!("transcript head: {cut}")
 }
 
