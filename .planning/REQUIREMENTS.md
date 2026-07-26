@@ -86,6 +86,18 @@ in-process evidence alone.
 - [ ] **F22-06**: The existing journal is proved compatible with Goal/Task/Wait records or receives one explicit versioned migration; accepted F12 behavior is not silently rewritten.
 - [ ] **F22-07**: Reconnect, stale commands, duplicate acknowledgements, missed intervals, crash/restart, and user preemption preserve one canonical producer state across CLI/TUI/host-protocol paths, with canonical serialized producer fixtures ready for the later D2 consumer gate.
 
+**Execution disposition, 2026-07-26 — every F22 requirement is OPEN, with the unmet clause named.**
+
+| Req | Disposition | Unmet clause |
+|---|---|---|
+| F22-01 | OPEN, untouched | No versioned command or event was added for start/list/inspect/log/steer/pause/cancel/resume/retry/acknowledge. Plan 22-04 was not executed. |
+| F22-02 | OPEN, partially built | The Goal *vocabulary* and the single terminal taxonomy exist (`crates/wcore-types/src/goal.rs`, 7 tests green on Linux). The **durable kernel does not**: no `SessionEvent` variants, no reducer arm, no `ReducedSessionState` field, no cursor exposure, no sole-writer. The requirement's verbs — *owns* objective, authority, budget, evidence, cursor, wait, progress — are all unmet. |
+| F22-03 | OPEN, untouched | No task ledger, no claim, no heartbeat, no ownership handoff. Plan 22-03 was not executed. |
+| F22-04 | OPEN, measured only | The five-strategy census is delivered (`22-02-LOOP-OWNER-CENSUS.md`) and it corrected the plan's own central assumption. No adapter surface, no loop-owner claim, no nesting refusal was built; the five engines still terminate through five vocabularies. |
+| F22-05 | OPEN, vocabulary only | `LoopPolicy` exists as a type with a structural bound on its dynamic form. Nothing enforces expiry, iteration, no-progress, concurrency or cumulative limits at runtime. Plan 22-04 Task 4 was not executed. |
+| F22-06 | OPEN, evidence gathered | The verdict `COMPATIBLE-AT-V5` is measured cross-binary and single-variable on Linux and authorized 4-of-4 by panel (`22-01-JOURNAL-COMPAT.md`). It is NOT complete because (a) the Windows halves of M1–M5 were never taken — the reduce instrument did not finish building on a contended box — and (b) no stored-corpus regression test pins the reduction, so nothing keeps F12 honest going forward. |
+| F22-07 | OPEN, untouched | No reconnect, stale-command, duplicate-ack or preemption behavior; no D2 producer fixtures. Plan 22-04 was not executed. |
+
 ### Phase 23 — Governed Continuous Personal Agency
 
 - [ ] **F23-01**: Generated skills follow detect, draft, quarantine, evaluate, review/policy, promote, observe, revoke, and rollback; unpromoted content cannot execute.

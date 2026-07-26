@@ -1,0 +1,110 @@
+PANEL-CMD: internal adversarial pass, fed the identical bundle at .planning/phases/22-supervision-durable-goals-fleet-loops/22-01-EVIDENCE/decision/panel-prompt.txt
+
+I walked into this believing `additive-at-current-version`. The measurements are
+clean, the mechanism is well understood, and serde's internally-tagged
+representation makes the additive path theoretically transparent. So this pass
+argues against that belief as hard as the evidence allows, because a fourth voice
+that restates the consensus is a rubber stamp and makes the count meaningless.
+
+THE STRONGEST CASE FOR `explicit-versioned-migration`, which I am obliged to make
+honestly rather than to knock down.
+
+The strongest argument is not about decoding. It is about what the version number
+is FOR. Right now `SESSION_JOURNAL_SCHEMA_VERSION = 5` and
+`LEGACY_... = 4`, and `validate_journal_schema_for_reader` admits exactly those
+two. Under `additive-at-current-version`, two journals both stamped v5 can have
+materially different content models: one written before Goal records existed and
+one written after. Anything that needs to distinguish them — a support engineer
+triaging a resume failure, a future migration that must know whether Goal frames
+are present, the Desktop consumer replaying a producer corpus at D2 — must ask
+the content rather than the header. The `cons` paragraph on the additive option
+says this in one clause and then moves on. It deserves more weight than it got,
+because "ask the content" over an append-only chain means a full scan.
+
+The second argument for the migration is the M3 result read pessimistically. M3
+showed the pre-change binary refusing a probe-bearing journal with
+`unknown variant p22_probe`. That is a fail-closed refusal, which is correct, but
+notice the error the user sees: `corrupt complete frame 15`. The word is
+CORRUPT. A user who downgrades wayland-core — which `self-update` makes a
+one-command operation — will be told their session journal is corrupt when it is
+merely newer. Under `explicit-versioned-migration` that same user gets
+`UnsupportedSchema { found: 6, supported: 5 }`, which is a diagnosis instead of
+an accusation. That is a real, user-visible quality difference and it is
+purchasable for 3 failing tests.
+
+The third argument is the weakest but is not nothing: the migration probe
+measured 3 of 76, and all three are constant assertions. The expensive option
+turns out to be cheap. When the cheap-looking option's only advantage over the
+expensive one is cost, and the cost was just measured to be small, the advantage
+mostly evaporates.
+
+THE STRONGEST CASE FOR `escalate`, argued honestly.
+
+Two limitations in the bundle are real. First, the live corpus contains no
+`tool_execution_*` frame, because the provisioned key returns 401. Tool frames
+are the densest, most deeply-nested part of the reduced state — `tools:
+BTreeMap<String, ToolState>` with effect states, hook phases and resolution
+sources. If any additive-transparency defect exists, that is where it would live,
+and the corpus does not touch it. Second, the Windows leg was not in the bundle
+at panel time, and the writer lease is `#[cfg(unix)]`-gated with a recorded prior
+defect class about Windows byte-range locks being mandatory rather than advisory.
+A determination that names two platforms and measures one is, strictly, a
+one-platform determination.
+
+WHY I NEVERTHELESS DO NOT VOTE FOR EITHER OF THOSE.
+
+`escalate` fails on its own definition. The option says the records "cannot be
+carried without invalidating accepted F12 behavior". M1 measured a byte-identical
+SHA-256 over the reduced state, and M2 measured that appending a record changes
+nothing but the chain head. Whatever else is unproven, "cannot be carried" was
+falsified. Voting escalate here would mean escalating a measured negative, which
+is not caution, it is refusing to read the instrument. The tool-frame gap is an
+argument for a stronger corpus in Task 3's Test 6 — and Task 3 already commits to
+storing this exact corpus as a permanent regression fixture — not an argument
+that the additive path is unsafe.
+
+`explicit-versioned-migration` fails on the plain condition written into its own
+`cons`: "this is the expensive option and it is only correct if Task 1 showed the
+additive path is not transparent". Task 1 showed the opposite. My best argument
+above — that v5 stops distinguishing "has Goal records" — is real, but it argues
+for a DIFFERENT thing than a migration: it argues for a content-level capability
+marker, which the additive option can carry as a Goal-opened record at a known
+position, without making 32 occurrences across 4 files and every existing user's
+journal into migration subjects. And the corrupt-versus-unsupported error-message
+argument, which I think is my strongest, is a diagnostics defect, not a schema
+defect. The right response to it is to improve the error, not to burn a version
+number. Filing it as a MEDIUM finding to BACKLOG is the proportionate action.
+
+There is also an asymmetry the migration option's advocates should confront. A
+version bump does not make an old binary read a new journal. It only changes the
+refusal message. Both options produce a hard refusal on downgrade; only one of
+them also invalidates the accepted `LEGACY_EVENT_TYPES` freeze point and requires
+re-freezing a 49-name list at a new boundary, which the option's own `cons`
+identifies as the place where "getting that wrong silently admits a new event into
+an old frame". That is a new silent-admission risk introduced to solve a
+diagnostics problem.
+
+ON THE VERDICT'S SOUNDNESS.
+
+I judge it sound but over-claimed in exactly one respect, and I want that on the
+record rather than absorbed. The evidence supports "additive variants are
+transparent to reduction, chain validation, snapshot binding and forward-refusal
+on Linux, over a corpus of 9 real event types". It does not yet support the
+two-platform claim the plan's own verdict language implies, and it does not touch
+the tool-frame region of the reduced state. I answer `VERDICT_SOUND=yes` because
+the verdict token COMPATIBLE-AT-V5 is about the mechanism, and the mechanism was
+measured end-to-end with a real file and two real binaries. But the executor
+should record the Windows leg and the tool-frame gap as named limitations of the
+determination, not as footnotes, and should not let Task 3 close F22-06 on a
+Linux-only proof.
+
+FINDINGS I WOULD FILE REGARDLESS OF THE OUTCOME:
+ - MEDIUM: a version-skewed journal is reported to the user as "corrupt". It is
+   not corrupt; it is newer. The message should distinguish an unknown event
+   variant from frame corruption.
+ - MEDIUM: `SESSION_JOURNAL_SCHEMA_VERSION` will no longer imply a content model
+   once Goal records land additively. Whatever needs that distinction must be
+   given an explicit content-level marker rather than inferring it from the header.
+
+PANEL_POSITION=additive-at-current-version
+VERDICT_SOUND=yes

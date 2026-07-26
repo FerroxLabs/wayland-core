@@ -1,0 +1,73 @@
+# STEP 2 — pricing the expensive option by measurement rather than by adjective
+# Tree: 2ecdfdf54ff7fda920eec7d068337006e5da4ee4
+# Taken 2026-07-26.
+
+## LEG A — the machinery claim, checked against THIS tree
+
+The `explicit-versioned-migration` option's central pro is that the crate ALREADY
+has the machinery, so the bump is an established pattern rather than a new one.
+Each of the four named pieces is checked present or absent with a citation.
+
+MACHINERY: legacy journal schema constant PRESENT: yes crates/wcore-agent/src/session_journal.rs:49 `pub const LEGACY_SESSION_JOURNAL_SCHEMA_VERSION: u32 = 4;`
+MACHINERY: reader admitting exactly two versions PRESENT: yes crates/wcore-agent/src/session_journal.rs:2129 `fn validate_journal_schema_for_reader` admits `{LEGACY, CURRENT}` and nothing else
+MACHINERY: schema-regression guard PRESENT: yes crates/wcore-agent/src/session_journal.rs:2140 `fn reject_schema_regression` refuses a version going backwards inside one file
+MACHINERY: frozen legacy event-type list PRESENT: yes crates/wcore-agent/src/session_journal.rs:2192 `const LEGACY_EVENT_TYPES` with 49 entries, guarded by the in-source note at :2190
+
+All four claimed pieces are present. The option's "established pattern" pro
+survives measurement; it is not marketing.
+
+## LEG A (continued) — the option's real blast radius
+
+Files in this tree that declare the LEGACY journal or snapshot version, and are
+therefore migration subjects, counted with `/usr/bin/grep -rn --include=*.rs -c`:
+
+  crates/wcore-agent/src/session_journal.rs               19 occurrences
+  crates/wcore-agent/src/session_journal/snapshot.rs       7 occurrences
+  crates/wcore-agent/tests/session_journal_compaction_test.rs   4 occurrences
+  crates/wcore-agent/tests/session_journal_crash_matrix_test.rs 2 occurrences
+
+  MIGRATION-SUBJECT-FILES: 4
+  MIGRATION-SUBJECT-OCCURRENCES: 32
+
+## LEG B — the migration-cost probe, measured live on hetzner-dsm and reverted
+
+Scratch checkout: `/root/wayland-p22-mig` (a copy of the phase-dedicated
+`/root/wayland-p22`; `/root/wayland`, which the rest of the phase measures
+against, was never touched). Exactly ONE thing changed: the journal schema
+constant, 5 -> 6. No new event variant. No other edit. The two files the
+compatibility probe had touched were restored to their committed bytes first so
+the constant was the only delta versus the recorded commit.
+
+Command:
+  CARGO_TARGET_DIR=/root/p22-target-mig cargo nextest run -p wcore-agent \
+    --test session_journal_test --test session_journal_crash_matrix_test \
+    --test session_journal_compaction_test --no-fail-fast
+
+Tool output (the tool's OWN summary line, not an impression of what scrolled past):
+  Summary [   3.373s] 76 tests run: 73 passed, 3 failed, 0 skipped
+
+The three that go red on a bare constant bump:
+  wcore-agent::session_journal_test checksum_sequence_previous_and_schema_tampering_fail_closed
+  wcore-agent::session_journal_test public_replay_boundary_enforces_forward_only_schema_history
+  wcore-agent::session_journal_test unreleased_v3_journal_schema_is_explicitly_rejected_before_event_decode
+
+MIGRATION-COST-PROBE: failing_tests=3 total_tests=76 commit=2ecdfdf54ff7fda920eec7d068337006e5da4ee4
+
+NOTE ON THE FIRST EMISSION OF THIS NUMBER. The probe script's first attempt
+printed `failing_tests=0` because it counted lines matching `^ *FAIL [`, and
+nextest prints a retried failure as `TRY 2 FAIL [`. The summary line said 3.
+That is precisely the self-passing shape this program's plan-gate lint rule
+exists to catch, produced by this executor's own script, and it is recorded
+rather than quietly corrected. The number above is re-derived by parsing
+nextest's own summary line.
+
+## WHAT THE MEASUREMENT MEANS FOR THE OPTION
+
+3 of 76 is a small, bounded, well-understood repair set: all three are
+version-boundary tests that assert the exact constants. It is NOT free, and the
+32 occurrences across 4 files are real edit surface, but the expensive option is
+cheaper than its `cons` paragraph implies. The probe therefore does NOT
+disqualify `explicit-versioned-migration` on cost; the decision has to turn on
+whether the migration is NEEDED, which is Task 1's question, not this one's.
+
+The tree, the target dir and the bump were removed after the measurement.
