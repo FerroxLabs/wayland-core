@@ -149,3 +149,7 @@ pub mod image;
 // (`POST /v1/fetch`). Lives in the lib so credential resolution is
 // unit-testable; reuses the same Flux key/base resolution as `image`.
 pub mod fetch;
+
+// F25-01: CLI surface `wayland-core backend` — the execution-backend operator
+// surface (list / probe / run / cancel / orphans / receipt verify / diff).
+pub mod backend;

@@ -83,6 +83,8 @@ wcore-replay.workspace   = true
 wcore-repomap.workspace  = true
 wcore-tools.workspace    = true
 wcore-sandbox.workspace  = true
+# F25-01: the `wayland-core backend` operator surface.
+wcore-exec-backend.workspace = true
 wcore-mcp.workspace      = true
 # v0.6.4 Task 2.5: `PolicyGateAdapter` bridges `wcore-mcp::PolicyCheck` to
 # the workspace `PolicyGate`. The `mcp-serve` subcommand constructs a
