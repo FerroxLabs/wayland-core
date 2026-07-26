@@ -1,11 +1,142 @@
 use std::ffi::OsString;
-use std::fs::{File, OpenOptions, TryLockError};
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use super::JournalError;
+
+/// Outcome of a non-blocking attempt to take the journal authority lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AuthorityLock {
+    /// This handle now owns the authority lock.
+    Acquired,
+    /// Another handle on the same file object already owns it.
+    Contended,
+}
+
+/// Take the journal authority lock without blocking.
+///
+/// The lock is bound to the underlying file object, not to a pathname, so a
+/// hard-link alias of an already-locked journal contends here rather than
+/// minting a second writer authority.
+#[cfg(unix)]
+fn try_lock_authority(file: &File) -> std::io::Result<AuthorityLock> {
+    match file.try_lock() {
+        Ok(()) => Ok(AuthorityLock::Acquired),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(AuthorityLock::Contended),
+        Err(std::fs::TryLockError::Error(source)) => Err(source),
+    }
+}
+
+#[cfg(unix)]
+fn unlock_authority(file: &File) -> std::io::Result<()> {
+    file.unlock()
+}
+
+/// Byte range reserved for the Windows authority lock.
+///
+/// Unix `flock` is advisory: it excludes competing lock holders without
+/// blocking anybody's reads. Windows `LockFileEx` is *mandatory* over the
+/// range it covers, and `File::try_lock` covers the whole file - so on Windows
+/// a locked journal makes every other handle's read fail with
+/// `ERROR_LOCK_VIOLATION` (33), including this crate's own `replay` and
+/// `recovered_state` read paths.
+///
+/// Locking a one-byte sentinel past the largest addressable file offset keeps
+/// the exclusion semantics identical (it is still bound to the file object, so
+/// hard-link aliases contend) while leaving all real journal bytes readable and
+/// appendable.
+#[cfg(windows)]
+const AUTHORITY_LOCK_OFFSET: u64 = u64::MAX - 1;
+#[cfg(windows)]
+const AUTHORITY_LOCK_LENGTH: u64 = 1;
+
+#[cfg(windows)]
+fn authority_lock_overlapped() -> windows_sys::Win32::System::IO::OVERLAPPED {
+    // SAFETY: OVERLAPPED is a plain-old-data struct with no invalid bit
+    // patterns; an all-zero value is its documented initial state.
+    let mut overlapped =
+        unsafe { std::mem::zeroed::<windows_sys::Win32::System::IO::OVERLAPPED>() };
+    overlapped.Anonymous.Anonymous.Offset = AUTHORITY_LOCK_OFFSET as u32;
+    overlapped.Anonymous.Anonymous.OffsetHigh = (AUTHORITY_LOCK_OFFSET >> 32) as u32;
+    overlapped
+}
+
+#[cfg(windows)]
+fn try_lock_authority(file: &File) -> std::io::Result<AuthorityLock> {
+    use std::os::windows::io::AsRawHandle as _;
+
+    use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
+    use windows_sys::Win32::Storage::FileSystem::{
+        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
+    };
+
+    let mut overlapped = authority_lock_overlapped();
+    // SAFETY: `file` keeps the OS handle valid for the call and `overlapped`
+    // is a live, correctly initialised OVERLAPPED for the sentinel range.
+    let succeeded = unsafe {
+        LockFileEx(
+            file.as_raw_handle(),
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            AUTHORITY_LOCK_LENGTH as u32,
+            (AUTHORITY_LOCK_LENGTH >> 32) as u32,
+            &mut overlapped,
+        )
+    };
+    if succeeded != 0 {
+        return Ok(AuthorityLock::Acquired);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) {
+        Ok(AuthorityLock::Contended)
+    } else {
+        Err(error)
+    }
+}
+
+#[cfg(windows)]
+fn unlock_authority(file: &File) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle as _;
+
+    use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+
+    let mut overlapped = authority_lock_overlapped();
+    // SAFETY: `file` keeps the OS handle valid for the call and `overlapped`
+    // is a live, correctly initialised OVERLAPPED for the sentinel range.
+    let succeeded = unsafe {
+        UnlockFileEx(
+            file.as_raw_handle(),
+            0,
+            AUTHORITY_LOCK_LENGTH as u32,
+            (AUTHORITY_LOCK_LENGTH >> 32) as u32,
+            &mut overlapped,
+        )
+    };
+    if succeeded == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn try_lock_authority(_file: &File) -> std::io::Result<AuthorityLock> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "journal authority locking is unavailable on this platform",
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn unlock_authority(_file: &File) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "journal authority locking is unavailable on this platform",
+    ))
+}
 
 pub(super) fn normalized_path(path: &Path) -> Result<PathBuf, JournalError> {
     let absolute = if path.is_absolute() {
@@ -72,12 +203,12 @@ impl WriterLease {
     pub(super) fn acquire(journal_path: &Path, session_id: &str) -> Result<Self, JournalError> {
         let path = lease_path(journal_path);
         let mut file = open_or_create_nofollow(&path)?;
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => {
+        match try_lock_authority(&file) {
+            Ok(AuthorityLock::Acquired) => {}
+            Ok(AuthorityLock::Contended) => {
                 return Err(JournalError::AlreadyOwned { lease_path: path });
             }
-            Err(TryLockError::Error(source)) => return Err(JournalError::Io { path, source }),
+            Err(source) => return Err(JournalError::Io { path, source }),
         }
         run_after_lease_lock_hook(&path);
         validate_opened_regular_file(&file, &path)?;
@@ -107,7 +238,7 @@ impl WriterLease {
             .and_then(|()| file.write_all(&bytes))
             .and_then(|()| file.sync_all())
         {
-            let _ = file.unlock();
+            let _ = unlock_authority(&file);
             return Err(JournalError::Io { path, source });
         }
         validate_opened_regular_file(&file, &path)?;
@@ -319,12 +450,12 @@ fn configure_reparse_safe(options: &mut OpenOptions) {
 fn configure_reparse_safe(_options: &mut OpenOptions) {}
 
 pub(super) fn lock_data_file(file: &File, path: &Path) -> Result<(), JournalError> {
-    match file.try_lock() {
-        Ok(()) => Ok(()),
-        Err(TryLockError::WouldBlock) => Err(JournalError::AlreadyOwned {
+    match try_lock_authority(file) {
+        Ok(AuthorityLock::Acquired) => Ok(()),
+        Ok(AuthorityLock::Contended) => Err(JournalError::AlreadyOwned {
             lease_path: path.to_path_buf(),
         }),
-        Err(TryLockError::Error(source)) => Err(JournalError::Io {
+        Err(source) => Err(JournalError::Io {
             path: path.to_path_buf(),
             source,
         }),
@@ -491,7 +622,7 @@ impl Drop for WriterLease {
             .set_len(0)
             .and_then(|()| self.file.seek(SeekFrom::Start(0)).map(|_| ()))
             .and_then(|()| self.file.sync_all());
-        let _ = self.file.unlock();
+        let _ = unlock_authority(&self.file);
     }
 }
 
@@ -522,18 +653,18 @@ fn read_owner(path: &Path) -> Result<LeaseOwner, JournalError> {
             "writer lease contains invalid owner metadata".to_owned(),
         ));
     }
-    match file.try_lock() {
-        Ok(()) => {
-            let _ = file.unlock();
+    match try_lock_authority(&file) {
+        Ok(AuthorityLock::Acquired) => {
+            let _ = unlock_authority(&file);
             Err(JournalError::InvalidTransition(
                 "writer lease is not actively owned".to_owned(),
             ))
         }
-        Err(TryLockError::WouldBlock) => {
+        Ok(AuthorityLock::Contended) => {
             ensure_path_identity(&file, path)?;
             Ok(owner)
         }
-        Err(TryLockError::Error(source)) => Err(JournalError::Io {
+        Err(source) => Err(JournalError::Io {
             path: path.to_path_buf(),
             source,
         }),
