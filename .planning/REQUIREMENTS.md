@@ -95,6 +95,21 @@ in-process evidence alone.
 - [ ] **F23-05**: A multi-day resume/wait/complete scenario proves cumulative authority, resource, memory, evidence, and delivery state survives restart without a second loop owner.
 - [ ] **F23-06**: `wcore-repomap` becomes a persistent incremental hybrid repository index with content-hash add/change/delete/rename/worktree invalidation, Git-respecting scope, BM25/FTS plus symbols and optional semantic/RRF retrieval, exact-search fallback, provenance/staleness, secret/authority isolation, and warm-start/size/latency/retrieval-quality gates.
 
+**Phase 23B disposition (2026-07-26).** No F23 requirement is marked complete. Full
+grading in `.planning/phases/23B-continuous-agency/23B-PHASE-DISPOSITION.md`.
+
+- **F23-02 — INCOMPLETE, substantial delivery.** `wayland-core session` ships every
+  listed verb plus `cancel`, driven against the shipped binary on Linux with captured
+  per-verb evidence; the `reconcile`/`cancel` pair closes live Windows UAT defect D2 end
+  to end. Unmet clauses: macOS not driven, Windows not driven, TUI verbs not added or
+  driven, `retry` live-proved only on its refusal path, binary provenance is base-sha
+  only. Evidence: `23B-01-LIVE-EVIDENCE.md`.
+- **F23-03 — INCOMPLETE, not started.** Plan 23B-02 was not executed.
+- **F23-04 — INCOMPLETE, not started.** Plan 23B-02 was not executed.
+- **F23-05 — INCOMPLETE, not started.** Plan 23B-04 was not executed.
+- **F23-06 — INCOMPLETE, not started.** Plan 23B-03 was not executed; `wcore-repomap`
+  is unchanged.
+
 ### Phase 24 — Gateway, Automation, Channels, and Typed API
 
 - [ ] **F24-01**: One persistent gateway runtime provides install/start/stop/restart/status/doctor/logs/drain, profile isolation, active-turn visibility, graceful recovery, and native service management.
