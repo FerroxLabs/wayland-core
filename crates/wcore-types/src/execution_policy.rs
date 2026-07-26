@@ -135,6 +135,15 @@ impl BaselineExecutionPolicy {
     /// weaken an installed Managed floor. Smart sessions accept the selected
     /// approval policy; Managed sessions keep whichever policy asks for more
     /// consent.
+    ///
+    /// A [`PolicySource::Child`] request is ALWAYS a ratchet, never a
+    /// replacement, on both branches. Phase 21 F21-01 requires a delegated
+    /// actor to stay inside its parent's authority envelope, and before this
+    /// the non-managed branch accepted a child-sourced `Bypass` verbatim -- so
+    /// a `Prompt` parent could be replaced by a `Bypass` child. The property
+    /// held only because `PolicySource::Child` has no production constructor,
+    /// which is enforcement by absence rather than enforcement. It now holds
+    /// because the child branch takes the stricter of the two.
     pub const fn with_requested_approvals(
         &self,
         requested: ApprovalPolicy,
@@ -148,6 +157,8 @@ impl BaselineExecutionPolicy {
                 source: PolicySource::Managed,
                 managed_dangerous: self.managed_dangerous,
             }
+        } else if matches!(source, PolicySource::Child) {
+            Self::smart(stricter_approval_policy(self.approvals, requested), source)
         } else {
             Self::smart(requested, source)
         }
@@ -508,6 +519,77 @@ mod tests {
                 assert_eq!(resolved.approvals(), ApprovalPolicy::Prompt);
                 assert_eq!(resolved.source(), PolicySource::Managed);
             }
+        }
+    }
+
+    /// Phase 21 F21-01 / corpus finding F21-02-02. The MANAGED branch already
+    /// ratcheted; this is the NON-managed branch, which accepted a
+    /// child-sourced `Bypass` verbatim and so let a delegated actor widen its
+    /// parent's approval posture. The corpus measured that behaviour
+    /// executably on both platforms and both surfaces.
+    #[test]
+    fn smart_approval_posture_cannot_be_weakened_by_a_child_sourced_request() {
+        // A Prompt parent handed the weakest possible child request keeps
+        // Prompt. Before the ratchet this returned Bypass.
+        let parent =
+            BaselineExecutionPolicy::smart(ApprovalPolicy::Prompt, PolicySource::LocalCliLaunch);
+        for requested in [ApprovalPolicy::Bypass, ApprovalPolicy::AutoEdit] {
+            let resolved = parent.with_requested_approvals(requested, PolicySource::Child);
+            assert_eq!(
+                resolved.approvals(),
+                ApprovalPolicy::Prompt,
+                "a child requesting {requested:?} widened a Prompt parent"
+            );
+            assert_eq!(resolved.source(), PolicySource::Child);
+            assert_eq!(resolved.posture(), ExecutionPosture::Smart);
+        }
+
+        // An AutoEdit parent still refuses the strictly weaker Bypass...
+        let parent =
+            BaselineExecutionPolicy::smart(ApprovalPolicy::AutoEdit, PolicySource::LocalCliLaunch);
+        assert_eq!(
+            parent
+                .with_requested_approvals(ApprovalPolicy::Bypass, PolicySource::Child)
+                .approvals(),
+            ApprovalPolicy::AutoEdit,
+            "a child widened an AutoEdit parent to Bypass"
+        );
+        // ...but a child asking for MORE consent than its parent is honoured,
+        // because the invariant is non-wideability, not immutability.
+        assert_eq!(
+            parent
+                .with_requested_approvals(ApprovalPolicy::Prompt, PolicySource::Child)
+                .approvals(),
+            ApprovalPolicy::Prompt,
+            "a child asking for stricter approvals should be honoured"
+        );
+    }
+
+    /// The ratchet is scoped to `PolicySource::Child` and must not silently
+    /// become a global posture freeze: every non-child source still selects
+    /// the requested policy on a Smart session, exactly as before.
+    #[test]
+    fn non_child_sources_still_select_the_requested_approvals_on_a_smart_session() {
+        let parent =
+            BaselineExecutionPolicy::smart(ApprovalPolicy::Prompt, PolicySource::LocalCliLaunch);
+        for source in [
+            PolicySource::UserConfig,
+            PolicySource::Project,
+            PolicySource::Environment,
+            PolicySource::LocalCliLaunch,
+            PolicySource::DesktopLocalLaunch,
+            PolicySource::Protocol,
+            PolicySource::Acp,
+            PolicySource::Tui,
+            PolicySource::Resume,
+        ] {
+            let resolved = parent.with_requested_approvals(ApprovalPolicy::Bypass, source);
+            assert_eq!(
+                resolved.approvals(),
+                ApprovalPolicy::Bypass,
+                "{source:?} lost its ability to select an approval policy"
+            );
+            assert_eq!(resolved.source(), source);
         }
     }
 
