@@ -54,7 +54,7 @@ use wcore_tools::Tool;
 use wcore_tools::delegate::DelegateTool;
 use wcore_tools::vfs::{RealFs, SandboxedFs, SecretDenyFs, VirtualFs};
 use wcore_tools::workspace_policy::WorkspacePolicy;
-use wcore_types::execution_policy::{ApprovalPolicy, EffectiveExecutionPolicy, PolicySource};
+use wcore_types::execution_policy::{ApprovalPolicy, BaselineExecutionPolicy, PolicySource};
 use wcore_types::llm::LlmEvent;
 use wcore_types::message::{FinishReason, StopReason, TokenUsage};
 use wcore_types::spawner::{ForkOverrides, Spawner, SubAgentConfig};
@@ -550,14 +550,22 @@ pub fn approval_no_channel_canary() -> ProbeResult {
         .filter(|file| !file.ends_with("wcore-types/src/execution_policy.rs"))
         .collect();
 
-    let parent = EffectiveExecutionPolicy::smart(ApprovalPolicy::Prompt, PolicySource::Cli);
-    let resolved = parent.with_requested_approvals(ApprovalPolicy::Bypass, PolicySource::Cli);
+    // The seam the census names is `with_requested_approvals` on
+    // `BaselineExecutionPolicy` — `EffectiveExecutionPolicy` is the output-only
+    // shape and carries no resolver, which is precisely the design that forces
+    // an untrusted input through this call. The requested source is
+    // `PolicySource::Child`: the type already exists, so the shape of the
+    // future channel is declared even though nothing production constructs it.
+    let parent =
+        BaselineExecutionPolicy::smart(ApprovalPolicy::Prompt, PolicySource::LocalCliLaunch);
+    let resolved = parent.with_requested_approvals(ApprovalPolicy::Bypass, PolicySource::Child);
     let resolver_note = format!(
-        "resolver measurement (non-managed parent at {:?}, request Bypass): posture {:?}, \
-         approvals {:?}, managed {}",
+        "resolver measurement (non-managed parent at {:?}, child request Bypass): posture {:?}, \
+         approvals {:?}, source {:?}, managed {}",
         parent.approvals(),
         resolved.posture(),
         resolved.approvals(),
+        resolved.source(),
         resolved.is_managed()
     );
 
