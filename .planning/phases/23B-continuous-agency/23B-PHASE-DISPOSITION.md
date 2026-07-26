@@ -114,8 +114,12 @@ path. Measured 8/8 and 9/10 in two bursts under concurrent compile load on
 This is strictly worse than the defect Phase 23B was chartered to close. D2 leaves a
 session blocked but repairable — which 23B-01 now repairs. 23B-H1 leaves it
 permanently unreadable, and it undercuts Criterion 5 before that criterion is even
-attempted. It has not been confirmed against a pristine baseline binary; doing so is
-the highest-value single next action in this phase's area.
+attempted.
+
+**Confirmed pre-existing.** The build host was reverted to untouched base sources and
+`wayland-core` rebuilt; the binary was verified pristine by `session --help` exiting
+non-zero (this phase's subcommand absent from it). Driving only the engine's own
+`--resume` path, the defect reproduced **9/10**. It is not a Phase 23B regression.
 
 Full evidence: `23B-01-LIVE-EVIDENCE.md` §3. Filed for BACKLOG as SR-23B-05.
 
@@ -132,8 +136,8 @@ Full evidence: `23B-01-LIVE-EVIDENCE.md` §3. Filed for BACKLOG as SR-23B-05.
    blocks 23B-02, 23B-03 and 23B-04, all of which consume that script unchanged.
    One of the two must be relaxed before any macOS row in Phase 23B can close.
 
-2. **23B-H1 needs a pristine-baseline confirmation**, and if confirmed, a tracked issue
-   rather than a backlog row. Opening the issue is reserved to Sean.
+2. **23B-H1 is confirmed pre-existing (9/10 on a pristine baseline binary) and needs a
+   tracked issue**, not a backlog row. Opening the issue is reserved to Sean.
 
 3. **Build-host disk exhaustion.** `hetzner-dsm` reached 93% with six phases building
    concurrently; the full `-p wcore-agent -p wcore-cli` aggregate failed with

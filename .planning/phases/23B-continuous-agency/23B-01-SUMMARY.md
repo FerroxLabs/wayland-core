@@ -125,7 +125,7 @@ path (T-23B01-02).
 
 | ID | Severity | Finding |
 |---|---|---|
-| 23B-H1 | **HIGH** | A cleanly-exited run can write a journal the product cannot read back: `--resume` fails with `journal checksum mismatch at sequence 16` on a session `--list-sessions` still shows. 8/8 and 9/10 in two bursts under load, 0/3 when the host was quiet. Pre-existing; nothing in this phase touches the journal write path. See `23B-01-LIVE-EVIDENCE.md` §3. |
+| 23B-H1 | **HIGH** | A cleanly-exited run can write a journal the product cannot read back: `--resume` fails with `journal checksum mismatch at sequence 16` on a session `--list-sessions` still shows. 8/8 and 9/10 in two bursts under load, 0/3 when the host was quiet. **Confirmed pre-existing: 9/10 against a pristine binary rebuilt from `15971d1b` with every Phase 23B source removed**, driving only the engine's `--resume` path. See `23B-01-LIVE-EVIDENCE.md` §3. |
 | 23B-M1 | MEDIUM | `--list-sessions` prints to STDERR; the new subcommand prints to STDOUT. Deliberate divergence, not converged. |
 | 23B-M2 | MEDIUM | `retry` derives approval admissibility from durable tool-effect state, not a live re-evaluation of the policy gate. Strictly conservative but not the full re-derivation F23-02 describes. |
 | 23B-M3 | MEDIUM | Provider-attempt receipts carry no `source` field, so the journal cannot record that a human rather than the engine asserted the outcome. |

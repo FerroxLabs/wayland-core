@@ -104,15 +104,25 @@ was quiet and did not reproduce; bursts 1 and 2 ran under concurrent compile loa
 other phases (15-minute load average 28). Journal size at failure ≈ 203 KB versus
 ≈ 71 KB on the passing shape, so the failing runs get further through the turn.
 
-**Why this is attributed to the product and not to this phase.** The three changed
-files on the write path are: two accessor methods and one visibility change in
-`session.rs`, a new module the engine never calls, and a new CLI subcommand. Nothing
-in this phase touches journal append, checksum computation, or flush ordering. The
-failing read is the ENGINE's own resume path, which this phase does not modify.
+**CONFIRMED PRE-EXISTING against a pristine baseline binary.** The build host was
+reverted to untouched base sources (`git checkout -- crates/`, the three new files moved
+out, `Cargo.lock` restored) and `wayland-core` was rebuilt. The binary was verified
+pristine by the absence of this phase's own work: `wayland-core session --help` exits
+non-zero, because the subcommand does not exist in it. Re-running the burst against that
+binary, using the ENGINE path only (`--resume`, never the new subcommand):
 
-**The one verification I did NOT do:** build a pristine binary from `15971d1b` with no
-phase sources applied and re-run the burst. That would convert "very high confidence
-pre-existing" into proof. It is the single highest-value next step on this finding.
+| Binary | Runs | `--resume` OK | checksum mismatch |
+|---|---|---|---|
+| **pristine `15971d1b`, no phase sources** | 10 | 1 | **9** |
+
+The defect reproduces identically without a single line of Phase 23B in the build. It is
+a pre-existing product defect, not a regression introduced here. The build host was
+restored afterwards.
+
+Corroborating structural argument: the only changes this phase makes anywhere near the
+write path are two accessor methods and one visibility change in `session.rs`, a new
+module the engine never calls, and a new CLI subcommand. Nothing touches journal append,
+checksum computation, or flush ordering.
 
 ---
 
