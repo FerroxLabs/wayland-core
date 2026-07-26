@@ -1195,15 +1195,20 @@ mod tests {
         make_private(path);
     }
 
-    #[cfg(unix)]
+    /// Give a fixture the same privacy the snapshot writer installs.
+    ///
+    /// Mode 0600 on Unix, a protected owner-only DACL on Windows. Making this
+    /// a no-op off Unix left the fixture carrying the directory's inherited
+    /// DACL, so the loader rejected it with `SnapshotUnsafePermissions` before
+    /// it could ever reach the behaviour under test.
     fn make_private(path: &Path) {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        secure_private_snapshot_file(&file, path).unwrap();
     }
-
-    #[cfg(not(unix))]
-    fn make_private(_path: &Path) {}
 
     fn authority_head() -> SnapshotAuthorityHead {
         SnapshotAuthorityHead::default()
