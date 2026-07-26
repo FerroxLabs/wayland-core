@@ -84,12 +84,37 @@ STATIC_RULES = [
 SELF_WRITTEN_RE = re.compile(r"grep[^\n]*?([A-Za-z0-9_.\-/]*\d{2}[A-Z]?-\d{2}-[A-Z-]+\.md)")
 
 
+# An <automated> block is a short list of shell commands. When one runs to dozens
+# of lines it means the opening tag was never closed and the non-greedy match ran
+# on to the NEXT block's closer, swallowing frontmatter and prose. Linting that as
+# gate text produces a flood of nonsense findings, and it inflated an early
+# measurement of this very repo by roughly 3x. Treat it as the plan defect it is.
+MALFORMED_BLOCK_LINES = 12
+
+
 def extract_gates(path):
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
+
+    opens = len(re.findall(r"<automated>", text))
+    closes = len(re.findall(r"</automated>", text))
+    malformed = []
+    if opens != closes:
+        malformed.append(
+            f"{opens} <automated> opening tag(s) but {closes} closing tag(s) -- gate "
+            "text is ambiguous and anything parsed from this file is unreliable"
+        )
+
     offsets = []
     for m in AUTOMATED_RE.finditer(text):
         line_no = text.count("\n", 0, m.start()) + 1
+        body_lines = [l for l in m.group(1).strip().splitlines() if l.strip()]
+        if len(body_lines) > MALFORMED_BLOCK_LINES:
+            malformed.append(
+                f"line {line_no}: <automated> block spans {len(body_lines)} lines, "
+                "which almost always means an unclosed tag above it swallowed prose"
+            )
+            continue
         for raw in m.group(1).strip().splitlines():
             # Gate text is XML-escaped inside the PLAN's <automated> element, so
             # `&&` arrives as `&amp;&amp;`. Running it un-unescaped makes every
@@ -100,7 +125,7 @@ def extract_gates(path):
             if cmd and not cmd.startswith("#"):
                 offsets.append((line_no, cmd))
             line_no += 1
-    return offsets
+    return offsets, malformed
 
 
 def static_findings(path, gates):
@@ -170,7 +195,11 @@ def main(argv):
     findings = []
     total_gates = 0
     for f in sorted(files):
-        gates = extract_gates(f)
+        gates, malformed = extract_gates(f)
+        for msg in malformed:
+            findings.append(("HIGH", "malformed-automated-block", f, 0, msg,
+                             "Close every <automated> tag. An unclosed one makes the gate "
+                             "text ambiguous to every reader, human or tool."))
         total_gates += len(gates)
         findings += static_findings(f, gates)
         if not static_only:
