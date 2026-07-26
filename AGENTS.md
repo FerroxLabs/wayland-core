@@ -393,6 +393,7 @@ Key references in `docs/` (don't duplicate their content here):
 When the user corrects your approach, append a one-line rule here before ending the session. Write it concretely ("Always use X for Y"), never abstractly ("be careful with Y"). If an existing line already covers the correction, tighten it instead of adding a new one. Remove lines when the underlying issue goes away (model upgrades, refactors, process changes).
 
 - When exporting a GSD program for transfer, include the entire milestone, canonical source documents, all phases and requirements, current execution state, and supporting evidence inventory; never export only the active phase unless explicitly requested.
+- **Live testing ranks at least as high as green code.** Close every Success Criterion by exercising the real shipped product — the actual CLI binary, and the actual TUI wherever a user sees or drives the behavior — with an exact invocation, an observable outcome, and a named platform. Unit and integration tests are necessary and never sufficient. Windows live runs go to SeanDesktop (`ssh SeanD@seandesktop`, PowerShell default shell, cargo at `C:\Users\seand\.cargo\bin\cargo.exe`); Linux proof stays on `hetzner-dsm:/root/wayland`. Why this rule exists: Phase 20A drove Windows and macOS acceptance targets to CI-green and nobody ever launched the binary — a passing suite proved the suite, not the product.
 
 <!-- IJFW-MEMORY-START -->
 Project memory at .ijfw/memory/. Call `ijfw_memory_prelude` for full context.
