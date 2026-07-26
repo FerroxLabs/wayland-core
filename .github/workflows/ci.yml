@@ -32,7 +32,11 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded PR runs (cheap, and only the latest push matters there),
+  # but NEVER cancel a branch push. Phases 24-27 execute in bounded parallel
+  # worktrees, each pushing its own branch; with unconditional cancellation
+  # those runs terminate each other and the fan-out silently loses CI coverage.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   ci:
