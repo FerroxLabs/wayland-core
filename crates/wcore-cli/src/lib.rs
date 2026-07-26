@@ -140,6 +140,12 @@ pub mod profile;
 // CLI surface: `wayland-core migrate` — import Hermes/OpenClaw setups (#228).
 pub mod migrate;
 
+// F23-02 (Phase 23B) — `wayland-core session`: the operator surface for
+// Success Criterion 2's verbs (list, search, show, checkpoint, rewind, retry,
+// fork, export, retain, reconcile, cancel). Lives in the lib so the
+// integration suite can drive it without the binary.
+pub mod session_cmd;
+
 // CLI surface: `wayland-core image` — FluxRouter image generation
 // (`POST /v1/images/generations`). Lives in the lib so credential
 // resolution + path numbering are unit-testable.

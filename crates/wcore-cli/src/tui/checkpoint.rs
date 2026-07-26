@@ -75,6 +75,23 @@ pub enum CheckpointError {
         /// The underlying i/o error.
         source: std::io::Error,
     },
+
+    /// A recorded destination path resolves outside the workspace root.
+    ///
+    /// F23-02: restore previously *skipped* such an entry and went on to apply
+    /// the rest, so a poisoned or older un-validated `meta.json` produced a
+    /// silent partial rewind with no operator signal. Restore now refuses the
+    /// whole checkpoint before writing anything, because an operator who asked
+    /// to rewind to a known state must not be given a different one quietly.
+    #[error("checkpoint {id} records destination {path} outside workspace root {root}")]
+    DestinationEscapesRoot {
+        /// The checkpoint that carried the escaping path.
+        id: String,
+        /// The escaping destination path as recorded in `meta.json`.
+        path: PathBuf,
+        /// The workspace boundary the store was constructed with.
+        root: PathBuf,
+    },
 }
 
 /// Result alias for checkpoint operations.
@@ -337,9 +354,16 @@ impl CheckpointStore {
         }
         let mut plan: Vec<Action> = Vec::with_capacity(meta.files.len());
         for entry in &meta.files {
-            // Refuse any path that resolves outside the workspace root.
+            // Refuse any path that resolves outside the workspace root. This
+            // returns rather than skipping: PASS 2 has not run, so nothing has
+            // been written, and the operator is told which path was refused
+            // instead of receiving a silently partial rewind (F23-02).
             if !path_within_root(&entry.path, &self.workspace_root) {
-                continue;
+                return Err(CheckpointError::DestinationEscapesRoot {
+                    id: id.0.clone(),
+                    path: entry.path.clone(),
+                    root: self.workspace_root.clone(),
+                });
             }
             match &entry.blob {
                 Some(blob_name) => {
