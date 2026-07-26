@@ -849,10 +849,15 @@ pub fn secret_read_probe() -> ProbeResult {
 pub fn egress_probe() -> ProbeResult {
     let policy = policy_from_config(&Config::default());
     let url = "https://corpus-not-allowlisted.invalid/exfil";
-    let request = wcore_egress::reqwest::Client::new()
-        .get(url)
-        .build()
-        .expect("build a probe request");
+    // The probe hands the policy a request to INSPECT; it never dispatches one,
+    // so no client is constructed. `reqwest::Client::new` is a disallowed method
+    // in this workspace precisely because a client would bypass the B1 egress
+    // chokepoint, and the corpus has no business bypassing the thing it is
+    // measuring.
+    let request = wcore_egress::reqwest::Request::new(
+        wcore_egress::Method::GET,
+        wcore_egress::Url::parse(url).expect("parse the probe destination"),
+    );
 
     let rt = runtime();
     let permitted = matches!(rt.block_on(policy.check(&request)), EgressDecision::Allow);
