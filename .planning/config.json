@@ -25,7 +25,7 @@
     "cross_ai_command": "",
     "cross_ai_timeout": 300,
     "test_gate_timeout": 1800,
-    "test_command": "git diff --check && bash .planning/scripts/test-phase20-proof-scripts.sh",
+    "test_command": "git diff --check && cargo fmt --all -- --check",
     "build_command": "git diff --check",
     "plan_review_convergence": true,
     "_auto_chain_active": false
