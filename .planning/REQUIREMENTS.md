@@ -101,6 +101,20 @@ in-process evidence alone.
 ### Phase 23 — Governed Continuous Personal Agency
 
 - [ ] **F23-01**: Generated skills follow detect, draft, quarantine, evaluate, review/policy, promote, observe, revoke, and rollback; unpromoted content cannot execute.
+  - **Phase 23A disposition (2026-07-26): INCOMPLETE — explicitly not marked complete.**
+    Met: `detect`, `draft`, `quarantine` (sixteen routes enumerated with citations, all
+    gated — `23A-01-SURFACE-CENSUS.md`), and `unpromoted content cannot execute`, observed
+    at the product surface.
+    Partially met: `observe` — `/skill list` tags a draft `(hidden)` and `/skill show`
+    reports `visibility: hidden from model` without disclosing the body, but there is no
+    governance provenance and no append-only history.
+    **Unmet clauses, named:** `evaluate`, `review/policy`, `promote`, `revoke`, `rollback`.
+    `run_skills_promote` (`crates/wcore-cli/src/main.rs:2408`) still fails closed, so
+    "cannot execute before governed promotion" currently holds because no promotion path
+    exists at all — a vacuous satisfaction, recorded as such.
+    **Open HIGH blocking the observe clause in practice:** F23A-01-H2 — any errored tool
+    call kills the session, so the quarantine refusal is real but not survivable
+    (`23A-01-LIVE-EVIDENCE.md` §L4).
 - [ ] **F23-02**: Users can inspect and control durable completion contracts, waits, session search, lineage, checkpoints, retry/regenerate, fork, rewind, redacted operational session/evidence export, retention, and unknown-effect reconciliation.
 - [ ] **F23-03**: Memory and user modeling expose activation truth, recall provenance, correction, forgetting, privacy, retention, provider choice, and bounded proactive nudges.
 - [ ] **F23-04**: Prompt-cache and compaction behavior have visible hit/invalidation reasons, token-pressure state, quality gates, and cost-regression thresholds.
