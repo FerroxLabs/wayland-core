@@ -30,12 +30,16 @@ to do that. The criteria are fixed; the verdict moves.
 
 CRITERION :: 1 :: NOT-MET :: A child cannot widen any provider, tool, filesystem, egress, secret, approval, depth, fan-out, time, token, or cost restriction.
 CRITERION :: 2 :: MET-WITH-STATED-EXCEPTIONS :: Nested reservation, refund, escalation, approval, cancellation, and result delivery remain attributable to the correct parent/session.
-CRITERION :: 3 :: MET-WITH-STATED-EXCEPTIONS :: Standalone and host-protocol hostile corpora prove equivalent enforcement.
+CRITERION :: 3 :: NOT-MET :: Standalone and host-protocol hostile corpora prove equivalent enforcement.
 
-EVIDENCE-LIVE :: 1 :: .planning/phases/21-child-authority-and-budget-inheritance/21-02-CORPUS-RESULTS.md :: eleven dimensions driven on both platforms in four surface/mode combinations; filesystem, egress and secret REFUSED live on Linux and Windows; provider NO-CHANNEL; tool, approval, depth, fan-out, time, token and cost NOT-EXPRESSIBLE on at least one live combination
+AMENDED :: 2026-07-26 :: CRITERION 3 :: MET-WITH-STATED-EXCEPTIONS -> NOT-MET :: at 46dd076a, per VERIFICATION.md F-V2/F-V3 and the repair recorded in 21-05-CRITERION3-REPAIR.md
+
+EVIDENCE-LIVE :: 1 :: .planning/phases/21-child-authority-and-budget-inheritance/21-02-CORPUS-RESULTS.md :: eleven dimensions driven on both platforms in four surface/mode combinations; filesystem, egress and secret REFUSED live on Linux and Windows; provider NO-CHANNEL; tool, approval, depth, fan-out, time, token and cost NOT-EXPRESSIBLE on at least one live combination -- SUPERSEDED, see EVIDENCE-LIVE :: 4: every decisive STANDALONE live verdict in this row came from a run with zero child provider turns
+EVIDENCE-LIVE :: 4 :: .planning/phases/21-child-authority-and-budget-inheritance/21-05-CRITERION3-REPAIR.md :: at 46dd076a, twelve of fourteen decisive live rows carry one or two delegated child provider turns on BOTH surfaces; tool, filesystem, secret, egress and depth REFUSED live with a real actor; provider and approval NO-CHANNEL with a real actor; fan-out and time/token/cost NOT-EXPRESSIBLE live
 EVIDENCE-LIVE :: 1 :: .planning/phases/21-child-authority-and-budget-inheritance/21-03-REPAIR-SET.md :: the one authorized repair recorded CLOSURE :: F21-02-02 :: NOT-CLOSED on its live leg, because no shipped surface offers a child any way to request an approval posture
 EVIDENCE-LIVE :: 2 :: .planning/phases/21-child-authority-and-budget-inheritance/21-04-ATTRIBUTION-RESULTS.md :: six lifecycle events, two siblings each, three generations for escalation and delivery; five of six CORRECT at the real in-process seam on both platforms; zero MISATTRIBUTED anywhere; per-sibling parent_call_id observed on the real wire in every run where the sibling pair survived
-EVIDENCE-LIVE :: 3 :: .planning/phases/21-child-authority-and-budget-inheritance/21-02-CORPUS-RESULTS.md :: the standalone and host-protocol surfaces reached the same enforcement verdict on every decisive dimension, asserted structurally by assert_surface_equivalence rather than compared by eye
+EVIDENCE-LIVE :: 3 :: .planning/phases/21-child-authority-and-budget-inheritance/21-02-CORPUS-RESULTS.md :: the standalone and host-protocol surfaces reached the same enforcement verdict on every decisive dimension, asserted structurally by assert_surface_equivalence rather than compared by eye -- QUALIFIED: for 7 of 11 dimensions the two drivers called the SAME function, so the assertion could not have failed on them; see 21-05-CRITERION3-REPAIR.md section 2
+EVIDENCE-LIVE :: 5 :: .planning/phases/21-child-authority-and-budget-inheritance/21-05-CRITERION3-REPAIR.md :: at 46dd076a the host-protocol driver reaches 9 of 11 dimensions through the production AgentBootstrap + HostChildController path; the remaining 2 record NOT-EXPRESSIBLE with the SubAgentConfig field set as evidence, read by exhaustive destructuring so a new child-request field cannot reach the product without the record being revisited
 
 ### Criterion 1 — NOT MET
 
@@ -130,22 +134,75 @@ The live half of the claim rests on one solid observation and three gaps:
   `pty_capture.rs` is `#![cfg(unix)]` and `support/pty.rs` inherits the gate. No
   headless or json-stream result was substituted for the missing evidence.
 
-### Criterion 3 — MET WITH STATED EXCEPTIONS
+### Criterion 3 — NOT MET (amended 2026-07-26; was MET WITH STATED EXCEPTIONS)
 
-21-02 asserted equivalence structurally rather than by comparison: one corpus
-table iterated across the full cross product of two surfaces and two modes, with
-a completeness invariant making a single-surface case impossible to author. On
-every decisive dimension the two surfaces reached the same enforcement verdict,
-and the mechanism differences (one surface refusing a request the other has no
-way to make) were printed as `SURFACE-MECHANISM-DIFFERENCE` rows rather than
-swallowed.
+**This grade is withdrawn and replaced.** It was awarded to a proof that, as
+written at `1058965e`, could not have failed. Verification found two independent
+defects (`VERIFICATION.md` §4, §5) and both were confirmed by measurement rather
+than argued:
 
-The exception is what equivalence was proved OVER. Six of eleven dimensions were
-`NOT-EXPRESSIBLE` or `NO-CHANNEL` on at least one live combination, so the two
-surfaces agree in substantial part by both being unable to express the hostile
-request. Equivalence over a narrow decisive set is still equivalence, and it was
-demonstrated on both platforms — but it is weaker than the sentence sounds, and
-saying so is the point of this section.
+1. **The standalone half of the equivalence had no actor.** Not one standalone
+   LIVE run on either platform got a delegated child to a provider turn. All
+   twelve decisive standalone live `REFUSED` verdicts came from runs recording
+   `child_turns=0`. The cause is a product fact:
+   `wcore_agent::confirm::ToolConfirmer::check_for` denies any tool call needing
+   confirmation when stdin is not a terminal, so the piped headless transport
+   refused the `Delegate` call before any child existed. The corpus's own
+   transcripts say `X Tool execution denied by user`. The refusals were absences
+   of effect from an actor that never acted.
+2. **Seven of eleven in-process pairings were one function called twice.** The
+   host-protocol driver dispatched to the standalone driver's probe functions, so
+   `assert_surface_equivalence` could not fail on them.
+
+Together, the `MET WITH STATED EXCEPTIONS` grade rested on two identical
+in-process calls agreeing with each other, one genuine two-seam in-process
+comparison, and a live comparison between a surface with a child and a surface
+without one. The section above described the *first* exception (what the set was)
+and missed the *load-bearing* one (that half of it had no actor). That was the
+error, and it is this document's error, not the verifier's.
+
+#### What equivalence is proved OVER at `46dd076a`
+
+The repair is recorded in `21-05-CRITERION3-REPAIR.md`. Restated as the clause
+this criterion is now graded against:
+
+> Across the standalone and host-protocol surfaces, driven both in process and
+> against the real `wayland-core` binary, a delegated actor that **demonstrably
+> took its own provider turn** did not obtain a filesystem root outside its
+> parent's, a credential file its parent's policy denies, an outbound
+> destination its parent's policy does not permit, nesting depth beyond its
+> parent's seeded envelope, a Bash effect its read-only parent does not hold, a
+> provider its parent does not hold, or an approval posture weaker than its
+> parent's — on **Linux**.
+
+That clause is now true, checked, and non-vacuous: twelve of fourteen decisive
+live rows carry one or two child provider turns, and the two surfaces are driven
+through genuinely different object graphs (production `AgentBootstrap` +
+`HostChildController` against a bare `AgentSpawner` + `spawn_fork`).
+
+#### Why that clause is still not the criterion
+
+The criterion says *standalone and host-protocol hostile corpora prove EQUIVALENT
+enforcement*, without qualification. Four unmet clauses:
+
+* **Three of eleven dimensions have no host-protocol expression at all.** Tool
+  and fan-out cannot be requested on the host child-spawn API; egress cannot be
+  attempted because the child registry carries no network-capable tool
+  (`Unknown tool: WebFetch`, measured). Equivalence is not established over
+  those three; their inexpressibility is recorded, not equated.
+* **Fan-out is undetermined live**, on both platforms and both surfaces.
+* **The Windows standalone live surface has no actor at all.** Every PTY-backed
+  transport is unavailable there, and the piped fallback has no approval channel,
+  so no delegated child can act. Windows equivalence is therefore proved over
+  the in-process modes and the host-protocol live mode only.
+* **The tool dimension's REFUSED is jointly attributable** to tool authority and
+  to workspace containment, and Criterion 1 records the tool guard as ABSENT — so
+  that REFUSED must not be read as evidence of tool enforcement.
+
+The phase's own standard — *a criterion that says ANY is not satisfied by MOST* —
+applied honestly to Criterion 3 yields NOT-MET. Recording it that way costs this
+phase its second-best grade and is the correct call: the previous grade's only
+support was a comparison that could not have come out any other way.
 
 ---
 
@@ -233,6 +290,22 @@ they are read.
    being theoretical. 21-02's corpus carries NO-CHANNEL canaries built to go red
    on that day; they are worth more than any currently-green assertion in the
    phase, and Phase 22 must not weaken or delete them.
+
+   **Correction, 2026-07-26 (VERIFICATION.md F-V4).** As shipped at `1058965e`
+   these canaries could NOT go red on that day. The budget canary returned a
+   `String` that nothing asserted on. The approval canary was excused by an early
+   return on its VACUOUS census verdict, so in the exact scenario it exists for —
+   a channel appears AND is live-exploitable — every assertion in the harness
+   passed. The paragraph above was the most important claim in this document and
+   it was false. Repaired at `46dd076a`
+   (`assert_no_channel_canaries_stayed_intact`, checked BEFORE the equivalence
+   pair, on two independent triggers and independent of census verdict). Proved
+   by injecting a production file naming the child-sourced policy request type
+   into the real tree: the suite fails `NO-CHANNEL CANARY TRIPPED` and goes green
+   again the moment that file is removed. Four permanent tests pin the same
+   behaviour as data, including one that pins that every OTHER assertion stays
+   green on that scenario, so the canary can never again be mistaken for
+   redundant. See `21-05-CRITERION3-REPAIR.md` section 3.
 
 3. **F21-04-03 blocks parallel supervision work directly.** Phase 22 supervises
    fleets of children. Two siblings already collide on the journal head about half
