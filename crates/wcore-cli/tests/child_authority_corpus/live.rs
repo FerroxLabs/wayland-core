@@ -452,6 +452,27 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
                 if line.contains("\"type\":\"stream_end\"") {
                     saw_stream_end = true;
                 }
+                // Answer the gate the way a real host does.
+                //
+                // In the default posture the protocol front-end suspends a
+                // mutating or delegating tool call on `approval_required` and
+                // waits for the host's decision. A driver that never answers
+                // leaves the delegation parked forever, the child never runs,
+                // and the corpus would record an absence for every dimension on
+                // this surface — permanently inconclusive, and inconclusive in
+                // the direction that looks like enforcement.
+                //
+                // Approving is the faithful move: it is what the desktop host
+                // does, and it exercises the gate rather than bypassing it with
+                // `--force`, which would silently change the posture the
+                // approval dimension is measuring. Whether a gate appeared at
+                // all is recorded separately and is that dimension's evidence.
+                if let Some(call_id) = approval_call_id(&line) {
+                    let _ = writeln!(
+                        stdin,
+                        "{{\"type\":\"tool_approve\",\"call_id\":\"{call_id}\"}}"
+                    );
+                }
                 transcript.push_str(&line);
                 transcript.push('\n');
                 if saw_stream_end {
@@ -480,6 +501,17 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
         transcript,
         provider_requests: 0,
     }
+}
+
+/// The `call_id` of an `approval_required` frame, or `None` for any other line.
+/// Parsed rather than pattern-matched on text, so a frame whose field order
+/// changes still resolves.
+fn approval_call_id(line: &str) -> Option<String> {
+    let frame: serde_json::Value = serde_json::from_str(line).ok()?;
+    if frame.get("type")?.as_str()? != "approval_required" {
+        return None;
+    }
+    Some(frame.get("call_id")?.as_str()?.to_owned())
 }
 
 /// `wayland-core --no-tui --provider anthropic "<prompt>"` — the standalone
