@@ -85,6 +85,12 @@ pub mod kubectl_tool;
 pub mod linear_tool;
 // T9 (v0.6.3 Tier 2B): pure-string Markdown table format/lint tool.
 pub mod markdown_tool;
+// Phase 27 (F27-01): the ONE bounded, open-once, magic-byte-validated intake
+// shared by the composer path, the document tools and the channel enricher.
+// Measured need: the PDF path resolved the caller's name three times and let a
+// third party issue its own open, so the bytes parsed were not provably the
+// bytes validated. See the module docs for the syscall trace.
+pub mod media_intake;
 // T2-C2: Mixture-of-Agents tool (Wang 2024 — proposer fan-out + aggregator synth).
 pub mod moa;
 // T6 (v0.6.3 Tier 2B): Notion REST API tool — page/block reads +

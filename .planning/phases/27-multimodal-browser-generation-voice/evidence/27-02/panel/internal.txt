@@ -1,0 +1,132 @@
+BUNDLE-SHA256: 5dda53566b934f2d2e751488e2fd3d19956814f2e17613e407867c59cf85b311
+
+INTERNAL ADVERSARIAL PASS — written AFTER codex, gemini and kimi had all
+answered `chain-plus-derived-flags`, and written deliberately AGAINST that
+emerging consensus. Its job is to make the strongest available case for every
+rival option and to name the evidence that would have made each one win. If
+this pass cannot break the consensus, that is worth recording; if it can, the
+consensus loses.
+
+POSITION OF THIS PASS: `chain-plus-new-flags`, argued at full strength below,
+then conceded on a point the other three did not make and this pass cannot
+answer.
+
+--------------------------------------------------------------------------
+THE BEST CASE FOR `chain-plus-new-flags` (the position this pass argues)
+--------------------------------------------------------------------------
+
+1. The three-way consensus rests on an unverified premise about a consumer
+   nobody in this repository can see. Every one of them reasons that the
+   Desktop host "consumes the flags AS readiness", so redefining the field is
+   a bug fix rather than a break. That claim is not in the bundle and is not
+   measurable from this repository. The bundle contains exactly ONE consumer
+   whose behavior is known: `release_binary_smoke.rs`. Its known reaction to
+   the redefinition is to GO RED. So the measured evidence supports "this
+   change breaks the only consumer we can observe", and the consensus
+   overrides that with an assumption about a consumer we cannot observe. That
+   is precisely the inversion the phase rules forbid — a panel claim that a
+   captured experiment contradicts loses to the experiment.
+
+2. Kimi's own answer names the problem and then walks past it. It quotes the
+   question verbatim — "without breaking the existing linkage-derived flags
+   that a shipped host already consumes" — notices that option 2 does exactly
+   the thing the question was framed to avoid, and then decides the framing is
+   less important than the outcome. That is re-scoping the question under the
+   guise of answering it.
+
+3. The "durable misreading hazard" con against new flags is asserted, never
+   measured. Two booleans whose difference is subtle is a documentation
+   problem with a known fix — name them so the difference is not subtle
+   (`browser_backend_ready` versus `browser_suite_linked`). Redefining a live
+   field is a class of change with no fix at all once a host has shipped
+   against it: you cannot un-ring it, and you cannot tell from the wire which
+   meaning a given peer holds.
+
+4. The safety asymmetry runs the other way from how the consensus states it.
+   Under new flags, the worst case is a host that keeps reading the old field
+   and keeps its current, already-shipped behavior — no regression, just an
+   unfixed defect. Under redefined flags, the worst case is a host that reads
+   the old field and silently changes behavior on an engine upgrade, with no
+   error, no event, and nothing in its own logs to explain it. An unfixed
+   defect is recoverable in the next release. A silent behavior change in a
+   field a host trusts is the failure mode this codebase writes fail-closed
+   defaults to avoid.
+
+5. There is a real, cheap experiment that would settle it and NOBODY RAN IT:
+   read the Desktop consumer. The bundle asserts this repository cannot answer
+   what Desktop does with the flags. That is true of this repository — and the
+   question is answerable, just not here. Deciding a compatibility event
+   without that answer is deciding it on a guess.
+
+--------------------------------------------------------------------------
+THE BEST CASE FOR `activation-chain-only`
+--------------------------------------------------------------------------
+
+It is the only option with a zero wire delta, and OBS-06 shows the ladder
+already works, already carries a fixed reason vocabulary, and already refuses
+to construct a reason-less unavailable. Every other option adds surface to a
+protocol that already has the right mechanism and simply has not been pointed
+at these three capabilities. The evidence that would make it win: a
+demonstration that the Desktop host already consumes `capability_activation`
+events — in which case the booleans are legacy noise and touching them buys
+nothing.
+
+--------------------------------------------------------------------------
+THE BEST CASE FOR `escalate`
+--------------------------------------------------------------------------
+
+The decision turns entirely on the behavior of a consumer in a different
+repository that Sean owns and can read in about ninety seconds. Escalation
+here is not parking — it is asking the one question that decides the answer.
+The evidence that would make it win: a genuine 2-2 split. There is none; the
+external panel was 3-0.
+
+--------------------------------------------------------------------------
+WHERE THIS PASS CONCEDES, AND WHY
+--------------------------------------------------------------------------
+
+Argument 1 above is the strongest thing this pass has, and it does not survive
+its own evidence.
+
+The bundle records that `release_binary_smoke.rs` asserts `browser_suite ==
+true` and `computer_use == true`, and OBS-01..07 record that on the machine CI
+actually runs on, no browser backend exists and the very next operation fails.
+So the one consumer this pass invoked as its measured witness is a test that
+currently asserts a FALSE STATEMENT ABOUT THE MACHINE IT RUNS ON, and passes
+only because the flag it asserts does not mean what its name says. Going red
+under a truthful redefinition is not that test detecting a break. It is that
+test finally failing to hide one. A witness whose testimony is the defect
+cannot be cited against the repair.
+
+Argument 4 also weakens on inspection. "A silent behavior change on upgrade"
+is only silent if the change ships unannounced. The plan requires the contract
+minor bumped, the generator version bumped and the manifest regenerated in the
+same commit. That is the announcement channel, and negotiating on it is what
+the contract exists for. The change is loud by construction.
+
+Argument 5 stands and is NOT withdrawn. It is recorded as the open risk this
+decision carries rather than as a reason to choose differently, because the
+alternative it argues for — new flags — leaves OBS-07's false ready reachable
+by every existing consumer, which is a certain harm traded against a possible
+one.
+
+--------------------------------------------------------------------------
+VERDICT OF THIS PASS
+--------------------------------------------------------------------------
+
+`chain-plus-derived-flags`. Reached against its own starting position, on the
+observation that the sole in-repo consumer's red is evidence FOR the change
+rather than against it. Two conditions are carried forward as the cost of the
+choice, and both are additions this pass makes that the other three did not
+all make:
+
+  (a) The linkage answer must survive under an explicit additive name and the
+      LTO guard in `release_binary_smoke.rs` must be RETARGETED onto it, not
+      deleted. If that guard is dropped rather than moved, the release-profile
+      dead-code-strip regression it was written for (v0.2.0 BLOCKER #1) comes
+      back unwatched, and this decision will have traded one defect for
+      another.
+  (b) The Desktop consumer's actual reading of these flags is UNVERIFIED from
+      this repository and must be confirmed before the contract bump is
+      published to a host. That is a real open risk, and the record says so
+      rather than pretending the panel resolved it.

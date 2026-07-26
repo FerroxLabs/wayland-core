@@ -1,0 +1,8 @@
+# Phase 27 / plan 27-02 — readiness publication decision.
+# Bundle: PROMPT.md, sha256 5dda53566b934f2d2e751488e2fd3d19956814f2e17613e407867c59cf85b311
+# All four members received that exact bundle; each capture carries its digest.
+PANEL::codex::chain-plus-derived-flags::capture=codex.txt
+PANEL::gemini::chain-plus-derived-flags::capture=gemini.txt
+PANEL::kimi::chain-plus-derived-flags::capture=kimi.txt
+PANEL::internal::chain-plus-derived-flags::capture=internal.txt
+CHOSEN::chain-plus-derived-flags::majority::rationale=RATIONALE.md::dissent=DISSENT.md

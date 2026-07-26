@@ -1,0 +1,20 @@
+# Phase 27 / plan 27-01 Task 1 — observation ledger.
+# Every row names a captured transcript that exists on disk. Determinations:
+#   CONFIRMED          the divergence reaches the shipped product
+#   REFUTED-NO-DEFECT  the premise is false at the shipped surface
+#   PARTIAL            real, but narrower than the premise stated
+#   SOURCE-ONLY        visible in source, not reachable through the product
+# Host: hetzner-dsm. SHA: 2ecdfdf54ff7fda920eec7d068337006e5da4ee4.
+# Binary: target/release/wayland-core, cargo build --release --locked.
+F27-01-OBS-01::REFUTED-NO-DEFECT::evidence=live/linux-host-valid-png.jsonl
+F27-01-OBS-02::REFUTED-NO-DEFECT::evidence=live/host-mismatch-png-in-jpg.jsonl
+F27-01-OBS-03::REFUTED-NO-DEFECT::evidence=live/host-empty-png.jsonl
+F27-01-OBS-04::REFUTED-NO-DEFECT::evidence=live/host-truncated-png.jsonl
+F27-01-OBS-05::REFUTED-NO-DEFECT::evidence=live/host-under-vision-min.jsonl
+F27-01-OBS-06::REFUTED-NO-DEFECT::evidence=live/host-at-vision-min.jsonl
+F27-01-OBS-07::REFUTED-NO-DEFECT::evidence=live/host-pdf-as-attachment.jsonl
+F27-01-OBS-08::CONFIRMED::evidence=wire/degrade-vision-off.txt
+F27-01-OBS-09::CONFIRMED::evidence=wire/degrade-vision-on.txt
+F27-01-OBS-10::REFUTED-NO-DEFECT::evidence=live/standalone-pdf-valid.txt
+F27-01-OBS-11::PARTIAL::evidence=live/standalone-pdf-mismatch.txt
+F27-01-OBS-12::CONFIRMED::evidence=REOPEN.log

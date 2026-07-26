@@ -1,0 +1,13 @@
+# Phase 27 / plan 27-01 Task 3 — live-exercise ledger.
+# Every row names a captured artifact that exists on disk.
+# PASS/FAIL artifacts carry at least five lines of real capture.
+# NOT-RUN artifacts carry a machine-parseable reason line.
+F27-01-SC1-LinuxHostValid::PASS::evidence=live/linux-host-valid-png.jsonl
+F27-01-SC1-LinuxHostMismatch::PASS::evidence=live/host-mismatch-png-in-jpg.jsonl
+F27-01-SC1-LinuxStandalonePdf::PASS::evidence=live/standalone-pdf-valid.txt
+F27-01-SC1-LinuxStandalonePdfMismatch::PASS::evidence=live/standalone-pdf-mismatch.txt
+F27-01-SC1-DegradeVisionOff::PASS::evidence=wire/degrade-vision-off.txt
+F27-01-SC1-DegradeVisionOn::PASS::evidence=wire/degrade-vision-on.txt
+F27-01-SC1-ReopenTrace::PASS::evidence=REOPEN.log
+F27-01-SC1-PtyTerminal::NOT-RUN::evidence=live/NOT-RUN-pty.txt
+F27-01-SC1-Macos::NOT-RUN::evidence=live/NOT-RUN-macos.txt

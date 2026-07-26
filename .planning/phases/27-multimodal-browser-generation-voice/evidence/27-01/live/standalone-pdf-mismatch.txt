@@ -1,0 +1,48 @@
+wayland-core: --dangerously-skip-permissions bypasses approval prompts only; the OS sandbox remains required. Use --dangerous for an explicit, time-bounded local sandbox bypass.
+warning: /tmp/tmp.TUI5lbniOk/config.toml has permissions 0o644; tightening to 0o600 on next write
+[2m2026-07-26T15:30:38.012699Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37
+[2m2026-07-26T15:30:38.012817Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37
+[2m2026-07-26T15:30:38.013457Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+[2m2026-07-26T15:30:38.013532Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback
+[2m2026-07-26T15:30:38.013545Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices
+[2m2026-07-26T15:30:38.013547Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue
+[2m2026-07-26T15:30:38.013550Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search
+[2m2026-07-26T15:30:38.013552Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists
+[2m2026-07-26T15:30:38.013554Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums
+[2m2026-07-26T15:30:38.013556Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library
+[2m2026-07-26T15:30:38.013564Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao
+[2m2026-07-26T15:30:38.013568Z[0m [33m WARN[0m image_gen: no API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations fallback disabled — tool hidden
+[2m2026-07-26T15:30:38.013577Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+[2m2026-07-26T15:30:38.013597Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-26T15:30:38.013603Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden
+[2m2026-07-26T15:30:38.013605Z[0m [33m WARN[0m tts: no TTS backend configured — set OPENAI_API_KEY or ELEVENLABS_API_KEY (or download Piper voices via piper_download). Tool hidden.
+[2m2026-07-26T15:30:38.013784Z[0m [33m WARN[0m video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+[2m2026-07-26T15:30:38.013812Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-26T15:30:38.014050Z[0m [33m WARN[0m plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool [3mplugin[0m[2m=[0mwayland-browser [3mtool[0m[2m=[0mexecute [3mfq_name[0m[2m=[0mBrowser::execute
+[2m2026-07-26T15:30:38.025085Z[0m [33m WARN[0m semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+[2m2026-07-26T15:30:38.025206Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-26T15:30:38.025215Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-26T15:30:38.027793Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /tmp/tmp.TUI5lbniOk/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+[2m2026-07-26T15:30:38.055198Z[0m [32m INFO[0m F-014: channels auto-registered from ~/.wayland/channels [3mcount[0m[2m=[0m0
+[2m2026-07-26T15:30:38.055222Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-26T15:30:38.055225Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden
+[2m2026-07-26T15:30:38.055238Z[0m [32m INFO[0m Phase 1B-2: inbound channel subscriber spawned
+[2m2026-07-26T15:30:38.055242Z[0m [32m INFO[0m F-014: channel_manager.start_all() complete — inbound polling active
+[2m2026-07-26T15:30:38.066821Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-20250514"
+[2m2026-07-26T15:30:38.066830Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-20250514"
+[2m2026-07-26T15:30:38.066833Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-20250514"
+> pdf_extract({"file_path":"/root/wayland-p27/crates/wcore-fixture-harness/fixtures/f27/intake/mismatch-not-a-pdf.pdf"})
+[2m2026-07-26T15:30:38.069018Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-20250514"
+  X Failed to extract text from /root/wayland-p27/crates/wcore-fixture-harness/fixtures/f27/intake/mismatch-not-a-pdf.pdf: PDF error: couldn't parse input: invalid file header
+[2m2026-07-26T15:30:38.073058Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-20250514"
+[2m2026-07-26T15:30:38.073268Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-20250514"
+[2m2026-07-26T15:30:38.073272Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-20250514"
+[2m2026-07-26T15:30:38.073275Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-20250514"
+
+* F27-MOCK-REPLY[2m2026-07-26T15:30:38.114865Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-20250514"
+[2m2026-07-26T15:30:38.114890Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-20250514"
+[2m2026-07-26T15:30:38.122339Z[0m [32m INFO[0m external edits detected (transcript-suppressed): User edited 352 files while I was thinking (`/root/wayland-p27/docs`, `/root/wayland-p27/docs/design`, `/root/wayland-p27/docs/design/flux-282-reference`, `/root/wayland-p27/docs/decisions`, `/root/wayland-p27/docs/security`, `/root/wayland…[truncated]
+[2m2026-07-26T15:30:38.128454Z[0m [32m INFO[0m auto-memorize skipped this session; no facts saved [3mskip_reason[0m[2m=[0mSome(BelowFactThreshold) [3mcandidates[0m[2m=[0m0
+
+[turns: 2 | tokens: 2 in / 2 out]

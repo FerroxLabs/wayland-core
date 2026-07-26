@@ -153,7 +153,7 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
   3. Built-in, MCP-only, late-MCP, and combined media generation expose consistent discovery, credentials, accounting, and failures.
   4. Streaming voice supports interruption, cancellation, compatibility, accounting, and ordered protocol events.
   5. Deterministic corpora and packaged smokes pass on native macOS, Linux, and Windows.
-**Plans**: TBD
+**Plans**: 4 plans (`27-01`…`27-04`). **Executed 2026-07-26 at base `2ecdfdf5`; GOAL NOT ACHIEVED.** Grades, verbatim per criterion, at `27-PHASE-VERDICT.md`: (1) PARTIAL — the document path has one bounded open-once magic-byte intake and image degradation is landed and live-proved, but "one" path is not true (the composer and channel paths were measured already correct and deliberately not rewritten) and the terminal and macOS halves were never exercised; (2) NOT MET — readiness is unpublished, still linkage-derived and measured `true` on a machine that cannot deliver, decision taken 4-0 but blocked on the fenced protocol seam, and three of four policy guarantees have no baseline; (3) NOT MET — none of the four generation shapes was exercised; (4) NOT MET — no audio ever flowed and no interruption ever occurred on any machine; (5) NOT MET — zero packaged smokes on zero platforms. Two open HIGH findings and one filed seam request.
 
 ### Phase 28: Native Cross-Platform Certification
 **Goal**: The exact candidate proves its security, reliability, recovery, and resource contract natively on all required OS families.
@@ -202,7 +202,7 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
 | 24. Gateway, Automation, Channels, and Typed API | 0/TBD | Not started | - |
 | 25. Remote Reach, Nodes, and Plugin Lifecycle | 0/TBD | Not started | - |
 | 26. Migration, Export, Backup, and Restore | 0/TBD | Not started | - |
-| 27. Multimodal, Browser, Generation, and Voice Contracts | 0/TBD | Not started | - |
+| 27. Multimodal, Browser, Generation, and Voice Contracts | 1/4 | **GOAL NOT ACHIEVED (2026-07-26)** — executed at base `2ecdfdf5`; graded verbatim at `27-PHASE-VERDICT.md`. Criterion 1 PARTIAL, Criteria 2/3/4/5 NOT MET, 0/5 requirements complete. 27-01 complete (termination state 3, partially refuted): one open-once magic-byte intake for the document path plus the `supports_vision` gate on the Anthropic and Gemini builders, both divergences measured live on `hetzner-dsm` — clippy `-D warnings` clean, `wcore-tools`+`wcore-providers` 2132/2132. 27-02 measured and decided (4-0 `chain-plus-derived-flags`) but publishes nothing — blocked on the FENCED protocol seam, request filed at `.planning/SEAM-REQUESTS/27.md`. 27-03 incomplete: real streaming voice with a real interruption was NEVER exercised on any machine. 27-04 not started: zero packaged smokes on zero platforms. | - |
 | 28. Native Cross-Platform Certification | 0/TBD | Not started | - |
 | 29. Supply Chain and Release Integrity | 0/TBD | Not started | - |
 | 30. Continuous Scorecard and Frontier Review | 0/TBD | Not started | - |

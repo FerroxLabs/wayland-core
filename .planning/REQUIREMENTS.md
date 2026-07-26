@@ -174,11 +174,57 @@ complete) never ran. Branch carrying the work:
 
 ### Phase 27 — Multimodal, Browser, Generation, and Voice Contracts
 
+**All five remain OPEN after the 2026-07-26 execution pass.** Nothing here is
+marked complete. Per-requirement disposition with the exact unmet clause is
+below; full grading in
+`phases/27-multimodal-browser-generation-voice/27-PHASE-VERDICT.md`.
+
 - [ ] **F27-01**: Standalone and host paths share one bounded, open-once, magic-byte-validated attachment/document intake pipeline with explicit provider degradation.
+  - **INCOMPLETE — partial.** MET: the document path now uses one bounded,
+    open-once, magic-byte-validated intake (`wcore_tools::media_intake`) with an
+    ingest cap enforced before any payload read; explicit provider degradation
+    for the image class is landed and was proved live on `hetzner-dsm` by
+    capturing byte-identical outbound requests with `supports_vision` false and
+    true, then gating both the Anthropic and Gemini builders.
+  - **UNMET CLAUSE — "share ONE ... pipeline":** the composer path and the
+    channel enricher were measured already open-once and correct and were
+    deliberately not rewritten through the chokepoint, so the mechanism is
+    shared for documents and duplicated elsewhere.
+  - **UNMET CLAUSE — host-path proof:** proved on the wire, never in the
+    terminal (no PTY drive), and never on macOS (no artifact for this SHA).
 - [ ] **F27-02**: Browser, CUA, and web-search capabilities publish live activation/readiness truth and preserve sandbox, egress, approval, and cleanup policy.
+  - **INCOMPLETE.** **UNMET CLAUSE — "publish live activation/readiness
+    truth":** nothing is published. `browser_suite` and `computer_use` are still
+    `true` at HEAD on a machine with no browser binary and no display, measured
+    invariant across five single-variable observations, with the very next
+    operation failing `spawn camoufox: No such file or directory`. The decision
+    is taken (`chain-plus-derived-flags`, 4-0) and blocked on a fenced protocol
+    seam; see `.planning/SEAM-REQUESTS/27.md`.
+  - **UNMET CLAUSE — "preserve sandbox, egress, approval, and cleanup policy":**
+    only origin admission was measured (it holds, fails closed, states its
+    reason). Downloads-root confinement, the approval gate, and the process
+    count across a session plus one reaper interval have no baseline.
 - [ ] **F27-03**: Built-in, MCP-only, late-MCP, and combined image/media generation expose consistent ToolSearch, readiness, credentials, accounting, and failure semantics.
+  - **INCOMPLETE.** **UNMET CLAUSE — all four generation shapes:** none was
+    exercised; the MCP media-tool fixture was never built. MEASURED AND GOOD:
+    the honest-unavailable advisory reaches the model verbatim on the wire,
+    naming each capability and the exact variables that enable it. MEASURED GAP:
+    it reaches no host — zero protocol events. Accounting is SOURCE-ONLY: a
+    media call produces no cost record.
 - [ ] **F27-04**: Speech and realtime/voice capability contracts define streaming, interruption, cancellation, provider compatibility, resource accounting, and protocol behavior.
+  - **INCOMPLETE — nothing exercised.** **EVERY CLAUSE UNMET.** No audio flowed
+    on any machine, no interruption occurred, no cancellation was driven, no
+    event ordering was observed. `seandesktop` has audio, a toolchain and was
+    verified reachable; the path existed and was not taken. This is an execution
+    shortfall, not an environmental impossibility.
 - [ ] **F27-05**: Deterministic image/PDF/docx/xlsx/pptx/browser/media/voice corpora and focused packaged smokes pass on native macOS, Linux, and Windows.
+  - **INCOMPLETE.** **UNMET CLAUSE — packaged smokes:** zero ran on zero
+    platforms. Every Linux measurement came from a `cargo build --release`
+    binary in a build tree, which is not a packaged artifact and is not counted
+    as one. **PARTIAL — corpora:** the intake corpus exists and is genuinely
+    deterministic (18 entries, pinned bytes, byte lengths and SHA-256 in
+    `MANIFEST.tsv`); the browser, media and voice corpora were never built and
+    no suite consumes any corpus.
 
 ### Phase 28 — Native Cross-Platform Certification
 
@@ -234,7 +280,7 @@ complete) never ran. Branch carrying the work:
 | F24-01, F24-02, F24-03, F24-04, F24-05 | Phase 24 | **All five Open, with explicit incomplete dispositions** — only plan 24-01 of four executed, and it did not reach its own Complete state. F24-01 has partial evidence (runtime, lock, ledger, drain, service abstraction, one HIGH Windows defect fixed on hardware measurement) with four named unmet clauses. F24-02/03/04/05 have no evidence: plans 24-02, 24-03 and 24-04 were not started. Branch `worktree-wf_b7d743bd-954-4`; evidence `phases/24-.../24-01-SUMMARY.md`. |
 | F25-01, F25-02, F25-03, F25-04, F25-05 | Phase 25 | Pending |
 | F26-01, F26-02, F26-03, F26-04, F26-05 | Phase 26 | Pending |
-| F27-01, F27-02, F27-03, F27-04, F27-05 | Phase 27 | Pending |
+| F27-01, F27-02, F27-03, F27-04, F27-05 | Phase 27 | **All five Open** — executed 2026-07-26 at base `2ecdfdf5`; graded at `27-PHASE-VERDICT.md`. Criterion 1 PARTIAL; Criteria 2, 3, 4 and 5 NOT MET. Phase goal NOT achieved and self-reported as such. Landed: one open-once intake chokepoint for the document path, and the `supports_vision` gate on the Anthropic and Gemini builders (both divergences measured live on `hetzner-dsm`, the second by capturing byte-identical outbound requests, the first by `strace`). Open HIGH: browser/CUA/web readiness still linkage-derived and unpublished (decision taken 4-0, blocked on the fenced protocol seam — `.planning/SEAM-REQUESTS/27.md`); `wcore-browser/src/tool.rs:499` remediation text names `[browser]` when the real key is `[browser.policy]`. Criterion 4 has zero evidence — no audio ever flowed. |
 | F28-01, F28-02, F28-03, F28-04 | Phase 28 | Pending |
 | F29-01, F29-02, F29-03, F29-04 | Phase 29 | Pending |
 | F30-01, F30-02, F30-03, F30-04, F30-05 | Phase 30 | Pending |

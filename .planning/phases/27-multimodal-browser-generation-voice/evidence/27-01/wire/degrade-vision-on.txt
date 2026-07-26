@@ -1,0 +1,3 @@
+TEXT 'describe the attachment'
+IMAGE part media_type=image/png data_len=100
+TEXT 'Current date: 2026-07-26'
