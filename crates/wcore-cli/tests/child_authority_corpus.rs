@@ -211,9 +211,15 @@ fn drive(dimension: Dimension) {
 
     assert_completeness(entry, &executions);
     assert_live_runs_proved_their_mode(entry, &executions);
+    // The canary assertion runs BEFORE the equivalence pair on purpose. A
+    // request channel appearing is the most specific thing the corpus can
+    // observe, and it explains any divergence the equivalence assertions would
+    // otherwise report as a surface drift. Checked in the other order, the
+    // injected-channel proof fails as "one surface enforces and the other does
+    // not" — true, but not the finding.
+    assert_no_channel_canaries_stayed_intact(entry, &executions);
     assert_surface_equivalence(entry, &executions);
     assert_mode_equivalence(entry, &executions);
-    assert_no_channel_canaries_stayed_intact(entry, &executions);
     assert_no_new_widening_against_the_census(entry, &executions);
 }
 
