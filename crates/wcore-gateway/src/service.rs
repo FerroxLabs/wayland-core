@@ -570,7 +570,27 @@ mod tests {
     fn a_relative_binary_is_not_registerable() {
         assert!(!is_registerable_binary(Path::new("wayland-core")));
         assert!(!is_registerable_binary(Path::new("./wayland-core")));
+
+        // The absolute case MUST be written per-family. `/opt/...` has no
+        // prefix component on Windows, so `is_absolute()` reports false
+        // there and this assertion fails — measured on SEANDESKTOP
+        // 2026-07-26, where it was the only red in the suite. AGENTS.md
+        // names exactly this: a hardcoded Unix path is fine for pure string
+        // work, and needs a per-platform variant the moment it reaches
+        // `is_absolute()`.
+        #[cfg(unix)]
         assert!(is_registerable_binary(Path::new("/opt/x/wayland-core")));
+        #[cfg(windows)]
+        assert!(is_registerable_binary(Path::new(
+            r"C:\Program Files\Wayland\wayland-core.exe"
+        )));
+
+        // A Windows drive-RELATIVE path (`C:wayland-core`) is a real trap:
+        // it looks absolute and is not. It resolves against the drive's
+        // current directory, which a service does not control — precisely
+        // the substitution `is_registerable_binary` exists to refuse.
+        #[cfg(windows)]
+        assert!(!is_registerable_binary(Path::new("C:wayland-core.exe")));
     }
 
     #[test]
