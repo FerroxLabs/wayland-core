@@ -378,6 +378,10 @@ struct LiveRun {
     /// carried no per-sibling attribution and every verdict from it is
     /// NOT-OBSERVABLE rather than CORRECT.
     saw_sub_agent_event: bool,
+    /// The Spawn tool's own failure output, when the siblings died rather than
+    /// ran. Carried so an absent observation is diagnosable as a failure rather
+    /// than reported as a bare silence.
+    sibling_failure: Option<String>,
     /// Provider requests the mock actually served, and how many came from each
     /// sibling. A negative observation only means something if the siblings ran.
     provider_requests: usize,
@@ -396,6 +400,7 @@ impl LiveRun {
             agent_names: BTreeMap::new(),
             approval_call_ids: Vec::new(),
             saw_sub_agent_event: false,
+            sibling_failure: None,
             provider_requests: 0,
             sibling_a_turns: 0,
             sibling_b_turns: 0,
@@ -615,16 +620,26 @@ fn ingest_frame(
     let kind = frame.get("type").and_then(serde_json::Value::as_str);
     match kind {
         Some("ready") => *saw_ready = true,
-        Some("text_delta") => {
-            // The parent's CLOSING text, emitted at top level rather than
-            // wrapped in a sub_agent_event. Reaching it means the Spawn tool
-            // returned and both siblings are done.
+        // The parent's CLOSING text, emitted at top level rather than wrapped
+        // in a sub_agent_event. Reaching it means the Spawn tool returned and
+        // both siblings are done.
+        Some("text_delta")
             if frame
                 .get("text")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|text| text.contains(PARENT_DONE))
+                .is_some_and(|text| text.contains(PARENT_DONE)) =>
+        {
+            *saw_parent_done = true;
+        }
+        // The Spawn tool's own result. When the siblings died rather than ran,
+        // this is where the product says why, and an attribution row that
+        // recorded only their absence would turn a diagnosable live failure
+        // into an unexplained silence.
+        Some("tool_result") => {
+            let failed = frame.get("status").and_then(serde_json::Value::as_str) == Some("error");
+            if failed && let Some(output) = frame.get("output").and_then(serde_json::Value::as_str)
             {
-                *saw_parent_done = true;
+                run.sibling_failure = Some(output.chars().take(400).collect());
             }
         }
         Some("sub_agent_event") => {
@@ -976,11 +991,14 @@ pub fn live_probe(case: &AttributionCase, transport: LiveTransport) -> LiveOutco
                 observable: format!(
                     "sibling A took {} provider turn(s) and sibling B took {}, so the two-sibling \
                      topology this case requires never existed in the run and no attribution \
-                     verdict may be taken from it; {} provider request(s) were served; full \
-                     transcript at {}",
+                     verdict may be taken from it; {} provider request(s) were served; the Spawn \
+                     tool reported: {}; full transcript at {}",
                     run.sibling_a_turns,
                     run.sibling_b_turns,
                     run.provider_requests,
+                    run.sibling_failure
+                        .clone()
+                        .unwrap_or_else(|| "no tool failure was reported".to_owned()),
                     run.transcript_path
                 ),
                 transcript_path: run.transcript_path,

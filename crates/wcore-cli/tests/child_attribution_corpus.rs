@@ -687,11 +687,20 @@ fn probe_cancellation() -> (Attribution, String) {
     }
 }
 
-/// RESULT DELIVERY, three generations deep, across all three
-/// `ChildDeliveryTarget` variants.
+/// RESULT DELIVERY, three generations deep, across the two
+/// `ChildDeliveryTarget` variants reachable without a live turn.
 ///
-/// The topology is the hardest one this seam admits. Two child siblings deliver
-/// to DIFFERENT targets — `ParentTurn` and `SessionOutbox` — and two GRANDCHILD
+/// MEASURED, and recorded as a coverage limit rather than worked around:
+/// `ChildDeliveryTarget::ParentTurn` is refused at declaration unless
+/// `parent.turn_id` names a turn the journal has actually seen
+/// (`session_journal/reducer.rs:1597`), and this corpus declares its children
+/// directly rather than through a live turn. `ParentTurn` is therefore left
+/// UNEXERCISED in process and said so, rather than faked with a synthetic turn
+/// that would prove attribution against a fixture instead of against the
+/// product.
+///
+/// The topology is otherwise the hardest one this seam admits. Two child
+/// siblings deliver to the same `SessionOutbox`, and two GRANDCHILD
 /// siblings under one of them deliver to the SAME target,
 /// `ParentChild { child_id }`. Sharing a destination is the point: delivering
 /// one grandchild must not mark the other delivered even though both are bound
@@ -722,7 +731,11 @@ fn probe_delivery() -> (Attribution, String) {
     };
 
     let declarations = [
-        sibling_record(alpha.as_str(), None, Some(ChildDeliveryTarget::ParentTurn)),
+        sibling_record(
+            alpha.as_str(),
+            None,
+            Some(ChildDeliveryTarget::SessionOutbox),
+        ),
         sibling_record(
             beta.as_str(),
             None,
@@ -844,7 +857,7 @@ fn probe_delivery() -> (Attribution, String) {
     let sibling_grandchild_untouched = after_two.delivery_state == ChildDeliveryState::Pending
         && after_two.delivery_target == Some(to_parent_child.clone());
     let children_untouched = after_alpha.delivery_state == ChildDeliveryState::Pending
-        && after_alpha.delivery_target == Some(ChildDeliveryTarget::ParentTurn)
+        && after_alpha.delivery_target == Some(ChildDeliveryTarget::SessionOutbox)
         && after_beta.delivery_state == ChildDeliveryState::Pending
         && after_beta.delivery_target == Some(ChildDeliveryTarget::SessionOutbox);
     if one_delivered && sibling_grandchild_untouched && children_untouched {
