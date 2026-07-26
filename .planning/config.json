@@ -1,21 +1,21 @@
 {
   "mode": "autonomous",
   "runtime": "codex",
-  "granularity": "fine",
+  "granularity": "standard",
   "workflow": {
     "research": false,
     "ai_integration_phase": true,
     "plan_check": true,
-    "inline_plan_threshold": 0,
+    "inline_plan_threshold": 3,
     "verifier": true,
-    "auto_advance": false,
+    "auto_advance": true,
     "node_repair": false,
     "use_worktrees": false,
     "nyquist_validation": true,
     "security_enforcement": true,
     "security_asvs_level": 2,
-    "security_block_on": "low",
-    "discuss_mode": "skip",
+    "security_block_on": "high",
+    "discuss_mode": "discuss",
     "research_before_questions": false,
     "code_review_command": null,
     "plan_bounce": true,
@@ -42,11 +42,11 @@
     "create_tag": false
   },
   "parallelization": {
-    "enabled": false,
-    "plan_level": false,
+    "enabled": true,
+    "plan_level": true,
     "task_level": false,
     "skip_checkpoints": false,
-    "max_concurrent_agents": 1,
+    "max_concurrent_agents": 6,
     "min_plans_for_parallel": 2
   },
   "hooks": {
