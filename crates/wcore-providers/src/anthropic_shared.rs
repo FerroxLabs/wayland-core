@@ -14,6 +14,14 @@ use crate::tool_name::{decode_tool_name, encode_tool_name};
 use wcore_config::compat::ProviderCompat;
 use wcore_config::debug::DebugConfig;
 
+/// The single wording every message builder uses when a compatibility record
+/// says the active model cannot accept an inline image.
+///
+/// This string is already emitted verbatim by the OpenAI, Bedrock and Cohere
+/// builders. It is named here rather than re-typed so a fifth builder joining
+/// the gate cannot drift into a fourth spelling of the same substitution.
+pub const VISION_OMITTED_PLACEHOLDER: &str = "[image omitted: model not vision-capable]";
+
 /// Convert internal Message format to Anthropic API message format.
 /// Compat flags control merging and alternation behavior.
 pub fn build_messages(messages: &[Message], compat: &ProviderCompat) -> Vec<Value> {
@@ -69,14 +77,35 @@ pub fn build_messages(messages: &[Message], compat: &ProviderCompat) -> Vec<Valu
                 ContentBlock::Thinking { .. } => None,
                 // Inline image on a user turn. Anthropic native shape:
                 // `{type:image, source:{type:base64, media_type, data}}`.
-                ContentBlock::Image { mime, data } => Some(json!({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": mime,
-                        "data": data
+                //
+                // Phase 27 (F27-01) measured this builder IGNORING the
+                // `supports_vision` compatibility gate. On `hetzner-dsm`, the
+                // same PNG attachment was driven through the shipped binary
+                // with `supports_vision = false` and with `= true`, and the
+                // captured outbound request body was byte-identical: an inline
+                // `image` part in BOTH cases. The OpenAI, Bedrock and Cohere
+                // builders all substitute an explicit text placeholder in that
+                // situation; this one did not, so a user who told the engine
+                // their endpoint is text-only got a hard provider rejection
+                // instead of an honest degradation. The gate below is that
+                // measurement's repair.
+                ContentBlock::Image { mime, data } => {
+                    if compat.supports_vision() {
+                        Some(json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": mime,
+                                "data": data
+                            }
+                        }))
+                    } else {
+                        Some(json!({
+                            "type": "text",
+                            "text": VISION_OMITTED_PLACEHOLDER
+                        }))
                     }
-                })),
+                }
             })
             .collect();
 
@@ -655,7 +684,15 @@ mod tests {
                 },
             ],
         )];
-        let result = build_messages(&messages, &default_compat());
+        // Phase 27: the image part is now gated on the compatibility record,
+        // so the vision-capable case must SAY it is vision-capable. Every
+        // assertion below is unchanged — only the compat the case is built
+        // with is stated explicitly instead of relying on a bare default.
+        let compat = ProviderCompat {
+            supports_vision: Some(true),
+            ..default_compat()
+        };
+        let result = build_messages(&messages, &compat);
         assert_eq!(result.len(), 1);
         let content = result[0]["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
@@ -665,6 +702,59 @@ mod tests {
         assert_eq!(content[1]["source"]["type"], "base64");
         assert_eq!(content[1]["source"]["media_type"], "image/png");
         assert_eq!(content[1]["source"]["data"], "QUJD");
+    }
+
+    /// F27-01: the divergence this repairs was MEASURED on the shipped binary
+    /// — the same PNG produced a byte-identical outbound request whether the
+    /// compatibility record said the model could take an image or not. This is
+    /// the regression guard for that measurement.
+    #[test]
+    fn image_is_substituted_when_compat_says_the_model_is_not_vision_capable() {
+        let messages = vec![Message::new(
+            Role::User,
+            vec![
+                ContentBlock::Text {
+                    text: "what is this?".to_string(),
+                },
+                ContentBlock::Image {
+                    mime: "image/png".to_string(),
+                    data: "QUJD".to_string(),
+                },
+            ],
+        )];
+        let compat = ProviderCompat {
+            supports_vision: Some(false),
+            ..default_compat()
+        };
+        let result = build_messages(&messages, &compat);
+        let content = result[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], VISION_OMITTED_PLACEHOLDER);
+        // The base64 payload must not survive anywhere in the request.
+        assert!(
+            !serde_json::to_string(&result).unwrap().contains("QUJD"),
+            "the image payload must not reach a model that cannot read it"
+        );
+    }
+
+    /// The default is the SAFE answer: `supports_vision()` is `false` when the
+    /// record says nothing, so an unknown endpoint degrades rather than risking
+    /// a hard rejection. This pins that default at the builder, not just at the
+    /// accessor.
+    #[test]
+    fn an_unstated_vision_capability_degrades_rather_than_gambling() {
+        let messages = vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Image {
+                mime: "image/png".to_string(),
+                data: "QUJD".to_string(),
+            }],
+        )];
+        let result = build_messages(&messages, &default_compat());
+        let content = result[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], VISION_OMITTED_PLACEHOLDER);
     }
 
     #[test]

@@ -427,12 +427,26 @@ pub(crate) fn build_contents(
                 }
                 ContentBlock::Image { mime, data } => {
                     // Gemini native shape: `parts:[{inlineData:{mimeType,data}}]`.
-                    parts.push(json!({
-                        "inlineData": {
-                            "mimeType": mime,
-                            "data": data,
-                        }
-                    }));
+                    //
+                    // Phase 27 (F27-01): this builder, like the Anthropic one,
+                    // emitted the image part unconditionally and so ignored the
+                    // `supports_vision` compatibility record entirely. A user
+                    // pointing the Gemini surface at a text-only endpoint got a
+                    // hard provider rejection rather than the explicit
+                    // substitution every other builder performs. Gate it on the
+                    // same field, with the same wording.
+                    if compat.supports_vision() {
+                        parts.push(json!({
+                            "inlineData": {
+                                "mimeType": mime,
+                                "data": data,
+                            }
+                        }));
+                    } else {
+                        parts.push(json!({
+                            "text": crate::anthropic_shared::VISION_OMITTED_PLACEHOLDER,
+                        }));
+                    }
                 }
             }
         }
@@ -1105,12 +1119,51 @@ mod tests {
                 },
             ],
         )];
-        let (_sys, contents) = build_contents(&messages, &compat());
+        // Phase 27: the inline part is gated on the compatibility record, so
+        // the vision-capable case states that it is. Every assertion below is
+        // unchanged.
+        let vision = ProviderCompat {
+            supports_vision: Some(true),
+            ..compat()
+        };
+        let (_sys, contents) = build_contents(&messages, &vision);
         let parts = contents[0]["parts"].as_array().unwrap();
         assert_eq!(parts[0]["text"], "Hi");
         // Gemini native inline image shape.
         assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
         assert_eq!(parts[1]["inlineData"]["data"], "QUJD");
+    }
+
+    /// F27-01 regression guard. Measured on `hetzner-dsm`: the shipped binary
+    /// emitted a byte-identical outbound request with `supports_vision = false`
+    /// and `= true`, so this gate did not exist at the message builder.
+    #[test]
+    fn build_contents_substitutes_when_the_model_is_not_vision_capable() {
+        let messages = vec![Message::new(
+            Role::User,
+            vec![
+                ContentBlock::Text { text: "Hi".into() },
+                ContentBlock::Image {
+                    mime: "image/png".into(),
+                    data: "QUJD".into(),
+                },
+            ],
+        )];
+        let no_vision = ProviderCompat {
+            supports_vision: Some(false),
+            ..compat()
+        };
+        let (_sys, contents) = build_contents(&messages, &no_vision);
+        let parts = contents[0]["parts"].as_array().unwrap();
+        assert_eq!(
+            parts[1]["text"],
+            crate::anthropic_shared::VISION_OMITTED_PLACEHOLDER
+        );
+        assert!(parts[1].get("inlineData").is_none());
+        assert!(
+            !serde_json::to_string(&contents).unwrap().contains("QUJD"),
+            "the image payload must not reach a model that cannot read it"
+        );
     }
 
     #[test]

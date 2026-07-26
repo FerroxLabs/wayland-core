@@ -16,22 +16,37 @@
 //!
 //! ## Safety posture
 //!
-//! Read-only. The LLM-supplied `file_path` is validated via
-//! [`crate::path_validation::validate_user_path`] before any filesystem
-//! touch (same discipline as `ReadTool`): absolute paths only, no traversal,
-//! no null bytes, system-secret deny-list. Output is truncated to a byte
-//! cap so a pathologically large PDF cannot blow the context window.
-
-use std::path::Path;
+//! Read-only. The LLM-supplied `file_path` goes through the shared
+//! [`crate::media_intake`] chokepoint, which validates the path (absolute, no
+//! traversal, no null bytes, system-secret deny-list — the same discipline as
+//! `ReadTool`), refuses network targets, opens the file EXACTLY ONCE, enforces
+//! the ingest cap from that descriptor's own metadata BEFORE reading a payload,
+//! and admits the file only when its leading bytes really are a PDF header.
+//! The extractor then works from those admitted BYTES.
+//!
+//! That last point is the Phase 27 repair. This tool previously validated the
+//! path and then handed the PATH onward to `pdf_extract`, which performed its
+//! own independent resolution — measured on `hetzner-dsm` with
+//! `strace -f -y`: three by-name resolutions of the caller's path and an
+//! `openat` issued by a party that had never seen the validated handle. The
+//! bytes parsed were therefore not provably the bytes validated. Passing bytes
+//! removes the second resolution entirely.
+//!
+//! Output is truncated to a byte cap so a pathologically large PDF cannot blow
+//! the context window. Note that the OUTPUT cap ([`MAX_PDF_TEXT_BYTES`]) and
+//! the INGEST cap ([`MAX_PDF_INGEST_BYTES`]) are different limits guarding
+//! different things: the first bounds what is returned, the second bounds what
+//! the parser is ever handed.
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use std::path::Path;
 
 use wcore_protocol::events::ToolCategory;
 use wcore_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
-use crate::path_validation::validate_user_path;
+use crate::media_intake::{IntakePolicy, MediaKind, admit_path};
 use crate::tool_output_limits::DEFAULT_MAX_BYTES;
 use crate::truncate_utf8;
 
@@ -43,6 +58,24 @@ const TRUNCATION_MARKER: &str = "\n\n... [PDF text truncated]";
 /// Reuses the shared [`DEFAULT_MAX_BYTES`] terminal-output cap (50_000) so
 /// PDF output is bounded consistently with other large-output tools.
 pub const MAX_PDF_TEXT_BYTES: usize = DEFAULT_MAX_BYTES;
+
+/// Byte cap on what the PDF PARSER is handed, as distinct from
+/// [`MAX_PDF_TEXT_BYTES`] which caps what the tool RETURNS.
+///
+/// Phase 27 measured that no ingest bound existed at all: the only PDF size
+/// discipline was the output cap, which fires after the parser has already
+/// consumed the file. This bound fires from the file's own metadata before a
+/// single payload byte is read. 64 MiB is deliberately generous — the point is
+/// that an unbounded parse is impossible, not that large PDFs are unwelcome.
+pub const MAX_PDF_INGEST_BYTES: u64 = 64 * 1024 * 1024;
+
+/// A PDF is identified by its `%PDF-` header, so the smallest admissible input
+/// is the header itself. Anything shorter cannot be a PDF.
+const MIN_PDF_BYTES: u64 = 5;
+
+fn pdf_intake_policy() -> IntakePolicy {
+    IntakePolicy::new(MIN_PDF_BYTES, MAX_PDF_INGEST_BYTES).accepting(&[MediaKind::Pdf])
+}
 
 /// Read-only PDF text-extraction tool.
 ///
@@ -169,10 +202,11 @@ impl Tool for PdfTool {
             };
         };
 
-        // Same path discipline as ReadTool: absolute, no traversal, no
-        // null bytes, system-secret deny-list.
-        let validated = match validate_user_path(Path::new(file_path)) {
-            Ok(p) => p,
+        // ONE resolution. The shared intake validates the path, opens it once,
+        // bounds it from that descriptor and proves the header before handing
+        // back bytes — so nothing downstream re-resolves the name.
+        let admitted = match admit_path(Path::new(file_path), &pdf_intake_policy()) {
+            Ok(a) => a,
             Err(e) => {
                 return ToolResult {
                     content: format!("Refused to read {file_path}: {e}"),
@@ -181,17 +215,10 @@ impl Tool for PdfTool {
             }
         };
 
-        if !validated.is_file() {
-            return ToolResult {
-                content: format!("PDF not found or not a file: {file_path}"),
-                is_error: true,
-            };
-        }
-
         let start_page = input.get("start_page").and_then(|v| v.as_u64());
         let end_page = input.get("end_page").and_then(|v| v.as_u64());
 
-        extract(&validated, file_path, start_page, end_page)
+        extract(&admitted.bytes, file_path, start_page, end_page)
     }
 
     fn max_result_size(&self) -> usize {
@@ -223,18 +250,20 @@ impl Tool for PdfTool {
 
 /// Real extraction body — `pdf` feature ON.
 ///
-/// `disk_path` is the validated path; `display_path` is the original
-/// user-supplied string used only for error messages.
+/// `bytes` are the ADMITTED bytes from the single open performed by the shared
+/// intake; `display_path` is the original user-supplied string used only for
+/// error messages. The extractor never sees a path, so it cannot re-resolve
+/// one.
 #[cfg(feature = "pdf")]
 fn extract(
-    disk_path: &Path,
+    bytes: &[u8],
     display_path: &str,
     start_page: Option<u64>,
     end_page: Option<u64>,
 ) -> ToolResult {
     // Whole-document fast path: no page range requested.
     if start_page.is_none() && end_page.is_none() {
-        return match pdf_extract::extract_text(disk_path) {
+        return match pdf_extract::extract_text_from_mem(bytes) {
             Ok(text) => ToolResult {
                 content: cap_text(&text),
                 is_error: false,
@@ -247,7 +276,7 @@ fn extract(
     }
 
     // Page-range path: extract per-page then slice.
-    let pages = match pdf_extract::extract_text_by_pages(disk_path) {
+    let pages = match pdf_extract::extract_text_from_mem_by_pages(bytes) {
         Ok(p) => p,
         Err(e) => {
             return ToolResult {
@@ -281,7 +310,7 @@ fn extract(
 /// (NO-STUBS: an honest blocker, not silent success).
 #[cfg(not(feature = "pdf"))]
 fn extract(
-    _disk_path: &Path,
+    _bytes: &[u8],
     display_path: &str,
     _start_page: Option<u64>,
     _end_page: Option<u64>,
@@ -581,7 +610,69 @@ mod tests {
             "corrupt file should fail: {}",
             result.content
         );
-        assert!(result.content.contains("Failed to extract text"));
+        // DELIBERATE WORDING CHANGE, recorded in 27-01-SUMMARY.md. This case
+        // previously reached the parser and came back "Failed to extract text",
+        // which blamed extraction for a file that was never a PDF. The shared
+        // intake now refuses it from its header before the parser is handed a
+        // single byte, and says so. The assertion is not weakened: it still
+        // requires an error AND still requires the message to name the cause —
+        // it now names the true one.
+        assert!(
+            result.content.contains("Unrecognised file format"),
+            "the refusal must name the format problem, got: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("Failed to extract text"),
+            "a non-PDF must not reach the extractor at all"
+        );
+    }
+
+    /// F27-01: the ingest cap must be decided from the file's own metadata
+    /// BEFORE the parser is handed anything. Measured gap: the only PDF size
+    /// discipline was `MAX_PDF_TEXT_BYTES`, which bounds the RETURNED text and
+    /// therefore fires only after a full parse.
+    #[cfg(feature = "pdf")]
+    #[tokio::test]
+    async fn a_pdf_over_the_ingest_cap_is_refused_before_it_is_parsed() {
+        assert!(
+            MAX_PDF_INGEST_BYTES > MAX_PDF_TEXT_BYTES as u64,
+            "the ingest bound and the output bound are different limits"
+        );
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("truncated.pdf");
+        // Four bytes: shorter than the `%PDF-` header, so it cannot be a PDF
+        // and must be refused at intake rather than by the parser.
+        std::fs::write(&path, b"%PDF").unwrap();
+        let result = PdfTool::new()
+            .execute(json!({ "file_path": path.to_str().unwrap() }))
+            .await;
+        assert!(result.is_error);
+        assert!(
+            !result.content.contains("Failed to extract text"),
+            "a sub-header file must not reach the extractor, got: {}",
+            result.content
+        );
+    }
+
+    /// F27-01: a file whose name claims PDF but whose bytes are another
+    /// container is refused on the disagreement, on the same terms as the
+    /// composer path refuses one.
+    #[cfg(feature = "pdf")]
+    #[tokio::test]
+    async fn a_png_named_pdf_is_refused_as_a_mismatch() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("forged.pdf");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nnot a pdf at all").unwrap();
+        let result = PdfTool::new()
+            .execute(json!({ "file_path": path.to_str().unwrap() }))
+            .await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("Extension declares") && result.content.contains("image/png"),
+            "the refusal must name both the claim and the detected bytes, got: {}",
+            result.content
+        );
     }
 
     #[cfg(feature = "pdf")]
