@@ -441,6 +441,22 @@ jobs:
             vx cargo build --release --target ${{ matrix.target }} -p wcore-cli
           fi
 
+      # The binary was already being built and then discarded. Keeping it makes
+      # cross-platform live testing possible from a host that cannot compile for
+      # the target — notably the arm64 macOS leg, where the planning Mac is
+      # forbidden from running Cargo and the only other certified producer was an
+      # ephemeral runner on that same machine. Without this the leg is
+      # structurally unreachable and the only alternative is to record it unproven.
+      - name: Upload release binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: wayland-core-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/wayland-core
+            target/${{ matrix.target }}/release/wayland-core.exe
+          if-no-files-found: error
+          retention-days: 14
+
   # ── W10: Chromium live e2e (debt-register A.1) ───────────────────────
   # Closes A.1 — chromiumoxide live tests don't run in CI because runners
   # don't ship Chromium pre-installed. This job installs `chromium-browser`
