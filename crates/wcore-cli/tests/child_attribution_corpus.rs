@@ -68,7 +68,9 @@ use live::{Attribution, LiveEvidence, LiveTransport};
 use wcore_agent::approval::{ApprovalBridge, ApprovalOutcome, ApprovalRequest};
 use wcore_agent::budget_authority::{BudgetAuthorityCoordinator, BudgetAuthoritySeed};
 use wcore_agent::durable_child::DurableChildStore;
-use wcore_agent::session_journal::{BudgetWallClockAuthority, SessionJournal};
+use wcore_agent::session_journal::{
+    BudgetWallClockAuthority, SessionEvent, SessionJournal, state_payload_digest,
+};
 use wcore_budget::execution::ExecutionBudget;
 use wcore_budget::tracker::{BudgetCap, BudgetExtensionError, BudgetTracker};
 use wcore_types::spawner::{
@@ -131,6 +133,30 @@ fn roomy_tracker() -> BudgetTracker {
 
 fn usd_eq(left: f64, right: f64) -> bool {
     (left - right).abs() < 1e-9
+}
+
+/// Seed a journal's canonical imported session baseline.
+///
+/// The reducer requires the import to be the journal's first event and to carry
+/// the journal's own session id, a matching `schema_version` and an array of
+/// object messages. Without it a durable budget authority refuses to bind at
+/// all, so this is the precondition for reaching the crash-survival seam rather
+/// than a fixture convenience.
+fn import_session_baseline(journal: &SessionJournal, session_id: &str) -> Result<(), String> {
+    let session = serde_json::json!({
+        "id": session_id,
+        "schema_version": 1,
+        "messages": [],
+    });
+    let session_digest = state_payload_digest(&session).map_err(|error| error.to_string())?;
+    journal
+        .append(SessionEvent::SessionImported {
+            source_schema_version: 1,
+            session_digest,
+            session,
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// RESERVATION. Two siblings reserve DIFFERENT amounts against the same parent
@@ -215,6 +241,17 @@ fn probe_refund_across_restart() -> (Attribution, String) {
                 );
             }
         };
+        // A durable budget authority refuses to bind against a journal with no
+        // canonical imported session baseline (`budget_authority.rs:182`), and
+        // the import must be the journal's FIRST event
+        // (`session_journal/reducer.rs:1662`). Seeding it is what makes the
+        // crash-and-restart leg reach the durable seam at all.
+        if let Err(error) = import_session_baseline(&journal, session) {
+            return (
+                Attribution::NotObservable,
+                format!("the journal's canonical session baseline could not be imported: {error}"),
+            );
+        }
         let mut coordinator =
             match BudgetAuthorityCoordinator::bind(seed.config(Some(journal), session)) {
                 Ok(coordinator) => coordinator,
@@ -348,10 +385,17 @@ fn probe_escalation() -> (Attribution, String) {
         );
     }
 
-    // Drive grandchild A to exhaustion.
+    // Drive grandchild A to exhaustion through the ADMISSION path.
+    //
+    // Measured, not assumed: `charge` records usage and returns the cap error
+    // but does NOT add the session to the blocked set — only `reserve_turn` and
+    // `settle_turn` do (`tracker.rs:910/921/932/951` and `:1038-1083`). An
+    // earlier iteration of this probe charged past the cap and then found the
+    // extension refused for want of an exhausted budget, which was the harness
+    // driving the wrong seam rather than the product refusing an escalation.
     let mut exhausted = false;
     for _ in 0..8 {
-        if tracker.charge(GRANDCHILD_A, 300, 0.40).is_err() {
+        if tracker.reserve(GRANDCHILD_A, 400, 0.40).is_err() {
             exhausted = true;
             break;
         }
@@ -482,7 +526,12 @@ fn sibling_record(
         child_id: ChildId::new(id).expect("a valid child id"),
         parent: ChildParent {
             session_id: "corpus-attr-session".into(),
-            turn_id: Some("corpus-attr-turn".into()),
+            // Left unset deliberately. The journal reducer resolves a declared
+            // turn id against turns it has actually seen, and this corpus
+            // declares its children directly rather than through a live turn;
+            // the attribution being measured is the parent/child edge, which
+            // `parent_child_id` and `parent_call_id` carry.
+            turn_id: None,
             parent_child_id: parent_child_id
                 .map(|value| ChildId::new(value).expect("a valid parent child id")),
             workflow_run_id: None,
@@ -638,11 +687,22 @@ fn probe_cancellation() -> (Attribution, String) {
     }
 }
 
-/// RESULT DELIVERY, three generations deep. Two siblings finish with different
-/// delivery targets — one to the parent turn, one to a nested parent child —
-/// and only one is delivered. `ChildDeliveryTarget::ParentChild { child_id }`
-/// only becomes distinguishable from `ParentTurn` when a child has a child of
-/// its own, which is why two levels would leave the variant untested.
+/// RESULT DELIVERY, three generations deep, across all three
+/// `ChildDeliveryTarget` variants.
+///
+/// The topology is the hardest one this seam admits. Two child siblings deliver
+/// to DIFFERENT targets — `ParentTurn` and `SessionOutbox` — and two GRANDCHILD
+/// siblings under one of them deliver to the SAME target,
+/// `ParentChild { child_id }`. Sharing a destination is the point: delivering
+/// one grandchild must not mark the other delivered even though both are bound
+/// for the same place, which a store that keyed delivery by target rather than
+/// by producer would get wrong and a two-generation corpus could never see.
+///
+/// A correction to this plan's own reading of the vocabulary, recorded because
+/// the misreading is easy to repeat: `ParentChild { child_id }` names the
+/// record's OWN parent child, and `validate_declaration` requires
+/// `parent.parent_child_id == Some(child_id)`. It is not a pointer to some other
+/// child a result is being handed to.
 fn probe_delivery() -> (Attribution, String) {
     let (_temp, store) = match durable_store() {
         Ok(pair) => pair,
@@ -655,18 +715,29 @@ fn probe_delivery() -> (Attribution, String) {
     };
     let alpha = ChildId::new("corpus-attr-alpha").expect("a valid child id");
     let beta = ChildId::new("corpus-attr-beta").expect("a valid child id");
-    let nested = ChildId::new("corpus-attr-alpha-nested").expect("a valid child id");
+    let alpha_one = ChildId::new("corpus-attr-alpha-one").expect("a valid child id");
+    let alpha_two = ChildId::new("corpus-attr-alpha-two").expect("a valid child id");
+    let to_parent_child = ChildDeliveryTarget::ParentChild {
+        child_id: alpha.clone(),
+    };
 
     let declarations = [
+        sibling_record(alpha.as_str(), None, Some(ChildDeliveryTarget::ParentTurn)),
         sibling_record(
-            alpha.as_str(),
+            beta.as_str(),
             None,
-            Some(ChildDeliveryTarget::ParentChild {
-                child_id: nested.clone(),
-            }),
+            Some(ChildDeliveryTarget::SessionOutbox),
         ),
-        sibling_record(beta.as_str(), None, Some(ChildDeliveryTarget::ParentTurn)),
-        sibling_record(nested.as_str(), Some(alpha.as_str()), None),
+        sibling_record(
+            alpha_one.as_str(),
+            Some(alpha.as_str()),
+            Some(to_parent_child.clone()),
+        ),
+        sibling_record(
+            alpha_two.as_str(),
+            Some(alpha.as_str()),
+            Some(to_parent_child.clone()),
+        ),
     ];
     for record in declarations {
         let id = record.child_id.clone();
@@ -678,8 +749,13 @@ fn probe_delivery() -> (Attribution, String) {
         }
     }
 
-    // Both siblings succeed; only sibling alpha is then delivered.
-    for (id, prefix) in [(&alpha, "a"), (&beta, "b")] {
+    // All four run to a result; only grandchild alpha-one is then delivered.
+    for (id, prefix) in [
+        (&alpha, "a"),
+        (&beta, "b"),
+        (&alpha_one, "a1"),
+        (&alpha_two, "a2"),
+    ] {
         for (event, revision, at, transition) in [
             (
                 format!("{prefix}-enqueue"),
@@ -705,20 +781,20 @@ fn probe_delivery() -> (Attribution, String) {
             if let Err(error) = store.transition(id.clone(), event, revision, at, transition) {
                 return (
                     Attribution::NotObservable,
-                    format!("sibling {id} could not be brought to a result: {error}"),
+                    format!("child {id} could not be brought to a result: {error}"),
                 );
             }
         }
     }
     for (event, revision, at, transition) in [
         (
-            "a-delivery-start",
+            "a1-delivery-start",
             3,
             204,
             DurableChildTransition::DeliveryStarted,
         ),
         (
-            "a-delivery-done",
+            "a1-delivery-done",
             4,
             205,
             DurableChildTransition::DeliveryDelivered {
@@ -726,46 +802,57 @@ fn probe_delivery() -> (Attribution, String) {
             },
         ),
     ] {
-        if let Err(error) = store.transition(alpha.clone(), event, revision, at, transition) {
+        if let Err(error) = store.transition(alpha_one.clone(), event, revision, at, transition) {
             return (
                 Attribution::NotObservable,
-                format!("sibling alpha's result could not be delivered: {error}"),
+                format!("grandchild alpha-one's result could not be delivered: {error}"),
             );
         }
     }
 
-    let (Ok(Some(after_alpha)), Ok(Some(after_beta))) =
-        (store.inspect(&alpha), store.inspect(&beta))
-    else {
+    let read = |id: &ChildId| store.inspect(id).ok().flatten();
+    let (Some(after_alpha), Some(after_beta), Some(after_one), Some(after_two)) = (
+        read(&alpha),
+        read(&beta),
+        read(&alpha_one),
+        read(&alpha_two),
+    ) else {
         return (
             Attribution::NotObservable,
-            "one of the two sibling records could not be read back after the delivery".to_owned(),
+            "one of the four records could not be read back after the delivery".to_owned(),
         );
     };
     let detail = format!(
-        "after delivering only sibling alpha: alpha delivery_state {:?} to target {:?}; beta \
-         delivery_state {:?} to target {:?}",
+        "after delivering only grandchild alpha-one: alpha-one {:?} to {:?}; its sibling \
+         grandchild alpha-two {:?} to {:?}; child alpha {:?} to {:?}; child beta {:?} to {:?}",
+        after_one.delivery_state,
+        after_one.delivery_target,
+        after_two.delivery_state,
+        after_two.delivery_target,
         after_alpha.delivery_state,
         after_alpha.delivery_target,
         after_beta.delivery_state,
         after_beta.delivery_target
     );
-    let alpha_delivered = matches!(
-        after_alpha.delivery_state,
+    let one_delivered = matches!(
+        after_one.delivery_state,
         ChildDeliveryState::Delivered { .. }
     );
-    let alpha_target_is_its_own = matches!(
-        &after_alpha.delivery_target,
-        Some(ChildDeliveryTarget::ParentChild { child_id }) if child_id == &nested
-    );
-    let beta_untouched = after_beta.delivery_state == ChildDeliveryState::Pending
-        && after_beta.delivery_target == Some(ChildDeliveryTarget::ParentTurn);
-    if alpha_delivered && alpha_target_is_its_own && beta_untouched {
+    // The sibling grandchild shares alpha-one's destination exactly, so its
+    // staying Pending is what proves delivery is keyed by producer rather than
+    // by target.
+    let sibling_grandchild_untouched = after_two.delivery_state == ChildDeliveryState::Pending
+        && after_two.delivery_target == Some(to_parent_child.clone());
+    let children_untouched = after_alpha.delivery_state == ChildDeliveryState::Pending
+        && after_alpha.delivery_target == Some(ChildDeliveryTarget::ParentTurn)
+        && after_beta.delivery_state == ChildDeliveryState::Pending
+        && after_beta.delivery_target == Some(ChildDeliveryTarget::SessionOutbox);
+    if one_delivered && sibling_grandchild_untouched && children_untouched {
         (
             Attribution::Correct,
             format!(
-                "{detail} — each result stayed bound to the sibling that produced it and to that \
-                 sibling's own target"
+                "{detail} — the delivery landed only on the descendant that produced the result, \
+                 including against a sibling bound for the identical target"
             ),
         )
     } else {

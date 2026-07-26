@@ -96,6 +96,10 @@ const SIBLING_B_RESULT: &str = "CORPUSATTRRESULTBETA";
 const SIBLING_A_NAME: &str = "corpus-sib-alpha";
 const SIBLING_B_NAME: &str = "corpus-sib-beta";
 
+/// The parent's closing text. Its arrival at top level is the proof the Spawn
+/// tool returned, which is what bounds a live run honestly.
+const PARENT_DONE: &str = "CORPUSATTRPARENTDONE";
+
 /// Ephemeral vault passphrase for the PTY child. Not a credential: it encrypts
 /// a throwaway store inside a tempdir deleted when the run ends.
 const CORPUS_VAULT_PASSPHRASE: &str = "child-attribution-corpus-ephemeral-vault";
@@ -282,7 +286,7 @@ fn parent_script(case: &AttributionCase) -> Vec<Turn> {
                 ]
             }),
         ),
-        Turn::Text("parent done".to_owned()),
+        Turn::Text(PARENT_DONE.to_owned()),
     ]
 }
 
@@ -543,7 +547,7 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
 
     let mut run = LiveRun::empty(invocation, String::new());
     let mut saw_ready = false;
-    let mut saw_stream_end = false;
+    let mut saw_parent_done = false;
     let deadline = Instant::now() + LIVE_RUN_BUDGET;
     while Instant::now() < deadline {
         match rx.recv_timeout(Duration::from_millis(250)) {
@@ -552,12 +556,24 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
                     &mut run,
                     &line,
                     &mut saw_ready,
-                    &mut saw_stream_end,
+                    &mut saw_parent_done,
                     &mut stdin,
                 );
                 run.transcript.push_str(&line);
                 run.transcript.push('\n');
-                if saw_stream_end {
+                // MEASURED, and the correction matters: `stream_end` is emitted
+                // per assistant STREAM, not per turn, so the parent's very
+                // first response — the one carrying the Spawn tool call —
+                // already ends with one. An earlier iteration broke on it and
+                // killed the process while the two siblings were still talking
+                // to the provider, then recorded their absence as if the
+                // topology had never existed. The run now ends when the work
+                // this corpus is watching is actually finished: both siblings'
+                // results have arrived, or the parent has taken its closing
+                // turn, which only happens after the Spawn tool returned.
+                let both_results_in = !run.keys_carrying(SIBLING_A_RESULT).is_empty()
+                    && !run.keys_carrying(SIBLING_B_RESULT).is_empty();
+                if both_results_in || saw_parent_done {
                     break;
                 }
             }
@@ -590,7 +606,7 @@ fn ingest_frame(
     run: &mut LiveRun,
     line: &str,
     saw_ready: &mut bool,
-    saw_stream_end: &mut bool,
+    saw_parent_done: &mut bool,
     stdin: &mut std::process::ChildStdin,
 ) {
     let Ok(frame) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -599,7 +615,18 @@ fn ingest_frame(
     let kind = frame.get("type").and_then(serde_json::Value::as_str);
     match kind {
         Some("ready") => *saw_ready = true,
-        Some("stream_end") => *saw_stream_end = true,
+        Some("text_delta") => {
+            // The parent's CLOSING text, emitted at top level rather than
+            // wrapped in a sub_agent_event. Reaching it means the Spawn tool
+            // returned and both siblings are done.
+            if frame
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|text| text.contains(PARENT_DONE))
+            {
+                *saw_parent_done = true;
+            }
+        }
         Some("sub_agent_event") => {
             let Some(parent_call_id) = frame
                 .get("parent_call_id")
