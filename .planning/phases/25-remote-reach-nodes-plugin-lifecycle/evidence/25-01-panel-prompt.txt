@@ -1,0 +1,124 @@
+WAYLAND CORE — PHASE 25 (F25-01/F25-02) CLOUD REFERENCE BACKEND SELECTION PANEL
+
+You are one of four independent auditors. Answer with a recommendation and your reasoning.
+Your LAST line must be exactly:
+PANEL_POSITION=<option-id>
+where <option-id> is one of: fly-machines, e2b-sandboxes, ec2-hibernate, no-cloud
+
+QUESTION
+Which single hibernating cloud backend is the F25 reference implementation?
+
+SCOPE FENCE (from PROJECT.md, Out of Scope)
+"Cloud-provider proliferation — F25 proves one hibernating cloud reference backend plus an
+extensible contract, not every vendor." So exactly one vendor is chosen, once, and the contract
+carries the extensibility.
+
+INTEGRATION SHAPE ALREADY FIXED (not negotiable, decided before this panel)
+- The backend is an HTTPS REST client routed through `wcore-egress`, the mandated single
+  outbound-HTTP chokepoint. A clippy disallowed-methods lint bans raw reqwest client
+  construction outside that crate.
+- It adds NO new third-party crate. Every dependency comes from the existing
+  [workspace.dependencies] with `workspace = true`. A genuinely required new crate is a
+  termination state, not a decision the executor may take.
+- It must expose a hibernation transition the contract can OBSERVE — start, run,
+  stop-or-suspend, and resume — because "hibernating" is the property the Success Criterion
+  names, not an incidental billing detail.
+- Cancellation must be real: cancelling a task must stop or destroy the remote machine, and the
+  vendor's own listing for the scratch org must then show no machine carrying the task nonce.
+- Machines must be labellable/taggable with a per-task nonce so a later orphan scan can assert
+  emptiness with one API call.
+
+THE FOUR OPTIONS (presented in rotated order; ids are stable)
+
+OPTION id=e2b-sandboxes — "E2B sandboxes"
+  PROS: Purpose-built for agent code execution with an explicit pause and resume, which maps
+  very cleanly onto "hibernating". Sandboxes are ephemeral by design, so cleanup assertions are
+  simple.
+  CONS: The product is SDK-first for Python and JavaScript; the raw HTTP surface is the
+  less-travelled path and is likelier to shift under us. It is also a narrower execution model
+  than a general machine, which makes it a weaker demonstration that the contract is genuinely
+  provider-neutral.
+
+OPTION id=ec2-hibernate — "AWS EC2 instance hibernation"
+  PROS: Hibernation is a literal, documented instance state with true RAM persistence, and Sean
+  may already have an AWS account.
+  CONS: Heaviest of the three by a wide margin — IAM, VPC, AMI and key management before a
+  single task runs — and hibernation carries real prerequisites on instance family and
+  encrypted root volume. Slow start times would dominate the equivalence run, and the blast
+  radius of a mis-scoped credential is far larger than a scratch Fly org.
+
+OPTION id=no-cloud — "Decline the cloud leg for this phase"
+  PROS: Zero cost, zero third-party dependency, and the other three legs still prove the
+  contract is genuinely multi-surface.
+  CONS: Success Criterion 1 explicitly names a hibernating cloud backend, so it would be
+  recorded NOT MET, and Phase 28 would inherit the gap.
+
+OPTION id=fly-machines — "Fly.io Machines"
+  PROS: Hibernation is first-class and explicitly observable: a Machine auto-stops or suspends
+  when idle and auto-starts on the next request, and `start`, `stop`, `suspend` and `destroy`
+  are all plain REST verbs on the Machines API — which is exactly the lifecycle the contract
+  needs to attest. It is a plain HTTPS JSON API, so it drops straight into `wcore-egress` with
+  no SDK and therefore no new dependency, and it behaves identically from macOS, Linux and
+  Windows, which matters because plan 25-04 runs the fail-closed legs on more than one OS.
+  Per-second billing on a scratch org makes a phase's worth of runs cost cents, and a
+  per-machine label lets 25-04's orphan scan assert emptiness against a single API call.
+  CONS: Requires a funded Fly organization and a scoped deploy token. Machine boot from cold is
+  seconds, not milliseconds, so the equivalence run must tolerate a wider timing band on this
+  leg than on the other three — which is fine, because timing is deliberately excluded from the
+  normalized receipt body.
+
+MEASUREMENT 1 — DEPENDENCY SATISFIABILITY, taken against this exact tree on 2026-07-26
+Raw output of `/usr/bin/grep -nE 'aws-sigv4|aws-credential-types|aws-config|aws-sdk-' Cargo.toml`:
+  350:aws-sigv4            = "=1.4.3"
+  351:aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
+  352:aws-config           = { version = "1", features = ["behavior-version-latest"] }
+  353:aws-sdk-sts          = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client", "sigv4a"] }
+Raw output of `/usr/bin/grep -cE '^name = "aws-sdk-ec2"$' Cargo.lock`:
+  0
+Raw output of `/usr/bin/grep -c '^name = ' Cargo.lock`:
+  1015
+
+READ THIS CORRECTLY. The workspace ALREADY pins `aws-sigv4` exactly (auth-boundary crypto),
+alongside aws-credential-types, aws-config and aws-sdk-sts, all for the Bedrock provider — while
+`aws-sdk-ec2` is ABSENT from the lockfile. So the common claim "EC2 needs a new crate" is FALSE
+as usually stated: the EC2 Query API is reachable with no new crate by hand-signing requests
+with the aws-sigv4 already present. Reaching for `aws-sdk-ec2` is what would be forbidden. The
+real cost of the EC2 option is hand-signing SigV4 Query-API calls plus IAM/VPC/AMI setup, not a
+forbidden dependency.
+Fly and E2B both authenticate with a bearer token in an Authorization header, which is
+satisfiable with zero crates.
+
+MEASUREMENT 2 — UNAUTHENTICATED REACHABILITY AND API SHAPE, from host hetzner-dsm, 2026-07-26
+  fly-machines   GET https://api.machines.dev/v1/apps?org_slug=personal
+                 STATUS 401, content-type application/json; charset=utf-8
+                 body: {"error":"Authenticate: token validation error"}
+  fly-machines   GET https://api.machines.dev/v1/apps/wayland-f25-probe/machines
+                 STATUS 401, content-type application/json; charset=utf-8
+                 body: {"error":"Authenticate: token validation error"}
+                 (note: a bare GET /v1/apps with no org_slug returns 404 text/plain — a route
+                 mismatch, not an outage; the documented routes answer 401 JSON)
+  e2b-sandboxes  GET https://api.e2b.dev/sandboxes
+                 STATUS 401, content-type application/json; charset=utf-8
+                 body: {"code":401,"message":"authorization header is missing"}
+  ec2-hibernate  GET https://ec2.us-east-1.amazonaws.com/?Action=DescribeInstances&Version=2016-11-15
+                 STATUS 400, content-type text/xml;charset=UTF-8
+                 body: <Response><Errors><Error><Code>MissingParameter</Code><Message>The request
+                 must contain the parameter AWSAccessKeyId</Message></Error></Errors>...
+All three vendors are reachable from the authoritative Linux build host over plain HTTPS with no
+SDK. No connection failure, no HTML body, no redirect onto an SDK-only surface.
+
+STANDING ASYMMETRY YOU MUST WEIGH EXPLICITLY
+Choosing a vendor whose credential never arrives costs nothing more than declining up front:
+the phase already has a defined termination state that records the cloud leg UNEXERCISED with
+its exact blocking reason and the exact command that closes it, and records Success Criterion 1
+NOT MET in those words — while leaving the code path built and one token away from running.
+Declining up front forfeits that built code path and gains nothing.
+
+WHAT IS AND IS NOT RESERVED
+The vendor choice is an architecture and cost tradeoff and is being DECIDED now, on this panel,
+without waiting for a human. The funded account and the minted token are the only thing no agent
+can produce, so those and only those are reserved to the project owner, and their absence is
+explicitly NON-BLOCKING.
+
+Give your recommendation and your reasoning. Engage at least two option ids by name. End with
+the PANEL_POSITION line.

@@ -1,0 +1,54 @@
+LEG 1 — DEPENDENCY SATISFIABILITY, measured against this exact tree
+HOST: Mac (read-only measurement; no cargo invoked)
+TREE: frontier/p25-remote-reach @ 1058965e (worktree of waylandcore-ferrox plan/f20-unified-audit-repair)
+DATE: 2026-07-26
+
+RAW: /usr/bin/grep -nE 'aws-sigv4|aws-credential-types|aws-config|aws-sdk-' Cargo.toml
+350:aws-sigv4            = "=1.4.3"
+351:aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
+352:aws-config           = { version = "1", features = ["behavior-version-latest"] }
+353:aws-sdk-sts          = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client", "sigv4a"] }
+
+RAW: /usr/bin/grep -cE '^name = "aws-sdk-ec2"$' Cargo.lock
+0
+
+RAW: /usr/bin/grep -c '^name = ' Cargo.lock
+1015
+
+The planning-time measurement HOLDS, re-taken rather than trusted: aws-sigv4 is exact-pinned at
+=1.4.3, aws-credential-types / aws-config / aws-sdk-sts are all present for the Bedrock provider,
+and aws-sdk-ec2 is absent from the lockfile. 1015 packages is the baseline this plan's Cargo.lock
+gate measures against.
+
+OPTION: fly-machines
+AUTH-SCHEME: HTTP bearer token — `Authorization: Bearer <FLY_API_TOKEN>` on a plain HTTPS JSON API.
+SATISFIABLE-WITHOUT-NEW-CRATE: yes
+BASIS: A bearer header requires no crypto crate at all. The transport is `wcore-egress`, which
+already re-exports reqwest as the mandated single outbound-HTTP chokepoint. Measured 401 responses
+in 25-01-livetest-reach-linux.txt confirm the surface is plain HTTPS JSON with no SDK handshake.
+
+OPTION: e2b-sandboxes
+AUTH-SCHEME: API-key header (`X-API-Key` / Authorization) on a plain HTTPS JSON API.
+SATISFIABLE-WITHOUT-NEW-CRATE: yes
+BASIS: Same reasoning as fly-machines — a static header needs no crate. Measured 401 body
+{"code":401,"message":"authorization header is missing"} names the header directly.
+
+OPTION: ec2-hibernate
+AUTH-SCHEME: AWS SigV4 request signing over the EC2 Query API (Action=/Version= query parameters).
+SATISFIABLE-WITHOUT-NEW-CRATE: yes
+BASIS: aws-sigv4 = "=1.4.3" is ALREADY in [workspace.dependencies] (Cargo.toml:350) and
+aws-credential-types (:351) supplies the credential type its signer takes. aws-sdk-ec2 is absent
+from Cargo.lock (count 0) and is NOT required: the EC2 Query API is signable by hand with the
+pinned aws-sigv4. The measured 400 response
+"The request must contain the parameter AWSAccessKeyId" confirms a plain HTTPS query surface.
+NOTE FOR THE PANEL: this REFUTES the common claim "EC2 needs a new crate". The real cost of the
+EC2 option is hand-rolled SigV4 signing plus IAM/VPC/AMI setup, not a forbidden dependency.
+
+OPTION: no-cloud
+AUTH-SCHEME: n/a
+SATISFIABLE-WITHOUT-NEW-CRATE: yes (trivially)
+BASIS: no network client at all.
+
+VERDICT: all three vendor options are dependency-satisfiable with zero new crates. Dependency
+satisfiability therefore DOES NOT discriminate between them, and any decision that rests on it is
+resting on a non-discriminating fact.

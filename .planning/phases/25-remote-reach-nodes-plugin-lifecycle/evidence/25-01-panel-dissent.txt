@@ -1,0 +1,75 @@
+DISSENT RECORD — F25 cloud reference backend selection
+Committed option: fly-machines. The losing arguments are preserved here because a decision record
+with the dissent deleted is not auditable.
+
+--- LOSING OPTION: ec2-hibernate
+STRONGEST ARGUMENT MADE FOR IT (internal adversarial pass, and implicitly conceded by codex):
+"ec2-hibernate is the ONLY option where the phase's own criterion word — hibernating — is a
+literal, documented instance state with true RAM persistence. Fly's suspend is the nearest
+analogue and Fly's more commonly exercised idle behaviour is auto-STOP, which is a cold restart,
+not hibernation." Measurement 1 additionally destroyed the usual objection to EC2: aws-sigv4 is
+already pinned at =1.4.3 and aws-sdk-ec2 is absent from the lockfile, so EC2 needs NO new crate.
+WHY IT DID NOT CARRY: two reasons, one measured and one structural.
+  (1) MEASURED. Leg 2 found the EC2 Query API answers in XML (Content-Type text/xml;charset=UTF-8),
+      and the workspace carries no XML parser in [workspace.dependencies]. Every EC2 response would
+      need hand-rolled XML parsing or a new crate, and a new crate is termination state 4. This is
+      a harder constraint than the dependency argument the plan expected to decide the option, and
+      it was found by measuring rather than by arguing.
+  (2) STRUCTURAL. The one genuine EC2 advantage under the adversarial pass's own Argument 1 — that
+      Sean is likelier to already hold an AWS account, which is the only lever that could move the
+      leg from UNEXERCISED to RUN — collapses, because using Sean's real AWS credential is inside
+      this program's reserved set, and a mis-scoped EC2 credential's blast radius is categorically
+      larger than a scratch Fly deploy token's. Measured: AWS_ACCESS_KEY_ID absent and
+      ~/.aws/credentials absent on hetzner-dsm, so the lever does not even exist on the proof host.
+WHAT SURVIVES FROM IT: the hibernation-word objection is NOT refuted and has been converted into a
+binding condition on the committed option (see CONDITIONS below).
+
+--- LOSING OPTION: e2b-sandboxes
+STRONGEST ARGUMENT MADE FOR IT (kimi, and conceded by codex): "pause/resume semantics are
+attractive… the cleanest conceptual mapping onto hibernating," and Leg 2 measured it returning the
+cleanest structured 401 of the three: {"code":401,"message":"authorization header is missing"}.
+WHY IT DID NOT CARRY: its defeat rests on the judgement that an SDK-first product's raw HTTP
+surface is likelier to shift, plus the narrower-execution-model argument that a sandbox is a weaker
+demonstration of provider neutrality than a general machine.
+HONEST WEAKNESS IN THAT REASONING, recorded because it is the panel's softest joint: the internal
+adversarial pass explicitly flagged "SDK-first products move their raw HTTP surface" as an
+UNMEASURED PREMISE carried by the majority. Nobody measured API stability inside this window and
+nobody could. e2b-sandboxes lost partly on an assertion, not entirely on evidence.
+
+--- LOSING OPTION: no-cloud
+STRONGEST ARGUMENT MADE FOR IT (internal adversarial pass, Argument 3): the standing asymmetry
+("building the path costs nothing if the token never arrives") is not actually free. An unexercised
+cloud backend is untested production code carrying credential handling and a network transport, and
+untested credential-handling code is precisely the class Phase 20A's TEST-AUDIT found 283 instances
+of. Shipping it unexercised imports a maintenance and security liability that no-cloud does not.
+The adversarial pass also observed that three panel members recited the asymmetry almost verbatim
+from the prompt, which is a prompt echo rather than an independent finding.
+WHY IT DID NOT CARRY: the liability is bounded and disclosed — the backend fails closed with an
+explicit unavailable verdict when the credential is absent, it is reachable only through an
+operator-invoked subcommand, and the conformance harness exercises every non-network code path in
+it. Bounded, disclosed, and one token from proof beats a forfeited Success Criterion.
+
+--- ARGUMENTS MADE AGAINST THE COMMITTED OPTION (fly-machines)
+1. (codex, conditional) Fly's ordinary idle behaviour is auto-STOP, a cold restart. Attesting
+   `stop` transitions would satisfy the letter of a REST call while quietly weakening the word the
+   Success Criterion uses. codex conditioned its vote on using `suspend`, NOT `stop`.
+2. (internal adversarial, Argument 1) The panel decided on ergonomics a question that is TIED AT
+   ZERO on the criterion that actually grades it. Measured on hetzner-dsm 2026-07-26: FLY_API_TOKEN
+   absent, WAYLAND_F25_CLOUD_TOKEN absent, WAYLAND_F25_CLOUD_ORG absent, E2B_API_KEY absent,
+   AWS_ACCESS_KEY_ID absent, ~/.aws/credentials absent, ~/.fly/config.yml absent. No vendor is
+   closer to running than any other. This objection is SUSTAINED and is not refuted by the
+   commitment; it is the reason the commitment is honest about termination state 2.
+3. (option text, conceded) Fly requires a funded organization and a scoped deploy token, and cold
+   boot is seconds not milliseconds. The second half is neutralised because timing is deliberately
+   excluded from the normalized receipt body; the first half is the reserved credential.
+4. (internal adversarial, Argument 4) The plan pre-labelled fly-machines "(Recommended)". That label
+   was STRIPPED from the panel bundle and the options were rotated, but three independent auditors
+   still converged on it, and unanimity after a prior is exactly the condition under which a fourth
+   rubber-stamp would be worthless.
+
+--- CONDITIONS BINDING THE COMMITMENT (carried forward from the dissent, not discarded)
+C1. The reference hibernation transition is `suspend`. An implementation that can only observe
+    `stop` MUST record that it did not observe hibernation, and MUST NOT report the hibernation
+    property as attested.
+C2. Objection 2 stands: the cloud leg is expected to end UNEXERCISED in this window, and Success
+    Criterion 1 is to be graded NOT MET in those words unless a credential arrives.

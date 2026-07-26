@@ -1,0 +1,39 @@
+PANEL-CMD: /Users/seandonahoe/.kimi-code/bin/kimi -p "$(cat 25-01-panel-prompt.txt)" --output-format text
+• This is a panel audit prompt — I'm one of four auditors answering a question. The working directory is the evidence directory for phase 25. I should check existing evidence files? The prompt gives me all the context. I just need to give a recommendation. Maybe read the prompt file for additional context? The evidence dir has 25-01-panel-prompt.txt etc. But I have the full question already. I could just answer directly.
+
+  Let me reason:
+
+  Options:
+  - fly-machines: bearer token, plain REST, first-class suspend/resume verbs, labels, per-second billing, cross-platform identical. No new crate. Cost: needs funded org + token (reserved to Sean, non-blocking).
+  - e2b-sandboxes: SDK-first Python/JS, raw HTTP less stable; narrower execution model; weaker proof of provider-neutrality.
+  - ec2-hibernate: real hibernation with RAM persistence, but heavy IAM/VPC/AMI setup, slow starts, hand-signed SigV4 Query API (doable without new crate per Measurement 1, but the hand-signing code is custom crypto-adjacent surface to maintain), huge credential blast radius, slow starts dominate equivalence run.
+  - no-cloud: forfeits Success Criterion 1 with no gain — standing asymmetry says building the path costs nothing even if token never arrives.
+
+  Recommendation: fly-machines. It satisfies every fixed constraint (REST via wcore-egress, no new crate, observable hibernate verbs, real cancellation/destroy, labels for nonce), cheapest ops burden, and the credential gap is non-blocking by design.
+
+  Answer concisely, engage at least two option ids by name (I'll engage e2b, ec2, no-cloud), end with PANEL_POSITION=fly-machines.
+
+  Should I write to a file? The prompt says answer as an auditor; the last line must be PANEL_POSITION=<option-id>. Other panel outputs are saved as 25-01-panel-kimi.txt — likely the harness captures my output. I could write my answer to 25-01-panel-kimi.txt? There's already a 25-01-panel-kimi.txt in the directory. Hmm, maybe I'm being run to produce that file, or it's from an earlier run. The instruction says "Answer with a recommendation and your reasoning." No file instruction. I'll check quickly whether the existing kimi file exists and if I should overwrite. Actually the safest: just answer in text. But the presence of 25-01-panel-kimi.txt suggests the harness collects outputs to files itself. I'll just reply in text. Maybe quickly read the prompt file to see if there's an instruction to write output. Let me check 25-01-panel-prompt.txt briefly.The prompt matches the user's message. I'm the Kimi panel member; the harness likely captures my stdout into 25-01-panel-kimi.txt. I'll just answer in text.
+
+• **Recommendation: fly-machines.**
+
+  Reasoning against the fixed constraints:
+
+  Every non-negotiable maps cleanly onto Fly Machines and only Fly Machines without qualification:
+
+  - **Egress shape / no new crate.** Bearer-token auth over plain HTTPS JSON is zero-crate by construction (Measurement 1 confirms it needs nothing beyond what `wcore-egress` already carries). The documented routes answer 401 JSON from the authoritative build host (Measurement 2), so the client surface is real and stable, not an SDK shim.
+  - **Observable hibernation.** `start` / `stop` / `suspend` / `destroy` are literal REST verbs on the Machines API, and auto-stop/auto-start on idle is documented first-class behavior. "Hibernating" is attested by API state transitions, not inferred from a billing page.
+  - **Real cancellation + orphan scan.** `destroy` plus per-machine metadata labels gives 25-04's nonce-labelled orphan scan a single `GET /v1/apps/{app}/machines` call to assert emptiness. That is the cheapest correct implementation of the two hardest Success Criterion properties.
+  - **Cross-OS parity.** A pure HTTPS client behaves identically on macOS, Linux, and Windows, which matters because 25-04 runs fail-closed legs on more than one OS. No platform-dependent credential chains or SDK shims.
+
+  Against the alternatives, by name:
+
+  - **ec2-hibernate**: Measurement 1 correctly kills the lazy "needs a new crate" objection — hand-signing SigV4 Query-API calls against the already-pinned `aws-sigv4 = "=1.4.3"` is legal. But the real cost was never the crate; it is IAM/VPC/AMI/key-pair setup before the first task runs, hibernation prerequisites on instance family and encrypted root volume, seconds-to-minutes start latency dominating the equivalence run, and — decisively — a mis-scoped AWS credential's blast radius versus a scratch Fly org's deploy token. The reference implementation's job is to prove the contract, not to maximize vendor realism. Hand-rolled SigV4 signing code is also bespoke crypto-adjacent surface we would own forever, for zero contract benefit.
+  - **e2b-sandboxes**: pause/resume semantics are attractive, but the raw HTTP path is explicitly the less-travelled surface of an SDK-first product, and a sandbox is a narrower execution model than a machine. Choosing it weakens the very claim F25 exists to make — that the contract is provider-neutral and not tailored to one vendor's abstraction. A general machine (Fly) is the stronger neutrality demonstration precisely because it is *not* purpose-built for agents.
+  - **no-cloud**: dominated option. Per the standing asymmetry, building the Fly code path and recording the leg UNEXERCISED if the token never arrives is strictly better than declining: same recorded outcome on Success Criterion 1 in the worst case, and one scoped token away from MET in the best case. Declining forfeits the built path and hands Phase 28 a gap for no savings.
+
+  The one genuine Fly cost — cold-boot seconds widening the timing band on this leg — is already neutralized by design, since timing is excluded from the normalized receipt body. The funded org and minted token are reserved to the owner and explicitly non-blocking, so the only thing Fly needs that an agent cannot produce is also the only thing the phase has already agreed not to wait for.
+
+  PANEL_POSITION=fly-machines
+
+To resume this session: kimi -r session_599f7a1a-3130-4b8b-8180-51f0bdb9c7f8
