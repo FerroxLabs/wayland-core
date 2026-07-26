@@ -757,7 +757,53 @@ fn live_probe(entry: &CorpusEntry, transport: LiveTransport) -> ProbeResult {
         });
     };
 
+    // THE ANTI-VACUITY GATE, and the single most important line in this file.
+    //
+    // Every probe below `observe` reads a negative: no probe file, no sentinel
+    // in the transcript, no grandchild completion. A negative is only evidence
+    // that a restriction held if the delegation actually happened. If the run
+    // never got a delegated child as far as its own provider turn, the absence
+    // means nothing was attempted — not that something was refused — and
+    // recording REFUSED from it would be precisely the class the Phase 20A
+    // audit found 283 times: a case that looks identical to a pass from a
+    // distance and proves nothing.
+    //
+    // The parent's own turn is request 1. A delegated child talking to the same
+    // configured endpoint is request 2. Fewer than two requests means no child
+    // ever ran.
+    //
+    // The provider dimension is the exception: its whole probe IS the request
+    // count, so it interprets the count itself rather than being gated on it.
+    let child_ran = run.provider_requests >= 2;
+    if !child_ran && entry.dimension != Dimension::Provider {
+        return ProbeResult::new(
+            Outcome::NotExpressible,
+            "no verdict — no delegated child reached a provider turn in this run",
+            format!(
+                "the {} run served {} provider request(s); at least two are required before an \
+                 absent effect can mean a refusal rather than an attempt that never happened; {}",
+                transport.label(),
+                run.provider_requests,
+                head(&run.transcript)
+            ),
+        )
+        .with_live(LiveEvidence {
+            invocation: run.invocation,
+            asserted_mode,
+            observable: format!(
+                "{} provider request(s) served — no delegated child turn, so the verdict was \
+                 withheld",
+                run.provider_requests
+            ),
+        });
+    }
+
     let (outcome, obtained, observable) = observe(entry.dimension, &world, &run);
+    let observable = format!(
+        "{observable} (the run served {} provider request(s), so a delegated child did reach its \
+         own turn)",
+        run.provider_requests
+    );
     ProbeResult::new(
         outcome,
         obtained,

@@ -269,6 +269,50 @@ pub fn source_files_mentioning(needle: &str) -> Vec<String> {
     hits
 }
 
+/// PRODUCTION sites under `crates/*/src` that mention `needle`, excluding the
+/// crate that defines the thing being looked for and excluding every test
+/// region. This is the shape every structural canary needs, and getting it
+/// wrong in either direction destroys the canary's value: too loose and it
+/// reports test fixtures as production channels (a manufactured red), too tight
+/// and it never fires on the channel it exists to catch.
+///
+/// Three exclusions, each of which the census applied by hand:
+///
+/// * `defining_crate` is where the mechanism lives; its own definition, its
+///   re-export and its own tests are not third-party call sites.
+/// * A file named `tests.rs`, or one under a `tests/` directory, is a whole-file
+///   test module declared `#[cfg(test)] mod tests;` by its parent, so it carries
+///   no inner `#[cfg(test)]` line to key on.
+/// * Within every other file, an occurrence at or after the first `#[cfg(test)]`
+///   is inside a test module.
+pub fn production_sites_mentioning(needle: &str, defining_crate: &str) -> Vec<String> {
+    let root = workspace_root();
+    let mut sites = Vec::new();
+    for file in source_files_mentioning(needle) {
+        if file.starts_with(defining_crate)
+            || file.ends_with("/tests.rs")
+            || file.contains("/tests/")
+        {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(root.join(&file)) else {
+            continue;
+        };
+        let test_boundary = text
+            .lines()
+            .position(|line| line.trim_start().starts_with("#[cfg(test)]"))
+            .unwrap_or(usize::MAX);
+        if text
+            .lines()
+            .enumerate()
+            .any(|(index, line)| index < test_boundary && line.contains(needle))
+        {
+            sites.push(file);
+        }
+    }
+    sites
+}
+
 /// A hermetic parent: a tempdir workspace, a session directory, and an
 /// `AgentSpawner` whose provider replays `script` for every child turn.
 pub struct ParentFixture {
@@ -596,7 +640,10 @@ pub fn approval_no_channel_canary() -> ProbeResult {
 /// reports the day a production caller starts forwarding a child-supplied
 /// override.
 pub fn budget_no_channel_canary() -> String {
-    let callers = source_files_mentioning("sub_budget(Some(");
+    // `wcore-budget` is the defining crate: its own `#[cfg(test)]` module at
+    // execution.rs:920 exercises `sub_budget(Some(..))`, which is the fixture
+    // that proves the override works at all, not a production request channel.
+    let callers = production_sites_mentioning("sub_budget(Some(", "crates/wcore-budget/");
     if callers.is_empty() {
         "NO-CHANNEL canary intact: no crates/*/src file forwards a Some(..) override into \
          sub_budget"
@@ -965,31 +1012,7 @@ pub fn egress_probe() -> ProbeResult {
 /// route through the B1 chokepoint, and 10 production files legitimately do it.
 /// Only the explicit per-client policy attachment is the hazard.
 fn production_egress_client_sites() -> Vec<String> {
-    let mut sites = Vec::new();
-    let root = workspace_root();
-    for file in source_files_mentioning(".with_policy(") {
-        if file.starts_with("crates/wcore-egress/")
-            || file.ends_with("/tests.rs")
-            || file.contains("/tests/")
-        {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(root.join(&file)) else {
-            continue;
-        };
-        let test_boundary = text
-            .lines()
-            .position(|line| line.trim_start().starts_with("#[cfg(test)]"))
-            .unwrap_or(usize::MAX);
-        let production = text
-            .lines()
-            .enumerate()
-            .any(|(index, line)| index < test_boundary && line.contains(".with_policy("));
-        if production {
-            sites.push(file);
-        }
-    }
-    sites
+    production_sites_mentioning(".with_policy(", "crates/wcore-egress/")
 }
 
 /// Breadth beyond the parent's cap, attempted through the real `SpawnTool`
@@ -1067,15 +1090,15 @@ impl CorpusExecutor for StandaloneInProcess {
                 probe
             }
             Dimension::Provider => {
-                let fixture = parent_fixture("corpus-standalone-provider", Vec::new());
+                let fixture = parent_fixture("c04b5a-a11e-0001", Vec::new());
                 provider_no_channel_canary(Arc::clone(&fixture.spawner))
             }
             Dimension::Approval => approval_no_channel_canary(),
-            Dimension::Tool => tool_widening_through_spawn_fork("corpus-standalone-tool"),
+            Dimension::Tool => tool_widening_through_spawn_fork("c04b5a-a11e-0003"),
             Dimension::Filesystem => filesystem_escape_probe(),
             Dimension::Secret => secret_read_probe(),
             Dimension::Egress => egress_probe(),
-            Dimension::FanOut => fan_out_probe("corpus-standalone-fanout"),
+            Dimension::FanOut => fan_out_probe("c04b5a-a11e-0005"),
         }
     }
 }
@@ -1135,15 +1158,15 @@ impl CorpusExecutor for HostProtocolInProcess {
             // the two ever diverge, the weaker path is a bypass of the stronger
             // and the property is false overall.
             Dimension::Provider => {
-                let fixture = parent_fixture("corpus-protocol-provider", Vec::new());
+                let fixture = parent_fixture("c04b5a-a11e-0002", Vec::new());
                 provider_no_channel_canary(Arc::clone(&fixture.spawner))
             }
             Dimension::Approval => approval_no_channel_canary(),
-            Dimension::Tool => tool_widening_through_spawn_fork("corpus-protocol-tool"),
+            Dimension::Tool => tool_widening_through_spawn_fork("c04b5a-a11e-0004"),
             Dimension::Filesystem => filesystem_escape_probe(),
             Dimension::Secret => secret_read_probe(),
             Dimension::Egress => egress_probe(),
-            Dimension::FanOut => fan_out_probe("corpus-protocol-fanout"),
+            Dimension::FanOut => fan_out_probe("c04b5a-a11e-0006"),
         }
     }
 }
