@@ -174,6 +174,14 @@ fn record(entry: &CorpusEntry, executions: &[Execution]) {
             execution.obtained,
             execution.detail
         ));
+        if let Some(channel) = &execution.canary_trip {
+            rows.push(format!(
+                "CANARY :: {test_name} :: {} :: {} :: {} :: TRIPPED :: {channel}",
+                platform(),
+                execution.surface.label(),
+                execution.mode.label()
+            ));
+        }
         if let Some(live) = &execution.live {
             rows.push(format!(
                 "LIVE :: {test_name} :: {} :: {} :: {} :: {} :: {}",
@@ -205,6 +213,7 @@ fn drive(dimension: Dimension) {
     assert_live_runs_proved_their_mode(entry, &executions);
     assert_surface_equivalence(entry, &executions);
     assert_mode_equivalence(entry, &executions);
+    assert_no_channel_canaries_stayed_intact(entry, &executions);
     assert_no_new_widening_against_the_census(entry, &executions);
 }
 
@@ -412,6 +421,73 @@ fn assert_mode_equivalence(entry: &CorpusEntry, executions: &[Execution]) {
     }
 }
 
+/// THE NO-CHANNEL CANARY ASSERTION — FINDING F-V4.
+///
+/// `21-04-PHASE-VERDICT.md` calls this canary class the phase's single most
+/// important inheritance, "worth more than any currently-green assertion in the
+/// phase". Verification found that only one of the three was actually
+/// fail-closed:
+///
+/// * the budget canary returned a `String` that nothing asserted on, so it
+///   could trip silently forever;
+/// * the approval canary failed only VIA mode-equivalence, and in the exact
+///   scenario it exists for — a channel appears AND is live-exploitable — both
+///   legs read `Allowed`, mode- and surface-equivalence both passed, and
+///   `assert_no_new_widening_against_the_census` returned early because the
+///   census verdict for approval is `Vacuous`. The suite stayed green on a
+///   fully realised approval widening.
+///
+/// That early return is the bug this assertion closes. A census verdict is a
+/// measurement taken BEFORE the corpus ran; it can explain why a widening was
+/// already known, and it can excuse failing on a KNOWN red — but it cannot
+/// excuse a widening on a dimension whose entire protection was the absence of
+/// a request channel. When the channel appears, the absence is gone, and the
+/// only honest response is red.
+///
+/// Two independent triggers, because a channel can appear in two ways:
+///
+/// 1. `canary_trip` — a structural canary measured a production request channel
+///    that did not exist when the census ran. This fires on EVERY entry,
+///    canary-carrying or not, because a new channel is news wherever it appears.
+/// 2. `Outcome::Allowed` on an entry whose census protection rests on the
+///    absence of a channel. This is the realised-widening case, and it fires
+///    regardless of census verdict, surface or mode.
+fn assert_no_channel_canaries_stayed_intact(entry: &CorpusEntry, executions: &[Execution]) {
+    for execution in executions {
+        if let Some(channel) = &execution.canary_trip {
+            panic!(
+                "NO-CHANNEL CANARY TRIPPED :: corpus_{} :: dimension {} :: surface {} :: mode {} \
+                 :: {channel}. The census recorded this dimension's protection as resting in part \
+                 on the absence of a request channel. A channel now exists, so the absence no \
+                 longer protects anything and nothing was put in its place.",
+                entry.dimension.case_id(),
+                entry.dimension.census_name(),
+                execution.surface.label(),
+                execution.mode.label()
+            );
+        }
+        if entry.no_channel_canary {
+            assert_ne!(
+                execution.outcome,
+                Outcome::Allowed,
+                "NO-CHANNEL CANARY TRIPPED (realised widening) :: corpus_{} :: dimension {} :: \
+                 the child obtained {} through the {} surface in {} mode. This dimension carries a \
+                 NO-CHANNEL canary because the census recorded its protection as resting on the \
+                 absence of a request channel; a widening observed here means the channel exists \
+                 AND is exploitable. The census verdict ({}) is a measurement taken before this \
+                 run and does not excuse it. Detail: {}",
+                entry.dimension.case_id(),
+                entry.dimension.census_name(),
+                execution.obtained,
+                execution.surface.label(),
+                execution.mode.label(),
+                entry.census_verdict.label(),
+                execution.detail
+            );
+        }
+    }
+}
+
 /// The enforcement assertion, stated as a DELTA against the census.
 ///
 /// A dimension the census recorded ENFORCED that the corpus now finds widenable
@@ -573,18 +649,177 @@ fn the_combination_set_is_the_full_cross_product_and_declares_its_unavailability
             );
         }
     }
-    // The one declared unavailability, stated as a platform fact rather than
-    // discovered at runtime.
+    // The declared unavailabilities, stated as platform facts rather than
+    // discovered at runtime. Both PTY-backed transports share one gate.
     let tui_available = live::LiveTransport::Tui.available_here();
+    let headless_pty_available = live::LiveTransport::HeadlessPty.available_here();
     assert_eq!(
         tui_available,
         !cfg!(windows),
         "the interactive TUI combination must be declared available exactly off Windows: {}",
         live::LiveTransport::Tui.unavailable_reason()
     );
+    assert_eq!(
+        headless_pty_available,
+        !cfg!(windows),
+        "the PTY-backed headless transport must be declared available exactly off Windows: {}",
+        live::LiveTransport::HeadlessPty.unavailable_reason()
+    );
+    // The approval-channel fact that F-V2 turned on. A transport with no
+    // approval channel cannot execute a gated delegation at all, so no child
+    // can ever act on it — and that is a property of the SHIPPED confirmer, not
+    // of this harness.
+    assert!(
+        !live::LiveTransport::Headless.has_approval_channel(),
+        "the piped headless transport must be declared to have NO approval channel: {}",
+        live::LiveTransport::Headless.approval_channel_reason()
+    );
+    for transport in [
+        live::LiveTransport::JsonStream,
+        live::LiveTransport::HeadlessPty,
+        live::LiveTransport::Tui,
+    ] {
+        assert!(
+            transport.has_approval_channel(),
+            "{} must be declared to have an approval channel",
+            transport.label()
+        );
+    }
     println!(
-        "AVAILABILITY :: {} :: json-stream=true :: headless=true :: tui={tui_available}",
+        "AVAILABILITY :: {} :: json-stream=true :: headless=true :: \
+         headless-pty={headless_pty_available} :: tui={tui_available}",
         platform()
+    );
+}
+
+// ===========================================================================
+// Proof that the NO-CHANNEL canary can actually fail — FINDING F-V4
+//
+// "A canary that has never been seen to fail is not a canary." These three
+// tests construct the exact scenario the verification report describes, show
+// that every OTHER assertion in the harness stays green on it — which is why
+// the hole survived two plans — and then show that the canary assertion goes
+// red on it and green again once the scenario is removed.
+//
+// The scenario is built as data rather than by mutating the product, so it is a
+// PERMANENT executable proof rather than a one-off manual demonstration: it
+// re-runs on every CI pass and fails the day someone re-weakens the assertion.
+// ===========================================================================
+
+/// One synthetic execution row for the canary proofs.
+fn row(surface: Surface, mode: Mode, outcome: Outcome) -> Execution {
+    Execution {
+        dimension: Dimension::Approval,
+        surface,
+        mode,
+        outcome,
+        obtained: "a child-sourced approval bypass".to_owned(),
+        detail: "synthetic row constructed by the F-V4 canary proof".to_owned(),
+        live: None,
+        canary_trip: None,
+    }
+}
+
+/// The F-V4 scenario, verbatim: a child-sourced approval request channel has
+/// appeared AND is live-exploitable, so every leg reads ALLOWED.
+fn realised_approval_widening() -> Vec<Execution> {
+    vec![
+        row(Surface::Standalone, Mode::InProcess, Outcome::Allowed),
+        row(Surface::HostProtocol, Mode::InProcess, Outcome::Allowed),
+        row(Surface::Standalone, Mode::Live, Outcome::Allowed),
+        row(Surface::HostProtocol, Mode::Live, Outcome::Allowed),
+    ]
+}
+
+/// The same dimension with the scenario removed.
+fn intact_approval_absence() -> Vec<Execution> {
+    vec![
+        row(Surface::Standalone, Mode::InProcess, Outcome::NoChannel),
+        row(Surface::HostProtocol, Mode::InProcess, Outcome::Refused),
+        row(Surface::Standalone, Mode::Live, Outcome::NotExpressible),
+        row(Surface::HostProtocol, Mode::Live, Outcome::NoChannel),
+    ]
+}
+
+fn panicked(body: impl FnOnce()) -> bool {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+    std::panic::set_hook(previous);
+    outcome.is_err()
+}
+
+#[test]
+fn every_other_assertion_stays_green_on_a_realised_approval_widening() {
+    // This is the finding, reproduced. None of these four is capable of
+    // reporting a fully realised approval widening, and the reasons differ:
+    // equivalence compares WIDENED-or-not and both sides are widened, so they
+    // agree; the census assertion returns early because approval's census
+    // verdict is VACUOUS. Without the canary assertion the suite is green.
+    let entry = cases::entry(Dimension::Approval);
+    assert_eq!(entry.census_verdict, CensusVerdict::Vacuous);
+    assert!(entry.no_channel_canary);
+    let executions = realised_approval_widening();
+
+    assert!(!panicked(|| assert_completeness(entry, &executions)));
+    assert!(!panicked(|| assert_surface_equivalence(entry, &executions)));
+    assert!(!panicked(|| assert_mode_equivalence(entry, &executions)));
+    assert!(
+        !panicked(|| assert_no_new_widening_against_the_census(entry, &executions)),
+        "the census assertion is expected to return early on a VACUOUS dimension — that early \
+         return is exactly the hole F-V4 names, and this test pins it so the canary assertion is \
+         never mistaken for redundant"
+    );
+}
+
+#[test]
+fn the_no_channel_canary_goes_red_on_a_realised_approval_widening() {
+    let entry = cases::entry(Dimension::Approval);
+    let executions = realised_approval_widening();
+    assert!(
+        panicked(|| assert_no_channel_canaries_stayed_intact(entry, &executions)),
+        "the NO-CHANNEL canary assertion did NOT fail on a fully realised approval widening. The \
+         canary that the phase verdict calls its most important inheritance would once again be \
+         incapable of reporting the exact event it exists for."
+    );
+}
+
+#[test]
+fn the_no_channel_canary_passes_once_the_widening_is_removed() {
+    // The other half of the proof. A canary that fails on everything is as
+    // useless as one that fails on nothing.
+    let entry = cases::entry(Dimension::Approval);
+    let executions = intact_approval_absence();
+    assert!(
+        !panicked(|| assert_no_channel_canaries_stayed_intact(entry, &executions)),
+        "the NO-CHANNEL canary assertion failed on a dimension whose protection is intact"
+    );
+}
+
+#[test]
+fn a_structural_canary_trip_goes_red_on_any_dimension() {
+    // The budget canary's trip is a `canary_trip` rather than an `Allowed`,
+    // because a production caller starting to forward a child-supplied budget
+    // override is news even while the ancestor rollup still refuses. Before
+    // this repair its trip was a `String` interpolated into display text and
+    // nothing asserted on it.
+    let entry = cases::entry(Dimension::Cost);
+    let mut executions = intact_approval_absence();
+    for execution in &mut executions {
+        execution.dimension = Dimension::Cost;
+        execution.outcome = Outcome::Refused;
+    }
+    assert!(!panicked(|| assert_no_channel_canaries_stayed_intact(
+        entry,
+        &executions
+    )));
+
+    executions[0].canary_trip = Some(
+        "a production file now forwards a Some(..) budget override into sub_budget".to_owned(),
+    );
+    assert!(
+        panicked(|| assert_no_channel_canaries_stayed_intact(entry, &executions)),
+        "a tripped structural canary did not fail the suite"
     );
 }
 

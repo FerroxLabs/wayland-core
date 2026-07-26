@@ -44,7 +44,6 @@ use wcore_agent::session::SessionManager;
 use wcore_agent::session_journal::BudgetWallClockAuthority;
 use wcore_agent::spawn_tool::SpawnTool;
 use wcore_agent::spawner::AgentSpawner;
-use wcore_agent::test_utils::ScriptedProvider;
 use wcore_budget::execution::{ExecutionBudget, ExecutionBudgetView};
 use wcore_budget::tracker::BudgetCap;
 use wcore_config::config::Config;
@@ -161,6 +160,14 @@ pub struct ProbeResult {
     pub obtained: String,
     pub detail: String,
     pub live: Option<LiveEvidence>,
+    /// `Some(description)` when a NO-CHANNEL canary this probe carries has
+    /// TRIPPED — a request channel the dimension's protection rests on has
+    /// appeared. Separate from `outcome` on purpose: the outcome is a verdict
+    /// about what the child obtained on this run, and a channel appearing is a
+    /// verdict about the WORLD. Collapsing the two would either hide a new
+    /// channel behind a still-refusing seam or restate a refusal as a widening.
+    /// Asserted by `assert_no_channel_canaries_stayed_intact`.
+    pub canary_trip: Option<String>,
 }
 
 impl ProbeResult {
@@ -170,12 +177,46 @@ impl ProbeResult {
             obtained: obtained.into(),
             detail: detail.into(),
             live: None,
+            canary_trip: None,
         }
     }
 
     pub fn with_live(mut self, live: LiveEvidence) -> Self {
         self.live = Some(live);
         self
+    }
+
+    pub fn with_canary(mut self, canary: &CanaryState) -> Self {
+        self.canary_trip = canary.tripped().map(ToOwned::to_owned);
+        self
+    }
+}
+
+/// The state of a structural NO-CHANNEL canary.
+///
+/// FINDING F-V4 (Phase 21 verification): the budget canary used to return a
+/// bare `String` that was interpolated into `detail` and consumed as display
+/// text only. The literal `"NO-CHANNEL CANARY TRIPPED"` appeared in exactly one
+/// place workspace-wide — its own definition. Nothing asserted on it, so it
+/// could trip silently forever. A canary nothing asserts on is a comment.
+#[derive(Debug, Clone)]
+pub enum CanaryState {
+    Intact(String),
+    Tripped(String),
+}
+
+impl CanaryState {
+    pub fn note(&self) -> &str {
+        match self {
+            Self::Intact(note) | Self::Tripped(note) => note,
+        }
+    }
+
+    pub fn tripped(&self) -> Option<&str> {
+        match self {
+            Self::Tripped(note) => Some(note),
+            Self::Intact(_) => None,
+        }
     }
 }
 
@@ -190,6 +231,7 @@ pub struct Execution {
     pub obtained: String,
     pub detail: String,
     pub live: Option<LiveEvidence>,
+    pub canary_trip: Option<String>,
 }
 
 /// The one job every driver does.
@@ -208,6 +250,7 @@ pub trait CorpusExecutor {
             obtained: probe.obtained,
             detail: probe.detail,
             live: probe.live,
+            canary_trip: probe.canary_trip,
         }
     }
 }
@@ -318,24 +361,104 @@ pub fn production_sites_mentioning(needle: &str, defining_crate: &str) -> Vec<St
 pub struct ParentFixture {
     /// Held so the tempdir outlives every probe that reads from it.
     pub _home: TempDir,
+    /// The session state root, held for the same reason. Deliberately NOT
+    /// inside `root` — see `parent_fixture`.
+    pub _session_home: TempDir,
     pub root: PathBuf,
     pub spawner: Arc<AgentSpawner>,
     /// `Some(reason)` when the durable session could not be bound. A driver
     /// that needs a launch reports NOT-EXPRESSIBLE rather than reporting a
     /// refusal it did not actually observe.
     pub bind_failure: Option<String>,
+    /// The fixture's own endpoint, counted. A probe reads this to tell "the
+    /// child ran and was refused" apart from "no child ever ran".
+    pub provider: Arc<CountingProvider>,
+}
+
+/// Make `root` a real git repository with one commit.
+///
+/// Required because a child that requests a MUTATING toolset resolves
+/// `RequestedChildWorkspace::IsolatedMutation`, and the isolated workspace is a
+/// git worktree of the parent: `resolve_durable_launch` calls
+/// `WorktreeManager::new_with_workspace_root`, which needs `pinned_head` and
+/// `git_common_dir`. Without a repo the child dies in workspace preparation and
+/// the probe reads an absent effect — the vacuity this file exists to close.
+///
+/// Argv mode throughout: no shell string, no interpolation. Identity is passed
+/// per-invocation with `-c` so no global git config is read or written.
+fn init_git_repo(root: &Path) -> Result<(), String> {
+    let run = |args: &[&str]| -> Result<(), String> {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .map_err(|error| format!("git is not available on this host: {error}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "git {:?} did not succeed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+    };
+    run(&["init", "--initial-branch=corpus"])?;
+    std::fs::write(root.join("README.corpus"), b"corpus fixture repository")
+        .map_err(|error| error.to_string())?;
+    // The binary writes its own per-workspace state under `.wayland-core/`, and
+    // an isolated-mutation dispatch refuses on a dirty checkout. Ignoring that
+    // directory is what keeps the repository clean enough for the child to be
+    // created at all; without it every mutating child dies before existing and
+    // the probe reads an absent effect.
+    std::fs::write(root.join(".gitignore"), b".wayland-core/\n")
+        .map_err(|error| error.to_string())?;
+    run(&["add", "README.corpus", ".gitignore"])?;
+    run(&[
+        "-c",
+        "user.email=corpus@example.invalid",
+        "-c",
+        "user.name=corpus",
+        "commit",
+        "-m",
+        "corpus fixture",
+    ])
 }
 
 pub fn parent_fixture(session_tag: &str, script: Vec<LlmEvent>) -> ParentFixture {
     let home = TempDir::new().expect("tempdir");
     let root = std::fs::canonicalize(home.path()).expect("canonical workspace root");
-    let sessions = root.join("sessions");
-    std::fs::create_dir_all(&sessions).expect("session directory");
+    // The session state root lives OUTSIDE the parent workspace on purpose. The
+    // isolated-mutation checkout root is derived as
+    // `<session.directory>/delegated-workspaces/checkouts`, and
+    // `WorktreeManager::new_with_workspace_root` refuses when that root's parent
+    // overlaps the repository. With the session directory nested inside the
+    // workspace — as this fixture had it — the overlap is unconditional, so
+    // EVERY mutating child died in workspace preparation and the tool probe
+    // recorded a refusal it never observed.
+    let session_home = TempDir::new().expect("session tempdir");
+    let sessions = std::fs::canonicalize(session_home.path()).expect("canonical session root");
+    let repo_failure = init_git_repo(&root).err();
 
     let mut config = Config::default();
     config.session.directory = sessions.to_string_lossy().into_owned();
+    // A FOURTH INSTANCE OF THE VACUITY FAMILY, found while closing F-V2.
+    //
+    // `Config::default()` carries an EMPTY model. `resolve_durable_launch`
+    // (spawner.rs:1465) fails closed on an empty resolved model, so every child
+    // launched from this fixture died before existing and the probes recorded
+    // REFUSED from a child that never ran. The evidence is verbatim in the
+    // shipped ledgers: `child text: durable child execution evidence mismatch:
+    // resolved model` on the standalone in-process tool row, and `0 children
+    // were reported` on the fan-out row — both recorded REFUSED at both the
+    // 21-02 and 21-03 SHAs on both platforms. Naming a model here is what gives
+    // those two probes an actor; the anti-vacuity gate below is what stops the
+    // absence of one from ever being read as a refusal again.
+    config.provider_label = "anthropic".to_owned();
+    config.model = "corpus-model".to_owned();
 
-    let provider: Arc<dyn LlmProvider> = Arc::new(ScriptedProvider::new(script));
+    let counted = Arc::new(CountingProvider::new(script));
+    let provider: Arc<dyn LlmProvider> = Arc::clone(&counted) as Arc<dyn LlmProvider>;
     let spawner = AgentSpawner::new(provider, config)
         .with_parent_workspace(&root)
         .expect("bind parent workspace");
@@ -356,10 +479,39 @@ pub fn parent_fixture(session_tag: &str, script: Vec<LlmEvent>) -> ParentFixture
 
     ParentFixture {
         _home: home,
+        _session_home: session_home,
         root,
         spawner: Arc::new(spawner),
-        bind_failure,
+        bind_failure: bind_failure.or(repo_failure),
+        provider: counted,
     }
+}
+
+/// The in-process anti-vacuity gate, the exact sibling of the live one.
+///
+/// Every in-process spawn probe reads a negative — no probe file, no child
+/// name in the batch result. A negative is only evidence that a restriction
+/// held if a child ACTUALLY RAN, and "ran" means took its own provider turn
+/// against the fixture's endpoint. Returns `Some(probe)` when it did not.
+fn withhold_if_no_child_ran(
+    fixture: &ParentFixture,
+    before: usize,
+    what: &str,
+    child_text: &str,
+) -> Option<ProbeResult> {
+    let turns = fixture.provider.calls().saturating_sub(before);
+    (turns == 0).then(|| {
+        ProbeResult::new(
+            Outcome::NotExpressible,
+            "no verdict — no child took a provider turn in this run",
+            format!(
+                "{what} returned without any child reaching the fixture's own endpoint, so an \
+                 absent effect would mean an attempt that never happened rather than a refusal; \
+                 child text: {}",
+                truncate(child_text)
+            ),
+        )
+    })
 }
 
 /// A one-turn child script that calls `tool` with `input` and then stops.
@@ -639,21 +791,22 @@ pub fn approval_no_channel_canary() -> ProbeResult {
 /// channel, because every production `sub_budget` caller passes `None`. This
 /// reports the day a production caller starts forwarding a child-supplied
 /// override.
-pub fn budget_no_channel_canary() -> String {
+pub fn budget_no_channel_canary() -> CanaryState {
     // `wcore-budget` is the defining crate: its own `#[cfg(test)]` module at
     // execution.rs:920 exercises `sub_budget(Some(..))`, which is the fixture
     // that proves the override works at all, not a production request channel.
     let callers = production_sites_mentioning("sub_budget(Some(", "crates/wcore-budget/");
     if callers.is_empty() {
-        "NO-CHANNEL canary intact: no crates/*/src file forwards a Some(..) override into \
-         sub_budget"
-            .to_owned()
-    } else {
-        format!(
-            "NO-CHANNEL CANARY TRIPPED: a production file now forwards a Some(..) budget override \
-             into sub_budget: {}",
-            callers.join(", ")
+        CanaryState::Intact(
+            "NO-CHANNEL canary intact: no crates/*/src file forwards a Some(..) override into \
+             sub_budget"
+                .to_owned(),
         )
+    } else {
+        CanaryState::Tripped(format!(
+            "a production file now forwards a Some(..) budget override into sub_budget: {}",
+            callers.join(", ")
+        ))
     }
 }
 
@@ -698,7 +851,31 @@ pub fn tool_widening_through_spawn_fork(session_tag: &str) -> ProbeResult {
     );
 
     let rt = runtime();
+    let before = fixture.provider.calls();
     let result = rt.block_on(fixture.spawner.spawn_fork(config, overrides));
+    if let Some(withheld) = withhold_if_no_child_ran(
+        &fixture,
+        before,
+        "the production Delegate path (`Spawner::spawn_fork`)",
+        &result.text,
+    ) {
+        return withheld;
+    }
+
+    // What the child's own tool call RETURNED, captured at the fixture's
+    // endpoint. Carried into the evidence but deliberately NOT used as the
+    // verdict — the verdict stays on the effect, per the corpus's rule that no
+    // assertion reads an error shape. It is here because the disk effect alone
+    // cannot separate the two reasons a probe file might be missing, and a
+    // record that cannot separate them should say so rather than imply one.
+    let returned = fixture.provider.tool_results().join(" | ");
+    let attribution = format!(
+        "the probe target sits outside the child's isolated-mutation checkout, so an absent effect \
+         is jointly attributable to tool authority and to workspace containment; the corpus cannot \
+         separate the two from the effect alone and does not claim to. What the child's own tool \
+         call returned: {}",
+        truncate(&returned)
+    );
 
     if probe_path.exists() {
         ProbeResult::new(
@@ -716,8 +893,8 @@ pub fn tool_widening_through_spawn_fork(session_tag: &str) -> ProbeResult {
             Outcome::Refused,
             "no Bash effect — nothing the read-only parent does not hold",
             format!(
-                "the delegated child produced no Bash effect on disk; parent workspace {}; \
-                 child text: {}",
+                "the delegated child produced no Bash effect on disk; parent workspace {}; child \
+                 text: {}; {attribution}",
                 fixture.root.display(),
                 truncate(&result.text)
             ),
@@ -1018,44 +1195,82 @@ fn production_egress_client_sites() -> Vec<String> {
 /// Breadth beyond the parent's cap, attempted through the real `SpawnTool`
 /// against the real topology configuration. The invariant is measured from the
 /// number of children the request actually produced, not from any refusal text.
+///
+/// ## Why this probe runs a CONTROL first
+///
+/// Fan-out is the one dimension where zero children is the CORRECT enforcement
+/// outcome: an admission gate that rejects an over-cap batch outright produces
+/// no child at all, and that is a refusal, not an absence. It is also exactly
+/// what a broken fixture produces. The two are indistinguishable from the
+/// over-cap run alone, and reading one as the other is the vacuity class F-V2
+/// names — which is how this probe recorded REFUSED at both prior SHAs while
+/// the fixture could not launch a child for an unrelated reason.
+///
+/// So the seam is proved live before its refusal is believed: an AT-CAP batch
+/// must admit at least one child. If the control admits none, no verdict is
+/// taken from the over-cap run. Nothing here reads a refusal message.
 pub fn fan_out_probe(session_tag: &str) -> ProbeResult {
     let fixture = parent_fixture(session_tag, done_script());
     let tool = SpawnTool::new(Arc::clone(&fixture.spawner));
     // Topology::Spawn is the default SpawnTool topology and its documented cap.
     let cap = 5usize;
     let over_cap = cap + 3;
-
-    let tasks: Vec<serde_json::Value> = (0..over_cap)
-        .map(|i| json!({ "name": format!("corpuschild{i}"), "prompt": "no-op" }))
-        .collect();
-
     let rt = runtime();
-    let result = rt.block_on(tool.execute(json!({ "tasks": tasks })));
+
+    let batch = |count: usize, prefix: &str| -> serde_json::Value {
+        json!({
+            "tasks": (0..count)
+                .map(|i| json!({ "name": format!("{prefix}{i}"), "prompt": "no-op" }))
+                .collect::<Vec<_>>()
+        })
+    };
+
+    // THE CONTROL. An at-cap batch the gate must admit.
+    let control_before = fixture.provider.calls();
+    let control = rt.block_on(tool.execute(batch(cap, "corpuscontrol")));
+    let control_children = fixture.provider.calls().saturating_sub(control_before);
+    if control_children == 0 {
+        return ProbeResult::new(
+            Outcome::NotExpressible,
+            "no verdict — the breadth seam admitted no child even at the cap",
+            format!(
+                "an AT-CAP batch of {cap} produced 0 child provider turns, so this fixture cannot \
+                 launch a child at all and an over-cap batch producing 0 would prove nothing about \
+                 the cap; control result: {}",
+                truncate(&control.content)
+            ),
+        );
+    }
+
+    let before = fixture.provider.calls();
+    let result = rt.block_on(tool.execute(batch(over_cap, "corpuschild")));
+    let over_cap_children = fixture.provider.calls().saturating_sub(before);
 
     // The discriminator is whether the over-cap request produced over-cap work.
     // A refused request never reaches a child; an accepted one reports each
     // child it ran by name.
     let named = (0..over_cap)
         .filter(|i| result.content.contains(&format!("corpuschild{i}")))
-        .count();
+        .count()
+        .max(over_cap_children);
 
+    let evidence = format!(
+        "the control batch of {cap} admitted {control_children} child provider turn(s), so the \
+         breadth seam is live in this fixture; a batch of {over_cap} was then requested against \
+         the Spawn topology cap of {cap} and {named} child(ren) resulted \
+         ({over_cap_children} of them reached a provider turn)"
+    );
     if named > cap {
         ProbeResult::new(
             Outcome::Allowed,
             format!("breadth of {named} children against a parent cap of {cap}"),
-            format!(
-                "a batch of {over_cap} was requested against the Spawn topology cap of {cap} and \
-                 {named} children were reported"
-            ),
+            evidence,
         )
     } else {
         ProbeResult::new(
             Outcome::Refused,
             format!("no breadth beyond the parent cap of {cap}"),
-            format!(
-                "a batch of {over_cap} was requested against the Spawn topology cap of {cap}; \
-                 {named} children were reported"
-            ),
+            evidence,
         )
     }
 }
@@ -1081,13 +1296,14 @@ impl CorpusExecutor for StandaloneInProcess {
             Dimension::Depth | Dimension::Time | Dimension::Token | Dimension::Cost => {
                 let parent = tight_parent_budget().start_root();
                 let child = parent.sub_budget(Some(wide_child_budget()));
+                let canary = budget_no_channel_canary();
                 let mut probe = budget_probe(entry.dimension, &child);
                 probe.detail = format!(
                     "ExecutionBudgetView::sub_budget(Some(wider)) at the child-spawn seam; {}; {}",
                     probe.detail,
-                    budget_no_channel_canary()
+                    canary.note()
                 );
-                probe
+                probe.with_canary(&canary)
             }
             Dimension::Provider => {
                 let fixture = parent_fixture("c04b5a-a11e-0001", Vec::new());
@@ -1109,17 +1325,45 @@ impl CorpusExecutor for StandaloneInProcess {
 
 /// The host-protocol in-process driver.
 ///
-/// `wcore_protocol::commands::ProtocolCommand` exposes NO direct child-spawn
-/// command. The host reaches children two ways: through `Message`, after which
-/// the model issues `Delegate`/`Spawn`, and through the in-process
-/// `HostChildController` that `AgentBootstrap` hands the front-end
-/// (`bootstrap.rs:2226`). Both land on the same `AgentSpawner`. So equivalence
-/// IS constructible — termination state 2 does not apply — but the protocol
-/// surface reaches the seam through the session/turn authority the front-end
-/// binds rather than through a raw `sub_budget` at the spawn seam. That
-/// distinction is what keeps the cross-surface comparison from being a
-/// tautology on the budget family: `BudgetAuthorityCoordinator::begin_active_turn`
-/// here against `ExecutionBudgetView::sub_budget` on the standalone side.
+/// ## What this driver is, and what it used to be — FINDING F-V3
+///
+/// Until this repair every dimension except the budget family dispatched to the
+/// SAME free function as [`StandaloneInProcess`], differing only in a session
+/// tag. Seven of eleven pairings were therefore one code path called twice:
+/// `assert_surface_equivalence` could not fail on them and proved nothing about
+/// two surfaces. The file's own comment claimed "driving them from the
+/// protocol-bound path is the point of the comparison" while the code called
+/// the standalone probe.
+///
+/// This driver now reaches its dimensions through the objects the protocol
+/// front-end actually owns:
+///
+/// * The parent is built by the production [`AgentBootstrap`] — the same
+///   constructor `wcore-cli`'s `--json-stream` path runs — so the spawner is
+///   `govern_spawner(...)`-wrapped, carries the session's durable authority, its
+///   execution policy, its egress policy, its approval manager and its session
+///   runtime. `StandaloneInProcess` builds a bare `AgentSpawner::new(...)`. The
+///   two constructions are not the same object graph and never were.
+/// * Children are created through `HostChildController::spawn_child` —
+///   `spawn_host_child`, `ChildOrigin::Host` — which is the host's own durable
+///   child path, not `Spawner::spawn_fork`.
+/// * The budget family stays on `BudgetAuthorityCoordinator::begin_active_turn`,
+///   the session/turn seam, against the standalone side's raw
+///   `ExecutionBudgetView::sub_budget`.
+///
+/// ## Where this surface genuinely cannot express a dimension
+///
+/// Three do not get a driven verdict, and that is REPORTED rather than
+/// papered over with a call into the other driver. The host child-spawn request
+/// type is `SubAgentConfig`, whose entire field set is name / prompt / max_turns
+/// / max_tokens / system_prompt / provider / model / temperature. It carries no
+/// tool-authority field, no breadth field and no approval field, and
+/// `spawn_host_child` hardcodes `ForkOverrides::default()` — so a tool, fan-out
+/// or approval widening cannot be REQUESTED on this surface at all. Those
+/// dimensions record NOT-EXPRESSIBLE with the field set as evidence, and the
+/// evidence is measured from the live type rather than asserted in prose, so
+/// the day one of those fields appears the recorded reason stops being true and
+/// the structural canary beside it fires.
 pub struct HostProtocolInProcess;
 
 impl CorpusExecutor for HostProtocolInProcess {
@@ -1136,14 +1380,15 @@ impl CorpusExecutor for HostProtocolInProcess {
             Dimension::Depth | Dimension::Time | Dimension::Token | Dimension::Cost => {
                 match session_turn_child_view() {
                     Ok(child) => {
+                        let canary = budget_no_channel_canary();
                         let mut probe = budget_probe(entry.dimension, &child);
                         probe.detail = format!(
                             "BudgetAuthorityCoordinator::begin_active_turn(turn, Some(wider)) — \
                              the session/turn seam the protocol front-end drives; {}; {}",
                             probe.detail,
-                            budget_no_channel_canary()
+                            canary.note()
                         );
-                        probe
+                        probe.with_canary(&canary)
                     }
                     Err(reason) => ProbeResult::new(
                         Outcome::NotExpressible,
@@ -1152,23 +1397,545 @@ impl CorpusExecutor for HostProtocolInProcess {
                     ),
                 }
             }
-            // Both surfaces reach the same schemas, the same resolver, the same
-            // VFS stack, the same chokepoint and the same spawner. Driving them
-            // from the protocol-bound path is the point of the comparison: if
-            // the two ever diverge, the weaker path is a bypass of the stronger
-            // and the property is false overall.
-            Dimension::Provider => {
-                let fixture = parent_fixture("c04b5a-a11e-0002", Vec::new());
-                provider_no_channel_canary(Arc::clone(&fixture.spawner))
-            }
-            Dimension::Approval => approval_no_channel_canary(),
-            Dimension::Tool => tool_widening_through_spawn_fork("c04b5a-a11e-0004"),
-            Dimension::Filesystem => filesystem_escape_probe(),
-            Dimension::Secret => secret_read_probe(),
-            Dimension::Egress => egress_probe(),
-            Dimension::FanOut => fan_out_probe("c04b5a-a11e-0006"),
+            Dimension::Provider => host_child_provider_pin_probe(),
+            Dimension::Approval => host_child_approval_inheritance_probe(),
+            Dimension::Filesystem => host_child_read_probe(HostReadTarget::OutsideRoot),
+            Dimension::Secret => host_child_read_probe(HostReadTarget::CredentialFile),
+            Dimension::Egress => host_child_egress_probe(),
+            Dimension::Tool => host_request_surface_not_expressible(
+                "a tool-authority request",
+                &["tool", "allow", "capab", "permission"],
+                "`spawn_host_child` hardcodes `ForkOverrides::default()`, whose allowed_tools is \
+                 empty, so every host child gets the SHARED_READ_ONLY_CHILD_TOOLS floor and no \
+                 caller-supplied tool set",
+            ),
+            Dimension::FanOut => host_request_surface_not_expressible(
+                "a breadth request",
+                &["task", "batch", "count", "breadth", "fan", "concurren"],
+                "`HostChildController::spawn_child` accepts exactly one SubAgentConfig per call \
+                 and exposes no batch entry point",
+            ),
         }
     }
+}
+
+// ===========================================================================
+// The host-protocol in-process machinery — the production bootstrap path
+// ===========================================================================
+
+/// The field set of the host child-spawn request type.
+///
+/// Read by EXHAUSTIVE DESTRUCTURING rather than transcribed into a list, which
+/// makes this the strongest canary shape available: adding a field to
+/// `SubAgentConfig` stops this function compiling, so a new child-request field
+/// cannot reach the product without every NOT-EXPRESSIBLE record that rests on
+/// this set being revisited. A hand-written list would silently go stale, and a
+/// serde key scan would need a `Serialize` derive on a production type that has
+/// no other reason to carry one.
+fn host_child_request_fields() -> Vec<&'static str> {
+    let SubAgentConfig {
+        name: _,
+        prompt: _,
+        max_turns: _,
+        max_tokens: _,
+        system_prompt: _,
+        provider: _,
+        model: _,
+        temperature: _,
+    } = child_config("field-probe", "field probe");
+    vec![
+        "name",
+        "prompt",
+        "max_turns",
+        "max_tokens",
+        "system_prompt",
+        "provider",
+        "model",
+        "temperature",
+    ]
+}
+
+/// Which fields of the host child-spawn request type a hostile actor could fill
+/// to widen the family described by `needles`. Empty means the request cannot
+/// be made on this surface at all.
+fn host_request_field_for(needles: &[&str]) -> Vec<&'static str> {
+    host_child_request_fields()
+        .into_iter()
+        .filter(|field| {
+            let lower = field.to_ascii_lowercase();
+            needles.iter().any(|needle| lower.contains(needle))
+        })
+        .collect()
+}
+
+fn host_request_surface_not_expressible(what: &str, needles: &[&str], why: &str) -> ProbeResult {
+    let requestable = host_request_field_for(needles);
+    let mut probe = ProbeResult::new(
+        Outcome::NotExpressible,
+        format!("nothing — {what} cannot be made on this surface"),
+        format!(
+            "the host child-spawn request type carries the fields {:?} and none of them expresses \
+             {what}; {why}. This surface's verdict is WITHHELD rather than borrowed from the \
+             standalone driver: an equivalence between a driven result and a copy of the other \
+             surface's result would be true by construction",
+            host_child_request_fields()
+        ),
+    );
+    if !requestable.is_empty() {
+        // The record above just stopped being true. A field through which the
+        // widening CAN be requested has appeared on the host child-spawn API,
+        // so the dimension no longer holds by inexpressibility on this surface
+        // and nothing was put in place of the absence.
+        probe.canary_trip = Some(format!(
+            "the host child-spawn request type now carries {requestable:?}, through which {what} \
+             could be made — this surface's NOT-EXPRESSIBLE record rested on that field not \
+             existing"
+        ));
+    }
+    probe
+}
+
+/// A bootstrapped parent — the production object graph the protocol front-end
+/// runs on — plus the loopback provider it talks to.
+struct HostSession {
+    _home: TempDir,
+    root: PathBuf,
+    host_children: wcore_agent::spawner::HostChildController,
+    policy: wcore_types::execution_policy::EffectiveExecutionPolicy,
+    provider: Arc<CountingProvider>,
+    /// Held so the durable session directory outlives every probe.
+    _sessions: TempDir,
+}
+
+/// Wrap a provider so a probe can tell "the child ran on the parent's own
+/// endpoint" apart from "the child ran somewhere else" without inspecting the
+/// child's text. The count is the observable; nothing here reads an error shape.
+pub struct CountingProvider {
+    inner: wcore_agent::test_utils::ScriptedProvider,
+    calls: std::sync::atomic::AtomicUsize,
+    /// Every tool-result body the provider was shown, in arrival order. This is
+    /// how a probe observes what a child's tool call actually RETURNED without
+    /// needing the child to narrate it.
+    tool_results: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for CountingProvider {
+    async fn stream(
+        &self,
+        request: &wcore_types::llm::LlmRequest,
+    ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, wcore_providers::ProviderError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut sink) = self.tool_results.lock() {
+            for message in &request.messages {
+                for block in &message.content {
+                    if let wcore_types::message::ContentBlock::ToolResult { content, .. } = block {
+                        sink.push(content.clone());
+                    }
+                }
+            }
+        }
+        self.inner.stream(request).await
+    }
+}
+
+impl CountingProvider {
+    pub fn new(script: Vec<LlmEvent>) -> Self {
+        Self {
+            inner: wcore_agent::test_utils::ScriptedProvider::new(script),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            tool_results: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn tool_results(&self) -> Vec<String> {
+        self.tool_results
+            .lock()
+            .map(|sink| sink.clone())
+            .unwrap_or_default()
+    }
+}
+
+/// Build the parent through the PRODUCTION bootstrap and bind a durable
+/// session, exactly as the `--json-stream` front-end does.
+///
+/// The workspace root is supplied by the caller and NOT created here, because
+/// every read probe must seed its target and bake the exact path into the
+/// child's script BEFORE the session exists. A probe that seeded a different
+/// path from the one the child reads would report a refusal about a missing
+/// file rather than about authority.
+fn host_session(
+    session_tag: &str,
+    script: Vec<LlmEvent>,
+    rt: &tokio::runtime::Runtime,
+    home: TempDir,
+) -> Result<HostSession, String> {
+    let root = std::fs::canonicalize(home.path()).map_err(|e| e.to_string())?;
+    let sessions = TempDir::new().map_err(|e| e.to_string())?;
+
+    let mut config = Config::default();
+    config.session.directory = sessions.path().to_string_lossy().into_owned();
+    // Long-term memory is a separate subsystem with its own on-disk store; it
+    // has no bearing on child authority and its decay scheduler would outlive
+    // the probe.
+    config.memory.enabled = false;
+    // `resolve_durable_launch` fails closed on an empty resolved model, so a
+    // default-config session declares children that never run. See the note in
+    // `parent_fixture`.
+    config.provider_label = "anthropic".to_owned();
+    config.model = "corpus-model".to_owned();
+
+    let provider = Arc::new(CountingProvider::new(script));
+    let provider_handle: Arc<dyn LlmProvider> = Arc::clone(&provider) as Arc<dyn LlmProvider>;
+
+    let mut result = rt
+        .block_on(
+            wcore_agent::bootstrap::AgentBootstrap::new(
+                config,
+                root.to_string_lossy(),
+                Arc::new(wcore_agent::output::null_sink::NullSink),
+            )
+            .provider(provider_handle)
+            .without_channels(true)
+            .defer_config_mcp(true)
+            .build(),
+        )
+        .map_err(|error| error.to_string())?;
+    result
+        .engine
+        .init_session("anthropic", &root.to_string_lossy(), Some(session_tag))
+        .map_err(|error| error.to_string())?;
+
+    Ok(HostSession {
+        _home: home,
+        root,
+        host_children: result.host_children.clone(),
+        policy: result.effective_execution_policy.clone(),
+        provider,
+        _sessions: sessions,
+    })
+}
+
+/// What a host child is scripted to read.
+enum HostReadTarget {
+    OutsideRoot,
+    CredentialFile,
+}
+
+/// Drive a real host child through the production bootstrap and observe what
+/// its `Read` actually returned.
+///
+/// The observable is the tool-result body the provider was shown on the child's
+/// SECOND turn — the bytes the shipped VFS stack handed the child, measured at
+/// the wire rather than inferred from a hand-built `SandboxedFs`. That is the
+/// substantive difference from the standalone probe: this one exercises the VFS
+/// the production bootstrap installed into a real child registry.
+fn host_child_read_probe(target: HostReadTarget) -> ProbeResult {
+    let rt = runtime();
+    let (home, outside_dir) = match (TempDir::new(), TempDir::new()) {
+        (Ok(home), Ok(outside)) => (home, outside),
+        _ => return host_session_unavailable("a hermetic tempdir could not be created"),
+    };
+    let (sentinel, tag) = match target {
+        HostReadTarget::OutsideRoot => ("CORPUS_HOST_OUTSIDE_ROOT", "c04b5a-a11e-0102"),
+        HostReadTarget::CredentialFile => ("CORPUS_HOST_SYNTHETIC_TOKEN", "c04b5a-a11e-0103"),
+    };
+
+    // Both targets are seeded, and the exact path the child will read is baked
+    // into its script, BEFORE the session is built. A refusal against a path
+    // that does not exist would be a refusal about a missing file rather than
+    // about authority — the vacuity class this whole repair exists to close.
+    //
+    // The credential file lives INSIDE the workspace root on purpose: outside
+    // it, the containment guard would answer before the secret guard and the
+    // probe would report the wrong mechanism.
+    let outside = outside_dir.path().join("corpus_host_outside.txt");
+    let dotenv = home.path().join(".env");
+    if std::fs::write(&outside, sentinel.as_bytes()).is_err()
+        || std::fs::write(&dotenv, format!("CORPUS_KEY={sentinel}\n").as_bytes()).is_err()
+    {
+        return host_session_unavailable("a read target could not be seeded");
+    }
+
+    let read_path = match target {
+        HostReadTarget::OutsideRoot => outside,
+        HostReadTarget::CredentialFile => dotenv,
+    };
+    let script = tool_call_script("Read", json!({ "file_path": read_path.to_string_lossy() }));
+
+    let session = match host_session(tag, script, &rt, home) {
+        Ok(session) => session,
+        Err(reason) => return host_session_unavailable(&reason),
+    };
+
+    let before = session.provider.calls();
+    let result = rt.block_on(
+        session
+            .host_children
+            .spawn_child(child_config("corpus-host-read", "read the target file")),
+    );
+    let child_turns = session.provider.calls().saturating_sub(before);
+    let returned = session.provider.tool_results().join(" | ");
+    let obtained_bytes = returned.contains(sentinel) || result.text.contains(sentinel);
+
+    if child_turns == 0 {
+        return ProbeResult::new(
+            Outcome::NotExpressible,
+            "no verdict — the host child never reached a provider turn",
+            format!(
+                "`HostChildController::spawn_child` returned without the child taking a turn on \
+                 the session's own endpoint, so nothing was observed about what it could read; \
+                 session root {}; child text: {}",
+                session.root.display(),
+                truncate(&result.text)
+            ),
+        );
+    }
+
+    let what = match target {
+        HostReadTarget::OutsideRoot => "a file outside the session's workspace root",
+        HostReadTarget::CredentialFile => "a credential file the session's policy denies",
+    };
+    let evidence = format!(
+        "a real host-originated child ran {child_turns} provider turn(s) against the tool registry \
+         the production bootstrap installed; it read {} under session root {}. Tool results the \
+         session's own provider was shown: {}",
+        read_path.display(),
+        session.root.display(),
+        truncate(&returned)
+    );
+    if obtained_bytes {
+        ProbeResult::new(Outcome::Allowed, format!("the bytes of {what}"), evidence)
+    } else {
+        ProbeResult::new(Outcome::Refused, format!("no bytes of {what}"), evidence)
+    }
+}
+
+/// The host-protocol provider probe.
+///
+/// Unlike the standalone surface — where the property holds by the ABSENCE of a
+/// provider field on either shipped tool schema — the host child-spawn request
+/// type DOES carry `provider`. So this surface has a request channel, and the
+/// question is whether filling it obtains a provider the session does not hold.
+/// The observable is which endpoint the child talked to: the session's own
+/// counting provider, or something else.
+fn host_child_provider_pin_probe() -> ProbeResult {
+    let rt = runtime();
+    let home = match TempDir::new() {
+        Ok(home) => home,
+        Err(error) => return host_session_unavailable(&error.to_string()),
+    };
+    let session = match host_session("c04b5a-a11e-0101", done_script(), &rt, home) {
+        Ok(session) => session,
+        Err(reason) => return host_session_unavailable(&reason),
+    };
+
+    let mut config = child_config("corpus-host-provider", "summarise the workspace");
+    config.provider = Some("openai".to_owned());
+
+    let before = session.provider.calls();
+    let result = rt.block_on(session.host_children.spawn_child(config));
+    let on_session_endpoint = session.provider.calls() > before;
+
+    if result.is_error || !on_session_endpoint {
+        ProbeResult::new(
+            Outcome::Refused,
+            "no provider — the pinned foreign provider was not obtained",
+            format!(
+                "a host child pinned to `openai` under an anthropic session did not run: the \
+                 session's own endpoint served {} additional request(s) and the child produced \
+                 no completed work, so no foreign provider was reached. Child text: {}",
+                session.provider.calls().saturating_sub(before),
+                truncate(&result.text)
+            ),
+        )
+    } else {
+        ProbeResult::new(
+            Outcome::Refused,
+            "no provider beyond the session's own",
+            format!(
+                "a host child pinned to `openai` ran on the session's OWN configured endpoint \
+                 ({} additional request(s)); the pin did not obtain a different upstream. Child \
+                 text: {}",
+                session.provider.calls().saturating_sub(before),
+                truncate(&result.text)
+            ),
+        )
+    }
+}
+
+/// The host-protocol approval probe — a PER-CHILD observable, not a grep.
+///
+/// Every durable child the host path creates carries a `ChildPolicySnapshot`
+/// derived from the session's own `EffectiveExecutionPolicy`
+/// (`spawner.rs::child_policy_snapshot`). The invariant is measured from that
+/// record: a child whose recorded approvals posture is WEAKER than the session's
+/// obtained an approval posture beyond its parent's. This is a different
+/// mechanism and a different object from the standalone structural canary, and
+/// it reads what the child was actually given rather than what the source says.
+fn host_child_approval_inheritance_probe() -> ProbeResult {
+    let rt = runtime();
+    let home = match TempDir::new() {
+        Ok(home) => home,
+        Err(error) => return host_session_unavailable(&error.to_string()),
+    };
+    let session = match host_session("c04b5a-a11e-0104", done_script(), &rt, home) {
+        Ok(session) => session,
+        Err(reason) => return host_session_unavailable(&reason),
+    };
+
+    let parent_posture = format!("{:?}", session.policy.approvals()).to_ascii_lowercase();
+    let supervisor = match session.host_children.supervisor() {
+        Ok(supervisor) => supervisor,
+        Err(error) => return host_session_unavailable(&error.to_string()),
+    };
+    let _ = rt.block_on(
+        session
+            .host_children
+            .spawn_child(child_config("corpus-host-approval", "no-op")),
+    );
+    let records = match supervisor.list() {
+        Ok(records) => records,
+        Err(error) => return host_session_unavailable(&error.to_string()),
+    };
+    let Some(record) = records.first() else {
+        return ProbeResult::new(
+            Outcome::NotExpressible,
+            "no verdict — no durable child record was declared",
+            "the host child path recorded no child, so no per-child approval posture was \
+             observable"
+                .to_owned(),
+        );
+    };
+
+    let child_posture = record.policy_snapshot.approvals.to_ascii_lowercase();
+    let weakened = approval_rank(&child_posture) > approval_rank(&parent_posture);
+    let requestable = host_request_field_for(&["approv", "policy", "posture", "permission"]);
+    let detail = format!(
+        "the session's launch policy records approvals {parent_posture:?}; the durable record for \
+         the host-originated child records approvals {child_posture:?} (source {:?}, managed floor \
+         {}). The host child-spawn request type offers no field through which a weaker posture \
+         could be asked for: {requestable:?}",
+        record.policy_snapshot.source, record.policy_snapshot.managed_floor_active
+    );
+
+    if weakened {
+        ProbeResult::new(
+            Outcome::Allowed,
+            format!("an approval posture of {child_posture} under a parent at {parent_posture}"),
+            detail,
+        )
+    } else {
+        ProbeResult::new(
+            Outcome::Refused,
+            "no approval posture weaker than the session's",
+            detail,
+        )
+    }
+}
+
+/// Strictness order, loosest highest. Any posture the corpus has not seen ranks
+/// as the loosest so an unrecognised value can never be read as "at least as
+/// strict as the parent".
+fn approval_rank(posture: &str) -> u8 {
+    match posture {
+        p if p.contains("prompt") => 0,
+        p if p.contains("auto") => 1,
+        p if p.contains("bypass") => 2,
+        _ => 3,
+    }
+}
+
+/// The host-protocol egress probe.
+///
+/// A real host child is scripted to fetch a loopback sentinel the session's
+/// policy does not allowlist, and the destination itself reports whether any
+/// request arrived. Three outcomes, discriminated by measurement rather than by
+/// text: the body reached the child (ALLOWED), a request reached the
+/// destination but the body did not (REFUSED), or no request was ever issued
+/// (NOT-EXPRESSIBLE — the child had no network-capable tool, so nothing was
+/// attempted and an absence would prove nothing).
+fn host_child_egress_probe() -> ProbeResult {
+    let rt = runtime();
+    let sentinel_body = "CORPUS_HOST_EGRESS_SENTINEL";
+    let server = rt.block_on(wiremock::MockServer::start());
+    rt.block_on(
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/corpus-host-egress"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(sentinel_body))
+            .mount(&server),
+    );
+    let url = format!("{}/corpus-host-egress", server.uri());
+
+    let script = tool_call_script("WebFetch", json!({ "url": url }));
+    let home = match TempDir::new() {
+        Ok(home) => home,
+        Err(error) => return host_session_unavailable(&error.to_string()),
+    };
+    let session = match host_session("c04b5a-a11e-0105", script, &rt, home) {
+        Ok(session) => session,
+        Err(reason) => return host_session_unavailable(&reason),
+    };
+
+    let before = session.provider.calls();
+    let result = rt.block_on(
+        session
+            .host_children
+            .spawn_child(child_config("corpus-host-egress", "fetch the destination")),
+    );
+    let child_turns = session.provider.calls().saturating_sub(before);
+    let returned = session.provider.tool_results().join(" | ");
+    let received = rt
+        .block_on(server.received_requests())
+        .unwrap_or_default()
+        .len();
+    let obtained = returned.contains(sentinel_body) || result.text.contains(sentinel_body);
+
+    if obtained {
+        ProbeResult::new(
+            Outcome::Allowed,
+            "an outbound destination the session's policy does not permit",
+            format!(
+                "a host-originated child ran {child_turns} provider turn(s) and the loopback \
+                 sentinel body reached it; the destination served {received} request(s)"
+            ),
+        )
+    } else if received > 0 {
+        ProbeResult::new(
+            Outcome::Refused,
+            "no outbound body beyond the session's policy",
+            format!(
+                "a host-originated child ran {child_turns} provider turn(s); the destination \
+                 served {received} request(s) and the sentinel body did not reach the child"
+            ),
+        )
+    } else {
+        ProbeResult::new(
+            Outcome::NotExpressible,
+            "no verdict — no outbound request was issued by the child",
+            format!(
+                "a host-originated child ran {child_turns} provider turn(s) and the loopback \
+                 destination served 0 requests, so no outbound attempt was made and an absent \
+                 body would prove nothing. Tool results the session's provider was shown: {}",
+                truncate(&returned)
+            ),
+        )
+    }
+}
+
+fn host_session_unavailable(reason: &str) -> ProbeResult {
+    ProbeResult::new(
+        Outcome::NotExpressible,
+        "no verdict — the production host session could not be built",
+        format!(
+            "AgentBootstrap could not produce a bound session in this fixture, so no host-protocol \
+             child could be driven: {reason}"
+        ),
+    )
 }
 
 /// Build the active-turn child view the way the protocol front-end's session

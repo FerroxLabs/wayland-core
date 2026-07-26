@@ -155,6 +155,34 @@ impl Pty {
         cols: u16,
         extra_env: &[(impl AsRef<str>, impl AsRef<str>)],
     ) -> Self {
+        let no_args: &[&str] = &[];
+        Self::spawn_with_args_env(home, home, rows, cols, no_args, extra_env)
+    }
+
+    /// Spawn the binary against `home` with explicit terminal size, explicit
+    /// ARGV, and additional environment overrides.
+    ///
+    /// The argv seam exists because a real terminal is not only the TUI's
+    /// requirement: `wcore_agent::confirm::ToolConfirmer::check_for` denies any
+    /// tool call that needs confirmation when `stdin` is not a terminal, so a
+    /// `--no-tui` one-shot run driven over pipes can never execute a gated tool
+    /// call at all. Driving the headless surface on a PTY is the only way to
+    /// give that surface the approval channel a user at a terminal actually has.
+    /// `cwd` is separate from `home` because the two are separate authorities:
+    /// `home` is `WAYLAND_HOME` (config, sessions, durable state) while `cwd` is
+    /// the repository the session governs. An isolated-mutation child's checkout
+    /// root is derived under the session directory, and
+    /// `WorktreeManager::new_with_workspace_root` refuses when that root's
+    /// parent overlaps the repository — so a run in which the two are the same
+    /// directory can never create a mutating child at all.
+    pub fn spawn_with_args_env(
+        home: &Path,
+        cwd: &Path,
+        rows: u16,
+        cols: u16,
+        args: &[impl AsRef<str>],
+        extra_env: &[(impl AsRef<str>, impl AsRef<str>)],
+    ) -> Self {
         let pty = native_pty_system()
             .openpty(PtySize {
                 rows,
@@ -165,6 +193,9 @@ impl Pty {
             .expect("open PTY");
 
         let mut cmd = CommandBuilder::new(binary());
+        for arg in args {
+            cmd.arg(arg.as_ref());
+        }
         cmd.env("HOME", home);
         cmd.env("WAYLAND_HOME", home);
         // The TUI needs a real terminal type (not "dumb") to render; the
@@ -180,7 +211,7 @@ impl Pty {
         for (k, v) in extra_env {
             cmd.env(k.as_ref(), v.as_ref());
         }
-        cmd.cwd(home);
+        cmd.cwd(cwd);
         let child = pty.slave.spawn_command(cmd).expect("spawn wayland-core");
 
         let mut reader = pty.master.try_clone_reader().expect("clone PTY reader");

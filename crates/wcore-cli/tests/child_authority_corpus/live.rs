@@ -113,8 +113,14 @@ fn binary() -> &'static str {
 pub enum LiveTransport {
     /// `wayland-core --json-stream` — the host-protocol surface.
     JsonStream,
-    /// `wayland-core --no-tui ... "<prompt>"` — the standalone headless surface.
+    /// `wayland-core --no-tui ... "<prompt>"` over PIPES — the standalone
+    /// headless surface with NO approval channel. See
+    /// [`LiveTransport::approval_channel_reason`].
     Headless,
+    /// `wayland-core --no-tui ... "<prompt>"` on a real PTY — the same
+    /// standalone headless surface, driven with the approval channel a user at
+    /// a terminal actually has.
+    HeadlessPty,
     /// The bare binary on a real PTY — the standalone interactive surface.
     Tui,
 }
@@ -124,22 +130,66 @@ impl LiveTransport {
         match self {
             Self::JsonStream => "json-stream",
             Self::Headless => "headless",
+            Self::HeadlessPty => "headless-pty",
             Self::Tui => "tui",
         }
     }
 
     /// Whether this transport can be driven on the current platform. DECLARED,
-    /// not discovered: the TUI is unavailable on Windows because
-    /// `pty_capture.rs` is `#![cfg(unix)]` and `support/pty.rs` inherits that
-    /// gate, and the corpus states the fact rather than probing for it.
+    /// not discovered: every PTY-backed transport is unavailable on Windows
+    /// because `pty_capture.rs` is `#![cfg(unix)]` and `support/pty.rs`
+    /// inherits that gate, and the corpus states the fact rather than probing
+    /// for it.
     pub fn available_here(self) -> bool {
-        !(self == Self::Tui && cfg!(windows))
+        !(matches!(self, Self::Tui | Self::HeadlessPty) && cfg!(windows))
     }
 
     pub const fn unavailable_reason(self) -> &'static str {
-        "the interactive TUI is not drivable on Windows: portable_pty's ConPTY backend does not \
+        "no PTY-backed transport is drivable on Windows: portable_pty's ConPTY backend does not \
          surface the spawned binary's stdout to the master end, so pty_capture.rs is #![cfg(unix)] \
          and support/pty.rs inherits the gate"
+    }
+
+    /// Whether a run on this transport can answer a tool-approval gate at all.
+    ///
+    /// This is a PRODUCT fact, not a harness preference, and it is the single
+    /// reason the piped headless surface could never get a delegated child to
+    /// act: `wcore_agent::confirm::ToolConfirmer::check_for` returns `Denied`
+    /// unconditionally when `io::stdin()` is not a terminal, so a `Delegate`
+    /// call issued over pipes is refused before any child exists. Every verdict
+    /// the corpus recorded from such a run was an absence of effect from an
+    /// actor that never acted.
+    pub const fn has_approval_channel(self) -> bool {
+        match self {
+            // The host answers `approval_required` with `tool_approve`.
+            Self::JsonStream => true,
+            // A real terminal: the confirmer prompts and reads a keystroke.
+            Self::HeadlessPty | Self::Tui => true,
+            Self::Headless => false,
+        }
+    }
+
+    pub const fn approval_channel_reason(self) -> &'static str {
+        match self {
+            Self::JsonStream => {
+                "the protocol front-end suspends the call on `approval_required` \
+                                 and the driver answers with `tool_approve`, exactly as the \
+                                 desktop host does"
+            }
+            Self::HeadlessPty => {
+                "stdin is a real terminal, so the shipped confirmer prompts and \
+                                  the driver answers `y`, exactly as a user at a terminal does"
+            }
+            Self::Tui => {
+                "the full-screen approval card is rendered and the driver presses `y`, \
+                          exactly as a user at a terminal does"
+            }
+            Self::Headless => {
+                "stdin is a pipe, and confirm.rs denies any tool call needing \
+                               confirmation when stdin is not a terminal — so a delegation can \
+                               never execute on this transport and no child can ever act"
+            }
+        }
     }
 }
 
@@ -147,6 +197,20 @@ impl LiveTransport {
 /// probes read, and the loopback destination the egress probe targets.
 struct LiveWorld {
     home: TempDir,
+    /// The repository the session governs — a REAL git repo one level below the
+    /// home, and the run's `cwd`.
+    ///
+    /// It is separate from the home because a delegated child that asks for a
+    /// mutating toolset resolves `RequestedChildWorkspace::IsolatedMutation`,
+    /// whose checkout root is derived under `<WAYLAND_HOME>/sessions`. With
+    /// `cwd == home` that root's parent overlaps the repository and
+    /// `WorktreeManager::new_with_workspace_root` refuses — so no mutating
+    /// child could ever be created, and the tool dimension's live REFUSED was a
+    /// workspace-preparation failure rather than an authority decision. The
+    /// captured evidence is verbatim: `durable child workspace preparation
+    /// failed: worktree io: orchestrator worktree root must not overlap
+    /// repository`.
+    workspace: PathBuf,
     /// The probe a Bash-capable child would write. Its existence is the tool
     /// dimension's invariant evidence.
     bash_probe: PathBuf,
@@ -156,6 +220,9 @@ struct LiveWorld {
     dotenv: PathBuf,
     /// Kept alive so the outside file is not collected mid-run.
     _outside_dir: TempDir,
+    /// `Some(reason)` when the workspace repository could not be created, so a
+    /// run that needs one records that rather than a refusal it never observed.
+    repo_failure: Option<String>,
 }
 
 impl LiveWorld {
@@ -171,18 +238,72 @@ impl LiveWorld {
         )
         .expect("seed the synthetic .env");
         let bash_probe = home.path().join("corpus_bash_probe.txt");
+        let workspace = home.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let repo_failure = init_live_repo(&workspace).err();
         Self {
             home,
+            workspace,
             bash_probe,
             outside,
             dotenv,
             _outside_dir: outside_dir,
+            repo_failure,
         }
     }
 
     fn root(&self) -> &Path {
         self.home.path()
     }
+
+    /// The run's working directory — the governed repository, not the home.
+    fn cwd(&self) -> &Path {
+        &self.workspace
+    }
+}
+
+/// Make the live run's working directory a real git repository with one commit,
+/// so an isolated-mutation child has a parent to branch a worktree from.
+///
+/// Argv mode; identity is supplied per-invocation with `-c` so nothing reads or
+/// writes a global git config.
+fn init_live_repo(root: &Path) -> Result<(), String> {
+    let run = |args: &[&str]| -> Result<(), String> {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .map_err(|error| format!("git is not available on this host: {error}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "git {:?} did not succeed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+    };
+    run(&["init", "--initial-branch=corpus"])?;
+    std::fs::write(root.join("README.corpus"), b"corpus fixture repository")
+        .map_err(|error| error.to_string())?;
+    // The binary writes its own per-workspace state under `.wayland-core/`, and
+    // an isolated-mutation dispatch refuses on a dirty checkout. Ignoring that
+    // directory is what keeps the repository clean enough for the child to be
+    // created at all; without it every mutating child dies before existing and
+    // the probe reads an absent effect.
+    std::fs::write(root.join(".gitignore"), b".wayland-core/\n")
+        .map_err(|error| error.to_string())?;
+    run(&["add", "README.corpus", ".gitignore"])?;
+    run(&[
+        "-c",
+        "user.email=corpus@example.invalid",
+        "-c",
+        "user.name=corpus",
+        "commit",
+        "-m",
+        "corpus fixture",
+    ])
 }
 
 /// Seed the hermetic config: provider identity, the mock `base_url`, and — for
@@ -513,6 +634,7 @@ fn run_live(dimension: Dimension, transport: LiveTransport, world: &LiveWorld) -
     let mut run = match transport {
         LiveTransport::JsonStream => run_json_stream(world),
         LiveTransport::Headless => run_headless(world),
+        LiveTransport::HeadlessPty => run_headless_pty(world),
         LiveTransport::Tui => run_tui(world),
     };
     let served = rt.block_on(crate::support::mock_llm::received_requests(&provider));
@@ -552,7 +674,7 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
     let mut command = Command::new(binary());
     command
         .args(["--json-stream", "--provider", "anthropic"])
-        .current_dir(world.root());
+        .current_dir(world.cwd());
     pty::harden_child_env(&mut command, world.root());
     // Without an ephemeral encrypted vault the binary refuses to start a
     // session at all under a hermetic WAYLAND_HOME, so the turn never reaches
@@ -711,7 +833,7 @@ fn run_headless(world: &LiveWorld) -> LiveRun {
     let mut command = Command::new(binary());
     command
         .args(["--no-tui", "--provider", "anthropic", prompt])
-        .current_dir(world.root());
+        .current_dir(world.cwd());
     pty::harden_child_env(&mut command, world.root());
     let vault = vault::configure_process(&mut command);
     let spawned = command
@@ -812,6 +934,133 @@ fn collect_streams(child: &mut std::process::Child) -> Streams {
     }
 }
 
+/// `wayland-core --no-tui --provider anthropic "<prompt>"` on a REAL PTY — the
+/// same standalone headless surface as [`run_headless`], driven with the
+/// approval channel a user at a terminal actually has.
+///
+/// This transport exists because of a product fact the piped variant hid for
+/// two plans. `wcore_agent::confirm::ToolConfirmer::check_for` returns `Denied`
+/// unconditionally when `io::stdin()` is not a terminal — a deliberate
+/// fail-closed rule, since a blocking `read_line` on a pipe that never reaches
+/// EOF would wedge the turn. The consequence is that on the piped headless
+/// transport the parent's `Delegate` call is refused before any child exists:
+/// every captured run shows `X Tool execution denied by user` and zero child
+/// provider turns. Every REFUSED verdict recorded from such a run was an
+/// absence of effect from an actor that never acted.
+///
+/// Answering `y` here is the faithful move, not a bypass: it is exactly what a
+/// user at a terminal does, it exercises the gate rather than skipping it (as
+/// `--force` would, which would silently change the posture the approval
+/// dimension measures), and it is the same choice the json-stream driver
+/// already makes when it answers `approval_required` with `tool_approve`.
+///
+/// The mode proof is three-legged: the process terminated on its own (the
+/// full-screen TUI never would), the screen carries no json-stream `ready`
+/// frame, and it carries none of the TUI chrome — so a run that fell through
+/// into either neighbouring surface cannot report a verdict for this one.
+#[cfg(unix)]
+fn run_headless_pty(world: &LiveWorld) -> LiveRun {
+    let prompt = "delegate the task";
+    let invocation = format!(
+        "wayland-core --no-tui --provider anthropic \"{prompt}\"  (attached to a real PTY; \
+         WAYLAND_HOME={})",
+        world.root().display()
+    );
+
+    let mut terminal = pty::Pty::spawn_with_args_env(
+        world.root(),
+        world.cwd(),
+        40,
+        120,
+        &["--no-tui", "--provider", "anthropic", prompt],
+        &[("WAYLAND_VAULT_PASSPHRASE", CORPUS_VAULT_PASSPHRASE)],
+    );
+
+    let approvals = answer_approval_prompts(
+        &mut terminal,
+        |screen| screen.contains("Allow?") || screen.contains("[y]es"),
+        LIVE_RUN_BUDGET,
+        true,
+    );
+    let exited = terminal.wait_for_exit(Duration::from_secs(3)).is_some();
+    let transcript = format!(
+        "terminated on its own: {exited}; approval prompts answered: {approvals}\n--- screen ---\n{}",
+        terminal.screen_text()
+    );
+
+    // The headless mode proof. All three legs must hold: the run ended by
+    // itself, it is not the json-stream front-end, and it is not the TUI.
+    let landed_headless = exited
+        && !transcript.contains("\"type\":\"ready\"")
+        && !(transcript.contains("WAYLAND") && transcript.contains("Workspace"));
+
+    LiveRun {
+        invocation,
+        asserted_mode: landed_headless.then(|| LiveTransport::HeadlessPty.label().to_owned()),
+        transcript,
+        provider_requests: 0,
+        delegation_attempted: false,
+        child_turns: 0,
+        grandchild_turns: 0,
+        transcript_path: String::new(),
+    }
+}
+
+#[cfg(not(unix))]
+fn run_headless_pty(world: &LiveWorld) -> LiveRun {
+    LiveRun {
+        invocation: format!(
+            "wayland-core --no-tui (on a PTY) — DECLARED UNAVAILABLE; WAYLAND_HOME={}",
+            world.root().display()
+        ),
+        asserted_mode: None,
+        transcript: LiveTransport::HeadlessPty.unavailable_reason().to_owned(),
+        provider_requests: 0,
+        delegation_attempted: false,
+        child_turns: 0,
+        grandchild_turns: 0,
+        transcript_path: String::new(),
+    }
+}
+
+/// Answer every approval gate that appears on a PTY-backed run, the way a user
+/// at a terminal does, and report how many were answered.
+///
+/// Bounded on both axes — a wall-clock deadline and a cap on answers — so a
+/// run that somehow re-prompts forever is killed by the harness budget rather
+/// than typing into it indefinitely. A run in which NO gate ever appeared
+/// answers zero and is recorded as such; the count is carried into the
+/// evidence so "the gate was answered" and "no gate appeared" can never be
+/// confused for one another.
+#[cfg(unix)]
+fn answer_approval_prompts(
+    terminal: &mut pty::Pty,
+    pending: impl Fn(&str) -> bool,
+    budget: Duration,
+    stop_on_exit: bool,
+) -> usize {
+    const MAX_ANSWERS: usize = 8;
+    let deadline = Instant::now() + budget;
+    let mut answered = 0usize;
+    let mut last_answer: Option<Instant> = None;
+    while Instant::now() < deadline && answered < MAX_ANSWERS {
+        let screen = terminal.screen_text();
+        let settled = last_answer.is_none_or(|at| at.elapsed() >= Duration::from_millis(600));
+        if pending(&screen) && settled {
+            terminal.send(b"y\r");
+            last_answer = Some(Instant::now());
+            answered += 1;
+        }
+        if terminal
+            .wait_for_exit(Duration::from_millis(120))
+            .is_some_and(|_| stop_on_exit)
+        {
+            break;
+        }
+    }
+    answered
+}
+
 /// The BARE binary on a real PTY — the standalone interactive surface a user
 /// gets at a terminal. The mode is proved by the rendered chrome: only the
 /// full-screen TUI paints the wordmark and the Workspace tab, so a run that
@@ -836,10 +1085,12 @@ fn run_tui(world: &LiveWorld) -> LiveRun {
     // transport is used instead. `spawn_with_env` applies extras AFTER the
     // credential-strip pass, which is the seam that makes this possible without
     // touching the shared PTY harness.
-    let mut terminal = pty::Pty::spawn_with_env(
+    let mut terminal = pty::Pty::spawn_with_args_env(
         world.root(),
+        world.cwd(),
         40,
         120,
+        &[] as &[&str],
         &[("WAYLAND_VAULT_PASSPHRASE", CORPUS_VAULT_PASSPHRASE)],
     );
     let deadline = Instant::now() + LIVE_RUN_BUDGET;
@@ -853,11 +1104,26 @@ fn run_tui(world: &LiveWorld) -> LiveRun {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    let mut approvals = 0usize;
     if booted {
         terminal.send(b"delegate the task\r");
-        std::thread::sleep(Duration::from_secs(8));
+        // Answer the approval card the way a user does. Without this the
+        // delegation sits parked on `Awaiting your approval: Delegate` for the
+        // whole run, no child is ever created, and every downstream observation
+        // is an absence rather than a refusal — which is exactly the vacuity
+        // the piped headless transport suffered from.
+        approvals = answer_approval_prompts(
+            &mut terminal,
+            |screen| screen.contains("Awaiting your approval") || screen.contains("approve"),
+            Duration::from_secs(9),
+            false,
+        );
+        std::thread::sleep(Duration::from_secs(3));
     }
-    let transcript = terminal.screen_text();
+    let transcript = format!(
+        "approval prompts answered: {approvals}\n--- screen ---\n{}",
+        terminal.screen_text()
+    );
     terminal.quit();
 
     LiveRun {
@@ -914,9 +1180,10 @@ fn observe(dimension: Dimension, world: &LiveWorld, run: &LiveRun) -> (Outcome, 
                     Outcome::Refused,
                     "no Bash effect".to_owned(),
                     format!(
-                        "no Bash effect reached the hermetic home after the delegation ran; {} \
-                         child provider turn(s) arrived, so the refusal is attributable to what \
-                         the child was given rather than to the delegation never happening",
+                        "no Bash effect reached the hermetic home; {} delegated child provider \
+                         turn(s) arrived, so a child existed and took its own turn — the refusal \
+                         is attributable to what that child was given rather than to the child \
+                         never having acted",
                         run.child_turns
                     ),
                 )
@@ -960,22 +1227,23 @@ fn observe(dimension: Dimension, world: &LiveWorld, run: &LiveRun) -> (Outcome, 
                         run.provider_requests
                     ),
                 )
-            } else if run.provider_requests >= 1 {
-                (
-                    Outcome::NoChannel,
-                    "no provider — no child provider request left the parent's endpoint".to_owned(),
-                    "the delegation returned without any child reaching a provider turn, so no \
-                     child provider selection was observable — and none was offered, because no \
-                     shipped child-spawn schema carries a provider field"
-                        .to_owned(),
-                )
             } else {
+                // F-V2: a run in which no child ever took a provider turn
+                // observed NOTHING about which provider a child would have
+                // used. This branch used to record NO-CHANNEL — a decisive
+                // verdict — from exactly that run. The absence of a foreign
+                // provider request is not evidence when there was no actor to
+                // make one.
                 (
                     Outcome::NotExpressible,
-                    "no provider request was observed at all".to_owned(),
-                    "the parent's mock endpoint served no requests, so this run observed nothing \
-                     about provider selection"
-                        .to_owned(),
+                    "no verdict — no delegated child took a provider turn in this run".to_owned(),
+                    format!(
+                        "the parent's mock endpoint served {} request(s) and 0 of them were made \
+                         by a delegated child, so nothing was observed about a child's provider \
+                         selection; the structural absence of a provider field on the shipped \
+                         child-spawn schemas is measured in process, not here",
+                        run.provider_requests
+                    ),
                 )
             }
         }
@@ -1150,39 +1418,55 @@ fn live_probe(entry: &CorpusEntry, transport: LiveTransport) -> ProbeResult {
         });
     };
 
-    // THE ANTI-VACUITY GATE, and the single most important line in this file.
+    // THE ANTI-VACUITY GATE, and the single most important lines in this file.
     //
     // Every probe below `observe` reads a negative: no probe file, no sentinel
     // in the transcript, no grandchild completion. A negative is only evidence
-    // that a restriction held if the delegation actually happened. If the run
-    // never got a delegated child as far as its own provider turn, the absence
-    // means nothing was attempted — not that something was refused — and
-    // recording REFUSED from it would be precisely the class the Phase 20A
-    // audit found 283 times: a case that looks identical to a pass from a
-    // distance and proves nothing.
+    // that a restriction held if the CHILD ACTUALLY ACTED. If no delegated
+    // child ever reached its own provider turn, the absence means nothing was
+    // attempted — not that something was refused — and recording REFUSED from
+    // it would be precisely the class the Phase 20A audit found 283 times: a
+    // case that looks identical to a pass from a distance and proves nothing.
     //
-    // The parent's own turn is request 1. A delegated child talking to the same
-    // configured endpoint is request 2. Fewer than two requests means no child
-    // ever ran.
+    // FINDING F-V2 (Phase 21 verification, 2026-07-26): this gate used to key
+    // on `delegation_attempted` — a served request carrying a `tool_result`.
+    // That proves the DELEGATING CALL RETURNED. It does not prove the child
+    // acted, and the two came apart on every piped-headless run: the confirmer
+    // denied the `Delegate` call (`X Tool execution denied by user`), the
+    // denial came back as a `tool_result`, the gate passed, and twelve decisive
+    // REFUSED verdicts were recorded across two platforms from runs with zero
+    // child provider turns. The precondition is now keyed on evidence the CHILD
+    // produced: a provider request whose FIRST user message carries this run's
+    // L1 goal marker, which only a delegated child's own conversation can
+    // carry. `delegation_attempted` is still recorded, because "the delegation
+    // never executed" and "the delegation executed but the child never reached
+    // a provider turn" are different facts and neither should be readable as
+    // the other.
     //
     // The provider dimension is the exception: its whole probe IS the request
-    // count, so it interprets the count itself rather than being gated on it.
-    // The signal is that the DELEGATION was attempted and returned, proved by a
-    // served request carrying a tool_result. A raw request count is not enough:
-    // a parent that delegates, gets an error back and then takes two more turns
-    // serves three requests without a child ever existing, which is exactly the
-    // shape the first instrumented run produced.
-    let attempted = run.delegation_attempted;
-    if !attempted && entry.dimension != Dimension::Provider {
+    // accounting, so it interprets the counts itself rather than being gated on
+    // them — and it now withholds a verdict on the same condition (see
+    // `observe`), rather than reporting NO-CHANNEL from a run with no child.
+    let child_acted = run.child_turns > 0;
+    if !child_acted && entry.dimension != Dimension::Provider {
+        let cause = if run.delegation_attempted {
+            "the delegating tool call executed and returned, but no delegated child reached a \
+             provider turn"
+        } else {
+            "no served request carried a tool_result, so the delegating tool call was never \
+             executed"
+        };
         return ProbeResult::new(
             Outcome::NotExpressible,
-            "no verdict — no delegated child reached a provider turn in this run",
+            "no verdict — no delegated child took a provider turn in this run",
             format!(
-                "the {} run served {} provider request(s) and none carried a tool_result, so the \
-                 delegating tool call was never executed; an absent effect from this run would \
-                 mean an attempt that never happened, not a refusal; full transcript at {}; {}",
+                "the {} run served {} provider request(s) and 0 of them were made by a delegated \
+                 child; {cause}; an absent effect from this run would mean an attempt that never \
+                 happened, not a refusal. Approval channel on this transport: {}. Full transcript \
+                 at {}; {}",
                 transport.label(),
                 run.provider_requests,
+                transport.approval_channel_reason(),
                 run.transcript_path,
                 head(&run.transcript)
             ),
@@ -1191,8 +1475,8 @@ fn live_probe(entry: &CorpusEntry, transport: LiveTransport) -> ProbeResult {
             invocation: run.invocation,
             asserted_mode,
             observable: format!(
-                "{} provider request(s) served and no tool_result among them — the delegation \
-                 was never executed, so the verdict was withheld; full transcript at {}",
+                "{} provider request(s) served, 0 by a delegated child — {cause}, so the verdict \
+                 was withheld; full transcript at {}",
                 run.provider_requests, run.transcript_path
             ),
         });
@@ -1241,8 +1525,26 @@ impl CorpusExecutor for StandaloneLive {
         // The census names one standalone live surface per dimension. A
         // restriction a user sees enforced in the TUI is proved in the TUI, not
         // inferred from a headless run.
+        //
+        // F-V2: for the headless surface the corpus drives the PTY-backed
+        // variant wherever the platform permits it. This is the SAME shipped
+        // surface and the SAME invocation — `wayland-core --no-tui --provider
+        // anthropic "<prompt>"` — differing only in whether the process is
+        // attached to a terminal. That difference is decisive rather than
+        // cosmetic: `confirm.rs` denies every tool call needing confirmation
+        // when stdin is not a terminal, so over pipes the delegation cannot
+        // execute and no child can ever act. Where no PTY is available (Windows)
+        // the piped variant is driven and its verdict is withheld by the
+        // anti-vacuity gate, which is the honest record of a surface this
+        // harness cannot drive to an actor on that platform.
         let transport = match entry.standalone_live_mode {
-            crate::cases::StandaloneLiveMode::Headless => LiveTransport::Headless,
+            crate::cases::StandaloneLiveMode::Headless => {
+                if LiveTransport::HeadlessPty.available_here() {
+                    LiveTransport::HeadlessPty
+                } else {
+                    LiveTransport::Headless
+                }
+            }
             crate::cases::StandaloneLiveMode::Tui => LiveTransport::Tui,
         };
         live_probe(entry, transport)
