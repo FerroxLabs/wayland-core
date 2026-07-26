@@ -1,0 +1,119 @@
+=== HOST ===
+Ubuntu-2404-noble-amd64-base
+2026-07-26T16:13:14Z
+commit: rsync-tree
+
+=== BACKEND LIST (shipped binary) ===
+BACKEND    KIND       AVAILABLE    PROBE BASIS            DETAIL
+local      local      yes          sandbox_backend_probe  platform containment backend 'bubblewrap' probed available
+container  container  yes          daemon_ping            container daemon answered a version ping: server 29.2.1
+ssh        ssh        yes          ssh_handshake          ssh handshake to f25-ssh-target reached the far end
+cloud      cloud      NO           credential_absent      backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+
+Availability is answered from a real probe in every row — the container backend from a daemon ping rather than socket presence, the ssh backend from a real handshake, the cloud backend from an authenticated API call. A backend with no credential reports NO and names what is missing; it never falls back to another backend.
+
+=== RUN local ===
+RUN_local_EXIT=0
+task:        f25-reference
+backend:     local
+transport:   Local via localhost
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: NotApplicable
+wall ms:     1
+receipt:     /root/f25-evidence/receipt-local.json
+
+=== RUN container ===
+RUN_container_EXIT=0
+task:        f25-reference
+backend:     container
+transport:   Container via wayland-f25-f25-reference
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: NotApplicable
+wall ms:     20999
+receipt:     /root/f25-evidence/receipt-container.json
+
+=== RUN ssh ===
+RUN_ssh_EXIT=0
+task:        f25-reference
+backend:     ssh
+transport:   Ssh via f25-ssh-target
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: NotApplicable
+wall ms:     265
+receipt:     /root/f25-evidence/receipt-ssh.json
+
+=== RUN cloud ===
+RUN_cloud_EXIT=1
+wayland-core backend: backend 'cloud' is unavailable and this command does NOT fall back: backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back (probe CredentialAbsent)
+
+=== RECEIPT VERIFY ===
+--- local
+receipt:   /root/f25-evidence/receipt-local.json
+schema:    wayland.execution-backend-receipt v1
+backend:   local
+key id:    6d25df6df5b8eb8f553861ee820a8be02181dbe5e305f8d267e77ab58c68c2cb
+terminal:  Success
+INTEGRITY: OK — body digest, event ordering, single terminal event and internal consistency all hold.
+IDENTITY:  NOT ESTABLISHED by this command. A receipt cannot authenticate itself: verifying identity requires a verifying key the caller already pinned, which a receipt file does not carry. Use the conformance harness or a caller holding the pinned key.
+--- container
+receipt:   /root/f25-evidence/receipt-container.json
+schema:    wayland.execution-backend-receipt v1
+backend:   container
+key id:    4dcd86f4f64a6a1b076a23a65dae28ed7e85f8686917533631b549c34d19b520
+terminal:  Success
+INTEGRITY: OK — body digest, event ordering, single terminal event and internal consistency all hold.
+IDENTITY:  NOT ESTABLISHED by this command. A receipt cannot authenticate itself: verifying identity requires a verifying key the caller already pinned, which a receipt file does not carry. Use the conformance harness or a caller holding the pinned key.
+--- ssh
+receipt:   /root/f25-evidence/receipt-ssh.json
+schema:    wayland.execution-backend-receipt v1
+backend:   ssh
+key id:    60f51cec519712f82f779d957cd47185b48de99be52cd25e2a81557e4a695eef
+terminal:  Success
+INTEGRITY: OK — body digest, event ordering, single terminal event and internal consistency all hold.
+IDENTITY:  NOT ESTABLISHED by this command. A receipt cannot authenticate itself: verifying identity requires a verifying key the caller already pinned, which a receipt file does not carry. Use the conformance harness or a caller holding the pinned key.
+--- cloud: NO RECEIPT
+
+=== NORMALIZED DIFF ===
+receipts compared: 3
+  local      transport=local      endpoint=localhost wall_ms=1
+  container  transport=container  endpoint=wayland-f25-f25-reference wall_ms=20999
+  ssh        transport=ssh        endpoint=f25-ssh-target wall_ms=265
+
+EXPECTED-DIVERGENT fields (excluded from the normalized body by design):
+  local      backend.backend_id     local
+  local      backend.instance_id    e726e46df27a4868852174c3a57ca8d8
+  local      backend.version        0.12.25
+  local      backend.key_id         6d25df6df5b8eb8f553861ee820a8be02181dbe5e305f8d267e77ab58c68c2cb
+  local      transport.kind         local
+  local      transport.endpoint     localhost
+  local      timing.wall_ms         1
+  local      hibernation            {"kind":"not_applicable"}
+  container  backend.backend_id     container
+  container  backend.instance_id    e726e46df27a4868852174c3a57ca8d8
+  container  backend.version        0.12.25
+  container  backend.key_id         4dcd86f4f64a6a1b076a23a65dae28ed7e85f8686917533631b549c34d19b520
+  container  transport.kind         container
+  container  transport.endpoint     wayland-f25-f25-reference
+  container  timing.wall_ms         20999
+  container  hibernation            {"kind":"not_applicable"}
+  ssh        backend.backend_id     ssh
+  ssh        backend.instance_id    e726e46df27a4868852174c3a57ca8d8
+  ssh        backend.version        0.12.25
+  ssh        backend.key_id         60f51cec519712f82f779d957cd47185b48de99be52cd25e2a81557e4a695eef
+  ssh        transport.kind         ssh
+  ssh        transport.endpoint     f25-ssh-target
+  ssh        timing.wall_ms         265
+  ssh        hibernation            {"kind":"not_applicable"}
+
+NORMALIZED DIFF: EQUIVALENT
+The four normalized bodies agree on task digests, resource budget, backend ceiling, event ordering and content digests, artifact digest, terminal status, exposed-secret names and egress decision.
+DIFF_EXIT=0

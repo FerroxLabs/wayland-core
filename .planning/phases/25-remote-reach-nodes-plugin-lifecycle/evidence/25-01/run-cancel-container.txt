@@ -1,0 +1,9 @@
+task:        f25-cancel
+backend:     container
+transport:   Container via wayland-f25-f25-cancel
+terminal:    Cancelled { reason: "operator cancelled" }
+input sha:   4f8983e6329e84fc61530f87c18731077691222cb5157842d1a36079328fb40d
+workspace:   135fe548909dbb50c097395dc322808f0f1848879cd11673cb932c8757f85f77
+hibernation: NotApplicable
+wall ms:     6482
+receipt:     /root/f25-evidence/receipt-cancel-container.json

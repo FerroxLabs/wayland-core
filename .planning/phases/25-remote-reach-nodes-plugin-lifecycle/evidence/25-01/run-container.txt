@@ -1,0 +1,10 @@
+task:        f25-reference
+backend:     container
+transport:   Container via wayland-f25-f25-reference
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: NotApplicable
+wall ms:     20999
+receipt:     /root/f25-evidence/receipt-container.json
