@@ -7,7 +7,7 @@
 //!
 //! | | in-process | live |
 //! |---|---|---|
-//! | **standalone** | the real spawn seam and the real mechanisms | the real `wayland-core` binary, `-p`/`--no-tui` or the bare binary on a PTY |
+//! | **standalone** | the real spawn seam and the real mechanisms | the real `wayland-core` binary, `--no-tui` headless or the bare binary on a PTY |
 //! | **host-protocol** | the real session/turn authority the protocol front-end binds | the real `wayland-core --json-stream` |
 //!
 //! The SURFACE axis is Success Criterion 3's actual proof. The MODE axis is the
@@ -239,6 +239,15 @@ fn assert_completeness(entry: &CorpusEntry, executions: &[Execution]) {
         );
     }
     for execution in executions {
+        assert_eq!(
+            execution.dimension,
+            entry.dimension,
+            "a driver returned an execution stamped {} while running the {} entry; a row \
+             attributed to the wrong dimension would land in the results table as evidence about \
+             something it never exercised.",
+            execution.dimension.census_name(),
+            entry.dimension.census_name()
+        );
         assert!(
             !execution.obtained.trim().is_empty(),
             "{} ({}, {}): recorded no statement of what the child obtained, so the row is not \

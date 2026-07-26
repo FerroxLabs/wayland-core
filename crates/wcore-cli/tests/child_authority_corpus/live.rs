@@ -15,7 +15,7 @@
 //! shape the in-repo precedent `crates/wcore-cli/tests/acp_gate_d012.rs` already
 //! drives against the real binary from THIS crate.
 //!
-//! The standalone live driver spawns `wayland-core -p "<prompt>" --no-tui` for
+//! The standalone live driver spawns `wayland-core --no-tui ... "<prompt>"` for
 //! the headless surface, and the BARE binary on a real PTY for the interactive
 //! one. The PTY harness is `crates/wcore-cli/tests/support/pty.rs`, which is the
 //! in-crate sibling of `crates/wcore-eval-scenarios/src/pty_capture.rs`: the
@@ -83,7 +83,7 @@ fn binary() -> &'static str {
 pub enum LiveTransport {
     /// `wayland-core --json-stream` — the host-protocol surface.
     JsonStream,
-    /// `wayland-core -p "<prompt>" --no-tui` — the standalone headless surface.
+    /// `wayland-core --no-tui ... "<prompt>"` — the standalone headless surface.
     Headless,
     /// The bare binary on a real PTY — the standalone interactive surface.
     Tui,
