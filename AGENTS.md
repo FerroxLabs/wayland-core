@@ -4,9 +4,12 @@ ijfw_schema: 1
 type: software
 primary_type: software
 secondary_types: []
-confidence: 0.907
-detected_at: 2026-07-13T04:27:50.434Z
+confidence: 0.943
+detected_at: 2026-07-24T06:27:45.311Z
 signals:
+  - kind: agents_md_frontmatter
+    weight: 0.9
+    value: software
   - kind: manifest
     weight: 0.9
     manifests: [Cargo.toml, Cargo.toml, Cargo.toml, Cargo.toml, Cargo.toml, Cargo.toml]
@@ -17,7 +20,7 @@ signals:
     weight: 0.7
     domain: software
     ratio: 1
-    count: 1359
+    count: 1522
 ---
 ## Coordination (READ EVERY TASK — multi-agent blackboard)
 
