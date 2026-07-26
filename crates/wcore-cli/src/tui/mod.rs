@@ -30,7 +30,10 @@ pub mod app;
 // v0.9.0 W4 E1 — `/auth google-meet` slash-command handler.
 mod auth;
 // D019 — workspace checkpoint store backing `/rewind` (capture/list/restore).
-mod checkpoint;
+// D019 — made public in Phase 23B so `wayland-core session checkpoint` and
+// `session rewind` drive the SAME store as the TUI `/rewind` handler: a
+// checkpoint taken in the TUI is restorable from the shell and the reverse.
+pub mod checkpoint;
 mod commands;
 mod engine_bridge;
 mod event;

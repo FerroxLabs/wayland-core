@@ -194,6 +194,10 @@ serde.workspace = true
 # `serde_yaml` parses Hermes `config.yaml` for the `migrate` importer (#228).
 serde_yaml.workspace = true
 thiserror.workspace = true
+# F23-02: `session retain` takes a typed retain-until instant. Already a
+# workspace dependency (wcore-agent, wcore-memory and others use it), so this
+# adds no new package to the lock.
+chrono.workspace = true
 dirs.workspace = true
 reqwest = { workspace = true, features = ["blocking"], optional = true }
 # B1: self_update routes through the egress chokepoint. Gated behind the same

@@ -610,6 +610,11 @@ enum TopCmd {
     McpServe(wcore_cli::mcp_serve::McpServeArgs),
     /// v0.6.4 Task 2.6: dispatch a worktree-isolated worker swarm.
     Swarm(wcore_cli::swarm::SwarmArgs),
+    /// F23-02 (Phase 23B): operator verbs over saved sessions — list, search,
+    /// show, checkpoint, rewind, retry, fork, export, retain, reconcile and
+    /// cancel. Every operation prints a machine-observable `F23_SESSION=`
+    /// token to STDOUT and uses the exit-code map documented in `session_cmd`.
+    Session(wcore_cli::session_cmd::SessionArgs),
     /// ForgeFlows: validate / list / run saved `.ron` workflows from
     /// `.wayland/workflows/`.
     #[command(visible_alias = "forgeflows")]
@@ -1184,6 +1189,11 @@ async fn run() -> anyhow::Result<ExitCode> {
                     Ok(ExitCode::FAILURE)
                 }
             },
+            // F23-02: dispatched here, alongside the other subcommands and
+            // before `Config::resolve`, so listing and searching sessions work
+            // for a first-run user with no provider key — the same contract the
+            // root `--list-sessions` flag already honours.
+            TopCmd::Session(args) => wcore_cli::session_cmd::run(args),
             TopCmd::Workflow { cmd } => match wcore_cli::workflow::run(cmd).await {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(e) => {
