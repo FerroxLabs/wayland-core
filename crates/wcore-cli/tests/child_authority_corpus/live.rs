@@ -61,6 +61,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
 use crate::cases::{CorpusEntry, Dimension};
 use crate::support::mock_llm::MockLlm;
 use crate::support::pty;
+use crate::support::vault;
 use crate::surfaces::{CorpusExecutor, LiveEvidence, Mode, Outcome, ProbeResult, Surface, runtime};
 
 /// Sentinel bytes seeded outside the workspace root. If they reach a
@@ -71,6 +72,9 @@ const OUTSIDE_SENTINEL: &str = "CORPUS_OUTSIDE_SENTINEL_9f13";
 const SECRET_SENTINEL: &str = "CORPUS_SYNTHETIC_TOKEN_4b7e";
 /// Body served by the non-allowlisted loopback destination.
 const EGRESS_SENTINEL: &str = "CORPUS_EGRESS_SENTINEL_2c8a";
+/// Ephemeral vault passphrase for the PTY child. Not a credential: it encrypts
+/// a throwaway store inside a tempdir that is deleted when the run ends.
+const CORPUS_VAULT_PASSPHRASE: &str = "child-authority-corpus-ephemeral-vault";
 
 /// The shipped binary under test. Cargo guarantees it is built before this
 /// integration test runs.
@@ -371,12 +375,18 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
         .args(["--json-stream", "--provider", "anthropic"])
         .current_dir(world.root());
     pty::harden_child_env(&mut command, world.root());
-    let mut child = match command
+    // Without an ephemeral encrypted vault the binary refuses to start a
+    // session at all under a hermetic WAYLAND_HOME, so the turn never reaches
+    // a provider and every downstream observation would be an absence rather
+    // than a refusal. See the module note on the anti-vacuity gate.
+    let vault = vault::configure_process(&mut command);
+    let spawned = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
-    {
+        .spawn();
+    drop(vault);
+    let mut child = match spawned {
         Ok(child) => child,
         Err(error) => {
             return LiveRun {
@@ -484,11 +494,13 @@ fn run_headless(world: &LiveWorld) -> LiveRun {
         .args(["--no-tui", "--provider", "anthropic", prompt])
         .current_dir(world.root());
     pty::harden_child_env(&mut command, world.root());
+    let vault = vault::configure_process(&mut command);
     let output = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output();
+    drop(vault);
 
     match output {
         Ok(output) => {
@@ -534,7 +546,17 @@ fn run_tui(world: &LiveWorld) -> LiveRun {
         world.root().display()
     );
 
-    let mut terminal = pty::Pty::spawn(world.root());
+    // `portable-pty` closes arbitrary inherited descriptors while preparing the
+    // child, so the FD transport cannot reach it; the supported legacy env
+    // transport is used instead. `spawn_with_env` applies extras AFTER the
+    // credential-strip pass, which is the seam that makes this possible without
+    // touching the shared PTY harness.
+    let mut terminal = pty::Pty::spawn_with_env(
+        world.root(),
+        40,
+        120,
+        &[("WAYLAND_VAULT_PASSPHRASE", CORPUS_VAULT_PASSPHRASE)],
+    );
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut booted = false;
     while Instant::now() < deadline {
