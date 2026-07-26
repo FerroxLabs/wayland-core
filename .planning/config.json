@@ -10,7 +10,7 @@
     "verifier": true,
     "auto_advance": true,
     "node_repair": false,
-    "use_worktrees": false,
+    "use_worktrees": true,
     "nyquist_validation": true,
     "security_enforcement": true,
     "security_asvs_level": 2,
