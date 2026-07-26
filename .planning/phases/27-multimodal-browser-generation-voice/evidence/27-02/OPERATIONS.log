@@ -1,0 +1,12 @@
+F27-02 CAPABILITY-VERSUS-OPERATION
+HOST: Ubuntu-2404-noble-amd64-base
+SHA: 2ecdfdf54ff7fda920eec7d068337006e5da4ee4
+
+=== OPERATION browser-navigate-policy-allowed ===
+TOOL: Browser  INPUT: {"op":{"kind":"navigate","url":"https://example.com/"}}
+RC: 0
+TOOL-RESULT (as the model saw it):
+  is_error=True
+  session: backend error: Camoufox is unavailable at http://localhost:9377/health and Core could not start `camofox-browser`: spawn camoufox: No such file or directory (os error 2). Install @askjo/camofox-browser or set WAYLAND_CAMOUFOX_BIN to its executable
+
+DONE

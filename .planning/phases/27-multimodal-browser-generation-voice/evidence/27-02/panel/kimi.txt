@@ -1,0 +1,60 @@
+BUNDLE-SHA256: 5dda53566b934f2d2e751488e2fd3d19956814f2e17613e407867c59cf85b311
+• We need answer as reviewer. Need weigh options. We need maybe inspect repo? The prompt gives detailed evidence. We're asked answer exactly one option id then reasoning. Could answer based on evidence. But AGENTS says verify not fabricate; but we're one reviewer with evidence provided. Might use tools to check key facts? The question likely wants decision. Could read relevant files to ground, but not strictly necessary; however being a code CLI, maybe verify. But the answer should be concise. Let me think about the decision itself.
+
+  Options:
+  1 activation-chain-only: keep booleans linkage meaning, publish readiness only via events. False ready persists for unchanged consumers. But preserves compat.
+  2 chain-plus-derived-flags: redefine existing booleans to live readiness, old linkage under new additive field. Fixes misreading for existing hosts immediately. Cost: release_binary_smoke.rs goes red on CI machine (it asserts true). But that test can/should be updated — the prompt says "that is a real cost that must be counted, not waved at". Hmm, but redefining meaning of a live field is a compat break. The question framing: "How does the engine publish live browser, computer-use and web readiness without breaking the existing linkage-derived flags that a shipped host already consumes?" — wait, the question says "without breaking the existing linkage-derived flags that a shipped host already consumes". That phrasing suggests preserving linkage flags. Option 2 redefines them — arguably breaking them (shape unchanged but meaning changed). Option 1 leaves them as-is. Option 3 adds new flags alongside.
+
+  Criterion 2 was written to remove dishonesty — handshake claiming capabilities machine cannot deliver. The false ready must be removed for consumers that exist today? Option 2 is "the only option that actually removes the false ready from consumers that exist today."
+
+  But the question title says "without breaking the existing linkage-derived flags". Option 2 changes meaning = a compatibility event. Option 1 keeps false ready for unchanged consumers but adds honest events. Option 3 keeps both — durable misreading hazard.
+
+  The decision bundle context: plan 27-02, cross-audit. The measured evidence emphasizes dishonesty: handshake said available, next op failed. The point of the criterion is to remove false ready. activation-chain-only leaves the false claim on the wire for the shipped host — the dishonesty persists in effect. chain-plus-new-flags too. chain-plus-derived-flags actually fixes it but changes meaning of live field, and breaks the smoke test on CI (which would need updating to assert the new semantics — but the prompt says count that cost, and the smoke test's purpose was to assert linkage survived optimization; under option 2 the linkage answer moves to a separate field so the test asserts on that field instead).
+
+  Escalate: reserved for Sean; but AGENTS project learning says "Do not park a decision on Sean. Cross-audit it, reach a definitive answer." So escalate is disfavored strongly.
+
+  Which is right? The requirement: "publish live readiness without breaking the existing linkage-derived flags that a shipped host already consumes". Hmm — "without breaking" could mean without breaking the consumers. Option 2 changes meaning — a host reading browser_suite==true as "linked" now sees false on a capable-of-linkage but not-ready machine; behavior change. But the shipped host (desktop) consumes these flags presumably to show capabilities; showing false when not ready is the honest fix.
+
+  The prompt says "the only option that actually removes the false ready from consumers that exist today" for option 2. The measured evidence's whole thrust (OBS-07: handshake said available and the very next operation could not deliver) is that the false ready is the defect being fixed. If we choose chain-only, the shipped desktop still shows browser available on a machine with no browser — criterion 2 fails in effect.
+
+  But the compat concern: the field meaning change must be "called that plainly and carried in the contract bump" — the plan already bumps contract minor, regenerates manifest. The wire shape unchanged. The smoke test going red is a test update, precise and describable.
+
+  Given the project learning "Do not park a decision on Sean... commit to the majority position, or to the minority position when it carries the stronger evidence", and the four options include escalate, escalate should only be chosen if genuinely deadlocked. I think the strongest answer is chain-plus-derived-flags, because the defect is dishonesty to existing consumers, and only that option removes it. The cons are manageable: contract bump already happening, smoke test updated to assert linkage on the new field, desktop sees honest false.
+
+  Counterargument: redefining a live field is the kind of silent compat break that option 3's additive discipline exists to avoid. But option 3 "satisfies requirement in letter more than in effect" — the false ready stays reachable. The question itself: "publish live browser, computer-use and web readiness without breaking the existing linkage-derived flags that a shipped host already consumes" — hmm, read literally, option 2 "breaks" the flags' meaning. But the flags as consumed by the host are used as readiness signals (that's the misreading). The shipped host consumes them believing readiness. So redefining them to actually mean readiness fixes the host without host change — not breaking the host, fixing it. The "breakage" is only for a host that special-cases the old linkage meaning — does one exist? The only in-repo consumer is the smoke test. The desktop consumes as readiness. So option 2's con is theoretical while its pro is actual.
+
+  I'll answer `chain-plus-derived-flags`.
+
+  Should I verify anything in repo? Could quickly check release_binary_smoke.rs and activation ladder to ground reasoning. But as a reviewer given measured evidence, maybe unnecessary. To be candid and accurate, a quick grep would strengthen. But the answer format wants option id then reasoning; tool use isn't required. However the environment gives tools; the instruction "default to taking action with tools" applies to tasks. This is an analysis/review question — answering directly is fine. But let me do a light verification of key claims to avoid parroting false evidence? The evidence is presented as measured on real hardware; I can't re-run on hetzner-dsm quickly (ssh?). Actually AGENTS mentions hetzner-dsm:/root/wayland. Not needed.
+
+  I could grep for the smoke test to confirm. Let's do a couple of quick reads to ground reasoning. It's cheap.
+
+  Actually, keep it simple: read the smoke test file section and maybe the activation ladder vocabulary. Quick greps.Confirmed the smoke test derives flags from linkage and asserts true. The decision: I'll answer chain-plus-derived-flags.
+
+  Reasoning points:
+  - The defect criterion 2 targets is the false ready reaching consumers that exist today (OBS-07). Only option 2 removes it in effect.
+  - The only in-repo consumer asserting linkage semantics is the smoke test; its stated purpose is "plugin discovery survived linking + LTO" — under option 2 that assertion moves to the new additive linkage field, so the LTO-guard purpose is preserved, not destroyed. The red test is a deliberate, precise patch, not collateral.
+  - The meaning change is a compat event but the plan already bumps the contract minor + regenerates the manifest; the wire shape is unchanged and the honest false is what the desktop actually wants to display.
+  - Option 1 leaves the shipped host showing a false ready indefinitely (the repo can't land the desktop change), so criterion 2 passes in letter only; option 3 ships a permanent pair of subtly-different booleans — a durable misreading hazard, and also leaves the false ready reachable.
+  - Escalate: the two costs aren't symmetrical — a meaning change with a contract bump is recoverable and declared; the dishonesty is the defect being fixed. Also per project learning, don't park on Sean what the evidence decides.
+  - Mitigations to require: document the semantics change in the contract bump notes, keep the additive linkage field named explicitly (e.g. browser_suite_linked), update the smoke test to assert linkage on the new field and readiness false on backend-absent machines.
+
+  Answer format: exactly one option id, then reasoning.
+
+• `chain-plus-derived-flags`
+
+  Reasoning:
+
+  The defect criterion 2 was written against is not "the wire lacks an honest signal" — it is OBS-07: a shipped consumer reads `browser_suite=true`, acts on it, and the very next operation cannot deliver. Options 1 and 3 both leave that exact sequence intact for every consumer that exists today. The activation ladder is the right mechanism for *proved* readiness going forward (OBS-06 shows it working, with a sound reason vocabulary), but under either of those options the honest signal sits next to a live lie, and the host this repository cannot patch keeps believing the lie. That satisfies the criterion in letter only. Option 3 additionally mints a permanent pair of booleans whose subtle difference is a misreading hazard that never expires — it trades today's single ambiguity for a durable doubled one.
+
+  Option 2 is the only choice where the false ready actually stops reaching consumers. Its costs are real but bounded and already paid for by the plan's mechanics:
+
+  - The meaning change is a compatibility event, but the plan already bumps the contract minor, bumps the generator, and regenerates the desktop manifest — the vehicle for declaring it plainly exists. The wire shape is unchanged; what changes is that the field now tells the truth the desktop always thought it was telling.
+  - The red smoke test is not collateral damage, it is a retarget. I verified `crates/wcore-cli/tests/release_binary_smoke.rs:18-23` — the test's stated purpose is guarding that plugin discovery survived release LTO, and it already documents the flags as linkage-derived via `PluginCapabilitySet::from_verified`. Under option 2 that LTO guard moves verbatim onto the additive linkage field, and the readiness flags gain assertions that match measured reality (false on a backend-absent, display-less machine). That is a single precise patch to one test file, fully describable at the serialized seam — not a waved-at cost.
+  - The con "a host that special-cases the old meaning observes an unasked behavior change" is theoretical here: the only consumers on record are the smoke test (updated in the same patch) and the desktop, which consumes the flags *as* readiness — for it the redefinition is the bug fix, not a break.
+
+  `escalate` is not warranted. The asymmetry Sean would be asked to resolve does not exist: one cost is a declared, revertible contract-bump semantics change; the other is the handshake continuing to claim capabilities the machine cannot deliver, which is the dishonesty the criterion exists to remove. Nothing here merges, tags, or releases, so a wrong call is recoverable — the evidence decides this one.
+
+  Non-negotiable implementation requirements if this option lands: the linkage fields must be additive, explicitly named (e.g. `browser_suite_linked`), and documented as linkage-derived in-source, as they are today; the contract bump notes must state the semantics change in plain language; and OBS-09's wrong remediation text (`[browser] allowed_origins` vs the real `[browser.policy]`) must be fixed in the same phase — an unavailable whose stated fix is wrong fails the same honesty bar.
+
+To resume this session: kimi -r session_8fde133f-3b6f-4407-8e91-055caacf02e4

@@ -1,0 +1,55 @@
+wayland-core: --dangerously-skip-permissions bypasses approval prompts only; the OS sandbox remains required. Use --dangerous for an explicit, time-bounded local sandbox bypass.
+warning: /tmp/tmp.qTNL9adgiz/config.toml has permissions 0o644; tightening to 0o600 on next write
+[2m2026-07-26T15:50:16.990237Z[0m [33m WARN[0m ignoring unknown or mis-sectioned config key `browser.allowed_origins` in /tmp/tmp.qTNL9adgiz/config.toml — it has no effect; check for a typo or wrong [section] [3mkey[0m[2m=[0mbrowser.allowed_origins [3mpath[0m[2m=[0m/tmp/tmp.qTNL9adgiz/config.toml
+[2m2026-07-26T15:50:16.990495Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37
+[2m2026-07-26T15:50:16.990733Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37
+[2m2026-07-26T15:50:16.991400Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+[2m2026-07-26T15:50:16.991472Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback
+[2m2026-07-26T15:50:16.991481Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices
+[2m2026-07-26T15:50:16.991483Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue
+[2m2026-07-26T15:50:16.991485Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search
+[2m2026-07-26T15:50:16.991492Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists
+[2m2026-07-26T15:50:16.991494Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums
+[2m2026-07-26T15:50:16.991497Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library
+[2m2026-07-26T15:50:16.991504Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao
+[2m2026-07-26T15:50:16.991512Z[0m [33m WARN[0m image_gen: no API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations fallback disabled — tool hidden
+[2m2026-07-26T15:50:16.991516Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+[2m2026-07-26T15:50:16.991531Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-26T15:50:16.991534Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden
+[2m2026-07-26T15:50:16.991537Z[0m [33m WARN[0m tts: no TTS backend configured — set OPENAI_API_KEY or ELEVENLABS_API_KEY (or download Piper voices via piper_download). Tool hidden.
+[2m2026-07-26T15:50:16.991733Z[0m [33m WARN[0m video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+[2m2026-07-26T15:50:16.991764Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-26T15:50:16.992011Z[0m [33m WARN[0m plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool [3mplugin[0m[2m=[0mwayland-browser [3mtool[0m[2m=[0mexecute [3mfq_name[0m[2m=[0mBrowser::execute
+[2m2026-07-26T15:50:17.002954Z[0m [33m WARN[0m semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+[2m2026-07-26T15:50:17.003078Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-26T15:50:17.003091Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-26T15:50:17.005286Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-26T15:50:17.005434Z[0m [33m WARN[0m ignoring unknown or mis-sectioned config key `browser.allowed_origins` in /tmp/tmp.qTNL9adgiz/config.toml — it has no effect; check for a typo or wrong [section] [3mkey[0m[2m=[0mbrowser.allowed_origins [3mpath[0m[2m=[0m/tmp/tmp.qTNL9adgiz/config.toml
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /tmp/tmp.qTNL9adgiz/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+[2m2026-07-26T15:50:17.113350Z[0m [32m INFO[0m F-014: channels auto-registered from ~/.wayland/channels [3mcount[0m[2m=[0m0
+[2m2026-07-26T15:50:17.113398Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-26T15:50:17.113401Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden
+[2m2026-07-26T15:50:17.113415Z[0m [32m INFO[0m Phase 1B-2: inbound channel subscriber spawned
+[2m2026-07-26T15:50:17.113418Z[0m [32m INFO[0m F-014: channel_manager.start_all() complete — inbound polling active
+[2m2026-07-26T15:50:17.145742Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-20250514"
+[2m2026-07-26T15:50:17.145758Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-20250514"
+[2m2026-07-26T15:50:17.145761Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-20250514"
+> Browser({"op":{"kind":"navigate","url":"https://example.com/"}})
+[2m2026-07-26T15:50:17.149292Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-20250514"
+  X Browser tool is disabled by default. Add allowed domains to your config.toml to enable it:
+
+[browser]
+# Allow specific domains (glob patterns supported)
+allowed_origins = ["example.com", "*.mysite.com"]
+
+Alternatively, set default_action = "allow" to permit all origins (not recommended — exposes SSRF risk).
+[2m2026-07-26T15:50:17.159275Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-20250514"
+[2m2026-07-26T15:50:17.159515Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-20250514"
+[2m2026-07-26T15:50:17.159520Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-20250514"
+[2m2026-07-26T15:50:17.159523Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-20250514"
+
+* F27-MOCK-REPLY[2m2026-07-26T15:50:17.201736Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-20250514"
+[2m2026-07-26T15:50:17.201768Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-20250514"
+[2m2026-07-26T15:50:17.208069Z[0m [32m INFO[0m auto-memorize skipped this session; no facts saved [3mskip_reason[0m[2m=[0mSome(BelowFactThreshold) [3mcandidates[0m[2m=[0m0
+
+[turns: 2 | tokens: 2 in / 2 out]
