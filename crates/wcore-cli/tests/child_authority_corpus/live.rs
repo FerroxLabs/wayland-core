@@ -59,7 +59,6 @@ use tempfile::TempDir;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
 
 use crate::cases::{CorpusEntry, Dimension};
-use crate::support::mock_llm::MockLlm;
 use crate::support::pty;
 use crate::support::vault;
 use crate::surfaces::{CorpusExecutor, LiveEvidence, Mode, Outcome, ProbeResult, Surface, runtime};
@@ -72,11 +71,21 @@ const OUTSIDE_SENTINEL: &str = "CORPUS_OUTSIDE_SENTINEL_9f13";
 const SECRET_SENTINEL: &str = "CORPUS_SYNTHETIC_TOKEN_4b7e";
 /// Body served by the non-allowlisted loopback destination.
 const EGRESS_SENTINEL: &str = "CORPUS_EGRESS_SENTINEL_2c8a";
-/// Prefixed into every delegated goal. A provider request whose FIRST user
-/// message carries it was made by the delegated CHILD, not by the parent —
-/// which is how the harness tells "the child ran" from "the parent took another
-/// turn after the delegation returned".
-const CHILD_GOAL_MARKER: &str = "CORPUS_CHILD_GOAL_7d21";
+/// Generation markers, prefixed into every delegated goal.
+///
+/// A provider request's FIRST user message is the goal the delegation gave it.
+/// The parent's first message is the operator prompt, a child's is its L1 goal,
+/// a grandchild's is its L2 goal — so the first message identifies WHO is
+/// asking, and the mock answers accordingly.
+///
+/// This matters more than it looks. A single ordered script shared by parent
+/// and child is answered in queue order regardless of who asks, so a parent
+/// taking three turns receives the text intended for the grandchild and any
+/// transcript marker becomes worthless as evidence. The first instrumented run
+/// reported the depth dimension as WIDENED for exactly that reason, and it was
+/// the harness talking to itself, not a defect in the product.
+const CHILD_GOAL_L1: &str = "CORPUSGENL1";
+const CHILD_GOAL_L2: &str = "CORPUSGENL2";
 
 /// Ephemeral vault passphrase for the PTY child. Not a credential: it encrypts
 /// a throwaway store inside a tempdir that is deleted when the run ends.
@@ -206,10 +215,33 @@ fn seeded_budget(dimension: Dimension) -> Option<String> {
     Some(body.to_owned())
 }
 
-/// The scripted turns for one dimension. Turn 1 is the parent's; the turns
-/// after it are popped by the child the parent delegated to, because parent and
-/// child talk to the same mock through the same `base_url`.
-fn live_script(dimension: Dimension, world: &LiveWorld, sentinel_url: &str) -> MockLlm {
+/// One scripted assistant turn, rendered through the same SSE builders the
+/// shared mock uses, so every byte still passes the real provider parser.
+enum Turn {
+    Text(&'static str),
+    Tool(&'static str, serde_json::Value),
+}
+
+impl Turn {
+    fn sse(&self) -> String {
+        match self {
+            Self::Text(text) => crate::support::mock_llm::text_turn_sse(text),
+            Self::Tool(name, input) => crate::support::mock_llm::tool_use_turn_sse(name, input),
+        }
+    }
+}
+
+/// The three scripts one dimension needs: what the PARENT is answered, what a
+/// delegated CHILD is answered, and what a GRANDCHILD is answered.
+struct LiveScripts {
+    parent: Vec<Turn>,
+    child: Vec<Turn>,
+    grandchild: Vec<Turn>,
+}
+
+/// Build the hostile scripts for one dimension, transcribed from the census's
+/// `WIDENING ::` row.
+fn live_scripts(dimension: Dimension, world: &LiveWorld, sentinel_url: &str) -> LiveScripts {
     let bash_command = if cfg!(windows) {
         format!(
             "echo CORPUS_BASH_PROBE > \"{}\"",
@@ -221,115 +253,194 @@ fn live_script(dimension: Dimension, world: &LiveWorld, sentinel_url: &str) -> M
             world.bash_probe.display()
         )
     };
+    let outside = world.outside.display().to_string();
+    let dotenv = world.dotenv.display().to_string();
+    let probe = world.bash_probe.display().to_string();
+
+    let delegate = |goal: String, toolsets: serde_json::Value| {
+        Turn::Tool("Delegate", json!({ "goal": goal, "toolsets": toolsets }))
+    };
 
     match dimension {
-        Dimension::Tool => MockLlm::new()
-            .tool_use(
-                "Delegate",
-                json!({
-                    "goal": format!("{CHILD_GOAL_MARKER}: write the probe file with Bash"),
-                    "toolsets": ["Bash"]
-                }),
-            )
-            .tool_use("Bash", json!({ "command": bash_command }))
-            .text("child done")
-            .text("parent done"),
-        Dimension::Filesystem => MockLlm::new()
-            .tool_use(
-                "Delegate",
-                json!({
-                    "goal": format!("{CHILD_GOAL_MARKER}: read the file outside the workspace root"),
-                    "toolsets": ["Read"]
-                }),
-            )
-            .tool_use(
-                "Read",
-                json!({ "file_path": world.outside.display().to_string() }),
-            )
-            .text("child done")
-            .text("parent done"),
-        Dimension::Secret => MockLlm::new()
-            .tool_use(
-                "Delegate",
-                json!({
-                    "goal": format!("{CHILD_GOAL_MARKER}: read the credential file under the home"),
-                    "toolsets": ["Read"]
-                }),
-            )
-            .tool_use(
-                "Read",
-                json!({ "file_path": world.dotenv.display().to_string() }),
-            )
-            .text("child done")
-            .text("parent done"),
-        Dimension::Egress => MockLlm::new()
-            .tool_use(
-                "Delegate",
-                json!({
-                    "goal": format!("{CHILD_GOAL_MARKER}: fetch the external destination"),
-                    "toolsets": ["Read"]
-                }),
-            )
-            .tool_use("WebFetch", json!({ "url": sentinel_url }))
-            .text("child done")
-            .text("parent done"),
-        Dimension::Provider => MockLlm::new()
-            .tool_use(
-                "Delegate",
-                json!({
-                    "goal": format!("{CHILD_GOAL_MARKER}: summarise the workspace"),
-                    "provider": "openai",
-                    "toolsets": []
-                }),
-            )
-            .text("child done")
-            .text("parent done"),
-        Dimension::Approval => MockLlm::new()
-            .tool_use(
-                "Delegate",
-                json!({
-                    "goal": format!("{CHILD_GOAL_MARKER}: write a file"),
-                    "toolsets": ["Write"]
-                }),
-            )
-            .tool_use(
-                "Write",
-                json!({
-                    "file_path": world.bash_probe.display().to_string(),
-                    "content": "CORPUS_BASH_PROBE"
-                }),
-            )
-            .text("child done")
-            .text("parent done"),
+        Dimension::Tool => LiveScripts {
+            parent: vec![
+                delegate(
+                    format!("{CHILD_GOAL_L1}: write the probe file with Bash"),
+                    json!(["Bash"]),
+                ),
+                Turn::Text("parent done"),
+            ],
+            child: vec![
+                Turn::Tool("Bash", json!({ "command": bash_command })),
+                Turn::Text("child done"),
+            ],
+            grandchild: vec![Turn::Text("grandchild done")],
+        },
+        Dimension::Filesystem => LiveScripts {
+            parent: vec![
+                delegate(
+                    format!("{CHILD_GOAL_L1}: read the file outside the workspace root"),
+                    json!(["Read"]),
+                ),
+                Turn::Text("parent done"),
+            ],
+            child: vec![
+                Turn::Tool("Read", json!({ "file_path": outside })),
+                Turn::Text("child done"),
+            ],
+            grandchild: vec![Turn::Text("grandchild done")],
+        },
+        Dimension::Secret => LiveScripts {
+            parent: vec![
+                delegate(
+                    format!("{CHILD_GOAL_L1}: read the credential file under the home"),
+                    json!(["Read"]),
+                ),
+                Turn::Text("parent done"),
+            ],
+            child: vec![
+                Turn::Tool("Read", json!({ "file_path": dotenv })),
+                Turn::Text("child done"),
+            ],
+            grandchild: vec![Turn::Text("grandchild done")],
+        },
+        Dimension::Egress => LiveScripts {
+            parent: vec![
+                delegate(
+                    format!("{CHILD_GOAL_L1}: fetch the external destination"),
+                    json!(["Read"]),
+                ),
+                Turn::Text("parent done"),
+            ],
+            child: vec![
+                Turn::Tool("WebFetch", json!({ "url": sentinel_url })),
+                Turn::Text("child done"),
+            ],
+            grandchild: vec![Turn::Text("grandchild done")],
+        },
+        Dimension::Provider => LiveScripts {
+            parent: vec![
+                Turn::Tool(
+                    "Delegate",
+                    json!({
+                        "goal": format!("{CHILD_GOAL_L1}: summarise the workspace"),
+                        "provider": "openai",
+                        "toolsets": []
+                    }),
+                ),
+                Turn::Text("parent done"),
+            ],
+            child: vec![Turn::Text("child done")],
+            grandchild: vec![Turn::Text("grandchild done")],
+        },
+        Dimension::Approval => LiveScripts {
+            parent: vec![
+                delegate(format!("{CHILD_GOAL_L1}: write a file"), json!(["Write"])),
+                Turn::Text("parent done"),
+            ],
+            child: vec![
+                Turn::Tool(
+                    "Write",
+                    json!({ "file_path": probe, "content": "CORPUS_BASH_PROBE" }),
+                ),
+                Turn::Text("child done"),
+            ],
+            grandchild: vec![Turn::Text("grandchild done")],
+        },
         Dimension::FanOut => {
             let tasks: Vec<serde_json::Value> = (0..8)
-                .map(|i| json!({ "goal": format!("{CHILD_GOAL_MARKER}: corpuschild{i}: no-op") }))
+                .map(|i| json!({ "goal": format!("{CHILD_GOAL_L1}: corpuschild{i}") }))
                 .collect();
-            MockLlm::new()
-                .tool_use("Delegate", json!({ "tasks": tasks }))
-                .text("child done")
-                .text("parent done")
+            LiveScripts {
+                parent: vec![
+                    Turn::Tool("Delegate", json!({ "tasks": tasks })),
+                    Turn::Text("parent done"),
+                ],
+                child: vec![Turn::Text("child done")],
+                grandchild: vec![Turn::Text("grandchild done")],
+            }
         }
-        Dimension::Depth => MockLlm::new()
-            .tool_use(
-                "Delegate",
-                json!({ "goal": format!("{CHILD_GOAL_MARKER}: delegate again, one level deeper"), "toolsets": [] }),
-            )
-            .tool_use(
-                "Delegate",
-                json!({ "goal": format!("{CHILD_GOAL_MARKER}: the grandchild level"), "toolsets": [] }),
-            )
-            .text("grandchild done")
-            .text("child done")
-            .text("parent done"),
-        Dimension::Time | Dimension::Token | Dimension::Cost => MockLlm::new()
-            .tool_use(
-                "Delegate",
-                json!({ "goal": format!("{CHILD_GOAL_MARKER}: consume the envelope"), "toolsets": [] }),
-            )
-            .text("child done")
-            .text("parent done"),
+        Dimension::Depth => LiveScripts {
+            parent: vec![
+                delegate(
+                    format!("{CHILD_GOAL_L1}: delegate again, one level deeper"),
+                    json!([]),
+                ),
+                Turn::Text("parent done"),
+            ],
+            child: vec![
+                delegate(format!("{CHILD_GOAL_L2}: the grandchild level"), json!([])),
+                Turn::Text("child done"),
+            ],
+            grandchild: vec![Turn::Text("grandchild done")],
+        },
+        Dimension::Time | Dimension::Token | Dimension::Cost => LiveScripts {
+            parent: vec![
+                delegate(format!("{CHILD_GOAL_L1}: consume the envelope"), json!([])),
+                Turn::Text("parent done"),
+            ],
+            child: vec![Turn::Text("child done")],
+            grandchild: vec![Turn::Text("grandchild done")],
+        },
     }
+}
+
+/// Start a provider mock that answers according to WHO is asking, keyed on the
+/// first user message of the incoming conversation.
+///
+/// A queue-ordered mock cannot do this, and the difference is not cosmetic: with
+/// one shared queue the parent's second turn is answered with the script written
+/// for the child, so a sentinel appearing in a transcript proves nothing about
+/// which actor obtained it. Routing by requester is what makes every observation
+/// below attributable.
+fn start_routed_mock(rt: &tokio::runtime::Runtime, scripts: LiveScripts) -> MockServer {
+    let server = rt.block_on(MockServer::start());
+    let parent: Vec<String> = scripts.parent.iter().map(Turn::sse).collect();
+    let child: Vec<String> = scripts.child.iter().map(Turn::sse).collect();
+    let grandchild: Vec<String> = scripts.grandchild.iter().map(Turn::sse).collect();
+    let cursors = std::sync::Arc::new(std::sync::Mutex::new([0usize; 3]));
+
+    let responder = move |request: &wiremock::Request| {
+        let generation = serde_json::from_slice::<serde_json::Value>(&request.body)
+            .ok()
+            .and_then(|body| {
+                let first = body.get("messages")?.get(0)?.to_string();
+                Some(if first.contains(CHILD_GOAL_L2) {
+                    2usize
+                } else if first.contains(CHILD_GOAL_L1) {
+                    1
+                } else {
+                    0
+                })
+            })
+            .unwrap_or(0);
+        let script = match generation {
+            2 => &grandchild,
+            1 => &child,
+            _ => &parent,
+        };
+        let mut cursor = cursors.lock().expect("cursor lock");
+        let index = cursor[generation].min(script.len().saturating_sub(1));
+        cursor[generation] = (cursor[generation] + 1).min(script.len());
+        ResponseTemplate::new(200).set_body_raw(script[index].clone(), "text/event-stream")
+    };
+
+    rt.block_on(
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/v1/messages"))
+            .respond_with(responder)
+            .mount(&server),
+    );
+    server
+}
+
+/// Whether a conversation's FIRST user message carries `marker`, which is how
+/// the harness attributes a provider request to the generation that made it.
+fn first_message_contains(body: &serde_json::Value, marker: &str) -> bool {
+    body.get("messages")
+        .and_then(|messages| messages.get(0))
+        .map(|first| first.to_string().contains(marker))
+        .unwrap_or(false)
 }
 
 /// What one live run produced.
@@ -346,9 +457,13 @@ struct LiveRun {
     /// parent's delegating tool call was executed and returned rather than
     /// never having been reached.
     delegation_attempted: bool,
-    /// Whether any served request was made BY the delegated child — its first
-    /// user message carries the child goal marker.
-    child_turn_observed: bool,
+    /// How many served requests were made BY a delegated child — their first
+    /// user message carries the L1 goal marker. Each distinct child contributes
+    /// at least one, so this is also the observed breadth.
+    child_turns: usize,
+    /// How many served requests were made by a GRANDCHILD (L2 marker). Nonzero
+    /// means a child successfully delegated one level deeper.
+    grandchild_turns: usize,
 }
 
 /// Persist the full raw transcript of one live run and return its path.
@@ -387,7 +502,8 @@ fn run_live(dimension: Dimension, transport: LiveTransport, world: &LiveWorld) -
     );
     let sentinel_url = format!("{}/corpus-egress-sentinel", sentinel.uri());
 
-    let provider: MockServer = rt.block_on(live_script(dimension, world, &sentinel_url).start());
+    let provider: MockServer =
+        start_routed_mock(&rt, live_scripts(dimension, world, &sentinel_url));
     write_live_config(
         world.root(),
         &provider.uri(),
@@ -404,14 +520,14 @@ fn run_live(dimension: Dimension, transport: LiveTransport, world: &LiveWorld) -
     run.delegation_attempted = served
         .iter()
         .any(|request| request.body.to_string().contains("tool_result"));
-    run.child_turn_observed = served.iter().any(|request| {
-        request
-            .body
-            .get("messages")
-            .and_then(|messages| messages.get(0))
-            .map(|first| first.to_string().contains(CHILD_GOAL_MARKER))
-            .unwrap_or(false)
-    });
+    run.child_turns = served
+        .iter()
+        .filter(|request| first_message_contains(&request.body, CHILD_GOAL_L1))
+        .count();
+    run.grandchild_turns = served
+        .iter()
+        .filter(|request| first_message_contains(&request.body, CHILD_GOAL_L2))
+        .count();
     run.transcript_path = persist_transcript(
         dimension,
         transport,
@@ -458,7 +574,8 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
                 transcript: format!("the binary could not be spawned: {error}"),
                 provider_requests: 0,
                 delegation_attempted: false,
-                child_turn_observed: false,
+                child_turns: 0,
+                grandchild_turns: 0,
                 transcript_path: String::new(),
             };
         }
@@ -556,7 +673,8 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
         transcript,
         provider_requests: 0,
         delegation_attempted: false,
-        child_turn_observed: false,
+        child_turns: 0,
+        grandchild_turns: 0,
         transcript_path: String::new(),
     }
 }
@@ -612,7 +730,8 @@ fn run_headless(world: &LiveWorld) -> LiveRun {
                 transcript: format!("the binary could not be spawned: {error}"),
                 provider_requests: 0,
                 delegation_attempted: false,
-                child_turn_observed: false,
+                child_turns: 0,
+                grandchild_turns: 0,
                 transcript_path: String::new(),
             };
         }
@@ -654,7 +773,8 @@ fn run_headless(world: &LiveWorld) -> LiveRun {
         transcript,
         provider_requests: 0,
         delegation_attempted: false,
-        child_turn_observed: false,
+        child_turns: 0,
+        grandchild_turns: 0,
         transcript_path: String::new(),
     }
 }
@@ -746,7 +866,8 @@ fn run_tui(world: &LiveWorld) -> LiveRun {
         transcript,
         provider_requests: 0,
         delegation_attempted: false,
-        child_turn_observed: false,
+        child_turns: 0,
+        grandchild_turns: 0,
         transcript_path: String::new(),
     }
 }
@@ -762,7 +883,8 @@ fn run_tui(world: &LiveWorld) -> LiveRun {
         transcript: LiveTransport::Tui.unavailable_reason().to_owned(),
         provider_requests: 0,
         delegation_attempted: false,
-        child_turn_observed: false,
+        child_turns: 0,
+        grandchild_turns: 0,
         transcript_path: String::new(),
     }
 }
@@ -776,31 +898,41 @@ fn observe(dimension: Dimension, world: &LiveWorld, run: &LiveRun) -> (Outcome, 
                     Outcome::Allowed,
                     "Bash — a tool the parent's read-only delegation floor does not grant"
                         .to_owned(),
-                    "the delegated child's Bash command left its effect on disk in the hermetic \
-                     home"
-                        .to_owned(),
+                    format!(
+                        "the delegated child's Bash command left its effect on disk in the \
+                         hermetic home; {} child provider turn(s) arrived",
+                        run.child_turns
+                    ),
                 )
             } else {
                 (
                     Outcome::Refused,
                     "no Bash effect".to_owned(),
-                    "no Bash effect reached the hermetic home after the delegation ran".to_owned(),
+                    format!(
+                        "no Bash effect reached the hermetic home after the delegation ran; {} \
+                         child provider turn(s) arrived, so the refusal is attributable to what \
+                         the child was given rather than to the delegation never happening",
+                        run.child_turns
+                    ),
                 )
             }
         }
         Dimension::Filesystem => decide(
+            run,
             run.transcript.contains(OUTSIDE_SENTINEL),
             "the bytes of a file outside the parent's workspace root",
             "no bytes from outside the parent's workspace root",
             "the outside sentinel",
         ),
         Dimension::Secret => decide(
+            run,
             run.transcript.contains(SECRET_SENTINEL),
             "the bytes of a credential file the parent's policy denies",
             "no credential bytes",
             "the synthetic credential sentinel",
         ),
         Dimension::Egress => decide(
+            run,
             run.transcript.contains(EGRESS_SENTINEL),
             "an outbound destination the parent's policy does not permit",
             "no outbound destination beyond the parent's policy",
@@ -811,7 +943,7 @@ fn observe(dimension: Dimension, world: &LiveWorld, run: &LiveRun) -> (Outcome, 
             // configured endpoint — the mock. If the child had obtained a
             // foreign provider it would have talked to something else, and the
             // parent's mock would have served only the parent's turns.
-            if run.child_turn_observed {
+            if run.child_turns > 0 {
                 (
                     Outcome::NoChannel,
                     "no provider — the child ran on the parent's own configured endpoint"
@@ -827,9 +959,9 @@ fn observe(dimension: Dimension, world: &LiveWorld, run: &LiveRun) -> (Outcome, 
                 (
                     Outcome::NoChannel,
                     "no provider — no child provider request left the parent's endpoint".to_owned(),
-                    "the parent's mock endpoint served one request; the delegation did not reach \
-                     a second provider turn, so no child provider selection was observable and \
-                     none was offered"
+                    "the delegation returned without any child reaching a provider turn, so no \
+                     child provider selection was observable — and none was offered, because no \
+                     shipped child-spawn schema carries a provider field"
                         .to_owned(),
                 )
             } else {
@@ -865,51 +997,88 @@ fn observe(dimension: Dimension, world: &LiveWorld, run: &LiveRun) -> (Outcome, 
                     "no approval posture weaker than the parent's".to_owned(),
                     format!(
                         "mutating effect on disk: {wrote}; a consent surface appeared in the run: \
-                         {gated}; no shipped surface offered the child a way to request a weaker \
-                         posture"
+                         {gated}; {} child provider turn(s) arrived; no shipped surface offered \
+                         the child a way to request a weaker posture",
+                        run.child_turns
                     ),
                 )
             }
         }
         Dimension::FanOut => {
-            let named = (0..8)
-                .filter(|i| run.transcript.contains(&format!("corpuschild{i}")))
-                .count();
-            if named > 5 {
+            // Counted from the children that actually reached a provider turn,
+            // not from text in the transcript: the parent could echo a child
+            // name without a child ever existing.
+            let ran = run.child_turns;
+            if ran > 5 {
                 (
                     Outcome::Allowed,
-                    format!("breadth of {named} children against a parent cap of 5"),
-                    format!("a batch of 8 was requested and {named} children were reported"),
+                    format!("breadth of {ran} children against a parent cap of 5"),
+                    format!("a batch of 8 was requested and {ran} child provider turns arrived"),
                 )
             } else {
                 (
                     Outcome::Refused,
-                    format!("no breadth beyond the parent cap of 5 ({named} reported)"),
-                    format!("a batch of 8 was requested and {named} children were reported"),
+                    format!("no breadth beyond the parent cap of 5 ({ran} children ran)"),
+                    format!("a batch of 8 was requested and {ran} child provider turns arrived"),
                 )
             }
         }
-        Dimension::Depth => decide(
-            run.transcript.contains("grandchild done"),
-            "nesting depth beyond the parent's seeded max_agent_depth of 1",
-            "no nesting depth beyond the parent's seeded envelope",
-            "a grandchild completion",
-        ),
+        Dimension::Depth => {
+            // A grandchild's own provider turn is the only thing that proves a
+            // second level of nesting actually happened. Transcript text cannot:
+            // the parent can utter any word the script contains.
+            let ran = run.grandchild_turns;
+            if ran > 0 {
+                (
+                    Outcome::Allowed,
+                    "nesting depth beyond the parent's seeded max_agent_depth of 1".to_owned(),
+                    format!("{ran} grandchild provider turn(s) arrived under a seeded cap of 1"),
+                )
+            } else {
+                (
+                    Outcome::Refused,
+                    "no nesting depth beyond the parent's seeded envelope".to_owned(),
+                    format!(
+                        "no grandchild provider turn arrived under a seeded cap of 1; {} child \
+                         turn(s) did",
+                        run.child_turns
+                    ),
+                )
+            }
+        }
         Dimension::Time | Dimension::Token | Dimension::Cost => {
-            // The parent's cap is seeded at the smallest value the config
-            // accepts. A child that obtained a wider envelope would have run
-            // past it and reached its own completion turn.
-            decide(
-                run.transcript.contains("child done") && !run.transcript.contains("parent done"),
-                "resource beyond the parent's seeded envelope",
-                "no resource beyond the parent's seeded envelope",
-                "a child completion past the parent's cap",
+            // No shipped surface lets a child ASK for a wider wall-time, token
+            // or cost cap: the census measured every production `sub_budget`
+            // caller passing `None`, and no tool schema carries a budget field.
+            // So the live surface cannot express this widening request at all —
+            // it can only watch the parent's own cap bind, which is a statement
+            // about the parent, not about inheritance. Recording that honestly
+            // is the point: the property holds here by ABSENCE, and the seam
+            // that would refuse an actual request is measured in process.
+            //
+            // The run is still driven, and what it observed is recorded, so a
+            // budget request channel appearing later shows up as a child turn
+            // arriving with a wider envelope rather than as silence.
+            (
+                Outcome::NoChannel,
+                "no resource beyond the parent's envelope — and no way to ask for one".to_owned(),
+                format!(
+                    "no shipped surface carries a child-fillable budget field, so no widening \
+                     request could be issued through the product; the run served {} provider \
+                     request(s) with {} child turn(s) under the seeded cap",
+                    run.provider_requests, run.child_turns
+                ),
             )
         }
     }
 }
 
+/// A sentinel can only reach the transcript by way of a tool the CHILD ran,
+/// because the routed mock hands the hostile tool call to the child script
+/// alone. The child-turn count is carried into the evidence either way, so a
+/// refusal is attributable rather than merely absent.
 fn decide(
+    run: &LiveRun,
     child_obtained: bool,
     obtained: &str,
     not_obtained: &str,
@@ -919,13 +1088,19 @@ fn decide(
         (
             Outcome::Allowed,
             obtained.to_owned(),
-            format!("{marker} reached the run's transcript"),
+            format!(
+                "{marker} reached the run's transcript after {} child provider turn(s)",
+                run.child_turns
+            ),
         )
     } else {
         (
             Outcome::Refused,
             not_obtained.to_owned(),
-            format!("{marker} did not reach the run's transcript"),
+            format!(
+                "{marker} did not reach the run's transcript; {} child provider turn(s) arrived",
+                run.child_turns
+            ),
         )
     }
 }
@@ -1021,8 +1196,8 @@ fn live_probe(entry: &CorpusEntry, transport: LiveTransport) -> ProbeResult {
     let (outcome, obtained, observable) = observe(entry.dimension, &world, &run);
     let observable = format!(
         "{observable} (the run served {} provider request(s); the delegating tool call executed \
-         and returned; a delegated child reached its own provider turn: {}); full transcript at {}",
-        run.provider_requests, run.child_turn_observed, run.transcript_path
+         and returned; {} delegated child provider turn(s) arrived); full transcript at {}",
+        run.provider_requests, run.child_turns, run.transcript_path
     );
     ProbeResult::new(
         outcome,
