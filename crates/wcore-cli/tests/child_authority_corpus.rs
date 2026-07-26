@@ -303,9 +303,22 @@ fn assert_live_runs_proved_their_mode(entry: &CorpusEntry, executions: &[Executi
 }
 
 /// Success Criterion 3's actual proof: the two surfaces must reach the same
-/// verdict. When they do not, the weaker path is a bypass of the stronger and
-/// the property is false overall, so the failure names the entry, the dimension
-/// and both outcomes — the drift is diagnosable from this text alone.
+/// ENFORCEMENT verdict. When they do not, the weaker path is a bypass of the
+/// stronger and the property is false overall, so the failure names the entry,
+/// the dimension and both outcomes — the drift is diagnosable from this text
+/// alone.
+///
+/// A JUDGEMENT, stated openly because it is the one place this harness does not
+/// compare labels literally. Equivalence is asserted on WIDENED-or-not, not on
+/// the outcome label. REFUSED and NO-CHANNEL are both "the child did not
+/// obtain": one path refuses a request, the other has no way to make one. That
+/// is a difference in MECHANISM, and it is exactly what the census found for
+/// the budget family — the seam refuses when a request is forced in process,
+/// and no shipped surface lets a child issue the request at all. Failing on
+/// that pairing would force one of the two honest answers to be restated as the
+/// other to reach green, which is the forgery this plan exists to avoid. The
+/// difference is not swallowed: it is printed as a
+/// `SURFACE-MECHANISM-DIFFERENCE` row and carried into the results.
 fn assert_surface_equivalence(entry: &CorpusEntry, executions: &[Execution]) {
     for mode in [Mode::InProcess, Mode::Live] {
         let standalone = pick(executions, Surface::Standalone, mode);
@@ -314,8 +327,8 @@ fn assert_surface_equivalence(entry: &CorpusEntry, executions: &[Execution]) {
             continue;
         }
         assert_eq!(
-            standalone.outcome,
-            protocol.outcome,
+            standalone.outcome == Outcome::Allowed,
+            protocol.outcome == Outcome::Allowed,
             "SURFACE-EQUIVALENCE FAILURE :: corpus_{} :: dimension {} :: mode {} :: standalone \
              {} (obtained: {}) against host-protocol {} (obtained: {}). One surface enforces and \
              the other does not, so the weaker path is a bypass of the stronger.",
@@ -327,6 +340,20 @@ fn assert_surface_equivalence(entry: &CorpusEntry, executions: &[Execution]) {
             protocol.outcome.label(),
             protocol.obtained
         );
+        if standalone.outcome != protocol.outcome {
+            // Both surfaces enforce, but by different mechanisms: one refuses a
+            // request the other has no way to make. That is a MECHANISM
+            // difference, not a drift in enforcement, and it is reported rather
+            // than asserted on — see the note above `assert_surface_equivalence`.
+            println!(
+                "SURFACE-MECHANISM-DIFFERENCE :: corpus_{} :: {} :: standalone {} against \
+                 host-protocol {} :: neither widened",
+                entry.dimension.case_id(),
+                mode.label(),
+                standalone.outcome.label(),
+                protocol.outcome.label()
+            );
+        }
     }
 }
 
@@ -334,6 +361,11 @@ fn assert_surface_equivalence(entry: &CorpusEntry, executions: &[Execution]) {
 /// once. An in-process REFUSED against a live ALLOWED means the suite was green
 /// while the product was ungoverned, and it is called out as its own class
 /// rather than folded into whatever widening it accompanies.
+///
+/// The same widened-or-not judgement applies here as in
+/// `assert_surface_equivalence`, and for the same reason. The serious direction
+/// — in-process not-widened against live ALLOWED — is checked first and named
+/// explicitly, because it is the most serious result the corpus can produce.
 fn assert_mode_equivalence(entry: &CorpusEntry, executions: &[Execution]) {
     for surface in [Surface::Standalone, Surface::HostProtocol] {
         let in_process = pick(executions, surface, Mode::InProcess);
@@ -355,8 +387,8 @@ fn assert_mode_equivalence(entry: &CorpusEntry, executions: &[Execution]) {
             );
         }
         assert_eq!(
-            in_process.outcome,
-            live_run.outcome,
+            in_process.outcome == Outcome::Allowed,
+            live_run.outcome == Outcome::Allowed,
             "MODE-EQUIVALENCE FAILURE :: corpus_{} :: dimension {} :: surface {} :: in-process {} \
              (obtained: {}) against live {} (obtained: {}).",
             entry.dimension.case_id(),
@@ -367,6 +399,16 @@ fn assert_mode_equivalence(entry: &CorpusEntry, executions: &[Execution]) {
             live_run.outcome.label(),
             live_run.obtained
         );
+        if in_process.outcome != live_run.outcome {
+            println!(
+                "MODE-MECHANISM-DIFFERENCE :: corpus_{} :: {} :: in-process {} against live {} \
+                 :: neither widened",
+                entry.dimension.case_id(),
+                surface.label(),
+                in_process.outcome.label(),
+                live_run.outcome.label()
+            );
+        }
     }
 }
 
