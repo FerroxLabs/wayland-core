@@ -924,6 +924,48 @@ async fn daemon_body(
         Arc::new(wcore_agent::cron::build_headless_cron_handler(&cwd).await);
     eprintln!("[cron-daemon] headless cron handler initialized (skill + channel sinks wired)");
 
+    // Phase 24 plan 24-02, Task 1 — SCHEDULE OWNERSHIP IS LEASED HERE TOO.
+    //
+    // This is the OTHER half of the double-fire. Before the lease, a session
+    // runner and this daemon both ticked one `jobs.json`, and the only thing
+    // between that and a duplicated job was the store's advance-on-fire
+    // bookkeeping, which is a read-then-write race rather than a guarantee.
+    // Leasing only the session side would have left the race exactly where it
+    // was, just with one participant that knew better.
+    //
+    // A daemon that loses the race still runs: it observes and reports and
+    // never fires, so its log, its pid file and its shutdown path stay
+    // identical in both roles.
+    let lease_dir = wcore_cron::default_lease_dir();
+    let lease = match &lease_dir {
+        Some(dir) => match wcore_cron::ScheduleLease::attempt(dir, "cron-daemon") {
+            Ok(a) => a,
+            Err(e) => {
+                // Fail CLOSED: an unprovable claim is exactly what the lease
+                // exists to refuse, and firing anyway would reinstate the
+                // double-fire under a worse name.
+                eprintln!("[cron-daemon] schedule ownership could not be evaluated: {e}");
+                wcore_cron::LeaseAttempt::Observer { holder_pid: None }
+            }
+        },
+        None => wcore_cron::LeaseAttempt::Observer { holder_pid: None },
+    };
+    let lease_handle = match &lease {
+        wcore_cron::LeaseAttempt::Owner(l) => {
+            eprintln!("[cron-daemon] role=owner — this process fires the schedule");
+            l.handle()
+        }
+        wcore_cron::LeaseAttempt::Observer { holder_pid } => {
+            eprintln!(
+                "[cron-daemon] role=observer — pid {} already owns this schedule; firing nothing",
+                holder_pid
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            );
+            wcore_cron::LeaseHandle::observer()
+        }
+    };
+
     let mut ticker = tokio::time::interval(wcore_cron::runner::TICK_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     ticker.tick().await; // eat the immediate first tick
@@ -942,16 +984,23 @@ async fn daemon_body(
                 break;
             }
             _ = ticker.tick() => {
-                if let Err(e) = wcore_cron::tick_once_with_history(
+                if let Err(e) = wcore_cron::tick_once_at(
                     &cron_store,
                     &handler,
                     Some(history_path),
+                    &lease_handle,
+                    chrono::Utc::now(),
                 ).await {
                     eprintln!("[cron-daemon] tick error: {e}");
                 }
             }
         }
     }
+
+    // Surrender the schedule BEFORE the pid file goes, so a successor that
+    // wins the lease cannot briefly see a pid file naming a process that no
+    // longer owns anything.
+    drop(lease);
 
     // Remove PID file on graceful exit so a subsequent `cron daemon` start
     // doesn't see a stale entry.
