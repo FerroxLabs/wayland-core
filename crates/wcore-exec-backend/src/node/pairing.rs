@@ -89,8 +89,27 @@ fn local_machine_id() -> String {
         .filter(|v| !v.is_empty())
         .or_else(|| std::env::var("HOSTNAME").ok().filter(|v| !v.is_empty()))
         .or_else(|| std::env::var("COMPUTERNAME").ok().filter(|v| !v.is_empty()))
+        // `HOSTNAME` is a SHELL variable, not an exported environment one, so a
+        // non-login ssh invocation — which is exactly how a controller reaches
+        // a node — sees none of the above and every host would report
+        // `unknown-host`. Found by running the real binary over ssh; the env
+        // lookup alone looked fine locally and was useless where it mattered.
+        .or_else(read_hostname_file)
         .unwrap_or_else(|| "unknown-host".to_string());
     sanitize_identifier(&raw)
+}
+
+/// Unix hosts publish the hostname on disk regardless of shell environment.
+fn read_hostname_file() -> Option<String> {
+    for path in ["/etc/hostname", "/proc/sys/kernel/hostname"] {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            let trimmed = contents.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Force an arbitrary host string into the crate's identifier shape, so a
