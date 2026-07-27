@@ -111,11 +111,19 @@ mod tests {
     /// a gate.
     #[test]
     fn atomic_write_survives_a_path_past_windows_max_path() {
-        // An ABSOLUTE base: Windows can only rewrite a path to extended-length
-        // (`\\?\`) form when it is absolute, so a relative base would measure a
-        // different thing than the restore does.
+        // A PLAIN absolute base, deliberately NOT `canonicalize()`d. On Windows
+        // `canonicalize()` returns an extended-length `\\?\` path, which is
+        // already in the form that lifts the 260 limit — a base built that way
+        // measures the working mode and can never reach the defect. A restore
+        // target arrives from the command line as a plain `C:\...` path, so
+        // that is what the fixture must use.
         let dir = tempfile::tempdir().unwrap();
-        let base = dir.path().canonicalize().unwrap();
+        let base = dir.path().to_path_buf();
+        assert!(
+            !base.to_string_lossy().starts_with(r"\\?\"),
+            "fixture base is already verbatim, so it cannot reach the defect: {}",
+            base.display()
+        );
 
         // The control leg runs FIRST. If it fails, the box or the harness is
         // the problem and the `/` result would be uninterpretable.
