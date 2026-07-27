@@ -55,6 +55,17 @@ not support that**, and recording it would be a fabricated finding:
 So: a genuine test-hygiene defect with a real shared-infrastructure cost, and **no demonstrated
 product defect**. Do not upgrade this to a reaping bug without an actual demonstration.
 
+**Do not read this the other way either — reaping is NOT fine.** There is a separately
+demonstrated descendant-reap failure: the known-red `live_future_drop_reaps_descendant_job_tree`.
+Phase 28 planning flagged that it contradicts Criterion 2 ("no orphan process") outright, which
+under amendment A2 makes it CRITICAL/HIGH by construction with its accept path closed; 28-03
+states in advance that it expects Criterion 2 to fail on Windows for exactly this reason.
+
+The two are distinct and must stay distinct: that test is the demonstrated reap failure; these
+five orphans are not evidence for it. Citing the orphans as proof would be borrowing weight the
+evidence does not carry — and would make a real, already-proven finding look like it rests on a
+weaker one than it does.
+
 ## 4. Worth checking while fixing it
 
 Whether the product's kill reaps a **blocked** grandchild as reliably as a spinning one. If the
