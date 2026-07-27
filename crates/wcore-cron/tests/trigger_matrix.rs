@@ -503,11 +503,15 @@ async fn the_backoff_actually_holds_a_failing_job_off_between_ticks() {
     });
     store.insert(job).await.unwrap();
 
-    // First attempt, then twenty ticks inside the ten-minute backoff.
+    // First attempt, then nineteen ticks STRICTLY INSIDE the ten-minute
+    // backoff. The nineteenth lands at t0+570s; t0+600s is the boundary and
+    // belongs to the second half of this test, because a window that also
+    // refused the attempt at its own expiry would be a backoff that never
+    // ends.
     tick_once_at(&store, &arc, Some(&history), &LeaseHandle::unleased(), t0())
         .await
         .unwrap();
-    for i in 1..=20 {
+    for i in 1..=19 {
         tick_once_at(
             &store,
             &arc,
@@ -522,6 +526,24 @@ async fn the_backoff_actually_holds_a_failing_job_off_between_ticks() {
         read_recent(&history, 100).unwrap().0.len(),
         1,
         "before the backoff was bounded this fired on every single tick"
+    );
+
+    // At the boundary it DOES retry. Without this half the assertion above
+    // would also pass against a job that had simply stopped forever, which is
+    // a different bug wearing the same green.
+    tick_once_at(
+        &store,
+        &arc,
+        Some(&history),
+        &LeaseHandle::unleased(),
+        t0() + Duration::seconds(600),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        read_recent(&history, 100).unwrap().0.len(),
+        2,
+        "the backoff must expire and admit the next attempt, not silence the job"
     );
 }
 

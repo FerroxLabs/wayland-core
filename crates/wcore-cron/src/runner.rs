@@ -533,6 +533,25 @@ pub async fn tick_once_at(
         if !job.enabled {
             continue;
         }
+        // Phase 24 plan 24-02: a terminal deadline is evaluated against NOW,
+        // not against the anchor.
+        //
+        // Measured red: a commitment whose last beat sat before its deadline
+        // computed a next-fire from that beat, and every subsequent tick — for
+        // as long as the process lived — found that instant in the past and
+        // fired again. Anchoring the deadline check to the anchor asks "was
+        // this trigger already spent when it last ran", which is never true of
+        // a live job. The question that has to be asked is "is it spent now".
+        let bound = job.effective_bound();
+        if bound.is_spent(now) {
+            debug!(
+                target: "wcore_cron::runner",
+                id = %job.id,
+                "trigger is past its terminal deadline; it will not fire again"
+            );
+            continue;
+        }
+
         // Anchor is the most recent of last_fired or created_at. Jobs
         // that have never fired anchor at created_at (so a job created
         // at 09:00:30 with "0 9 * * *" doesn't fire today — next is 9am
