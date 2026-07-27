@@ -115,10 +115,13 @@ pub fn required_role(method: &str) -> Role {
         // for the events it missed. It reveals exactly what a live subscriber
         // already received, so it is classified with the other reads rather
         // than falling through to the Admin default.
-        "initialize" | "session/list" | "session/get" | "session/events" | "agents/list" => {
-            Role::Viewer
-        }
-        "session/create" | "message/send" | "a2a/handshake" | "a2a/message/send" => Role::Operator,
+        "initialize" | "session/list" | "session/get" | "session/events" | "agents/list"
+        | "tools/list" | "health" => Role::Viewer,
+        "session/create"
+        | "message/send"
+        | "session/approval/resolve"
+        | "a2a/handshake"
+        | "a2a/message/send" => Role::Operator,
         "session/delete" | "support/bundle" => Role::Admin,
         _ => Role::Admin,
     }

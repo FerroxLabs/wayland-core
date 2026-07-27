@@ -208,9 +208,11 @@ impl<H: HttpHandler> RestTransport<H> {
             .with_state(self.handler.clone());
 
         let api = if let Some(v) = self.verifier.clone() {
+            let h = self.handler.clone();
             api.layer(middleware::from_fn(move |req: Request, next: Next| {
                 let v = Arc::clone(&v);
-                async move { auth_middleware(v, req, next).await }
+                let h = Arc::clone(&h);
+                async move { auth_middleware(v, h, req, next).await }
             }))
         } else {
             api
@@ -356,9 +358,52 @@ const DOC_HTML: &str = r##"<!doctype html>
 </body>
 </html>"##;
 
-// ── Auth middleware (mirrors super::http) ─────────────────────────────────
+// ── Method resolution + auth/authz middleware (mirrors super::http) ───────
 
-async fn auth_middleware(verifier: Arc<dyn Verifier>, req: Request, next: Next) -> Response {
+/// The ACP method name a `/v1` route+verb pair stands for.
+///
+/// # This surface must classify its OWN routes
+///
+/// F24-E-H1, measured live: with role gating ENABLED at `--role viewer`, the
+/// same key on the same server was refused `POST /sessions` with 403 and
+/// ACCEPTED at `POST /v1/sessions` with 200. Authentication was shared between
+/// the two surfaces and authorization was not, so a control the operator had
+/// switched on protected exactly one of the two doors into the same
+/// `AcpServer`.
+///
+/// The method NAMES are deliberately the same strings `super::http` resolves,
+/// so both surfaces consult one role table. Two tables would drift, and the
+/// drift would look exactly like this defect again.
+///
+/// An unmatched route resolves to its own path and therefore inherits the
+/// role table's Admin default — a `/v1` route added without being classified
+/// fails loudly for ordinary principals instead of quietly becoming reachable.
+pub(crate) fn rest_method_for(path: &str, verb: &axum::http::Method) -> String {
+    use axum::http::Method;
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match (verb, segments.as_slice()) {
+        (&Method::POST, ["v1", "sessions"]) => "session/create".to_string(),
+        (&Method::GET, ["v1", "sessions"]) => "session/list".to_string(),
+        (&Method::GET, ["v1", "sessions", _]) => "session/get".to_string(),
+        (&Method::DELETE, ["v1", "sessions", _]) => "session/delete".to_string(),
+        (&Method::POST, ["v1", "sessions", _, "prompt"]) => "message/send".to_string(),
+        (&Method::POST, ["v1", "sessions", _, "approvals", _, "resolve"]) => {
+            "session/approval/resolve".to_string()
+        }
+        (&Method::GET, ["v1", "tools"]) => "tools/list".to_string(),
+        (&Method::GET, ["v1", "agents"]) => "agents/list".to_string(),
+        (&Method::GET, ["v1", "initialize"]) => "initialize".to_string(),
+        (&Method::GET, ["v1", "health"]) => "health".to_string(),
+        _ => path.to_string(),
+    }
+}
+
+async fn auth_middleware(
+    verifier: Arc<dyn Verifier>,
+    handler: Arc<dyn super::http::AuthorizesMethods>,
+    req: Request,
+    next: Next,
+) -> Response {
     let headers: Vec<(String, String)> = req
         .headers()
         .iter()
@@ -367,17 +412,35 @@ async fn auth_middleware(verifier: Arc<dyn Verifier>, req: Request, next: Next) 
             v.to_str().ok().map(|val| (name, val.to_string()))
         })
         .collect();
-    match verifier.verify(&headers) {
-        Ok(_) => next.run(req).await,
+    let principal = match verifier.verify(&headers) {
+        Ok(p) => p,
         Err(e) => {
             let body = JsonRpcError {
                 code: ErrorCode::AuthRequired.code(),
                 message: e.to_string(),
                 data: None,
             };
-            (StatusCode::UNAUTHORIZED, Json(body)).into_response()
+            return (StatusCode::UNAUTHORIZED, Json(body)).into_response();
         }
+    };
+    // F24-E-H1: authorize as well as authenticate. Sharing the verifier between
+    // the two surfaces while gating only one of them left the `/v1` door open to
+    // a principal the `/sessions` door had just refused.
+    let method = rest_method_for(req.uri().path(), req.method());
+    if let Err(e) = handler.authorize_method_dyn(&principal, &method).await {
+        let status = if matches!(e, AcpError::Forbidden(_)) {
+            StatusCode::FORBIDDEN
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        let body = JsonRpcError {
+            code: ErrorCode::Forbidden.code(),
+            message: e.to_string(),
+            data: None,
+        };
+        return (status, Json(body)).into_response();
     }
+    next.run(req).await
 }
 
 // ── Handlers ───────────────────────────────────────────────────────────────

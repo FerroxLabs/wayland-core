@@ -558,3 +558,133 @@ async fn a_handler_that_cannot_honour_a_key_refuses_it_rather_than_ignoring_it()
          nothing, from a surface that never looked"
     );
 }
+
+// ── The second door into the same server (F24-E-H1) ──────────────────────
+
+#[tokio::test]
+async fn the_rest_surface_cannot_be_used_to_walk_around_a_role_refusal() {
+    // MEASURED LIVE before it was fixed: with `--role viewer` on the shipped
+    // binary, the SAME key on the SAME server was refused `POST /sessions`
+    // with 403 and ACCEPTED at `POST /v1/sessions` with 200. Authentication was
+    // shared between the two surfaces and authorization was not, so a control
+    // the operator had switched on guarded exactly one of two doors into one
+    // `AcpServer`.
+    //
+    // Both routers are mounted on ONE listener here, exactly as
+    // `wayland-core acp serve` mounts them, because a test that served only the
+    // REST router would not be testing the situation that produced the defect.
+    let server = AcpServer::new()
+        .with_turn_engine(Arc::new(DoneEngine))
+        .with_role_policy(policy());
+    let shared = Arc::new(server);
+    let acp = HttpSseTransport::new(Arc::clone(&shared))
+        .with_verifier(verifier())
+        .router();
+    let rest = wcore_acp::transport::RestTransport::new(Arc::clone(&shared))
+        .with_verifier(verifier())
+        .router();
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, acp.merge(rest)).await;
+    });
+    let base = format!("http://{addr}");
+    let http = raw_http();
+
+    // POSITIVE CONTROL: an OPERATOR reaches the REST create, so the refusal
+    // below is caused by the role and not by the REST surface being broken,
+    // unreachable, or refusing everyone.
+    let allowed = http
+        .post(format!("{base}/v1/sessions"))
+        .header("X-API-Key", "key-operator")
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(
+        allowed.status().as_u16(),
+        200,
+        "positive control: an operator must still reach POST /v1/sessions"
+    );
+
+    // The two doors must now agree for a VIEWER.
+    let acp_code = http
+        .post(format!("{base}/sessions"))
+        .header("X-API-Key", "key-viewer")
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("send")
+        .status()
+        .as_u16();
+    let rest_code = http
+        .post(format!("{base}/v1/sessions"))
+        .header("X-API-Key", "key-viewer")
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("send")
+        .status()
+        .as_u16();
+    assert_eq!(acp_code, 403, "the ACP surface refuses a viewer");
+    assert_eq!(
+        rest_code, 403,
+        "the REST surface must refuse the same principal the same operation; \
+         a role control that guards one of two doors into one server is not a \
+         control, and the operator who switched it on has no way to see that"
+    );
+
+    // Authentication is still enforced on REST, and stays DISTINCT from the
+    // role refusal — the same 401-vs-403 separation, on the second surface.
+    let unauth = http
+        .post(format!("{base}/v1/sessions"))
+        .header("X-API-Key", "not-a-key")
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(unauth.status().as_u16(), 401);
+
+    // And a read the viewer IS entitled to still works on REST, so the fix
+    // refuses by role rather than by blanket-denying the surface.
+    let read = http
+        .get(format!("{base}/v1/sessions"))
+        .header("X-API-Key", "key-viewer")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(
+        read.status().as_u16(),
+        200,
+        "a viewer may still read on REST; the fix must gate by role, not shut \
+         the surface"
+    );
+}
+
+#[tokio::test]
+async fn the_unauthenticated_spec_routes_stay_reachable() {
+    // `/openapi.json` and `/doc` are a documented public carve-out. The
+    // authorization added above sits INSIDE the authenticated layer, so it must
+    // not have swept them up — a fix that broke spec discovery would be a new
+    // defect wearing the old one's clothes.
+    let server = AcpServer::new().with_role_policy(RolePolicy::new());
+    let rest = wcore_acp::transport::RestTransport::new(Arc::new(server))
+        .with_verifier(verifier())
+        .router();
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, rest).await;
+    });
+    let http = raw_http();
+    for path in ["/openapi.json", "/doc"] {
+        let code = http
+            .get(format!("http://{addr}{path}"))
+            .send()
+            .await
+            .expect("send")
+            .status()
+            .as_u16();
+        assert_eq!(code, 200, "{path} must stay unauthenticated and reachable");
+    }
+}
