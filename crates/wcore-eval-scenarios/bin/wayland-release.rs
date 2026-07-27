@@ -21,8 +21,9 @@ use sha2::{Digest, Sha256};
 
 use wcore_eval_scenarios::receipt::Evidence;
 use wcore_eval_scenarios::release_integrity::{
-    ArtifactKind, CANONICAL_RELEASE_STATES, PackagedArtifactV1, ReleaseManifestBodyV1,
-    ReleaseManifestV1, ReleaseState, ReleaseTrustRootV1, ReproducibilityVerdictV1, TrustedKeyV1,
+    ArtifactKind, CANONICAL_RELEASE_STATES, DependencyPolicyOutcomeV1, PackagedArtifactV1,
+    PolicyResult, ReleaseManifestBodyV1, ReleaseManifestV1, ReleaseState, ReleaseTrustRootV1,
+    ReproducibilityVerdictV1, SbomFormat, SbomReferenceV1, TrustedKeyV1, VarianceClass,
     signing_key_from_seed_base64, verify_manifest, wipe,
 };
 use wcore_eval_scenarios::release_states::{
@@ -57,6 +58,11 @@ enum Command {
         output: PathBuf,
     },
     /// Build an unsigned manifest over a directory of artifacts.
+    ///
+    /// The three clean-room results are OPTIONAL arguments, and each is
+    /// modelled as `Evidence` so its absence is explicit rather than an empty
+    /// success: omitting `--sbom` records "no SBOM was produced", never "the
+    /// SBOM was fine".
     ManifestBuild {
         #[arg(long)]
         artifacts: PathBuf,
@@ -66,6 +72,26 @@ enum Command {
         release_id: String,
         #[arg(long)]
         source_commit: String,
+        /// CycloneDX SBOM to bind by digest.
+        #[arg(long)]
+        sbom: Option<PathBuf>,
+        /// Dependency-policy verdict: `pass` or `fail`.
+        #[arg(long, value_parser = parse_policy_result)]
+        dependency_policy: Option<PolicyResult>,
+        /// The policy configuration the verdict was produced against
+        /// (deny.toml). Digested into the manifest, because a pass against an
+        /// empty policy is not a pass.
+        #[arg(long)]
+        dependency_policy_config: Option<PathBuf>,
+        /// Reproducibility verdict: `reproduced` or `variance`.
+        #[arg(long, value_parser = parse_reproducibility)]
+        reproducibility: Option<ReproducibilityKind>,
+        /// Required with `--reproducibility variance`.
+        #[arg(long, value_parser = parse_variance_class)]
+        variance_class: Option<VarianceClass>,
+        /// The measurement that identified the variance. Digested.
+        #[arg(long)]
+        variance_evidence: Option<PathBuf>,
     },
     /// Sign a manifest. The base64 32-byte Ed25519 seed is read from stdin.
     ManifestSign {
@@ -119,6 +145,39 @@ fn parse_state(value: &str) -> Result<ReleaseState, String> {
         .map_err(|_| format!("unknown release state: {value}"))
 }
 
+/// Whether the two clean-room builds agreed. Deliberately NOT defaultable:
+/// there is no "unknown" that reads as success.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReproducibilityKind {
+    Reproduced,
+    Variance,
+}
+
+fn parse_policy_result(value: &str) -> Result<PolicyResult, String> {
+    match value {
+        "pass" => Ok(PolicyResult::Pass),
+        "fail" => Ok(PolicyResult::Fail),
+        other => Err(format!(
+            "dependency policy result must be pass|fail: {other}"
+        )),
+    }
+}
+
+fn parse_reproducibility(value: &str) -> Result<ReproducibilityKind, String> {
+    match value {
+        "reproduced" => Ok(ReproducibilityKind::Reproduced),
+        "variance" => Ok(ReproducibilityKind::Variance),
+        other => Err(format!(
+            "reproducibility must be reproduced|variance: {other}"
+        )),
+    }
+}
+
+fn parse_variance_class(value: &str) -> Result<VarianceClass, String> {
+    serde_json::from_value::<VarianceClass>(serde_json::Value::String(value.to_string()))
+        .map_err(|_| format!("unknown variance class: {value}"))
+}
+
 /// Owns a secret for as long as it is needed and wipes it on drop.
 struct SecretBytes(Vec<u8>);
 
@@ -147,7 +206,26 @@ fn execute(cli: Cli) -> Result<(), String> {
             output,
             release_id,
             source_commit,
-        } => manifest_build(&artifacts, &output, &release_id, &source_commit),
+            sbom,
+            dependency_policy,
+            dependency_policy_config,
+            reproducibility,
+            variance_class,
+            variance_evidence,
+        } => manifest_build(
+            &artifacts,
+            &output,
+            &release_id,
+            &source_commit,
+            CleanRoomInputs {
+                sbom: sbom.as_deref(),
+                dependency_policy,
+                dependency_policy_config: dependency_policy_config.as_deref(),
+                reproducibility,
+                variance_class,
+                variance_evidence: variance_evidence.as_deref(),
+            },
+        ),
         Command::ManifestSign {
             manifest,
             output,
@@ -265,11 +343,116 @@ fn sbom_generate(metadata_path: &Path, output: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The three clean-room results 29-02 measures, carried together so
+/// `manifest_build` keeps one argument list rather than nine.
+struct CleanRoomInputs<'a> {
+    sbom: Option<&'a Path>,
+    dependency_policy: Option<PolicyResult>,
+    dependency_policy_config: Option<&'a Path>,
+    reproducibility: Option<ReproducibilityKind>,
+    variance_class: Option<VarianceClass>,
+    variance_evidence: Option<&'a Path>,
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    Ok(format!("{:x}", Sha256::digest(&bytes)))
+}
+
+/// Turn the clean-room arguments into the manifest's evidence fields.
+///
+/// Every refusal here is deliberate. A variance verdict with no class and no
+/// evidence would be the "unknown that reads as success" the manifest type was
+/// built to make unrepresentable, so it is rejected at the CLI boundary rather
+/// than encoded.
+fn clean_room_evidence(
+    inputs: &CleanRoomInputs<'_>,
+) -> Result<
+    (
+        Evidence<SbomReferenceV1>,
+        Evidence<DependencyPolicyOutcomeV1>,
+        ReproducibilityVerdictV1,
+    ),
+    String,
+> {
+    let sbom = match inputs.sbom {
+        Some(path) => Evidence::Observed {
+            value: SbomReferenceV1 {
+                name: path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .ok_or_else(|| format!("non-UTF-8 SBOM name at {}", path.display()))?
+                    .to_string(),
+                sha256: sha256_file(path)?,
+                format: SbomFormat::CycloneDxJson,
+            },
+        },
+        None => Evidence::Unavailable {
+            code: "sbom_not_produced_by_release_pipeline".to_string(),
+        },
+    };
+
+    let dependency_policy = match (inputs.dependency_policy, inputs.dependency_policy_config) {
+        (Some(result), Some(config)) => Evidence::Observed {
+            value: DependencyPolicyOutcomeV1 {
+                tool: "cargo-deny".to_string(),
+                policy_sha256: sha256_file(config)?,
+                result,
+            },
+        },
+        (Some(_), None) => {
+            return Err(
+                "--dependency-policy requires --dependency-policy-config: a verdict without the \
+                 policy it ran against is not a verdict"
+                    .to_string(),
+            );
+        }
+        (None, _) => Evidence::Unavailable {
+            code: "dependency_policy_never_executed".to_string(),
+        },
+    };
+
+    let reproducibility = match inputs.reproducibility {
+        Some(ReproducibilityKind::Reproduced) => {
+            if inputs.variance_class.is_some() || inputs.variance_evidence.is_some() {
+                return Err(
+                    "--reproducibility reproduced cannot carry a variance class or variance \
+                     evidence"
+                        .to_string(),
+                );
+            }
+            ReproducibilityVerdictV1::Reproduced
+        }
+        Some(ReproducibilityKind::Variance) => {
+            let class = inputs.variance_class.ok_or_else(|| {
+                "--reproducibility variance requires --variance-class: a variance without a named \
+                 class is an assertion, not a measurement"
+                    .to_string()
+            })?;
+            let evidence = inputs.variance_evidence.ok_or_else(|| {
+                "--reproducibility variance requires --variance-evidence".to_string()
+            })?;
+            ReproducibilityVerdictV1::Variance {
+                class,
+                evidence_sha256: sha256_file(evidence)?,
+            }
+        }
+        None => ReproducibilityVerdictV1::Variance {
+            class: VarianceClass::Unclassified,
+            evidence_sha256: format!("{:x}", Sha256::digest(b"reproducibility-never-measured")),
+        },
+    };
+
+    Ok((sbom, dependency_policy, reproducibility))
+}
+
 fn manifest_build(
     artifacts_dir: &Path,
     output: &Path,
     release_id: &str,
     source_commit: &str,
+    inputs: CleanRoomInputs<'_>,
 ) -> Result<(), String> {
     let mut entries: Vec<_> = std::fs::read_dir(artifacts_dir)
         .map_err(|error| format!("could not read {}: {error}", artifacts_dir.display()))?
@@ -290,6 +473,8 @@ fn manifest_build(
             .to_string();
         let kind = if name.contains("checksums") {
             ArtifactKind::Checksums
+        } else if name.contains("sbom") {
+            ArtifactKind::Sbom
         } else {
             ArtifactKind::Archive
         };
@@ -301,20 +486,15 @@ fn manifest_build(
         });
     }
 
+    let (sbom, dependency_policy, reproducibility) = clean_room_evidence(&inputs)?;
+
     let body = ReleaseManifestBodyV1 {
         release_id: release_id.to_string(),
         source_commit: source_commit.to_string(),
         artifacts,
-        sbom: Evidence::Unavailable {
-            code: "sbom_not_produced_by_release_pipeline".to_string(),
-        },
-        dependency_policy: Evidence::Unavailable {
-            code: "dependency_policy_never_executed".to_string(),
-        },
-        reproducibility: ReproducibilityVerdictV1::Variance {
-            class: wcore_eval_scenarios::release_integrity::VarianceClass::Unclassified,
-            evidence_sha256: format!("{:x}", Sha256::digest(b"reproducibility-never-measured")),
-        },
+        sbom,
+        dependency_policy,
+        reproducibility,
         certification: Evidence::Unavailable {
             code: "phase_28_certification_binding_not_yet_available".to_string(),
         },
