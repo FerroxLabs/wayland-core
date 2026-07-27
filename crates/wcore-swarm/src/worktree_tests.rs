@@ -1076,6 +1076,85 @@ async fn assert_clean_accepts_line_ending_only_dirt_and_still_refuses_every_othe
         .expect_err("a deleted tracked file must still be refused");
 }
 
+/// F22-03 REGRESSION GUARD: the swarm's OWN minted root must not be judged as
+/// the user's uncommitted work.
+///
+/// THE DEFECT IT CLOSES. [`WorktreeManager::new`] creates
+/// `<repo>/.swarm-worktrees/` inside the repository whose cleanliness
+/// [`WorktreeManager::assert_clean`] judges, and that directory is untracked. So
+/// the guard refused dispatch because of an artifact the swarm had itself just
+/// created. Measured on Linux with the real release binary against a throwaway
+/// repository carrying no `.gitignore`: `wayland-core swarm --workers 8` ran ONE
+/// worker and refused the other seven with `?? .swarm-worktrees/` while still
+/// exiting 0, and a SECOND dispatch against the same repository failed outright
+/// with exit 1 and zero workers — which is the restart path.
+///
+/// WHY THE EXISTING SUITE MISSED IT, and why this test is written the way it is:
+/// every other fixture that builds an in-repo manager first commits a
+/// `.gitignore` naming `.swarm-worktrees/`. That workaround is exactly what the
+/// shipping product never does for the user, so the suite proved the fixture
+/// rather than the product. **This test therefore deliberately does NOT write a
+/// `.gitignore`** — that omission is the whole point, and re-adding one here
+/// would silently turn the test back into a tautology.
+///
+/// IT MUST BE ABLE TO FAIL. Clause 1 fails against the pre-fix tree, because the
+/// manager's own root is reported and refused. Clauses 2 through 4 fail against
+/// an over-broad "fix" that simply stopped refusing untracked paths — which is
+/// the blinding of the v0.2.2 dirty-worker gate that must not happen.
+#[cfg(any(target_os = "linux", windows))]
+#[tokio::test]
+async fn assert_clean_ignores_the_swarm_root_it_mints_and_still_refuses_real_dirt() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    seal_init_repo(fixture.path()).await;
+
+    // No `.gitignore`. The manager mints `.swarm-worktrees/` inside the repo on
+    // construction, so from here the working tree carries exactly the entry the
+    // guard used to refuse itself over.
+    let manager = WorktreeManager::new(fixture.path()).expect("in-repo manager");
+    assert!(
+        fixture.path().join(".swarm-worktrees").is_dir(),
+        "precondition: the manager mints its root inside the repository"
+    );
+
+    // 1. THE FIX. The swarm's own container directory is not user dirt.
+    manager.assert_clean().await.expect(
+        "the swarm's own minted worktree root must not be judged as the user's uncommitted work",
+    );
+
+    // 2. A DIFFERENT untracked file must still be refused — the exclusion is one
+    //    exact path, not a general amnesty for untracked entries.
+    let stray = fixture.path().join("stray.txt");
+    std::fs::write(&stray, "untracked\n").unwrap();
+    manager
+        .assert_clean()
+        .await
+        .expect_err("an unrelated untracked file must still be refused");
+    std::fs::remove_file(&stray).unwrap();
+    manager
+        .assert_clean()
+        .await
+        .expect("precondition: only the swarm's own root remains");
+
+    // 3. An untracked file NESTED under a directory of the user's own must still
+    //    be refused. Git reports it as `?? other/`, which differs from the
+    //    excluded entry only in the pathname.
+    std::fs::create_dir(fixture.path().join("other")).unwrap();
+    std::fs::write(fixture.path().join("other/file.txt"), "nested\n").unwrap();
+    manager
+        .assert_clean()
+        .await
+        .expect_err("an unrelated untracked directory must still be refused");
+    std::fs::remove_dir_all(fixture.path().join("other")).unwrap();
+
+    // 4. A tracked-file deletion must still be refused, so the exclusion cannot
+    //    be reached by a non-untracked status code.
+    std::fs::remove_file(fixture.path().join("README.md")).unwrap();
+    manager
+        .assert_clean()
+        .await
+        .expect_err("a deleted tracked file must still be refused");
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn candidate_seal_mints_and_revalidates_from_fresh_checkout() {
