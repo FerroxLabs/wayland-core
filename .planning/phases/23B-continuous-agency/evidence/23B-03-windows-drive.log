@@ -1,27 +1,27 @@
    Compiling wcore-cli v0.12.25 (C:\ferrox-win\crates\wcore-cli)
-    Finished `release` profile [optimized] target(s) in 11m 12s
+    Finished `release` profile [optimized] target(s) in 9m 31s
 warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
 note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
-F23_03_PROVENANCE=ok platform=windows sha=3cf304e90aaee21ed8993ee14163501ee020a81a
+F23_03_PROVENANCE=ok platform=windows sha=1eb2d7c255b8cdc4f2f194e60cd82ab6bbddfc68
 F23_03_CORPUS=repo path=C:\ferrox-win
-F23_03_MEASURE=cold-build platform=windows sample=1 value=1576
-F23_03_MEASURE=store-size platform=windows sample=1 value=66592768
-F23_03_CORPUS=indexed sample=1 records=3609 symbols=37868 read=3609
+F23_03_MEASURE=cold-build platform=windows sample=1 value=1533
+F23_03_MEASURE=store-size platform=windows sample=1 value=66707456
+F23_03_CORPUS=indexed sample=1 records=3614 symbols=37868 read=3614
 F23_03_MEASURE=warm-start platform=windows sample=1 value=151
 F23_03_WARM=sample=1 read=0 extracted=0
-F23_03_MEASURE=cold-build platform=windows sample=2 value=1479
-F23_03_MEASURE=store-size platform=windows sample=2 value=66592768
-F23_03_CORPUS=indexed sample=2 records=3609 symbols=37868 read=3609
-F23_03_MEASURE=warm-start platform=windows sample=2 value=157
+F23_03_MEASURE=cold-build platform=windows sample=2 value=1454
+F23_03_MEASURE=store-size platform=windows sample=2 value=66707456
+F23_03_CORPUS=indexed sample=2 records=3614 symbols=37868 read=3614
+F23_03_MEASURE=warm-start platform=windows sample=2 value=159
 F23_03_WARM=sample=2 read=0 extracted=0
-F23_03_MEASURE=cold-build platform=windows sample=3 value=1522
-F23_03_MEASURE=store-size platform=windows sample=3 value=66592768
-F23_03_CORPUS=indexed sample=3 records=3609 symbols=37868 read=3609
-F23_03_MEASURE=warm-start platform=windows sample=3 value=157
+F23_03_MEASURE=cold-build platform=windows sample=3 value=1510
+F23_03_MEASURE=store-size platform=windows sample=3 value=66707456
+F23_03_CORPUS=indexed sample=3 records=3614 symbols=37868 read=3614
+F23_03_MEASURE=warm-start platform=windows sample=3 value=166
 F23_03_WARM=sample=3 read=0 extracted=0
-F23_03_MEASURE=latency-p50 platform=windows sample=1 value=5016
-F23_03_MEASURE=latency-p95 platform=windows sample=1 value=5350
-F23_03_LATENCY=samples n=20 unit=microseconds all=4617 4664 4703 4797 4820 4851 4877 4918 4964 5016 5063 5150 5171 5193 5224 5251 5325 5336 5350 6057
+F23_03_MEASURE=latency-p50 platform=windows sample=1 value=4892
+F23_03_MEASURE=latency-p95 platform=windows sample=1 value=5200
+F23_03_LATENCY=samples n=20 unit=microseconds all=4494 4658 4696 4760 4779 4798 4817 4853 4860 4892 4908 4914 4937 4966 5020 5054 5079 5179 5200 6137
 F23_03_QUALITY_CASE=IndexStore precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/store.rs
 F23_03_QUALITY_CASE=normalize_rel precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/scope.rs
 F23_03_QUALITY_CASE=ScopeIdentity precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/scope.rs
@@ -42,17 +42,17 @@ F23_03_MEASURE=precision platform=windows sample=1 value=0.8125
 F23_03_MEASURE=recall platform=windows sample=1 value=1.0000
 F23_03_QUALITY=corpus queries=16 precision_at_1=0.8125 recall_at_10=1.0000
 F23_03_FALLBACK_REPORTED=true
-F23_03_SCRATCH=files=3610
-F23_03_MUTATION_BASE=records=3605
-F23_03_MUTATION=add platform=windows status=PASS unchanged_reextracted=0 added=1 extracted=1 unchanged=3605
-F23_03_MUTATION=edit platform=windows status=PASS unchanged_reextracted=0 changed=1 extracted=1 unchanged=3605
-F23_03_MUTATION=delete platform=windows status=PASS unchanged_reextracted=0 deleted=1 extracted=0 unchanged=3605
-F23_03_MUTATION=rename platform=windows status=PASS unchanged_reextracted=0 renamed=1 extracted=0 unchanged=3605
+F23_03_SCRATCH=files=3615
+F23_03_MUTATION_BASE=records=3610
+F23_03_MUTATION=add platform=windows status=PASS unchanged_reextracted=0 added=1 extracted=1 unchanged=3610
+F23_03_MUTATION=edit platform=windows status=PASS unchanged_reextracted=0 changed=1 extracted=1 unchanged=3610
+F23_03_MUTATION=delete platform=windows status=PASS unchanged_reextracted=0 deleted=1 extracted=0 unchanged=3610
+F23_03_MUTATION=rename platform=windows status=PASS unchanged_reextracted=0 renamed=1 extracted=0 unchanged=3610
 warning: in the working copy of 'f23_branch.rs', CRLF will be replaced by LF the next time Git touches it
-F23_03_MUTATION=branch-switch platform=windows status=PASS unchanged_reextracted=0 added=1 extracted=1 unchanged=3605
-F23_03_SCOPE_AFTER_SWITCH=commit=2d23da372fed4279049d940d50a9974194f1334e ref=refs/heads/f23-drive-8ed4d1215a01c1f4 gitdir=//?/C:/Users/seand/AppData/Local/Temp/f23idx-8ed4d1215a01c1f4/scratch/clone/.git
+F23_03_MUTATION=branch-switch platform=windows status=PASS unchanged_reextracted=0 added=1 extracted=1 unchanged=3610
+F23_03_SCOPE_AFTER_SWITCH=commit=d8ad0fb58d10c47bb3538771afd47a63c6230343 ref=refs/heads/f23-drive-49a9ca44ae600fe8 gitdir=//?/C:/Users/seand/AppData/Local/Temp/f23idx-49a9ca44ae600fe8/scratch/clone/.git
 F23_03_STALENESS_REPORTED=true
 F23_03_VERIFY=agrees=false exit=6
 F23_03_STORE_CONTROL_OCCURRENCES=1
 F23_03_STORE_NONCE_OCCURRENCES=0
-F23_03_DRIVE=PASS platform=windows nonce=8ed4d1215a01c1f4
+F23_03_DRIVE=PASS platform=windows nonce=49a9ca44ae600fe8

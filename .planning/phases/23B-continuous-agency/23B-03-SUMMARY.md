@@ -281,13 +281,24 @@ not hidden, and not counted as this plan's green.
 | `cargo nextest run -p wcore-cli --profile ci` | `hetzner-dsm` | 2177 run, **2173 passed, 4 failed** — all four pre-existing at base, proved |
 | `cargo nextest run -p wcore-repomap --profile ci` | **native Windows** | **57/57** (58th is `#[cfg(unix)]`) |
 | `scripts/f23-index-drive.sh` | `hetzner-dsm` | **exit 0**, `F23_03_DRIVE=PASS platform=linux nonce=d3b14061fc7a3735` |
-| `scripts/f23-index-drive.ps1` | **SeanDesktop** | **exit 0**, `F23_03_DRIVE=PASS platform=windows nonce=8ed4d1215a01c1f4` |
+| `scripts/f23-index-drive.ps1` | **SeanDesktop** | **exit 0**, `F23_03_DRIVE=PASS platform=windows nonce=49a9ca44ae600fe8` |
 | `scripts/f23-index-drive.sh` | macOS | **NOT RUN** — no binary; see evidence §6 |
 | `cargo hakari verify` | — | **NOT RUN** — tool absent |
 
 Every remote gate pinned the exact commit with `git checkout -q --detach $SHA`
 and asserted a file this plan creates was present, in the same `&&` chain,
 before the compiler ran. No gate in this plan is a pipeline into a filter.
+
+**The plan's own Windows gate form is self-passing, and this leg did not use
+it.** `lint-plan-gates.py` reports HIGH `powershell-missing-script-exits-zero`
+against `23B-03-PLAN.md:253`, and it is right — proved on SeanDesktop:
+`powershell -File <missing>.ps1; exit $LASTEXITCODE` exits **0**, while the
+guarded form exits **94**. Closed for the gates actually executed, two ways:
+the final Windows leg ran under the guarded form, and every drive gate is
+closed by the process exit status *and* a `grep` for a marker carrying a nonce
+generated seconds earlier — an absent script exits 0 but prints no marker. The
+plan file is not this executor's to edit, so the HIGH stays open against the
+plan and is reported rather than silently satisfied. Detail in evidence §5.1.
 
 **Five gates were made to go RED on purpose**, on real hardware, and the
 failure output was read — the read-count incrementality assertion, the

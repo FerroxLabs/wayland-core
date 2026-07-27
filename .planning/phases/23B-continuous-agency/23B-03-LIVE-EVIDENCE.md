@@ -240,14 +240,21 @@ ascending, joined on rowid, fused at k = 60 — and is not imported.
 ## 5. Windows — `SeanDesktop`, native msvc
 
 **PASS.** `WIN_DRIVE_RC=0`, and the log carries
-`F23_03_DRIVE=PASS platform=windows nonce=8ed4d1215a01c1f4` — the nonce the
+`F23_03_DRIVE=PASS platform=windows nonce=49a9ca44ae600fe8` — the nonce the
 caller generated for this run. Commit under test
-`3cf304e90aaee21ed8993ee14163501ee020a81a`, asserted against the binary's own
+`1eb2d7c255b8cdc4f2f194e60cd82ab6bbddfc68`, asserted against the binary's own
 `--build-info` before any measurement.
 
 The remote command string ends in an explicit `exit $LASTEXITCODE` and is
 **never** piped into a filter; the status was captured on the next line and
-asserted before the log was read for the marker.
+asserted before the log was read for the marker. It additionally guards
+`Test-Path scripts\f23-index-drive.ps1` — see §5.1 for why that guard is
+load-bearing and not decoration.
+
+The leg was driven three times in total, at `decbca2b…`, `3cf304e9…` and
+`1eb2d7c2…`; the numbers below are the last run's, and every figure
+reproduced across all runs within noise (cold build 1454–1576 ms, warm start
+151–166 ms, p50 4892–5016 µs, precision 0.8125 on every run).
 
 Corpus: `C:\ferrox-win` — **3,609 records, 37,868 symbols** (six more files
 than the Linux checkout; the symbol count is identical, so the difference is
@@ -257,11 +264,11 @@ non-source).
 
 | Sample | Cold (ms) | Warm (ms) | Warm reads | Warm re-extracts | Store bytes |
 |---:|---:|---:|---:|---:|---:|
-| 1 | 1576 | 151 | **0** | **0** | 66,592,768 |
-| 2 | 1479 | 157 | **0** | **0** | 66,592,768 |
-| 3 | 1522 | 157 | **0** | **0** | 66,592,768 |
+| 1 | 1533 | 151 | **0** | **0** | 66,707,456 |
+| 2 | 1454 | 159 | **0** | **0** | 66,707,456 |
+| 3 | 1510 | 166 | **0** | **0** | 66,707,456 |
 
-**Warm : cold ratio ≈ 0.099.** Store size is within 37 KB of Linux for six
+**Warm : cold ratio ≈ 0.099.** Store size is within 152 KB of Linux for six
 more files — the format is platform-stable.
 
 ### The one Windows-specific perf observation, reported rather than smoothed
@@ -277,10 +284,8 @@ is not a defect and no threshold was moved because of it.
 
 ### Query latency
 
-`p50 = 5,016 µs`, `p95 = 5,350 µs`, n = 20 — slightly **faster** than Linux
-(5,810 / 6,159), on a much smaller machine. All samples (µs): 4617 4664 4703
-4797 4820 4851 4877 4918 4964 5016 5063 5150 5171 5193 5224 5251 5325 5336
-5350 6057.
+`p50 = 4,892 µs`, `p95 = 5,200 µs`, n = 20 — slightly **faster** than Linux
+(5,810 / 6,159), on a much smaller machine.
 
 ### Retrieval quality
 
@@ -291,8 +296,8 @@ wrong and is worth having measured rather than assumed.
 
 ### Incremental mutations
 
-All five PASS with `unchanged_reextracted=0`, against a 3,610-file scratch
-tree with 3,605 records:
+All five PASS with `unchanged_reextracted=0`, against a scratch tree with
+3,610 records:
 
 | Mutation | Counter | Re-extracted |
 |---|---|---:|
@@ -301,6 +306,39 @@ tree with 3,605 records:
 | delete | `deleted=1` | 0 |
 | rename | `renamed=1` | **0** |
 | branch switch | `added=1` | 1 |
+
+### 5.1 The plan's own Windows gate form is self-passing, and this leg did not use it
+
+`python3 .planning/scripts/lint-plan-gates.py .planning/phases/23B-continuous-agency/`
+reports **HIGH `powershell-missing-script-exits-zero`** against
+`23B-03-PLAN.md:253` — the plan's own Windows drive gate, the one this task
+was told to run. **Proved on SeanDesktop rather than argued:**
+
+```
+$ ssh SeanD@seandesktop "Set-Location C:\ferrox-win; \
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts\definitely_missing_script.ps1; \
+    exit $LASTEXITCODE"
+MISSING_SCRIPT_EXIT=0          <- the plan's gate form GREENS on an absent script
+
+$ ssh SeanD@seandesktop "Set-Location C:\ferrox-win; \
+    if (-not (Test-Path scripts\definitely_missing_script.ps1)) { exit 94 }; …"
+GUARDED_EXIT=94                <- the guarded form REDDENS
+```
+
+This HIGH is **closed for the gates actually executed**, two ways:
+
+1. The final Windows leg ran under the guarded form — `if (-not (Test-Path
+   scripts\f23-index-drive.ps1)) { exit 94 }` in the same statement chain,
+   ahead of the build and the driver — and that guard is proved able to
+   return 94.
+2. Every drive gate in this plan is closed by **two independent** checks: the
+   process exit status *and* a `grep -qF` for a marker containing the nonce
+   the caller generated seconds earlier. An absent script exits 0 but prints
+   no marker, so the second check fails. That is why the *first* Windows run,
+   which did use the unguarded form, was not vacuous.
+
+The plan file itself is not this executor's to edit, so the HIGH remains open
+against `23B-03-PLAN.md` and is reported here rather than silently satisfied.
 
 ### Path representation — the class this platform was expected to break on
 
