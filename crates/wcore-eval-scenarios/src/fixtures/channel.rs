@@ -710,4 +710,72 @@ mod tests {
         assert!(!a[1].answered);
         assert_eq!(ArrivalTally::of(&a).stalled, 1);
     }
+
+    /// The exact property the live fix rests on, and the subtlest one here.
+    ///
+    /// A STALLED arrival is a message the destination holds and the sender
+    /// never heard about. So its idempotency key must be registered when the
+    /// message is JOURNALLED, not when it is answered — otherwise the retry
+    /// that follows a `kill -9` looks like a brand-new delivery and becomes the
+    /// second copy. Registering on "answered" would leave exactly the dangerous
+    /// case unprotected while every easy case still passed, which is the
+    /// too-clean-scenario failure in miniature.
+    ///
+    /// This is the unit-level twin of live records 9 and 10: same key, second
+    /// arrival suppressed, one message at the destination.
+    #[tokio::test]
+    async fn a_replay_of_a_stalled_deliverys_key_is_suppressed_not_duplicated() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = dir.path().join("arrivals.jsonl");
+        // Stall from the very first arrival: the message lands, the sender
+        // never learns it did.
+        let sink = ChannelSink::start(&j, SinkMode::StallAfter(0), 0)
+            .await
+            .unwrap();
+        let base = sink.base_url().to_string();
+        let key = "cron:job-a:1785124088790";
+
+        let c = wcore_egress::EgressClient::new();
+        let first = c
+            .post(format!("{base}/api/chat.postMessage"))
+            .header("Idempotency-Key", key)
+            .header("Authorization", "Bearer t")
+            .json(&json!({ "channel": "room", "text": "carried" }))
+            .timeout(std::time::Duration::from_millis(600))
+            .send()
+            .await;
+        assert!(first.is_err(), "the first attempt is never answered");
+
+        // The restart retries under the SAME key.
+        let retry = c
+            .post(format!("{base}/api/chat.postMessage"))
+            .header("Idempotency-Key", key)
+            .header("Authorization", "Bearer t")
+            .json(&json!({ "channel": "room", "text": "carried" }))
+            .timeout(std::time::Duration::from_millis(2000))
+            .send()
+            .await
+            .expect("a recognised replay is answered from the message already held");
+        let v: serde_json::Value = retry.json().await.unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(
+            v["ts"], "1.000000",
+            "the sender is handed the identity of the message the FIRST attempt created"
+        );
+
+        let a = read_arrivals(&j).unwrap();
+        assert_eq!(a.len(), 2, "both attempts reached the destination");
+        assert!(!a[0].suppressed);
+        assert!(a[1].suppressed, "the replay was collapsed, not duplicated");
+
+        let t = ArrivalTally::of(&a);
+        assert_eq!(t.total, 1, "ONE message exists at the destination");
+        assert_eq!(t.unique, 1);
+        assert!(
+            t.duplicated.is_empty(),
+            "this is the duplicate Criterion 1 forbids: {:?}",
+            t.duplicated
+        );
+        assert_eq!(t.suppressed, 1);
+    }
 }
