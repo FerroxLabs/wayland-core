@@ -64,9 +64,19 @@ task. Full evidence is in `22-03-CLAIM-MODEL.md`.
 | ID | Severity | Status | Summary |
 |---|---|---|---|
 | F-1 | HIGH | **FIXED** (`f43c279c`, guard `1fab91f7`) | Fanout refused dispatch over its own worktree root: effective parallelism 1 at width 8, exit 0; second dispatch refused entirely. |
-| F-2 | HIGH | **NOT FIXED** | A killed fanout cannot be restarted: orphaned reservations exhaust the aggregate workspace budget and nothing reclaims them at dispatch. |
-| F-3 | HIGH | **NOT FIXED** | Workers fail as a function of elapsed run time — 4/4 at 1s, 1/4 at 10s, `invalid retained workspace reservation`. Reproduced on Windows. |
-| F-4 | HIGH | reported, not fixed (other crate) | `wcore-sandbox` acceptance tests write leases into the **production** lease directory, permanently disabling the Windows sandbox. See the intel note. |
+| F-2 | HIGH | **FIXED 2026-07-27** (`lane/swarm-durability`) | A killed fanout cannot be restarted: orphaned reservations exhaust the aggregate workspace budget and nothing reclaims them at dispatch. `reclaim_abandoned_transactions()` now runs at dispatch before either on-disk gate counts anything, discriminating on the transaction's own **`flock` lease** — kernel-enforced, released only when the holding process exits, so no timeout/heartbeat/age heuristic and in-process siblings are detected too. Live: `kill -9` 8 mid-flight, restart went exit 1 / 0 of 8 → **exit 0 / 8 of 8**, 8 orphans reclaimed, 0 roots left. Worse than recorded here: only **2** orphans exhaust the budget at width 8, not 8. |
+| F-3 | HIGH | **FIXED 2026-07-27** (`lane/swarm-durability`) | Workers fail as a function of elapsed run time — 4/4 at 1s, 1/4 at 10s, `invalid retained workspace reservation`. **Root cause was not in `wcore-swarm`**: `RegularFileAuthority::read_bounded` rewound and drained a `try_clone()` of the retained descriptor, and `try_clone` is `dup`/`DuplicateHandle` — **both share the file offset**. Two concurrent validators interleave rewind/rewind/drain/drain and the loser reads **zero bytes from an intact file**; `"".parse::<u64>()` produces that error. Elapsed time was only a proxy for how many racing pairs occur. Fixed with positional reads. Live: **4/4 at every duration** including 45s, vs 0/4 at 20s before. |
+| F-4 | HIGH | **FIXED 2026-07-27** (`lane/sandbox-lease`) | `wcore-sandbox` acceptance tests write leases into the **production** lease directory, permanently disabling the Windows sandbox. Root-caused byte-for-byte and fixed at one chokepoint (`lease_root()` is a temp dir under `cfg(test)`). This was also the true cause of the "AppContainer cannot be observed over SSH" lore, now struck from the shared planning files. See the intel notes. |
+
+> **Verdict on `f43c279c` (asked in the original report and left open): it UNMASKED F-3, it did
+> not cause it.** Proven single-variable — the F-3 reproduction fails identically at `de977949`,
+> the commit immediately before the fanout fix, with the same error string in 0.04s and no suite
+> load. The fanout fix touches three `wcore-swarm` files; the racing read and both its callers
+> are untouched by it. It raised effective parallelism 1→8, which multiplied the racing pairs.
+>
+> F-3 was also hiding behind retry across **six** tests, not the one originally suspected:
+> matched N=20 full-suite runs gave **16 flaky events across 6 tests** at base and **2 events
+> across 1 test** after the fix.
 
 F-1's fix is proved red-before/green-after on the real binary: 1/8 → 8/8, and
 restart unblocked at that layer. The regression guard was **verified to fail**

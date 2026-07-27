@@ -64,7 +64,12 @@ race that is absent.
 
 ---
 
-## F-2 (HIGH, NOT FIXED) — a killed fanout cannot be restarted
+## F-2 (HIGH, **FIXED 2026-07-27** on `lane/swarm-durability`) — a killed fanout cannot be restarted
+
+> Status updated after this document was written. Fixed by `reclaim_abandoned_transactions()`
+> at dispatch, discriminating on the transaction's own kernel-enforced `flock` lease rather than
+> any age or heartbeat heuristic. Live: restart after `kill -9` of 8 workers went 0/8 to 8/8.
+> Also worse than described below: **2** orphans exhaust the budget at width 8, not 8.
 
 This is the load-bearing baseline for Success Criterion 2.
 
@@ -134,7 +139,16 @@ rather than inferred from Linux.
 
 ---
 
-## F-3 (HIGH, NOT FIXED) — workers fail as a function of how long they run
+## F-3 (HIGH, **FIXED 2026-07-27** on `lane/swarm-durability`) — workers fail as a function of how long they run
+
+> Status updated after this document was written, and the root cause is NOT where this section
+> looks for it. It is not in `wcore-swarm` at all: `RegularFileAuthority::read_bounded` rewound
+> and drained a `try_clone()` of the retained descriptor, and `try_clone` is `dup` on unix and
+> `DuplicateHandle` on Windows — **both share the file offset**. Two concurrent validators
+> interleave and the loser reads zero bytes from an intact file. Elapsed time was only a proxy
+> for how many racing pairs occur. Fixed with positional reads; 4/4 at every duration to 45s.
+> The suspicion recorded below that F-1 would make F-3 more visible was CORRECT — it unmasked
+> it (proven at `de977949`, the commit before), it did not cause it.
 
 Discovered while building the kill instrument. `--worker-command /bin/sleep N`,
 4 workers, Linux, post-fix binary:
