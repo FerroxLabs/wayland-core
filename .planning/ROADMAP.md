@@ -181,7 +181,11 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
   2. Install and update paths verify source/artifact identity, rollback/freeze protection, revocation, and key rotation.
   3. Tampered artifacts, manifests, receipts, plugins, backends, or keys are rejected.
   4. Packaging, deployment preparation, rollback rehearsal, and release acceptance remain separate evidence and authorization states.
-**Plans**: TBD
+**Plans**: 4 plans (`29-01`…`29-04`), one per wave, planned 2026-07-27 at base `ac94b1d5`. Every proof runs against Ed25519 trust roots generated at run time and a local artifact store; no plan requires a real key, account or published release to pass a gate.
+- [ ] `29-01-PLAN.md` — measure the shipped supply chain, then land the signed release manifest, the role-scoped trust root and the CLOSED four-state release ledger; write the Phase 28 receipt input contract (R28-A…R28-F).
+- [ ] `29-02-PLAN.md` — clean-room provenance: a byte-deterministic CycloneDX SBOM from `cargo metadata --locked`, wire the `deny.toml` policy that measurably nothing runs today, and measure reproducibility as two build digests or a named variance class.
+- [ ] `29-03-PLAN.md` — install and update identity: ordered downgrade refusal, persisted freeze high-water mark, revocation, and a bundled release trust root that fails closed on a placeholder exactly as `IndexVerifier::bundled()` already does, with a full key-rotation drill.
+- [ ] `29-04-PLAN.md` — paired tamper corpus over all seven F29-03 object classes (control accepted, then one mutation refused), the four-state separation proof run twice (all keys, then acceptance key withheld), and the verbatim phase verdict.
 
 ### Phase 30: Continuous Scorecard and Frontier Review
 **Goal**: Sean can make a defensible release-positioning decision from repeated, comparable, independently reviewed evidence.
