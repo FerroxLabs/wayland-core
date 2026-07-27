@@ -476,34 +476,58 @@ const RUNNERS = {
     return pass(`exit=${r.status} with all egress pointed at a closed local port; completed within budget, no panic`);
   },
 
+  // Two mechanisms, tried in order, and the one that ACTUALLY established the
+  // condition is named in the observable. Permission bits alone are not enough: the
+  // certification Linux host runs as root, and root bypasses them — a probe that
+  // trusted `chmod 0500` there would report a pass over a fully writable directory.
+  // The canary write is what catches that, and the fallback is what keeps the
+  // dimension measurable rather than reporting 24 environment reds.
   'disk-full-read-only'(bin, verb) {
     const root = scratch('ro');
     const home = join(root, 'home');
+    let mechanism = 'permission bits (0500)';
     mkdirSync(home, { recursive: true });
     try {
       chmodSync(home, 0o500);
-    } catch (e) {
-      rmSync(root, { recursive: true, force: true });
-      return red(`the host refused to make the fixture read-only: ${e.code ?? e.message}`);
-    }
-    // Prove the fixture is actually read-only before trusting anything downstream: a
-    // read-only probe over a writable directory is a gate that cannot fail.
-    let enforced = false;
-    try {
-      writeFileSync(join(home, '.f28-writable-canary'), 'x');
     } catch {
-      enforced = true;
+      /* fall through to the canary check, which is what decides */
     }
-    if (!enforced) {
-      rmSync(root, { recursive: true, force: true });
-      return red('the fixture root remained writable, so the read-only condition was never established');
+    const canaryFails = (dir) => {
+      try {
+        writeFileSync(join(dir, '.f28-writable-canary'), 'x');
+        return false;
+      } catch {
+        return true;
+      }
+    };
+    let target = home;
+    if (!canaryFails(home)) {
+      // Root ignores the mode bits. Point HOME at a REGULAR FILE instead: every write
+      // beneath it then fails with ENOTDIR for every uid, root included, so the
+      // unwritable condition is established by the filesystem's own type system rather
+      // than by a permission the caller can bypass.
+      target = join(root, 'home-is-a-file');
+      writeFileSync(target, 'f28: HOME is deliberately not a directory\n');
+      mechanism = 'HOME bound to a regular file (ENOTDIR, unbypassable by root)';
+      if (!canaryFails(target)) {
+        rmSync(root, { recursive: true, force: true });
+        return red(
+          'neither permission bits nor a non-directory HOME made the fixture unwritable, ' +
+            'so the read-only condition was never established and this is not a measurement',
+        );
+      }
     }
-    const r = runBin(bin, [...verb.split(' '), '--help'], { env: { HOME: home, USERPROFILE: home } });
+    const r = runBin(bin, [...verb.split(' '), '--help'], {
+      env: { HOME: target, USERPROFILE: target },
+    });
     try { chmodSync(home, 0o700); } catch { /* best effort */ }
     rmSync(root, { recursive: true, force: true });
     if (r.timedOut) return red('timed out with a read-only HOME');
     if (PANIC_RE.test(r.text)) return red(`panicked with a read-only HOME: ${firstLine(r.text)}`);
-    return pass(`exit=${r.status} with a read-only HOME (write canary proved the refusal); no panic`);
+    return pass(
+      `exit=${r.status} with an unwritable HOME established by ${mechanism} and proved by ` +
+        `a canary write that was refused; no panic`,
+    );
   },
 
   'hostile-inputs'(bin, verb) {
@@ -559,6 +583,120 @@ const RUNNERS = {
 
 function firstLine(text) {
   return (text.split('\n').find((l) => l.trim().length > 0) ?? '').slice(0, 160);
+}
+
+// ---------------------------------------------------------------------------------
+// --capture-activeness — the positive containment observation, measured DIFFERENTIALLY
+// ---------------------------------------------------------------------------------
+//
+// The same probe script is run OUTSIDE the product and INSIDE a worker the product
+// spawns through its own sandbox path. Activeness is asserted from the DIFFERENCE, not
+// from the absence of a violation: the process-id namespace, the visible root, and DNS
+// reachability all change when the sandbox is active and none of them changes when it
+// is not. A detector that fired on the inside reading alone could not tell a contained
+// child from an uncontained one, which is exactly the failure this rule exists to stop.
+//
+// It is a MEASUREMENT and it can fail. Where no worker can be spawned at all — as on
+// macOS, where the delegated-execution path refuses because sandbox-exec does not meet
+// the delegated admission contract and the Docker fallback is compiled out — this
+// returns `observed: false` with the reason, and every sandbox cell on that family is
+// then a RED. That is the honest outcome; a green there would be indistinguishable
+// from a silently disabled sandbox.
+
+const ACTIVENESS_PROBE = [
+  'echo F28RAN',
+  'echo F28_NSPID=$(grep -E "^NSpid" /proc/self/status 2>/dev/null | tr -s " \\t" ":" || echo none)',
+  'echo F28_ROOTLS=$(ls / 2>/dev/null | tr "\\n" ",")',
+  '(getent hosts github.com >/dev/null 2>&1 || nslookup github.com >/dev/null 2>&1) && echo F28_DNS=RESOLVES || echo F28_DNS=NO_DNS',
+  '(whoami /groups 2>&1 | head -3) 2>/dev/null || true',
+].join('\n') + '\n';
+
+function gitInit(dir, files) {
+  mkdirSync(dir, { recursive: true });
+  const g = (args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+  g(['init', '-q', '-b', 'main', '.']);
+  g(['config', 'user.email', 'ci@f28.local']);
+  g(['config', 'user.name', 'f28']);
+  for (const [name, body] of Object.entries(files)) writeFileSync(join(dir, name), body);
+  writeFileSync(join(dir, '.gitignore'), '.swarm-worktrees/\n');
+  g(['add', '-A']);
+  g(['-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'f28']);
+}
+
+function summarise(text) {
+  const g = (re) => (re.exec(text) ?? [])[1] ?? null;
+  return {
+    ran: /F28RAN/.test(text),
+    nspid: g(/F28_NSPID=(\S*)/),
+    rootls: g(/F28_ROOTLS=(\S*)/),
+    dns: g(/F28_DNS=(\S*)/),
+    appcontainer: /0xC0000022|BaseNamedObjects/.test(text),
+    accessDenied: /Access is denied/.test(text),
+    highIntegrity: /S-1-16-12288/.test(text),
+  };
+}
+
+export function captureActiveness(bin) {
+  const root = scratch('act');
+  const repo = join(root, 'repo');
+  gitInit(repo, { 'probe.sh': ACTIVENESS_PROBE, 'README.md': 'seed\n' });
+
+  const outside = summarise(
+    runBin('/bin/sh', ['probe.sh'], { cwd: repo, timeout: 30_000 }).text +
+      (IS_WINDOWS ? runBin('cmd.exe', ['/c', 'whoami', '/groups'], { timeout: 30_000 }).text : ''),
+  );
+  const swarm = runBin(
+    bin,
+    ['swarm', '--workers', '1', '--worker-command', IS_WINDOWS ? 'cmd.exe /c echo F28RAN & whoami /groups' : '/bin/sh probe.sh',
+     '--repo', repo, '--base-branch', 'main', '--timeout', '90s'],
+    { env: { HOME: root, USERPROFILE: root }, timeout: 180_000 },
+  );
+  const inside = summarise(swarm.text);
+  rmSync(root, { recursive: true, force: true });
+
+  if (!inside.ran) {
+    return {
+      observed: false,
+      reason:
+        'no worker could be spawned through the product\'s own sandbox path, so no ' +
+        'containment differential is obtainable: ' + firstLine(swarm.text),
+      raw: swarm.text.slice(0, 1200),
+    };
+  }
+
+  const differences = [];
+  if (inside.nspid && outside.nspid && inside.nspid !== outside.nspid) {
+    differences.push(`process-id namespace changed (${outside.nspid} outside, ${inside.nspid} inside)`);
+  }
+  if (inside.rootls && outside.rootls && inside.rootls !== outside.rootls) {
+    const o = outside.rootls.split(',').filter(Boolean).length;
+    const i = inside.rootls.split(',').filter(Boolean).length;
+    if (i < o) differences.push(`filesystem root reduced from ${o} entries to ${i} (mount namespace)`);
+  }
+  if (outside.dns === 'RESOLVES' && inside.dns === 'NO_DNS') {
+    differences.push('DNS resolves outside and does not inside (network namespace)');
+  }
+  if (inside.appcontainer && !outside.appcontainer) {
+    differences.push('the child was refused \\BaseNamedObjects with 0xC0000022, which AppContainer confines by construction');
+  }
+  if (inside.accessDenied && outside.highIntegrity && !inside.highIntegrity) {
+    differences.push('a System32 binary the uncontained context runs was refused to the child, and the child holds no High integrity label');
+  }
+
+  if (differences.length === 0) {
+    return {
+      observed: false,
+      reason:
+        'a worker ran but showed NO containment difference from the uncontained baseline; ' +
+        'the sandbox cannot be evidenced active for this run',
+      raw: swarm.text.slice(0, 1200),
+    };
+  }
+  return {
+    observed: true,
+    probe: 'containment-differential',
+    detail: differences.join('; '),
+  };
 }
 
 function sleep(ms) {
@@ -816,6 +954,15 @@ if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToP
   try {
     if (argv.includes('--self-test')) {
       process.exit(selfTest());
+    } else if (argv.includes('--capture-activeness')) {
+      const bin = arg(argv, '--bin');
+      if (!bin) fail('--capture-activeness requires --bin');
+      const result = captureActiveness(bin);
+      const out = arg(argv, '--out');
+      const text = JSON.stringify(result, null, 1) + '\n';
+      if (out) writeFileSync(out, text, 'utf8');
+      process.stdout.write(text);
+      process.exit(0);
     } else if (argv.includes('--run')) {
       const bin = arg(argv, '--bin');
       const os = arg(argv, '--os');
