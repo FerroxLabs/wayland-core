@@ -1,0 +1,12 @@
+PANEL-MEMBER: gemini
+PANEL-QUESTION-SHA256: ccd6608ce227290e3bf093d415f01d46db8e9d2e9b7eee72b8adf3e641e4ca7f
+---
+The evidence shows that the structural gaps identified in the previous rounds have been systematically closed. 
+
+1. **Direct credentials:** Handled via `CredentialRef`, which only contains `name` and `source_file`. It physically lacks a field to hold the secret value, meaning the value is dropped at the type boundary.
+2. **Embedded credentials:** Previously an escape hatch through the untyped `details` map. Making `details` private and forcing all writes (via `insert_detail`) and reads from untrusted documents (via `deserialize_scrubbed`) through the `scrub_detail` sanitizer guarantees that an unscrubbed value cannot exist inside the struct.
+
+Because there is no remaining path for a secret value—either direct or embedded—to be stored within `PortabilityPlan` or `DiscoveredItem`, it cannot be accidentally emitted by `serde`, `Debug`, or any downstream error formatter. The redaction is enforced by the type's structure and encapsulation, not by trusting the downstream printers.
+
+PANEL-VERDICT: contract-holds
+PANEL-BASIS: By dropping direct values via `CredentialRef` and encapsulating the `details` map to enforce scrubbing on every construction and deserialization path, an unredacted secret value is completely unrepresentable in the emitted types.

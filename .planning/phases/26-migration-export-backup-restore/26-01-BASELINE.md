@@ -276,3 +276,54 @@ the walk.
 
 - `hetzner-dsm` toolchain is `cargo 1.96.0`, not the `1.95.0` the plan recorded. Non-blocking;
   noted so a later reader does not treat it as tampering. Disk free on `/root`: **741 GB**.
+
+---
+
+## 6. The macOS real-state decision leg — RUN
+
+Binary acquired from CI, not built locally. Run `30229917833` on `lane/26`, head SHA
+`b671f9ad557f85a36cc67da3d3ec0218f0bf08e8`, job `Build (aarch64-apple-darwin)` conclusion
+`success`, artifact `wayland-core-aarch64-apple-darwin` downloaded to a directory OUTSIDE the
+repository. Verified before use:
+
+- `/usr/bin/file` → `Mach-O 64-bit executable arm64`
+- `lipo -archs` → `arm64`
+- `--build-info` → `wayland-core 0.12.25 (source b671f9ad557f85a36cc67da3d3ec0218f0bf08e8)`
+- `migrate --help` → lists BOTH `hermes` and `openclaw`, so it postdates this plan's work
+
+`scripts/portability-real-state-check.sh` output against the REAL homes:
+
+```
+extracted 7 real secret values to search for (values never printed)
+hermes: exit 0, well-formed JSON, items=14
+hermes: non-mutation confirmed (tree digest unchanged)
+hermes: searched 7 real values, 0 hits
+openclaw: exit 0, well-formed JSON, items=3
+openclaw: non-mutation confirmed (tree digest unchanged)
+openclaw: searched 7 real values, 0 hits
+REAL-STATE CHECK PASSED
+```
+
+Item breakdown against the real Hermes install: **profiles=12** (the pre-change baseline,
+preserved exactly), **root_profile=1** (newly discovered — gap 4 closed), **mcp_server=1**.
+
+F26-SC1-MACOS: RAN — run=30229917833 sha=b671f9ad557f85a36cc67da3d3ec0218f0bf08e8 binary=/Users/seandonahoe/f26-artifacts/b671/wayland-core arch=arm64 hermes_profiles=12 openclaw_items=3 secret_hits=0
+
+### Honest scope limit on this leg
+
+The leg ran against `b671f9ad`, which contains `openclaw.rs` and `redact.rs` and is an
+ancestor of HEAD. THREE later commits hardened redaction in response to the panel
+(`255d06ba` details scrubbing, `44bbd499` details made private, `f63da68a` name narrowing).
+Those were each verified on Linux — clippy clean at deny-warnings, 2627/2628 tests passing —
+but the macOS real-secret leg was **not** re-run against them, because each push supersedes the
+queued CI run and the final build had not completed. This is stated rather than glossed: the
+real-secret evidence is against the pre-hardening binary, and every hardening commit since is
+strictly more restrictive, never less.
+
+### Deferred-inventory delta (expected, and a consequence of closing gap 4)
+
+Against the real home the deferred counts moved from the pre-change baseline: skill
+directories **540 → 589**, persona files **12 → 13**. That is the root setup's own
+`skills/` and `SOUL.md` becoming visible for the first time. The PROSE output therefore
+changes against a rooted real install — correctly, because previously-dropped state is now
+named — while remaining byte-identical for the existing test fixture, which has no root config.
