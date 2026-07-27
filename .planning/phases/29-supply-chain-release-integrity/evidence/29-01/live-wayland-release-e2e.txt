@@ -1,0 +1,62 @@
+=== LIVE wayland-release END-TO-END RUN (hetzner Linux, lane/29-01 @ dc7e7c65) ===
+Throwaway Ed25519 trust root generated at run time into a temp dir; the artifact store is
+an ordinary directory. No real key, no real account, no credential of any kind.
+
+--- PART A: trust root, manifest build/sign/verify, one-byte tamper ---
+### tree must be clean after the mutation campaign (every mutation reverted):
+dirty_paths=0
+### workspace: /tmp/tmp.xkg9WcefNP (a temp dir; the trust root dies with it)
+### 1. trust-root init (prints key ids + PUBLIC keys only)
+TRUST ROOT READY path=/tmp/tmp.xkg9WcefNP/trust/trust-root.json
+KEY key_id=packaging-key role=packaging public_key_base64=U8coL4NKpbrDv1q6gGtfJ8CAyXolRcxfRgvp8+ylc+g=
+KEY key_id=deployment-preparation-key role=deployment_preparation public_key_base64=qjF9Q1+unhLj+6yPZsn1htzG+wJ6AZ+Ws28Jd9Fuimg=
+KEY key_id=rollback-rehearsal-key role=rollback_rehearsal public_key_base64=bq1gFV3TgCnuDO2gZEw9KwKqEBEfJ2WD+8qsVhyS9M4=
+KEY key_id=release-acceptance-key role=release_acceptance public_key_base64=vBUsnUrw5FkDcUM5OT8bVvNv5+3aAfy+w80WCrLUjiY=
+### seed files on disk and their modes:
+total 
+-rw------- deployment-preparation-key.seed
+-rw------- packaging-key.seed
+-rw------- release-acceptance-key.seed
+-rw------- rollback-rehearsal-key.seed
+-rw-r--r-- trust-root.json
+### 2. manifest build over the local artifact store
+MANIFEST BUILT body_sha256=a62c5985c78cae9b2e50171b63168b5d16d05ed546184b7302b5e2881cfea00e
+### 3. manifest sign (seed piped on STDIN, never on argv, never printed)
+MANIFEST SIGNED body_sha256=a62c5985c78cae9b2e50171b63168b5d16d05ed546184b7302b5e2881cfea00e
+### 4. PRISTINE VERIFY — must succeed
+MANIFEST VERIFIED body_sha256=a62c5985c78cae9b2e50171b63168b5d16d05ed546184b7302b5e2881cfea00e
+PRISTINE_VERIFY_RC=0
+### 5. mutate ONE BYTE of one artifact, rebuild+re-sign the manifest over the mutated store
+### the one-byte change moved the manifest digest:
+pristine body_sha256 = a62c5985c78cae9b2e50171b63168b5d16d05ed546184b7302b5e2881cfea00e
+mutated  body_sha256 = 5b26c3691126a1c61d258c1caf29019436568013843d92e86ec3c7ac68edf5cc
+DIGESTS DIFFER = True
+### 6. splice the mutated artifact digest into the SIGNED manifest, leaving the signature intact
+TAMPERED_VERIFY_RC=1
+### 7. state ledger — append three states, withholding the ACCEPTANCE key
+STATE APPENDED state=packaging body_sha256=3d100f8cd3927be82347f2b997cf9baae276289edf77c5bcaba348e1fe7e2fa6
+STATE APPENDED state=deployment_preparation body_sha256=7c171cffc758a08ce5161132cd592108235b4834967e70f984f205ddb6549805
+wayland-release: body digest mismatch
+STATE APPENDED state=rollback_rehearsal body_sha256=299d7617d635ef9e4b593c0ee9782bd3e973fe81a4ea9ecee8b1aca9b8161860
+### (each state needs DISTINCT evidence; re-using one file is refused — see below)
+wayland-release: state DeploymentPreparation reuses evidence digest 601ac7b167d93f8d36d63a6569f6e9bb9cf2f229fb7db4b81484ce341b2d385d from an earlier state
+CHAIN_VERIFY_RC=1
+
+NOTE ON ORDERING IN PART A: the line 'wayland-release: body digest mismatch' is the STDERR
+of step 6 (the tampered manifest verify, TAMPERED_VERIFY_RC=1). It appears out of order
+because step 7's loop piped through a buffered 'tail -1' while stderr went straight to the
+stream. Part B re-runs the ledger with NO pipes and per-command rc capture, which is the
+authoritative record.
+
+--- PART B: the state ledger, deterministic, no pipes, per-command exit status ---
+=== appending states one at a time, each rc captured separately, no pipes ===
+append[packaging] rc=0 out=STATE APPENDED state=packaging body_sha256=028bb458974acac8f61610979b163885deb8ce9c6a3a5251ee83657a291bb7a5
+append[deployment_preparation] rc=0 out=STATE APPENDED state=deployment_preparation body_sha256=560930ac5f34f411eca41ffa1eeac901f30d0daff4844d0958e40c9bd1b13f08
+append[rollback_rehearsal] rc=0 out=STATE APPENDED state=rollback_rehearsal body_sha256=d976503afaafbe22a0bdcad17f29de39259edff5b4079bab5b96ce9d0a7af0bb
+=== verify chain with the ACCEPTANCE KEY WITHHELD (only 3 records exist) ===
+state-verify rc=0 out=CHAIN VERIFIED highest_state=rollback_rehearsal records=3 accepted=false
+=== now append release_acceptance USING the acceptance key ===
+append[release_acceptance] rc=0 out=STATE APPENDED state=release_acceptance body_sha256=eb6a4ff78ebba781d137fec7eacb9043db0500b4f3c68b1742fc3ad6951a27d2
+state-verify rc=1 out=wayland-release: release acceptance requires an observed certification binding
+=== reuse packaging evidence as acceptance evidence (the collapse move) ===
+state-verify(reused evidence) rc=1 out=wayland-release: release acceptance requires an observed certification binding

@@ -1,0 +1,32 @@
+=== HETZNER CLIPPY + FULL TARGETED SUITE (lane/29-01 @ dc7e7c65) ===
+$ cargo clippy -p wcore-eval-scenarios --all-targets -- -D warnings
+$ cargo nextest run -p wcore-eval-scenarios --no-fail-fast
+remote exit status captured into rc BEFORE any filtering: rc=0
+
+        PASS [   0.013s] (113/310) wcore-eval-scenarios release_integrity::tests::every_state_has_a_distinct_signature_domain
+        PASS [   0.014s] (114/310) wcore-eval-scenarios release_integrity::tests::ordinals_match_canonical_positions
+        PASS [   0.014s] (119/310) wcore-eval-scenarios release_integrity::tests::an_unrecognised_role_name_fails_to_deserialize
+        PASS [   0.015s] (121/310) wcore-eval-scenarios release_states::tests::an_unknown_state_name_fails_to_deserialize_before_any_logic_runs
+        PASS [   0.015s] (127/310) wcore-eval-scenarios release_states::tests::chain_progress_is_accepted_only_at_release_acceptance
+        PASS [   0.017s] (142/310) wcore-eval-scenarios release_integrity::tests::body_validation_rejects_an_empty_artifact_list
+        PASS [   0.056s] (274/310) wcore-eval-scenarios::release_integrity_contract an_invented_state_name_fails_to_deserialize
+        PASS [   0.048s] (276/310) wcore-eval-scenarios::release_integrity_contract the_real_receipt_fixture_verifies_so_the_cross_domain_proof_is_not_vacuous
+        PASS [   0.062s] (279/310) wcore-eval-scenarios::release_integrity_contract trust_root_init_never_prints_the_signing_seed
+        PASS [   0.092s] (281/310) wcore-eval-scenarios::release_integrity_contract an_unknown_field_in_a_manifest_is_refused_at_deserialization
+        PASS [   0.092s] (282/310) wcore-eval-scenarios::release_integrity_contract an_unknown_key_id_is_refused_rather_than_trusted
+        PASS [   0.098s] (284/310) wcore-eval-scenarios::release_integrity_contract a_tampered_manifest_body_is_refused_by_digest
+        PASS [   0.122s] (286/310) wcore-eval-scenarios::release_integrity_contract an_unavailable_certification_binding_is_representable_and_verifies
+        PASS [   0.126s] (287/310) wcore-eval-scenarios::release_integrity_contract receipt_signature_does_not_verify_as_a_manifest_signature
+        PASS [   0.140s] (288/310) wcore-eval-scenarios::release_integrity_contract manifest_signature_does_not_verify_under_the_receipt_domain
+        PASS [   0.155s] (289/310) wcore-eval-scenarios::release_integrity_contract a_retired_key_is_refused_although_its_signature_is_valid
+        PASS [   0.165s] (290/310) wcore-eval-scenarios::release_integrity_contract a_record_bound_to_a_different_manifest_is_rejected
+        PASS [   0.215s] (291/310) wcore-eval-scenarios::release_integrity_contract a_reordered_chain_is_rejected
+        PASS [   0.218s] (292/310) wcore-eval-scenarios::release_integrity_contract a_broken_previous_record_digest_is_rejected
+        PASS [   0.227s] (293/310) wcore-eval-scenarios::release_integrity_contract a_fifth_state_record_is_rejected
+        PASS [   0.254s] (294/310) wcore-eval-scenarios::release_integrity_contract release_acceptance_signed_by_the_packaging_key_is_rejected
+        PASS [   0.267s] (295/310) wcore-eval-scenarios::release_integrity_contract evidence_reused_from_an_earlier_state_is_rejected
+        PASS [   0.270s] (296/310) wcore-eval-scenarios::release_integrity_contract all_four_records_signed_by_one_key_is_rejected
+        PASS [   0.323s] (299/310) wcore-eval-scenarios::release_integrity_contract a_packaging_signature_replayed_into_the_acceptance_slot_is_rejected
+        PASS [   0.436s] (300/310) wcore-eval-scenarios::release_integrity_contract an_unavailable_certification_binding_cannot_reach_release_acceptance
+        PASS [   0.465s] (301/310) wcore-eval-scenarios::release_integrity_contract withholding_the_acceptance_key_caps_progress_at_rollback_rehearsal
+     Summary [   1.097s] 310 tests run: 310 passed, 5 skipped

@@ -27,3 +27,7 @@ F29-CEN-23::CONFIRMED::evidence=baseline-counts.txt
 F29-CEN-24::CONFIRMED::evidence=toolchain-drift-nightly.txt
 F29-CEN-25::CONFIRMED::evidence=receipt-substrate-consumed.txt
 F29-CEN-26::CONFIRMED::evidence=domain-separation-counterexample.txt
+F29-CEN-27::CONFIRMED::evidence=hetzner-clippy-nextest.txt
+F29-CEN-28::CONFIRMED::evidence=mutation-campaign.txt
+F29-CEN-29::CONFIRMED::evidence=live-wayland-release-e2e.txt
+F29-CEN-30::CONFIRMED::evidence=fenced-file-edits.txt

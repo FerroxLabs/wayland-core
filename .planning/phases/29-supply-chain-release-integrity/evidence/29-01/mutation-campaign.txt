@@ -1,0 +1,59 @@
+=== MUTATION CAMPAIGN (hetzner Linux, lane/29-01 @ dc7e7c65) ===
+Disable exactly ONE check in the verifier; the ONE test that claims to cover it must go RED;
+revert; it must go GREEN again. A test that survives its own mutation is not testing what
+its name says. rc=101 is a Rust test-binary assertion failure.
+
+MUTATION CAMPAIGN over 16 checks
+Each row: apply one mutation -> the named test MUST go RED -> revert -> MUST go GREEN.
+
+[OK] M01 role binding removed
+        test=release_acceptance_signed_by_the_packaging_key_is_rejected
+        baseline_rc=0 mutated_rc=101 restored_rc=0
+[OK] M02 retirement never enforced
+        test=a_retired_key_is_refused_although_its_signature_is_valid
+        baseline_rc=0 mutated_rc=101 restored_rc=0
+[OK] M03 unknown key id falls back to the first key
+        test=an_unknown_key_id_is_refused_rather_than_trusted
+        baseline_rc=0 mutated_rc=101 restored_rc=0
+[OK] M04 manifest accepts unknown fields
+        test=an_unknown_field_in_a_manifest_is_refused_at_deserialization
+        baseline_rc=0 mutated_rc=101 restored_rc=0
+[OK] M05 acceptance shares the packaging signature domain
+        test=a_packaging_signature_replayed_into_the_acceptance_slot_is_rejected
+        baseline_rc=0 mutated_rc=101 restored_rc=0
+[OK] M06 manifest reuses the receipt domain
+        test=receipt_signature_does_not_verify_as_a_manifest_signature
+        baseline_rc=0 mutated_rc=101 restored_rc=0
+[OK] M07 manifest body digest never rechecked
+        test=a_tampered_manifest_body_is_refused_by_digest
+        baseline_rc=0 mutated_rc=101 restored_rc=0
+[OK] M08 closed enum given a catch-all variant
+        test=an_invented_state_name_fails_to_deserialize
+        baseline_rc=0 mutated_rc=101 restored_rc=0
+[OK] M09 chain length unbounded
+        test=a_fifth_state_record_is_rejected
+        baseline_rc=0 mutated_rc=101 restored_rc=0
+[OK] M10 canonical order not enforced
+        test=a_reordered_chain_is_rejected
+        baseline_rc=0 mutated_rc=101 restored_rc=0
+[OK] M11 previous-record back-link not checked
+        test=a_broken_previous_record_digest_is_rejected
+        baseline_rc=0 mutated_rc=101 restored_rc=0
+[OK] M12 one key may sign every state
+        test=all_four_records_signed_by_one_key_is_rejected
+        baseline_rc=0 mutated_rc=101 restored_rc=0
+[OK] M13 evidence may be reused across states
+        test=evidence_reused_from_an_earlier_state_is_rejected
+        baseline_rc=0 mutated_rc=101 restored_rc=0
+[OK] M14 acceptance allowed over an absent certification
+        test=an_unavailable_certification_binding_cannot_reach_release_acceptance
+        baseline_rc=0 mutated_rc=101 restored_rc=0
+[OK] M15 trust-root init prints the signing seed
+        test=trust_root_init_never_prints_the_signing_seed
+        baseline_rc=0 mutated_rc=101 restored_rc=0
+[OK] M16 record may bind any manifest
+        test=a_record_bound_to_a_different_manifest_is_rejected
+        baseline_rc=0 mutated_rc=101 restored_rc=0
+
+RESULT: 16/16 mutations were detected by their own test.
+Every mutation was caught by exactly the test that claims to cover it.
