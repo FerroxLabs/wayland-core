@@ -14,7 +14,7 @@ impl WorktreeManager {
         // UNC/device paths, so Linux is unaffected.
         let repo_root = normalized_root(repo_root)?;
         let repo_authority = DirectoryAuthority::open_observational(&repo_root)?;
-        let swarm_root = repo_root.join(".swarm-worktrees");
+        let swarm_root = repo_root.join(SWARM_ROOT_DIR);
         ensure_real_directory(&swarm_root)?;
         let swarm_root = normalized_root(&swarm_root)?;
         let swarm_authority = DirectoryAuthority::open(&swarm_root)?;
@@ -635,7 +635,8 @@ impl WorktreeManager {
             )));
         }
         let stdout = String::from_utf8_lossy(&out.stdout);
-        let reported = stdout.trim();
+        let reported = self.without_own_swarm_root(stdout.trim());
+        let reported = reported.as_str();
         if reported.is_empty() {
             return Ok(());
         }
@@ -643,6 +644,69 @@ impl WorktreeManager {
             return Ok(());
         }
         Err(SwarmError::DirtyCheckout(reported.to_string()))
+    }
+
+    /// Drop the ONE porcelain entry that reports the swarm's own minted
+    /// worktree root, and nothing else.
+    ///
+    /// # The defect this closes
+    ///
+    /// [`Self::new`] creates `<repo>/.swarm-worktrees/` INSIDE the repository
+    /// whose cleanliness [`Self::assert_clean`] judges. That directory is
+    /// untracked, so `git status --porcelain` reports `?? .swarm-worktrees/` and
+    /// the guard refused dispatch because of an artifact the swarm itself had
+    /// just created. Measured on Linux at the pre-fix commit, against a
+    /// throwaway repository with no `.gitignore`:
+    ///
+    /// * `--workers 8` ran **one** worker and refused the other seven, each with
+    ///   `dirty checkout — refused dispatch: ?? .swarm-worktrees/`, while the CLI
+    ///   still exited 0 — so the fanout silently had an effective parallelism of
+    ///   one;
+    /// * the SECOND dispatch against the same repository failed outright with
+    ///   exit 1 and zero workers, because the directory survives cleanup. That is
+    ///   the restart path, so a killed run could not be resumed at all.
+    ///
+    /// The unit suite did not catch either, because its fixture commits a
+    /// `.gitignore` naming `.swarm-worktrees/` — a workaround the shipping
+    /// product never performs for the user.
+    ///
+    /// # Why this is not a weakening of the guard
+    ///
+    /// The exclusion is deliberately the narrowest one that fixes it, and it
+    /// FAILS CLOSED everywhere else:
+    ///
+    /// * it applies only when this manager minted its root inside the repository
+    ///   (`swarm_parent == repo_root`). An orchestrator-owned root lives outside
+    ///   the repository, so a `.swarm-worktrees/` seen there is foreign residue
+    ///   and keeps refusing;
+    /// * it matches only the exact untracked-directory entry for that one path.
+    ///   A tracked modification, an addition, a deletion, a rename, an unmerged
+    ///   state, or any other path — including anything nested that git chose to
+    ///   report individually — is untouched and still refuses;
+    /// * it drops at most that single line. Every other reported entry survives
+    ///   into the refusal message unchanged.
+    ///
+    /// The v0.2.2 incident this gate exists for is a *worker* contaminating the
+    /// user's tree. The swarm's own container directory is not user work, and
+    /// admitting it cannot admit a worker's changes: those live one level deeper,
+    /// inside per-worker checkouts that are separate repositories.
+    fn without_own_swarm_root(&self, reported: &str) -> String {
+        if self.swarm_parent != self.repo_root {
+            return reported.to_owned();
+        }
+        if self.swarm_root.file_name().and_then(|name| name.to_str()) != Some(SWARM_ROOT_DIR) {
+            return reported.to_owned();
+        }
+        // Porcelain v1 renders an untracked directory as `?? <path>/`. Git quotes
+        // a path containing unusual bytes, but this one is a fixed ASCII literal
+        // this crate mints itself, so the unquoted form is the only one it can
+        // produce.
+        let own = format!("?? {SWARM_ROOT_DIR}/");
+        reported
+            .lines()
+            .filter(|line| *line != own)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Second pass for [`Self::assert_clean`]: is every reported entry a
