@@ -157,11 +157,17 @@ async fn two_runners_against_one_store_fire_a_due_job_exactly_once() {
     let arc_a: Arc<dyn JobHandler> = Arc::new(handler_a.clone());
     let arc_b: Arc<dyn JobHandler> = Arc::new(handler_b.clone());
 
-    // Both tick against the same store at the same instant.
-    tick_once_at(&store, &arc_a, Some(&history), &owner_handle, now)
+    // Both tick against the same store at the same instant, and the OBSERVER
+    // ticks FIRST. The order is load-bearing and was chosen by measurement:
+    // with the owner ticking first, its fire advances `last_fired`, the job
+    // stops being due, and the observer then fires nothing whether or not the
+    // lease is consulted at all — the assertion would pass against a runtime
+    // with the whole ownership check deleted. Ticking the observer against a
+    // still-due job is what makes this gate capable of going red.
+    tick_once_at(&store, &arc_b, Some(&history), &observer_handle, now)
         .await
         .unwrap();
-    tick_once_at(&store, &arc_b, Some(&history), &observer_handle, now)
+    tick_once_at(&store, &arc_a, Some(&history), &owner_handle, now)
         .await
         .unwrap();
 
