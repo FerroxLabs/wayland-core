@@ -1,0 +1,68 @@
+$ echo '### the receipt fields Phase 29 consumes, as they exist today:'; /usr/bin/sed -n '21,26p' crates/wcore-eval-scenarios/src/receipt.rs; /usr/bin/sed -n '40,58p' crates/wcore-eval-scenarios/src/receipt.rs; /usr/bin/sed -n '80,110p' crates/wcore-eval-scenarios/src/receipt.rs; echo '### the domain-separated signature message the receipt already uses:'; /usr/bin/sed -n '942,948p' crates/wcore-eval-scenarios/src/receipt.rs
+--- captured 2026-07-27T14:51:21Z at tree c6766f02498f7bc7dda1511108c1d59ef9741af0 ---
+### the receipt fields Phase 29 consumes, as they exist today:
+pub const RECEIPT_SCHEMA: &str = "wayland.eval.receipt";
+pub const RECEIPT_SCHEMA_VERSION: u32 = 1;
+pub const BEHAVIOR_SCHEMA: &str = "wayland.eval.behavior";
+pub const BEHAVIOR_SCHEMA_VERSION: u32 = 1;
+const SIGNATURE_DOMAIN: &[u8] = b"wayland.eval.receipt.v1\0";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceReceiptV1 {
+    pub schema: String,
+    pub schema_version: u32,
+    pub body_sha256: String,
+    pub body: ReceiptBodyV1,
+    pub authority: AuthorityClaimV1,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AuthorityClaimV1 {
+    Local,
+    Ci {
+        key_id: String,
+        signature_base64: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentityEvidenceV1 {
+    pub source_commit: String,
+    pub binary_sha256: String,
+    pub config_sha256: String,
+    pub fixture_sha256: String,
+    pub provider: String,
+    pub model: String,
+    pub build: Evidence<BuildProvenanceV1>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BuildProvenanceV1 {
+    pub repository: String,
+    pub source_ref: String,
+    pub workflow: String,
+    pub invocation_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TargetEvidenceV1 {
+    pub os: String,
+    pub architecture: String,
+    pub sandbox_backend: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyEvidenceV1 {
+    pub posture: String,
+    pub effective_policy_sha256: String,
+}
+### the domain-separated signature message the receipt already uses:
+fn signature_message(body_sha256: &str) -> Vec<u8> {
+    let mut message = Vec::with_capacity(SIGNATURE_DOMAIN.len() + body_sha256.len());
+    message.extend_from_slice(SIGNATURE_DOMAIN);
+    message.extend_from_slice(body_sha256.as_bytes());
+    message
+}
+
+--- exit=0 ---

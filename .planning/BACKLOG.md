@@ -547,3 +547,72 @@ and does not block.
   self-passing-gate list alongside "a test filter that matches nothing exits 0".
   Any cross-host workflow in this programme that syncs with `rsync -a` and then
   runs cargo is exposed.
+
+---
+
+## Phase 29-01 supply-chain census — MEDIUM and below (non-blocking)
+
+Measured at `c6766f02498f7bc7dda1511108c1d59ef9741af0`. Full detail and captured evidence:
+`.planning/phases/29-supply-chain-release-integrity/29-01-SUPPLY-CHAIN-CENSUS.md` and
+`evidence/29-01/`. The CRITICAL/HIGH set is NOT here — it binds 29-02 through 29-04 and is
+listed in the census gap table.
+
+### F29-CEN-21 · shipped `self-update --help` misstates the trust model · MEDIUM
+
+The shipped binary tells the user it "Verifies the `.sig` artifact against the pinned
+marketplace pubkey (ed25519) before atomic swap". None of that is true any more: there is no
+`.sig` artifact, no pinned pubkey in the update path, and verification is keyless Sigstore via
+`gh attestation verify`. `self_update.rs`'s own header records that the advertised scheme was
+removed (finding R16) precisely because it shipped an all-zeros placeholder key.
+
+Graded MEDIUM because the actual control is *stronger* than the advertised one and fails closed;
+the harm is that a user auditing their own supply chain is told a false mechanism. **Found only
+by running the binary** — the string lives in `crates/wcore-cli/src/main.rs:693`, not in the
+updater. Not repaired in 29-01 because `main.rs` is the all-lane shared fence. Owner: 29-03.
+
+### F29-CEN-01b · `nightly-windows-soak.yml` bypasses the 1.95.0 toolchain pin · MEDIUM
+
+Three jobs (lines 98, 311, 415) use `dtolnay/rust-toolchain@stable` instead of routing through
+`loonghao/vx@v0.9.17`, which honours `rust-toolchain.toml` / `vx.toml`. Not a release path.
+
+### F29-CEN-08 · reproducibility is never measured · MEDIUM
+
+No workflow, recipe or manifest sets `SOURCE_DATE_EPOCH`, rebuilds an artifact, or compares two
+build outputs. Each release binary is built exactly once per target, so no variance class is ever
+observed. Graded MEDIUM: a detective control, and attestation already binds builder identity.
+Owner: 29-02. (A bare grep for `reproducib` hits `ci.yml` five times; all five are comment prose
+about a runner crash — recorded as REFUTED, not evidence of a check.)
+
+### F29-CEN-12 · no freshness bound on the update offer · MEDIUM
+
+Zero occurrences of `expires|expiry|timestamp|published_at|created_at|freshness|SystemTime` in
+`self_update.rs`; the `Release` struct models only `tag_name` and `assets`, so no publication
+time is even parsed. Nothing detects a frozen `releases/latest`. Graded MEDIUM: exploiting it
+needs an adversary who can hold a TLS connection to `api.github.com` at a chosen response — a
+materially higher bar than the rollback gap (F29-CEN-11, HIGH), which needs no network position.
+Owner: 29-03.
+
+### F29-CEN-13 · no revocation surface is consulted · MEDIUM
+
+Zero occurrences of `revoke|revocation|crl|blocklist|denylist` in `self_update.rs`. There is no
+path by which a published-then-withdrawn release is refused by an already-installed client.
+Owner: 29-03.
+
+### F29-CEN-14 · single compile-time trust anchor · MEDIUM
+
+`pub const RELEASES_REPO` is the sole anchor and there is no runtime override (0 `env::var(`
+occurrences — deliberately so; an env var that repoints the updater would itself be an attack
+surface). Because the scheme is keyless there is no key list to rotate, but a policy change such
+as an org move requires a new binary.
+
+### F29-CEN-07b · `wayland-core-checksums.txt` is unattested · MEDIUM
+
+`sha256sum` runs *after* the attest step and the checksums file is not in `subject-path`, so it
+carries no Sigstore attestation while being uploaded as a release asset. The archives are
+individually attested, so the file is redundant rather than load-bearing. Owner: 29-02.
+
+### F29-CEN-02b · the release build omits `--locked` · LOW
+
+`release.yml:142,144` build without `--locked`, unlike the seven `--locked` call sites in
+`ci.yml` and `justfile`. The committed lockfile is honoured by default, so this is a hardening
+gap rather than a demonstrated divergence.

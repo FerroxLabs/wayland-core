@@ -1,0 +1,30 @@
+$ echo '### the ONLY authorization boundary in release.yml is the tag push + per-job token scopes:'; /usr/bin/grep -n 'on:$\|  push:\|    tags:\|workflow_dispatch:\|permissions:\|contents:\|id-token:\|attestations:\|GH_TOKEN\|NPM_TOKEN\|NODE_AUTH_TOKEN' .github/workflows/release.yml; echo '=> packaging (build), deployment preparation (github-release) and release acceptance (publish-npm) are all triggered by ONE act: pushing a tag matching v*-wayland-*. No human approval separates them.'
+--- captured 2026-07-27T14:50:54Z at tree c6766f02498f7bc7dda1511108c1d59ef9741af0 ---
+### the ONLY authorization boundary in release.yml is the tag push + per-job token scopes:
+4:  push:
+5:    tags:
+19:  workflow_dispatch:
+26:permissions:
+27:  contents: write
+182:    # A job-level block REPLACES the workflow-level `contents: write`, so it must
+183:    # be restated. `id-token: write` + `attestations: write` let
+186:    permissions:
+187:      contents: write
+188:      id-token: write
+189:      attestations: write
+215:          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+305:          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+427:  # `--version` on its native OS. Requires the org secret NPM_TOKEN (an
+436:    # `id-token: write` lets `npm publish --provenance` mint a keyless,
+439:    # `contents: write`; this job only reads the checked-out tag.
+440:    permissions:
+441:      contents: read
+442:      id-token: write
+448:      - name: Guard — NPM_TOKEN present
+452:          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+454:          if [ -z "${NPM_TOKEN:-}" ]; then
+455:            echo "::notice::NPM_TOKEN not set — skipping npm publish for this release."
+508:          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+523:          # `--provenance` rides the job's `id-token: write` to emit a keyless
+=> packaging (build), deployment preparation (github-release) and release acceptance (publish-npm) are all triggered by ONE act: pushing a tag matching v*-wayland-*. No human approval separates them.
+--- exit=0 ---

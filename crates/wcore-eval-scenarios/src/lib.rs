@@ -63,6 +63,10 @@ pub mod qa;
 pub mod receipt;
 pub mod receipt_policy;
 mod redaction;
+/// Phase 29 signed release manifest + role-scoped trust root (F29-01/F29-04).
+pub mod release_integrity;
+/// Phase 29 closed four-state release ledger (F29-04).
+pub mod release_states;
 pub mod report;
 pub mod runner;
 pub mod scenario;

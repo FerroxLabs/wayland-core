@@ -1,0 +1,16 @@
+$ echo '### is any artifact rebuilt and its digest compared?'; /usr/bin/grep -rniE 'bit-for-bit|SOURCE_DATE_EPOCH|rebuild.*(compare|verify)|reproducible build' .github/workflows justfile Cargo.toml 2>/dev/null || echo 'ZERO MATCHES: nothing rebuilds and compares.'; echo ''; echo '### NOISE DECLARED: a bare grep for reproducib* DOES hit ci.yml. Those hits are English prose in comments about a runner crash, not a reproducibility check:'; /usr/bin/grep -rn 'reproducib' .github/workflows/ci.yml; echo ''; echo '### how many times is the release binary built per target?'; /usr/bin/grep -c 'cargo build --release\|cross build --release' .github/workflows/release.yml; echo '=> built once per target. No second build exists, so no variance class is ever observed and no reproducibility verdict is ever produced.'
+--- captured 2026-07-27T14:51:52Z at tree c6766f02498f7bc7dda1511108c1d59ef9741af0 ---
+### is any artifact rebuilt and its digest compared?
+ZERO MATCHES: nothing rebuilds and compares.
+
+### NOISE DECLARED: a bare grep for reproducib* DOES hit ci.yml. Those hits are English prose in comments about a runner crash, not a reproducibility check:
+.github/workflows/ci.yml:87:        # reproducibly crashes the runner agent ~56s into the nextest
+.github/workflows/ci.yml:216:      # at ~56s reproducibly (logs: BlobNotFound 404; step stuck
+.github/workflows/ci.yml:327:      # top of this file (line 28: "reproducibly crashes the runner agent
+.github/workflows/ci.yml:367:  # ~56s reproducibly during this specific nextest invocation (logs
+.github/workflows/ci.yml:377:  # reproducible by any contributor or customer who pulls the same
+
+### how many times is the release binary built per target?
+2
+=> built once per target. No second build exists, so no variance class is ever observed and no reproducibility verdict is ever produced.
+--- exit=0 ---

@@ -1,0 +1,28 @@
+$ cat rust-toolchain.toml; echo '### vx.toml [tools]'; /usr/bin/sed -n '1,5p' vx.toml; echo '### every workflow toolchain-install step'; /usr/bin/grep -rn 'loonghao/vx\|dtolnay/rust-toolchain\|actions-rs/toolchain\|rustup toolchain install\|rustup default\|rustup target add' .github/workflows/
+--- captured 2026-07-27T14:49:49Z at tree c6766f02498f7bc7dda1511108c1d59ef9741af0 ---
+[toolchain]
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]
+
+### vx.toml [tools]
+[tools]
+just = "1.48.1"
+rust = "1.95.0"
+
+[settings]
+### every workflow toolchain-install step
+.github/workflows/release.yml:116:        uses: loonghao/vx@v0.9.17
+.github/workflows/release.yml:122:        run: rustup target add ${{ matrix.target }}
+.github/workflows/nightly-windows-soak.yml:98:        uses: dtolnay/rust-toolchain@stable
+.github/workflows/nightly-windows-soak.yml:311:        uses: dtolnay/rust-toolchain@stable
+.github/workflows/nightly-windows-soak.yml:415:        uses: dtolnay/rust-toolchain@stable
+.github/workflows/bench-regression.yml:64:        uses: loonghao/vx@v0.9.17
+.github/workflows/release-please.yml:11:# Design: Two-job approach (mirrors loonghao/vx) to avoid duplicate-PR bug.
+.github/workflows/e2e.yml:76:        uses: loonghao/vx@v0.9.17
+.github/workflows/marketplace-drift.yml:37:        uses: loonghao/vx@v0.9.17
+.github/workflows/ci.yml:102:        uses: loonghao/vx@v0.9.17
+.github/workflows/ci.yml:456:        uses: loonghao/vx@v0.9.17
+.github/workflows/ci.yml:462:        run: rustup target add ${{ matrix.target }}
+.github/workflows/ci.yml:539:        uses: loonghao/vx@v0.9.17
+.github/workflows/mutants-nightly.yml:75:        uses: loonghao/vx@v0.9.17
+--- exit=0 ---

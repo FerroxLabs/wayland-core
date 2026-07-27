@@ -1,0 +1,20 @@
+$ ssh hetzner-dsm: wayland-core --version; self-update --check-only; self-update --help  (NO credential — GH_TOKEN and GITHUB_TOKEN explicitly unset)
+--- captured 2026-07-27T14:55:38Z ---
+--- remote exit status captured into rc BEFORE any filtering; a failing binary exits 21/22/23 and is NOT masked by a trailing echo ---
+c6766f02498f7bc7dda1511108c1d59ef9741af0
+GH_TOKEN=[<unset>] GITHUB_TOKEN=[<unset>]
+### wayland-core --version
+wayland-core 0.12.25
+### wayland-core self-update --check-only (real public API, unauthenticated)
+current: v0.12.25
+latest:  v0.12.25
+already up to date.
+### self-update --help (the full shipped surface)
+v0.8.1 U9: update wayland-core to the latest signed release from `FerroxLabs/wayland-core`. Verifies the `.sig` artifact against the pinned marketplace pubkey (ed25519) before atomic swap. Use `--check-only` to print versions without installing
+
+Usage: wayland-core self-update [OPTIONS]
+
+Options:
+      --check-only  Print current vs. latest version and exit without installing
+  -h, --help        Print help
+--- remote rc=0 ---

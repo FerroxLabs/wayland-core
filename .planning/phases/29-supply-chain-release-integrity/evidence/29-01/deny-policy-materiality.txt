@@ -1,0 +1,12 @@
+$ (materiality of the never-executed deny.toml policy)
+--- captured 2026-07-27T14:52:40Z at tree c6766f02498f7bc7dda1511108c1d59ef9741af0 ---
+### git sources in Cargo.lock (deny.toml declares unknown-git = "deny", allow-git = []):
+0
+### the distinct git sources actually present:
+
+### total crates in the lockfile that the license allowlist would be checked against:
+1017
+
+### copyleft-family license strings anywhere in the vendored manifests we can see from the lockfile alone: NOT DETERMINABLE without running cargo-deny.
+=> This is the point. The allowlist, the yanked=deny, the unknown-registry=deny and the unknown-git=deny rules have NEVER been evaluated against this lockfile, so the answer to 'does this dependency set comply with the declared policy?' is UNKNOWN, not 'yes'.
+--- exit=0 ---

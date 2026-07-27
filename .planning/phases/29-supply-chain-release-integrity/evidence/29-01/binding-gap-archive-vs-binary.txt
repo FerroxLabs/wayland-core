@@ -1,0 +1,69 @@
+$ echo '### WHAT IS ATTESTED — the Sigstore subject is the ARCHIVE:'; /usr/bin/sed -n '197,205p' .github/workflows/release.yml; echo ''; echo '### WHAT IS CERTIFIED — receipt identity digest is the EXTRACTED BINARY:'; /usr/bin/sed -n '80,90p' crates/wcore-eval-scenarios/src/receipt.rs; echo ''; echo '### THE RECEIPT BODY IN FULL — it carries no packaged-archive field:'; /usr/bin/sed -n '59,78p' crates/wcore-eval-scenarios/src/receipt.rs; echo ''; echo '### DOES ANY RELEASE-PATH FILE BIND AN ARCHIVE DIGEST TO A BINARY DIGEST?'; /usr/bin/grep -rn 'archive_sha256\|archive_digest\|packaged_artifact' --include='*.rs' crates/wcore-cli crates/wcore-eval-scenarios/src/receipt.rs crates/wcore-eval-scenarios/src/receipt_policy.rs 2>/dev/null || echo 'ZERO MATCHES in the updater, the receipt or the receipt policy.'; echo ''; echo '### NOISE DECLARED: the tree-wide grep for artifact_sha256 DOES hit these files, and they are NOT the release path — they are the remote-execution fixture (a different subsystem, Phase 25 lineage):'; /usr/bin/grep -rln 'artifact_sha256' --include='*.rs' crates/; echo ''; echo '### The checksums file that release.yml DOES produce covers archives only, and is generated AFTER attestation and is itself unattested:'; /usr/bin/sed -n '206,211p' .github/workflows/release.yml; echo '=> CONCLUSION: the archive is attested by Sigstore; the binary is certified by the receipt; NOTHING binds those two objects to one another.'
+--- captured 2026-07-27T14:51:51Z at tree c6766f02498f7bc7dda1511108c1d59ef9741af0 ---
+### WHAT IS ATTESTED — the Sigstore subject is the ARCHIVE:
+      - name: Attest build provenance (keyless, Sigstore-backed)
+        uses: actions/attest-build-provenance@v4
+        with:
+          # Attest the distributed archives themselves — that is what consumers
+          # download and what `gh attestation verify <archive>` checks.
+          subject-path: |
+            artifacts/wayland-core-*.tar.gz
+            artifacts/wayland-core-*.zip
+
+
+### WHAT IS CERTIFIED — receipt identity digest is the EXTRACTED BINARY:
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentityEvidenceV1 {
+    pub source_commit: String,
+    pub binary_sha256: String,
+    pub config_sha256: String,
+    pub fixture_sha256: String,
+    pub provider: String,
+    pub model: String,
+    pub build: Evidence<BuildProvenanceV1>,
+}
+
+
+### THE RECEIPT BODY IN FULL — it carries no packaged-archive field:
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiptBodyV1 {
+    pub run_id: String,
+    pub identity: IdentityEvidenceV1,
+    pub target: TargetEvidenceV1,
+    pub policy: PolicyEvidenceV1,
+    pub timings: TimingEvidenceV1,
+    pub provider: ProviderEvidenceV1,
+    pub tools: Vec<ToolEvidenceV1>,
+    pub decisions: Vec<DecisionEvidenceV1>,
+    pub boundaries: BoundaryEvidenceV1,
+    pub process: ProcessEvidenceV1,
+    pub recovery: RecoveryEvidenceV1,
+    pub canary_scans: CanaryScanEvidenceV1,
+    pub assertions: Vec<AssertionEvidenceV1>,
+    pub quarantines: Vec<QuarantineEvidenceV1>,
+    pub required_cells: Vec<String>,
+    pub results: Vec<CellResultV1>,
+    pub summary: SummaryEvidenceV1,
+}
+
+### DOES ANY RELEASE-PATH FILE BIND AN ARCHIVE DIGEST TO A BINARY DIGEST?
+ZERO MATCHES in the updater, the receipt or the receipt policy.
+
+### NOISE DECLARED: the tree-wide grep for artifact_sha256 DOES hit these files, and they are NOT the release path — they are the remote-execution fixture (a different subsystem, Phase 25 lineage):
+crates/wcore-eval-scenarios/tests/remote_execution_fixture_contract.rs
+crates/wcore-eval-scenarios/src/fixtures/remote_execution.rs
+crates/wcore-exec-backend/tests/node_contract.rs
+crates/wcore-exec-backend/tests/fail_closed_matrix.rs
+crates/wcore-exec-backend/src/backends/mod.rs
+crates/wcore-exec-backend/src/receipt.rs
+crates/wcore-exec-backend/src/node/attribution.rs
+
+### The checksums file that release.yml DOES produce covers archives only, and is generated AFTER attestation and is itself unattested:
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd artifacts
+          sha256sum wayland-core-* > wayland-core-checksums.txt
+
+=> CONCLUSION: the archive is attested by Sigstore; the binary is certified by the receipt; NOTHING binds those two objects to one another.
+--- exit=0 ---

@@ -1,0 +1,36 @@
+$ echo '### freshness: does the updater bound the age of the offer, or compare a monotonic counter?'; echo -n 'occurrences of a timestamp/expiry/freshness check in self_update.rs: '; /usr/bin/grep -cE 'expires|expiry|timestamp|published_at|created_at|freshness|SystemTime' crates/wcore-cli/src/self_update.rs; echo '### revocation: does the updater consult any revocation list?'; echo -n 'occurrences of revocation vocabulary: '; /usr/bin/grep -ciE 'revoke|revocation|crl|blocklist|denylist' crates/wcore-cli/src/self_update.rs; echo '### multi-key: how many trust anchors can the updater hold?'; /usr/bin/grep -n 'pub const RELEASES_REPO' crates/wcore-cli/src/self_update.rs; echo '=> one compile-time repo pin, keyless. No key list, so no rotation and no revocation surface exists to consult.'; echo '### the Release struct models only these fields:'; /usr/bin/sed -n '100,124p' crates/wcore-cli/src/self_update.rs
+--- captured 2026-07-27T14:50:54Z at tree c6766f02498f7bc7dda1511108c1d59ef9741af0 ---
+### freshness: does the updater bound the age of the offer, or compare a monotonic counter?
+occurrences of a timestamp/expiry/freshness check in self_update.rs: 0
+### revocation: does the updater consult any revocation list?
+occurrences of revocation vocabulary: 0
+### multi-key: how many trust anchors can the updater hold?
+38:pub const RELEASES_REPO: &str = "FerroxLabs/wayland-core";
+=> one compile-time repo pin, keyless. No key list, so no rotation and no revocation surface exists to consult.
+### the Release struct models only these fields:
+/// Raw GitHub release shape. Only the fields we read are modeled.
+#[derive(Debug, serde::Deserialize)]
+pub struct Release {
+    #[serde(rename = "tag_name")]
+    pub tag: String,
+    pub assets: Vec<Asset>,
+}
+
+impl Release {
+    /// Strip the leading `v` and the trailing `-wayland-base` from the
+    /// release tag so consumers see a SemVer string that matches
+    /// `CARGO_PKG_VERSION`.
+    pub fn version(&self) -> &str {
+        self.tag
+            .trim_start_matches('v')
+            .trim_end_matches("-wayland-base")
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct Asset {
+    pub name: String,
+    pub browser_download_url: String,
+}
+
+--- exit=0 ---

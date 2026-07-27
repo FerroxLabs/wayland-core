@@ -1,0 +1,16 @@
+$ ls -l Cargo.lock; echo '### --locked usage across workflows and justfile'; /usr/bin/grep -rn -- '--locked' .github/workflows justfile; echo '### release.yml build invocations'; /usr/bin/grep -n 'cargo build --release\|cross build --release' .github/workflows/release.yml
+--- captured 2026-07-27T14:49:49Z at tree c6766f02498f7bc7dda1511108c1d59ef9741af0 ---
+-rw-r--r--@ 1 seandonahoe  staff  268139 Jul 27 21:46 Cargo.lock
+### --locked usage across workflows and justfile
+.github/workflows/ci.yml:204:        run: vx cargo test --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
+.github/workflows/ci.yml:310:          RUN cargo install --locked cargo-nextest --version "^0.9"
+.github/workflows/ci.yml:311:          RUN cargo install --locked cargo-audit
+.github/workflows/ci.yml:351:        run: $DOCKER_RUN -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} "$CI_IMAGE" cargo test --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
+.github/workflows/ci.yml:394:        run: cargo install --locked cargo-nextest --version "^0.9"
+justfile:173:    vx cargo build --locked -p wcore-cli --bin wayland-core
+justfile:179:    vx cargo test --locked -p wcore-eval-scenarios \
+justfile:184:    $dirty = git status --porcelain --untracked-files=normal; if ($dirty) { Write-Error "F01 packaged-driver gate requires a clean source tree"; exit 2 }; $env:WAYLAND_BUILD_SOURCE_SHA = (git rev-parse HEAD).Trim(); vx cargo build --locked -p wcore-cli --bin wayland-core; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "target" }; $env:WCORE_EVAL_BIN = [System.IO.Path]::GetFullPath((Join-Path $target "debug/wayland-core.exe")); vx cargo test --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate; exit $LASTEXITCODE
+### release.yml build invocations
+142:            cross build --release --target ${{ matrix.target }} -p wcore-cli
+144:            vx cargo build --release --target ${{ matrix.target }} -p wcore-cli
+--- exit=0 ---

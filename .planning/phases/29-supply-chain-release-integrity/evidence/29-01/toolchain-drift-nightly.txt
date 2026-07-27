@@ -1,0 +1,29 @@
+$ echo '### three jobs install an UNPINNED toolchain instead of the vx/rust-toolchain.toml pin:'; /usr/bin/grep -n -B3 -A2 'dtolnay/rust-toolchain@stable' .github/workflows/nightly-windows-soak.yml; echo '### the pin they bypass:'; cat rust-toolchain.toml
+--- captured 2026-07-27T14:50:34Z at tree c6766f02498f7bc7dda1511108c1d59ef9741af0 ---
+### three jobs install an UNPINNED toolchain instead of the vx/rust-toolchain.toml pin:
+95-      - uses: actions/checkout@v4
+96-
+97-      - name: Setup Rust toolchain
+98:        uses: dtolnay/rust-toolchain@stable
+99-
+100-      - name: Install cargo-nextest
+--
+308-          }
+309-
+310-      - name: Setup Rust toolchain
+311:        uses: dtolnay/rust-toolchain@stable
+312-
+313-      - name: Install cargo-nextest
+--
+412-          }
+413-
+414-      - name: Setup Rust toolchain
+415:        uses: dtolnay/rust-toolchain@stable
+416-
+417-      - name: Install cargo-nextest
+### the pin they bypass:
+[toolchain]
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]
+
+--- exit=0 ---

@@ -1,0 +1,25 @@
+$ echo '### every job in release.yml, in order, with its needs: edges:'; /usr/bin/grep -n '^  [a-z-]*:$\|^    name:\|^    needs:\|^      - prepare-release\|^      - build\|^      - github-release\|^      - post-tag-smoke\|^    permissions:\|^    environment:' .github/workflows/release.yml; echo '### does ANY workflow declare a GitHub Environment (the only native approval gate)?'; /usr/bin/grep -rn 'environment:' .github/workflows/ || echo 'ZERO: no job in any workflow declares an environment, so NO manual approval gate exists anywhere in the release pipeline.'; echo '### does ANY step rehearse a rollback?'; /usr/bin/grep -rniE 'rollback|roll-back|revert release|downgrade|previous version' .github/workflows/ || echo 'ZERO: no workflow mentions rollback in any form.'
+--- captured 2026-07-27T14:50:54Z at tree c6766f02498f7bc7dda1511108c1d59ef9741af0 ---
+### every job in release.yml, in order, with its needs: edges:
+37:    name: Prepare Release Metadata
+56:    name: Build ${{ matrix.target }}
+58:    needs: prepare-release
+177:    name: Upload GitHub Release assets
+179:    needs:
+180:      - prepare-release
+181:      - build
+186:    permissions:
+256:    name: Smoke ${{ matrix.target }}
+258:    needs:
+259:      - prepare-release
+260:      - github-release
+431:    name: Publish to npm
+433:    needs:
+434:      - prepare-release
+435:      - post-tag-smoke
+440:    permissions:
+### does ANY workflow declare a GitHub Environment (the only native approval gate)?
+ZERO: no job in any workflow declares an environment, so NO manual approval gate exists anywhere in the release pipeline.
+### does ANY step rehearse a rollback?
+ZERO: no workflow mentions rollback in any form.
+--- exit=0 ---
