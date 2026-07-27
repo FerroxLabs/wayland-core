@@ -158,7 +158,7 @@ summary table above; nothing above it is edited, so the trajectory stays legible
 | Criterion | Was | Now | Why |
 |---|---|---|---|
 | 1 — three surfaces observe identical state | FAILED, not attempted | **FAILED**, one surface of three | `wayland-core goal` exists and emits the canonical projection; no TUI surface, no host-protocol Goal events, no fixtures. Agreement needs at least two. |
-| 2 — fleet claims survive kill/restart | FAILED, not attempted | **PASSED on Linux against the shipped binary; NOT CLOSED on Windows** | See below. |
+| 2 — fleet claims survive kill/restart | FAILED, not attempted | **PASSED, both platforms, against the shipped binary** | See below. |
 | 3 — one canonical terminal transition | FAILED, measured not built | **FAILED**, unchanged | The five engines still return `ClimbOutcome`, `CouncilRunResult`, `WorkflowRunError`, a caller-chosen `T`, and nothing. The ledger uses `GoalTerminalState` for task outcomes, which is one more real consumer of the taxonomy, but the adapter surface over the five owners was not built. No lane attempted 22-02 Task 3. |
 | 4 — bounded session-local loops | FAILED, vocabulary only | **PARTIAL** | `LoopPolicy::Fixed` is now enforced by the reducer at the durable boundary and the bound survives a restart, because the count lives in the chain. `Dynamic`, `EventDriven` and `Manual` still have no runtime enforcement, and preemption / missed intervals are untouched. |
 | 5 — journal compatibility proved or migrated | PARTIAL | **PARTIAL**, unchanged | The Windows M1–M5 legs were still not taken. The `tasks` field added by the ledger carries `skip_serializing_if`, and F-7 added the falsifiable guard the original grading said was missing, so the "no regression canary" half is better than it was. The Linux-only half is not. |
@@ -190,13 +190,13 @@ This retires the caveat three successive summaries carried honestly — that the
 proof was a real process but a test harness, not the product. It is now the
 product. Full record: `22-03-SUMMARY-WIRE.md`.
 
-**NOT CLOSED on Windows.** The release build did not finish inside the session.
-A leg that did not run is recorded as not run and is never inferred from Linux —
-which is the exact error F-1 punished earlier in this phase, where a race Windows
-happened to win was read as a race that was absent. Everything needed is staged:
-`C:\p22gk` is at the lane commit and
-`22-03-EVIDENCE/wire-live/live-windows-proof.ps1` is the platform-matched
-scenario, using `taskkill /T /F` for the uncatchable tree kill.
+**Windows: PASSED, same numbers.** `taskkill /T /F` on the process tree at
+2026-07-27T13:12:06Z: 7 descendants → 0 (2 `PING.EXE` workers, 2 `cmd.exe`, 2
+`wayland-core.exe` exec-task children, 1 `conhost.exe`), killed parent confirmed
+gone, restart exit 0, 2 claims revoked, 4 completions drained from the outbox,
+effects 12 / 12 / 12, 14 attempts, 12 dependency releases, 0 unresolved, and the
+same `produced=no reason=idempotency-key-present` on the reassigned task. Gate
+falsified to exit 1 and restored in the same run.
 
 ## Claim-model conditions
 
@@ -210,16 +210,13 @@ scenario, using `taskkill /T /F` for the uncatchable tree kill.
 
 ## What the next session should do first, in order
 
-1. **Take the Windows shipped-binary leg.** One command once the build lands:
-   `powershell -File 22-03-EVIDENCE/wire-live/live-windows-proof.ps1`. This is the
-   only thing standing between Criterion 2 and a two-platform pass.
-2. **22-02 Task 3 — the adapter surface over the five loop owners.** This is
+1. **22-02 Task 3 — the adapter surface over the five loop owners.** This is
    Criterion 3, it is the phase's hard criterion, and no lane has attempted it.
    The census in `22-02-LOOP-OWNER-CENSUS.md` already says exactly what each of
    the five produces and where Fleet must bind.
-3. **The TUI Goal surface and the typed host command set**, in that order. The
+2. **The TUI Goal surface and the typed host command set**, in that order. The
    canonical projection they must consume already exists and is emitted by
    `wayland-core goal status`; the contract seam request in `22-04-SUMMARY.md`
    explains why command fixtures must wait for the typed command set.
-4. **The Windows M1–M5 journal-compatibility legs** (Criterion 5), unchanged from
+3. **The Windows M1–M5 journal-compatibility legs** (Criterion 5), unchanged from
    the original list.

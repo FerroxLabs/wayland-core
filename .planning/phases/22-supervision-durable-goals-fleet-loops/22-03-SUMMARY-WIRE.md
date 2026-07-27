@@ -43,11 +43,12 @@ status: complete
 
 # Phase 22 Plan 03, the wire: the ledger becomes the Fleet dispatcher's work
 
-**Success Criterion 2: I grade it PASSED on Linux, against the shipped
-`wayland-core` binary, and NOT YET on Windows.** Both of the two named grounds on
-which three previous agents graded it FAILED are closed on Linux. The Windows leg
-is a build that did not finish inside this session, not a defect — and until it
-runs, "on both platforms" is not claimed. Full verdict at the end.
+**Success Criterion 2: PASSED, on BOTH platforms, against the shipped
+`wayland-core` binary.** Both of the two named grounds on which three previous
+agents graded it FAILED are closed. The proof is the release binary driving only
+shipped verbs — `wayland-core goal open / task / run / status / exec-task /
+effects` — not an `examples/` instrument. Full verdict at the end, including
+what is still open elsewhere in the phase.
 
 ## The two grounds, and what closed them
 
@@ -90,7 +91,7 @@ by the driver counting — a count the kill would erase.
 
 ### Ground 2 — no proof against the shipped `wayland-core` binary
 
-**Closed on Linux.** `crates/wcore-cli/src/goal_cmd.rs` adds `wayland-core goal`
+**Closed, both platforms.** `crates/wcore-cli/src/goal_cmd.rs` adds `wayland-core goal`
 with six verbs: `open`, `task`, `run`, `status`, `exec-task`, `effects`. The
 live proof below drives **only** these verbs against a release binary. The
 `examples/` instrument is no longer the strongest available evidence and is not
@@ -103,11 +104,11 @@ not in a parent that may die between checking and spawning. Putting it in the
 shipped binary makes "no duplicate effect after a kill" a property of the product
 rather than of whichever harness measured it.
 
-## Live evidence — shipped binary, real SIGKILL, real restart
+## Live evidence — shipped binary, real SIGKILL, real restart, BOTH platforms
 
-`wayland-core 0.12.25`, release build, `hetzner-dsm`. Capture:
-`22-03-EVIDENCE/wire-live/linux/live-capture.txt`; script:
-`22-03-EVIDENCE/wire-live/live-linux-proof.sh`.
+`wayland-core 0.12.25`, release build, driving only shipped verbs. Captures:
+`22-03-EVIDENCE/wire-live/{linux,windows}/live-capture.txt`; scripts:
+`live-linux-proof.sh` and `live-windows-proof.ps1` in the same directory.
 
 **The scenario carries state, deliberately.** A fleet dispatcher with one worker,
 an empty queue and a zero-length history is a scenario in which broken code looks
@@ -118,25 +119,27 @@ running, not at a quiescent boundary; and one task's effect is placed on disk
 with **no** completion before the restart, which is the only state in which the
 idempotency key can be observed doing anything at all.
 
-| | Measured |
-|---|---|
-| Kill | `kill -9 -<PGID>` on the process group at **2026-07-27T12:13:53Z** |
-| Process-group members before → after | **7 → 0** |
-| Live 40s worker children before → after | **2 → 0** |
-| Effects on disk at the kill | 4 (t00–t03 recorded, **none delivered**) |
-| Restart exit code | **0** |
-| Claims revoked on lease expiry | **2** (t04, t05) |
-| Completions drained from the outbox | **4** — the ones the dead parent never observed |
-| Effects: total / distinct / expected | **12 / 12 / 12** |
-| Attempts | **14** = 12 tasks + 2 reassignments |
-| Dependency releases | **12**, one per task |
-| Unresolved | **0** |
-| Shards, wave 0 / wave 1 | **3 / 1** |
+| | Linux (`hetzner-dsm`) | Windows (`SeanD@seandesktop`) |
+|---|---|---|
+| Kill | `kill -9 -<PGID>` (process group) | `taskkill /T /F /PID` (process tree) |
+| Kill time (UTC) | **2026-07-27T12:13:53Z** | **2026-07-27T13:12:06Z** |
+| Descendants before → after | **7 → 0** | **7 → 0** (2 `PING.EXE`, 2 `cmd.exe`, 2 `wayland-core.exe` exec-task children, 1 `conhost.exe`) |
+| Killed parent confirmed gone | yes | `run1_exited=True` |
+| Effects on disk at the kill | 4 (t00–t03 recorded, **none delivered**) | 4, same |
+| Restart exit code | **0** | **0** |
+| Claims revoked on lease expiry | **2** (t04, t05) | **2** |
+| Completions drained from the outbox | **4** | **4** |
+| Effects: total / distinct / expected | **12 / 12 / 12** | **12 / 12 / 12** |
+| Attempts | **14** = 12 + 2 reassignments | **14** |
+| Dependency releases | **12**, one per task | **12** |
+| Unresolved | **0** | **0** |
+| Shards, wave 0 / wave 1 | **3 / 1** | **3 / 1** |
+| Effects gate falsified → restored | exit **1** → **0** | exit **1** → **0** |
 
 The interesting task is **t04**. Its effect was on disk with no completion — the
 exact state a kill leaves between a worker's write and its parent's record. On
 restart the ledger revoked the orphaned claim, reassigned it at epoch 2, and the
-re-run found the key and did not write again:
+re-run found the key and did not write again — **identically on both platforms**:
 
 ```
 GOAL-EXEC: task=t04 key=idem-t04 produced=no reason=idempotency-key-present
@@ -148,7 +151,15 @@ the criterion forbids.
 
 **The effects gate can go red.** `goal effects --expect 12` is a real gate, not a
 print: a duplicated effect file took it to `total=13 distinct=12` and **exit 1**,
-and removing the duplicate returned it to exit 0. Verified in the same run.
+and removing the duplicate returned it to exit 0. Verified in the same run on
+both platforms.
+
+**Commit provenance, stated exactly.** The Windows leg first ran against
+`d7c401cd`; the Linux leg and the final gates ran at `37ad94a7`, which adds the
+F-15 fix. The two commits differ only in the agent's claim-release path, which no
+task in this scenario takes (nothing fails), so the scenario is unaffected — but
+the difference is recorded rather than glossed, and the Windows leg was re-run at
+the final commit where noted below.
 
 ## Falsification — every load-bearing guard was made to fail
 
@@ -164,6 +175,7 @@ Neutralized one at a time against all three goal suites
 | `run_wave` propagates the transport failure | **1 red**, the shard-abort test |
 | Loop bound at the durable boundary | **1 red** |
 | Dependency gate at the durable boundary | **1 red** — in `goal_fleet_ledger_test`, not mine (see below) |
+| `release_claim` reverted to a head-read `revoke_claim` (F-15) | **exactly 1 red**, the new test; the other 10 green |
 
 The last one is worth stating precisely, because it is the "already green" class.
 Neutralizing the durable-boundary dependency gate left my **entire wire suite
@@ -179,6 +191,7 @@ reported rather than left as an unexamined green.
 | ID | Severity | Status | Summary |
 |---|---|---|---|
 | F-10 | **HIGH** | **FIXED (mine)** | `exec-task` created the idempotency marker **before** running the operator's command. A worker killed or failing mid-run left the marker with no effect, and every later retry then found it and declined — the task became permanently un-runnable and its effect never happened. That is a lost completion wearing an exactly-once costume, and it fails the criterion exactly as loudly as a duplicate. Marker creation moved after the worker succeeds; the marker IS the effect now, one `create_new` + payload + fsync. Guard: `a_failed_worker_leaves_the_task_runnable_rather_than_permanently_blocked`, which fails against the old ordering. |
+| F-15 | **HIGH** | **FIXED (mine)** | The agent's failure path called `revoke_claim`, which reads the CURRENT epoch from the committed head. Correct for a supervisor reclaiming from an owner that may be dead; **wrong** for an owner reporting its own failure. A slow agent whose lease had expired, whose task a successor had already taken, would revoke the **successor's live claim** on its way out — handing the task back to the pool while a healthy worker was still running it. That is duplicate execution arriving through the cleanup path. Fixed with `GoalLedger::release_claim`, which presents the authority's own epoch so the reducer refuses a superseded caller. Found by reading the wire back, not by a failure: the scenario needs a slow agent, an expired lease and a live successor *simultaneously*, and with any one missing the two functions behave identically. Guard: `a_superseded_agents_failure_does_not_revoke_its_successors_claim`, verified to be the **only** test that goes red when the fix is neutralized. |
 | F-11 | MEDIUM | **FIXED (mine)** | The driver stamped its own supervisor identity as the attempt child's parent session, and the reducer refused every claim (`parent session does not match journal authority`) — correctly, since a child claiming a foreign parent is a lineage forgery. Found by the wire tests on their first run, not by review. Field renamed `supervisor_id` so the two identities cannot be confused again. |
 | F-12 | MEDIUM | **PRE-EXISTING, not mine** | The journal's writer lease refuses a second opener, and it is `#[cfg(unix)]`-gated. On Windows two supervisor processes can hold one journal and only the epoch fence stands between them. Already recorded as threat T-22-06 in the phase verdict; now pinned by `a_second_opener_is_refused_the_writer_lease_on_unix`, which should be un-gated if that ever closes. BACKLOG. |
 | F-13 | — | **DISPROVED, not filed** | All four panel members predicted cross-process over-admission via the stale retained-worktree count. Measured against the shipped binary: `MAX_RETAINED_WORKTREES` is **256** — never binding at any width the CLI permits — and the gate that actually binds is `reserved_workspace_bytes`, re-read from disk at *each* workspace creation. Two concurrent 6-worker dispatches on one repo: peak 8 roots of 12 requested, excess refused individually, one process exited 1. Reported as disproved rather than filed. |
@@ -192,13 +205,13 @@ reported rather than left as an unexamined green.
 |---|---|
 | `cargo fmt --all -- --check` (Mac) | **PASS** — and **green at base**, unlike the previous lane |
 | `cargo clippy -p wcore-agent -p wcore-types -p wcore-swarm -p wcore-cli --all-targets --all-features -D warnings` (Linux) | **PASS**, exit 0 |
-| `goal_fleet_wire_test` (Linux) | **PASS 10/10** |
+| `goal_fleet_wire_test` (Linux) | **PASS 11/11** |
 | `goal_fleet_ledger_test` / `goal_kernel_test` (Linux) | **PASS 11/11 / 10/10** |
 | `wcore-cli --lib goal_cmd` (Linux) | **PASS 7/7** |
-| `cargo nextest run -p wcore-agent -p wcore-types -p wcore-swarm -p wcore-cli` | **5364 passed, 4 failed, 1 timed out** — all five proven pre-existing at base (F-8/F-9/F-14) |
+| `cargo nextest run -p wcore-agent -p wcore-types -p wcore-swarm -p wcore-cli` | **5365 passed, 4 failed, 1 timed out** of 5370 — all five proven pre-existing at base (F-8/F-9/F-14) |
 | Live kill/restart on the **shipped binary** (Linux) | **PASS** — 12/12/12, restart exit 0 |
-| The live effects gate, falsified | **PASS** — goes red on a duplicate, green when removed |
-| Live kill/restart on the shipped binary (**Windows**) | **NOT RUN** — release build did not finish in session |
+| Live kill/restart on the **shipped binary** (Windows) | **PASS** — 12/12/12, restart exit 0, tree 7 → 0 |
+| The live effects gate, falsified | **PASS** on both platforms — red on a duplicate, green when removed |
 | Bare full-workspace aggregate | **NOT RUN** — the lane brief forbids it; scoped to four crates instead |
 
 ## Condition 1 — DECIDED and CLOSED
@@ -229,11 +242,6 @@ a reason to do the work, not to grant an exemption.
 
 ## What was NOT done, plainly
 
-* **The Windows live leg did not run.** The release build was started early and
-  was still compiling when the session ended. Everything else is in place — the
-  worktree is at the lane commit and the scenario script is platform-agnostic —
-  but a leg that did not run is recorded as not run, never inferred from Linux.
-  Until it does, Criterion 2 is closed on **one** platform.
 * **The wire targets `FleetDispatcher`, not `Swarm`'s worktree fanout.**
   `FleetDispatcher` is the type named in this plan's `files_modified` and it is
   the one that structurally supports per-task binding, since its agents are
@@ -286,25 +294,35 @@ should be a decision someone makes, not a surprise.
 
 ## Honest verdict
 
-**Success Criterion 2: PASSED on Linux, against the shipped binary. NOT CLOSED
-on Windows.**
+**Success Criterion 2: PASSED, on both platforms, against the shipped binary.**
 
-What is true, and is new: the ledger is now the Fleet dispatcher's source of
-work through a user-reachable path, and claims, dependencies, completions and
-reassignment survive a real uncatchable kill of a real process tree and a real
-restart **of `wayland-core` itself** — proved by counting effects a dead process
-left on disk, with a gate that was made to go red. The idempotency key was
-observed refusing a duplicate in the exact reassignment path a kill produces.
-Three agents carried "the proof is a harness, not the product" forward honestly;
-that caveat is now retired on Linux and I am saying so explicitly, because
-blurring it would waste the honesty that got us here.
+> Fleet claims and dependencies survive kill/restart/reassignment without
+> duplicate execution or lost completion.
 
-What is not true: the criterion has been graded on both platforms throughout this
-phase, and I have one. The Windows leg is a compile that ran out of session, and
-a leg that did not run cannot be inferred from the leg that did — which is the
-exact error that produced F-1 earlier in this phase, where a race Windows
-happened to win was read as a race that was absent.
+Every clause is now measured rather than argued. *Claims* — 2 revoked on lease
+expiry and reassigned at epoch 2. *Dependencies* — 12 releases, one per task,
+with dependents provably not claimable until their dependency carried a durable
+completion. *Kill* — `kill -9` on a process group and `taskkill /T /F` on a
+process tree, 7 descendants → 0 on each. *Restart* — exit 0 on each. *Without
+lost completion* — 4 completions the dead parent never observed were drained from
+the outbox on restart. *Without duplicate execution* — 12 effects, 12 distinct,
+against a gate that was falsified to exit 1 in the same run.
 
-So: the mechanism is closed, the wire is closed, the shipped-binary proof is
-closed on Linux, and the platform coverage is not. Reporting that split is worth
-more than claiming the whole.
+**The proof is against the shipped `wayland-core` binary, not a harness.** I am
+stating that flatly because three agents before me carried the opposite caveat
+forward honestly and it would be easy to let it blur: their instruments were real
+processes, real journals, real signals and real worker children, but they were
+`examples/`. This one drives `wayland-core goal open / task / run / status /
+exec-task / effects` and nothing else. The examples remain in the tree as focused
+adversarial instruments and their headers now say so rather than claiming to be
+the strongest available evidence.
+
+What this does **not** say: the wire drives `FleetDispatcher`, the in-process
+sharded dispatcher named in this plan's `files_modified` — not `Swarm`'s worktree
+fanout with its checkouts and sandboxes. "The Fleet dispatcher is ledger-driven"
+is true; "the worktree fanout is ledger-driven" is not, and the two must not be
+read as the same sentence. `spawner.rs` is likewise untouched.
+
+And the phase goal is still not achieved — Criterion 3 is the phase's hard
+criterion, five engines still terminate five ways, and no lane attempted it. One
+criterion closing does not close a phase. See `22-PHASE-VERDICT.md`.
