@@ -1,0 +1,28 @@
+full-nine-verbs — the losing option, in its own terms.
+
+The contract document recorded nine verbs and the code will now carry seven plus
+`run`. A reader who finds the contract before the summary will believe the product
+has `gateway doctor` and `gateway logs`. That divergence is real and is only
+acceptable because it is written down here and in the summary.
+
+`logs` in particular was dismissed too quickly by the three external members as
+"diagnostics, not lifecycle". Journey step 10 asks for confirmation that the
+PLATFORM'S OWN service mechanism brought the runtime back after a hard kill. The
+only in-product evidence of an unattended relaunch is what the relaunched process
+wrote. Without a `logs` verb the journey reads $WAYLAND_HOME/gateway.log directly,
+which proves a file exists on disk rather than proving the product can show an
+operator that its service restarted it. Phase 24 therefore closes that clause on a
+narrower claim than the criterion reads, and the narrowing is recorded rather than
+absorbed.
+
+`doctor` has the weaker case of the two: Criterion 1's profile-isolation clause is
+already observable through `status --json`'s `profile` field and the pid lock's
+home comparison, so `doctor` would be a second projection of facts the status verb
+already carries.
+
+separate-binary — also not chosen, and its one genuine merit should be recorded:
+it is the only option under which the two shared fenced files (wcore-cli/src/lib.rs
+and main.rs) are never opened at all. Five lanes edit those two files concurrently
+in this execution and every additive edit is a merge hazard. That merit lost to
+three defects, but the hazard it names is real and the edit made here was kept to
+one `pub mod` line and two adjacent blocks for exactly that reason.

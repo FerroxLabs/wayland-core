@@ -1,0 +1,57 @@
+INTERNAL ADVERSARIAL PASS — instructed to argue AGAINST the emerging consensus
+(journey-minimal), and to state where it is genuinely weak.
+
+THE STRONGEST CASE AGAINST journey-minimal IS NOT "nine verbs were promised".
+
+The contract-count argument is weak and all three external members correctly
+dismissed it. A document listing nine verbs is a record of an earlier guess.
+
+The real objection is different, and none of the three external members raised
+it: **journey-minimal is only better than full-nine-verbs if `run` is real.**
+
+Every one of the seven retained verbs is a thin shell around something else:
+  install/uninstall  -> service::ServiceManager argv + unit text (already exists)
+  start/stop         -> the same manager's argv (already exists)
+  status             -> lifecycle::StatusProjection + pidlock::read_record (exists)
+  drain              -> drain::DrainController (exists)
+Only `run` is new code. And `run` is the ONLY one of the eight that the phase's
+Criterion 1 actually rests on, because every delivery-continuity claim — accepted,
+attempted, settled, no duplicate, no loss across a hard kill — happens inside it.
+
+So the failure mode journey-minimal invites is precise: build seven verbs that
+all "work" against a `run` that is a hollow sleep loop holding a pid lock. Then
+`gateway install && gateway start && gateway status` prints `state=running
+pid=NNNN` and the journey's first five steps go green while proving nothing at
+all. That is Phase 20A's exact defect in a new costume — a green surface over an
+unexercised runtime — and it is MORE likely under journey-minimal than under
+full-nine-verbs, because journey-minimal's whole justification is "we spent the
+saved budget on proving it", which is a promise, not a mechanism.
+
+A SECOND objection the panel waved through. `logs` was dismissed as "diagnostics,
+not lifecycle". That is not quite true. Journey step 10 is "confirm the platform's
+own service mechanism brings it back". The only in-product evidence that an
+UNATTENDED relaunch happened is what the relaunched process wrote. Without a
+`logs` verb the journey must `cat $WAYLAND_HOME/gateway.log`, which proves a file
+exists on disk — it does not prove the product can show an operator that its
+service restarted it. That is a narrower claim than the criterion reads.
+
+WHY I NEVERTHELESS CONCUR, AND ON WHAT CONDITION.
+
+The `logs` objection is real but small: a journey that reads the log file directly
+still exercises the recovery, and the gap can be named. It does not outweigh the
+defect in EVIDENCE 3.
+
+The `run` objection is NOT small, and it is the condition I attach to my vote:
+
+  journey-minimal is adopted ONLY IF `gateway run` genuinely acquires the pid
+  lock, opens the DeliveryLedger at the gateway home, hosts a real
+  AutomationPlane (not a sleep loop), honours the DrainController, and is
+  proved by a LIVE count at an INDEPENDENT SINK across an ungraceful kill —
+  submitted == arrived == unique, duplicates 0, losses 0.
+
+If that live count is not obtained, journey-minimal has not beaten
+full-nine-verbs; it has simply built less. In that case the honest report is
+that the verb surface exists and Criterion 1 remains open — NOT that seven
+verbs shipped.
+
+PANEL_POSITION=journey-minimal

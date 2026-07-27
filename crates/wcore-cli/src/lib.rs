@@ -159,3 +159,10 @@ pub mod fetch;
 // F25-01: CLI surface `wayland-core backend` — the execution-backend operator
 // surface (list / probe / run / cancel / orphans / receipt verify / diff).
 pub mod backend;
+
+// F24-B: CLI surface `wayland-core gateway` — the persistent-runtime operator
+// surface (install / uninstall / start / stop / restart / status / drain) plus
+// `run`, the long-lived runtime every generated service unit invokes. Lives in
+// the lib so the lifecycle projection and the unit/verb agreement are testable
+// under `cargo test -p wcore-cli --lib`.
+pub mod gateway;

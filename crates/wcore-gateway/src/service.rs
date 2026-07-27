@@ -66,8 +66,23 @@ impl ServiceSpec {
     /// underscore survive, which is a subset every one of the three
     /// registries accepts literally.
     pub fn service_name(&self) -> String {
-        let sanitised: String = self
-            .profile
+        format!("wayland-core-gateway-{}", self.sanitised_profile())
+    }
+
+    /// The profile as it is safe to write into a unit, a plist argv or a
+    /// scheduled-task command line.
+    ///
+    /// ONE sanitiser, used by the service identifier AND by the `--profile`
+    /// argument every generated unit now passes to `gateway run`. They must
+    /// agree: a unit registered as `wayland-core-gateway-my-profile` whose
+    /// runtime reports a different profile string is precisely the
+    /// misreport the live Linux journey caught (F24-B-H1). Only ASCII
+    /// alphanumerics, dash and underscore survive, which is a subset every
+    /// one of the three registries — and every one of the three unit
+    /// formats — accepts literally, so an operator profile carrying a space
+    /// cannot split a systemd ExecStart into two tokens.
+    pub fn sanitised_profile(&self) -> String {
+        self.profile
             .chars()
             .map(|c| {
                 if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
@@ -76,8 +91,7 @@ impl ServiceSpec {
                     '-'
                 }
             })
-            .collect();
-        format!("wayland-core-gateway-{sanitised}")
+            .collect()
     }
 }
 
@@ -214,6 +228,8 @@ impl ServiceManager for LaunchdManager {
     <string>{binary}</string>
     <string>gateway</string>
     <string>run</string>
+    <string>--profile</string>
+    <string>{profile}</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -229,6 +245,7 @@ impl ServiceManager for LaunchdManager {
             name = spec.service_name(),
             binary = spec.binary.display(),
             home = spec.home.display(),
+            profile = spec.sanitised_profile(),
         ))
     }
 
@@ -305,13 +322,13 @@ impl ServiceManager for SystemdManager {
              [Service]\n\
              Type=simple\n\
              Environment=WAYLAND_HOME={home}\n\
-             ExecStart={binary} gateway run\n\
+             ExecStart={binary} gateway run --profile {profile}\n\
              Restart=on-failure\n\
              RestartSec=5\n\
              \n\
              [Install]\n\
              WantedBy=default.target\n",
-            profile = spec.profile,
+            profile = spec.sanitised_profile(),
             home = spec.home.display(),
             binary = spec.binary.display(),
         ))
@@ -362,7 +379,11 @@ impl ServiceManager for ScheduledTaskManager {
             "/tn".into(),
             spec.service_name(),
             "/tr".into(),
-            format!("\"{}\" gateway run", spec.binary.display()),
+            format!(
+                "\"{}\" gateway run --profile {}",
+                spec.binary.display(),
+                spec.sanitised_profile()
+            ),
             "/sc".into(),
             "onlogon".into(),
             "/f".into(),
@@ -591,6 +612,54 @@ mod tests {
         // the substitution `is_registerable_binary` exists to refuse.
         #[cfg(windows)]
         assert!(!is_registerable_binary(Path::new("C:wayland-core.exe")));
+    }
+
+    #[test]
+    fn every_family_passes_the_profile_to_the_runtime_it_registers() {
+        // F24-B-H1, found by the LIVE Linux journey and not by any test that
+        // existed before it. The units invoked `gateway run` with no
+        // `--profile`, so the runtime resolved `default` from the
+        // environment while the registration was named for profile `f24b`.
+        // `gateway status --profile f24b` then printed `profile: default` —
+        // a status verb contradicting the service identity it was asked
+        // about, which is Criterion 1's profile-isolation clause failing.
+        //
+        // Goes red if any family stops passing the profile, and red if a
+        // family passes the RAW profile instead of the sanitised one.
+        let hostile = ServiceSpec {
+            profile: "a b;rm -rf /".into(),
+            binary: PathBuf::from("/opt/x/wayland-core"),
+            home: PathBuf::from("/home/op/.wayland"),
+        };
+        let sane = hostile.sanitised_profile();
+        assert!(!sane.contains(' '), "the sanitised profile is one token");
+
+        let managers: Vec<Box<dyn ServiceManager>> = vec![
+            Box::new(LaunchdManager),
+            Box::new(SystemdManager),
+            Box::new(ScheduledTaskManager),
+        ];
+        for m in managers {
+            let rendered = match m.unit_text(&hostile) {
+                Some(t) => t,
+                None => m.install_argv(&hostile).join(" "),
+            };
+            assert!(
+                rendered.contains("--profile"),
+                "{} must pass --profile to `gateway run`: {rendered}",
+                m.family()
+            );
+            assert!(
+                rendered.contains(&sane),
+                "{} must pass the SANITISED profile {sane:?}: {rendered}",
+                m.family()
+            );
+            assert!(
+                !rendered.contains("rm -rf"),
+                "{} leaked the raw profile into a unit: {rendered}",
+                m.family()
+            );
+        }
     }
 
     #[test]

@@ -1,0 +1,39 @@
+CHOSEN: journey-minimal. Panel 4/4 (codex, gemini, kimi, internal adversarial).
+No MINORITY-POSITION-ADOPTED clause applies and no EVIDENTIARY-TIEBREAK is needed.
+
+The decision turns on EVIDENCE 3, which reframes the whole question. This is not
+"should a new operator surface be invented". Every service unit `wcore-gateway`
+already generates — the launchd ProgramArguments array, the systemd ExecStart line
+and the schtasks /tr string — invokes `<binary> gateway run`, and that subcommand
+does not exist. `gateway install` therefore registers, on all three OS families, a
+unit whose ExecStart fails immediately with a clap "unrecognized subcommand" error.
+The registration succeeds and the service never runs, silently. That is a shipped
+defect in code that is already merged, not a missing feature, and creating
+crates/wcore-cli/src/gateway.rs is its fix.
+
+That disposes of do-not-create: it would leave a known-broken install path in the
+tree with no operator surface for Criterion 1.
+
+separate-binary was rejected on three independent grounds, any one sufficient: it
+contradicts the crate's own module documentation, which names
+crates/wcore-cli/src/gateway.rs by path in two files; it would require editing
+service.rs on all three families to change the registered command; and a [[bin]]
+in wcore-gateway needs clap, which is a Cargo.toml + Cargo.lock edit this lane is
+forbidden to make. It solves a file-contention problem that EVIDENCE 2 shows does
+not exist — wcore-cli already depends on wcore-gateway, so the module needs no
+manifest change and the subcommand registration is the same two additive lines
+twenty-plus existing subcommands already use.
+
+Between the two live options the argument is budget-against-proof. `doctor` and
+`logs` appear in no Success Criterion clause and in no step of 24-04's journey.
+Building them consumes budget that would otherwise go to live-proving the
+hard-kill and platform-recovery path, which is the riskiest claim in the phase and
+the one Phase 20A got wrong. Seven verbs that are all exercised beat nine of which
+two are asserted.
+
+CONDITION ATTACHED BY THE INTERNAL PASS, AND ACCEPTED AS BINDING. The saving is
+only real if `gateway run` is a real runtime. `run` must acquire the pid lock, open
+the DeliveryLedger, host a real AutomationPlane and honour the DrainController, and
+the claim must rest on a live count at an independent sink across an ungraceful
+kill. If that count is not obtained, the honest report is that the verb surface
+exists and Criterion 1 remains open — not that seven verbs shipped.

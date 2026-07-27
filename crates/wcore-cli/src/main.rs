@@ -724,6 +724,10 @@ enum TopCmd {
     /// F25-01: execution backends — list / probe / run / cancel / orphans /
     /// receipt verify / diff across local, container, ssh and cloud.
     Backend(wcore_cli::backend::BackendArgs),
+    /// F24-B: the persistent gateway runtime — install / uninstall / start /
+    /// stop / restart / status / drain, plus the `run` verb every generated
+    /// launchd, systemd and scheduled-task unit invokes.
+    Gateway(wcore_cli::gateway::GatewayArgs),
     /// Manage isolated profiles — each is an independent `WAYLAND_HOME`-rooted
     /// home with its own config, credentials, memory, and skills.
     Profile {
@@ -1367,6 +1371,13 @@ async fn run() -> anyhow::Result<ExitCode> {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(e) => {
                     eprintln!("wayland-core backend: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
+            TopCmd::Gateway(args) => match wcore_cli::gateway::run(args).await {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core gateway: {e:#}");
                     Ok(ExitCode::FAILURE)
                 }
             },
