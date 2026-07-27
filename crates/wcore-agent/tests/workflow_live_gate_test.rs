@@ -666,6 +666,7 @@ fn fork_overrides_classification_never_downgrades_mutation_to_shared() {
     let shared = |tools: &[&str]| {
         ForkOverrides {
             allowed_tools: tools.iter().map(|t| t.to_string()).collect(),
+            budget: None,
             ..ForkOverrides::default()
         }
         .requested_workspace()
@@ -708,6 +709,7 @@ async fn resolve_durable_launch_refuses_inline_mutation() {
 
     let mutating = ForkOverrides {
         allowed_tools: vec!["Write".to_string()],
+        budget: None,
         ..ForkOverrides::default()
     };
     assert_eq!(

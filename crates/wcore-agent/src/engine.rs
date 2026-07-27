@@ -2668,6 +2668,15 @@ pub struct AgentEngine {
     /// Session-root execution envelope installed by bootstrap. Each `run()`
     /// derives a child view so turn usage rolls into the session root.
     execution_budget: crate::budget::ExecutionBudgetView,
+    /// F21-02 — the sub-allocated envelope handed to THIS engine at the spawn
+    /// seam, when its delegator asked for a narrower one.
+    ///
+    /// `Some` only on a delegated child whose spawn carried a budget request.
+    /// It exists because the durable-authority path re-derives the run budget
+    /// from the shared coordinator, which answers with the PARENT's active
+    /// turn — so without holding the narrowed view here the sub-allocation
+    /// would be computed at the seam and then never bind anything.
+    narrowed_execution_budget: Option<crate::budget::ExecutionBudgetView>,
     /// F10 production monitor instance. It is constructed with the engine so
     /// startup activation can truthfully report readiness, then reset to the
     /// current run's budget at each `run()` boundary.
@@ -3141,6 +3150,7 @@ impl AgentEngine {
             budget_authority_seed: None,
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
+            narrowed_execution_budget: None,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -3375,6 +3385,7 @@ impl AgentEngine {
             budget_authority_seed: None,
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
+            narrowed_execution_budget: None,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -3848,11 +3859,23 @@ impl AgentEngine {
     /// Attach a child engine to the parent's sole budget authority. Child
     /// engines never bind or replace the durable session; every provider and
     /// tool mutation commits through the inherited coordinator.
+    /// `narrowed` is the sub-allocated child envelope built at the spawn seam
+    /// (F21-02). When present it REPLACES the coordinator's current view as this
+    /// engine's envelope, because the coordinator's view is the PARENT's and
+    /// re-deriving from it would silently discard the sub-allocation. It is
+    /// already a descendant of that same view, so every charge still rolls up
+    /// into the parent's turn and the session root exactly as before — the
+    /// child simply also carries its own, stricter caps.
     pub(crate) fn inherit_budget_authority(
         &mut self,
         authority: SharedBudgetAuthorityCoordinator,
+        narrowed: Option<crate::budget::ExecutionBudgetView>,
     ) -> anyhow::Result<()> {
-        self.execution_budget = authority.lock().current_execution_view()?;
+        self.execution_budget = match narrowed.clone() {
+            Some(view) => view,
+            None => authority.lock().current_execution_view()?,
+        };
+        self.narrowed_execution_budget = narrowed;
         self.budget_authority = Some(authority);
         self.budget_authority_seed = None;
         self.budget_tracker = None;
@@ -6185,6 +6208,16 @@ impl AgentEngine {
     }
 
     fn current_run_budget(&self) -> Result<crate::budget::ExecutionBudgetView, AgentError> {
+        // F21-02 — a sub-allocated child must run against ITS envelope. The
+        // durable-authority branch below re-derives from the coordinator, whose
+        // current view is the PARENT's active turn; taking it would discard the
+        // narrowing that `enter_child_budget` computed. Descending one more
+        // level keeps this run's counters off the child's own aggregate while
+        // the child's caps, the parent's turn and the session root all remain in
+        // the ancestor chain.
+        if let Some(narrowed) = self.narrowed_execution_budget.as_ref() {
+            return Ok(narrowed.sub_budget(None));
+        }
         let Some(authority) = self.durable_budget_authority()? else {
             return Ok(self.execution_budget.sub_budget(None));
         };
@@ -15310,6 +15343,7 @@ mod set_config_tests {
             budget_authority_seed: None,
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
+            narrowed_execution_budget: None,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -16989,6 +17023,7 @@ mod phase6_tests {
             budget_authority_seed: None,
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
+            narrowed_execution_budget: None,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -17303,6 +17338,7 @@ mod compact_tests {
             budget_authority_seed: None,
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
+            narrowed_execution_budget: None,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -18691,6 +18727,7 @@ mod plan_mode_tests {
             budget_authority_seed: None,
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
+            narrowed_execution_budget: None,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -19138,6 +19175,7 @@ mod hook_integration_tests {
             budget_authority_seed: None,
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
+            narrowed_execution_budget: None,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -19995,6 +20033,7 @@ mod approval_bridge_engine_tests {
             budget_authority_seed: None,
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
+            narrowed_execution_budget: None,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -21045,6 +21084,7 @@ mod user_model_writeback_tests {
             budget_authority_seed: None,
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
+            narrowed_execution_budget: None,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),

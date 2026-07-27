@@ -412,6 +412,7 @@ impl Builder for SpawnBuilder<'_> {
             model: None,
             effort: None,
             allowed_tools: BUILDER_TOOLS.iter().map(|s| (*s).to_string()).collect(),
+            budget: None,
         };
 
         // Wall-clock bound on ONE builder fork: keep a single in-flight await from
@@ -555,6 +556,7 @@ impl Valve for SpawnValve<'_> {
             model: None,
             effort: None,
             allowed_tools: Vec::new(), // read-only (Read/Grep/Glob)
+            budget: None,
         };
         let result = tokio::time::timeout(
             VALVE_TIMEOUT,

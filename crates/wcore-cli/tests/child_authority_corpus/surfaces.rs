@@ -889,6 +889,7 @@ fn tool_widening_through_spawn_fork_inner(session_tag: &str) -> ProbeResult {
         model: None,
         effort: None,
         allowed_tools: vec!["Bash".to_owned()],
+        budget: None,
     };
     let config = child_config(
         "corpus-tool-widening",

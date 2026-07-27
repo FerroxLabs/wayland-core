@@ -34,7 +34,9 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use wcore_protocol::events::ToolCategory;
-use wcore_types::spawner::{ChildOrigin, ForkOverrides, Spawner, SubAgentConfig, SubAgentResult};
+use wcore_types::spawner::{
+    ChildBudgetRequest, ChildOrigin, ForkOverrides, Spawner, SubAgentConfig, SubAgentResult,
+};
 use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use crate::Tool;
@@ -89,6 +91,34 @@ struct Task {
     /// Reserved for future per-task tool whitelisting — currently
     /// surfaced via `ForkOverrides::allowed_tools` when set.
     toolsets: Vec<String>,
+}
+
+/// Read the caller's requested per-child envelope.
+///
+/// F21-02 — this is the delegating actor's REQUEST, not an authority. It is
+/// resolved at the spawn seam by intersection with the caps that actually bind
+/// the requester, so nothing read here can widen anything; a field naming more
+/// than the requester holds is clamped down to the requester's own limit.
+/// Malformed or negative values are dropped rather than rejected: a request is
+/// advisory in the narrowing direction only, and failing the whole delegation
+/// over an unparseable cap would turn a safe no-op into an outage.
+fn parse_budget(input: &Value) -> Option<ChildBudgetRequest> {
+    let budget = input.get("budget")?.as_object()?;
+    let uint = |key: &str| budget.get(key).and_then(Value::as_u64);
+    let usize_ = |key: &str| uint(key).map(|value| value as usize);
+    let request = ChildBudgetRequest {
+        max_wall_time_secs: uint("max_wall_time_secs"),
+        max_tool_runtime_secs: uint("max_tool_runtime_secs"),
+        max_processes: usize_("max_processes"),
+        max_agent_depth: usize_("max_agent_depth"),
+        max_tokens_in: uint("max_tokens_in"),
+        max_tokens_out: uint("max_tokens_out"),
+        max_cost_usd: budget
+            .get("max_cost_usd")
+            .and_then(Value::as_f64)
+            .filter(|usd| usd.is_finite() && *usd >= 0.0),
+    };
+    (!request.is_empty()).then_some(request)
 }
 
 fn parse_input(input: &Value) -> Result<(Vec<Task>, usize), String> {
@@ -203,7 +233,11 @@ pub fn build_child_prompt(goal: &str, context: Option<&str>) -> String {
     parts.join("\n")
 }
 
-fn task_to_config(task: &Task, max_turns: usize) -> (SubAgentConfig, ForkOverrides) {
+fn task_to_config(
+    task: &Task,
+    max_turns: usize,
+    budget: Option<&ChildBudgetRequest>,
+) -> (SubAgentConfig, ForkOverrides) {
     let cfg = SubAgentConfig {
         name: format!("delegate-{}", first_word(&task.goal)),
         prompt: task.goal.clone(),
@@ -218,6 +252,7 @@ fn task_to_config(task: &Task, max_turns: usize) -> (SubAgentConfig, ForkOverrid
         model: None,
         effort: None,
         allowed_tools: task.toolsets.clone(),
+        budget: budget.cloned(),
     };
     (cfg, overrides)
 }
@@ -301,6 +336,19 @@ impl Tool for DelegateTool {
                 "max_iterations": {
                     "type": "integer",
                     "description": "Max conversation turns per subagent (default 50)."
+                },
+                "budget": {
+                    "type": "object",
+                    "description": "Sub-allocate a SMALLER slice of your own remaining execution envelope to each subagent, so one runaway subagent cannot consume the whole session and starve its siblings. Every field can only lower a cap: a value larger than what you yourself hold is clamped down to your own limit, never granted. Omit to let subagents share your full envelope.",
+                    "properties": {
+                        "max_wall_time_secs":    { "type": "integer", "description": "Wall-clock seconds the subagent may run for." },
+                        "max_tool_runtime_secs": { "type": "integer", "description": "Aggregate seconds the subagent's tool calls may consume." },
+                        "max_processes":         { "type": "integer", "description": "Concurrent process-backed tool calls the subagent may hold." },
+                        "max_agent_depth":       { "type": "integer", "description": "How deep the subagent may itself delegate." },
+                        "max_tokens_in":         { "type": "integer", "description": "Input tokens charged to the subagent and its descendants." },
+                        "max_tokens_out":        { "type": "integer", "description": "Output tokens charged to the subagent and its descendants." },
+                        "max_cost_usd":          { "type": "number",  "description": "USD charged to the subagent and its descendants." }
+                    }
                 }
             }
         })
@@ -343,11 +391,16 @@ impl Tool for DelegateTool {
             };
         };
 
+        // F21-02 — the caller's per-child envelope ask, applied to every task in
+        // the batch. Resolved by intersection at the spawn seam, so it can only
+        // narrow.
+        let budget = parse_budget(&input);
+
         // Build (config, overrides) pairs and fan out concurrently.
         let jobs: Vec<_> = tasks
             .iter()
             .map(|t| {
-                let (cfg, overrides) = task_to_config(t, max_turns);
+                let (cfg, overrides) = task_to_config(t, max_turns, budget.as_ref());
                 let s = spawner.clone();
                 async move {
                     s.spawn_fork_with_origin(cfg, overrides, ChildOrigin::Delegate)

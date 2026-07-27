@@ -547,6 +547,50 @@ impl ExecutionBudgetView {
         AgentDepthGuard { view: self.clone() }
     }
 
+    /// The caps that actually bind this view: the pointwise MINIMUM of the
+    /// leaf's own caps and every ancestor's.
+    ///
+    /// Read the leaf's `budget` directly and you get the caps the leaf NAMES,
+    /// which an override may have set wider than the chain permits. `limit_for`
+    /// has the same shape hazard — it renders whichever state is currently
+    /// exceeded and falls back to the LEAF. Anything that needs "what may this
+    /// view actually spend" must fold over the whole chain, exactly as
+    /// `minimum_remaining` does for the remaining-allowance accessors.
+    pub fn effective_budget(&self) -> ExecutionBudget {
+        let mut effective = self.inner.read().budget.clone();
+        for ancestor in self.ancestors.iter() {
+            effective = intersect_execution_budget(&effective, &ancestor.read().budget);
+        }
+        effective
+    }
+
+    /// Build a child view whose caps are the INTERSECTION of `requested` with
+    /// the caps that actually bind this view.
+    ///
+    /// This is the sub-allocation seam: a parent hands one child a strictly
+    /// smaller envelope so a single runaway child cannot drain the whole
+    /// subtree and starve its siblings.
+    ///
+    /// Narrowing is monotonic by construction. `requested` can only ever lower
+    /// a cap, never raise one, so the value is safe to accept from an untrusted
+    /// delegating actor: the worst an adversarial request achieves is
+    /// under-allocating its OWN descendant. There is no arithmetic path from a
+    /// larger requested number to a larger effective envelope.
+    ///
+    /// Note what this does NOT claim. `sub_budget(Some(wider))` was already
+    /// unable to amplify, because the ancestor chain is consulted by
+    /// `first_exceeded_reason`, `try_enter_process` and `try_reserve_tool_runtime`
+    /// regardless of what the leaf names. The value added here is that the
+    /// child's OWN caps are correct too, so every leaf-rendering accessor
+    /// reports the envelope that binds rather than the one that was asked for.
+    pub fn sub_budget_narrowed(&self, requested: ExecutionBudget) -> ExecutionBudgetView {
+        let narrowed = intersect_execution_budget(
+            &normalize_execution_budget(requested),
+            &self.effective_budget(),
+        );
+        self.sub_budget(Some(narrowed))
+    }
+
     /// Build a child view. `override_` replaces the caps on the child
     /// only; parent caps still apply for the rollup. None → inherit.
     pub fn sub_budget(&self, override_: Option<ExecutionBudget>) -> ExecutionBudgetView {
