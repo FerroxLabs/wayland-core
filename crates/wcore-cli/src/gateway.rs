@@ -281,12 +281,12 @@ async fn uninstall(scope: &ScopeArgs) -> Result<()> {
     // The unit file goes AFTER the deregistration succeeds. Removing it first
     // would leave a registration naming a file that is gone, which is the one
     // state neither `uninstall` nor `install` can then reason about.
-    if let Some(path) = mgr.unit_path(&spec) {
-        if path.exists() {
-            std::fs::remove_file(&path)
-                .with_context(|| format!("cannot remove service unit {}", path.display()))?;
-            println!("removed unit: {}", path.display());
-        }
+    if let Some(path) = mgr.unit_path(&spec)
+        && path.exists()
+    {
+        std::fs::remove_file(&path)
+            .with_context(|| format!("cannot remove service unit {}", path.display()))?;
+        println!("removed unit: {}", path.display());
     }
     println!(
         "gateway uninstalled ({}): {}",
@@ -414,10 +414,10 @@ async fn status(scope: &ScopeArgs, json: bool) -> Result<()> {
             // "installed and down": an operator debugging a service that will
             // not start needs to know the registration exists.
             let mut p = StatusProjection::stopped(&profile);
-            if let Ok(spec) = spec(scope) {
-                if !is_registered(&*mgr, &spec).await {
-                    p.state = GatewayState::Uninstalled;
-                }
+            if let Ok(spec) = spec(scope)
+                && !is_registered(&*mgr, &spec).await
+            {
+                p.state = GatewayState::Uninstalled;
             }
             p
         }
@@ -515,14 +515,14 @@ fn drain(scope: &ScopeArgs, budget_ms: u64) -> Result<()> {
                 // The process is gone. Its last published projection is the
                 // record of how it ended, and it is read from disk rather
                 // than assumed clean.
-                if let Ok(raw) = std::fs::read_to_string(status_path(&home)) {
-                    if let Ok(p) = serde_json::from_str::<StatusProjection>(&raw) {
-                        println!(
-                            "drain complete: {} (deliveries pending {})",
-                            p.state, p.deliveries_pending
-                        );
-                        return Ok(());
-                    }
+                if let Ok(raw) = std::fs::read_to_string(status_path(&home))
+                    && let Ok(p) = serde_json::from_str::<StatusProjection>(&raw)
+                {
+                    println!(
+                        "drain complete: {} (deliveries pending {})",
+                        p.state, p.deliveries_pending
+                    );
+                    return Ok(());
                 }
                 println!("drain complete: gateway exited");
                 return Ok(());
