@@ -1,0 +1,6 @@
+SHA-ASSERT expect=553e848b936c0afd694b4401256d7745562db811 actual=553e848b936c0afd694b4401256d7745562db811
+TREE=133d3e712bfc7dabc97dd0bb4af88312c83e9988
+    Checking wcore-eval-scenarios v0.12.25 (/root/wayland-p28/crates/wcore-eval-scenarios)
+    Checking wcore-mcp v0.12.25 (/root/wayland-p28/crates/wcore-mcp)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.64s
+EXIT=0
