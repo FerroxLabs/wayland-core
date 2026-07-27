@@ -74,10 +74,26 @@ fn lease_root() -> Result<PathBuf> {
 /// not discipline, is what keeps them out.
 #[cfg(test)]
 fn lease_root() -> Result<PathBuf> {
+    test_lease_root()
+}
+
+/// Environment variable carrying the lease root to a spawned helper process.
+///
+/// `killed_owner_is_recovered_before_next_execution` spawns the test binary
+/// again and then looks for the lease that child deliberately abandoned. A root
+/// keyed only on the process id would put the child's lease somewhere the
+/// parent never looks, so the root travels to the child through the
+/// environment. Test-only.
+#[cfg(test)]
+pub(super) const TEST_LEASE_ROOT_ENV: &str = "WCORE_TEST_LEASE_ROOT";
+
+#[cfg(test)]
+pub(super) fn test_lease_root() -> Result<PathBuf> {
     use std::sync::OnceLock;
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
-    let root = ROOT.get_or_init(|| {
-        std::env::temp_dir().join(format!("wcore-lease-test-{:08x}", std::process::id()))
+    let root = ROOT.get_or_init(|| match std::env::var_os(TEST_LEASE_ROOT_ENV) {
+        Some(inherited) => PathBuf::from(inherited),
+        None => std::env::temp_dir().join(format!("wcore-lease-test-{:08x}", std::process::id())),
     });
     fs::create_dir_all(root).map_err(|error| {
         exec_error(format!(
