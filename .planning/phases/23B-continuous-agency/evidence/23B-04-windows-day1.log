@@ -1,0 +1,21 @@
+HARNESS=C:\\ferrox-win-23B04\\target\\debug\\deps\\multi_day_journey_test-4f5c0f06a2c8fef9.exe
+F23_04_PROVENANCE=ok platform=windows sha=0ed05322462e64cb44e2b80aa15b7357263b8187
+
+running 1 test
+F23_04_DAY=1 platform=windows ts=2026-07-27T23:54:26Z host=SEANDESKTOP pid=39008
+F23_04_INVARIANT=loop-owner platform=windows day=1 status=PASS
+F23_04_INVARIANT=cumulative-budget platform=windows day=1 status=PASS
+F23_04_INVARIANT=authority-envelope platform=windows day=1 status=PASS
+F23_04_INVARIANT=memory-recall platform=windows day=1 status=PASS
+F23_04_INVARIANT=evidence-chain platform=windows day=1 status=PASS
+F23_04_INVARIANT=delivery-once platform=windows day=1 status=PASS
+F23_04_LOOP_OWNERS_OBSERVED=1
+F23_04_GOAL_LIFECYCLE=Waiting { wait: Event { event: "f23-span-elapsed-259200s" } }
+F23_04_JOURNAL_CURSOR=seq=7 checksum=b728beb16810fa05d9ce58e63b189007804fe3a96b2e26bad97450d0405b918c
+F23_04_DAY_INVARIANTS_ALL_PASS=true
+F23_04_STEP=OK day=1 platform=windows nonce=acb1d0b24b3fdecf
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.06s
+
+F23_04_JOURNEY_DAY_RECORDED=1 platform=windows nonce=acb1d0b24b3fdecf
