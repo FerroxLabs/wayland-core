@@ -3986,6 +3986,15 @@ impl AgentEngine {
         &self,
         spawner: crate::spawner::AgentSpawner,
     ) -> crate::spawner::AgentSpawner {
+        // F21-02-01 — bind the transient spawner's child tool authority to THIS
+        // engine's live registry. Every transient spawner (workflow, crucible,
+        // plan synthesis, fleet) is constructed from a bare
+        // `AgentSpawner::new`, which defaults to unrestricted; without this a
+        // channel-posture or persona-narrowed engine would delegate tools it
+        // does not itself hold. `self.tools` is the parent's real, post-retain
+        // registry, so the authority is exact rather than re-derived.
+        spawner.narrow_parent_tool_authority(self.tools.tool_names());
+
         // Bind the parent repository identity so a transient child resolves the
         // SAME shared/isolated workspace authority as the bootstrap spawner. A
         // mutating child then allocates its standalone checkout relative to this
