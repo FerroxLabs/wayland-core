@@ -253,6 +253,24 @@ a reason to do the work, not to grant an exemption.
   criterion measures changes; closing it entirely needs an atomic
   write-then-link, which buys nothing here.
 
+## A semantic drift worth naming rather than leaving for someone to trip over
+
+`goal run` calls `recover()` **unconditionally**, including on a Goal's very
+first run. That is deliberate — a driver that only recovers "when it looks like a
+crash" is a driver whose recovery path is never exercised until the day it
+matters, which is the worst possible day to first run it. The live evidence shows
+the cost: `resume_count` reached **1 after the first clean run** and 2 after the
+restart.
+
+`GoalState::resume_count` is documented in the kernel as "how many times this Goal
+has been resumed **after a crash**". Under this CLI it counts *process starts that
+attached to a non-terminal Goal*, which is one higher than the crash count. The
+field is not wrong for what it records, and the kernel is untouched; but the
+docstring and the CLI's usage no longer say the same thing, and a future host
+surface that renders "crashes: N" from it would be off by one. Named here rather
+than quietly absorbed. MEDIUM at most, and arguably the right trade — but it
+should be a decision someone makes, not a surprise.
+
 ## Deviations
 
 * **[Rule 1 — bug] Fixed F-10 in my own new code**, found while designing the
