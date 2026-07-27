@@ -410,3 +410,20 @@ residue, not the disease.
   the portability projection today, so it does not leak; but a future edit that emits it would
   bypass the scrub boundary, and the multi-emitter probe would not notice. Named by the F26-01
   redaction panel. 26-02 should either emit it through `insert_detail` or fence it explicitly.
+
+### portability-external-paths — the manifest's `external_paths` is an untyped string channel · MEDIUM
+
+Same shape 26-01 closed in `DiscoveredItem.details`, reopened one layer up: an untyped string
+field in a document that crosses a trust boundary is where a credential hides. 26-01's case was
+an MCP url carrying `?token=`. Type it, or redact it structurally the way the rest of the
+portability document already is.
+
+### windows-shell-traps — two cmd/PowerShell forms that silently lose data or exit status · MEDIUM
+
+Both measured on `SeanDesktop` during Phase 26:
+- `powershell -File <missing.ps1>; exit $LASTEXITCODE` exits **0**. A gate whose script is
+  absent therefore PASSES. Now caught by `lint-plan-gates.py`
+  (`powershell-missing-script-exits-zero`), but any *existing* Windows harness predating that
+  rule should be re-read.
+- `echo X=1>> file` in `cmd` eats the value: `1>>` parses as an fd redirect, so the variable is
+  written without it. Quote or space it (`echo X=1 >> file`).

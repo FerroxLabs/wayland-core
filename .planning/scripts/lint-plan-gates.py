@@ -92,6 +92,16 @@ STATIC_RULES = [
     ),
     (
         "HIGH",
+        "powershell-missing-script-exits-zero",
+        re.compile(r"(?:powershell|pwsh)\b[^\n|;]*-File\b"),
+        "`powershell -File <missing.ps1>; exit $LASTEXITCODE` exits **0**. A gate whose script "
+        "is absent — wrong path, not yet written, lost in a worktree switch — therefore PASSES. "
+        "Measured on this repo. Every Windows gate in this program runs this way, so it is the "
+        "highest-leverage version of the self-passing bug here. Assert the script exists first "
+        "(`Test-Path` / `test -f`) and fail if it does not, then run it.",
+    ),
+    (
+        "HIGH",
         "empty-equals-empty-passes",
         re.compile(r"\btest\s+\"\$\([^)]*\)\"\s*=\s*\"\$\([^)]*\)\""),
         "Comparing two command substitutions passes when BOTH produce empty output -- two "
@@ -226,8 +236,17 @@ def static_findings(path, gates):
 
     for line_no, cmd in gates:
         for sev, rule, pattern, advice in STATIC_RULES:
-            if pattern.search(cmd):
-                out.append((sev, rule, path, line_no, cmd, advice))
+            if not pattern.search(cmd):
+                continue
+            # Contextual suppression. `empty-equals-empty-passes` fires on the
+            # SHAPE of the comparison, but the shape is fine once both operands
+            # are known non-empty -- and asserting that is precisely the fix the
+            # rule recommends. Without this, the rule flags every gate that has
+            # already taken its own advice, which it did on two correct Phase 30
+            # gates the first time it ran.
+            if rule == "empty-equals-empty-passes" and cmd.count("test -s") >= 2:
+                continue
+            out.append((sev, rule, path, line_no, cmd, advice))
         m = SELF_WRITTEN_RE.search(cmd)
         if m and os.path.basename(m.group(1)) in produced:
             out.append((
