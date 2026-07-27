@@ -533,12 +533,18 @@ mod tests {
             verdict_for_age(AGE_FRESH_SECS - 1, None),
             StalenessVerdict::Fresh
         );
-        assert_eq!(verdict_for_age(AGE_FRESH_SECS, None), StalenessVerdict::Aging);
+        assert_eq!(
+            verdict_for_age(AGE_FRESH_SECS, None),
+            StalenessVerdict::Aging
+        );
         assert_eq!(
             verdict_for_age(AGE_AGING_SECS - 1, None),
             StalenessVerdict::Aging
         );
-        assert_eq!(verdict_for_age(AGE_AGING_SECS, None), StalenessVerdict::Stale);
+        assert_eq!(
+            verdict_for_age(AGE_AGING_SECS, None),
+            StalenessVerdict::Stale
+        );
         // A very old item is Stale, not Expired, when no bound is set: a
         // reporting band must never quietly become a filter.
         assert_eq!(verdict_for_age(10_000_000, None), StalenessVerdict::Stale);

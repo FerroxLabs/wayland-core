@@ -140,8 +140,7 @@ impl MemoryHandler {
             out.push_str(&format!(
                 "  EXCLUDED {}{}: {}\n",
                 x.partition.as_str(),
-                x.id
-                    .as_ref()
+                x.id.as_ref()
                     .map(|i| format!(" {i}"))
                     .unwrap_or_else(|| " (whole cell)".to_string()),
                 match &x.cause {
@@ -159,9 +158,9 @@ impl MemoryHandler {
 
     fn correct(&self, args: &[String]) -> Result<SlashOutcome, SlashError> {
         let (_api, controls) = self.controls("correct")?;
-        let (id, rest) = args.split_first().ok_or_else(|| {
-            SlashError::Bad("/memory correct <id> <corrected text>".to_string())
-        })?;
+        let (id, rest) = args
+            .split_first()
+            .ok_or_else(|| SlashError::Bad("/memory correct <id> <corrected text>".to_string()))?;
         if rest.is_empty() {
             return Err(SlashError::Bad(
                 "/memory correct <id> <corrected text> — the corrected text is required"
@@ -260,7 +259,9 @@ impl MemoryHandler {
             .get(1)
             .ok_or_else(|| SlashError::Bad("/memory retention <partition> <days>".to_string()))?
             .parse()
-            .map_err(|_| SlashError::Bad("/memory retention: <days> must be a number".to_string()))?;
+            .map_err(|_| {
+                SlashError::Bad("/memory retention: <days> must be a number".to_string())
+            })?;
         match controls.set_retention(
             &AccessToken::MainAgent,
             partition,
@@ -609,7 +610,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn controls_reach_a_real_store_and_report_the_item_they_acted_on() {
-        let mem = wcore_memory::open_for_test(std::path::Path::new(".")).await.unwrap();
+        let mem = wcore_memory::open_for_test(std::path::Path::new("."))
+            .await
+            .unwrap();
         let api: Arc<dyn MemoryApi> = Arc::new(mem);
         let controls = api.controls().expect("a real store must expose controls");
 
@@ -685,7 +688,9 @@ mod tests {
     async fn a_privacy_scope_is_reported_as_an_exclusion_not_as_an_empty_result() {
         // The difference between "nothing matched" and "you excluded this" is
         // the entire point of reporting exclusions.
-        let mem = wcore_memory::open_for_test(std::path::Path::new(".")).await.unwrap();
+        let mem = wcore_memory::open_for_test(std::path::Path::new("."))
+            .await
+            .unwrap();
         let api: Arc<dyn MemoryApi> = Arc::new(mem);
         let handler = MemoryHandler::Runtime { api: api.clone() };
 

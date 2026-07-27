@@ -661,7 +661,13 @@ mod tests {
     #[test]
     fn correction_updates_the_item_and_is_audited() {
         let (ctl, db) = controls();
-        seed_episode(&db, Tier::Project, "ep-1", "the aardvark is blue", now_secs());
+        seed_episode(
+            &db,
+            Tier::Project,
+            "ep-1",
+            "the aardvark is blue",
+            now_secs(),
+        );
         let before = ctl.audit().count().unwrap();
         let receipt = ctl
             .correct_episode(

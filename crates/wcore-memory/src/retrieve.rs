@@ -550,7 +550,10 @@ fn rrf_fuse_with_contributions(
     vector: &[VecHit],
     kg: &[KgHit],
     k: usize,
-) -> (Vec<Hit>, std::collections::HashMap<String, Vec<ModalityContribution>>) {
+) -> (
+    Vec<Hit>,
+    std::collections::HashMap<String, Vec<ModalityContribution>>,
+) {
     use std::collections::HashMap;
     let mut scores: HashMap<String, f64> = HashMap::new();
     let mut meta: HashMap<String, (String, Option<String>)> = HashMap::new();

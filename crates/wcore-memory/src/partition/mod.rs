@@ -316,7 +316,8 @@ impl MemoryApi for PartitionDispatcher {
         let start = std::time::Instant::now();
         let result = async {
             self.gate.check_read(&tok, partition, tier)?;
-            crate::retrieve::search_basic_with_provenance(&self.db, self.embedder.as_ref(), &q).await
+            crate::retrieve::search_basic_with_provenance(&self.db, self.embedder.as_ref(), &q)
+                .await
         }
         .await;
         self.emit_trace(
