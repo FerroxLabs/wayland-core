@@ -107,9 +107,18 @@ idx() {
 }
 
 # Extract one `key=value` field from a `F23_INDEX=<kind> …` line.
+#
+# Splits the line into tokens rather than using one anchored regex. The first
+# cut used `s/^F23_INDEX=$1 .*[[:space:]]$2=…/`, which silently returned EMPTY
+# for the FIRST field on a line — `agrees=` sits immediately after the literal
+# space already consumed, so the `.*[[:space:]]` demanded a second one that
+# was not there. It reported `agrees=` blank on a real, correct verify.
 field() {
   printf '%s\n' "$IDX_OUT" \
-    | sed -n "s/^F23_INDEX=$1 .*[[:space:]]$2=\([^[:space:]]*\).*/\1/p" \
+    | sed -n "s/^F23_INDEX=$1 //p" \
+    | head -1 \
+    | tr ' ' '\n' \
+    | sed -n "s/^$2=//p" \
     | head -1
 }
 
