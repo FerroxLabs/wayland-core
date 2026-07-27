@@ -642,6 +642,68 @@ mod tests {
         lease
     }
 
+    /// The real, user-facing lease directory: what `lease_directory()` resolves
+    /// to in a production build. Computed here WITHOUT creating anything, so
+    /// the check itself never brings the production tree into existence.
+    fn production_lease_directory() -> Option<PathBuf> {
+        let mut path = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+        for component in LEASE_DIRECTORY_COMPONENTS {
+            path.push(component);
+        }
+        Some(path)
+    }
+
+    /// A unit test must never resolve the production lease directory.
+    ///
+    /// Every lease this module's tests write goes to `lease_directory()`, so
+    /// this one path decides whether the whole test module writes into the
+    /// user's real sandbox state. It resolved to production, and the native
+    /// acceptance suite left two unreconcilable leases on a real developer box
+    /// that silently disabled its Windows sandbox until a human deleted them
+    /// (`.planning/intel/APPCONTAINER-SSH-LEASE-WEDGE.md`).
+    #[test]
+    fn unit_tests_never_resolve_the_production_lease_directory() {
+        let resolved = lease_directory().expect("test lease directory must resolve");
+        let Some(production) = production_lease_directory() else {
+            return;
+        };
+        assert!(
+            !same_windows_path(&resolved, &production),
+            "lease_directory() resolved to the PRODUCTION lease directory under \
+             cfg(test): {}. Every lease written by this test module lands in the \
+             user's real sandbox state, where a synthetic test profile can never \
+             reconcile and disables the sandbox permanently.",
+            resolved.display()
+        );
+    }
+
+    /// End-to-end form of the same invariant: drive the real write path with
+    /// the same helper the acceptance tests use and prove nothing appeared in
+    /// production. The observation is captured and the lease removed BEFORE the
+    /// assertion, so even the failing (pre-fix) run leaves no residue behind —
+    /// a test that proves pollution must not itself pollute.
+    #[test]
+    fn a_lease_written_by_a_test_never_lands_in_the_production_directory() {
+        let root = lease_directory().expect("test lease directory must resolve");
+        let lease = test_lease(0xdead, LeaseState::Prepared);
+        let name = format!("{}.toml", lease.profile_name);
+        let path = root.join(&name);
+
+        write_new_synced_lease(&path, &lease).expect("write test lease");
+        let landed_in_production = production_lease_directory()
+            .map(|production| production.join(&name).exists())
+            .unwrap_or(false);
+        remove_validated_lease(&path).expect("remove test lease");
+
+        assert!(
+            !landed_in_production,
+            "a lease written by a test appeared in the PRODUCTION lease directory \
+             as {name}; it carries a synthetic profile name with no AppContainer \
+             profile behind it, so recovery can never reconcile it and every \
+             later sandboxed execution on this machine is refused."
+        );
+    }
+
     #[test]
     #[ignore = "explicit native Windows AppContainer acceptance"]
     fn atomic_rewrite_is_old_or_new_across_injected_crash_phases() {
