@@ -197,7 +197,7 @@ pub struct GoalFleetDriver {
     ledger: GoalLedger,
     kernel: GoalKernel,
     goal: GoalId,
-    session_id: String,
+    supervisor_id: String,
     /// Monotonic within this process, so two attempts in one wave cannot collide
     /// on a reservation identity. Uniqueness ACROSS processes comes from the
     /// journal: the reducer refuses a duplicate reservation id outright, so a
@@ -207,13 +207,13 @@ pub struct GoalFleetDriver {
 
 impl GoalFleetDriver {
     #[must_use]
-    pub fn new(journal: SessionJournal, goal: GoalId, session_id: impl Into<String>) -> Self {
+    pub fn new(journal: SessionJournal, goal: GoalId, supervisor_id: impl Into<String>) -> Self {
         Self {
             ledger: GoalLedger::new(journal.clone()),
             kernel: GoalKernel::new(journal.clone()),
             journal,
             goal,
-            session_id: session_id.into(),
+            supervisor_id: supervisor_id.into(),
             reservation_seq: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -384,7 +384,7 @@ impl GoalFleetDriver {
                 continue;
             };
             let reservation = self.reserve_attempt(&task)?;
-            let worker_id = format!("{}-w{}", self.session_id, agents.len());
+            let worker_id = format!("{}-w{}", self.supervisor_id, agents.len());
             let authority = match self.ledger.claim_task(
                 &self.goal,
                 &task,
@@ -578,8 +578,13 @@ impl GoalFleetDriver {
     /// unbounded reservations.
     fn reserve_attempt(&self, task: &TaskId) -> Result<String, JournalError> {
         let seq = self.reservation_seq.fetch_add(1, Ordering::SeqCst);
-        let reservation = format!("goalfleet-{}-{}-{seq}", self.session_id, task.as_str());
-        let record = child_record(&reservation, &self.session_id).map_err(|error| {
+        let reservation = format!("goalfleet-{}-{}-{seq}", self.supervisor_id, task.as_str());
+        // The child's parent session must be the JOURNAL's session, not this
+        // driver's supervisor identity. The two are different things and the
+        // reducer refuses a child whose parent session does not match the
+        // journal's authority — correctly, since a child claiming a foreign
+        // parent is a lineage forgery.
+        let record = child_record(&reservation, &self.journal.session_id()?).map_err(|error| {
             JournalError::InvalidTransition(format!(
                 "attempt reservation identity {reservation} is not a valid child id: {error}"
             ))

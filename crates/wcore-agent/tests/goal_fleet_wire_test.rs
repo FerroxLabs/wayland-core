@@ -156,6 +156,7 @@ impl TaskExecutor for DelayedExecutor {
 struct Fixture {
     _dir: tempfile::TempDir,
     journal_path: std::path::PathBuf,
+    journal: SessionJournal,
     goal: GoalId,
 }
 
@@ -163,19 +164,25 @@ impl Fixture {
     fn new(name: &str) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let journal_path = dir.path().join(format!("{name}.journal"));
+        let journal = SessionJournal::open(&journal_path, "wire-test").expect("journal opens");
         Self {
             _dir: dir,
             journal_path,
+            journal,
             goal: GoalId::new(format!("g-{name}")),
         }
     }
 
-    /// A DISTINCT driver, as a separate supervisor would build: its own journal
-    /// handle over the same file. Two drivers sharing one handle would prove
-    /// nothing about two supervisors.
+    /// A distinct SUPERVISOR over the same journal handle.
+    ///
+    /// Not a second `SessionJournal::open` — the writer lease refuses that, and
+    /// `a_second_opener_is_refused_the_writer_lease` pins exactly that. Two
+    /// supervisors sharing one writer is the case the epoch fence still has to
+    /// cover: a driver object that outlived its wave, a second wave started
+    /// before the first was reaped, or any Windows build, where the lease is
+    /// `cfg(unix)`-gated and gives no such protection at all.
     fn driver(&self, supervisor: &str) -> GoalFleetDriver {
-        let journal = SessionJournal::open(&self.journal_path, "wire-test").expect("journal opens");
-        GoalFleetDriver::new(journal, self.goal.clone(), supervisor)
+        GoalFleetDriver::new(self.journal.clone(), self.goal.clone(), supervisor)
     }
 
     fn open(&self, driver: &GoalFleetDriver, iterations: u32) {
@@ -711,6 +718,36 @@ async fn run_to_completion_drives_a_dependency_graph_to_a_standstill_exactly_onc
         );
         assert_eq!(task.attempts.len(), 1, "{task:?}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// 9. What actually stops two SUPERVISOR PROCESSES, and where it does not.
+// ---------------------------------------------------------------------------
+
+/// The first line of defence against two supervisors is not the epoch — it is
+/// the journal's writer lease, and it is `cfg(unix)`-gated.
+///
+/// This test exists to pin which mechanism is doing the work, because the two
+/// answers have very different Windows consequences and the phase's own verdict
+/// already records the lease as a Unix-only construction (threat T-22-06). If
+/// this ever passes on Windows too, that gap has closed and this test should be
+/// un-gated rather than left as folklore.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_second_opener_is_refused_the_writer_lease_on_unix() {
+    let fixture = Fixture::new("lease");
+    let driver = fixture.driver("sup-a");
+    fixture.open(&driver, 8);
+    fixture.declare(&driver, "t00", &[]);
+
+    let second = SessionJournal::open(&fixture.journal_path, "wire-test");
+    let error = second
+        .err()
+        .expect("a second process opened the journal while a supervisor held it");
+    assert!(
+        error.to_string().contains("AlreadyOwned") || format!("{error:?}").contains("AlreadyOwned"),
+        "refused for the wrong reason: {error:?}"
+    );
 }
 
 /// Commit a budget reservation the way the driver does, for the two tests that
