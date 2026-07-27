@@ -211,6 +211,22 @@ struct Property {
     value: String,
 }
 
+/// Everything the document says EXCEPT its own serial number.
+///
+/// The serial is a digest over this, not over the raw cargo metadata text.
+/// That distinction is the whole finding of the two-worktree measurement: the
+/// raw text embeds the checkout path in `workspace_root`, in every package id
+/// and in every `manifest_path`, so a serial derived from it moves when the
+/// same commit is checked out somewhere else. This payload carries only name,
+/// version, package url, licences and origin properties — none of which can
+/// contain a filesystem path, because [`properties`] refuses a source that
+/// does.
+#[derive(Debug, Serialize)]
+struct CanonicalPayload<'a> {
+    metadata: &'a DocumentMetadata,
+    components: &'a [Component],
+}
+
 // ---------------------------------------------------------------------------
 // The transform
 // ---------------------------------------------------------------------------
@@ -274,18 +290,29 @@ pub fn cyclonedx_from_cargo_metadata(metadata_json: &str) -> Result<String, Sbom
         }
     }
 
+    let document_metadata = DocumentMetadata {
+        tools: vec![Tool {
+            name: SBOM_TRANSFORM_NAME,
+            version: SBOM_TRANSFORM_VERSION,
+        }],
+    };
+    let components: Vec<Component> = by_purl.into_values().collect();
+
+    // Two passes on purpose. The serial is a content address over what the
+    // document SAYS, never over the text it was derived from.
+    let canonical = serde_json::to_vec(&CanonicalPayload {
+        metadata: &document_metadata,
+        components: &components,
+    })
+    .map_err(|error| SbomError::Encode(error.to_string()))?;
+
     let document = CycloneDxDocument {
         bom_format: "CycloneDX",
         spec_version: CYCLONEDX_SPEC_VERSION,
-        serial_number: derive_serial_number(metadata_json),
+        serial_number: derive_serial_number(&canonical),
         version: 1,
-        metadata: DocumentMetadata {
-            tools: vec![Tool {
-                name: SBOM_TRANSFORM_NAME,
-                version: SBOM_TRANSFORM_VERSION,
-            }],
-        },
-        components: by_purl.into_values().collect(),
+        metadata: document_metadata,
+        components,
     };
 
     let mut encoded = serde_json::to_string_pretty(&document)
@@ -399,15 +426,16 @@ fn license_is_unnamed(package: &CargoPackage) -> bool {
         .is_none_or(str::is_empty)
 }
 
-/// A URN UUID derived from the SHA-256 of the input text.
+/// A URN UUID derived from the SHA-256 of the canonical document payload.
 ///
 /// CycloneDX wants a `serialNumber` that identifies the document. A random one
 /// would destroy determinism, so this is a content address: bytes 0..16 of the
-/// input digest with the RFC 9562 version-8 (custom) and variant bits applied.
-/// Two runs over the same input therefore produce the same serial, and any
-/// change to the input moves it.
-fn derive_serial_number(input: &str) -> String {
-    let digest = Sha256::digest(input.as_bytes());
+/// payload digest with the RFC 9562 version-8 (custom) and variant bits
+/// applied. Two runs over the same dependency graph therefore produce the same
+/// serial — including from two different checkouts — and any change to what the
+/// document asserts moves it.
+fn derive_serial_number(canonical_payload: &[u8]) -> String {
+    let digest = Sha256::digest(canonical_payload);
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     bytes[6] = (bytes[6] & 0x0f) | 0x80; // version 8 — custom
@@ -439,9 +467,9 @@ mod tests {
 
     #[test]
     fn the_derived_serial_is_a_urn_uuid_that_moves_with_its_input() {
-        let first = derive_serial_number("alpha");
-        assert_eq!(first, derive_serial_number("alpha"));
-        assert_ne!(first, derive_serial_number("beta"));
+        let first = derive_serial_number(b"alpha");
+        assert_eq!(first, derive_serial_number(b"alpha"));
+        assert_ne!(first, derive_serial_number(b"beta"));
         assert!(first.starts_with("urn:uuid:"));
         assert_eq!(first.len(), 45);
         // Version nibble 8 and variant nibble in 8..=b, per RFC 9562.
