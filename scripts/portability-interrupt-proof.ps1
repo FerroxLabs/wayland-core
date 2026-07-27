@@ -83,8 +83,12 @@ Set-Content -LiteralPath (Join-Path $Target 'config.toml') -Value 'PRE-EXISTING-
 Set-Content -LiteralPath (Join-Path $Target 'legacy\keepme.txt') -Value 'PRE-EXISTING-ONLY-HERE' -NoNewline
 Set-Content -LiteralPath (Join-Path $Target 'untouched-by-archive.txt') -Value 'PRE-EXISTING-TOP-LEVEL' -NoNewline
 
-function Read-DigestField([string]$home, [string]$field) {
-    $out = & $Binary backup digest --home $home 2>$null
+# NOTE: the parameter is deliberately NOT called $home. $HOME is a read-only
+# automatic variable in PowerShell, so a parameter of that name cannot bind and
+# every call fails with "Cannot overwrite variable home because it is read-only
+# or constant" -- which surfaces only at run time, on the box.
+function Read-DigestField([string]$homePath, [string]$field) {
+    $out = & $Binary backup digest --home $homePath 2>$null
     foreach ($line in $out) {
         if ($line -match "^$field`: (.+)$") { return $Matches[1] }
     }
