@@ -381,20 +381,103 @@ mod tests {
         assert!(!rendered.contains(binding_secret));
     }
 
-    #[test]
-    fn preflight_fails_with_actionable_guidance_before_request_persistence() {
+    fn config_with_backend(backend: CredentialsBackend) -> Config {
         let mut config = Config::default();
         config.storage.credentials = CredentialsStorageConfig {
-            backend: CredentialsBackend::Plaintext,
+            backend,
             service_name: None,
         };
+        config
+    }
 
+    /// D3: the plaintext backend used to be reported as "secure recovery
+    /// storage is unavailable; configure an OS keyring or encrypted credentials
+    /// vault" — guidance for a user who has configured nothing, given to a user
+    /// who has configured exactly the one value that is fatal. The failure must
+    /// name itself and name the setting to change.
+    #[test]
+    fn preflight_fails_with_actionable_guidance_before_request_persistence() {
         let error = RecoveryRequestProtector::default()
-            .preflight(&config)
+            .preflight(&config_with_backend(CredentialsBackend::Plaintext))
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("secure recovery storage is unavailable"));
-        assert!(error.contains("OS keyring or encrypted credentials vault"));
+        assert!(
+            error.contains("plaintext"),
+            "the cause must be named: {error}"
+        );
+        assert!(
+            error.contains("credentials.backend"),
+            "the setting to change must be named: {error}"
+        );
+        assert!(
+            error.contains("session"),
+            "the user must be told which capability requires it: {error}"
+        );
+    }
+
+    /// D3/D8: the plaintext backend and an unavailable secure backend are
+    /// different problems with different fixes, so they must not render as one
+    /// indistinguishable string.
+    #[test]
+    fn distinct_confidential_failures_do_not_share_one_message() {
+        let plaintext = RecoveryConfidentialError::PlaintextBackendRejected.to_string();
+        let unavailable = RecoveryConfidentialError::NoSecureBackendAvailable.to_string();
+        let unreadable = RecoveryConfidentialError::SecureStoreUnreadable.to_string();
+
+        assert_ne!(plaintext, unavailable);
+        assert_ne!(plaintext, unreadable);
+        assert_ne!(unavailable, unreadable);
+    }
+
+    /// The static rule the session-open check uses. Refusing plaintext for
+    /// confidential material is the security property being preserved, not
+    /// relaxed.
+    #[test]
+    fn only_plaintext_is_statically_rejected() {
+        assert_eq!(
+            reject_backend_without_confidential_storage(&config_with_backend(
+                CredentialsBackend::Plaintext
+            )),
+            Err(RecoveryConfidentialError::PlaintextBackendRejected)
+        );
+        assert_eq!(
+            reject_backend_without_confidential_storage(&config_with_backend(
+                CredentialsBackend::Auto
+            )),
+            Ok(())
+        );
+        assert_eq!(
+            reject_backend_without_confidential_storage(&config_with_backend(
+                CredentialsBackend::Keyring
+            )),
+            Ok(())
+        );
+    }
+
+    /// Naming the configured backend is not a disclosure — the value is written
+    /// in the user's own cleartext config. Key material, ciphertext and AAD
+    /// still must never appear.
+    #[test]
+    fn cause_specific_messages_still_render_no_secret_material() {
+        for error in [
+            RecoveryConfidentialError::PlaintextBackendRejected,
+            RecoveryConfidentialError::NoSecureBackendAvailable,
+            RecoveryConfidentialError::SecureStoreUnreadable,
+            RecoveryConfidentialError::MissingRecoveryKey,
+            RecoveryConfidentialError::Unavailable,
+            RecoveryConfidentialError::Invalid,
+        ] {
+            let rendered = error.to_string();
+            assert!(!rendered.contains(KEY_REF), "key ref leaked: {rendered}");
+            assert!(
+                !rendered.contains(PURPOSE),
+                "AAD purpose leaked: {rendered}"
+            );
+            assert!(
+                !rendered.contains(ALGORITHM),
+                "cipher detail leaked: {rendered}"
+            );
+        }
     }
 }
