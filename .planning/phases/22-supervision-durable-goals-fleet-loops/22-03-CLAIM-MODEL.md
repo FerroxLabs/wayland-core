@@ -161,6 +161,22 @@ Real fanout workers run for minutes, so at the observed trend this makes the
 Fleet path unusable for real work. It does not block a kill experiment, because
 a killed parent never reaches teardown.
 
+**Corroboration, and a caveat stated precisely.** The full `wcore-swarm` suite on
+this lane's branch reported `147 tests run: 147 passed (1 flaky)`, and the flaky
+one — `swarm_reports_failed_worker_status_and_succeeding_workers_complete` — failed
+its first attempt with this exact error before passing on retry. So the defect is
+already intermittently red in the existing suite and is being hidden by the retry.
+
+What that does **not** establish is whether fixing F-1 unmasked it. Two readings
+are possible: before F-1 only one worker ever ran, so a concurrency-dependent
+reservation race could not manifest; or the flake is unrelated to worker count.
+The evidence does not separate them — the test was run 10 times in isolation at
+base (`de977949`) and 10 times on this branch (`7dab7840`) and failed **0/10 on
+both**. It only appeared under full-suite concurrency on a host at load average
+~149. The reliable evidence for F-3 is therefore the duration sweep above, not
+that flake, and anyone merging F-1 should expect F-3 to become *more* visible
+rather than assume it was introduced.
+
 ---
 
 ## Budget re-entry seam (named from source, as Task 1 requires)
