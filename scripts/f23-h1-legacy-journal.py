@@ -93,6 +93,21 @@ def tool_intent_with_explicit_null_receipt():
     }
 
 
+def tool_execution_not_started():
+    """A terminal outcome for the tool the legacy frame recorded.
+
+    With it the tool execution is durably terminal, so `session cancel` has
+    nothing outstanding to refuse on and instead APPENDS `TurnCancelled` to the
+    recovered journal. That is the stronger claim: a recovered journal is not
+    merely readable, it is writable and re-readable afterwards.
+    """
+    return {
+        "type": "tool_execution_not_started",
+        "tool_execution_id": "x1",
+        "reason": {"kind": "cancelled", "reason": "f23-h1 fixture"},
+    }
+
+
 def envelope_body(session_id, seq, previous_checksum, event):
     """One frame body: the checksum material, then the checksum it hashes to.
 
@@ -128,20 +143,32 @@ def main():
     parser.add_argument("--out", required=True, help="journal file to write")
     parser.add_argument("--session-id", required=True)
     parser.add_argument("--nonce", required=True, help="run-time nonce planted in the payload")
+    parser.add_argument(
+        "--terminal-tool",
+        action="store_true",
+        help="append a terminal outcome for the tool, so cancel appends instead of refusing",
+    )
     args = parser.parse_args()
 
     first, first_checksum = envelope_body(
         args.session_id, 0, GENESIS_CHECKSUM, turn_started(args.nonce)
     )
-    second, _ = envelope_body(
+    second, second_checksum = envelope_body(
         args.session_id, 1, first_checksum, tool_intent_with_explicit_null_receipt()
     )
     if b'"effect_receipt":null' not in second:
         raise SystemExit("fixture did not carry the explicit null it exists to carry")
 
+    bodies = [first, second]
+    if args.terminal_tool:
+        third, _ = envelope_body(
+            args.session_id, 2, second_checksum, tool_execution_not_started()
+        )
+        bodies.append(third)
+
     with open(args.out, "wb") as handle:
-        handle.write(frame(first))
-        handle.write(frame(second))
+        for body in bodies:
+            handle.write(frame(body))
 
     print(f"wrote {args.out} session={args.session_id} nonce={args.nonce}", file=sys.stderr)
 
