@@ -144,6 +144,117 @@ fn concurrent_reservation_validation_never_reads_a_truncated_receipt() {
     );
 }
 
+/// Materialize a transaction root exactly as an uncatchably killed run leaves
+/// one: the root, its reservation receipt, its scratch directory and its lease
+/// FILE all survive; only the `flock` ON that file does not, because the kernel
+/// drops it when the holding process dies.
+fn abandoned_transaction_root(swarm_root: &Path, owner: &str, reserved_bytes: u64) -> PathBuf {
+    let root = swarm_root.join(owner);
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join(RESERVATION_FILE), reserved_bytes.to_string()).unwrap();
+    std::fs::create_dir(root.join("scratch")).unwrap();
+    std::fs::write(root.join(LEASE_FILE), b"").unwrap();
+    root
+}
+
+/// F-2: a dispatch-time reclaim must return an aggregate budget that a killed
+/// run committed and can no longer be using.
+///
+/// Measured before this guard: `kill -9 -<PGID>` over eight in-flight workers
+/// left eight transaction roots whose receipts kept being summed, and every
+/// later dispatch was refused with "dispatch aggregate workspace budget is
+/// already committed" until a human deleted `.swarm-worktrees/`.
+///
+/// The assertion is on the ACCOUNTING, not on directory existence alone: a
+/// reclaim that unlinked roots while leaving the budget summed would not fix
+/// the restart, and would still fail here.
+#[test]
+fn abandoned_transaction_reservations_are_reclaimed() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let manager = WorktreeManager::new(fixture.path()).expect("manager");
+    let swarm_root = manager.swarm_root().to_path_buf();
+    let reserved_bytes = 4096_u64;
+
+    for owner in ["dead-worker-0", "dead-worker-1"] {
+        abandoned_transaction_root(&swarm_root, owner, reserved_bytes);
+    }
+    assert_eq!(
+        manager.reserved_workspace_bytes().unwrap(),
+        reserved_bytes * 2,
+        "the orphaned receipts of a killed run were not counted, so this fixture proves nothing"
+    );
+
+    assert_eq!(
+        manager.reclaim_abandoned_transactions().unwrap(),
+        2,
+        "a killed run's transaction roots were not reclaimed"
+    );
+    assert_eq!(
+        manager.reserved_workspace_bytes().unwrap(),
+        0,
+        "the killed run's reservations still exhaust the aggregate budget after reclaim"
+    );
+    for owner in ["dead-worker-0", "dead-worker-1"] {
+        assert!(
+            !swarm_root.join(owner).exists(),
+            "{owner} survived reclaim as untracked residue"
+        );
+    }
+}
+
+/// F-2 FAIL-OPEN GUARD, and the half that carries the risk.
+///
+/// Reclaiming a reservation whose owner is still working would convert a
+/// durability fix into a budget-enforcement hole: two live dispatches could
+/// each reclaim the other's committed budget and jointly overcommit the disk
+/// the aggregate ceiling exists to protect.
+///
+/// The peer's lease is taken through a SEPARATELY opened authority, which is
+/// what makes this non-vacuous — a genuinely independent open file description
+/// on unix and an independent handle on Windows, so reclaim observes a foreign
+/// lease rather than one of its own.
+///
+/// The release half is the strong assertion. Without it this test would also
+/// pass against a reclaim that never removed anything at all; with it, the
+/// guard is proven to be the LEASE specifically, since the identical root
+/// becomes reclaimable the instant its owner lets go and nothing else changes.
+#[test]
+fn a_live_peer_transaction_is_never_reclaimed() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let manager = WorktreeManager::new(fixture.path()).expect("manager");
+    let swarm_root = manager.swarm_root().to_path_buf();
+    let reserved_bytes = 4096_u64;
+    let root = abandoned_transaction_root(&swarm_root, "live-peer-0", reserved_bytes);
+
+    let peer = DirectoryAuthority::open(&root).unwrap();
+    let mut lease = ActiveLease::acquire(transaction_lease_handle(&peer).unwrap())
+        .expect("the peer transaction lease must be acquirable");
+
+    assert_eq!(
+        manager.reclaim_abandoned_transactions().unwrap(),
+        0,
+        "reclaim took a transaction root whose lease a live owner still holds"
+    );
+    assert!(
+        root.exists(),
+        "reclaim deleted a live peer's transaction root"
+    );
+    assert_eq!(
+        manager.reserved_workspace_bytes().unwrap(),
+        MAX_TRANSACTION_WORKSPACE_BYTES,
+        "a live peer's committed budget was released by reclaim"
+    );
+
+    lease.close();
+    assert_eq!(
+        manager.reclaim_abandoned_transactions().unwrap(),
+        1,
+        "the same root stayed unreclaimable after its owner released the lease, \
+         so the skip above was not the lease"
+    );
+    assert!(!root.exists(), "the released root survived reclaim");
+}
+
 /// A held transaction lease must be observable as held by an INDEPENDENT
 /// observer, and must stop being observable once released.
 ///

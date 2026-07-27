@@ -294,6 +294,21 @@ impl Swarm {
                 "another dispatch is already active for this repository in this process".into(),
             )
         })?;
+        // Reclaim what a killed predecessor left behind BEFORE anything is
+        // counted. Both gates below — the retained-worktree limit and the
+        // aggregate workspace budget — sum on-disk transaction roots, so an
+        // uncatchably killed run's orphans otherwise refuse every restart with
+        // "dispatch aggregate workspace budget is already committed" until a
+        // human deletes `.swarm-worktrees/`. Only roots whose lease no live
+        // process holds are taken; a peer that is still working keeps its
+        // budget. See `WorktreeManager::reclaim_abandoned_transactions`.
+        let reclaimed = self.manager.reclaim_abandoned_transactions()?;
+        if reclaimed > 0 {
+            tracing::info!(
+                reclaimed,
+                "reclaimed abandoned swarm transaction roots left by a previous run"
+            );
+        }
         let retained = self.manager.retained_worker_count(MAX_RETAINED_WORKTREES)?;
         let limits = DispatchLimits::admit(count, retained)?;
         tokio::select! {

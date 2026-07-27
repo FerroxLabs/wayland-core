@@ -165,6 +165,99 @@ impl WorktreeManager {
         workspace.cleanup.release()
     }
 
+    /// Reclaim transaction roots left behind by a process that no longer
+    /// exists, and NOTHING else. Returns how many were reclaimed.
+    ///
+    /// # The defect this closes (F-2)
+    ///
+    /// An uncatchable kill leaves every in-flight transaction root on disk with
+    /// its reservation receipt intact. `reserved_workspace_bytes` keeps counting
+    /// those receipts, so the next dispatch sums the dead run's reservations
+    /// against a budget nobody is using and refuses with *"dispatch aggregate
+    /// workspace budget is already committed"*. Measured on Linux: eight workers
+    /// killed with `kill -9 -<PGID>` left eight orphaned roots, and every later
+    /// dispatch on that repository was refused until a human deleted
+    /// `.swarm-worktrees/` by hand. `cleanup_all` could have reclaimed them, but
+    /// nothing invoked it on a fresh process at dispatch time — so the product
+    /// survived the crash and then could not be restarted, which reads as
+    /// correct fail-closed behaviour while actually being unrecoverable.
+    ///
+    /// # Why this cannot reclaim a budget a live run legitimately holds
+    ///
+    /// The discriminator is the transaction's own lease, and it is enforced by
+    /// the KERNEL rather than inferred:
+    ///
+    /// * a live owner holds an exclusive `flock` on `<root>/.wayland-active-lease`
+    ///   for the whole life of its transaction, taken inside the same swarm
+    ///   critical section that creates the root. [`transaction_is_active`]
+    ///   observes that as contention and this skips the root, leaving its
+    ///   reservation committed;
+    /// * that lock is released ONLY when the holding process exits — by exit,
+    ///   by signal, or by `kill -9`. There is no timeout, no heartbeat and no
+    ///   age heuristic here, so a slow but live peer can never be mistaken for a
+    ///   dead one however long it runs;
+    /// * `flock` is per open file description, not per process, so a sibling
+    ///   transaction in THIS process is observed as held exactly like one in
+    ///   another process;
+    /// * this manager's own in-flight owners are skipped a second time via
+    ///   `active_reservations`, which `TransactionCleanup::release` only clears
+    ///   while holding the sentinel this function holds;
+    /// * the whole scan runs under that sentinel, so it cannot interleave with
+    ///   an admission that has created a root but not yet taken its lease.
+    ///
+    /// A root that resists removal is LEFT counted rather than dropped from the
+    /// accounting: reclaim failures are reported, never assumed. The result is
+    /// that a failure to reclaim degrades to the pre-existing refusal, which is
+    /// the safe direction.
+    pub fn reclaim_abandoned_transactions(&self) -> Result<usize> {
+        self.validate_swarm_root()?;
+        with_directory_lock(&self.swarm_root, &self.swarm_authority, || {
+            let mut reclaimed = 0_usize;
+            for entry in std::fs::read_dir(&self.swarm_root)? {
+                let entry = entry?;
+                // Name equality, never path equality or canonicalization: see
+                // `reserved_workspace_bytes`.
+                let name = entry.file_name();
+                if name.as_os_str() == std::ffi::OsStr::new(CONTROL_DIR) {
+                    continue;
+                }
+                let path = entry.path();
+                if !is_real_directory_entry(&path)? {
+                    // A non-directory child is not a transaction root. Leave it
+                    // for `cleanup_all`, which refuses it explicitly.
+                    continue;
+                }
+                let Ok(owner) = name.into_string() else {
+                    continue;
+                };
+                if self
+                    .active_reservations
+                    .lock()
+                    .map_err(|_| {
+                        SwarmError::WorktreeIo("active reservation registry is poisoned".to_owned())
+                    })?
+                    .contains_key(&owner)
+                {
+                    continue;
+                }
+                let root_authority = DirectoryAuthority::open(&path)?;
+                if transaction_is_active(&root_authority, &path)? {
+                    continue;
+                }
+                match self.remove_owned_transaction_root(&owner, &path, &root_authority) {
+                    Ok(()) => reclaimed += 1,
+                    Err(error) => tracing::warn!(
+                        path = %path.display(),
+                        error = %error,
+                        "abandoned transaction root could not be reclaimed; \
+                         its reservation stays counted against the dispatch budget"
+                    ),
+                }
+            }
+            Ok(reclaimed)
+        })
+    }
+
     /// Remove every directory under `.swarm-worktrees/` via
     /// `git worktree remove --force`. Attempts every safe entry, then reports
     /// all failures and every residual path. Idempotent when the root is empty.

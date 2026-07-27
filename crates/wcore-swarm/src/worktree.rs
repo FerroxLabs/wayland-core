@@ -239,26 +239,44 @@ impl TransactionCleanup {
         }
         self.root_authority()?;
         validate_reservation_contents(&self.reservation_authority, self.reserved_bytes)?;
-        let mut lease_was_poisoned = false;
-        let mut slot = match self.lease.lock() {
-            Ok(slot) => slot,
-            Err(error) => {
-                lease_was_poisoned = true;
-                self.lease.clear_poison();
-                error.into_inner()
-            }
-        };
-        if let Some(mut lease) = slot.take() {
-            lease.close();
-        }
-        drop(slot);
-        if lease_was_poisoned {
-            return Err(SwarmError::WorktreeIo(
-                "transaction lease authority was poisoned; lease was closed but cleanup must be retried"
-                    .to_owned(),
-            ));
-        }
         let cleanup_result = with_directory_lock(&self.swarm_root, &self.swarm_authority, || {
+            // The lease is dropped INSIDE the swarm critical section, and that
+            // ordering is load-bearing rather than tidiness.
+            //
+            // `WorktreeManager::reclaim_abandoned_transactions` treats a
+            // transaction root whose lease nobody holds as abandoned by a
+            // process that no longer exists, and reclaims its reservation. That
+            // inference is only sound if a LIVE transaction is never observably
+            // lease-free. Closing the lease before contending for the swarm
+            // sentinel opened exactly that window: a peer process reclaiming
+            // between the close and the lock would delete a root out from under
+            // its own live owner, turning a worker that succeeded into
+            // "transaction cleanup: ...".
+            //
+            // Reclaim holds the SAME sentinel, so with the close moved in here
+            // the window cannot be observed at all. The lock ORDER is unchanged
+            // — `create_isolated_checkout` already acquires the transaction
+            // lease while holding the swarm sentinel — and release only ever
+            // drops the lease, which cannot block.
+            let mut lease_was_poisoned = false;
+            let mut slot = match self.lease.lock() {
+                Ok(slot) => slot,
+                Err(error) => {
+                    lease_was_poisoned = true;
+                    self.lease.clear_poison();
+                    error.into_inner()
+                }
+            };
+            if let Some(mut lease) = slot.take() {
+                lease.close();
+            }
+            drop(slot);
+            if lease_was_poisoned {
+                return Err(SwarmError::WorktreeIo(
+                    "transaction lease authority was poisoned; lease was closed but cleanup must be retried"
+                        .to_owned(),
+                ));
+            }
             let retained_reservation = self
                 .active_reservations
                 .lock()
