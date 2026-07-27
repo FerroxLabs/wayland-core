@@ -3184,6 +3184,182 @@ mod spawn_task_set_tests {
         assert_eq!(authority.lock().authority_epoch(), released.authority_epoch);
     }
 
+    // =======================================================================
+    // F21-02 — the sub-allocation seam.
+    //
+    // These are the NO-CHANNEL CANARY at the agent layer. Each one is written
+    // as a DIFFERENTIAL against the historical behaviour, because a test that
+    // only asserts "the child could not exceed the parent" passes whether the
+    // child was refused or never asked — and that indistinguishability is what
+    // graded this requirement vacuous three times.
+    // =======================================================================
+
+    /// Build a spawner over a durable budget authority with a LOOSE root.
+    fn spawner_with_durable_root(
+        dir: &std::path::Path,
+        max_tokens_in: u64,
+    ) -> (
+        AgentSpawner,
+        crate::budget_authority::SharedBudgetAuthorityCoordinator,
+    ) {
+        let journal =
+            crate::session_journal::SessionJournal::open(dir.join("session.journal"), "session")
+                .unwrap();
+        let session = json!({ "id": "session", "schema_version": 1, "messages": [] });
+        journal
+            .append(crate::session_journal::SessionEvent::SessionImported {
+                source_schema_version: 1,
+                session_digest: crate::session_journal::state_payload_digest(&session).unwrap(),
+                session,
+            })
+            .unwrap();
+        let authority = crate::budget_authority::BudgetAuthorityCoordinator::bind(
+            crate::budget_authority::BudgetAuthorityConfig {
+                journal: Some(journal),
+                budget_session_id: "session-budget".to_owned(),
+                provider_caps: wcore_budget::BudgetCap::default(),
+                preserve_committed_session_extensions: false,
+                execution_policy: wcore_budget::ExecutionBudget {
+                    max_tokens_in: Some(max_tokens_in),
+                    max_agent_depth: Some(4),
+                    ..Default::default()
+                },
+                wall_clock: crate::session_journal::BudgetWallClockAuthority::ActiveRuntime,
+                process_cleanup_proof: None,
+            },
+        )
+        .unwrap()
+        .into_shared();
+        let provider: Arc<dyn LlmProvider> = Arc::new(CountingErrorProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let spawner = AgentSpawner::new(provider, Config::default()).with_budget_governance(
+            SpawnerBudgetGovernance::from_authority(
+                Arc::clone(&authority),
+                tokio_util::sync::CancellationToken::new(),
+            ),
+        );
+        (spawner, authority)
+    }
+
+    fn tight_request(max_tokens_in: u64) -> wcore_types::spawner::ChildBudgetRequest {
+        wcore_types::spawner::ChildBudgetRequest {
+            max_tokens_in: Some(max_tokens_in),
+            ..Default::default()
+        }
+    }
+
+    /// THE CANARY. A request is made, and the child is demonstrably bound by
+    /// what was asked rather than by what it inherited.
+    ///
+    /// The parent's root allows 10_000 input tokens; the delegator asks for 100.
+    /// The control below spawns from the SAME root with NO request and shows the
+    /// child gets 10_000. So this pair cannot both pass unless the request was
+    /// actually carried, resolved, and installed — remove the channel, or revert
+    /// `enter_child_budget` to an unconditional `sub_budget(None)`, and the two
+    /// assertions collide.
+    #[test]
+    fn f21_02_a_requested_narrow_envelope_binds_the_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let (spawner, _authority) = spawner_with_durable_root(dir.path(), 10_000);
+
+        let (child, _guard) = spawner
+            .enter_child_budget(Some(&tight_request(100)))
+            .expect("the durable authority admits the child");
+        let child = child.expect("a governed spawner always yields a child view");
+
+        assert_eq!(
+            child.effective_budget().max_tokens_in,
+            Some(100),
+            "the child must be bound by the sub-allocation its delegator requested"
+        );
+        child.record_tokens(500, 0);
+        assert_eq!(
+            child.first_exceeded_reason(),
+            Some("max_tokens_in"),
+            "500 tokens is far inside the 10_000 root — only the requested 100 \
+             can be stopping this child"
+        );
+    }
+
+    /// The differential control. Same root, no request: the child inherits.
+    /// If this ever reports 100, the harness is not reaching the seam and the
+    /// canary above proves nothing.
+    #[test]
+    fn f21_02_control_an_unrequested_child_still_inherits_the_parent_envelope() {
+        let dir = tempfile::tempdir().unwrap();
+        let (spawner, _authority) = spawner_with_durable_root(dir.path(), 10_000);
+
+        let (child, _guard) = spawner
+            .enter_child_budget(None)
+            .expect("the durable authority admits the child");
+        let child = child.expect("a governed spawner always yields a child view");
+
+        assert_eq!(
+            child.effective_budget().max_tokens_in,
+            Some(10_000),
+            "with nothing requested the child must inherit, exactly as before"
+        );
+        child.record_tokens(500, 0);
+        assert_eq!(child.first_exceeded_reason(), None);
+    }
+
+    /// A request for MORE than the parent holds is clamped down, not granted.
+    #[test]
+    fn f21_02_a_child_cannot_request_a_wider_envelope_than_its_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (spawner, _authority) = spawner_with_durable_root(dir.path(), 100);
+
+        let (child, _guard) = spawner
+            .enter_child_budget(Some(&tight_request(1_000_000)))
+            .expect("the durable authority admits the child");
+        let child = child.expect("a governed spawner always yields a child view");
+
+        assert_eq!(
+            child.effective_budget().max_tokens_in,
+            Some(100),
+            "a request for 1_000_000 against a 100 parent must clamp to 100"
+        );
+    }
+
+    /// The trap this phase was warned about, pinned as a test.
+    ///
+    /// `bind_child_budget` on the durable-authority path used to call
+    /// `inherit_budget_authority(authority)`, which sets the child engine's
+    /// envelope from `current_execution_view()` — the PARENT's. The
+    /// sub-allocation was computed correctly by `enter_child_budget` and then
+    /// thrown away, so enforcement would have LOOKED correct at the seam and
+    /// bound nothing the child ran against.
+    #[test]
+    fn f21_02_the_narrowed_envelope_survives_binding_to_the_child_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let (spawner, _authority) = spawner_with_durable_root(dir.path(), 10_000);
+        let (child, _guard) = spawner
+            .enter_child_budget(Some(&tight_request(100)))
+            .expect("the durable authority admits the child");
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(CountingErrorProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let mut engine = AgentEngine::new_with_provider(
+            provider,
+            Config::default(),
+            crate::tools::ToolRegistry::new(),
+            Arc::new(NullSink),
+        );
+        spawner
+            .bind_child_budget(&mut engine, child, true)
+            .expect("binding the narrowed child envelope succeeds");
+
+        assert_eq!(
+            engine.execution_budget().effective_budget().max_tokens_in,
+            Some(100),
+            "the child ENGINE — not merely the seam's guard — must carry the \
+             sub-allocated envelope; re-deriving from the shared coordinator \
+             here silently restores the parent's 10_000"
+        );
+    }
+
     #[tokio::test]
     async fn cancelling_legacy_parallel_spawn_aborts_running_children() {
         let dir = tempfile::tempdir().unwrap();
