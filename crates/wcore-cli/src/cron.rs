@@ -36,7 +36,39 @@ pub enum CronCmd {
     Add {
         /// Cron expression (5-field crontab shape or 6-field
         /// `cron`-crate shape, e.g. "0 9 * * *" = daily at 09:00).
-        expression: String,
+        ///
+        /// Optional when `--trigger` or `--describe` supplies the timing
+        /// instead.
+        expression: Option<String>,
+
+        /// Phase 24: any trigger in the vocabulary, as `kind:params`.
+        ///
+        ///   --trigger once:2026-08-01T09:00:00Z
+        ///   --trigger every:900
+        ///   --trigger cron:"0 9 * * *"
+        ///   --trigger event:build.finished
+        ///   --trigger webhook:/hooks/build          (authenticated)
+        ///   --trigger webhook:/hooks/build:open     (UNAUTHENTICATED)
+        ///   --trigger poll:https://x.test/health:300
+        ///   --trigger commit:2026-08-01T17:00:00Z:900
+        #[arg(long, value_name = "KIND:PARAMS")]
+        trigger: Option<String>,
+
+        /// Phase 24: author the timing from a phrase.
+        ///
+        /// Prints the concrete trigger the phrase resolved to, together with
+        /// the next few computed fire times, and writes NOTHING until
+        /// `--confirm` is also given. An unparseable phrase is quoted back
+        /// and nothing is written.
+        ///
+        ///   --describe "every weekday at 9am"
+        #[arg(long, value_name = "PHRASE")]
+        describe: Option<String>,
+
+        /// Persist what `--describe` proposed. Without it, `--describe` only
+        /// shows the candidate.
+        #[arg(long, requires = "describe")]
+        confirm: bool,
 
         /// Slash-command target: run the given command on fire.
         #[arg(long, conflicts_with_all = ["channel", "skill"], value_name = "COMMAND")]
@@ -152,12 +184,31 @@ async fn run_inner(
         CronCmd::List => list_cmd(store).await,
         CronCmd::Add {
             expression,
+            trigger,
+            describe,
+            confirm,
             slash,
             channel,
             text,
             skill,
             args,
-        } => add_cmd(expression, slash, channel, text, skill, args, store).await,
+        } => {
+            add_cmd(
+                AddRequest {
+                    expression,
+                    trigger,
+                    describe,
+                    confirm,
+                },
+                slash,
+                channel,
+                text,
+                skill,
+                args,
+                store,
+            )
+            .await
+        }
         CronCmd::Remove { id } => {
             store.remove(&id).await.context("cron remove failed")?;
             println!("removed {id}");
@@ -203,10 +254,24 @@ async fn list_cmd(store: &FileCronStore) -> Result<()> {
             .last_fired
             .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
             .unwrap_or_else(|| "never".to_string());
+        // Phase 24 plan 24-02: the trigger kind and the retry state are shown
+        // on the SAME line as everything else rather than behind a second
+        // verb. A job that has given up is the one an operator most needs to
+        // notice, and a state only visible in `cron status <id>` is a state
+        // nobody looks at until they already suspect something.
+        let kind = job.effective_trigger().kind();
+        let retry = if job.retry_state.gave_up {
+            format!("  GAVE_UP(after {} attempts)", job.retry_state.attempts)
+        } else if job.retry_state.attempts > 0 {
+            format!("  retrying({})", job.retry_state.attempts)
+        } else {
+            String::new()
+        };
         println!(
-            "{state} {id}  {expr:<20}  {target:<30}  last_fired={last_fired}",
+            "{state} {id}  [{kind:<10}] {expr:<28}  {target:<30}  last_fired={last_fired}{retry}",
             state = state,
             id = job.id,
+            kind = kind,
             expr = job.expression,
             target = target,
             last_fired = last_fired
@@ -215,9 +280,19 @@ async fn list_cmd(store: &FileCronStore) -> Result<()> {
     Ok(())
 }
 
+/// How the caller expressed the timing. Exactly one of the three must be
+/// supplied — three ways to say the same thing is a usable surface, three ways
+/// that silently override each other is not.
+pub struct AddRequest {
+    pub expression: Option<String>,
+    pub trigger: Option<String>,
+    pub describe: Option<String>,
+    pub confirm: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn add_cmd(
-    expression: String,
+    timing: AddRequest,
     slash: Option<String>,
     channel: Option<String>,
     text: Option<String>,
@@ -250,11 +325,285 @@ async fn add_cmd(
         ),
         _ => bail!("`--slash`, `--channel`, and `--skill` are mutually exclusive"),
     };
-    let job = CronJob::new(expression, target).context("could not create cron job")?;
+    let AddRequest {
+        expression,
+        trigger,
+        describe,
+        confirm,
+    } = timing;
+
+    let supplied = [expression.is_some(), trigger.is_some(), describe.is_some()]
+        .iter()
+        .filter(|b| **b)
+        .count();
+    if supplied == 0 {
+        bail!(
+            "provide the timing exactly once: a cron expression, `--trigger KIND:PARAMS`, or `--describe \"phrase\"`"
+        );
+    }
+    if supplied > 1 {
+        bail!(
+            "the timing was given more than once; use exactly one of a cron expression, `--trigger`, or `--describe`"
+        );
+    }
+
+    let job = if let Some(phrase) = describe {
+        // NATURAL-LANGUAGE AUTHORING. A phrase becomes a CANDIDATE that the
+        // operator sees before anything is persisted. A background runtime
+        // that silently schedules whatever a sentence was interpreted to mean
+        // is a correctness problem and a safety problem at once (threat
+        // T-24-02-01), so the candidate plus its next computed fire times are
+        // printed and nothing is written without `--confirm`.
+        let Some(t) = parse_phrase(&phrase) else {
+            // Quoted back verbatim, and nothing written.
+            bail!("could not interpret {phrase:?} as a schedule; nothing was written");
+        };
+        let candidate = CronJob::with_trigger(t.clone(), target.clone())
+            .context("the interpreted trigger is not valid")?;
+        println!("phrase:  {phrase:?}");
+        println!("becomes: {}", wcore_cron::render_trigger(&t));
+        print_next_fires(&candidate, 3);
+        if !confirm {
+            println!();
+            println!("nothing written. re-run with --confirm to persist this schedule.");
+            return Ok(());
+        }
+        candidate
+    } else if let Some(spec) = trigger {
+        let t = parse_trigger_spec(&spec)
+            .with_context(|| format!("could not parse --trigger {spec:?}"))?;
+        let job = CronJob::with_trigger(t, target).context("could not create cron job")?;
+        print_next_fires(&job, 3);
+        job
+    } else {
+        let expr = expression.expect("checked above");
+        CronJob::new(expr, target).context("could not create cron job")?
+    };
+
     let id = job.id.clone();
     store.insert(job).await.context("cron add failed")?;
     println!("added {id}");
     Ok(())
+}
+
+/// Print the next few instants a job will fire, so an operator can confirm the
+/// timing means what they thought before it runs unattended.
+///
+/// An externally driven trigger prints that it cannot be predicted rather than
+/// printing nothing — silence there reads as "it will never fire".
+fn print_next_fires(job: &CronJob, n: usize) {
+    let t = job.effective_trigger();
+    let bound = job.effective_bound();
+    if !t.is_clock_driven() {
+        println!(
+            "next:    driven externally ({}) — not predictable from the clock",
+            t.kind()
+        );
+        return;
+    }
+    let mut at = chrono::Utc::now();
+    for i in 0..n {
+        match t.next_after(at, &bound) {
+            Ok(Some(next)) => {
+                println!("next[{i}]: {}", next.to_rfc3339());
+                at = next;
+            }
+            Ok(None) => {
+                if i == 0 {
+                    println!("next:    no future occurrence");
+                }
+                break;
+            }
+            Err(e) => {
+                println!("next:    could not be computed: {e}");
+                break;
+            }
+        }
+    }
+}
+
+/// Parse a `kind:params` trigger spec.
+///
+/// Deliberately strict: an unrecognised kind is an error rather than a
+/// fallback to cron, because silently reinterpreting `webhook:/x` as a cron
+/// expression would produce a job that never fires and never says why.
+fn parse_trigger_spec(spec: &str) -> Result<wcore_cron::Trigger> {
+    use wcore_cron::Trigger;
+    let (kind, rest) = spec
+        .split_once(':')
+        .with_context(|| format!("expected KIND:PARAMS, got {spec:?}"))?;
+    let t = match kind {
+        "once" => Trigger::Once {
+            at: parse_instant(rest)?,
+        },
+        "every" | "interval" => Trigger::Interval {
+            every_secs: rest
+                .trim_end_matches('s')
+                .parse()
+                .with_context(|| format!("expected seconds, got {rest:?}"))?,
+        },
+        "cron" => Trigger::Cron {
+            expression: rest.to_string(),
+        },
+        "event" => Trigger::Event {
+            topic: rest.to_string(),
+        },
+        "webhook" => {
+            // `path[:open]`. The default is authenticated; opening an endpoint
+            // has to be typed out.
+            let (path, open) = match rest.rsplit_once(':') {
+                Some((p, "open")) => (p.to_string(), true),
+                _ => (rest.to_string(), false),
+            };
+            Trigger::Webhook {
+                path,
+                require_auth: !open,
+            }
+        }
+        "poll" => {
+            let (url, secs) = rest
+                .rsplit_once(':')
+                .with_context(|| format!("expected poll:URL:SECONDS, got {rest:?}"))?;
+            Trigger::Poll {
+                url: url.to_string(),
+                every_secs: secs
+                    .parse()
+                    .with_context(|| format!("expected seconds, got {secs:?}"))?,
+            }
+        }
+        "commit" | "commitment" => {
+            let (deadline, hb) = rest
+                .rsplit_once(':')
+                .with_context(|| format!("expected commit:DEADLINE:HEARTBEAT, got {rest:?}"))?;
+            Trigger::Commitment {
+                deadline: parse_instant(deadline)?,
+                heartbeat_secs: hb
+                    .parse()
+                    .with_context(|| format!("expected seconds, got {hb:?}"))?,
+            }
+        }
+        other => bail!(
+            "unknown trigger kind {other:?}; expected one of {}",
+            wcore_cron::Trigger::KINDS.join(", ")
+        ),
+    };
+    t.validate()?;
+    Ok(t)
+}
+
+fn parse_instant(s: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|d| d.with_timezone(&chrono::Utc))
+        .with_context(|| format!("expected an RFC3339 instant, got {s:?}"))
+}
+
+/// Turn a phrase into a concrete trigger, or refuse.
+///
+/// Deliberately a SMALL, deterministic vocabulary rather than a fuzzy match. A
+/// phrase this cannot interpret is refused and quoted back; guessing is how a
+/// sentence turns into a schedule the operator did not intend, which is the
+/// whole reason the confirmation step exists. Every accepted phrase is shown
+/// with its next fire times before it can be persisted.
+pub fn parse_phrase(phrase: &str) -> Option<wcore_cron::Trigger> {
+    use wcore_cron::Trigger;
+    let p = phrase.trim().to_lowercase();
+    let words: Vec<&str> = p.split_whitespace().collect();
+
+    // "every N minutes|hours|days"
+    if words.len() >= 3
+        && words[0] == "every"
+        && let Ok(n) = words[1].parse::<u64>()
+    {
+        {
+            let secs = match words[2].trim_end_matches('s') {
+                "second" => Some(1),
+                "minute" => Some(60),
+                "hour" => Some(3600),
+                "day" => Some(86_400),
+                _ => None,
+            }?;
+            return Some(Trigger::Interval {
+                every_secs: n.saturating_mul(secs),
+            });
+        }
+    }
+
+    // "every minute|hour|day" (no count)
+    if words.len() == 2 && words[0] == "every" {
+        return match words[1] {
+            "minute" => Some(Trigger::Interval { every_secs: 60 }),
+            "hour" => Some(Trigger::Interval { every_secs: 3600 }),
+            "day" => Some(Trigger::Cron {
+                expression: "0 0 * * *".into(),
+            }),
+            _ => None,
+        };
+    }
+
+    // "every day at <time>", "daily at <time>", "every weekday at <time>",
+    // "every <weekday> at <time>"
+    let at_pos = words.iter().position(|w| *w == "at")?;
+    let time = words.get(at_pos + 1)?;
+    let (hour, minute) = parse_clock(time)?;
+    let head = words[..at_pos].join(" ");
+    let dow = match head.as_str() {
+        "every day" | "daily" => "*",
+        "every weekday" | "weekdays" => "1-5",
+        "every weekend" => "0,6",
+        "every monday" => "1",
+        "every tuesday" => "2",
+        "every wednesday" => "3",
+        "every thursday" => "4",
+        "every friday" => "5",
+        "every saturday" => "6",
+        "every sunday" => "0",
+        _ => return None,
+    };
+    Some(Trigger::Cron {
+        expression: format!("{minute} {hour} * * {dow}"),
+    })
+}
+
+/// Parse `9am`, `9:30am`, `17:00`, `09:05`.
+fn parse_clock(s: &str) -> Option<(u32, u32)> {
+    let s = s.trim().trim_end_matches('.');
+    let (body, shift) = if let Some(b) = s.strip_suffix("am") {
+        (b, 0)
+    } else if let Some(b) = s.strip_suffix("pm") {
+        (b, 12)
+    } else {
+        (s, -1)
+    };
+    let (h, m) = match body.split_once(':') {
+        Some((h, m)) => (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?),
+        None => (body.parse::<u32>().ok()?, 0),
+    };
+    if m > 59 {
+        return None;
+    }
+    let hour = match shift {
+        // 24-hour: accept as written.
+        -1 => {
+            if h > 23 {
+                return None;
+            }
+            h
+        }
+        // 12-hour: 12am is 00, 12pm is 12.
+        0 => {
+            if h == 0 || h > 12 {
+                return None;
+            }
+            if h == 12 { 0 } else { h }
+        }
+        _ => {
+            if h == 0 || h > 12 {
+                return None;
+            }
+            if h == 12 { 12 } else { h + 12 }
+        }
+    };
+    Some((hour, m))
 }
 
 fn render_target(t: &Target) -> String {
@@ -304,10 +653,44 @@ async fn status_cmd(id: &str, store: &FileCronStore) -> Result<()> {
         Some(CronFireOutcome::Staged) => {
             "staged (no live dispatcher; last_fired advanced, not a success)".to_string()
         }
+        Some(CronFireOutcome::Abandoned { reason }) => {
+            format!("abandoned ({reason}); the fire did not run and is still owed")
+        }
+        Some(CronFireOutcome::GaveUp { attempts, message }) => {
+            format!("gave up after {attempts} attempts: {message}")
+        }
     };
 
+    let trigger = job.effective_trigger();
+    let bound = job.effective_bound();
+    let retry = job.effective_retry();
+
     println!("id:          {}", job.id);
-    println!("expression:  {}", job.expression);
+    println!("trigger:     {} — {}", trigger.kind(), job.expression);
+    println!(
+        "bound:       min_interval={}s max_in_flight={} deadline={}",
+        bound.min_interval_secs,
+        bound.max_in_flight,
+        bound
+            .deadline
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_else(|| "none".to_string())
+    );
+    println!(
+        "retry:       max_attempts={} backoff={}s..{}s  attempts={}{}",
+        retry.max_attempts,
+        retry.base_backoff_secs,
+        retry.max_backoff_secs,
+        job.retry_state.attempts,
+        if job.retry_state.gave_up {
+            "  GAVE UP"
+        } else {
+            ""
+        }
+    );
+    if let Some(hb) = job.heartbeat_state(chrono::Utc::now()) {
+        println!("heartbeat:   {hb:?}");
+    }
     println!("target:      {target}");
     println!("state:       {state}");
     println!("created_at:  {created}");
@@ -355,6 +738,10 @@ async fn history_cmd(id: &str, limit: usize, history_path: Option<&PathBuf>) -> 
             CronFireOutcome::Error { message } => format!("error: {message}"),
             CronFireOutcome::NoSink => "no-sink".to_string(),
             CronFireOutcome::Staged => "staged (no live dispatcher)".to_string(),
+            CronFireOutcome::Abandoned { reason } => format!("abandoned: {reason}"),
+            CronFireOutcome::GaveUp { attempts, message } => {
+                format!("gave up after {attempts}: {message}")
+            }
         };
         println!("{ts}  {outcome}");
     }
@@ -376,6 +763,14 @@ async fn logs_cmd(id: &str, limit: usize, history_path: Option<&PathBuf>) -> Res
             }
             CronFireOutcome::Error { message } => ("WARN ", format!("dispatch failed: {message}")),
             CronFireOutcome::NoSink => ("WARN ", "no sink; last_fired not advanced".to_string()),
+            CronFireOutcome::Abandoned { reason } => (
+                "WARN ",
+                format!("abandoned mid-tick: {reason}; still owed by the next owner"),
+            ),
+            CronFireOutcome::GaveUp { attempts, message } => (
+                "ERROR",
+                format!("gave up after {attempts} attempts: {message}"),
+            ),
             CronFireOutcome::Staged => (
                 "INFO ",
                 "staged — no live dispatcher; last_fired advanced".to_string(),
@@ -532,6 +927,48 @@ async fn daemon_body(
         Arc::new(wcore_agent::cron::build_headless_cron_handler(&cwd).await);
     eprintln!("[cron-daemon] headless cron handler initialized (skill + channel sinks wired)");
 
+    // Phase 24 plan 24-02, Task 1 — SCHEDULE OWNERSHIP IS LEASED HERE TOO.
+    //
+    // This is the OTHER half of the double-fire. Before the lease, a session
+    // runner and this daemon both ticked one `jobs.json`, and the only thing
+    // between that and a duplicated job was the store's advance-on-fire
+    // bookkeeping, which is a read-then-write race rather than a guarantee.
+    // Leasing only the session side would have left the race exactly where it
+    // was, just with one participant that knew better.
+    //
+    // A daemon that loses the race still runs: it observes and reports and
+    // never fires, so its log, its pid file and its shutdown path stay
+    // identical in both roles.
+    let lease_dir = wcore_cron::default_lease_dir();
+    let lease = match &lease_dir {
+        Some(dir) => match wcore_cron::ScheduleLease::attempt(dir, "cron-daemon") {
+            Ok(a) => a,
+            Err(e) => {
+                // Fail CLOSED: an unprovable claim is exactly what the lease
+                // exists to refuse, and firing anyway would reinstate the
+                // double-fire under a worse name.
+                eprintln!("[cron-daemon] schedule ownership could not be evaluated: {e}");
+                wcore_cron::LeaseAttempt::Observer { holder_pid: None }
+            }
+        },
+        None => wcore_cron::LeaseAttempt::Observer { holder_pid: None },
+    };
+    let lease_handle = match &lease {
+        wcore_cron::LeaseAttempt::Owner(l) => {
+            eprintln!("[cron-daemon] role=owner — this process fires the schedule");
+            l.handle()
+        }
+        wcore_cron::LeaseAttempt::Observer { holder_pid } => {
+            eprintln!(
+                "[cron-daemon] role=observer — pid {} already owns this schedule; firing nothing",
+                holder_pid
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            );
+            wcore_cron::LeaseHandle::observer()
+        }
+    };
+
     let mut ticker = tokio::time::interval(wcore_cron::runner::TICK_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     ticker.tick().await; // eat the immediate first tick
@@ -550,16 +987,23 @@ async fn daemon_body(
                 break;
             }
             _ = ticker.tick() => {
-                if let Err(e) = wcore_cron::tick_once_with_history(
+                if let Err(e) = wcore_cron::tick_once_at(
                     &cron_store,
                     &handler,
                     Some(history_path),
+                    &lease_handle,
+                    chrono::Utc::now(),
                 ).await {
                     eprintln!("[cron-daemon] tick error: {e}");
                 }
             }
         }
     }
+
+    // Surrender the schedule BEFORE the pid file goes, so a successor that
+    // wins the lease cannot briefly see a pid file naming a process that no
+    // longer owns anything.
+    drop(lease);
 
     // Remove PID file on graceful exit so a subsequent `cron daemon` start
     // doesn't see a stale entry.
@@ -691,7 +1135,10 @@ mod tests {
         let s = store(dir.path());
         run_with_store(
             CronCmd::Add {
-                expression: "0 9 * * *".into(),
+                expression: Some("0 9 * * *".into()),
+                trigger: None,
+                describe: None,
+                confirm: false,
                 slash: Some("/morning".into()),
                 channel: None,
                 text: None,
@@ -713,7 +1160,10 @@ mod tests {
         let s = store(dir.path());
         let r = run_with_store(
             CronCmd::Add {
-                expression: "*/15 * * * *".into(),
+                expression: Some("*/15 * * * *".into()),
+                trigger: None,
+                describe: None,
+                confirm: false,
                 slash: None,
                 channel: Some("team".into()),
                 text: None,
@@ -732,7 +1182,10 @@ mod tests {
         let s = store(dir.path());
         run_with_store(
             CronCmd::Add {
-                expression: "*/15 * * * *".into(),
+                expression: Some("*/15 * * * *".into()),
+                trigger: None,
+                describe: None,
+                confirm: false,
                 slash: None,
                 channel: Some("team-slack".into()),
                 text: Some("status check".into()),
@@ -753,7 +1206,10 @@ mod tests {
         let s = store(dir.path());
         run_with_store(
             CronCmd::Add {
-                expression: "0 8 * * *".into(),
+                expression: Some("0 8 * * *".into()),
+                trigger: None,
+                describe: None,
+                confirm: false,
                 slash: None,
                 channel: None,
                 text: None,
@@ -780,7 +1236,10 @@ mod tests {
         let s = store(dir.path());
         let r = run_with_store(
             CronCmd::Add {
-                expression: "0 9 * * *".into(),
+                expression: Some("0 9 * * *".into()),
+                trigger: None,
+                describe: None,
+                confirm: false,
                 slash: None,
                 channel: None,
                 text: None,
@@ -799,7 +1258,10 @@ mod tests {
         let s = store(dir.path());
         run_with_store(
             CronCmd::Add {
-                expression: "0 9 * * *".into(),
+                expression: Some("0 9 * * *".into()),
+                trigger: None,
+                describe: None,
+                confirm: false,
                 slash: Some("/x".into()),
                 channel: None,
                 text: None,

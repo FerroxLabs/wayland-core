@@ -9824,6 +9824,7 @@ dependencies = [
 name = "wcore-gateway"
 version = "0.12.25"
 dependencies = [
+ "async-trait",
  "chrono",
  "dirs",
  "libc",
@@ -9831,7 +9832,9 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
+ "wcore-cron",
  "windows-sys 0.59.0",
 ]
 
