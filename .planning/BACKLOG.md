@@ -363,3 +363,28 @@ stdout to the master end, and `crates/wcore-cli/tests/support/pty.rs` inherits t
 gate. Every human-visible property is provable on Linux and macOS only. Carried
 forward from 21-02's identical limitation at the same severity; it stays open
 until the PTY driver supports ConPTY.
+
+### test-isolation — the parallel `wcore-agent` lib run fails a different set of tests every time · MEDIUM
+
+**Three separate agents have independently rediscovered this and spent time on it. Read this
+before you do too.**
+
+Raw `cargo test -p wcore-agent --lib` on the 96-core build host fails **a different 13-22 tests
+on each run**, at base and on every branch alike. Under `--test-threads=1` the same tree is
+clean: measured 2098/0 at base and 2107/0 on a branch — a clean comparison, so nothing about
+the failures is branch-specific. A separate agent measured 14 failures parallel vs 2101/0
+serial; another measured 2 failures that were `file_watcher_notifier` panicking on EMFILE
+("Too many open files") at load 146 with 842 sessions.
+
+Diagnosed causes so far: session-journal writer **lease contention** (`session journal writer
+lease is already held`), file-descriptor exhaustion under load, and a `wcore-config` max-tokens
+**shared-env race**. `cargo nextest run --profile ci` is unaffected — 3418 passed / 13 skipped /
+0 retries consumed on the same tree.
+
+**Why it is worth fixing rather than living with:** the parallel number is the one an unwary
+reader quotes. One agent explicitly recorded "a first parallel run said 14 failed" precisely
+because 14 is what a careless reader would have reported as a regression. It costs every agent
+a diagnosis cycle and it can mask a genuine red.
+
+**Until then:** use `cargo nextest run --profile ci`, or `--test-threads=1` for the raw harness,
+and do not report a parallel-run failure count as a regression without the serial control.
