@@ -13,10 +13,19 @@ cargo command allowed on the Mac.
 1. **Live testing ranks at least as high as green code.**
 2. **Lint plan gates to 0 HIGH** — `python3 .planning/scripts/lint-plan-gates.py <dir>`.
 3. **Decide, do not park.** Cross-audit; do not escalate.
-4. **NEW — a live test whose scenario is too clean cannot reach the defect.** `gateway drain`
-   hung forever with carried work yet **passed its first live journey**, because that gateway
-   had zero pending deliveries. An empty queue, a fresh profile, one worker and a zero-length
-   history are all scenarios where broken code behaves correctly.
+4. **NEW — a live test whose scenario is too clean cannot reach the defect, and a comparison
+   must be taken while the two sides can still disagree.** `gateway drain` hung forever with
+   carried work yet **passed its first live journey**, because that gateway had zero pending
+   deliveries. Separately, a `SCANNER-AGREEMENT` gate printed `AGREE scanner=0 manual=0` while
+   running **only after the reap**, when both sides are legitimately zero — it agreed
+   enthusiastically while the scanner was structurally blind.
+5. **NEW — a measurement that cannot be taken must never render as `0`.** Windows orphan
+   detection reported a **measured zero while an orphan existed**, because `tasklist` has no
+   command-line column. Worse than an error: a zero reads as proof and everything downstream
+   banks it. **The first fix reproduced the identical bug** (`Win32_Process.CommandLine` returns
+   NULL without privilege) — the instrument was never the defect, the *representable bad state*
+   was. Fixed in the type: `Enumerated | CannotDetermine` with **no `count()`**, plus an
+   instrument self-test (the scanner must see its own process, with its own command line).
 
 **Reserved to Sean, and nothing else:** main merge, PR, tag, release, issue closure, deleting a
 retained evidence ref, real credentials. Pushing this working branch is expected.
@@ -31,7 +40,7 @@ retained evidence ref, real credentials. Pushing this working branch is expected
 | **22** | Goal kernel + task ledger landed, live-proven Linux **and** Windows. **Criterion 2 FAILED** — ledger not wired to `FleetDispatcher`, no shipped-binary proof. Agent in flight. |
 | **23B** | H1 data-loss residual CLOSED; D2 fixed. **23B-03/04 not run** (23B-04 needs a leg over *real elapsed days*). |
 | **24** | 24-02 + `gateway.rs` + independent delivery sink landed. **`wcore-acp` completely untouched; 24-04 never started.** Agent in flight. |
-| **25** | 14 commits, agent in flight. |
+| **25** | **COMPLETE and merged** (`cb131278`). 25-02/03/04 all landed; **nine HIGH** found and fixed. Criterion 3 MET on Linux; **Criterion 2 NOT MET** (attribution held through all 5 disruptions but against a separate *machine identity*, not a second physical host — needs an SSH key on one of Sean's machines, §5); **Criterion 4 NOT MET** (SSH and cloud orphan surfaces report `NOT MEASURED`, and those are exactly the two with no proven reaping mechanism). |
 | **26** | 26-01 landed (~25%). **Backup/restore requirement UNMET.** Agent in flight. |
 | **28 / 29 / 30** | **PLANNED, 0 HIGH.** Not executed. 28 certifies the candidate 24-27 produce, so it cannot start until they land. |
 
@@ -78,6 +87,15 @@ retained evidence ref, real credentials. Pushing this working branch is expected
   from inside** — the gateway reported `carried=1 (unknown-outcome 1)`, exactly as designed.
   Only an independent sink could see it.
 
+**Lane 25 — nine HIGH, and its own description is the right one: "every one a false answer, not
+a crash."** `plugin sign` wrote the signature where the verifier never looks · `plugin install`
+had **no path at all** for a Wayland-native plugin · `plugin remove` could not remove a
+marketplace install · both shipped templates were unusable while their smoke tests skipped ·
+`node probe` reported a healthy node OFFLINE · `node probe` refreshed from the **controller's**
+backends · the orphan scan could not see an orphan · the scanner counted itself · the Windows
+measured zero. A surface that answers confidently and wrongly is the failure mode this codebase
+produces; crashes are comparatively rare.
+
 ---
 
 ## 4. Gate defects — the linter now catches six shapes
@@ -120,9 +138,24 @@ any linter change.
 
 ---
 
+## 5b. Merge hazard — the shared `wcore-cli` fence is NOT always a clean union
+
+`crates/wcore-cli/src/{lib,main}.rs` are touched by every lane, and the fence keeps edits
+additive — but "additive" does not mean "unionable". Measured on lane/25:
+
+- `lib.rs` conflicted on two `pub mod` declarations. Union is correct.
+- `main.rs` conflicted **mid-match-arm**: the shared closing lines (`Ok(ExitCode::FAILURE) } },`)
+  sit *after* the `>>>>>>>` marker, so taking both sides leaves the FIRST arm unclosed. A naive
+  union produced a tree that `cargo fmt` reported as "unclosed delimiter".
+
+**Resolve these by reading them, and verify with `cargo check -p wcore-cli --all-targets` on
+hetzner — not with `fmt`.** `fmt` parsing is necessary and not sufficient.
+
+---
+
 ## 6. Next
 
-1. Land the four in-flight agents (22 dispatcher wiring, 24 `wcore-acp`+24-04, 25, 26
+1. Land the three in-flight agents (22 dispatcher wiring, 24 `wcore-acp`+24-04, 26
    backup/restore).
 2. **23B-03** (nine-file feature, no partial credit) and **23B-04** (needs real elapsed days).
 3. Then **28 → 29 → 30**, in order; 28 cannot start until 24-27 land.
@@ -131,6 +164,15 @@ any linter change.
    status` reporting `deliveries_pending: 0` mid-flight, Windows orphan scanner reporting a
    **measured zero** because `tasklist` has no command lines.
 5. `core#254` still needs Sean's maintainer decision; our lease fix may change its relevance.
+
+**Reserved-to-Sean items now blocking specific criteria** (nothing else is waiting on him):
+- **An SSH key on one of his machines** — the only thing blocking Phase 25 Criterion 2's
+  cross-machine half. It is an authorization grant, not a technical gap. Exact commands in
+  `25-03-NODE-EVIDENCE.md` §7.
+- **A cloud account** for 25's cloud backend; the choice was made autonomously, the account is his.
+- **The coordinated Core+Desktop digest re-pin** (`SEAM-REQUESTS/CONTRACT-DIGEST-RESTAMP.md`),
+  batched with `F21-04-01.md`'s three items so the set costs one release.
+- **24-04's terminal publication** and `core#254`.
 
 **Verify what landed before redoing anything.** Agents die mid-write routinely; partial state is
 the norm. Three separate claims I made today were wrong and had to be corrected by measurement —
