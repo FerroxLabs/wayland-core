@@ -623,7 +623,11 @@ function gitInit(dir, files) {
   g(['-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'f28']);
 }
 
-function summarise(text) {
+function summarise(raw) {
+  // The swarm reports the worker's stdout as a JSON string, so real newlines arrive as
+  // the two characters `\` `n`. Un-escape before scanning, or a field regex runs past
+  // the end of its own line and swallows the next three.
+  const text = raw.replace(/\\r\\n|\\n/g, '\n');
   const g = (re) => (re.exec(text) ?? [])[1] ?? null;
   return {
     ran: /F28RAN/.test(text),
