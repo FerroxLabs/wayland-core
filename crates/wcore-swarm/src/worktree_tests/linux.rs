@@ -884,7 +884,15 @@ async fn worktree_add_timeout_kills_tree_and_reports_preserved_residual() {
     let pid_file = fixture.path().join("hung-child.pid");
     let mut manager = WorktreeManager::new_with_git_script_and_limits(
         fixture.path(),
-        "case \" $* \" in *\" config \"*) exit 1;; esac\nmkdir -p .swarm-worktrees/worker-1\n(while :; do :; done) &\nchild=$!\nprintf %s \"$child\" > \"$WAYLAND_TEST_PID_FILE\"\nwait \"$child\"",
+        // The hung grandchild BLOCKS rather than busy-spinning. It simulates a
+        // wedged git at least as faithfully — the point is a process that is
+        // alive and will not exit on its own — and it costs no CPU, so a test
+        // binary that is SIGKILLed mid-run leaves an idle process instead of a
+        // permanent core-burner. Five such orphans were found on the shared
+        // build host at PPID 1, alive 7d11h, each pinning ~99% of a core.
+        // `sleep 2147483647` is portable to plain `sh`; `sleep infinity` is a
+        // GNU extension and is deliberately not used.
+        "case \" $* \" in *\" config \"*) exit 1;; esac\nmkdir -p .swarm-worktrees/worker-1\n(sleep 2147483647) &\nchild=$!\nprintf %s \"$child\" > \"$WAYLAND_TEST_PID_FILE\"\nwait \"$child\"",
         CaptureLimits {
             stdout_bytes: 4096,
             stderr_bytes: 4096,
@@ -918,7 +926,11 @@ async fn cancelled_cleanup_kills_git_and_reports_residual() {
     let pid_file = fixture.path().join("hung-cleanup.pid");
     let mut manager = WorktreeManager::new_with_git_script_and_limits(
         fixture.path(),
-        "printf %s \"$$\" > \"$WAYLAND_TEST_PID_FILE\"\nwhile :; do :; done",
+        // Blocks instead of busy-spinning, for the reason given on the hung
+        // grandchild above: an interrupted run must not leave a core-burner on
+        // a shared host. The recorded pid is this shell's own, and it stays
+        // alive and unkillable-by-itself either way.
+        "printf %s \"$$\" > \"$WAYLAND_TEST_PID_FILE\"\nsleep 2147483647",
         GIT_CAPTURE_LIMITS,
     )
     .unwrap();
