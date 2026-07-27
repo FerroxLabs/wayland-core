@@ -1,0 +1,46 @@
+MAX_RETAINED_WORKTREES (source of truth):
+102:pub const MAX_RETAINED_WORKTREES: usize = 256;
+=== launching two concurrent swarm dispatches on ONE repo ===
+A_EXIT=1 B_EXIT=0 PEAK_RETAINED_ROOTS=8
+--- a.log (head) ---
+{
+  "workers": [
+    {
+      "branch": "swarm/a/ebe5e171da6048dca39cfcf5975cf9cf-4",
+      "duration": "319ms 699us 62ns",
+      "status": {
+        "Failed": "worktree create: dispatch admission refused: aggregate workspace budget exhausted"
+      },
+      "stderr": "",
+      "stdout": "",
+      "worker_id": "ebe5e171da6048dca39cfcf5975cf9cf-4"
+    },
+    {
+      "branch": "swarm/a/2113de09856a4752bb1cfa0459a23cb7-5",
+      "duration": "311ms 699us 299ns",
+      "status": {
+        "Failed": "worktree create: dispatch admission refused: aggregate workspace budget exhausted"
+      },
+      "st
+--- b.log (head) ---
+{
+  "workers": [
+    {
+      "branch": "swarm/b/46e0ad51eca74f5e99c8f9a7e4c4a41a-4",
+      "duration": "314ms 901us 728ns",
+      "status": {
+        "Failed": "worktree create: dispatch admission refused: aggregate workspace budget exhausted"
+      },
+      "stderr": "",
+      "stdout": "",
+      "worker_id": "46e0ad51eca74f5e99c8f9a7e4c4a41a-4"
+    },
+    {
+      "branch": "swarm/b/96a2d57d1f764f7b8267c4107cafad0e-5",
+      "duration": "306ms 775us 154ns",
+      "status": {
+        "Failed": "worktree create: dispatch admission refused: aggregate workspace budget exhausted"
+      },
+      "s
+A_WORKERS=6
+B_WORKERS=6

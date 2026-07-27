@@ -1,0 +1,442 @@
+===== run1.log =====
+GOAL: run pid=1010188 goal=g-live
+GOAL: recovery=resumed iterations=0 resume_count=1 resumable=true revoked=0 drained=0 needs_resolution=0
+GOAL-EXEC: task=t00 key=idem-t00 produced=yes
+GOAL-EXEC: task=t01 key=idem-t01 produced=yes
+GOAL-EXEC: task=t02 key=idem-t02 produced=yes
+GOAL-EXEC: task=t03 key=idem-t03 produced=yes
+
+===== run2.log =====
+GOAL: run pid=1013724 goal=g-live
+GOAL: recovery=resumed iterations=1 resume_count=2 resumable=true revoked=2 drained=4 needs_resolution=0
+GOAL: revoked task=t04 reason=lease-expired
+GOAL: revoked task=t05 reason=lease-expired
+GOAL: drained task=t00 source=outbox
+GOAL: drained task=t01 source=outbox
+GOAL: drained task=t02 source=outbox
+GOAL: drained task=t03 source=outbox
+GOAL-EXEC: task=t04 key=idem-t04 produced=no reason=idempotency-key-present
+GOAL-EXEC: task=t07 key=idem-t07 produced=yes
+GOAL-EXEC: task=t06 key=idem-t06 produced=yes
+GOAL-EXEC: task=t09 key=idem-t09 produced=yes
+GOAL-EXEC: task=t08 key=idem-t08 produced=yes
+GOAL-EXEC: task=t05 key=idem-t05 produced=yes
+GOAL-EXEC: task=t011 key=idem-t011 produced=yes
+GOAL-EXEC: task=t010 key=idem-t010 produced=yes
+GOAL: wave=0 shards=3 claimed=6 lost=0 completed=6 failed=0 indeterminate=0 abandoned=0 delivered=6 dispatch_error=-
+GOAL: wave=1 shards=1 claimed=2 lost=0 completed=2 failed=0 indeterminate=0 abandoned=0 delivered=2 dispatch_error=-
+GOAL: run_complete waves=2 iterations=2 completed=8 delivered=8 stopped_because=no claimable task remains
+
+===== status.json =====
+{
+  "goal_id": "g-live",
+  "objective": "prove the wire survives a kill",
+  "authority": {
+    "effective_limits": {
+      "max_tokens": 10000
+    },
+    "strategy": "fleet",
+    "loop_policy": {
+      "kind": "fixed",
+      "iterations": 8
+    },
+    "parent_envelope_digest": "wayland-core-goal-fleet/v1",
+    "snapshot_digest": "7c64f91ef439c08cb75114860504da407b4f781f5035cd3c8fbe4d00779c9951"
+  },
+  "lifecycle": {
+    "state": "running"
+  },
+  "iterations_started": 3,
+  "resume_count": 2,
+  "opened_at_unix_ms": 1785154430659,
+  "last_transition_seq": 75,
+  "last_transition_checksum": "f57a79647d61cd9707713e6cf13cbb2b4a882e25ce12ab376032c0fc8bfbdc2f",
+  "tasks": {
+    "t00": {
+      "task_id": "t00",
+      "idempotency_key": "idem-t00",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-1010188-w0",
+          "budget_reservation_id": "goalfleet-fleet-1010188-t00-0",
+          "lease_expires_unix_ms": 1785154436363,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t00",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 40,
+      "last_transition_checksum": "8eb146b207adcf5ac11cb161de7542cc20bdea66079117ae817338fa663949fc"
+    },
+    "t01": {
+      "task_id": "t01",
+      "idempotency_key": "idem-t01",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-1010188-w1",
+          "budget_reservation_id": "goalfleet-fleet-1010188-t01-1",
+          "lease_expires_unix_ms": 1785154436363,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t01",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 41,
+      "last_transition_checksum": "259331eaab054dfaf93bc3863a45266cafb18e5df8a9a79902de006f405b561c"
+    },
+    "t010": {
+      "task_id": "t010",
+      "depends_on": [
+        "t04"
+      ],
+      "idempotency_key": "idem-t010",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-1013724-w0",
+          "budget_reservation_id": "goalfleet-fleet-1013724-t010-6",
+          "lease_expires_unix_ms": 1785154543175,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t010",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 84,
+      "last_transition_checksum": "ae7186f3c04eaffc8f5f29678ff7acf13fa793ea2a2104148f271eec3e24a456"
+    },
+    "t011": {
+      "task_id": "t011",
+      "depends_on": [
+        "t05"
+      ],
+      "idempotency_key": "idem-t011",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-1013724-w1",
+          "budget_reservation_id": "goalfleet-fleet-1013724-t011-7",
+          "lease_expires_unix_ms": 1785154543175,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t011",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 85,
+      "last_transition_checksum": "6bf677089f34ccefe216add191412f8f60aa915c37ec9c02c076434e5cf66abb"
+    },
+    "t02": {
+      "task_id": "t02",
+      "idempotency_key": "idem-t02",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-1010188-w2",
+          "budget_reservation_id": "goalfleet-fleet-1010188-t02-2",
+          "lease_expires_unix_ms": 1785154436363,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t02",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 42,
+      "last_transition_checksum": "06a16a6af8a7c8f0eeb50fd3dd1644953e32de8e45f2fa26bf1ffb49635ea5d9"
+    },
+    "t03": {
+      "task_id": "t03",
+      "idempotency_key": "idem-t03",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-1010188-w3",
+          "budget_reservation_id": "goalfleet-fleet-1010188-t03-3",
+          "lease_expires_unix_ms": 1785154436363,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t03",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 43,
+      "last_transition_checksum": "14e8ddf530b4aeca0e308d7b593d54d36d2d09ccf6bc92e1075bc820983bd64a"
+    },
+    "t04": {
+      "task_id": "t04",
+      "idempotency_key": "idem-t04",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-1010188-w4",
+          "budget_reservation_id": "goalfleet-fleet-1010188-t04-4",
+          "lease_expires_unix_ms": 1785154436363,
+          "status": {
+            "status": "revoked",
+            "reason": "lease expired at 1785154436363 (now 1785154443070)"
+          }
+        },
+        {
+          "epoch": 2,
+          "worker_id": "fleet-1013724-w0",
+          "budget_reservation_id": "goalfleet-fleet-1013724-t04-0",
+          "lease_expires_unix_ms": 1785154503072,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 2,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t04",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 69,
+      "last_transition_checksum": "9668284d336150ed84374555b095659a36fabf7c99f106405704aa176440eaa3"
+    },
+    "t05": {
+      "task_id": "t05",
+      "idempotency_key": "idem-t05",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-1010188-w5",
+          "budget_reservation_id": "goalfleet-fleet-1010188-t05-5",
+          "lease_expires_unix_ms": 1785154436363,
+          "status": {
+            "status": "revoked",
+            "reason": "lease expired at 1785154436363 (now 1785154443070)"
+          }
+        },
+        {
+          "epoch": 2,
+          "worker_id": "fleet-1013724-w1",
+          "budget_reservation_id": "goalfleet-fleet-1013724-t05-1",
+          "lease_expires_unix_ms": 1785154503072,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 2,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t05",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 70,
+      "last_transition_checksum": "c79e72dbf7c6d890d31c9f476fd0f10b40a51221884265d6fe05c453e5f83dd9"
+    },
+    "t06": {
+      "task_id": "t06",
+      "depends_on": [
+        "t00"
+      ],
+      "idempotency_key": "idem-t06",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-1013724-w2",
+          "budget_reservation_id": "goalfleet-fleet-1013724-t06-2",
+          "lease_expires_unix_ms": 1785154503072,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t06",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 71,
+      "last_transition_checksum": "ba147c030fb075f18f8de931451a5f044dfea13b1b2fdaeb0d8d2b972833b67f"
+    },
+    "t07": {
+      "task_id": "t07",
+      "depends_on": [
+        "t01"
+      ],
+      "idempotency_key": "idem-t07",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-1013724-w3",
+          "budget_reservation_id": "goalfleet-fleet-1013724-t07-3",
+          "lease_expires_unix_ms": 1785154503072,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t07",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 72,
+      "last_transition_checksum": "01969d0d5a69386265862959b2eaf97ac9082952de44d893435ca4e6c56b6dc3"
+    },
+    "t08": {
+      "task_id": "t08",
+      "depends_on": [
+        "t02"
+      ],
+      "idempotency_key": "idem-t08",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-1013724-w4",
+          "budget_reservation_id": "goalfleet-fleet-1013724-t08-4",
+          "lease_expires_unix_ms": 1785154503072,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t08",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 73,
+      "last_transition_checksum": "530a29240ac3456195d0991902a0c9251027b76016db1b29c6bc4904312fe7dc"
+    },
+    "t09": {
+      "task_id": "t09",
+      "depends_on": [
+        "t03"
+      ],
+      "idempotency_key": "idem-t09",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-1013724-w5",
+          "budget_reservation_id": "goalfleet-fleet-1013724-t09-5",
+          "lease_expires_unix_ms": 1785154503072,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t09",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 74,
+      "last_transition_checksum": "3e463d85eabda6a50d5532d9da6cfeae7e086a7e9818728e0f43d962401bdab7"
+    }
+  }
+}
+
+===== worker.sh =====
+#!/bin/sh
+case "$WAYLAND_GOAL_TASK" in
+  t00|t01) sleep 1 ;;
+  t02|t03) sleep 2 ;;
+  t04|t05) sleep 40 ;;
+  *)       sleep 1 ;;
+esac
+
+===== effects listing =====
+idem-t00
+idem-t01
+idem-t010
+idem-t011
+idem-t02
+idem-t03
+idem-t04
+idem-t05
+idem-t06
+idem-t07
+idem-t08
+idem-t09
+===== effect contents =====
+effects/effects/idem-t00: t00
+effects/effects/idem-t01: t01
+effects/effects/idem-t010: t010
+effects/effects/idem-t011: t011
+effects/effects/idem-t02: t02
+effects/effects/idem-t03: t03
+effects/effects/idem-t04: t04
+effects/effects/idem-t05: t05
+effects/effects/idem-t06: t06
+effects/effects/idem-t07: t07
+effects/effects/idem-t08: t08
+effects/effects/idem-t09: t09
