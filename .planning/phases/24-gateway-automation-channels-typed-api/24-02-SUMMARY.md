@@ -4,6 +4,9 @@ plan: "02"
 subsystem: automation
 tags: [scheduling, lease, single-owner, triggers, retry, history-bound, natural-language]
 status: partial
+plans-not-executed:
+  - "24-03 — not started"
+  - "24-04 — not started"
 requires:
   - "24-01"
 provides:
@@ -309,8 +312,56 @@ phase's largest hole rather than half-built.
 | F24-02-M2: `max_in_flight` clamped but not enforced at dispatch | MEDIUM | BACKLOG |
 | F24-02-L1: lock primitive duplicated between `pidlock` and `lease` | LOW | BACKLOG |
 | F24-02-L2: a same-instant loser logs `pid unknown` because the winner has not written its record yet | LOW | BACKLOG — cosmetic; the decision never depends on the record |
+| **F24-02-H1: the plan's own SEAM GUARD is self-passing under zsh** | **HIGH** (process) | **REPORTED, not fixed here** — see below |
 
-No CRITICAL findings. Both HIGHs are fixed with executable evidence.
+No CRITICAL findings. Both product HIGHs are fixed with executable evidence.
+
+### F24-02-H1 — the plan's declared seam guard cannot go red under zsh
+
+The gate text in Tasks 1 and 2 is:
+
+```sh
+SEAM="Cargo.toml Cargo.lock crates/wcore-config/src/config.rs crates/wcore-protocol"
+... && /usr/bin/git diff --quiet -- $SEAM && ...
+```
+
+`$SEAM` is **unquoted**, which relies on IFS word-splitting to become four
+pathspecs. **zsh does not word-split unquoted parameter expansions.** Under zsh
+the whole string is passed as ONE pathspec, it matches no file, the diff is
+empty and `--quiet` exits 0 — *whatever* was actually modified.
+
+Measured, on this lane, where the seam genuinely IS modified:
+
+```
+$ SEAM="Cargo.toml Cargo.lock crates/wcore-config/src/config.rs crates/wcore-protocol"
+$ git diff --quiet plan/f20-unified-audit-repair -- $SEAM && echo "SEAM CLEAN"
+SEAM CLEAN                      ← WRONG
+
+$ git diff --stat plan/f20-unified-audit-repair -- Cargo.lock
+ Cargo.lock | 3 +++
+ 1 file changed, 3 insertions(+)   ← the truth
+```
+
+This is a fifth entry for the standing self-passing list, and a new shape:
+**a gate whose correctness depends on the operator's shell.** The plan was
+careful to replace a bare `git status --porcelain` with `test -z "$(...)"`
+precisely because the bare form always exits 0 — and then wrote a
+substitute that also always exits 0 under half the shells it will be run in.
+
+The fix is one character-class: quote the expansion and loop, or use
+`git diff --name-only -- "Cargo.toml" "Cargo.lock" …` with the paths written
+out. **Not applied here**, because the gate lives in the PLAN file, which this
+plan does not own and which other lanes are reading concurrently. Handed to the
+orchestrator: the same gate text appears in 24-03 and in every plan the shape
+was copied into.
+
+**The truth about this lane's seam, taken with a gate that can go red:**
+`Cargo.lock` is modified by exactly three lines (`async-trait`, `tokio`,
+`wcore-cron` in the `wcore-gateway` block), plus the cherry-picked base fix
+`9a86b287` whose bytes are identical to the coordinator's. `Cargo.toml` at the
+workspace root, `crates/wcore-config/src/config.rs` and `crates/wcore-protocol`
+are **untouched**. `crates/wcore-cli/src/lib.rs` and `crates/wcore-cli/src/main.rs`
+— the two shared-fence files named in the lane brief — are **untouched**.
 
 ## Self-Check
 
