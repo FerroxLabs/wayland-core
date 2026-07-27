@@ -25,6 +25,20 @@ on:
       # Transient: drop this entry when the branch merges. The job matrix,
       # runner labels, concurrency group and test commands are untouched.
       - plan/f20-unified-audit-repair
+      # 2026-07-27. Lane branches, so a lane can obtain a CI-built binary for
+      # its OWN changes. Without this, `gh run download` only ever yields
+      # artifacts from the integration branch, and a lane needing macOS or
+      # Windows evidence for work it has not merged yet has no route to a
+      # binary at all — which read as "macOS is not obtainable" and was
+      # escalated twice as a platform impossibility. It is a CI-trigger gap
+      # with a one-line fix. A wildcard rather than one entry per lane,
+      # because lanes are created and retired continuously and an
+      # enumeration goes stale the moment it is written.
+      #
+      # Same reasoning as above applies: `workflow_dispatch` is not available,
+      # because GitHub exposes it only for workflows present on the DEFAULT
+      # branch and ci.yml on `main` has no such trigger.
+      - 'lane/**'
 
 permissions:
   contents: read
