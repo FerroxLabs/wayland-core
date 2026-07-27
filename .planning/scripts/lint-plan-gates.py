@@ -78,6 +78,18 @@ STATIC_RULES = [
         "trips it, and it goes permanently green once committed. Pair it with a "
         "working-tree leg.",
     ),
+    (
+        "HIGH",
+        "unquoted-pathspec-shell-dependent",
+        re.compile(r"\bgit\s+(?:diff|ls-files)\b[^\n|;]*?--\s+\$[A-Za-z_][A-Za-z0-9_]*"),
+        "An unquoted `$VAR` holding SPACE-SEPARATED paths only splits into multiple pathspecs "
+        "under a shell that word-splits. **zsh does not**, so the whole string becomes ONE "
+        "pathspec, it matches nothing, and `--quiet` exits 0 no matter what changed. Measured "
+        "live: a seam gate printed SEAM CLEAN while Cargo.lock carried 3 added lines. Quoting "
+        "it does NOT fix this -- that makes it one pathspec everywhere. Inline the paths "
+        "literally instead. This is the only gate defect here whose correctness depends on "
+        "which shell the operator happens to use.",
+    ),
     # ---- The mirror class: gates that cannot go GREEN. -------------------
     # Everything above catches a gate that always passes. These catch a gate
     # that always fails, which is just as useless and much more confusing --
