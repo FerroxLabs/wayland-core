@@ -93,11 +93,18 @@ pub enum SbomError {
          corrupted or forged metadata document rather than something to deduplicate silently"
     )]
     DuplicatePackageUrl(String),
+    // The field is `declared_source`, not `source`: thiserror binds a field
+    // literally named `source` as the error's `std::error::Error::source()`,
+    // which a `String` cannot satisfy.
     #[error(
-        "package {name} declares source {source}, which carries a filesystem path; emitting it \
-         would make the document depend on where the workspace happens to be checked out"
+        "package {name} declares source {declared_source}, which carries a filesystem path; \
+         emitting it would make the document depend on where the workspace happens to be \
+         checked out"
     )]
-    SourceCarriesFilesystemPath { name: String, source: String },
+    SourceCarriesFilesystemPath {
+        name: String,
+        declared_source: String,
+    },
     #[error("could not encode the CycloneDX document: {0}")]
     Encode(String),
 }
@@ -348,7 +355,7 @@ fn properties(
     if source.contains("file://") || source.starts_with("path+") {
         return Err(SbomError::SourceCarriesFilesystemPath {
             name: package.name.clone(),
-            source: source.to_string(),
+            declared_source: source.to_string(),
         });
     }
 
