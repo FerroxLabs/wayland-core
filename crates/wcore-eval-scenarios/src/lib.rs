@@ -45,6 +45,9 @@ pub mod cost;
 pub mod coverage;
 pub mod cron_scenarios;
 pub mod cross_session;
+/// Phase 28 E5 black-box probe definitions (F28-01), one per dimension plus one per
+/// mandatory cell. Executed by `scripts/f28-native-matrix.mjs`.
+pub mod e5_cases;
 /// Phase 28 E5 certification matrix generator (F28-01).
 pub mod e5_matrix;
 mod egress_evidence;
