@@ -1,11 +1,11 @@
-# portability-interrupt-proof.ps1 — F26-03 Windows interruption and exact-rollback proof.
+# portability-interrupt-proof.ps1 -- F26-03 Windows interruption and exact-rollback proof.
 #
 # Usage:
 #   powershell -NoProfile -File scripts\portability-interrupt-proof.ps1 -Binary <exe> [-Undersized] [-HandlerControl] [-OpenHandle]
 #
 # This MIRRORS scripts/portability-interrupt-proof.sh step for step. A Windows
 # leg that measured something else could not tell you whether Windows behaves
-# differently — it would only tell you two unrelated things passed. Same
+# differently -- it would only tell you two unrelated things passed. Same
 # fixture shape, same target-that-carries-state, same mid-flight checks, same
 # verdict grammar, and the same digest read from the product's own
 # `backup digest` so both platforms compare identical algorithms by
@@ -16,7 +16,7 @@
 #                 The sibling-tempfile-plus-rename that makes the write atomic
 #                 on Linux behaves differently when Windows will not replace a
 #                 file another handle holds. The assertion is NOT that the
-#                 restore succeeds — it is that it either succeeds or fails
+#                 restore succeeds -- it is that it either succeeds or fails
 #                 CLEANLY with an exact rollback, never leaving a half-state.
 #   deep paths  : the fixture carries a deliberately deep/long relative path,
 #                 because a restored tree reconstructs full paths under a new
@@ -63,7 +63,7 @@ New-Item -ItemType Directory -Path (Join-Path $Src 'skills')  -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $Src 'memory')  -Force | Out-Null
 New-Item -ItemType Directory -Path $DeepDir -Force -ErrorAction SilentlyContinue | Out-Null
 if (-not (Test-Path -LiteralPath $DeepDir)) {
-    Write-Output "DEEP-PATH-CREATE: failed (source side) — length $($DeepDir.Length)"
+    Write-Output "DEEP-PATH-CREATE: failed (source side) -- length $($DeepDir.Length)"
 } else {
     Set-Content -LiteralPath (Join-Path $DeepDir 'deep-canary.md') -Value 'CANARY-DEEP-PAYLOAD' -NoNewline
 }
