@@ -427,3 +427,70 @@ Both measured on `SeanDesktop` during Phase 26:
   rule should be re-read.
 - `echo X=1>> file` in `cmd` eats the value: `1>>` parses as an fd redirect, so the variable is
   written without it. Quote or space it (`echo X=1 >> file`).
+
+## lane/red-repair — integration-red repair, findings and dispositions
+
+Measured on `hetzner-dsm` at integration base `0f3330e5`. Full-workspace baseline:
+`12172 tests run: 12165 passed, 6 failed, 1 timed out, 49 skipped`; workspace build exit 0,
+zero errors.
+
+### CLOSED — gateway hermeticity bypass (was filed above by lane/26 as MEDIUM)
+
+`crates/wcore-gateway/src/service.rs:338` no longer calls `dirs::config_dir()`. Fixed in
+`lane/red-repair` by routing `SystemdManager::unit_path` through
+`wcore_config::config::os_native_config_root()`, the existing sanctioned single-call-site
+bypass. The ALLOWLIST was NOT used: the unit file is a *write*, unlike the three read-only
+probes already listed, and `wayland_config_dir()` would have broken the feature outright
+(systemd's user manager never scans `$WAYLAND_HOME`). See the commit body for the four-way
+panel record.
+
+### pipeline-cpu-floor — a fixed per-dispatch CPU cost caps pipeline throughput below ~21/s (debug) · LOW
+
+Measured, not predicted. `AgentEngine::run` costs ~47ms of inline synchronous CPU for ONE
+trivial turn against a zero-latency in-memory provider (~6.9ms in release; the rest is debug
+overhead). `run_pipeline` drives its per-item futures with `buffer_unordered`, which
+multiplexes every future onto ONE task, so that inline CPU cannot overlap.
+
+Scaling of `buffer_unordered` over the spawn path, 60 dispatches each, varying ONLY provider
+latency:
+
+| provider latency | width=1 | width=20 | speedup |
+|---|---|---|---|
+| 0 ms | 48.7 ms/spawn | 50.9 ms/spawn | 0.96x |
+| 50 ms | 100.4 ms/spawn | 50.3 ms/spawn | 2.0x |
+| 500 ms | 551.1 ms/spawn | 69.1 ms/spawn | 8.0x |
+
+**The initially-suspected defect is RETRACTED.** At zero latency the pipeline's advertised
+concurrency of 20 delivers 1x, which looks like a broken engine — but that is an artifact of a
+fake provider with no I/O to overlap. Real providers are network calls in the hundreds of ms,
+and at 500ms the pipeline streams at 8x and rises toward the configured width as latency grows.
+The module doc's claim that items race ahead of one another is TRUE for the production
+workload. What remains is a throughput ceiling of roughly `1 / 47ms` per pipeline that binds
+only when stage latency falls below the per-dispatch CPU cost. Panel (gemini 3.1-pro, kimi K3,
+internal adversarial) unanimous on LOW after the corrected evidence; codex 5.6-sol voted
+HIGH/FIX on the pre-correction facts and then dropped its vote on the re-put (no output twice).
+
+Fixing it would mean giving the pipeline task-level parallelism, which needs `'static`
+ownership: `WorkflowRunner<'a> { spawner: &'a AgentSpawner }` and `PipelineStageDispatch<'a>`
+would become `Arc`-based, changing the public `WorkflowRunner::new(&AgentSpawner)` and its call
+sites. Not worth it at LOW, and not a parallel lane's change to make.
+
+### wall-clock-budgeted binary tests are flaky under full-suite load · MEDIUM
+
+Three of the reds/flakes at integration HEAD share one cause: tests that spawn the REAL
+`wayland-core` binary under a wall-clock budget of 1-5s, run inside a 12k-test suite at
+`test-threads = num-cpus` on a 96-core box that also hosts other lanes' builds.
+
+- `wcore-eval-scenarios::runner_contracts outer_deadline_reaps_owned_descendant_listener` —
+  FLAKY (failed try 1, passed try 2). Fails at `runner_contracts.rs:230`, "owned descendant must
+  publish pid, port, and heartbeat": `wait_for_orphan_state` polls for ONE second for a freshly
+  spawned descendant to write pid/port/heartbeat, against a scenario `max_total_time` of one
+  second. Under contention the spawn does not beat the poll window. The product's reaping is not
+  implicated — the assertion is about the fixture publishing its own markers.
+- `wcore-cli::deterministic_openai_loop packaged_core_cancels_an_active_stream` — see below.
+- `wcore-agent::workflow_limits_test fix1_dispatch_budget_aborts_with_partial_result` — see the
+  RED-REPAIR-SUMMARY; not a hang, a 66s debug-build run against a 60s harness budget.
+
+The right repair is per-test, in the harness, by whoever owns test infrastructure: widen the
+fixture's publish window relative to the scenario deadline so the two are not racing. A repair
+lane forbidden from raising timeouts cannot make that call.
