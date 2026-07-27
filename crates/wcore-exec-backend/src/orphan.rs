@@ -259,9 +259,30 @@ pub async fn scan_one(
 /// the whole class of "the filter silently dropped lines", which here would
 /// report zero orphans while orphans exist.
 pub async fn local_process_rows(nonce: &str) -> Result<Vec<String>> {
-    let program = if cfg!(windows) { "tasklist" } else { "ps" };
+    // F25-05 FINDING (HIGH), fixed here.
+    //
+    // This used `tasklist /V /FO CSV` on Windows. **`tasklist` does not print
+    // command lines at all** — its columns are image name, pid, session,
+    // memory, status, user, CPU and window title. The nonce lives in the
+    // command line, so it was never in the output, and the scanner returned a
+    // *MEASURED* zero while a process carrying the nonce was running.
+    //
+    // A measured zero that is wrong is strictly worse than an unmeasured one,
+    // because it is the value this module exists to make trustworthy. Measured
+    // on SeanDesktop: Win32_Process found 1 row, the scanner reported 0.
+    //
+    // `Get-CimInstance Win32_Process` is the enumeration that carries
+    // `CommandLine`. The PowerShell argument is a FIXED literal — the nonce is
+    // never interpolated into it, and the filtering happens in Rust — so this
+    // is not a shell-injection surface even though it is a shell string.
+    let program = if cfg!(windows) { "powershell" } else { "ps" };
     let args: Vec<&str> = if cfg!(windows) {
-        vec!["/V", "/FO", "CSV"]
+        vec![
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId) $($_.CommandLine)\" }",
+        ]
     } else {
         vec!["-eo", "pid,ppid,pgid,etimes,args"]
     };
@@ -298,14 +319,9 @@ pub async fn local_process_rows(nonce: &str) -> Result<Vec<String>> {
 /// failed to understand would be a filter that silently loses orphans, which
 /// is the worst failure available to this module.
 fn row_pid(row: &str) -> Option<u32> {
-    if cfg!(windows) {
-        row.split(',')
-            .nth(1)
-            .map(|f| f.trim().trim_matches('"'))
-            .and_then(|f| f.parse().ok())
-    } else {
-        row.split_whitespace().next().and_then(|f| f.parse().ok())
-    }
+    // Both platforms now emit `<pid> <ppid> <command line>`, so there is ONE
+    // parse rather than two that can drift apart.
+    row.split_whitespace().next().and_then(|f| f.parse().ok())
 }
 
 #[cfg(test)]
