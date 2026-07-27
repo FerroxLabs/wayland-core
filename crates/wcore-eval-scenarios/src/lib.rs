@@ -69,6 +69,8 @@ pub mod release_integrity;
 pub mod release_states;
 pub mod report;
 pub mod runner;
+/// Phase 29 deterministic CycloneDX SBOM transform (F29-01, closes F29-CEN-05).
+pub mod sbom;
 pub mod scenario;
 pub mod stderr_capture;
 pub mod tempenv;
