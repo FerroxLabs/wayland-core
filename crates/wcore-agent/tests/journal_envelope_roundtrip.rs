@@ -33,9 +33,12 @@
 //!
 //!     serialize(deserialize(serialize(event))) == serialize(event)
 //!
-//! They can go red. Delete the `sanitize_json_nulls` normalisation from the
-//! event constructors and `option_value_null_is_stable_across_a_round_trip`
-//! fails on the exact byte the reader would reject.
+//! They can go red, and one of them DID: before the fix,
+//! `option_value_null_is_stable_across_a_round_trip` failed with the written
+//! bytes ending `..."effect_receipt":null}` and the re-serialized bytes ending
+//! `...}`. Restore `skip_serializing_if = "Option::is_none"` on either
+//! `effect_receipt` field in `session_journal/model.rs` and it fails again on
+//! exactly that byte.
 
 use serde_json::json;
 use wcore_agent::session_journal::{CompletionOutcome, SessionEvent, StoredToolInput};
@@ -164,4 +167,41 @@ fn nested_object_key_order_is_stable_across_a_round_trip() {
         message_digest: "c".repeat(64),
     };
     assert_round_trip_stable(&ev, "nested object key order");
+}
+
+#[test]
+fn a_null_receipt_survives_a_real_journal_write_and_read() {
+    // The end-to-end form of the invariant, through the real writer and the
+    // real reader rather than through serde alone. Before the fix this wrote a
+    // journal that `JournalError::ChecksumMismatch` rejected on read — the
+    // exact 23B-H1 symptom, from a run that exited normally.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("null-receipt.journal");
+
+    let journal = wcore_agent::session_journal::SessionJournal::open(&path, "s-null")
+        .expect("open journal for write");
+    journal
+        .append(SessionEvent::ToolIntentRecordedV2 {
+            tool_execution_id: "x1".into(),
+            idempotency_key: "k1".into(),
+            retry_of: None,
+            provider_call_id: "c1".into(),
+            turn_id: "t1".into(),
+            ordinal: 0,
+            tool: "Read".into(),
+            requested_input: StoredToolInput::redacted("a".repeat(64)),
+            requested_input_digest: "a".repeat(64),
+            effective_input: StoredToolInput::redacted("b".repeat(64)),
+            effective_input_digest: "b".repeat(64),
+            effect_contract: ToolEffectContract::default(),
+            effect_receipt: Some(serde_json::Value::Null),
+            pre_hook_phase_id: None,
+        })
+        .expect("append must succeed");
+    drop(journal);
+
+    // A fresh reader, as `--resume` and every operator verb use.
+    let reopened = wcore_agent::session_journal::SessionJournal::open(&path, "s-null")
+        .expect("a journal the product just wrote must be readable back");
+    drop(reopened);
 }
