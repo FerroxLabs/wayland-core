@@ -7,10 +7,13 @@
 //!    and only then discovers the archive was corrupt has destroyed the thing the
 //!    backup existed to protect. Nothing is written until the archive has been
 //!    verified end to end.
-//! 2. **Settle the credential remap.** A refusal must happen while the target is
+//! 2. **Refuse paths this platform cannot materialize.** An archive travels
+//!    between platforms and can carry names that are ordinary where it was made
+//!    and impossible here. The target root is known, so this is exact.
+//! 3. **Settle the credential remap.** A refusal must happen while the target is
 //!    still untouched, or it is not a refusal.
-//! 3. **Refuse an occupied target** unless `--replace` was passed explicitly.
-//! 4. **Open the journal and preserve the prior tree**, then write.
+//! 4. **Refuse an occupied target** unless `--replace` was passed explicitly.
+//! 5. **Open the journal and preserve the prior tree**, then write.
 //!
 //! # Why `--replace` exists, and why it is the interesting path
 //!
@@ -25,6 +28,7 @@
 use std::path::Path;
 
 use super::archive::{self, Manifest};
+use super::platform_paths;
 use super::remap::{self, RemapPlan};
 use super::{BackupError, dir_holds_state, journal};
 
@@ -60,11 +64,28 @@ pub fn restore_archive(
     let manifest = archive::verify_archive(archive_path)?;
     let (_, payloads) = archive::unpack(archive_path)?;
 
-    // 2. Settle the remap while the target is still untouched. A refusal
+    // 2. Refuse paths this platform cannot materialize, while the target is
+    //    still untouched (F26-03-D). The archive travels between platforms, so
+    //    it can legitimately carry names that are ordinary where it was made
+    //    and impossible here — a reserved device name, a forbidden character,
+    //    an overlong component. Discovering that half way through the write
+    //    loop is what made a backup unrestorable in the first place; the target
+    //    root is known here, so every destination is known exactly and the
+    //    refusal is a statement of fact rather than a guess.
+    let declared: Vec<String> = manifest.payloads.iter().map(|p| p.path.clone()).collect();
+    let objections = platform_paths::objections_for_target(target, &declared);
+    if !objections.is_empty() {
+        return Err(BackupError::UnrestorablePaths(platform_paths::render(
+            &objections,
+            target,
+        )));
+    }
+
+    // 3. Settle the remap while the target is still untouched. A refusal
     //    propagates as an error from here, so nothing is written.
     let plan = remap::plan_remap(&manifest, target, opts.accept_missing_secrets)?;
 
-    // 3. Refuse an occupied target unless replacement was asked for explicitly.
+    // 4. Refuse an occupied target unless replacement was asked for explicitly.
     let occupied = dir_holds_state(target);
     if occupied && !opts.replace {
         return Err(BackupError::TargetOccupied(target.to_path_buf()));
@@ -72,7 +93,7 @@ pub fn restore_archive(
 
     std::fs::create_dir_all(target).map_err(BackupError::io("create target home"))?;
 
-    // 4. Write-ahead intent, then preserve the prior tree, then mutate.
+    // 5. Write-ahead intent, then preserve the prior tree, then mutate.
     let mut guard = journal::begin(target, "restore")?;
     let pre_digest = guard.pre_digest().to_string();
     guard.preserve_target(target)?;

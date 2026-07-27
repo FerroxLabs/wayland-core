@@ -38,6 +38,7 @@ use clap::Subcommand;
 
 pub mod archive;
 pub mod journal;
+pub mod platform_paths;
 pub mod remap;
 pub mod restore;
 
@@ -82,6 +83,12 @@ pub enum BackupError {
     /// verbatim by `scripts/portability-remap-capture.sh`.
     #[error("{0}")]
     RemapRefused(String),
+
+    /// Refused before the first write because the archive carries paths this
+    /// platform cannot materialize (F26-03-D). Rendered message names every
+    /// offending payload; an operator cannot act on a bare count.
+    #[error("{0}")]
+    UnrestorablePaths(String),
 
     #[error("journal error: {0}")]
     Journal(String),
@@ -181,6 +188,22 @@ pub fn run(cmd: BackupCmd) -> Result<(), BackupError> {
             );
             if !manifest.absent_secrets.is_empty() {
                 println!("absent_secrets: {}", manifest.absent_secrets.join(","));
+            }
+            // F26-03-D, the create half: name the payloads that a Windows
+            // restore will refuse. This WARNS rather than refuses, because the
+            // creating machine does not know which platform will restore — a
+            // Linux-to-Linux archive carrying `aux.txt` is entirely valid, and
+            // refusing it would break correct use to prevent a hypothetical.
+            // The root-independent half is knowable here, and this is the
+            // earliest point it is knowable.
+            let windows_objections: Vec<_> = manifest
+                .payloads
+                .iter()
+                .flat_map(|p| platform_paths::intrinsic_objections(&p.path, true))
+                .collect();
+            println!("windows_unrestorable_paths: {}", windows_objections.len());
+            for o in &windows_objections {
+                eprintln!("warning: will not restore on Windows — {o}");
             }
             Ok(())
         }
