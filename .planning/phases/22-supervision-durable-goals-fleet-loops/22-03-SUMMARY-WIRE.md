@@ -122,7 +122,7 @@ idempotency key can be observed doing anything at all.
 | | Linux (`hetzner-dsm`) | Windows (`SeanD@seandesktop`) |
 |---|---|---|
 | Kill | `kill -9 -<PGID>` (process group) | `taskkill /T /F /PID` (process tree) |
-| Kill time (UTC) | **2026-07-27T12:13:53Z** | **2026-07-27T13:12:06Z** |
+| Kill time (UTC) | **2026-07-27T12:13:53Z** | **2026-07-27T13:30:09Z** |
 | Descendants before → after | **7 → 0** | **7 → 0** (2 `PING.EXE`, 2 `cmd.exe`, 2 `wayland-core.exe` exec-task children, 1 `conhost.exe`) |
 | Killed parent confirmed gone | yes | `run1_exited=True` |
 | Effects on disk at the kill | 4 (t00–t03 recorded, **none delivered**) | 4, same |
@@ -154,12 +154,13 @@ print: a duplicated effect file took it to `total=13 distinct=12` and **exit 1**
 and removing the duplicate returned it to exit 0. Verified in the same run on
 both platforms.
 
-**Commit provenance, stated exactly.** The Windows leg first ran against
-`d7c401cd`; the Linux leg and the final gates ran at `37ad94a7`, which adds the
-F-15 fix. The two commits differ only in the agent's claim-release path, which no
-task in this scenario takes (nothing fails), so the scenario is unaffected — but
-the difference is recorded rather than glossed, and the Windows leg was re-run at
-the final commit where noted below.
+**Commit provenance, stated exactly.** Both legs ran at **`37ad94a7`**, the
+commit carrying the F-15 fix, and the retained captures name it in their first
+line. The Windows leg first ran at `d7c401cd` before that fix landed, produced
+identical numbers, and was then **re-run at `37ad94a7`** rather than the earlier
+result being reported as if it were the final one — kill at
+2026-07-27T13:30:09Z, same 7 → 0, same 12 / 12 / 12. Only documentation commits
+follow `37ad94a7`, so the proven code is the shipped code.
 
 ## Falsification — every load-bearing guard was made to fail
 
