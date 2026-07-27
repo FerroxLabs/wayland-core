@@ -685,3 +685,36 @@ it. A trigram index or a bounded prefilter would close it.
 added two dependency edges and reported the gate as NOT RUN rather than as a pass, checking the
 substantive property directly instead (`git diff -U0 Cargo.lock | grep -E '^[+-]name = '` →
 no output, i.e. zero new `[[package]]` entries).
+
+## Phase 29 / 29-02 — dependency-policy findings (MEDIUM and below, non-blocking)
+
+Surfaced by the first-ever execution of `deny.toml` (F29-CEN-04). Full verdict and severities in
+`.planning/phases/29-supply-chain-release-integrity/29-02-CLEANROOM-RESULTS.md`;
+raw output in `evidence/29-02/deny-verdict.txt`. **`deny.toml` was not weakened to close any
+of these**, and `deny` is deliberately NOT chained into `just check-all` while the verdict is red.
+
+- **F29-02-M1 (MEDIUM)** — `RUSTSEC-2026-0192`, `ttf-parser 0.25.1` unmaintained, no safe upgrade
+  published. Path: `ttf-parser ← lopdf ← pdf-extract ← wcore-tools`. Upstream suggests `skrifa`.
+  Nothing to take at source today; revisit when `lopdf` moves.
+- **F29-02-M2 (MEDIUM)** — `RUSTSEC-2024-0370`, `proc-macro-error 1.0.4` unmaintained. Path:
+  `proc-macro-error ← utoipa-gen ← utoipa ← wcore-acp`. Build-time only.
+- **F29-02-M3 (MEDIUM)** — `RUSTSEC-2025-0141`, `bincode 1.3.3` unmaintained.
+- **F29-02-M4 (MEDIUM)** — **Advisory dispositions are fragmented across three files with no
+  single source of truth**: `.cargo/audit.toml`, `.github/osv-scanner.toml` and `deny.toml` each
+  carry (or fail to carry) their own ignore list. A disposition lifted in one and forgotten in
+  the others is silent. This is the structural cause of F29-02-H1.
+- **F29-02-L1 (LOW)** — `RUSTSEC-2026-0195` (quick-xml `NsReader` unbounded namespace allocation)
+  is **not reachable**: `NsReader` appears zero times in calamine and zero times in the
+  workspace. Recorded so the determination is not re-derived from scratch next time.
+- **F29-02-L2 (LOW)** — `crates/wcore-fixture-harness/Cargo.toml` declares neither
+  `publish = false` nor a licence, so `deny.toml`'s `private = { ignore = true }` does not
+  classify it as first-party and it fails the licence gate as `unlicensed`. **One-line remedy:
+  add `publish = false`.** Not applied by 29-02: the file is outside that plan's declared
+  `files_modified` and its surgical-diff gate, and fixing it alone would not change the verdict
+  (advisories still fail) or the `check-all` decision.
+- **F29-02-L3 (LOW)** — 60 `duplicate` crate warnings (`windows-sys` ×4, `hashbrown` ×4, `rand`
+  ×3 …). Non-failing by policy (`bans.multiple-versions = "warn"`), recorded as the measured
+  baseline so a future tightening has a number to compare against.
+
+**HIGH findings are NOT here** — F29-02-H1 and the re-raised F29-CEN-06 are escalations in
+`.planning/SEAM-REQUESTS/29.md` (SR-29-6, SR-29-7).

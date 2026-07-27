@@ -1,0 +1,69 @@
+F29-02 -- RE-MEASUREMENT OF THE F29-01 CLAUSES THIS PLAN DID NOT BUILD
+
+29-01 measured these. This file re-measures them directly against the tree
+at the commit below rather than citing the census, so 'PRE-EXISTING' in
+CLAUSE-LEDGER.tsv is a named control and not an assumption.
+
+commit:  2c89b14118fca8b3663e619b32e64f6199c44f97
+tree:    /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-29-02
+date:    2026-07-27T23:31:02Z
+
+== TOOLCHAIN LOCK ==
+rust-toolchain.toml channel : channel = "1.95.0"
+vx.toml rust pin            : rust = "1.95.0"
+workflows routing through vx: 7
+  files: .github/workflows/release.yml .github/workflows/bench-regression.yml .github/workflows/release-please.yml .github/workflows/e2e.yml .github/workflows/marketplace-drift.yml .github/workflows/ci.yml .github/workflows/mutants-nightly.yml 
+DRIFT (29-01 F29-CEN-01b, MEDIUM): dtolnay/rust-toolchain\@stable sites:
+    .github/workflows/nightly-windows-soak.yml:98:        uses: dtolnay/rust-toolchain@stable
+    .github/workflows/nightly-windows-soak.yml:311:        uses: dtolnay/rust-toolchain@stable
+    .github/workflows/nightly-windows-soak.yml:415:        uses: dtolnay/rust-toolchain@stable
+DRIFT (29-01 F29-CEN-06, HIGH): unpinned cross install in the release path:
+    136:        run: cargo install cross --git https://github.com/cross-rs/cross
+
+== DEPENDENCY LOCK ==
+Cargo.lock committed        : yes
+Cargo.lock bytes            : 268139
+crates locked               : 1017
+git sources in lockfile     : 0
+0   <- 29-01 F29-CEN-19 refutation
+--locked call sites         : .github/workflows/ci.yml:5 justfile:3 
+release build --locked      : 0   <- 0 = 29-01 F29-CEN-02b, LOW
+
+== VULNERABILITY POLICY (pre-existing, executes and blocks) ==
+cargo audit in ci.yml       : 3
+osv-scanner workflow        : present
+osv dispositions file       : present
+cargo-audit ignore entries  : 3  <- see SR-29-6, this is F29-02-H1
+
+== PROVENANCE AND ARTIFACT SIGNING (pre-existing; do not reinvent) ==
+    183:    # be restated. `id-token: write` + `attestations: write` let
+    184:    # attest-build-provenance mint keyless Sigstore SLSA provenance for each
+    188:      id-token: write
+    189:      attestations: write
+    198:        uses: actions/attest-build-provenance@v4
+    210:          sha256sum wayland-core-* > wayland-core-checksums.txt
+    436:    # `id-token: write` lets `npm publish --provenance` mint a keyless,
+    442:      id-token: write
+    523:          # `--provenance` rides the job's `id-token: write` to emit a keyless
+    527:            ( cd "$d" && npm publish --provenance --access public --tag "${NPM_DIST_TAG}" )
+    529:          ( cd npm-dist/wayland-core && npm publish --provenance --access public --tag "${NPM_DIST_TAG}" )
+== WHAT 29-02 CHANGED IN THESE CLAUSES ==
+Nothing. Diffed against the MERGE-BASE sha (never against the branch name,
+which would re-read the integration branch as it is NOW and attribute every
+lane merged since to this one -- LANE-BRIEF section 6).
+merge-base: 2fd771d2cd69e13f5c686f859547ab46ebddd41f
+
+    UNTOUCHED  .github/workflows/release.yml
+    UNTOUCHED  .github/workflows/ci.yml
+    UNTOUCHED  Cargo.toml
+    UNTOUCHED  Cargo.lock
+    UNTOUCHED  deny.toml
+    UNTOUCHED  .cargo/audit.toml
+    UNTOUCHED  .github/osv-scanner.toml
+    UNTOUCHED  crates/wcore-eval-scenarios/Cargo.toml
+    UNTOUCHED  crates/wcore-eval-scenarios/src/receipt.rs
+    UNTOUCHED  crates/wcore-eval-scenarios/src/receipt_policy.rs
+    UNTOUCHED  crates/wcore-eval-scenarios/bin/wayland-receipt.rs
+    UNTOUCHED  crates/wcore-cli/src/lib.rs
+    UNTOUCHED  crates/wcore-cli/src/main.rs
+    UNTOUCHED  crates/wcore-cli/src/self_update.rs

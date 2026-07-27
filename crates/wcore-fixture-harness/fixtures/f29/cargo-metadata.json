@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "workspace_root": "/root/wayland-29-02",
+  "target_directory": "/root/wayland-29-02/target",
+  "workspace_members": [
+    "path+file:///root/wayland-29-02/crates/wcore-types#0.12.25",
+    "path+file:///root/wayland-29-02/crates/wcore-fixture-harness#0.1.0"
+  ],
+  "packages": [
+    {
+      "name": "wcore-types",
+      "version": "0.12.25",
+      "id": "path+file:///root/wayland-29-02/crates/wcore-types#0.12.25",
+      "license": "MIT",
+      "license_file": null,
+      "source": null,
+      "description": "Shared provider-neutral data types.",
+      "manifest_path": "/root/wayland-29-02/crates/wcore-types/Cargo.toml",
+      "publish": []
+    },
+    {
+      "name": "toml",
+      "version": "1.1.2+spec-1.1.0",
+      "id": "registry+https://github.com/rust-lang/crates.io-index#toml@1.1.2+spec-1.1.0",
+      "license": "MIT OR Apache-2.0",
+      "license_file": null,
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "description": "A native Rust encoder and decoder of TOML-formatted files and streams.",
+      "manifest_path": "/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/toml-1.1.2+spec-1.1.0/Cargo.toml",
+      "publish": null
+    },
+    {
+      "name": "anyhow",
+      "version": "1.0.99",
+      "id": "registry+https://github.com/rust-lang/crates.io-index#anyhow@1.0.99",
+      "license": "Apache-2.0 OR MIT",
+      "license_file": null,
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "description": "Flexible concrete Error type built on std::error::Error",
+      "manifest_path": "/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anyhow-1.0.99/Cargo.toml",
+      "publish": null
+    },
+    {
+      "name": "wcore-fixture-harness",
+      "version": "0.1.0",
+      "id": "path+file:///root/wayland-29-02/crates/wcore-fixture-harness#0.1.0",
+      "license": null,
+      "license_file": null,
+      "source": null,
+      "description": "Customer-fixture catalog and replay harness for T6 app-integration tests.",
+      "manifest_path": "/root/wayland-29-02/crates/wcore-fixture-harness/Cargo.toml",
+      "publish": null
+    },
+    {
+      "name": "ring",
+      "version": "0.17.14",
+      "id": "registry+https://github.com/rust-lang/crates.io-index#ring@0.17.14",
+      "license": null,
+      "license_file": "LICENSE",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "description": "An experiment.",
+      "manifest_path": "/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ring-0.17.14/Cargo.toml",
+      "publish": null
+    }
+  ],
+  "resolve": {
+    "root": null,
+    "nodes": []
+  }
+}
