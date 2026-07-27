@@ -1,0 +1,20 @@
+PANEL-MEMBER: kimi
+PANEL-QUESTION-SHA256: 67ac3759b150b519b339e01be363eed8bafb28f91765ecd84b0e4a8d2cb6968a
+---
+• ## Analysis
+
+  **The deciding element is the struct definition of `CredentialRef` itself** (`redact.rs`): exactly two `String` fields, `name` and `source_file`, both locations. There is no `value` field, no variant, and — critically — the only constructor, `CredentialRef::new(name, source_file)`, has **no parameter capable of accepting a value**. Derived `Debug`, `Serialize`/`Deserialize`, and the hand-written `Display` can therefore only ever render those two location strings. The conversion site in `to_portability()` (Evidence 2) passes `p.credential_env_var` (a name) and `p.credential_file` (a path) — the `api_key` the internal `MigrationPlan` legitimately holds is simply never referenced on this path, and `PortabilityPlan`/`DiscoveredItem` have no field typed to receive it.
+
+  This is what separates it from cosmetic redaction: a cosmetic design has a value-carrying field and relies on each emitter eliding it; here the emitter set is closed by the type. The probe (Evidence 4) is correctly constructed to demonstrate the difference — the positive half (`creds` non-empty, `json.len() > 200`, Debug contains `PortabilityPlan`) rules out the vacuous pass, and 13 credential references against 36 canaries (Evidence 5) confirms the emitters were actually exercised.
+
+  **Findings — paths the probe does NOT cover structurally:**
+
+  1. **`DiscoveredItem.details: BTreeMap<String, String>`** (Evidence 3) is an untyped string channel that *can* hold a secret value. It carries `base_url`, `url`, `command`, `mcp_refs` — an MCP server URL with an embedded token, or a command line containing an API key, would serialize straight through with the type offering no resistance. The probe covers this only *empirically* (canaries absent from the corpus), not structurally. If the question is widened from "the credential representation" to "the whole emitted document", this is the residual hole — `details` should be considered tainted-by-construction or given its own boundary type.
+  2. **`CredentialRef.name` misuse**: nothing stops a future caller from passing a value as the `name` argument. This is convention, not type safety — the canary probe is the only guard, which makes the probe load-bearing rather than decorative. Worth keeping.
+  3. Errors referencing the internal `MigrationPlan` (which *does* hold `api_key`) are out of the probe's scope — it only wraps the `PortabilityPlan` in `anyhow`. That is a separate surface from the emitted `--json` document, so it does not change the verdict on the contract as stated.
+
+  None of these negate the verdict: the contract as specified — "a discovered credential is represented by its source reference only" in the emitted plan — is enforced by the type, not the printer, and the probe's positive half closes the vacuity gap the prompt describes.
+
+  PANEL-VERDICT: contract-holds
+  PANEL-BASIS: `CredentialRef` has exactly two location fields and its sole constructor `new(name, source_file)` accepts no value parameter, so Debug/Display/serde/error paths inherit the redaction from the type — with the caveat that `DiscoveredItem.details` remains an untyped string channel guarded only empirically by the canary probe.
+

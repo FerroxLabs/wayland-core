@@ -24,20 +24,29 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 use wcore_config::config::{McpServerConfig, ProfileConfig, patch_global_config};
+use wcore_config::portability::{
+    CredentialRef, DiscoveredItem, ItemKind, PeerSource, PortabilityPlan, is_root_profile_id,
+};
 
 pub mod hermes;
+pub mod openclaw;
 
 /// `wayland-core migrate <source>` subcommands.
 #[derive(Subcommand, Debug)]
 pub enum MigrateCmd {
     /// Import Hermes profiles (`~/.hermes/profiles/*`) into wayland-core.
     Hermes(HermesArgs),
+    /// Import an OpenClaw setup (`~/.openclaw`) into wayland-core.
+    Openclaw(HermesArgs),
 }
 
-/// Options for `migrate hermes`.
+/// Options for `migrate hermes` and `migrate openclaw`.
+///
+/// Shared deliberately: the two sources differ in what they READ, not in how a
+/// user drives them, and a second identical arg struct would drift.
 #[derive(Args, Debug)]
 pub struct HermesArgs {
-    /// Hermes home to import from (default: `~/.hermes`).
+    /// Source home to import from (default: `~/.hermes` or `~/.openclaw`).
     #[arg(long)]
     pub home: Option<PathBuf>,
     /// Show what would be imported and exit without writing anything.
@@ -53,6 +62,13 @@ pub struct HermesArgs {
     /// Overwrite wayland-core profiles whose name already exists.
     #[arg(long)]
     pub overwrite: bool,
+    /// Emit the plan as machine-readable JSON instead of the prose preview.
+    ///
+    /// The emitted document is the typed plan, in which a credential value is
+    /// unrepresentable — only its name and source file appear. Implies a
+    /// preview: with `--json` nothing is ever written.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// One wayland-core profile to be created from a source profile.
@@ -68,10 +84,14 @@ pub struct ProfilePlan {
     pub has_credential: bool,
     /// The env var name the key came from — for the preview, never its value.
     pub credential_env_var: Option<String>,
+    /// The file the credential was found in, relative to the source home.
+    pub credential_file: Option<String>,
     /// MCP server names this profile references.
     pub mcp_refs: Vec<String>,
     /// A wayland-core profile with this name already exists.
     pub conflict: bool,
+    /// Where this setup came from, relative to the source home.
+    pub source_path: String,
 }
 
 /// Source artifacts detected but intentionally NOT imported in this slice.
@@ -102,6 +122,12 @@ pub struct MigrationPlan {
     pub mcp_conflicts: Vec<String>,
     /// Detected-but-deferred artifacts.
     pub deferred: Deferred,
+    /// Source-specific detected-but-not-imported counts, keyed by kind. The
+    /// OpenClaw tree carries several categories Hermes has no equivalent for
+    /// (per-agent state, flows, tasks, identity, …); they are COUNTED here
+    /// rather than dropped, because a discovered item that is neither imported
+    /// nor named has been silently lost.
+    pub deferred_other: BTreeMap<String, usize>,
     /// Non-fatal notes surfaced during planning.
     pub warnings: Vec<String>,
 }
@@ -112,6 +138,96 @@ impl MigrationPlan {
     fn is_empty(&self, overwrite: bool) -> bool {
         let no_profiles = self.profiles.iter().all(|p| p.conflict) && !overwrite;
         no_profiles && self.mcp_servers.is_empty()
+    }
+
+    /// Project onto the typed, structurally-redacted plan that `--json` emits.
+    ///
+    /// **This conversion is the redaction boundary.** `MigrationPlan` can hold a
+    /// real `api_key` — it has to, because `--include-credentials` writes one —
+    /// and [`PortabilityPlan`] cannot. The value is dropped HERE and there is no
+    /// inverse conversion, so a consumer handed the emitted plan cannot render a
+    /// secret through `serde`, `Debug`, `Display` or an error formatter even
+    /// deliberately. Nothing below reads `config.api_key`.
+    pub fn to_portability(&self) -> PortabilityPlan {
+        let source = match self.source {
+            "openclaw" => PeerSource::OpenClaw,
+            _ => PeerSource::Hermes,
+        };
+        let mut out = PortabilityPlan::new(source, self.source_home.display().to_string());
+
+        for p in &self.profiles {
+            let kind = if is_root_profile_id(&p.name) {
+                ItemKind::RootProfile
+            } else {
+                ItemKind::Profile
+            };
+            let mut item = DiscoveredItem::new(
+                kind,
+                p.name.clone(),
+                p.source_path.clone(),
+                format!("profiles.{}", p.name),
+            );
+            item.conflict = p.conflict;
+            // Reference only — by TYPE there is nowhere for a value to go.
+            item.credential = p.credential_env_var.as_ref().map(|name| {
+                CredentialRef::new(name.clone(), p.credential_file.clone().unwrap_or_default())
+            });
+            if let Some(v) = &p.config.provider {
+                item.insert_detail("provider", v);
+            }
+            if let Some(v) = &p.config.model {
+                item.insert_detail("model", v);
+            }
+            if let Some(v) = &p.config.base_url {
+                item.insert_detail("base_url", v);
+            }
+            if !p.mcp_refs.is_empty() {
+                item.insert_detail("mcp_refs", &p.mcp_refs.join(","));
+            }
+            out.items.push(item);
+        }
+
+        for (name, srv) in &self.mcp_servers {
+            let mut item = DiscoveredItem::new(
+                ItemKind::McpServer,
+                name.clone(),
+                String::new(),
+                format!("mcp.servers.{name}"),
+            );
+            item.insert_detail("transport", &format!("{:?}", srv.transport));
+            if let Some(c) = &srv.command {
+                item.insert_detail("command", c);
+            }
+            if let Some(u) = &srv.url {
+                item.insert_detail("url", u);
+            }
+            out.items.push(item);
+        }
+
+        let d = &self.deferred;
+        if d.skills > 0 {
+            out.deferred.insert("skill_directories".into(), d.skills);
+        }
+        if d.personas > 0 {
+            out.deferred.insert("persona_files".into(), d.personas);
+        }
+        if d.memory_files > 0 {
+            out.deferred.insert("memory_notes".into(), d.memory_files);
+        }
+        for (k, v) in &self.deferred_other {
+            if *v > 0 {
+                out.deferred.insert(k.clone(), *v);
+            }
+        }
+
+        out.warnings = self.warnings.clone();
+        for name in &self.mcp_conflicts {
+            out.warnings.push(format!(
+                "mcp server {name:?} already exists — left untouched"
+            ));
+        }
+        out.finalize();
+        out
     }
 }
 
@@ -127,13 +243,32 @@ pub struct MigrationReport {
 /// Entry point for `wayland-core migrate`.
 pub fn run(cmd: MigrateCmd) -> Result<()> {
     match cmd {
-        MigrateCmd::Hermes(args) => run_hermes(args),
+        MigrateCmd::Hermes(args) => run_source(PeerSource::Hermes, args),
+        MigrateCmd::Openclaw(args) => run_source(PeerSource::OpenClaw, args),
     }
 }
 
-fn run_hermes(args: HermesArgs) -> Result<()> {
-    let home = hermes::detect_home(args.home.as_deref())?;
-    let plan = hermes::build_plan(&home, args.include_credentials)?;
+fn run_source(source: PeerSource, args: HermesArgs) -> Result<()> {
+    let (home, plan) = match source {
+        PeerSource::Hermes => {
+            let home = hermes::detect_home(args.home.as_deref())?;
+            let plan = hermes::build_plan(&home, args.include_credentials)?;
+            (home, plan)
+        }
+        PeerSource::OpenClaw => {
+            let home = openclaw::detect_home(args.home.as_deref())?;
+            let plan = openclaw::build_plan(&home, args.include_credentials)?;
+            (home, plan)
+        }
+    };
+    let _ = home;
+
+    // `--json` is a PREVIEW surface: it emits the typed plan and never writes,
+    // so an unconfirmed apply cannot mutate anything through it.
+    if args.json {
+        println!("{}", plan.to_portability().to_json()?);
+        return Ok(());
+    }
 
     render_plan(&plan, args.include_credentials, args.overwrite);
 
@@ -356,8 +491,10 @@ mod tests {
             config: ProfileConfig::default(),
             has_credential: false,
             credential_env_var: None,
+            credential_file: None,
             mcp_refs: Vec::new(),
             conflict,
+            source_path: format!("profiles/{name}"),
         }
     }
 
@@ -369,6 +506,7 @@ mod tests {
             mcp_servers: BTreeMap::new(),
             mcp_conflicts: Vec::new(),
             deferred: Deferred::default(),
+            deferred_other: BTreeMap::new(),
             warnings: Vec::new(),
         }
     }

@@ -1,0 +1,125 @@
+{
+  "agents": {
+    "defaults": {
+      "agentRuntime": {
+        "id": "claude-cli"
+      },
+      "maxConcurrent": 4,
+      "model": {
+        "primary": "anthropic/claude-opus-4-7"
+      },
+      "models": {
+        "anthropic/claude-haiku-4-5": {},
+        "anthropic/claude-opus-4-5": {},
+        "anthropic/claude-opus-4-6": {},
+        "anthropic/claude-opus-4-7": {},
+        "anthropic/claude-sonnet-4-5": {},
+        "anthropic/claude-sonnet-4-6": {}
+      },
+      "subagents": {
+        "maxConcurrent": 8
+      },
+      "workspace": "/Users/seandonahoe/.openclaw/workspace"
+    }
+  },
+  "auth": {
+    "profiles": {
+      "anthropic:claude-cli": {
+        "mode": "oauth",
+        "provider": "claude-cli"
+      }
+    }
+  },
+  "channels": {
+    "telegram": {
+      "botToken": "CANARY-4f863aa676788672ccd4475934ad6ad6",
+      "enabled": true,
+      "groups": {
+        "*": {
+          "requireMention": true
+        }
+      }
+    }
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "ownerAllowFrom": [
+      "telegram:8524591594"
+    ],
+    "ownerDisplay": "raw",
+    "restart": true
+  },
+  "discovery": {
+    "mdns": {
+      "mode": "off"
+    }
+  },
+  "gateway": {
+    "auth": {
+      "mode": "token",
+      "token": "CANARY-b80536073e44b23fda01696582421b16"
+    },
+    "bind": "loopback",
+    "controlUi": {
+      "allowInsecureAuth": true
+    },
+    "mode": "local",
+    "port": 18789,
+    "remote": {
+      "token": "CANARY-fec91d0e5093e2657299050fe06687b3"
+    },
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    }
+  },
+  "mcp": {
+    "servers": {
+      "ijfw-memory": {
+        "args": [
+          "/Users/seandonahoe/.ijfw/mcp-server/src/server.js"
+        ],
+        "command": "node"
+      }
+    }
+  },
+  "messages": {
+    "ackReactionScope": "group-mentions"
+  },
+  "meta": {
+    "lastTouchedAt": "2026-06-08T02:09:01.950Z",
+    "lastTouchedVersion": "2026.5.7"
+  },
+  "plugins": {
+    "entries": {
+      "anthropic": {
+        "enabled": true
+      },
+      "duckduckgo": {
+        "enabled": true
+      },
+      "telegram": {
+        "enabled": true
+      }
+    }
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "tools": {
+    "profile": "coding",
+    "web": {
+      "search": {
+        "enabled": true,
+        "provider": "duckduckgo"
+      }
+    }
+  },
+  "wizard": {
+    "lastRunAt": "2026-05-11T11:34:34.592Z",
+    "lastRunCommand": "onboard",
+    "lastRunMode": "local",
+    "lastRunVersion": "2026.5.7"
+  }
+}

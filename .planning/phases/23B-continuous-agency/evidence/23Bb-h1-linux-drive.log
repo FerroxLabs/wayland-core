@@ -1,0 +1,28 @@
+########## LINUX RED (pre-fix b75e640c)
+provenance: wayland-core 0.12.25 (source b75e640c589ef4dcaa8f557260354e7aa90851aa)
+wrote /tmp/tmp.o7rHBUmRO5/s-4341a250eb9b4033.journal session=s-4341a250eb9b4033 nonce=4341a250eb9b4033
+--- session reconcile s-4341a250eb9b4033 (exit 1)
+wayland-core session: journal '/tmp/tmp.o7rHBUmRO5/s-4341a250eb9b4033.journal' could not be read: journal checksum mismatch at sequence 1
+--- session cancel s-4341a250eb9b4033 (exit 1)
+wayland-core session: journal '/tmp/tmp.o7rHBUmRO5/s-4341a250eb9b4033.journal' could not be read: journal checksum mismatch at sequence 1
+F23_H1_DRIVE=PASS platform=linux mode=unreadable nonce=4341a250eb9b4033
+RED_EXIT=0
+########## LINUX GREEN (fixed 4b9512a0)
+provenance: wayland-core 0.12.25 (source 4b9512a02cc5f754e0b150e3708a5d705a93b4c2)
+wrote /tmp/tmp.RLPzCY4VFo/s-1021c397760acad3.journal session=s-1021c397760acad3 nonce=1021c397760acad3
+--- session reconcile s-1021c397760acad3 (exit 0)
+F23_SESSION=reconcile_item id=s-1021c397760acad3 kind=tool_execution ref=x1 tool=Write turn=t1 reason=Prepared resolvable=false
+F23_SESSION=reconcile id=s-1021c397760acad3 outstanding=1
+--- session cancel s-1021c397760acad3 (exit 5)
+wayland-core session: session 's-1021c397760acad3' has 1 outstanding reconcile item(s)
+--- session reconcile s-1021c397760acad3 (exit 0)
+F23_SESSION=reconcile_item id=s-1021c397760acad3 kind=tool_execution ref=x1 tool=Write turn=t1 reason=Prepared resolvable=false
+F23_SESSION=reconcile id=s-1021c397760acad3 outstanding=1
+F23_H1_DRIVE=PASS platform=linux mode=readable nonce=1021c397760acad3
+GREEN_EXIT=0
+### falsification A: --expect readable against the PRE-FIX binary must FAIL
+A_EXIT=1 (non-zero required)
+### falsification B: --expect unreadable against the FIXED binary must FAIL
+B_EXIT=1 (non-zero required)
+### falsification C: wrong --sha must FAIL
+C_EXIT=3 (non-zero required)

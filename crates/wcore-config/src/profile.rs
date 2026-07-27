@@ -394,7 +394,10 @@ const SECRET_FILE_PREFIX: &str = "credentials";
 /// only special-cases the top level; if the credential/oauth layout ever nests
 /// (e.g. `providers/<x>/credentials.toml`), update this set AND the copy depth
 /// handling together.
-fn is_secret_entry(file_name: &str) -> bool {
+///
+/// Public because `portability` classifies peer state trees and must agree with
+/// this definition rather than growing a second, divergent one (F26-01).
+pub fn is_secret_entry(file_name: &str) -> bool {
     if SECRET_DIR_NAMES.contains(&file_name) {
         return true;
     }

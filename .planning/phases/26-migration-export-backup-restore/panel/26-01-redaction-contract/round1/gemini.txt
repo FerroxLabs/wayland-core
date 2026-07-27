@@ -1,0 +1,13 @@
+PANEL-MEMBER: gemini
+PANEL-QUESTION-SHA256: 67ac3759b150b519b339e01be363eed8bafb28f91765ecd84b0e4a8d2cb6968a
+---
+Based on the provided evidence, the redaction is structural.
+
+The `CredentialRef` type defined in `crates/wcore-config/src/portability/redact.rs` (Evidence 1) is a struct with exactly two fields: `name` and `source_file`. There is no field, enum variant, or hidden state within `CredentialRef` capable of holding the credential's value. 
+
+During the conversion in `to_portability` (Evidence 2), the actual secret value held by the internal `MigrationPlan` is dropped, and only the reference data is passed into `CredentialRef::new()`. Furthermore, the `DiscoveredItem` struct (Evidence 3) populates its `details` map strictly with explicitly mapped, non-secret fields (`provider`, `model`, `base_url`, etc.), leaving nowhere else for the secret value to travel.
+
+Because the type itself cannot hold the value, it is physically unrepresentable in the emitted plan. The multi-emitter probe (Evidence 4) correctly confirms this, but it is the lack of a storage field in the struct that definitively proves it is safe by construction rather than relying on a `Debug` or `Serialize` implementation to cosmetically withhold it.
+
+PANEL-VERDICT: contract-holds
+PANEL-BASIS: The `CredentialRef` struct physically lacks any field to store the secret value, meaning the value is dropped unconditionally at the `to_portability` conversion boundary and becomes unrepresentable to all downstream consumers.

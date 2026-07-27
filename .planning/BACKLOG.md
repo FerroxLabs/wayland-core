@@ -399,3 +399,14 @@ a 4096-byte stdout cap. Left untouched; its timeout was deliberately NOT raised.
 For contrast, so this is not confused with the defect that was fixed: F-3 produced **16 flaky
 events across 6 tests** at base and **2 events across 1 test** after the fix. This one is the
 residue, not the disease.
+## F26-01 (lane/26) — out-of-scope findings, non-blocking
+
+- **MEDIUM — pre-existing hermeticity bypass.** `crates/wcore-gateway/src/service.rs:338` calls (was :321 when reported; lane 24b's gateway fix added 83 lines above it and shifted it — the call itself is unchanged and still bypasses)
+  `dirs::config_dir()` directly, failing `hermeticity_audit_test::no_dirs_config_dir_bypasses_outside_canonical_helper`.
+  Present verbatim at `de977949` (introduced by phase-24 `8b582851`); untouched by phase 26.
+  Belongs to the gateway/phase-24 area. Either route it through `wayland_config_dir()` or add it
+  to the test's ALLOWLIST with a reason.
+- **MEDIUM — `McpServerConfig::headers` is an unfenced future value channel.** Not emitted by
+  the portability projection today, so it does not leak; but a future edit that emits it would
+  bypass the scrub boundary, and the multi-emitter probe would not notice. Named by the F26-01
+  redaction panel. 26-02 should either emit it through `insert_detail` or fence it explicitly.

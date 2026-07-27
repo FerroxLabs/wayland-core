@@ -1,0 +1,24 @@
+########## MACOS RED (pre-fix b75e640c, CI artifact run 30228836800)
+provenance: wayland-core 0.12.25 (source b75e640c589ef4dcaa8f557260354e7aa90851aa)
+wrote /var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/tmp.3lte50LHDt/s-86b68437b5b2bbdd.journal session=s-86b68437b5b2bbdd nonce=86b68437b5b2bbdd
+--- session reconcile s-86b68437b5b2bbdd (exit 1)
+wayland-core session: journal '/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/tmp.3lte50LHDt/s-86b68437b5b2bbdd.journal' could not be read: journal checksum mismatch at sequence 1
+--- session cancel s-86b68437b5b2bbdd (exit 1)
+wayland-core session: journal '/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/tmp.3lte50LHDt/s-86b68437b5b2bbdd.journal' could not be read: journal checksum mismatch at sequence 1
+F23_H1_DRIVE=PASS platform=macos mode=unreadable nonce=86b68437b5b2bbdd
+RED_EXIT=0
+########## MACOS GREEN (fixed 12bd0834, CI artifact run 30232472209)
+provenance: wayland-core 0.12.25 (source 12bd0834497ffb4b4bc653da075dbf8bee0d45f7)
+wrote /var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/tmp.Xk8x1B9pcO/s-1ffb910cb3482353.journal session=s-1ffb910cb3482353 nonce=1ffb910cb3482353
+--- session reconcile s-1ffb910cb3482353 (exit 0)
+F23_SESSION=reconcile_item id=s-1ffb910cb3482353 kind=tool_execution ref=x1 tool=Write turn=t1 reason=Prepared resolvable=false
+F23_SESSION=reconcile id=s-1ffb910cb3482353 outstanding=1
+--- session cancel s-1ffb910cb3482353 (exit 5)
+wayland-core session: session 's-1ffb910cb3482353' has 1 outstanding reconcile item(s)
+--- session reconcile s-1ffb910cb3482353 (exit 0)
+F23_SESSION=reconcile_item id=s-1ffb910cb3482353 kind=tool_execution ref=x1 tool=Write turn=t1 reason=Prepared resolvable=false
+F23_SESSION=reconcile id=s-1ffb910cb3482353 outstanding=1
+F23_H1_DRIVE=PASS platform=macos mode=readable nonce=1ffb910cb3482353
+GREEN_EXIT=0
+########## falsification: readable against the pre-fix macOS binary must FAIL
+FALSIFY_EXIT=1 (non-zero required)
