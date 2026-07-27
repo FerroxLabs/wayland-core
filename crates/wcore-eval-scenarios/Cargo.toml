@@ -29,6 +29,14 @@ path = "bin/wcore-eval-fixture.rs"
 name = "wayland-receipt"
 path = "bin/wayland-receipt.rs"
 
+# The independent delivery sink (Phase 24). A SEPARATE PROCESS on purpose: it
+# is started before the gateway and outlives its kill and platform restart, so
+# the arrivals journal is owned by something the gateway cannot write to except
+# by completing a real round trip. See src/fixtures/channel.rs.
+[[bin]]
+name = "wayland-channel-sink"
+path = "bin/wayland-channel-sink.rs"
+
 [dependencies]
 # Async runtime — used by the runner for spawn/timeout/stderr-drain.
 tokio        = { workspace = true }
