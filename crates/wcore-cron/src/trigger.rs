@@ -89,10 +89,14 @@ impl TriggerBound {
                 .min_interval_secs
                 .max(default.min_interval_secs)
                 .max(FLOOR_INTERVAL_SECS),
+            // Deliberately NOT `clamp`: `clamp` panics when max < min, and the
+            // upper operand here is a persisted, hand-editable value. A
+            // bounds-enforcement function that panics on a hostile input is a
+            // denial of service in the code that exists to prevent one. The
+            // min-then-max order saturates instead.
             max_in_flight: self
                 .max_in_flight
-                .min(default.max_in_flight)
-                .min(CEILING_IN_FLIGHT)
+                .min(default.max_in_flight.min(CEILING_IN_FLIGHT))
                 .max(1),
             deadline: match (self.deadline, default.deadline) {
                 // The EARLIER deadline wins: a job may end sooner than its
