@@ -64,6 +64,12 @@ const MAX_EFFECT_CHECKPOINT_SESSION_BYTES: u64 = 512 * 1024 * 1024;
 pub struct JournalEnvelope {
     pub schema_version: u32, pub session_id: String, pub seq: u64,
     pub previous_checksum: String, pub event: SessionEvent, pub checksum: String,
+    /// 23B-H1 recovery: this envelope's stored checksum was proved against the
+    /// pre-fix `effect_receipt` encoding, so `computed_checksum` must hash
+    /// under that same encoding. Never serialized, never read from disk, and
+    /// set in exactly one place — `recover_legacy_effect_receipt`, and only
+    /// after an exact SHA-256 match.
+    #[serde(skip)] pub(crate) legacy_effect_receipt: bool,
 }
 
 #[derive(Serialize)]
@@ -92,12 +98,14 @@ impl JournalEnvelope {
             previous_checksum,
             event,
             checksum: String::new(),
+            legacy_effect_receipt: false,
         };
         envelope.checksum = envelope.computed_checksum()?;
         Ok(envelope)
     }
 
     fn computed_checksum(&self) -> Result<String, JournalError> {
+        let _encoding = model::LegacyEffectReceiptEncoding::scoped(self.legacy_effect_receipt);
         let material = ChecksumMaterial {
             schema_version: self.schema_version,
             session_id: &self.session_id,
@@ -2116,13 +2124,14 @@ fn parse_complete_frames(path: &Path, bytes: &[u8]) -> Result<ParsedJournal, Jou
                 schema.schema_version,
             )?;
             enforce_event_schema_boundary(body, schema.schema_version)?;
-            let entry: JournalEnvelope =
+            let mut entry: JournalEnvelope =
                 serde_json::from_slice(body).map_err(|source| JournalError::CorruptFrame {
                     path: path.to_path_buf(),
                     frame: frame_number,
                     source,
                 })?;
             reject_unknown_event_fields(body, &entry)?;
+            recover_legacy_effect_receipt(&mut entry, body)?;
             entries.push(entry);
         }
         offset += frame_len;
@@ -2133,6 +2142,57 @@ fn parse_complete_frames(path: &Path, bytes: &[u8]) -> Result<ParsedJournal, Jou
         bindings,
         valid_len: offset,
     })
+}
+
+/// 23B-H1 read-side recovery: restore the exact `effect_receipt` value the
+/// pre-fix writer held, so a journal already on disk hashes to its stored
+/// checksum again instead of being rejected forever.
+///
+/// The pre-fix encoding wrote `Some(Value::Null)` as an explicit
+/// `"effect_receipt":null`, which serde decodes back to `None`, and the fixed
+/// predicate then omits — so the recomputed checksum covers different bytes
+/// than the stored one and `ChecksumMismatch` rejects a correctly-written
+/// journal, permanently, for every operator verb.
+///
+/// **This does not loosen the integrity check.** The raw event object is only
+/// consulted to decide WHICH value to try; the candidate is then accepted only
+/// if re-hashing it under [`model::LegacyEffectReceiptEncoding`] reproduces the
+/// stored SHA-256 exactly. A journal that is genuinely corrupt matches neither
+/// encoding and is rejected by the unchanged checks downstream. What the
+/// stored hash attests is what the reader accepts; the hash picks the
+/// interpretation, not the reader.
+fn recover_legacy_effect_receipt(
+    entry: &mut JournalEnvelope,
+    body: &[u8],
+) -> Result<(), JournalError> {
+    if entry.computed_checksum()? == entry.checksum {
+        return Ok(());
+    }
+    let raw =
+        serde_json::from_slice::<serde_json::Value>(body).map_err(|source| JournalError::Json {
+            context: "checking journal event fields",
+            source,
+        })?;
+    if raw.pointer("/event/effect_receipt") != Some(&serde_json::Value::Null) {
+        return Ok(());
+    }
+    let SessionEvent::ToolIntentRecordedV2 { effect_receipt, .. } = &mut entry.event else {
+        return Ok(());
+    };
+    if effect_receipt.is_some() {
+        return Ok(());
+    }
+    *effect_receipt = Some(serde_json::Value::Null);
+    entry.legacy_effect_receipt = true;
+    if entry.computed_checksum()? != entry.checksum {
+        // Not the 23B-H1 artifact. Leave the envelope exactly as decoded so the
+        // unchanged chain and checksum checks report the real failure.
+        if let SessionEvent::ToolIntentRecordedV2 { effect_receipt, .. } = &mut entry.event {
+            *effect_receipt = None;
+        }
+        entry.legacy_effect_receipt = false;
+    }
+    Ok(())
 }
 
 fn reject_unknown_event_fields(body: &[u8], entry: &JournalEnvelope) -> Result<(), JournalError> {

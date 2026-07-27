@@ -26,13 +26,51 @@ use super::GENESIS_CHECKSUM;
 /// `known_explicit_event_defaults_are_wire_compatible_but_unknowns_fail_closed`),
 /// so a null that is never written is a null nobody can miss.
 ///
-/// LIMIT, stated plainly: this closes the write path. A journal ALREADY on
-/// disk carrying an explicit null still fails its checksum on read, because
-/// the stored hash covers bytes this encoding no longer produces. Repairing
-/// those would mean making the integrity check tolerant of two encodings,
-/// which is a worse trade than losing them.
+/// READ SIDE: a journal ALREADY on disk carries the old encoding, and its
+/// stored hash covers bytes this predicate no longer produces. Those are
+/// recovered — without loosening the integrity check — by
+/// `session_journal::recover_legacy_effect_receipt`, which restores the exact
+/// value the writer held and then re-hashes under
+/// [`LegacyEffectReceiptEncoding`]. The stored SHA-256 still has to match
+/// EXACTLY; the mode selects which of two precisely-specified encodings is
+/// hashed, it never skips a check.
 fn is_absent_json_value(value: &Option<serde_json::Value>) -> bool {
-    matches!(value, None | Some(serde_json::Value::Null))
+    if LEGACY_EFFECT_RECEIPT_ENCODING.with(std::cell::Cell::get) {
+        value.is_none()
+    } else {
+        matches!(value, None | Some(serde_json::Value::Null))
+    }
+}
+
+thread_local! {
+    /// Selects the pre-23B-H1 encoding of the `effect_receipt` fields for the
+    /// duration of a single serialization. Never observable outside the scope
+    /// of a [`LegacyEffectReceiptEncoding`] guard.
+    static LEGACY_EFFECT_RECEIPT_ENCODING: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Scopes the encoding `effect_receipt` serializes under.
+///
+/// Enabled, `Some(Value::Null)` writes an explicit `"effect_receipt":null` —
+/// exactly what the pre-23B-H1 writer emitted, so a journal or snapshot
+/// written by that build re-hashes to the digest stored beside it. Disabled
+/// (the default, and what every write path uses) it is skipped like `None`.
+///
+/// The guard restores the previous value on drop, so a panic mid-serialization
+/// cannot leave the thread in legacy mode.
+pub(crate) struct LegacyEffectReceiptEncoding(bool);
+
+impl LegacyEffectReceiptEncoding {
+    pub(crate) fn scoped(enabled: bool) -> Self {
+        Self(LEGACY_EFFECT_RECEIPT_ENCODING.with(|mode| mode.replace(enabled)))
+    }
+}
+
+impl Drop for LegacyEffectReceiptEncoding {
+    fn drop(&mut self) {
+        LEGACY_EFFECT_RECEIPT_ENCODING.with(|mode| mode.set(self.0));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
