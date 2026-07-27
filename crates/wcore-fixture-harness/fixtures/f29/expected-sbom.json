@@ -1,0 +1,126 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "serialNumber": "urn:uuid:8ec20514-fc34-8a8c-8b99-fdbd4610e2bb",
+  "version": 1,
+  "metadata": {
+    "tools": [
+      {
+        "name": "wayland-release sbom",
+        "version": "1"
+      }
+    ]
+  },
+  "components": [
+    {
+      "bom-ref": "pkg:cargo/anyhow@1.0.99",
+      "type": "library",
+      "name": "anyhow",
+      "version": "1.0.99",
+      "purl": "pkg:cargo/anyhow@1.0.99",
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR MIT"
+        }
+      ],
+      "properties": [
+        {
+          "name": "cargo:origin",
+          "value": "registry"
+        },
+        {
+          "name": "cargo:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        }
+      ]
+    },
+    {
+      "bom-ref": "pkg:cargo/ring@0.17.14",
+      "type": "library",
+      "name": "ring",
+      "version": "0.17.14",
+      "purl": "pkg:cargo/ring@0.17.14",
+      "licenses": [
+        {
+          "license": {
+            "name": "NOASSERTION"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "cargo:origin",
+          "value": "registry"
+        },
+        {
+          "name": "cargo:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "cargo:license-file-declared",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "bom-ref": "pkg:cargo/toml@1.1.2%2Bspec-1.1.0",
+      "type": "library",
+      "name": "toml",
+      "version": "1.1.2+spec-1.1.0",
+      "purl": "pkg:cargo/toml@1.1.2%2Bspec-1.1.0",
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "cargo:origin",
+          "value": "registry"
+        },
+        {
+          "name": "cargo:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        }
+      ]
+    },
+    {
+      "bom-ref": "pkg:cargo/wcore-fixture-harness@0.1.0",
+      "type": "library",
+      "name": "wcore-fixture-harness",
+      "version": "0.1.0",
+      "purl": "pkg:cargo/wcore-fixture-harness@0.1.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "NOASSERTION"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "cargo:origin",
+          "value": "workspace-member"
+        }
+      ]
+    },
+    {
+      "bom-ref": "pkg:cargo/wcore-types@0.12.25",
+      "type": "library",
+      "name": "wcore-types",
+      "version": "0.12.25",
+      "purl": "pkg:cargo/wcore-types@0.12.25",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "properties": [
+        {
+          "name": "cargo:origin",
+          "value": "workspace-member"
+        }
+      ]
+    }
+  ]
+}
