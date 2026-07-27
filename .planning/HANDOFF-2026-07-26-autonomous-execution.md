@@ -99,9 +99,17 @@ A one-word probe passes despite all three. Probe with a real question.
 - **Windows OpenSSH kills session children on disconnect.** Every long build started over ssh
   dies the instant the call returns — three agents died on this. Run builds as a scheduled task
   (`schtasks /create ... /ru SeanD` then `schtasks /run`), log to a file, poll for an `EXIT=` marker.
-- **AppContainer cannot be observed over SSH.** A session-0 logon reports
-  `is_available() == false` regardless of correctness, so sandbox reds from an SSH run are
-  artifacts. Establish a control first.
+- ~~**AppContainer cannot be observed over SSH.**~~ **REFUTED 2026-07-27. Struck — this trap was
+  itself the trap.** It said a session-0 logon reports `is_available() == false` regardless of
+  correctness, so sandbox reds from an SSH run are artifacts. Measured: `live_fs_acl` is
+  **12/12 PASS** over session-0 SSH on a clean lease directory, including the exact test cited as
+  establishing the rule. The original control varied the *logon* while the lease dir was wedged,
+  so both hypotheses predicted its result — it never had discriminating power. Real cause:
+  `wcore-sandbox` tests wrote leases into the **production** lease directory, and Windows
+  `is_available()` is a real spawn probe, so a foreign lease made it fail and the product logged
+  "sandbox disabled" and kept running **unsandboxed**. Fixed structurally. This rule was used for
+  weeks to discount Windows sandbox reds; **treat such a red as evidence now.** See
+  `.planning/intel/APPCONTAINER-SSH-LEASE-WEDGE.md` and `…-LORE-READJUDICATION.md`.
 - **hetzner-dsm has no cargo on a non-login shell's PATH** — use `/root/.cargo/bin/cargo`. A bare
   `cargo` exits 127; that is PATH, not a build failure.
 - **Use a phase-dedicated worktree on hetzner** (`/root/wayland-p21`), never shared
