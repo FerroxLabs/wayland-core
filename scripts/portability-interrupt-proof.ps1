@@ -245,7 +245,17 @@ if ($DigestPre -eq $DigestPost) { $DigestEqual = 'yes' }
 # --- verdict block ------------------------------------------------------------
 Write-Output "INTERRUPT-PLATFORM: windows"
 Write-Output "KILL-MECHANISM: $KillName CATCHABLE: $KillCatchable"
-Write-Output "KILL-HANDLER-PROBE: installed=yes fired=$HandlerFired"
+# `installed` is READ, never asserted. It used to be the literal string "yes",
+# so the line reported an armed probe whether or not one existed -- and a probe
+# that silently failed to arm produces exactly the `fired=no` on which the whole
+# uncatchability claim rests. The binary writes the marker only after a handler
+# is genuinely registered.
+$ArmedMarker = $Probe + '.armed'
+$HandlerInstalled = if (Test-Path -LiteralPath $ArmedMarker) { 'yes' } else { 'no' }
+Write-Output "KILL-HANDLER-PROBE: installed=$HandlerInstalled fired=$HandlerFired"
+if ($HandlerInstalled -ne 'yes') {
+    Fail 'the kill-handler probe never armed, so fired=no measures nothing at all'
+}
 Write-Output "FIXTURE-PAYLOADS: $Payloads"
 Write-Output "MIDFLIGHT-JOURNAL-OPEN: $MidflightJournalOpen"
 Write-Output "MIDFLIGHT-TARGET-INTERMEDIATE: $MidflightTargetIntermediate"

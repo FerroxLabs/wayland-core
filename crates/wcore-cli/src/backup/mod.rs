@@ -279,11 +279,19 @@ fn arm_kill_handler_probe(path: PathBuf) {
         else {
             return;
         };
+        // `installed` must be a MEASUREMENT, not a constant. The proof script
+        // used to print `installed=yes` unconditionally, so it reported an
+        // armed probe whether or not one existed — and a probe that silently
+        // failed to arm produces exactly the `fired=no` that the uncatchability
+        // claim rests on. The marker below is written only after a handler is
+        // genuinely registered, and the script reads it.
+        let armed_marker = path.with_extension("armed");
         rt.block_on(async move {
             #[cfg(unix)]
             {
                 use tokio::signal::unix::{SignalKind, signal};
                 if let Ok(mut sig) = signal(SignalKind::terminate()) {
+                    let _ = std::fs::write(&armed_marker, b"armed");
                     sig.recv().await;
                     let _ = std::fs::write(&path, b"fired");
                 }
@@ -293,31 +301,50 @@ fn arm_kill_handler_probe(path: PathBuf) {
                 // Listen on EVERY catchable console control event, not just
                 // one. Measured: the control leg delivered a close request
                 // (`taskkill` without `/F`) while the probe watched only
-                // CTRL_BREAK, so the probe could never fire and the control
+                // CTRL_BREAK, so nothing was ever delivered and the control
                 // reported `fired=no` for a mechanism it called catchable —
-                // which left the real run's `fired=no` vacuous rather than a
-                // measurement.
+                // which left the real run's `fired=no` vacuous.
                 //
-                // Widening makes the uncatchability claim STRONGER, not weaker:
-                // `fired=no` under TerminateProcess now means none of the five
-                // catchable mechanisms was delivered, rather than one.
+                // Registration is INDEPENDENT per signal. A single irrefutable
+                // binding over all four disarmed the whole probe whenever any
+                // one failed to register, which is a silent way to guarantee
+                // `fired=no`. Widening makes the uncatchability claim stronger:
+                // it now means none of the registered mechanisms was delivered.
                 use tokio::signal::windows;
-                let (Ok(mut brk), Ok(mut close), Ok(mut shutdown), Ok(mut logoff)) = (
-                    windows::ctrl_break(),
-                    windows::ctrl_close(),
-                    windows::ctrl_shutdown(),
-                    windows::ctrl_logoff(),
-                ) else {
-                    return;
-                };
-                tokio::select! {
-                    _ = brk.recv() => {}
-                    _ = close.recv() => {}
-                    _ = shutdown.recv() => {}
-                    _ = logoff.recv() => {}
-                    _ = tokio::signal::ctrl_c() => {}
+                let mut registered = 0usize;
+                macro_rules! arm {
+                    ($mk:expr, $tx:expr) => {
+                        if let Ok(mut sig) = $mk {
+                            registered += 1;
+                            let tx = $tx;
+                            tokio::spawn(async move {
+                                sig.recv().await;
+                                let _ = tx.send(());
+                            });
+                        }
+                    };
                 }
-                let _ = std::fs::write(&path, b"fired");
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+                arm!(windows::ctrl_break(), tx.clone());
+                arm!(windows::ctrl_close(), tx.clone());
+                arm!(windows::ctrl_shutdown(), tx.clone());
+                arm!(windows::ctrl_logoff(), tx.clone());
+                {
+                    let tx = tx.clone();
+                    registered += 1;
+                    tokio::spawn(async move {
+                        let _ = tokio::signal::ctrl_c().await;
+                        let _ = tx.send(());
+                    });
+                }
+                drop(tx);
+                if registered == 0 {
+                    return;
+                }
+                let _ = std::fs::write(&armed_marker, format!("armed:{registered}"));
+                if rx.recv().await.is_some() {
+                    let _ = std::fs::write(&path, b"fired");
+                }
             }
         });
     });
