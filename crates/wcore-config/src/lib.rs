@@ -46,6 +46,11 @@ pub mod keychain;
 pub mod limits;
 pub mod mcp_cred_refs;
 pub mod plan;
+// F25-04: the plugin approval gate + its content-digest primitive. Lives here
+// because BOTH `wcore-cli` (which writes approvals) and `wcore-agent` (whose
+// loader enforces them) must agree byte-for-byte on the digest and the verdict;
+// duplicating either would create two answers to "is this plugin approved?".
+pub mod plugin_governance;
 pub mod plugins_config;
 pub mod profile;
 pub mod resolution_provenance;

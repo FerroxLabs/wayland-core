@@ -747,6 +747,15 @@ impl AgentBootstrap {
                 );
                 continue;
             }
+            // F25-04: the positive half of the approval gate has to be
+            // observable too. Without this line an operator can see a REFUSED
+            // plugin (the warn above) but has no CLI-visible evidence that an
+            // APPROVED one actually loaded — and "no error" is not evidence.
+            tracing::info!(
+                plugin = %record.plugin_name,
+                manifest = %record.manifest_path.display(),
+                "on-disk plugin loaded"
+            );
             let crate::plugins::loader::OnDiskDispatchRecord {
                 plugin_name,
                 tool_namespace,
