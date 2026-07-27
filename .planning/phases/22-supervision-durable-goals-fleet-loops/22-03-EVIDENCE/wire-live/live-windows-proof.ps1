@@ -60,15 +60,15 @@ Write-Output "RUN1 pid=$($p.Id)"
 # Wait for the state we intend to kill in to be REAL, not hoped for.
 for ($k=0; $k -lt 200; $k++) { if ((Effects) -ge 4) { break }; Start-Sleep -Milliseconds 200 }
 Write-Output "PRE-KILL effects=$(Effects)"
-$before = Descendants $p.Id
-Write-Output "PRE-KILL descendants=$($before.Count) names=$(($before | ForEach-Object {$_.Name}) -join ',')"
+$before = @(Descendants $p.Id)
+Write-Output "PRE-KILL descendants=$(@($before).Count) names=$(($before | ForEach-Object {$_.Name}) -join ',')"
 Write-Output "KILL_AT_UTC=$((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))"
 
 # The uncatchable tree kill. /T takes descendants, /F is SIGKILL-equivalent.
 taskkill /T /F /PID $p.Id 2>&1 | Out-String | Write-Output
 Start-Sleep -Seconds 3
-$after = Descendants $p.Id
-Write-Output "POST-KILL descendants=$($after.Count)"
+$after = @(Descendants $p.Id)
+Write-Output "POST-KILL descendants=$(@($after).Count)"
 Write-Output "POST-KILL run1_exited=$((Get-Process -Id $p.Id -ErrorAction SilentlyContinue) -eq $null)"
 Write-Output "POST-KILL effects=$(Effects)"
 Write-Output "--- run1.out ---"; Get-Content "$R\run1.out" -ErrorAction SilentlyContinue
@@ -100,7 +100,7 @@ Remove-Item "$R\effects\effects\idem-t00-DUPLICATE"
 Write-Output "RESTORED_GATE_EXIT=$LASTEXITCODE"
 
 Write-Output "=== 8. LEDGER STATE (shipped status verb) ==="
-& $BIN goal status --journal $J --goal $G | Set-Content "$R\status.json"
+& $BIN goal status --journal $J --goal $G | Set-Content -Encoding UTF8 "$R\status.json"
 $s = Get-Content "$R\status.json" -Raw | ConvertFrom-Json
 $tasks = $s.tasks.PSObject.Properties
 $comp = ($tasks | Where-Object { $_.Value.completion -ne $null }).Count
