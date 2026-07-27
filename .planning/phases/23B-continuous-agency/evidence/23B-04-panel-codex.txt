@@ -1,0 +1,326 @@
+Reading additional input from stdin...
+OpenAI Codex v0.144.4
+--------
+workdir: /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-23B-04
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019fa3e3-fbe4-75c2-9648-c4be76eacb6a
+--------
+user
+panel_run_nonce=05028d2c95e3a675
+
+# F23-05 clock-policy cross-audit bundle
+
+You are one of four independent members of a cross-audit panel. Answer the
+DECISION below on the EVIDENCE below. Do not ask questions; commit to one option.
+
+## The decision
+
+Which legs of a multi-day wait/resume/complete journey for Wayland Core must run
+against REAL elapsed wall time, and which may legitimately use an accelerated
+clock?
+
+## Success Criterion 5, verbatim
+
+> A multi-day wait, resume and complete journey preserves cumulative authority,
+> resource, evidence, memory and delivery state, with exactly one loop owner at
+> every resume point.
+
+## The LIVE determination, measured before this panel was convened
+
+These lines are the verbatim output of scripts/f23-clock-probe.sh, run on the
+authoritative Linux host against the binary built at the commit under test. The
+probe armed durable budget authority in one real process, let that process EXIT,
+elapsed a REAL gap during which no process existed, and bound the authority again
+in a SECOND real process.
+
+```
+F23_04_PROBE_NONCE=64b35c212168149b
+F23_04_PROBE_HOST=Ubuntu-2404-noble-amd64-base
+F23_04_PROBE_UNAME=Linux_6.8.0-101-generic_x86_64
+F23_04_PROBE_SHA=9be07203bc65bb2cce87621a85df609b2da0ccaa
+F23_04_PROBE_BINARY_BUILD_INFO=wayland-core 0.12.25 (source 9be07203bc65bb2cce87621a85df609b2da0ccaa)
+F23_04_PROBE_HARNESS=/root/wayland-23B-04/target/debug/deps/multi_day_journey_test-cd7922f357e39e40
+F23_04_EXPERIMENT_B=absolute-deadline gap=0s exceeded=false reason=none
+F23_04_PROBE_GAP_BEGIN=2026-07-27T14:01:26Z seconds=45
+F23_04_PROBE_GAP_END=2026-07-27T14:02:11Z
+F23_04_EXPERIMENT_A=absolute-deadline gap=45s exceeded=true reason=max_wall_time rc=0
+F23_04_EXPERIMENT_C=active-runtime gap=45s exceeded=false reason=none
+F23_04_SEAM_ATTEMPT=WAYLAND_CLOCK_NOW_MS rc=0 exceeded=false
+F23_04_SEAM_ATTEMPT=WAYLAND_NOW_UNIX_MILLIS rc=0 exceeded=false
+F23_04_SEAM_ATTEMPT=WAYLAND_FAKE_CLOCK rc=0 exceeded=false
+F23_04_SEAM_ATTEMPT=WAYLAND_TEST_CLOCK rc=0 exceeded=false
+F23_04_SEAM_ATTEMPT=WAYLAND_CLOCK_OFFSET_MS rc=0 exceeded=false
+F23_04_SEAM_ATTEMPT=WAYLAND_BUDGET_DEADLINE_UNIX_MILLIS rc=0 exceeded=false
+F23_04_SEAM_ATTEMPT=WCORE_CLOCK_NOW_MS rc=0 exceeded=false
+F23_04_SEAM_ATTEMPT=WCORE_NOW_UNIX_MILLIS rc=0 exceeded=false
+F23_04_SEAM_ATTEMPT=WCORE_FAKE_CLOCK rc=0 exceeded=false
+F23_04_SEAM_ATTEMPT=WCORE_TEST_CLOCK rc=0 exceeded=false
+F23_04_SEAM_ATTEMPT=WCORE_CLOCK_OFFSET_MS rc=0 exceeded=false
+F23_04_SEAM_ATTEMPT=SOURCE_DATE_EPOCH rc=0 exceeded=false
+F23_04_SEAM_ATTEMPT=FAKETIME rc=0 exceeded=false
+F23_04_SEAM_CLI_FLAG_HITS=0
+F23_04_ABSDEADLINE_MATCH_SITES_NONTEST=8
+F23_04_ABSDEADLINE_PRODUCT_CONSTRUCTION_SITES=0
+F23_04_ABSDEADLINE_PRODUCT_REACHABLE=false
+F23_04_ABSDEADLINE_EVAL=system-clock-at-evaluation
+F23_04_ABSDEADLINE_CHARGES_DOWNTIME=true
+F23_04_ACTIVERUNTIME_CHARGES_DOWNTIME=false
+F23_04_CLOCK_INJECTION_SEAM=none
+F23_04_ACCEL_HONEST_FOR_ABSOLUTE_DEADLINE=false
+F23_04_REAL_GAP_SECONDS=46
+F23_04_PROBE=PASS nonce=64b35c212168149b
+```
+
+## The four options, verbatim from the plan
+
+### real-time-full
+Full real elapsed time — the journey spans at least three real calendar days on
+all three platforms with real process restarts and no clock manipulation anywhere.
+PROS: the strongest possible evidence and the only one that proves a persisted
+deadline, a session store, a journal and an operating system all behaved across
+days of the process not existing; it also incidentally exercises the Windows box's
+real reboots, which is the environment a user actually has; no argument about what
+was simulated.
+CONS: costs at least three calendar days of elapsed wall time before the phase can
+close, and occupies the Linux host, the Windows box and a Mac for that span; a
+defect found on day three costs another full cycle to re-prove.
+
+### real-time-linux-accelerated-elsewhere
+Real elapsed time on the long-lived Linux host, accelerated clock on the macOS and
+Windows legs.
+PROS: keeps the strongest evidence on the one host that genuinely stays up
+unattended for days, while the two attended machines finish in an afternoon; the
+accelerated legs still perform real process restarts and real persistence, so only
+the time span is simulated; total calendar cost is the same three days but only one
+host is occupied.
+CONS: the macOS and Windows platform claims are weaker than the Linux one and must
+be labelled that way in the evidence rather than presented as equivalent; a
+platform-specific time or persistence defect could hide on exactly the two
+platforms that were accelerated.
+
+### accelerated-except-absolute-deadline
+Accelerated clock everywhere except the absolute-deadline leg, which always runs
+against real elapsed time on every platform.
+PROS: targets the cost precisely at the one authority whose meaning depends on real
+time passing while the process is dead, and leaves everything with no real-time
+dependency free to run fast; finishes in roughly one day of calendar.
+CONS: depends entirely on the determination being correct about which behaviors
+have a genuine real-time dependency; if that determination is wrong, an accelerated
+leg silently proves nothing and the error is invisible in the evidence.
+
+### escalate
+Escalate — none of the above buys evidence worth its cost right now, so record the
+decision as open and do not run the journey.
+PROS: spends no calendar time on a proof whose shape is not yet agreed, and leaves
+the criterion visibly open rather than closed on evidence the owner does not accept.
+CONS: Success Criterion 5 stays open, Phase 23B cannot close, and the criterion most
+likely to reveal a cross-restart defect goes unexercised.
+
+## The three host facts
+
+* Linux (authoritative, and the only host that stays up unattended for days):
+  hetzner-dsm, /root/wayland. Full workspace aggregate is 11,519 tests in roughly
+  194 seconds.
+* Windows (native leg): SeanDesktop, C:\ferrox-win. The box reboots and is shared;
+  the journey surviving that is a feature of the test rather than a problem with it.
+* macOS (native leg): a developer Mac. The phase's controlling execution instruction
+  forbids running Cargo on it, and the binary resolver the plan expected
+  (scripts/f23-macos-binary.sh) was never landed by its owning plan.
+
+## What to weigh explicitly
+
+An accelerated leg makes a platform's span assertion TRIVIALLY satisfiable, which is
+exactly why an accelerated leg is a WEAKER claim and must be labelled as one rather
+than presented as equivalent evidence. Weigh that against three calendar days.
+
+Consider carefully whether the measured determination REMOVES any option outright.
+An option that rests on a mechanism the product does not expose is not a cheaper
+option; it is an argument about a thing that does not exist.
+
+## Reply contract — the last three lines of your reply MUST be exactly:
+
+PANEL_NONCE=05028d2c95e3a675
+PANEL_POSITION=<one of: real-time-full real-time-linux-accelerated-elsewhere accelerated-except-absolute-deadline escalate>
+PANEL_RATIONALE=<one single line, at least forty characters, no newlines>
+deprecated: `[features].codex_hooks` is deprecated. Use `[features].hooks` instead.
+Enable it with `--enable hooks` or `[features].hooks` in config.toml. See https://developers.openai.com/codex/config-basic#feature-flags for details.
+2026-07-27T14:04:19.006704Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(AuthRequiredError { www_authenticate_header: "Bearer realm=\"OAuth\", resource_metadata=\"https://mcp.canva.com/.well-known/oauth-protected-resource/mcp\", error=\"invalid_token\", error_description=\"Missing or invalid access token\"" })
+2026-07-27T14:04:19.742421Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Auth(AuthorizationRequired)
+hook: SessionStart
+hook: SessionStart Completed
+hook: UserPromptSubmit
+hook: UserPromptSubmit Completed
+codex
+I’m using the `ijfw-cross-audit` skill because this is an explicit multi-model decision gate. I’ll apply its evidence discipline to the supplied bundle, then commit to exactly one option.
+hook: PreToolUse
+hook: PreToolUse
+hook: PreToolUse
+hook: PreToolUse Completed
+hook: PreToolUse Completed
+hook: PreToolUse Completed
+exec
+/bin/zsh -lc "sed -n '1,260p' /Users/seandonahoe/.codex/skills/ijfw-cross-audit/SKILL.md" in /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-23B-04
+ succeeded in 0ms:
+---
+name: ijfw-cross-audit
+description: "Generate a cross-platform multi-model audit (Trident) on a diff, brief, or artifact. Trigger: 'cross audit', 'Trident', 'second opinion', 'check with other models', 'check with other AIs', 'cross-check this', 'get another perspective', /cross-audit"
+---
+
+## Execution
+
+1. **Detect artifact.** Accept: diff, file path, brief text, or `HEAD~1..HEAD`.
+   If none provided, ask once: `What should I audit? (diff, file, or paste text)`
+
+2. **Detect auditors.** Check PATH for `codex` and `gemini`.
+   Default: one OpenAI-family + one Google-family, excluding caller's family.
+   Cap at 4 auditors total.
+
+3. **Dispatch in parallel via background bash** -- never hand off to user.
+   Prompt each: security findings, logic issues, reliability concerns, test gaps.
+   ```bash
+   codex "Review for security, logic, reliability, test gaps: <artifact>" &
+   gemini "Review for security, logic, reliability, test gaps: <artifact>" &
+   wait
+   ```
+
+4. **Reconcile.** Deduplicate. Classify:
+   - CONSENSUS -- flagged by 2+ auditors
+   - CONTESTED -- flagged by 1 auditor only
+   - PASS -- no issues
+
+5. **Emit report** using the format below.
+
+## Report format rule (all cross-audit outputs)
+
+Any reconciliation report presenting multiple paths MUST use this structure:
+
+```
+VERDICT
+  <one-line converged recommendation>
+
+OPTIONS
+  A -- <short-name>: <one-line what it is>
+  B -- <short-name>: <one-line what it is>
+
+REVIEWER CONVERGENCE
+  <reviewer>:  <letter>  <score>  "<their call>"  => Option <letter> -- <name>
+
+RECOMMENDATION
+  Option <X> -- <name> because <one-sentence why>.
+
+NEXT ACTION
+  <exact command or step>
+```
+
+Never write "Option A" or "Option B" without "-- name" immediately after it on the same line.
+
+## Output contract
+
+Emit a `gate-result` block as the **LAST** content of your output. Nothing
+after it. Use `gate="cross-audit"`. Statuses: `PASS | CONDITIONAL | WARN | FLAG | FAIL`.
+
+Format:
+
+```gate-result
+{
+  "schema_version": "1.0",
+  "gate": "cross-audit",
+  "status": "<STATUS>",
+  "project_type": "<from project-type-detector>",
+  "lenses": [],
+  "affected_artifacts": [],
+  "accounting": {"duration_ms": 0, "lenses_invoked": 0, "cost_usd": null},
+  "remediation": [],
+  "receipts_ref": null,
+  "supersedes": null,
+  "gate_id": "<gate-with-colons-replaced-by-dashes>-<ts>-<rand4>",
+  "emitted_at": "<ISO-8601>"
+}
+```
+
+hook: PostToolUse
+exec
+/bin/zsh -lc 'export WL_LANE=core
+wl queue' in /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-23B-04
+hook: PostToolUse Completed
+exec
+/bin/zsh -lc "sed -n '1,240p' /Users/seandonahoe/.codex/RTK.md" in /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-23B-04
+ succeeded in 0ms:
+# RTK - Rust Token Killer (Codex CLI)
+
+**Usage**: Token-optimized CLI proxy for shell commands.
+
+## Rule
+
+Always prefix shell commands with `rtk`.
+
+Examples:
+
+```bash
+rtk git status
+rtk cargo test
+rtk npm run build
+rtk pytest -q
+```
+
+## Meta Commands
+
+```bash
+rtk gain            # Token savings analytics
+rtk gain --history  # Recent command savings history
+rtk proxy <cmd>     # Run raw command without filtering
+```
+
+## Verification
+
+```bash
+rtk --version
+rtk gain
+which rtk
+```
+
+hook: PostToolUse
+hook: PostToolUse Completed
+hook: PostToolUse
+ exited 1 in 465ms:
+error connecting to api.github.com
+check your internet connection or https://githubstatus.com
+
+hook: PostToolUse Completed
+codex
+The coordination queue could not reach GitHub from this restricted session; that does not affect this read-only panel decision. The clock probe itself is decisive on one point: the product exposes no acceleration seam, so any option requiring accelerated product-clock execution is not currently runnable as described.
+hook: PreToolUse
+hook: PreToolUse Completed
+exec
+/bin/zsh -lc "rtk proxy sh -lc 'command -v codex; command -v gemini; command -v /Users/seandonahoe/.kimi-code/bin/kimi 2>/dev/null || true'" in /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-23B-04
+ succeeded in 0ms:
+/opt/homebrew/bin/codex
+/opt/homebrew/bin/gemini
+/Users/seandonahoe/.kimi-code/bin/kimi
+
+hook: PostToolUse
+hook: PostToolUse Completed
+codex
+Only the absolute-deadline behavior inherently requires real elapsed time; active-runtime and state-continuity legs could use acceleration if a trustworthy product clock seam existed. It does not: every attempted seam was inert, and evaluation reads the system clock.
+
+That removes both accelerated options. Escalation leaves Criterion 5 open, so the current executable choice is full real time across Linux, Windows, and macOS. The missing macOS binary resolver must be landed first without violating the no-Cargo-on-Mac rule.
+
+PANEL_NONCE=05028d2c95e3a675
+PANEL_POSITION=real-time-full
+PANEL_RATIONALE=No acceleration seam exists, so every runnable platform leg must use real wall time and the weaker accelerated options are unavailable.
+hook: Stop
+hook: Stop Completed
+tokens used
+38,827
+Only the absolute-deadline behavior inherently requires real elapsed time; active-runtime and state-continuity legs could use acceleration if a trustworthy product clock seam existed. It does not: every attempted seam was inert, and evaluation reads the system clock.
+
+That removes both accelerated options. Escalation leaves Criterion 5 open, so the current executable choice is full real time across Linux, Windows, and macOS. The missing macOS binary resolver must be landed first without violating the no-Cargo-on-Mac rule.
+
+PANEL_NONCE=05028d2c95e3a675
+PANEL_POSITION=real-time-full
+PANEL_RATIONALE=No acceleration seam exists, so every runnable platform leg must use real wall time and the weaker accelerated options are unavailable.
