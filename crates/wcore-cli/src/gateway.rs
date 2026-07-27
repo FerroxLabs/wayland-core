@@ -817,6 +817,17 @@ mod tests {
         assert_eq!(back, proj);
     }
 
+    /// The verbs clap will actually accept, read off the built command
+    /// rather than off the enum, so a `#[command(skip)]` or a rename would
+    /// change the answer.
+    fn verb_names() -> Vec<String> {
+        use clap::Subcommand as _;
+        GatewayCmd::augment_subcommands(clap::Command::new("gateway"))
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .collect()
+    }
+
     #[test]
     fn every_generated_unit_invokes_the_verb_this_module_implements() {
         // THE REGRESSION THIS FILE EXISTS FOR. Before this module, all three
@@ -825,8 +836,6 @@ mod tests {
         // failed with a clap "unrecognized subcommand" error. This asserts the
         // two halves still agree; it goes red if either the unit text or the
         // subcommand name moves.
-        use clap::CommandFactory as _;
-
         let s = ServiceSpec {
             profile: "default".into(),
             binary: PathBuf::from("/opt/x/wayland-core"),
@@ -857,11 +866,7 @@ mod tests {
         }
 
         // And `run` must actually be a parseable subcommand of this surface.
-        let cmd = GatewayArgs::command();
-        let names: Vec<String> = cmd
-            .get_subcommands()
-            .map(|c| c.get_name().to_string())
-            .collect();
+        let names = verb_names();
         assert!(
             names.iter().any(|n| n == "run"),
             "`gateway run` must exist — the service units invoke it: {names:?}"
@@ -870,12 +875,7 @@ mod tests {
 
     #[test]
     fn the_seven_lifecycle_verbs_are_all_present() {
-        use clap::CommandFactory as _;
-        let cmd = GatewayArgs::command();
-        let names: Vec<String> = cmd
-            .get_subcommands()
-            .map(|c| c.get_name().to_string())
-            .collect();
+        let names = verb_names();
         for v in [
             "install",
             "uninstall",
