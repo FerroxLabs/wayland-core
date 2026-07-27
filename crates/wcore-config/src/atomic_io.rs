@@ -185,7 +185,20 @@ mod tests {
 
         // The control leg runs FIRST. If it fails, the box or the harness is
         // the problem and the `/` result would be uninterpretable.
-        for (label, sep) in [("control-backslash", '\\'), ("subject-forwardslash", '/')] {
+        //
+        // The control uses the platform's NATIVE separator, not a literal `\`.
+        // On unix `\` is an ordinary filename character, so a `\`-built fixture
+        // is one 300-byte component rather than a nested path, and it fails
+        // with ENAMETOOLONG against `NAME_MAX` — a fixture defect that says
+        // nothing about `atomic_write`. Measured: it did exactly that on Linux.
+        // On unix the two legs are therefore the same shape, and the test
+        // honestly degenerates to a single measurement there; the separator
+        // distinction only exists on Windows.
+        let native = std::path::MAIN_SEPARATOR;
+        for (label, sep) in [
+            ("control-native-sep", native),
+            ("subject-forwardslash", '/'),
+        ] {
             let root = base.join(label);
             std::fs::create_dir_all(&root).unwrap();
             let deep = deep_path_over_max_path(&root, "payload.txt", sep);
