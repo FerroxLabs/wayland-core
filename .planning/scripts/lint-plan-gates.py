@@ -189,6 +189,37 @@ SELF_WRITTEN_RE = re.compile(r"grep[^\n]*?([A-Za-z0-9_.\-/]*\d{2}[A-Z]?-\d{2}-[A
 MALFORMED_BLOCK_LINES = 12
 
 
+_PS_FILE_RE = re.compile(r"(?:powershell|pwsh)\b[^\n|;]*?-File\s+([^\s;]+)")
+_PS_GUARD_RE = re.compile(r"Test-Path\s+([^\s)]+)|test\s+-[fex]+\s+([^\s;]+)")
+
+
+def _ps_script_guarded(cmd):
+    """True when every `-File <script>` in `cmd` is guarded by a Test-Path/test -f
+    on that same script EARLIER in the command.
+
+    Matching on the basename is deliberate: the guard and the invocation routinely
+    spell the path differently (`scripts\\x.ps1` vs `.\\x.ps1`), and requiring a
+    byte-identical spelling would fail to recognise a correct guard -- which is the
+    exact failure mode this suppression exists to prevent.
+    """
+    invocations = list(_PS_FILE_RE.finditer(cmd))
+    if not invocations:
+        return False
+    for inv in invocations:
+        target = os.path.basename(inv.group(1).replace("\\", "/")).strip("\"'")
+        guarded = False
+        for g in _PS_GUARD_RE.finditer(cmd):
+            if g.start() >= inv.start():
+                break  # a guard AFTER the call cannot protect it
+            spelled = g.group(1) or g.group(2) or ""
+            if os.path.basename(spelled.replace("\\", "/")).strip("\"'") == target:
+                guarded = True
+                break
+        if not guarded:
+            return False
+    return True
+
+
 def extract_gates(path):
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
@@ -245,6 +276,14 @@ def static_findings(path, gates):
             # already taken its own advice, which it did on two correct Phase 30
             # gates the first time it ran.
             if rule == "empty-equals-empty-passes" and cmd.count("test -s") >= 2:
+                continue
+            # Same shape of suppression, same reason. `powershell -File x.ps1` is
+            # only self-passing when x.ps1 might be ABSENT; a `Test-Path` (or
+            # `test -f`) guard on that same script ahead of the call is exactly
+            # the fix the advice asks for, and the rule must recognise it or it
+            # punishes the gate for complying. Measured: the guarded form exits
+            # 94 on an absent script where the bare form exits 0.
+            if rule == "powershell-missing-script-exits-zero" and _ps_script_guarded(cmd):
                 continue
             out.append((sev, rule, path, line_no, cmd, advice))
         m = SELF_WRITTEN_RE.search(cmd)
@@ -338,6 +377,25 @@ def main(argv):
     highs = sum(1 for f in findings if f[0] == "HIGH")
     print(f"{len(files)} plan(s), {total_gates} gate(s) examined: "
           f"{highs} HIGH, {len(findings) - highs} other")
+
+    # `already-green-at-base` asks "would this gate pass on an untouched tree?",
+    # which is only a question worth asking BEFORE the plan runs. Once the plan
+    # has executed, its artifacts exist, its gates legitimately pass at base, and
+    # the rule fires on every one of them. Measured 2026-07-28: phases 28 and 29
+    # went from 0 HIGH to 28 and 13 the moment their first plans merged, while
+    # unexecuted phase 30 stayed at 0. Without this note the next reader sees
+    # "28 HIGH" on a phase that is fine and starts chasing it.
+    executed = [f for f in files
+                if os.path.exists(f.replace("-PLAN.md", "-SUMMARY.md"))]
+    agb = sum(1 for f in findings if f[1] == "already-green-at-base")
+    if executed and agb:
+        print()
+        print(f"NOTE: {len(executed)} of {len(files)} plan(s) have a SUMMARY, i.e. have already "
+              f"executed, and {agb} finding(s) are `already-green-at-base`.")
+        print("      That rule is a PRE-EXECUTION check. On a plan that has run, its artifacts")
+        print("      exist and its gates pass at base by construction -- these are expected, not")
+        print("      defects. Re-read them only if you are re-planning. Every OTHER rule stays")
+        print("      meaningful after execution.")
     return 1 if highs else 0
 
 
