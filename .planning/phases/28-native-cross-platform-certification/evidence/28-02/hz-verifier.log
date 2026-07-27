@@ -1,0 +1,6 @@
+self-test: 25 assertions passed, 0 failed
+VERIFIER_SELFTEST_EXIT=0
+self-test: 62 assertions passed, 0 failed
+VALIDATOR_SELFTEST_EXIT=0
+VERIFIED platform=linux cells=216
+LINUX_MARKER_VERIFY_EXIT=0

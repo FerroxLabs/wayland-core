@@ -1,0 +1,5 @@
+{
+ "observed": false,
+ "reason": "no worker could be spawned through the product's own sandbox path, so no containment differential is obtainable: {",
+ "raw": "{\n  \"workers\": [\n    {\n      \"branch\": \"swarm/cli/18b0f20c702b4ea0bcb8b323c241c75b-0\",\n      \"duration\": \"534ms 142us 625ns\",\n      \"status\": {\n        \"Failed\": \"sandbox backend sandbox_exec cannot own descendants that escape a process group; select Docker for delegated Swarm execution on this host; qualified Docker fallback is unavailable on this macOS host: docker backend disabled (feature `live-docker` off)\"\n      },\n      \"stderr\": \"\",\n      \"stdout\": \"\",\n      \"worker_id\": \"18b0f20c702b4ea0bcb8b323c241c75b-0\"\n    }\n  ]\n}\n"
+}

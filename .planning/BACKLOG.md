@@ -616,3 +616,29 @@ individually attested, so the file is redundant rather than load-bearing. Owner:
 `release.yml:142,144` build without `--locked`, unlike the seven `--locked` call sites in
 `ci.yml` and `justfile`. The committed lockfile is honoured by default, so this is a hardening
 gap rather than a demonstrated divergence.
+## Phase 28 plan 28-02 — MEDIUM findings, non-blocking
+
+Raised by the E5 certification matrix run. All MEDIUM: each is a real defect that contradicts
+none of Phase 28's four Success Criteria, so under the standing severity policy they are
+logged here and do not block execution.
+
+- **`F-28-02-003`** — swarm dispatch admission intermittently refuses with the sandbox
+  AVAILABLE (`dispatch admission refused: invalid retained workspace reservation`). Observed
+  in 1 of 4 clean-lease control observations, and previously twice by another lane, so it is
+  not a one-off. Not a sandbox failure. Owner: swarm dispatch admission.
+- **`F-28-02-004`** — process finding: the "AppContainer cannot be observed over SSH" rule
+  rested on a control that varied the logon while the lease directory was wedged, an
+  observation both competing hypotheses predicted. It discounted security evidence for weeks
+  across at least four documents. Structural repair already landed in certification contract
+  §4.2. Remaining plan-brief copies of the rule need a serialized cross-lane edit.
+- **`F-28-02-005`** — a task run through `wayland-core backend run --backend local` on macOS
+  created a file outside its workspace (`/tmp`). Whether that is in-profile needs reading
+  against the actual sandbox-exec profile; recorded so it is not lost. Owner: `wcore-sandbox`.
+- **`F-28-02-006`** — the Linux bwrap backend read-binds ALL of `/etc` (`SYSTEM_RO_DIRS`), so
+  a sandboxed worker can read `/etc/shadow`. Measured. This is a deliberate bind and NOT a
+  control reporting itself active while inactive — `enforces_read_deny()` means the backend
+  honours `fs_read_deny` masks, which it does. Hardening gap. Owner: `wcore-sandbox`.
+- **`F-28-01-R001`** — `wayland-core channel` is claimed by a phase 24 artifact and is absent
+  from the candidate binary's command tree (`claimed-but-absent`). Surfaced by re-resolving
+  the candidate after phase-24 artifacts landed. Needs phase 24's own recorded requirement
+  disposition before any cell for that surface could be skipped.

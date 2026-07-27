@@ -1,0 +1,26 @@
+MARKER VERIFIER, mutated against the REAL 216-cell Linux proof log
+
+REJECTED         rc=1  a cell marker deleted
+                        -> final acceptance marker before all cells were recorded
+REJECTED         rc=1  a cell marker duplicated
+                        -> duplicate cell marker: sandbox-probes-linux-auth
+REJECTED         rc=1  two cell markers transposed
+                        -> cell markers out of order at index 2: saw sandbox-probes-linux-backend, expected sandbox-probes-linux-auth
+REJECTED         rc=1  a marker's commit tampered
+                        -> cell sandbox-probes-linux-auth commit drift
+REJECTED         rc=1  a marker's tree tampered
+                        -> cell sandbox-probes-linux-auth tree drift
+REJECTED         rc=1  a marker's nonce tampered
+                        -> cell sandbox-probes-linux-auth nonce drift
+REJECTED         rc=1  a foreign-platform marker
+                        -> foreign platform marker: windows (verifying linux)
+REJECTED         rc=1  the final marker moved first
+                        -> final acceptance marker before all cells were recorded
+REJECTED         rc=1  the final marker deleted
+                        -> missing final platform acceptance marker
+REJECTED         rc=1  a sandbox green stripped of activeness
+                        -> cell sandbox-probes-linux-auth claims pass on a sandbox-dimension cell with no activeness observation; absence
+
+PASS             rc=0  control re-run on the unmutated log -> VERIFIED platform=linux cells=216
+
+10/10 marker mutations rejected
