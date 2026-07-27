@@ -31,17 +31,6 @@ param(
 
 $ErrorActionPreference = 'Continue'
 
-# Console control plumbing, used only by the -HandlerControl leg to deliver a
-# genuinely catchable CTRL_BREAK to the child. Declared once at load time so a
-# type-already-exists error cannot surface mid-run.
-if (-not ('W.K' -as [type])) {
-    Add-Type -Namespace 'W' -Name 'K' -MemberDefinition @'
-[DllImport("kernel32.dll", SetLastError=true)] public static extern bool FreeConsole();
-[DllImport("kernel32.dll", SetLastError=true)] public static extern bool AttachConsole(uint dwProcessId);
-[DllImport("kernel32.dll", SetLastError=true)] public static extern bool SetConsoleCtrlHandler(IntPtr handler, bool add);
-[DllImport("kernel32.dll", SetLastError=true)] public static extern bool GenerateConsoleCtrlEvent(uint dwCtrlEvent, uint dwProcessGroupId);
-'@
-}
 
 function Fail($msg) {
     Write-Output "PROOF-FAIL: $msg"
@@ -179,26 +168,34 @@ if (-not $proc.HasExited) {
         # before raising it -- otherwise this script dies alongside the child
         # and the run reports nothing at all.
         $KillLanded = 'yes'
-        try {
-            [W.K]::FreeConsole() | Out-Null
-            if ([W.K]::AttachConsole([uint32]$proc.Id)) {
-                [W.K]::SetConsoleCtrlHandler([IntPtr]::Zero, $true) | Out-Null
-                # CTRL_C_EVENT (0), not CTRL_BREAK_EVENT (1). Measured: with
-                # CTRL_BREAK this script itself died with STATUS_CONTROL_C_EXIT
-                # (0xC000013A) and produced no output at all, because
-                # SetConsoleCtrlHandler(NULL, TRUE) suppresses CTRL+C ONLY -- it
-                # does not suppress CTRL+BREAK. That exit code is also the proof
-                # the event really is delivered through this path.
-                [W.K]::GenerateConsoleCtrlEvent(0, 0) | Out-Null   # 0 = CTRL_C_EVENT
-                Start-Sleep -Milliseconds 1200
-                [W.K]::FreeConsole() | Out-Null
-                [W.K]::SetConsoleCtrlHandler([IntPtr]::Zero, $false) | Out-Null
-            } else {
-                Write-Output "HANDLER-CONTROL-DELIVERY: could not attach to the child console"
-            }
-        } catch {
-            Write-Output "HANDLER-CONTROL-DELIVERY: $($_.Exception.Message)"
-        }
+        # The console work runs in a SEPARATE helper process, deliberately.
+        # AttachConsole RESETS the calling process's standard handles to the
+        # console it attaches to. Doing it inline swapped this script's stdout
+        # away from the ssh pipe mid-run and the entire proof produced no output
+        # at all -- a run that looks like a hang and reports nothing. The helper
+        # sacrifices its own handles instead; ours are never touched.
+        $helper = @'
+Add-Type -Namespace W -Name K -MemberDefinition @"
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool FreeConsole();
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool AttachConsole(uint dwProcessId);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool SetConsoleCtrlHandler(IntPtr handler, bool add);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool GenerateConsoleCtrlEvent(uint dwCtrlEvent, uint dwProcessGroupId);
+"@
+[W.K]::FreeConsole() | Out-Null
+if (-not [W.K]::AttachConsole([uint32]$args[0])) { exit 21 }
+# Suppress the event for THIS helper only; CTRL_C is the one a null handler can
+# actually suppress, which is why it is used rather than CTRL_BREAK.
+[W.K]::SetConsoleCtrlHandler([IntPtr]::Zero, $true) | Out-Null
+if (-not [W.K]::GenerateConsoleCtrlEvent(0, 0)) { exit 22 }
+Start-Sleep -Milliseconds 300
+exit 0
+'@
+        $helperPath = Join-Path $Work 'send-ctrl-c.ps1'
+        Set-Content -LiteralPath $helperPath -Value $helper -Encoding ASCII
+        $h = Start-Process -FilePath 'powershell.exe' -PassThru -Wait -WindowStyle Hidden `
+             -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $helperPath, "$($proc.Id)")
+        Write-Output ("HANDLER-CONTROL-DELIVERY: helper exit " + $h.ExitCode)
+        Start-Sleep -Milliseconds 1500
         if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
     } else {
         # TerminateProcess: cannot be trapped, masked or deferred by the target.
