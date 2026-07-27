@@ -79,7 +79,12 @@ struct Fixture {
 fn fixture(path: &Path) -> Fixture {
     let journal = SessionJournal::open(path, SESSION).expect("journal opens");
     GoalKernel::new(journal.clone())
-        .open_goal(&goal_id(), "fan out durably", &snapshot(), 1_700_000_000_000)
+        .open_goal(
+            &goal_id(),
+            "fan out durably",
+            &snapshot(),
+            1_700_000_000_000,
+        )
         .expect("goal opens");
     Fixture {
         ledger: GoalLedger::new(journal.clone()),
@@ -118,7 +123,12 @@ impl Fixture {
 
     fn declare(&self, name: &str, depends_on: &[&str]) {
         self.ledger
-            .declare_task(&goal_id(), &task(name), &deps(depends_on), &format!("idem-{name}"))
+            .declare_task(
+                &goal_id(),
+                &task(name),
+                &deps(depends_on),
+                &format!("idem-{name}"),
+            )
             .expect("task declares");
     }
 
@@ -149,7 +159,10 @@ fn a_task_with_unmet_dependencies_is_not_claimable_and_unblocks_exactly_once() {
     fixture.declare("root", &[]);
     fixture.declare("leaf", &["root"]);
 
-    let claimable = fixture.ledger.claimable(&goal_id()).expect("claimable reads");
+    let claimable = fixture
+        .ledger
+        .claimable(&goal_id())
+        .expect("claimable reads");
     assert_eq!(claimable, vec![task("root")]);
 
     // The refusal is durable, not advisory: a worker that ignores `claimable`
@@ -168,7 +181,10 @@ fn a_task_with_unmet_dependencies_is_not_claimable_and_unblocks_exactly_once() {
         .expect("root completes");
 
     assert_eq!(
-        fixture.ledger.claimable(&goal_id()).expect("claimable reads"),
+        fixture
+            .ledger
+            .claimable(&goal_id())
+            .expect("claimable reads"),
         vec![task("leaf")]
     );
 
@@ -178,7 +194,7 @@ fn a_task_with_unmet_dependencies_is_not_claimable_and_unblocks_exactly_once() {
     // gone before a second one can replay — which is the situation a restart is.
     drop(fixture);
     let replayed = GoalLedger::new(
-        SessionJournal::open(&temp.path().join("session.journal"), SESSION).expect("reopen"),
+        SessionJournal::open(temp.path().join("session.journal"), SESSION).expect("reopen"),
     );
     let leaf = replayed
         .task(&goal_id(), &task("leaf"))
@@ -214,7 +230,10 @@ fn two_workers_racing_for_one_task_produce_exactly_one_claim_and_the_loser_is_to
         .expect("read")
         .expect("task exists");
     assert_eq!(state.attempts.len(), 1);
-    assert_eq!(state.live_attempt().map(|a| a.worker_id.as_str()), Some("w-1"));
+    assert_eq!(
+        state.live_attempt().map(|a| a.worker_id.as_str()),
+        Some("w-1")
+    );
     assert_eq!(winner.epoch(), state.epoch());
 }
 
@@ -238,10 +257,14 @@ fn a_superseded_owners_late_completion_is_refused_while_it_is_still_alive() {
         .expect("revocation commits");
     let successor = fixture.win("t", "w-new", 10);
 
-    let late = fixture
-        .ledger
-        .complete_task(&superseded, GoalTerminalState::SelfChecked, "effect-old");
-    assert!(late.is_err(), "the superseded owner's late write must be refused");
+    let late =
+        fixture
+            .ledger
+            .complete_task(&superseded, GoalTerminalState::SelfChecked, "effect-old");
+    assert!(
+        late.is_err(),
+        "the superseded owner's late write must be refused"
+    );
 
     // And it is refused for every effect-bearing path it holds, not just the
     // one this test happens to call first.
@@ -352,7 +375,9 @@ fn a_completion_produced_before_a_crash_is_still_delivered_to_the_parent_after_r
 
     let restarted = GoalLedger::new(SessionJournal::open(&path, SESSION).expect("reopen"));
     assert_eq!(
-        restarted.pending_deliveries(&goal_id()).expect("outbox reads"),
+        restarted
+            .pending_deliveries(&goal_id())
+            .expect("outbox reads"),
         vec![task("t")]
     );
 
@@ -368,7 +393,11 @@ fn a_completion_produced_before_a_crash_is_still_delivered_to_the_parent_after_r
 
     // Delivery is not repeatable: a second drain of the same completion would
     // wake the parent twice for one piece of work.
-    assert!(restarted.deliver_completion(&goal_id(), &task("t")).is_err());
+    assert!(
+        restarted
+            .deliver_completion(&goal_id(), &task("t"))
+            .is_err()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -497,7 +526,13 @@ fn workspace_ownership_moves_only_through_a_committed_delegated_mutation_transac
     assert!(
         fixture
             .ledger
-            .hand_off_workspace(&owner, "transaction-that-never-opened", "w-new", "res-ghost", 30_000)
+            .hand_off_workspace(
+                &owner,
+                "transaction-that-never-opened",
+                "w-new",
+                "res-ghost",
+                30_000
+            )
             .is_err()
     );
 
@@ -611,12 +646,18 @@ fn the_ledger_replays_from_the_journal_to_the_same_state_after_a_fresh_load() {
         fixture.declare("leaf", &["mid"]);
 
         let root = fixture.win("root", "w-1", 10);
-        fixture.ledger.prove_liveness(&root, 1_700_000_001_000).unwrap();
+        fixture
+            .ledger
+            .prove_liveness(&root, 1_700_000_001_000)
+            .unwrap();
         fixture
             .ledger
             .complete_task(&root, GoalTerminalState::SelfChecked, "effect-root")
             .unwrap();
-        fixture.ledger.deliver_completion(&goal_id(), &task("root")).unwrap();
+        fixture
+            .ledger
+            .deliver_completion(&goal_id(), &task("root"))
+            .unwrap();
 
         let mid = fixture.win("mid", "w-2", 10);
         fixture

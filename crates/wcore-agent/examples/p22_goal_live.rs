@@ -53,7 +53,10 @@ fn main() {
     let mode = args[1].as_str();
     let journal_path = args[2].clone();
     let goal_id = GoalId::new(args[3].clone());
-    let parent_digest = args.get(4).cloned().unwrap_or_else(|| "parent-v1".to_owned());
+    let parent_digest = args
+        .get(4)
+        .cloned()
+        .unwrap_or_else(|| "parent-v1".to_owned());
 
     let journal = match SessionJournal::open(&journal_path, SESSION) {
         Ok(journal) => journal,
@@ -79,7 +82,12 @@ fn main() {
             let snapshot = resolve_goal_authority(&request, &parent_limits(), &parent_digest);
 
             let cursor = kernel
-                .open_goal(&goal_id, "survive an uncatchable kill", &snapshot, 1_700_000_000_000)
+                .open_goal(
+                    &goal_id,
+                    "survive an uncatchable kill",
+                    &snapshot,
+                    1_700_000_000_000,
+                )
                 .expect("open goal");
             println!(
                 "GOAL-LIVE: opened goal={goal_id} cursor_seq={:?} cursor_digest={}",

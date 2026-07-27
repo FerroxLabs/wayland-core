@@ -143,9 +143,11 @@ fn budget_limit_key(unit: BudgetUnit) -> &'static str {
 /// A free function rather than the `GoalState` method so the reducer can consult
 /// it while holding a mutable borrow of the task map.
 fn task_dependencies_met(tasks: &BTreeMap<String, GoalTaskState>, task: &GoalTaskState) -> bool {
-    task.depends_on
-        .iter()
-        .all(|dependency| tasks.get(dependency).is_some_and(|state| state.completion.is_some()))
+    task.depends_on.iter().all(|dependency| {
+        tasks
+            .get(dependency)
+            .is_some_and(|state| state.completion.is_some())
+    })
 }
 
 /// The committed live attempt whose epoch a transition must present, or a
@@ -370,7 +372,11 @@ fn apply_goal_event(
                 return Err(duplicate("goal task", task_id));
             }
             if depends_on.contains(task_id) {
-                return Err(invalid_task(goal_id, task_id, "a task cannot depend on itself"));
+                return Err(invalid_task(
+                    goal_id,
+                    task_id,
+                    "a task cannot depend on itself",
+                ));
             }
             // A dependency named before it is declared would make claimability
             // depend on declaration order, and the ledger would release a
@@ -548,7 +554,11 @@ fn apply_goal_task_transition(
             // unit. Together those are what stop N attempts costing N
             // reservations without this ledger minting a budget of its own.
             let Some((reservation_id, budget)) = reservation else {
-                return Err(invalid_task(goal_id, task_id, "claim carries no reservation"));
+                return Err(invalid_task(
+                    goal_id,
+                    task_id,
+                    "claim carries no reservation",
+                ));
             };
             let Some(budget) = budget else {
                 return Err(invalid_task(

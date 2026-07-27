@@ -1516,9 +1516,9 @@ impl GoalTaskState {
     /// else may happen to it.
     #[must_use]
     pub fn requires_resolution(&self) -> bool {
-        self.attempts.last().is_some_and(|attempt| {
-            matches!(attempt.status, GoalTaskAttemptStatus::Unknown { .. })
-        })
+        self.attempts
+            .last()
+            .is_some_and(|attempt| matches!(attempt.status, GoalTaskAttemptStatus::Unknown { .. }))
     }
 
     /// Whether this task carries a durable completion the parent has not yet
