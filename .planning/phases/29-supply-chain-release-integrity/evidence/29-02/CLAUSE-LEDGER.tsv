@@ -1,0 +1,29 @@
+# F29-01 clause coverage ledger, machine-readable.
+#
+# F29-01 names eight things. This ledger maps every one to a measurement, the
+# platform it ran on, and a captured artifact in this directory that holds the
+# evidence. Clauses the EXISTING release pipeline already satisfies are marked
+# PRE-EXISTING and NAMED rather than assumed -- pre-existing-controls.txt
+# re-measures each of them directly against the tree rather than citing
+# 29-01's census.
+#
+# Status vocabulary:
+#   MEASURED           - 29-02 ran something and captured the result
+#   PRE-EXISTING       - the shipped pipeline already does this; 29-02 re-measured it, did not build it
+#   NOT-PROVABLE-HERE  - needs a credential, a published release or hardware this lane does not have
+#
+# Columns: F29-01-<CLAUSE>::<status>::platform=<where>::evidence=<file in this directory>
+F29-01-TOOLCHAIN-LOCK::PRE-EXISTING::platform=source-tree::evidence=pre-existing-controls.txt
+F29-01-DEPENDENCY-LOCK::PRE-EXISTING::platform=source-tree::evidence=pre-existing-controls.txt
+F29-01-VULNERABILITY-POLICY::PRE-EXISTING::platform=linux-x86_64::evidence=deny-verdict.txt
+F29-01-LICENSE-POLICY::MEASURED::platform=linux-x86_64::evidence=deny-verdict.txt
+F29-01-SBOM::MEASURED::platform=linux-x86_64::evidence=sbom-determinism.txt
+F29-01-PROVENANCE::PRE-EXISTING::platform=github-actions::evidence=pre-existing-controls.txt
+F29-01-ARTIFACT-SIGNING::PRE-EXISTING::platform=github-actions::evidence=pre-existing-controls.txt
+F29-01-REPRODUCIBILITY::MEASURED::platform=linux-x86_64::evidence=repro-measurement.txt
+# Supporting rows -- not F29-01 clauses in their own right, but the bindings and
+# controls that make the eight above count as release integrity rather than as
+# eight files in a directory.
+F29-01-MANIFEST-BINDING::MEASURED::platform=linux-x86_64::evidence=manifest-verify-pristine.txt
+F29-01-TAMPER-REFUSAL::MEASURED::platform=linux-x86_64::evidence=manifest-verify-mutated.txt
+F29-01-VARIANCE-CLASS::MEASURED::platform=linux-x86_64::evidence=repro-variance-class.txt

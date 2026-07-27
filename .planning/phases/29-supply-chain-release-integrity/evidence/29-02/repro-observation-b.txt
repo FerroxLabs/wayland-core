@@ -1,0 +1,7 @@
+OBSERVATION B -- IDENTICAL target directory path, cleaned between builds
+  target dir for both: /root/f29-repro/b
+  build b1 rc=0   build b2 rc=0
+  b1=8272fae881a78d24e04cb5468bec58ce4da65d32e75e920933bd247b6382984c
+  b2=8272fae881a78d24e04cb5468bec58ce4da65d32e75e920933bd247b6382984c
+  sizes: 92871448 / 92871448
+  RESULT: IDENTICAL -> the varying input in observation A was the TARGET DIRECTORY PATH

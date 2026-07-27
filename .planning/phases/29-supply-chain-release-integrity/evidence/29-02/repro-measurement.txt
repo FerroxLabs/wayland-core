@@ -1,0 +1,57 @@
+F29-02 / TASK 3 -- REPRODUCIBILITY MEASUREMENT
+captured: 2026-07-27T23:49:56Z
+host:     Linux 6.8.0-101-generic x86_64
+commit:   148330aeadcb628c1a772171ce4de041b53e3d8c
+toolchain:rustc 1.95.0 (59807616e 2026-04-14)   [rust-toolchain.toml pins 1.95.0]
+lockfile: sha256=b538881b7bd78d4774bb7cd720386cb4d0a4a23825ab896de11d02c24e6edfa7
+artifact: wayland-core, --release --locked --target x86_64-unknown-linux-gnu -p wcore-cli
+profile:  lto=thin codegen-units=1 strip=debuginfo overflow-checks=true
+disk before the run: /dev/md2        1.8T  742G  924G  45% /
+
+F29-REPRO::DOCUMENTED-VARIANCE::a=ca35c34fe071850aa8920aa548f03f5dafc88e90aa67302ec90522497d45f7bb::b=8272fae881a78d24e04cb5468bec58ce4da65d32e75e920933bd247b6382984c
+
+  (a = observation A build 1; b = observation B build 1. They differ, which
+   is what DOCUMENTED-VARIANCE asserts. The full four-digest matrix is below;
+   the identifying comparison is A1-vs-A2 differing while B1-vs-B2 agree.)
+
+==========================================================================
+THE MEASUREMENT WAS SINGLE-VARIABLE
+==========================================================================
+Same source commit, same lockfile, same pinned toolchain, --locked, and
+a CLEAN target directory for every build. Exactly ONE thing changes
+between observation A and observation B: whether the two builds share a
+target-directory path.
+
+OBSERVATION A -- two DIFFERENT target directory paths
+  /root/f29-repro/a1 -> ca35c34fe071850aa8920aa548f03f5dafc88e90aa67302ec90522497d45f7bb
+  /root/f29-repro/a2 -> d6cd315419aff3dbba4ddaae4fed0a436ce5079c752ca4341edeefb0825d3c2c
+  A: DIFFER
+  sizes: 92871448 / 92871040
+  build times: 320s / 320s, both rc=0
+
+OBSERVATION B -- ONE target directory path, wiped between builds
+  /root/f29-repro/b (1st) -> 8272fae881a78d24e04cb5468bec58ce4da65d32e75e920933bd247b6382984c
+  /root/f29-repro/b (2nd) -> 8272fae881a78d24e04cb5468bec58ce4da65d32e75e920933bd247b6382984c
+  B: IDENTICAL
+  sizes: 92871448 / 92871448
+
+READING: A differs, B is byte-identical. The varying input is the
+ABSOLUTE BUILD-DIRECTORY PATH. Nothing else was changed between the two
+observations, so nothing else can be responsible.
+
+STALENESS GUARD (an artifact newer than its source is a build that did
+not happen -- and the dangerous direction is a false GREEN from a stale
+permissive binary):
+  every target dir was created empty immediately before its build
+  each build took 320s and exited 0; none was a cache hit
+  observation B wipes the directory between builds, so B's agreement
+  cannot come from reusing b1's artifacts -- a cache hit would have
+  taken seconds, not a full compile
+  b1 build log lines: 638   b2: 638
+
+==========================================================================
+VERDICT: DOCUMENTED-VARIANCE, class = path_prefix
+==========================================================================
+F29-01 asks for reproducibility OR a documented deterministic variance.
+This is the latter, and the class is named and proven, not guessed.
+Full detail in repro-variance-class.txt.

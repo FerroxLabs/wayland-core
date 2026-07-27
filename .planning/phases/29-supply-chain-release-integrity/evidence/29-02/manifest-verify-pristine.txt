@@ -1,0 +1,44 @@
+F29-02 / TASK 3 -- CLEAN-ROOM ARTIFACTS BOUND INTO A SIGNED MANIFEST
+captured: 2026-07-27T23:50:56Z
+host:     Linux 6.8.0-101-generic x86_64
+commit:   148330aeadcb628c1a772171ce4de041b53e3d8c
+
+NO REAL KEY, NO REAL ACCOUNT. The packaging keypair below is generated at
+run time into /root/f29-bind/trust and dies with this run. No token, no registry
+credential and no published release is used or needed.
+
+== artifact store ==
+total 34744
+-rw-r--r-- 1 root root      208 Jul 27 23:50 wayland-core-checksums.txt
+-rw-r--r-- 1 root root   447364 Jul 27 23:50 wayland-core-sbom.cdx.json
+-rw-r--r-- 1 root root 35120099 Jul 27 23:50 wayland-core-x86_64-unknown-linux-gnu.tar.gz
+
+== trust root (PUBLIC material only; seeds go to mode-0600 files) ==
+TRUST ROOT READY path=/root/f29-bind/trust/trust-root.json
+KEY key_id=packaging-key role=packaging public_key_base64=i+vSGaJSlJ4CVruqRo3fSN1wFUnYvYEY/S8a4Q9smvI=
+KEY key_id=deployment-preparation-key role=deployment_preparation public_key_base64=2MOTEUCqVHTfjDxRdOhlN6vdgaiVTSeYoEPF5go3eUs=
+KEY key_id=rollback-rehearsal-key role=rollback_rehearsal public_key_base64=RvLNBghZDuzHy0duI/XpCUChLQN5JcvwkxbPXvnft4Q=
+KEY key_id=release-acceptance-key role=release_acceptance public_key_base64=Fz8DqICb4Hc+DDo/uDJp649fL/faAjlDAYYnKXCQE5U=
+  seed file modes: 600 /root/f29-bind/trust/deployment-preparation-key.seed 600 /root/f29-bind/trust/packaging-key.seed 600 /root/f29-bind/trust/release-acceptance-key.seed 600 /root/f29-bind/trust/rollback-rehearsal-key.seed 
+
+== manifest-build, binding all three clean-room results ==
+MANIFEST BUILT body_sha256=00d5294c770f1d56864a9ee49419c69e18a59e9a6dbdb3fce8f1960a5267bb39
+manifest-build rc=0
+
+== bound values (what the signature will cover) ==
+  release_id      : f29-02-cleanroom
+  source_commit   : 148330aeadcb628c1a772171ce4de041b53e3d8c
+  artifacts       : [('wayland-core-checksums.txt', 'checksums', 208), ('wayland-core-sbom.cdx.json', 'sbom', 447364), ('wayland-core-x86_64-unknown-linux-gnu.tar.gz', 'archive', 35120099)]
+  sbom            : {"state": "observed", "value": {"name": "wayland-core-sbom.cdx.json", "sha256": "5028fe289ceb05f39578c6e8848e8e91dba5aaef22a526a5396858f2a8ac9d1a", "format": "cyclone_dx_json"}}
+  dependency_policy: {"state": "observed", "value": {"tool": "cargo-deny", "policy_sha256": "05a8535b020aff63147acbc46a40afa44087ba50f76e2edc36407c5797abf3a8", "result": "fail"}}
+  reproducibility : {"verdict": "variance", "class": "path_prefix", "evidence_sha256": "9a9cc83436abef9d8f0823a66935ccde4fd904a722b46199aaeb091443de5810"}
+  certification   : {"state": "unavailable", "code": "phase_28_certification_binding_not_yet_available"}
+  body_sha256     : 00d5294c770f1d56864a9ee49419c69e18a59e9a6dbdb3fce8f1960a5267bb39
+
+== sign (seed on STDIN, never argv, never printed) ==
+MANIFEST SIGNED body_sha256=00d5294c770f1d56864a9ee49419c69e18a59e9a6dbdb3fce8f1960a5267bb39
+manifest-sign rc=0
+
+== PRISTINE VERIFY (the control -- must be accepted BEFORE any refusal) ==
+MANIFEST VERIFIED body_sha256=00d5294c770f1d56864a9ee49419c69e18a59e9a6dbdb3fce8f1960a5267bb39
+F29-MANIFEST-VERIFY::PRISTINE::exit=0

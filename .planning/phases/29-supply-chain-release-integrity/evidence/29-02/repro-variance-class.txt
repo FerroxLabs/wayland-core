@@ -1,0 +1,83 @@
+F29-02 / TASK 3 -- VARIANCE CLASS: path_prefix
+captured: 2026-07-27T23:50:34Z
+
+CLASS: the ABSOLUTE BUILD-DIRECTORY PATH is embedded in the shipped
+binary, so the artifact digest moves when the same source is built in a
+different directory. Maps to release_integrity::VarianceClass::PathPrefix.
+
+==========================================================================
+HOW THE CLASS WAS IDENTIFIED (single variable, two observations)
+==========================================================================
+A: two clean target dirs at DIFFERENT paths  -> digests DIFFER
+B: two clean builds at the SAME path         -> digests IDENTICAL
+
+That pair is the identification. Everything else -- commit, lockfile,
+toolchain, --locked, profile, host, user, environment -- was held fixed
+across both observations, so the target-directory path is the only input
+that changed when the outcome changed.
+
+==========================================================================
+THE MECHANISM, LOCATED
+==========================================================================
+The embedded paths are cranelift-codegen's build-script OUT_DIR, reaching
+the binary through file!() in ISLE-generated sources. cranelift-codegen
+arrives via wasmtime (the plugin/WASM runtime).
+
+Occurrences of each build directory in each binary:
+  f29-repro/a1 : a1=7  a2=0
+  f29-repro/a2 : a1=0  a2=7
+
+The 7 embedded strings in a1:
+    /root/f29-repro/a1/x86_64-unknown-linux-gnu/release/build/cranelift-codegen-da8dd1682a033698/out/isle_x64.rs
+    /root/f29-repro/a1/x86_64-unknown-linux-gnu/release/build/cranelift-codegen-da8dd1682a033698/out/settings-x86.rs
+    /root/f29-repro/a1/x86_64-unknown-linux-gnu/release/build/cranelift-codegen-da8dd1682a033698/out/inst_builder.rs
+    /root/f29-repro/a1/x86_64-unknown-linux-gnu/release/build/cranelift-codegen-da8dd1682a033698/out/settings-pulley.rs
+    /root/f29-repro/a1/x86_64-unknown-linux-gnu/release/build/cranelift-codegen-da8dd1682a033698/out/settings.rs
+    /root/f29-repro/a1/x86_64-unknown-linux-gnu/release/build/cranelift-codegen-da8dd1682a033698/out/isle_pulley_shared.rs
+    /root/f29-repro/a1/x86_64-unknown-linux-gnu/release/build/cranelift-codegen-da8dd1682a033698/out/isle_opt.rs
+
+The same 7 in a2 -- note they also appear in a DIFFERENT ORDER, which is
+why the size delta is larger than equal-length substitution alone would
+explain: the ELF string table tail-merges, and a different ordering of
+equal-length strings changes how much suffix sharing occurs.
+    /root/f29-repro/a2/x86_64-unknown-linux-gnu/release/build/cranelift-codegen-da8dd1682a033698/out/settings-x86.rs
+    /root/f29-repro/a2/x86_64-unknown-linux-gnu/release/build/cranelift-codegen-da8dd1682a033698/out/settings.rs
+    /root/f29-repro/a2/x86_64-unknown-linux-gnu/release/build/cranelift-codegen-da8dd1682a033698/out/isle_opt.rs
+    /root/f29-repro/a2/x86_64-unknown-linux-gnu/release/build/cranelift-codegen-da8dd1682a033698/out/inst_builder.rs
+    /root/f29-repro/a2/x86_64-unknown-linux-gnu/release/build/cranelift-codegen-da8dd1682a033698/out/isle_pulley_shared.rs
+    /root/f29-repro/a2/x86_64-unknown-linux-gnu/release/build/cranelift-codegen-da8dd1682a033698/out/isle_x64.rs
+    /root/f29-repro/a2/x86_64-unknown-linux-gnu/release/build/cranelift-codegen-da8dd1682a033698/out/settings-pulley.rs
+
+Consequences visible in the ELF:
+  .strtab size : a1=000000000099e4e0  a2=000000000099e34d
+  file size    : a1=92871448  a2=92871040  (delta 408 bytes)
+  GNU build-id : a1=BuildID:a49e46dd67d04cd59ce1a66775fad2b17d937d28
+                 a2=BuildID:c038fc444e1271fd56f7281b2ef8312b4698267c
+  differing bytes: 2106961 of 92871448
+
+The differing build-id is a CONSEQUENCE, not an independent cause: it is a
+hash of the linked content, and observation B shows it is stable when the
+path is stable. Per the plan, the hunt stops at a class that explains the
+difference; it does not enumerate every downstream effect.
+
+==========================================================================
+WHAT THIS MEANS FOR THE SHIPPED RELEASE
+==========================================================================
+The shipped release is reproducible IN PRACTICE but only ACCIDENTALLY.
+GitHub-hosted runners always check out at the same absolute path
+(/home/runner/work/wayland-core/wayland-core), so release.yml's builds
+hold the varying input constant without ever intending to. A third party
+rebuilding at any other path gets a different digest and cannot confirm
+the artifact -- which is exactly the property reproducibility is for.
+
+REMEDY, not applied here (release.yml is outside this plan's fence):
+  RUSTFLAGS='--remap-path-prefix=$CARGO_TARGET_DIR=/build' (and the same
+  for the source root), or the -Ztrim-paths / trim-paths profile option
+  once stable. Either pins the class to a constant and should move this
+  verdict to REPRODUCED. Filed for 29-04 / release coordination.
+
+NOT MEASURED HERE, stated rather than implied: whether this same class is
+the ONLY variance on macOS and Windows. That needs Phase 28's native
+hardware and is explicitly out of this plan's scope. The aarch64-Linux
+release leg additionally goes through 'cross' (see F29-CEN-06 / SR-29-7)
+and was not measured at all.
