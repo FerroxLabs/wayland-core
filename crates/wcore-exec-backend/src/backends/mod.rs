@@ -316,6 +316,10 @@ fn finish_body(
     Ok(ReceiptBody {
         protocol_version: PROTOCOL_VERSION,
         backend: identity.clone(),
+        // F25-03: filled in when this Core is acting as a paired node. A
+        // controller running work locally has no node identity to attest, and
+        // `None` says exactly that rather than inventing a placeholder.
+        node: local_node_attribution(),
         transport,
         task: TaskEvidence {
             task_id: task.task_id.clone(),
@@ -352,6 +356,25 @@ pub fn materialize_workspace(root: &std::path::Path, task: &ExecutionTask) -> Re
     }
     std::fs::write(root.join(INPUT_FILE_NAME), &task.input)?;
     Ok(())
+}
+
+/// F25-03: this host's node attribution, when it has been given a node
+/// identity to run under.
+///
+/// Set by `WAYLAND_NODE_ID` — the name an operator paired this machine under.
+/// Absent means "not running as a paired node", which is a legitimate state
+/// and is recorded as `None` rather than as a placeholder string, because a
+/// placeholder would later be indistinguishable from a real attribution.
+pub fn local_node_attribution() -> Option<crate::node::attribution::NodeAttribution> {
+    let node_id = std::env::var("WAYLAND_NODE_ID")
+        .ok()
+        .filter(|v| !v.is_empty())?;
+    let seed = crate::node::pairing::load_or_create_node_seed().ok()?;
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let identity = crate::node::pairing::NodeIdentity::local(&node_id, &signing_key).ok()?;
+    Some(crate::node::attribution::NodeAttribution::from_identity(
+        &identity,
+    ))
 }
 
 /// Per-backend Ed25519 seed, persisted so one backend keeps one identity

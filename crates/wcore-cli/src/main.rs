@@ -724,6 +724,9 @@ enum TopCmd {
     /// F25-01: execution backends — list / probe / run / cancel / orphans /
     /// receipt verify / diff across local, container, ssh and cloud.
     Backend(wcore_cli::backend::BackendArgs),
+    /// F25-03: nodes — pair / list / show / probe / revoke / submit /
+    /// attribution across paired machines that host execution backends.
+    Node(wcore_cli::node::NodeArgs),
     /// Manage isolated profiles — each is an independent `WAYLAND_HOME`-rooted
     /// home with its own config, credentials, memory, and skills.
     Profile {
@@ -1367,6 +1370,13 @@ async fn run() -> anyhow::Result<ExitCode> {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(e) => {
                     eprintln!("wayland-core backend: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
+            TopCmd::Node(args) => match wcore_cli::node::run(args).await {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core node: {e:#}");
                     Ok(ExitCode::FAILURE)
                 }
             },

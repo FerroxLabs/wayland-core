@@ -159,3 +159,7 @@ pub mod fetch;
 // F25-01: CLI surface `wayland-core backend` — the execution-backend operator
 // surface (list / probe / run / cancel / orphans / receipt verify / diff).
 pub mod backend;
+
+// F25-03: CLI surface `wayland-core node` — the node/device operator surface
+// (identity / pair / list / show / probe / revoke / submit / attribution).
+pub mod node;

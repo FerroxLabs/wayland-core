@@ -179,6 +179,17 @@ pub enum TerminalStatus {
 pub struct ReceiptBody {
     pub protocol_version: u32,
     pub backend: BackendIdentity,
+    /// F25-03: WHICH MACHINE, attested. This lives inside the signed body on
+    /// purpose — altering it changes `body_sha256` and therefore breaks the
+    /// attestation, exactly as altering `backend` does. A caller-settable
+    /// `node_name` string beside the body would have been trivial and
+    /// worthless: an attribution field a caller can set is not attribution.
+    ///
+    /// `Option` with `skip_serializing_if` so a receipt produced without a node
+    /// serializes to the SAME bytes it did before this field existed — every
+    /// receipt sealed by plan 25-01 still verifies unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<crate::node::attribution::NodeAttribution>,
     pub transport: Transport,
     pub task: TaskEvidence,
     pub limits: ResourceBudget,
@@ -412,6 +423,9 @@ pub fn validate_receipt_semantics(body: &ReceiptBody) -> Result<()> {
     validate_identifier("instance_id", &body.backend.instance_id)?;
     validate_identifier("version", &body.backend.version)?;
     validate_sha256("backend.key_id", &body.backend.key_id)?;
+    if let Some(node) = &body.node {
+        node.validate()?;
+    }
     validate_identifier("task_id", &body.task.task_id)?;
     validate_sha256("workspace_sha256", &body.task.workspace_sha256)?;
     validate_sha256("input_sha256", &body.task.input_sha256)?;
@@ -544,6 +558,24 @@ pub fn validate_receipt_semantics(body: &ReceiptBody) -> Result<()> {
     Ok(())
 }
 
+/// F25-03: the node layer needs the SAME digest the receipt identity uses, so
+/// there is one definition of `key_id` rather than two that can disagree.
+pub fn sha256_public(bytes: &[u8]) -> String {
+    sha256(bytes)
+}
+
+/// F25-03: node identities are validated against the same rule as receipt
+/// digests, for the same reason.
+pub fn validate_sha256_public(field: &str, value: &str) -> Result<()> {
+    validate_sha256(field, value)
+}
+
+/// F25-03: the events digest, exposed so a caller assembling a body outside
+/// this module cannot compute it a second, subtly different way.
+pub fn events_digest(events: &[ReceiptEvent]) -> String {
+    sha256(&serde_json::to_vec(events).unwrap_or_default())
+}
+
 pub(crate) fn sha256(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -587,6 +619,7 @@ mod tests {
         let signer = signer();
         let mut body = ReceiptBody {
             protocol_version: PROTOCOL_VERSION,
+            node: None,
             backend: BackendIdentity {
                 backend_id: "local".into(),
                 instance_id: "inst-1".into(),
