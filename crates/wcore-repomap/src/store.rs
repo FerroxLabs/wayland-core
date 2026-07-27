@@ -147,13 +147,13 @@ impl IndexStore {
             path: root.to_path_buf(),
             source: e,
         })?;
-        if let Some(parent) = store_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent).map_err(|e| RepoMapError::Io {
-                    path: parent.to_path_buf(),
-                    source: e,
-                })?;
-            }
+        if let Some(parent) = store_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).map_err(|e| RepoMapError::Io {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
         }
 
         let conn = Connection::open(store_path).map_err(|e| store_err(store_path, &e))?;

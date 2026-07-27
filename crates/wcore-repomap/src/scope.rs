@@ -325,10 +325,10 @@ fn resolve_head(git_dir: &Path) -> (Option<String>, Option<String>) {
                 if line.starts_with('#') || line.starts_with('^') {
                     continue;
                 }
-                if let Some((oid, name)) = line.split_once(' ') {
-                    if name.trim() == symbolic {
-                        return (Some(symbolic), Some(oid.trim().to_string()));
-                    }
+                if let Some((oid, name)) = line.split_once(' ')
+                    && name.trim() == symbolic
+                {
+                    return (Some(symbolic), Some(oid.trim().to_string()));
                 }
             }
         }
