@@ -1,0 +1,16 @@
+# Standalone — `[workspace]` keeps this out of the wayland-core workspace so it
+# never joins a `cargo build` of the repo. Run it directly from this directory.
+[workspace]
+
+[package]
+name = "f21-04-01-serde-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.dev]
+debug = false
