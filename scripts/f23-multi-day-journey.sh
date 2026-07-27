@@ -136,6 +136,15 @@ epoch_of() {
   return 1
 }
 
+# The harness prints through the libtest runner, which prefixes the FIRST marker
+# on a line with `test f23_journey_step ... `. Every consumer of these markers —
+# this driver's own span extraction, and the plan's gates — anchors at column
+# one, so an unnormalized prefix silently loses the day record. That is the same
+# defect class as an anchored regex losing a bullet-prefixed panel vote: the read
+# succeeds, finds nothing, and reports the wrong thing. Normalize on the way IN,
+# and read unanchored anyway, so a log written before this fix still parses.
+normalize_markers() { sed 's/^.*\(F23_04_[A-Z]\)/\1/'; }
+
 run_step() {
   F23_JOURNEY_ROOT="$ROOT" \
   F23_JOURNEY_DAY="${1:-0}" \
@@ -153,15 +162,16 @@ if [ "$VERIFY" -eq 1 ]; then
   # Every day record the journey actually wrote, replayed verbatim from the
   # append-only log. These rows were emitted by a process that ran on THIS
   # platform on the day it stamps.
-  grep -E '^F23_04_(DAY|INVARIANT|LOOP_OWNERS_OBSERVED|GOAL_LIFECYCLE|JOURNAL_CURSOR|WAIT_)' "$RUNLOG"
-  rc=$?
+  grep -E 'F23_04_(DAY|INVARIANT|LOOP_OWNERS_OBSERVED|GOAL_LIFECYCLE|JOURNAL_CURSOR|WAIT_)' "$RUNLOG" \
+    | normalize_markers
+  rc=${PIPESTATUS[0]}
   if [ "$rc" -ne 0 ]; then
     echo "FATAL: the run log carries no day records; the journey did not run" >&2
     exit 71
   fi
 
-  FIRST_TS=$(grep -oE '^F23_04_DAY=[0-9]+ platform=[a-z]+ ts=[^ ]+' "$RUNLOG" | head -1 | sed -n 's/.* ts=//p')
-  LAST_TS=$(grep -oE '^F23_04_DAY=[0-9]+ platform=[a-z]+ ts=[^ ]+' "$RUNLOG" | tail -1 | sed -n 's/.* ts=//p')
+  FIRST_TS=$(grep -oE 'F23_04_DAY=[0-9]+ platform=[a-z]+ ts=[^ ]+' "$RUNLOG" | head -1 | sed -n 's/.* ts=//p')
+  LAST_TS=$(grep -oE 'F23_04_DAY=[0-9]+ platform=[a-z]+ ts=[^ ]+' "$RUNLOG" | tail -1 | sed -n 's/.* ts=//p')
   if [ -z "$FIRST_TS" ] || [ -z "$LAST_TS" ]; then
     echo "FATAL: could not read the run log's own first and last timestamps" >&2
     exit 71
@@ -192,7 +202,7 @@ if [ "$VERIFY" -eq 1 ]; then
 
   # The live re-observation. Its process exit status is the platform gate.
   OUT=$(run_step 0 verify); rc=$?
-  printf '%s\n' "$OUT"
+  printf '%s\n' "$OUT" | normalize_markers
   if [ "$rc" -ne 0 ]; then
     echo "FATAL: the live verify step exited $rc" >&2
     exit 73
@@ -206,12 +216,12 @@ fi
 [ -n "$DAY" ] || { echo "FATAL: --day <n> or --verify is required" >&2; exit 64; }
 
 # Idempotent per day: a second invocation on the same day must not double-count.
-if grep -qE "^F23_04_DAY=$DAY platform=$PLATFORM " "$RUNLOG"; then
+if grep -qE "F23_04_DAY=$DAY platform=$PLATFORM " "$RUNLOG"; then
   echo "F23_04_DAY_ALREADY_RECORDED=$DAY platform=$PLATFORM"
   exit 0
 fi
 
-STEP_OUT=$(run_step "$DAY" day); rc=$?
+STEP_OUT=$(run_step "$DAY" day | normalize_markers); rc=${PIPESTATUS[0]}
 {
   echo "# ---- invocation day=$DAY platform=$PLATFORM ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) host=$(hostname) pid=$$ sha=$SHA rc=$rc"
   printf '%s\n' "$STEP_OUT"

@@ -102,6 +102,20 @@ if ([string]::IsNullOrWhiteSpace($Harness) -or -not (Test-Path -LiteralPath $Har
 New-Item -ItemType Directory -Force -Path $Root | Out-Null
 if (-not (Test-Path -LiteralPath $RunLog)) { New-Item -ItemType File -Path $RunLog | Out-Null }
 
+# The harness prints through the libtest runner, which prefixes the FIRST marker
+# on a line with `test f23_journey_step ... `. Every consumer anchors at column
+# one, so an unnormalized prefix silently loses the day record — the same defect
+# class as an anchored regex losing a bullet-prefixed panel vote. Normalize on
+# the way IN, and read unanchored anyway.
+function Format-Markers([string[]]$Lines) {
+    $out = @()
+    foreach ($line in $Lines) {
+        $m = [regex]::Match([string]$line, '(F23_04_[A-Z].*)$')
+        if ($m.Success) { $out += $m.Groups[1].Value } else { $out += [string]$line }
+    }
+    return $out
+}
+
 function Invoke-Step([int]$StepDay, [string]$Mode) {
     $env:F23_JOURNEY_ROOT = $Root
     $env:F23_JOURNEY_DAY = "$StepDay"
@@ -111,9 +125,10 @@ function Invoke-Step([int]$StepDay, [string]$Mode) {
     $env:F23_JOURNEY_PLATFORM = $Platform
     $env:F23_JOURNEY_HOST = $env:COMPUTERNAME
     # Capture on the NEXT line. Never `$out = & { … ; $LASTEXITCODE }`.
-    $out = & $Harness --exact f23_journey_step --nocapture --test-threads=1 2>&1 | Out-String
+    $raw = & $Harness --exact f23_journey_step --nocapture --test-threads=1 2>&1
+    # Capture on the NEXT line, before anything else touches $LASTEXITCODE.
     $script:StepExit = $LASTEXITCODE
-    return $out
+    return (Format-Markers @($raw))
 }
 
 if ($Verify) {
@@ -121,13 +136,13 @@ if ($Verify) {
         Fail 'FATAL: the run log carries no day records; the journey did not run' 71
     }
     $logLines = Get-Content -LiteralPath $RunLog
-    $dayRows = @($logLines | Where-Object { $_ -match '^F23_04_DAY=\d+ platform=\S+ ts=\S+' })
+    $dayRows = @($logLines | Where-Object { $_ -match 'F23_04_DAY=\d+ platform=\S+ ts=\S+' })
     if ($dayRows.Count -lt 1) {
         Fail 'FATAL: the run log carries no day records; the journey did not run' 71
     }
     foreach ($line in $logLines) {
-        if ($line -match '^F23_04_(DAY|INVARIANT|LOOP_OWNERS_OBSERVED|GOAL_LIFECYCLE|JOURNAL_CURSOR|WAIT_)') {
-            Write-Output $line
+        if ($line -match 'F23_04_(DAY|INVARIANT|LOOP_OWNERS_OBSERVED|GOAL_LIFECYCLE|JOURNAL_CURSOR|WAIT_)') {
+            Write-Output (Format-Markers @($line))[0]
         }
     }
 
@@ -155,7 +170,7 @@ if ($Verify) {
     Write-Output 'F23_04_SPAN_MEETS_AUTHORIZED_POLICY=true'
 
     $out = Invoke-Step 0 'verify'
-    Write-Output $out
+    $out | ForEach-Object { Write-Output $_ }
     if ($script:StepExit -ne 0) {
         Fail "FATAL: the live verify step exited $($script:StepExit)" 73
     }
@@ -169,7 +184,7 @@ if ($Day -le 0) {
 }
 
 # Idempotent per day: a second invocation on the same day must not double-count.
-$already = Select-String -LiteralPath $RunLog -Pattern "^F23_04_DAY=$Day platform=$Platform " -SimpleMatch:$false
+$already = Select-String -LiteralPath $RunLog -Pattern "F23_04_DAY=$Day platform=$Platform " -SimpleMatch:$false
 if ($already) {
     Write-Output "F23_04_DAY_ALREADY_RECORDED=$Day platform=$Platform"
     exit 0
@@ -181,7 +196,7 @@ $stamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 Add-Content -LiteralPath $RunLog -Value "# ---- invocation day=$Day platform=$Platform ts=$stamp host=$($env:COMPUTERNAME) pid=$PID sha=$Sha rc=$stepExit"
 Add-Content -LiteralPath $RunLog -Value $out
 
-Write-Output $out
+$out | ForEach-Object { Write-Output $_ }
 if ($stepExit -ne 0) {
     Fail "FATAL: journey day $Day exited $stepExit on $Platform" $stepExit
 }
