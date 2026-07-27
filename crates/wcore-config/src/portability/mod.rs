@@ -130,20 +130,70 @@ pub struct DiscoveredItem {
     /// Mapped, non-secret settings — provider, model, base_url, transport, …
     /// A `BTreeMap` so the order is the key order, not the insertion order.
     ///
-    /// **Every value here is passed through [`redact::scrub_detail`] on the way
-    /// in.** This map is an untyped string channel, and the strings come from a
-    /// peer configuration — an MCP `url` with `?token=…` or a `command` with
-    /// `--api-key …` would otherwise carry a credential straight into the
-    /// emitted document. Use [`DiscoveredItem::insert_detail`] rather than
-    /// inserting directly.
-    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
-    pub details: BTreeMap<String, String>,
+    /// PRIVATE by design. This is an untyped string channel and the strings come
+    /// from a peer configuration, so an MCP `url` with `?token=…` or a `command`
+    /// with `--api-key …` would otherwise carry a credential straight into the
+    /// emitted document.
+    ///
+    /// Every construction path scrubs: [`DiscoveredItem::insert_detail`] is the
+    /// only writer, and deserialization routes through [`deserialize_scrubbed`].
+    /// A struct literal cannot reach this field from outside the module. That is
+    /// what makes the guarantee an invariant of the TYPE rather than a promise
+    /// made at selected call sites.
+    #[serde(
+        skip_serializing_if = "BTreeMap::is_empty",
+        default,
+        deserialize_with = "deserialize_scrubbed"
+    )]
+    details: BTreeMap<String, String>,
+}
+
+/// Scrub on the way IN, so a `DiscoveredItem` parsed from an untrusted document
+/// cannot carry an unscrubbed value either.
+fn deserialize_scrubbed<'de, D>(d: D) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = BTreeMap::<String, String>::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .map(|(k, v)| {
+            let s = scrub_detail(&v);
+            (k, s)
+        })
+        .collect())
 }
 
 impl DiscoveredItem {
+    /// Build an item. `details` starts empty; use [`Self::insert_detail`].
+    pub fn new(
+        kind: ItemKind,
+        id: impl Into<String>,
+        source_path: impl Into<String>,
+        target: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            id: id.into(),
+            source_path: source_path.into(),
+            target: target.into(),
+            conflict: false,
+            credential: None,
+            details: BTreeMap::new(),
+        }
+    }
+
     /// Insert a detail, scrubbing any credential material embedded in it.
+    ///
+    /// The ONLY writer. `details` is private precisely so that this cannot be
+    /// bypassed by a struct literal in another crate.
     pub fn insert_detail(&mut self, key: impl Into<String>, value: &str) {
         self.details.insert(key.into(), scrub_detail(value));
+    }
+
+    /// Read-only view of the scrubbed details.
+    pub fn details(&self) -> &BTreeMap<String, String> {
+        &self.details
     }
 }
 
@@ -207,15 +257,7 @@ mod tests {
     use super::*;
 
     fn item(kind: ItemKind, id: &str) -> DiscoveredItem {
-        DiscoveredItem {
-            kind,
-            id: id.into(),
-            source_path: format!("profiles/{id}"),
-            target: format!("profiles.{id}"),
-            conflict: false,
-            credential: None,
-            details: BTreeMap::new(),
-        }
+        DiscoveredItem::new(kind, id, format!("profiles/{id}"), format!("profiles.{id}"))
     }
 
     #[test]
@@ -271,7 +313,7 @@ mod tests {
             "OPENROUTER_API_KEY",
             "profiles/fred/.env",
         ));
-        it.details.insert("provider".into(), "anthropic".into());
+        it.insert_detail("provider", "anthropic");
         p.items.push(it);
         p.finalize();
 
@@ -294,6 +336,41 @@ mod tests {
             ROOT_PROFILE_ID.contains('/'),
             "the root id must be unspoofable by a directory name"
         );
+    }
+
+    #[test]
+    fn details_are_scrubbed_on_every_construction_path() {
+        // The panel's finding: `details` is an untyped channel. It is now
+        // private, so a struct literal cannot reach it from another crate, and
+        // BOTH remaining paths scrub.
+        let secret = "EMBEDDEDSECRET1234567890";
+
+        // Path 1: the only writer.
+        let mut it = item(ItemKind::McpServer, "srv");
+        it.insert_detail("url", &format!("https://x.test/mcp?token={secret}"));
+        assert!(
+            !format!("{it:?}").contains(secret),
+            "insert_detail did not scrub"
+        );
+        assert!(it.details()["url"].contains("<redacted>"));
+
+        // Path 2: deserialization of an untrusted document.
+        let hostile = format!(
+            r#"{{"kind":"mcp_server","id":"s","source_path":"","target":"t",
+                 "conflict":false,"details":{{"url":"https://x.test/m?token={secret}"}}}}"#
+        );
+        let parsed: DiscoveredItem = serde_json::from_str(&hostile).unwrap();
+        assert!(
+            !serde_json::to_string(&parsed).unwrap().contains(secret),
+            "deserialization bypassed the scrubber"
+        );
+        assert!(
+            parsed.details()["url"].contains("<redacted>"),
+            "deserialized detail was not scrubbed: {:?}",
+            parsed.details()
+        );
+        // Positive half: the non-secret shape survived both paths.
+        assert!(parsed.details()["url"].contains("x.test"));
     }
 
     #[test]

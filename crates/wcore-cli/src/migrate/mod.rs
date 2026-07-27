@@ -26,7 +26,6 @@ use clap::{Args, Subcommand};
 use wcore_config::config::{McpServerConfig, ProfileConfig, patch_global_config};
 use wcore_config::portability::{
     CredentialRef, DiscoveredItem, ItemKind, PeerSource, PortabilityPlan, is_root_profile_id,
-    scrub_detail,
 };
 
 pub mod hermes;
@@ -162,51 +161,47 @@ impl MigrationPlan {
             } else {
                 ItemKind::Profile
             };
-            let mut details = BTreeMap::new();
+            let mut item = DiscoveredItem::new(
+                kind,
+                p.name.clone(),
+                p.source_path.clone(),
+                format!("profiles.{}", p.name),
+            );
+            item.conflict = p.conflict;
+            // Reference only — by TYPE there is nowhere for a value to go.
+            item.credential = p.credential_env_var.as_ref().map(|name| {
+                CredentialRef::new(name.clone(), p.credential_file.clone().unwrap_or_default())
+            });
             if let Some(v) = &p.config.provider {
-                details.insert("provider".to_string(), scrub_detail(v));
+                item.insert_detail("provider", v);
             }
             if let Some(v) = &p.config.model {
-                details.insert("model".to_string(), scrub_detail(v));
+                item.insert_detail("model", v);
             }
             if let Some(v) = &p.config.base_url {
-                details.insert("base_url".to_string(), scrub_detail(v));
+                item.insert_detail("base_url", v);
             }
             if !p.mcp_refs.is_empty() {
-                details.insert("mcp_refs".to_string(), scrub_detail(&p.mcp_refs.join(",")));
+                item.insert_detail("mcp_refs", &p.mcp_refs.join(","));
             }
-            out.items.push(DiscoveredItem {
-                kind,
-                id: p.name.clone(),
-                source_path: p.source_path.clone(),
-                target: format!("profiles.{}", p.name),
-                conflict: p.conflict,
-                // Reference only — by TYPE there is nowhere for a value to go.
-                credential: p.credential_env_var.as_ref().map(|name| {
-                    CredentialRef::new(name.clone(), p.credential_file.clone().unwrap_or_default())
-                }),
-                details,
-            });
+            out.items.push(item);
         }
 
         for (name, srv) in &self.mcp_servers {
-            let mut details = BTreeMap::new();
-            details.insert("transport".to_string(), format!("{:?}", srv.transport));
+            let mut item = DiscoveredItem::new(
+                ItemKind::McpServer,
+                name.clone(),
+                String::new(),
+                format!("mcp.servers.{name}"),
+            );
+            item.insert_detail("transport", &format!("{:?}", srv.transport));
             if let Some(c) = &srv.command {
-                details.insert("command".to_string(), scrub_detail(c));
+                item.insert_detail("command", c);
             }
             if let Some(u) = &srv.url {
-                details.insert("url".to_string(), scrub_detail(u));
+                item.insert_detail("url", u);
             }
-            out.items.push(DiscoveredItem {
-                kind: ItemKind::McpServer,
-                id: name.clone(),
-                source_path: String::new(),
-                target: format!("mcp.servers.{name}"),
-                conflict: false,
-                credential: None,
-                details,
-            });
+            out.items.push(item);
         }
 
         let d = &self.deferred;
