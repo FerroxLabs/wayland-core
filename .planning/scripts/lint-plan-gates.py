@@ -78,7 +78,68 @@ STATIC_RULES = [
         "trips it, and it goes permanently green once committed. Pair it with a "
         "working-tree leg.",
     ),
+    # ---- The mirror class: gates that cannot go GREEN. -------------------
+    # Everything above catches a gate that always passes. These catch a gate
+    # that always fails, which is just as useless and much more confusing --
+    # it burns an executor's time proving a defect that is in the gate.
+    # All three were found BY HAND during Phase 29 planning, after this
+    # linter reported that plan set clean.
+    (
+        "HIGH",
+        "grep-rc-prefixes-the-count",
+        # Must be a real option CLUSTER: whitespace, a dash, then letters only,
+        # containing both r and c. The naive `-\w*r\w*c` also matched hyphenated
+        # words inside PATHS -- `.../28-native-cross-platform-certification/`
+        # contains `-certification`, which is `-` + `ce` + `r` + `tifi` + `c`.
+        # That fired on six clean gates across phases 28 and 29 on first run.
+        re.compile(r"\bgrep\b[^\n|;]*?\s-(?=[A-Za-z]*[rR])(?=[A-Za-z]*c)[A-Za-z]+(?=\s|$)"),
+        "Recursive `grep -c` prints `path:count` PER FILE, not a bare number. So "
+        "`test \"$(grep -rc ...)\" -eq 0` compares the string `path:0` against 0 and dies "
+        "with 'integer expression expected' every single time, pass or fail. Use "
+        "`grep -rho ... | wc -l`, or `grep -rc ... | cut -d: -f2`.",
+    ),
+    (
+        "HIGH",
+        "grep-c-exit-1-breaks-chain",
+        re.compile(r"\w+=\"?\$\(\s*grep\b[^)]*-c\b[^)]*\)\"?\s*&&"),
+        "`grep -c` exits 1 when the count is ZERO, and a command substitution assignment "
+        "takes that exit status. So this `&&` chain breaks precisely when the count is 0 -- "
+        "which is usually the PASSING condition. Split the assignment off the chain, or "
+        "append `|| true` to the substitution.",
+    ),
+    (
+        "MEDIUM",
+        "backslash-s-not-portable",
+        re.compile(r"grep\b(?![^\n|;]*-P\b)[^\n|;]*\\s"),
+        "`\\s` is a GNU extension. BSD/macOS grep matches a literal 's' instead, so this "
+        "gate means different things on the two hosts this program builds on. Use a POSIX "
+        "class -- `[[:space:]]` -- or pass -P where PCRE is guaranteed.",
+    ),
 ]
+
+# stderr signatures that mean the gate is BROKEN rather than legitimately red.
+# A gate SHOULD fail against the untouched tree -- that is the whole point. But
+# it should fail by asserting something absent, not by being malformed. Anything
+# here indicates the shell could not even run the check.
+#
+BROKEN_GATE_STDERR = re.compile(
+    r"integer expression expected|unary operator expected|syntax error|"
+    r"command not found|invalid option|unknown option|unrecognized option|"
+    r"Try '.*--help'|conditional binary operator expected",
+    re.IGNORECASE,
+)
+
+# ...but ONLY when the error is not downstream of a missing artifact. The
+# canonical correct gate here is `test "$(grep -c X evidence/foo.log)" -eq 3`,
+# which at base emits BOTH "No such file or directory" AND, because the
+# substitution is then empty, "integer expression expected". That gate is
+# perfectly good -- it goes green the moment the executor produces the file.
+# Without this suppression the check fired on six such gates across phases 28
+# and 29, i.e. it flagged the very shape the linter wants people to write.
+MISSING_ARTIFACT_STDERR = re.compile(
+    r"No such file or directory|Is a directory|cannot open|does not exist",
+    re.IGNORECASE,
+)
 
 # A gate that greps a document the plan itself produces is a tautology.
 SELF_WRITTEN_RE = re.compile(r"grep[^\n]*?([A-Za-z0-9_.\-/]*\d{2}[A-Z]?-\d{2}-[A-Z-]+\.md)")
@@ -158,13 +219,27 @@ def baseline_findings(path, gates):
         if UNSAFE_RE.search(cmd):
             continue
         try:
-            rc = subprocess.run(
+            proc = subprocess.run(
                 cmd, shell=True, cwd=REPO, timeout=25,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            ).returncode
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            )
+            rc = proc.returncode
+            err = (proc.stderr or b"").decode("utf-8", "replace")
         except subprocess.TimeoutExpired:
             continue
         except Exception:
+            continue
+        # A gate that cannot even be PARSED is not "red", it is broken. Catching
+        # this needs stderr, which is why it is not discarded any more.
+        if (rc != 0 and BROKEN_GATE_STDERR.search(err)
+                and not MISSING_ARTIFACT_STDERR.search(err)):
+            first = next((l for l in err.splitlines() if l.strip()), err.strip())
+            out.append((
+                "HIGH", "gate-is-broken-not-red", path, line_no, cmd,
+                f"Fails with a shell/usage error, not an assertion: {first[:120]!r}. "
+                "This gate can never go green no matter what the executor does, so it "
+                "proves nothing and costs an executor a debugging cycle to discover.",
+            ))
             continue
         if rc == 0:
             out.append((
