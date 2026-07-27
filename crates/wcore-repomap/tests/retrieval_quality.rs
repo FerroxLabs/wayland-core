@@ -302,11 +302,18 @@ fn a_query_full_text_cannot_serve_falls_back_and_says_so() {
     // And the contrast case: a token that genuinely is not present must come
     // back EMPTY and NOT flagged as a fallback answer, so "no matches" and
     // "cannot be served" stay distinguishable.
-    let absent = search(
-        &store,
-        &SearchQuery::new("zzzznosuchtokenanywhere").with_limit(5),
-    )
-    .expect("search");
+    //
+    // The token is BUILT AT RUN TIME rather than written as a literal. The
+    // first cut of this test used a literal, and it failed — correctly —
+    // because the corpus is this crate's own tree, so the literal was sitting
+    // in this very file and the index found it. A hard-coded "absent" token
+    // in a self-indexing corpus is present by construction.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let absent_token = format!("zq{}q{nanos}q", std::process::id());
+    let absent = search(&store, &SearchQuery::new(&absent_token).with_limit(5)).expect("search");
     assert!(absent.hits.is_empty(), "{:?}", absent.hits);
     assert!(!absent.used_fallback);
 }
