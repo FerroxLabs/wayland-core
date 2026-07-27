@@ -3167,7 +3167,7 @@ mod spawn_task_set_tests {
         let initial_epoch = authority.lock().authority_epoch();
 
         let (_child, guard) = spawner
-            .enter_child_budget()
+            .enter_child_budget(None)
             .expect("durable authority admits the child");
         let admitted = journal.state().unwrap().budget_authority.unwrap();
         assert_eq!(admitted.authority_epoch, initial_epoch + 1);
