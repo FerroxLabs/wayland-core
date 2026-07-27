@@ -644,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_refuses_an_archive_from_a_NEWER_schema_and_accepts_an_OLDER_one() {
+    fn verify_refuses_a_newer_schema_archive_and_accepts_an_older_one() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).unwrap();

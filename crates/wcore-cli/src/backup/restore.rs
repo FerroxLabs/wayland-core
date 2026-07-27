@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn a_partially_written_backup_leaves_an_OCCUPIED_target_byte_identical() {
+    fn a_partially_written_backup_leaves_an_occupied_target_byte_identical() {
         // The scenario that matters: the target is a live profile, and the
         // archive is one whose write was interrupted. Restoring into an empty
         // directory would prove nothing here -- there would be nothing to lose.
