@@ -1,0 +1,466 @@
+_config_version: 23
+agent:
+  api_max_retries: 3
+  disabled_toolsets:
+  - browser
+  - code_execution
+  - cronjob
+  - delegation
+  - homeassistant
+  - image_gen
+  - messaging
+  - moa
+  - skills
+  - spotify
+  - terminal
+  - tts
+  - vision
+  - web
+  gateway_auto_continue_freshness: 3600
+  gateway_notify_interval: 600
+  gateway_timeout: 1800
+  gateway_timeout_warning: 900
+  image_input_mode: auto
+  max_turns: 30
+  restart_drain_timeout: 60
+  service_tier: ''
+  tool_use_enforcement: auto
+approvals:
+  cron_mode: deny
+  mcp_reload_confirm: true
+  mode: manual
+  timeout: 60
+auxiliary:
+  approval:
+    api_key: ''
+    base_url: https://api.deepseek.com/v1
+    extra_body: {}
+    model: deepseek-v4-flash
+    provider: deepseek
+    timeout: 30
+  compression:
+    api_key: ''
+    base_url: https://api.deepseek.com/v1
+    extra_body: {}
+    model: deepseek-v4-flash
+    provider: deepseek
+    timeout: 120
+  curator:
+    api_key: ''
+    base_url: https://api.deepseek.com/v1
+    extra_body: {}
+    model: deepseek-v4-flash
+    provider: deepseek
+    timeout: 600
+  flush_memories:
+    api_key: ''
+    base_url: https://api.deepseek.com/v1
+    extra_body: {}
+    model: deepseek-v4-flash
+    provider: deepseek
+    timeout: 30
+  mcp:
+    api_key: ''
+    base_url: https://api.deepseek.com/v1
+    extra_body: {}
+    model: deepseek-v4-flash
+    provider: deepseek
+    timeout: 30
+  session_search:
+    api_key: ''
+    base_url: https://api.deepseek.com/v1
+    extra_body: {}
+    max_concurrency: 3
+    model: deepseek-v4-flash
+    provider: deepseek
+    timeout: 30
+  skills_hub:
+    api_key: ''
+    base_url: https://api.deepseek.com/v1
+    extra_body: {}
+    model: deepseek-v4-flash
+    provider: deepseek
+    timeout: 30
+  title_generation:
+    api_key: ''
+    base_url: https://api.deepseek.com/v1
+    extra_body: {}
+    model: deepseek-v4-flash
+    provider: deepseek
+    timeout: 30
+  triage_specifier:
+    api_key: ''
+    base_url: https://api.deepseek.com/v1
+    extra_body: {}
+    model: deepseek-v4-flash
+    provider: deepseek
+    timeout: 120
+  vision:
+    api_key: ''
+    base_url: https://api.deepseek.com/v1
+    download_timeout: 30
+    extra_body: {}
+    model: deepseek-v4-flash
+    provider: deepseek
+    timeout: 120
+  web_extract:
+    api_key: ''
+    base_url: https://api.deepseek.com/v1
+    extra_body: {}
+    model: deepseek-v4-flash
+    provider: deepseek
+    timeout: 360
+bedrock:
+  discovery:
+    enabled: true
+    provider_filter: []
+    refresh_interval: 3600
+  guardrail:
+    guardrail_identifier: ''
+    guardrail_version: ''
+    stream_processing_mode: async
+    trace: disabled
+  region: ''
+browser:
+  allow_private_urls: false
+  auto_local_for_private_urls: true
+  camofox:
+    managed_persistence: false
+  cdp_url: ''
+  command_timeout: 30
+  dialog_policy: must_respond
+  dialog_timeout_s: 300
+  engine: auto
+  inactivity_timeout: 120
+  record_sessions: false
+checkpoints:
+  auto_prune: true
+  delete_orphans: true
+  enabled: true
+  max_file_size_mb: 10
+  max_snapshots: 50
+  max_total_size_mb: 500
+  min_interval_hours: 24
+  retention_days: 7
+code_execution:
+  mode: project
+command_allowlist: []
+compression:
+  enabled: true
+  hygiene_hard_message_limit: 400
+  protect_last_n: 20
+  target_ratio: 0.2
+  threshold: 0.5
+context:
+  engine: compressor
+credential_pool_strategies: {}
+cron:
+  max_parallel_jobs: null
+  wrap_response: true
+curator:
+  archive_after_days: 90
+  backup:
+    enabled: true
+    keep: 5
+  enabled: true
+  interval_hours: 168
+  min_idle_hours: 2
+  stale_after_days: 30
+dashboard:
+  theme: default
+delegation:
+  api_key: ''
+  base_url: ''
+  child_timeout_seconds: 600
+  inherit_mcp_toolsets: true
+  max_concurrent_children: 3
+  max_iterations: 50
+  max_spawn_depth: 1
+  model: ''
+  orchestrator_enabled: true
+  provider: ''
+  reasoning_effort: ''
+  subagent_auto_approve: false
+discord:
+  allowed_channels: ''
+  auto_thread: true
+  channel_prompts: {}
+  dm_role_auth_guild: ''
+  free_response_channels: ''
+  reactions: true
+  require_mention: true
+  server_actions: ''
+display:
+  bell_on_complete: false
+  busy_input_mode: interrupt
+  compact: true
+  copy_shortcut: auto
+  ephemeral_system_ttl: 0
+  final_response_markdown: strip
+  inline_diffs: true
+  interim_assistant_messages: true
+  language: en
+  persistent_output: true
+  persistent_output_max_lines: 200
+  personality: ''
+  platforms: {}
+  resume_display: full
+  runtime_footer:
+    enabled: false
+    fields:
+    - model
+    - context_pct
+    - cwd
+  show_cost: false
+  show_reasoning: false
+  skin: default
+  streaming: true
+  tool_preview_length: 0
+  tool_progress: all
+  tool_progress_command: false
+  tool_progress_overrides: {}
+  tui_auto_resume_recent: false
+  tui_status_indicator: kaomoji
+  user_message_preview:
+    first_lines: 2
+    last_lines: 2
+fallback_providers: []
+file_read_max_chars: 100000
+goals:
+  max_turns: 20
+honcho: {}
+hooks:
+  pre_tool_use: []
+hooks_auto_accept: false
+human_delay:
+  max_ms: 2500
+  min_ms: 800
+  mode: 'off'
+kanban:
+  dispatch_in_gateway: true
+  dispatch_interval_seconds: 60
+  failure_limit: 2
+logging:
+  backup_count: 3
+  level: INFO
+  max_size_mb: 5
+matrix:
+  allowed_rooms: ''
+  free_response_rooms: ''
+  require_mention: true
+mattermost:
+  allowed_channels: ''
+  channel_prompts: {}
+  free_response_channels: ''
+  require_mention: true
+mcp_servers: {}
+memory:
+  memory_char_limit: 2200
+  memory_enabled: true
+  provider: ''
+  user_char_limit: 1375
+  user_profile_enabled: true
+moa:
+  default_preset: default
+  presets:
+    default:
+      aggregator:
+        model: anthropic/claude-opus-4.6
+        provider: openrouter
+      enabled: true
+      max_tokens: 4096
+      reference_max_tokens: 600
+      reference_models:
+      - model: deepseek/deepseek-chat
+        provider: openrouter
+      - model: meta-llama/llama-3.3-70b-instruct
+        provider: openrouter
+model:
+  api_mode: chat_completions
+  base_url: https://api.deepseek.com/v1
+  default: deepseek/deepseek-v4-pro
+  provider: deepseek
+model_catalog:
+  enabled: true
+  providers: {}
+  ttl_hours: 24
+  url: https://hermes-agent.nousresearch.com/docs/api/model-catalog.json
+network:
+  force_ipv4: false
+onboarding:
+  seen:
+    openclaw_residue_cleanup: true
+openrouter:
+  response_cache: false
+  response_cache_ttl: 0
+personalities: {}
+platform_toolsets:
+  cli:
+  - browser
+  - clarify
+  - code_execution
+  - cronjob
+  - delegation
+  - file
+  - homeassistant
+  - image_gen
+  - memory
+  - messaging
+  - moa
+  - rl
+  - session_search
+  - skills
+  - spotify
+  - terminal
+  - todo
+  - tts
+  - vision
+  - web
+platforms:
+  api_server:
+    enabled: true
+    extra:
+      host: 127.0.0.1
+      port: 8642
+  telegram:
+    enabled: false
+plugins:
+  enabled: []
+prefill_messages_file: ''
+privacy:
+  redact_pii: false
+prompt_caching:
+  cache_ttl: 5m
+providers: {}
+quick_commands: {}
+security:
+  allow_private_urls: false
+  redact_secrets: true
+  tirith_enabled: true
+  tirith_fail_open: true
+  tirith_path: tirith
+  tirith_timeout: 5
+  website_blocklist:
+    domains: []
+    enabled: false
+    shared_files: []
+session_reset:
+  at_hour: 4
+  idle_minutes: 1440
+  mode: both
+sessions:
+  auto_prune: false
+  min_interval_hours: 24
+  retention_days: 90
+  vacuum_after_prune: true
+skills:
+  external_dirs: []
+  guard_agent_created: false
+  inline_shell: false
+  inline_shell_timeout: 10
+  template_vars: true
+slack:
+  allowed_channels: ''
+  channel_prompts: {}
+  free_response_channels: ''
+  require_mention: true
+smart_model_routing:
+  cheap_model: {}
+  enabled: false
+  max_simple_chars: 160
+  max_simple_words: 28
+stt:
+  enabled: false
+  local:
+    language: ''
+    model: base
+  mistral:
+    model: voxtral-mini-latest
+  openai:
+    model: whisper-1
+  provider: local
+telegram:
+  allowed_chats: ''
+  channel_prompts: {}
+  reactions: false
+terminal:
+  auto_source_bashrc: true
+  backend: local
+  container_cpu: 1
+  container_disk: 51200
+  container_memory: 5120
+  container_persistent: true
+  cwd: .
+  daytona_image: nikolaik/python-nodejs:python3.11-nodejs20
+  docker_env: {}
+  docker_forward_env: []
+  docker_image: nikolaik/python-nodejs:python3.11-nodejs20
+  docker_mount_cwd_to_workspace: false
+  docker_run_as_host_user: false
+  docker_volumes: []
+  env_passthrough: []
+  modal_image: nikolaik/python-nodejs:python3.11-nodejs20
+  modal_mode: auto
+  persistent_shell: true
+  shell_init_files: []
+  singularity_image: docker://nikolaik/python-nodejs:python3.11-nodejs20
+  timeout: 180
+  vercel_runtime: node24
+timezone: ''
+tool_loop_guardrails:
+  hard_stop_after:
+    exact_failure: 5
+    idempotent_no_progress: 5
+    same_tool_failure: 8
+  hard_stop_enabled: false
+  warn_after:
+    exact_failure: 2
+    idempotent_no_progress: 2
+    same_tool_failure: 3
+  warnings_enabled: true
+tool_output:
+  max_bytes: 50000
+  max_line_length: 2000
+  max_lines: 2000
+toolsets:
+- hermes-cli
+tts:
+  edge:
+    voice: en-US-AriaNeural
+  elevenlabs:
+    model_id: eleven_multilingual_v2
+    voice_id: pNInz6obpgDQGcFmaJgB
+  mistral:
+    model: voxtral-mini-tts-2603
+    voice_id: c69964a6-ab8b-4f8a-9465-ec0925096ec8
+  neutts:
+    device: cpu
+    model: neuphonic/neutts-air-q4-gguf
+    ref_audio: ''
+    ref_text: ''
+  openai:
+    model: gpt-4o-mini-tts
+    voice: alloy
+  piper:
+    voice: en_US-lessac-medium
+  provider: edge
+  xai:
+    bit_rate: 128000
+    language: en
+    sample_rate: 24000
+    voice_id: eve
+updates:
+  backup_keep: 5
+  pre_update_backup: false
+voice:
+  auto_tts: false
+  beep_enabled: true
+  max_recording_seconds: 120
+  record_key: ctrl+b
+  silence_duration: 3.0
+  silence_threshold: 200
+web:
+  backend: ''
+  extract_backend: ''
+  search_backend: ''
+whatsapp: {}

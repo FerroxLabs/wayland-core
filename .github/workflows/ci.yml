@@ -25,6 +25,15 @@ on:
       # Transient: drop this entry when the branch merges. The job matrix,
       # runner labels, concurrency group and test commands are untouched.
       - plan/f20-unified-audit-repair
+      # Phase 26 lane. 26-01 declares a MANDATORY proof leg needing a fresh
+      # arm64 macOS binary; the planning Mac may not run cargo, so the `build:`
+      # job below is the only admissible producer. This lane executes on its own
+      # branch, which the entries above do not name, so its push fired nothing
+      # and the leg was structurally unreachable. `workflow_dispatch` is not an
+      # alternative: ci.yml on `main` declares no such trigger, and GitHub
+      # exposes that trigger only for workflows already on the default branch.
+      # Transient, exactly like the entry above: drop this at serial merge.
+      - lane/26
 
 permissions:
   contents: read

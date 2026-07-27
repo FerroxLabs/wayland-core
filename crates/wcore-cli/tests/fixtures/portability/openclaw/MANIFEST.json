@@ -1,0 +1,166 @@
+{
+  "bounded": true,
+  "bounding_rule": "Only importer-relevant files are cloned verbatim; large trees are reproduced as directory markers preserving subdirectory counts.",
+  "canaries": [
+    {
+      "canary": "CANARY-0789c716a9ead407c5042b031896e319",
+      "file": "credentials/telegram-default-allowFrom.json",
+      "key": "allowFrom[0]"
+    },
+    {
+      "canary": "CANARY-14daa6e927c7991f4b6c4bb4c7a6c9af",
+      "file": "openclaw.json",
+      "key": "channels.telegram.botToken"
+    },
+    {
+      "canary": "CANARY-3085b0b3e6b8a70601c483a25d5fd22a",
+      "file": "openclaw.json",
+      "key": "gateway.auth.token"
+    },
+    {
+      "canary": "CANARY-e826307bf061c37a2f30bdb4ad49c962",
+      "file": "openclaw.json",
+      "key": "gateway.remote.token"
+    },
+    {
+      "canary": "CANARY-52fa01180892828fa0911339ff8dac6b",
+      "file": "openclaw.json.bak",
+      "key": "channels.telegram.botToken"
+    },
+    {
+      "canary": "CANARY-c2767df7a21c7777942a8fb72459380f",
+      "file": "openclaw.json.bak",
+      "key": "gateway.auth.token"
+    },
+    {
+      "canary": "CANARY-efb124352d86495eefbc8aea8addb359",
+      "file": "openclaw.json.bak",
+      "key": "gateway.remote.token"
+    },
+    {
+      "canary": "CANARY-bb214d76705575f5b4db38edb76df497",
+      "file": "openclaw.json.bak-20260511-190206",
+      "key": "channels.telegram.botToken"
+    },
+    {
+      "canary": "CANARY-c81588559e4ce19fae45f135138cdd97",
+      "file": "openclaw.json.bak-20260511-190206",
+      "key": "gateway.auth.token"
+    },
+    {
+      "canary": "CANARY-e4f35d7ed490ca4a11c8f83211d364c1",
+      "file": "openclaw.json.bak-20260511-190206",
+      "key": "gateway.remote.token"
+    },
+    {
+      "canary": "CANARY-637a9fd39a50f9c79f8715fea0cd60fd",
+      "file": "openclaw.json.bak.1",
+      "key": "channels.telegram.botToken"
+    },
+    {
+      "canary": "CANARY-0a7ad3ff39dc950eb9fc05a1ea2f636b",
+      "file": "openclaw.json.bak.1",
+      "key": "gateway.auth.token"
+    },
+    {
+      "canary": "CANARY-72f337fbcfe22d7ef4f2941ec80c1b2d",
+      "file": "openclaw.json.bak.1",
+      "key": "gateway.remote.token"
+    },
+    {
+      "canary": "CANARY-3f766ce3e9d9e0deedae49c7947ea1f3",
+      "file": "openclaw.json.bak.2",
+      "key": "channels.telegram.botToken"
+    },
+    {
+      "canary": "CANARY-bdece908f12dd1cf4daec20e0d933e62",
+      "file": "openclaw.json.bak.2",
+      "key": "gateway.auth.token"
+    },
+    {
+      "canary": "CANARY-890565929f2ca69836490410e7fc34b1",
+      "file": "openclaw.json.bak.2",
+      "key": "gateway.remote.token"
+    },
+    {
+      "canary": "CANARY-a9721840e8d49cd7909c702dd5e56cbd",
+      "file": "openclaw.json.bak.20260725-114041",
+      "key": "channels.telegram.botToken"
+    },
+    {
+      "canary": "CANARY-292258abc8ce93687ee94fb51f2b4bcc",
+      "file": "openclaw.json.bak.20260725-114041",
+      "key": "gateway.auth.token"
+    },
+    {
+      "canary": "CANARY-9978255fa4b490335366900efe96fd78",
+      "file": "openclaw.json.bak.20260725-114041",
+      "key": "gateway.remote.token"
+    },
+    {
+      "canary": "CANARY-4f863aa676788672ccd4475934ad6ad6",
+      "file": "openclaw.json.bak.3",
+      "key": "channels.telegram.botToken"
+    },
+    {
+      "canary": "CANARY-b80536073e44b23fda01696582421b16",
+      "file": "openclaw.json.bak.3",
+      "key": "gateway.auth.token"
+    },
+    {
+      "canary": "CANARY-fec91d0e5093e2657299050fe06687b3",
+      "file": "openclaw.json.bak.3",
+      "key": "gateway.remote.token"
+    },
+    {
+      "canary": "CANARY-6f16b0fe80029dec1a435cebb048ce18",
+      "file": "openclaw.json.bak.4",
+      "key": "channels.telegram.botToken"
+    },
+    {
+      "canary": "CANARY-19d3a22a08e11eee119bdd70ebbb485f",
+      "file": "openclaw.json.bak.4",
+      "key": "gateway.auth.token"
+    },
+    {
+      "canary": "CANARY-49f1463ce1d90cac0c3131fd5f006072",
+      "file": "openclaw.json.bak.4",
+      "key": "gateway.remote.token"
+    },
+    {
+      "canary": "CANARY-db4bd29172d348915932e8ae9d7cbcfc",
+      "file": "openclaw.json.last-good",
+      "key": "channels.telegram.botToken"
+    },
+    {
+      "canary": "CANARY-2493790a204b9143c0c9041ab121a20e",
+      "file": "openclaw.json.last-good",
+      "key": "gateway.auth.token"
+    },
+    {
+      "canary": "CANARY-854e79dc5e7bae86e8f870c8b8cb4b36",
+      "file": "openclaw.json.last-good",
+      "key": "gateway.remote.token"
+    }
+  ],
+  "classification_rules": {
+    "R1": "dotenv key matching *_(API_KEY|TOKEN|SECRET|KEY|PASSWORD|PASSWD|CREDENTIAL)",
+    "R2": "JSON/YAML mapping key containing key/token/secret/auth/pass/cred with a string value >= 8 chars",
+    "R3": "every string value under credentials/ or in auth.json"
+  },
+  "counts": {
+    "agents": 1,
+    "config_files": 10,
+    "credentials": 2,
+    "flows": 0,
+    "identity": 0,
+    "logs": 0,
+    "memory": 0,
+    "plugin-skills": 1,
+    "plugins!unreadable": "PermissionError",
+    "tasks": 0,
+    "tui": 0,
+    "workspace": 4
+  },
+  "kind": "openclaw"
+}

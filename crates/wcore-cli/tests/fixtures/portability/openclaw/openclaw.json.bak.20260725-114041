@@ -1,0 +1,160 @@
+{
+  "agents": {
+    "defaults": {
+      "agentRuntime": {
+        "id": "claude-cli"
+      },
+      "maxConcurrent": 4,
+      "model": {
+        "primary": "flux/flux-auto"
+      },
+      "models": {
+        "anthropic/claude-haiku-4-5": {},
+        "anthropic/claude-opus-4-5": {},
+        "anthropic/claude-opus-4-6": {},
+        "anthropic/claude-opus-4-7": {},
+        "anthropic/claude-sonnet-4-5": {},
+        "anthropic/claude-sonnet-4-6": {}
+      },
+      "subagents": {
+        "maxConcurrent": 8
+      },
+      "workspace": "/Users/seandonahoe/.openclaw/workspace"
+    }
+  },
+  "auth": {
+    "profiles": {
+      "anthropic:claude-cli": {
+        "mode": "oauth",
+        "provider": "claude-cli"
+      }
+    }
+  },
+  "channels": {
+    "telegram": {
+      "botToken": "CANARY-a9721840e8d49cd7909c702dd5e56cbd",
+      "enabled": true,
+      "groups": {
+        "*": {
+          "requireMention": true
+        }
+      }
+    }
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "ownerAllowFrom": [
+      "telegram:8524591594"
+    ],
+    "ownerDisplay": "raw",
+    "restart": true
+  },
+  "discovery": {
+    "mdns": {
+      "mode": "off"
+    }
+  },
+  "gateway": {
+    "auth": {
+      "mode": "token",
+      "token": "CANARY-292258abc8ce93687ee94fb51f2b4bcc"
+    },
+    "bind": "loopback",
+    "controlUi": {
+      "allowInsecureAuth": true
+    },
+    "mode": "local",
+    "port": 18789,
+    "remote": {
+      "token": "CANARY-9978255fa4b490335366900efe96fd78"
+    },
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    }
+  },
+  "mcp": {
+    "servers": {
+      "ijfw-memory": {
+        "args": [
+          "/Users/seandonahoe/.ijfw/mcp-server/src/server.js"
+        ],
+        "command": "node"
+      }
+    }
+  },
+  "messages": {
+    "ackReactionScope": "group-mentions"
+  },
+  "meta": {
+    "lastTouchedAt": "2026-07-25T04:40:43.549Z",
+    "lastTouchedVersion": "2026.5.7"
+  },
+  "models": {
+    "providers": {
+      "flux": {
+        "api": "openai-completions",
+        "apiKey": "",
+        "baseUrl": "http://127.0.0.1:7878/v1",
+        "models": [
+          {
+            "contextWindow": 200000,
+            "id": "flux-auto",
+            "maxTokens": 8192,
+            "name": "Flux Autopilot"
+          },
+          {
+            "contextWindow": 200000,
+            "id": "flux-fast",
+            "maxTokens": 8192,
+            "name": "Flux Express Lane"
+          },
+          {
+            "contextWindow": 200000,
+            "id": "flux-standard",
+            "maxTokens": 8192,
+            "name": "Flux Daily Driver"
+          },
+          {
+            "contextWindow": 200000,
+            "id": "flux-reasoning",
+            "maxTokens": 8192,
+            "name": "Flux Deep Thought"
+          }
+        ]
+      }
+    }
+  },
+  "plugins": {
+    "entries": {
+      "anthropic": {
+        "enabled": true
+      },
+      "duckduckgo": {
+        "enabled": true
+      },
+      "telegram": {
+        "enabled": true
+      }
+    }
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "tools": {
+    "profile": "coding",
+    "web": {
+      "search": {
+        "enabled": true,
+        "provider": "duckduckgo"
+      }
+    }
+  },
+  "wizard": {
+    "lastRunAt": "2026-05-11T11:34:34.592Z",
+    "lastRunCommand": "onboard",
+    "lastRunMode": "local",
+    "lastRunVersion": "2026.5.7"
+  }
+}
