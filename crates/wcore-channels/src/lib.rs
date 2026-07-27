@@ -14,16 +14,21 @@
 //! came from.
 
 pub mod auto_register;
+pub mod binding;
 pub mod chunk;
 pub mod config;
 pub mod dispatch;
 pub mod error;
 pub mod event;
+pub mod health;
 pub mod manager;
+pub mod media;
 pub mod mock;
 pub mod outgoing;
+pub mod probe;
 pub mod webhook;
 
+pub use binding::{Binding, BindingSource, BindingTable, ConversationRef, RouteTarget};
 pub use chunk::chunk_message;
 pub use config::{ChannelConfig, ChannelConfigLoader};
 pub use dispatch::{
@@ -37,9 +42,12 @@ pub use event::{
     Attachment, ChannelEvent, ChatType, ConnectionState, IncomingMessage, MAX_INBOX, MediaKind,
     MentionKind, MessageReceipt, push_bounded,
 };
+pub use health::{ChannelHealth, HealthState};
 pub use manager::{ChannelManager, TaggedEvent};
+pub use media::{MediaBounds, MediaDisposition, RawAttachment};
 pub use mock::MockChannel;
 pub use outgoing::OutgoingMessage;
+pub use probe::{ProbeOutcome, ProbeReport};
 pub use webhook::{WebhookRequest, WebhookResponse};
 
 use async_trait::async_trait;
@@ -132,6 +140,85 @@ pub trait Channel: Send + Sync {
         false
     }
 
+    /// Answer the setup and authentication probe WITHOUT sending a message:
+    /// is the configuration complete, does the credential authenticate, and
+    /// what identity did it authenticate as.
+    ///
+    /// # The default reports `Unsupported`, never a green
+    ///
+    /// An adapter that has not implemented this returns
+    /// [`ProbeOutcome::Unsupported`](crate::probe::ProbeOutcome::Unsupported) —
+    /// a NAMED state meaning "nothing was checked". A default of `Ok` would be
+    /// an adapter attesting to its own configuration without looking at it,
+    /// which is the failure shape this phase keeps measuring: lane 24c's
+    /// gateway reported a clean carry from its own ledger while an independent
+    /// destination held a duplicate. The probe must never be the sole witness
+    /// to a configuration it did not read.
+    ///
+    /// Takes `&self` (like `react`/`ingest_webhook`): a probe reads, it does
+    /// not drive the lifecycle, so it must be callable while the poll loop
+    /// holds the adapter.
+    async fn probe(&self) -> Result<ProbeReport, ChannelError> {
+        Ok(ProbeReport::unsupported(self.name(), self.platform()))
+    }
+
+    /// This adapter's DECLARED inbound media bounds. Enforced by
+    /// [`media::normalize`](crate::media::normalize). The default is finite —
+    /// an unbounded default is a fetch whose size a hostile sender chooses.
+    fn media_bounds(&self) -> MediaBounds {
+        MediaBounds::default()
+    }
+
+    /// Edit an already-sent message.
+    ///
+    /// Default: [`ChannelError::Unsupported`] — a NAMED outcome, never a silent
+    /// `Ok`. A caller that receives `Ok` from a platform with no edit API
+    /// believes the message changed; the next reader sees the original.
+    async fn edit_message(
+        &self,
+        _conversation_id: &str,
+        _message_id: &str,
+        _new_text: &str,
+    ) -> Result<MessageReceipt, ChannelError> {
+        Err(ChannelError::Unsupported {
+            op: "edit".to_string(),
+            platform: self.platform().to_string(),
+        })
+    }
+
+    /// Delete an already-sent message.
+    ///
+    /// Default: [`ChannelError::Unsupported`]. Same reasoning as
+    /// [`edit_message`](Self::edit_message), and worse in consequence — a
+    /// silent success here reads as "the message is gone" when it is not.
+    async fn delete_message(
+        &self,
+        _conversation_id: &str,
+        _message_id: &str,
+    ) -> Result<(), ChannelError> {
+        Err(ChannelError::Unsupported {
+            op: "delete".to_string(),
+            platform: self.platform().to_string(),
+        })
+    }
+
+    /// Fingerprint of the configuration this adapter was constructed from, used
+    /// by [`ChannelManager::reload`](crate::manager::ChannelManager::reload) to
+    /// decide whether a re-registered adapter actually CHANGED.
+    ///
+    /// Default `None` meaning "cannot tell", which reload treats as CHANGED and
+    /// therefore replaces. That direction is deliberate: replacing an unchanged
+    /// adapter costs a reconnect, whereas keeping a changed one running means
+    /// an operator edits a credential, reloads, sees success, and keeps sending
+    /// through the old one.
+    ///
+    /// An adapter that returns a fingerprint MUST derive it from configuration
+    /// only, and must never let a secret's VALUE into it — a fingerprint is
+    /// surfaced in reload output. Hash it.
+    fn config_fingerprint(&self) -> Option<String> {
+        None
+    }
+
     /// Returns the JSON-schema doc string for this channel's
     /// config TOML. UI uses this to render a setup form; tests use
     /// it to validate config files.
@@ -174,16 +261,25 @@ pub trait Channel: Send + Sync {
     /// signal used by the subscriber's ack state machine (👀 received →
     /// ✅ done / ❌ failed).
     ///
-    /// Default: `Rejected` (the platform has no reaction API, or it isn't
-    /// implemented for this connector). The subscriber treats a reaction
-    /// failure as non-fatal.
+    /// Default: [`ChannelError::Unsupported`] — the platform has no reaction
+    /// API, or it isn't implemented for this connector. The subscriber treats a
+    /// reaction failure as non-fatal.
+    ///
+    /// This was `Rejected("reactions unsupported")` before Phase 24 made edit,
+    /// delete and reaction contract operations. `Rejected` means the platform
+    /// looked at the request and said no, which is a retryable condition;
+    /// "there is no reaction API" is not. Folding the two together let a caller
+    /// retry forever against a surface that will never exist.
     async fn react(
         &self,
         _conversation_id: &str,
         _message_id: &str,
         _emoji: &str,
     ) -> Result<(), ChannelError> {
-        Err(ChannelError::Rejected("reactions unsupported".to_string()))
+        Err(ChannelError::Unsupported {
+            op: "react".to_string(),
+            platform: self.platform().to_string(),
+        })
     }
 
     /// Handle an inbound webhook HTTP request routed to this channel by
