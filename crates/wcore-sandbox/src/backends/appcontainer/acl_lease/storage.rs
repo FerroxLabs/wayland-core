@@ -38,10 +38,54 @@ pub(super) fn lease_directory() -> Result<PathBuf> {
 }
 
 /// Production lease root: the user's real `%LOCALAPPDATA%`.
+#[cfg(not(test))]
 fn lease_root() -> Result<PathBuf> {
     Ok(PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or_else(
         || exec_error("LOCALAPPDATA is required for AppContainer ACL leases".into()),
     )?))
+}
+
+/// Unit-test lease root: one temp directory per test process.
+///
+/// This is the single chokepoint that makes it STRUCTURALLY impossible for a
+/// unit test to write a lease into the user's real lease directory. It is
+/// deliberately here rather than at the call sites: there are five call sites
+/// in this crate's tests, and the sixth one somebody adds is the one that
+/// forgets.
+///
+/// The stakes are not test hygiene. A lease written by a test carries a
+/// synthetic `WCore-storage-…` profile name for which no AppContainer profile
+/// is ever created, so `recover_dead_leases_locked` can never derive a matching
+/// SID, returns `Err`, and fails closed FOREVER — there is no quarantine path,
+/// and the negative probe cache is in-process only, so every later process
+/// re-reads the same file and fails again. That error reaches the caller
+/// through `probe_appcontainer_available()`, which maps it to `false` and logs
+/// "sandbox disabled"; the product then carries on running UNSANDBOXED. Running
+/// the native acceptance suite could therefore silently disable the sandbox on
+/// that machine until a human deleted a file nobody knew to look for — which is
+/// exactly what was found on a real developer box. See
+/// `.planning/intel/APPCONTAINER-SSH-LEASE-WEDGE.md`.
+///
+/// Integration tests under `tests/` compile the library WITHOUT `cfg(test)` and
+/// so still use the real directory. That is correct and intended: they drive
+/// `ExecutionIdentity::start`, whose leases carry a real profile and a real SID
+/// and therefore reconcile normally. They cannot reach the synthetic-lease
+/// helpers at all, because those are private to this module tree — visibility,
+/// not discipline, is what keeps them out.
+#[cfg(test)]
+fn lease_root() -> Result<PathBuf> {
+    use std::sync::OnceLock;
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    let root = ROOT.get_or_init(|| {
+        std::env::temp_dir().join(format!("wcore-lease-test-{:08x}", std::process::id()))
+    });
+    fs::create_dir_all(root).map_err(|error| {
+        exec_error(format!(
+            "create test AppContainer ACL lease root {}: {error}",
+            root.display()
+        ))
+    })?;
+    Ok(root.clone())
 }
 
 fn lease_directory_from(local: PathBuf) -> Result<PathBuf> {
