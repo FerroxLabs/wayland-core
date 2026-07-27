@@ -272,22 +272,30 @@ else {
 # `git clone`: the measurement checkout is a detached-HEAD worktree, and a
 # clone of a detached HEAD yields an EMPTY working tree, which would make
 # every mutation below pass vacuously.
+# FOUND LIVE ON SeanDesktop, and the reason this uses zip rather than tar:
+# the POSIX driver's `tar -xf "$tarPath"` fails here with
+#   /usr/bin/tar: Cannot connect to C: resolve failed        (exit 128)
+# because the `tar` on PATH is git-for-Windows' GNU tar, which parses an
+# `-f` argument containing a colon as a REMOTE `host:path` spec and tries to
+# reach a host literally named "C". A drive-lettered path is therefore
+# unusable with `-f` unless `--force-local` is passed. The zip route avoids
+# the class entirely: `git archive --format=zip` plus PowerShell's own
+# `Expand-Archive`, neither of which parses a path as a host.
 $Clone = Join-Path $Scratch 'clone'
 New-Item -ItemType Directory -Force -Path $Clone | Out-Null
-$tarPath = Join-Path $Scratch 'tree.tar'
-& git -C $Repo archive HEAD -o $tarPath
+$zipPath = Join-Path $Scratch 'tree.zip'
+& git -C $Repo archive --format=zip -o $zipPath HEAD
 $rc = $LASTEXITCODE
 if ($rc -ne 0) {
     Write-Host "FATAL: git archive exited $rc"
     exit 69
 }
-& tar -xf $tarPath -C $Clone
-$rc = $LASTEXITCODE
-if ($rc -ne 0) {
-    Write-Host "FATAL: tar -xf exited $rc"
+Expand-Archive -LiteralPath $zipPath -DestinationPath $Clone -Force
+if (-not $?) {
+    Write-Host 'FATAL: Expand-Archive failed'
     exit 69
 }
-Remove-Item -LiteralPath $tarPath -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
 $scratchFiles = @(Get-ChildItem -LiteralPath $Clone -Recurse -File).Count
 if ($scratchFiles -lt 100) {
     Write-Host "FATAL: the scratch tree has only $scratchFiles files; every mutation would pass vacuously"
