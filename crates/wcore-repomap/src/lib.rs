@@ -24,7 +24,7 @@ pub use scope::{ScopeEntry, ScopeIdentity, normalize_rel, scope_files};
 pub use search::{
     Hit, Modality, ModalityRank, SearchOutcome, SearchQuery, Staleness, search, semantic_status,
 };
-pub use store::{FileRecord, IndexStats, IndexStore};
+pub use store::{FileRecord, IndexStats, IndexStore, VerifyReport};
 
 use std::fs;
 use std::path::Path;

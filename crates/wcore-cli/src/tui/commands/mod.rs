@@ -214,7 +214,7 @@ impl CommandRegistry {
             Command::new(
                 "/repomap",
                 ContextMemory,
-                "ask about this codebase (build / refresh the symbol index)",
+                "ask about this codebase (persistent index: `wayland-core index`)",
                 false,
             ),
             Command::new(

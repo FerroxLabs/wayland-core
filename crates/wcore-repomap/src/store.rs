@@ -103,6 +103,40 @@ pub struct IndexStats {
     pub scope_changed: bool,
 }
 
+/// The result of [`IndexStore::verify`] — how far the store has drifted from
+/// the working tree, without changing either.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct VerifyReport {
+    /// Records the store holds.
+    pub records: u64,
+    /// Files the scope walk currently finds.
+    pub in_scope: u64,
+    /// In-scope files whose bytes differ from the recorded content hash.
+    pub changed: u64,
+    /// In-scope files the store has no record for.
+    pub missing_from_store: u64,
+    /// Records whose file is no longer in scope or no longer readable.
+    pub missing_from_disk: u64,
+    /// The store's recorded scope identity no longer matches the working
+    /// tree.
+    pub scope_drifted: bool,
+}
+
+impl VerifyReport {
+    /// True only when the store describes the working tree exactly.
+    ///
+    /// Scope drift counts as disagreement. A store built on another branch
+    /// may hold byte-identical records and still be answering about a
+    /// different checkout than the operator is looking at.
+    pub fn agrees(&self) -> bool {
+        self.changed == 0
+            && self.missing_from_store == 0
+            && self.missing_from_disk == 0
+            && !self.scope_drifted
+    }
+}
+
 /// One stored file record, as the store holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -537,6 +571,62 @@ impl IndexStore {
         self.set_meta("root", &self.root.to_string_lossy())?;
         self.set_meta("built_at_unix_secs", &now.to_string())?;
         Ok(stats)
+    }
+
+    /// Compare the store against the working tree **without modifying it**.
+    ///
+    /// The read-only counterpart of [`IndexStore::refresh`]: it answers "does
+    /// this index still describe what is on disk?" for an operator who needs
+    /// the answer before deciding to rebuild. It uses the same size-and-mtime
+    /// shortcut, so a store that is genuinely current costs no file reads;
+    /// only entries the shortcut flags are opened and hashed, which is what
+    /// keeps a false "unchanged" from being reported for a file whose mtime
+    /// moved but whose bytes did not.
+    ///
+    /// # Errors
+    ///
+    /// - [`RepoMapError::Root`] when the root can no longer be canonicalised.
+    /// - [`RepoMapError::Store`] on any database failure.
+    pub fn verify(&self, opts: &IndexOptions) -> Result<VerifyReport, RepoMapError> {
+        let entries = scope_files(&self.root, opts)?;
+        let mut rows = self.load_index_rows()?;
+        let mut report = VerifyReport {
+            records: rows.len() as u64,
+            in_scope: entries.len() as u64,
+            scope_drifted: self.scope_drifted()?,
+            ..VerifyReport::default()
+        };
+
+        for entry in &entries {
+            match rows.remove(&entry.key) {
+                None => report.missing_from_store += 1,
+                Some(row) => {
+                    if row.size_bytes == entry.size_bytes
+                        && row.mtime_unix_nanos == entry.mtime_unix_nanos
+                    {
+                        continue;
+                    }
+                    // The cheap check disagreed; only the hash can say
+                    // whether the CONTENT actually moved.
+                    let current = if entry.size_bytes > opts.max_file_bytes {
+                        oversize_hash(entry.size_bytes)
+                    } else {
+                        match hash_file_on_disk(&entry.abs_path) {
+                            Ok(hash) => hash,
+                            Err(_) => {
+                                report.missing_from_disk += 1;
+                                continue;
+                            }
+                        }
+                    };
+                    if current != row.content_hash {
+                        report.changed += 1;
+                    }
+                }
+            }
+        }
+        report.missing_from_disk += rows.len() as u64;
+        Ok(report)
     }
 
     fn load_index_rows(&self) -> Result<HashMap<String, IndexRow>, RepoMapError> {

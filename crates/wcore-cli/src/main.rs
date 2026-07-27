@@ -615,6 +615,11 @@ enum TopCmd {
     /// cancel. Every operation prints a machine-observable `F23_SESSION=`
     /// token to STDOUT and uses the exit-code map documented in `session_cmd`.
     Session(wcore_cli::session_cmd::SessionArgs),
+    /// F23-06 (Phase 23B): the persistent repository index — `build`,
+    /// `status`, `search` and `verify`. Every verb prints greppable
+    /// `F23_INDEX=` lines to STDOUT; `verify` exits 6 when the store
+    /// disagrees with the working tree.
+    Index(wcore_cli::index_cmd::IndexArgs),
     /// ForgeFlows: validate / list / run saved `.ron` workflows from
     /// `.wayland/workflows/`.
     #[command(visible_alias = "forgeflows")]
@@ -1209,6 +1214,10 @@ async fn run() -> anyhow::Result<ExitCode> {
             // for a first-run user with no provider key — the same contract the
             // root `--list-sessions` flag already honours.
             TopCmd::Session(args) => wcore_cli::session_cmd::run(args),
+            // F23-06: dispatched beside `session` and before `Config::resolve`
+            // for the same reason — indexing and searching a checkout needs no
+            // provider credential.
+            TopCmd::Index(args) => wcore_cli::index_cmd::run(args),
             TopCmd::Workflow { cmd } => match wcore_cli::workflow::run(cmd).await {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(e) => {
