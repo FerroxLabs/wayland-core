@@ -786,25 +786,48 @@ pub fn approval_no_channel_canary() -> ProbeResult {
     }
 }
 
-/// The budget-family canary required by census section 8: the `Some(..)` legs
-/// of depth/time/token/cost are protected in part by the absence of a request
-/// channel, because every production `sub_budget` caller passes `None`. This
-/// reports the day a production caller starts forwarding a child-supplied
-/// override.
+/// The budget-family canary required by census section 8. Its stated job is to
+/// "report the day a production caller starts forwarding a child-supplied
+/// override".
+///
+/// **That day arrived on 2026-07-27, and this canary missed it**, because it
+/// matched only the literal spelling `sub_budget(Some(` while the production
+/// caller landed as `sub_budget_narrowed(..)`. For one grading cycle it kept
+/// reporting "NO-CHANNEL canary intact" while a live, LLM-reachable
+/// sub-allocation channel existed and was enforced. A canary keyed to one
+/// spelling of the thing it watches is a canary that reports on the spelling.
+///
+/// It now matches either spelling, so a trip is truthful. **Tripped is the
+/// expected and correct state from 2026-07-27 onward** — it no longer means
+/// "something went wrong", it means the depth/time/token/cost legs are no
+/// longer protected by the *absence* of a request channel and must be graded
+/// on enforcement instead. The live differential in
+/// `crates/wcore-cli/tests/f21_02_child_budget_live.rs` is what carries that
+/// now; the revert-to-vacuous control there collapses 3 served turns back to 8.
 pub fn budget_no_channel_canary() -> CanaryState {
     // `wcore-budget` is the defining crate: its own `#[cfg(test)]` module at
     // execution.rs:920 exercises `sub_budget(Some(..))`, which is the fixture
     // that proves the override works at all, not a production request channel.
-    let callers = production_sites_mentioning("sub_budget(Some(", "crates/wcore-budget/");
+    let mut callers = production_sites_mentioning("sub_budget(Some(", "crates/wcore-budget/");
+    callers.extend(production_sites_mentioning(
+        "sub_budget_narrowed(",
+        "crates/wcore-budget/",
+    ));
+    callers.sort();
+    callers.dedup();
+
     if callers.is_empty() {
         CanaryState::Intact(
-            "NO-CHANNEL canary intact: no crates/*/src file forwards a Some(..) override into \
-             sub_budget"
+            "NO-CHANNEL canary intact: no crates/*/src file forwards a child-supplied override \
+             into sub_budget or sub_budget_narrowed. NOTE: as of 2026-07-27 this state is a \
+             REGRESSION, not a pass -- the sub-allocation channel is meant to exist."
                 .to_owned(),
         )
     } else {
         CanaryState::Tripped(format!(
-            "a production file now forwards a Some(..) budget override into sub_budget: {}",
+            "a production file forwards a child-supplied budget override: {}. This is EXPECTED \
+             from 2026-07-27: the vacuity protection is intentionally gone, so grade the budget \
+             legs on enforcement (see f21_02_child_budget_live.rs), not on absence of a channel.",
             callers.join(", ")
         ))
     }
