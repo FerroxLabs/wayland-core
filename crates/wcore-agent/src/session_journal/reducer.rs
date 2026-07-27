@@ -238,6 +238,7 @@ fn apply_goal_event(
                     opened_at_unix_ms: *opened_at_unix_ms,
                     last_transition_seq: seq,
                     last_transition_checksum: checksum.to_owned(),
+                    tasks: BTreeMap::new(),
                 },
             );
         }
@@ -471,16 +472,20 @@ fn apply_goal_task_transition(
     }
 
     match transition {
+        // `budget_reservation_id` is deliberately discarded here and read from
+        // `reservation` above instead: the committed BudgetState had to be
+        // looked up before the goal was mutably borrowed, and binding the id
+        // twice is how the two copies drift.
         GoalTaskTransition::Claimed {
             epoch,
             worker_id,
-            budget_reservation_id,
+            budget_reservation_id: _,
             lease_expires_unix_ms,
         }
         | GoalTaskTransition::WorkspaceHandedOff {
             to_epoch: epoch,
             to_worker: worker_id,
-            budget_reservation_id,
+            budget_reservation_id: _,
             lease_expires_unix_ms,
             ..
         } => {
