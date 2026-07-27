@@ -23,16 +23,21 @@
 // v5: adds the `last_latency_ms` column to `procedures` so `record_use`
 // can persist the latency measured by `ProceduralSkillTelemetrySink`
 // (previously underscore-ignored, leaving regression detection blind).
+//
+// v6 (F23-03): adds `memory_privacy_scope` and `memory_retention` — the
+// operator's controls over what may be recalled into a prompt. Both are
+// keyed by the same (partition, tier) grid cell the access gate governs.
 
 use crate::error::{MemoryError, Result};
 
-pub const CURRENT_VERSION: u32 = 5;
+pub const CURRENT_VERSION: u32 = 6;
 
 const V1_SQL: &str = include_str!("v1.sql");
 const V2_SQL: &str = include_str!("v2_evolved_prompts.sql");
 const V3_SQL: &str = include_str!("v3_vec_episodes.sql");
 const V4_SQL: &str = include_str!("v4_vec_episodes_dim.sql");
 const V5_SQL: &str = include_str!("v5_procedure_latency.sql");
+const V6_SQL: &str = include_str!("v6_recall_control.sql");
 
 /// Apply all pending migrations on the given connection.
 pub fn apply_migrations(conn: &mut rusqlite::Connection) -> Result<()> {
@@ -55,6 +60,9 @@ pub fn apply_migrations(conn: &mut rusqlite::Connection) -> Result<()> {
     }
     if installed < 5 {
         apply_v5(conn)?;
+    }
+    if installed < 6 {
+        apply_v6(conn)?;
     }
     Ok(())
 }
@@ -177,6 +185,20 @@ fn apply_v5(conn: &mut rusqlite::Connection) -> Result<()> {
         version: 5,
         source: e,
     })?;
+    tx.commit().map_err(MemoryError::Db)?;
+    Ok(())
+}
+
+fn apply_v6(conn: &mut rusqlite::Connection) -> Result<()> {
+    // v6 is two regular tables plus the version bump — all transactional,
+    // so a crash mid-migration leaves either both tables and the bump or
+    // neither. The `IF NOT EXISTS` guards keep it idempotent regardless.
+    let tx = conn.transaction().map_err(MemoryError::Db)?;
+    tx.execute_batch(V6_SQL)
+        .map_err(|e| MemoryError::Migration {
+            version: 6,
+            source: e,
+        })?;
     tx.commit().map_err(MemoryError::Db)?;
     Ok(())
 }

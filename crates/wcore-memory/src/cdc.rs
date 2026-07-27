@@ -342,6 +342,50 @@ impl CdcWriter {
             serde_json::json!({"new_score": new_score}),
         )
     }
+
+    // ---- F23-03 operator control paths (2) ----
+    //
+    // A forget is a DELETE, which every other mutation path in this file is
+    // not. Without a changelog entry a downstream consumer replaying the CDC
+    // stream would see a row that simply stopped appearing and could not
+    // distinguish "deleted" from "never replicated". The payload carries the
+    // actor and NO content: the whole point of a forget is that the content
+    // stops existing, so echoing it into an append-only changelog would
+    // defeat the operation.
+
+    pub fn append_forget(
+        &self,
+        tier: Tier,
+        partition: crate::v2_types::Partition,
+        id: &str,
+        actor: &str,
+    ) -> Result<()> {
+        self.append(
+            tier,
+            partition.as_str(),
+            "forget",
+            Some(id.to_string()),
+            Some("operator".to_string()),
+            serde_json::json!({"actor": actor}),
+        )
+    }
+
+    pub fn append_correction(
+        &self,
+        tier: Tier,
+        partition: crate::v2_types::Partition,
+        id: &str,
+        actor: &str,
+    ) -> Result<()> {
+        self.append(
+            tier,
+            partition.as_str(),
+            "correct",
+            Some(id.to_string()),
+            Some("operator".to_string()),
+            serde_json::json!({"actor": actor}),
+        )
+    }
 }
 
 fn now_secs() -> i64 {
