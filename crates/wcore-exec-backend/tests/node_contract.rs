@@ -99,8 +99,15 @@ fn pair_node(
     let challenge = PairingChallenge::new("controller-key-id");
     let proof = prove_challenge(&key, &identity, &challenge, ad.clone()).unwrap();
     let verified = verify_proof(&challenge, &proof).unwrap();
-    reg.record_paired(identity, verified, "ssh", "host.example", ad)
-        .unwrap()
+    reg.record_paired(
+        identity,
+        verified,
+        "ssh",
+        "host.example",
+        "wayland-core",
+        ad,
+    )
+    .unwrap()
 }
 
 /// A sealed, verifiable receipt attributed to `node`.
@@ -392,6 +399,7 @@ fn a_revoked_node_cannot_re_pair_itself_but_an_operator_can() {
             verified,
             "ssh",
             "host.example",
+            "wayland-core",
             ad.clone(),
         )
         .unwrap_err();
@@ -461,8 +469,15 @@ fn an_unsupported_version_refuses_work_at_the_registry() {
     let challenge = PairingChallenge::new("controller-key-id");
     let proof = prove_challenge(&key, &identity, &challenge, ad.clone()).unwrap();
     let verified = verify_proof(&challenge, &proof).unwrap();
-    reg.record_paired(identity, verified, "ssh", "host.example", ad)
-        .unwrap();
+    reg.record_paired(
+        identity,
+        verified,
+        "ssh",
+        "host.example",
+        "wayland-core",
+        ad,
+    )
+    .unwrap();
 
     let verdict = reg.evaluate_submission("gamma").unwrap();
     assert!(!verdict.is_accepted());
@@ -633,7 +648,7 @@ fn attribution_survives_every_disruption_the_criterion_names() {
     let challenge = PairingChallenge::new("controller-key-id");
     let proof = prove_challenge(&key, &future, &challenge, ad.clone()).unwrap();
     let verified = verify_proof(&challenge, &proof).unwrap();
-    reg.record_paired(future, verified, "ssh", "host.example", ad)
+    reg.record_paired(future, verified, "ssh", "host.example", "wayland-core", ad)
         .unwrap();
     assert!(
         !reg.evaluate_submission("alpha").unwrap().is_accepted(),

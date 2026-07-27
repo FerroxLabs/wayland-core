@@ -230,6 +230,7 @@ mod tests {
                 node_key().verifying_key(),
                 "ssh",
                 "host.example",
+                "wayland-core",
                 NodeAdvertisement::empty("alpha"),
             )
             .unwrap();
@@ -432,6 +433,7 @@ mod tests {
                 node_key().verifying_key(),
                 "ssh",
                 "host.example",
+                "wayland-core",
                 NodeAdvertisement::empty("alpha"),
             )
             .unwrap();

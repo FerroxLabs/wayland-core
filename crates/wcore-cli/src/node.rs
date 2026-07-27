@@ -61,6 +61,12 @@ pub enum NodeCmd {
         #[arg(long)]
         advertise: bool,
     },
+    /// Print THIS host's FRESH capability advertisement, from a real probe.
+    /// The far-end half of `node probe`.
+    Advertise {
+        #[arg(long, default_value = "self")]
+        name: String,
+    },
     /// Pair a remote host as a node, proving its identity before recording it.
     Pair {
         /// The name this controller will know the node by.
@@ -124,6 +130,7 @@ pub async fn run(args: NodeArgs) -> Result<()> {
             controller_key_id,
             advertise,
         } => identity(&name, challenge.as_deref(), &controller_key_id, advertise).await,
+        NodeCmd::Advertise { name } => advertise(&name).await,
         NodeCmd::Pair {
             name,
             target,
@@ -178,6 +185,17 @@ async fn identity(
     }
 }
 
+/// Far-end half of `node probe`: a FRESH advertisement, from a real probe of
+/// this host's backends.
+async fn advertise(name: &str) -> Result<()> {
+    let ad = NodeAdvertisement::observe(name, reference_budget()).await?;
+    if let Some(leak) = ad.leaks_host_detail() {
+        bail!("refusing to advertise: {leak}");
+    }
+    println!("{}", serde_json::to_string(&ad)?);
+    Ok(())
+}
+
 /// Controller half of pairing.
 async fn pair(name: &str, target: &str, remote_bin: &str) -> Result<()> {
     let (controller_identity, _) = local_identity("controller")?;
@@ -217,6 +235,7 @@ async fn pair(name: &str, target: &str, remote_bin: &str) -> Result<()> {
         key,
         "ssh",
         target,
+        remote_bin,
         proof.advertisement.clone(),
     )?;
 
@@ -290,7 +309,10 @@ fn show(name: &str) -> Result<()> {
     println!("key id      {}", record.identity.key_id);
     println!("version     {}", record.identity.contract_version);
     println!("verdict     {}", record.version_verdict().label());
-    println!("transport   {} → {}", record.transport, record.target);
+    println!(
+        "transport   {} → {} ({})",
+        record.transport, record.target, record.remote_bin
+    );
     println!(
         "state       {}",
         match &record.state {
@@ -332,9 +354,13 @@ async fn probe(name: &str) -> Result<()> {
         .ok_or_else(|| anyhow!("no node named '{name}' is paired"))?;
 
     let before = describe_backends(&record.advertisement);
+    // The binary recorded at PAIRING time, not a hardcoded name. Assuming
+    // `wayland-core` is on the far end's PATH made a healthy node report
+    // OFFLINE — and an offline node then refuses work, so a wrong guess became
+    // a refusal. Found by running this against a real far end.
     let result = far_end_call(
         &record.target,
-        "wayland-core",
+        &record.remote_bin,
         &["node", "identity", "--name", name, "--advertise"],
     )
     .await;

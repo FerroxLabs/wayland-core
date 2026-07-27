@@ -81,6 +81,14 @@ pub struct NodeRecord {
     /// How the controller reaches it — an ssh target today.
     pub transport: String,
     pub target: String,
+    /// Where `wayland-core` lives ON THE FAR END.
+    ///
+    /// Recorded at pairing time because `probe` has to invoke the same binary
+    /// pairing did. Hardcoding a name and hoping it is on the far end's PATH
+    /// makes a perfectly healthy node report OFFLINE — and an offline node then
+    /// refuses work, so the false answer becomes a refusal. Found live.
+    #[serde(default = "default_remote_bin")]
+    pub remote_bin: String,
     pub state: NodeState,
     pub paired_unix_ms: u64,
     pub liveness: Liveness,
@@ -174,12 +182,14 @@ impl NodeRegistry {
     /// Takes the verified key by value so an unverified pairing cannot reach
     /// this function by accident — there is no path that records a node
     /// without something having produced a `VerifyingKey` from a real proof.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_paired(
         &self,
         identity: NodeIdentity,
         verified_key: ed25519_dalek::VerifyingKey,
         transport: &str,
         target: &str,
+        remote_bin: &str,
         advertisement: NodeAdvertisement,
     ) -> Result<NodeRecord> {
         use base64::Engine as _;
@@ -205,6 +215,7 @@ impl NodeRegistry {
                 .encode(verified_key.as_bytes()),
             transport: transport.to_string(),
             target: target.to_string(),
+            remote_bin: remote_bin.to_string(),
             state: NodeState::Paired,
             paired_unix_ms: now_unix_ms(),
             liveness: Liveness::Unknown,
@@ -338,6 +349,13 @@ impl NodeRegistry {
     }
 }
 
+/// The far-end binary name assumed for records written before `remote_bin`
+/// existed. Kept as a named function rather than an inline literal so the
+/// migration default is greppable.
+fn default_remote_bin() -> String {
+    "wayland-core".to_string()
+}
+
 /// Where the node registry lives, for operator-facing messages.
 pub fn registry_path(root: &Path) -> PathBuf {
     root.join("nodes.json")
@@ -378,6 +396,7 @@ mod tests {
             k.verifying_key(),
             "ssh",
             "host.example",
+            "wayland-core",
             NodeAdvertisement::empty(node_id),
         )
         .unwrap()
@@ -437,6 +456,7 @@ mod tests {
                 k.verifying_key(),
                 "ssh",
                 "host.example",
+                "wayland-core",
                 NodeAdvertisement::empty("alpha"),
             )
             .unwrap_err();
@@ -502,6 +522,7 @@ mod tests {
             k.verifying_key(),
             "ssh",
             "host.example",
+            "wayland-core",
             NodeAdvertisement::empty("alpha"),
         )
         .unwrap();
