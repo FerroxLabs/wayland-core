@@ -1,0 +1,20 @@
+PROCESS IDENTITY — is a naive liveness probe sound, or does it need a start-time binding?
+Measured live on both real hosts. Each probe started a throwaway process, read
+its identity token twice, started a second process, and read that one.
+
+--- hetzner-dsm (Linux) ---
+pid1=449745 read1=1127179998 read2=1127179998
+pid2=449768 read1=1127180018
+PROCESS-IDENTITY: host=hetzner-dsm binding=available field=/proc/<pid>/stat:22 starttime_ticks
+
+--- seandesktop (Windows) ---
+pid1=44528 read1=639207404679578151 read2=639207404679578151
+pid2=43300 read1=639207404684154029
+PROCESS-IDENTITY: host=seandesktop binding=available field=Win32 process creation time (Get-Process StartTime.Ticks)
+
+VERDICT: the binding os-process-liveness needs to be SOUND is available on BOTH
+platforms - stable across repeated reads of the same process, and different for
+a different process. So that option's soundness con is answerable and is NOT a
+reason to reject it. What the measurement does NOT do is give it a fencing half:
+a start-time binding tells you whether the owner is alive, not whether a write
+arriving now came from the current owner.

@@ -1,0 +1,32 @@
+FENCING SURFACE — effect-producing write paths a worker can reach on behalf of a task
+Measured against the tree at lane/22-goal-kernel (91979ec8). Citations verified
+to resolve to a real line in a real file at that commit.
+
+This is a FOCUSED enumeration of the principal seams, not an exhaustive audit of
+every write in the workspace. Stated plainly so the count is not read as
+stronger than it is: the review-only subset below is the option's real price and
+it is a lower bound, not an upper one.
+
+FENCE-PATH: child-spawn seam cite=crates/wcore-agent/src/spawner.rs:75 structural_guard=possible
+FENCE-PATH: child-budget durable append cite=crates/wcore-agent/src/budget_authority.rs:559 structural_guard=possible
+FENCE-PATH: worker heartbeat/status file write cite=crates/wcore-swarm/src/heartbeat.rs:56 structural_guard=review-only
+FENCE-PATH: blackboard child outcome write cite=crates/wcore-swarm/src/bridge.rs:149 structural_guard=possible
+FENCE-PATH: blackboard child lineage write cite=crates/wcore-swarm/src/bridge.rs:130 structural_guard=possible
+FENCE-PATH: workspace reservation accounting cite=crates/wcore-swarm/src/worktree_manager.rs:235 structural_guard=review-only
+
+COUNT: 6 enumerated, 4 structurally guardable, 2 review-only.
+
+WHY THE TWO REVIEW-ONLY ONES MATTER MOST:
+The heartbeat/status write and the workspace reservation accounting are both
+reached from inside a worker's own checkout, by a process that already holds the
+directory. Neither currently passes through a value that a fencing token could
+be attached to by construction, so making them refuse a superseded owner would
+depend on a contributor remembering. That is precisely the "silent hole" the
+lease-with-fencing-token option's own con names.
+
+A NOTE THE PANEL SHOULD WEIGH: the durable Goal transition path added in this
+lane (crates/wcore-agent/src/goal/kernel.rs) is already structurally fenced by
+construction - SessionJournal::append refuses every Goal variant, so the kernel
+is the only writer. That is an existence proof that structural_guard=possible is
+achievable on this codebase rather than aspirational, and it is the pattern any
+task-claim fencing would follow.

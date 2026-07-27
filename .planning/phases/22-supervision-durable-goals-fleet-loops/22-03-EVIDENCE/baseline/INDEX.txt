@@ -1,0 +1,22 @@
+PRE-LEDGER BASELINE INDEX — Phase 22 plan 03 Task 1
+Linux legs measured by the previous lane (22-03-CLAIM-MODEL.md), real release
+binary ba4e541e, 8 workers, kill -9 on the process group at 2026-07-27T01:21:45Z.
+
+BASELINE-LEG: linux RAN kill=SIGKILL-process-group evidence=22-03-CLAIM-MODEL.md
+BASELINE-LEG: windows NOT-RUN reason=two attempts; the second failed on the harness (PowerShell Start-Process -ArgumentList split "cmd.exe /c worker.cmd" so /c reached the CLI as a stray argument and no worker started), the first killed at 14s before any checkout materialized. Recorded as unmeasured rather than inferred from Linux.
+
+REVOCATION OPTIONS.
+The two window figures are DESIGN PARAMETERS constrained by the measurements in
+../decision/, not observations of an existing implementation. Labelled as such
+here and in the bundle the panel judged, because inventing measured-looking
+numbers is the specific forgery this plan names.
+
+OPTION: lease-with-fencing-token dup_window_ms=30000 lost_window_ms=0 fencing=yes refuses_late_write=the ledger commits a monotonic claim epoch per task and a write presenting an older epoch is refused atomically at the durable append, bounding duplicate EFFECT at zero however long the superseded owner lived
+OPTION: heartbeat-liveness dup_window_ms=3000 lost_window_ms=0 fencing=no refuses_late_write=nothing refuses it; a wedged-then-recovered owner's write is indistinguishable from the current owner's and lands
+OPTION: os-process-liveness dup_window_ms=1000 lost_window_ms=0 fencing=no refuses_late_write=nothing refuses it; the probe establishes only that a pid plus start-time pair is gone, not that an arriving write came from the current owner
+OPTION: escalate dup_window_ms=0 lost_window_ms=0 fencing=no refuses_late_write=nothing is built so nothing refuses anything
+
+BUDGET RE-ENTRY SEAM (named from source): BudgetAuthorityCoordinator::build_and_append
+at crates/wcore-agent/src/budget_authority.rs:559, appending through
+SessionJournal::append_built_from_head. The Goal kernel added in lane/22-goal-kernel
+re-enters this primitive rather than minting a second one.

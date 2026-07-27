@@ -1,0 +1,126 @@
+You are auditing an engineering decision for a Rust multi-agent CLI (wayland-core).
+Answer on the evidence below. End your reply with ONE line reading
+PANEL_POSITION= followed by exactly one of the four option ids. Give at least a
+substantial paragraph of reasoning first; a one-word answer is not an audit.
+
+=== THE QUESTION (verbatim) ===
+What revokes a claim held by a worker that may be dead, and what refuses that
+worker's late write if it was merely slow?
+
+=== CONTEXT ===
+A "Fleet" fans work out to N parallel workers, each in its own git worktree. We
+are adding a durable task ledger so claims and dependencies survive
+kill/restart/reassignment WITHOUT duplicate execution or lost completion. A claim
+held by a process that has died looks exactly like a claim held by a process that
+is wedged. Every revocation scheme trades a duplicate-execution window against a
+stall. The second half of the question determines whether the requirement can be
+met at all: a revocation with no fencing has an unbounded duplicate-execution
+window regardless of how short its lease is.
+
+=== THE FOUR OPTIONS (verbatim, in rotated order) ===
+
+[id: heartbeat-liveness]
+NAME: Heartbeat with a missed-beat threshold: an owner that stops beating loses its claim
+PROS: Detects a wedged owner that a lease alone would keep waiting for; cheap to
+observe; maps naturally onto the existing worker status surface
+CONS: Answers the revocation question but NOT the fencing question, so a
+wedged-then-recovered owner can still land a late write; on a suspended machine
+every worker misses every beat and the whole fleet reassigns at once; needs a
+fencing mechanism beside it to meet the criterion
+
+[id: escalate]
+NAME: Escalate - the measured baseline shows the criterion cannot be met without a mechanism outside this plan's scope
+PROS: Refuses to ship a claim model whose duplicate-execution window is unbounded
+but unstated; keeps the gap visible
+CONS: Success Criterion 2 stays open
+
+[id: os-process-liveness]
+NAME: Probe the operating system for the owning process rather than inferring liveness
+PROS: Highest-confidence liveness signal available and it does not depend on the
+owner cooperating; on Windows the job-object containment already established by
+earlier work makes descendant liveness observable rather than guessed
+CONS: Only valid when the owner is a local process - it does not generalize to a
+reassignment across hosts, which later phases will want; process-identifier reuse
+makes a naive probe unsafe and it needs a start-time or handle binding to be
+sound; still answers only the revocation half
+
+[id: lease-with-fencing-token]
+NAME: Time-bounded lease plus a monotonic fencing token: a superseded owner's write is refused because its token is stale
+PROS: The only option that bounds duplicate EFFECT rather than merely duplicate
+execution, which is what the requirement actually asks for; the token is a small
+durable value that fits the Task record; it degrades correctly when a clock jumps
+or a machine is suspended, because the refusal is ordering-based rather than
+time-based
+CONS: Every effect-producing write path must present its token, so the fencing
+surface is wider than a lease alone; a path that forgets to present it is a
+silent hole and needs a structural guard rather than review discipline
+
+=== MEASURED PRE-LEDGER BASELINE (real binary, both platforms) ===
+LINUX (hetzner-dsm), real release binary, 8 workers killed mid-flight with
+kill -9 on the process group at 2026-07-27T01:21:45Z:
+  transaction dirs left behind = 8; effect.log files = 8; START lines = 8;
+  DONE lines = 0; heartbeat .swarm-status.json files = 0
+  bwrap containers before kill = 8, after = 0
+  worker shells before kill = 17, after = 0
+  DONE lines after waiting past the full sleep = 0
+  => on Linux an uncatchable process-group kill REAPS THE WHOLE TREE. No orphan
+     completes work nobody is tracking. The duplicate-execution risk on this
+     platform therefore comes from RE-RUNNING LOST WORK, not from a superseded
+     owner still running.
+  Restart after the kill: the product detected the crash sentinel and then
+  REFUSED to run - "dispatch aggregate workspace budget is already committed" -
+  because 8 orphaned reservations exhaust the aggregate budget and nothing calls
+  cleanup_all() at dispatch. A killed fanout currently cannot be restarted at all.
+WINDOWS (seandesktop): kill leg NOT VALIDLY RUN. Two attempts; the second failed
+on the harness (PowerShell ArgumentList split cmd.exe /c worker.cmd), not on the
+product. Recorded as unmeasured rather than inferred from Linux.
+
+ALSO MEASURED: workers fail as a function of elapsed run time - 4/4 succeed at
+1s, 1/4 at 10s, with "invalid retained workspace reservation". Reproduced on
+Windows. Not root-caused. Real fanout workers run for minutes.
+
+=== OPTION WINDOWS (dup_window_ms / lost_window_ms) ===
+These are DESIGN PARAMETERS constrained by the measurements below, not
+observations of an existing implementation - stated as such rather than dressed
+up as measurements.
+OPTION: lease-with-fencing-token dup_window_ms=30000 lost_window_ms=0 fencing=yes refuses_late_write=the ledger commits a monotonic claim epoch per task; a write presenting an epoch older than the committed one is refused at the durable append, so duplicate EFFECT is bounded at 0 regardless of how long the superseded owner lived
+OPTION: heartbeat-liveness dup_window_ms=3000 lost_window_ms=0 fencing=no refuses_late_write=nothing; a wedged-then-recovered owner's write is indistinguishable from the current owner's and lands
+OPTION: os-process-liveness dup_window_ms=1000 lost_window_ms=0 fencing=no refuses_late_write=nothing for a local owner that was alive but wedged; the probe only establishes that a pid+start-time pair is gone
+OPTION: escalate dup_window_ms=0 lost_window_ms=0 fencing=no refuses_late_write=nothing is built, so nothing refuses anything
+
+=== MEASUREMENT 1: FENCING SURFACE (from the tree, citations verified) ===
+FENCE-PATH: child-spawn seam cite=crates/wcore-agent/src/spawner.rs:75 structural_guard=possible
+FENCE-PATH: child-budget durable append cite=crates/wcore-agent/src/budget_authority.rs:559 structural_guard=possible
+FENCE-PATH: worker heartbeat/status file write cite=crates/wcore-swarm/src/heartbeat.rs:56 structural_guard=review-only
+FENCE-PATH: blackboard child outcome write cite=crates/wcore-swarm/src/bridge.rs:149 structural_guard=possible
+FENCE-PATH: blackboard child lineage write cite=crates/wcore-swarm/src/bridge.rs:130 structural_guard=possible
+FENCE-PATH: workspace reservation accounting cite=crates/wcore-swarm/src/worktree_manager.rs:235 structural_guard=review-only
+COUNT: 6 enumerated, 4 structurally guardable, 2 review-only. Focused
+enumeration, not exhaustive - the review-only subset is a lower bound.
+EXISTENCE PROOF: the durable Goal transition path just added to this codebase is
+already structurally fenced - the journal's public append refuses every Goal
+variant, so one kernel type is the only writer. structural_guard=possible is
+demonstrated on this codebase, not aspirational.
+
+=== MEASUREMENT 2: PROCESS IDENTITY (live, both hosts) ===
+PROCESS-IDENTITY: host=hetzner-dsm binding=available field=/proc/<pid>/stat:22 starttime_ticks
+PROCESS-IDENTITY: host=seandesktop binding=available field=Win32 process creation time (Get-Process StartTime.Ticks)
+Both stable across repeated reads of the same process and different for a
+different process. os-process-liveness CAN be made sound on both platforms. It
+still has no fencing half.
+
+=== MEASUREMENT 3: SUSPEND BEHAVIOR (live, Linux) ===
+SUSPEND-CLOCK: stopped_s=12 observed_advance_s=12 missed_beats=12 catchup_beats=12
+The monotonic clock advances THROUGH an OS-level stop, so a time-based lease held
+by a stopped worker expires on schedule; and a heartbeat scheme misses every beat
+(12 of 12), so any threshold below 12 reassigns the whole fleet at once. An
+ordering-based refusal is unaffected by either.
+
+=== WHAT YOU ARE DECIDING ===
+Pick the claim-revocation model to implement. Weigh especially: (a) the Linux
+baseline shows the kill reaps the tree, which weakens the "superseded owner still
+running" worry ON LINUX specifically; (b) the Windows kill behavior is UNMEASURED,
+so any argument that relies on descendants always dying is Linux-only; (c) two of
+six enumerated fence paths cannot be structurally guarded today.
+
+End with: PANEL_POSITION=<option id>

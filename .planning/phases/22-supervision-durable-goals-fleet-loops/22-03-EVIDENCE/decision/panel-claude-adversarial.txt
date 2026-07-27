@@ -1,0 +1,75 @@
+PANEL-CMD: internal adversarial pass by the executing agent, fed the same panel-prompt.txt, written and committed BEFORE reading any external member's reply so it is not anchored to an emerging consensus.
+
+I walked into this believing lease-with-fencing-token was obviously correct. It is
+the only option that bounds duplicate EFFECT, the requirement literally asks for
+"without duplicate execution or lost completion", and the suspend measurement
+supports its ordering-based-refusal pro. So that is the position I will argue
+AGAINST here.
+
+ARGUMENT 1 — the fencing token defends a hazard the only measured platform says
+does not occur. The Linux baseline is not ambiguous: 8 bwrap containers before
+the kill and 0 after, 17 worker shells before and 0 after, and 0 DONE lines even
+after waiting past the full worker sleep. An uncatchable process-group kill reaps
+the entire tree. There is no superseded owner still running to fence against.
+The claim-model record itself says this is "the opposite of the plan's stated
+worry". lease-with-fencing-token asks us to instrument six write paths - two of
+which the measurement says CANNOT be structurally guarded today - to refuse a
+write that, on the measured platform, no process is alive to make. That is a real
+cost paid against zero measured instances of the hazard.
+
+ARGUMENT 2 — and this is the sharper one - a PARTIALLY fenced system is worse
+than an honestly unfenced one. Four of six paths can be structurally guarded; two
+cannot. Ship that and the system acquires a property it does not have: engineers
+will reason "duplicate effects are refused" because the design says so, while the
+heartbeat write and the workspace reservation accounting still admit them. An
+unfenced heartbeat-liveness design at least forces its duplicate-effect window to
+be stated out loud and detected. The failure mode of a half-closed fence is
+misplaced confidence, and this program has already paid for exactly that once:
+F-1 shipped because the suite proved the fixture rather than the product, and
+everyone believed the coverage was real.
+
+ARGUMENT 3 — the case for escalate is stronger than it looks, and it is not
+cowardice. Success Criterion 2 says fleet claims survive kill/restart/reassignment.
+The measured baseline says a killed fanout CANNOT BE RESTARTED AT ALL: orphaned
+reservations exhaust the aggregate budget, nothing calls cleanup_all() at
+dispatch, and a human must delete .swarm-worktrees/ by hand (F-2, open). And
+workers fail as a function of elapsed run time - 4/4 at 1s but 1/4 at 10s - while
+real fanout workers run for minutes (F-3, open, not root-caused). A claim model
+layered over an executor that cannot restart and cannot run a worker for ten
+seconds is a model whose stated windows are fiction. Choosing any mechanism now
+produces a number nobody can honor.
+
+ARGUMENT 4 — os-process-liveness just got materially cheaper and its main
+objection died. Its soundness con was that "process-identifier reuse makes a
+naive probe unsafe and it needs a start-time or handle binding to be sound". The
+measurement answers that on BOTH hosts: /proc/<pid>/stat field 22 on Linux and
+Win32 creation time on Windows, each stable across reads and distinct per
+process. Combined with Argument 1's reap result, an OS probe that says "pid+start
+time is gone" is a genuine liveness verdict on a local owner, not an inference.
+For a single-host fleet - which is all this phase builds - that may simply be
+enough, at a fraction of the fencing surface.
+
+WHERE MY OWN ARGUMENT IS WEAKEST, stated so it can be weighed rather than hidden:
+Arguments 1 and 4 both lean on the Linux reap result, and the WINDOWS KILL LEG WAS
+NEVER VALIDLY RUN. Reasoning "descendants always die" from one platform is the
+precise error that produced F-1, where a race Windows happened to win was read as
+a race that was absent. Windows job-object teardown is a different mechanism, and
+a detached descendant surviving there would resurrect the superseded-owner hazard
+that Argument 1 dismisses. Argument 2 also cuts both ways: two unguardable paths
+is an argument for closing four and DETECTING on the other two, not necessarily
+for closing none. And Argument 3 proves the criterion cannot be CLOSED yet; it
+does not prove the mechanism cannot be CHOSEN yet, and choosing it now is what
+lets the ledger be built against a stated contract instead of an implicit one.
+
+On balance, and against my own case above: the escalate argument establishes that
+Success Criterion 2 cannot be closed in this state, which is true and should be
+reported - but escalate is defined as "the criterion cannot be met without a
+mechanism outside this plan's scope", and that is NOT what the evidence shows.
+The evidence shows two open defects inside scope, owned by another agent. That
+makes escalate the wrong instrument for a true observation. Between the
+remaining three, only one bounds duplicate effect on a platform whose kill
+behavior is still unmeasured, and unmeasured is exactly when you want the
+ordering-based refusal that does not depend on the platform's process semantics
+being what you assumed.
+
+PANEL_POSITION=lease-with-fencing-token

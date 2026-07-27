@@ -1,0 +1,28 @@
+SUSPEND BEHAVIOR — what does a stopped process observe when it resumes?
+Measured live on hetzner-dsm by SIGSTOPping a real process for 12s with a
+notional 1s beat interval, then SIGCONTing it.
+
+stopped_s=12 observed_advance_s=12 missed_beats=12 catchup_beats=12
+SUSPEND-CLOCK: stopped_s=12 observed_advance_s=12 missed_beats=12 catchup_beats=12
+
+WHAT THIS SETTLES, CONCRETELY:
+1. The monotonic clock advances THROUGH an OS-level stop. It is not paused with
+   the process. So a TIME-BASED lease held by a stopped worker expires on
+   schedule even though the worker did nothing wrong, and a suspended machine
+   expires every lease at once.
+2. A heartbeat scheme misses EVERY beat across the stop - 12 of 12 here. With
+   any missed-beat threshold below 12 the whole fleet is declared dead and
+   reassigned simultaneously. That is the heartbeat option's mass-reassignment
+   con, measured rather than argued.
+3. Neither effect touches an ORDERING-based refusal. A monotonic fencing token
+   compares "is this token older than the one the ledger has committed", which
+   is unaffected by how much wall time passed while the owner was stopped. The
+   lease-with-fencing-token pro that it "degrades correctly when a machine is
+   suspended, because the refusal is ordering-based rather than time-based" is
+   therefore supported by this measurement.
+
+CAVEAT STATED HONESTLY: SIGSTOP/SIGCONT models a suspended or descheduled
+process. It is not a full machine suspend-to-RAM, where the wall clock jumps but
+the monotonic clock's behavior is platform-specific. The direction of the result
+is the same and the mass-reassignment conclusion holds for both, but the exact
+observed_advance for a real S3 suspend was not measured.
