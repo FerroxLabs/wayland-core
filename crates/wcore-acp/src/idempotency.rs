@@ -165,7 +165,7 @@ mod tests {
         // Effects are counted here rather than assumed: the contract is about
         // how many times the caller ACTS, not about what the ledger says.
         let mut effects = 0;
-        let mut issue = |ledger: &mut CommandLedger<Cmd, String>, effects: &mut i32| match ledger
+        let issue = |ledger: &mut CommandLedger<Cmd, String>, effects: &mut i32| match ledger
             .classify("req-1", &c)
         {
             LedgerOutcome::Fresh => {

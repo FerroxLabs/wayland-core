@@ -51,7 +51,7 @@ use clap::{Args, Subcommand};
 // shared seam concurrent lanes conflict on.
 use wcore_channels::ChannelManager;
 use wcore_channels::health::ChannelHealth;
-use wcore_channels::probe::{ProbeOutcome, ProbeReport};
+use wcore_channels::probe::ProbeReport;
 use wcore_channels_registry::wcore_channels;
 
 /// The file the RUNNING gateway republishes its observed channel health into.
@@ -490,6 +490,7 @@ fn reload() -> Result<()> {
 mod tests {
     use super::*;
     use wcore_channels::health::HealthState;
+    use wcore_channels::probe::ProbeOutcome;
 
     fn sample() -> ChannelHealthReport {
         ChannelHealthReport {
