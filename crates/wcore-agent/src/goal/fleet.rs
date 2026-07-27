@@ -233,6 +233,16 @@ impl GoalFleetDriver {
         &self.goal
     }
 
+    /// The journal handle this driver appends through.
+    ///
+    /// Exposed so a caller that must commit a reservation outside a wave uses
+    /// the SAME handle — and therefore the same writer lock — rather than
+    /// opening a second one beside it.
+    #[must_use]
+    pub fn journal_handle(&self) -> SessionJournal {
+        self.journal.clone()
+    }
+
     /// Authorize the Goal. Thin passthrough so a surface needs one handle.
     pub fn open(
         &self,
