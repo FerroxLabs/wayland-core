@@ -1,0 +1,167 @@
+Reading additional input from stdin...
+OpenAI Codex v0.144.4
+--------
+workdir: /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-26c/.planning/phases/26-migration-export-backup-restore/panel/26-03-remap-operability
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019fa408-dd7e-7933-8f84-07b3e99dab33
+--------
+user
+# Decision B — can an operator act on what a cross-machine restore tells them about secrets the archive could not carry?
+
+`wayland-core backup restore` must never emit a restored config that points at
+credentials which are not present. Judge the operator-facing behaviour.
+
+Answer with exactly one line `PANEL-VERDICT: <option-id>` and one line
+`PANEL-BASIS: <one sentence>`, then up to 250 words.
+
+## Options (rotated order; ids are fixed)
+
+### `remap-warns-and-continues`
+- **Name:** The refusal is not a refusal — it warns and writes the target anyway
+- **Pros:** Names the worst outcome honestly: a restore that reports a problem and then produces the broken install anyway is worse than one that refuses, because the operator believes they were warned and covered.
+- **Cons:** Contradicted if every captured refusal left its target unwritten, measured by digest rather than read off the message.
+
+### `remap-actionable`
+- **Name:** An operator can act on what the restore tells them
+- **Pros:** Every backend's message names the backend, the number of credential sources that will be absent, and a concrete next action; no refusal writes its target; and no source-machine absolute path survives into a restored config.
+- **Cons:** Nothing is recorded as outstanding, so any residual opacity the capture did not measure ships as acceptable.
+
+### `remap-blocked`
+- **Name:** No honest remap can be defined for some backend at all
+- **Pros:** Would be the honest outcome if some backend could only be handled by moving a secret Core cannot read or by emitting a config pointing at nothing.
+- **Cons:** A REFUSAL naming the backend and the operator's next action is itself an honest outcome, so this is reachable only when even that cannot be built.
+
+### `remap-opaque`
+- **Name:** The message does not tell an operator enough to act
+- **Pros:** A message that says a restore is incomplete without naming which backend, how many secrets, or what to do next leaves the operator to guess.
+- **Cons:** Contradicted if every captured message names all three of backend, count and action.
+
+## Evidence in this directory
+
+- `remap-records.txt` — all four credential backends (`auto`, `plaintext`,
+  `keyring`, `encrypted-file`), each with its exit status, disposition, whether
+  the target was written (MEASURED by digesting the target before and after, not
+  read off the message), whether the message names the backend / the count / an
+  action, whether any source-machine absolute path survived, and the verbatim
+  operator message between `REMAP-MESSAGE-BEGIN` / `REMAP-MESSAGE-END`.
+- `peer-bar.txt` — the bar taken from two real peer checkouts on this host.
+
+The capture script is proven able to go red: handed a binary that does not
+exist it exits 1.
+
+=== remap-records.txt ===
+REMAP-BACKEND: auto
+REMAP-EXIT: 1
+REMAP-DISPOSITION: refused
+REMAP-TARGET-WRITTEN: no
+REMAP-MESSAGE-BEGIN
+wayland-core backup: credential remap: backend `auto` — 2 credential source(s) will NOT be present after restore.
+absent: auto-stored secrets (OS keychain), credentials.toml
+action: re-add these credentials on this machine (`wayland-core auth add <provider>`) after the restore, or re-run with --accept-missing-secrets to proceed knowing the restored install starts without them.
+REMAP-MESSAGE-END
+REMAP-NAMES-BACKEND: yes
+REMAP-NAMES-COUNT: yes
+REMAP-NAMES-ACTION: yes
+REMAP-CARRIES-SOURCE-ABSOLUTE-PATH: no
+REMAP-BACKEND: plaintext
+REMAP-EXIT: 1
+REMAP-DISPOSITION: refused
+REMAP-TARGET-WRITTEN: no
+REMAP-MESSAGE-BEGIN
+wayland-core backup: credential remap: backend `plaintext` — 1 credential source(s) will NOT be present after restore.
+absent: credentials.toml
+action: re-add these credentials on this machine (`wayland-core auth add <provider>`) after the restore, or re-run with --accept-missing-secrets to proceed knowing the restored install starts without them.
+REMAP-MESSAGE-END
+REMAP-NAMES-BACKEND: yes
+REMAP-NAMES-COUNT: yes
+REMAP-NAMES-ACTION: yes
+REMAP-CARRIES-SOURCE-ABSOLUTE-PATH: no
+REMAP-BACKEND: keyring
+REMAP-EXIT: 1
+REMAP-DISPOSITION: refused
+REMAP-TARGET-WRITTEN: no
+REMAP-MESSAGE-BEGIN
+wayland-core backup: credential remap: backend `keyring` — 2 credential source(s) will NOT be present after restore.
+absent: credentials.toml, keyring-stored secrets (OS keychain)
+action: re-add these credentials on this machine (`wayland-core auth add <provider>`) after the restore, or re-run with --accept-missing-secrets to proceed knowing the restored install starts without them.
+REMAP-MESSAGE-END
+REMAP-NAMES-BACKEND: yes
+REMAP-NAMES-COUNT: yes
+REMAP-NAMES-ACTION: yes
+REMAP-CARRIES-SOURCE-ABSOLUTE-PATH: no
+REMAP-BACKEND: encrypted-file
+REMAP-EXIT: 1
+REMAP-DISPOSITION: refused
+REMAP-TARGET-WRITTEN: no
+REMAP-MESSAGE-BEGIN
+wayland-core backup: credential remap: backend `encrypted_file` — 3 credential source(s) will NOT be present after restore.
+absent: cipher_path (credentials.enc), credentials.toml, key_params_path (credentials.kdf.json)
+action: re-add these credentials on this machine (`wayland-core auth add <provider>`) after the restore, or re-run with --accept-missing-secrets to proceed knowing the restored install starts without them.
+REMAP-MESSAGE-END
+REMAP-NAMES-BACKEND: yes
+REMAP-NAMES-COUNT: yes
+REMAP-NAMES-ACTION: yes
+REMAP-CARRIES-SOURCE-ABSOLUTE-PATH: no
+
+REMAP-CAPTURE-OK: 4 backend records written to /tmp/f26c-remap/remap-records.txt
+=== peer-bar.txt ===
+# The peer bar for what a backup tells an operator about secrets it cannot carry
+
+Taken from two REAL peer checkouts present on this host:
+  /Users/seandonahoe/dev/resources/openclaw/docs/cli/backup.md
+  /Users/seandonahoe/dev/resources/hermes-agent/hermes_cli/backup.py
+
+## OpenClaw (docs/cli/backup.md)
+OpenClaw INCLUDES credentials in the archive by default -- 'auth profiles,
+channel/provider credentials' are named as backed-up content, and the resolved
+credentials/ directory is a top-level backup source when it lives outside the
+state directory. It canonicalizes paths so a credentials directory already
+inside the state directory is not duplicated. It documents which live-mutation
+and rebuildable roots are EXCLUDED, and tells the operator what to do about
+them after restore ('reinstall or update the corresponding runtime or plugin
+after restore'). So the peer bar is: name what is not carried, and state the
+operator's next action.
+Verbatim, line 83:
+- The resolved `credentials/` directory when it exists outside the state directory
+Verbatim, line 110 (the exclusion + next-action pattern):
+Installer-managed and rebuildable runtime roots under the state directory are also skipped: `dev/`, `git/`, `npm/`, legacy `npm-runtime/`, and `tools/`. These contain managed checkouts, package trees, and downloaded runtimes rather than authoritative user state; reinstall or update the corresponding runtime or plugin after restore. An explicitly configured config file, credentials directory, or workspace inside one of these roots remains included.
+
+## Hermes (hermes_cli/backup.py)
+Hermes classifies secret-bearing files by NAME and by SUFFIX and treats them
+as a distinct class rather than as ordinary payload.
+Verbatim, line 125:
+_SECRET_FILE_NAMES = {".env", "auth.json", "state.db"}
+Verbatim, lines 612-613 (external provider configs commonly hold credentials):
+                    # External provider configs commonly hold credentials.
+                    if target.suffix in {".json", ".env", ".conf"} or target.name in _SECRET_FILE_NAMES:
+
+## What Core is judged against
+Neither peer faces Core's hardest case: a backend whose secrets are in the OS
+keyring and therefore NOT in the filesystem at all, and a backend whose secrets
+sit at absolute paths that are meaningless on the restoring machine. The bar
+Core must clear is the peers' own stated pattern applied to that harder case:
+name the backend, name how many credential sources will be absent, and state
+the operator's next action -- and never emit a restored config pointing at a
+secret that is not there.
+deprecated: `[features].codex_hooks` is deprecated. Use `[features].hooks` instead.
+Enable it with `--enable hooks` or `[features].hooks` in config.toml. See https://developers.openai.com/codex/config-basic#feature-flags for details.
+2026-07-27T14:44:35.465133Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(AuthRequiredError { www_authenticate_header: "Bearer realm=\"OAuth\", resource_metadata=\"https://mcp.canva.com/.well-known/oauth-protected-resource/mcp\", error=\"invalid_token\", error_description=\"Missing or invalid access token\"" })
+2026-07-27T14:44:36.011094Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Auth(AuthorizationRequired)
+hook: SessionStart
+hook: SessionStart Completed
+hook: UserPromptSubmit
+hook: UserPromptSubmit Completed
+codex
+PANEL-VERDICT: remap-actionable
+PANEL-BASIS: All four backends refuse without modifying the target, identify the backend and absent-source count, prescribe a concrete recovery action, and preserve no source-machine absolute path.
+hook: Stop
+hook: Stop Completed
+tokens used
+33,122
+PANEL-VERDICT: remap-actionable
+PANEL-BASIS: All four backends refuse without modifying the target, identify the backend and absent-source count, prescribe a concrete recovery action, and preserve no source-machine absolute path.
