@@ -40,9 +40,23 @@ use std::path::Path;
 /// the rename is journalled so the new dentry survives a crash; the
 /// extra `fsync(parent_dir)` would block the call by ~1ms for a
 /// guarantee the journal already provides.
+/// # Long destination paths on Windows (F26-03-D)
+///
+/// The tempfile round trip below reaches Win32 (`MoveFileExW`) without
+/// `std`'s long-path handling, so a destination past `MAX_PATH` (260)
+/// fails with `ERROR_PATH_NOT_FOUND` even where `std::fs::write` to the
+/// very same path succeeds. Measured on Windows 11 26200 at a 320-char
+/// plain `C:\...` path: `create_dir_all` OK, `fs::write` OK,
+/// `atomic_write` **os error 3**.
+///
+/// [`long_path_safe_dest`] resolves the parent to its extended-length
+/// (`\\?\`) form before the round trip, which lifts the limit at the
+/// Win32 layer regardless of the machine's `LongPathsEnabled` setting.
 pub fn atomic_write<P: AsRef<Path>>(path: P, contents: &[u8]) -> std::io::Result<()> {
     let path = path.as_ref();
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let dest = long_path_safe_dest(path)?;
+    let dest = dest.as_ref();
+    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
 
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     tmp.write_all(contents)?;
@@ -51,7 +65,51 @@ pub fn atomic_write<P: AsRef<Path>>(path: P, contents: &[u8]) -> std::io::Result
     // `persist()` does the atomic rename. `PersistError` wraps both
     // the underlying io::Error and the un-renamed temp file; we only
     // care about the io::Error for callers using `?`.
-    tmp.persist(path).map(|_| ()).map_err(|e| e.error)
+    tmp.persist(dest).map(|_| ()).map_err(|e| e.error)
+}
+
+/// Length past which a destination is rewritten to extended-length form on
+/// Windows. Well below `MAX_PATH` (260) so there is headroom for the sibling
+/// temp file's own name, which is what the round trip actually creates.
+#[cfg(windows)]
+const WINDOWS_LONG_PATH_THRESHOLD: usize = 200;
+
+/// The single place platform long-path handling lives, per the
+/// centralize-platform-differences rule. On unix this is the identity.
+///
+/// Only paths at or past the threshold are rewritten, so the ordinary short
+/// path keeps exactly its present behavior and the change is bounded to the
+/// case that is broken today.
+#[cfg(windows)]
+fn long_path_safe_dest(path: &Path) -> std::io::Result<std::borrow::Cow<'_, Path>> {
+    use std::borrow::Cow;
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let too_long = path.as_os_str().len() >= WINDOWS_LONG_PATH_THRESHOLD
+        || parent.as_os_str().len() >= WINDOWS_LONG_PATH_THRESHOLD;
+    if !too_long || path.to_string_lossy().starts_with(r"\\?\") {
+        return Ok(Cow::Borrowed(path));
+    }
+    let Some(file_name) = path.file_name() else {
+        return Ok(Cow::Borrowed(path));
+    };
+    // `canonicalize` is how std spells "extended-length form" on Windows. The
+    // parent must already exist for the tempfile round trip to work at all, so
+    // resolving it here costs one metadata call and no new failure mode: if it
+    // cannot be resolved the original path is used and the caller sees the same
+    // error it would have seen anyway.
+    match std::fs::canonicalize(parent) {
+        Ok(canon) => Ok(Cow::Owned(canon.join(file_name))),
+        Err(_) => Ok(Cow::Borrowed(path)),
+    }
+}
+
+#[cfg(not(windows))]
+#[inline]
+fn long_path_safe_dest(path: &Path) -> std::io::Result<std::borrow::Cow<'_, Path>> {
+    // unix has no MAX_PATH equivalent at this scale (PATH_MAX is 4096) and no
+    // extended-length form, so there is nothing to rewrite.
+    Ok(std::borrow::Cow::Borrowed(path))
 }
 
 /// Build a path under `base` whose total length exceeds Windows' `MAX_PATH`
