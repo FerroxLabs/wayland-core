@@ -377,6 +377,23 @@ impl SessionJournal {
                 "child transaction authority events require ChildTransactionStore".to_owned(),
             ));
         }
+        // The Goal kernel is the SOLE writer of Goal, task and wait transitions.
+        // Refusing them on the public path is what makes that structural rather
+        // than a convention: a transition with no attributable kernel append
+        // cannot exist, which is the repudiation property (T-22-04).
+        if matches!(
+            &event,
+            SessionEvent::GoalOpened { .. }
+                | SessionEvent::GoalIterationStarted { .. }
+                | SessionEvent::GoalWaitBegun { .. }
+                | SessionEvent::GoalWaitResolved { .. }
+                | SessionEvent::GoalRunResumed { .. }
+                | SessionEvent::GoalTerminated { .. }
+        ) {
+            return Err(JournalError::InvalidTransition(
+                "goal transitions require the goal kernel".to_owned(),
+            ));
+        }
         self.inner
             .lock()
             .map_err(|_| JournalError::WriterPoisoned)?

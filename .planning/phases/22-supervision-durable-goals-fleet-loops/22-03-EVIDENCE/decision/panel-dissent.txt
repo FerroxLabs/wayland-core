@@ -1,0 +1,92 @@
+DISSENT RECORD — every losing option's strongest argument, and why it did not carry.
+Preserved because a 4-0 panel is exactly the result most likely to have flattened
+a real objection, and the objections here are not weak.
+
+--- os-process-liveness ---
+STRONGEST ARGUMENT FOR IT: its only soundness objection died under measurement.
+The con said "process-identifier reuse makes a naive probe unsafe and it needs a
+start-time or handle binding to be sound". Measurement 2 shows that binding is
+AVAILABLE ON BOTH HOSTS - /proc/<pid>/stat field 22 on Linux, Win32 creation time
+on Windows, each stable across repeated reads and distinct per process. Combined
+with the Linux baseline (8 bwrap containers to 0, 17 worker shells to 0, 0 DONE
+lines after waiting past the full sleep), an OS probe on a single-host fleet is a
+genuine liveness verdict rather than an inference, at a fraction of the fencing
+surface. For the fleet this phase actually builds - one host - it is arguably
+sufficient.
+WHY IT DID NOT CARRY: it answers only the revocation half. Its own OPTION line
+records refuses_late_write=nothing. A wedged-but-alive owner that recovers is
+indistinguishable from the current owner, so its duplicate-EFFECT window is
+unbounded no matter how good the liveness signal is. Both external members and
+the adversarial pass reached this independently. The "single host is enough"
+premise also expires the moment reassignment crosses hosts, which the option's
+own con names.
+
+--- heartbeat-liveness ---
+STRONGEST ARGUMENT FOR IT: it is the only option that detects a WEDGED owner - one
+that is alive, holding a claim, and making no progress. A lease detects that too
+but only after its full term; an OS probe never detects it at all, because the
+process is genuinely alive. It is also the cheapest to observe and maps onto the
+worker status surface that already exists (heartbeat.rs:56).
+WHY IT DID NOT CARRY: Measurement 3 turned its stated con into a number. A process
+stopped for 12 seconds missed 12 of 12 beats, so any missed-beat threshold below
+12 declares a healthy-but-suspended fleet dead and reassigns all of it at once.
+And like os-process-liveness it has no fencing half. It survives in the committed
+design as an OPTIONAL ACCELERATOR - codex's phrase - that can shorten revocation
+latency, never as the thing that makes a late write refusable.
+
+--- escalate ---
+STRONGEST ARGUMENT FOR IT, and it is the one that nearly carried: the measured
+baseline says Success Criterion 2 cannot be closed in this tree at all. A killed
+fanout CANNOT BE RESTARTED - orphaned reservations exhaust the aggregate budget,
+nothing calls cleanup_all() at dispatch, and a human must delete
+.swarm-worktrees/ by hand (F-2, HIGH, open). Workers fail as a function of
+elapsed run time, 4/4 at 1s but 1/4 at 10s, while real fanout workers run for
+minutes (F-3, HIGH, open, not root-caused). Any claim model layered on that
+executor states windows nobody can honor. Choosing a mechanism now risks
+manufacturing exactly the false confidence this program has already paid for
+once.
+WHY IT DID NOT CARRY: `escalate` is defined in this plan as "the criterion cannot
+be met WITHOUT A MECHANISM OUTSIDE THIS PLAN'S SCOPE". That is not what the
+evidence shows. It shows two open defects INSIDE scope, already owned by another
+agent. Escalating would be using the wrong instrument to report a true
+observation. The correct handling - and what this lane does - is to commit the
+mechanism on the evidence, and separately and loudly report that the criterion
+remains OPEN behind F-2 and F-3. The decision and the criterion are recorded
+separately rather than one being used to launder the other.
+
+--- ARGUMENTS MADE AGAINST THE COMMITTED OPTION (lease-with-fencing-token) ---
+These are real and are NOT dismissed; they are converted into shipping conditions.
+
+1. It defends a hazard the only measured platform says does not occur. The Linux
+   kill reaps the whole tree, so there is no superseded owner alive to fence.
+   ANSWER: the Windows kill leg was never validly run, and reasoning
+   "descendants always die" from one platform is precisely the error that
+   produced F-1, where a race Windows happened to win was read as a race that
+   was absent. An ordering-based refusal is the option that does not depend on
+   the unmeasured platform's process semantics being what we assumed.
+
+2. A PARTIALLY fenced system is worse than an honestly unfenced one, because it
+   creates the belief that duplicate effects are impossible while two real paths
+   still admit them. Two of six enumerated paths are review-only today, and the
+   enumeration is explicitly a lower bound, not exhaustive.
+   ANSWER: accepted as the binding condition on the commitment rather than
+   waved away. All four members raised it independently. It is recorded as
+   CONDITION 1 below and the criterion is not claimed met until it holds.
+
+3. The stated dup_window_ms=30000 is a design parameter, not a measurement.
+   ANSWER: true, and labelled as such in the bundle the panel judged. What IS
+   measured is that the duplicate-EFFECT bound is 0 for this option and
+   unbounded for the two revocation-only ones; that comparison, not the lease
+   term, is what decided it.
+
+--- CONDITIONS ATTACHED TO THE COMMITMENT ---
+CONDITION 1 (from codex, corroborated by kimi and the adversarial pass): ship only
+after every AUTHORITATIVE effect path is routed through a structurally guarded
+commit API that requires the claim epoch and compares it atomically against the
+ledger's committed epoch. Status and diagnostic writes may be exempt ONLY if they
+cannot affect task completion, reassignment, accounting, or dependency release.
+The workspace reservation accounting path (worktree_manager.rs:235) does affect
+accounting and is therefore NOT exempt.
+CONDITION 2: the Windows kill leg must be validly run before Success Criterion 2
+is claimed on both platforms. It is currently unmeasured, and the committed
+option was chosen partly BECAUSE that is unmeasured.

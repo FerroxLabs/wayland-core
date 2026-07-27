@@ -230,3 +230,90 @@ exhaustive with no wildcard (`reducer.rs:1655-3354`), so a new record cannot
 enter without a deliberate reduction arm; and new `ReducedSessionState` fields
 must be `#[serde(default, skip_serializing_if = ...)]`
 (`model.rs:1178-1189`) or 22-01's measured byte-identity property stops holding.
+
+---
+
+# Task 2 — THE CLAIM MODEL, DECIDED
+
+Added by lane `lane/22-goal-kernel` at commit `91979ec8`. The scope note at the
+top of this document — "Task 2 (the four-way panel) was not run, and no
+claim-revocation model was chosen" — is now superseded. Everything above it
+stands as written; the previous lane's restraint in refusing to invent `OPTION:`
+lines it had not grounded was correct, and this section supplies them with their
+provenance labelled rather than disguised.
+
+## The committed model
+
+**`lease-with-fencing-token`** — a time-bounded lease revokes a claim held by a
+worker that may be dead; a **monotonic claim epoch** committed per task refuses
+that worker's late write if it was merely slow.
+
+| Field | Value |
+|---|---|
+| Basis | `majority` — 4 of 4 |
+| Accepted duplicate-execution window | 30,000 ms (design parameter) |
+| Accepted lost-completion window | 0 ms |
+| Fencing | yes — duplicate **effect** bounded at 0 |
+| Residual declaration | not required; the committed option answers the fencing half |
+
+Evidence: `22-03-EVIDENCE/decision/`.
+
+## The three measurable cons were measured, not argued
+
+Every con in the option set was a measurable claim, so each was measured on the
+real hosts before the panel saw them.
+
+| Measurement | Result | What it settled |
+|---|---|---|
+| Fencing surface (`fencing-surface.txt`) | 6 paths enumerated, 4 structurally guardable, 2 review-only | The lease option's central con is real and is a **lower bound** — the enumeration is focused, not exhaustive |
+| Process identity (`process-identity.txt`) | `binding=available` on **both** hosts | Killed `os-process-liveness`'s soundness objection — and it still had no fencing half |
+| Suspend behavior (`suspend-clock.txt`) | 12s stop → `missed_beats=12`, `observed_advance_s=12` | Made `heartbeat-liveness`'s mass-reassignment con concrete, and showed the monotonic clock advances *through* a stop so a time-based lease expires anyway while an ordering-based refusal does not care |
+
+## Why this option and not the others
+
+All four members converged independently, and the reasoning was substantive
+rather than a rubber stamp. The decisive asymmetry: `heartbeat-liveness` and
+`os-process-liveness` both record `refuses_late_write=nothing`. Their window
+figures measure duplicate **execution**; only the lease-plus-epoch bounds
+duplicate **effect**, which is what "without duplicate execution or lost
+completion" actually demands.
+
+The Linux baseline showed the kill reaps the whole tree — 8 `bwrap` containers to
+0, 17 worker shells to 0 — which genuinely weakens the superseded-owner worry.
+But **the Windows kill leg was never validly run**, and inferring "descendants
+always die" from one platform is the exact error that produced F-1, where a race
+Windows happened to win was read as a race that was absent. An ordering-based
+refusal is the one mechanism that does not depend on the unmeasured platform's
+process semantics being what we assumed.
+
+## Conditions attached — the panel's objections are binding, not decorative
+
+**Condition 1.** Ship only once every *authoritative* effect path is routed
+through a structurally guarded commit API that requires the claim epoch and
+compares it atomically against the ledger's committed epoch. Status and
+diagnostic writes are exempt **only** if they cannot affect completion,
+reassignment, accounting, or dependency release — which means
+`worktree_manager.rs:235` (reservation accounting) is **not** exempt. A
+half-closed fence is worse than an open one because it manufactures confidence.
+
+**Condition 2.** The Windows kill leg must be validly run before Success
+Criterion 2 is claimed on both platforms.
+
+## What this decision does NOT do
+
+It does not close Success Criterion 2, and it must not be read as doing so. The
+criterion remains **blocked behind two open HIGH defects owned by another agent**:
+F-2 (a killed fanout cannot be restarted at all — orphaned reservations exhaust
+the aggregate budget and nothing calls `cleanup_all()` at dispatch) and F-3
+(workers fail as a function of elapsed run time, 1/4 at 10s, uncaught root
+cause). `escalate` was the closest rival precisely because of these, and it lost
+only on its own definition — it is reserved for "a mechanism outside this plan's
+scope", and these are defects *inside* scope. Reporting the criterion open and
+committing the mechanism are recorded as two separate facts here so that neither
+launders the other.
+
+## Gate clause NOT satisfied, stated plainly
+
+The plan's Task 2 gate binds the commitment to **both** baseline legs recording
+`RAN`. The Windows leg is `NOT-RUN`. That clause is unmet. It is reported unmet
+rather than satisfied by writing a Windows line nobody measured.

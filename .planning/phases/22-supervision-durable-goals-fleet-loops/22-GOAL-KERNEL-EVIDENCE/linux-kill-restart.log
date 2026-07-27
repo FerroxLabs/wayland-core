@@ -1,0 +1,38 @@
+=== leg 1: create a durable Goal, then SIGKILL the process holding it ===
+writer pid=325889 committed its transitions
+GOAL-LIVE: opened goal=g-live-1 cursor_seq=Some(0) cursor_digest=4aa511c986a83a365ab739c6094351da592ffb6a6fcdec2a828154bebc323af9
+GOAL-LIVE: pre_kill lifecycle=Waiting { wait: Event { event: "external-signal" } } iterations=1 resumes=0
+kill -9 325889 at 2026-07-27T02:11:30Z
+PASS: the killed process is gone (uncatchable, no cooperative shutdown ran)
+PASS: the writer was mid-flight when killed
+
+=== leg 2: a FRESH process resumes the Goal from the ledger ===
+GOAL-LIVE: open=OK pid=326043
+GOAL-LIVE: RESUMED iterations=1 resumes=1 max_tokens=Some(500) max_cost_cents=Some(25) strategy=Anvil
+GOAL-LIVE: post_resume objective="survive an uncatchable kill" lifecycle=Waiting { wait: Event { event: "external-signal" } } cursor_seq=Some(3) cursor_digest=adf652c742b83fef13be047426e9826124264922d6a288d1e00b1ed00ba0479b
+PASS: the fresh process exited zero after a kill -9 left the writer lease behind
+PASS: the Goal RESUMED rather than parking or vanishing
+PASS: the iteration committed before the kill survived, and the resume was counted
+PASS: the authority envelope was restored from the record, narrowed not widened
+PASS: the objective replayed from the chain
+
+=== leg 3: kill it again — durability is not a one-shot property ===
+PASS: a second process really held the journal writer lease
+kill -9 326051 at 2026-07-27T02:11:31Z
+.planning/phases/22-supervision-durable-goals-fleet-loops/22-GOAL-KERNEL-EVIDENCE/goal-kill-restart.sh: line 78: 326051 Killed                  "$BIN" hold "$J" "$GOAL" parent-v1 > "$WORK/hold.log" 2>&1
+PASS: the second killed process is gone
+GOAL-LIVE: open=OK pid=328738
+GOAL-LIVE: RESUMED iterations=1 resumes=2 max_tokens=Some(500) max_cost_cents=Some(25) strategy=Anvil
+GOAL-LIVE: post_resume objective="survive an uncatchable kill" lifecycle=Waiting { wait: Event { event: "external-signal" } } cursor_seq=Some(4) cursor_digest=58f1b91966eb1c192e0e106c5aa545d349c144c5bd6bcaf57af3224958c8c025
+PASS: a second crash-resume cycle increments the durable resume count to 2
+
+=== leg 4: a moved parent envelope PARKS instead of resuming permissively ===
+GOAL-LIVE: open=OK pid=328838
+GOAL-LIVE: PARKED terminal=AuthorityUnreconstructable { detail: "parent envelope digest moved since the Goal was authorized" }
+GOAL-LIVE: post_resume objective="survive an uncatchable kill" lifecycle=Terminated { terminal: AuthorityUnreconstructable { detail: "parent envelope digest moved since the Goal was authorized" } } cursor_seq=Some(5) cursor_digest=5b89a9f292aaceae272cbc9f9acc5f0a1ed44bb7bdc5df7693baddce4c099436
+PASS: a Goal whose parent envelope moved is parked, not resumed under a re-derived one
+PASS: the park survived into a fresh process, so it is durable not in-memory
+
+journal bytes on disk: 2491
+WORKDIR=/tmp/tmp.umw6QovRoI
+GOAL-KERNEL-LIVE: failures=0
