@@ -259,68 +259,178 @@ pub async fn scan_one(
 /// the whole class of "the filter silently dropped lines", which here would
 /// report zero orphans while orphans exist.
 pub async fn local_process_rows(nonce: &str) -> Result<Vec<String>> {
-    // F25-05 FINDING (HIGH), fixed here.
-    //
-    // This used `tasklist /V /FO CSV` on Windows. **`tasklist` does not print
-    // command lines at all** — its columns are image name, pid, session,
-    // memory, status, user, CPU and window title. The nonce lives in the
-    // command line, so it was never in the output, and the scanner returned a
-    // *MEASURED* zero while a process carrying the nonce was running.
-    //
-    // A measured zero that is wrong is strictly worse than an unmeasured one,
-    // because it is the value this module exists to make trustworthy. Measured
-    // on SeanDesktop: Win32_Process found 1 row, the scanner reported 0.
-    //
-    // `Get-CimInstance Win32_Process` is the enumeration that carries
-    // `CommandLine`. The PowerShell argument is a FIXED literal — the nonce is
-    // never interpolated into it, and the filtering happens in Rust — so this
-    // is not a shell-injection surface even though it is a shell string.
+    match enumerate_process_table(nonce).await {
+        ProcessTableScan::Enumerated { rows } => Ok(rows),
+        ProcessTableScan::CannotDetermine { reason } => Err(crate::error::ExecError::Exec(reason)),
+    }
+}
+
+/// The result of trying to read the host process table.
+///
+/// **Three states collapse to two everywhere else in this codebase and that is
+/// the bug.** "Found nothing" and "could not look" are different facts, and a
+/// scanner that returns `0` for the second is reporting proof of correctness it
+/// does not have. This type makes the second one unrepresentable as a number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcessTableScan {
+    /// The table was read AND the instrument proved it can see command lines.
+    Enumerated { rows: Vec<String> },
+    /// The table could not be read, or could be read but not usefully. Carries
+    /// no count at all — deliberately.
+    CannotDetermine { reason: String },
+}
+
+impl ProcessTableScan {
+    pub fn rows(&self) -> &[String] {
+        match self {
+            ProcessTableScan::Enumerated { rows } => rows,
+            ProcessTableScan::CannotDetermine { .. } => &[],
+        }
+    }
+    pub fn is_determinate(&self) -> bool {
+        matches!(self, ProcessTableScan::Enumerated { .. })
+    }
+}
+
+/// Read the host process table and filter it for `nonce`.
+///
+/// # The two findings this function exists to hold closed
+///
+/// **1. `tasklist` cannot see command lines at all.** The Windows arm used
+/// `tasklist /V /FO CSV`, whose columns are image name, pid, session, memory,
+/// status, user, CPU and window title — no command line anywhere. The nonce
+/// lives in the command line, so it was never in the output and the scanner
+/// returned a *MEASURED zero while a process carrying the nonce was running*.
+/// Measured on SeanDesktop: `Win32_Process` found 1 row, the scanner said 0.
+///
+/// **2. `Win32_Process.CommandLine` can come back NULL.** It is not readable
+/// for processes owned by another user without the right privilege, and under
+/// some conditions it is empty across the board. An enumeration that "succeeds"
+/// with every command line blank looks *exactly* like a clean host, and would
+/// reproduce finding 1 with a different instrument.
+///
+/// So the instrument SELF-TESTS: this process's own row must be present AND
+/// carry a non-empty command line. We know our own pid, and we know we have a
+/// command line, so if we cannot see our own we cannot see anyone's — and that
+/// is reported as [`ProcessTableScan::CannotDetermine`], never as zero.
+pub async fn enumerate_process_table(nonce: &str) -> ProcessTableScan {
+    // The PowerShell argument is a FIXED literal — the nonce is never
+    // interpolated into it and the filtering happens in Rust — so this is not
+    // an injection surface even though it is a shell string. `-Property
+    // ProcessId,ParentProcessId,CommandLine` keeps the CIM query narrow.
     let program = if cfg!(windows) { "powershell" } else { "ps" };
     let args: Vec<&str> = if cfg!(windows) {
         vec![
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId) $($_.CommandLine)\" }",
+            "Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CommandLine \
+             | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId) $($_.CommandLine)\" }",
         ]
     } else {
         vec!["-eo", "pid,ppid,pgid,etimes,args"]
     };
+
     let mut command = wcore_config::shell::shell_command_argv(program, &args);
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let output = command
-        .output()
-        .await
-        .map_err(|e| crate::error::ExecError::Exec(format!("enumerating processes: {e}")))?;
+    let output = match command.output().await {
+        Ok(o) => o,
+        Err(e) => {
+            return ProcessTableScan::CannotDetermine {
+                reason: format!("could not run `{program}` to enumerate processes: {e}"),
+            };
+        }
+    };
+    if !output.status.success() {
+        return ProcessTableScan::CannotDetermine {
+            reason: format!(
+                "`{program}` exited {}: {}",
+                output.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        };
+    }
+
     let text = String::from_utf8_lossy(&output.stdout);
+    let all: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    if all.is_empty() {
+        return ProcessTableScan::CannotDetermine {
+            reason: format!("`{program}` returned no rows at all"),
+        };
+    }
+
     let me = std::process::id();
-    Ok(text
-        .lines()
-        .filter(|line| line.contains(nonce))
-        // EXCLUDE OURSELVES. `wayland-core backend scan --task-id <nonce>`
-        // carries the nonce on its own argv, so the scanner matches itself and
-        // reports one orphan that does not exist. This is the SAME defect plan
-        // 25-01 hit on the remote scanner ("the remote orphan scanner found
-        // itself"), and it recurred here the moment the local scan started
-        // reading the real process table. Measured on hetzner-dsm: scanner=1,
-        // independent enumeration=0, and the one row was the scanner.
-        .filter(|line| row_pid(line) != Some(me))
-        .map(|line| line.trim().to_string())
-        .collect())
+    if let Some(reason) = command_line_visibility_failure(&all, me, program) {
+        return ProcessTableScan::CannotDetermine { reason };
+    }
+
+    ProcessTableScan::Enumerated {
+        rows: all
+            .into_iter()
+            .filter(|line| line.contains(nonce))
+            // EXCLUDE OURSELVES. `wayland-core backend scan --task-id <nonce>`
+            // carries the nonce on its own argv, so the scanner matches itself
+            // and reports one orphan that does not exist. Plan 25-01 hit this
+            // exact defect on the remote scanner, and it recurred here the
+            // moment the local scan started reading the real process table.
+            // Measured on hetzner-dsm: scanner=1, independent enumeration=0,
+            // and the one row was the scanner.
+            .filter(|line| row_pid(line) != Some(me))
+            .map(|line| line.trim().to_string())
+            .collect(),
+    }
+}
+
+/// The instrument's self-test. `None` means command lines are genuinely visible.
+///
+/// Split out so it is unit-testable against captured output, including the
+/// NULL-`CommandLine` shape that cannot be induced on a Linux CI box.
+fn command_line_visibility_failure(rows: &[&str], me: u32, program: &str) -> Option<String> {
+    let own = rows.iter().find(|row| row_pid(row) == Some(me));
+    match own {
+        None => Some(format!(
+            "`{program}` listed {} process(es) but not this one (pid {me}); the enumeration \
+             cannot see the process asking the question, so it cannot be trusted to see an \
+             orphan either",
+            rows.len()
+        )),
+        Some(row) if row_command_line(row).is_empty() => Some(format!(
+            "`{program}` listed this process (pid {me}) with an EMPTY command line. The nonce \
+             lives in the command line, so a filter over this output can only ever return \
+             zero. On Windows this is the documented NULL-CommandLine case — Win32_Process \
+             does not expose it without sufficient privilege. Reporting zero here would be a \
+             false negative dressed as a measurement"
+        )),
+        Some(_) => None,
+    }
+}
+
+/// The command-line portion of a row: everything after the fixed leading
+/// numeric columns.
+fn row_command_line(row: &str) -> &str {
+    // Unix: `pid ppid pgid etimes args…` (4 numeric columns).
+    // Windows: `pid ppid CommandLine` (2 numeric columns).
+    let skip = if cfg!(windows) { 2 } else { 4 };
+    let mut rest = row.trim();
+    for _ in 0..skip {
+        match rest.split_once(char::is_whitespace) {
+            Some((_, tail)) => rest = tail.trim_start(),
+            None => return "",
+        }
+    }
+    rest
 }
 
 /// The pid a process-listing row describes.
 ///
-/// `ps -eo pid,...` puts it first; `tasklist /FO CSV` puts it in the second
-/// quoted field. A row whose pid cannot be parsed is KEPT — dropping a row we
-/// failed to understand would be a filter that silently loses orphans, which
-/// is the worst failure available to this module.
+/// Both platforms emit `<pid> <ppid> …`, so there is ONE parse rather than two
+/// that can drift apart. A row whose pid cannot be parsed is KEPT by callers —
+/// dropping a row we failed to understand would be a filter that silently loses
+/// orphans, which is the worst failure available to this module.
 fn row_pid(row: &str) -> Option<u32> {
-    // Both platforms now emit `<pid> <ppid> <command line>`, so there is ONE
-    // parse rather than two that can drift apart.
     row.split_whitespace().next().and_then(|f| f.parse().ok())
 }
 
@@ -415,6 +525,95 @@ mod tests {
         assert_eq!(e.orphan_count, Some(1));
         assert_eq!(e.rows.len(), 1);
         assert!(e.label().contains("1 ORPHAN(S) FOUND"));
+    }
+
+    // ---- the instrument's self-test -------------------------------------
+    //
+    // These pin the exact defect that made the Windows scanner report a
+    // MEASURED zero while an orphan was running. They are unit tests over
+    // captured output shapes because the NULL-CommandLine condition cannot be
+    // induced on a Linux CI box — and "we could not reproduce it so we did not
+    // test it" is how it survived the first time.
+
+    #[test]
+    fn windows_null_command_lines_are_cannot_determine_not_zero() {
+        // The shape Win32_Process returns when CommandLine is not readable:
+        // pids and parents are present, the command line is blank.
+        let rows = ["4321 1 ", "9999 4321 "];
+        let rows: Vec<&str> = rows.to_vec();
+        let failure = command_line_visibility_failure(&rows, 4321, "powershell")
+            .expect("blank command lines must be CannotDetermine");
+        assert!(failure.contains("EMPTY command line"), "{failure}");
+        assert!(
+            failure.contains("false negative"),
+            "the reason must say what the consequence is: {failure}"
+        );
+    }
+
+    #[test]
+    fn an_enumeration_that_cannot_see_its_own_process_is_cannot_determine() {
+        let rows = vec!["1 0 1 99 /sbin/init", "2 0 2 99 [kthreadd]"];
+        let failure = command_line_visibility_failure(&rows, 424242, "ps")
+            .expect("not seeing our own process must be CannotDetermine");
+        assert!(
+            failure.contains("cannot see the process asking"),
+            "{failure}"
+        );
+    }
+
+    #[test]
+    fn a_healthy_enumeration_passes_the_self_test() {
+        let rows = vec![
+            "1 0 1 99 /sbin/init",
+            "4321 1 4321 9 wayland-core backend scan",
+        ];
+        assert_eq!(
+            command_line_visibility_failure(&rows, 4321, "ps"),
+            None,
+            "an enumeration that shows our own command line must be trusted"
+        );
+    }
+
+    /// The self-test itself has to be able to pass AND fail, or it is decoration.
+    #[tokio::test]
+    async fn the_real_process_table_passes_its_own_self_test_on_this_host() {
+        let scan = enumerate_process_table("f25-nonce-that-matches-nothing").await;
+        assert!(
+            scan.is_determinate(),
+            "the process table could not be enumerated on this host: {scan:?}"
+        );
+        assert!(
+            scan.rows().is_empty(),
+            "a nonce matching nothing must yield no rows"
+        );
+    }
+
+    #[test]
+    fn cannot_determine_carries_no_count_at_all() {
+        let scan = ProcessTableScan::CannotDetermine {
+            reason: "blank command lines".into(),
+        };
+        assert!(!scan.is_determinate());
+        assert!(scan.rows().is_empty());
+        // And there is deliberately no `count()` on this type: the ONLY way to
+        // get a number out of a scan is through the Enumerated arm.
+    }
+
+    #[test]
+    fn the_command_line_column_is_found_on_each_platform_shape() {
+        if cfg!(windows) {
+            assert_eq!(
+                row_command_line("4321 1 wayland-core backend scan"),
+                "wayland-core backend scan"
+            );
+            assert_eq!(row_command_line("4321 1 "), "");
+        } else {
+            assert_eq!(
+                row_command_line("4321 1 4321 9 sh -c while :; do sleep 1; done"),
+                "sh -c while :; do sleep 1; done"
+            );
+            assert_eq!(row_command_line("4321 1 4321 9"), "");
+        }
     }
 
     #[test]
