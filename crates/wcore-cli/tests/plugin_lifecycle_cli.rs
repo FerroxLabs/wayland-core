@@ -668,7 +668,7 @@ fn all_twelve_lifecycle_verbs_appear_in_plugin_help() {
     ] {
         assert!(
             text.lines()
-                .any(|l| l.trim_start().split_whitespace().next() == Some(verb)),
+                .any(|l| l.split_whitespace().next() == Some(verb)),
             "verb `{verb}` is absent from `plugin --help`:\n{text}"
         );
     }
