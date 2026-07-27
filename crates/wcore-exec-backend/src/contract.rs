@@ -346,7 +346,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     out
 }
 
-pub(crate) fn validate_identifier(field: &str, value: &str) -> Result<()> {
+pub fn validate_identifier(field: &str, value: &str) -> Result<()> {
     if value.is_empty() || value.len() > 128 {
         return Err(ExecError::MalformedTask(format!(
             "{field} must be 1..=128 bytes"

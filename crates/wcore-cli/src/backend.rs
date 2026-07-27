@@ -66,6 +66,19 @@ pub enum BackendCmd {
         #[arg(long)]
         nonce: String,
     },
+    /// F25-05: scan every backend for orphaned execution left behind by a
+    /// task, printing the RAW enumeration alongside the count and naming the
+    /// reaping mechanism each backend actually relies on.
+    Scan {
+        /// The task id, which is also its nonce for the reference task.
+        #[arg(long = "task-id")]
+        task_id: String,
+        /// An explicit nonce, when it differs from the task id.
+        #[arg(long)]
+        nonce: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Receipt operations.
     Receipt {
         #[command(subcommand)]
@@ -95,6 +108,11 @@ pub async fn run(args: BackendArgs) -> Result<()> {
         } => execute(&backend, task.as_deref(), &receipt_out).await,
         BackendCmd::Cancel { task_id, backend } => cancel(&task_id, backend.as_deref()).await,
         BackendCmd::Orphans { nonce } => orphans(&nonce).await,
+        BackendCmd::Scan {
+            task_id,
+            nonce,
+            json,
+        } => scan(&task_id, nonce.as_deref(), json).await,
         BackendCmd::Receipt {
             cmd: ReceiptCmd::Verify { path },
         } => verify_receipt(&path),
@@ -387,5 +405,58 @@ fn diff(paths: &[PathBuf]) -> Result<()> {
          event ordering and content digests, artifact digest, terminal status, exposed-secret \
          names and egress decision."
     );
+    Ok(())
+}
+
+/// F25-05: `wayland-core backend scan --task-id <id>`.
+///
+/// Prints the RAW enumeration alongside the count so an operator can check the
+/// scanner's own work, and names each backend's reaping mechanism so nobody has
+/// to infer it. A surface that could not be enumerated prints NOT MEASURED —
+/// never zero, because "did not look" and "looked and found nothing" are
+/// different facts and only one of them is evidence.
+async fn scan(task_id: &str, nonce: Option<&str>, json: bool) -> Result<()> {
+    let nonce = nonce.unwrap_or(task_id);
+    let evidence = wcore_exec_backend::orphan::scan_all(nonce, reference_budget()).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&evidence)?);
+    } else {
+        println!("orphan scan for task {task_id} (nonce {nonce})");
+        for e in &evidence {
+            println!();
+            println!("  backend    {}", e.backend_id);
+            println!("  mechanism  {}", e.mechanism.label());
+            println!("  method     {}", e.method);
+            match e.orphan_count {
+                Some(n) => println!("  count      {n} (MEASURED)"),
+                None => println!(
+                    "  count      NOT MEASURED — {}",
+                    e.unobserved_reason
+                        .as_deref()
+                        .unwrap_or("no reason recorded")
+                ),
+            }
+            if e.rows.is_empty() {
+                println!("  rows       (none)");
+            } else {
+                for row in &e.rows {
+                    println!("  row        {row}");
+                }
+            }
+        }
+    }
+
+    // A found orphan is a non-zero exit so this is scriptable as a gate.
+    let found: u64 = evidence.iter().filter_map(|e| e.orphan_count).sum();
+    let unmeasured = evidence.iter().filter(|e| !e.is_observed()).count();
+    println!();
+    println!(
+        "TOTAL: {found} orphan(s) measured across {} backend(s); {unmeasured} surface(s) NOT measured",
+        evidence.len()
+    );
+    if found > 0 {
+        bail!("{found} orphaned execution surface(s) still carry nonce {nonce}");
+    }
     Ok(())
 }

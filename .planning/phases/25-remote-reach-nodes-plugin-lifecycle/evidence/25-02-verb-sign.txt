@@ -1,0 +1,40 @@
+digest        2f39eb5a9400474634dfb926116cc5357fa4be2cb5e53383e3e970332746446e
+api version   declared=1.0 host=1.0 → COMPATIBLE
+entry         bin/run (present)
+signature     (unsigned)
+permissions:
+  - run hooks around the agent lifecycle
+VERIFIED
+[exit=0]
+
+STATE: exit=0 (0 = compatible)
+### VERB 3/12 verify — NEGATIVE (incompatible api version)
+$ /root/wayland-25/target/release/wayland-core plugin verify /root/f25-02-lab/src/lifecycle-demo --install-root /root/f25-02-lab/home/plugins
+plugin        lifecycle-demo 1.0.0
+runtime       subprocess
+digest        15d0e24a2ef585f1791dde07c35a4d2e52fb9018fe85c2b05dce3334fd5211be
+api version   declared=999.0-from-the-future host=1.0 → INCOMPATIBLE
+              plugin lifecycle-demo: plugin_api_version `999.0-from-the-future` does not match engine `1.0`
+entry         bin/run (present)
+signature     (unsigned)
+permissions:
+  - run hooks around the agent lifecycle
+error: quarantine: verification failed for lifecycle-demo: plugin lifecycle-demo: plugin_api_version `999.0-from-the-future` does not match engine `1.0`
+[exit=1]
+
+STATE: exit=1 (non-zero required — a gate that cannot fail is not a gate)
+### VERB 4/12 sign — mint a key
+$ /root/wayland-25/target/release/wayland-core plugin sign --new-key /root/f25-02-lab/keys/author.key --install-root /root/f25-02-lab/home/plugins
+wrote signing key   /root/f25-02-lab/keys/author.key
+wrote verifying key /root/f25-02-lab/keys/author.pub
+install the verifying key as a trust anchor:
+  cp /root/f25-02-lab/keys/author.pub "${WAYLAND_TRUSTED_KEYS_DIR:-$HOME/.wayland/trusted-keys}/"
+[exit=0]
+
+### VERB 4/12 sign — sign the entry artifact
+$ /root/wayland-25/target/release/wayland-core plugin sign /root/f25-02-lab/src/lifecycle-demo --key /root/f25-02-lab/keys/author.key --install-root /root/f25-02-lab/home/plugins
+signed bin/run → /root/f25-02-lab/src/lifecycle-demo/bin/wayland-plugin.sig
+[exit=0]
+
+STATE: installed the verifying key as a trust anchor at /root/f25-02-lab/home/trusted-keys/author.pub -- the exact step that sign --new-key printed
+STATE: 64 bytes at bin/wayland-plugin.sig (beside the entry artifact, where the engine verifier reads it)

@@ -1,0 +1,21 @@
+=== F25-04 LIVE LIFECYCLE — host hetzner-dsm — 2026-07-27T01:48:26Z ===
+binary: /root/wayland-25/target/release/wayland-core (wayland-core 0.12.25)
+commit: c5552e691928bc977b514b4a006a717f30fb45af
+
+### VERB 1/12 new
+$ /root/wayland-25/target/release/wayland-core plugin new smoke-plugin --path /root/f25-02-lab/scaffolded --install-root /root/f25-02-lab/home/plugins
+🔧   description: "A Wayland plugin" (value from CLI)
+🔧   Destination: /root/f25-02-lab/scaffolded/smoke-plugin ...
+🔧   project-name: smoke-plugin ...
+🔧   Generating template ...
+🔧   Moving generated files into: `/root/f25-02-lab/scaffolded/smoke-plugin`...
+🔧   Initializing a fresh Git repository
+✨   Done! New project created /root/f25-02-lab/scaffolded/smoke-plugin
+repointed wcore-plugin-api at the in-tree crate
+scaffolded smoke-plugin → /root/f25-02-lab/scaffolded/smoke-plugin
+next:
+  wayland-core plugin test /root/f25-02-lab/scaffolded/smoke-plugin
+  wayland-core plugin verify /root/f25-02-lab/scaffolded/smoke-plugin
+[exit=0]
+
+STATE: /root/f25-02-lab/scaffolded/smoke-plugin/Cargo.toml exists

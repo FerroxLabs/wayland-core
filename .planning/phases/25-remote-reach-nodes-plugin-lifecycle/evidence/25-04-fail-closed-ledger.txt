@@ -1,0 +1,10 @@
+F25-SC4-CASE-ROTATED-KEY: REFUSED host=hetzner-dsm exit=1 verdict=rotated-out-signature-refused-via-body-digest-cli-verify-is-integrity-only evidence=25-04-case-rotated-key.txt
+F25-SC4-CASE-TAMPERED-BUNDLE: REFUSED host=hetzner-dsm exit=1 verdict=body-digest-mismatch evidence=25-04-case-tampered-bundle.txt
+F25-SC4-CASE-ATTESTATION-MISMATCH: REFUSED host=hetzner-dsm exit=1 verdict=backend-identity-mismatch evidence=25-04-case-attestation-mismatch.txt
+F25-SC4-CASE-DENIED-SECRET: REFUSED host=hetzner-dsm exit=1 verdict=credential-absent-no-fallback evidence=25-04-case-denied-secret.txt
+F25-SC4-CASE-DENIED-EGRESS: REFUSED host=hetzner-dsm exit=1 verdict=egress-surface-refused-before-any-request-left-the-host evidence=25-04-case-denied-egress.txt
+F25-SC4-SCANNER-AGREEMENT-PLANTED: AGREE scanner=1 manual=1 evidence=25-04-enum-linux-ps-planted.txt
+F25-SC4-SCANNER-AGREEMENT: AGREE scanner=0 manual=0 evidence=25-04-enum-linux-ps.txt
+F25-SC4-ENUM-LOCAL: MEASURED host=hetzner-dsm planted=1 after=0 evidence=25-04-enum-linux-ps.txt
+F25-SC4-ENUM-CONTAINER: MEASURED host=hetzner-dsm evidence=25-04-enum-container-docker.txt
+F25-SC4-WINDOWS-KNOWN-RED: INDEPENDENT test=live_future_drop_reaps_descendant_job_tree evidence=25-04-windows-known-red.txt

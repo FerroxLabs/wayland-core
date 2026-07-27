@@ -1,0 +1,55 @@
+[exit=0]
+
+### PAIR (negative) — a host that does not answer
+$ /root/wayland-25/target/release/wayland-core node pair ghostnode --target root@203.0.113.253 --remote-bin /root/wayland-25/target/release/wayland-core
+pairing 'ghostnode' at root@203.0.113.253 (challenge 88f5d159abb3)
+wayland-core node: reaching node 'ghostnode' at root@203.0.113.253: far end exited 255: ssh: connect to host 203.0.113.253 port 22: Connection timed out 
+[exit=1]
+
+###      node list (ghostnode must be ABSENT)
+$ /root/wayland-25/target/release/wayland-core node list
+NODE           OS        STATE    VERSION    LIVENESS                     VERDICT / BACKENDS
+farnode        linux     paired   1.0        unknown (not probed since pairing) same | cloud (unavailable), container (unavailable), local, ssh (unavailable)
+selfnode       linux     paired   1.0        unknown (not probed since pairing) same | cloud (unavailable), container, local, ssh (unavailable)
+[exit=0]
+
+STATE: an unreachable far end was REFUSED and left no record at all
+### ADVERTISE — node show farnode
+$ /root/wayland-25/target/release/wayland-core node show farnode
+node        farnode
+machine     f25-farnode-box
+os          linux
+key id      bfed45d376de52e0d67057526eb8c078210499f854053d55e42cba2456503445
+version     1.0
+verdict     same
+transport   ssh → f25node (/usr/local/bin/wayland-core)
+state       paired
+liveness    unknown (not probed since pairing)
+advertised  observed at 1785121162637 (4 backend(s))
+  cloud      cloud      available=false basis=credential_absent — backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+  container  container  available=false basis=daemon_ping — docker client could not be launched: No such file or directory (os error 2)
+  local      local      available=true  basis=sandbox_backend_probe — platform containment backend 'fail_closed' probed available
+  ssh        ssh        available=false basis=credential_absent — WAYLAND_EXEC_SSH_TARGET is not set
+[exit=0]
+
+### ADVERTISE — node show selfnode
+$ /root/wayland-25/target/release/wayland-core node show selfnode
+node        selfnode
+machine     ubuntu-2404-noble-amd64-base
+os          linux
+key id      d66f9b31b176e4b6c7307c0477c50fa9838635ab7004f047e6db92ecb4f8b300
+version     1.0
+verdict     same
+transport   ssh → f25self (/root/wayland-25/target/release/wayland-core)
+state       paired
+liveness    unknown (not probed since pairing)
+advertised  observed at 1785121163165 (4 backend(s))
+  cloud      cloud      available=false basis=credential_absent — backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+  container  container  available=true  basis=daemon_ping — container daemon answered a version ping: server 29.2.1
+  local      local      available=true  basis=sandbox_backend_probe — platform containment backend 'bubblewrap' probed available
+  ssh        ssh        available=false basis=credential_absent — WAYLAND_EXEC_SSH_TARGET is not set
+[exit=0]
+
+STATE: farnode  machine=f25-farnode-box  available-backends=1
+STATE: selfnode machine=ubuntu-2404-noble-amd64-base available-backends=2
+STATE: the two machines advertise GENUINELY different capability sets, from real probes on each

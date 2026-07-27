@@ -166,3 +166,6 @@ pub mod backend;
 // the lib so the lifecycle projection and the unit/verb agreement are testable
 // under `cargo test -p wcore-cli --lib`.
 pub mod gateway;
+// F25-03: CLI surface `wayland-core node` — the node/device operator surface
+// (identity / pair / list / show / probe / revoke / submit / attribution).
+pub mod node;

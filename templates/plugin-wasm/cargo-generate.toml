@@ -8,4 +8,10 @@ ignore = ["tests/template_smoke.rs"]
 
 [placeholders]
 description = { type = "string", prompt = "Short description of the plugin", default = "A Wayland WASM tool plugin" }
-authors = { type = "string", prompt = "Plugin author(s) (Name <email>)", default = "Unknown <unknown@example.com>" }
+# NOTE (F25-04): `authors` is NOT declared here. cargo-generate reserves
+# `project-name`, `crate_name`, `crate_type`, `authors` and `os-arch` as
+# built-ins and REFUSES the whole run when a template declares or overrides
+# one of them:
+#   Error: placeholder `authors` is not valid as you can't override ...
+# `{{authors}}` still renders in the .liquid files -- cargo-generate supplies
+# it as a built-in, derived from the user's git config.

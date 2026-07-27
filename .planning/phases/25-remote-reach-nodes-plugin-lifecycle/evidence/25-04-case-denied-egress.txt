@@ -1,0 +1,3 @@
+COMMAND: wayland-core backend run --backend cloud (the credentialed egress surface)
+wayland-core backend: backend 'cloud' is unavailable and this command does NOT fall back: backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back (probe CredentialAbsent)
+EXIT: 1

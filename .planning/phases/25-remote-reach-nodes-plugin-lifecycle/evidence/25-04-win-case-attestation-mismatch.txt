@@ -1,0 +1,10 @@
+COMMAND: wayland-core.exe backend receipt verify C:\f25-04-attest.json
+wayland-core.exe : wayland-core backend: receipt is invalid: task_accepted names a different 
+backend than the receipt
+At C:\f25-04-live.ps1:27 char:10
++   $out = & $BIN @CliArgs 2>&1 | Out-String
++          ~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (wayland-core ba...han the receipt:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+EXIT: 1

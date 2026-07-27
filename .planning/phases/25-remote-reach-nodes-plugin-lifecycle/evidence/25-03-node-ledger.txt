@@ -1,0 +1,13 @@
+F25-SC2-PAIR: PASS host=hetzner-dsm peer=f25-farnode-box evidence=25-03-pair.txt
+F25-SC2-ADVERTISE: PASS host=hetzner-dsm peer=f25-farnode-box evidence=25-03-advertise.txt
+F25-SC2-ATTRIBUTION: PASS host=hetzner-dsm peer=f25-farnode-box evidence=25-03-attr-baseline.txt
+F25-SC2-REVOKE: PASS host=hetzner-dsm peer=f25-farnode-box evidence=25-03-revoke.txt
+F25-SC2-ATTRIBUTION-AFTER-REVOKE: HOLDS evidence=25-03-attr-after-revoke.txt
+F25-SC2-ATTRIBUTION-AFTER-REPAIR: HOLDS evidence=25-03-attr-after-repair.txt
+F25-SC2-OFFLINE: PASS host=hetzner-dsm peer=f25-farnode-box evidence=25-03-offline.txt
+F25-SC2-ATTRIBUTION-AFTER-DISCONNECT: HOLDS evidence=25-03-attr-after-disconnect.txt
+F25-SC2-RECOVER: PASS host=hetzner-dsm peer=f25-farnode-box evidence=25-03-recover.txt
+F25-SC2-ATTRIBUTION-AFTER-RETURN: HOLDS evidence=25-03-attr-after-return.txt
+F25-SC2-VERSION: PASS host=hetzner-dsm peer=f25-farnode-box evidence=25-03-version.txt
+F25-SC2-ATTRIBUTION-AFTER-VERSION-MISMATCH: HOLDS evidence=25-03-attr-after-version-mismatch.txt
+F25-SC2-WINDOWS-PEER: NOT-RUN host=hetzner-dsm peer=seandesktop evidence=none reason=no-ssh-trust-relationship-exists-between-hetzner-dsm-and-seandesktop-in-either-direction-establishing-one-is-a-credential-grant-reserved-to-sean

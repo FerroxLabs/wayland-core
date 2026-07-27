@@ -1,0 +1,4 @@
+COMMAND: ps -eo pid,ppid,pgid,etimes,args   (filtered with /usr/bin/grep -F on the nonce)
+--- WITH A DELIBERATE ORPHAN PLANTED ---
+1172830 1171673 1171672       2 sh -c while :; do sleep 1; done # f25-04-orphan-1171673
+ROWS-MATCHING-NONCE: 1

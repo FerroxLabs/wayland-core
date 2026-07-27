@@ -36,6 +36,13 @@ pub mod backends;
 pub mod conformance;
 pub mod contract;
 pub mod error;
+// F25-03: the node/device layer. Sits ABOVE the backend contract in this
+// same crate — a node HOSTS backends and answers "by whose authority", which
+// is a different question from the backend's "how".
+pub mod node;
+// F25-05: the orphan scanner and an honest per-backend account of what
+// actually reaps a process tree. Zero is only a number when something looked.
+pub mod orphan;
 pub mod policy;
 pub mod receipt;
 pub mod registry;
@@ -46,6 +53,11 @@ pub use contract::{
     ResourceKind, SecretChannel, WorkspaceFile,
 };
 pub use error::{ExecError, Result};
+pub use node::{
+    Liveness, NodeAdvertisement, NodeAttribution, NodeIdentity, NodeRecord, NodeRegistry,
+    NodeState, SubmissionVerdict, VersionVerdict,
+};
+pub use orphan::{OrphanEvidence, ReapingMechanism, mechanism_for};
 pub use policy::EffectivePolicy;
 pub use receipt::{BackendIdentity, ExecutionReceipt, NormalizedBody, ReceiptBody};
 

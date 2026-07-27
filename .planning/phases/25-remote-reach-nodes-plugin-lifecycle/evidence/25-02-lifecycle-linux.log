@@ -1,0 +1,475 @@
+=== F25-04 LIVE LIFECYCLE — host hetzner-dsm — 2026-07-27T01:48:26Z ===
+binary: /root/wayland-25/target/release/wayland-core (wayland-core 0.12.25)
+commit: c5552e691928bc977b514b4a006a717f30fb45af
+
+### VERB 1/12 new
+$ /root/wayland-25/target/release/wayland-core plugin new smoke-plugin --path /root/f25-02-lab/scaffolded --install-root /root/f25-02-lab/home/plugins
+🔧   description: "A Wayland plugin" (value from CLI)
+🔧   Destination: /root/f25-02-lab/scaffolded/smoke-plugin ...
+🔧   project-name: smoke-plugin ...
+🔧   Generating template ...
+🔧   Moving generated files into: `/root/f25-02-lab/scaffolded/smoke-plugin`...
+🔧   Initializing a fresh Git repository
+✨   Done! New project created /root/f25-02-lab/scaffolded/smoke-plugin
+repointed wcore-plugin-api at the in-tree crate
+scaffolded smoke-plugin → /root/f25-02-lab/scaffolded/smoke-plugin
+next:
+  wayland-core plugin test /root/f25-02-lab/scaffolded/smoke-plugin
+  wayland-core plugin verify /root/f25-02-lab/scaffolded/smoke-plugin
+[exit=0]
+
+STATE: /root/f25-02-lab/scaffolded/smoke-plugin/Cargo.toml exists
+### VERB 2/12 test
+$ /root/wayland-25/target/release/wayland-core plugin test /root/f25-02-lab/scaffolded/smoke-plugin --install-root /root/f25-02-lab/home/plugins
+    Updating crates.io index
+     Locking 144 packages to latest compatible versions
+      Adding generic-array v0.14.7 (available: v0.14.9)
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling libc v0.2.189
+   Compiling cfg-if v1.0.4
+   Compiling serde_core v1.0.229
+   Compiling bitflags v2.13.1
+   Compiling version_check v0.9.5
+   Compiling rustix v1.1.4
+   Compiling memchr v2.8.3
+   Compiling linux-raw-sys v0.12.1
+   Compiling typenum v1.20.1
+   Compiling autocfg v1.5.1
+   Compiling pin-project-lite v0.2.17
+   Compiling once_cell v1.21.4
+   Compiling serde v1.0.229
+   Compiling zmij v1.0.23
+   Compiling generic-array v0.14.7
+   Compiling io-lifetimes v2.0.4
+   Compiling num-traits v0.2.19
+   Compiling parking_lot_core v0.9.12
+   Compiling futures-core v0.3.33
+   Compiling winnow v1.0.4
+   Compiling serde_json v1.0.151
+   Compiling scopeguard v1.2.0
+   Compiling futures-sink v0.3.33
+   Compiling smallvec v1.15.2
+   Compiling lock_api v0.4.14
+   Compiling futures-channel v0.3.33
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling getrandom v0.4.3
+   Compiling futures-io v0.3.33
+   Compiling syn v2.0.119
+   Compiling syn v3.0.3
+   Compiling slab v0.4.12
+   Compiling thiserror v2.0.19
+   Compiling io-extras v0.18.4
+   Compiling itoa v1.0.18
+   Compiling errno v0.3.14
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling iana-time-zone v0.1.65
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling futures-task v0.3.33
+   Compiling digest v0.10.7
+   Compiling signal-hook-registry v1.4.8
+   Compiling parking_lot v0.12.5
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.2
+   Compiling cap-primitives v3.4.5
+   Compiling rustix v0.38.44
+   Compiling bytes v1.12.1
+   Compiling cpufeatures v0.2.17
+   Compiling sha2 v0.10.9
+   Compiling tracing-core v0.1.36
+   Compiling cap-std v3.4.5
+   Compiling maybe-owned v0.3.4
+   Compiling linux-raw-sys v0.4.15
+   Compiling ipnet v2.12.0
+   Compiling ambient-authority v0.0.2
+   Compiling filetime v0.2.29
+   Compiling anyhow v1.0.104
+   Compiling either v1.17.0
+   Compiling fastrand v2.5.0
+   Compiling home v0.5.12
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling sha1_smol v1.0.1
+   Compiling option-ext v0.2.0
+   Compiling schemars v0.8.22
+   Compiling dirs-sys v0.5.0
+   Compiling uuid v1.24.0
+   Compiling toml v1.1.3+spec-1.1.0
+   Compiling dyn-clone v1.0.20
+   Compiling workspace-hack v0.1.0 (/root/wayland-25/workspace-hack)
+   Compiling dirs v6.0.0
+   Compiling inventory v0.3.24
+   Compiling rustix-linux-procfs v0.1.1
+   Compiling fs-set-times v0.20.3
+   Compiling xattr v1.6.1
+   Compiling tempfile v3.27.0
+   Compiling tar v0.4.46
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v2.0.19
+   Compiling async-trait v0.1.91
+   Compiling serde_derive_internals v0.29.1
+   Compiling which v6.0.3
+   Compiling wcore-plugin-api v0.12.25 (/root/wayland-25/crates/wcore-plugin-api)
+   Compiling futures-macro v0.3.33
+   Compiling tokio-macros v2.7.1
+   Compiling tracing-attributes v0.1.31
+   Compiling schemars_derive v0.8.22
+   Compiling tokio v1.53.1
+   Compiling futures-util v0.3.33
+   Compiling tracing v0.1.44
+   Compiling chrono v0.4.45
+   Compiling wcore-types v0.12.25 (/root/wayland-25/crates/wcore-types)
+   Compiling futures-executor v0.3.33
+   Compiling futures v0.3.33
+   Compiling tokio-util v0.7.19
+   Compiling wcore-protocol v0.12.25 (/root/wayland-25/crates/wcore-protocol)
+   Compiling wcore-sandbox v0.12.25 (/root/wayland-25/crates/wcore-sandbox)
+   Compiling smoke-plugin v0.1.0 (/root/f25-02-lab/scaffolded/smoke-plugin)
+warning: type `Smoke_pluginPlugin` should have an upper camel case name
+ --> src/lib.rs:8:12
+  |
+8 | pub struct Smoke_pluginPlugin;
+  |            ^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `SmokePluginPlugin`
+  |
+  = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: type `Smoke_pluginFactory` should have an upper camel case name
+  --> src/lib.rs:36:12
+   |
+36 | pub struct Smoke_pluginFactory;
+   |            ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `SmokePluginFactory`
+
+warning: `smoke-plugin` (lib) generated 2 warnings
+warning: `smoke-plugin` (lib test) generated 2 warnings (2 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.71s
+     Running unittests src/lib.rs (target/debug/deps/smoke_plugin-fc9aa7f746db3a4f)
+
+running 2 tests
+test tests::factory_builds_a_plugin ... ok
+test tests::manifest_parses_and_matches_api_version ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests smoke_plugin
+warning: type `Smoke_pluginPlugin` should have an upper camel case name
+ --> src/lib.rs:8:12
+  |
+8 | pub struct Smoke_pluginPlugin;
+  |            ^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `SmokePluginPlugin`
+  |
+  = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: type `Smoke_pluginFactory` should have an upper camel case name
+  --> src/lib.rs:36:12
+   |
+36 | pub struct Smoke_pluginFactory;
+   |            ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `SmokePluginFactory`
+
+warning: 2 warnings emitted
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+plugin tests passed in /root/f25-02-lab/scaffolded/smoke-plugin
+[exit=0]
+
+### VERB 3/12 verify
+$ /root/wayland-25/target/release/wayland-core plugin verify /root/f25-02-lab/src/lifecycle-demo --install-root /root/f25-02-lab/home/plugins
+plugin        lifecycle-demo 1.0.0
+runtime       subprocess
+digest        2f39eb5a9400474634dfb926116cc5357fa4be2cb5e53383e3e970332746446e
+api version   declared=1.0 host=1.0 → COMPATIBLE
+entry         bin/run (present)
+signature     (unsigned)
+permissions:
+  - run hooks around the agent lifecycle
+VERIFIED
+[exit=0]
+
+STATE: exit=0 (0 = compatible)
+### VERB 3/12 verify — NEGATIVE (incompatible api version)
+$ /root/wayland-25/target/release/wayland-core plugin verify /root/f25-02-lab/src/lifecycle-demo --install-root /root/f25-02-lab/home/plugins
+plugin        lifecycle-demo 1.0.0
+runtime       subprocess
+digest        15d0e24a2ef585f1791dde07c35a4d2e52fb9018fe85c2b05dce3334fd5211be
+api version   declared=999.0-from-the-future host=1.0 → INCOMPATIBLE
+              plugin lifecycle-demo: plugin_api_version `999.0-from-the-future` does not match engine `1.0`
+entry         bin/run (present)
+signature     (unsigned)
+permissions:
+  - run hooks around the agent lifecycle
+error: quarantine: verification failed for lifecycle-demo: plugin lifecycle-demo: plugin_api_version `999.0-from-the-future` does not match engine `1.0`
+[exit=1]
+
+STATE: exit=1 (non-zero required — a gate that cannot fail is not a gate)
+### VERB 4/12 sign — mint a key
+$ /root/wayland-25/target/release/wayland-core plugin sign --new-key /root/f25-02-lab/keys/author.key --install-root /root/f25-02-lab/home/plugins
+wrote signing key   /root/f25-02-lab/keys/author.key
+wrote verifying key /root/f25-02-lab/keys/author.pub
+install the verifying key as a trust anchor:
+  cp /root/f25-02-lab/keys/author.pub "${WAYLAND_TRUSTED_KEYS_DIR:-$HOME/.wayland/trusted-keys}/"
+[exit=0]
+
+### VERB 4/12 sign — sign the entry artifact
+$ /root/wayland-25/target/release/wayland-core plugin sign /root/f25-02-lab/src/lifecycle-demo --key /root/f25-02-lab/keys/author.key --install-root /root/f25-02-lab/home/plugins
+signed bin/run → /root/f25-02-lab/src/lifecycle-demo/bin/wayland-plugin.sig
+[exit=0]
+
+STATE: installed the verifying key as a trust anchor at /root/f25-02-lab/home/trusted-keys/author.pub -- the exact step that sign --new-key printed
+STATE: 64 bytes at bin/wayland-plugin.sig (beside the entry artifact, where the engine verifier reads it)
+### VERB 5/12 publish
+$ /root/wayland-25/target/release/wayland-core plugin publish /root/f25-02-lab/src/lifecycle-demo --to /root/f25-02-lab/market --install-root /root/f25-02-lab/home/plugins
+published lifecycle-demo 1.0.0
+  digest   4fa0ee587fbf59e75577a98dec1ce646cccb46283f96442716f82816a3642bac
+  signed   bin/run (wayland-plugin.sig)
+  target   /root/f25-02-lab/market/plugins/lifecycle-demo
+  install  wayland-core plugin marketplace add /root/f25-02-lab/market && wayland-core plugin install lifecycle-demo@market
+[exit=0]
+
+STATE: bundle at /root/f25-02-lab/market/plugins/lifecycle-demo:
+{
+  "name": "lifecycle-demo",
+  "version": "1.0.0",
+  "content_digest": "4fa0ee587fbf59e75577a98dec1ce646cccb46283f96442716f82816a3642bac",
+  "signed_artifact": "bin/run",
+  "signature_file": "wayland-plugin.sig",
+  "published_at": "2026-07-27T01:48:38.010661817Z"
+}###         marketplace add (existing verb, unchanged)
+$ /root/wayland-25/target/release/wayland-core plugin marketplace add /root/f25-02-lab/market --install-root /root/f25-02-lab/home/plugins
+added marketplace 'market'
+[exit=0]
+
+###         available (existing verb, unchanged)
+$ /root/wayland-25/target/release/wayland-core plugin available --install-root /root/f25-02-lab/home/plugins
+wayland-browser	0.6.0	Browser tool plugin shell (Camoufox / chromiumoxide / Browserbase)
+wayland-cua	0.6.0	Computer-use plugin shell (multi-platform)
+wayland-honcho	0.6.0	Honcho user-model plugin (mock + live-gated)
+wayland-ollama	0.6.0	Local Ollama provider plugin
+[exit=0]
+
+### NEGATIVE 2/4 — install a TAMPERED bundle
+$ /root/wayland-25/target/release/wayland-core plugin install lifecycle-demo@market --install-root /root/f25-02-lab/home/plugins
+error: quarantine: bundle integrity check FAILED for lifecycle-demo: bundle.json records 4fa0ee587fbf59e75577a98dec1ce646cccb46283f96442716f82816a3642bac but the tree hashes to 305a0b31a636aa84e7a593bff3bbf4b9dfa999ea8264b5345e43a126fe43fb92 — the published bytes were modified after publication
+[exit=1]
+
+STATE: refused (exit=1) and NOTHING landed in the install root
+### VERB 6/12 install
+$ /root/wayland-25/target/release/wayland-core plugin install lifecycle-demo@market --install-root /root/f25-02-lab/home/plugins
+bundle integrity OK (lifecycle-demo 1.0.0 @ 4fa0ee587fbf)
+installed lifecycle-demo@market → /root/f25-02-lab/home/plugins/lifecycle-demo@market
+  digest c564afd228049eb94853f9f2879c5313f97b37d802d3737f25b3cdd8c6caf5c3
+  NOT YET APPROVED — it will be refused at load until you run `wayland-core plugin approve lifecycle-demo`
+[exit=0]
+
+STATE: install dir contents:
+/root/f25-02-lab/home/plugins/lifecycle-demo@market/bin/run
+/root/f25-02-lab/home/plugins/lifecycle-demo@market/bin/wayland-plugin.sig
+/root/f25-02-lab/home/plugins/lifecycle-demo@market/bundle.json
+/root/f25-02-lab/home/plugins/lifecycle-demo@market/plugin.toml
+/root/f25-02-lab/home/plugins/lifecycle-demo@market/provenance.json
+STATE: generations.json:
+{
+  "plugins": {
+    "lifecycle-demo": {
+      "live": "c564afd228049eb94853f9f2879c5313f97b37d802d3737f25b3cdd8c6caf5c3",
+      "retained": [
+        {
+          "digest": "c564afd228049eb94853f9f2879c5313f97b37d802d3737f25b3cdd8c6caf5c3",
+          "version": "1.0.0",
+          "created_at": "2026-07-27T01:48:38.225255451Z"
+        }
+      ],
+      "live_path": "lifecycle-demo@market"
+    }
+  }
+}###         list (existing verb, unchanged)
+$ /root/wayland-25/target/release/wayland-core plugin list --install-root /root/f25-02-lab/home/plugins
+lifecycle-demo@market	1.0.0	Native
+[exit=0]
+
+### VERB 7/12 inspect — while UNAPPROVED
+$ /root/wayland-25/target/release/wayland-core plugin inspect lifecycle-demo --install-root /root/f25-02-lab/home/plugins
+name          lifecycle-demo
+version       1.0.0
+path          /root/f25-02-lab/home/plugins/lifecycle-demo@market
+runtime       subprocess
+digest        c564afd228049eb94853f9f2879c5313f97b37d802d3737f25b3cdd8c6caf5c3
+source        path:./plugins/lifecycle-demo (marketplace 'market')
+resolved sha  (none)
+installed at  2026-07-27T01:48:38.225255451Z
+api version   declared=1.0 host=1.0 → COMPATIBLE
+signature     present (wayland-plugin.sig)
+bundle        intact (published 2026-07-27T01:48:38.010661817Z, signs bin/run)
+approval      REFUSED — plugin approval required: lifecycle-demo: installed at digest c564afd22804 but never approved — run `wayland-core plugin approve lifecycle-demo`
+loads         NO — the loader will refuse this plugin
+live gen      c564afd22804
+retained      1 generation(s)
+  * live c564afd22804 v1.0.0 created 2026-07-27T01:48:38.225255451Z
+permissions:
+  - run hooks around the agent lifecycle
+[exit=0]
+
+### NEGATIVE 1/4 — the ENGINE refuses to load an unapproved plugin
+$ WAYLAND_PLUGINS_DIR=/root/f25-02-lab/home/plugins /root/wayland-25/target/release/wayland-core --json-stream (boot only)
+[2m2026-07-27T01:48:38.396723Z[0m [33m WARN[0m on-disk plugin load failed (continuing) [3mplugin[0m[2m=[0mlifecycle-demo [3mmanifest[0m[2m=[0m/root/f25-02-lab/home/plugins/lifecycle-demo@market/plugin.toml [3merror[0m[2m=[0mplugin approval required: lifecycle-demo: installed at digest c564afd22804 but never approved — run `wayland-core plugin approve lifecycle-demo`
+
+STATE: the engine refused the plugin at load; the refusal reached stderr
+### VERB 8/12 approve
+$ /root/wayland-25/target/release/wayland-core plugin approve lifecycle-demo --install-root /root/f25-02-lab/home/plugins
+approved lifecycle-demo at digest c564afd22804
+  /root/f25-02-lab/home/plugins/lifecycle-demo@market
+  grants: run hooks around the agent lifecycle
+[exit=0]
+
+STATE: approvals.json:
+{
+  "approvals": {
+    "lifecycle-demo": {
+      "plugin": "lifecycle-demo",
+      "digest": "c564afd228049eb94853f9f2879c5313f97b37d802d3737f25b3cdd8c6caf5c3",
+      "approved_at": "2026-07-27T01:48:38.514645275Z"
+    }
+  },
+  "revoked": []
+}### POSITIVE — the ENGINE loads the SAME plugin once approved
+$ WAYLAND_PLUGINS_DIR=/root/f25-02-lab/home/plugins /root/wayland-25/target/release/wayland-core --json-stream (boot only)
+[2m2026-07-27T01:48:38.588907Z[0m [32m INFO[0m on-disk plugin loaded [3mplugin[0m[2m=[0mlifecycle-demo [3mmanifest[0m[2m=[0m/root/f25-02-lab/home/plugins/lifecycle-demo@market/plugin.toml
+STATE: the engine LOADED the same plugin once approved, and the refusal line is gone
+
+### VERB 8/12 approve --revoke
+$ /root/wayland-25/target/release/wayland-core plugin approve lifecycle-demo --revoke --install-root /root/f25-02-lab/home/plugins
+revoked approval for lifecycle-demo (was approved at digest c564afd22804)
+it will now be REFUSED at load until re-approved
+[exit=0]
+
+###         inspect after revoke
+$ /root/wayland-25/target/release/wayland-core plugin inspect lifecycle-demo --install-root /root/f25-02-lab/home/plugins
+name          lifecycle-demo
+version       1.0.0
+path          /root/f25-02-lab/home/plugins/lifecycle-demo@market
+runtime       subprocess
+digest        c564afd228049eb94853f9f2879c5313f97b37d802d3737f25b3cdd8c6caf5c3
+source        path:./plugins/lifecycle-demo (marketplace 'market')
+resolved sha  (none)
+installed at  2026-07-27T01:48:38.225255451Z
+api version   declared=1.0 host=1.0 → COMPATIBLE
+signature     present (wayland-plugin.sig)
+bundle        intact (published 2026-07-27T01:48:38.010661817Z, signs bin/run)
+approval      REFUSED — plugin approval required: lifecycle-demo: installed at digest c564afd22804 but never approved — run `wayland-core plugin approve lifecycle-demo`
+loads         NO — the loader will refuse this plugin
+live gen      c564afd22804
+retained      1 generation(s)
+  * live c564afd22804 v1.0.0 created 2026-07-27T01:48:38.225255451Z
+permissions:
+  - run hooks around the agent lifecycle
+[exit=0]
+
+###         re-approve
+$ /root/wayland-25/target/release/wayland-core plugin approve lifecycle-demo --install-root /root/f25-02-lab/home/plugins
+approved lifecycle-demo at digest c564afd22804
+  /root/f25-02-lab/home/plugins/lifecycle-demo@market
+  grants: run hooks around the agent lifecycle
+[exit=0]
+
+###         re-sign v2
+$ /root/wayland-25/target/release/wayland-core plugin sign /root/f25-02-lab/src/lifecycle-demo --key /root/f25-02-lab/keys/author.key --install-root /root/f25-02-lab/home/plugins
+signed bin/run → /root/f25-02-lab/src/lifecycle-demo/bin/wayland-plugin.sig
+[exit=0]
+
+###         re-publish v2
+$ /root/wayland-25/target/release/wayland-core plugin publish /root/f25-02-lab/src/lifecycle-demo --to /root/f25-02-lab/market --install-root /root/f25-02-lab/home/plugins
+published lifecycle-demo 2.0.0
+  digest   e0afb5e22d003eadf5c4c9ef970cc8b28f4dce10b4ed1fe82f5bae7ece53d453
+  signed   bin/run (wayland-plugin.sig)
+  target   /root/f25-02-lab/market/plugins/lifecycle-demo
+  install  wayland-core plugin marketplace add /root/f25-02-lab/market && wayland-core plugin install lifecycle-demo@market
+[exit=0]
+
+### VERB 9/12 update
+$ /root/wayland-25/target/release/wayland-core plugin update lifecycle-demo --install-root /root/f25-02-lab/home/plugins
+updating lifecycle-demo from marketplace 'market' (current digest c564afd22804)
+bundle integrity OK (lifecycle-demo 2.0.0 @ e0afb5e22d00)
+updated lifecycle-demo c564afd22804 → a818b717bde6
+NOTE: the approval for the previous digest does not carry over. Run `wayland-core plugin approve lifecycle-demo` to admit the new bytes.
+[exit=0]
+
+STATE: live digest c564afd22804 -> a818b717bde6
+STATE: retained generations on disk:
+  a818b717bde61f8f676f999ccc8b1d22b26442706e300005f929132e5d09594b
+  c564afd228049eb94853f9f2879c5313f97b37d802d3737f25b3cdd8c6caf5c3
+STATE: installed entry artifact now reads:     print(json.dumps(out), flush=True)
+###         inspect after update (approval must be invalidated)
+$ /root/wayland-25/target/release/wayland-core plugin inspect lifecycle-demo --install-root /root/f25-02-lab/home/plugins
+name          lifecycle-demo
+version       2.0.0
+path          /root/f25-02-lab/home/plugins/lifecycle-demo@market
+runtime       subprocess
+digest        a818b717bde61f8f676f999ccc8b1d22b26442706e300005f929132e5d09594b
+source        path:./plugins/lifecycle-demo (marketplace 'market')
+resolved sha  (none)
+installed at  2026-07-27T01:48:38.967188811Z
+api version   declared=1.0 host=1.0 → COMPATIBLE
+signature     present (wayland-plugin.sig)
+bundle        intact (published 2026-07-27T01:48:38.913714652Z, signs bin/run)
+approval      REFUSED — plugin approval required: lifecycle-demo: approved digest c564afd22804 does not match installed digest a818b717bde6 — the plugin changed since it was approved; re-approve with `wayland-core plugin approve lifecycle-demo`
+loads         NO — the loader will refuse this plugin
+live gen      a818b717bde6
+retained      2 generation(s)
+          c564afd22804 v1.0.0 created 2026-07-27T01:48:38.225255451Z
+  * live a818b717bde6 v2.0.0 created 2026-07-27T01:48:38.967188811Z
+permissions:
+  - run hooks around the agent lifecycle
+[exit=0]
+
+### VERB 10/12 rollback
+$ /root/wayland-25/target/release/wayland-core plugin rollback lifecycle-demo --install-root /root/f25-02-lab/home/plugins
+rolled back lifecycle-demo a818b717bde6 → c564afd22804 (v1.0.0)
+  restored digest equals retained generation digest: c564afd228049eb94853f9f2879c5313f97b37d802d3737f25b3cdd8c6caf5c3
+  the restored bytes are already approved and will load
+[exit=0]
+
+STATE: live digest is now c564afd22804 (pre-update was c564afd22804)
+STATE: recursive diff against the pre-update snapshot: BYTE-IDENTICAL to the pre-update snapshot
+STATE: installed entry artifact now reads:     print(json.dumps(out), flush=True)
+###         recover on a SOUND store (must report nothing to repair)
+$ /root/wayland-25/target/release/wayland-core plugin recover --install-root /root/f25-02-lab/home/plugins
+plugin store is sound — nothing to repair
+quarantine    absent
+  lifecycle-demo: approved at c564afd22804
+[exit=0]
+
+STATE (damage induced):
+  removed the live install directory /root/f25-02-lab/home/plugins/lifecycle-demo@market
+  left an interrupted staging directory .generations/lifecycle-demo/.staging-deadbeef
+### VERB 11/12 recover
+$ /root/wayland-25/target/release/wayland-core plugin recover --install-root /root/f25-02-lab/home/plugins
+repaired 2 item(s):
+  + removed interrupted staging directory .staging-deadbeef
+  + lifecycle-demo: install directory did not match live generation c564afd22804 — restored it
+quarantine    absent
+  lifecycle-demo: approved at c564afd22804
+[exit=0]
+
+STATE: install dir restored = YES
+STATE: staging dir swept    = YES
+STATE: recover on a sound store had said: plugin store is sound — nothing to repair
+### VERB 12/12 remove
+$ /root/wayland-25/target/release/wayland-core plugin remove lifecycle-demo --install-root /root/f25-02-lab/home/plugins
+removed lifecycle-demo
+[exit=0]
+
+STATE: install dir present = NO
+STATE: approvals.json now: {
+  "approvals": {},
+  "revoked": []
+}
+###         inspect after remove (must be non-zero)
+$ /root/wayland-25/target/release/wayland-core plugin inspect lifecycle-demo --install-root /root/f25-02-lab/home/plugins
+error: plugin not installed: lifecycle-demo
+[exit=1]
+
+STATE: inspect after remove exited 1 (non-zero required)

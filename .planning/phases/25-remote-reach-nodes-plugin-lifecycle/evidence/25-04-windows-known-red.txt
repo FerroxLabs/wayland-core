@@ -1,0 +1,24 @@
+F25-SC4 — is the Phase 25 Windows orphan claim dependent on the escalated known-RED?
+
+TEST:   wcore-sandbox::live_integrity::live_future_drop_reaps_descendant_job_tree
+STATUS: deterministically RED on Windows, ESCALATED (handoff §4). NOT fixed by this plan.
+
+VERDICT: INDEPENDENT.
+
+REASONING (not an assertion):
+  * That test exercises the Job Object REAPING path — whether dropping a future
+    tears down a descendant tree.
+  * The Phase 25 Windows orphan claim is an OBSERVATION, not a reaping claim. The
+    scanner enumerates what is present. In the live exercise the reap was performed
+    by Stop-Process, not by the sandbox's Job Object teardown.
+  * The scanner reports a surviving descendant whether or not the Job Object reaped
+    it. That is precisely what it is for, so its correctness does not rest on the
+    mechanism the RED test covers.
+
+CONSEQUENCE, STATED PLAINLY:
+  Phase 25 does NOT claim that the Windows Job Object reaps descendant trees.
+  It claims only that the scanner can SEE whether one survived — and that claim is
+  backed by a planted-orphan measurement on SeanDesktop (scannerPlanted=1,
+  independent Win32_Process enumeration=1).
+  A Windows "orphans: 0" from this scanner means "nothing was left behind in this
+  run". It does NOT mean "the Job Object mechanism is proven".

@@ -1,0 +1,18 @@
+
+F25-SC3-WIN-VERB-NEW: NOT-RUN host=SeanDesktop reason=cargo-generate-not-installed-on-this-host-verb-refused-with-the-install-command
+F25-SC3-WIN-VERB-TEST: PASS host=SeanDesktop exit=1 state=propagated-red-exit-1 evidence=25-02-lifecycle-windows.log
+F25-SC3-WIN-VERB-VERIFY: PASS host=SeanDesktop exit=0 state=verified-exit-0 evidence=25-02-lifecycle-windows.log
+F25-SC3-WIN-VERB-SIGN: PASS host=SeanDesktop exit=0 state=signature-beside-entry evidence=25-02-lifecycle-windows.log
+F25-SC3-WIN-VERB-PUBLISH: PASS host=SeanDesktop exit=0 state=bundle-and-catalog-written evidence=25-02-lifecycle-windows.log
+F25-SC3-WIN-NEG-TAMPERED-REFUSED: PASS host=SeanDesktop evidence=25-02-lifecycle-windows.log
+F25-SC3-WIN-VERB-INSTALL: PASS host=SeanDesktop exit=0 state=install-dir-and-generation-ledger-written evidence=25-02-lifecycle-windows.log
+F25-SC3-WIN-VERB-INSPECT: PASS host=SeanDesktop exit=0 state=reports-refused-while-unapproved evidence=25-02-lifecycle-windows.log
+F25-SC3-WIN-NEG-UNAPPROVED-REFUSED: PASS host=SeanDesktop evidence=25-02-win-neg-unapproved.txt
+F25-SC3-WIN-VERB-APPROVE: PASS host=SeanDesktop exit=0 state=approval-record-bound-to-digest evidence=25-02-lifecycle-windows.log
+F25-SC3-WIN-NEG-APPROVED-LOADS: PARTIAL host=SeanDesktop evidence=25-02-win-pos-approved.txt
+F25-SC3-WIN-VERB-UPDATE: PASS host=SeanDesktop exit=0 state=live-digest-changed-prior-generation-retained evidence=25-02-lifecycle-windows.log
+F25-SC3-WIN-VERB-ROLLBACK: PASS host=SeanDesktop exit=0 state=restored-digest-equals-pre-update-digest evidence=25-02-lifecycle-windows.log
+F25-SC3-WIN-NEG-ROLLBACK-DIGEST-EQUAL: PASS host=SeanDesktop evidence=25-02-lifecycle-windows.log
+F25-SC3-WIN-VERB-RECOVER: PASS host=SeanDesktop exit=0 state=install-dir-restored-and-staging-swept evidence=25-02-lifecycle-windows.log
+F25-SC3-WIN-NEG-RECOVER-REPAIRED: PASS host=SeanDesktop evidence=25-02-lifecycle-windows.log
+F25-SC3-WIN-VERB-REMOVE: PASS host=SeanDesktop exit=0 state=install-dir-and-approval-gone evidence=25-02-lifecycle-windows.log

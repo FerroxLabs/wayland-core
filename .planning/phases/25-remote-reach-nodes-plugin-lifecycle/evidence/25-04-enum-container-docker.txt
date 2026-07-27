@@ -1,0 +1,3 @@
+COMMAND: docker ps -a --filter label=wayland.task-nonce=f25-04-orphan-1171673
+CONTAINER ID   IMAGE     COMMAND   CREATED   STATUS    PORTS     NAMES
+ROWS-MATCHING-NONCE: 0

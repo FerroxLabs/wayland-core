@@ -1,0 +1,287 @@
+=== F25-03 LIVE NODE EXERCISE — controller hetzner-dsm — 2026-07-27T02:59:19Z ===
+binary: /root/wayland-25/target/release/wayland-core (wayland-core 0.12.25)
+commit: 644bd5877f819ae8b2aafd339e5d0cb0d7293d83
+far end: container 'f25-03-farnode' (hostname f25-farnode-box), own fs / own key / own netns
+
+### PAIR — pair the separate far end as node 'farnode'
+$ /root/wayland-25/target/release/wayland-core node pair farnode --target f25node --remote-bin /usr/local/bin/wayland-core
+pairing 'farnode' at f25node (challenge 2678e6661497)
+paired 'farnode'
+  machine   f25-farnode-box
+  os        linux
+  key id    bfed45d376de52e0d67057526eb8c078210499f854053d55e42cba2456503445
+  version   1.0
+  verdict   same
+  backends  cloud (unavailable), container (unavailable), local, ssh (unavailable)
+[exit=0]
+
+###      node list
+$ /root/wayland-25/target/release/wayland-core node list
+NODE           OS        STATE    VERSION    LIVENESS                     VERDICT / BACKENDS
+farnode        linux     paired   1.0        unknown (not probed since pairing) same | cloud (unavailable), container (unavailable), local, ssh (unavailable)
+[exit=0]
+
+STATE: far-end key  bfed45d376de52e0d67057526eb8c078210499f854053d55e42cba2456503445
+STATE: controller key d66f9b31b176e4b6c7307c0477c50fa9838635ab7004f047e6db92ecb4f8b300
+STATE: the far end proved possession of a key that is genuinely NOT the controller's, before any record was written
+### PAIR — the controller itself, as 'selfnode'
+$ /root/wayland-25/target/release/wayland-core node pair selfnode --target f25self --remote-bin /root/wayland-25/target/release/wayland-core
+pairing 'selfnode' at f25self (challenge 446e06855c8c)
+paired 'selfnode'
+  machine   ubuntu-2404-noble-amd64-base
+  os        linux
+  key id    d66f9b31b176e4b6c7307c0477c50fa9838635ab7004f047e6db92ecb4f8b300
+  version   1.0
+  verdict   same
+  backends  cloud (unavailable), container, local, ssh (unavailable)
+[exit=0]
+
+### PAIR (negative) — a host that does not answer
+$ /root/wayland-25/target/release/wayland-core node pair ghostnode --target root@203.0.113.253 --remote-bin /root/wayland-25/target/release/wayland-core
+pairing 'ghostnode' at root@203.0.113.253 (challenge 88f5d159abb3)
+wayland-core node: reaching node 'ghostnode' at root@203.0.113.253: far end exited 255: ssh: connect to host 203.0.113.253 port 22: Connection timed out 
+[exit=1]
+
+###      node list (ghostnode must be ABSENT)
+$ /root/wayland-25/target/release/wayland-core node list
+NODE           OS        STATE    VERSION    LIVENESS                     VERDICT / BACKENDS
+farnode        linux     paired   1.0        unknown (not probed since pairing) same | cloud (unavailable), container (unavailable), local, ssh (unavailable)
+selfnode       linux     paired   1.0        unknown (not probed since pairing) same | cloud (unavailable), container, local, ssh (unavailable)
+[exit=0]
+
+STATE: an unreachable far end was REFUSED and left no record at all
+### ADVERTISE — node show farnode
+$ /root/wayland-25/target/release/wayland-core node show farnode
+node        farnode
+machine     f25-farnode-box
+os          linux
+key id      bfed45d376de52e0d67057526eb8c078210499f854053d55e42cba2456503445
+version     1.0
+verdict     same
+transport   ssh → f25node (/usr/local/bin/wayland-core)
+state       paired
+liveness    unknown (not probed since pairing)
+advertised  observed at 1785121162637 (4 backend(s))
+  cloud      cloud      available=false basis=credential_absent — backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+  container  container  available=false basis=daemon_ping — docker client could not be launched: No such file or directory (os error 2)
+  local      local      available=true  basis=sandbox_backend_probe — platform containment backend 'fail_closed' probed available
+  ssh        ssh        available=false basis=credential_absent — WAYLAND_EXEC_SSH_TARGET is not set
+[exit=0]
+
+### ADVERTISE — node show selfnode
+$ /root/wayland-25/target/release/wayland-core node show selfnode
+node        selfnode
+machine     ubuntu-2404-noble-amd64-base
+os          linux
+key id      d66f9b31b176e4b6c7307c0477c50fa9838635ab7004f047e6db92ecb4f8b300
+version     1.0
+verdict     same
+transport   ssh → f25self (/root/wayland-25/target/release/wayland-core)
+state       paired
+liveness    unknown (not probed since pairing)
+advertised  observed at 1785121163165 (4 backend(s))
+  cloud      cloud      available=false basis=credential_absent — backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+  container  container  available=true  basis=daemon_ping — container daemon answered a version ping: server 29.2.1
+  local      local      available=true  basis=sandbox_backend_probe — platform containment backend 'bubblewrap' probed available
+  ssh        ssh        available=false basis=credential_absent — WAYLAND_EXEC_SSH_TARGET is not set
+[exit=0]
+
+STATE: farnode  machine=f25-farnode-box  available-backends=1
+STATE: selfnode machine=ubuntu-2404-noble-amd64-base available-backends=2
+STATE: the two machines advertise GENUINELY different capability sets, from real probes on each
+### WORK — run the reference task, attributed to node 'selfnode'
+$ /root/wayland-25/target/release/wayland-core backend run --backend local --receipt-out /root/f25-03-evidence/receipt-selfnode.json
+task:        f25-reference
+backend:     local
+transport:   Local via localhost
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: NotApplicable
+wall ms:     2
+receipt:     /root/f25-03-evidence/receipt-selfnode.json
+[exit=0]
+
+STATE: receipt node stamp: {"node_id": "selfnode", "machine_id": "ubuntu-2404-noble-amd64-base", "key_id": "d66f9b31b176e4b6c7307c0477c50fa9838635ab7004f047e6db92ecb4f8b300", "contract_version": {"major": 1, "minor": 0}}
+###      baseline attribution
+$ /root/wayland-25/target/release/wayland-core node attribution selfnode --receipt /root/f25-03-evidence/receipt-selfnode.json
+receipt     /root/f25-03-evidence/receipt-selfnode.json
+backend     local
+node        selfnode
+attribution HOLDS — work attributed to node 'selfnode' (key d66f9b31b176)
+[exit=0]
+
+###      the same receipt attributed to the WRONG node (must be refused)
+$ /root/wayland-25/target/release/wayland-core node attribution farnode --receipt /root/f25-03-evidence/receipt-selfnode.json
+receipt     /root/f25-03-evidence/receipt-selfnode.json
+backend     local
+node        farnode
+attribution BROKEN — receipt attributes work to node 'selfnode' (key d66f9b31b176) but the pinned record for 'farnode' carries key bfed45d376de
+wayland-core node: attribution BROKEN: receipt attributes work to node 'selfnode' (key d66f9b31b176) but the pinned record for 'farnode' carries key bfed45d376de
+[exit=1]
+
+STATE: cross-node attribution exit=1 (non-zero required, or attribution proves nothing)
+### REVOKE — withdraw authority from farnode
+$ /root/wayland-25/target/release/wayland-core node revoke farnode --reason operator withdrew authority for the F25-03 exercise
+REVOKED 'farnode' (operator withdrew authority for the F25-03 exercise)
+  no in-flight work was recorded against it
+  subsequent work to it will be REFUSED and will NOT be rerouted
+  the record is retained; the far end cannot re-pair itself
+[exit=0]
+
+###      submit to the REVOKED node (must exit non-zero)
+$ /root/wayland-25/target/release/wayland-core node submit farnode
+wayland-core node: REFUSED: node 'farnode' is REVOKED (operator withdrew authority for the F25-03 exercise); refusing to run and NOT falling back to another node (node 'farnode')
+[exit=1]
+
+###      submit to the OTHER healthy node (it must not have absorbed farnode's work)
+$ /root/wayland-25/target/release/wayland-core node submit selfnode
+ACCEPTED: node 'selfnode' may take work
+[exit=0]
+
+STATE: submit-to-revoked exit=1 ; submit-to-other exit=0
+STATE: the refusal names farnode and states plainly that nothing reroutes
+###      ATTRIBUTION after REVOKE
+$ /root/wayland-25/target/release/wayland-core node attribution selfnode --receipt /root/f25-03-evidence/receipt-selfnode.json
+receipt     /root/f25-03-evidence/receipt-selfnode.json
+backend     local
+node        selfnode
+attribution HOLDS — work attributed to node 'selfnode' (key d66f9b31b176)
+[exit=0]
+
+###      the revoked far end presenting a GENUINE proof still cannot re-pair itself
+$ /root/wayland-25/target/release/wayland-core node pair farnode --target f25node --remote-bin /usr/local/bin/wayland-core
+pairing 'farnode' at f25node (challenge 86f03df22888)
+wayland-core node: receipt is invalid: node 'farnode' is REVOKED; re-pairing is an operator action (`wayland-core node repair farnode` after `node revoke --clear`)
+[exit=1]
+
+STATE: self re-pair of a revoked node exit=1 (non-zero required)
+###      operator clears the revocation
+$ /root/wayland-25/target/release/wayland-core node revoke farnode --clear
+cleared the revocation for 'farnode'; re-pair it deliberately with
+  wayland-core node pair farnode --target <ssh-target>
+[exit=0]
+
+###      operator deliberately re-pairs
+$ /root/wayland-25/target/release/wayland-core node pair farnode --target f25node --remote-bin /usr/local/bin/wayland-core
+pairing 'farnode' at f25node (challenge bff2b86cd30e)
+paired 'farnode'
+  machine   f25-farnode-box
+  os        linux
+  key id    bfed45d376de52e0d67057526eb8c078210499f854053d55e42cba2456503445
+  version   1.0
+  verdict   same
+  backends  cloud (unavailable), container (unavailable), local, ssh (unavailable)
+[exit=0]
+
+###      ATTRIBUTION after REPAIR
+$ /root/wayland-25/target/release/wayland-core node attribution selfnode --receipt /root/f25-03-evidence/receipt-selfnode.json
+receipt     /root/f25-03-evidence/receipt-selfnode.json
+backend     local
+node        selfnode
+attribution HOLDS — work attributed to node 'selfnode' (key d66f9b31b176)
+[exit=0]
+
+###      probe farnode while its far end is UP
+$ /root/wayland-25/target/release/wayland-core node probe farnode
+node 'farnode' is LIVE
+  advertised before: cloud (unavailable), container (unavailable), local, ssh (unavailable)
+  advertised now:    cloud (unavailable), container (unavailable), local, ssh (unavailable)
+[exit=0]
+
+STATE: probe-while-up said: node 'farnode' is LIVE
+STATE: stopping the far end for real: docker stop f25-03-farnode
+STATE: far end still listening on 2222? 0
+### OFFLINE — probe farnode after its far end was STOPPED
+$ /root/wayland-25/target/release/wayland-core node probe farnode
+node 'farnode' is OFFLINE: far end exited 255: ssh: connect to host 127.0.0.1 port 2222: Connection refused 
+  no in-flight work was recorded against it
+  work submitted to it will now be REFUSED, not rerouted
+[exit=0]
+
+STATE: the probe returned in 0s — bounded, not hung
+###      node list (farnode must read offline)
+$ /root/wayland-25/target/release/wayland-core node list
+NODE           OS        STATE    VERSION    LIVENESS                     VERDICT / BACKENDS
+farnode        linux     paired   1.0        offline (far end exited 255: ssh: connect to host 127.0.0.1 port 2222: Connection refused ) same | cloud (unavailable), container (unavailable), local, ssh (unavailable)
+selfnode       linux     paired   1.0        unknown (not probed since pairing) same | cloud (unavailable), container, local, ssh (unavailable)
+[exit=0]
+
+###      submit to the offline node (non-zero, no reroute)
+$ /root/wayland-25/target/release/wayland-core node submit farnode
+wayland-core node: REFUSED: node 'farnode' was last observed offline (far end exited 255: ssh: connect to host 127.0.0.1 port 2222: Connection refused ); refusing to run and NOT falling back to another node (node 'farnode')
+[exit=1]
+
+STATE: a stopped far end is detected within a bounded time, refuses work, and does not reroute
+###      ATTRIBUTION after DISCONNECT
+$ /root/wayland-25/target/release/wayland-core node attribution selfnode --receipt /root/f25-03-evidence/receipt-selfnode.json
+receipt     /root/f25-03-evidence/receipt-selfnode.json
+backend     local
+node        selfnode
+attribution HOLDS — work attributed to node 'selfnode' (key d66f9b31b176)
+[exit=0]
+
+STATE: bringing the far end back: docker start f25-03-farnode
+### RECOVER — probe farnode after its far end came back
+$ /root/wayland-25/target/release/wayland-core node probe farnode
+node 'farnode' is LIVE
+  advertised before: cloud (unavailable), container (unavailable), local, ssh (unavailable)
+  advertised now:    cloud (unavailable), container (unavailable), local, ssh (unavailable)
+[exit=0]
+
+###      node list (farnode must read live again)
+$ /root/wayland-25/target/release/wayland-core node list
+NODE           OS        STATE    VERSION    LIVENESS                     VERDICT / BACKENDS
+farnode        linux     paired   1.0        live                         same | cloud (unavailable), container (unavailable), local, ssh (unavailable)
+selfnode       linux     paired   1.0        unknown (not probed since pairing) same | cloud (unavailable), container, local, ssh (unavailable)
+[exit=0]
+
+###      submit to the recovered node (accepted again)
+$ /root/wayland-25/target/release/wayland-core node submit farnode
+ACCEPTED: node 'farnode' may take work
+[exit=0]
+
+STATE: the node returned, is visible, and takes work again
+###      ATTRIBUTION after RETURN
+$ /root/wayland-25/target/release/wayland-core node attribution selfnode --receipt /root/f25-03-evidence/receipt-selfnode.json
+receipt     /root/f25-03-evidence/receipt-selfnode.json
+backend     local
+node        selfnode
+attribution HOLDS — work attributed to node 'selfnode' (key d66f9b31b176)
+[exit=0]
+
+### MIXED VERSION — pair the major-99 build as 'oldnode'
+$ /root/wayland-25/target/release/wayland-core node pair oldnode --target f25node --remote-bin /usr/local/bin/wayland-core-old
+pairing 'oldnode' at f25node (challenge c4767f904b0c)
+paired 'oldnode'
+  machine   f25-farnode-box
+  os        linux
+  key id    bfed45d376de52e0d67057526eb8c078210499f854053d55e42cba2456503445
+  version   99.0
+  verdict   unsupported (node 99.0: major version 99 is not 1; the node contract changed incompatibly)
+  backends  cloud (unavailable), container (unavailable), local, ssh (unavailable)
+[exit=0]
+
+###      node list (looking for a NAMED unsupported verdict)
+$ /root/wayland-25/target/release/wayland-core node list
+NODE           OS        STATE    VERSION    LIVENESS                     VERDICT / BACKENDS
+farnode        linux     paired   1.0        live                         same | cloud (unavailable), container (unavailable), local, ssh (unavailable)
+oldnode        linux     paired   99.0       unknown (not probed since pairing) unsupported (node 99.0: major version 99 is not 1; the node contract changed incompatibly) | cloud (unavailable), container (unavailable), local, ssh (unavailable)
+selfnode       linux     paired   1.0        unknown (not probed since pairing) same | cloud (unavailable), container, local, ssh (unavailable)
+[exit=0]
+
+###      submit to the version-mismatched node (REFUSED, not negotiated down)
+$ /root/wayland-25/target/release/wayland-core node submit oldnode
+wayland-core node: REFUSED: node 'oldnode' advertises an unsupported contract version: unsupported (node 99.0: major version 99 is not 1; the node contract changed incompatibly) (node 'oldnode')
+[exit=1]
+
+STATE: node list carries a named unsupported verdict and work to it is refused
+###      ATTRIBUTION after VERSION-MISMATCH
+$ /root/wayland-25/target/release/wayland-core node attribution selfnode --receipt /root/f25-03-evidence/receipt-selfnode.json
+receipt     /root/f25-03-evidence/receipt-selfnode.json
+backend     local
+node        selfnode
+attribution HOLDS — work attributed to node 'selfnode' (key d66f9b31b176)
+[exit=0]
+

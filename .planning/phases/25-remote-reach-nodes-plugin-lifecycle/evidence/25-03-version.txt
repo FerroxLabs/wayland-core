@@ -1,0 +1,55 @@
+STATE: bringing the far end back: docker start f25-03-farnode
+### RECOVER — probe farnode after its far end came back
+$ /root/wayland-25/target/release/wayland-core node probe farnode
+node 'farnode' is LIVE
+  advertised before: cloud (unavailable), container (unavailable), local, ssh (unavailable)
+  advertised now:    cloud (unavailable), container (unavailable), local, ssh (unavailable)
+[exit=0]
+
+###      node list (farnode must read live again)
+$ /root/wayland-25/target/release/wayland-core node list
+NODE           OS        STATE    VERSION    LIVENESS                     VERDICT / BACKENDS
+farnode        linux     paired   1.0        live                         same | cloud (unavailable), container (unavailable), local, ssh (unavailable)
+selfnode       linux     paired   1.0        unknown (not probed since pairing) same | cloud (unavailable), container, local, ssh (unavailable)
+[exit=0]
+
+###      submit to the recovered node (accepted again)
+$ /root/wayland-25/target/release/wayland-core node submit farnode
+ACCEPTED: node 'farnode' may take work
+[exit=0]
+
+STATE: the node returned, is visible, and takes work again
+###      ATTRIBUTION after RETURN
+$ /root/wayland-25/target/release/wayland-core node attribution selfnode --receipt /root/f25-03-evidence/receipt-selfnode.json
+receipt     /root/f25-03-evidence/receipt-selfnode.json
+backend     local
+node        selfnode
+attribution HOLDS — work attributed to node 'selfnode' (key d66f9b31b176)
+[exit=0]
+
+### MIXED VERSION — pair the major-99 build as 'oldnode'
+$ /root/wayland-25/target/release/wayland-core node pair oldnode --target f25node --remote-bin /usr/local/bin/wayland-core-old
+pairing 'oldnode' at f25node (challenge c4767f904b0c)
+paired 'oldnode'
+  machine   f25-farnode-box
+  os        linux
+  key id    bfed45d376de52e0d67057526eb8c078210499f854053d55e42cba2456503445
+  version   99.0
+  verdict   unsupported (node 99.0: major version 99 is not 1; the node contract changed incompatibly)
+  backends  cloud (unavailable), container (unavailable), local, ssh (unavailable)
+[exit=0]
+
+###      node list (looking for a NAMED unsupported verdict)
+$ /root/wayland-25/target/release/wayland-core node list
+NODE           OS        STATE    VERSION    LIVENESS                     VERDICT / BACKENDS
+farnode        linux     paired   1.0        live                         same | cloud (unavailable), container (unavailable), local, ssh (unavailable)
+oldnode        linux     paired   99.0       unknown (not probed since pairing) unsupported (node 99.0: major version 99 is not 1; the node contract changed incompatibly) | cloud (unavailable), container (unavailable), local, ssh (unavailable)
+selfnode       linux     paired   1.0        unknown (not probed since pairing) same | cloud (unavailable), container, local, ssh (unavailable)
+[exit=0]
+
+###      submit to the version-mismatched node (REFUSED, not negotiated down)
+$ /root/wayland-25/target/release/wayland-core node submit oldnode
+wayland-core node: REFUSED: node 'oldnode' advertises an unsupported contract version: unsupported (node 99.0: major version 99 is not 1; the node contract changed incompatibly) (node 'oldnode')
+[exit=1]
+
+STATE: node list carries a named unsupported verdict and work to it is refused

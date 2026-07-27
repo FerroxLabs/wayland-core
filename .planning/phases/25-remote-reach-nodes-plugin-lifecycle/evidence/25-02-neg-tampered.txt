@@ -1,0 +1,40 @@
+[exit=0]
+
+STATE: installed the verifying key as a trust anchor at /root/f25-02-lab/home/trusted-keys/author.pub -- the exact step that sign --new-key printed
+STATE: 64 bytes at bin/wayland-plugin.sig (beside the entry artifact, where the engine verifier reads it)
+### VERB 5/12 publish
+$ /root/wayland-25/target/release/wayland-core plugin publish /root/f25-02-lab/src/lifecycle-demo --to /root/f25-02-lab/market --install-root /root/f25-02-lab/home/plugins
+published lifecycle-demo 1.0.0
+  digest   4fa0ee587fbf59e75577a98dec1ce646cccb46283f96442716f82816a3642bac
+  signed   bin/run (wayland-plugin.sig)
+  target   /root/f25-02-lab/market/plugins/lifecycle-demo
+  install  wayland-core plugin marketplace add /root/f25-02-lab/market && wayland-core plugin install lifecycle-demo@market
+[exit=0]
+
+STATE: bundle at /root/f25-02-lab/market/plugins/lifecycle-demo:
+{
+  "name": "lifecycle-demo",
+  "version": "1.0.0",
+  "content_digest": "4fa0ee587fbf59e75577a98dec1ce646cccb46283f96442716f82816a3642bac",
+  "signed_artifact": "bin/run",
+  "signature_file": "wayland-plugin.sig",
+  "published_at": "2026-07-27T01:48:38.010661817Z"
+}###         marketplace add (existing verb, unchanged)
+$ /root/wayland-25/target/release/wayland-core plugin marketplace add /root/f25-02-lab/market --install-root /root/f25-02-lab/home/plugins
+added marketplace 'market'
+[exit=0]
+
+###         available (existing verb, unchanged)
+$ /root/wayland-25/target/release/wayland-core plugin available --install-root /root/f25-02-lab/home/plugins
+wayland-browser	0.6.0	Browser tool plugin shell (Camoufox / chromiumoxide / Browserbase)
+wayland-cua	0.6.0	Computer-use plugin shell (multi-platform)
+wayland-honcho	0.6.0	Honcho user-model plugin (mock + live-gated)
+wayland-ollama	0.6.0	Local Ollama provider plugin
+[exit=0]
+
+### NEGATIVE 2/4 — install a TAMPERED bundle
+$ /root/wayland-25/target/release/wayland-core plugin install lifecycle-demo@market --install-root /root/f25-02-lab/home/plugins
+error: quarantine: bundle integrity check FAILED for lifecycle-demo: bundle.json records 4fa0ee587fbf59e75577a98dec1ce646cccb46283f96442716f82816a3642bac but the tree hashes to 305a0b31a636aa84e7a593bff3bbf4b9dfa999ea8264b5345e43a126fe43fb92 — the published bytes were modified after publication
+[exit=1]
+
+STATE: refused (exit=1) and NOTHING landed in the install root
