@@ -1,0 +1,9 @@
+PANEL-MEMBER: codex
+PANEL-QUESTION-SHA256: eb15e09b031f20a17cf94aaed0b9219531762ea568fef1b6febee1d657cab88d
+---
+`CredentialRef` is structurally safe: it has no value field, variant, constructor parameter, or accessor.
+
+But `DiscoveredItem::details: BTreeMap<String, String>` still permits arbitrary secret-bearing values. `scrub_detail` sanitizes selected write paths; it does not make secrets unrepresentable. Because `details` is public and deserializable, direct insertion, struct construction, or deserialization can bypass `insert_detail` and carry a credential value into serde, `Debug`, or errors. The extended probe validates the known projection paths, not the emitted type’s structural invariant.
+
+PANEL-VERDICT: contract-cosmetic
+PANEL-BASIS: CredentialRef is structural, but the public deserializable DiscoveredItem::details String values can still represent secrets and depend on scrubbers at selected insertion paths.

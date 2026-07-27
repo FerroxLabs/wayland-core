@@ -305,6 +305,55 @@ pub enum WaitKind {
     OperatorResolution { detail: String },
 }
 
+/// Stable identity of one durable task inside a Goal's ledger (F22-03).
+///
+/// A task is Fleet work the ledger tracks across a kill: its dependencies, its
+/// attempts, who owns it now and whether its completion ever reached the parent.
+/// It is identified separately from the Goal because a Goal outlives any single
+/// task and a task is reassigned without the Goal changing identity.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TaskId(pub String);
+
+impl TaskId {
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for TaskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Why an attempt's outcome could not be established.
+///
+/// Every variant means the same operational thing — the ledger does NOT know
+/// whether the effect happened — and the ledger's response to all of them is
+/// identical: park the task for explicit resolution rather than retry it. The
+/// variants are kept distinct because an operator settles them differently, the
+/// same reason [`ExhaustionKind`] exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TaskUnknownReason {
+    /// The owning process died between starting the effect and recording it.
+    OwnerDiedMidAttempt,
+    /// The lease expired while the owner may still have been running.
+    LeaseExpiredWhileOwnerLive,
+    /// The effect was dispatched and its receipt never arrived.
+    ReceiptMissing,
+    /// Something else, stated rather than collapsed into one of the above.
+    Other { detail: String },
+}
+
 /// UNTRUSTED authority/budget envelope as it arrives from a host or child.
 ///
 /// This is the only shape an untrusted payload can deserialize into. It is

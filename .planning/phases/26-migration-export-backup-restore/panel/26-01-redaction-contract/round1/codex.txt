@@ -1,0 +1,9 @@
+PANEL-MEMBER: codex
+PANEL-QUESTION-SHA256: 67ac3759b150b519b339e01be363eed8bafb28f91765ecd84b0e4a8d2cb6968a
+---
+`CredentialRef` itself is structurally safe: its only fields are `name` and `source_file`, and it has no value-bearing variant or accessor. `MigrationPlan::to_portability()` drops the API key when constructing it.
+
+But the emitted `DiscoveredItem` still contains `details: BTreeMap<String, String>`, through which any credential value is representable and would be emitted by Serde and `Debug`. The probe covers current projections and canary fixtures, but it does not test arbitrary insertion of a canary into `details`—nor whether MCP `command` or `url` strings contain embedded credentials. Therefore it proves current output does not leak, not that the emitted type makes leakage unrepresentable.
+
+PANEL-VERDICT: contract-cosmetic
+PANEL-BASIS: CredentialRef has no value path, but DiscoveredItem::details is an uncovered value-capable serialization path, so the whole emitted type does not structurally enforce the contract.

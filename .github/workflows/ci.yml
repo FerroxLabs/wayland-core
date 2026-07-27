@@ -154,9 +154,6 @@ jobs:
       - name: Pre-build wcore-cli release binary (smoked by release_binary_smoke tests)
         run: vx cargo build --release -p wcore-cli
 
-      - name: Check Desktop protocol contract corpus drift
-        run: vx cargo run -p wcore-protocol --bin wcore-contract -- check
-
       - name: Check formatting
         run: vx just fmt-check
 
@@ -165,6 +162,28 @@ jobs:
 
       - name: Run tests (nextest CI profile)
         run: vx just test-ci
+
+      # 2026-07-27: MOVED to after the test step. It used to run before it, so a
+      # contract digest drift failed the job at that step and macOS and
+      # self-hosted Windows never reached the tests at all — three separate
+      # lanes reported "CI is red on two of three platforms" when what was
+      # actually lost was test VISIBILITY on those platforms.
+      #
+      # Deliberately still a hard failure, and deliberately NOT fixed by
+      # regenerating: a 4-way cross-audit went 3-0 against re-stamping the
+      # digests on a working branch, on the grounds that an agent who
+      # regenerates whenever CI goes red destroys the only guard that would
+      # catch a genuine wire change. The drift here is bookkeeping only —
+      # measured field-by-field, exactly `fixture_digest` and
+      # `source_inputs_digest` moved while `schema_digest` did NOT, so the wire
+      # shape is unchanged — but the coordinated Core+Desktop re-pin is still
+      # owed and the red is the honest signal that it is owed. See
+      # .planning/SEAM-REQUESTS/CONTRACT-DIGEST-RESTAMP.md.
+      #
+      # Ordering only. The command, its strictness and its exit status are
+      # untouched: the job still fails on drift, it just reports the tests first.
+      - name: Check Desktop protocol contract corpus drift
+        run: vx cargo run -p wcore-protocol --bin wcore-contract -- check
 
       # V1 C2 — release-binary smoke. Catches the v0.2.0 BLOCKER #1 class
       # of regression where `inventory::submit!` items get dead-code-stripped

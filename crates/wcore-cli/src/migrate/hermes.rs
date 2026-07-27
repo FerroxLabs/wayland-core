@@ -20,9 +20,17 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use wcore_config::config::{McpServerConfig, ProfileConfig, TransportType};
 
+use wcore_config::portability::ROOT_PROFILE_ID;
+
 use super::{Deferred, MigrationPlan, ProfilePlan};
 
 /// Resolve and validate the Hermes home to import from.
+///
+/// A home is acceptable when EITHER `profiles/` exists OR a root-level
+/// `config.yaml` does. Requiring `profiles/` made a root-only Hermes install
+/// unimportable outright, and made a rooted install's own top-level setup
+/// invisible — measured against the real install, whose 8.9K root `config.yaml`
+/// and root `.env` were both being dropped (F26-01 gap 4).
 pub fn detect_home(explicit: Option<&Path>) -> Result<PathBuf> {
     let home = match explicit {
         Some(p) => p.to_path_buf(),
@@ -31,13 +39,19 @@ pub fn detect_home(explicit: Option<&Path>) -> Result<PathBuf> {
             .join(".hermes"),
     };
     let profiles = home.join("profiles");
-    if !profiles.is_dir() {
+    if !profiles.is_dir() && !root_config_path(&home).is_file() {
         bail!(
-            "no Hermes profiles found — expected a directory at {}",
-            profiles.display()
+            "no Hermes setup found — expected a directory at {} or a root config at {}",
+            profiles.display(),
+            root_config_path(&home).display()
         );
     }
     Ok(home)
+}
+
+/// The root-level `config.yaml` that sits beside `profiles/`.
+fn root_config_path(home: &Path) -> PathBuf {
+    home.join("config.yaml")
 }
 
 /// Walk `<home>/profiles/*` and build the full migration plan.
@@ -46,12 +60,20 @@ pub fn build_plan(home: &Path, include_credentials: bool) -> Result<MigrationPla
     let existing_profiles = existing_profile_names();
     let existing_mcp = existing_mcp_names();
 
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(&profiles_dir)
-        .with_context(|| format!("reading {}", profiles_dir.display()))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
+    // A root-only home has no `profiles/` at all, and that is now legal — so a
+    // missing directory yields an empty set rather than aborting the walk.
+    let mut entries: Vec<PathBuf> = match std::fs::read_dir(&profiles_dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect(),
+        Err(_) if root_config_path(home).is_file() => Vec::new(),
+        Err(e) => {
+            return Err(anyhow::Error::from(e))
+                .with_context(|| format!("reading {}", profiles_dir.display()));
+        }
+    };
     entries.sort();
 
     let mut profiles = Vec::new();
@@ -60,7 +82,45 @@ pub fn build_plan(home: &Path, include_credentials: bool) -> Result<MigrationPla
     let mut deferred = Deferred::default();
     let mut warnings = Vec::new();
 
-    for dir in entries {
+    // The ROOT-level setup, imported alongside the per-profile ones. Before
+    // F26-01 this was dropped entirely: `detect_home` required `profiles/`, so
+    // a root-only install was unimportable and a rooted install's own top-level
+    // `config.yaml` + `.env` were invisible. The root uses the SAME mapper as a
+    // profile — measured: the real root `config.yaml` carries exactly the
+    // `model:` keys and `mcp_servers:` map the profile mapper already consumes.
+    if root_config_path(home).is_file() {
+        // A real profile cannot be named this: `ROOT_PROFILE_ID` contains `/`,
+        // which is not a legal directory name, so the collision is impossible
+        // rather than merely detected. Warn anyway if a profile called `root`
+        // exists, so a user who expected that name is told where it went.
+        if entries
+            .iter()
+            .any(|d| d.file_name().and_then(|n| n.to_str()) == Some("root"))
+        {
+            warnings.push(format!(
+                "a profile directory named \"root\" exists; the home's own \
+                 top-level setup is imported separately as {ROOT_PROFILE_ID:?}"
+            ));
+        }
+        match map_setup(
+            home,
+            ROOT_PROFILE_ID.to_string(),
+            &root_config_path(home),
+            home,
+            include_credentials,
+            &existing_profiles,
+            &existing_mcp,
+            &mut mcp_servers,
+            &mut mcp_conflicts,
+            &mut deferred,
+        ) {
+            Ok(p) => profiles.push(p),
+            Err(e) => warnings.push(format!("root setup: {e}")),
+        }
+    }
+
+    for dir in &entries {
+        let dir = dir.as_path();
         let name = match dir.file_name().and_then(|n| n.to_str()) {
             Some(n) => n.to_string(),
             None => continue,
@@ -70,74 +130,25 @@ pub fn build_plan(home: &Path, include_credentials: bool) -> Result<MigrationPla
             warnings.push(format!("profile {name:?}: no config.yaml — skipped"));
             continue;
         }
-        let hermes =
-            parse_config(&cfg_path).with_context(|| format!("parsing {}", cfg_path.display()))?;
-
-        let (provider, model) = map_model(&hermes.model);
-        let mut config = ProfileConfig {
-            provider,
-            model,
-            base_url: hermes.model.base_url.clone(),
-            ..Default::default()
-        };
-
-        // MCP servers: add new ones globally, reference all by name.
-        let mut refs: Vec<String> = Vec::new();
-        for (srv_name, srv) in hermes.mcp_servers.unwrap_or_default() {
-            if existing_mcp.contains(&srv_name) {
-                if !mcp_conflicts.contains(&srv_name) {
-                    mcp_conflicts.push(srv_name.clone());
-                }
-            } else {
-                mcp_servers
-                    .entry(srv_name.clone())
-                    .or_insert_with(|| map_mcp(&srv));
-            }
-            refs.push(srv_name);
-        }
-        refs.sort();
-        refs.dedup();
-        if !refs.is_empty() {
-            config.mcp_servers = Some(refs.clone());
-        }
-
-        // Credentials (value read only when it may be written; name always
-        // recorded for the preview).
-        let mut credential_env_var = None;
-        let mut has_credential = false;
-        let env_path = dir.join(".env");
-        if env_path.is_file() {
-            let env = parse_dotenv(&env_path).unwrap_or_default();
-            if let Some((var, value)) = pick_provider_key(&env, config.provider.as_deref()) {
-                has_credential = true;
-                credential_env_var = Some(var);
-                if include_credentials {
-                    config.api_key = Some(value);
-                }
-            }
-        }
-
-        // Deferred inventory.
-        deferred.skills += count_subdirs(&dir.join("skills"));
-        if dir.join("SOUL.md").is_file() {
-            deferred.personas += 1;
-        }
-        deferred.memory_files += count_memory_notes(&dir.join("memories"));
-
-        profiles.push(ProfilePlan {
-            conflict: existing_profiles.contains(&name),
+        let p = map_setup(
+            home,
             name,
-            config,
-            has_credential,
-            credential_env_var,
-            mcp_refs: refs,
-        });
+            &cfg_path,
+            dir,
+            include_credentials,
+            &existing_profiles,
+            &existing_mcp,
+            &mut mcp_servers,
+            &mut mcp_conflicts,
+            &mut deferred,
+        )?;
+        profiles.push(p);
     }
 
     if profiles.is_empty() {
         bail!(
-            "no importable Hermes profiles under {}",
-            profiles_dir.display()
+            "no importable Hermes setup under {} (no profiles, no root config.yaml)",
+            home.display()
         );
     }
 
@@ -150,8 +161,111 @@ pub fn build_plan(home: &Path, include_credentials: bool) -> Result<MigrationPla
         mcp_servers,
         mcp_conflicts,
         deferred,
+        deferred_other: BTreeMap::new(),
         warnings,
     })
+}
+
+/// Map ONE Hermes setup — a `profiles/<name>/` directory, or the home root —
+/// onto a [`ProfilePlan`].
+///
+/// Extracted so the root-level setup goes through exactly the same mapping as a
+/// profile rather than a second, divergent copy of it. `cfg_path` is the
+/// `config.yaml` to read and `dir` is the directory whose `.env`, `skills/`,
+/// `SOUL.md` and `memories/` belong to this setup.
+#[allow(clippy::too_many_arguments)]
+fn map_setup(
+    home: &Path,
+    name: String,
+    cfg_path: &Path,
+    dir: &Path,
+    include_credentials: bool,
+    existing_profiles: &HashSet<String>,
+    existing_mcp: &HashSet<String>,
+    mcp_servers: &mut BTreeMap<String, McpServerConfig>,
+    mcp_conflicts: &mut Vec<String>,
+    deferred: &mut Deferred,
+) -> Result<ProfilePlan> {
+    let hermes =
+        parse_config(cfg_path).with_context(|| format!("parsing {}", cfg_path.display()))?;
+
+    let (provider, model) = map_model(&hermes.model);
+    let mut config = ProfileConfig {
+        provider,
+        model,
+        base_url: hermes.model.base_url.clone(),
+        ..Default::default()
+    };
+
+    // MCP servers: add new ones globally, reference all by name.
+    let mut refs: Vec<String> = Vec::new();
+    for (srv_name, srv) in hermes.mcp_servers.unwrap_or_default() {
+        if existing_mcp.contains(&srv_name) {
+            if !mcp_conflicts.contains(&srv_name) {
+                mcp_conflicts.push(srv_name.clone());
+            }
+        } else {
+            mcp_servers
+                .entry(srv_name.clone())
+                .or_insert_with(|| map_mcp(&srv));
+        }
+        refs.push(srv_name);
+    }
+    refs.sort();
+    refs.dedup();
+    if !refs.is_empty() {
+        config.mcp_servers = Some(refs.clone());
+    }
+
+    // Credentials (value read only when it may be written; the NAME is always
+    // what the preview records).
+    let mut credential_env_var = None;
+    let mut has_credential = false;
+    let mut credential_file = None;
+    let env_path = dir.join(".env");
+    if env_path.is_file() {
+        let env = parse_dotenv(&env_path).unwrap_or_default();
+        if let Some((var, value)) = pick_provider_key(&env, config.provider.as_deref()) {
+            has_credential = true;
+            credential_env_var = Some(var);
+            credential_file = Some(relative_to(home, &env_path));
+            if include_credentials {
+                config.api_key = Some(value);
+            }
+        }
+    }
+
+    // Deferred inventory.
+    deferred.skills += count_subdirs(&dir.join("skills"));
+    if dir.join("SOUL.md").is_file() {
+        deferred.personas += 1;
+    }
+    deferred.memory_files += count_memory_notes(&dir.join("memories"));
+
+    Ok(ProfilePlan {
+        conflict: existing_profiles.contains(&name),
+        name,
+        config,
+        has_credential,
+        credential_env_var,
+        credential_file,
+        mcp_refs: refs,
+        source_path: relative_to(home, dir),
+    })
+}
+
+/// A `/`-separated path relative to the source home, for the emitted plan. An
+/// absolute path on the discovering machine must never reach a document.
+pub(super) fn relative_to(home: &Path, path: &Path) -> String {
+    match path.strip_prefix(home) {
+        Ok(rel) if rel.as_os_str().is_empty() => ".".to_string(),
+        Ok(rel) => rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/"),
+        Err(_) => path.to_string_lossy().into_owned(),
+    }
 }
 
 // --- Hermes source schema (permissive; unknown keys ignored) ---
@@ -305,7 +419,7 @@ fn count_memory_notes(dir: &Path) -> usize {
         .unwrap_or(0)
 }
 
-fn existing_profile_names() -> HashSet<String> {
+pub(super) fn existing_profile_names() -> HashSet<String> {
     wcore_config::config::global_profiles()
         .into_iter()
         .map(|(name, _, _)| name)
@@ -315,7 +429,7 @@ fn existing_profile_names() -> HashSet<String> {
 /// Read the `[mcp.servers]` names already present in the global `config.toml`.
 /// Best-effort and read-only: any missing file or parse error yields an empty
 /// set (the apply step never clobbers an existing server regardless).
-fn existing_mcp_names() -> HashSet<String> {
+pub(super) fn existing_mcp_names() -> HashSet<String> {
     #[derive(Deserialize, Default)]
     struct Probe {
         #[serde(default)]

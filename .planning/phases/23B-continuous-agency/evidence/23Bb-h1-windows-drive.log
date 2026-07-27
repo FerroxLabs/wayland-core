@@ -1,0 +1,31 @@
+########## WINDOWS RED (pre-fix b75e640c)
+
+provenance: wayland-core 0.12.25 (source b75e640c589ef4dcaa8f557260354e7aa90851aa)
+--- session reconcile s-5e6e062185b9fe8e (exit 1)
+be read: journal checksum mismatch at sequence 1
+--- session cancel s-5e6e062185b9fe8e (exit 1)
+be read: journal checksum mismatch at sequence 1
+F23_H1_DRIVE=PASS platform=windows mode=unreadable nonce=5e6e062185b9fe8e
+RED_EXIT=0
+########## WINDOWS GREEN (fixed 12bd0834)
+provenance: wayland-core 0.12.25 (source 12bd0834497ffb4b4bc653da075dbf8bee0d45f7)
+wrote C:\Users\seand\AppData\Local\Temp\f23h1-c38dc8e8ab072d87\s-c38dc8e8ab072d87.journal session=s-c38dc8e8ab072d87 nonce=c38dc8e8ab072d87
+--- session reconcile s-c38dc8e8ab072d87 (exit 0)
+F23_SESSION=reconcile_item id=s-c38dc8e8ab072d87 kind=tool_execution ref=x1 tool=Write turn=t1 reason=Prepared resolvable=false
+F23_SESSION=reconcile id=s-c38dc8e8ab072d87 outstanding=1
+--- session cancel s-c38dc8e8ab072d87 (exit 5)
+wayland-core-fixed.exe : wayland-core session: session 's-c38dc8e8ab072d87' has 1 outstanding 
+reconcile item(s)
+At C:\f23h1\f23-h1-recovery-drive.ps1:74 char:16
++ ...      $out = & $Binary session --dir $work $verb $session 2>&1 | Out-S ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (wayland-core se...concile item(s):String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+--- session reconcile s-c38dc8e8ab072d87 (exit 0)
+F23_SESSION=reconcile_item id=s-c38dc8e8ab072d87 kind=tool_execution ref=x1 tool=Write turn=t1 reason=Prepared resolvable=false
+F23_SESSION=reconcile id=s-c38dc8e8ab072d87 outstanding=1
+F23_H1_DRIVE=PASS platform=windows mode=readable nonce=c38dc8e8ab072d87
+GREEN_EXIT=0
+########## falsification: readable against the pre-fix Windows binary must FAIL
+FALSIFY_EXIT=1 (non-zero required)

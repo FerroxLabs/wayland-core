@@ -62,7 +62,9 @@ pub(crate) fn reduce(
         | SessionEvent::GoalWaitBegun { .. }
         | SessionEvent::GoalWaitResolved { .. }
         | SessionEvent::GoalRunResumed { .. }
-        | SessionEvent::GoalTerminated { .. } => {
+        | SessionEvent::GoalTerminated { .. }
+        | SessionEvent::GoalTaskDeclared { .. }
+        | SessionEvent::GoalTaskTransitioned { .. } => {
             apply_goal_event(
                 &mut state,
                 &envelope.event,
@@ -112,6 +114,76 @@ fn required_goal_mut<'a>(
         .goals
         .get_mut(goal_id)
         .ok_or_else(|| missing("goal", goal_id))
+}
+
+fn invalid_task(goal_id: &str, task_id: &str, detail: &str) -> JournalError {
+    JournalError::InvalidTransition(format!("goal {goal_id} task {task_id}: {detail}"))
+}
+
+/// The Goal limit key a budget unit is charged against.
+///
+/// Centralized here rather than scattered so a unit cannot be charged against
+/// two different ceilings in two places. A unit with no matching key has no
+/// ceiling in this envelope — an absent limit is NOT invented as zero, and it is
+/// not silently treated as infinite either: the caller sees `None` and the
+/// attempt is admitted only because the Goal never named a bound for that unit.
+fn budget_limit_key(unit: BudgetUnit) -> &'static str {
+    match unit {
+        BudgetUnit::Tokens => "max_tokens",
+        BudgetUnit::Requests => "max_requests",
+        BudgetUnit::ToolCalls => "max_tool_calls",
+        BudgetUnit::Milliseconds => "max_wall_millis",
+        BudgetUnit::Bytes => "max_bytes",
+        BudgetUnit::Credits => "max_cost_cents",
+    }
+}
+
+/// Whether every dependency of `task` carries a durable completion.
+///
+/// A free function rather than the `GoalState` method so the reducer can consult
+/// it while holding a mutable borrow of the task map.
+fn task_dependencies_met(tasks: &BTreeMap<String, GoalTaskState>, task: &GoalTaskState) -> bool {
+    task.depends_on.iter().all(|dependency| {
+        tasks
+            .get(dependency)
+            .is_some_and(|state| state.completion.is_some())
+    })
+}
+
+/// The committed live attempt whose epoch a transition must present, or a
+/// refusal naming what was presented against what is committed.
+///
+/// THIS IS THE FENCE. Every effect-bearing transition passes through here, and
+/// it runs at the durable boundary rather than in a caller, so a superseded
+/// owner is refused even if it hand-builds the record. The comparison is
+/// equality against the committed epoch, not `>=`: a stale owner and a
+/// from-the-future one are both wrong.
+fn require_live_epoch<'a>(
+    goal_id: &str,
+    task: &'a mut GoalTaskState,
+    presented: u64,
+) -> Result<&'a mut GoalTaskAttempt, JournalError> {
+    let committed = task.epoch();
+    if presented != committed {
+        return Err(invalid_task(
+            goal_id,
+            &task.task_id,
+            "transition presents a superseded claim epoch",
+        ));
+    }
+    let task_id = task.task_id.clone();
+    let attempt = task
+        .attempts
+        .last_mut()
+        .ok_or_else(|| invalid_task(goal_id, &task_id, "task has never been claimed"))?;
+    if !matches!(attempt.status, GoalTaskAttemptStatus::Live) {
+        return Err(invalid_task(
+            goal_id,
+            &task_id,
+            "the claim this transition presents is no longer live",
+        ));
+    }
+    Ok(attempt)
 }
 
 /// Refuse any transition against a Goal that has already terminated.
@@ -168,6 +240,7 @@ fn apply_goal_event(
                     opened_at_unix_ms: *opened_at_unix_ms,
                     last_transition_seq: seq,
                     last_transition_checksum: checksum.to_owned(),
+                    tasks: BTreeMap::new(),
                 },
             );
         }
@@ -266,13 +339,433 @@ fn apply_goal_event(
             goal.lifecycle = GoalLifecycle::Terminated {
                 terminal: terminal.clone(),
             };
+            // The cancellation cascade. A Goal that terminates revokes every
+            // live task claim, so the epoch every in-flight owner holds is now
+            // superseded and `require_live_epoch` refuses its completion. That
+            // is what makes "no cancelled task's effect lands afterward" a
+            // property of the durable boundary rather than of the shutdown path
+            // — which is the one path a killed process never runs.
+            let reason = format!("goal terminated: {terminal:?}");
+            for task in goal.tasks.values_mut() {
+                if let Some(attempt) = task.attempts.last_mut()
+                    && matches!(attempt.status, GoalTaskAttemptStatus::Live)
+                {
+                    attempt.status = GoalTaskAttemptStatus::Revoked {
+                        reason: reason.clone(),
+                    };
+                    task.last_transition_seq = seq;
+                    task.last_transition_checksum = checksum.to_owned();
+                }
+            }
             goal.last_transition_seq = seq;
             goal.last_transition_checksum = checksum.to_owned();
+        }
+        SessionEvent::GoalTaskDeclared {
+            goal_id,
+            task_id,
+            depends_on,
+            idempotency_key,
+        } => {
+            let goal = required_goal_mut(state, goal_id)?;
+            require_goal_live(goal)?;
+            if goal.tasks.contains_key(task_id) {
+                return Err(duplicate("goal task", task_id));
+            }
+            if depends_on.contains(task_id) {
+                return Err(invalid_task(
+                    goal_id,
+                    task_id,
+                    "a task cannot depend on itself",
+                ));
+            }
+            // A dependency named before it is declared would make claimability
+            // depend on declaration order, and the ledger would release a
+            // dependent on a dependency that never exists. Refuse rather than
+            // treat an unknown dependency as satisfied.
+            if let Some(unknown) = depends_on.iter().find(|id| !goal.tasks.contains_key(*id)) {
+                return Err(invalid_task(
+                    goal_id,
+                    task_id,
+                    &format!("depends on undeclared task {unknown}"),
+                ));
+            }
+            if idempotency_key.is_empty() {
+                return Err(invalid_task(
+                    goal_id,
+                    task_id,
+                    "a task with no idempotency key has no route to an at-most-once effect",
+                ));
+            }
+            let dependency_releases = u64::from(depends_on.is_empty());
+            goal.tasks.insert(
+                task_id.clone(),
+                GoalTaskState {
+                    task_id: task_id.clone(),
+                    depends_on: depends_on.clone(),
+                    idempotency_key: idempotency_key.clone(),
+                    attempts: Vec::new(),
+                    completion: None,
+                    handoffs: Vec::new(),
+                    dependency_releases,
+                    last_transition_seq: seq,
+                    last_transition_checksum: checksum.to_owned(),
+                },
+            );
+        }
+        SessionEvent::GoalTaskTransitioned {
+            goal_id,
+            task_id,
+            transition,
+        } => {
+            apply_goal_task_transition(state, goal_id, task_id, transition, seq, checksum)?;
         }
         _ => {
             return Err(JournalError::InvalidTransition(
                 "goal reduction received a non-goal event".to_owned(),
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Reduce one durable task-ledger transition.
+///
+/// Split out of `apply_goal_event` because the epoch fence, the budget re-entry
+/// check and the dependency release all need to consult state OUTSIDE the goal
+/// (the committed budget reservations, the delegated-mutation transactions), and
+/// interleaving those reads with the mutable goal borrow inside one function is
+/// how the borrow gets widened until the checks drift apart.
+fn apply_goal_task_transition(
+    state: &mut ReducedSessionState,
+    goal_id: &str,
+    task_id: &str,
+    transition: &GoalTaskTransition,
+    seq: u64,
+    checksum: &str,
+) -> Result<(), JournalError> {
+    // Reads that must happen before the goal is mutably borrowed.
+    let reservation = match transition {
+        GoalTaskTransition::Claimed {
+            budget_reservation_id,
+            ..
+        }
+        | GoalTaskTransition::WorkspaceHandedOff {
+            budget_reservation_id,
+            ..
+        } => Some((
+            budget_reservation_id.clone(),
+            state.budgets.get(budget_reservation_id).cloned(),
+        )),
+        _ => None,
+    };
+    let handoff_transaction_exists = match transition {
+        GoalTaskTransition::WorkspaceHandedOff { transaction_id, .. } => {
+            Some(state.child_transactions.contains_key(transaction_id))
+        }
+        _ => None,
+    };
+    let prior_reserved: BTreeMap<String, u64> = state
+        .budgets
+        .iter()
+        .map(|(id, budget)| (id.clone(), budget.reserved.value))
+        .collect();
+
+    let goal = required_goal_mut(state, goal_id)?;
+    require_goal_live(goal)?;
+    let effective_limits = goal.authority.effective_limits.clone();
+    let Some(existing) = goal.tasks.get(task_id) else {
+        return Err(missing("goal task", task_id));
+    };
+    // Computed before the mutable borrow, and consulted at the DURABLE
+    // boundary rather than only in `claimable_tasks`. A worker that ignores the
+    // claimable query and claims a blocked task directly must still be refused;
+    // a query-surface-only check is advice, not a gate.
+    let dependencies_met = task_dependencies_met(&goal.tasks, existing);
+
+    match transition {
+        // `budget_reservation_id` is deliberately discarded here and read from
+        // `reservation` above instead: the committed BudgetState had to be
+        // looked up before the goal was mutably borrowed, and binding the id
+        // twice is how the two copies drift.
+        GoalTaskTransition::Claimed {
+            epoch,
+            worker_id,
+            budget_reservation_id: _,
+            lease_expires_unix_ms,
+        }
+        | GoalTaskTransition::WorkspaceHandedOff {
+            to_epoch: epoch,
+            to_worker: worker_id,
+            budget_reservation_id: _,
+            lease_expires_unix_ms,
+            ..
+        } => {
+            let is_handoff = matches!(transition, GoalTaskTransition::WorkspaceHandedOff { .. });
+
+            // A handoff is a CHANGE OF WRITER over a workspace, which Phase 20
+            // already made authoritative. Requiring the transaction to exist in
+            // reduced state means the only route to a new owner is one that
+            // already passed the delegated-mutation lifecycle: there is no
+            // transition that writes an owner field directly, so bypassing that
+            // lifecycle is not expressible rather than merely discouraged.
+            if let (
+                GoalTaskTransition::WorkspaceHandedOff {
+                    epoch: from_epoch,
+                    transaction_id,
+                    ..
+                },
+                Some(exists),
+            ) = (transition, handoff_transaction_exists)
+            {
+                if !exists {
+                    return Err(invalid_task(
+                        goal_id,
+                        task_id,
+                        "workspace handoff names no committed delegated-mutation transaction",
+                    ));
+                }
+                if *epoch != from_epoch.saturating_add(1) {
+                    return Err(invalid_task(
+                        goal_id,
+                        task_id,
+                        "a handoff's successor epoch must be the successor of the epoch it supersedes",
+                    ));
+                }
+                let task = goal
+                    .tasks
+                    .get_mut(task_id)
+                    .ok_or_else(|| missing("goal task", task_id))?;
+                let superseded = require_live_epoch(goal_id, task, *from_epoch)?;
+                superseded.status = GoalTaskAttemptStatus::Revoked {
+                    reason: format!("workspace handed off via transaction {transaction_id}"),
+                };
+                task.handoffs.push(GoalTaskHandoff {
+                    from_epoch: *from_epoch,
+                    to_epoch: *epoch,
+                    transaction_id: transaction_id.clone(),
+                    to_worker: worker_id.clone(),
+                });
+            }
+
+            // The budget re-entry check. An attempt must name a reservation
+            // that was committed through the EXISTING budget events, and the
+            // running total across every attempt of this task must stay inside
+            // whatever ceiling the Goal's authorized envelope names for that
+            // unit. Together those are what stop N attempts costing N
+            // reservations without this ledger minting a budget of its own.
+            let Some((reservation_id, budget)) = reservation else {
+                return Err(invalid_task(
+                    goal_id,
+                    task_id,
+                    "claim carries no reservation",
+                ));
+            };
+            let Some(budget) = budget else {
+                return Err(invalid_task(
+                    goal_id,
+                    task_id,
+                    &format!(
+                        "reservation {reservation_id} was never committed through the budget seam"
+                    ),
+                ));
+            };
+            let task = goal
+                .tasks
+                .get_mut(task_id)
+                .ok_or_else(|| missing("goal task", task_id))?;
+
+            if !is_handoff {
+                if !dependencies_met {
+                    return Err(invalid_task(
+                        goal_id,
+                        task_id,
+                        "the task's dependencies are not all durably completed",
+                    ));
+                }
+                if task.completion.is_some() {
+                    return Err(invalid_task(
+                        goal_id,
+                        task_id,
+                        "a task carrying a durable completion is not claimable",
+                    ));
+                }
+                if task.requires_resolution() {
+                    return Err(invalid_task(
+                        goal_id,
+                        task_id,
+                        "an attempt with an unestablished outcome must be resolved, never retried",
+                    ));
+                }
+                if task.live_attempt().is_some() {
+                    return Err(invalid_task(
+                        goal_id,
+                        task_id,
+                        "the task already has a live claim",
+                    ));
+                }
+                if *epoch != task.epoch().saturating_add(1) {
+                    return Err(invalid_task(
+                        goal_id,
+                        task_id,
+                        "claim epoch is not the successor of the committed epoch",
+                    ));
+                }
+            }
+
+            if task
+                .attempts
+                .iter()
+                .any(|attempt| attempt.budget_reservation_id == reservation_id)
+            {
+                return Err(invalid_task(
+                    goal_id,
+                    task_id,
+                    "an attempt may not reuse another attempt's reservation identity",
+                ));
+            }
+
+            let already_reserved: u64 = task
+                .attempts
+                .iter()
+                .filter_map(|attempt| prior_reserved.get(&attempt.budget_reservation_id))
+                .sum();
+            let would_reserve = already_reserved.saturating_add(budget.reserved.value);
+            if let Some(ceiling) = effective_limits.get(budget_limit_key(budget.reserved.unit))
+                && would_reserve > *ceiling
+            {
+                return Err(invalid_task(
+                    goal_id,
+                    task_id,
+                    "attempts across this task would exceed the Goal's authorized reservation",
+                ));
+            }
+
+            task.attempts.push(GoalTaskAttempt {
+                epoch: *epoch,
+                worker_id: worker_id.clone(),
+                budget_reservation_id: reservation_id,
+                lease_expires_unix_ms: *lease_expires_unix_ms,
+                last_liveness_unix_ms: None,
+                status: GoalTaskAttemptStatus::Live,
+            });
+            task.last_transition_seq = seq;
+            task.last_transition_checksum = checksum.to_owned();
+        }
+        GoalTaskTransition::LivenessProved { epoch, at_unix_ms } => {
+            let task = goal
+                .tasks
+                .get_mut(task_id)
+                .ok_or_else(|| missing("goal task", task_id))?;
+            let attempt = require_live_epoch(goal_id, task, *epoch)?;
+            attempt.last_liveness_unix_ms = Some(*at_unix_ms);
+            task.last_transition_seq = seq;
+            task.last_transition_checksum = checksum.to_owned();
+        }
+        GoalTaskTransition::ClaimRevoked { epoch, reason } => {
+            let task = goal
+                .tasks
+                .get_mut(task_id)
+                .ok_or_else(|| missing("goal task", task_id))?;
+            let attempt = require_live_epoch(goal_id, task, *epoch)?;
+            attempt.status = GoalTaskAttemptStatus::Revoked {
+                reason: reason.clone(),
+            };
+            task.last_transition_seq = seq;
+            task.last_transition_checksum = checksum.to_owned();
+        }
+        GoalTaskTransition::Completed {
+            epoch,
+            outcome,
+            effect_digest,
+        } => {
+            let task = goal
+                .tasks
+                .get_mut(task_id)
+                .ok_or_else(|| missing("goal task", task_id))?;
+            if task.completion.is_some() {
+                return Err(invalid_task(
+                    goal_id,
+                    task_id,
+                    "the task already carries a durable completion",
+                ));
+            }
+            let attempt = require_live_epoch(goal_id, task, *epoch)?;
+            attempt.status = GoalTaskAttemptStatus::Completed;
+            task.completion = Some(GoalTaskCompletion {
+                epoch: *epoch,
+                outcome: outcome.clone(),
+                effect_digest: effect_digest.clone(),
+                // Durable at PRODUCTION time. Delivery is a separate committed
+                // transition, so a worker that finishes and dies before the
+                // parent observes it leaves the completion here rather than
+                // nowhere.
+                delivered: false,
+            });
+            task.last_transition_seq = seq;
+            task.last_transition_checksum = checksum.to_owned();
+
+            // Release the dependents this completion unblocks, exactly once.
+            // The count moves only on the transition from unmet to met, and a
+            // second completion for the same task is refused above, so replay
+            // of the whole chain reproduces the same count rather than
+            // accumulating one per replay.
+            let dependents: Vec<String> = goal
+                .tasks
+                .values()
+                .filter(|candidate| candidate.depends_on.contains(task_id))
+                .map(|candidate| candidate.task_id.clone())
+                .collect();
+            for dependent_id in dependents {
+                let snapshot = goal.tasks.clone();
+                let Some(dependent) = goal.tasks.get_mut(&dependent_id) else {
+                    continue;
+                };
+                if task_dependencies_met(&snapshot, dependent) {
+                    dependent.dependency_releases = dependent.dependency_releases.saturating_add(1);
+                }
+            }
+        }
+        GoalTaskTransition::OutcomeUnknown { epoch, reason } => {
+            let task = goal
+                .tasks
+                .get_mut(task_id)
+                .ok_or_else(|| missing("goal task", task_id))?;
+            let attempt = require_live_epoch(goal_id, task, *epoch)?;
+            attempt.status = GoalTaskAttemptStatus::Unknown {
+                reason: reason.clone(),
+            };
+            task.last_transition_seq = seq;
+            task.last_transition_checksum = checksum.to_owned();
+        }
+        GoalTaskTransition::CompletionDelivered { epoch } => {
+            let task = goal
+                .tasks
+                .get_mut(task_id)
+                .ok_or_else(|| missing("goal task", task_id))?;
+            let Some(completion) = task.completion.as_mut() else {
+                return Err(invalid_task(
+                    goal_id,
+                    task_id,
+                    "no durable completion to deliver",
+                ));
+            };
+            if completion.epoch != *epoch {
+                return Err(invalid_task(
+                    goal_id,
+                    task_id,
+                    "delivery presents an epoch that did not produce the completion",
+                ));
+            }
+            if completion.delivered {
+                return Err(invalid_task(
+                    goal_id,
+                    task_id,
+                    "the completion has already been delivered",
+                ));
+            }
+            completion.delivered = true;
+            task.last_transition_seq = seq;
+            task.last_transition_checksum = checksum.to_owned();
         }
     }
     Ok(())
@@ -3189,7 +3682,9 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
         | SessionEvent::GoalWaitBegun { .. }
         | SessionEvent::GoalWaitResolved { .. }
         | SessionEvent::GoalRunResumed { .. }
-        | SessionEvent::GoalTerminated { .. } => {
+        | SessionEvent::GoalTerminated { .. }
+        | SessionEvent::GoalTaskDeclared { .. }
+        | SessionEvent::GoalTaskTransitioned { .. } => {
             return Err(JournalError::InvalidTransition(
                 "goal transitions require cursor-bound reduction".to_owned(),
             ));

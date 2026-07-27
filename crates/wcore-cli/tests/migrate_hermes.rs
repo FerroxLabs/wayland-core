@@ -95,6 +95,8 @@ fn hermes_args(home: &Path, include_credentials: bool, overwrite: bool) -> Herme
         yes: true,
         include_credentials,
         overwrite,
+        // These tests exercise the prose/apply path, which `--json` bypasses.
+        json: false,
     }
 }
 
@@ -253,5 +255,10 @@ fn missing_hermes_home_errors() {
     let _g = rooted().0;
     let missing: PathBuf = tempfile::tempdir().unwrap().path().join("nope");
     let err = migrate::hermes::detect_home(Some(&missing)).unwrap_err();
-    assert!(err.to_string().contains("no Hermes profiles"));
+    // F26-01 widened the guard: a home is valid with EITHER `profiles/` or a
+    // root `config.yaml`, so the message now names both. Still a hard error.
+    assert!(
+        err.to_string().contains("no Hermes setup found"),
+        "unexpected error text: {err}"
+    );
 }
