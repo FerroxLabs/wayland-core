@@ -35,10 +35,22 @@ set -u
 FAIL() { echo "PROOF-FAIL: $*"; exit 1; }
 
 UNDERSIZED=no
-if [ "${1:-}" = "--undersized" ]; then
-    UNDERSIZED=yes
-    shift
-fi
+HANDLER_CONTROL=no
+case "${1:-}" in
+    --undersized)
+        UNDERSIZED=yes
+        shift
+        ;;
+    # Positive control for the uncatchability measurement. Runs the identical
+    # procedure but sends a CATCHABLE signal, and requires the probe to fire.
+    # Without this leg, `fired=no` in the real run is equally consistent with a
+    # probe that was never installed -- the same vacuity the mid-flight check
+    # exists to rule out, applied to the kill mechanism.
+    --handler-control)
+        HANDLER_CONTROL=yes
+        shift
+        ;;
+esac
 
 BIN="${1:-}"
 [ -n "$BIN" ] || FAIL "usage: $0 [--undersized] <path-to-wayland-core>"
@@ -123,12 +135,25 @@ sleep_ms() { sleep "$(awk "BEGIN{printf \"%.3f\", $1/1000}")"; }
 sleep_ms "$KILL_AT_MS"
 
 KILL_LANDED=no
+KILL_NAME=SIGKILL
+KILL_CATCHABLE=no
+if [ "$HANDLER_CONTROL" = yes ]; then
+    KILL_NAME=SIGTERM
+    KILL_CATCHABLE=yes
+fi
 if kill -0 "$CHILD" 2>/dev/null; then
-    # SIGKILL: the process cannot install a handler for it, cannot mask it and
-    # cannot defer it. A graceful stop would prove the shutdown path, not the
-    # interruption path.
-    kill -9 "$CHILD" 2>/dev/null
-    KILL_LANDED=yes
+    if [ "$HANDLER_CONTROL" = yes ]; then
+        kill -TERM "$CHILD" 2>/dev/null
+        KILL_LANDED=yes
+        sleep_ms 600            # let the handler run and record itself
+        kill -9 "$CHILD" 2>/dev/null
+    else
+        # SIGKILL: the process cannot install a handler for it, cannot mask it
+        # and cannot defer it. A graceful stop would prove the shutdown path,
+        # not the interruption path.
+        kill -9 "$CHILD" 2>/dev/null
+        KILL_LANDED=yes
+    fi
 fi
 wait "$CHILD" 2>/dev/null
 KILL_AT_ACTUAL_MS=$KILL_AT_MS
@@ -173,7 +198,7 @@ DIGEST_EQUAL=no
 
 # --- verdict block ------------------------------------------------------------
 echo "INTERRUPT-PLATFORM: linux"
-echo "KILL-MECHANISM: SIGKILL CATCHABLE: no"
+echo "KILL-MECHANISM: $KILL_NAME CATCHABLE: $KILL_CATCHABLE"
 echo "KILL-HANDLER-PROBE: installed=yes fired=$HANDLER_FIRED"
 echo "FIXTURE-PAYLOADS: $PAYLOADS"
 echo "MIDFLIGHT-JOURNAL-OPEN: $MIDFLIGHT_JOURNAL_OPEN"
@@ -185,6 +210,18 @@ echo "DIGEST-POST: $DIGEST_POST"
 echo "DIGEST-EQUAL: $DIGEST_EQUAL"
 
 # --- adjudication -------------------------------------------------------------
+if [ "$HANDLER_CONTROL" = yes ]; then
+    # The probe must FIRE here. If it does not, it was never installed, and the
+    # real run's `fired=no` measured nothing.
+    if [ "$HANDLER_FIRED" = yes ]; then
+        echo "HANDLER-CONTROL: fired=yes"
+        echo "PROOF-OK: the probe fires for a catchable signal, so fired=no under SIGKILL is a measurement"
+        exit 0
+    fi
+    echo "HANDLER-CONTROL: fired=no"
+    FAIL "the handler probe did NOT fire for a catchable signal, so it was never installed and the uncatchability measurement is vacuous"
+fi
+
 if [ "$UNDERSIZED" = yes ]; then
     # Negative control: the operation is EXPECTED to finish before the kill. The
     # script must detect that and fail, which is what proves the mid-flight check
