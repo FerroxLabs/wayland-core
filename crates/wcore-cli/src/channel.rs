@@ -135,19 +135,75 @@ pub fn channel_reload_path(home: &Path) -> PathBuf {
     home.join(CHANNEL_RELOAD_FILE)
 }
 
+/// What a running gateway publishes about its channel adapters.
+///
+/// # Why this is not just `Vec<ChannelHealth>` — F24-D-H2, found live
+///
+/// It was, and the first live run on real hardware printed:
+///
+/// ```text
+/// gateway is running and has registered no channels
+/// ```
+///
+/// while TWO channels were configured on disk. The gateway had failed to open
+/// the credentials store, registered nothing, and published `[]`. An empty
+/// array cannot distinguish "you have no channels" from "I could not load the
+/// ones you have", and the message it produced asserted the first.
+///
+/// That is the same false zero this file's module docs are about — F24-C-M2,
+/// F24-B-H3, the Windows orphan scanner — reintroduced by the code written to
+/// close it. So the document now carries THREE numbers instead of one list,
+/// and two of them come from different places:
+///
+/// - `configured` is counted by scanning the config DIRECTORY,
+/// - `registered` is what the gateway actually constructed,
+/// - `registration_error` is why they differ, when they do.
+///
+/// A reader that sees `configured: 2, registered: 0` cannot mistake it for an
+/// empty installation, and `channel health` exits non-zero on the disagreement
+/// rather than printing a reassuring line.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelHealthReport {
+    /// Channels found in the config directory — counted independently of
+    /// whatever the gateway managed to construct.
+    pub configured: usize,
+    /// Adapters the gateway actually registered.
+    pub registered: usize,
+    /// Why registration produced fewer adapters than are configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registration_error: Option<String>,
+    /// Per-adapter observations.
+    #[serde(default)]
+    pub channels: Vec<ChannelHealth>,
+}
+
+impl ChannelHealthReport {
+    /// Whether every configured channel is actually registered and running.
+    pub fn is_complete(&self) -> bool {
+        self.registration_error.is_none() && self.registered >= self.configured
+    }
+}
+
 /// Publish observed channel health for a second process to read.
 ///
 /// Written to a same-directory temporary and renamed, so a `channel health`
 /// racing a republish reads either the previous set or the next one and never
 /// a half-written file. Same discipline as the gateway projection.
-pub fn publish_health(home: &Path, health: &[ChannelHealth]) -> Result<()> {
+pub fn publish_health(home: &Path, report: &ChannelHealthReport) -> Result<()> {
     let final_path = channel_health_path(home);
     let tmp = final_path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(health)?)
+    std::fs::write(&tmp, serde_json::to_vec_pretty(report)?)
         .with_context(|| format!("cannot write {}", tmp.display()))?;
     std::fs::rename(&tmp, &final_path)
         .with_context(|| format!("cannot publish {}", final_path.display()))?;
     Ok(())
+}
+
+/// Count the channels configured on disk. The INDEPENDENT number the
+/// gateway's own registration count is checked against.
+pub fn configured_count(home: &Path) -> usize {
+    wcore_channels_registry::scan_channel_summaries(&channels_dir(home)).len()
 }
 
 /// Read the health a LIVE gateway published, or `None`.
@@ -156,13 +212,54 @@ pub fn publish_health(home: &Path, health: &[ChannelHealth]) -> Result<()> {
 /// `channel-health.json` left by a gateway that has since been killed
 /// describes adapters that no longer exist, and reporting it would be exactly
 /// the stale-projection failure `gateway status` already guards against.
-pub fn read_live_health(home: &Path) -> Option<Vec<ChannelHealth>> {
+pub fn read_live_health(home: &Path) -> Option<ChannelHealthReport> {
     let record = wcore_gateway::pidlock::PidLock::read_record(home)?;
     if !wcore_gateway::pidlock::process_is_alive(record.pid) {
         return None;
     }
     let raw = std::fs::read_to_string(channel_health_path(home)).ok()?;
     serde_json::from_str(&raw).ok()
+}
+
+/// Resolve configuration for the purpose of opening the CREDENTIALS STORE.
+///
+/// # F24-D-H1, found on the first live run
+///
+/// `Config::resolve` fails with [`wcore_config::config::MissingApiKey`] when no
+/// LLM provider credential is present. That is entirely correct for a turn, and
+/// entirely wrong here: opening the credentials store reads
+/// `storage.credentials` and has nothing to do with any provider. Measured on
+/// hetzner-dsm against a fresh home:
+///
+/// ```text
+/// wayland-core channel: cannot resolve configuration: No API key found.
+/// [gateway] channel reload: credentials store: No API key found.
+/// ```
+///
+/// So `channel probe` was unusable on exactly the host an operator debugs a
+/// fresh install on, and — worse — the gateway registered ZERO channels for
+/// the same reason and reported it as an empty installation.
+///
+/// The fix retries resolution with a placeholder provider key ONLY when the
+/// failure was specifically `MissingApiKey`. Every other configuration error
+/// still propagates. The placeholder never reaches a provider: the only thing
+/// taken from the resolved config is `open_credentials_store`, which reads the
+/// operator's REAL `storage.credentials` backend. Falling back to a default
+/// storage configuration instead would silently open the wrong store — finding
+/// no credentials in it and reporting a perfectly configured channel as
+/// incomplete.
+pub fn resolve_config_for_credentials() -> Result<wcore_config::config::Config> {
+    use wcore_config::config::{CliArgs, Config, MissingApiKey};
+
+    match Config::resolve(&CliArgs::default()) {
+        Ok(c) => Ok(c),
+        Err(e) if e.downcast_ref::<MissingApiKey>().is_some() => Config::resolve(&CliArgs {
+            api_key: Some("unused-placeholder-credentials-store-only".to_string()),
+            ..CliArgs::default()
+        })
+        .context("cannot resolve configuration for the credentials store"),
+        Err(e) => Err(e).context("cannot resolve configuration"),
+    }
 }
 
 pub async fn run(args: ChannelArgs) -> Result<()> {
@@ -231,8 +328,7 @@ async fn probe(only: Option<&str>, json: bool) -> Result<()> {
     let home = home()?;
     let dir = channels_dir(&home);
 
-    let config = wcore_config::config::Config::resolve(&wcore_config::config::CliArgs::default())
-        .context("cannot resolve configuration")?;
+    let config = resolve_config_for_credentials()?;
     let store = config
         .open_credentials_store()
         .context("cannot open the credentials store")?;
@@ -314,7 +410,7 @@ async fn probe(only: Option<&str>, json: bool) -> Result<()> {
 
 fn health(json: bool) -> Result<()> {
     let home = home()?;
-    let Some(health) = read_live_health(&home) else {
+    let Some(report) = read_live_health(&home) else {
         // The refusal is the feature. See the module docs.
         bail!(
             "no running gateway for {} — channel health is an OBSERVATION and \
@@ -326,20 +422,38 @@ fn health(json: bool) -> Result<()> {
     };
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&health)?);
-        return Ok(());
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "configured: {}   registered: {}",
+            report.configured, report.registered
+        );
+        for h in &report.channels {
+            println!("{} ({})", h.channel, h.platform);
+            println!("  state:      {:?}", h.state);
+            println!("  reason:     {}", h.reason.as_deref().unwrap_or("-"));
+            println!("  errors:     {}", h.consecutive_errors);
+            println!("  reconnects: {}", h.reconnects);
+        }
     }
 
-    if health.is_empty() {
-        println!("gateway is running and has registered no channels");
-        return Ok(());
-    }
-    for h in &health {
-        println!("{} ({})", h.channel, h.platform);
-        println!("  state:      {:?}", h.state);
-        println!("  reason:     {}", h.reason.as_deref().unwrap_or("-"));
-        println!("  errors:     {}", h.consecutive_errors);
-        println!("  reconnects: {}", h.reconnects);
+    // F24-D-H2. An incomplete registration must not be reported as a healthy
+    // empty installation. `configured` is counted from the config DIRECTORY and
+    // `registered` from what the gateway built, so a disagreement between two
+    // independently-sourced numbers is what trips this — not the gateway's own
+    // opinion of itself.
+    if !report.is_complete() {
+        bail!(
+            "{} of {} configured channels are NOT registered in the running \
+             gateway{}",
+            report.configured.saturating_sub(report.registered),
+            report.configured,
+            report
+                .registration_error
+                .as_ref()
+                .map(|e| format!(": {e}"))
+                .unwrap_or_default()
+        );
     }
     Ok(())
 }
@@ -377,15 +491,20 @@ mod tests {
     use super::*;
     use wcore_channels::health::HealthState;
 
-    fn sample() -> Vec<ChannelHealth> {
-        vec![ChannelHealth {
-            channel: "acme".into(),
-            platform: "discord".into(),
-            state: HealthState::Degraded,
-            reason: Some("supervised reconnect in progress".into()),
-            consecutive_errors: 5,
-            reconnects: 2,
-        }]
+    fn sample() -> ChannelHealthReport {
+        ChannelHealthReport {
+            configured: 1,
+            registered: 1,
+            registration_error: None,
+            channels: vec![ChannelHealth {
+                channel: "acme".into(),
+                platform: "discord".into(),
+                state: HealthState::Degraded,
+                reason: Some("supervised reconnect in progress".into()),
+                consecutive_errors: 5,
+                reconnects: 2,
+            }],
+        }
     }
 
     #[test]
@@ -393,7 +512,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         publish_health(dir.path(), &sample()).unwrap();
         let raw = std::fs::read_to_string(channel_health_path(dir.path())).unwrap();
-        let back: Vec<ChannelHealth> = serde_json::from_str(&raw).unwrap();
+        let back: ChannelHealthReport = serde_json::from_str(&raw).unwrap();
         assert_eq!(back, sample());
     }
 
@@ -431,8 +550,8 @@ mod tests {
         // `read_live_health` were simply broken.
         let dir = tempfile::tempdir().unwrap();
         publish_health(dir.path(), &sample()).unwrap();
-        // A pid that cannot be alive: 0 is never a live user process on any
-        // supported platform.
+        // A pid that cannot be alive. `process_is_alive(0)` used to return
+        // TRUE on Unix — see F24-D-M1 in `wcore_gateway::pidlock`.
         wcore_gateway::pidlock::PidLock::write_stale_record_for_test(dir.path(), 0);
         assert!(
             wcore_gateway::pidlock::PidLock::read_record(dir.path()).is_some(),
@@ -465,6 +584,49 @@ mod tests {
             Some(sample()),
             "a live pid plus a published file must produce the report"
         );
+    }
+
+    #[test]
+    fn a_registration_failure_is_not_reportable_as_an_empty_installation() {
+        // F24-D-H2, found on real hardware. The gateway could not open the
+        // credentials store, registered nothing, published an empty list, and
+        // `channel health` rendered it as "you have no channels" — a false
+        // zero produced by the code written to close false zeros.
+        let failed = ChannelHealthReport {
+            configured: 2,
+            registered: 0,
+            registration_error: Some("credentials store unavailable".into()),
+            channels: Vec::new(),
+        };
+        assert!(
+            !failed.is_complete(),
+            "two configured and none registered must NOT read as complete"
+        );
+
+        // The error alone is not what trips it: a silent shortfall must too,
+        // because a registration that drops one adapter without erroring is
+        // the quieter version of the same bug.
+        let silent_shortfall = ChannelHealthReport {
+            configured: 2,
+            registered: 1,
+            registration_error: None,
+            channels: Vec::new(),
+        };
+        assert!(!silent_shortfall.is_complete());
+
+        // Positive control: a genuinely empty installation IS complete, so the
+        // check above is not simply always-false.
+        let genuinely_empty = ChannelHealthReport {
+            configured: 0,
+            registered: 0,
+            registration_error: None,
+            channels: Vec::new(),
+        };
+        assert!(
+            genuinely_empty.is_complete(),
+            "an operator with no channels configured is not in an error state"
+        );
+        assert!(sample().is_complete());
     }
 
     #[test]

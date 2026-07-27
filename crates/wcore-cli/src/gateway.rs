@@ -566,6 +566,26 @@ fn drain_wait(
     started.elapsed().as_millis() as u64
 }
 
+/// Assemble the channel-health document a second process reads.
+///
+/// `configured` is counted from the config DIRECTORY here rather than taken
+/// from the manager, so the two numbers in the published report come from two
+/// independent places and a disagreement between them is detectable. A report
+/// that sourced both from the manager could only ever agree with itself.
+fn channel_health_report(
+    home: &Path,
+    registered: usize,
+    registration_error: &Option<String>,
+    channels: &wcore_channels_registry::wcore_channels::ChannelManager,
+) -> crate::channel::ChannelHealthReport {
+    crate::channel::ChannelHealthReport {
+        configured: crate::channel::configured_count(home),
+        registered,
+        registration_error: registration_error.clone(),
+        channels: channels.health(),
+    }
+}
+
 /// Publish the projection a second process reads.
 ///
 /// Written to a same-directory temporary and renamed, so a `status` racing a
@@ -636,14 +656,21 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
     // non-fatal: a gateway with no channels still runs the schedule, and
     // taking the whole runtime down because one adapter's credential is
     // missing would be a worse outcome than a Disconnected row in `health`.
+    //
+    // Non-fatal is NOT the same as unreported. F24-D-H2: the first live run
+    // registered zero channels because the credentials store would not open,
+    // published an empty list, and `channel health` rendered that as "you have
+    // no channels". Every failure below is therefore carried into
+    // `registration_error` and surfaced against an independently-counted
+    // `configured`.
     let mut channels = wcore_channels_registry::wcore_channels::ChannelManager::new();
     let channels_dir = home.join("channels");
-    match wcore_config::config::Config::resolve(&wcore_config::config::CliArgs::default())
-        .map_err(|e| anyhow::anyhow!("{e}"))
-        .and_then(|c| {
-            c.open_credentials_store()
-                .map_err(|e| anyhow::anyhow!("{e}"))
-        }) {
+    let mut registration_error: Option<String> = None;
+    let mut registered_n = 0usize;
+    match crate::channel::resolve_config_for_credentials().and_then(|c| {
+        c.open_credentials_store()
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }) {
         Ok(store) => {
             let creds: Arc<dyn wcore_config::credentials::CredentialsStore> = Arc::from(store);
             match wcore_channels_registry::auto_register_from_dir(
@@ -654,19 +681,30 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
             .await
             {
                 Ok(n) => {
+                    registered_n = n;
                     if n > 0
                         && let Err(e) = channels.start_all().await
                     {
                         eprintln!("[gateway] channel start_all: {e}");
+                        registration_error = Some(format!("start_all: {e}"));
                     }
                     eprintln!("[gateway] channels registered={n}");
                 }
-                Err(e) => eprintln!("[gateway] channel registration failed: {e}"),
+                Err(e) => {
+                    eprintln!("[gateway] channel registration failed: {e}");
+                    registration_error = Some(e.to_string());
+                }
             }
         }
-        Err(e) => eprintln!("[gateway] credentials store unavailable, channels disabled: {e}"),
+        Err(e) => {
+            eprintln!("[gateway] credentials store unavailable, channels disabled: {e}");
+            registration_error = Some(format!("credentials store unavailable: {e}"));
+        }
     }
-    let _ = crate::channel::publish_health(&home, &channels.health());
+    let _ = crate::channel::publish_health(
+        &home,
+        &channel_health_report(&home, registered_n, &registration_error, &channels),
+    );
 
     let binary_path = std::env::current_exe().ok();
     let binary_version = Some(env!("CARGO_PKG_VERSION").to_string());
@@ -725,12 +763,10 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                 // dispatches through a channel uses the adapter set the
                 // operator just asked for rather than the previous one.
                 if std::fs::remove_file(crate::channel::channel_reload_path(&home)).is_ok() {
-                    match wcore_config::config::Config::resolve(
-                        &wcore_config::config::CliArgs::default(),
-                    )
-                    .map_err(|e| anyhow::anyhow!("{e}"))
-                    .and_then(|c| c.open_credentials_store().map_err(|e| anyhow::anyhow!("{e}")))
-                    {
+                    match crate::channel::resolve_config_for_credentials()
+                        .and_then(|c| {
+                            c.open_credentials_store().map_err(|e| anyhow::anyhow!("{e}"))
+                        }) {
                         Ok(store) => {
                             let creds: Arc<dyn wcore_config::credentials::CredentialsStore> =
                                 Arc::from(store);
@@ -748,6 +784,8 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                                 Ok(_) => {
                                     let desired = staging.take_registered().await;
                                     let report = channels.reload(desired).await;
+                                    registered_n = channels.list_names().len();
+                                    registration_error = None;
                                     eprintln!(
                                         "[gateway] channel reload: added={:?} replaced={:?} removed={:?} unchanged={:?}",
                                         report.added,
@@ -756,10 +794,17 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                                         report.unchanged
                                     );
                                 }
-                                Err(e) => eprintln!("[gateway] channel reload failed: {e}"),
+                                Err(e) => {
+                                    eprintln!("[gateway] channel reload failed: {e}");
+                                    registration_error = Some(e.to_string());
+                                }
                             }
                         }
-                        Err(e) => eprintln!("[gateway] channel reload: credentials store: {e}"),
+                        Err(e) => {
+                            eprintln!("[gateway] channel reload: credentials store: {e}");
+                            registration_error =
+                                Some(format!("credentials store unavailable: {e}"));
+                        }
                     }
                 }
                 if let Err(e) = plane.tick(chrono::Utc::now()).await {
@@ -768,7 +813,7 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                 publish(&home, &project(&plane, plane.state()))?;
                 // Republished on the SAME tick as the projection so the two
                 // surfaces can never disagree about when they were observed.
-                let _ = crate::channel::publish_health(&home, &channels.health());
+                let _ = crate::channel::publish_health(&home, &channel_health_report(&home, registered_n, &registration_error, &channels));
             }
         }
     }
