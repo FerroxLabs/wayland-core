@@ -1,0 +1,56 @@
+$ echo '### what the updater verifies before it extracts or swaps:'; /usr/bin/sed -n '241,286p' crates/wcore-cli/src/self_update.rs; echo '### the pinned repo constant (single trust anchor):'; /usr/bin/grep -n 'RELEASES_REPO' crates/wcore-cli/src/self_update.rs; echo '### runtime environment reads in the updater (must be zero):'; /usr/bin/grep -cE 'env::var\(' crates/wcore-cli/src/self_update.rs
+--- captured 2026-07-27T14:50:34Z at tree c6766f02498f7bc7dda1511108c1d59ef9741af0 ---
+### what the updater verifies before it extracts or swaps:
+
+/// Verify the release archive's Sigstore build-provenance attestation via the
+/// GitHub CLI, pinning the source repo. Fails closed: a missing `gh`, a failed
+/// check, or any non-zero exit is an error — never a silent skip.
+pub async fn verify_provenance(archive_path: &Path, repo: &str) -> Result<()> {
+    verify_provenance_with("gh", archive_path, repo).await
+}
+
+/// Inner form with an injectable program name so tests can exercise the
+/// `gh`-missing path without a real `gh` on the box.
+async fn verify_provenance_with(program: &str, archive_path: &Path, repo: &str) -> Result<()> {
+    let archive = archive_path
+        .to_str()
+        .context("archive path is not valid UTF-8")?;
+    // argv mode: no shell is involved, so metacharacters in arguments are never
+    // interpreted. `archive` is a path we just created under our own tempdir
+    // (never attacker-controlled) and `repo` is a compile-time const.
+    let output = wcore_config::shell::shell_command_argv(
+        program,
+        &["attestation", "verify", archive, "--repo", repo],
+    )
+    .output()
+    .await
+    .map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            anyhow::anyhow!(
+                "GitHub CLI (`gh`) not found — it is required to verify release \
+                 provenance. Install it from https://cli.github.com, or update via \
+                 npm instead: npm install -g @ferroxlabs/wayland-core@latest"
+            )
+        } else {
+            anyhow::Error::new(e).context("spawn `gh attestation verify`")
+        }
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "`gh attestation verify` rejected {}: {}",
+            archive_path.display(),
+            stderr.trim()
+        );
+    }
+    Ok(())
+}
+
+### the pinned repo constant (single trust anchor):
+38:pub const RELEASES_REPO: &str = "FerroxLabs/wayland-core";
+46:    let release = match fetch_latest_release(RELEASES_REPO).await? {
+82:    verify_provenance(&archive_path, RELEASES_REPO)
+### runtime environment reads in the updater (must be zero):
+0
+--- exit=1 ---

@@ -1,0 +1,17 @@
+$ echo '### deny.toml sections that declare policy'; /usr/bin/grep -n '^\[licenses\]\|^\[bans\]\|^\[sources\]\|^\[advisories\]\|^allow = \|yanked = \|unknown-registry\|unknown-git\|^exceptions\|^ignore = ' deny.toml; echo '### who runs cargo-deny? (search .github, justfile, vx.toml, whole tree ex-target)'; /usr/bin/grep -rlE 'cargo[- ]deny' .github justfile vx.toml 2>/dev/null | /usr/bin/wc -l | tr -d ' '; /usr/bin/grep -rlE 'cargo-deny|cargo deny' --include='*.yml' --include='*.toml' --include='justfile' . 2>/dev/null | /usr/bin/grep -v '^./target' | /usr/bin/grep -v '^./.planning' || echo 'NO FILE ANYWHERE INVOKES cargo-deny'
+--- captured 2026-07-27T14:49:49Z at tree c6766f02498f7bc7dda1511108c1d59ef9741af0 ---
+### deny.toml sections that declare policy
+24:[licenses]
+27:allow = [
+44:exceptions = []
+54:[advisories]
+56:yanked = "deny"
+59:ignore = []
+64:[bans]
+75:[sources]
+76:unknown-registry = "deny"
+77:unknown-git = "deny"
+### who runs cargo-deny? (search .github, justfile, vx.toml, whole tree ex-target)
+0
+./deny.toml
+--- exit=0 ---

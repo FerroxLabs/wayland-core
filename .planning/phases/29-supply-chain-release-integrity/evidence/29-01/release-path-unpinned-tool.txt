@@ -1,0 +1,21 @@
+$ echo '### the aarch64-linux release build does NOT route through the vx pin:'; /usr/bin/sed -n '134,146p' .github/workflows/release.yml; echo '### deny.toml simultaneously declares:'; /usr/bin/grep -n 'unknown-git\|allow-git' deny.toml; echo '=> the release path installs a BUILD TOOL from git HEAD with no rev pin, while the (never-executed) dependency policy declares unknown-git = deny.'
+--- captured 2026-07-27T14:50:34Z at tree c6766f02498f7bc7dda1511108c1d59ef9741af0 ---
+### the aarch64-linux release build does NOT route through the vx pin:
+      - name: Install cross (Linux aarch64)
+        if: matrix.use_cross == true
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
+            cross build --release --target ${{ matrix.target }} -p wcore-cli
+          else
+            vx cargo build --release --target ${{ matrix.target }} -p wcore-cli
+          fi
+
+### deny.toml simultaneously declares:
+77:unknown-git = "deny"
+79:allow-git = []
+=> the release path installs a BUILD TOOL from git HEAD with no rev pin, while the (never-executed) dependency policy declares unknown-git = deny.
+--- exit=0 ---

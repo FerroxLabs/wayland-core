@@ -1,0 +1,43 @@
+$ echo '### the release path DOES mint real keyless Sigstore SLSA provenance:'; /usr/bin/sed -n '186,211p' .github/workflows/release.yml; echo '### and npm publishes with --provenance:'; /usr/bin/grep -n 'provenance\|id-token' .github/workflows/release.yml
+--- captured 2026-07-27T14:50:54Z at tree c6766f02498f7bc7dda1511108c1d59ef9741af0 ---
+### the release path DOES mint real keyless Sigstore SLSA provenance:
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Attest build provenance (keyless, Sigstore-backed)
+        uses: actions/attest-build-provenance@v4
+        with:
+          # Attest the distributed archives themselves — that is what consumers
+          # download and what `gh attestation verify <archive>` checks.
+          subject-path: |
+            artifacts/wayland-core-*.tar.gz
+            artifacts/wayland-core-*.zip
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd artifacts
+          sha256sum wayland-core-* > wayland-core-checksums.txt
+
+### and npm publishes with --provenance:
+183:    # be restated. `id-token: write` + `attestations: write` let
+184:    # attest-build-provenance mint keyless Sigstore SLSA provenance for each
+188:      id-token: write
+197:      - name: Attest build provenance (keyless, Sigstore-backed)
+198:        uses: actions/attest-build-provenance@v4
+436:    # `id-token: write` lets `npm publish --provenance` mint a keyless,
+437:    # Sigstore-signed, transparency-logged provenance attestation for each npm
+442:      id-token: write
+523:          # `--provenance` rides the job's `id-token: write` to emit a keyless
+524:          # Sigstore provenance statement (requires repository.url in each
+527:            ( cd "$d" && npm publish --provenance --access public --tag "${NPM_DIST_TAG}" )
+529:          ( cd npm-dist/wayland-core && npm publish --provenance --access public --tag "${NPM_DIST_TAG}" )
+--- exit=0 ---

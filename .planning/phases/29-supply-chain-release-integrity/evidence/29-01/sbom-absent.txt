@@ -1,0 +1,10 @@
+$ echo '### CycloneDX / SPDX / SBOM across the tree (excluding .planning and target)'; /usr/bin/grep -rliE 'cyclonedx|spdx|sbom' --include='*.rs' --include='*.toml' --include='*.yml' --include='*.json' --include='*.mjs' --include='justfile' . 2>/dev/null | /usr/bin/grep -v '^./target' | /usr/bin/grep -v '^./.planning' | /usr/bin/grep -v '^./node_modules' || echo 'ZERO FILES'; echo '### release.yml assets uploaded to the GitHub release'; /usr/bin/grep -n 'sha256sum\|gh release upload\|gh release create\|subject-path' .github/workflows/release.yml
+--- captured 2026-07-27T14:49:49Z at tree c6766f02498f7bc7dda1511108c1d59ef9741af0 ---
+### CycloneDX / SPDX / SBOM across the tree (excluding .planning and target)
+./crates/wcore-channel-msteams/src/auth.rs
+### release.yml assets uploaded to the GitHub release
+202:          subject-path: |
+210:          sha256sum wayland-core-* > wayland-core-checksums.txt
+228:            gh release upload "${RELEASE_TAG}" artifacts/* --repo "${REPOSITORY}" --clobber
+230:            gh release create "${RELEASE_TAG}" artifacts/* \
+--- exit=0 ---

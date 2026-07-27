@@ -1,0 +1,19 @@
+BASELINE COUNTS measured on the untouched tree at c6766f02498f7bc7dda1511108c1d59ef9741af0
+date: 2026-07-27T14:49:30Z
+
+$ /usr/bin/grep -rlE 'cargo[- ]deny' .github justfile | /usr/bin/wc -l
+0
+=> cargo-deny is invoked by ZERO files under .github/ or in justfile
+
+$ /usr/bin/grep -rli 'cyclonedx' --include='*.rs' --include='*.toml' --include='*.yml' crates .github justfile | /usr/bin/wc -l
+0
+=> CycloneDX appears in ZERO source/config files
+
+$ /usr/bin/grep -rliE 'sbom|spdx' .github/workflows | /usr/bin/wc -l
+0
+=> ZERO workflow files mention SBOM or SPDX
+
+$ ls deny.toml && wc -l deny.toml
+deny.toml
+79
+=> deny.toml EXISTS (a real 4-section policy) and nothing runs it

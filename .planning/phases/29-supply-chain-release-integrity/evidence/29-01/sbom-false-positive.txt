@@ -1,0 +1,8 @@
+$ echo 'The one case-insensitive sbom/spdx hit under crates/ is a BASE64 TEST FIXTURE, not an SBOM reference:'; /usr/bin/grep -niE 'cyclonedx|spdx|sbom' crates/wcore-channel-msteams/src/auth.rs; echo '=> the literal substring is hsbOm0 inside a base64 blob. REFUTED as an SBOM reference.'; echo '### case-sensitive SBOM/CycloneDX/SPDX search across the whole tree:'; /usr/bin/grep -rlE 'CycloneDX|SPDX|SBOM|cyclonedx' --include='*.rs' --include='*.toml' --include='*.yml' --include='*.json' --include='*.mjs' . 2>/dev/null | /usr/bin/grep -v '^./target' | /usr/bin/grep -v '^./.planning' | /usr/bin/grep -v node_modules || echo 'ZERO FILES — no SBOM of any format exists in this repository'
+--- captured 2026-07-27T14:50:33Z at tree c6766f02498f7bc7dda1511108c1d59ef9741af0 ---
+The one case-insensitive sbom/spdx hit under crates/ is a BASE64 TEST FIXTURE, not an SBOM reference:
+348:eEPRKeRLNfsABAoLhsbOm0EpwlAbRznAggKOfNc9WSZ6G56tuvTpss4QS6M/XzYM
+=> the literal substring is hsbOm0 inside a base64 blob. REFUTED as an SBOM reference.
+### case-sensitive SBOM/CycloneDX/SPDX search across the whole tree:
+ZERO FILES — no SBOM of any format exists in this repository
+--- exit=0 ---

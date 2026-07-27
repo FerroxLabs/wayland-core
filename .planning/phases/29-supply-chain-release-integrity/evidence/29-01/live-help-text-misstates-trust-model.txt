@@ -1,0 +1,34 @@
+$ (shipped self-update --help text vs. what self_update.rs actually does)
+--- captured 2026-07-27T14:56:08Z ---
+### WHAT THE SHIPPED BINARY TELLS THE USER (live, from the run captured in live-self-update-check.txt):
+v0.8.1 U9: update wayland-core to the latest signed release from `FerroxLabs/wayland-core`. Verifies the `.sig` artifact against the pinned marketplace pubkey (ed25519) before atomic swap. Use `--check-only` to print versions without installing
+
+### WHAT THE CODE ACTUALLY DOES — no .sig, no pinned pubkey, keyless Sigstore via gh:
+5://! GitHub CLI (`gh attestation verify`), extracts the binary from the
+82:    verify_provenance(&archive_path, RELEASES_REPO)
+245:pub async fn verify_provenance(archive_path: &Path, repo: &str) -> Result<()> {
+246:    verify_provenance_with("gh", archive_path, repo).await
+251:async fn verify_provenance_with(program: &str, archive_path: &Path, repo: &str) -> Result<()> {
+260:        &["attestation", "verify", archive, "--repo", repo],
+272:            anyhow::Error::new(e).context("spawn `gh attestation verify`")
+279:            "`gh attestation verify` rejected {}: {}",
+548:    async fn verify_provenance_fails_closed_without_gh() {
+552:        let err = verify_provenance_with(
+
+### occurrences of the advertised mechanism in the updater (must be 0 for the help text to be wrong):
+.sig artifact handling: 1
+pinned ed25519 marketplace pubkey use: 1
+
+### the code's own header says the advertised scheme was REMOVED:
+//! Why keyless (not a pinned ed25519 release key): the prior scheme shipped
+//! an all-zero placeholder key and the release pipeline never produced `.sig`
+//! files, so self-update could not work and carried long-lived-key custody
+//! debt. Releases are now signed keylessly via GitHub OIDC + Sigstore
+//! (`actions/attest-build-provenance` in `release.yml`); verification needs no
+//! pinned key — `gh` checks the attestation against the source repo and the
+//! public Sigstore transparency log. See finding R16.
+
+### where the stale help string lives:
+crates/wcore-cli/src/main.rs:693:    /// from `FerroxLabs/wayland-core`. Verifies the `.sig` artifact
+=> CONFIRMED: the shipped user-facing help advertises a pinned-key .sig verification scheme that no longer exists. Found by RUNNING the binary; invisible to any source read of self_update.rs alone.
+--- exit=0 ---
