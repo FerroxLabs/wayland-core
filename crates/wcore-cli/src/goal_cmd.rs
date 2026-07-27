@@ -246,7 +246,9 @@ pub async fn run(args: GoalArgs) -> anyhow::Result<()> {
             .await
         }
         GoalCommand::Status { journal, goal } => status(&journal, &goal),
-        GoalCommand::ExecTask { effects_dir, argv } => exec_task(&effects_dir, &argv).await,
+        GoalCommand::ExecTask { effects_dir, argv } => {
+            exec_task_from_env(&effects_dir, &argv).await
+        }
         GoalCommand::Effects {
             effects_dir,
             expect,
@@ -561,11 +563,32 @@ impl TaskExecutor for ChildProcessExecutor {
 /// which still counts as produced and is still counted exactly once. That
 /// residual is stated rather than hidden; closing it entirely needs an atomic
 /// write-then-link, which buys nothing the criterion measures.
-async fn exec_task(effects_dir: &std::path::Path, argv: &[String]) -> anyhow::Result<()> {
+/// Reads the assignment out of the environment `run` spawned this process with,
+/// then does the work.
+///
+/// The env read is deliberately separated from [`exec_task`] rather than done
+/// inside it. Process environment is global mutable state, and a function that
+/// reaches for it can only be tested by mutating the whole process — which makes
+/// the tests serialize against each other and go flaky in a way that looks
+/// exactly like the idempotency gate failing. Passing the assignment in means
+/// the gate is testable without touching the environment at all.
+async fn exec_task_from_env(effects_dir: &std::path::Path, argv: &[String]) -> anyhow::Result<()> {
     let task = std::env::var(ENV_TASK).unwrap_or_else(|_| "unknown".to_owned());
     let key = std::env::var(ENV_KEY).map_err(|_| {
         anyhow::anyhow!("{ENV_KEY} is not set; refusing to produce an unkeyed effect")
     })?;
+    exec_task(effects_dir, argv, &task, &key).await
+}
+
+async fn exec_task(
+    effects_dir: &std::path::Path,
+    argv: &[String],
+    task: &str,
+    key: &str,
+) -> anyhow::Result<()> {
+    if key.is_empty() {
+        anyhow::bail!("{ENV_KEY} is empty; refusing to produce an unkeyed effect");
+    }
     let effects = effects_dir.join("effects");
     std::fs::create_dir_all(&effects)?;
 
@@ -573,7 +596,7 @@ async fn exec_task(effects_dir: &std::path::Path, argv: &[String]) -> anyhow::Re
     // the gate — `create_new` below is — because between this read and that
     // create there is a window, and a check that is not the gate must never be
     // mistaken for one.
-    if effects.join(&key).exists() {
+    if effects.join(key).exists() {
         println!("GOAL-EXEC: task={task} key={key} produced=no reason=idempotency-key-present");
         return Ok(());
     }
@@ -599,7 +622,7 @@ async fn exec_task(effects_dir: &std::path::Path, argv: &[String]) -> anyhow::Re
     let mut file = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(effects.join(&key))
+        .open(effects.join(key))
     {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -638,68 +661,55 @@ pub fn count_effects(effects_dir: &std::path::Path) -> anyhow::Result<(usize, us
 mod tests {
     use super::*;
 
-    fn env_guard(key: &str, value: &str) {
-        // SAFETY: single-threaded test bodies; each sets and clears its own key.
-        unsafe { std::env::set_var(key, value) };
+    /// The operator's argv for a worker that exits with `code`.
+    fn worker(code: i32) -> Vec<String> {
+        vec![
+            if cfg!(windows) { "cmd" } else { "sh" }.to_owned(),
+            if cfg!(windows) { "/c" } else { "-c" }.to_owned(),
+            format!("exit {code}"),
+        ]
     }
-
-    /// Every `exec-task` test mutates the same process-wide environment, so they
-    /// share one lock rather than racing each other under the test harness's
-    /// thread pool. Without this the suite is flaky in a way that looks like the
-    /// idempotency gate failing.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[tokio::test]
     async fn exec_task_refuses_to_produce_an_unkeyed_effect() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        // SAFETY: serialized by ENV_LOCK.
-        unsafe { std::env::remove_var(ENV_KEY) };
-        env_guard(ENV_TASK, "t-unkeyed");
-        let error = exec_task(dir.path(), &[]).await.unwrap_err().to_string();
+        let error = exec_task(dir.path(), &[], "t-unkeyed", "")
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(error.contains(ENV_KEY), "got: {error}");
         assert_eq!(count_effects(dir.path()).unwrap(), (0, 0));
     }
 
     #[tokio::test]
     async fn exec_task_produces_once_and_refuses_the_second_attempt() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        env_guard(ENV_TASK, "t-once");
-        env_guard(ENV_KEY, "idem-t-once");
-
-        exec_task(dir.path(), &[]).await.unwrap();
-        exec_task(dir.path(), &[]).await.unwrap();
-
+        exec_task(dir.path(), &[], "t-once", "idem-t-once")
+            .await
+            .unwrap();
+        exec_task(dir.path(), &[], "t-once", "idem-t-once")
+            .await
+            .unwrap();
         assert_eq!(
             count_effects(dir.path()).unwrap(),
             (1, 1),
             "the effect landed twice"
         );
-        // SAFETY: serialized by ENV_LOCK.
-        unsafe { std::env::remove_var(ENV_KEY) };
     }
 
     #[tokio::test]
     async fn exec_task_does_not_produce_an_effect_when_the_worker_command_fails() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        env_guard(ENV_TASK, "t-fail");
-        env_guard(ENV_KEY, "idem-t-fail");
-        let argv = vec![
-            if cfg!(windows) { "cmd" } else { "sh" }.to_owned(),
-            if cfg!(windows) { "/c" } else { "-c" }.to_owned(),
-            "exit 3".to_owned(),
-        ];
-        let error = exec_task(dir.path(), &argv).await.unwrap_err().to_string();
+        let error = exec_task(dir.path(), &worker(3), "t-fail", "idem-t-fail")
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("exited"), "got: {error}");
         assert_eq!(
             count_effects(dir.path()).unwrap(),
             (0, 0),
             "a failed worker still produced an effect"
         );
-        // SAFETY: serialized by ENV_LOCK.
-        unsafe { std::env::remove_var(ENV_KEY) };
     }
 
     /// The regression guard for the ordering bug this function shipped with in
@@ -708,15 +718,8 @@ mod tests {
     /// effect could then never happen at all.
     #[tokio::test]
     async fn a_failed_worker_leaves_the_task_runnable_rather_than_permanently_blocked() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        env_guard(ENV_TASK, "t-retry");
-        env_guard(ENV_KEY, "idem-t-retry");
-
-        let shell = if cfg!(windows) { "cmd" } else { "sh" }.to_owned();
-        let flag = if cfg!(windows) { "/c" } else { "-c" }.to_owned();
-        let failing = vec![shell.clone(), flag.clone(), "exit 3".to_owned()];
-        exec_task(dir.path(), &failing)
+        exec_task(dir.path(), &worker(3), "t-retry", "idem-t-retry")
             .await
             .expect_err("the failing worker should surface its failure");
         assert_eq!(count_effects(dir.path()).unwrap(), (0, 0));
@@ -724,8 +727,7 @@ mod tests {
         // The retry must be able to produce. Before the fix this returned
         // `produced=no reason=idempotency-key-present` and the effect was lost
         // forever, which is a lost completion wearing an exactly-once costume.
-        let succeeding = vec![shell, flag, "exit 0".to_owned()];
-        exec_task(dir.path(), &succeeding)
+        exec_task(dir.path(), &worker(0), "t-retry", "idem-t-retry")
             .await
             .expect("the retry must be able to produce the effect");
         assert_eq!(
@@ -733,8 +735,22 @@ mod tests {
             (1, 1),
             "the retry after a failed worker produced nothing"
         );
-        // SAFETY: serialized by ENV_LOCK.
-        unsafe { std::env::remove_var(ENV_KEY) };
+    }
+
+    /// Two tasks with different keys must not collide, and two attempts of the
+    /// same task must. A gate keyed on the task LABEL rather than the key would
+    /// pass the first half and fail here.
+    #[tokio::test]
+    async fn the_gate_is_keyed_on_the_idempotency_key_not_on_the_task_label() {
+        let dir = tempfile::tempdir().unwrap();
+        exec_task(dir.path(), &[], "shared-label", "idem-a")
+            .await
+            .unwrap();
+        exec_task(dir.path(), &[], "shared-label", "idem-b")
+            .await
+            .unwrap();
+        // Two effects, both labelled the same: total 2, distinct labels 1.
+        assert_eq!(count_effects(dir.path()).unwrap(), (2, 1));
     }
 
     #[test]
