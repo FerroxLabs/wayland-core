@@ -33,13 +33,19 @@ records a zero span, so no `weaker_claim_<platform>=acknowledged` line exists.
 
 | Platform | Host | Day 1 recorded | Days 2–3 | Verify | Status |
 |---|---|---|---|---|---|
-| **linux** | `hetzner-dsm` | **2026-07-27T14:21:19Z** | scheduled | not yet due | **RUNNING** |
-| **windows** | `SeanDesktop` | not yet | — | — | build in flight at hand-off |
-| **macos** | this Mac | **not started** | — | — | **OPEN — blocked, blocker named below** |
+| **linux** | `hetzner-dsm` | **2026-07-27T14:21:19Z** | scheduled (systemd timers) | not yet due | **RUNNING** |
+| **windows** | `SEANDESKTOP` | **2026-07-27T23:54:26Z** | scheduled (Task Scheduler, SYSTEM) | not yet due | **RUNNING** |
+| **macos** | this Mac | **not started** | — | — | **NOT ACHIEVED — blocked, blocker named below** |
 
-**The earliest moment any platform's journey may be closed is
-`2026-07-30T14:21:19Z`** (Linux day one plus the authorized 259,200 seconds).
-A `--verify` run before then exits `72` and prints
+**Earliest close per platform** — day one plus the authorized 259,200 seconds:
+
+| Platform | Earliest verify may pass |
+|---|---|
+| linux | **2026-07-30T14:21:19Z** |
+| windows | **2026-07-30T23:54:26Z** |
+
+**The journey as a whole cannot be closed before `2026-07-30T23:54:26Z`.** A
+`--verify` run before a platform's own threshold exits `72` and prints
 `F23_04_SPAN_MEETS_AUTHORIZED_POLICY=false`. That is not a bug to work around;
 it is the gate doing its job.
 
@@ -91,7 +97,63 @@ wait condition is genuinely met rather than marginally met.
 
 ---
 
-## macOS — OPEN, and precisely why
+---
+
+## Windows — day one, verbatim
+
+`C:\Users\seand\.f23-journey-windows\runlog.txt` on `SEANDESKTOP`:
+
+```
+# ---- invocation day=1 platform=windows ts=2026-07-27T23:54:26Z host=SEANDESKTOP pid=41844 sha=0ed05322462e64cb44e2b80aa15b7357263b8187 rc=0
+F23_04_DAY=1 platform=windows ts=2026-07-27T23:54:26Z host=SEANDESKTOP pid=39008
+F23_04_INVARIANT=loop-owner platform=windows day=1 status=PASS
+F23_04_INVARIANT=cumulative-budget platform=windows day=1 status=PASS
+F23_04_INVARIANT=authority-envelope platform=windows day=1 status=PASS
+F23_04_INVARIANT=memory-recall platform=windows day=1 status=PASS
+F23_04_INVARIANT=evidence-chain platform=windows day=1 status=PASS
+F23_04_INVARIANT=delivery-once platform=windows day=1 status=PASS
+F23_04_LOOP_OWNERS_OBSERVED=1
+F23_04_GOAL_LIFECYCLE=Waiting { wait: Event { event: "f23-span-elapsed-259200s" } }
+F23_04_JOURNAL_CURSOR=seq=7 checksum=b728beb16810fa05d9ce58e63b189007804fe3a96b2e26bad97450d0405b918c
+F23_04_DAY_INVARIANTS_ALL_PASS=true
+F23_04_STEP=OK day=1 platform=windows nonce=acb1d0b24b3fdecf
+```
+
+Driver exit status `0`, carried through an explicit `exit $LASTEXITCODE` and
+never through a pipeline. Binary provenance asserted:
+`wayland-core 0.12.25 (source 0ed05322…)`. `Get-Process multi_day_journey_test`
+afterwards returns nothing, so between day one and day two no process of this
+journey exists. Journey nonce `acb1d0b24b3fdecf`; captured at
+`evidence/23B-04-windows-day1.log`.
+
+The marker normalization committed in `0ed05322` is confirmed working on
+Windows too: `F23_04_DAY=…` sits at column one in the run log rather than behind
+the libtest prefix.
+
+### Windows resume days are scheduled under the Task Scheduler
+
+```
+f23win23B04day2   next run 2026-07-29 06:58 local (2026-07-28 23:58Z)
+f23win23B04day3   next run 2026-07-31 07:05 local (2026-07-31 00:05Z)
+```
+
+Both run `C:\ferrox-win-23B04-resume.cmd <n>` as **SYSTEM**, which is what makes
+them survive an ssh session ending and a reboot of this shared box. Day 3 fires
+eleven minutes past the `2026-07-30T23:54:26Z` threshold, so the wait condition
+is genuinely met rather than marginally met.
+
+**`-Root C:\Users\seand\.f23-journey-windows` is passed explicitly and must
+stay.** SYSTEM's `USERPROFILE` is `C:\Windows\System32\config\systemprofile`, so
+without it the scheduled resume would silently create a SECOND, empty journey
+root and every day would look like day one. Verified by live-testing the
+scheduled path against day 1 — it printed `F23_04_DAY_ALREADY_RECORDED=1`,
+exited 0, left the day count at exactly 1, and
+`Test-Path C:\Windows\System32\config\systemprofile\.f23-journey-windows`
+returned `False`.
+
+---
+
+## macOS — NOT ACHIEVED, and precisely why
 
 The plan says: "If `scripts/f23-macos-binary.sh` is absent because 23B-01 did
 not land it, STOP and record that as a blocking dependency rather than
@@ -136,17 +198,17 @@ someone's call, not an improvisation this lane should have taken quietly.
 
 **Consequence for the criterion, stated plainly:** because the authorized policy
 is `real-time-full` with a 259,200-second threshold and macOS day one has not
-started, **the macOS leg cannot meet its threshold before `2026-07-30`.** If
-macOS is to be claimed at all, its day one must start at least three real days
-before the phase closes. Recording it OPEN under termination state 2 is the
-honest alternative, and it is what this file currently records.
+started, **the macOS leg cannot meet its threshold before `2026-07-31` even if
+its blocker were cleared this minute.** It is reported as **NOT ACHIEVED** —
+not a pass, and not a fail of the product. Nothing about macOS was run, so
+nothing about macOS is claimed in either direction.
 
 ---
 
 ## What has NOT been done, and is not claimed
 
-- **No Success Criterion 5 verdict.** Two of three platforms have not finished a
-  journey and the third has recorded one day of three.
+- **No Success Criterion 5 verdict.** Two platforms have recorded one day of
+  three; the third has recorded nothing.
 - **No F23-05 disposition.**
 - **No phase-level statement, no aggregate proof, no D2 record.** Task 3 is
   deliberately unstarted; it depends on 23B-03, which was still being built by a
