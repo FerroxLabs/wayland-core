@@ -196,8 +196,15 @@ unexercised.
 **[F24-C-L1] `cargo fmt --all -- --check` was RED at base commit `24bc2821`**, on
 `crates/wcore-agent/examples/p22_goal_live.rs` — a file this lane does not own.
 Verified by restoring the base version and re-running (rc=1). Fixed with pure
-rustfmt output and flagged here for attribution, because leaving it red would
-have made this lane's own fmt gate unreadable.
+rustfmt output, because leaving it red would have made this lane's own fmt gate
+unreadable. **Now moot:** the owning lane fixed it upstream, and after merging
+`7260d43f` that file is absent from this lane's delta entirely.
+
+**Post-merge re-verification.** The base moved 29 commits during this lane. The
+merge was clean (no conflicts) and every gate was **re-run on the merged tree**
+rather than trusted from the pre-merge run: 539 tests pass, clippy clean, fmt
+clean, and the seam and §6-fence checks both return 0 against the new upstream
+`7260d43f` with a control returning 1 on a file this lane did change.
 
 **Shared-file fence: not touched at all.** `crates/wcore-cli/src/lib.rs` and
 `crates/wcore-cli/src/main.rs` are byte-identical to base. The only manifest
@@ -216,7 +223,7 @@ axis.
 | **F24-C-H1** outcome-unknown delivery re-sent → duplicate at the destination | **HIGH** | **FIXED**, measured before/after at an independent sink, mutation-proved |
 | F24-C-M1 run 2 tallies 10 of 12; stalling sink blocks the tick loop | MEDIUM | BACKLOG — instrument artefact, needs a resume-after-kill sink mode |
 | F24-C-M2 `gateway status` freezes mid-delivery; `deliveries_pending` read 0 with 9 already delivered | MEDIUM | BACKLOG — same family as F24-B-H3, which fixed only the drain case |
-| F24-C-L1 `cargo fmt --check` red at base on another lane's file | LOW | FIXED (rustfmt output only), flagged for attribution |
+| F24-C-L1 `cargo fmt --check` red at base `24bc2821` on another lane's file | LOW | **MOOT** — the owning lane fixed it upstream; after merging `7260d43f` the file is absent from this lane's delta |
 
 No CRITICAL. The one HIGH is fixed with executable evidence.
 
