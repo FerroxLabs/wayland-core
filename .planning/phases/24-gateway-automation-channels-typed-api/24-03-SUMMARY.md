@@ -4,6 +4,8 @@ plan: "03"
 subsystem: channels-and-typed-api
 tags: [channel-framework, probe, binding, health, reload, typed-client, roles, cursor, support-bundle]
 status: partial
+superseded-items:
+  - "§6 item 2 and item 3, and the Criterion 4 verdict — closed by lane 24e, see 24-04-SUMMARY.md"
 plans-not-executed:
   - "24-04 — NOT STARTED"
 requires:
@@ -268,21 +270,40 @@ guard restores agreement across families rather than adding a quirk.
    pushed to main, merged, tagged, released, or used to close an issue.
 
 2. **The four typed-client contracts are NOT wired into the ACP server's
-   request path.** `roles`, `idempotency`, `cursor` and `negotiate` are complete,
-   tested and mutation-proved as MODULES. `server.rs` does not yet call
-   `authorize` before dispatch, `message/send` does not yet append to an
-   `EventLog`, and no transport yet serves a resume request. **The contracts
-   exist; the plane does not.** This is the same honest distinction 24-02 drew
-   about `event`/`webhook`/`poll` — a complete vocabulary and an incomplete
-   plane — and it is stated the same way rather than rounded up.
+   request path.**
+
+   **[SUPERSEDED 2026-07-27 by lane 24e — see `24-04-SUMMARY.md`.]** The four
+   contracts are now wired. `RolePolicy` + `HttpHandler::authorize_method` decide
+   every request before dispatch on BOTH the ACP and the REST surfaces,
+   `message/send` appends to a per-session `EventLog` from a drain task so the
+   record survives a disconnection, `GET /sessions/:id/events` serves resumes,
+   `Idempotency-Key` is honoured on session create and delete, and
+   `GET /initialize` negotiates. Proved by 13 new integration tests, 11
+   mutations each reddening its named test, and a live transcript from the
+   shipped binary. The original text is kept below unaltered: it was correct
+   when written, and it is the statement lane 24e was dispatched to answer.
+
+   > `roles`, `idempotency`, `cursor` and `negotiate` are complete,
+   > tested and mutation-proved as MODULES. `server.rs` does not yet call
+   > `authorize` before dispatch, `message/send` does not yet append to an
+   > `EventLog`, and no transport yet serves a resume request. **The contracts
+   > exist; the plane does not.** This is the same honest distinction 24-02 drew
+   > about `event`/`webhook`/`poll` — a complete vocabulary and an incomplete
+   > plane — and it is stated the same way rather than rounded up.
 
 3. **The plan's two named integration tests were not written.**
-   `crates/wcore-acp/tests/typed_client_recovery.rs` and
-   `crates/wcore-acp/tests/roles_and_idempotency.rs` do not exist. The recovery
-   test in particular is the one that matters, because driving a REAL client
-   against a REAL server over the streaming transport and severing it mid-stream
-   is the only thing that would exercise item 2 above. Unit-level evidence is
-   NOT offered as a substitute for it.
+
+   **[CLOSED 2026-07-27 by lane 24e.]** Both files now exist and pass:
+   `typed_client_recovery.rs` (4 tests — one severs a live SSE stream mid-turn
+   and reconciles 13 events with duplicates and losses at zero) and
+   `roles_and_idempotency.rs` (11 tests). The original text follows.
+
+   > `crates/wcore-acp/tests/typed_client_recovery.rs` and
+   > `crates/wcore-acp/tests/roles_and_idempotency.rs` do not exist. The recovery
+   > test in particular is the one that matters, because driving a REAL client
+   > against a REAL server over the streaming transport and severing it mid-stream
+   > is the only thing that would exercise item 2 above. Unit-level evidence is
+   > NOT offered as a substitute for it.
 
 4. **No macOS and no Windows evidence.** CI fires on `lane/**` and `lane/24d`
    is pushed (run `30270352912`), so the artefacts are obtainable per
@@ -364,7 +385,7 @@ a merged one — an integrator should re-run them post-merge.
 | F24-D-M1 `process_is_alive(0)` returned true on Unix, always | MEDIUM | **FIXED**, measured with a C probe, mutation-proved (M5) |
 | F24-D-P1 the mutation harness was self-passing (a filter matching zero tests) | MEDIUM (process) | **FIXED** in the harness; recorded as a new self-passing shape |
 | F24-D-P2 a seam gate against a branch NAME mis-attributes other lanes' work | MEDIUM (process) | **REPORTED** — use the merge-base SHA; affects every lane in this program |
-| F24-D-M2 the typed-client contracts are not wired into the server request path | MEDIUM | BACKLOG — named gap, §6 item 2 |
+| F24-D-M2 the typed-client contracts are not wired into the server request path | MEDIUM | **CLOSED 2026-07-27 by lane 24e** — wired on ACP + REST, mutation-proved, live-exercised |
 | F24-D-L1 email probe checks SMTP credentials for presence only | LOW | BACKLOG — documented in the method |
 | F24-D-L2 no `gateway support-bundle` operator verb | LOW | BACKLOG |
 
@@ -380,7 +401,11 @@ on the shipped binary and was live-exercised. Idempotency was closed by lane
 fixture (admit → dedupe → access → bind → route), and any evidence at all on the
 other two platforms.
 
-**Criterion 4 (typed authenticated clients): NOT MET.** Roles, command
+**Criterion 4 (typed authenticated clients): NOT MET — *at the time of
+writing*. [SUPERSEDED 2026-07-27: lane 24e grades it MET on Linux for the
+HTTP/SSE transport, with the limits named in `24-04-SUMMARY.md` §8. The verdict
+below is retained verbatim because it was accurate, and because it is the
+sentence that scoped the work which closed it.]** Roles, command
 idempotency, an ordered gap-aware cursor and version negotiation all exist as
 correct, tested, mutation-proved contracts, and the redacted support bundle is
 canary-proved live. But **no typed client has recovered an event gap**, because

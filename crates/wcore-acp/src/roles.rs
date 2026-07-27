@@ -25,6 +25,8 @@
 //! usually a typo in an operator's configuration, and the safe reading of "I
 //! do not understand this role" is "grant nothing", not "grant the minimum".
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::auth::Principal;
@@ -109,8 +111,17 @@ impl RoledPrincipal {
 /// ordinary callers, someone notices, and the table gets an entry.
 pub fn required_role(method: &str) -> Role {
     match method {
-        "initialize" | "session/list" | "session/get" | "agents/list" => Role::Viewer,
-        "session/create" | "message/send" | "a2a/handshake" | "a2a/message/send" => Role::Operator,
+        // `session/events` is the RESUME read — a disconnected client asking
+        // for the events it missed. It reveals exactly what a live subscriber
+        // already received, so it is classified with the other reads rather
+        // than falling through to the Admin default.
+        "initialize" | "session/list" | "session/get" | "session/events" | "agents/list"
+        | "tools/list" | "health" => Role::Viewer,
+        "session/create"
+        | "message/send"
+        | "session/approval/resolve"
+        | "a2a/handshake"
+        | "a2a/message/send" => Role::Operator,
         "session/delete" | "support/bundle" => Role::Admin,
         _ => Role::Admin,
     }
@@ -154,6 +165,88 @@ impl AuthzOutcome {
                 required.as_str(),
                 held.map(Role::as_str).unwrap_or("no recognised role")
             ))),
+        }
+    }
+}
+
+/// The server-side assignment of roles to verified principals.
+///
+/// # Why this type exists rather than a bare `HashMap`
+///
+/// [`authorize`] needs a [`RoledPrincipal`], and nothing was producing one:
+/// the verifiers return a bare [`Principal`] and the role had no source. That
+/// is the entire reason the authorization contract sat unreachable. This is
+/// the missing half — the SERVER's own statement of who holds what, consulted
+/// after verification and never influenced by the request.
+///
+/// # An unnamed principal gets no role, not the lowest one
+///
+/// [`Self::role_for`] returns `None` for a principal the policy does not name,
+/// unless a default was set EXPLICITLY with [`Self::with_default_role`]. A
+/// policy is an operator's enumeration of who may do what; a principal missing
+/// from it is an omission, and the safe reading of an omission is "grant
+/// nothing". Granting `Viewer` on an omission is a grant nobody wrote down.
+///
+/// # Installing no policy at all is a DIFFERENT state, and it is observable
+///
+/// [`crate::AcpServer::has_role_policy`] reports whether one is installed. With
+/// none, the server performs NO role gating and every authenticated principal
+/// reaches every method — which is exactly the pre-role behaviour, kept so
+/// installing this crate's update cannot lock an existing operator out of their
+/// own gateway. That state is not a green and must never be reported as one:
+/// it is "role gating is not configured", and the distinction is asserted by
+/// `an_uninstalled_policy_is_reported_as_absent_not_as_a_deny_all`.
+#[derive(Debug, Clone, Default)]
+pub struct RolePolicy {
+    by_principal: HashMap<String, Role>,
+    default_role: Option<Role>,
+}
+
+impl RolePolicy {
+    /// An empty policy: every principal is unnamed, therefore denied.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Bind a principal id to a role.
+    pub fn grant(mut self, principal_id: impl Into<String>, role: Role) -> Self {
+        self.by_principal.insert(principal_id.into(), role);
+        self
+    }
+
+    /// Set the role an unnamed principal receives. Deliberately explicit —
+    /// there is no way to reach a non-`None` default by accident.
+    pub fn with_default_role(mut self, role: Role) -> Self {
+        self.default_role = Some(role);
+        self
+    }
+
+    /// The role held by `principal_id`, or the explicit default, or `None`.
+    pub fn role_for(&self, principal_id: &str) -> Option<Role> {
+        self.by_principal
+            .get(principal_id)
+            .copied()
+            .or(self.default_role)
+    }
+
+    /// Attach this policy's verdict to a verified principal.
+    pub fn attach(&self, principal: &Principal) -> RoledPrincipal {
+        RoledPrincipal::new(principal.clone(), self.role_for(&principal.id))
+    }
+
+    /// Decide `method` for `principal`, returning the crate error on refusal.
+    ///
+    /// This is the call site the transports use, so the refusal a client sees
+    /// and the decision this module makes are the same object rather than two
+    /// implementations that can drift.
+    pub fn authorize(
+        &self,
+        principal: &Principal,
+        method: &str,
+    ) -> Result<(), crate::error::AcpError> {
+        match authorize(&self.attach(principal), method).into_error() {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
     }
 }
@@ -268,6 +361,64 @@ mod tests {
         // rather than silently becoming world-readable.
         assert_eq!(required_role("some/method/added/later"), Role::Admin);
         assert!(!authorize(&who(Some(Role::Operator)), "some/method/added/later").is_allowed());
+    }
+
+    // ── RolePolicy: the half that was missing, so `authorize` had no caller ──
+
+    #[test]
+    fn a_policy_grants_the_named_role_and_denies_above_it() {
+        let policy = RolePolicy::new().grant("acct-1", Role::Operator);
+        let p = who(None).principal;
+        // Positive control first: the grant really does open something, so the
+        // refusal below is attributable to the requirement and not to the
+        // policy failing to grant anything at all.
+        assert!(policy.authorize(&p, "message/send").is_ok());
+        let err = policy
+            .authorize(&p, "session/delete")
+            .expect_err("an operator may not delete");
+        assert!(matches!(err, AcpError::Forbidden(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn a_principal_the_policy_does_not_name_is_denied_everything() {
+        // Not "granted the lowest role". A policy is an enumeration; a missing
+        // principal is an omission, and an omission must not become a grant.
+        let policy = RolePolicy::new().grant("somebody-else", Role::Admin);
+        let p = who(None).principal;
+        assert_eq!(policy.role_for(&p.id), None);
+        for method in ["initialize", "session/list", "message/send"] {
+            assert!(
+                policy.authorize(&p, method).is_err(),
+                "an unnamed principal must be denied {method}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_default_role_applies_only_where_it_was_asked_for() {
+        // The default exists so an operator can say "everyone authenticated is
+        // a viewer" out loud. It must never appear without being written.
+        let bare = RolePolicy::new();
+        assert_eq!(bare.role_for("anyone"), None);
+        let defaulted = RolePolicy::new().with_default_role(Role::Viewer);
+        assert_eq!(defaulted.role_for("anyone"), Some(Role::Viewer));
+        // An explicit grant still beats the default.
+        let mixed = RolePolicy::new()
+            .with_default_role(Role::Viewer)
+            .grant("acct-1", Role::Admin);
+        assert_eq!(mixed.role_for("acct-1"), Some(Role::Admin));
+        assert_eq!(mixed.role_for("acct-2"), Some(Role::Viewer));
+    }
+
+    #[test]
+    fn the_resume_read_is_classified_rather_than_falling_through_to_admin() {
+        // If `session/events` were left unclassified it would require Admin and
+        // an ordinary operator could never resume a stream it was allowed to
+        // receive live — a refusal with no security meaning.
+        assert_eq!(required_role("session/events"), Role::Viewer);
+        assert!(authorize(&who(Some(Role::Viewer)), "session/events").is_allowed());
+        // …and it is still a real gate: no role at all is still refused.
+        assert!(!authorize(&who(None), "session/events").is_allowed());
     }
 
     #[test]

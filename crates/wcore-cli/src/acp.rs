@@ -64,6 +64,22 @@ pub struct AcpServeArgs {
     #[arg(long)]
     pub base_url: Option<String>,
 
+    /// F24-04 - the ROLE the API-key principal holds. One of `viewer`,
+    /// `operator` or `admin`.
+    ///
+    /// Omitted, NO role policy is installed and the server performs no role
+    /// gating: every caller presenting the key reaches every method, which is
+    /// this server's behaviour before roles existed and is kept so an upgrade
+    /// cannot lock an operator out of their own gateway. Which of the two
+    /// states is active is PRINTED at startup - the absence of a role check
+    /// must never be inferred from a quiet log.
+    ///
+    /// A refusal under this flag is a 403 carrying the required and held
+    /// roles, never a 401: rotating the key will not help and the message says
+    /// so.
+    #[arg(long, value_name = "viewer|operator|admin")]
+    pub role: Option<String>,
+
     /// Auto-approve EVERY tool call (shell, file writes, sub-agents) for API
     /// sessions. Off by default. Turning this on makes the API key
     /// root-equivalent: anyone who can reach the server and present the key
@@ -437,6 +453,35 @@ async fn serve(args: AcpServeArgs) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("failed to init profile supervisor: {e}"))?;
         acp_server = acp_server.with_profile_router(Arc::new(router));
     }
+    // F24-04: install the role policy when the operator asked for one, and say
+    // out loud which state the server is in either way. `has_role_policy()` of
+    // false is "role gating is NOT CONFIGURED" - it is neither a green nor a
+    // deny-all, and a surface that stays silent about it lets an operator read
+    // a working request as an authorization that passed.
+    match args.role.as_deref() {
+        Some(r) => {
+            let role = wcore_acp::roles::Role::parse(r).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--role must be one of viewer, operator or admin; got {r:?}. \
+                     An unrecognised role grants NOTHING, so this is refused at \
+                     startup rather than silently serving a deny-all gateway."
+                )
+            })?;
+            acp_server = acp_server.with_role_policy(
+                wcore_acp::roles::RolePolicy::new().grant(ACP_SERVER_KEY_ACCOUNT, role),
+            );
+            eprintln!(
+                "wayland-core acp: role gating ENABLED - the api-key principal holds \
+                 '{}'; refusals are 403 naming the required role",
+                role.as_str()
+            );
+        }
+        None => eprintln!(
+            "wayland-core acp: role gating NOT CONFIGURED - every caller presenting \
+             the api key reaches every method. Pass --role to gate."
+        ),
+    }
+
     let server = Arc::new(acp_server);
 
     // F-017: wire the ApiKeyVerifier so every request must carry

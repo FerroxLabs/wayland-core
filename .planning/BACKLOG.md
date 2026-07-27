@@ -494,3 +494,56 @@ Three of the reds/flakes at integration HEAD share one cause: tests that spawn t
 The right repair is per-test, in the harness, by whoever owns test infrastructure: widen the
 fixture's publish window relative to the scenario deadline so the two are not racing. A repair
 lane forbidden from raising timeouts cannot make that call.
+## From lane 24e (Phase 24, F24-04) — 2026-07-27
+
+Each item was found while wiring the typed-client contracts into the ACP request
+path. CRITICAL and HIGH were fixed in-lane; everything here is MEDIUM or below
+and does not block.
+
+- **[LOW] `acp serve` refuses to start without an LLM provider key** (F24-E-L1),
+  even though session create/list/get/delete, the resume route and `initialize`
+  need no engine at all, and the server already has an honest "no turn engine
+  installed" path for turns. On a host with no provider key the entire ACP
+  surface is unavailable rather than degraded. Same SHAPE as F24-D-H1 but with a
+  defensible justification, so it is filed rather than fixed: an ACP server that
+  cannot run turns is arguably not worth starting. Decide deliberately.
+
+- **[LOW] Live evidence covers ONE event, not an ordered run** (F24-E-L2). The
+  engine on the headless Linux host fails fast (no OS keyring, no unlocked
+  vault), so a live turn emits a single `error` frame. Delivery-independence is
+  fully proved by it — the event was produced 12s AFTER the client had gone and
+  was still served on resume — but live multi-event ordering, duplicate and loss
+  counting is not. That rests on `typed_client_recovery.rs` (13 events over a
+  real severed socket). Close it on a host that can complete a real turn.
+
+- **[MEDIUM] REST `/v1` is gated by role but cannot resume or deduplicate.**
+  After F24-E-H1 the REST surface authorizes against the same role table, but
+  there is no `/v1` resume route and no `Idempotency-Key` handling on
+  `/v1/sessions`. A REST-only client is protected and cannot recover a gap.
+
+- **[MEDIUM] `transport/stdio.rs` and `transport/ws.rs` authorize nothing,
+  record nothing and resume nothing.** Neither was touched by this lane.
+  **Whether either is reachable in a shipped deployment was NOT investigated** —
+  that absence is itself unmeasured and is the first thing to settle, because if
+  either is reachable with a verifier installed it is a second F24-E-H1.
+
+- **[MEDIUM] The ACP event log is in-memory and per-process.** A restart loses
+  history. The run-scoped stream id makes the loss LOUD (a stale cursor is
+  refused by name rather than silently mis-served), which is the contract, but
+  no persistence exists.
+
+- **[MEDIUM] Roles bind to ONE principal on the shipped binary.** `acp serve`
+  has a single api-key identity, so `--role` sets that identity's role.
+  `RolePolicy::grant` supports many principals; multi-principal configuration
+  has no CLI surface.
+
+- **[PROCESS, HIGH-severity mechanism, already fixed in-lane] An artifact newer
+  than its source is a build that did not happen** (F24-E-P1). `rsync -a`
+  preserves mtimes; a tree synced back after a mutation harness had built from a
+  MUTATED tree left cargo running the mutant binary — measured, source
+  `14:14:55` vs artifact `14:19:15`, two tests reporting a false red. It
+  surfaced as a false red here; the same mechanism produces a false GREEN
+  whenever the stale binary is the permissive one. Add to the standing
+  self-passing-gate list alongside "a test filter that matches nothing exits 0".
+  Any cross-host workflow in this programme that syncs with `rsync -a` and then
+  runs cargo is exposed.
