@@ -1,0 +1,9 @@
+COMMAND: wayland-core.exe backend receipt verify C:\f25-04-rotatedout.json
+wayland-core.exe : wayland-core backend: receipt is invalid: receipt body digest mismatch
+At C:\f25-04-live.ps1:27 char:10
++   $out = & $BIN @CliArgs 2>&1 | Out-String
++          ~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (wayland-core ba...digest mismatch:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+EXIT: 1

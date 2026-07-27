@@ -1,0 +1,3 @@
+COMMAND: wayland-core backend receipt verify receipt-tampered.json
+wayland-core backend: receipt is invalid: task_accepted does not agree with the receipt's own task evidence
+EXIT: 1

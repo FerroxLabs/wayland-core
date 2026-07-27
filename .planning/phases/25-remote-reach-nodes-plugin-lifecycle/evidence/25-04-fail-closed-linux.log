@@ -1,0 +1,277 @@
+=== F25-05 LIVE FAIL-CLOSED + ORPHAN PROOF — host hetzner-dsm — 2026-07-27T12:21:22Z ===
+binary: /root/wayland-25/target/release/wayland-core (wayland-core 0.12.25)
+commit: f0778ba1df825c07af27f5f358ebcae2503675c5
+
+### produce a genuine receipt to rotate out from under
+$ /root/wayland-25/target/release/wayland-core backend run --backend local --receipt-out /root/f25-04-lab/receipt-prerotation.json
+task:        f25-reference
+backend:     local
+transport:   Local via localhost
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: NotApplicable
+wall ms:     1
+receipt:     /root/f25-04-lab/receipt-prerotation.json
+[exit=0]
+
+### verify it BEFORE rotation (must pass, or the case is vacuous)
+$ /root/wayland-25/target/release/wayland-core backend receipt verify /root/f25-04-lab/receipt-prerotation.json
+receipt:   /root/f25-04-lab/receipt-prerotation.json
+schema:    wayland.execution-backend-receipt v1
+backend:   local
+key id:    1a3e454b306c3f798f660ef9fcabea132c8e2f6c3e6fd3790497cfd31db94f8f
+terminal:  Success
+INTEGRITY: OK — body digest, event ordering, single terminal event and internal consistency all hold.
+IDENTITY:  NOT ESTABLISHED by this command. A receipt cannot authenticate itself: verifying identity requires a verifying key the caller already pinned, which a receipt file does not carry. Use the conformance harness or a caller holding the pinned key.
+[exit=0]
+
+STATE: pre-rotation verify exit=0
+STATE: ROTATING the local backend signing key on disk
+### run a task under the ROTATED key
+$ /root/wayland-25/target/release/wayland-core backend run --backend local --receipt-out /root/f25-04-lab/receipt-postrotation.json
+task:        f25-reference
+backend:     local
+transport:   Local via localhost
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: NotApplicable
+wall ms:     1
+receipt:     /root/f25-04-lab/receipt-postrotation.json
+[exit=0]
+
+STATE: pre-rotation key_id  1a3e454b306c3f798f660ef9fcabea132c8e2f6c3e6fd3790497cfd31db94f8f
+STATE: post-rotation key_id 9507db2905c1aad54f7d12b3c443133b9e6a9197078b5c9c6b23beaed6c39256
+### present the pre-rotation signature under the ROTATED key id
+$ /root/wayland-25/target/release/wayland-core backend receipt verify /root/f25-04-lab/receipt-rotated-out.json
+wayland-core backend: receipt is invalid: receipt body digest mismatch
+[exit=1]
+
+### verify a receipt whose task id was mutated by one field
+$ /root/wayland-25/target/release/wayland-core backend receipt verify /root/f25-04-lab/receipt-tampered.json
+wayland-core backend: receipt is invalid: task_accepted does not agree with the receipt's own task evidence
+[exit=1]
+
+### verify a receipt claiming a DIFFERENT backend produced it
+$ /root/wayland-25/target/release/wayland-core backend receipt verify /root/f25-04-lab/receipt-attestation.json
+wayland-core backend: receipt is invalid: task_accepted names a different backend than the receipt
+[exit=1]
+
+### run a task on a backend whose credential is absent
+$ /root/wayland-25/target/release/wayland-core backend run --backend cloud --receipt-out /root/f25-04-lab/receipt-cloud.json
+wayland-core backend: backend 'cloud' is unavailable and this command does NOT fall back: backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back (probe CredentialAbsent)
+[exit=1]
+
+STATE: cloud run exit=1 ; receipt produced? NO
+### read the egress disposition every backend reports
+$ /root/wayland-25/target/release/wayland-core backend list --json
+[
+  {
+    "available": true,
+    "backend": "local",
+    "capabilities": {
+      "artifact_transfer": true,
+      "cancellation": true,
+      "hibernation": false,
+      "limits": {
+        "cpu_millis": 30000,
+        "memory_bytes": 268435456,
+        "output_bytes": 1048576,
+        "wall_time_ms": 60000
+      },
+      "secret_channel": "none"
+    },
+    "kind": "local",
+    "probe_basis": "sandbox_backend_probe",
+    "probe_detail": "platform containment backend 'bubblewrap' probed available",
+    "version": "0.12.25"
+  },
+  {
+    "available": true,
+    "backend": "container",
+    "capabilities": {
+      "artifact_transfer": true,
+      "cancellation": true,
+      "hibernation": false,
+      "limits": {
+        "cpu_millis": 30000,
+        "memory_bytes": 268435456,
+        "output_bytes": 1048576,
+        "wall_time_ms": 60000
+      },
+      "secret_channel": "container_env"
+    },
+    "kind": "container",
+    "probe_basis": "daemon_ping",
+    "probe_detail": "container daemon answered a version ping: server 29.2.1",
+    "version": "0.12.25"
+  },
+  {
+    "available": false,
+    "backend": "ssh",
+    "capabilities": {
+      "artifact_transfer": true,
+      "cancellation": true,
+      "hibernation": false,
+      "limits": {
+        "cpu_millis": 30000,
+        "memory_bytes": 268435456,
+        "output_bytes": 1048576,
+        "wall_time_ms": 60000
+      },
+      "secret_channel": "remote_transport"
+    },
+    "kind": "ssh",
+    "probe_basis": "credential_absent",
+    "probe_detail": "WAYLAND_EXEC_SSH_TARGET is not set",
+    "version": "0.12.25"
+  },
+  {
+    "available": false,
+    "backend": "cloud",
+    "capabilities": {
+      "artifact_transfer": true,
+      "cancellation": true,
+      "hibernation": true,
+      "limits": {
+        "cpu_millis": 30000,
+        "memory_bytes": 268435456,
+        "output_bytes": 1048576,
+        "wall_time_ms": 60000
+      },
+      "secret_channel": "vendor_managed"
+    },
+    "kind": "cloud",
+    "probe_basis": "credential_absent",
+    "probe_detail": "backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back",
+    "version": "0.12.25"
+  }
+]
+[exit=0]
+
+### attempt the credentialed egress surface for real (a RUN, not a probe)
+$ /root/wayland-25/target/release/wayland-core backend run --backend cloud --receipt-out /root/f25-04-lab/receipt-egress.json
+wayland-core backend: backend 'cloud' is unavailable and this command does NOT fall back: backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back (probe CredentialAbsent)
+[exit=1]
+
+###         for the record, what a PROBE reports (exits 0 -- a report, not a refusal)
+$ /root/wayland-25/target/release/wayland-core backend probe cloud
+backend:       cloud
+available:     false
+probe basis:   CredentialAbsent
+probe detail:  backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+healthy:       false
+live tasks:    0
+health detail: backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+[exit=0]
+
+STATE: probe exit=0 (a probe REPORTS; it does not refuse)
+STATE: using orphan nonce f25-04-orphan-1171673
+STATE: independent enumeration with an orphan planted: 1 row(s)
+### the SCANNER, while the orphan is planted
+$ /root/wayland-25/target/release/wayland-core backend scan --task-id f25-04-orphan-1171673
+orphan scan for task f25-04-orphan-1171673 (nonce f25-04-orphan-1171673)
+
+  backend    cloud
+  mechanism  NONE: stopping a cloud machine is a vendor API call, not a kernel mechanism. ProcessTreeMechanism has no variant for it, and if the API call does not land the machine keeps running
+  method     backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+  count      NOT MEASURED — the surface could not be enumerated (backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back), so no count exists — this is NOT zero orphans
+  rows       (none)
+
+  backend    container
+  mechanism  kernel-backed: ProcessTreeMechanism::DockerContainerReap — the container daemon force-removing the container and its whole tree
+  method     docker ps -a --filter label=wayland.task.nonce=<nonce>
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    local
+  mechanism  kernel-backed: ProcessTreeMechanism::LinuxPidNamespaceReap — the platform sandbox backend's PID namespace, with /proc descendant discovery
+  method     live-task registry UNION a real enumeration of the host process table
+  count      1 (MEASURED)
+  row        process table: 1172830 1171673 1171672       2 sh -c while :; do sleep 1; done # f25-04-orphan-1171673
+
+  backend    ssh
+  mechanism  BEST-EFFORT: a remote process group killed over the same ssh transport. ProcessTreeMechanism has NO variant that crosses an ssh connection, so nothing kernel-backed on the controller reaps the far end; a remote child that calls setsid survives
+  method     WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned
+  count      NOT MEASURED — the surface could not be enumerated (WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned), so no count exists — this is NOT zero orphans
+  rows       (none)
+
+TOTAL: 1 orphan(s) measured across 4 backend(s); 2 surface(s) NOT measured
+wayland-core backend: 1 orphaned execution surface(s) still carry nonce f25-04-orphan-1171673
+[exit=1]
+
+STATE: scanner while planted: 1 orphan(s); exit=1
+STATE: independent enumeration after the reap: 0 row(s)
+### the SCANNER, after the reap
+$ /root/wayland-25/target/release/wayland-core backend scan --task-id f25-04-orphan-1171673
+orphan scan for task f25-04-orphan-1171673 (nonce f25-04-orphan-1171673)
+
+  backend    cloud
+  mechanism  NONE: stopping a cloud machine is a vendor API call, not a kernel mechanism. ProcessTreeMechanism has no variant for it, and if the API call does not land the machine keeps running
+  method     backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+  count      NOT MEASURED — the surface could not be enumerated (backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back), so no count exists — this is NOT zero orphans
+  rows       (none)
+
+  backend    container
+  mechanism  kernel-backed: ProcessTreeMechanism::DockerContainerReap — the container daemon force-removing the container and its whole tree
+  method     docker ps -a --filter label=wayland.task.nonce=<nonce>
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    local
+  mechanism  kernel-backed: ProcessTreeMechanism::LinuxPidNamespaceReap — the platform sandbox backend's PID namespace, with /proc descendant discovery
+  method     live-task registry UNION a real enumeration of the host process table
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    ssh
+  mechanism  BEST-EFFORT: a remote process group killed over the same ssh transport. ProcessTreeMechanism has NO variant that crosses an ssh connection, so nothing kernel-backed on the controller reaps the far end; a remote child that calls setsid survives
+  method     WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned
+  count      NOT MEASURED — the surface could not be enumerated (WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned), so no count exists — this is NOT zero orphans
+  rows       (none)
+
+TOTAL: 0 orphan(s) measured across 4 backend(s); 2 surface(s) NOT measured
+[exit=0]
+
+STATE: scanner after the reap: 0 orphan(s)
+STATE: container enumeration: ROWS-MATCHING-NONCE: 0
+### cancel a task id that no backend is running (cleanup path, no work)
+$ /root/wayland-25/target/release/wayland-core backend cancel --task-id f25-04-orphan-1171673
+wayland-core backend: no backend owns task 'f25-04-orphan-1171673': local: task f25-04-orphan-1171673 is not known to backend <any>; container: task f25-04-orphan-1171673 is not known to backend <any>; ssh: task f25-04-orphan-1171673 is not known to backend <any>; cloud: task f25-04-orphan-1171673 is not known to backend <any>
+[exit=1]
+
+STATE: cancel exit=1
+### scan again after cancellation
+$ /root/wayland-25/target/release/wayland-core backend scan --task-id f25-04-orphan-1171673
+orphan scan for task f25-04-orphan-1171673 (nonce f25-04-orphan-1171673)
+
+  backend    cloud
+  mechanism  NONE: stopping a cloud machine is a vendor API call, not a kernel mechanism. ProcessTreeMechanism has no variant for it, and if the API call does not land the machine keeps running
+  method     backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+  count      NOT MEASURED — the surface could not be enumerated (backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back), so no count exists — this is NOT zero orphans
+  rows       (none)
+
+  backend    container
+  mechanism  kernel-backed: ProcessTreeMechanism::DockerContainerReap — the container daemon force-removing the container and its whole tree
+  method     docker ps -a --filter label=wayland.task.nonce=<nonce>
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    local
+  mechanism  kernel-backed: ProcessTreeMechanism::LinuxPidNamespaceReap — the platform sandbox backend's PID namespace, with /proc descendant discovery
+  method     live-task registry UNION a real enumeration of the host process table
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    ssh
+  mechanism  BEST-EFFORT: a remote process group killed over the same ssh transport. ProcessTreeMechanism has NO variant that crosses an ssh connection, so nothing kernel-backed on the controller reaps the far end; a remote child that calls setsid survives
+  method     WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned
+  count      NOT MEASURED — the surface could not be enumerated (WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned), so no count exists — this is NOT zero orphans
+  rows       (none)
+
+TOTAL: 0 orphan(s) measured across 4 backend(s); 2 surface(s) NOT measured
+[exit=0]
+

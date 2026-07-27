@@ -1,0 +1,9 @@
+
+F25-SC4-CASE-TAMPERED-BUNDLE: REFUSED host=seandesktop exit=1 verdict=body-digest-mismatch evidence=25-04-win-case-tampered-bundle.txt
+F25-SC4-CASE-ATTESTATION-MISMATCH: REFUSED host=seandesktop exit=1 verdict=backend-identity-mismatch evidence=25-04-win-case-attestation-mismatch.txt
+F25-SC4-CASE-DENIED-SECRET: REFUSED host=seandesktop exit=1 verdict=credential-absent-no-fallback evidence=25-04-win-case-denied-secret.txt
+F25-SC4-CASE-DENIED-EGRESS: REFUSED host=seandesktop exit=1 verdict=egress-surface-refused-without-credential evidence=25-04-win-case-denied-egress.txt
+F25-SC4-CASE-ROTATED-KEY: REFUSED host=seandesktop exit=1 verdict=rotated-key-signature-refused evidence=25-04-win-case-rotated-key.txt
+F25-SC4-ENUM-WINDOWS: MEASURED host=seandesktop planted=1 after=0 evidence=25-04-enum-windows-cim.txt
+F25-SC4-SCANNER-AGREEMENT-PLANTED: AGREE scanner=1 manual=1 evidence=25-04-enum-windows-cim-planted.txt
+F25-SC4-SCANNER-AGREEMENT: AGREE scanner=0 manual=0 evidence=25-04-enum-windows-cim.txt

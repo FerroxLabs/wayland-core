@@ -1,0 +1,38 @@
+COMMAND: wayland-core.exe backend scan --task-id f25-04-win-orphan-40608 (planted)
+orphan scan for task f25-04-win-orphan-40608 (nonce f25-04-win-orphan-40608)
+wayland-core.exe : wayland-core backend: 1 orphaned execution surface(s) still carry nonce 
+f25-04-win-orphan-40608
+At C:\f25-04-live.ps1:108 char:16
++ $scanPlanted = & $BIN backend scan --task-id $nonce 2>&1 | Out-String
++                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (wayland-core ba...in-orphan-40608:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+  backend    cloud
+  mechanism  NONE: stopping a cloud machine is a vendor API call, not a kernel mechanism. ProcessTreeMechanism has no variant for it, and if the API call does not land the machine keeps running
+  method     backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+  count      NOT MEASURED G현 the surface could not be enumerated (backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back), so no count exists G현 this is NOT zero orphans
+  rows       (none)
+
+  backend    container
+  mechanism  kernel-backed: ProcessTreeMechanism::DockerContainerReap G현 the container daemon force-removing the container and its whole tree
+  method     docker ps failed: error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.47/containers/json?all=1&filters=%7B%22label%22%3A%7B%22wayland.task.nonce%3Df25-04-win-orphan-40608%22%3Atrue%7D%7D": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.
+  count      NOT MEASURED G현 the surface could not be enumerated (docker ps failed: error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.47/containers/json?all=1&filters=%7B%22label%22%3A%7B%22wayland.task.nonce%3Df25-04-win-orphan-40608%22%3Atrue%7D%7D": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.), so no count exists G현 this is NOT zero orphans
+  rows       (none)
+
+  backend    local
+  mechanism  kernel-backed: ProcessTreeMechanism::WindowsJobObject G현 a kill-on-close Job Object owning the descendant tree
+  method     live-task registry UNION a real enumeration of the host process table
+  count      1 (MEASURED)
+  row        process table: 6336 40608 "C:\WINDOWS\system32\cmd.exe" /c ping -n 600 127.0.0.1 > nul & rem f25-04-win-orphan-40608
+
+  backend    ssh
+  mechanism  BEST-EFFORT: a remote process group killed over the same ssh transport. ProcessTreeMechanism has NO variant that crosses an ssh connection, so nothing kernel-backed on the controller reaps the far end; a remote child that calls setsid survives
+  method     WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned
+  count      NOT MEASURED G현 the surface could not be enumerated (WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned), so no count exists G현 this is NOT zero orphans
+  rows       (none)
+
+TOTAL: 1 orphan(s) measured across 4 backend(s); 3 surface(s) NOT measured
+EXIT: 1

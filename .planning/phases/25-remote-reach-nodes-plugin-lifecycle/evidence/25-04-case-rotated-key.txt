@@ -1,0 +1,3 @@
+COMMAND: wayland-core backend receipt verify receipt-rotated-out.json
+wayland-core backend: receipt is invalid: receipt body digest mismatch
+EXIT: 1
