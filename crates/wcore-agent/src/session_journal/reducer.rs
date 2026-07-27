@@ -53,6 +53,23 @@ pub(crate) fn reduce(
         SessionEvent::ChildTransactionOpened { opening } => {
             apply_child_transaction_opened(&mut state, opening, envelope.seq, &envelope.checksum)?;
         }
+        // Goal transitions record the cursor they committed at. The reducer
+        // derives it from the envelope rather than trusting a caller-supplied
+        // value, exactly as the child-transaction opening token does, so the
+        // cursor a host resumes from cannot be forged by the event author.
+        SessionEvent::GoalOpened { .. }
+        | SessionEvent::GoalIterationStarted { .. }
+        | SessionEvent::GoalWaitBegun { .. }
+        | SessionEvent::GoalWaitResolved { .. }
+        | SessionEvent::GoalRunResumed { .. }
+        | SessionEvent::GoalTerminated { .. } => {
+            apply_goal_event(
+                &mut state,
+                &envelope.event,
+                envelope.seq,
+                &envelope.checksum,
+            )?;
+        }
         _ => apply_event(&mut state, &envelope.event)?,
     }
     state.last_seq = Some(envelope.seq);
@@ -81,6 +98,184 @@ fn missing(kind: &str, id: &str) -> JournalError {
 
 fn valid_sha256_digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn invalid_goal(goal_id: &str, detail: &str) -> JournalError {
+    JournalError::InvalidTransition(format!("goal {goal_id}: {detail}"))
+}
+
+fn required_goal_mut<'a>(
+    state: &'a mut ReducedSessionState,
+    goal_id: &str,
+) -> Result<&'a mut GoalState, JournalError> {
+    state
+        .goals
+        .get_mut(goal_id)
+        .ok_or_else(|| missing("goal", goal_id))
+}
+
+/// Refuse any transition against a Goal that has already terminated.
+///
+/// This is what makes a stale command explicit rather than absorbed: a command
+/// that raced a terminal transition is rejected instead of quietly overwriting
+/// a committed outcome.
+fn require_goal_live(goal: &GoalState) -> Result<(), JournalError> {
+    if goal.is_terminal() {
+        return Err(invalid_goal(
+            &goal.goal_id,
+            "is already terminal and admits no further transition",
+        ));
+    }
+    Ok(())
+}
+
+/// Reduce one durable Goal transition.
+///
+/// Takes the committed sequence and checksum so the Goal's recovery cursor is
+/// DERIVED from the envelope the transition actually landed in, never supplied
+/// by whoever built the event.
+fn apply_goal_event(
+    state: &mut ReducedSessionState,
+    event: &SessionEvent,
+    seq: u64,
+    checksum: &str,
+) -> Result<(), JournalError> {
+    match event {
+        SessionEvent::GoalOpened {
+            goal_id,
+            objective,
+            authority,
+            opened_at_unix_ms,
+        } => {
+            if state.goals.contains_key(goal_id) {
+                return Err(duplicate("goal", goal_id));
+            }
+            // An envelope that does not match its own committed digest never
+            // enters reduced state. Fail closed at the durable boundary, so a
+            // widened limit cannot become an effective limit by being replayed.
+            authority
+                .reconstruct()
+                .map_err(|error| invalid_goal(goal_id, &error.to_string()))?;
+            state.goals.insert(
+                goal_id.clone(),
+                GoalState {
+                    goal_id: goal_id.clone(),
+                    objective: objective.clone(),
+                    authority: authority.clone(),
+                    lifecycle: GoalLifecycle::Opened,
+                    iterations_started: 0,
+                    resume_count: 0,
+                    opened_at_unix_ms: *opened_at_unix_ms,
+                    last_transition_seq: seq,
+                    last_transition_checksum: checksum.to_owned(),
+                },
+            );
+        }
+        SessionEvent::GoalIterationStarted { goal_id, iteration } => {
+            let goal = required_goal_mut(state, goal_id)?;
+            require_goal_live(goal)?;
+            if !matches!(
+                goal.lifecycle,
+                GoalLifecycle::Opened | GoalLifecycle::Running
+            ) {
+                return Err(invalid_goal(
+                    goal_id,
+                    "an iteration starts only from opened or running",
+                ));
+            }
+            let next = goal.iterations_started.saturating_add(1);
+            if *iteration != next {
+                return Err(invalid_goal(
+                    goal_id,
+                    "iteration is not the successor of the committed count",
+                ));
+            }
+            // The bound is enforced here, at the durable boundary, rather than
+            // in the caller. A loop bound that is recorded but checked only by
+            // the process that happens to be driving is not a bound.
+            if let Some(ceiling) = goal.authority.iteration_ceiling()
+                && next > ceiling
+            {
+                return Err(invalid_goal(
+                    goal_id,
+                    "iteration exceeds the authorized loop bound",
+                ));
+            }
+            goal.iterations_started = next;
+            goal.lifecycle = GoalLifecycle::Running;
+            goal.last_transition_seq = seq;
+            goal.last_transition_checksum = checksum.to_owned();
+        }
+        SessionEvent::GoalWaitBegun { goal_id, wait } => {
+            let goal = required_goal_mut(state, goal_id)?;
+            require_goal_live(goal)?;
+            if !matches!(goal.lifecycle, GoalLifecycle::Running) {
+                return Err(invalid_goal(goal_id, "only a running goal begins waiting"));
+            }
+            goal.lifecycle = GoalLifecycle::Waiting { wait: wait.clone() };
+            goal.last_transition_seq = seq;
+            goal.last_transition_checksum = checksum.to_owned();
+        }
+        SessionEvent::GoalWaitResolved { goal_id } => {
+            let goal = required_goal_mut(state, goal_id)?;
+            require_goal_live(goal)?;
+            if !matches!(goal.lifecycle, GoalLifecycle::Waiting { .. }) {
+                return Err(invalid_goal(
+                    goal_id,
+                    "only a waiting goal can resolve a wait",
+                ));
+            }
+            goal.lifecycle = GoalLifecycle::Running;
+            goal.last_transition_seq = seq;
+            goal.last_transition_checksum = checksum.to_owned();
+        }
+        SessionEvent::GoalRunResumed {
+            goal_id,
+            resume_count,
+        } => {
+            let goal = required_goal_mut(state, goal_id)?;
+            require_goal_live(goal)?;
+            let next = goal.resume_count.saturating_add(1);
+            if *resume_count != next {
+                return Err(invalid_goal(
+                    goal_id,
+                    "resume count is not the successor of the committed count",
+                ));
+            }
+            goal.resume_count = next;
+            goal.last_transition_seq = seq;
+            goal.last_transition_checksum = checksum.to_owned();
+        }
+        SessionEvent::GoalTerminated { goal_id, terminal } => {
+            let goal = required_goal_mut(state, goal_id)?;
+            require_goal_live(goal)?;
+            // The durable half of the anti-forgery property. The compiler closes
+            // the model-authored route (`HostGateObservation` is not
+            // `Deserialize`); this closes the remaining one, a same-UID writer
+            // appending a hand-built record that stamps `verified` on a strategy
+            // whose verification owner is a model judge, a shape validator or a
+            // boolean count.
+            if terminal.is_verified()
+                && !goal.authority.strategy.can_produce_host_observed_evidence()
+            {
+                return Err(invalid_goal(
+                    goal_id,
+                    "strategy has no host-observed verification owner and cannot reach verified",
+                ));
+            }
+            goal.lifecycle = GoalLifecycle::Terminated {
+                terminal: terminal.clone(),
+            };
+            goal.last_transition_seq = seq;
+            goal.last_transition_checksum = checksum.to_owned();
+        }
+        _ => {
+            return Err(JournalError::InvalidTransition(
+                "goal reduction received a non-goal event".to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn child_transaction_opening_token_digest(
@@ -2984,6 +3179,20 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
                 "child transaction {} opening requires committed envelope authority",
                 opening.transaction_id
             )));
+        }
+        // Goal transitions bind their recovery cursor to the envelope they
+        // commit in, so they are reduced only through the cursor-bearing path
+        // in `reduce`. Reaching them here means a caller tried to reduce one
+        // without that binding.
+        SessionEvent::GoalOpened { .. }
+        | SessionEvent::GoalIterationStarted { .. }
+        | SessionEvent::GoalWaitBegun { .. }
+        | SessionEvent::GoalWaitResolved { .. }
+        | SessionEvent::GoalRunResumed { .. }
+        | SessionEvent::GoalTerminated { .. } => {
+            return Err(JournalError::InvalidTransition(
+                "goal transitions require cursor-bound reduction".to_owned(),
+            ));
         }
         SessionEvent::ChildTransactionReceiptCommitted {
             transaction_id,

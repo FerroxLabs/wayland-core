@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use wcore_protocol::events::RecoveryCursor;
 use wcore_types::child_transaction::{ChildGatePlan, ChildTransactionReceipt};
+use wcore_types::goal::{GoalTerminalState, WaitKind};
 use wcore_types::spawner::{ChildId, DurableChildRecord, DurableChildTransition};
 use wcore_types::tool::ToolEffectContract;
 
 use super::GENESIS_CHECKSUM;
+use crate::goal::GoalAuthorityRecord;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -817,6 +820,39 @@ pub enum SessionEvent {
         opening_token_digest: String,
         successor: LandingSuccessor,
     },
+    /// Durable Goal lifecycle records (F22-02).
+    ///
+    /// These enter additively at schema 5 with no version bump, on the shape
+    /// authorized by the 22-01 cross-binary determination. Like the child
+    /// transaction authority events they are refused by the public `append`
+    /// path: only `crate::goal::GoalKernel` may mint a Goal transition, so a
+    /// transition with no attributable kernel append cannot exist.
+    GoalOpened {
+        goal_id: String,
+        objective: String,
+        authority: GoalAuthorityRecord,
+        opened_at_unix_ms: u64,
+    },
+    GoalIterationStarted {
+        goal_id: String,
+        iteration: u32,
+    },
+    GoalWaitBegun {
+        goal_id: String,
+        wait: WaitKind,
+    },
+    GoalWaitResolved {
+        goal_id: String,
+    },
+    /// A new process picked this Goal up after a crash.
+    GoalRunResumed {
+        goal_id: String,
+        resume_count: u32,
+    },
+    GoalTerminated {
+        goal_id: String,
+        terminal: GoalTerminalState,
+    },
     DeliveryPrepared {
         delivery_id: String,
         origin: DeliveryOrigin,
@@ -1143,6 +1179,71 @@ impl ChildTransactionState {
     }
 }
 
+/// Where a durable Goal is in its lifecycle.
+///
+/// The set is closed and every transition the kernel can write lands in exactly
+/// one of these. `Opened` is distinct from `Running` on purpose: a Goal that has
+/// been authorized but has not yet consumed an iteration of its loop bound is
+/// not the same thing as one that has, and collapsing them would make the bound
+/// off by one on the resume path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum GoalLifecycle {
+    /// Authorized, no iteration consumed yet.
+    Opened,
+    /// Executing an iteration.
+    Running,
+    /// Not executing, blocked on something named.
+    Waiting { wait: WaitKind },
+    /// Finished, in exactly one canonical terminal category.
+    Terminated { terminal: GoalTerminalState },
+}
+
+/// Deterministic replay projection for one durable Goal.
+///
+/// Every field is reconstructed by replaying the chain. Nothing here is carried
+/// in memory across a load, which is what makes the chain — not the kernel — the
+/// source of truth.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalState {
+    pub goal_id: String,
+    pub objective: String,
+    pub authority: GoalAuthorityRecord,
+    pub lifecycle: GoalLifecycle,
+    /// Iterations consumed against the recorded loop bound.
+    pub iterations_started: u32,
+    /// How many times this Goal has been resumed after a crash.
+    pub resume_count: u32,
+    pub opened_at_unix_ms: u64,
+    /// Journal sequence of this Goal's most recent transition.
+    pub last_transition_seq: u64,
+    /// Journal checksum at this Goal's most recent transition.
+    pub last_transition_checksum: String,
+}
+
+impl GoalState {
+    /// The recovery cursor a reconnecting host resumes from.
+    ///
+    /// This is the protocol crate's EXISTING cursor shape — journal sequence
+    /// plus digest — rather than a second definition. Two cursor definitions
+    /// over one journal are guaranteed to drift, and the host contract in plan
+    /// 22-04 has to hand exactly this to a reconnecting Desktop.
+    #[must_use]
+    pub fn cursor(&self) -> RecoveryCursor {
+        RecoveryCursor {
+            journal_sequence: Some(self.last_transition_seq),
+            journal_digest: self.last_transition_checksum.clone(),
+        }
+    }
+
+    /// Whether this Goal has reached a terminal state.
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        matches!(self.lifecycle, GoalLifecycle::Terminated { .. })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryState {
     pub origin: DeliveryOrigin,
@@ -1186,6 +1287,16 @@ pub struct ReducedSessionState {
     pub children: BTreeMap<String, ChildState>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub child_transactions: BTreeMap<String, ChildTransactionState>,
+    /// Durable Goals (F22-02).
+    ///
+    /// `skip_serializing_if` is NOT cosmetic here and must not be removed: the
+    /// 22-01 determination measured that an existing journal reduces to a
+    /// byte-identical state under a binary carrying this field, and that
+    /// property holds only while a session with no Goal serializes exactly as it
+    /// did before. `goal_journal_compat_test.rs` pins it against the real
+    /// retained corpus and goes red if this attribute is dropped.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub goals: BTreeMap<String, GoalState>,
     pub deliveries: BTreeMap<String, DeliveryState>,
 }
 
@@ -1209,6 +1320,7 @@ impl Default for ReducedSessionState {
             checkpoints: BTreeMap::new(),
             children: BTreeMap::new(),
             child_transactions: BTreeMap::new(),
+            goals: BTreeMap::new(),
             deliveries: BTreeMap::new(),
         }
     }

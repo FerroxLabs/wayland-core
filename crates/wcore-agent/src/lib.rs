@@ -56,6 +56,8 @@ pub mod egress;
 pub mod engine;
 // W8b C.6: FileHistory snapshot store for Rollback (root-level RealFs).
 pub mod file_history;
+// F22-02: the durable Goal kernel over the existing F12 session-journal chain.
+pub mod goal;
 // v0.9.0 Wave-4 E2 — provider health probes (HTTP HEAD/GET against
 // `/v1/models` with 5s cap) for the `/doctor` TUI diagnostics surface.
 pub mod health;
