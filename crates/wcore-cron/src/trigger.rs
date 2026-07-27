@@ -204,9 +204,16 @@ impl Trigger {
     /// bounded by the thing it committed to.
     pub fn default_bound(&self) -> TriggerBound {
         match self {
-            // Spent the moment it fires. The deadline is the fire instant
-            // itself, so a one-shot that was missed does not re-arm.
-            Self::Once { at } => TriggerBound::new(1, 1).with_deadline(*at),
+            // Deliberately NO deadline, and the reason is a measured red.
+            //
+            // Setting the deadline to the fire instant makes the trigger spent
+            // at exactly the moment it becomes due, so a one-shot could never
+            // fire at all — the tick evaluates spentness against NOW, and NOW
+            // is always at or after the instant by the time the job is
+            // selected. A one-shot's terminal property is structural instead:
+            // once it has fired, the anchor moves past `at` and
+            // [`Trigger::next_after`] returns `None` forever after.
+            Self::Once { .. } => TriggerBound::new(1, 1),
             // A minute floor: the tick is 30s, so anything faster cannot be
             // honoured evenly and would simply fire on every tick.
             Self::Interval { every_secs } => TriggerBound::new((*every_secs).max(60), 1),
@@ -471,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn a_one_shot_is_spent_after_its_instant() {
+    fn a_one_shot_is_spent_once_its_anchor_passes_its_instant() {
         let t = Trigger::Once {
             at: t0() + Duration::minutes(5),
         };
@@ -483,8 +490,22 @@ mod tests {
         assert_eq!(
             t.next_after(t0() + Duration::minutes(6), &b).unwrap(),
             None,
-            "a one-shot must not re-arm after its instant"
+            "a one-shot must not re-arm once its anchor has passed its instant"
         );
+    }
+
+    #[test]
+    fn a_one_shot_carries_no_terminal_deadline() {
+        // Measured red: a deadline equal to the fire instant makes the trigger
+        // spent at exactly the moment it becomes due, because the runner
+        // evaluates spentness against NOW and NOW is always at or past the
+        // instant by the time the job is selected. The one-shot then never
+        // fires at all.
+        let t = Trigger::Once {
+            at: t0() + Duration::minutes(5),
+        };
+        assert_eq!(t.default_bound().deadline, None);
+        assert!(!t.default_bound().is_spent(t0() + Duration::days(400)));
     }
 
     #[test]
