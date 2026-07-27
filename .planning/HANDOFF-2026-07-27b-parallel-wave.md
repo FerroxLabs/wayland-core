@@ -41,7 +41,7 @@ retained evidence ref, real credentials. Pushing this working branch is expected
 | **23B** | H1 data-loss residual CLOSED; D2 fixed. **23B-03/04 not run** (23B-04 needs a leg over *real elapsed days*). |
 | **24** | 24-02 + `gateway.rs` + independent delivery sink landed. **`wcore-acp` completely untouched; 24-04 never started.** Agent in flight. |
 | **25** | **COMPLETE and merged** (`cb131278`). 25-02/03/04 all landed; **nine HIGH** found and fixed. Criterion 3 MET on Linux; **Criterion 2 NOT MET** (attribution held through all 5 disruptions but against a separate *machine identity*, not a second physical host — needs an SSH key on one of Sean's machines, §5); **Criterion 4 NOT MET** (SSH and cloud orphan surfaces report `NOT MEASURED`, and those are exactly the two with no proven reaping mechanism). |
-| **26** | 26-01 landed (~25%). **Backup/restore requirement UNMET.** Agent in flight. |
+| **26** | 26-01 + most of 26-03 landed. Exact rollback from an uncatchable mid-flight `SIGKILL` proven with THREE controls (negative, handler, positive) so `fired=no` is a measurement not a missing probe; round trip `diff -r` empty at full fidelity, redacted diff exactly `credentials.toml`+`oauth`. **26-02 and 26-04 never started; 26-03 Task 4's two panels never run, so F26-03/F26-04 are UNCLAIMED.** **HIGH F26-03-D open:** on Windows `backup create` accepts a deep tree `backup restore` cannot restore (`os error 3`, past `MAX_PATH`) — the archive is silently unrestorable on the platform that made it. Reported red, not fixed; the fixture was deliberately NOT deleted to force a green. Agent in flight. |
 | **28 / 29 / 30** | **PLANNED, 0 HIGH.** Not executed. 28 certifies the candidate 24-27 produce, so it cannot start until they land. |
 
 **All phases 20-30 are now planned.** 28 = 75 gates, 29 = 84, 30 = 96, all 0 HIGH.
@@ -156,7 +156,7 @@ hetzner — not with `fmt`.** `fmt` parsing is necessary and not sufficient.
 ## 6. Next
 
 1. Land the three in-flight agents (22 dispatcher wiring, 24 `wcore-acp`+24-04, 26
-   backup/restore).
+   F26-03-D + import/hostile).
 2. **23B-03** (nine-file feature, no partial credit) and **23B-04** (needs real elapsed days).
 3. Then **28 → 29 → 30**, in order; 28 cannot start until 24-27 land.
 4. Open MEDIUMs worth a sweep: parallel `wcore-agent` test isolation (a *different* 13-22 tests
