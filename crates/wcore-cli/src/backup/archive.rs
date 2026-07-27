@@ -181,10 +181,10 @@ pub fn create_archive(
     // Publish through the existing atomic primitive: a crash during publication
     // leaves either no archive or a complete one, never a truncated file that
     // verification would have to distinguish from tampering.
-    if let Some(parent) = out.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(BackupError::io("create archive parent"))?;
-        }
+    if let Some(parent) = out.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(BackupError::io("create archive parent"))?;
     }
     wcore_config::atomic_io::atomic_write(out, &bytes)
         .map_err(BackupError::io("publish archive"))?;

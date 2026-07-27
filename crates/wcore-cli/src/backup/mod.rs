@@ -293,10 +293,10 @@ fn walk(
 
         if meta.is_dir() {
             walk(root, &path, skip_secrets, false, out, omitted)?;
-        } else if meta.is_file() {
-            if let Some(rel) = rel_path(root, &path) {
-                out.push(Payload { rel, abs: path });
-            }
+        } else if meta.is_file()
+            && let Some(rel) = rel_path(root, &path)
+        {
+            out.push(Payload { rel, abs: path });
         }
     }
     Ok(())
