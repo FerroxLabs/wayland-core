@@ -1132,7 +1132,10 @@ mod tests {
         let s = store(dir.path());
         run_with_store(
             CronCmd::Add {
-                expression: "0 9 * * *".into(),
+                expression: Some("0 9 * * *".into()),
+                trigger: None,
+                describe: None,
+                confirm: false,
                 slash: Some("/morning".into()),
                 channel: None,
                 text: None,
@@ -1154,7 +1157,10 @@ mod tests {
         let s = store(dir.path());
         let r = run_with_store(
             CronCmd::Add {
-                expression: "*/15 * * * *".into(),
+                expression: Some("*/15 * * * *".into()),
+                trigger: None,
+                describe: None,
+                confirm: false,
                 slash: None,
                 channel: Some("team".into()),
                 text: None,
@@ -1173,7 +1179,10 @@ mod tests {
         let s = store(dir.path());
         run_with_store(
             CronCmd::Add {
-                expression: "*/15 * * * *".into(),
+                expression: Some("*/15 * * * *".into()),
+                trigger: None,
+                describe: None,
+                confirm: false,
                 slash: None,
                 channel: Some("team-slack".into()),
                 text: Some("status check".into()),
@@ -1194,7 +1203,10 @@ mod tests {
         let s = store(dir.path());
         run_with_store(
             CronCmd::Add {
-                expression: "0 8 * * *".into(),
+                expression: Some("0 8 * * *".into()),
+                trigger: None,
+                describe: None,
+                confirm: false,
                 slash: None,
                 channel: None,
                 text: None,
@@ -1221,7 +1233,10 @@ mod tests {
         let s = store(dir.path());
         let r = run_with_store(
             CronCmd::Add {
-                expression: "0 9 * * *".into(),
+                expression: Some("0 9 * * *".into()),
+                trigger: None,
+                describe: None,
+                confirm: false,
                 slash: None,
                 channel: None,
                 text: None,
@@ -1240,7 +1255,10 @@ mod tests {
         let s = store(dir.path());
         run_with_store(
             CronCmd::Add {
-                expression: "0 9 * * *".into(),
+                expression: Some("0 9 * * *".into()),
+                trigger: None,
+                describe: None,
+                confirm: false,
                 slash: Some("/x".into()),
                 channel: None,
                 text: None,
