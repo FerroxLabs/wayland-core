@@ -42,7 +42,17 @@ struct Capture {
 }
 
 /// Load a capture, or `None` when this run was not pointed at one.
-fn capture() -> Option<Capture> {
+///
+/// Loaded exactly ONCE per process and shared. The journal's writer lease is
+/// exclusive by design, so four tests each opening it in parallel is a race the
+/// lease correctly refuses — the first draft of this file did exactly that and
+/// three of its four tests failed on the lease rather than on the capture.
+fn capture() -> Option<&'static Capture> {
+    static CAPTURE: std::sync::OnceLock<Option<Capture>> = std::sync::OnceLock::new();
+    CAPTURE.get_or_init(load_capture).as_ref()
+}
+
+fn load_capture() -> Option<Capture> {
     let journal = std::env::var("F22_03_LIVE_JOURNAL").ok()?;
     let effects_dir = PathBuf::from(
         std::env::var("F22_03_LIVE_EFFECTS")
@@ -81,7 +91,7 @@ fn capture() -> Option<Capture> {
 /// A capture with fewer than eight tasks cannot have had a kill land with tasks
 /// claimed, finished-undelivered and unstarted all at once, so its "exactly
 /// once" would be measuring a much weaker run than the criterion asks for.
-fn require_capture() -> Capture {
+fn require_capture() -> &'static Capture {
     let capture = capture().expect("no capture supplied");
     assert!(
         capture.expected >= 8,
