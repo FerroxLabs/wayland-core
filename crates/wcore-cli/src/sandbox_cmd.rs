@@ -244,8 +244,15 @@ mod tests {
     /// `sandbox exec` from being usable as a bypass.
     #[test]
     fn exec_selector_refuses_an_explicit_no_sandbox_selection() {
-        let error = SandboxRegistry::required_for_session(Some("none"))
-            .expect_err("an explicit `none` selection must not yield a runtime");
+        // `SandboxRegistry` is deliberately not `Debug`, so unwrap the Result
+        // by hand rather than through `expect_err`.
+        let error = match SandboxRegistry::required_for_session(Some("none")) {
+            Ok(registry) => panic!(
+                "an explicit `none` selection must not yield a runtime; got backend {}",
+                registry.backend_name()
+            ),
+            Err(error) => error,
+        };
         // Fails as an unsafe bypass source, not as an unknown backend.
         assert!(
             format!("{error}").to_lowercase().contains("bypass"),
