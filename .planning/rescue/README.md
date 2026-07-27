@@ -17,3 +17,33 @@ present: `/Users/seandonahoe/dev/waylandcore-frontier-worktrees/wt-f21-02-0{1,3}
 `wt-f21-04-02`, all based at `df63a4af`.
 
 Apply with `git apply --3way .planning/rescue/<name>.patch` from the repo root.
+
+---
+
+## These three files do NOT apply — and that is the whole lesson
+
+**`git apply` rejects all three**, each with `error: No valid patches in input` — they
+contain no diff hunks whatsoever. They were produced by hand and are human-readable
+*summaries* that were given a `.patch` extension. The 1,424 lines were
+recovered from the live worktrees instead, and all three findings have since landed properly
+(`6b0083b0`, `e879206e`, and `9c3e3687` for the F21-02-01/F21-02-03 reconciliation), so
+nothing here is load-bearing. They are kept only as an audit trail.
+
+**A patch nobody tried to apply is not a backup.** Use
+`.planning/scripts/rescue-worktrees.sh` instead — it verifies every artifact it emits and
+exits non-zero if anything needs a human. It also captures the two things the hand-rolled
+attempt missed:
+
+- **committed-but-unmerged work**, as a real `git format-patch` series (`git am` restores
+  authorship and messages);
+- **untracked files**, which a plain `git diff HEAD` silently omits — the single most
+  common way new work gets lost, since a new module is untracked until someone stages it.
+
+```bash
+.planning/scripts/rescue-worktrees.sh                  # every registered worktree
+.planning/scripts/rescue-worktrees.sh /path/to/wt      # just one
+```
+
+It is safe to run against worktrees that agents are actively working in: it builds its diff
+through a throwaway copy of the index and never writes to the live one.
+
