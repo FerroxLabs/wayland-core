@@ -331,13 +331,40 @@ impl EffectiveExecutionPolicy {
     /// Return an output snapshot with the live approval gate reflected.
     ///
     /// This does not create authority: `EffectiveExecutionPolicy` remains
-    /// serialization-only, and the caller must first resolve the request
-    /// through the live approval manager (including any Managed floor). The
-    /// sandbox grant, launch origin, expiry and activation identity are kept
-    /// byte-for-byte from the resolver-produced snapshot.
+    /// serialization-only. The sandbox grant, launch origin, expiry and
+    /// activation identity are kept byte-for-byte from the resolver-produced
+    /// snapshot.
+    ///
+    /// In the Managed posture the runtime value is a RATCHET, never a
+    /// replacement: the snapshot keeps whichever of the two asks for more
+    /// consent. This mirrors the managed branch of
+    /// [`BaselineExecutionPolicy::with_requested_approvals`], and it is the
+    /// seam a delegated child actually passes through — `AgentSpawner`'s child
+    /// launch records the child's durable policy receipt as
+    /// `effective_policy.with_runtime_approvals(child_config.smart_approval_policy())`,
+    /// with no floor resolution anywhere on that path. Before this, that seam
+    /// could emit a receipt asserting `posture: managed` and
+    /// `managed_floor_active: true` alongside `approvals: bypass` — a snapshot
+    /// that claims a floor is enforced while reporting it was not. The
+    /// docstring used to push that obligation onto every caller; one of the two
+    /// production callers did not honour it, so the invariant now lives in the
+    /// type where it cannot be forgotten.
+    ///
+    /// Deliberately keyed on the Managed POSTURE, not on `managed_floor_active`
+    /// alone. A resolver-produced Dangerous lease also carries
+    /// `managed_floor_active` (its provenance), but its approvals are already
+    /// the loosest value, and a managed organization that permits Dangerous has
+    /// consented to that lease. Keying on the posture leaves the Dangerous and
+    /// Smart snapshots byte-identical to their previous behaviour: a local
+    /// operator moving a Smart session to Force still propagates Bypass to its
+    /// descendants.
     pub fn with_runtime_approvals(&self, approvals: ApprovalPolicy) -> Self {
         let mut snapshot = self.clone();
-        snapshot.approvals = approvals;
+        snapshot.approvals = if matches!(self.posture, ExecutionPosture::Managed) {
+            stricter_approval_policy(self.approvals, approvals)
+        } else {
+            approvals
+        };
         snapshot
     }
 }
