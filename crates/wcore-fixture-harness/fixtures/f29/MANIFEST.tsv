@@ -22,11 +22,16 @@
 #     graph contains six such versions.
 #
 # expected-sbom.json is the byte-exact output of
-#   wayland-release sbom --metadata cargo-metadata.json --output -
-# generated on Hetzner Linux at lane/29-02 463e1c29, and reproduced digest-for-
+#   wayland-release sbom --metadata cargo-metadata.json --output <file>
+# generated on Hetzner Linux at lane/29-02 5b2fce2e, and reproduced digest-for-
 # digest after transfer to macOS. Regenerate it ONLY when the document shape
 # changes deliberately, and bump sbom::SBOM_TRANSFORM_VERSION when you do.
 #
+# Note the serial number visible in expected-sbom.json is NOT a digest of this
+# metadata file. It is a digest of the canonical output payload — see
+# `the_serial_number_is_derived_from_the_canonical_output_not_the_raw_input`
+# and the two-worktree measurement that forced that change.
+#
 # Columns: name<TAB>bytes<TAB>sha256
 cargo-metadata.json	2649	8ec20514fc342a8c4b99fdbd4610e2bb8c54df18d982bace9f26f52e5db54fd2
-expected-sbom.json	2809	35ca2a0ef7c0f755df9e7d84b0c27915f7cfe3321380173143d88365a528d8cb
+expected-sbom.json	2809	28f7c0538ed86bc70af9a90a18799aa597943f9375838956006c208fdfc9e3b3
