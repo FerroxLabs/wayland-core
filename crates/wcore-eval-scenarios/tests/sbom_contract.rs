@@ -350,6 +350,58 @@ fn no_absolute_path_from_the_input_reaches_the_output() {
     );
 }
 
+/// FOUND BY MEASUREMENT, NOT BY READING THE SOURCE.
+///
+/// The first implementation derived `serialNumber` from a digest of the RAW
+/// input text. The contract suite passed, the pinned fixture reproduced, and
+/// two runs in the same directory were byte-identical — and it was still
+/// wrong. Generating from the same commit checked out at `/root/wayland-29-02`
+/// and at `/root/wl29-pathb` produced documents of identical length that
+/// differed at byte 83: the serial, because the raw metadata text embeds the
+/// checkout path in `workspace_root`, in every package id and in every
+/// `manifest_path`.
+///
+/// A serial that moves with the checkout path is exactly the nondeterminism
+/// this module exists to prevent — a second party regenerating the SBOM from
+/// the same source gets a different digest and the manifest binding breaks.
+/// The serial is now derived from the CANONICAL OUTPUT, which by construction
+/// carries no path.
+#[test]
+fn the_serial_number_is_derived_from_the_canonical_output_not_the_raw_input() {
+    let metadata = fixture_metadata();
+
+    // Simulate the same commit checked out somewhere else, exactly as the live
+    // two-worktree run did: every absolute path moves together, in
+    // workspace_root, workspace_members, package ids and manifest_path.
+    let relocated = metadata.replace("/root/wayland-29-02", "/home/somebody/elsewhere");
+
+    assert_ne!(
+        relocated, metadata,
+        "presence control: the relocation must actually change the input text"
+    );
+    assert!(
+        relocated.contains("/home/somebody/elsewhere/crates/wcore-types"),
+        "presence control: package ids must have moved with the checkout"
+    );
+
+    let from_original = generate(&metadata);
+    let from_relocated = generate(&relocated);
+
+    // Presence control: both are real documents, so this is not two failures
+    // comparing equal.
+    assert!(from_original.len() > 200 && from_relocated.len() > 200);
+
+    assert_eq!(
+        from_original, from_relocated,
+        "the checkout path must not reach the document, INCLUDING via the serial"
+    );
+    assert_eq!(
+        sbom::sbom_sha256(&from_original),
+        sbom::sbom_sha256(&from_relocated),
+        "and therefore the bound digest must not move with the checkout path"
+    );
+}
+
 /// The workspace's own private members must be distinguishable from
 /// third-party registry dependencies, or a reviewer cannot tell which
 /// unlicensed crate is theirs and which arrived from the internet.
