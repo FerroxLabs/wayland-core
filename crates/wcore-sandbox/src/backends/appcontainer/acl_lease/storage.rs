@@ -889,37 +889,57 @@ mod tests {
         let path = root_path.join(format!("{}.toml", lease.profile_name));
         write_new_synced_lease(&path, &lease).unwrap();
 
-        let ordinary_root = trusted_root_for(&path).unwrap();
-        let ordinary = open_existing_nofollow(&ordinary_root, &path, GENERIC_READ).unwrap();
-        let expected = file_identity(&ordinary, &path).unwrap();
+        // `lease_directory()` resolves through `GetFinalPathNameByHandleW`, so
+        // `path` is ALREADY the verbatim `\\?\C:\…` spelling. Every spelling
+        // below is therefore derived from the ordinary form, not from `path`:
+        // prepending `\\?\` to `path` produced `\\?\\\?\C:\…` and failed with
+        // os error 123, and the drive-letter leg silently never ran because
+        // byte 1 of a verbatim path is `\`, not `:`. Both were measured on
+        // SEANDESKTOP; the extended leg is what aborted this test before its
+        // cleanup below, which is how a lease leaked into the real lease
+        // directory and disabled the sandbox on that machine.
+        let ordinary_path = strip_verbatim(&path);
+        let ordinary_root = trusted_root_for(&ordinary_path).unwrap();
+        let ordinary =
+            open_existing_nofollow(&ordinary_root, &ordinary_path, GENERIC_READ).unwrap();
+        let expected = file_identity(&ordinary, &ordinary_path).unwrap();
 
-        let slash_path = PathBuf::from(path.to_string_lossy().replace('\\', "/"));
+        let slash_path = PathBuf::from(ordinary_path.to_string_lossy().replace('\\', "/"));
         let slash_root = trusted_root_for(&slash_path).unwrap();
         let slash = open_existing_nofollow(&slash_root, &slash_path, GENERIC_READ).unwrap();
         assert_eq!(file_identity(&slash, &slash_path).unwrap(), expected);
 
-        let mut drive_spelling = path.to_string_lossy().into_owned();
-        if drive_spelling.as_bytes().get(1) == Some(&b':') {
-            let toggled = if drive_spelling.as_bytes()[0].is_ascii_lowercase() {
-                drive_spelling[0..1].to_ascii_uppercase()
-            } else {
-                drive_spelling[0..1].to_ascii_lowercase()
-            };
-            drive_spelling.replace_range(0..1, &toggled);
-            let drive_path = PathBuf::from(drive_spelling);
-            let drive_root = trusted_root_for(&drive_path).unwrap();
-            let drive = open_existing_nofollow(&drive_root, &drive_path, GENERIC_READ).unwrap();
-            assert_eq!(file_identity(&drive, &drive_path).unwrap(), expected);
-        }
+        let mut drive_spelling = ordinary_path.to_string_lossy().into_owned();
+        assert_eq!(
+            drive_spelling.as_bytes().get(1),
+            Some(&b':'),
+            "the drive-letter leg must actually run: {drive_spelling}"
+        );
+        let toggled = if drive_spelling.as_bytes()[0].is_ascii_lowercase() {
+            drive_spelling[0..1].to_ascii_uppercase()
+        } else {
+            drive_spelling[0..1].to_ascii_lowercase()
+        };
+        drive_spelling.replace_range(0..1, &toggled);
+        let drive_path = PathBuf::from(drive_spelling);
+        let drive_root = trusted_root_for(&drive_path).unwrap();
+        let drive = open_existing_nofollow(&drive_root, &drive_path, GENERIC_READ).unwrap();
+        assert_eq!(file_identity(&drive, &drive_path).unwrap(), expected);
 
-        let spelling = path.to_string_lossy();
+        let spelling = ordinary_path.to_string_lossy();
         let extended_path = PathBuf::from(format!(r"\\?\{spelling}"));
         let extended_root = trusted_root_for(&extended_path).unwrap();
         let extended =
             open_existing_nofollow(&extended_root, &extended_path, GENERIC_READ).unwrap();
         assert_eq!(file_identity(&extended, &extended_path).unwrap(), expected);
 
-        drop((ordinary, slash, extended));
+        // `drive` belongs here too. Lease handles deliberately omit
+        // FILE_SHARE_DELETE, so any still-open handle makes the DELETE open
+        // inside `remove_validated_lease` fail with a sharing violation — the
+        // same property `opened_lease_cannot_be_swapped_under_validation`
+        // asserts. It was absent from this drop only because the drive-letter
+        // leg never used to run.
+        drop((ordinary, slash, drive, extended));
         remove_validated_lease(&path).unwrap();
     }
 
