@@ -116,27 +116,34 @@ pub fn run_new(name: &str, dest: &Path, template: Template) -> Result<()> {
     }
 
     std::fs::create_dir_all(dest)?;
+    let out = dest.join(name);
+    // `authors` is deliberately NOT passed. cargo-generate reserves
+    // `project-name`, `crate_name`, `crate_type`, `authors` and `os-arch` as
+    // built-ins and REFUSES the whole run if you try to `--define` one of them:
+    //
+    //   Error: placeholder `authors` is not valid as you can't override ...
+    //
+    // Both shipped templates declare an `authors` placeholder, so overriding it
+    // looked reasonable and fails outright on cargo-generate 0.23. It reaches
+    // the template as a built-in regardless.
     let status = Command::new("cargo")
         .args(["generate", "--path"])
         .arg(&tdir)
         .args(["--name", name, "--destination"])
         .arg(dest)
-        .args([
-            "--define",
-            "description=A Wayland plugin",
-            "--define",
-            "authors=you <you@example.com>",
-            "--silent",
-        ])
+        .args(["--define", "description=A Wayland plugin", "--silent"])
         .status()
         .map_err(|e| PluginCliError::Quarantine(format!("invoking cargo generate: {e}")))?;
     if !status.success() {
+        // A failed generate can leave a partial tree behind, and a half-written
+        // scaffold is worse than none: the author only finds out at build time.
+        if out.exists() {
+            std::fs::remove_dir_all(&out).ok();
+        }
         return Err(PluginCliError::Quarantine(format!(
-            "cargo generate failed ({status})"
+            "cargo generate failed ({status}); no scaffold was left behind"
         )));
     }
-
-    let out = dest.join(name);
     // The template ships a git+tag dependency so a plugin generated OUTSIDE
     // this repo builds against a published API. Generated INSIDE the workspace
     // that would silently test a released tag instead of the tree in front of
