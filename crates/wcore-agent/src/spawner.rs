@@ -5192,8 +5192,8 @@ mod posture_inheritance_tests {
     /// session config with `tools.auto_approve` FORCED true (seat.rs) — and the
     /// governance function is the real one, which notably never calls
     /// `with_approval_manager`, so `child_config`'s clamp does not apply.
-    #[test]
-    fn govern_standalone_spawner_cannot_compose_a_contradictory_child_receipt() {
+    #[tokio::test]
+    async fn govern_standalone_spawner_cannot_compose_a_contradictory_child_receipt() {
         let home = tempfile::tempdir().expect("temp home");
 
         // Exactly `resolve_driver_seat`'s composition: a managed session config
