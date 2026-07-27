@@ -54,9 +54,83 @@ pub fn atomic_write<P: AsRef<Path>>(path: P, contents: &[u8]) -> std::io::Result
     tmp.persist(path).map(|_| ()).map_err(|e| e.error)
 }
 
+/// Build a path under `base` whose total length exceeds Windows' `MAX_PATH`
+/// (260), using nesting rather than one long component so that every individual
+/// component stays inside the 255-byte per-component limit every filesystem
+/// enforces.
+///
+/// Shared by the tests below and by `wcore-cli`'s backup long-path proof, so
+/// both measure the same shape rather than two hand-rolled approximations that
+/// could drift apart and disagree about what "deep" means.
+#[doc(hidden)]
+pub fn deep_path_over_max_path(base: &Path, leaf: &str) -> std::path::PathBuf {
+    const WINDOWS_MAX_PATH: usize = 260;
+    let mut p = base.to_path_buf();
+    // 8 components of 40 chars each = 328 characters of nesting on top of
+    // `base`, which is comfortably past 260 even for a short base.
+    while p.as_os_str().len() + leaf.len() + 1 <= WINDOWS_MAX_PATH + 40 {
+        p.push("d234567890123456789012345678901234567890");
+    }
+    p.push(leaf);
+    p
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F26-03-D. The diagnostic that discriminates between the three candidate
+    /// causes of the Windows `os error 3` seen when restoring a deep tree:
+    /// whether `create_dir_all` fails, whether plain `fs::write` fails, or
+    /// whether only `atomic_write` fails. Only the third would point at the
+    /// tempfile round trip rather than at `std`'s own long-path handling.
+    ///
+    /// It prints every leg so a single Windows run yields the whole picture,
+    /// and it ASSERTS the property that matters: `atomic_write` must work at a
+    /// path past `MAX_PATH`, because that is the call the restore write loop
+    /// makes for every payload.
+    ///
+    /// On unix this is already green against the untouched tree — `PATH_MAX` is
+    /// 4096, so a 300-character path was never the constraint there. It is
+    /// recorded as a gate for Windows only; the unix run proves the harness
+    /// builds and the fixture is well formed, not that the defect is absent.
+    #[test]
+    fn atomic_write_survives_a_path_past_windows_max_path() {
+        let dir = tempfile::tempdir().unwrap();
+        // An ABSOLUTE base: Windows can only rewrite a path to extended-length
+        // (`\\?\`) form when it is absolute, so a relative base would measure a
+        // different thing than the restore path does.
+        let base = dir.path().canonicalize().unwrap();
+        let deep = deep_path_over_max_path(&base, "payload.txt");
+        let len = deep.as_os_str().len();
+        assert!(
+            len > 260,
+            "fixture is too shallow to reach the defect: {len} chars"
+        );
+
+        let parent = deep.parent().unwrap();
+        let mkdir = std::fs::create_dir_all(parent);
+        println!("LONGPATH-LEN: {len}");
+        println!("LONGPATH-CREATE-DIR-ALL: {:?}", mkdir.as_ref().err());
+        mkdir.expect("create_dir_all failed past MAX_PATH");
+
+        // Leg 2: plain `std::fs::write`, which goes through std's own
+        // `maybe_verbatim` long-path handling.
+        let plain = parent.join("plain.txt");
+        let plain_res = std::fs::write(&plain, b"plain");
+        println!("LONGPATH-STD-WRITE: {:?}", plain_res.as_ref().err());
+
+        // Leg 3: the call the restore loop actually makes.
+        let atomic_res = atomic_write(&deep, b"atomic");
+        println!("LONGPATH-ATOMIC-WRITE: {:?}", atomic_res.as_ref().err());
+
+        atomic_res.expect("atomic_write failed at a path past MAX_PATH");
+        assert_eq!(std::fs::read(&deep).unwrap(), b"atomic");
+        // And it must replace, not only create — persist() over an existing
+        // long path is a separate Win32 call shape from creating one.
+        atomic_write(&deep, b"atomic-2").unwrap();
+        assert_eq!(std::fs::read(&deep).unwrap(), b"atomic-2");
+    }
 
     #[test]
     fn atomic_write_replaces_existing_file() {
