@@ -148,8 +148,8 @@ product spawned. Absence of a violation is never expressible as a green.
 
 | Family | Greens | Observation |
 |---|---|---|
-| linux | 26 | process-id namespace changed (`NSpid:1277328` outside → `NSpid:4` inside); filesystem root reduced from 52 entries to 9; DNS resolves outside and not inside |
-| windows | 24 | the child was refused `\BaseNamedObjects` with **`0xC0000022`**, which AppContainer confines by construction |
+| linux | 24 | process-id namespace changed (`NSpid:1277328` outside → `NSpid:4` inside); filesystem root reduced from 52 entries to 9; DNS resolves outside and not inside |
+| windows | 26 | the child was refused `\BaseNamedObjects` with **`0xC0000022`**, which AppContainer confines by construction |
 | macos | **0** | **none obtainable — every macOS sandbox cell is a RED** (§6) |
 
 ### Windows serialization, stated per the hazard
@@ -257,8 +257,7 @@ sandbox available while the product ran unsandboxed — was **measured and does 
 
 ## 6. STATED EXCEPTION — macOS sandbox coverage is NOT achieved
 
-**72 of 216 macOS cells are sandbox cells; 24 are RED and the remainder pass on other
-dimensions.** No positive activeness observation is obtainable on macOS through any black-box
+**All 24 macOS sandbox-dimension cells are RED.** The other 192 macOS cells pass. No positive activeness observation is obtainable on macOS through any black-box
 surface of the shipped candidate:
 
 ```

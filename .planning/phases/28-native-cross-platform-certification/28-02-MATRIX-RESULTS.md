@@ -84,8 +84,8 @@ product spawned, so absence of a violation can never stand in for it.
 ## 7. Where the goal was NOT achieved
 
 **macOS sandbox coverage is not achieved, and this is stated here rather than in a footnote.**
-72 of 216 macOS cells are RED because no positive activeness observation is obtainable on
-that family through any black-box surface of the shipped candidate: the only delegated-
+All 24 macOS sandbox-dimension cells are RED because no positive activeness observation is
+obtainable on that family through any black-box surface of the shipped candidate: the only delegated-
 execution surface refuses on macOS (`sandbox_exec cannot own descendants that escape a
 process group`) and the Docker fallback is compiled out (`feature \`live-docker\` off`).
 Under the contract's activeness rule that is a RED — never a green, and never a skip.
