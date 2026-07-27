@@ -3344,7 +3344,7 @@ mod spawn_task_set_tests {
         let mut engine = crate::engine::AgentEngine::new_with_provider(
             provider,
             Config::default(),
-            ToolRegistry::new(),
+            wcore_tools::registry::ToolRegistry::new(),
             Arc::new(crate::output::null_sink::NullSink),
         );
         spawner
