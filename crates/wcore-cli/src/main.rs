@@ -736,6 +736,10 @@ enum TopCmd {
     /// leases, drains completions the dead parent never observed, and drives the
     /// remaining tasks through the Fleet dispatcher.
     Goal(wcore_cli::goal_cmd::GoalArgs),
+    /// F24-03: channel adapters — list / probe / health / reload. `probe` asks
+    /// the platform and needs no gateway; `health` reports only what a RUNNING
+    /// gateway has observed and refuses otherwise.
+    Channel(wcore_cli::channel::ChannelArgs),
     /// Manage isolated profiles — each is an independent `WAYLAND_HOME`-rooted
     /// home with its own config, credentials, memory, and skills.
     Profile {
@@ -1405,6 +1409,13 @@ async fn run() -> anyhow::Result<ExitCode> {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(e) => {
                     eprintln!("wayland-core goal: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
+            TopCmd::Channel(args) => match wcore_cli::channel::run(args).await {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core channel: {e:#}");
                     Ok(ExitCode::FAILURE)
                 }
             },

@@ -20,7 +20,50 @@ use tokio::task::JoinHandle;
 use crate::Channel;
 use crate::error::ChannelError;
 use crate::event::{ChannelEvent, ConnectionState, MessageReceipt};
+use crate::health::{ChannelHealth, HealthState};
 use crate::outgoing::OutgoingMessage;
+use crate::probe::ProbeReport;
+
+/// Shared per-adapter health map. A `std::sync::Mutex` on purpose: every
+/// critical section is a map write with no `await` inside it, so an async mutex
+/// would buy nothing and would make the poll task's hot path yield.
+type HealthMap = Arc<std::sync::Mutex<HashMap<String, ChannelHealth>>>;
+
+/// Take the health lock, recovering from a poisoned mutex.
+///
+/// A panic in another thread must not turn the health surface into a permanent
+/// error — a health surface that stops answering after an unrelated panic is
+/// worse than one reporting stale data, because nothing reports that it stopped.
+fn health_lock(map: &HealthMap) -> std::sync::MutexGuard<'_, HashMap<String, ChannelHealth>> {
+    map.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Record an observed health transition for `name`.
+///
+/// `reason` is `None` only for [`HealthState::Healthy`]; the invariant is
+/// asserted here rather than trusted, because every other caller of this
+/// function is a code path that could forget.
+fn record_health(
+    map: &HealthMap,
+    name: &str,
+    state: HealthState,
+    reason: Option<String>,
+    consecutive_errors: u32,
+    reconnect_delta: u32,
+) {
+    let mut guard = health_lock(map);
+    let Some(entry) = guard.get_mut(name) else {
+        return;
+    };
+    entry.state = state;
+    entry.reason = if state.requires_reason() {
+        Some(reason.unwrap_or_else(|| "no reason recorded".to_string()))
+    } else {
+        None
+    };
+    entry.consecutive_errors = consecutive_errors;
+    entry.reconnects = entry.reconnects.saturating_add(reconnect_delta);
+}
 
 const DEFAULT_POLL_INTERVAL_MS: u64 = 250;
 const EVENT_CHANNEL_CAP: usize = 256;
@@ -46,6 +89,25 @@ pub struct ChannelManager {
     poll_tasks: HashMap<String, JoinHandle<()>>,
     poll_interval: Duration,
     events_tx: broadcast::Sender<TaggedEvent>,
+    /// Observed per-adapter health, written by the poll tasks and read by the
+    /// operator surfaces. Registered-but-unpolled adapters sit at
+    /// [`HealthState::Unknown`], never `Healthy`.
+    health: HealthMap,
+}
+
+/// What a [`ChannelManager::reload`] did to the registered set.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReloadReport {
+    /// Newly configured adapters, registered and started.
+    pub added: Vec<String>,
+    /// Adapters whose configuration fingerprint changed — stopped, replaced by
+    /// the new instance, and restarted.
+    pub replaced: Vec<String>,
+    /// Adapters no longer configured — stopped and removed.
+    pub removed: Vec<String>,
+    /// Adapters whose fingerprint matched. The RUNNING INSTANCE IS KEPT: not
+    /// stopped, not restarted, not replaced. See [`ChannelManager::reload`].
+    pub unchanged: Vec<String>,
 }
 
 /// One `ChannelEvent` annotated with the channel that produced it.
@@ -63,6 +125,7 @@ impl ChannelManager {
             poll_tasks: HashMap::new(),
             poll_interval: Duration::from_millis(DEFAULT_POLL_INTERVAL_MS),
             events_tx,
+            health: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -76,9 +139,14 @@ impl ChannelManager {
     /// same name (stops the old poll task first).
     pub async fn register(&mut self, ch: Box<dyn Channel>) {
         let name = ch.name().to_string();
+        let platform = ch.platform().to_string();
         if let Some(handle) = self.poll_tasks.remove(&name) {
             handle.abort();
         }
+        // Seed health at Unknown — registered, nothing observed. A newly
+        // registered adapter that read `Healthy` would be claiming a liveness
+        // nobody measured.
+        health_lock(&self.health).insert(name.clone(), ChannelHealth::unknown(&name, &platform));
         self.channels.insert(name, Arc::new(Mutex::new(ch)));
     }
 
@@ -109,6 +177,14 @@ impl ChannelManager {
                         error = %e,
                         "channel start() failed; skipping and continuing with the rest"
                     );
+                    record_health(
+                        &self.health,
+                        name,
+                        HealthState::Disconnected,
+                        Some(format!("start() failed: {e}")),
+                        0,
+                        0,
+                    );
                     let _ = self.events_tx.send(TaggedEvent {
                         channel_name: name.clone(),
                         event: ChannelEvent::ConnectionStateChanged {
@@ -118,9 +194,11 @@ impl ChannelManager {
                     continue;
                 }
             }
+            record_health(&self.health, name, HealthState::Healthy, None, 0, 0);
             let task_slot = Arc::clone(slot);
             let task_name = name.clone();
             let task_tx = self.events_tx.clone();
+            let task_health = Arc::clone(&self.health);
             let interval = self.poll_interval;
             let handle = tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(interval);
@@ -159,10 +237,30 @@ impl ChannelManager {
                         };
                         match poll_outcome {
                             Ok(v) => {
+                                if consecutive_errors > 0 {
+                                    record_health(
+                                        &task_health,
+                                        &task_name,
+                                        HealthState::Healthy,
+                                        None,
+                                        0,
+                                        0,
+                                    );
+                                }
                                 consecutive_errors = 0;
                                 v
                             }
-                            Err(ChannelError::NotStarted) => break,
+                            Err(ChannelError::NotStarted) => {
+                                record_health(
+                                    &task_health,
+                                    &task_name,
+                                    HealthState::Disconnected,
+                                    Some("adapter reported not started; poll loop ended".into()),
+                                    consecutive_errors,
+                                    0,
+                                );
+                                break;
+                            }
                             Err(e) => {
                                 // A dead task jumps straight to the reconnect
                                 // threshold; a normal poll error backs off one
@@ -179,6 +277,14 @@ impl ChannelManager {
                                         "poll_events errored; backing off one tick"
                                     );
                                 }
+                                record_health(
+                                    &task_health,
+                                    &task_name,
+                                    HealthState::Degraded,
+                                    Some(format!("poll_events failed: {e}")),
+                                    consecutive_errors,
+                                    0,
+                                );
                                 if consecutive_errors < RECONNECT_ERROR_THRESHOLD {
                                     continue;
                                 }
@@ -191,6 +297,14 @@ impl ChannelManager {
                                 // succeeds. The task is stopped via handle.abort()
                                 // (stop_all / register replace), so the sleeps
                                 // below double as the abort points.
+                                record_health(
+                                    &task_health,
+                                    &task_name,
+                                    HealthState::Degraded,
+                                    Some("supervised reconnect in progress".into()),
+                                    consecutive_errors,
+                                    0,
+                                );
                                 let _ = task_tx.send(TaggedEvent {
                                     channel_name: task_name.clone(),
                                     event: ChannelEvent::ConnectionStateChanged {
@@ -212,10 +326,30 @@ impl ChannelManager {
                                                 "channel reconnected; resuming polling"
                                             );
                                             consecutive_errors = 0;
+                                            // The reconnect count is what
+                                            // distinguishes a channel that is
+                                            // healthy from one that is flapping
+                                            // and happens to be up right now.
+                                            record_health(
+                                                &task_health,
+                                                &task_name,
+                                                HealthState::Healthy,
+                                                None,
+                                                0,
+                                                1,
+                                            );
                                             break;
                                         }
                                         Err(re) => {
                                             backoff = (backoff * 2).min(RECONNECT_BACKOFF_CAP);
+                                            record_health(
+                                                &task_health,
+                                                &task_name,
+                                                HealthState::Degraded,
+                                                Some(format!("reconnect start() failed: {re}")),
+                                                consecutive_errors,
+                                                0,
+                                            );
                                             tracing::warn!(
                                                 target: "wcore_channels::manager",
                                                 channel = %task_name,
@@ -233,6 +367,34 @@ impl ChannelManager {
                         }
                     };
                     for event in evs {
+                        // The adapter's OWN published state outranks the poll
+                        // loop's inference: a connector that knows its token was
+                        // rejected is reporting a fact the poll loop can only
+                        // guess at from a generic transport error.
+                        match &event {
+                            ChannelEvent::ConnectionStateChanged { state } => {
+                                let mapped = HealthState::from_connection_state(*state);
+                                record_health(
+                                    &task_health,
+                                    &task_name,
+                                    mapped,
+                                    Some(format!("adapter published {state:?}")),
+                                    consecutive_errors,
+                                    0,
+                                );
+                            }
+                            ChannelEvent::AuthExpired { reason } => {
+                                record_health(
+                                    &task_health,
+                                    &task_name,
+                                    HealthState::Unauthenticated,
+                                    Some(format!("adapter reported auth expired: {reason}")),
+                                    consecutive_errors,
+                                    0,
+                                );
+                            }
+                            _ => {}
+                        }
                         let _ = task_tx.send(TaggedEvent {
                             channel_name: task_name.clone(),
                             event,
@@ -256,8 +418,232 @@ impl ChannelManager {
                 let mut guard = slot.lock().await;
                 let _ = guard.stop().await;
             }
+            record_health(
+                &self.health,
+                &name,
+                HealthState::Disconnected,
+                Some("stopped by operator".into()),
+                0,
+                0,
+            );
         }
         Ok(())
+    }
+
+    /// Per-adapter health as the manager has OBSERVED it, sorted by name.
+    ///
+    /// This reads the poll tasks' recorded observations. It does not ask the
+    /// adapters how they are — an adapter reporting on its own liveness is the
+    /// witness problem this phase measured at the delivery sink.
+    pub fn health(&self) -> Vec<ChannelHealth> {
+        let guard = health_lock(&self.health);
+        let mut out: Vec<ChannelHealth> = guard.values().cloned().collect();
+        out.sort_by(|a, b| a.channel.cmp(&b.channel));
+        out
+    }
+
+    /// Health of one named adapter, or `None` if it is not registered.
+    pub fn health_of(&self, name: &str) -> Option<ChannelHealth> {
+        health_lock(&self.health).get(name).cloned()
+    }
+
+    /// Run the setup and authentication probe on one adapter.
+    pub async fn probe_one(&self, name: &str) -> Result<ProbeReport, ChannelError> {
+        let slot = self
+            .channels
+            .get(name)
+            .ok_or_else(|| ChannelError::Config(format!("unknown channel: {name}")))?;
+        let guard = slot.lock().await;
+        guard.probe().await
+    }
+
+    /// Probe every registered adapter, sorted by name.
+    ///
+    /// A probe that ERRORS is reported as [`crate::probe::ProbeOutcome::Unreachable`]
+    /// rather than omitted: a channel missing from a probe listing is
+    /// indistinguishable from one that was never configured.
+    pub async fn probe_all(&self) -> Vec<ProbeReport> {
+        let mut names = self.list_names();
+        names.sort();
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            let Some(slot) = self.channels.get(&name) else {
+                continue;
+            };
+            let guard = slot.lock().await;
+            let platform = guard.platform().to_string();
+            match guard.probe().await {
+                Ok(report) => out.push(report),
+                Err(e) => out.push(ProbeReport::unreachable(&name, &platform, e.to_string())),
+            }
+        }
+        out
+    }
+
+    /// Edit an already-sent message through channel `name`. Unknown channel →
+    /// `Config` error; platforms with no edit API →
+    /// [`ChannelError::Unsupported`] via the trait default.
+    pub async fn edit_on(
+        &self,
+        name: &str,
+        conversation_id: &str,
+        message_id: &str,
+        new_text: &str,
+    ) -> Result<MessageReceipt, ChannelError> {
+        let slot = self
+            .channels
+            .get(name)
+            .ok_or_else(|| ChannelError::Config(format!("unknown channel: {name}")))?;
+        let guard = slot.lock().await;
+        guard
+            .edit_message(conversation_id, message_id, new_text)
+            .await
+    }
+
+    /// Delete an already-sent message through channel `name`. Mirrors
+    /// [`Self::edit_on`].
+    pub async fn delete_on(
+        &self,
+        name: &str,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<(), ChannelError> {
+        let slot = self
+            .channels
+            .get(name)
+            .ok_or_else(|| ChannelError::Config(format!("unknown channel: {name}")))?;
+        let guard = slot.lock().await;
+        guard.delete_message(conversation_id, message_id).await
+    }
+
+    /// Take every registered adapter OUT of this manager, leaving it empty.
+    ///
+    /// Exists so a caller can build a DESIRED adapter set with the registry's
+    /// existing loader — which registers into a `ChannelManager` and nothing
+    /// else — and then hand that set to [`Self::reload`] on the live manager.
+    /// The alternative was a second loader that produces a bare `Vec`, i.e. two
+    /// code paths deciding which adapters exist, which is how the loaded set
+    /// and the reloaded set drift apart.
+    ///
+    /// An adapter whose poll task is still running is SKIPPED rather than
+    /// forcibly extracted: its `Arc` has a second owner, and tearing it out
+    /// from under a live task is not something a staging helper should do.
+    /// Callers use this on a freshly loaded, unstarted manager.
+    pub async fn take_registered(&mut self) -> Vec<Box<dyn Channel>> {
+        let names: Vec<String> = self.list_names();
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            if let Some(handle) = self.poll_tasks.remove(&name) {
+                handle.abort();
+            }
+            let Some(slot) = self.channels.remove(&name) else {
+                continue;
+            };
+            match Arc::try_unwrap(slot) {
+                Ok(mutex) => out.push(mutex.into_inner()),
+                Err(shared) => {
+                    tracing::warn!(
+                        target: "wcore_channels::manager",
+                        channel = %name,
+                        "adapter is still shared with a running task; leaving it registered"
+                    );
+                    self.channels.insert(name, shared);
+                }
+            }
+        }
+        health_lock(&self.health).retain(|k, _| self.channels.contains_key(k));
+        out
+    }
+
+    /// Apply a new configured adapter set without disturbing adapters whose
+    /// configuration did not change.
+    ///
+    /// # The property that matters: an unchanged adapter keeps its INSTANCE
+    ///
+    /// The obvious implementation — clear the registry, register everything
+    /// from the new set, start it all — is wrong in a way that is invisible
+    /// from the outside. Adapters hold state that is not in their
+    /// configuration: buffered inbound events not yet polled, an open socket, a
+    /// platform session, outbound work handed to them but not yet acknowledged.
+    /// Replacing an instance whose configuration did not change discards all of
+    /// it, and the operator who edited ONE channel's token pays a reconnect and
+    /// a dropped buffer on all ten. So an unchanged adapter is not stopped, not
+    /// replaced, and not restarted; its running instance is kept.
+    ///
+    /// # Which direction "cannot tell" resolves, and why
+    ///
+    /// Sameness is decided by [`Channel::config_fingerprint`]. When EITHER side
+    /// returns `None` the adapter is treated as CHANGED and replaced. The
+    /// asymmetry is deliberate: treating unknown as unchanged means an operator
+    /// rotates a credential, reloads, sees success, and keeps sending through
+    /// the adapter holding the old one.
+    pub async fn reload(&mut self, desired: Vec<Box<dyn Channel>>) -> ReloadReport {
+        let mut report = ReloadReport::default();
+
+        let desired_names: std::collections::HashSet<String> =
+            desired.iter().map(|c| c.name().to_string()).collect();
+
+        // Remove adapters that are no longer configured.
+        let registered: Vec<String> = self.list_names();
+        for name in registered {
+            if !desired_names.contains(&name) {
+                if let Some(handle) = self.poll_tasks.remove(&name) {
+                    handle.abort();
+                }
+                if let Some(slot) = self.channels.remove(&name) {
+                    let mut guard = slot.lock().await;
+                    let _ = guard.stop().await;
+                }
+                health_lock(&self.health).remove(&name);
+                report.removed.push(name);
+            }
+        }
+
+        for candidate in desired {
+            let name = candidate.name().to_string();
+            let existing_fp = match self.channels.get(&name) {
+                Some(slot) => Some(slot.lock().await.config_fingerprint()),
+                None => None,
+            };
+            match existing_fp {
+                None => {
+                    self.register(candidate).await;
+                    report.added.push(name);
+                }
+                Some(current) => {
+                    let incoming = candidate.config_fingerprint();
+                    // `None` on either side means "cannot tell" — replace.
+                    let same = match (current, incoming) {
+                        (Some(a), Some(b)) => a == b,
+                        _ => false,
+                    };
+                    if same {
+                        report.unchanged.push(name);
+                        // The candidate is dropped WITHOUT being started, and
+                        // the running instance is left completely alone.
+                    } else {
+                        if let Some(handle) = self.poll_tasks.remove(&name) {
+                            handle.abort();
+                        }
+                        if let Some(slot) = self.channels.get(&name) {
+                            let mut guard = slot.lock().await;
+                            let _ = guard.stop().await;
+                        }
+                        self.register(candidate).await;
+                        report.replaced.push(name);
+                    }
+                }
+            }
+        }
+
+        report.added.sort();
+        report.replaced.sort();
+        report.removed.sort();
+        report.unchanged.sort();
+        // Start anything newly registered. `start_all` skips adapters that
+        // already have a poll task, so an unchanged adapter is untouched here.
+        let _ = self.start_all().await;
+        report
     }
 
     /// Send a message through a named channel.

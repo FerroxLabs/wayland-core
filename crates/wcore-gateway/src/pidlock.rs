@@ -280,6 +280,28 @@ fn lexical_normalise(p: &Path) -> PathBuf {
 /// returned a hardcoded `false` and every Windows daemon start spawned a
 /// duplicate.
 pub fn process_is_alive(pid: u32) -> bool {
+    // F24-D-M1. Pid 0 is NOT a process, and asking the OS about it does not
+    // ask what it looks like it asks. POSIX defines `kill(0, sig)` as
+    // "every process in the CALLER'S process group", so `kill(0, 0)` succeeds
+    // for any caller on any Unix — measured on Linux 2026-07-27:
+    //
+    //     kill(0,0) = 0 errno=0        /proc/0 exists = 0
+    //
+    // The Unix arm below therefore reported pid 0 as ALIVE, unconditionally,
+    // for every caller. That matters because 0 is a value this module itself
+    // produces: `acquire` refuses with `AlreadyHeld { pid: 0 }` when the
+    // record is unreadable, and any record that is truncated or hand-edited
+    // parses to it. A liveness gate downstream — `gateway status`,
+    // `channel health` — would then report a running gateway on the strength
+    // of a record whose pid field is a placeholder.
+    //
+    // This is the same shape as the false zeros this phase keeps measuring: a
+    // check that answers without looking. The Windows arm was already correct
+    // (`OpenProcess(.., 0)` fails), so this restores agreement across
+    // families rather than adding a platform quirk.
+    if pid == 0 {
+        return false;
+    }
     #[cfg(unix)]
     {
         if std::path::Path::new(&format!("/proc/{pid}")).exists() {
@@ -403,6 +425,32 @@ mod tests {
         assert!(
             !p.to_string_lossy().contains("/./"),
             "normalisation must apply to a home that does not exist yet: {p:?}"
+        );
+    }
+
+    #[test]
+    fn pid_zero_is_never_alive() {
+        // F24-D-M1, found by a `channel health` case and then measured
+        // directly: `kill(0, 0)` addresses the CALLER'S process group, so it
+        // succeeds for everyone and reported pid 0 as a live process. 0 is a
+        // value this module itself emits (`AlreadyHeld { pid: 0 }` on an
+        // unreadable record), so a liveness gate fed that placeholder would
+        // report a running gateway that does not exist.
+        assert!(
+            !process_is_alive(0),
+            "pid 0 is not a process; kill(0,0) asks about the caller's own \
+             process group and always succeeds"
+        );
+    }
+
+    #[test]
+    fn this_process_is_alive() {
+        // Positive control. Without it, `process_is_alive` returning `false`
+        // unconditionally would satisfy the case above.
+        assert!(
+            process_is_alive(std::process::id()),
+            "the running test process must read as alive, or the guard above \
+             proves nothing"
         );
     }
 }

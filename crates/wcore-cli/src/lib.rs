@@ -183,3 +183,10 @@ pub mod node;
 // testable under `cargo test -p wcore-cli --lib`, and so the kill/restart proof
 // runs against the shipped binary rather than an `examples/` instrument.
 pub mod goal_cmd;
+
+// F24-03: CLI surface `wayland-core channel` — the channel operator surface
+// (list / probe / health / reload). Lives in the lib so the observation
+// boundary (health is only ever reported from a LIVE gateway, never
+// fabricated by the reporting process) is testable under
+// `cargo test -p wcore-cli --lib`.
+pub mod channel;

@@ -21,6 +21,17 @@ pub enum AcpError {
     /// are the SAME signal — this leaks no existence information.
     #[error("agent error: {0}")]
     Agent(String),
+    /// F24-03: the caller AUTHENTICATED successfully and is not permitted to
+    /// issue this command.
+    ///
+    /// Deliberately distinct from [`Self::Auth`]. "I do not know who you are"
+    /// and "I know exactly who you are and you may not do this" call for
+    /// opposite operator responses, and folding them together is how somebody
+    /// spends an afternoon regenerating a credential that was never the
+    /// problem. Transports map this to a FORBIDDEN status, never to an
+    /// authentication challenge.
+    #[error("forbidden: {0}")]
+    Forbidden(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("serde error: {0}")]

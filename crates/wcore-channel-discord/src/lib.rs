@@ -282,6 +282,85 @@ impl Channel for DiscordChannel {
         include_str!("schemas/discord.json")
     }
 
+    /// Setup and authentication probe — reference implementation for the
+    /// PERSISTENT-CONNECTION half of the Phase 24 channel matrix.
+    ///
+    /// Answers all three setup questions WITHOUT opening the gateway and
+    /// without sending a message: is `credential_handle` resolvable (config
+    /// complete), does the token authenticate (`GET /users/@me`), and which bot
+    /// identity did it authenticate as.
+    ///
+    /// # Why the bot id is worth a round trip
+    ///
+    /// A Discord bot token that is live but belongs to the WRONG application
+    /// starts cleanly, IDENTIFYs cleanly, and then answers in the wrong
+    /// server. `start()` cannot distinguish that case; `/users/@me` can, and
+    /// it is the only part of this probe that costs a network call.
+    ///
+    /// # The three failure modes are three different operator actions
+    ///
+    /// A missing credential is an `Incomplete` (edit the credentials store), a
+    /// rejected one is `Unauthenticated` (rotate the token), and an
+    /// unreachable API is `Unreachable` (no verdict was reached at all — retry
+    /// later). Collapsing these into one boolean is what makes an operator
+    /// rotate a working token because the network was down.
+    async fn probe(&self) -> Result<wcore_channels::ProbeReport, ChannelError> {
+        use wcore_channels::ProbeReport;
+
+        if self.config.credential_handle.trim().is_empty() {
+            return Ok(ProbeReport::incomplete(
+                &self.name,
+                "discord",
+                vec!["options.credential_handle".to_string()],
+            ));
+        }
+
+        // NOTE: only the HANDLE is ever named in a finding. The token's value
+        // never enters the report — see `wcore_channels::probe` on T-24-03-06.
+        let token = match self.creds.get(&self.config.credential_handle) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                return Ok(ProbeReport::incomplete(
+                    &self.name,
+                    "discord",
+                    vec![format!(
+                        "credential {:?} is not present in the credentials store",
+                        self.config.credential_handle
+                    )],
+                ));
+            }
+            Err(e) => {
+                return Ok(ProbeReport::incomplete(
+                    &self.name,
+                    "discord",
+                    vec![format!("credentials store unreadable: {e}")],
+                ));
+            }
+        };
+
+        match rest::get_current_user_id(&self.http, &self.api_base, &token).await {
+            Ok(id) => Ok(ProbeReport::ok(&self.name, "discord", id)),
+            // `DiscordError::Auth` is exactly "the platform looked at this
+            // token and said no"; everything else is "we never got an answer".
+            Err(DiscordError::Auth(reason)) => {
+                Ok(ProbeReport::unauthenticated(&self.name, "discord", reason))
+            }
+            Err(other) => Ok(ProbeReport::unreachable(
+                &self.name,
+                "discord",
+                other.to_string(),
+            )),
+        }
+    }
+
+    /// Discord's per-attachment ceiling for a non-boosted upload.
+    fn media_bounds(&self) -> wcore_channels::MediaBounds {
+        wcore_channels::MediaBounds {
+            max_bytes: 25 * 1024 * 1024,
+            max_attachments: 10,
+        }
+    }
+
     /// Discord caps a single message at 2000 characters.
     fn max_message_len(&self) -> Option<usize> {
         Some(2000)
@@ -645,5 +724,166 @@ heartbeat_grace_ms = 8000
         );
         let err = ch.start().await.expect_err("expected Auth error");
         assert!(matches!(err, ChannelError::Auth(_)), "got {err:?}");
+    }
+
+    // -----------------------------------------------------------------
+    // 9. Setup and authentication probe (Phase 24, Criterion 3).
+    //
+    // Every case runs against a LOCAL mockito endpoint. No Discord token
+    // and no network reach a vendor: the plan requires this proof to
+    // reproduce on three platforms and in review, and a vendor outage
+    // must not be able to turn a real defect into a green.
+    // -----------------------------------------------------------------
+
+    fn probe_channel(
+        creds: Arc<dyn CredentialsStore>,
+        api_base: String,
+        config: DiscordConfig,
+    ) -> DiscordChannel {
+        DiscordChannel::with_bases(
+            "test",
+            config,
+            creds,
+            api_base,
+            "ws://127.0.0.1:1".to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn probe_reports_ok_with_the_bot_identity_without_opening_the_gateway() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v10/users/@me")
+            .match_header("authorization", format!("Bot {TEST_TOKEN}").as_str())
+            .with_status(200)
+            .with_body(r#"{"id":"998877","username":"acme-bot"}"#)
+            .create_async()
+            .await;
+
+        let ch = probe_channel(
+            InMemoryCreds::with_token("discord.test.bot_token", TEST_TOKEN),
+            server.url(),
+            cfg(),
+        );
+        let report = ch.probe().await.expect("probe returns a report");
+        mock.assert_async().await;
+
+        assert_eq!(report.outcome, wcore_channels::ProbeOutcome::Ok);
+        assert_eq!(
+            report.identity.as_deref(),
+            Some("998877"),
+            "the identity is what distinguishes a live token for the WRONG \
+             application from the right one; start() cannot tell them apart"
+        );
+        assert!(
+            ch.task_handle().is_none(),
+            "a probe must not open the gateway — it answers setup questions \
+             without putting traffic on a production surface"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_separates_a_rejected_token_from_an_unreachable_api() {
+        // These are opposite operator actions. A probe that folded them into
+        // one boolean makes an operator rotate a working token because the
+        // network was down.
+        let mut server = mockito::Server::new_async().await;
+        let rejected = server
+            .mock("GET", "/api/v10/users/@me")
+            .with_status(401)
+            .with_body(r#"{"message":"401: Unauthorized","code":0}"#)
+            .create_async()
+            .await;
+        let ch = probe_channel(
+            InMemoryCreds::with_token("discord.test.bot_token", TEST_TOKEN),
+            server.url(),
+            cfg(),
+        );
+        let report = ch.probe().await.unwrap();
+        rejected.assert_async().await;
+        assert_eq!(
+            report.outcome,
+            wcore_channels::ProbeOutcome::Unauthenticated,
+            "HTTP 401 is the platform looking at the token and saying no"
+        );
+        assert!(
+            report.config_complete,
+            "the CONFIG was fine; the token was not"
+        );
+
+        // Nothing listening at all — no verdict was reached.
+        let ch = probe_channel(
+            InMemoryCreds::with_token("discord.test.bot_token", TEST_TOKEN),
+            "http://127.0.0.1:1".to_string(),
+            cfg(),
+        );
+        let report = ch.probe().await.unwrap();
+        assert_eq!(
+            report.outcome,
+            wcore_channels::ProbeOutcome::Unreachable,
+            "a refused connection is not a credential verdict"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_reports_incomplete_when_the_credential_is_absent() {
+        let creds: Arc<dyn CredentialsStore> = Arc::new(InMemoryCreds::new());
+        let ch = probe_channel(creds, "http://unused".to_string(), cfg());
+        let report = ch.probe().await.unwrap();
+        assert_eq!(report.outcome, wcore_channels::ProbeOutcome::Incomplete);
+        assert!(!report.config_complete);
+        assert!(
+            report.findings[0].contains("discord.test.bot_token"),
+            "the finding must name the HANDLE so the operator knows where to \
+             look; got {:?}",
+            report.findings
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_reports_incomplete_when_no_credential_handle_is_configured() {
+        let ch = probe_channel(
+            Arc::new(InMemoryCreds::new()),
+            "http://unused".to_string(),
+            DiscordConfig {
+                credential_handle: String::new(),
+                ..cfg()
+            },
+        );
+        let report = ch.probe().await.unwrap();
+        assert_eq!(report.outcome, wcore_channels::ProbeOutcome::Incomplete);
+        assert_eq!(
+            report.findings,
+            vec!["options.credential_handle".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_output_never_carries_the_bot_token() {
+        // T-24-03-06 with a POSITIVE CONTROL: the token is provably in the
+        // adapter's credentials store before its absence from the report means
+        // anything.
+        const CANARY: &str = "MTIz.ABCDEF.F24D-DISCORD-PROBE-CANARY-3b7f";
+        let creds = InMemoryCreds::with_token("discord.test.bot_token", CANARY);
+        assert_eq!(
+            creds.get("discord.test.bot_token").unwrap().as_deref(),
+            Some(CANARY),
+            "POSITIVE CONTROL: the adapter really can read the canary"
+        );
+
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/api/v10/users/@me")
+            .with_status(401)
+            .with_body(r#"{"message":"401: Unauthorized"}"#)
+            .create_async()
+            .await;
+        let ch = probe_channel(creds, server.url(), cfg());
+        let report = ch.probe().await.unwrap();
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(
+            !json.contains(CANARY),
+            "the probe leaked the bot token into its report: {json}"
+        );
     }
 }
