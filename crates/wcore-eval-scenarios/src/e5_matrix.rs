@@ -605,13 +605,13 @@ impl Matrix {
 
                 // A declared (dimension, OS) skip on a CRITICAL dimension is rejected here
                 // rather than silently producing skipped critical cells.
-                if let Some(record) = record {
-                    if crit.is_critical() {
-                        return Err(MatrixError::CriticalCellSkipped {
-                            cell_id: format!("{dimension}-{os}-*"),
-                            class: record.evidence.class().id(),
-                        });
-                    }
+                if let Some(record) = record
+                    && crit.is_critical()
+                {
+                    return Err(MatrixError::CriticalCellSkipped {
+                        cell_id: format!("{dimension}-{os}-*"),
+                        class: record.evidence.class().id(),
+                    });
                 }
 
                 for surface in &selected {
