@@ -46,6 +46,16 @@ enum Command {
         #[arg(long, default_value = "0")]
         valid_from: u64,
     },
+    /// Transform `cargo metadata --locked --format-version 1` output into a
+    /// byte-deterministic CycloneDX SBOM. Pure: no clock, no randomness, no
+    /// environment read, so two runs over the same metadata file produce
+    /// identical bytes and therefore an identical digest.
+    Sbom {
+        #[arg(long)]
+        metadata: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Build an unsigned manifest over a directory of artifacts.
     ManifestBuild {
         #[arg(long)]
@@ -131,6 +141,7 @@ fn execute(cli: Cli) -> Result<(), String> {
             directory,
             valid_from,
         } => trust_root_init(&directory, valid_from),
+        Command::Sbom { metadata, output } => sbom_generate(&metadata, &output),
         Command::ManifestBuild {
             artifacts,
             output,
@@ -232,6 +243,26 @@ fn write_secret_file(path: &Path, contents: &[u8]) -> Result<(), String> {
     // directory ACL. The caller is expected to pass a per-user directory.
     std::fs::write(path, contents)
         .map_err(|error| format!("could not write {}: {error}", path.display()))
+}
+
+/// Read a cargo metadata document, emit the CycloneDX SBOM, and print the
+/// digest that a release manifest binds. Reads and writes files but performs
+/// the transform through the pure library function, so the bytes on disk are a
+/// function of the input file alone.
+fn sbom_generate(metadata_path: &Path, output: &Path) -> Result<(), String> {
+    let metadata_json = std::fs::read_to_string(metadata_path)
+        .map_err(|error| format!("could not read {}: {error}", metadata_path.display()))?;
+    let document = wcore_eval_scenarios::sbom::cyclonedx_from_cargo_metadata(&metadata_json)
+        .map_err(|error| error.to_string())?;
+    std::fs::write(output, document.as_bytes())
+        .map_err(|error| format!("could not write {}: {error}", output.display()))?;
+    println!(
+        "SBOM WRITTEN path={} bytes={} sha256={}",
+        output.display(),
+        document.len(),
+        wcore_eval_scenarios::sbom::sbom_sha256(&document)
+    );
+    Ok(())
 }
 
 fn manifest_build(
