@@ -31,6 +31,18 @@ param(
 
 $ErrorActionPreference = 'Continue'
 
+# Console control plumbing, used only by the -HandlerControl leg to deliver a
+# genuinely catchable CTRL_BREAK to the child. Declared once at load time so a
+# type-already-exists error cannot surface mid-run.
+if (-not ('W.K' -as [type])) {
+    Add-Type -Namespace 'W' -Name 'K' -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool FreeConsole();
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool AttachConsole(uint dwProcessId);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool SetConsoleCtrlHandler(IntPtr handler, bool add);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool GenerateConsoleCtrlEvent(uint dwCtrlEvent, uint dwProcessGroupId);
+'@
+}
+
 function Fail($msg) {
     Write-Output "PROOF-FAIL: $msg"
     exit 1
@@ -154,12 +166,33 @@ if ($HandlerControl) { $KillName = 'taskkill-close-request'; $KillCatchable = 'y
 
 if (-not $proc.HasExited) {
     if ($HandlerControl) {
-        # A CLOSE REQUEST, not a terminate: this is the catchable mechanism, and
-        # the probe must fire for it. Without this pair, `fired=no` in the real
-        # run is equally consistent with a probe that was never installed.
-        & taskkill /PID $proc.Id *> $null
+        # A real console CTRL_BREAK, not a window close request. Measured on
+        # this box, twice: `taskkill` without `/F` posts WM_CLOSE to a TOP-LEVEL
+        # WINDOW, and a process started from a non-interactive ssh session has
+        # no such window -- so nothing was ever delivered, the probe could not
+        # fire, and the control was structurally incapable of going green. That
+        # made the real run's `fired=no` vacuous rather than a measurement.
+        #
+        # GenerateConsoleCtrlEvent delivers to every process attached to the
+        # child's console. We detach from our own console, attach to the
+        # child's, and neutralize the event for ourselves with a NULL handler
+        # before raising it -- otherwise this script dies alongside the child
+        # and the run reports nothing at all.
         $KillLanded = 'yes'
-        Start-Sleep -Milliseconds 800
+        try {
+            [W.K]::FreeConsole() | Out-Null
+            if ([W.K]::AttachConsole([uint32]$proc.Id)) {
+                [W.K]::SetConsoleCtrlHandler([IntPtr]::Zero, $true) | Out-Null
+                [W.K]::GenerateConsoleCtrlEvent(1, 0) | Out-Null   # 1 = CTRL_BREAK_EVENT
+                Start-Sleep -Milliseconds 1200
+                [W.K]::FreeConsole() | Out-Null
+                [W.K]::SetConsoleCtrlHandler([IntPtr]::Zero, $false) | Out-Null
+            } else {
+                Write-Output "HANDLER-CONTROL-DELIVERY: could not attach to the child console"
+            }
+        } catch {
+            Write-Output "HANDLER-CONTROL-DELIVERY: $($_.Exception.Message)"
+        }
         if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
     } else {
         # TerminateProcess: cannot be trapped, masked or deferred by the target.
