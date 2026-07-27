@@ -685,3 +685,40 @@ fn the_public_append_path_refuses_to_mint_a_task_record_beside_the_ledger() {
     let state = fixture.journal.state().expect("state reduces");
     assert!(!state.goals[GOAL].tasks.contains_key("smuggled"));
 }
+
+#[test]
+fn a_goal_with_no_tasks_serializes_exactly_as_it_did_before_the_ledger_existed() {
+    // `ReducedSessionState::goals` carries the same attribute and 22-01 pinned
+    // it against the retained real-binary corpus. That corpus contains NO
+    // Goals, so it can never exercise the attribute one level down: dropping
+    // `skip_serializing_if` from `GoalState::tasks` was measured to leave
+    // `goal_journal_compat_test`, `goal_kernel_test` and the rest of this file
+    // all green. This is the gate that goes red instead, and it exists because
+    // an attribute nothing can falsify is an attribute the next refactor
+    // deletes.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = fixture(&temp.path().join("session.journal"));
+
+    let state = fixture.journal.state().expect("state reduces");
+    let encoded = serde_json::to_value(&state).expect("state encodes");
+    let goal = encoded
+        .get("goals")
+        .and_then(|goals| goals.get(GOAL))
+        .expect("the goal is present");
+    assert!(
+        goal.get("tasks").is_none(),
+        "a Goal with no tasks must not emit a tasks key: {goal}"
+    );
+
+    // And the key does appear once there is something to say, so the assertion
+    // above is about emptiness rather than about the field never encoding.
+    fixture.declare("t", &[]);
+    let with_task = serde_json::to_value(fixture.journal.state().expect("state reduces"))
+        .expect("state encodes");
+    assert!(
+        with_task
+            .pointer(&format!("/goals/{GOAL}/tasks/t"))
+            .is_some(),
+        "a declared task must be present in the encoded projection"
+    );
+}
