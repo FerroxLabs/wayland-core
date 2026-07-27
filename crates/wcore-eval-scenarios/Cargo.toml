@@ -29,6 +29,14 @@ path = "bin/wcore-eval-fixture.rs"
 name = "wayland-receipt"
 path = "bin/wayland-receipt.rs"
 
+# Phase 29 (F29-01/F29-04): the only executable surface that mints or checks a
+# release manifest or a release state record. Adds no dependency — everything
+# it needs (ed25519-dalek, sha2, base64, rand, serde, serde_json, clap) is
+# already declared below.
+[[bin]]
+name = "wayland-release"
+path = "bin/wayland-release.rs"
+
 # The independent delivery sink (Phase 24). A SEPARATE PROCESS on purpose: it
 # is started before the gateway and outlives its kill and platform restart, so
 # the arrivals journal is owned by something the gateway cannot write to except
