@@ -1,0 +1,75 @@
+PANEL MEMBER: Kimi K3
+INVOCATION: /Users/seandonahoe/.kimi-code/bin/kimi -p "<panel-question.txt>" --output-format text
+CAPTURED: 2026-07-27, planning session for Phase 28.
+NOTE ON THIS TRANSCRIPT: the absolute path is required (a Bash-tool shell predates .zshrc's
+PATH). This member bullet-prefixes and indents its output, so an anchored ^PANEL_POSITION=
+regex loses its vote; extraction was unanchored. Bullet prefixes and leading indentation are
+stripped below; the reviewer's answer is otherwise verbatim and complete.
+
+--- ANSWER ---
+
+**The crux first: is "dispositioned" an honest reading of "resolved", or scope reduction in
+reconciliation's clothes?**
+
+The answer turns on what Criterion 4 is actually protecting, and its own text answers that.
+F28-04 does not say "every finding is fixed." It says "no critical case is skipped and every
+finding at every severity is resolved." The two clauses are a pair: the first is about
+**coverage** (nothing skipped), the second is about **accounting** (nothing dropped). The
+protective core of the criterion is that the finding ledger is complete and every entry has a
+closed fate — not that every entry's fate is "fixed." A program that fixes nothing but silently
+deletes MEDIUM findings from the ledger satisfies the literal c4-literal gate while violating
+the criterion's actual purpose. A program that fixes CRITICAL/HIGH and carries three MEDIUMs as
+named, owned, receipt-enumerated deferrals satisfies the purpose while violating the dictionary
+sense of "resolved." Honest reconciliation reads the criterion by its internal structure; scope
+reduction reads it by whatever the executor finds convenient. c4-disposition is the former,
+*provided* the anti-laundering machinery (written severity rubric, independent cross-audit for
+any CRITICAL/HIGH downgrade, receipt enumeration) is real and not decorative. Without that
+machinery it would be scope reduction — which is precisely why the option carries it.
+
+**The measured evidence.** This is not a theoretical tradeoff; the program ran both rules. The
+literal rule (block on LOW) produced 74 plans in two weeks. The amended rule (RULE B) produced
+3 of 3 Success Criteria in 4 plans. That is the single strongest data point in the decision, and
+c4-literal asks the program to repeal its one measured process improvement — on the phase with
+the largest matrix and the most surface for findings, where the loop cost would be worst.
+Worse: several open sub-HIGH items are architectural (bash under Windows AppContainer cannot
+exist by construction). Under a literal "fixed" gate those items are unfixable at any budget, so
+the gate can only be met by reclassifying them — forcing the severity-laundering attack that
+c4-disposition merely has to defend against. c4-literal is not just slow; it is unreachable as
+written and corruptible in practice.
+
+**The certification argument cuts toward rigor, but toward rigor of a specific kind.** A signed
+receipt that a release will rely on is a stronger claim than a feature phase makes — but the
+strength the receipt needs is **honesty and visibility**, not an empty ledger. The program's
+measured catastrophic failure mode is not accumulated MEDIUMs; it is evidence that proves
+nothing (177 unfailable gates, 283 tests with no execution evidence). A receipt that says "zero
+open defects" while an AppContainer finding was quietly relabeled is exactly that failure mode
+with a signature on it. A receipt that enumerates "three accepted MEDIUMs: Windows descendant
+reap (owner X, BACKLOG-412, rationale: ...), ..." is a stronger certification artifact than the
+fiction of zero — Phase 29 and the release can actually rely on it, because what it says is
+true.
+
+**Why not the other two.** c4-standing commits the sin it accuses c4-disposition of: it narrows
+a written Success Criterion to fit the intended evidence, and it does the *worse* narrowing —
+dropping MEDIUM/LOW from the gate entirely means a MEDIUM finding need not even be recorded,
+which directly defeats "no critical case is skipped." c4-disposition keeps every finding in the
+ledger and in the receipt; c4-standing makes sub-HIGH findings invisible at the exact moment
+visibility matters most. c4-escalate fails the program's explicit operating rule:
+evidence-acceptance policy is reserved to the panel, not the human, and the measured cost of
+routing decisions upward (18 blocking gates, the largest contributor to the two-week wall
+clock) is documented in the same record as the 74 plans. The conflict is between two documents,
+but the program's own precedence rules (decide well, don't stop; never redefine success
+downward; don't reintroduce the measured failure mode) resolve it without an appeal.
+
+**Gameability of the chosen option.** Two attacks: severity laundering (downgrade HIGH to
+MEDIUM to buy acceptance) and accept-everything (a lazy executor accepts a genuinely serious
+MEDIUM). The rubric plus mandatory independent cross-audit on any CRITICAL/HIGH downgrade
+addresses the first; the second is mitigated but not eliminated — a named rationale, owner,
+BACKLOG id, and receipt enumeration raise the cost of a bad accept from invisible to signed,
+which is the same accountability mechanism the program already trusts for its PARTIAL phase
+grades. No option is ungameable; c4-disposition is the only one whose failure mode is *visible
+in the signed artifact* rather than hidden behind it.
+
+The certification phase's receipt should certify the truth with full accounting, not a number
+that was reached by the cheapest available reclassification.
+
+PANEL_POSITION=c4-disposition

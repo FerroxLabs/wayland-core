@@ -1,0 +1,55 @@
+PANEL MEMBER: Codex 5.6 Sol
+INVOCATION: codex exec -m gpt-5.6-sol --sandbox read-only --skip-git-repo-check "<panel-question.txt>"
+CAPTURED: 2026-07-27, planning session for Phase 28.
+NOTE ON THIS TRANSCRIPT: codex repeats its final block, so the answer below appears twice in
+the raw capture; the LAST occurrence is taken, per the known vote-loss trap. Tool-startup noise
+(MCP auth errors, hook lines, a deprecation warning, the echoed prompt) is omitted; the
+reviewer's answer is verbatim and complete.
+
+--- ANSWER ---
+
+c4-disposition is the only option that preserves both the certification's integrity and the
+standing severity policy.
+
+Criterion 4 is primarily protecting completeness and accountability. F28-04 pairs "every
+finding … resolved" with "no critical case is skipped," indicating that the core threat is
+silent omission: unexecuted cases, unrecorded findings, or findings disappearing between
+certification and release. Requiring every discovered item to reach a documented terminal
+disposition preserves that protection. c4-standing does not, because sub-HIGH findings could
+bypass the acceptance artifact entirely.
+
+The measured history decisively rejects c4-literal. Blocking on LOW produced 74 plans over
+roughly two weeks; the amended HIGH threshold produced closure in four plans. Worse, literal
+zero defects is unreachable when some observations describe intentional platform constraints.
+It would incentivize deleting findings, narrowing test coverage, or relabeling defects until
+the ledger appeared empty. That produces a cleaner receipt and a less trustworthy
+certification.
+
+Certification nevertheless requires more than ordinary backlog handling. A signed receipt must
+disclose every accepted or deferred MEDIUM/LOW finding, including owner, rationale, backlog
+identity, evidence, and release visibility. It must not claim "zero known defects." Its
+defensible claim is: zero undispositioned findings, zero skipped critical cases, and zero
+unresolved CRITICAL/HIGH findings. The known Windows process-tree reap defect deserves
+especially rigorous rubric-based severity review; if its consequences cross a containment or
+cleanup boundary classified HIGH, it cannot be accepted merely because it arrived labeled
+MEDIUM.
+
+The main gaming paths are severity laundering, evidence-free "disproof," ceremonial backlog
+entries, and habitual acceptance of serious MEDIUMs. The proposed written rubric, independent
+review of CRITICAL/HIGH downgrades, executable disproof evidence, and signed enumeration
+materially constrain those attacks. The receipt also makes later release review capable of
+rejecting an accepted risk rather than inheriting it invisibly.
+
+Reading "resolved" as "dispositioned" is linguistically weaker than the ordinary meaning of
+"resolved," so it would be dishonest if the receipt represented deferred defects as fixed or
+claimed an empty defect ledger. It is an honest reconciliation only because the governing
+policy explicitly establishes deferral as the terminal treatment for sub-HIGH findings and the
+certification artifact preserves those findings rather than erasing them. The implementation
+must therefore use distinct states—FIXED, DISPROVED, ACCEPTED, and DEFERRED—and define the
+gate as zero findings without a terminal disposition. That is a clarified meaning of
+resolution under the standing policy, not covert success reduction.
+
+c4-escalate is unsupported: this is precisely the evidence-acceptance decision the program
+assigns to reviewers, and escalation would repeat the measured human-gate failure mode.
+
+PANEL_POSITION=c4-disposition

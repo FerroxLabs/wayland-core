@@ -1,0 +1,134 @@
+=== PHASE 28 ACCEPTANCE-GATE DECISION: how must "zero findings remain at every severity" be
+    implemented as a certification acceptance gate, given a standing program rule that says the
+    opposite for MEDIUM and below? ===
+
+You are one of four independent reviewers. Answer from the evidence below.
+End your response with EXACTLY one line: PANEL_POSITION=<option-id>
+where <option-id> is one of: c4-disposition | c4-literal | c4-standing | c4-escalate
+
+--- CONTEXT ---
+
+wayland-core is a Rust multi-provider AI agent CLI. Its delivery program ("phases 20-30") is
+about to plan Phase 28, "Native Cross-Platform Certification". Phase 28 does not build product
+features. It certifies an exact candidate build produced by phases 24-27 against a hostile
+native platform matrix (macOS, Linux, Windows), a 1,000-session and concurrent-child soak, and
+signed evidence receipts.
+
+TWO WRITTEN RULES COLLIDE, and the collision decides how the phase's acceptance gate is built.
+
+RULE A -- Phase 28's own text, from the program ROADMAP and REQUIREMENTS, verbatim:
+
+  ROADMAP Phase 28 Success Criterion 4:
+    "Zero findings remain at every severity before acceptance."
+
+  REQUIREMENTS F28-04:
+    "No critical case is skipped and every finding at every severity is resolved before
+     certification acceptance."
+
+RULE B -- the program's standing severity policy, in AGENTS.md and in the lane operating brief,
+verbatim:
+
+  "Severity policy: CRITICAL/HIGH must be fixed, or disproved with executable evidence.
+   MEDIUM and below go to BACKLOG, non-blocking. Do not invent a stricter rule -- that is what
+   turned Phase 20 into a 74-plan loop lasting two weeks."
+
+--- MEASURED HISTORY THAT BEARS ON THIS, not opinion ---
+
+1. Phase 20 of this same program ran under a stricter rule in which a LOW finding blocked
+   advancement (the tool config literally had security_block_on=low). Phase 20 metastasised to
+   74 plans over roughly two weeks. The rule was then amended -- commit d0837aa7 -- to exactly
+   RULE B, and the config changed to security_block_on=high. The very next phase, 20A, which
+   ran under the amended rule and a hard four-plan cap, closed all three of its Success Criteria
+   in 4 plans. That is the strongest single piece of evidence in this decision, and it points
+   away from the literal reading.
+
+2. Phase 20A nevertheless closed with FOUR requirements deliberately OPEN (r2, r8, r12, r13),
+   each with a written disposition, and the phase was still called complete because none of the
+   four gated a Success Criterion. So this program already has a working precedent for
+   "recorded open item, explicitly dispositioned, does not block acceptance". It has NO
+   precedent for "every item at every severity actually fixed".
+
+3. This program's most expensive recurring failure is NOT unfixed low-severity defects. It is
+   evidence that proves nothing: a plan-gate linter run over five phase plan sets that had
+   already passed three rounds of adversarial human review found 177 gates that could not
+   possibly fail. A separate audit found 283 tests with no execution evidence and roughly 145
+   that ran in no workflow at all. The program's demonstrated risk is silent absence, not
+   accumulated MEDIUMs.
+
+4. Counter-evidence that cuts the other way, and it is real: this is a CERTIFICATION phase whose
+   output is a signed receipt that a downstream phase (29, supply chain and release integrity)
+   and ultimately a release will rely on. Phases 24-27 all graded themselves honestly and all
+   are currently PARTIAL. Several already-known defects on this candidate are classified
+   below HIGH and are carried as "known-red, non-gating", including a Windows descendant
+   process-tree reap failure, two Windows DACL unit tests, and a worker output-exhaustion test
+   that exceeds its time budget. A certification that signs a receipt while a process-reap
+   defect stays open is signing something.
+
+--- OPTIONS. Do not re-scope them. ---
+
+c4-disposition:
+  "Resolved" is implemented as DISPOSITIONED, not as FIXED. The acceptance gate is: zero
+  findings at any severity lack an explicit, recorded, evidence-backed disposition. CRITICAL and
+  HIGH must be FIXED or DISPROVED WITH EXECUTABLE EVIDENCE -- accept is not available at those
+  severities. MEDIUM and LOW may additionally be ACCEPTED or DEFERRED, each requiring a named
+  rationale, a named owner, and a BACKLOG id, and each is enumerated inside the signed receipt
+  so it is visible at acceptance and at release rather than absorbed. Because the obvious attack
+  on this option is severity laundering -- downgrading a HIGH to MEDIUM to buy the weaker
+  disposition -- severity is assigned by a written rubric, and any downgrade from an initially
+  assessed CRITICAL/HIGH requires an independent cross-audit and is recorded in the receipt.
+  PROS: preserves what Criterion 4 is actually protecting, which is that nothing is silently
+  dropped and no critical case is skipped -- the clause it is paired with in F28-04 is about
+  coverage and accounting; keeps RULE B intact so the 74-plan failure mode is not reintroduced;
+  makes every accepted defect visible in the artifact the release depends on.
+  CONS: "resolved" is being read as "dispositioned", which is a weaker word than the criterion
+  chose; a determined executor can still accept a genuinely serious MEDIUM; it adds rubric and
+  cross-audit machinery to the phase.
+
+c4-literal:
+  Criterion 4 means what it says. Every finding at every severity, LOW included, is fixed before
+  the certification is accepted. Phase 28 does not close until the finding ledger is empty.
+  PROS: strongest possible certification claim; no judgement call about severity can weaken it;
+  a signed receipt then means the candidate had no known open defect of any kind.
+  CONS: it is precisely the rule that produced the 74-plan two-week loop on this program, and
+  the amendment away from it is the single measured process improvement the program has; several
+  currently-open sub-HIGH items are architectural (bash cannot run under Windows AppContainer at
+  all, by construction) and cannot be "fixed" at any budget, so the gate would be unreachable
+  and would be met by reclassifying items rather than by fixing them -- the same laundering
+  attack, but forced rather than optional.
+
+c4-standing:
+  RULE B governs unchanged. Phase 28's acceptance gate is CRITICAL/HIGH fixed-or-disproved;
+  MEDIUM and below go to BACKLOG and do not appear in the gate. Criterion 4 is recorded as
+  narrowed to that reading.
+  PROS: simplest, fully consistent with the rest of the program, zero new machinery.
+  CONS: it narrows a written Success Criterion to fit the evidence the phase intends to produce.
+  This program has an explicit standing prohibition on exactly that move -- "never redefine
+  success downward when you hit a wall" -- and a prior agent on this program invented a fake
+  termination state to dodge an artifact it wrongly believed unobtainable. Narrowing also
+  discards the criterion's real content: "no critical case is SKIPPED" is about coverage, and
+  dropping MEDIUM/LOW from the gate entirely means a MEDIUM finding need not even be recorded.
+
+c4-escalate:
+  Do not decide. Route the conflict to the human owner and block Phase 28 planning on his ruling.
+  PROS: the conflict is between two documents the human owns, so he is the correct authority.
+  CONS: the program's own operating rule says a decision point is an instruction to decide well,
+  not to stop, and reserves to the human only irreversible outward actions -- merging, tagging,
+  releasing, closing issues, credentials -- explicitly NOT evidence-acceptance policy. Measured
+  cost of the opposite habit: 18 blocking human gates across 32 plans was the single largest
+  contributor to Phase 20's two-week wall clock.
+
+--- YOUR TASK ---
+
+Choose ONE option id. Weigh specifically:
+ (a) what Criterion 4 is actually protecting, given that its own requirement text pairs it with
+     "no critical case is skipped";
+ (b) the measured 74-plan outcome of the literal rule versus the measured 4-plan outcome of the
+     amended one;
+ (c) that this is a CERTIFICATION phase signing a receipt a release will rely on, which is a
+     stronger claim than an ordinary feature phase makes;
+ (d) whether your chosen option can be gamed, and by what;
+ (e) whether reading "resolved" as "dispositioned" is honest reconciliation or is scope
+     reduction wearing a reconciliation's clothes -- argue this point explicitly, it is the
+     crux.
+
+Give your reasoning, then the PANEL_POSITION line as the final line.

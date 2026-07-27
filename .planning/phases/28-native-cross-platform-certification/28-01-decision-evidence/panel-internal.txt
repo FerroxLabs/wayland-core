@@ -1,0 +1,111 @@
+PANEL MEMBER: internal adversarial pass (Claude), arguing AGAINST the emerging consensus.
+CAPTURED: 2026-07-27, planning session for Phase 28.
+
+The three external members returned c4-disposition 3-0. A unanimous external panel is the one
+most likely to have agreed too fast, so this pass takes the strongest available case against it
+and pushes until the case either survives or is defeated by something executable.
+
+=== THE STRONGEST ARGUMENT AGAINST c4-disposition ===
+
+c4-disposition is c4-standing with paperwork.
+
+Strip the machinery away and ask what actually differs at the moment of acceptance. Under
+c4-standing, Phase 28 signs a certification with N unfixed MEDIUM/LOW defects. Under
+c4-disposition, Phase 28 signs a certification with the same N unfixed MEDIUM/LOW defects, each
+now carrying a rationale, an owner and a BACKLOG id. The candidate is byte-identical. The
+defects are identical. Only the prose differs. The three external members all treated
+"enumerated in the receipt" as if it were a mitigation, but a receipt is not a control — it
+does not stop a defect from reaching a user, it only records that someone knew.
+
+And the option's own defence undercuts it. Every member wrote that c4-disposition's integrity
+depends on the anti-laundering machinery being "real and not decorative" (kimi's words). That
+is an admission that the option's safety is entirely a function of executor diligence, at the
+exact severity band where diligence is cheapest to skip. The gate reduces to "did somebody type
+a rationale," and this program has measured, repeatedly, what happens to gates whose satisfying
+condition is somebody typing something: 177 self-passing gates across five plan sets that had
+each passed three rounds of adversarial human review.
+
+=== THE ARGUMENT THAT SHOULD HAVE DECIDED IT, AND WHY IT DID NOT ===
+
+The above is a good argument but it is not the strongest one. The strongest one is a claim about
+authorship, and it is checkable rather than arguable:
+
+  If the author of Criterion 4 wrote "zero findings remain at every severity" WHILE the standing
+  severity policy already existed, then the criterion is not a conflict to be reconciled at all.
+  It is a deliberate, one-time elevation of the bar at the certification gate, written by
+  someone who knew the ordinary rule and chose to exceed it for this phase specifically. Reading
+  it back down to the ordinary rule would then not be reconciliation. It would be an agent
+  overruling a human's explicit, informed instruction — precisely the "never redefine success
+  downward" prohibition, and precisely the failure mode that produced the invented termination
+  state earlier in this program.
+
+That claim decides the question if true, so it was checked rather than argued:
+
+  $ git log -1 --format='%H %ad %s' --date=iso d0837aa7
+  d0837aa7277c9fd97bba90a8c6da9e88e8a51b48 2026-07-25 12:20:08 +0700 decision(20): bound the two non-terminating findin...
+
+  $ git log --format='%h %ad %s' --date=iso -S'Zero findings remain at every severity' -- .planning/ROADMAP.md
+  0192e3c0 2026-07-19 19:01:55 +0700 docs(gsd): admit phase 20 execution
+
+  $ git log --format='%h %ad %s' --date=iso -S'every finding at every severity is resolved' -- .planning/REQUIREMENTS.md
+  0192e3c0 2026-07-19 19:01:55 +0700 docs(gsd): admit phase 20 execution
+
+The claim is FALSE, and decisively so. Criterion 4 and F28-04 both entered the repository on
+2026-07-19. The severity-policy amendment landed on 2026-07-25 — SIX DAYS LATER. Criterion 4
+was therefore written under the OLD regime, the one in which a LOW finding blocked advancement
+and the tool configuration literally read security_block_on=low. It is not an informed
+elevation above the standing rule. It is a survival of the rule that the program then measured,
+found catastrophic, and deliberately replaced, and the replacement's commit message says in
+terms: do not invent a stricter rule.
+
+That inverts the "never redefine success downward" objection. Applying Criterion 4 literally
+would not be honoring a human's instruction; it would be honoring a superseded draft over the
+human's own later, measured correction. The later instrument governs.
+
+=== WHAT SURVIVES OF THIS PASS, AND IT IS BINDING ===
+
+The paperwork objection is not fully answered by the vote, and one specific consequence of it
+must be built into the phase rather than waved at. The external members named severity
+laundering as the attack and answered it with "a rubric and a cross-audit on downgrades." That
+is not sufficient here, because the dangerous findings on this candidate do not need to be
+downgraded by anyone. They ARRIVE pre-labelled below HIGH, inherited from a phase that scored
+them against ITS criteria, not against Phase 28's.
+
+Concretely: `live_future_drop_reaps_descendant_job_tree` is carried today as "known-red,
+non-gating." It is a failure to reap a descendant process tree. Phase 28 Success Criterion 2
+says, in its own words, that the soak completes with "no orphan process." An orphan process is
+not a peripheral MEDIUM in Phase 28. It is the literal subject of one of the four criteria this
+phase exists to certify. Under a naive reading of c4-disposition, that finding walks in wearing
+its inherited label, takes the MEDIUM path, gets a rationale and an owner, and gets signed —
+and the certification then asserts a clean orphan-process result while carrying a known
+orphan-process defect. Nobody laundered anything. The label was simply never re-scored, and
+"inherited severity" is a laundering channel that needs no launderer.
+
+The same applies to the AppContainer ACL lease SID/profile mismatch, under which Windows can
+run with the sandbox SILENTLY DISABLED. Inherited, that is an environment quirk. Scored against
+Criterion 1, a security control that reports itself active while being inactive is not a MEDIUM
+in any rubric worth the name.
+
+THEREFORE, as a binding amendment to the adopted option and not as commentary:
+
+  (1) SEVERITY IS RE-SCORED AGAINST PHASE 28'S OWN FOUR CRITERIA. No finding enters the ledger
+      at an inherited severity. The inherited severity is recorded as provenance only.
+
+  (2) A FINDING THAT CONTRADICTS A PHASE 28 SUCCESS CRITERION IS CRITICAL OR HIGH BY
+      CONSTRUCTION AND CANNOT TAKE THE ACCEPT PATH. Not by judgement — by construction, because
+      the criterion it contradicts is the thing being certified. Accepting it would mean signing
+      a receipt whose own text is contradicted by an entry in its own finding ledger.
+
+  (3) THE RECEIPT MAY NOT CLAIM WHAT IT DOES NOT HAVE. Its defensible assertion is: zero
+      undispositioned findings, zero skipped critical cases, zero unresolved CRITICAL/HIGH. It
+      may not assert "zero known defects", and a verifier must reject a receipt that does.
+
+With (1), (2) and (3) attached, the paperwork objection loses most of its force: the findings
+the objection is actually worried about can no longer take the paper path at all. Without them,
+the objection stands and this pass would dissent.
+
+POSITION: concur with c4-disposition, conditional on amendments (1), (2) and (3) being carried
+into the acceptance gate as executable rules rather than as prose. The pass's strongest
+independent argument was checked and disproved by the repository's own history.
+
+PANEL_POSITION=c4-disposition
