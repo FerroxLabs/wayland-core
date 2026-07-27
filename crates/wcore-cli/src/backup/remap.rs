@@ -150,7 +150,11 @@ fn read_backend(home: &Path) -> Result<Option<CredentialsBackend>, BackupError> 
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Ok(None);
     };
-    let Ok(doc) = text.parse::<toml::Value>() else {
+    // `toml::Table`, NOT `toml::Value`: `Value: FromStr` parses a TOML *value*,
+    // so a document beginning `[storage.credentials]` is read as an ARRAY and
+    // then rejected for trailing content. That misparse is silent if its result
+    // is discarded, and it made every home look like it declared no backend.
+    let Ok(doc) = text.parse::<toml::Table>() else {
         return Ok(None);
     };
     let Some(value) = doc
@@ -162,7 +166,18 @@ fn read_backend(home: &Path) -> Result<Option<CredentialsBackend>, BackupError> 
     };
     // Deserialize through the REAL enum rather than string-matching, so this
     // stays correct if a variant is added or renamed.
-    Ok(value.clone().try_into::<CredentialsBackend>().ok())
+    //
+    // A backend that is DECLARED but unparseable is an error, never `None`:
+    // treating it as "no credentials configured" would let the archive present
+    // itself as a complete capture of a home whose secrets it could not locate.
+    match value.clone().try_into::<CredentialsBackend>() {
+        Ok(backend) => Ok(Some(backend)),
+        Err(e) => Err(BackupError::Journal(format!(
+            "{} declares a credentials backend this build cannot parse ({e}); \
+             refusing to archive it as though no credentials were configured",
+            path.display()
+        ))),
+    }
 }
 
 fn path_is_inside(home: &Path, candidate: &Path) -> bool {
@@ -280,7 +295,9 @@ pub(crate) fn apply_rewrites(target_home: &Path, plan: &RemapPlan) -> Result<(),
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Ok(());
     };
-    let mut doc: toml::Value = text.parse().map_err(|e| {
+    // `Table`, not `Value` — see `read_backend` for why a document must not be
+    // parsed through `Value: FromStr`.
+    let mut doc: toml::Table = text.parse().map_err(|e| {
         BackupError::Journal(format!("restored config.toml is not valid TOML: {e}"))
     })?;
 

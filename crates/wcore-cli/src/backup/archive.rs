@@ -415,6 +415,43 @@ fn file_mode(path: &Path) -> Option<u32> {
 mod tests {
     use super::*;
 
+    /// Build a gzipped tar by hand, so an entry can carry a name our own writer
+    /// refuses to produce. Plain ustar: a 512-byte header per entry, content
+    /// padded to 512, two zero blocks to terminate.
+    fn raw_tar_gz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+
+        let mut tar: Vec<u8> = Vec::new();
+        for (name, data) in entries {
+            let mut header = [0u8; 512];
+            let nb = name.as_bytes();
+            assert!(nb.len() < 100, "ustar name field is 100 bytes");
+            header[..nb.len()].copy_from_slice(nb);
+            header[100..107].copy_from_slice(b"0000644"); // mode
+            header[108..115].copy_from_slice(b"0000000"); // uid
+            header[116..123].copy_from_slice(b"0000000"); // gid
+            header[124..135].copy_from_slice(format!("{:011o}", data.len()).as_bytes());
+            header[136..147].copy_from_slice(b"00000000000"); // mtime
+            header[156] = b'0'; // typeflag: regular file
+            header[257..263].copy_from_slice(b"ustar\0");
+            header[263..265].copy_from_slice(b"00");
+            // Checksum is computed with the checksum field read as 8 spaces.
+            header[148..156].copy_from_slice(b"        ");
+            let sum: u32 = header.iter().map(|b| u32::from(*b)).sum();
+            header[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+
+            tar.extend_from_slice(&header);
+            tar.extend_from_slice(data);
+            let pad = (512 - data.len() % 512) % 512;
+            tar.resize(tar.len() + pad, 0);
+        }
+        tar.resize(tar.len() + 1024, 0); // end-of-archive marker
+
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&tar).unwrap();
+        enc.finish().unwrap()
+    }
+
     fn seed_home(home: &Path) {
         std::fs::create_dir_all(home.join("skills/demo")).unwrap();
         std::fs::write(home.join("config.toml"), "[storage]\n").unwrap();
@@ -537,10 +574,22 @@ mod tests {
         let out = dir.path().join("b.tar.gz");
         let m = create_archive(&home, &out, false).unwrap();
 
-        // A payload whose recorded name climbs out of the extraction root.
-        let blobs = vec![("../../escape.txt".to_string(), b"pwned".to_vec())];
+        // A payload whose RECORDED name climbs out of the extraction root.
+        // Built by hand: the `tar` crate refuses to write a `..` name at all
+        // ("paths in archives must not have `..`"), so an archive of this shape
+        // can only come from an attacker's tooling — which is precisely the
+        // input the verifier has to survive. Packing it with our own writer
+        // would have tested our writer, not the verifier.
+        let manifest_bytes = serde_json::to_vec_pretty(&m).unwrap();
         let bad = dir.path().join("bad.tar.gz");
-        std::fs::write(&bad, pack(&m, &blobs).unwrap()).unwrap();
+        std::fs::write(
+            &bad,
+            raw_tar_gz(&[
+                (MANIFEST_ENTRY, manifest_bytes.as_slice()),
+                ("payload/../../escape.txt", b"pwned".as_slice()),
+            ]),
+        )
+        .unwrap();
 
         let err = verify_archive(&bad).unwrap_err();
         match err {
