@@ -25,13 +25,6 @@ on:
       # Transient: drop this entry when the branch merges. The job matrix,
       # runner labels, concurrency group and test commands are untouched.
       - plan/f20-unified-audit-repair
-      # TEMPORARY, lane-local — MUST NOT MERGE. The 23B-H1 read-side recovery
-      # needs a macOS binary carrying this branch's change, and
-      # `.planning/intel/MACOS-BINARY-IS-OBTAINABLE.md` records the only
-      # mechanism that produces one without Cargo on the Mac: let CI build it
-      # and download the `build` job's artifact. `workflow_dispatch` is not an
-      # option here for the reason given above. Reverted before handback.
-      - lane/23Bb
 
 permissions:
   contents: read
