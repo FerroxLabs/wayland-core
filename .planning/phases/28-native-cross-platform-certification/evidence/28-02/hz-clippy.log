@@ -1,33 +1,14 @@
-HOST_SHA=7c54e030229bd9580be6f4591659474b34dbaefc
-HOST_TREE=7e42e3e1dab915ddf5b4e0e8fe452d3feb164b73
-    Checking hashlink v0.9.1
-    Checking euclid v0.20.14
-    Checking csv-core v0.1.13
-    Checking mutate_once v0.1.2
-    Checking postscript v0.14.1
-    Checking cff-parser v0.2.0
-    Checking byteorder v1.5.0
-    Checking kamadak-exif v0.6.1
-    Checking csv v1.4.0
-    Checking calamine v0.26.1
-    Checking wcore-repomap v0.12.25 (/root/wayland-p28/crates/wcore-repomap)
-    Checking mail-parser v0.11.3
-    Checking lru v0.18.0
-    Checking quick-xml v0.39.4
-    Checking hyper-rustls v0.27.9
-    Checking axum v0.7.9
-    Checking rusqlite v0.32.1
-    Checking reqwest v0.12.28
-    Checking image v0.25.10
-    Checking wcore-protocol v0.12.25 (/root/wayland-p28/crates/wcore-protocol)
-    Checking wcore-sandbox v0.12.25 (/root/wayland-p28/crates/wcore-sandbox)
-    Checking pdf-extract v0.12.0
-    Checking wcore-config v0.12.25 (/root/wayland-p28/crates/wcore-config)
-    Checking wcore-egress v0.12.25 (/root/wayland-p28/crates/wcore-egress)
+HOST_SHA=e99c00c30943b5985663d82f94ffe5145d193b61
+HOST_TREE=07bc8af8082576fdfa2e615d3dacaa9b97ed0d91
     Checking wcore-eval-scenarios v0.12.25 (/root/wayland-p28/crates/wcore-eval-scenarios)
-    Checking wcore-observability v0.12.25 (/root/wayland-p28/crates/wcore-observability)
-    Checking wcore-memory v0.12.25 (/root/wayland-p28/crates/wcore-memory)
-    Checking wcore-tools v0.12.25 (/root/wayland-p28/crates/wcore-tools)
-    Checking wcore-mcp v0.12.25 (/root/wayland-p28/crates/wcore-mcp)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 24.57s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.53s
 CLIPPY_EXIT=0
+        PASS [   0.007s] (32/37) wcore-eval-scenarios::e5_native_matrix all_three_mandatory_cells_are_probed_by_their_own_cell_specific_probe
+        PASS [   0.022s] (33/37) wcore-eval-scenarios::e5_matrix_contract unclassified_skip_is_unrepresentable_and_every_class_carries_its_evidence
+        PASS [   0.022s] (34/37) wcore-eval-scenarios::e5_native_matrix black_box_probes_require_no_cargo_harness
+        PASS [   0.022s] (35/37) wcore-eval-scenarios::e5_matrix_contract three_os_families_are_fixed
+        PASS [   0.007s] (36/37) wcore-eval-scenarios::e5_native_matrix the_executor_self_test_covers_the_marker_rejections_this_plan_relies_on
+        PASS [   0.021s] (37/37) wcore-eval-scenarios::e5_matrix_contract every_sandbox_dimension_cell_requires_activeness_not_only_the_mandatory_one
+────────────
+     Summary [   0.037s] 37 tests run: 37 passed, 0 skipped
+NEXTEST_EXIT=0
