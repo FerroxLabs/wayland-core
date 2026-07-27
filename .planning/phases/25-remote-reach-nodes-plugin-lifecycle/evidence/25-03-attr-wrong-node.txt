@@ -1,0 +1,55 @@
+
+### ADVERTISE — node show selfnode
+$ /root/wayland-25/target/release/wayland-core node show selfnode
+node        selfnode
+machine     ubuntu-2404-noble-amd64-base
+os          linux
+key id      d66f9b31b176e4b6c7307c0477c50fa9838635ab7004f047e6db92ecb4f8b300
+version     1.0
+verdict     same
+transport   ssh → f25self (/root/wayland-25/target/release/wayland-core)
+state       paired
+liveness    unknown (not probed since pairing)
+advertised  observed at 1785121163165 (4 backend(s))
+  cloud      cloud      available=false basis=credential_absent — backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+  container  container  available=true  basis=daemon_ping — container daemon answered a version ping: server 29.2.1
+  local      local      available=true  basis=sandbox_backend_probe — platform containment backend 'bubblewrap' probed available
+  ssh        ssh        available=false basis=credential_absent — WAYLAND_EXEC_SSH_TARGET is not set
+[exit=0]
+
+STATE: farnode  machine=f25-farnode-box  available-backends=1
+STATE: selfnode machine=ubuntu-2404-noble-amd64-base available-backends=2
+STATE: the two machines advertise GENUINELY different capability sets, from real probes on each
+### WORK — run the reference task, attributed to node 'selfnode'
+$ /root/wayland-25/target/release/wayland-core backend run --backend local --receipt-out /root/f25-03-evidence/receipt-selfnode.json
+task:        f25-reference
+backend:     local
+transport:   Local via localhost
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: NotApplicable
+wall ms:     2
+receipt:     /root/f25-03-evidence/receipt-selfnode.json
+[exit=0]
+
+STATE: receipt node stamp: {"node_id": "selfnode", "machine_id": "ubuntu-2404-noble-amd64-base", "key_id": "d66f9b31b176e4b6c7307c0477c50fa9838635ab7004f047e6db92ecb4f8b300", "contract_version": {"major": 1, "minor": 0}}
+###      baseline attribution
+$ /root/wayland-25/target/release/wayland-core node attribution selfnode --receipt /root/f25-03-evidence/receipt-selfnode.json
+receipt     /root/f25-03-evidence/receipt-selfnode.json
+backend     local
+node        selfnode
+attribution HOLDS — work attributed to node 'selfnode' (key d66f9b31b176)
+[exit=0]
+
+###      the same receipt attributed to the WRONG node (must be refused)
+$ /root/wayland-25/target/release/wayland-core node attribution farnode --receipt /root/f25-03-evidence/receipt-selfnode.json
+receipt     /root/f25-03-evidence/receipt-selfnode.json
+backend     local
+node        farnode
+attribution BROKEN — receipt attributes work to node 'selfnode' (key d66f9b31b176) but the pinned record for 'farnode' carries key bfed45d376de
+wayland-core node: attribution BROKEN: receipt attributes work to node 'selfnode' (key d66f9b31b176) but the pinned record for 'farnode' carries key bfed45d376de
+[exit=1]
+
+STATE: cross-node attribution exit=1 (non-zero required, or attribution proves nothing)

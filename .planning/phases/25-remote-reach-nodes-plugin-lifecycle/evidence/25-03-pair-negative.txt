@@ -1,0 +1,52 @@
+=== F25-03 LIVE NODE EXERCISE — controller hetzner-dsm — 2026-07-27T02:59:19Z ===
+binary: /root/wayland-25/target/release/wayland-core (wayland-core 0.12.25)
+commit: 644bd5877f819ae8b2aafd339e5d0cb0d7293d83
+far end: container 'f25-03-farnode' (hostname f25-farnode-box), own fs / own key / own netns
+
+### PAIR — pair the separate far end as node 'farnode'
+$ /root/wayland-25/target/release/wayland-core node pair farnode --target f25node --remote-bin /usr/local/bin/wayland-core
+pairing 'farnode' at f25node (challenge 2678e6661497)
+paired 'farnode'
+  machine   f25-farnode-box
+  os        linux
+  key id    bfed45d376de52e0d67057526eb8c078210499f854053d55e42cba2456503445
+  version   1.0
+  verdict   same
+  backends  cloud (unavailable), container (unavailable), local, ssh (unavailable)
+[exit=0]
+
+###      node list
+$ /root/wayland-25/target/release/wayland-core node list
+NODE           OS        STATE    VERSION    LIVENESS                     VERDICT / BACKENDS
+farnode        linux     paired   1.0        unknown (not probed since pairing) same | cloud (unavailable), container (unavailable), local, ssh (unavailable)
+[exit=0]
+
+STATE: far-end key  bfed45d376de52e0d67057526eb8c078210499f854053d55e42cba2456503445
+STATE: controller key d66f9b31b176e4b6c7307c0477c50fa9838635ab7004f047e6db92ecb4f8b300
+STATE: the far end proved possession of a key that is genuinely NOT the controller's, before any record was written
+### PAIR — the controller itself, as 'selfnode'
+$ /root/wayland-25/target/release/wayland-core node pair selfnode --target f25self --remote-bin /root/wayland-25/target/release/wayland-core
+pairing 'selfnode' at f25self (challenge 446e06855c8c)
+paired 'selfnode'
+  machine   ubuntu-2404-noble-amd64-base
+  os        linux
+  key id    d66f9b31b176e4b6c7307c0477c50fa9838635ab7004f047e6db92ecb4f8b300
+  version   1.0
+  verdict   same
+  backends  cloud (unavailable), container, local, ssh (unavailable)
+[exit=0]
+
+### PAIR (negative) — a host that does not answer
+$ /root/wayland-25/target/release/wayland-core node pair ghostnode --target root@203.0.113.253 --remote-bin /root/wayland-25/target/release/wayland-core
+pairing 'ghostnode' at root@203.0.113.253 (challenge 88f5d159abb3)
+wayland-core node: reaching node 'ghostnode' at root@203.0.113.253: far end exited 255: ssh: connect to host 203.0.113.253 port 22: Connection timed out 
+[exit=1]
+
+###      node list (ghostnode must be ABSENT)
+$ /root/wayland-25/target/release/wayland-core node list
+NODE           OS        STATE    VERSION    LIVENESS                     VERDICT / BACKENDS
+farnode        linux     paired   1.0        unknown (not probed since pairing) same | cloud (unavailable), container (unavailable), local, ssh (unavailable)
+selfnode       linux     paired   1.0        unknown (not probed since pairing) same | cloud (unavailable), container, local, ssh (unavailable)
+[exit=0]
+
+STATE: an unreachable far end was REFUSED and left no record at all

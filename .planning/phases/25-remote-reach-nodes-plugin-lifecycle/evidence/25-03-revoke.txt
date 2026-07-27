@@ -1,0 +1,55 @@
+STATE: selfnode machine=ubuntu-2404-noble-amd64-base available-backends=2
+STATE: the two machines advertise GENUINELY different capability sets, from real probes on each
+### WORK — run the reference task, attributed to node 'selfnode'
+$ /root/wayland-25/target/release/wayland-core backend run --backend local --receipt-out /root/f25-03-evidence/receipt-selfnode.json
+task:        f25-reference
+backend:     local
+transport:   Local via localhost
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: NotApplicable
+wall ms:     2
+receipt:     /root/f25-03-evidence/receipt-selfnode.json
+[exit=0]
+
+STATE: receipt node stamp: {"node_id": "selfnode", "machine_id": "ubuntu-2404-noble-amd64-base", "key_id": "d66f9b31b176e4b6c7307c0477c50fa9838635ab7004f047e6db92ecb4f8b300", "contract_version": {"major": 1, "minor": 0}}
+###      baseline attribution
+$ /root/wayland-25/target/release/wayland-core node attribution selfnode --receipt /root/f25-03-evidence/receipt-selfnode.json
+receipt     /root/f25-03-evidence/receipt-selfnode.json
+backend     local
+node        selfnode
+attribution HOLDS — work attributed to node 'selfnode' (key d66f9b31b176)
+[exit=0]
+
+###      the same receipt attributed to the WRONG node (must be refused)
+$ /root/wayland-25/target/release/wayland-core node attribution farnode --receipt /root/f25-03-evidence/receipt-selfnode.json
+receipt     /root/f25-03-evidence/receipt-selfnode.json
+backend     local
+node        farnode
+attribution BROKEN — receipt attributes work to node 'selfnode' (key d66f9b31b176) but the pinned record for 'farnode' carries key bfed45d376de
+wayland-core node: attribution BROKEN: receipt attributes work to node 'selfnode' (key d66f9b31b176) but the pinned record for 'farnode' carries key bfed45d376de
+[exit=1]
+
+STATE: cross-node attribution exit=1 (non-zero required, or attribution proves nothing)
+### REVOKE — withdraw authority from farnode
+$ /root/wayland-25/target/release/wayland-core node revoke farnode --reason operator withdrew authority for the F25-03 exercise
+REVOKED 'farnode' (operator withdrew authority for the F25-03 exercise)
+  no in-flight work was recorded against it
+  subsequent work to it will be REFUSED and will NOT be rerouted
+  the record is retained; the far end cannot re-pair itself
+[exit=0]
+
+###      submit to the REVOKED node (must exit non-zero)
+$ /root/wayland-25/target/release/wayland-core node submit farnode
+wayland-core node: REFUSED: node 'farnode' is REVOKED (operator withdrew authority for the F25-03 exercise); refusing to run and NOT falling back to another node (node 'farnode')
+[exit=1]
+
+###      submit to the OTHER healthy node (it must not have absorbed farnode's work)
+$ /root/wayland-25/target/release/wayland-core node submit selfnode
+ACCEPTED: node 'selfnode' may take work
+[exit=0]
+
+STATE: submit-to-revoked exit=1 ; submit-to-other exit=0
+STATE: the refusal names farnode and states plainly that nothing reroutes
