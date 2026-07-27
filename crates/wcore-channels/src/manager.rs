@@ -516,6 +516,45 @@ impl ChannelManager {
         guard.delete_message(conversation_id, message_id).await
     }
 
+    /// Take every registered adapter OUT of this manager, leaving it empty.
+    ///
+    /// Exists so a caller can build a DESIRED adapter set with the registry's
+    /// existing loader — which registers into a `ChannelManager` and nothing
+    /// else — and then hand that set to [`Self::reload`] on the live manager.
+    /// The alternative was a second loader that produces a bare `Vec`, i.e. two
+    /// code paths deciding which adapters exist, which is how the loaded set
+    /// and the reloaded set drift apart.
+    ///
+    /// An adapter whose poll task is still running is SKIPPED rather than
+    /// forcibly extracted: its `Arc` has a second owner, and tearing it out
+    /// from under a live task is not something a staging helper should do.
+    /// Callers use this on a freshly loaded, unstarted manager.
+    pub async fn take_registered(&mut self) -> Vec<Box<dyn Channel>> {
+        let names: Vec<String> = self.list_names();
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            if let Some(handle) = self.poll_tasks.remove(&name) {
+                handle.abort();
+            }
+            let Some(slot) = self.channels.remove(&name) else {
+                continue;
+            };
+            match Arc::try_unwrap(slot) {
+                Ok(mutex) => out.push(mutex.into_inner()),
+                Err(shared) => {
+                    tracing::warn!(
+                        target: "wcore_channels::manager",
+                        channel = %name,
+                        "adapter is still shared with a running task; leaving it registered"
+                    );
+                    self.channels.insert(name, shared);
+                }
+            }
+        }
+        health_lock(&self.health).retain(|k, _| self.channels.contains_key(k));
+        out
+    }
+
     /// Apply a new configured adapter set without disturbing adapters whose
     /// configuration did not change.
     ///

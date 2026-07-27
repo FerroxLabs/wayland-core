@@ -387,6 +387,158 @@ impl Channel for EmailChannel {
         include_str!("schemas/email.json")
     }
 
+    /// Setup and authentication probe — reference implementation for the
+    /// POLLING half of the Phase 24 channel matrix.
+    ///
+    /// The two reference adapters are deliberately different SHAPES, not two
+    /// spellings of the same shape. Discord's probe is one HTTP round trip
+    /// against a live persistent-connection API. This one has to resolve four
+    /// credential handles across two protocols and then open a real IMAP
+    /// session, so it exercises the parts of the contract a single-credential
+    /// HTTP adapter never touches: partial configuration, and an
+    /// authentication answer that costs a blocking socket.
+    ///
+    /// # Which credential is checked, and the gap this leaves
+    ///
+    /// The identity a mailbox authenticates as is the IMAP account, so IMAP is
+    /// what is logged into. SMTP's credentials are checked for PRESENCE only —
+    /// a probe that also sent through SMTP would be sending a message, which
+    /// this surface exists to avoid. An SMTP credential that is present but
+    /// wrong therefore passes this probe and fails at first send. That is a
+    /// stated gap, not an oversight; closing it needs an SMTP `NOOP`-style
+    /// handshake the sender abstraction does not currently expose.
+    async fn probe(&self) -> Result<wcore_channels::ProbeReport, ChannelError> {
+        use wcore_channels::ProbeReport;
+
+        // ---- 1. Configuration completeness. Every finding names the KEY,
+        // never a value.
+        let mut missing: Vec<String> = Vec::new();
+        if self.config.from_address.trim().is_empty() {
+            missing.push("from_address".to_string());
+        }
+        if self.config.smtp.host.trim().is_empty() {
+            missing.push("smtp.host".to_string());
+        }
+        for (label, handle) in [
+            (
+                "smtp.user_credential_handle",
+                &self.config.smtp.user_credential_handle,
+            ),
+            (
+                "smtp.password_credential_handle",
+                &self.config.smtp.password_credential_handle,
+            ),
+        ] {
+            if handle.trim().is_empty() {
+                missing.push(label.to_string());
+            } else if matches!(self.creds.get(handle), Ok(None)) {
+                missing.push(format!(
+                    "{label} -> {handle:?} absent from credentials store"
+                ));
+            }
+        }
+
+        let Some(imap_cfg) = self.config.imap.clone() else {
+            // No IMAP configured: this mailbox can send but never receives.
+            // That is a complete, legal configuration for an outbound-only
+            // channel, and it is NOT an authenticated one — there is no
+            // credential this probe can exercise without sending mail, so the
+            // honest verdict is Incomplete with the reason named, not Ok.
+            missing.push(
+                "imap (absent — outbound only; no credential can be verified without sending)"
+                    .to_string(),
+            );
+            return Ok(ProbeReport::incomplete(&self.name, "email", missing));
+        };
+
+        let user = match self.creds.get(&imap_cfg.user_credential_handle) {
+            Ok(Some(u)) => Some(u),
+            Ok(None) => {
+                missing.push(format!(
+                    "imap.user_credential_handle -> {:?} absent from credentials store",
+                    imap_cfg.user_credential_handle
+                ));
+                None
+            }
+            Err(e) => {
+                missing.push(format!("credentials store unreadable: {e}"));
+                None
+            }
+        };
+        let pass = match self.creds.get(&imap_cfg.password_credential_handle) {
+            Ok(Some(p)) => Some(p),
+            Ok(None) => {
+                missing.push(format!(
+                    "imap.password_credential_handle -> {:?} absent from credentials store",
+                    imap_cfg.password_credential_handle
+                ));
+                None
+            }
+            Err(e) => {
+                missing.push(format!("credentials store unreadable: {e}"));
+                None
+            }
+        };
+
+        let (Some(user), Some(pass)) = (user, pass) else {
+            return Ok(ProbeReport::incomplete(&self.name, "email", missing));
+        };
+        if !missing.is_empty() {
+            // Configuration is incomplete somewhere else. Report that rather
+            // than opening a socket: an operator fixes the missing key first,
+            // and a probe that authenticates anyway just adds noise.
+            return Ok(ProbeReport::incomplete(&self.name, "email", missing));
+        }
+
+        // ---- 2. Authentication. A real IMAP LOGIN, then an immediate LOGOUT.
+        // Nothing is fetched and no mailbox state is touched, so running this
+        // against a production mailbox is safe.
+        let host = imap_cfg.host.clone();
+        let port = imap_cfg.port;
+        let mailbox = imap_cfg.mailbox.clone();
+        let identity = user.clone();
+        let outcome = tokio::task::spawn_blocking(move || -> Result<(), (bool, String)> {
+            // `(is_auth_failure, reason)` — the bool is what separates
+            // "rotate the password" from "the server was unreachable", and
+            // collapsing it would make an operator rotate a working password
+            // because a firewall was in the way.
+            let tls =
+                native_tls::TlsConnector::new().map_err(|e| (false, format!("tls init: {e}")))?;
+            let client = ::imap::connect((host.as_str(), port), host.as_str(), &tls)
+                .map_err(|e| (false, format!("connect {host}:{port}: {e}")))?;
+            let mut session = client
+                .login(&user, &pass)
+                .map_err(|(e, _)| (true, format!("imap login rejected: {e}")))?;
+            // SELECT proves the configured mailbox actually exists. A login
+            // that succeeds against a mailbox name with a typo is a channel
+            // that starts and then receives nothing, forever.
+            let select = session
+                .select(&mailbox)
+                .map_err(|e| (false, format!("select {mailbox}: {e}")));
+            let _ = session.logout();
+            select.map(|_| ())
+        })
+        .await
+        .map_err(|e| ChannelError::Other(format!("probe task panicked: {e}")))?;
+
+        match outcome {
+            Ok(()) => Ok(ProbeReport::ok(&self.name, "email", identity)),
+            Err((true, reason)) => Ok(ProbeReport::unauthenticated(&self.name, "email", reason)),
+            Err((false, reason)) => Ok(ProbeReport::unreachable(&self.name, "email", reason)),
+        }
+    }
+
+    /// Inline attachment ceiling. Email attachments arrive base64-inlined by
+    /// the IMAP parser rather than fetched, so this bound governs how much of
+    /// a message body is retained, and it is lower than a link-based platform's
+    /// for that reason.
+    fn media_bounds(&self) -> wcore_channels::MediaBounds {
+        wcore_channels::MediaBounds {
+            max_bytes: 10 * 1024 * 1024,
+            max_attachments: 20,
+        }
+    }
+
     /// Return the bytes of an inbound email attachment. The IMAP parser already
     /// decoded each attachment part and inlined it as a `data:<mime>;base64,…`
     /// URL (bounded — oversize parts stay metadata-only), so there is no network

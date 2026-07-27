@@ -628,6 +628,46 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
         resumed.quarantined,
     );
 
+    // F24-03. The gateway hosts the channel adapters and REPUBLISHES their
+    // observed health every tick, because `wayland-core channel health` runs
+    // in a different process and would otherwise have to fabricate an answer
+    // by starting its own adapters — describing channels eight milliseconds
+    // old instead of the ones carrying traffic. Every failure here is
+    // non-fatal: a gateway with no channels still runs the schedule, and
+    // taking the whole runtime down because one adapter's credential is
+    // missing would be a worse outcome than a Disconnected row in `health`.
+    let mut channels = wcore_channels_registry::wcore_channels::ChannelManager::new();
+    let channels_dir = home.join("channels");
+    match wcore_config::config::Config::resolve(&wcore_config::config::CliArgs::default())
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .and_then(|c| {
+            c.open_credentials_store()
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        }) {
+        Ok(store) => {
+            let creds: Arc<dyn wcore_config::credentials::CredentialsStore> = Arc::from(store);
+            match wcore_channels_registry::auto_register_from_dir(
+                &mut channels,
+                &channels_dir,
+                creds,
+            )
+            .await
+            {
+                Ok(n) => {
+                    if n > 0
+                        && let Err(e) = channels.start_all().await
+                    {
+                        eprintln!("[gateway] channel start_all: {e}");
+                    }
+                    eprintln!("[gateway] channels registered={n}");
+                }
+                Err(e) => eprintln!("[gateway] channel registration failed: {e}"),
+            }
+        }
+        Err(e) => eprintln!("[gateway] credentials store unavailable, channels disabled: {e}"),
+    }
+    let _ = crate::channel::publish_health(&home, &channels.health());
+
     let binary_path = std::env::current_exe().ok();
     let binary_version = Some(env!("CARGO_PKG_VERSION").to_string());
     let project = |plane: &wcore_gateway::automation::AutomationPlane, state: GatewayState| {
@@ -681,10 +721,54 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                     publish(&home, &project(&plane, GatewayState::Draining))?;
                     break;
                 }
+                // A reload request is honoured BEFORE the tick, so a tick that
+                // dispatches through a channel uses the adapter set the
+                // operator just asked for rather than the previous one.
+                if std::fs::remove_file(crate::channel::channel_reload_path(&home)).is_ok() {
+                    match wcore_config::config::Config::resolve(
+                        &wcore_config::config::CliArgs::default(),
+                    )
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+                    .and_then(|c| c.open_credentials_store().map_err(|e| anyhow::anyhow!("{e}")))
+                    {
+                        Ok(store) => {
+                            let creds: Arc<dyn wcore_config::credentials::CredentialsStore> =
+                                Arc::from(store);
+                            // Build the DESIRED set from disk, then hand it to
+                            // `reload`, which keeps the running instance of any
+                            // adapter whose configuration did not change.
+                            let mut staging = wcore_channels_registry::wcore_channels::ChannelManager::new();
+                            match wcore_channels_registry::auto_register_from_dir(
+                                &mut staging,
+                                &channels_dir,
+                                creds,
+                            )
+                            .await
+                            {
+                                Ok(_) => {
+                                    let desired = staging.take_registered().await;
+                                    let report = channels.reload(desired).await;
+                                    eprintln!(
+                                        "[gateway] channel reload: added={:?} replaced={:?} removed={:?} unchanged={:?}",
+                                        report.added,
+                                        report.replaced,
+                                        report.removed,
+                                        report.unchanged
+                                    );
+                                }
+                                Err(e) => eprintln!("[gateway] channel reload failed: {e}"),
+                            }
+                        }
+                        Err(e) => eprintln!("[gateway] channel reload: credentials store: {e}"),
+                    }
+                }
                 if let Err(e) = plane.tick(chrono::Utc::now()).await {
                     eprintln!("[gateway] tick error: {e}");
                 }
                 publish(&home, &project(&plane, plane.state()))?;
+                // Republished on the SAME tick as the projection so the two
+                // surfaces can never disagree about when they were observed.
+                let _ = crate::channel::publish_health(&home, &channels.health());
             }
         }
     }
@@ -709,6 +793,13 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
     for id in &report.abandoned {
         eprintln!("[gateway] ABANDONED delivery {id}");
     }
+
+    // Channels stop with the runtime. The published health is then REMOVED
+    // rather than left describing a set of adapters that no longer exists —
+    // `channel health` already refuses on a dead pid, and leaving a file
+    // behind gives a second reader a chance to get it wrong.
+    let _ = channels.stop_all().await;
+    let _ = std::fs::remove_file(crate::channel::channel_health_path(&home));
 
     let mut final_proj = project(&plane, GatewayState::Drained);
     final_proj.pid = None;

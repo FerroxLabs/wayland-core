@@ -29,6 +29,16 @@ use wcore_config::credentials::CredentialsStore;
 
 pub use wcore_channels::auto_register::{ChannelFactory as Factory, ChannelLoadError as LoadError};
 
+/// The channel runtime this registry loads into, re-exported.
+///
+/// F24-03. `wayland-core channel` and `gateway run` need the manager, the
+/// health projection and the probe report, and they already depend on this
+/// crate to construct adapters at all. Re-exporting is how they reach those
+/// types WITHOUT `wcore-cli` growing a second direct edge to `wcore-channels`
+/// — a new dependency edge rewrites `Cargo.lock`, which is a Phase-24 shared
+/// seam that concurrent lanes conflict on deterministically.
+pub use wcore_channels;
+
 /// Look up the constructor for a given platform string. Returns `None`
 /// for any platform the registry doesn't know about — callers should
 /// log + skip rather than crash so a single rogue config can't take

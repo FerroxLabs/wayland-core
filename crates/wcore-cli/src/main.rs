@@ -728,6 +728,10 @@ enum TopCmd {
     /// stop / restart / status / drain, plus the `run` verb every generated
     /// launchd, systemd and scheduled-task unit invokes.
     Gateway(wcore_cli::gateway::GatewayArgs),
+    /// F24-03: channel adapters — list / probe / health / reload. `probe` asks
+    /// the platform and needs no gateway; `health` reports only what a RUNNING
+    /// gateway has observed and refuses otherwise.
+    Channel(wcore_cli::channel::ChannelArgs),
     /// Manage isolated profiles — each is an independent `WAYLAND_HOME`-rooted
     /// home with its own config, credentials, memory, and skills.
     Profile {
@@ -1378,6 +1382,13 @@ async fn run() -> anyhow::Result<ExitCode> {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(e) => {
                     eprintln!("wayland-core gateway: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
+            TopCmd::Channel(args) => match wcore_cli::channel::run(args).await {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core channel: {e:#}");
                     Ok(ExitCode::FAILURE)
                 }
             },
