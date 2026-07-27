@@ -1,0 +1,19 @@
+
+HANDLER-CONTROL-DELIVERY: helper exit 0
+INTERRUPT-PLATFORM: windows
+KILL-MECHANISM: console-ctrl-c CATCHABLE: yes
+KILL-HANDLER-PROBE: installed=yes fired=no
+FIXTURE-PAYLOADS: 120
+MIDFLIGHT-JOURNAL-OPEN: no
+MIDFLIGHT-TARGET-INTERMEDIATE: no
+MIDFLIGHT-TIMING: op_expected_ms=3441 kill_at_ms=900 completed_before_kill=yes
+DIGEST-ALGO: sha256/wcore-portability-tree-v1 path-norm=slash-relative content=raw-bytes
+DIGEST-PRE: 719ee8c7770d7dbc8b1cabfe55d94ae8cce11382ebd64cad1fca91c808c2aa51
+DIGEST-POST: ac93329ece23ae81807dc31c661847b7bb7ca72649e02500a3397079d6e30978
+DIGEST-EQUAL: no
+DEEP-PATH-RESTORED: yes len=294
+HANDLER-CONTROL: fired=no
+PROOF-FAIL: the handler probe did NOT fire for a catchable mechanism, so the uncatchability
+measurement is vacuous on this platform
+
+

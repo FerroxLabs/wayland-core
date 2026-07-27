@@ -199,7 +199,17 @@ DIGEST_EQUAL=no
 # --- verdict block ------------------------------------------------------------
 echo "INTERRUPT-PLATFORM: linux"
 echo "KILL-MECHANISM: $KILL_NAME CATCHABLE: $KILL_CATCHABLE"
-echo "KILL-HANDLER-PROBE: installed=yes fired=$HANDLER_FIRED"
+# `installed` is READ, never asserted. It was the literal string "yes", so the
+# line reported an armed probe whether or not one existed -- and a probe that
+# silently failed to arm produces exactly the `fired=no` on which the
+# uncatchability claim rests. The binary writes the marker only after a handler
+# is genuinely registered.
+if [ -f "$PROBE.armed" ]; then HANDLER_INSTALLED=yes; else HANDLER_INSTALLED=no; fi
+echo "KILL-HANDLER-PROBE: installed=$HANDLER_INSTALLED fired=$HANDLER_FIRED"
+if [ "$HANDLER_INSTALLED" != yes ]; then
+  echo "PROOF-FAIL: the kill-handler probe never armed, so fired=no measures nothing at all" >&2
+  exit 1
+fi
 echo "FIXTURE-PAYLOADS: $PAYLOADS"
 echo "MIDFLIGHT-JOURNAL-OPEN: $MIDFLIGHT_JOURNAL_OPEN"
 echo "MIDFLIGHT-TARGET-INTERMEDIATE: $MIDFLIGHT_TARGET_INTERMEDIATE"

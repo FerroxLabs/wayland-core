@@ -40,9 +40,23 @@ use std::path::Path;
 /// the rename is journalled so the new dentry survives a crash; the
 /// extra `fsync(parent_dir)` would block the call by ~1ms for a
 /// guarantee the journal already provides.
+/// # Long destination paths on Windows (F26-03-D)
+///
+/// The tempfile round trip below reaches Win32 (`MoveFileExW`) without
+/// `std`'s long-path handling, so a destination past `MAX_PATH` (260)
+/// fails with `ERROR_PATH_NOT_FOUND` even where `std::fs::write` to the
+/// very same path succeeds. Measured on Windows 11 26200 at a 320-char
+/// plain `C:\...` path: `create_dir_all` OK, `fs::write` OK,
+/// `atomic_write` **os error 3**.
+///
+/// [`long_path_safe_dest`] resolves the parent to its extended-length
+/// (`\\?\`) form before the round trip, which lifts the limit at the
+/// Win32 layer regardless of the machine's `LongPathsEnabled` setting.
 pub fn atomic_write<P: AsRef<Path>>(path: P, contents: &[u8]) -> std::io::Result<()> {
     let path = path.as_ref();
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let dest = long_path_safe_dest(path)?;
+    let dest = dest.as_ref();
+    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
 
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     tmp.write_all(contents)?;
@@ -51,12 +65,184 @@ pub fn atomic_write<P: AsRef<Path>>(path: P, contents: &[u8]) -> std::io::Result
     // `persist()` does the atomic rename. `PersistError` wraps both
     // the underlying io::Error and the un-renamed temp file; we only
     // care about the io::Error for callers using `?`.
-    tmp.persist(path).map(|_| ()).map_err(|e| e.error)
+    tmp.persist(dest).map(|_| ()).map_err(|e| e.error)
+}
+
+/// Length past which a destination is rewritten to extended-length form on
+/// Windows. Well below `MAX_PATH` (260) so there is headroom for the sibling
+/// temp file's own name, which is what the round trip actually creates.
+#[cfg(windows)]
+const WINDOWS_LONG_PATH_THRESHOLD: usize = 200;
+
+/// The single place platform long-path handling lives, per the
+/// centralize-platform-differences rule. On unix this is the identity.
+///
+/// Only paths at or past the threshold are rewritten, so the ordinary short
+/// path keeps exactly its present behavior and the change is bounded to the
+/// case that is broken today.
+#[cfg(windows)]
+fn long_path_safe_dest(path: &Path) -> std::io::Result<std::borrow::Cow<'_, Path>> {
+    use std::borrow::Cow;
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let too_long = path.as_os_str().len() >= WINDOWS_LONG_PATH_THRESHOLD
+        || parent.as_os_str().len() >= WINDOWS_LONG_PATH_THRESHOLD;
+    if !too_long || path.to_string_lossy().starts_with(r"\\?\") {
+        return Ok(Cow::Borrowed(path));
+    }
+    let Some(file_name) = path.file_name() else {
+        return Ok(Cow::Borrowed(path));
+    };
+    // `canonicalize` is how std spells "extended-length form" on Windows. The
+    // parent must already exist for the tempfile round trip to work at all, so
+    // resolving it here costs one metadata call and no new failure mode: if it
+    // cannot be resolved the original path is used and the caller sees the same
+    // error it would have seen anyway.
+    match std::fs::canonicalize(parent) {
+        Ok(canon) => Ok(Cow::Owned(canon.join(file_name))),
+        Err(_) => Ok(Cow::Borrowed(path)),
+    }
+}
+
+#[cfg(not(windows))]
+#[inline]
+fn long_path_safe_dest(path: &Path) -> std::io::Result<std::borrow::Cow<'_, Path>> {
+    // unix has no MAX_PATH equivalent at this scale (PATH_MAX is 4096) and no
+    // extended-length form, so there is nothing to rewrite.
+    Ok(std::borrow::Cow::Borrowed(path))
+}
+
+/// Build a path under `base` whose total length exceeds Windows' `MAX_PATH`
+/// (260), using nesting rather than one long component so that every individual
+/// component stays inside the 255-byte per-component limit every filesystem
+/// enforces.
+///
+/// Shared by the tests below and by `wcore-cli`'s backup long-path proof, so
+/// both measure the same shape rather than two hand-rolled approximations that
+/// could drift apart and disagree about what "deep" means.
+///
+/// `sep` selects the separator used to build the RELATIVE part. This is the
+/// variable under test, not a detail: a backup manifest records payload paths
+/// `/`-separated (`path-norm=slash-relative`), so the restore reconstructs a
+/// target path by joining ONE forward-slash string onto the target root. A
+/// fixture built with `\` is a different shape and, measured, does not reach
+/// the defect.
+#[doc(hidden)]
+pub fn deep_path_over_max_path(base: &Path, leaf: &str, sep: char) -> std::path::PathBuf {
+    const WINDOWS_MAX_PATH: usize = 260;
+    let mut rel = String::new();
+    // Components of 40 chars each, each well inside the 255-byte per-component
+    // limit every filesystem enforces, nested until the total is past 260.
+    while base.as_os_str().len() + rel.len() + leaf.len() + 2 <= WINDOWS_MAX_PATH + 40 {
+        rel.push_str("d234567890123456789012345678901234567890");
+        rel.push(sep);
+    }
+    rel.push_str(leaf);
+    // A single join of the whole relative string, exactly as the restore write
+    // loop does it (`target.join(&entry.path)`).
+    base.join(rel)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F26-03-D. The Windows restore failed with `os error 3` past `MAX_PATH`
+    /// while `create` accepted the same tree.
+    ///
+    /// The separator is the variable, and it is the whole point. A first
+    /// version of this test built the deep path with `\` and PASSED on Windows
+    /// at 306 characters — every leg green, defect untouched. The restore does
+    /// not build paths that way: a manifest records payload paths
+    /// `/`-separated, so the write loop joins one forward-slash string onto the
+    /// target root. The `\` leg is kept as a CONTROL: it proves the harness,
+    /// the box and the length regime are all fine, so a failure on the `/` leg
+    /// isolates the separator rather than the depth.
+    ///
+    /// Each of the three calls the restore path makes is measured separately —
+    /// `create_dir_all`, plain `fs::write`, `atomic_write` — because they fail
+    /// for different reasons and a combined check would hide which.
+    ///
+    /// On unix this is already green against the untouched tree: `PATH_MAX` is
+    /// 4096 and `/` is the native separator, so neither variable exists there.
+    /// The unix run proves the fixture is well formed; only the Windows run is
+    /// a gate.
+    #[test]
+    fn atomic_write_survives_a_path_past_windows_max_path() {
+        // A PLAIN absolute base, deliberately NOT `canonicalize()`d. On Windows
+        // `canonicalize()` returns an extended-length `\\?\` path, which is
+        // already in the form that lifts the 260 limit — a base built that way
+        // measures the working mode and can never reach the defect. A restore
+        // target arrives from the command line as a plain `C:\...` path, so
+        // that is what the fixture must use.
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().to_path_buf();
+        assert!(
+            !base.to_string_lossy().starts_with(r"\\?\"),
+            "fixture base is already verbatim, so it cannot reach the defect: {}",
+            base.display()
+        );
+
+        // The control leg runs FIRST. If it fails, the box or the harness is
+        // the problem and the `/` result would be uninterpretable.
+        //
+        // The control uses the platform's NATIVE separator, not a literal `\`.
+        // On unix `\` is an ordinary filename character, so a `\`-built fixture
+        // is one 300-byte component rather than a nested path, and it fails
+        // with ENAMETOOLONG against `NAME_MAX` — a fixture defect that says
+        // nothing about `atomic_write`. Measured: it did exactly that on Linux.
+        // On unix the two legs are therefore the same shape, and the test
+        // honestly degenerates to a single measurement there; the separator
+        // distinction only exists on Windows.
+        let native = std::path::MAIN_SEPARATOR;
+        for (label, sep) in [
+            ("control-native-sep", native),
+            ("subject-forwardslash", '/'),
+        ] {
+            let root = base.join(label);
+            std::fs::create_dir_all(&root).unwrap();
+            let deep = deep_path_over_max_path(&root, "payload.txt", sep);
+            let len = deep.as_os_str().len();
+            assert!(
+                len > 260,
+                "[{label}] fixture too shallow to reach the defect: {len} chars"
+            );
+
+            let parent = deep.parent().unwrap();
+            let mkdir = std::fs::create_dir_all(parent);
+            println!("LONGPATH[{label}]-LEN: {len}");
+            println!(
+                "LONGPATH[{label}]-CREATE-DIR-ALL: {:?}",
+                mkdir.as_ref().err()
+            );
+            mkdir.unwrap_or_else(|e| panic!("[{label}] create_dir_all failed past MAX_PATH: {e}"));
+
+            // Plain `fs::write` goes through std's own long-path handling;
+            // `atomic_write` additionally goes through the tempfile round trip.
+            // Measuring both tells us which layer is responsible.
+            let plain = parent.join("plain.txt");
+            let plain_res = std::fs::write(&plain, b"plain");
+            println!(
+                "LONGPATH[{label}]-STD-WRITE: {:?}",
+                plain_res.as_ref().err()
+            );
+
+            let atomic_res = atomic_write(&deep, b"atomic");
+            println!(
+                "LONGPATH[{label}]-ATOMIC-WRITE: {:?}",
+                atomic_res.as_ref().err()
+            );
+
+            plain_res.unwrap_or_else(|e| panic!("[{label}] fs::write failed past MAX_PATH: {e}"));
+            atomic_res
+                .unwrap_or_else(|e| panic!("[{label}] atomic_write failed past MAX_PATH: {e}"));
+            assert_eq!(std::fs::read(&deep).unwrap(), b"atomic");
+            // It must REPLACE as well as create — persisting over an existing
+            // long path is a different Win32 call shape from creating one.
+            atomic_write(&deep, b"atomic-2").unwrap();
+            assert_eq!(std::fs::read(&deep).unwrap(), b"atomic-2");
+        }
+    }
 
     #[test]
     fn atomic_write_replaces_existing_file() {

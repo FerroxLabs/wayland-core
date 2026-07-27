@@ -1,0 +1,12 @@
+INTERRUPT-PLATFORM: linux
+KILL-MECHANISM: SIGKILL CATCHABLE: no
+KILL-HANDLER-PROBE: installed=yes fired=no
+FIXTURE-PAYLOADS: 120
+MIDFLIGHT-JOURNAL-OPEN: yes
+MIDFLIGHT-TARGET-INTERMEDIATE: yes
+MIDFLIGHT-TIMING: op_expected_ms=3231 kill_at_ms=900 completed_before_kill=no
+DIGEST-ALGO: sha256/wcore-portability-tree-v1 path-norm=slash-relative content=raw-bytes
+DIGEST-PRE: 4069e26f5d5527be57482afe86f6c422b22d19a5ee9574cf44fb087b89542a40
+DIGEST-POST: 4069e26f5d5527be57482afe86f6c422b22d19a5ee9574cf44fb087b89542a40
+DIGEST-EQUAL: yes
+PROOF-OK: exact rollback from an uncatchable mid-flight kill, over a target that carried state

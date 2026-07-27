@@ -1,0 +1,16 @@
+
+INTERRUPT-PLATFORM: windows
+KILL-MECHANISM: TerminateProcess CATCHABLE: no
+KILL-HANDLER-PROBE: installed=yes fired=no
+FIXTURE-PAYLOADS: 120
+MIDFLIGHT-JOURNAL-OPEN: yes
+MIDFLIGHT-TARGET-INTERMEDIATE: yes
+MIDFLIGHT-TIMING: op_expected_ms=3408 kill_at_ms=900 completed_before_kill=no
+DIGEST-ALGO: sha256/wcore-portability-tree-v1 path-norm=slash-relative content=raw-bytes
+DIGEST-PRE: 719ee8c7770d7dbc8b1cabfe55d94ae8cce11382ebd64cad1fca91c808c2aa51
+DIGEST-POST: 719ee8c7770d7dbc8b1cabfe55d94ae8cce11382ebd64cad1fca91c808c2aa51
+DIGEST-EQUAL: yes
+DEEP-PATH-RESTORED: yes len=294
+PROOF-OK: exact rollback from an uncatchable mid-flight kill, over a target that carried state
+
+

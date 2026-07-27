@@ -31,6 +31,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 
+
 function Fail($msg) {
     Write-Output "PROOF-FAIL: $msg"
     exit 1
@@ -128,27 +129,73 @@ if ($OpenHandle) {
 
 # --- the interrupted run ------------------------------------------------------
 $env:WAYLAND_BACKUP_KILL_PROBE = $Probe
-$proc = Start-Process -FilePath $Binary -PassThru -WindowStyle Hidden `
-    -ArgumentList @('backup', 'restore', $Archive, '--home', $Target, '--replace',
-                    '--accept-missing-secrets', '--pace-ms', "$PaceMs") `
-    -RedirectStandardOutput (Join-Path $Work 'restore.out') `
-    -RedirectStandardError  (Join-Path $Work 'restore.err')
+$restoreArgs = @('backup', 'restore', $Archive, '--home', $Target, '--replace',
+                 '--accept-missing-secrets', '--pace-ms', "$PaceMs")
+if ($HandlerControl) {
+    # The control child needs its OWN console, because a close request is
+    # delivered to a console window and is what turns into a catchable
+    # CTRL_CLOSE_EVENT inside the process. Measured: launched hidden with its
+    # stdio redirected, the child had no console to receive the close request,
+    # so the probe could not fire and the control was structurally unable to
+    # go green. Redirection is dropped only for this leg; the real run keeps it.
+    $proc = Start-Process -FilePath $Binary -PassThru -ArgumentList $restoreArgs
+} else {
+    $proc = Start-Process -FilePath $Binary -PassThru -WindowStyle Hidden `
+        -ArgumentList $restoreArgs `
+        -RedirectStandardOutput (Join-Path $Work 'restore.out') `
+        -RedirectStandardError  (Join-Path $Work 'restore.err')
+}
 
 Start-Sleep -Milliseconds $KillAtMs
 
 $KillLanded = 'no'
 $KillName = 'TerminateProcess'
 $KillCatchable = 'no'
-if ($HandlerControl) { $KillName = 'taskkill-close-request'; $KillCatchable = 'yes' }
+if ($HandlerControl) { $KillName = 'console-ctrl-c'; $KillCatchable = 'yes' }
 
 if (-not $proc.HasExited) {
     if ($HandlerControl) {
-        # A CLOSE REQUEST, not a terminate: this is the catchable mechanism, and
-        # the probe must fire for it. Without this pair, `fired=no` in the real
-        # run is equally consistent with a probe that was never installed.
-        & taskkill /PID $proc.Id *> $null
+        # A real console CTRL_BREAK, not a window close request. Measured on
+        # this box, twice: `taskkill` without `/F` posts WM_CLOSE to a TOP-LEVEL
+        # WINDOW, and a process started from a non-interactive ssh session has
+        # no such window -- so nothing was ever delivered, the probe could not
+        # fire, and the control was structurally incapable of going green. That
+        # made the real run's `fired=no` vacuous rather than a measurement.
+        #
+        # GenerateConsoleCtrlEvent delivers to every process attached to the
+        # child's console. We detach from our own console, attach to the
+        # child's, and neutralize the event for ourselves with a NULL handler
+        # before raising it -- otherwise this script dies alongside the child
+        # and the run reports nothing at all.
         $KillLanded = 'yes'
-        Start-Sleep -Milliseconds 800
+        # The console work runs in a SEPARATE helper process, deliberately.
+        # AttachConsole RESETS the calling process's standard handles to the
+        # console it attaches to. Doing it inline swapped this script's stdout
+        # away from the ssh pipe mid-run and the entire proof produced no output
+        # at all -- a run that looks like a hang and reports nothing. The helper
+        # sacrifices its own handles instead; ours are never touched.
+        $helper = @'
+Add-Type -Namespace W -Name K -MemberDefinition @"
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool FreeConsole();
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool AttachConsole(uint dwProcessId);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool SetConsoleCtrlHandler(IntPtr handler, bool add);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool GenerateConsoleCtrlEvent(uint dwCtrlEvent, uint dwProcessGroupId);
+"@
+[W.K]::FreeConsole() | Out-Null
+if (-not [W.K]::AttachConsole([uint32]$args[0])) { exit 21 }
+# Suppress the event for THIS helper only; CTRL_C is the one a null handler can
+# actually suppress, which is why it is used rather than CTRL_BREAK.
+[W.K]::SetConsoleCtrlHandler([IntPtr]::Zero, $true) | Out-Null
+if (-not [W.K]::GenerateConsoleCtrlEvent(0, 0)) { exit 22 }
+Start-Sleep -Milliseconds 300
+exit 0
+'@
+        $helperPath = Join-Path $Work 'send-ctrl-c.ps1'
+        Set-Content -LiteralPath $helperPath -Value $helper -Encoding ASCII
+        $h = Start-Process -FilePath 'powershell.exe' -PassThru -Wait -WindowStyle Hidden `
+             -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $helperPath, "$($proc.Id)")
+        Write-Output ("HANDLER-CONTROL-DELIVERY: helper exit " + $h.ExitCode)
+        Start-Sleep -Milliseconds 1500
         if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
     } else {
         # TerminateProcess: cannot be trapped, masked or deferred by the target.
@@ -195,7 +242,17 @@ if ($DigestPre -eq $DigestPost) { $DigestEqual = 'yes' }
 # --- verdict block ------------------------------------------------------------
 Write-Output "INTERRUPT-PLATFORM: windows"
 Write-Output "KILL-MECHANISM: $KillName CATCHABLE: $KillCatchable"
-Write-Output "KILL-HANDLER-PROBE: installed=yes fired=$HandlerFired"
+# `installed` is READ, never asserted. It used to be the literal string "yes",
+# so the line reported an armed probe whether or not one existed -- and a probe
+# that silently failed to arm produces exactly the `fired=no` on which the whole
+# uncatchability claim rests. The binary writes the marker only after a handler
+# is genuinely registered.
+$ArmedMarker = $Probe + '.armed'
+$HandlerInstalled = if (Test-Path -LiteralPath $ArmedMarker) { 'yes' } else { 'no' }
+Write-Output "KILL-HANDLER-PROBE: installed=$HandlerInstalled fired=$HandlerFired"
+if ($HandlerInstalled -ne 'yes') {
+    Fail 'the kill-handler probe never armed, so fired=no measures nothing at all'
+}
 Write-Output "FIXTURE-PAYLOADS: $Payloads"
 Write-Output "MIDFLIGHT-JOURNAL-OPEN: $MidflightJournalOpen"
 Write-Output "MIDFLIGHT-TARGET-INTERMEDIATE: $MidflightTargetIntermediate"
@@ -235,6 +292,20 @@ if ($Undersized) {
     Fail 'the undersized fixture was still mid-flight; the negative control did not reproduce a late kill'
 }
 
+if ($OpenHandle) {
+    # This leg does not need a mid-flight kill and must not require one. Its
+    # documented assertion is that a restore contending with another handle
+    # either SUCCEEDS or FAILS CLEANLY with an exact rollback -- never a half
+    # state. Measured: the contended write fails fast, so the operation is over
+    # before any kill could land, and demanding a mid-flight kill scored a
+    # correct product outcome as a harness failure.
+    if ($DigestEqual -ne 'yes') {
+        Fail "open-handle contention left the target neither its old self nor its new one ($DigestPre vs $DigestPost)"
+    }
+    Write-Output 'OPEN-HANDLE-OUTCOME: resolved cleanly with an exact tree'
+    Write-Output 'PROOF-OK: a restore contending with another open handle left the target byte-identical to its pre-operation tree'
+    exit 0
+}
 if ($KillLanded -ne 'yes')                  { Fail 'the process had already exited when the kill was sent' }
 if ($MidflightJournalOpen -ne 'yes')        { Fail 'no open journal record: the kill did not land mid-flight' }
 if ($MidflightTargetIntermediate -ne 'yes') { Fail 'the target was not observably intermediate: the kill did not land mid-flight' }

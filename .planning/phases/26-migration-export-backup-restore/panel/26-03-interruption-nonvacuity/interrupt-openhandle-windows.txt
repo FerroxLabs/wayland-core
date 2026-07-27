@@ -1,0 +1,21 @@
+
+OPEN-HANDLE: holding
+C:\Users\seand\AppData\Local\Temp\f26-int-d2465944a853\target-home\config.toml exclusively during
+the restore
+INTERRUPT-PLATFORM: windows
+KILL-MECHANISM: TerminateProcess CATCHABLE: no
+KILL-HANDLER-PROBE: installed=yes fired=no
+FIXTURE-PAYLOADS: 120
+MIDFLIGHT-JOURNAL-OPEN: no
+MIDFLIGHT-TARGET-INTERMEDIATE: no
+MIDFLIGHT-TIMING: op_expected_ms=3473 kill_at_ms=900 completed_before_kill=yes
+DIGEST-ALGO: sha256/wcore-portability-tree-v1 path-norm=slash-relative content=raw-bytes
+DIGEST-PRE: 719ee8c7770d7dbc8b1cabfe55d94ae8cce11382ebd64cad1fca91c808c2aa51
+DIGEST-POST: 719ee8c7770d7dbc8b1cabfe55d94ae8cce11382ebd64cad1fca91c808c2aa51
+DIGEST-EQUAL: yes
+DEEP-PATH-RESTORED: yes len=294
+OPEN-HANDLE-OUTCOME: resolved cleanly with an exact tree
+PROOF-OK: a restore contending with another open handle left the target byte-identical to its
+pre-operation tree
+
+
