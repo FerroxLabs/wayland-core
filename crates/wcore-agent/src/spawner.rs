@@ -5105,6 +5105,65 @@ mod posture_inheritance_tests {
         );
     }
 
+    /// Phase 21, F21-02-02 LIVE leg. `BaselineExecutionPolicy::with_requested_approvals`
+    /// carries the child ratchet, but `PolicySource::Child` has no production
+    /// constructor, so no live child reaches it. The seam a live child DOES
+    /// reach is the two lines in `pre_resolve_durable_launch` reproduced below:
+    /// the child's durable policy receipt is
+    /// `effective_policy.with_runtime_approvals(child_config.smart_approval_policy())`,
+    /// and nothing on that path resolves the request against the Managed floor
+    /// that `effective_policy` carries. A config whose typed baseline is Managed
+    /// while its legacy `auto_approve` says otherwise therefore minted a receipt
+    /// asserting `posture: managed` and `managed_floor_active: true` alongside
+    /// `approvals: bypass` — the floor reported as enforced and bypassed at once.
+    #[test]
+    fn child_durable_receipt_cannot_report_a_managed_floor_as_bypassed() {
+        // A managed baseline whose legacy approval fields disagree with it.
+        // `AgentSpawner::new` derives the session receipt from the TYPED
+        // baseline; `child_config` derives the child's posture from the legacy
+        // fields, so the two sides of the seam genuinely diverge.
+        let mut authority = config_with_posture(true, vec![]);
+        authority.execution_policy =
+            BaselineExecutionPolicy::managed(ApprovalPolicy::Prompt, ManagedDangerousPolicy::Allow);
+
+        let spawner = AgentSpawner::new(Arc::new(NeverProvider), authority);
+        let child = spawner.child_config(&sub_config());
+        assert_eq!(
+            child.smart_approval_policy(),
+            ApprovalPolicy::Bypass,
+            "precondition: the seam must actually be handed a widening request",
+        );
+
+        // Verbatim reproduction of `pre_resolve_durable_launch`.
+        let runtime_policy = spawner
+            .effective_policy
+            .with_runtime_approvals(child.smart_approval_policy());
+        let receipt = super::child_policy_snapshot(&runtime_policy)
+            .expect("child policy snapshot must encode");
+
+        // The contradiction itself: a receipt may never simultaneously assert a
+        // Managed posture with an active floor AND report that floor bypassed.
+        assert!(
+            !(receipt.posture == "managed"
+                && receipt.managed_floor_active
+                && receipt.approvals == "bypass"),
+            "receipt asserts an active Managed floor and reports it bypassed at once: \
+             posture={} managed_floor_active={} approvals={}",
+            receipt.posture,
+            receipt.managed_floor_active,
+            receipt.approvals,
+        );
+        assert_eq!(
+            receipt.approvals, "prompt",
+            "a child's durable receipt widened an active Managed floor to bypass",
+        );
+        assert_eq!(receipt.posture, "managed");
+        assert!(
+            receipt.managed_floor_active,
+            "the receipt must keep asserting the floor it now actually enforces",
+        );
+    }
+
     #[test]
     fn routed_seat_preserves_canonical_policy_and_budget_authority() {
         let mut authority = config_with_posture(false, vec!["Read".into()]);

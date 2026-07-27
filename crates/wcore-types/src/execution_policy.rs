@@ -593,6 +593,151 @@ mod tests {
         }
     }
 
+    /// The pre-fix body of [`EffectiveExecutionPolicy::with_runtime_approvals`],
+    /// verbatim: a bare replacement. Kept as the reference implementation so the
+    /// non-regression carve-outs below can assert BYTE-identity against the
+    /// behaviour that shipped before the ratchet, rather than merely asserting
+    /// the approvals accessor.
+    fn bare_replacement_with_runtime_approvals(
+        policy: &EffectiveExecutionPolicy,
+        approvals: ApprovalPolicy,
+    ) -> EffectiveExecutionPolicy {
+        let mut snapshot = policy.clone();
+        snapshot.approvals = approvals;
+        snapshot
+    }
+
+    /// Phase 21, F21-02-02 LIVE leg. `with_requested_approvals` is where the
+    /// ratchet was installed, but `PolicySource::Child` has no production
+    /// constructor, so no live child ever reaches it. The seam a live child DOES
+    /// reach is `EffectiveExecutionPolicy::with_runtime_approvals`, called by
+    /// `AgentSpawner::pre_resolve_durable_launch` to build the child's durable
+    /// policy receipt. That call passed `child_config.smart_approval_policy()`
+    /// straight through with no floor resolution, so an active Managed floor
+    /// could be reported as bypassed by the receipt that claims to enforce it.
+    #[test]
+    fn managed_floor_cannot_be_widened_by_a_runtime_approval_snapshot() {
+        let managed =
+            BaselineExecutionPolicy::managed(ApprovalPolicy::Prompt, ManagedDangerousPolicy::Allow);
+        let effective = EffectiveExecutionPolicy::baseline(&managed);
+        assert!(effective.managed_floor_active());
+
+        for requested in [ApprovalPolicy::Bypass, ApprovalPolicy::AutoEdit] {
+            let snapshot = effective.with_runtime_approvals(requested);
+            // The contradiction itself: no snapshot may assert a Managed posture
+            // with an active floor while reporting that floor bypassed.
+            assert!(
+                !(snapshot.posture() == ExecutionPosture::Managed
+                    && snapshot.managed_floor_active()
+                    && snapshot.approvals() == ApprovalPolicy::Bypass),
+                "snapshot asserts an active Managed floor and reports it bypassed at once"
+            );
+            assert_eq!(
+                snapshot.approvals(),
+                ApprovalPolicy::Prompt,
+                "a runtime {requested:?} widened an active Managed floor"
+            );
+            // The receipt must never assert a floor it did not enforce.
+            assert!(snapshot.managed_floor_active());
+            assert_eq!(snapshot.posture(), ExecutionPosture::Managed);
+        }
+
+        // Tightening below the floor is still honoured — the invariant is
+        // non-wideability, not immutability. A host moving Force to Default
+        // must still reach every descendant (see `current_approval_policy`).
+        let auto_edit_floor =
+            EffectiveExecutionPolicy::baseline(&BaselineExecutionPolicy::managed(
+                ApprovalPolicy::AutoEdit,
+                ManagedDangerousPolicy::Deny,
+            ));
+        assert_eq!(
+            auto_edit_floor
+                .with_runtime_approvals(ApprovalPolicy::Prompt)
+                .approvals(),
+            ApprovalPolicy::Prompt,
+            "a stricter runtime request must still be honoured under a floor"
+        );
+    }
+
+    /// The runtime ratchet is scoped to the Managed posture and must not become
+    /// a global posture freeze. An unmanaged session's operator can still move
+    /// the session — and therefore its children — to any posture. Asserted as
+    /// BYTE-identity against the pre-fix bare replacement.
+    #[test]
+    fn unmanaged_sessions_still_select_any_runtime_approvals() {
+        let smart = EffectiveExecutionPolicy::baseline(&BaselineExecutionPolicy::smart(
+            ApprovalPolicy::Prompt,
+            PolicySource::LocalCliLaunch,
+        ));
+        assert!(!smart.managed_floor_active());
+
+        for requested in [
+            ApprovalPolicy::Bypass,
+            ApprovalPolicy::AutoEdit,
+            ApprovalPolicy::Prompt,
+        ] {
+            let snapshot = smart.with_runtime_approvals(requested);
+            assert_eq!(
+                snapshot.approvals(),
+                requested,
+                "an unmanaged session lost its ability to select {requested:?}"
+            );
+            assert_eq!(snapshot.source(), PolicySource::LocalCliLaunch);
+            assert_eq!(snapshot.posture(), ExecutionPosture::Smart);
+
+            let before = bare_replacement_with_runtime_approvals(&smart, requested);
+            assert_eq!(
+                serde_json::to_string(&snapshot).unwrap(),
+                serde_json::to_string(&before).unwrap(),
+                "the Smart snapshot for {requested:?} is not byte-identical to its \
+                 pre-ratchet value"
+            );
+        }
+    }
+
+    /// The runtime ratchet is keyed on the Managed POSTURE, so a
+    /// resolver-produced Dangerous lease — which also carries
+    /// `managed_floor_active` as provenance — keeps the previous replacement
+    /// semantics in both directions. A managed organization that permits
+    /// Dangerous has already consented to the lease. Asserted as BYTE-identity
+    /// against the pre-fix bare replacement.
+    #[test]
+    fn dangerous_lease_runtime_approvals_are_unaffected_by_the_managed_ratchet() {
+        let baseline =
+            BaselineExecutionPolicy::managed(ApprovalPolicy::Prompt, ManagedDangerousPolicy::Allow);
+        let grant = resolve_dangerous_launch(
+            &baseline,
+            DangerousLaunchRequest::desktop(60, "desktop-ratchet"),
+            10_000,
+        )
+        .unwrap();
+        let effective = EffectiveExecutionPolicy::dangerous(&grant);
+        assert!(effective.managed_floor_active());
+
+        for requested in [
+            ApprovalPolicy::Prompt,
+            ApprovalPolicy::AutoEdit,
+            ApprovalPolicy::Bypass,
+        ] {
+            let snapshot = effective.with_runtime_approvals(requested);
+            assert_eq!(
+                snapshot.approvals(),
+                requested,
+                "a Dangerous lease lost its ability to report {requested:?}"
+            );
+            assert_eq!(snapshot.posture(), ExecutionPosture::Dangerous);
+            assert_eq!(snapshot.sandbox(), SandboxPolicy::Bypass);
+
+            let before = bare_replacement_with_runtime_approvals(&effective, requested);
+            assert_eq!(
+                serde_json::to_string(&snapshot).unwrap(),
+                serde_json::to_string(&before).unwrap(),
+                "the Dangerous snapshot for {requested:?} is not byte-identical to its \
+                 pre-ratchet value"
+            );
+        }
+    }
+
     #[test]
     fn local_dangerous_grant_retains_managed_floor_provenance() {
         let baseline =
