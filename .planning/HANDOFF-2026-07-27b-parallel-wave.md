@@ -98,7 +98,12 @@ produces; crashes are comparatively rare.
 
 ---
 
-## 4. Gate defects — the linter now catches six shapes
+## 4. Gate defects — seven new shapes caught today
+
+- `powershell-missing-script-exits-zero` — **`powershell -File <missing.ps1>; exit $LASTEXITCODE`
+  exits 0.** A Windows gate whose script is absent PASSES. Every Windows gate in this program
+  runs that way, so it is the highest-leverage instance of the self-passing bug here.
+
 
 `.planning/scripts/lint-plan-gates.py` gained, today:
 - `unquoted-pathspec-shell-dependent` — `SEAM="a b c" … -- $SEAM`. **zsh does not word-split**,
@@ -109,9 +114,13 @@ produces; crashes are comparatively rare.
 - `grep-rc-prefixes-the-count`, `grep-c-exit-1-breaks-chain`, `backslash-s-not-portable`,
   `gate-is-broken-not-red` (runs the gate, reads stderr).
 
-**The linter had the disease it hunts three times today.** Each time the rule was written
-against the example that motivated it rather than the shape. Re-verify 28/29 at 0 HIGH after
-any linter change.
+**The linter had the disease it hunts FOUR times today**, and the pattern never varied: a rule
+written against the shape it hunts, with no matching test for the shape that is **correct**.
+Twice it produced false negatives (`-\w*r\w*c` also matched `-certification` inside a *path*;
+`grep-c` required a bare `grep` while every real gate uses `/usr/bin/grep`), and twice false
+positives (flagging gates that had already taken its own advice). **Test both directions on
+every rule**, and re-verify 28/29/30 at 0 HIGH over 255 gates after any linter change —
+`python3 .planning/scripts/lint-plan-gates.py .planning/phases/2[89]* .planning/phases/30*`.
 
 ---
 
