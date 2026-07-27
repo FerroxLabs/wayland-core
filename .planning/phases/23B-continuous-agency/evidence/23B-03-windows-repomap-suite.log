@@ -1,0 +1,101 @@
+   Compiling ahash v0.8.12
+   Compiling once_cell v1.21.4
+   Compiling crossbeam-utils v0.8.21
+   Compiling serde_core v1.0.228
+   Compiling vcpkg v0.2.15
+   Compiling crossbeam-epoch v0.9.20
+   Compiling pkg-config v0.3.33
+   Compiling log v0.4.30
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling fallible-iterator v0.3.0
+   Compiling smallvec v1.15.1
+   Compiling windows-sys v0.61.2
+   Compiling aho-corasick v1.1.4
+   Compiling bstr v1.12.1
+   Compiling crypto-common v0.1.7
+   Compiling syn v2.0.117
+   Compiling chrono v0.4.44
+   Compiling digest v0.10.7
+   Compiling sha2 v0.10.9
+   Compiling libsqlite3-sys v0.30.1
+   Compiling hashbrown v0.14.5
+   Compiling winapi-util v0.1.11
+   Compiling tempfile v3.27.0
+   Compiling regex-automata v0.4.14
+   Compiling same-file v1.0.6
+   Compiling walkdir v2.5.0
+   Compiling crossbeam-deque v0.8.6
+   Compiling hashlink v0.9.1
+   Compiling thiserror-impl v2.0.18
+   Compiling serde_derive v1.0.228
+   Compiling rusqlite v0.32.1
+   Compiling serde_json v1.0.150
+   Compiling globset v0.4.18
+   Compiling regex v1.12.3
+   Compiling thiserror v2.0.18
+   Compiling ignore v0.4.25
+   Compiling serde v1.0.228
+   Compiling wcore-repomap v0.12.25 (C:\ferrox-win\crates\wcore-repomap)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.27s
+────────────
+ Nextest run ID fd6d1a88-926f-4b5d-a759-d4b15e1f63ea with nextest profile: ci
+    Starting 57 tests across 4 binaries
+────────────
+     Summary [   0.519s] 57 tests run: 57 passed, 0 skipped
+        PASS [   0.010s] ( 1/57) wcore-repomap store::tests::symbol_kind_and_language_encodings_round_trip
+        PASS [   0.012s] ( 2/57) wcore-repomap search::tests::fts5_query_returns_none_for_a_query_full_text_cannot_serve
+        PASS [   0.013s] ( 3/57) wcore-repomap extractor::rust::tests::extracts_mod_and_pub_use
+        PASS [   0.015s] ( 4/57) wcore-repomap search::tests::truncate_respects_char_boundaries
+        PASS [   0.023s] ( 5/57) wcore-repomap extractor::typescript::tests::ignores_keywords_in_comments
+        PASS [   0.026s] ( 6/57) wcore-repomap extractor::rust::tests::extracts_pub_and_priv_fns_with_line_numbers
+        PASS [   0.028s] ( 7/57) wcore-repomap extractor::typescript::tests::extracts_classes_interfaces_type_aliases
+        PASS [   0.033s] ( 8/57) wcore-repomap extractor::rust::tests::captures_imports_as_lines
+        PASS [   0.035s] ( 9/57) wcore-repomap extractor::rust::tests::ignores_keywords_inside_line_comments
+        PASS [   0.037s] (10/57) wcore-repomap search::tests::locate_finds_the_matching_line_and_falls_back_to_the_first
+        PASS [   0.037s] (11/57) wcore-repomap extractor::typescript::tests::captures_export_const_and_named_reexports
+        PASS [   0.040s] (12/57) wcore-repomap extractor::tests::strip_comments_preserves_line_count
+        PASS [   0.046s] (13/57) wcore-repomap store::tests::hex_sha256_matches_the_known_empty_digest
+        PASS [   0.048s] (14/57) wcore-repomap extractor::rust::tests::ignores_keywords_inside_block_comments
+        PASS [   0.050s] (15/57) wcore-repomap scope::tests::detect_on_a_plain_directory_is_a_stable_empty_identity
+        PASS [   0.061s] (16/57) wcore-repomap extractor::rust::tests::extracts_struct_enum_trait_impl
+        PASS [   0.063s] (17/57) wcore-repomap search::tests::staleness_is_fresh_only_when_every_axis_is_clean
+        PASS [   0.064s] (18/57) wcore-repomap extractor::typescript::tests::extracts_anonymous_default_function_as_default
+        PASS [   0.067s] (19/57) wcore-repomap scope::tests::from_fingerprint_rejects_a_foreign_string
+        PASS [   0.070s] (20/57) wcore-repomap scope::tests::normalize_rel_is_slash_separated_and_drops_non_normal_components
+        PASS [   0.071s] (21/57) wcore-repomap tests::build_on_inline_tempdir_finds_rust_and_ts_files
+        PASS [   0.073s] (22/57) wcore-repomap search::tests::fts5_query_strips_operators_and_quotes_tokens
+        PASS [   0.076s] (23/57) wcore-repomap scope::tests::normalize_rel_round_trips_a_non_ascii_component
+        PASS [   0.079s] (24/57) wcore-repomap search::tests::escape_like_neutralises_wildcards
+        PASS [   0.081s] (25/57) wcore-repomap render::tests::render_is_deterministic_across_runs
+        PASS [   0.088s] (26/57) wcore-repomap extractor::typescript::tests::extracts_function_declarations
+        PASS [   0.090s] (27/57) wcore-repomap render::tests::render_contains_expected_shape
+        PASS [   0.092s] (28/57) wcore-repomap extractor::typescript::tests::captures_import_statements
+        PASS [   0.093s] (29/57) wcore-repomap scope::tests::fingerprint_round_trips_including_absent_fields
+        PASS [   0.096s] (30/57) wcore-repomap extractor::rust::tests::handles_empty_input
+        PASS [   0.099s] (31/57) wcore-repomap scope::tests::normalize_rel_round_trips_a_deeply_nested_path
+        PASS [   0.101s] (32/57) wcore-repomap store::tests::oversize_hash_changes_with_size
+        PASS [   0.099s] (33/57) wcore-repomap tests::build_rejects_nonexistent_root
+        PASS [   0.099s] (34/57) wcore-repomap tests::language_detect_recognizes_rust_and_typescript_and_falls_back
+        PASS [   0.107s] (35/57) wcore-repomap tests::build_paths_are_sorted_deterministically
+        PASS [   0.095s] (36/57) wcore-repomap tests::repomap_default_has_empty_files_and_a_root
+        PASS [   0.095s] (37/57) wcore-repomap tests::symbol_kinds_cover_every_extractor_target
+        PASS [   0.109s] (38/57) wcore-repomap tests::build_respects_gitignore
+        PASS [   0.167s] (39/57) wcore-repomap::fixture_index indexes_fixture_repo_correctly
+        PASS [   0.163s] (40/57) wcore-repomap::fixture_index render_compact_is_deterministic_on_fixture
+        PASS [   0.156s] (41/57) wcore-repomap::retrieval_quality editing_an_indexed_file_makes_its_hit_report_itself_stale
+        PASS [   0.207s] (42/57) wcore-repomap::retrieval_quality a_query_full_text_cannot_serve_falls_back_and_says_so
+        PASS [   0.205s] (43/57) wcore-repomap::retrieval_quality every_hit_carries_provenance_and_a_staleness_verdict
+        PASS [   0.217s] (44/57) wcore-repomap::retrieval_quality a_query_is_bounded_by_the_limit_the_caller_sets
+        PASS [   0.239s] (45/57) wcore-repomap::retrieval_quality retrieval_quality_meets_the_recorded_precision_and_recall_floor
+        PASS [   0.310s] (46/57) wcore-repomap::incremental_index a_nonce_in_a_gitignored_file_is_absent_from_the_store_bytes
+        PASS [   0.314s] (47/57) wcore-repomap::incremental_index a_corrupt_store_returns_a_structured_error_naming_the_file
+        PASS [   0.335s] (48/57) wcore-repomap::incremental_index a_store_written_by_a_future_schema_is_refused_with_a_rebuild_hint
+        PASS [   0.338s] (49/57) wcore-repomap::incremental_index adding_a_file_adds_exactly_one_record
+        PASS [   0.328s] (50/57) wcore-repomap::incremental_index first_build_writes_one_record_per_in_scope_file_with_symbols
+        PASS [   0.335s] (51/57) wcore-repomap::incremental_index deleting_a_file_removes_its_record_and_its_symbols
+        PASS [   0.343s] (52/57) wcore-repomap::incremental_index changing_a_files_bytes_changes_only_that_records_hash
+        PASS [   0.334s] (53/57) wcore-repomap::incremental_index renaming_an_unchanged_file_reuses_its_hash_and_re_extracts_nothing
+        PASS [   0.337s] (54/57) wcore-repomap::incremental_index reopening_an_unchanged_store_reads_no_files
+        PASS [   0.350s] (55/57) wcore-repomap::incremental_index stored_paths_round_trip_for_non_ascii_and_deeply_nested_names
+        PASS [   0.441s] (56/57) wcore-repomap::incremental_index switching_branches_invalidates_only_the_records_whose_content_differs
+        PASS [   0.448s] (57/57) wcore-repomap::incremental_index the_existing_repomap_build_entry_point_behaves_exactly_as_before

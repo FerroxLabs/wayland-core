@@ -153,6 +153,12 @@ pub mod backup;
 // integration suite can drive it without the binary.
 pub mod session_cmd;
 
+// F23-06 (Phase 23B) — `wayland-core index`: build / status / search / verify
+// over `wcore-repomap`'s persistent index. Lives in the lib for the same
+// reason `session_cmd` does, and because it is the instrument the phase's
+// perf and retrieval-quality gates are measured through.
+pub mod index_cmd;
+
 // CLI surface: `wayland-core image` — FluxRouter image generation
 // (`POST /v1/images/generations`). Lives in the lib so credential
 // resolution + path numbering are unit-testable.

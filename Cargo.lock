@@ -10136,8 +10136,10 @@ version = "0.12.25"
 dependencies = [
  "ignore",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "workspace-hack",

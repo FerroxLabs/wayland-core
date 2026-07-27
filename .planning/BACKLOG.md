@@ -642,3 +642,46 @@ logged here and do not block execution.
   from the candidate binary's command tree (`claimed-but-absent`). Surfaced by re-resolving
   the candidate after phase-24 artifacts landed. Needs phase 24's own recorded requirement
   disposition before any cell for that surface could be skipped.
+### f23-06-lexical-only-precision — BM25 without a semantic layer mis-ranks concept queries · MEDIUM
+
+Measured through the shipped binary against the whole 3,603-file workspace on Linux AND Windows
+(identical, query for query): `wcore-repomap`'s persistent index scores `recall@10 = 1.0000` but
+`precision@1 = 0.8125` over the 16-query corpus in `23B-03-LIVE-EVIDENCE.md`. Three
+concept-shaped queries put the wrong file first:
+
+| Query | Expected | Actual top hit |
+|---|---|---|
+| `content hash invalidation` | `crates/wcore-repomap/src/store.rs` | `crates/wcore-agent/src/orchestration/anvil/forge.rs` |
+| `worktree identity` | `crates/wcore-repomap/src/scope.rs` | `.planning/phases/20-…/20-06-PLAN.md` |
+| `bm25 full text` | `crates/wcore-repomap/src/search.rs` | `crates/wcore-memory/src/retrieve.rs` |
+
+Nothing is lost — every expected file is inside the top 10 — it is ordered wrong, because term
+frequency puts a prose-heavy planning document or another crate's doc-comment above the
+definition. This is exactly the class the OPTIONAL semantic / dense-vector layer addresses, and
+F23-06 marks that layer optional; 23B-03 deferred it under its termination state 2 and recorded
+the non-claim. **Do not close this by trimming the corpus to the queries that score well.**
+
+### f23-06-windows-verbatim-prefix-in-scope-fingerprint — `\\?\` leaks into the recorded identity · MEDIUM
+
+On `SeanDesktop` the persistent index's scope fingerprint records
+`gitdir=//?/C:/Users/seand/AppData/Local/Temp/…/clone/.git` — `fs::canonicalize`'s verbatim
+extended-length prefix, slash-normalised. It is self-consistent (both operands pass through the
+same function, and the live branch-switch comparison worked), so nothing is broken today. But a
+fingerprint produced by a path that did NOT go through `fs::canonicalize` would not compare equal
+to one that did, which would read as spurious scope drift.
+
+### f23-06-exact-fallback-is-a-full-scan — 9x slower than an indexed query · MEDIUM
+
+`wcore-repomap`'s exact-search fallback answers queries FTS5 cannot serve (punctuation-heavy
+literals) with `instr()` over the stored text, i.e. a full table scan: **51,601 µs** measured on
+`hetzner-dsm` against 5,810 µs p50 for an indexed query. It is bounded by the caller's explicit
+limit so it is not a denial-of-service surface, but a caller issuing many such queries pays for
+it. A trigram index or a bounded prefilter would close it.
+
+### cargo-hakari-absent-from-hetzner — the workspace-hack gate cannot be run there · LOW
+
+`cargo hakari verify` is in `justfile`'s `check-all` but `cargo-hakari` is not installed on
+`hetzner-dsm` and is not a CI step, so no lane can run it on the authoritative build host. 23B-03
+added two dependency edges and reported the gate as NOT RUN rather than as a pass, checking the
+substantive property directly instead (`git diff -U0 Cargo.lock | grep -E '^[+-]name = '` →
+no output, i.e. zero new `[[package]]` entries).

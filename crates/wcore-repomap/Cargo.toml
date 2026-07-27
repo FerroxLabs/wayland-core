@@ -12,9 +12,27 @@ regex.workspace     = true
 serde.workspace     = true
 thiserror.workspace = true
 ignore              = "0.4"
+# F23-06 (Phase 23B plan 03) — the persistent index in `store.rs` / `search.rs`.
+#
+# READ THIS BEFORE ASSUMING THE ISOLATION RULE IS BROKEN. AGENTS.md declares
+# this crate deliberately isolated with NO internal `wcore-*` dependencies, and
+# the package description above advertises that. Neither line below is an
+# internal crate: both are EXTERNAL crates already declared in the workspace
+# `[workspace.dependencies]` table (`rusqlite` 0.32 with the `bundled` feature,
+# `sha2` 0.10), so adding them here introduces NO new package into the
+# workspace lock. `bundled` rusqlite ships FTS5, which `wcore-memory`'s schema
+# already relies on — that crate's hybrid retriever is the PATTERN mirrored by
+# `search.rs`, and is deliberately NOT a dependency.
+rusqlite.workspace  = true
+sha2.workspace      = true
 
 workspace-hack.workspace = true
 
 [dev-dependencies]
 tempfile.workspace   = true
 serde_json.workspace = true
+# The incremental-index suite writes a wrong `schema_version` through a plain
+# SQLite connection to prove the store refuses it. Doing that through a
+# test-only method on `IndexStore` would put a mutation hole in the production
+# type; the same already-locked package is used instead.
+rusqlite.workspace   = true

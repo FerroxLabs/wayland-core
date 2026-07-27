@@ -1,0 +1,56 @@
+F23_03_PROVENANCE=ok platform=macos sha=1eb2d7c255b8cdc4f2f194e60cd82ab6bbddfc68
+F23_03_CORPUS=repo path=/Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-23B-03
+F23_03_MEASURE=cold-build platform=macos sample=1 value=5294
+F23_03_MEASURE=store-size platform=macos sample=1 value=66699264
+F23_03_CORPUS=indexed sample=1 records=3610 symbols=37868 read=3610
+F23_03_MEASURE=warm-start platform=macos sample=1 value=152
+  FAIL: warm start sample 1 opened 1 files and extracted 1 — incrementality is a READ COUNT, and this one is not zero
+F23_03_WARM=sample=1 read=1 extracted=1
+F23_03_MEASURE=cold-build platform=macos sample=2 value=5918
+F23_03_MEASURE=store-size platform=macos sample=2 value=66691072
+F23_03_CORPUS=indexed sample=2 records=3610 symbols=37868 read=3610
+F23_03_MEASURE=warm-start platform=macos sample=2 value=180
+  FAIL: warm start sample 2 opened 1 files and extracted 1 — incrementality is a READ COUNT, and this one is not zero
+F23_03_WARM=sample=2 read=1 extracted=1
+F23_03_MEASURE=cold-build platform=macos sample=3 value=6325
+F23_03_MEASURE=store-size platform=macos sample=3 value=66707456
+F23_03_CORPUS=indexed sample=3 records=3610 symbols=37868 read=3610
+F23_03_MEASURE=warm-start platform=macos sample=3 value=330
+  FAIL: warm start sample 3 opened 1 files and extracted 1 — incrementality is a READ COUNT, and this one is not zero
+F23_03_WARM=sample=3 read=1 extracted=1
+F23_03_MEASURE=latency-p50 platform=macos sample=1 value=5426
+F23_03_MEASURE=latency-p95 platform=macos sample=1 value=6813
+F23_03_LATENCY=samples n=20 unit=microseconds all= 5945 4364 8414 3610 5426 6552 3731 6691 4303 6321 4229 3858 3451 5873 4670 5927 5029 5884 6813 6063
+F23_03_QUALITY_CASE=IndexStore precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/store.rs
+F23_03_QUALITY_CASE=normalize_rel precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/scope.rs
+F23_03_QUALITY_CASE=ScopeIdentity precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/scope.rs
+F23_03_QUALITY_CASE=semantic_status precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/search.rs
+F23_03_QUALITY_CASE=extract_rust precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/extractor/rust.rs
+F23_03_QUALITY_CASE=extract_typescript precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/extractor/typescript.rs
+F23_03_QUALITY_CASE=strip_comments_rust_style precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/extractor/mod.rs
+F23_03_QUALITY_CASE=SymbolKind precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/types.rs
+F23_03_QUALITY_CASE=IndexOptions precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/types.rs
+F23_03_QUALITY_CASE=RepoMapError precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/types.rs
+F23_03_QUALITY_CASE=first_meaningful precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/lib.rs
+F23_03_QUALITY_CASE=reciprocal_rank_fusion precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/search.rs
+F23_03_QUALITY_CASE=content_hash_invalidation precision_at_1=0 recall_at_10=1.0000 top=crates/wcore-agent/src/orchestration/anvil/forge.rs
+F23_03_QUALITY_CASE=worktree_identity precision_at_1=0 recall_at_10=1.0000 top=.planning/phases/20-transactional-delegated-mutation/20-06-PLAN.md
+F23_03_QUALITY_CASE=bm25_full_text precision_at_1=0 recall_at_10=1.0000 top=crates/wcore-memory/src/retrieve.rs
+F23_03_QUALITY_CASE=walker_gitignore_hidden precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/lib.rs
+F23_03_MEASURE=precision platform=macos sample=1 value=0.8125
+F23_03_MEASURE=recall platform=macos sample=1 value=1.0000
+F23_03_QUALITY=corpus queries=16 precision_at_1=0.8125 recall_at_10=1.0000
+F23_03_FALLBACK_REPORTED=true
+F23_03_SCRATCH=files=3614
+F23_03_MUTATION_BASE=records=3609
+F23_03_MUTATION=add platform=macos status=PASS unchanged_reextracted=0 added=1 extracted=1 unchanged=3609
+F23_03_MUTATION=edit platform=macos status=PASS unchanged_reextracted=0 changed=1 extracted=1 unchanged=3609
+F23_03_MUTATION=delete platform=macos status=PASS unchanged_reextracted=0 deleted=1 extracted=0 unchanged=3609
+F23_03_MUTATION=rename platform=macos status=PASS unchanged_reextracted=0 renamed=1 extracted=0 unchanged=3609
+F23_03_MUTATION=branch-switch platform=macos status=PASS unchanged_reextracted=0 added=1 extracted=1 unchanged=3609
+F23_03_SCOPE_AFTER_SWITCH=commit=2225c5c5bc8c5a0916b691fc1bff7d2455d74845 ref=refs/heads/f23-drive-c939a599d4dbc81e gitdir=/private/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/tmp.TAdZ6WDTzL/scratch/clone/.git
+F23_03_STALENESS_REPORTED=true
+F23_03_VERIFY=agrees=false exit=6
+F23_03_STORE_CONTROL_OCCURRENCES=1
+F23_03_STORE_NONCE_OCCURRENCES=0
+F23_03_DRIVE=FAIL platform=macos nonce=c939a599d4dbc81e failures=3
