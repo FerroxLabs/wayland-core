@@ -22,6 +22,36 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The longest plausible credential NAME. Env vars and dotted key paths are
+/// short; provider secrets are not.
+const MAX_NAME_LEN: usize = 128;
+
+/// Force a credential name into an identifier shape.
+///
+/// A name is `[A-Za-z0-9_.:/-]+` and short. Anything else is not a name, so it
+/// is replaced rather than carried — the field reserved for a LOCATION must not
+/// become a second channel for a value.
+pub fn sanitize_name(raw: &str) -> String {
+    let ok = !raw.is_empty()
+        && raw.len() <= MAX_NAME_LEN
+        && raw
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '/' | '-'));
+    if ok {
+        raw.to_string()
+    } else {
+        "<invalid-credential-name>".to_string()
+    }
+}
+
+fn deserialize_name<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(d)?;
+    Ok(sanitize_name(&raw))
+}
+
 /// A discovered credential, represented by its SOURCE REFERENCE only.
 ///
 /// # Invariant
@@ -35,6 +65,13 @@ use serde::{Deserialize, Serialize};
 pub struct CredentialRef {
     /// The environment variable or configuration key the credential was found
     /// under — e.g. `DEEPSEEK_API_KEY`, or `gateway.auth.token`.
+    ///
+    /// Constrained to an IDENTIFIER shape by [`sanitize_name`] on every
+    /// construction path, including deserialization. A credential name is
+    /// always an identifier or a dotted key path; a credential VALUE is not.
+    /// Narrowing the field this way is what stops a producer — or a hostile
+    /// document — from smuggling a value through the field reserved for a name.
+    #[serde(deserialize_with = "deserialize_name")]
     pub name: String,
     /// The file it was found in, relative to the source home — e.g.
     /// `profiles/fred/.env`. Relative so that an absolute path on the
@@ -49,7 +86,7 @@ impl CredentialRef {
     /// happens to be holding one cannot pass it in even by accident.
     pub fn new(name: impl Into<String>, source_file: impl Into<String>) -> Self {
         Self {
-            name: name.into(),
+            name: sanitize_name(&name.into()),
             source_file: source_file.into(),
         }
     }
@@ -259,6 +296,42 @@ mod tests {
         assert!(
             debug.contains("DEEPSEEK_API_KEY"),
             "debug is empty: {debug}"
+        );
+    }
+
+    #[test]
+    fn a_secret_cannot_be_smuggled_through_the_name_field() {
+        // The round-3 panel objection: `name` is a public deserializable String,
+        // so a producer or a hostile document could put a VALUE there. A name is
+        // an identifier; a secret is not, so the field is narrowed to that shape.
+        let secret = "sk-live-abcdefghijklmnop!!/QQ==+longvalue+with+padding+and+more+entropy+here";
+        let c = CredentialRef::new(secret, ".env");
+        assert!(
+            !format!("{c:?} {c} {}", serde_json::to_string(&c).unwrap()).contains(secret),
+            "a secret survived in the name field"
+        );
+
+        // Hostile deserialization must be narrowed too.
+        let hostile = format!(r#"{{"name":"{secret}","source_file":".env"}}"#);
+        let parsed: CredentialRef = serde_json::from_str(&hostile).unwrap();
+        assert!(
+            !serde_json::to_string(&parsed).unwrap().contains(secret),
+            "deserialization bypassed the name narrowing"
+        );
+
+        // NEGATIVE controls: real names must survive untouched, or discovery
+        // output becomes useless.
+        assert_eq!(
+            CredentialRef::new("DEEPSEEK_API_KEY", "x").name,
+            "DEEPSEEK_API_KEY"
+        );
+        assert_eq!(
+            CredentialRef::new("gateway.auth.token", "x").name,
+            "gateway.auth.token"
+        );
+        assert_eq!(
+            CredentialRef::new("models.providers.flux.apiKey", "x").name,
+            "models.providers.flux.apiKey"
         );
     }
 
