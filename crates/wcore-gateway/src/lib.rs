@@ -10,6 +10,7 @@
 //! the dependency graph AGENTS.md describes. The operator verb surface
 //! lives in `crates/wcore-cli/src/gateway.rs` and drives this crate.
 
+pub mod automation;
 pub mod drain;
 pub mod ledger;
 pub mod lifecycle;

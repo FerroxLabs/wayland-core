@@ -14,6 +14,15 @@ rust-version.workspace = true
 # crates/wcore-cli/src/gateway.rs and drives this crate.
 
 [dependencies]
+# Phase 24 plan 24-02: the automation plane acquires the scheduling lease and
+# wraps the scheduler's dispatcher so every delivery-bearing fire goes through
+# THIS crate's exactly-once ledger. The edge runs wcore-gateway → wcore-cron
+# (never the reverse), which is the direction this crate's header already
+# declares as permitted, and it introduces no cycle: wcore-cron depends on no
+# workspace crate at all.
+async-trait = { workspace = true }
+wcore-cron = { workspace = true }
+
 chrono = { workspace = true }
 dirs = { workspace = true }
 serde = { workspace = true }
@@ -38,3 +47,5 @@ windows-sys = { version = "0.59", features = [
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# The automation suites drive the async dispatcher path directly.
+tokio = { workspace = true }

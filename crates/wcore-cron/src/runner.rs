@@ -15,17 +15,81 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::job::{CronFireOutcome, CronFireRecord, Target};
+use crate::lease::LeaseHandle;
 use crate::store::CronStore;
 use crate::{CronError, Result};
 
 /// Production tick interval. Spec §Runner.
 pub const TICK_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The tick's source of "now".
+///
+/// Phase 24 plan 24-02: a scheduling test that sleeps to reach a boundary is
+/// flaky by construction and is the first thing to rot. Every trigger-type
+/// test therefore drives time through this trait rather than through the wall
+/// clock, so the whole matrix is deterministic. The shipped runtime passes
+/// [`SystemClock`]; the suite passes [`TestClock`].
+pub trait Clock: Send + Sync {
+    fn now(&self) -> DateTime<Utc>;
+}
+
+/// The wall clock. What the shipped runtime uses.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
+
+/// A clock the caller advances by hand.
+///
+/// `advance` moves it forward by a stated duration; it never moves backwards,
+/// because a schedule that observes time going backwards would re-fire
+/// everything and that is an artefact of the test harness rather than a
+/// property of the runtime.
+#[derive(Debug, Clone)]
+pub struct TestClock {
+    at: Arc<std::sync::Mutex<DateTime<Utc>>>,
+}
+
+impl TestClock {
+    pub fn at(t: DateTime<Utc>) -> Self {
+        Self {
+            at: Arc::new(std::sync::Mutex::new(t)),
+        }
+    }
+
+    /// Move forward. Panics on a negative duration rather than silently
+    /// rewinding — see the type note.
+    pub fn advance(&self, by: chrono::Duration) {
+        assert!(
+            by >= chrono::Duration::zero(),
+            "TestClock must not run backwards"
+        );
+        let mut g = self.at.lock().expect("TestClock mutex poisoned");
+        *g += by;
+    }
+
+    pub fn set(&self, t: DateTime<Utc>) {
+        let mut g = self.at.lock().expect("TestClock mutex poisoned");
+        assert!(t >= *g, "TestClock must not run backwards");
+        *g = t;
+    }
+}
+
+impl Clock for TestClock {
+    fn now(&self) -> DateTime<Utc> {
+        *self.at.lock().expect("TestClock mutex poisoned")
+    }
+}
 
 // ---------------------------------------------------------------------------
 // M-18 · Target threat scan (best-effort keyword denylist — NOT a sandbox).
@@ -173,6 +237,46 @@ pub(crate) fn scan_target(target: &Target) -> Option<String> {
 #[async_trait]
 pub trait JobHandler: Send + Sync {
     async fn dispatch(&self, target: &Target) -> Result<()>;
+
+    /// Dispatch with the fire's IDENTITY attached.
+    ///
+    /// Defaulted to [`dispatch`](Self::dispatch), so every existing handler is
+    /// unchanged and no call site had to be rewritten. It exists because a
+    /// delivery-bearing fire needs a key that is stable across a restart, and
+    /// `&Target` alone cannot produce one: two runs of the same daily job carry
+    /// byte-identical targets. `job_id` plus the SCHEDULED instant does produce
+    /// one — it is derived from the schedule rather than from the attempt, so
+    /// the retry after a hard kill is recognisably the SAME delivery rather
+    /// than a second one.
+    ///
+    /// `wcore-gateway`'s automation plane overrides this to route the fire
+    /// through the exactly-once delivery ledger.
+    async fn dispatch_fire(&self, _fire: &FireContext<'_>, target: &Target) -> Result<()> {
+        self.dispatch(target).await
+    }
+}
+
+/// The identity of one scheduled fire.
+///
+/// `scheduled_for` is the instant the SCHEDULE said this occurrence was due,
+/// not the instant the tick noticed it. That distinction is what makes the
+/// derived idempotency key survive a restart: the noticing instant moves, the
+/// scheduled instant does not.
+#[derive(Debug, Clone, Copy)]
+pub struct FireContext<'a> {
+    pub job_id: &'a str,
+    pub scheduled_for: DateTime<Utc>,
+}
+
+impl FireContext<'_> {
+    /// The stable delivery identity for this occurrence.
+    pub fn delivery_id(&self) -> String {
+        format!(
+            "cron:{}:{}",
+            self.job_id,
+            self.scheduled_for.timestamp_millis()
+        )
+    }
 }
 
 /// In-memory test handler. Records every dispatch so tests can assert
@@ -204,6 +308,12 @@ impl JobHandler for RecordingHandler {
 pub struct CronRunner {
     shutdown: watch::Sender<bool>,
     handle: Option<JoinHandle<()>>,
+    /// The schedule lease, when this runner won it. Held for exactly as long
+    /// as the runner lives, so the schedule is surrendered by the same event
+    /// that stops the ticking rather than by a separate release the caller
+    /// could forget.
+    lease: Option<crate::lease::ScheduleLease>,
+    role: crate::lease::LeaseRole,
 }
 
 impl CronRunner {
@@ -211,7 +321,47 @@ impl CronRunner {
     /// background task. `tick` defaults to [`TICK_INTERVAL`] for
     /// production; tests pass a shorter duration plus `tokio::time::pause`.
     pub fn spawn(store: Arc<dyn CronStore>, handler: Arc<dyn JobHandler>, tick: Duration) -> Self {
-        Self::spawn_inner(store, handler, tick, None)
+        Self::spawn_inner(store, handler, tick, None, None, LeaseHandle::unleased())
+    }
+
+    /// Spawn a runner from the result of a schedule-lease attempt.
+    ///
+    /// An OBSERVER attempt produces a runner that ticks and fires nothing,
+    /// which is exactly what a session booting alongside a running gateway must
+    /// do. The runner is still spawned rather than skipped so that its shutdown
+    /// path, its history handle and its lifecycle are identical in both roles —
+    /// a code path that only exists in one role is a code path nothing tests.
+    ///
+    /// The lease is MOVED into the runner, so the schedule is surrendered by
+    /// the same event that stops the ticking. A caller holding the lease
+    /// separately could drop the runner and keep the schedule, which is a
+    /// silent deadlock for the next process that wants it.
+    pub fn spawn_leased(
+        store: Arc<dyn CronStore>,
+        handler: Arc<dyn JobHandler>,
+        tick: Duration,
+        history_path: Option<PathBuf>,
+        attempt: crate::lease::LeaseAttempt,
+    ) -> Self {
+        match attempt {
+            crate::lease::LeaseAttempt::Owner(lease) => {
+                let handle = lease.handle();
+                Self::spawn_inner(store, handler, tick, history_path, Some(lease), handle)
+            }
+            crate::lease::LeaseAttempt::Observer { .. } => Self::spawn_inner(
+                store,
+                handler,
+                tick,
+                history_path,
+                None,
+                LeaseHandle::observer(),
+            ),
+        }
+    }
+
+    /// Whether this runner fires the schedule or only observes it.
+    pub fn role(&self) -> crate::lease::LeaseRole {
+        self.role
     }
 
     /// Like [`spawn`] but writes a JSONL fire-record to `history_path`
@@ -223,7 +373,14 @@ impl CronRunner {
         tick: Duration,
         history_path: PathBuf,
     ) -> Self {
-        Self::spawn_inner(store, handler, tick, Some(history_path))
+        Self::spawn_inner(
+            store,
+            handler,
+            tick,
+            Some(history_path),
+            None,
+            LeaseHandle::unleased(),
+        )
     }
 
     fn spawn_inner(
@@ -231,7 +388,10 @@ impl CronRunner {
         handler: Arc<dyn JobHandler>,
         tick: Duration,
         history_path: Option<PathBuf>,
+        owned_lease: Option<crate::lease::ScheduleLease>,
+        lease: LeaseHandle,
     ) -> Self {
+        let role = lease.role();
         let (tx, mut rx) = watch::channel(false);
         let handle = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(tick);
@@ -253,10 +413,12 @@ impl CronRunner {
                         }
                     }
                     _ = ticker.tick() => {
-                        if let Err(e) = tick_once_with_history(
+                        if let Err(e) = tick_once_at(
                             &store,
                             &handler,
                             history_path.as_ref(),
+                            &lease,
+                            Utc::now(),
                         ).await {
                             warn!(
                                 target: "wcore_cron::runner",
@@ -272,11 +434,20 @@ impl CronRunner {
         Self {
             shutdown: tx,
             handle: Some(handle),
+            lease: owned_lease,
+            role,
         }
     }
 
     /// Signal shutdown and await task exit. Idempotent.
+    ///
+    /// The lease is surrendered FIRST so that a tick already in flight sees the
+    /// handover and abandons its selected fire, rather than completing it after
+    /// the schedule has been released.
     pub async fn shutdown(mut self) {
+        if let Some(lease) = self.lease.take() {
+            lease.release();
+        }
         let _ = self.shutdown.send(true);
         if let Some(handle) = self.handle.take() {
             let _ = handle.await;
@@ -286,6 +457,11 @@ impl CronRunner {
 
 impl Drop for CronRunner {
     fn drop(&mut self) {
+        // Same ordering as the graceful path: hand the schedule back before
+        // the task stops, so an in-flight tick abandons rather than fires.
+        if let Some(lease) = self.lease.take() {
+            lease.release();
+        }
         // Best-effort: flip the watch + abort the task so the runner
         // doesn't outlive the engine. `shutdown` is the graceful path;
         // this is the safety net when the handle is just dropped.
@@ -310,7 +486,45 @@ pub async fn tick_once_with_history(
     handler: &Arc<dyn JobHandler>,
     history_path: Option<&PathBuf>,
 ) -> Result<()> {
-    let now = Utc::now();
+    // The pre-lease entry points keep firing exactly as they did before: a
+    // caller that never asked about ownership is treated as the owner. Only a
+    // caller that explicitly attempted a lease can be demoted to an observer.
+    tick_once_at(
+        store,
+        handler,
+        history_path,
+        &LeaseHandle::unleased(),
+        Utc::now(),
+    )
+    .await
+}
+
+/// The tick, with schedule ownership and the clock both supplied by the
+/// caller.
+///
+/// Two properties live here and nowhere else:
+///
+/// - an OBSERVER fires nothing at all, and returns before touching the store's
+///   run list, so an attached session cannot double-fire the gateway's
+///   schedule;
+/// - ownership is re-checked IMMEDIATELY BEFORE each dispatch, so a lease
+///   surrendered mid-tick abandons the selected fire with a record instead of
+///   completing it after the handover.
+pub async fn tick_once_at(
+    store: &Arc<dyn CronStore>,
+    handler: &Arc<dyn JobHandler>,
+    history_path: Option<&PathBuf>,
+    lease: &LeaseHandle,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    if !lease.is_owner() {
+        debug!(
+            target: "wcore_cron::runner",
+            owner_pid = lease.owner_pid(),
+            "observing: another process owns this schedule; firing nothing"
+        );
+        return Ok(());
+    }
     // M-19: the runner fires only jobs the store deems trustworthy for
     // unattended execution (engine-stamped integrity tag, owner-only perms).
     // `list_for_run` withholds tampered/untagged/foreign-owned jobs.
@@ -382,8 +596,45 @@ pub async fn tick_once_with_history(
             continue;
         }
 
+        // Ownership is re-checked HERE, between selection and dispatch, and
+        // not only at the top of the tick. A gateway that entered drain after
+        // this job was selected has already surrendered the schedule; firing
+        // now would be a second owner's fire wearing the first owner's badge.
+        // `last_fired` is deliberately NOT advanced: the job did not run, and
+        // the incoming owner must still fire it.
+        if !lease.is_owner() {
+            let outcome = CronFireOutcome::Abandoned {
+                reason: "schedule lease lost between selection and dispatch".to_string(),
+            };
+            let record = CronFireRecord {
+                job_id: job.id.clone(),
+                fired_at: now,
+                outcome: outcome.clone(),
+            };
+            job.last_result = Some(outcome);
+            if let Err(update_err) = store.update(job.clone()).await {
+                warn!(
+                    target: "wcore_cron::runner",
+                    id = %job.id,
+                    error = %update_err,
+                    "failed to persist last_result after abandoning a selected fire"
+                );
+            }
+            append_history(history_path, &record);
+            warn!(
+                target: "wcore_cron::runner",
+                id = %job.id,
+                "abandoned a selected fire: schedule lease lost mid-tick"
+            );
+            continue;
+        }
+
+        let fire = FireContext {
+            job_id: &job.id,
+            scheduled_for: next,
+        };
         let t0 = Instant::now();
-        match handler.dispatch(&job.target).await {
+        match handler.dispatch_fire(&fire, &job.target).await {
             Ok(()) => {
                 let duration_ms = t0.elapsed().as_millis() as u64;
                 job.last_fired = Some(now);

@@ -21,12 +21,19 @@
 //! cancels the runner via its shutdown watch channel.
 
 pub mod job;
+pub mod lease;
 pub mod runner;
 pub mod schedule;
 pub mod store;
 
 pub use job::{CronFireOutcome, CronFireRecord, CronJob, Target};
-pub use runner::{CronRunner, JobHandler, tick_once, tick_once_with_history};
+pub use lease::{
+    LeaseAttempt, LeaseError, LeaseHandle, LeaseRecord, LeaseRole, ScheduleLease, default_lease_dir,
+};
+pub use runner::{
+    Clock, CronRunner, FireContext, JobHandler, SystemClock, TestClock, tick_once, tick_once_at,
+    tick_once_with_history,
+};
 pub use schedule::{next_fire_after, parse_expression};
 pub use store::{CronStore, FileCronStore, default_history_path, default_store_path};
 

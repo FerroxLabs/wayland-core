@@ -3345,22 +3345,76 @@ impl AgentBootstrap {
                         // skill_sink: wired — F-013 fix (skill arm)
                         Some(cron_skill_sink),
                     ));
-                // F-065: use spawn_with_history so every fire is recorded
-                // in history.jsonl (parallel to jobs.json). The history
-                // file is the backing store for `cron history` and
+                // F-065: use the history-writing spawn so every fire is
+                // recorded in history.jsonl (parallel to jobs.json). The
+                // history file is the backing store for `cron history` and
                 // `cron logs` subcommands.
-                match wcore_cron::default_history_path() {
-                    Some(hp) => Some(wcore_cron::CronRunner::spawn_with_history(
-                        store,
-                        handler,
-                        wcore_cron::runner::TICK_INTERVAL,
-                        hp,
-                    )),
-                    None => Some(wcore_cron::CronRunner::spawn(
-                        store,
-                        handler,
-                        wcore_cron::runner::TICK_INTERVAL,
-                    )),
+                //
+                // Phase 24 plan 24-02, Task 1 — SCHEDULE OWNERSHIP IS LEASED,
+                // NOT ASSUMED. This runner attempts the lease and degrades to
+                // OBSERVING when something else already holds it (a running
+                // gateway, or a `cron daemon` started against the same home).
+                // Before the lease, this spawn and that daemon both fired
+                // against one store, and the only thing between that and a
+                // duplicated job was the store's advance-on-fire bookkeeping —
+                // a read-then-write race, not a guarantee.
+                //
+                // With NO other owner this session takes the lease itself and
+                // behaves exactly as it did before, so a plain interactive
+                // session with no gateway installed is unchanged.
+                let history_path = wcore_cron::default_history_path();
+                match wcore_cron::default_lease_dir() {
+                    Some(dir) => match wcore_cron::ScheduleLease::attempt(&dir, "session") {
+                        Ok(attempt) => {
+                            if !attempt.is_owner() {
+                                tracing::info!(
+                                    target: "wcore_agent::bootstrap",
+                                    dir = %dir.display(),
+                                    "another process owns the schedule; this session observes and will not fire"
+                                );
+                            }
+                            Some(wcore_cron::CronRunner::spawn_leased(
+                                store,
+                                handler,
+                                wcore_cron::runner::TICK_INTERVAL,
+                                history_path,
+                                attempt,
+                            ))
+                        }
+                        Err(e) => {
+                            // Ownership could not be evaluated at all. Fail
+                            // CLOSED — observe rather than fire. An unprovable
+                            // claim is exactly the case the lease exists to
+                            // refuse, and firing anyway would reinstate the
+                            // double-fire under a worse name.
+                            tracing::warn!(
+                                target: "wcore_agent::bootstrap",
+                                dir = %dir.display(),
+                                error = %e,
+                                "schedule ownership could not be evaluated; observing without firing"
+                            );
+                            Some(wcore_cron::CronRunner::spawn_leased(
+                                store,
+                                handler,
+                                wcore_cron::runner::TICK_INTERVAL,
+                                history_path,
+                                wcore_cron::LeaseAttempt::Observer { holder_pid: None },
+                            ))
+                        }
+                    },
+                    None => match history_path {
+                        Some(hp) => Some(wcore_cron::CronRunner::spawn_with_history(
+                            store,
+                            handler,
+                            wcore_cron::runner::TICK_INTERVAL,
+                            hp,
+                        )),
+                        None => Some(wcore_cron::CronRunner::spawn(
+                            store,
+                            handler,
+                            wcore_cron::runner::TICK_INTERVAL,
+                        )),
+                    },
                 }
             }
             Err(e) => {

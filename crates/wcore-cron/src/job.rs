@@ -110,6 +110,16 @@ pub enum CronFireOutcome {
     /// advanced (so the job does not hot-loop re-firing every tick within
     /// its window) but the outcome is NOT recorded as a success.
     Staged,
+    /// The fire was SELECTED while this process owned the schedule, and
+    /// ownership was lost before the dispatch could be performed — a
+    /// gateway entering drain while a tick was in flight.
+    ///
+    /// `last_fired` is NOT advanced, because the job genuinely did not run
+    /// and the incoming owner must still fire it. Recorded rather than
+    /// silent: a fire that vanished between selection and dispatch with no
+    /// record is indistinguishable from a fire that never came due, and
+    /// that ambiguity is what makes a handover look like a lost job.
+    Abandoned { reason: String },
 }
 
 /// Snapshot of a single cron fire, written to the ring-buffer history
