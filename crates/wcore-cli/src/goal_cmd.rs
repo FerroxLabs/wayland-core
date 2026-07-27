@@ -174,6 +174,20 @@ pub enum GoalCommand {
         #[arg(last = true)]
         argv: Vec<String>,
     },
+    /// Count the effects on disk: total, and how many carry distinct labels.
+    ///
+    /// A verb rather than a shell one-liner so a kill/restart proof counts what
+    /// the PRODUCT wrote, using the product, on both platforms — and so the
+    /// count cannot quietly differ between a Linux `wc -l` and a PowerShell
+    /// `Measure-Object`.
+    Effects {
+        #[arg(long)]
+        effects_dir: PathBuf,
+        /// How many distinct effects the caller expects. Exit 1 on a mismatch,
+        /// so this is a gate that can actually go red rather than a print.
+        #[arg(long)]
+        expect: Option<usize>,
+    },
 }
 
 pub async fn run(args: GoalArgs) -> anyhow::Result<()> {
@@ -233,6 +247,19 @@ pub async fn run(args: GoalArgs) -> anyhow::Result<()> {
         }
         GoalCommand::Status { journal, goal } => status(&journal, &goal),
         GoalCommand::ExecTask { effects_dir, argv } => exec_task(&effects_dir, &argv).await,
+        GoalCommand::Effects {
+            effects_dir,
+            expect,
+        } => {
+            let (total, distinct) = count_effects(&effects_dir)?;
+            println!("GOAL-EFFECTS: total={total} distinct={distinct}");
+            if let Some(expect) = expect
+                && (total != expect || distinct != expect)
+            {
+                anyhow::bail!("expected {expect} effects, found total={total} distinct={distinct}");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -512,29 +539,43 @@ impl TaskExecutor for ChildProcessExecutor {
 
 /// The effect boundary.
 ///
-/// `create_new` is atomic on both platforms. A retried attempt after its owner
-/// died finds the marker and refuses to produce the effect a second time — which
-/// is the half of exactly-once the ledger's epoch fence structurally cannot
-/// reach, because it cannot get inside a process that already holds a directory.
+/// ## The ordering here is load-bearing and was wrong once
+///
+/// The idempotency marker is created **after** the operator's command succeeds,
+/// not before it. The first draft of this function created it first, and that is
+/// a lost-effect bug rather than a stylistic choice: a worker killed mid-run
+/// leaves the marker behind with no effect, and every later retry then finds the
+/// marker and declines — so the task is permanently un-runnable and its effect
+/// never happens. "No lost completion" fails exactly as loudly as "no duplicate".
+///
+/// Creating it afterwards is safe because nothing else is allowed to be running
+/// this task concurrently: the ledger's claim is exclusive at the durable
+/// boundary and only one live claim exists per task. The marker's job is
+/// narrower than a lock — it stops a *retry after a death* from redoing work
+/// whose effect already landed. That is precisely the case the epoch fence
+/// structurally cannot reach, because it cannot get inside a process that
+/// already holds a directory.
+///
+/// The marker IS the effect: one `create_new`, then the payload, then an fsync.
+/// A kill between the create and the write leaves a present-but-empty effect,
+/// which still counts as produced and is still counted exactly once. That
+/// residual is stated rather than hidden; closing it entirely needs an atomic
+/// write-then-link, which buys nothing the criterion measures.
 async fn exec_task(effects_dir: &std::path::Path, argv: &[String]) -> anyhow::Result<()> {
     let task = std::env::var(ENV_TASK).unwrap_or_else(|_| "unknown".to_owned());
     let key = std::env::var(ENV_KEY).map_err(|_| {
         anyhow::anyhow!("{ENV_KEY} is not set; refusing to produce an unkeyed effect")
     })?;
-    let keys = effects_dir.join("keys");
-    std::fs::create_dir_all(&keys)?;
+    let effects = effects_dir.join("effects");
+    std::fs::create_dir_all(&effects)?;
 
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(keys.join(&key))
-    {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            println!("GOAL-EXEC: task={task} key={key} produced=no reason=idempotency-key-present");
-            return Ok(());
-        }
-        Err(error) => return Err(anyhow::anyhow!("idempotency marker for {key}: {error}")),
+    // Cheap pre-check so a re-run does not pay for the worker again. It is NOT
+    // the gate — `create_new` below is — because between this read and that
+    // create there is a window, and a check that is not the gate must never be
+    // mistaken for one.
+    if effects.join(&key).exists() {
+        println!("GOAL-EXEC: task={task} key={key} produced=no reason=idempotency-key-present");
+        return Ok(());
     }
 
     if !argv.is_empty() {
@@ -553,17 +594,44 @@ async fn exec_task(effects_dir: &std::path::Path, argv: &[String]) -> anyhow::Re
         }
     }
 
-    // The effect itself, appended and fsynced, so it survives an uncatchable
-    // kill of everything above it. This is what the live proof counts.
+    // THE GATE. `create_new` is atomic on both platforms.
     use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(effects_dir.join("effects.txt"))?;
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(effects.join(&key))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            println!("GOAL-EXEC: task={task} key={key} produced=no reason=idempotency-key-present");
+            return Ok(());
+        }
+        Err(error) => return Err(anyhow::anyhow!("effect for {key}: {error}")),
+    };
     writeln!(file, "{task}")?;
     file.sync_all()?;
     println!("GOAL-EXEC: task={task} key={key} produced=yes");
     Ok(())
+}
+
+/// Count the effects on disk: total files, and how many carry distinct labels.
+///
+/// Exposed so the live proof counts what the PRODUCT wrote rather than what a
+/// harness believes it wrote.
+pub fn count_effects(effects_dir: &std::path::Path) -> anyhow::Result<(usize, usize)> {
+    let effects = effects_dir.join("effects");
+    let mut total = 0_usize;
+    let mut labels = BTreeSet::new();
+    if effects.is_dir() {
+        for entry in std::fs::read_dir(&effects)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                total += 1;
+                labels.insert(std::fs::read_to_string(entry.path())?.trim().to_owned());
+            }
+        }
+    }
+    Ok((total, labels.len()))
 }
 
 #[cfg(test)]
@@ -590,10 +658,7 @@ mod tests {
         env_guard(ENV_TASK, "t-unkeyed");
         let error = exec_task(dir.path(), &[]).await.unwrap_err().to_string();
         assert!(error.contains(ENV_KEY), "got: {error}");
-        assert!(
-            !dir.path().join("effects.txt").exists(),
-            "an unkeyed effect was produced anyway"
-        );
+        assert_eq!(count_effects(dir.path()).unwrap(), (0, 0));
     }
 
     #[tokio::test]
@@ -606,9 +671,11 @@ mod tests {
         exec_task(dir.path(), &[]).await.unwrap();
         exec_task(dir.path(), &[]).await.unwrap();
 
-        let effects = std::fs::read_to_string(dir.path().join("effects.txt")).unwrap();
-        let lines: Vec<&str> = effects.lines().collect();
-        assert_eq!(lines, vec!["t-once"], "the effect landed twice: {lines:?}");
+        assert_eq!(
+            count_effects(dir.path()).unwrap(),
+            (1, 1),
+            "the effect landed twice"
+        );
         // SAFETY: serialized by ENV_LOCK.
         unsafe { std::env::remove_var(ENV_KEY) };
     }
@@ -626,9 +693,45 @@ mod tests {
         ];
         let error = exec_task(dir.path(), &argv).await.unwrap_err().to_string();
         assert!(error.contains("exited"), "got: {error}");
-        assert!(
-            !dir.path().join("effects.txt").exists(),
+        assert_eq!(
+            count_effects(dir.path()).unwrap(),
+            (0, 0),
             "a failed worker still produced an effect"
+        );
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe { std::env::remove_var(ENV_KEY) };
+    }
+
+    /// The regression guard for the ordering bug this function shipped with in
+    /// its first draft: the marker was created BEFORE the worker ran, so a
+    /// worker that failed left the marker behind and every retry declined — the
+    /// effect could then never happen at all.
+    #[tokio::test]
+    async fn a_failed_worker_leaves_the_task_runnable_rather_than_permanently_blocked() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        env_guard(ENV_TASK, "t-retry");
+        env_guard(ENV_KEY, "idem-t-retry");
+
+        let shell = if cfg!(windows) { "cmd" } else { "sh" }.to_owned();
+        let flag = if cfg!(windows) { "/c" } else { "-c" }.to_owned();
+        let failing = vec![shell.clone(), flag.clone(), "exit 3".to_owned()];
+        exec_task(dir.path(), &failing)
+            .await
+            .expect_err("the failing worker should surface its failure");
+        assert_eq!(count_effects(dir.path()).unwrap(), (0, 0));
+
+        // The retry must be able to produce. Before the fix this returned
+        // `produced=no reason=idempotency-key-present` and the effect was lost
+        // forever, which is a lost completion wearing an exactly-once costume.
+        let succeeding = vec![shell, flag, "exit 0".to_owned()];
+        exec_task(dir.path(), &succeeding)
+            .await
+            .expect("the retry must be able to produce the effect");
+        assert_eq!(
+            count_effects(dir.path()).unwrap(),
+            (1, 1),
+            "the retry after a failed worker produced nothing"
         );
         // SAFETY: serialized by ENV_LOCK.
         unsafe { std::env::remove_var(ENV_KEY) };
