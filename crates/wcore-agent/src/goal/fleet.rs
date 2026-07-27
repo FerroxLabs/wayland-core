@@ -534,11 +534,17 @@ impl GoalFleetDriver {
                     TaskExecution::Indeterminate { reason } => {
                         ledger.record_unknown_outcome(&authority, reason.clone())
                     }
-                    TaskExecution::Failed { detail } => ledger.revoke_claim(
-                        authority.goal_id(),
-                        authority.task_id(),
-                        &format!("attempt failed: {detail}"),
-                    ),
+                    // `release_claim`, NOT `revoke_claim`. The agent is giving
+                    // up its OWN claim and must present its own epoch, so a
+                    // superseded agent is refused. `revoke_claim` reads the
+                    // committed epoch from the head and would revoke whatever
+                    // claim is current — meaning a slow agent whose lease had
+                    // expired would revoke its SUCCESSOR's live claim on the way
+                    // out, handing the task back to the pool while a healthy
+                    // worker was still running it.
+                    TaskExecution::Failed { detail } => {
+                        ledger.release_claim(&authority, &format!("attempt failed: {detail}"))
+                    }
                 };
                 let succeeded =
                     recorded.is_ok() && matches!(execution, TaskExecution::Produced { .. });

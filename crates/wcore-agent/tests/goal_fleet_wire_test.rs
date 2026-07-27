@@ -738,6 +738,101 @@ async fn run_to_completion_drives_a_dependency_graph_to_a_standstill_exactly_onc
 }
 
 // ---------------------------------------------------------------------------
+// 8b. A superseded agent must not revoke its successor's claim on the way out.
+// ---------------------------------------------------------------------------
+
+/// Found by reading the wire back, not by a failure: the agent's failure path
+/// originally called `revoke_claim`, which reads the CURRENT epoch from the
+/// committed head rather than presenting the caller's own.
+///
+/// The scenario that makes that wrong needs three things at once — a slow agent,
+/// an expired lease, and a successor already running — and none of the other
+/// tests here has all three. With any one missing, `revoke_claim` and
+/// `release_claim` behave identically and the bug is invisible.
+#[tokio::test]
+async fn a_superseded_agents_failure_does_not_revoke_its_successors_claim() {
+    let fixture = Fixture::new("release");
+    let driver = fixture.driver("sup-a");
+    fixture.open(&driver, 8);
+    fixture.declare(&driver, "t00", &[]);
+
+    // The slow original owner, with a lease that is about to expire.
+    let stale = match driver
+        .ledger()
+        .claim_task(
+            &fixture.goal,
+            &TaskId::new("t00"),
+            "w-slow",
+            &reserve(&driver, "r-slow"),
+            500,
+        )
+        .expect("claim decides")
+    {
+        ClaimOutcome::Won(authority) => authority,
+        ClaimOutcome::Lost { detail } => panic!("first claim lost: {detail}"),
+    };
+
+    // A supervisor reclaims past the expired lease and a successor takes it.
+    let successor_driver = fixture.driver("sup-b");
+    let recovery = successor_driver
+        .recover("parent-v1", 1_000)
+        .expect("recovery");
+    assert_eq!(recovery.revoked, vec!["t00".to_owned()], "{recovery:?}");
+    let successor = match successor_driver
+        .ledger()
+        .claim_task(
+            &fixture.goal,
+            &TaskId::new("t00"),
+            "w-fresh",
+            &reserve(&successor_driver, "r-fresh"),
+            99_000,
+        )
+        .expect("claim decides")
+    {
+        ClaimOutcome::Won(authority) => authority,
+        ClaimOutcome::Lost { detail } => panic!("successor could not claim: {detail}"),
+    };
+    assert_eq!(successor.epoch(), 2);
+
+    // NOW the stale owner finally fails and tries to give its claim back.
+    let refused = driver
+        .ledger()
+        .release_claim(&stale, "attempt failed: worker exited 1")
+        .expect_err("a superseded owner released a claim it no longer held");
+    assert!(
+        refused.to_string().contains("superseded claim epoch"),
+        "refused for the wrong reason: {refused}"
+    );
+
+    // The successor's claim is untouched and still live — it was NOT handed back
+    // to the pool while a healthy worker was still running it.
+    let task = driver
+        .ledger()
+        .task(&fixture.goal, &TaskId::new("t00"))
+        .expect("read")
+        .expect("task");
+    assert_eq!(task.epoch(), 2);
+    assert!(
+        task.live_attempt().is_some(),
+        "the successor's live claim was revoked by a superseded predecessor: {task:?}"
+    );
+    assert!(
+        driver
+            .ledger()
+            .claimable(&fixture.goal)
+            .expect("claimable")
+            .is_empty(),
+        "the task was offered for reclaim while a live successor held it"
+    );
+
+    // And the successor can still complete normally.
+    successor_driver
+        .ledger()
+        .complete_task(&successor, GoalTerminalState::SelfChecked, "idem-t00")
+        .expect("the live successor completes");
+}
+
+// ---------------------------------------------------------------------------
 // 9. The half the epoch fence structurally cannot reach.
 // ---------------------------------------------------------------------------
 

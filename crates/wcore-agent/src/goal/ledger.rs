@@ -259,6 +259,34 @@ impl GoalLedger {
         })
     }
 
+    /// Release a claim the HOLDER is giving up, presenting its own epoch.
+    ///
+    /// The fenced counterpart to [`Self::revoke_claim`], and the difference is
+    /// not cosmetic. `revoke_claim` reads the committed epoch from the head, so
+    /// it revokes *whatever claim is current* — correct for a supervisor
+    /// reclaiming from an owner that may be dead, and WRONG for an owner
+    /// reporting its own failure: if that owner's lease has already expired and
+    /// a successor has taken the task, the head-read would revoke the
+    /// SUCCESSOR's live claim on behalf of a process that no longer owns
+    /// anything.
+    ///
+    /// This path presents the authority's own epoch, so the reducer refuses it
+    /// when it has been superseded — which is the whole point of holding an
+    /// authority rather than a task id.
+    pub fn release_claim(
+        &self,
+        authority: &TaskAuthority,
+        reason: &str,
+    ) -> Result<(), JournalError> {
+        self.transition(
+            authority,
+            GoalTaskTransition::ClaimRevoked {
+                epoch: authority.epoch,
+                reason: reason.to_owned(),
+            },
+        )
+    }
+
     /// Record a durable completion.
     ///
     /// Durable at the moment it is PRODUCED. Delivery to the parent is a
