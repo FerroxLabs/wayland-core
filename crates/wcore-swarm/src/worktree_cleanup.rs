@@ -199,6 +199,11 @@ impl WorktreeManager {
     /// * `flock` is per open file description, not per process, so a sibling
     ///   transaction in THIS process is observed as held exactly like one in
     ///   another process;
+    /// * only a root carrying a parseable reservation receipt is a candidate at
+    ///   all, so legacy linked worktrees and foreign retained evidence keep
+    ///   being counted and are left to `cleanup_all`, which knows to prune the
+    ///   parent repository's worktree metadata rather than unlink a checkout
+    ///   under it;
     /// * this manager's own in-flight owners are skipped a second time via
     ///   `active_reservations`, which `TransactionCleanup::release` only clears
     ///   while holding the sentinel this function holds;
@@ -238,6 +243,19 @@ impl WorktreeManager {
                     })?
                     .contains_key(&owner)
                 {
+                    continue;
+                }
+                // Reclaim ONLY roots this manager's own transaction path minted,
+                // proven by a parseable reservation receipt. A root without one
+                // is a legacy linked worktree or foreign retained evidence: it
+                // is still counted at the ceiling by
+                // `reserved_workspace_bytes`, but removing it belongs to
+                // `cleanup_all`, which runs `git worktree remove` and prunes the
+                // parent repository's administrative metadata. Tearing such a
+                // root out with a plain recursive delete would strand that
+                // metadata, and reclaiming residue this function cannot
+                // identify is not what F-2 asks for.
+                if read_workspace_reservation(&path.join(RESERVATION_FILE)).is_err() {
                     continue;
                 }
                 let root_authority = DirectoryAuthority::open(&path)?;

@@ -178,9 +178,15 @@ fn abandoned_transaction_reservations_are_reclaimed() {
     for owner in ["dead-worker-0", "dead-worker-1"] {
         abandoned_transaction_root(&swarm_root, owner, reserved_bytes);
     }
+    // A root with NO receipt is a legacy linked worktree or foreign residue.
+    // Reclaim must leave it — and its budget — for `cleanup_all`, which knows
+    // to prune the parent repository's worktree metadata.
+    let foreign = swarm_root.join("foreign-residue");
+    std::fs::create_dir(&foreign).unwrap();
+
     assert_eq!(
         manager.reserved_workspace_bytes().unwrap(),
-        reserved_bytes * 2,
+        reserved_bytes * 2 + MAX_TRANSACTION_WORKSPACE_BYTES,
         "the orphaned receipts of a killed run were not counted, so this fixture proves nothing"
     );
 
@@ -191,7 +197,7 @@ fn abandoned_transaction_reservations_are_reclaimed() {
     );
     assert_eq!(
         manager.reserved_workspace_bytes().unwrap(),
-        0,
+        MAX_TRANSACTION_WORKSPACE_BYTES,
         "the killed run's reservations still exhaust the aggregate budget after reclaim"
     );
     for owner in ["dead-worker-0", "dead-worker-1"] {
@@ -200,6 +206,11 @@ fn abandoned_transaction_reservations_are_reclaimed() {
             "{owner} survived reclaim as untracked residue"
         );
     }
+    assert!(
+        foreign.exists(),
+        "reclaim removed a root it could not prove it minted, stranding any worktree metadata \
+         beneath it"
+    );
 }
 
 /// F-2 FAIL-OPEN GUARD, and the half that carries the risk.
