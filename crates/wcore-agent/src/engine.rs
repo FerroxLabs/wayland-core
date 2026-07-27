@@ -26124,20 +26124,25 @@ mod audit_2026_05_22_tests {
         ));
     }
 
-    #[tokio::test]
-    async fn newly_unknown_tool_stops_the_live_turn_before_another_provider_call() {
-        let server = physical_attempt_server().await;
-        let dir = tempfile::tempdir().unwrap();
+    /// Build a journaled engine whose scripted provider calls `tool_name` once
+    /// and then, if it is asked again, produces a final text turn.
+    async fn journaled_engine_calling_tool(
+        session_id: &str,
+        tool_name: &str,
+        tool: Box<dyn wcore_tools::Tool>,
+        dir: &tempfile::TempDir,
+        server_uri: String,
+    ) -> (super::AgentEngine, Arc<std::sync::atomic::AtomicUsize>) {
         let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
         let active = manager
-            .create_for_run("test", "test-model", "/tmp", Some("f1300004"))
+            .create_for_run("test", "test-model", "/tmp", Some(session_id))
             .unwrap();
         let provider = Arc::new(
             ScriptedProvider::new(vec![
                 vec![
                     LlmEvent::ToolUse {
                         id: "opaque-call".into(),
-                        name: "Flaky".into(),
+                        name: tool_name.into(),
                         input: json!({}),
                         extra: None,
                     },
@@ -26147,24 +26152,109 @@ mod audit_2026_05_22_tests {
                         usage: TokenUsage::default(),
                     },
                 ],
-                vec![LlmEvent::TextDelta("must not run".into()), done_endturn()],
+                vec![
+                    LlmEvent::TextDelta("saw the tool error".into()),
+                    done_endturn(),
+                ],
             ])
-            .with_physical_url(server.uri()),
+            .with_physical_url(server_uri),
         );
         let calls = provider.call_counter();
         let mut registry = ToolRegistry::new();
-        registry.register(Box::new(AlwaysFailTool));
+        registry.register(tool);
         let mut config = wcore_config::config::Config::default();
         config.session.enabled = true;
         config.session.directory = dir.path().to_string_lossy().into_owned();
-        config.tools.allow_list = vec!["Flaky".into()];
-        let mut engine = super::AgentEngine::resume_active_with_provider(
+        config.tools.allow_list = vec![tool_name.to_string()];
+        let engine = super::AgentEngine::resume_active_with_provider(
             provider,
             config,
             registry,
             Arc::new(NullOutput),
             active,
         );
+        (engine, calls)
+    }
+
+    /// D1, at the level a user experiences it. An opaque tool that runs and
+    /// reports an error used to take the whole session down —
+    /// `AgentError::SessionAuthority`, no second provider request, and a
+    /// journal the turn could never leave. The model must instead see the
+    /// error and get another round to react to it.
+    #[tokio::test]
+    async fn completed_opaque_tool_error_does_not_stop_the_live_turn() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut engine, calls) = journaled_engine_calling_tool(
+            "f1300004",
+            "Flaky",
+            Box::new(AlwaysFailTool),
+            &dir,
+            server.uri(),
+        )
+        .await;
+
+        let result = engine
+            .run("run once", "m-1")
+            .await
+            .expect("a tool error must not be fatal to the session");
+        assert_eq!(result.text, "saw the tool error");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the model must get a round to react to the tool error"
+        );
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert_eq!(
+            state
+                .tools
+                .values()
+                .filter(|tool| tool.effect.requires_reconciliation())
+                .count(),
+            0,
+            "a dispatch this process watched finish must not need reconciliation"
+        );
+    }
+
+    /// The other half of the same rule, unchanged: an effect nothing observed
+    /// finishing — here a tool that panics mid-dispatch — is genuinely unknown.
+    /// It must still stop the turn before another provider request, because the
+    /// external effect may be in any state.
+    #[tokio::test]
+    async fn newly_unknown_tool_stops_the_live_turn_before_another_provider_call() {
+        struct PanickingTool;
+        #[async_trait]
+        impl wcore_tools::Tool for PanickingTool {
+            fn name(&self) -> &str {
+                "Panicky"
+            }
+            fn description(&self) -> &str {
+                "panics mid-dispatch, so nothing observes it finish"
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                json!({"type": "object"})
+            }
+            fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+                false
+            }
+            async fn execute(&self, _: serde_json::Value) -> wcore_types::tool::ToolResult {
+                panic!("injected opaque tool panic")
+            }
+            fn category(&self) -> wcore_protocol::events::ToolCategory {
+                wcore_protocol::events::ToolCategory::Info
+            }
+        }
+
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut engine, calls) = journaled_engine_calling_tool(
+            "f1300004",
+            "Panicky",
+            Box::new(PanickingTool),
+            &dir,
+            server.uri(),
+        )
+        .await;
 
         let run = engine.run("run once", "m-1").await;
         let state = engine.session_journal.as_ref().unwrap().state().unwrap();
