@@ -538,6 +538,34 @@ fn drain(scope: &ScopeArgs, budget_ms: u64) -> Result<()> {
 // run — the runtime every generated service unit invokes
 // ---------------------------------------------------------------------------
 
+/// One observation interval of a drain.
+///
+/// F24-B-H4 (HIGH), found by the live Linux journey and NOT by any test.
+/// `DrainController::drain`'s injected clock is documented as returning
+/// **total** elapsed milliseconds — the loop compares the return value
+/// against the whole budget. The first version of this closure returned the
+/// per-iteration increment (a constant `100`), so `elapsed` was pinned at
+/// 100, never reached the budget, and the loop could only exit through its
+/// other condition: nothing left pending. With work pending that never
+/// settled, `gateway drain` HUNG in `Draining` indefinitely.
+///
+/// It passed the first live journey because that gateway had zero pending
+/// deliveries, so the loop broke on its first observation. The defect is
+/// only reachable with real carried work, which is exactly why it survived
+/// a green suite and a green journey.
+fn drain_wait(
+    started: std::time::Instant,
+    ledger: &mut wcore_gateway::ledger::DeliveryLedger,
+) -> u64 {
+    // Durable before each observation: the report must never claim a count
+    // that is not yet on disk.
+    let _ = ledger.flush();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    // TOTAL elapsed, per the controller's contract. Returning the increment
+    // here is the bug above.
+    started.elapsed().as_millis() as u64
+}
+
 /// Publish the projection a second process reads.
 ///
 /// Written to a same-directory temporary and renamed, so a `status` racing a
@@ -665,15 +693,9 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
     // request file. A stop that skipped the drain would abandon deliveries
     // without recording that it had.
     let budget = drain_budget.unwrap_or(30_000);
+    let started_drain = std::time::Instant::now();
     let report = plane
-        .drain_and_release(budget, |ledger| {
-            // The wait is one bounded sleep per observation rather than a
-            // spin, and it returns the elapsed milliseconds the controller
-            // charges against the budget.
-            let _ = ledger.flush();
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            100
-        })
+        .drain_and_release(budget, |ledger| drain_wait(started_drain, ledger))
         .context("drain failed")?;
 
     let clean = wcore_gateway::automation::AutomationPlane::drained_cleanly(&report);
@@ -850,6 +872,35 @@ mod tests {
         let live = read_live_projection(home).expect("the holder is alive");
         assert_eq!(live.pid, Some(std::process::id()));
         assert_eq!(live.deliveries_pending, 2);
+    }
+
+    #[test]
+    fn the_drain_clock_reports_total_elapsed_not_the_increment() {
+        // F24-B-H4. `DrainController::drain` exits its wait loop when the
+        // value this returns reaches the budget. A closure returning the
+        // per-iteration increment pins that value and the drain never
+        // terminates while anything is pending — measured live as a gateway
+        // stuck in `Draining` with 12 carried deliveries.
+        //
+        // Goes red the moment this returns a constant again.
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = wcore_gateway::ledger::DeliveryLedger::open(dir.path()).unwrap();
+        let started = std::time::Instant::now();
+
+        let first = drain_wait(started, &mut ledger);
+        let second = drain_wait(started, &mut ledger);
+        let third = drain_wait(started, &mut ledger);
+
+        assert!(
+            second > first && third > second,
+            "the drain clock must ACCUMULATE: got {first}, {second}, {third}"
+        );
+        // And it must actually be able to reach a budget. Three intervals of
+        // 100ms cannot still be reporting one interval.
+        assert!(
+            third >= 250,
+            "three 100ms observations must report >=250ms total, got {third}"
+        );
     }
 
     #[test]
