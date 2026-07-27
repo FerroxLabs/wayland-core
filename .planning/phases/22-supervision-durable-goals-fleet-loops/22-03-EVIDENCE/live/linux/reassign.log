@@ -1,0 +1,2 @@
+LEDGER-LIVE: REASSIGN refused_late_write=yes detail=invalid journal state transition: goal g-fence task t-fence: transition presents a superseded claim epoch
+LEDGER-LIVE: REASSIGN attempts=2 effect=Some("successor-write")

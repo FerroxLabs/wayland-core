@@ -1,0 +1,63 @@
+START 2026-07-27T09:52:50.0467569+07:00
+COMMIT: 538d906ae07dc9d925b116271c2ed2ca5e240d9f
+=== CRON CLIPPY AT HEAD ===
+   Compiling thiserror-impl v2.0.18
+    Checking thiserror v2.0.18
+error: casting raw pointers to the same type and constness is unnecessary (`*mut std::ffi::c_void` -> `*mut std::ffi::c_void`)
+error: could not compile `wcore-cron` (lib) due to 1 previous error
+error: could not compile `wcore-cron` (lib test) due to 1 previous error
+CRON_HEAD_EXIT=101
+=== CRON CLIPPY AT BASE 918b2e0 ===
+error: casting raw pointers to the same type and constness is unnecessary (`*mut std::ffi::c_void` -> `*mut std::ffi::c_void`)
+error: could not compile `wcore-cron` (lib) due to 1 previous error
+error: could not compile `wcore-cron` (lib test) due to 1 previous error
+CRON_BASE_EXIT=101
+BACK AT: 538d906ae07dc9d925b116271c2ed2ca5e240d9f
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report 
+future-incompatibilities --id 1`
+PRE-KILL effects:
+  t00
+  t01
+  t02
+  t03
+  t04
+  t05
+PRE-KILL instrument processes: 3
+KILL_CMD: taskkill /T /F /PID 6240
+KILL_AT: 2026-07-27T02:53:57Z
+  SUCCESS: The process with PID 36724 (child process of PID 6240) has been terminated.
+  SUCCESS: The process with PID 46684 (child process of PID 6240) has been terminated.
+  SUCCESS: The process with PID 45148 (child process of PID 6240) has been terminated.
+  SUCCESS: The process with PID 6240 (child process of PID 39984) has been terminated.
+POST-KILL instrument processes: 0
+=== RESUME ===
+  LEDGER-LIVE: recovery=Resumed { snapshot: GoalAuthoritySnapshot { effective_limits: {"max_tokens": 1000}, strategy: Fleet, loop_policy: Fixed { iterations: 8 }, parent_envelope_digest: "parent-v1" }, iterations_started: 0, resume_count: 1 }
+  LEDGER-LIVE: revoked task=t05
+  LEDGER-LIVE: revoked task=t06
+  LEDGER-LIVE: worker_effect key=idem-t05 label=t05 produced=no reason=idempotency-key-present
+  LEDGER-LIVE: worker_effect key=idem-t06 label=t06 produced=yes
+  LEDGER-LIVE: worker_effect key=idem-t07 label=t07 produced=yes
+  LEDGER-LIVE: worker_effect key=idem-t08 label=t08 produced=yes
+  LEDGER-LIVE: worker_effect key=idem-t09 label=t09 produced=yes
+  LEDGER-LIVE: drained_outbox count=6
+  LEDGER-LIVE: REPORT tasks=10 completed=10 delivered=10 dependency_releases=10 attempts=12 unresolved=0
+RESUME_EXIT=0
+=== REASSIGN ===
+  LEDGER-LIVE: REASSIGN refused_late_write=yes detail=invalid journal state transition: goal g-fence task t-fence: transition presents a superseded claim epoch
+  LEDGER-LIVE: REASSIGN attempts=2 effect=Some("successor-write")
+REASSIGN_EXIT=0
+FINAL effects:
+  t00
+  t01
+  t02
+  t03
+  t04
+  t05
+  t06
+  t07
+  t08
+  t09
+TOTAL_LINES=10 DISTINCT_LINES=10 EXPECTED=10
+EXIT=0
+END 2026-07-27T09:54:02.1729176+07:00
