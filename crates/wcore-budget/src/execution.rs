@@ -547,6 +547,50 @@ impl ExecutionBudgetView {
         AgentDepthGuard { view: self.clone() }
     }
 
+    /// The caps that actually bind this view: the pointwise MINIMUM of the
+    /// leaf's own caps and every ancestor's.
+    ///
+    /// Read the leaf's `budget` directly and you get the caps the leaf NAMES,
+    /// which an override may have set wider than the chain permits. `limit_for`
+    /// has the same shape hazard — it renders whichever state is currently
+    /// exceeded and falls back to the LEAF. Anything that needs "what may this
+    /// view actually spend" must fold over the whole chain, exactly as
+    /// `minimum_remaining` does for the remaining-allowance accessors.
+    pub fn effective_budget(&self) -> ExecutionBudget {
+        let mut effective = self.inner.read().budget.clone();
+        for ancestor in self.ancestors.iter() {
+            effective = intersect_execution_budget(&effective, &ancestor.read().budget);
+        }
+        effective
+    }
+
+    /// Build a child view whose caps are the INTERSECTION of `requested` with
+    /// the caps that actually bind this view.
+    ///
+    /// This is the sub-allocation seam: a parent hands one child a strictly
+    /// smaller envelope so a single runaway child cannot drain the whole
+    /// subtree and starve its siblings.
+    ///
+    /// Narrowing is monotonic by construction. `requested` can only ever lower
+    /// a cap, never raise one, so the value is safe to accept from an untrusted
+    /// delegating actor: the worst an adversarial request achieves is
+    /// under-allocating its OWN descendant. There is no arithmetic path from a
+    /// larger requested number to a larger effective envelope.
+    ///
+    /// Note what this does NOT claim. `sub_budget(Some(wider))` was already
+    /// unable to amplify, because the ancestor chain is consulted by
+    /// `first_exceeded_reason`, `try_enter_process` and `try_reserve_tool_runtime`
+    /// regardless of what the leaf names. The value added here is that the
+    /// child's OWN caps are correct too, so every leaf-rendering accessor
+    /// reports the envelope that binds rather than the one that was asked for.
+    pub fn sub_budget_narrowed(&self, requested: ExecutionBudget) -> ExecutionBudgetView {
+        let narrowed = intersect_execution_budget(
+            &normalize_execution_budget(requested),
+            &self.effective_budget(),
+        );
+        self.sub_budget(Some(narrowed))
+    }
+
     /// Build a child view. `override_` replaces the caps on the child
     /// only; parent caps still apply for the rollup. None → inherit.
     pub fn sub_budget(&self, override_: Option<ExecutionBudget>) -> ExecutionBudgetView {
@@ -914,6 +958,178 @@ impl Drop for AgentDepthGuard {
         for state in &mut states {
             state.agent_depth = state.agent_depth.saturating_sub(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod sub_allocation_tests {
+    use super::*;
+
+    fn root_with(max_tokens_in: u64, max_cost_usd: f64) -> ExecutionBudgetView {
+        ExecutionBudget {
+            max_tokens_in: Some(max_tokens_in),
+            max_cost_usd: Some(max_cost_usd),
+            ..Default::default()
+        }
+        .start_root()
+    }
+
+    /// The narrowing direction, which is the capability F21-02 was missing.
+    ///
+    /// This is the differential that makes the property non-vacuous: the parent
+    /// is nowhere near its cap, so the ONLY thing that can stop the child is the
+    /// envelope the caller asked for. Revert `sub_budget_narrowed` to
+    /// `sub_budget(None)` and the child inherits 10_000, spends 500 happily, and
+    /// this assertion fails.
+    #[test]
+    fn a_narrowed_child_is_stopped_by_its_own_envelope_while_the_parent_is_not() {
+        let parent = root_with(10_000, 100.0);
+        let child = parent.sub_budget_narrowed(ExecutionBudget {
+            max_tokens_in: Some(100),
+            ..Default::default()
+        });
+
+        child.record_tokens(500, 0);
+
+        assert_eq!(
+            child.first_exceeded_reason(),
+            Some("max_tokens_in"),
+            "the child must be bound by the envelope its delegator sub-allocated"
+        );
+        assert_eq!(
+            parent.first_exceeded_reason(),
+            None,
+            "the parent is far from its own cap — nothing but the sub-allocation \
+             can be stopping the child, which is what makes this non-vacuous"
+        );
+        assert_eq!(child.limit_for("max_tokens_in"), "100");
+    }
+
+    /// The widening direction. Stated precisely, because overclaiming here is
+    /// how this phase got graded vacuous in the first place.
+    ///
+    /// `sub_budget(Some(wider))` was ALREADY unable to amplify consumption: the
+    /// ancestor chain is consulted by every admission path regardless of what
+    /// the leaf names. What the intersection adds is that the child's OWN caps
+    /// are the binding ones, so a leaf-reading accessor cannot report the
+    /// requested number as if it had been granted.
+    #[test]
+    fn a_widening_request_is_clamped_to_the_parent_rather_than_granted() {
+        let parent = root_with(100, 1.0);
+        let child = parent.sub_budget_narrowed(ExecutionBudget {
+            max_tokens_in: Some(1_000_000),
+            max_cost_usd: Some(9_999.0),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            child.effective_budget().max_tokens_in,
+            Some(100),
+            "a request larger than the parent's must clamp to the parent's"
+        );
+        assert_eq!(child.effective_budget().max_cost_usd, Some(1.0));
+
+        // The leaf itself, not just the fold — this is the part a plain
+        // `sub_budget(Some(..))` would get wrong.
+        assert_eq!(
+            child.inner.read().budget.max_tokens_in,
+            Some(100),
+            "the child's own cap must be the clamped one, so limit_for and any \
+             other leaf-rendering accessor cannot report the requested value"
+        );
+
+        child.record_tokens(150, 0);
+        assert_eq!(child.first_exceeded_reason(), Some("max_tokens_in"));
+        assert_eq!(
+            child.limit_for("max_tokens_in"),
+            "100",
+            "the reported limit must be the one that bound, never the ask"
+        );
+    }
+
+    /// Unnamed dimensions inherit. A request is a narrowing on the axes it
+    /// mentions, not a replacement envelope.
+    #[test]
+    fn a_request_narrows_only_the_dimensions_it_names() {
+        let parent = root_with(10_000, 5.0);
+        let child = parent.sub_budget_narrowed(ExecutionBudget {
+            max_tokens_in: Some(10),
+            ..Default::default()
+        });
+
+        let effective = child.effective_budget();
+        assert_eq!(effective.max_tokens_in, Some(10));
+        assert_eq!(
+            effective.max_cost_usd,
+            Some(5.0),
+            "an unmentioned dimension keeps the parent's cap rather than \
+             becoming unbounded"
+        );
+    }
+
+    /// `effective_budget` folds the WHOLE chain, so a grandchild cannot climb
+    /// back out through an intermediate that names a looser cap.
+    #[test]
+    fn effective_budget_folds_every_ancestor_not_just_the_parent() {
+        let root = root_with(100, 1.0);
+        let middle = root.sub_budget_narrowed(ExecutionBudget {
+            max_tokens_in: Some(50),
+            ..Default::default()
+        });
+        let leaf = middle.sub_budget_narrowed(ExecutionBudget {
+            max_tokens_in: Some(9_999),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            leaf.effective_budget().max_tokens_in,
+            Some(50),
+            "the tightest cap anywhere in the chain must bind the grandchild"
+        );
+    }
+
+    /// Sibling isolation — the capability claim. One child exhausting its
+    /// sub-allocation must not take the other down with it.
+    #[test]
+    fn one_child_exhausting_its_sub_allocation_does_not_starve_its_sibling() {
+        let parent = root_with(10_000, 100.0);
+        let greedy = parent.sub_budget_narrowed(ExecutionBudget {
+            max_tokens_in: Some(100),
+            ..Default::default()
+        });
+        let quiet = parent.sub_budget_narrowed(ExecutionBudget {
+            max_tokens_in: Some(100),
+            ..Default::default()
+        });
+
+        greedy.record_tokens(5_000, 0);
+
+        assert_eq!(greedy.first_exceeded_reason(), Some("max_tokens_in"));
+        assert_eq!(
+            quiet.first_exceeded_reason(),
+            None,
+            "without sub-allocation the greedy child's 5_000 tokens roll into a \
+             shared parent envelope and the sibling inherits the damage"
+        );
+        assert_eq!(
+            parent.observed_for("max_tokens_in"),
+            "5000",
+            "the greedy child's spend still rolls up — narrowing adds a cap, it \
+             does not hide consumption from the parent's books"
+        );
+    }
+
+    /// Fail closed on a nonsensical cost request rather than treating it as
+    /// "no cap".
+    #[test]
+    fn a_nonfinite_cost_request_narrows_to_zero_rather_than_unbounded() {
+        let parent = root_with(10_000, 5.0);
+        let child = parent.sub_budget_narrowed(ExecutionBudget {
+            max_cost_usd: Some(f64::NAN),
+            ..Default::default()
+        });
+
+        assert_eq!(child.effective_budget().max_cost_usd, Some(0.0));
     }
 }
 

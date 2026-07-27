@@ -538,6 +538,47 @@ pub struct SubAgentConfig {
     pub temperature: Option<f32>,
 }
 
+/// A delegating actor's request for a NARROWER execution envelope on one
+/// child.
+///
+/// Provider-neutral scalars rather than `wcore_budget::ExecutionBudget`,
+/// because `wcore-types` carries no internal dependencies. The spawn seam in
+/// `wcore-agent` converts this and intersects it with the caps that actually
+/// bind the delegator.
+///
+/// **Every field can only LOWER a cap.** The seam intersects pointwise with the
+/// requester's own effective envelope, so a request for more than the requester
+/// holds is clamped to what the requester holds. That is what makes the type
+/// safe to fill from an untrusted delegating actor: `None` inherits, a smaller
+/// number narrows, and a larger number is refused down to the binding cap.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChildBudgetRequest {
+    /// Wall-clock seconds the child may run for.
+    pub max_wall_time_secs: Option<u64>,
+    /// Aggregate seconds the child's tool calls may consume.
+    pub max_tool_runtime_secs: Option<u64>,
+    /// Concurrent process-backed tool calls the child may hold.
+    pub max_processes: Option<usize>,
+    /// Delegation depth beneath the child.
+    pub max_agent_depth: Option<usize>,
+    /// Input tokens charged to the child and its descendants.
+    pub max_tokens_in: Option<u64>,
+    /// Output tokens charged to the child and its descendants.
+    pub max_tokens_out: Option<u64>,
+    /// USD charged to the child and its descendants.
+    pub max_cost_usd: Option<f64>,
+}
+
+impl ChildBudgetRequest {
+    /// `true` when no dimension was requested, so the child should simply
+    /// inherit. Distinguishes "asked for nothing" from "asked for something",
+    /// which is the difference the F21-02 canary turns on.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Overrides applied when spawning a fork-mode skill sub-agent.
 #[derive(Debug, Clone, Default)]
 pub struct ForkOverrides {
@@ -547,6 +588,13 @@ pub struct ForkOverrides {
     pub effort: Option<String>,
     /// Restrict registered tools to this list; empty = shared read-only tools.
     pub allowed_tools: Vec<String>,
+    /// Request a strictly narrower execution envelope for this child.
+    ///
+    /// Sits beside `allowed_tools` deliberately: both are what a delegating
+    /// actor ASKS for its child, and both are resolved by intersection with the
+    /// delegator's own authority at the spawn seam. `None` ⇒ inherit the
+    /// delegator's envelope, which is the pre-existing behaviour.
+    pub budget: Option<ChildBudgetRequest>,
 }
 
 impl ForkOverrides {

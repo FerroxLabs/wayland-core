@@ -754,6 +754,7 @@ async fn mutating_child_without_isolation_fails_closed() {
         model: None,
         effort: None,
         allowed_tools: vec!["Write".into(), "Edit".into()],
+        budget: None,
     };
     assert_eq!(
         overrides.requested_workspace(),
@@ -796,6 +797,7 @@ fn read_only_child_request_classifies_shared() {
         model: None,
         effort: None,
         allowed_tools: vec!["Read".into(), "Grep".into(), "Glob".into()],
+        budget: None,
     };
     assert_eq!(
         overrides.requested_workspace(),

@@ -518,6 +518,7 @@ Workflow(
         // construction cannot downgrade mutating work to shared parent access.
         let mutating = ForkOverrides {
             allowed_tools: vec!["Write".into(), "Edit".into()],
+            budget: None,
             ..Default::default()
         };
         assert_eq!(
