@@ -296,6 +296,13 @@ fn render_runner_job(rj: &wcore_cron::CronJob, name_hint: Option<&str>) -> ToolC
             wcore_cron::CronFireOutcome::Abandoned { reason } => {
                 format!("abandoned: {reason}")
             }
+            // Terminal: the retry cap is spent and this job has stopped
+            // trying. Distinct from "error" on purpose — an error is a job
+            // that will try again, and telling an operator the two apart is
+            // the whole reason the state exists.
+            wcore_cron::CronFireOutcome::GaveUp { attempts, message } => {
+                format!("gave_up after {attempts} attempts: {message}")
+            }
         }),
         enabled: rj.enabled,
         state: Some(if rj.enabled { "scheduled" } else { "paused" }.to_string()),
