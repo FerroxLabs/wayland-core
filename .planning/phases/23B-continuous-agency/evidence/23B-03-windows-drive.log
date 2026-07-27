@@ -1,0 +1,58 @@
+   Compiling wcore-cli v0.12.25 (C:\ferrox-win\crates\wcore-cli)
+    Finished `release` profile [optimized] target(s) in 11m 12s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+F23_03_PROVENANCE=ok platform=windows sha=3cf304e90aaee21ed8993ee14163501ee020a81a
+F23_03_CORPUS=repo path=C:\ferrox-win
+F23_03_MEASURE=cold-build platform=windows sample=1 value=1576
+F23_03_MEASURE=store-size platform=windows sample=1 value=66592768
+F23_03_CORPUS=indexed sample=1 records=3609 symbols=37868 read=3609
+F23_03_MEASURE=warm-start platform=windows sample=1 value=151
+F23_03_WARM=sample=1 read=0 extracted=0
+F23_03_MEASURE=cold-build platform=windows sample=2 value=1479
+F23_03_MEASURE=store-size platform=windows sample=2 value=66592768
+F23_03_CORPUS=indexed sample=2 records=3609 symbols=37868 read=3609
+F23_03_MEASURE=warm-start platform=windows sample=2 value=157
+F23_03_WARM=sample=2 read=0 extracted=0
+F23_03_MEASURE=cold-build platform=windows sample=3 value=1522
+F23_03_MEASURE=store-size platform=windows sample=3 value=66592768
+F23_03_CORPUS=indexed sample=3 records=3609 symbols=37868 read=3609
+F23_03_MEASURE=warm-start platform=windows sample=3 value=157
+F23_03_WARM=sample=3 read=0 extracted=0
+F23_03_MEASURE=latency-p50 platform=windows sample=1 value=5016
+F23_03_MEASURE=latency-p95 platform=windows sample=1 value=5350
+F23_03_LATENCY=samples n=20 unit=microseconds all=4617 4664 4703 4797 4820 4851 4877 4918 4964 5016 5063 5150 5171 5193 5224 5251 5325 5336 5350 6057
+F23_03_QUALITY_CASE=IndexStore precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/store.rs
+F23_03_QUALITY_CASE=normalize_rel precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/scope.rs
+F23_03_QUALITY_CASE=ScopeIdentity precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/scope.rs
+F23_03_QUALITY_CASE=semantic_status precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/search.rs
+F23_03_QUALITY_CASE=extract_rust precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/extractor/rust.rs
+F23_03_QUALITY_CASE=extract_typescript precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/extractor/typescript.rs
+F23_03_QUALITY_CASE=strip_comments_rust_style precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/extractor/mod.rs
+F23_03_QUALITY_CASE=SymbolKind precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/types.rs
+F23_03_QUALITY_CASE=IndexOptions precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/types.rs
+F23_03_QUALITY_CASE=RepoMapError precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/types.rs
+F23_03_QUALITY_CASE=first_meaningful precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/lib.rs
+F23_03_QUALITY_CASE=reciprocal_rank_fusion precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/search.rs
+F23_03_QUALITY_CASE=content_hash_invalidation precision_at_1=0 recall_at_10=1.0000 top=crates/wcore-agent/src/orchestration/anvil/forge.rs
+F23_03_QUALITY_CASE=worktree_identity precision_at_1=0 recall_at_10=1.0000 top=.planning/phases/20-transactional-delegated-mutation/20-06-PLAN.md
+F23_03_QUALITY_CASE=bm25_full_text precision_at_1=0 recall_at_10=1.0000 top=crates/wcore-memory/src/retrieve.rs
+F23_03_QUALITY_CASE=walker_gitignore_hidden precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/lib.rs
+F23_03_MEASURE=precision platform=windows sample=1 value=0.8125
+F23_03_MEASURE=recall platform=windows sample=1 value=1.0000
+F23_03_QUALITY=corpus queries=16 precision_at_1=0.8125 recall_at_10=1.0000
+F23_03_FALLBACK_REPORTED=true
+F23_03_SCRATCH=files=3610
+F23_03_MUTATION_BASE=records=3605
+F23_03_MUTATION=add platform=windows status=PASS unchanged_reextracted=0 added=1 extracted=1 unchanged=3605
+F23_03_MUTATION=edit platform=windows status=PASS unchanged_reextracted=0 changed=1 extracted=1 unchanged=3605
+F23_03_MUTATION=delete platform=windows status=PASS unchanged_reextracted=0 deleted=1 extracted=0 unchanged=3605
+F23_03_MUTATION=rename platform=windows status=PASS unchanged_reextracted=0 renamed=1 extracted=0 unchanged=3605
+warning: in the working copy of 'f23_branch.rs', CRLF will be replaced by LF the next time Git touches it
+F23_03_MUTATION=branch-switch platform=windows status=PASS unchanged_reextracted=0 added=1 extracted=1 unchanged=3605
+F23_03_SCOPE_AFTER_SWITCH=commit=2d23da372fed4279049d940d50a9974194f1334e ref=refs/heads/f23-drive-8ed4d1215a01c1f4 gitdir=//?/C:/Users/seand/AppData/Local/Temp/f23idx-8ed4d1215a01c1f4/scratch/clone/.git
+F23_03_STALENESS_REPORTED=true
+F23_03_VERIFY=agrees=false exit=6
+F23_03_STORE_CONTROL_OCCURRENCES=1
+F23_03_STORE_NONCE_OCCURRENCES=0
+F23_03_DRIVE=PASS platform=windows nonce=8ed4d1215a01c1f4
