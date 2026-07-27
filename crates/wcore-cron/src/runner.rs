@@ -564,6 +564,22 @@ pub async fn tick_once_at(
             continue;
         }
 
+        // Phase 24 plan 24-02: retry is BOUNDED. A job inside its backoff
+        // window is not attempted, and a job that has given up is not
+        // attempted at all. Before this, a failing job kept `last_fired`
+        // pinned and was re-dispatched on every single tick forever, which is
+        // how an unattended runtime consumes a machine (threat T-24-02-03).
+        if !job.retry_state.may_attempt(now) {
+            debug!(
+                target: "wcore_cron::runner",
+                id = %job.id,
+                attempts = job.retry_state.attempts,
+                gave_up = job.retry_state.gave_up,
+                "skipping: inside the retry backoff, or the attempt cap is spent"
+            );
+            continue;
+        }
+
         // M-18: scan the target at the execution boundary BEFORE dispatch.
         // A blocked target never fires; record the block as an error outcome
         // (so operators see it in `cron status`/history) and do NOT advance
@@ -638,6 +654,16 @@ pub async fn tick_once_at(
             Ok(()) => {
                 let duration_ms = t0.elapsed().as_millis() as u64;
                 job.last_fired = Some(now);
+                // A success ends the current failure run. Leaving the attempt
+                // counter standing would carry a long-past failure into the
+                // next one and give up early against a target that recovered.
+                job.retry_state.record_success();
+                if matches!(
+                    job.effective_trigger(),
+                    crate::trigger::Trigger::Commitment { .. }
+                ) {
+                    job.last_heartbeat = Some(now);
+                }
                 job.last_result = Some(CronFireOutcome::Success { duration_ms });
                 let record = CronFireRecord {
                     job_id: job.id.clone(),
@@ -690,16 +716,51 @@ pub async fn tick_once_at(
                 );
             }
             Err(e) => {
-                let outcome = CronFireOutcome::Error {
-                    message: e.to_string(),
+                // Phase 24 plan 24-02: a failed dispatch consumes an attempt.
+                // Reaching the cap is a TERMINAL, RECORDED state — not a
+                // silently-stopped job and not an indefinite retry.
+                let policy = job.effective_retry();
+                let outcome = match job.retry_state.record_failure(&policy, now) {
+                    crate::retry::RetryDecision::GiveUp { attempts } => {
+                        // Advance `last_fired` on give-up so the exhausted job
+                        // stops re-selecting on every tick. It is not a
+                        // success and is never recorded as one.
+                        job.last_fired = Some(now);
+                        warn!(
+                            target: "wcore_cron::runner",
+                            id = %job.id,
+                            attempts,
+                            error = %e,
+                            "gave up: retry cap reached; not retrying until this job is edited"
+                        );
+                        CronFireOutcome::GaveUp {
+                            attempts,
+                            message: e.to_string(),
+                        }
+                    }
+                    crate::retry::RetryDecision::Retry {
+                        attempt,
+                        not_before,
+                    } => {
+                        debug!(
+                            target: "wcore_cron::runner",
+                            id = %job.id,
+                            attempt,
+                            not_before = %not_before,
+                            "retrying after backoff"
+                        );
+                        CronFireOutcome::Error {
+                            message: e.to_string(),
+                        }
+                    }
                 };
                 let record = CronFireRecord {
                     job_id: job.id.clone(),
                     fired_at: now,
                     outcome: outcome.clone(),
                 };
-                // F-063: on error, do NOT advance last_fired. Only update
-                // last_result so operators can see the failure.
+                // F-063: on a retryable error, do NOT advance last_fired. Only
+                // update last_result so operators can see the failure.
                 job.last_result = Some(outcome);
                 if let Err(update_err) = store.update(job.clone()).await {
                     warn!(
@@ -725,30 +786,18 @@ pub async fn tick_once_at(
 /// Append a [`CronFireRecord`] as a single JSONL line to `path`.
 /// Non-fatal: history is diagnostic-only; a write failure is logged
 /// but never propagates to the caller.
+/// Phase 24 plan 24-02: the append is BOUNDED. The file was previously
+/// append-only with no cap at all — "ring-buffered" appeared in the module
+/// documentation and nothing in the code ever removed a record. The bound is
+/// enforced on the WRITE path, so the file cannot exceed it between reads;
+/// enforcing it only on read would leave the file growing forever and merely
+/// hide that from the operator.
 fn append_history(path: Option<&PathBuf>, record: &CronFireRecord) {
     let Some(p) = path else { return };
-    let line = match serde_json::to_string(record) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(target: "wcore_cron::runner", error = %e, "failed to serialise fire record");
-            return;
-        }
-    };
-    use std::io::Write as _;
-    if let Some(parent) = p.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(p)
-    {
-        Ok(mut f) => {
-            let _ = writeln!(f, "{line}");
-        }
-        Err(e) => {
-            warn!(target: "wcore_cron::runner", error = %e, "failed to open history file");
-        }
+    if let Err(e) = crate::history::append_bounded(p, record, crate::history::DEFAULT_MAX_RECORDS) {
+        // Diagnostic-only, exactly as the unbounded append was: losing a
+        // history line must never abort a fire.
+        warn!(target: "wcore_cron::runner", error = %e, "failed to write fire record");
     }
 }
 

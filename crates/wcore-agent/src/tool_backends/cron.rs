@@ -287,6 +287,15 @@ fn render_runner_job(rj: &wcore_cron::CronJob, name_hint: Option<&str>) -> ToolC
             wcore_cron::CronFireOutcome::Error { message } => format!("error: {message}"),
             wcore_cron::CronFireOutcome::NoSink => "no_sink".to_string(),
             wcore_cron::CronFireOutcome::Staged => "staged".to_string(),
+            // Phase 24 plan 24-02: the fire was selected and then the schedule
+            // lease was surrendered before it could be dispatched. Surfaced
+            // with its reason rather than folded into "error", because the job
+            // did not fail — it did not run, and the incoming owner still owes
+            // it. Collapsing the two would tell an operator to investigate a
+            // failure that never happened.
+            wcore_cron::CronFireOutcome::Abandoned { reason } => {
+                format!("abandoned: {reason}")
+            }
         }),
         enabled: rj.enabled,
         state: Some(if rj.enabled { "scheduled" } else { "paused" }.to_string()),
