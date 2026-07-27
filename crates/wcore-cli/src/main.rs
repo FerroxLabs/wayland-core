@@ -756,6 +756,11 @@ enum TopCmd {
         #[command(subcommand)]
         cmd: wcore_cli::backup::BackupCmd,
     },
+    /// F28: platform containment operator surface — `status` reports the
+    /// selected backend and its properties; `exec` runs a command through the
+    /// agent's own shell tool so an operator can observe, from the child's own
+    /// output, that the sandbox was ACTIVE rather than merely available.
+    Sandbox(wcore_cli::sandbox_cmd::SandboxArgs),
 }
 
 /// F-089: `models` sub-subcommands.
@@ -1416,6 +1421,13 @@ async fn run() -> anyhow::Result<ExitCode> {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(e) => {
                     eprintln!("wayland-core channel: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
+            TopCmd::Sandbox(args) => match wcore_cli::sandbox_cmd::run_sandbox(args).await {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core sandbox: {e:#}");
                     Ok(ExitCode::FAILURE)
                 }
             },
