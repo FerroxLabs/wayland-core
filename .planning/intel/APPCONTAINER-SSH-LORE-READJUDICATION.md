@@ -1,5 +1,36 @@
 # The SSH lore is refuted by its own control — and what that concealed
 
+> ## SUPERSEDED IN TWO PLACES by 28-02's control — read this box first
+>
+> Phase 28-02 re-measured this under a designed control (2 session types × 3 lease
+> states, both directional controls, one quiet run, against the digest-bound CI
+> candidate binary). Verdict **`wedge-clearable`**. It agrees with this document's
+> headline and corrects it in two ways that matter:
+>
+> **1. The refutation does NOT generalize, and this document should not be cited as
+> though it does.** Session type made *no* difference; lease state made *all* the
+> difference — session 0 / non-interactive / SSH reported the sandbox **available**
+> and ran a **contained** worker on a clean lease directory. But `seandesktop` is
+> the same physical box this document measured, so the finding holds **in the
+> certification environment** and generalization to other Windows hosts stays
+> **OPEN**. `KR-06` must not be closed on it.
+>
+> **2. "Silently disabled" is DISPROVED for the delegated-execution surface.** Under
+> a wedged lease the probe reported `unavailable` and the product **refused to
+> execute** — `ran=False`, nothing ran unsandboxed. So a stale lease is a **denial
+> of service, not an elevation of privilege**, and the measured behaviour is
+> **fail-closed**. Scored HIGH rather than CRITICAL for that reason. Not closed
+> outright: the bash-tool path (`default_for_platform()`) was not exercised, and
+> the misleading-message half of the finding stands.
+>
+> **Neither this file nor `APPCONTAINER-SSH-LEASE-WEDGE.md` may be cited as skip
+> evidence for any certification cell** — 28-01's ruling, upheld by 28-02, which
+> authorised the `observation-blocked` skip class for **no** cell. A laundering
+> channel does not become sound by pointing it at good news. The full record is
+> `.planning/phases/28-native-cross-platform-certification/28-02-OBSERVABILITY-CONTROL.md`.
+>
+> The text below is the earlier readjudication, kept as written.
+
 **Status: the lore is REFUTED, not merely doubted.** Measured 2026-07-27 on
 `SeanD@seandesktop` at `455dd836`, over a non-interactive session-0 SSH logon.
 

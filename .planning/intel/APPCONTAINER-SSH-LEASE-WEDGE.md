@@ -1,5 +1,15 @@
 # The "AppContainer is unavailable over SSH" trap is wrong — it is a stale test lease
 
+> **Confirmed and bounded by 28-02's control (`wedge-clearable`).** Session type made
+> no difference; lease state made all the difference — which is this document's
+> thesis, independently reproduced. Two corrections carry: the result holds **in the
+> certification environment only** (`seandesktop` is this same box, so other Windows
+> hosts stay OPEN), and a wedged lease makes the product **refuse to execute**
+> (`ran=False`) rather than run unsandboxed — a **denial of service, not an elevation
+> of privilege**. **This file may NOT be cited as skip evidence for any certification
+> cell.** See `.planning/intel/APPCONTAINER-SSH-LORE-READJUDICATION.md` and
+> `28-02-OBSERVABILITY-CONTROL.md`.
+
 **Status: the lore is FALSIFIED on the measured box, with a repeatable red/green.**
 Measured 2026-07-27 on `SeanD@seandesktop` by the Phase 22 lane, against
 `C:\p22-target\release\wayland-core.exe` (built from `2ecdfdf5`).
