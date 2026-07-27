@@ -363,3 +363,15 @@ stdout to the master end, and `crates/wcore-cli/tests/support/pty.rs` inherits t
 gate. Every human-visible property is provable on Linux and macOS only. Carried
 forward from 21-02's identical limitation at the same severity; it stays open
 until the PTY driver supports ConPTY.
+
+## F26-01 (lane/26) — out-of-scope findings, non-blocking
+
+- **MEDIUM — pre-existing hermeticity bypass.** `crates/wcore-gateway/src/service.rs:321` calls
+  `dirs::config_dir()` directly, failing `hermeticity_audit_test::no_dirs_config_dir_bypasses_outside_canonical_helper`.
+  Present verbatim at `de977949` (introduced by phase-24 `8b582851`); untouched by phase 26.
+  Belongs to the gateway/phase-24 area. Either route it through `wayland_config_dir()` or add it
+  to the test's ALLOWLIST with a reason.
+- **MEDIUM — `McpServerConfig::headers` is an unfenced future value channel.** Not emitted by
+  the portability projection today, so it does not leak; but a future edit that emits it would
+  bypass the scrub boundary, and the multi-emitter probe would not notice. Named by the F26-01
+  redaction panel. 26-02 should either emit it through `insert_detail` or fence it explicitly.
