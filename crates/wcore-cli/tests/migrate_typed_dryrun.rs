@@ -441,3 +441,60 @@ fn every_emitter_of_a_plan_is_free_of_canary_values() {
         );
     }
 }
+
+/// The path the F26-01 redaction panel NAMED, closed and re-measured.
+///
+/// Two panel members independently identified `DiscoveredItem::details` as an
+/// untyped `BTreeMap<String, String>` through which a credential could travel
+/// even though `CredentialRef` cannot hold one — specifically an MCP server
+/// `url` carrying `?token=…` or a `command` carrying `--api-key …`, both of
+/// which come from an untrusted peer configuration. The panel's rule for a
+/// named-but-uncovered path is to extend the probe and re-measure rather than
+/// vote, which is what this test is.
+#[test]
+#[serial]
+fn every_emitter_scrubs_credentials_embedded_in_free_form_details() {
+    let (_g, _h) = rooted();
+    let secret = "EMBEDDEDSECRET1234567890";
+
+    // A Hermes home whose MCP server hides a credential in its url AND its
+    // command — the exact shapes the panel named.
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("profiles/alpha");
+    std::fs::create_dir_all(&p).unwrap();
+    std::fs::write(
+        p.join("config.yaml"),
+        format!(
+            "model:\n  default: x\n  provider: y\n  base_url: https://user:{secret}@example.com/v1\n\
+             mcp_servers:\n  srv:\n    url: https://example.com/mcp?token={secret}\n\
+             \n  srv2:\n    command: runner --api-key={secret}\n"
+        ),
+    )
+    .unwrap();
+
+    let plan = hermes::build_plan(dir.path(), false)
+        .unwrap()
+        .to_portability();
+
+    let json = plan.to_json().unwrap();
+    let debug = format!("{plan:#?}");
+    let err = format!("{:?}", anyhow::anyhow!("failed: {plan:?}"));
+
+    for (what, rendered) in [("json", &json), ("Debug", &debug), ("error path", &err)] {
+        assert!(
+            !rendered.contains(secret),
+            "a credential embedded in free-form details leaked through {what}: {rendered}"
+        );
+    }
+
+    // POSITIVE half — the details WERE emitted (scrubbed), so the absence
+    // assertions above are not passing because the map was empty.
+    assert!(
+        json.contains("<redacted>"),
+        "nothing was scrubbed, so this test never exercised the path: {json}"
+    );
+    assert!(
+        json.contains("example.com"),
+        "scrubbing destroyed the non-secret shape too: {json}"
+    );
+}

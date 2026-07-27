@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub use digest::{TreeDigest, tree_digest};
-pub use redact::CredentialRef;
+pub use redact::{CredentialRef, scrub_detail};
 
 /// Which peer a plan was discovered from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -129,8 +129,22 @@ pub struct DiscoveredItem {
     pub credential: Option<CredentialRef>,
     /// Mapped, non-secret settings — provider, model, base_url, transport, …
     /// A `BTreeMap` so the order is the key order, not the insertion order.
+    ///
+    /// **Every value here is passed through [`redact::scrub_detail`] on the way
+    /// in.** This map is an untyped string channel, and the strings come from a
+    /// peer configuration — an MCP `url` with `?token=…` or a `command` with
+    /// `--api-key …` would otherwise carry a credential straight into the
+    /// emitted document. Use [`DiscoveredItem::insert_detail`] rather than
+    /// inserting directly.
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub details: BTreeMap<String, String>,
+}
+
+impl DiscoveredItem {
+    /// Insert a detail, scrubbing any credential material embedded in it.
+    pub fn insert_detail(&mut self, key: impl Into<String>, value: &str) {
+        self.details.insert(key.into(), scrub_detail(value));
+    }
 }
 
 /// The full typed plan. This is the type `migrate --json` serializes.

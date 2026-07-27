@@ -64,9 +64,160 @@ impl std::fmt::Display for CredentialRef {
     }
 }
 
+/// Configuration key fragments whose VALUE is credential material.
+const SECRET_KEY_FRAGMENTS: &[&str] = &[
+    "token",
+    "secret",
+    "apikey",
+    "api_key",
+    "password",
+    "passwd",
+    "auth",
+    "credential",
+    "key",
+];
+
+fn is_secret_key(name: &str) -> bool {
+    let low = name.to_ascii_lowercase();
+    // `max_tokens` / `keywords` / `authorized` are structural look-alikes.
+    const ALLOW: &[&str] = &[
+        "max_tokens",
+        "maxtokens",
+        "keywords",
+        "authorized",
+        "tokenizer",
+    ];
+    if ALLOW.contains(&low.as_str()) {
+        return false;
+    }
+    SECRET_KEY_FRAGMENTS.iter().any(|f| low.contains(f))
+}
+
+/// Scrub credential material that is EMBEDDED inside an otherwise-ordinary
+/// string before it is placed in a plan's free-form `details` map.
+///
+/// # Why this exists
+///
+/// [`CredentialRef`] closes the path where a credential is a first-class
+/// discovered value. It does NOT close the path where a credential is embedded
+/// inside a value that is legitimately reported — an MCP server `url` carrying
+/// `?token=…`, a `command` line carrying `--api-key …`, or a `base_url` with
+/// HTTP userinfo. Those strings come from a peer configuration, which is
+/// untrusted input, and they flow into an untyped `BTreeMap<String, String>`
+/// that offers the value no resistance.
+///
+/// This was found by the F26-01 redaction panel: two independent members named
+/// `DiscoveredItem::details` as an uncovered channel, so it was fixed and
+/// re-measured rather than voted on.
+pub fn scrub_detail(value: &str) -> String {
+    let mut out = strip_url_userinfo(value);
+    out = strip_secret_query_params(&out);
+    strip_secret_flags(&out)
+}
+
+/// `scheme://user:pass@host/…` ⇒ `scheme://<redacted>@host/…`
+fn strip_url_userinfo(v: &str) -> String {
+    let Some(scheme_end) = v.find("://") else {
+        return v.to_string();
+    };
+    let rest_start = scheme_end + 3;
+    let rest = &v[rest_start..];
+    // Userinfo ends at the first `@` that precedes the first `/`.
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let Some(at) = rest[..authority_end].find('@') else {
+        return v.to_string();
+    };
+    format!("{}<redacted>@{}", &v[..rest_start], &rest[at + 1..])
+}
+
+/// `?token=abc&x=1` ⇒ `?token=<redacted>&x=1`
+fn strip_secret_query_params(v: &str) -> String {
+    let Some(q) = v.find('?') else {
+        return v.to_string();
+    };
+    let (head, query) = v.split_at(q + 1);
+    let scrubbed: Vec<String> = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((k, _)) if is_secret_key(k) => format!("{k}=<redacted>"),
+            _ => pair.to_string(),
+        })
+        .collect();
+    format!("{head}{}", scrubbed.join("&"))
+}
+
+/// `--api-key SECRET` / `--token=SECRET` ⇒ the value replaced.
+fn strip_secret_flags(v: &str) -> String {
+    let toks: Vec<&str> = v.split_whitespace().collect();
+    let mut out: Vec<String> = Vec::with_capacity(toks.len());
+    let mut redact_next = false;
+    for t in toks {
+        if redact_next {
+            out.push("<redacted>".to_string());
+            redact_next = false;
+            continue;
+        }
+        if let Some(flag) = t.strip_prefix("--")
+            && let Some((name, _)) = flag.split_once('=')
+            && is_secret_key(name)
+        {
+            out.push(format!("--{name}=<redacted>"));
+            continue;
+        }
+        if let Some(flag) = t.strip_prefix("--")
+            && is_secret_key(flag)
+        {
+            out.push(t.to_string());
+            redact_next = true;
+            continue;
+        }
+        out.push(t.to_string());
+    }
+    // Preserve the original when there was no whitespace splitting to do.
+    if out.len() == 1 && !v.contains(char::is_whitespace) {
+        return out.into_iter().next().unwrap_or_default();
+    }
+    out.join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrub_detail_removes_embedded_credentials_but_keeps_the_shape() {
+        // URL userinfo.
+        assert_eq!(
+            scrub_detail("https://alice:hunter2@example.com/mcp"),
+            "https://<redacted>@example.com/mcp"
+        );
+        // Secret-named query parameter, non-secret ones preserved.
+        assert_eq!(
+            scrub_detail("https://example.com/mcp?token=SEKRIT&mode=fast"),
+            "https://example.com/mcp?token=<redacted>&mode=fast"
+        );
+        // Command flags, both spellings.
+        assert_eq!(
+            scrub_detail("srv --api-key=SEKRIT --verbose"),
+            "srv --api-key=<redacted> --verbose"
+        );
+        assert_eq!(
+            scrub_detail("srv --token SEKRIT --port 80"),
+            "srv --token <redacted> --port 80"
+        );
+        // NEGATIVE controls: an ordinary value must survive untouched, or the
+        // plan's details map would become useless.
+        assert_eq!(
+            scrub_detail("https://api.deepseek.com/v1"),
+            "https://api.deepseek.com/v1"
+        );
+        assert_eq!(scrub_detail("deepseek-v4-pro"), "deepseek-v4-pro");
+        assert_eq!(
+            scrub_detail("srv --max_tokens 8192"),
+            "srv --max_tokens 8192",
+            "max_tokens is a structural look-alike, not a secret"
+        );
+    }
 
     #[test]
     fn credential_ref_carries_no_value_through_any_emitter() {

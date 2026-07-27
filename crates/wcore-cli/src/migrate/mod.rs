@@ -26,6 +26,7 @@ use clap::{Args, Subcommand};
 use wcore_config::config::{McpServerConfig, ProfileConfig, patch_global_config};
 use wcore_config::portability::{
     CredentialRef, DiscoveredItem, ItemKind, PeerSource, PortabilityPlan, is_root_profile_id,
+    scrub_detail,
 };
 
 pub mod hermes;
@@ -163,16 +164,16 @@ impl MigrationPlan {
             };
             let mut details = BTreeMap::new();
             if let Some(v) = &p.config.provider {
-                details.insert("provider".to_string(), v.clone());
+                details.insert("provider".to_string(), scrub_detail(v));
             }
             if let Some(v) = &p.config.model {
-                details.insert("model".to_string(), v.clone());
+                details.insert("model".to_string(), scrub_detail(v));
             }
             if let Some(v) = &p.config.base_url {
-                details.insert("base_url".to_string(), v.clone());
+                details.insert("base_url".to_string(), scrub_detail(v));
             }
             if !p.mcp_refs.is_empty() {
-                details.insert("mcp_refs".to_string(), p.mcp_refs.join(","));
+                details.insert("mcp_refs".to_string(), scrub_detail(&p.mcp_refs.join(",")));
             }
             out.items.push(DiscoveredItem {
                 kind,
@@ -192,10 +193,10 @@ impl MigrationPlan {
             let mut details = BTreeMap::new();
             details.insert("transport".to_string(), format!("{:?}", srv.transport));
             if let Some(c) = &srv.command {
-                details.insert("command".to_string(), c.clone());
+                details.insert("command".to_string(), scrub_detail(c));
             }
             if let Some(u) = &srv.url {
-                details.insert("url".to_string(), u.clone());
+                details.insert("url".to_string(), scrub_detail(u));
             }
             out.items.push(DiscoveredItem {
                 kind: ItemKind::McpServer,
