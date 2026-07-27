@@ -166,3 +166,10 @@ pub mod backend;
 // the lib so the lifecycle projection and the unit/verb agreement are testable
 // under `cargo test -p wcore-cli --lib`.
 pub mod gateway;
+
+// F22-04: CLI surface `wayland-core goal` — the user-reachable surface over the
+// durable Goal kernel and its Fleet task ledger (open / task / run / status /
+// exec-task). Lives in the lib so the idempotency gate at the effect boundary is
+// testable under `cargo test -p wcore-cli --lib`, and so the kill/restart proof
+// runs against the shipped binary rather than an `examples/` instrument.
+pub mod goal_cmd;
