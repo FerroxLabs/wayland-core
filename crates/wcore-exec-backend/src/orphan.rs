@@ -275,16 +275,37 @@ pub async fn local_process_rows(nonce: &str) -> Result<Vec<String>> {
         .await
         .map_err(|e| crate::error::ExecError::Exec(format!("enumerating processes: {e}")))?;
     let text = String::from_utf8_lossy(&output.stdout);
+    let me = std::process::id();
     Ok(text
         .lines()
         .filter(|line| line.contains(nonce))
-        // The enumerator itself carries the nonce on its own argv on some
-        // platforms; excluding our own pid would need the pid, which we do not
-        // have here, so instead the nonce is never passed to the enumerator at
-        // all — the filter is in Rust. This closes the "the scan found itself"
-        // defect plan 25-01 hit on the remote scanner.
+        // EXCLUDE OURSELVES. `wayland-core backend scan --task-id <nonce>`
+        // carries the nonce on its own argv, so the scanner matches itself and
+        // reports one orphan that does not exist. This is the SAME defect plan
+        // 25-01 hit on the remote scanner ("the remote orphan scanner found
+        // itself"), and it recurred here the moment the local scan started
+        // reading the real process table. Measured on hetzner-dsm: scanner=1,
+        // independent enumeration=0, and the one row was the scanner.
+        .filter(|line| row_pid(line) != Some(me))
         .map(|line| line.trim().to_string())
         .collect())
+}
+
+/// The pid a process-listing row describes.
+///
+/// `ps -eo pid,...` puts it first; `tasklist /FO CSV` puts it in the second
+/// quoted field. A row whose pid cannot be parsed is KEPT — dropping a row we
+/// failed to understand would be a filter that silently loses orphans, which
+/// is the worst failure available to this module.
+fn row_pid(row: &str) -> Option<u32> {
+    if cfg!(windows) {
+        row.split(',')
+            .nth(1)
+            .map(|f| f.trim().trim_matches('"'))
+            .and_then(|f| f.parse().ok())
+    } else {
+        row.split_whitespace().next().and_then(|f| f.parse().ok())
+    }
 }
 
 #[cfg(test)]
@@ -380,6 +401,14 @@ mod tests {
         assert!(e.label().contains("1 ORPHAN(S) FOUND"));
     }
 
+    #[test]
+    fn a_row_whose_pid_cannot_be_parsed_is_kept_rather_than_dropped() {
+        // Dropping an unparseable row would be a filter that silently loses
+        // orphans — the single worst failure this module can have.
+        assert_eq!(row_pid("  1234 1 1234 9 sh -c ..."), Some(1234));
+        assert_eq!(row_pid("not-a-pid something"), None);
+    }
+
     /// The scanner must be able to return NONZERO, or a zero proves nothing.
     /// This deliberately leaves a descendant behind and requires it be found.
     #[tokio::test]
@@ -419,5 +448,25 @@ mod tests {
             after.is_empty(),
             "the deliberate orphan survived its own reap: {after:?}"
         );
+    }
+
+    /// The scanner must not count ITSELF. This process's own argv carries the
+    /// nonce whenever a caller passes one on the command line, and plan 25-01
+    /// already hit this exact defect on the remote scanner.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn the_scanner_does_not_count_its_own_process() {
+        // A nonce this process itself carries: our own pid, which appears in
+        // no other process's argv but is trivially findable if we scanned
+        // ourselves by pid.
+        let me = std::process::id();
+        let rows = local_process_rows(&me.to_string()).await.unwrap();
+        for row in &rows {
+            assert_ne!(
+                row_pid(row),
+                Some(me),
+                "the scanner counted its own process as an orphan: {row}"
+            );
+        }
     }
 }

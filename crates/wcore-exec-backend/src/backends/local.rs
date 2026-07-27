@@ -278,20 +278,50 @@ impl ExecutionBackend for LocalBackend {
         })
     }
 
+    /// F25-05 FINDING (HIGH), fixed here.
+    ///
+    /// This used to consult ONLY the live-task registry. That makes the scan
+    /// structurally blind to the exact thing an orphan scan exists to find: a
+    /// terminal event REMOVES the registry entry, so a process that outlived
+    /// its task is, by construction, no longer listed — and the scan returned
+    /// zero while `ps` showed the process. Measured on hetzner-dsm: the
+    /// independent enumeration found 1 row carrying the nonce and this scan
+    /// reported 0.
+    ///
+    /// It now takes the UNION of the registry crossing and a real enumeration
+    /// of the host process table, so a surviving process is found whether or
+    /// not any bookkeeping still remembers it.
     async fn scan_orphans(&self, nonce: &str) -> Result<OrphanScan> {
-        let found: Vec<String> = registry::list()
+        let mut found: Vec<String> = registry::list()
             .into_iter()
             .filter(|t| t.backend_id == BACKEND_ID && t.nonce == nonce)
             .filter(|t| t.pid.map(process_alive).unwrap_or(false))
-            .map(|t| format!("task {} pid {:?}", t.task_id, t.pid))
+            .map(|t| format!("registry: task {} pid {:?}", t.task_id, t.pid))
             .collect();
+
+        // The half the registry cannot see. Failure to enumerate is reported
+        // as a failure to enumerate — never as zero.
+        let (rows, enumerated, detail) = match crate::orphan::local_process_rows(nonce).await {
+            Ok(rows) => (rows, true, String::new()),
+            Err(e) => (Vec::new(), false, e.to_string()),
+        };
+        found.extend(rows.into_iter().map(|row| format!("process table: {row}")));
+        found.sort();
+        found.dedup();
+
         Ok(OrphanScan {
             backend_id: BACKEND_ID.into(),
             kind: BackendKind::Local,
             nonce: nonce.into(),
-            method: "live-task registry crossed with the real process table".into(),
+            method: if enumerated {
+                "live-task registry UNION a real enumeration of the host process table".into()
+            } else {
+                format!(
+                    "live-task registry only; the process table could not be enumerated ({detail})"
+                )
+            },
             found,
-            enumerated: true,
+            enumerated,
         })
     }
 }

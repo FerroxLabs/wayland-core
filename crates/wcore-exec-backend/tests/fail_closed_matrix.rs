@@ -533,3 +533,68 @@ fn no_backend_claims_a_reaping_mechanism_it_does_not_have() {
     ));
     assert!(mechanism_for(BackendKind::Container).is_kernel_backed());
 }
+
+// ===========================================================================
+// THE FINDING — a scanner blind to what the registry forgot
+// ===========================================================================
+
+/// F25-05 HIGH finding, pinned.
+///
+/// The local scan used to consult ONLY the live-task registry, which makes it
+/// structurally blind to the exact thing an orphan scan exists to find: a
+/// terminal event REMOVES the registry entry, so a process that outlived its
+/// task is by construction no longer listed. Measured on hetzner-dsm: the
+/// independent `ps` enumeration found 1 row carrying the nonce while the scan
+/// reported 0.
+///
+/// This test plants a process that carries a nonce and is in NO registry, and
+/// requires the scan to find it anyway.
+#[tokio::test]
+#[cfg(unix)]
+async fn the_local_scan_finds_an_orphan_that_no_registry_remembers() {
+    let nonce = format!("f25-registryless-{}", std::process::id());
+    let state = TempDir::new().unwrap();
+    // SAFETY: single-threaded test setup before any backend is constructed.
+    unsafe {
+        std::env::set_var("WAYLAND_EXEC_BACKEND_STATE_DIR", state.path());
+    }
+
+    // No `exec`: the shell keeps its full argv so the nonce is genuinely
+    // visible in the process table. With `exec` the nonce vanishes and the
+    // scan finds nothing — which is how this class of test passes for the
+    // wrong reason.
+    let mut child = wcore_config::shell::shell_command_argv(
+        "sh",
+        &["-c", &format!("while :; do sleep 1; done # {nonce}")],
+    )
+    .spawn()
+    .expect("plant a registryless orphan");
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+    let evidence = wcore_exec_backend::orphan::scan_one("local", &nonce, reference_budget())
+        .await
+        .unwrap()
+        .expect("the local backend exists");
+
+    // Reap the plant AND its descendants. Killing only the direct child leaves
+    // the `sleep` grandchild behind — nextest marks the test leaky, which is
+    // this plan's own subject matter showing up in its own test.
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    let _ = wcore_config::shell::shell_command_argv("pkill", &["-f", &nonce])
+        .output()
+        .await;
+
+    assert!(
+        evidence.is_observed(),
+        "the local surface must be enumerable on this host"
+    );
+    assert!(
+        evidence.orphan_count.unwrap_or(0) >= 1,
+        "the scan reported {:?} for a process that was definitely running and carried the \
+         nonce — a scan that can only see what the registry still remembers cannot see an \
+         orphan, because a terminal event removes the entry. rows: {:?}",
+        evidence.orphan_count,
+        evidence.rows
+    );
+}
