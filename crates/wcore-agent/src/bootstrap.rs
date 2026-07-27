@@ -2190,11 +2190,20 @@ impl AgentBootstrap {
                 wcore_budget::BudgetCap::default(),
             )))
         });
+        // F21-02-03 — the cell that will carry this session's tool authority
+        // to every child it spawns. Created empty here because the spawner is
+        // `Arc`-wrapped (and moved into SpawnTool/DelegateTool/WorkflowTool)
+        // below, while the parent registry keeps changing until the channel
+        // posture and persona narrowings run. Published exactly once, further
+        // down, the moment the toolset is final.
+        let parent_tool_authority: Arc<std::sync::OnceLock<crate::policy_gate::PolicyGate>> =
+            Arc::new(std::sync::OnceLock::new());
         let mut spawner_builder = session_budget
             .govern_spawner(
                 crate::spawner::AgentSpawner::new(provider.clone(), self.config.clone()),
                 session_runtime.active_turn_token(),
             )
+            .with_parent_tool_authority(Arc::clone(&parent_tool_authority))
             .with_durable_session_authority(
                 durable_session_authority.clone(),
                 effective_execution_policy.clone(),
@@ -2546,6 +2555,29 @@ impl AgentBootstrap {
                 "persona tool allowlist applied"
             );
         }
+
+        // F21-02-03 — publish the parent's tool authority to the session
+        // spawner. This is the LAST point at which the registry changes: every
+        // built-in, MCP, plugin and orchestration tool is registered above, and
+        // both narrowings (channel posture, persona allowlist) have just run.
+        // Snapshotting the registry rather than re-deriving the declarations
+        // keeps a single source of truth — a narrowing added later composes
+        // into the child floor for free instead of escaping it.
+        //
+        // Unconditional on purpose. Gating the install on "did the operator
+        // declare a restriction" would leave the enforcement absent by default,
+        // which is the property-by-absence shape this finding is about; and for
+        // an unrestricted session the snapshot grants everything the parent
+        // holds, so it denies a child nothing it could legitimately have had.
+        let parent_tool_names = registry.tool_names();
+        let _ = parent_tool_authority.set(crate::policy_gate::PolicyGate::from_parent_tools(
+            &parent_tool_names,
+        ));
+        tracing::debug!(
+            target: "wcore_agent::bootstrap",
+            tools = parent_tool_names.len(),
+            "parent tool authority published to session spawner"
+        );
 
         // Every session gets a workspace policy so BashTool's OS sandbox is
         // rooted at the workspace. Only a fingerprint-trusted, non-Managed,

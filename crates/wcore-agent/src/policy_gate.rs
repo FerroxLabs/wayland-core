@@ -15,6 +15,30 @@
 //! signal, so the cost on the unconfigured fast path is one `Option`
 //! match per tool call.
 //!
+//! ## F21-02-03 — how a gate reaches production
+//!
+//! Through v0.12 the gate was opt-in *and had no opt-in*:
+//! `AgentEngine::set_policy_gate` had zero callers workspace-wide, and
+//! both production engine constructors hard-coded `policy_gate: None`.
+//! The mechanism could not run outside a test, so the "a child cannot
+//! widen the parent's tool authority" property was satisfied only by the
+//! absence of any enforcement — the exact shape Phase 21 indicts.
+//!
+//! It is now installed on the **child** side of every spawn, without any
+//! new operator knob. `AgentBootstrap::build` snapshots the parent
+//! engine's final tool registry once the toolset stops changing, turns it
+//! into a gate via [`PolicyGate::from_parent_tools`], and publishes it to
+//! the session `AgentSpawner`. `AgentSpawner::execute_resolved_launch`
+//! installs that same gate on every child engine it constructs, beside
+//! the egress policy it already inherits. A child that requests a tool
+//! its parent does not hold is denied at dispatch, no matter what its
+//! own `allowed_tools` says.
+//!
+//! The parent engine itself is deliberately NOT gated: its registry is
+//! already the authority on what it can invoke, and a snapshot would go
+//! stale against deferred MCP connection (`wayland#551`), turning a
+//! late-registered server's tools into spurious denials.
+//!
 //! ## Actor resolution
 //!
 //! Top-level (main-agent) tool calls use the gate's configured
@@ -60,6 +84,35 @@ impl PolicyGate {
             engine,
             default_actor,
         }
+    }
+
+    /// F21-02-03 — the parent session's tool authority, as an inheritable
+    /// floor for the children it spawns.
+    ///
+    /// `names` is the parent engine's **final** registry contents, read
+    /// after every narrowing bootstrap applies (`channel_tool_posture`'s
+    /// `apply_posture`, the persona `allowed_tools` retain, and any
+    /// conditional built-in registration). Reading the registry rather
+    /// than reconstructing the declarations keeps one source of truth:
+    /// a future narrowing composes automatically instead of silently
+    /// escaping the floor.
+    ///
+    /// One `Invoke` grant per surviving tool, for the same actor the gate
+    /// resolves top-level calls to, so a child's dispatch — which passes
+    /// `source_agent = None` — is checked against exactly the parent's
+    /// set. A tool the parent does not hold is therefore denied to every
+    /// descendant, which is the non-widening property Phase 21 requires.
+    pub fn from_parent_tools(names: &[String]) -> Self {
+        let actor = Actor::User("default".into());
+        let mut engine = PolicyEngine::new();
+        for name in names {
+            engine.grant(wcore_permissions::Permission {
+                actor: actor.clone(),
+                resource: Resource::Tool(name.clone()),
+                action: Action::Invoke,
+            });
+        }
+        Self::new(Arc::new(engine), actor)
     }
 
     /// Check whether the dispatching actor may invoke `tool_name`.

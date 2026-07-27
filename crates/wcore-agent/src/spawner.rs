@@ -731,6 +731,19 @@ pub struct AgentSpawner {
     /// Child engines must never fall back to a process-global compatibility
     /// policy after the bootstrap task-local scope has exited.
     egress_policy: wcore_egress::SharedPolicy,
+    /// F21-02-03 — the parent session's tool authority, as an inheritable
+    /// floor. Every child engine this spawner builds is gated by it, so a
+    /// child cannot invoke a tool the parent does not hold regardless of the
+    /// `allowed_tools` its spawn request asked for.
+    ///
+    /// A `OnceLock` because bootstrap must `Arc`-wrap the spawner (it is moved
+    /// into `SpawnTool` / `DelegateTool` / `WorkflowTool`) *before* the parent
+    /// registry stops changing: the channel-posture and persona narrowings run
+    /// several hundred lines later. Bootstrap therefore hands over the empty
+    /// cell at construction and publishes into it once the toolset is final.
+    /// Unset (every direct/test constructor, and any session whose bootstrap
+    /// never published) means no gate — identical to the pre-F21 child.
+    parent_tool_authority: Arc<std::sync::OnceLock<crate::policy_gate::PolicyGate>>,
     /// Shared live posture authority for host-backed sessions. Read only when
     /// deriving a child config so runtime de-escalation applies to descendants
     /// that have not started yet.
@@ -873,6 +886,7 @@ impl AgentSpawner {
             sandbox_runtime,
             parent_workspace: None,
             egress_policy: wcore_egress::default_policy(),
+            parent_tool_authority: Arc::new(std::sync::OnceLock::new()),
             approval_manager: None,
             bus: None,
             cancel: tokio_util::sync::CancellationToken::new(),
@@ -891,6 +905,18 @@ impl AgentSpawner {
                 wcore_swarm::MAX_CONCURRENT_WORKERS,
             )),
         }
+    }
+
+    /// F21-02-03 — bind the cell carrying the parent session's tool
+    /// authority. Bootstrap calls this with a still-empty cell and fills it
+    /// once the parent registry is final; see the field docs for why the
+    /// publish cannot happen at construction time.
+    pub(crate) fn with_parent_tool_authority(
+        mut self,
+        cell: Arc<std::sync::OnceLock<crate::policy_gate::PolicyGate>>,
+    ) -> Self {
+        self.parent_tool_authority = cell;
+        self
     }
 
     /// Install the one session authority shared by every transient spawner.
@@ -2045,6 +2071,16 @@ impl AgentSpawner {
             return SubAgentResult::error(&launch.request.name, &error);
         }
         engine.set_egress_policy(self.egress_policy.clone());
+        // F21-02-03: inherit the parent session's tool authority, alongside
+        // the egress authority above. This is the production caller of
+        // `set_policy_gate` — before it, `policy_gate` was `None` at every
+        // production constructor and the gate could not run outside a test.
+        // The child's own registry is built from its requested
+        // `allowed_tools`; this gate is the parent-side floor that request
+        // cannot climb over.
+        if let Some(gate) = self.parent_tool_authority.get() {
+            engine.set_policy_gate(gate.clone());
+        }
         engine.set_cancel_token(child_cancel);
         engine.set_initial_reasoning_effort(launch.overrides.effort.clone());
 
@@ -2142,6 +2178,12 @@ impl AgentSpawner {
             sandbox_runtime: Arc::clone(&self.sandbox_runtime),
             parent_workspace: self.parent_workspace.clone(),
             egress_policy: self.egress_policy.clone(),
+            // F21-02-03 CRITICAL: clone the `Arc`, never the contents. Every
+            // derived spawner (fleet shards, council proposers, transient
+            // engine spawners) must observe the SAME cell, or a spawn path
+            // that clones before bootstrap publishes would hand its children
+            // an empty authority and silently restore the fail-open child.
+            parent_tool_authority: Arc::clone(&self.parent_tool_authority),
             approval_manager: self.approval_manager.clone(),
             bus: self.bus.clone(),
             cancel: self.cancel.clone(),
