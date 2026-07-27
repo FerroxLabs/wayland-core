@@ -92,8 +92,21 @@ pub(super) fn test_lease_root() -> Result<PathBuf> {
     use std::sync::OnceLock;
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
     let root = ROOT.get_or_init(|| match std::env::var_os(TEST_LEASE_ROOT_ENV) {
+        // Inherited from a parent test process: join it as-is, and never clear
+        // it — the lease this process is about to abandon is the whole point.
         Some(inherited) => PathBuf::from(inherited),
-        None => std::env::temp_dir().join(format!("wcore-lease-test-{:08x}", std::process::id())),
+        None => {
+            let path =
+                std::env::temp_dir().join(format!("wcore-lease-test-{:08x}", std::process::id()));
+            // Start every run from an empty root. The name is keyed on the
+            // process id, Windows reuses process ids freely, and a lease left
+            // behind by an earlier run is not inert: `create_new` collides with
+            // it, and `recover_dead_leases_locked` refuses it outright. Both
+            // were observed on SEANDESKTOP when a reused id inherited a lease
+            // that an earlier failing run had abandoned here.
+            let _ = fs::remove_dir_all(&path);
+            path
+        }
     });
     fs::create_dir_all(root).map_err(|error| {
         exec_error(format!(
