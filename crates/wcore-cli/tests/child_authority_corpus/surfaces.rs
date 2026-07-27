@@ -786,28 +786,69 @@ pub fn approval_no_channel_canary() -> ProbeResult {
     }
 }
 
-/// The budget-family canary required by census section 8. Its stated job is to
-/// "report the day a production caller starts forwarding a child-supplied
-/// override".
+/// The budget-family canary required by census section 8, **re-pointed from
+/// absence to enforcement**.
 ///
-/// **That day arrived on 2026-07-27, and this canary missed it**, because it
-/// matched only the literal spelling `sub_budget(Some(` while the production
-/// caller landed as `sub_budget_narrowed(..)`. For one grading cycle it kept
-/// reporting "NO-CHANNEL canary intact" while a live, LLM-reachable
-/// sub-allocation channel existed and was enforced. A canary keyed to one
-/// spelling of the thing it watches is a canary that reports on the spelling.
+/// ## The history this function carries
 ///
-/// It now matches either spelling, so a trip is truthful. **Tripped is the
-/// expected and correct state from 2026-07-27 onward** — it no longer means
-/// "something went wrong", it means the depth/time/token/cost legs are no
-/// longer protected by the *absence* of a request channel and must be graded
-/// on enforcement instead. The live differential in
-/// `crates/wcore-cli/tests/f21_02_child_budget_live.rs` is what carries that
-/// now; the revert-to-vacuous control there collapses 3 served turns back to 8.
-pub fn budget_no_channel_canary() -> CanaryState {
-    // `wcore-budget` is the defining crate: its own `#[cfg(test)]` module at
-    // execution.rs:920 exercises `sub_budget(Some(..))`, which is the fixture
-    // that proves the override works at all, not a production request channel.
+/// The census recorded depth/time/token/cost as protected *in part* by the
+/// absence of a request channel: no shipped surface carried a child-fillable
+/// budget field, so "a child cannot widen its own budget" held because nothing
+/// could ask. The original canary asserted that absence — `Intact` while no
+/// production caller forwarded an override, `Tripped` the day one appeared.
+///
+/// Two failures followed, and both are instructive:
+///
+/// 1. Phase 21's F21-02 BUILT the sub-allocation channel
+///    (`ExecutionBudgetView::sub_budget_narrowed`, reached from the Delegate
+///    tool's `budget` object through `ForkOverrides`). The canary did not
+///    notice, because it matched only the literal spelling `sub_budget(Some(`
+///    while the production caller landed as `sub_budget_narrowed(..)`. A canary
+///    keyed to one spelling of the thing it watches reports on the spelling.
+/// 2. Unblinding it to match both spellings made it truthful and made it trip —
+///    permanently, on every run, for a channel whose existence is intended. A
+///    canary whose `Tripped` state is the correct steady state is not a canary;
+///    it is a red light wired to the ignition.
+///
+/// ## What it measures now
+///
+/// The property the corpus owes has not changed — *a child must not obtain a
+/// budget envelope wider than its parent's* — but the reason it holds has. It
+/// no longer rests on the channel's non-existence, so this canary no longer
+/// grades non-existence. It **drives the real channel with a hostile request
+/// and observes the refusal**, and it trips in the two directions that would
+/// actually be news:
+///
+/// * **The channel VANISHED.** No `crates/*/src` file forwards a child-supplied
+///   override into `sub_budget`/`sub_budget_narrowed` any more. That is F21-02
+///   reverting to vacuity — the state Phase 21 graded NOT MET three times — and
+///   it must be loud, so the *absence* is now the alarm rather than the pass.
+/// * **The widening SUCCEEDED.** `sub_budget_narrowed` was handed caps orders of
+///   magnitude wider than the parent's and the child came back holding them.
+///
+/// ## Why it can go red (F-V4's lesson, applied)
+///
+/// F-V4 recorded that the previous canary "could trip silently forever" because
+/// nothing asserted on it. This one is consumed exactly as before — through
+/// [`ProbeResult::with_canary`] into `canary_trip`, asserted by
+/// `assert_no_channel_canaries_stayed_intact` — and its executable half is
+/// differential rather than tautological:
+///
+/// * `limit_for(..)` renders the child's OWN leaf cap when nothing is exceeded.
+///   Revert `sub_budget_narrowed` to `self.sub_budget(Some(requested))` (drop
+///   the intersection) and the child names 10_000_000 tokens / $1_000_000 /
+///   depth 1_000 instead of the parent's 100 / $0.01 / 1, and this trips.
+/// * `effective_budget()` folds the whole ancestor chain. Drop the ancestor leg
+///   and it reports the requested envelope, and this trips.
+///
+/// Neither number is written by this test, and neither was obtainable before
+/// the seam existed.
+pub fn budget_narrowing_channel_canary(dimension: Dimension) -> CanaryState {
+    // ---- Half 1: the channel must still EXIST in production. --------------
+    // `wcore-budget` is the defining crate: its own `#[cfg(test)]` module
+    // exercises `sub_budget(Some(..))`, which is the fixture proving the
+    // override works at all, not a production request channel. Excluded so a
+    // unit test can never stand in for a shipped caller.
     let mut callers = production_sites_mentioning("sub_budget(Some(", "crates/wcore-budget/");
     callers.extend(production_sites_mentioning(
         "sub_budget_narrowed(",
@@ -817,20 +858,149 @@ pub fn budget_no_channel_canary() -> CanaryState {
     callers.dedup();
 
     if callers.is_empty() {
-        CanaryState::Intact(
-            "NO-CHANNEL canary intact: no crates/*/src file forwards a child-supplied override \
-             into sub_budget or sub_budget_narrowed. NOTE: as of 2026-07-27 this state is a \
-             REGRESSION, not a pass -- the sub-allocation channel is meant to exist."
+        return CanaryState::Tripped(
+            "the sub-allocation REQUEST CHANNEL HAS VANISHED: no crates/*/src file forwards a \
+             child-supplied override into sub_budget or sub_budget_narrowed. F21-02 has reverted \
+             to being satisfied by ABSENCE — the property would hold because nothing can ask, \
+             which is the exact vacuity Phase 21 graded NOT MET three times. This canary grades \
+             enforcement now, and there is nothing left to enforce against."
                 .to_owned(),
-        )
+        );
+    }
+
+    // ---- Half 2: drive the real channel and observe the refusal. ----------
+    // The hostile request is `wide_child_budget()` — every cap wider than the
+    // parent's by orders of magnitude — pushed through the PRODUCTION seam
+    // (`sub_budget_narrowed`), not through the raw `sub_budget(Some(..))` the
+    // standalone driver already exercises.
+    let parent = narrowing_probe_parent().start_root();
+    let child = parent.sub_budget_narrowed(wide_child_budget());
+    let requested = wide_child_budget();
+    let parent_caps = narrowing_probe_parent();
+    let effective = child.effective_budget();
+
+    // Per dimension: (the reason string `limit_for` keys on, the cap the parent
+    // holds, the cap the hostile request asked for, the cap the child ended up
+    // NAMING, the cap that actually BINDS it). Every rendering below uses the
+    // same formatting `limit_for` uses, so `named` is compared like for like.
+    let (reason, parent_cap, asked, named, binding) = match dimension {
+        Dimension::Depth => (
+            "max_agent_depth",
+            render_usize(parent_caps.max_agent_depth),
+            render_usize(requested.max_agent_depth),
+            child.limit_for("max_agent_depth"),
+            render_usize(effective.max_agent_depth),
+        ),
+        Dimension::Time => (
+            "max_wall_time",
+            render_duration(parent_caps.max_wall_time),
+            render_duration(requested.max_wall_time),
+            child.limit_for("max_wall_time"),
+            render_duration(effective.max_wall_time),
+        ),
+        Dimension::Token => (
+            "max_tokens_in",
+            render_u64(parent_caps.max_tokens_in),
+            render_u64(requested.max_tokens_in),
+            child.limit_for("max_tokens_in"),
+            render_u64(effective.max_tokens_in),
+        ),
+        Dimension::Cost => (
+            "max_cost_usd",
+            render_f64(parent_caps.max_cost_usd),
+            render_f64(requested.max_cost_usd),
+            child.limit_for("max_cost_usd"),
+            render_f64(effective.max_cost_usd),
+        ),
+        other => {
+            return CanaryState::Intact(format!(
+                "{} is not a budget-rollup dimension; the sub-allocation canary does not apply \
+                 to it",
+                other.census_name()
+            ));
+        }
+    };
+
+    // The refusal is stated as an EQUALITY against the parent's cap, not as
+    // "!= the requested cap". `intersect_optional` is a pointwise minimum and
+    // every requested cap here is strictly wider, so a working seam lands the
+    // child EXACTLY on the parent's number. Testing inequality-against-the-ask
+    // would let a seam that widened to some third value pass; testing equality
+    // against the parent leaves it nowhere to land but the right answer.
+    let binding_ok = binding == parent_cap;
+    let named_ok = named == parent_cap;
+    let evidence = format!(
+        "sub_budget_narrowed({reason}) — parent holds {parent_cap}, the child asked for {asked}, \
+         the child NAMES {named} and is BOUND BY {binding}; production callers: {}",
+        callers.join(", ")
+    );
+
+    if binding_ok && named_ok {
+        CanaryState::Intact(format!(
+            "sub-allocation channel intact and ENFORCED (not vacuous): {evidence}"
+        ))
     } else {
+        let which = match (binding_ok, named_ok) {
+            (false, false) => "both the envelope that BINDS the child and the one it NAMES",
+            (true, false) => {
+                "the envelope the child NAMES (the ancestor rollup still binds it, so every \
+                 leaf-rendering accessor now reports a cap the child cannot actually spend — \
+                 which is the exact defect sub_budget_narrowed was added to close)"
+            }
+            (false, true) => "the envelope that BINDS the child",
+            (true, true) => unreachable!("handled by the Intact arm"),
+        };
         CanaryState::Tripped(format!(
-            "a production file forwards a child-supplied budget override: {}. This is EXPECTED \
-             from 2026-07-27: the vacuity protection is intentionally gone, so grade the budget \
-             legs on enforcement (see f21_02_child_budget_live.rs), not on absence of a channel.",
-            callers.join(", ")
+            "A CHILD WIDENED ITS OWN BUDGET THROUGH THE LIVE SUB-ALLOCATION CHANNEL: {which} \
+             departed from the parent's cap. {evidence}. The channel was built on the promise \
+             that narrowing is monotonic by construction, so a request could only ever LOWER a \
+             cap. That promise no longer holds on this dimension."
         ))
     }
+}
+
+/// The parent envelope the sub-allocation canary probes against.
+///
+/// Deliberately NOT [`tight_parent_budget`]. That fixture's 40ms wall cap is
+/// sized so `budget_probe`'s Time leg can watch a child burn past it — which is
+/// the opposite of what this probe needs. `limit_for` resolves through
+/// `with_reason_state`, which renders the cap of whichever state is *currently
+/// exceeded* and only falls back to the leaf when none is: with a 40ms parent
+/// cap, any scheduling hiccup between `start_root()` and the read would make
+/// the ancestor exceeded, so `limit_for` would render the PARENT's cap and the
+/// probe would report a pass no matter what the child named. That is a
+/// self-passing gate, and this fixture exists to close it.
+///
+/// One hour is unreachable inside a probe that runs in microseconds, and is
+/// still 24x narrower than the 86_400s the hostile request asks for, so the
+/// differential stays large.
+fn narrowing_probe_parent() -> ExecutionBudget {
+    ExecutionBudget {
+        max_wall_time: Some(Duration::from_secs(3_600)),
+        max_tool_runtime: None,
+        max_processes: None,
+        max_agent_depth: Some(1),
+        max_tokens_in: Some(100),
+        max_tokens_out: Some(100),
+        max_cost_usd: Some(0.01),
+    }
+}
+
+fn render_usize(v: Option<usize>) -> String {
+    v.map(|n| n.to_string()).unwrap_or_default()
+}
+
+fn render_u64(v: Option<u64>) -> String {
+    v.map(|n| n.to_string()).unwrap_or_default()
+}
+
+fn render_f64(v: Option<f64>) -> String {
+    v.map(|c| format!("${c:.4}")).unwrap_or_default()
+}
+
+fn render_duration(v: Option<Duration>) -> String {
+    v.map(|d| format!("{:.1}s", d.as_secs_f64()))
+        .unwrap_or_default()
 }
 
 // ===========================================================================
@@ -1365,7 +1535,7 @@ impl CorpusExecutor for StandaloneInProcess {
             Dimension::Depth | Dimension::Time | Dimension::Token | Dimension::Cost => {
                 let parent = tight_parent_budget().start_root();
                 let child = parent.sub_budget(Some(wide_child_budget()));
-                let canary = budget_no_channel_canary();
+                let canary = budget_narrowing_channel_canary(entry.dimension);
                 let mut probe = budget_probe(entry.dimension, &child);
                 probe.detail = format!(
                     "ExecutionBudgetView::sub_budget(Some(wider)) at the child-spawn seam; {}; {}",
@@ -1449,7 +1619,7 @@ impl CorpusExecutor for HostProtocolInProcess {
             Dimension::Depth | Dimension::Time | Dimension::Token | Dimension::Cost => {
                 match session_turn_child_view() {
                     Ok(child) => {
-                        let canary = budget_no_channel_canary();
+                        let canary = budget_narrowing_channel_canary(entry.dimension);
                         let mut probe = budget_probe(entry.dimension, &child);
                         probe.detail = format!(
                             "BudgetAuthorityCoordinator::begin_active_turn(turn, Some(wider)) — \
