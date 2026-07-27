@@ -1111,10 +1111,25 @@ async fn assert_clean_ignores_the_swarm_root_it_mints_and_still_refuses_real_dir
     // construction, so from here the working tree carries exactly the entry the
     // guard used to refuse itself over.
     let manager = WorktreeManager::new(fixture.path()).expect("in-repo manager");
+    let swarm_root = fixture.path().join(".swarm-worktrees");
     assert!(
-        fixture.path().join(".swarm-worktrees").is_dir(),
+        swarm_root.is_dir(),
         "precondition: the manager mints its root inside the repository"
     );
+
+    // THE PRECONDITION THAT MAKES THIS TEST ABLE TO FAIL, and the reason the
+    // defect survived to production in the first place. Git does not report an
+    // untracked directory that contains no files, so the freshly-minted swarm
+    // root is INVISIBLE to `git status --porcelain` and the guard passes over it
+    // trivially. Asserting on the bare constructed manager is therefore a
+    // tautology: it passes with the fix reverted. (Measured — the first draft of
+    // this test did exactly that.)
+    //
+    // A real worker makes the directory non-empty the moment it materializes its
+    // checkout, which is when `?? .swarm-worktrees/` appears and every SUBSEQUENT
+    // sibling was refused. Reproduce that state directly.
+    std::fs::create_dir_all(swarm_root.join("worker-0")).unwrap();
+    std::fs::write(swarm_root.join("worker-0/checkout-marker"), "worker file\n").unwrap();
 
     // 1. THE FIX. The swarm's own container directory is not user dirt.
     manager.assert_clean().await.expect(
