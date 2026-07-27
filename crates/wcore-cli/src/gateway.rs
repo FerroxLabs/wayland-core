@@ -189,31 +189,32 @@ fn spec(scope: &ScopeArgs) -> Result<ServiceSpec> {
 /// Never a shell string: the profile, the binary path and the home path all
 /// cross a trust boundary from the operator, and in argv mode a shell
 /// metacharacter in any of them reaches the child as a literal byte.
-fn run_argv(argv: &[String]) -> Result<std::process::Output> {
+async fn run_argv(argv: &[String]) -> Result<std::process::Output> {
     if argv.is_empty() {
         bail!("this platform has no service mechanism for the gateway");
     }
     let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
     wcore_config::shell::shell_command_argv(&argv[0], &args)
         .output()
+        .await
         .with_context(|| format!("failed to invoke `{}`", argv.join(" ")))
 }
 
 pub async fn run(args: GatewayArgs) -> Result<()> {
     match args.cmd {
-        GatewayCmd::Install(scope) => install(&scope),
-        GatewayCmd::Uninstall(scope) => uninstall(&scope),
-        GatewayCmd::Start(scope) => start(&scope),
-        GatewayCmd::Stop(scope) => stop(&scope, true),
+        GatewayCmd::Install(scope) => install(&scope).await,
+        GatewayCmd::Uninstall(scope) => uninstall(&scope).await,
+        GatewayCmd::Start(scope) => start(&scope).await,
+        GatewayCmd::Stop(scope) => stop(&scope, true).await,
         GatewayCmd::Restart(scope) => {
             // A stop refusal because nothing was running is not an error:
             // restarting a stopped gateway is a start. Any OTHER stop failure
             // still propagates, because restarting over a gateway that refused
             // to stop would leave two.
-            stop(&scope, false)?;
-            start(&scope)
+            stop(&scope, false).await?;
+            start(&scope).await
         }
-        GatewayCmd::Status { scope, json } => status(&scope, json),
+        GatewayCmd::Status { scope, json } => status(&scope, json).await,
         GatewayCmd::Drain { scope, budget_ms } => drain(&scope, budget_ms),
         GatewayCmd::Run { scope, detach } => run_gateway(&scope, detach).await,
     }
@@ -223,7 +224,7 @@ pub async fn run(args: GatewayArgs) -> Result<()> {
 // install / uninstall
 // ---------------------------------------------------------------------------
 
-fn install(scope: &ScopeArgs) -> Result<()> {
+async fn install(scope: &ScopeArgs) -> Result<()> {
     let spec = spec(scope)?;
     let mgr = wcore_gateway::service::for_this_platform();
     std::fs::create_dir_all(&spec.home)
@@ -243,7 +244,7 @@ fn install(scope: &ScopeArgs) -> Result<()> {
     }
 
     let argv = mgr.install_argv(&spec);
-    let out = run_argv(&argv)?;
+    let out = run_argv(&argv).await?;
     if !out.status.success() {
         bail!(
             "`{}` failed with status {}: {}",
@@ -262,12 +263,12 @@ fn install(scope: &ScopeArgs) -> Result<()> {
     Ok(())
 }
 
-fn uninstall(scope: &ScopeArgs) -> Result<()> {
+async fn uninstall(scope: &ScopeArgs) -> Result<()> {
     let spec = spec(scope)?;
     let mgr = wcore_gateway::service::for_this_platform();
 
     let argv = mgr.uninstall_argv(&spec);
-    let out = run_argv(&argv)?;
+    let out = run_argv(&argv).await?;
     if !out.status.success() {
         bail!(
             "`{}` failed with status {}: {}",
@@ -299,11 +300,11 @@ fn uninstall(scope: &ScopeArgs) -> Result<()> {
 // start / stop / restart
 // ---------------------------------------------------------------------------
 
-fn start(scope: &ScopeArgs) -> Result<()> {
+async fn start(scope: &ScopeArgs) -> Result<()> {
     let spec = spec(scope)?;
     let mgr = wcore_gateway::service::for_this_platform();
     let argv = mgr.start_argv(&spec);
-    let out = run_argv(&argv)?;
+    let out = run_argv(&argv).await?;
     if !out.status.success() {
         bail!(
             "`{}` failed with status {}: {}",
@@ -319,11 +320,11 @@ fn start(scope: &ScopeArgs) -> Result<()> {
 /// `strict` distinguishes `stop` (a refusal is an error the operator asked
 /// about) from the stop inside `restart` (a refusal because nothing was
 /// running is the normal case).
-fn stop(scope: &ScopeArgs, strict: bool) -> Result<()> {
+async fn stop(scope: &ScopeArgs, strict: bool) -> Result<()> {
     let spec = spec(scope)?;
     let mgr = wcore_gateway::service::for_this_platform();
     let argv = mgr.stop_argv(&spec);
-    let out = run_argv(&argv)?;
+    let out = run_argv(&argv).await?;
     if !out.status.success() {
         if strict {
             bail!(
@@ -371,7 +372,7 @@ pub fn read_live_projection(home: &Path) -> Option<StatusProjection> {
     Some(proj)
 }
 
-fn status(scope: &ScopeArgs, json: bool) -> Result<()> {
+async fn status(scope: &ScopeArgs, json: bool) -> Result<()> {
     let home = home()?;
     let profile = scope.profile();
     let mgr = wcore_gateway::service::for_this_platform();
@@ -385,7 +386,10 @@ fn status(scope: &ScopeArgs, json: bool) -> Result<()> {
             let mut p = StatusProjection::stopped(&profile);
             if let Ok(spec) = spec(scope) {
                 let argv = mgr.status_argv(&spec);
-                let registered = run_argv(&argv).map(|o| o.status.success()).unwrap_or(false);
+                let registered = run_argv(&argv)
+                    .await
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
                 if !registered {
                     p.state = GatewayState::Uninstalled;
                 }
@@ -556,7 +560,7 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
 
     let binary_path = std::env::current_exe().ok();
     let binary_version = Some(env!("CARGO_PKG_VERSION").to_string());
-    let mut project = |plane: &wcore_gateway::automation::AutomationPlane, state: GatewayState| {
+    let project = |plane: &wcore_gateway::automation::AutomationPlane, state: GatewayState| {
         StatusProjection {
             state,
             pid: Some(std::process::id()),
