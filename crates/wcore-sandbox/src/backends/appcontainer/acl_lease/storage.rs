@@ -34,10 +34,14 @@ struct TrustedRoot {
 }
 
 pub(super) fn lease_directory() -> Result<PathBuf> {
-    let local = PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or_else(|| {
-        exec_error("LOCALAPPDATA is required for AppContainer ACL leases".into())
-    })?);
-    lease_directory_from(local)
+    lease_directory_from(lease_root()?)
+}
+
+/// Production lease root: the user's real `%LOCALAPPDATA%`.
+fn lease_root() -> Result<PathBuf> {
+    Ok(PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or_else(
+        || exec_error("LOCALAPPDATA is required for AppContainer ACL leases".into()),
+    )?))
 }
 
 fn lease_directory_from(local: PathBuf) -> Result<PathBuf> {
@@ -633,13 +637,30 @@ mod tests {
     fn test_lease(tag: u64, state: LeaseState) -> LeaseFile {
         let mut lease = LeaseFile::new(
             format!("WCore-storage-{:08x}-{tag:016x}", std::process::id()),
-            b"storage-test-sid",
+            TEST_SID_SENTINEL,
             Vec::new(),
         )
         .unwrap();
         lease.state = state;
         lease.refresh_digest();
         lease
+    }
+
+    /// Drop a `\\?\` verbatim prefix so two spellings of the same directory
+    /// compare equal.
+    ///
+    /// Without this the comparison below is VACUOUS: `lease_directory()`
+    /// returns the path via `GetFinalPathNameByHandleW`, which yields the
+    /// verbatim `\\?\C:\…` form, while the production path composed from
+    /// `%LOCALAPPDATA%` is the ordinary `C:\…` form. A plain string compare
+    /// therefore never matched and the assertion passed against the UNFIXED
+    /// tree — measured, not hypothesised, on SEANDESKTOP at 2419b868.
+    fn strip_verbatim(path: &Path) -> PathBuf {
+        let text = path.to_string_lossy();
+        match text.strip_prefix(r"\\?\") {
+            Some(rest) => PathBuf::from(rest),
+            None => PathBuf::from(text.as_ref()),
+        }
     }
 
     /// The real, user-facing lease directory: what `lease_directory()` resolves
@@ -668,7 +689,7 @@ mod tests {
             return;
         };
         assert!(
-            !same_windows_path(&resolved, &production),
+            !same_windows_path(&strip_verbatim(&resolved), &strip_verbatim(&production)),
             "lease_directory() resolved to the PRODUCTION lease directory under \
              cfg(test): {}. Every lease written by this test module lands in the \
              user's real sandbox state, where a synthetic test profile can never \
@@ -856,6 +877,43 @@ mod tests {
 
         drop((ordinary, slash, extended));
         remove_validated_lease(&path).unwrap();
+    }
+
+    /// The sentinel digest is frozen, because PRODUCTION reads it.
+    ///
+    /// `TEST_SID_SENTINEL_SHA256` is how a production build recognises a lease
+    /// that a test suite leaked into a real lease directory. The two files
+    /// found wedging a developer box carry exactly this digest; changing either
+    /// constant would make those files unrecognisable again. This also re-proves
+    /// on every run the byte-level identification that established the defect.
+    #[test]
+    fn test_sid_sentinel_digest_is_frozen() {
+        assert_eq!(sha256_hex(TEST_SID_SENTINEL), TEST_SID_SENTINEL_SHA256);
+    }
+
+    /// A leaked test lease must be named as such, not reported as a generic
+    /// mismatch. The generic text is what operators read as a platform limit.
+    #[test]
+    fn a_leaked_test_lease_is_diagnosed_by_name() {
+        let lease = test_lease(0xbeef, LeaseState::Prepared);
+        let message = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &lease);
+        assert!(
+            message.contains("OWN TEST SUITE"),
+            "test-origin lease must be named as test-origin, got: {message}"
+        );
+        assert!(
+            message.contains("DELETED") || message.contains("Delete it"),
+            "the diagnosis must state the remedy, got: {message}"
+        );
+
+        let mut genuine = lease.clone();
+        genuine.sid_sha256 = sha256_hex(b"a-real-appcontainer-package-sid");
+        genuine.refresh_digest();
+        let other = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &genuine);
+        assert!(
+            !other.contains("OWN TEST SUITE"),
+            "a genuine mismatch must NOT be blamed on the test suite, got: {other}"
+        );
     }
 
     #[test]

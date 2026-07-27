@@ -70,6 +70,27 @@ const ACL_WRITE_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERI
 
 static PROFILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// SID bytes this crate's OWN test helpers stamp into a lease.
+///
+/// Production never builds a lease from these bytes: a real lease always
+/// carries the bytes of a real AppContainer package SID. The value is frozen
+/// (not regenerated, not prettified) so that leases already leaked onto real
+/// machines by earlier runs of the acceptance suite stay recognisable.
+#[cfg(test)]
+pub(super) const TEST_SID_SENTINEL: &[u8] = b"storage-test-sid";
+
+/// `sha256(TEST_SID_SENTINEL)`, kept in PRODUCTION builds on purpose.
+///
+/// It is the only way a running product can tell "a test suite leaked a lease
+/// into my real lease directory" apart from "this lease genuinely does not
+/// match its profile". Two files carrying exactly this digest were found
+/// disabling the Windows sandbox on a developer box
+/// (`.planning/intel/APPCONTAINER-SSH-LEASE-WEDGE.md`); the paired
+/// `test_sid_sentinel_digest_is_frozen` test re-proves the correspondence so
+/// neither constant can drift away from those files.
+const TEST_SID_SENTINEL_SHA256: &str =
+    "5b22ee051799cf8aa6783a40faf32ce5bc9a7f7817bae7ab4076db3279005155";
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum IntentKind {
@@ -645,14 +666,53 @@ unsafe fn recover_dead_leases_locked(lease_dir: &Path) -> Result<()> {
         let sid_guard = SidFreeGuard(derived_sid);
         let bytes = unsafe { sid_bytes(sid_guard.0)? };
         if !constant_time_eq(sha256_hex(&bytes).as_bytes(), lease.sid_sha256.as_bytes()) {
-            return Err(exec_error(format!(
-                "AppContainer ACL lease SID/profile mismatch in {}",
-                path.display()
-            )));
+            return Err(exec_error(unreconcilable_lease_message(&path, &lease)));
         }
         unsafe { cleanup_locked(&path, &lease, sid_guard.0)? };
     }
     Ok(())
+}
+
+/// Diagnose a dead lease that can never reconcile against its own profile.
+///
+/// A lease bearing the test SID sentinel is called out by name and never
+/// reported as a generic mismatch. Both cases still fail closed — refusing to
+/// run unsandboxed is the correct behaviour and is unchanged here — but they
+/// need different remedies, and conflating them cost this program weeks.
+///
+/// The generic text surfaces at `probe_appcontainer_available()` as "sandbox
+/// disabled … may be transient (AV, disk contention)", which reads like a
+/// platform limitation and points the reader AWAY from persistent on-disk
+/// state. Operators who only reached the machine over SSH saw it on every run
+/// and concluded that a session-0 logon was the cause. That inference became a
+/// standing rule that Windows sandbox reds observed over SSH are environment
+/// artifacts — and it was false: measured 2026-07-27, the probe is green under
+/// session 0 whenever the lease directory is clean, and red only when it is
+/// wedged.
+fn unreconcilable_lease_message(path: &Path, lease: &LeaseFile) -> String {
+    if constant_time_eq(
+        lease.sid_sha256.as_bytes(),
+        TEST_SID_SENTINEL_SHA256.as_bytes(),
+    ) {
+        return format!(
+            "AppContainer ACL lease {} was written by wcore-sandbox's OWN TEST SUITE \
+             (it carries the test SID sentinel) and can NEVER reconcile against a real \
+             AppContainer profile. This is not a platform limitation, not an SSH or \
+             session-0 effect, and not transient: the sandbox stays disabled on this \
+             machine until this file is DELETED. Delete it and re-run. Tests must never \
+             write here; lease_directory() resolves to a temp root under cfg(test) so \
+             this cannot recur.",
+            path.display()
+        );
+    }
+    format!(
+        "AppContainer ACL lease SID/profile mismatch in {} (the recorded SID does not \
+         match the SID derived from profile {:?}). The sandbox stays disabled until this \
+         lease is reconciled or removed; this is persistent on-disk state, not a \
+         transient or environment fault.",
+        path.display(),
+        lease.profile_name
+    )
 }
 
 fn owner_is_live(lease: &LeaseFile) -> Result<bool> {
