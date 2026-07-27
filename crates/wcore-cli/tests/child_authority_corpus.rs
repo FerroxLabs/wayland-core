@@ -450,22 +450,28 @@ fn assert_mode_equivalence(entry: &CorpusEntry, executions: &[Execution]) {
 /// a request channel. When the channel appears, the absence is gone, and the
 /// only honest response is red.
 ///
-/// Two independent triggers, because a channel can appear in two ways:
+/// Two independent triggers, because a canary can go red in two ways:
 ///
-/// 1. `canary_trip` — a structural canary measured a production request channel
-///    that did not exist when the census ran. This fires on EVERY entry,
-///    canary-carrying or not, because a new channel is news wherever it appears.
-/// 2. `Outcome::Allowed` on an entry whose census protection rests on the
-///    absence of a channel. This is the realised-widening case, and it fires
-///    regardless of census verdict, surface or mode.
+/// 1. `canary_trip` — the entry's carried canary reported. What that means is
+///    the CANARY's business, not this assertion's, and the two families now
+///    differ. Provider and approval still carry NO-CHANNEL canaries, which trip
+///    when a request channel APPEARS. The budget family carries an ENFORCEMENT
+///    canary (`budget_narrowing_channel_canary`), because its channel was built
+///    on purpose in F21-02 and its absence is now the regression: it trips when
+///    the channel VANISHES, or when a widening driven through the live channel
+///    is not refused. Either way the canary's own note carries the verdict, so
+///    this panic quotes it rather than restating a cause it cannot know.
+/// 2. `Outcome::Allowed` on an entry carrying a canary. This is the realised-
+///    widening case, and it fires regardless of census verdict, surface or mode.
 fn assert_no_channel_canaries_stayed_intact(entry: &CorpusEntry, executions: &[Execution]) {
     for execution in executions {
         if let Some(channel) = &execution.canary_trip {
             panic!(
-                "NO-CHANNEL CANARY TRIPPED :: corpus_{} :: dimension {} :: surface {} :: mode {} \
-                 :: {channel}. The census recorded this dimension's protection as resting in part \
-                 on the absence of a request channel. A channel now exists, so the absence no \
-                 longer protects anything and nothing was put in its place.",
+                "CANARY TRIPPED :: corpus_{} :: dimension {} :: surface {} :: mode {} :: \
+                 {channel}. The census recorded this dimension's protection as resting in part on \
+                 something other than a driven refusal, and this entry's canary is what watches \
+                 that. It reported, so the protection the census recorded is no longer the \
+                 protection in force.",
                 entry.dimension.case_id(),
                 entry.dimension.census_name(),
                 execution.surface.label(),

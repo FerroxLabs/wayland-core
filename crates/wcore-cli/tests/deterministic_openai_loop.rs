@@ -368,7 +368,21 @@ async fn packaged_core_cancels_an_active_stream() {
         "packaged candidate cancellation lifecycle exceeded the five-second bound: {:?}",
         result.wall_time
     );
-    assert!(matches!(result.failures.as_slice(), [Failure::CostMissing]));
+    // The predicate is unchanged; only the diagnostic is added. A bare
+    // `assert!(matches!(..))` prints nothing but the source line, and this test
+    // is a measured ~2.5% flake in isolation (1 failure in 40 reps on an idle
+    // 96-core box) that fails more often under full-suite contention — so the
+    // one run that goes red is the only chance to see what it actually got.
+    // Without the payload every red costs another reproduction loop.
+    assert!(
+        matches!(result.failures.as_slice(), [Failure::CostMissing]),
+        "expected exactly [CostMissing] after a mid-turn cancellation, got {:?}. \
+         wall_time {:?}, cancellation_requested {}, final_text {:?}",
+        result.failures,
+        result.wall_time,
+        result.execution.cancellation_requested,
+        result.final_text
+    );
     assert_eq!(result.final_text, "before cancellation");
     assert!(result.execution.cancellation_requested);
     assert_eq!(

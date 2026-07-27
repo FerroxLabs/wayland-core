@@ -3042,13 +3042,34 @@ pub fn app_config_dir() -> Option<PathBuf> {
 
 /// The OS-native config root (`dirs::config_dir()`), deliberately NOT
 /// `WAYLAND_HOME`-scoped. This is the single sanctioned bypass of
-/// [`wayland_config_dir`] for the profiles control plane: `profiles_root()`
-/// (see [`crate::profile`]) must resolve OUTSIDE any one profile home — a
-/// profile home is a *child* of the profiles root — so it cannot route through
-/// the `WAYLAND_HOME`-aware resolver without becoming self-referential. Kept
-/// here in `config.rs` (the one file allow-listed by the hermeticity audit for
-/// raw `dirs::config_dir()`), so the audit's single-call-site invariant holds.
-pub(crate) fn os_native_config_root() -> Option<PathBuf> {
+/// [`wayland_config_dir`], and it exists for call sites that must address a
+/// location the *operating system* owns rather than a location Wayland owns.
+/// Kept here in `config.rs` (the one file allow-listed by the hermeticity audit
+/// for raw `dirs::config_dir()`), so the audit's single-call-site invariant
+/// holds no matter how many crates need the native root.
+///
+/// Two consumers, both structural rather than incidental:
+///
+/// 1. **The profiles control plane.** `profiles_root()` (see [`crate::profile`])
+///    must resolve OUTSIDE any one profile home — a profile home is a *child* of
+///    the profiles root — so it cannot route through the `WAYLAND_HOME`-aware
+///    resolver without becoming self-referential.
+/// 2. **OS service registration records.** `wcore_gateway::service::SystemdManager`
+///    writes the gateway's systemd *user unit* to `<native>/systemd/user/`, which
+///    is the only directory systemd's own user manager scans
+///    (`$XDG_CONFIG_HOME/systemd/user`, else `~/.config/systemd/user`). Routing
+///    that path through [`wayland_config_dir`] would emit a unit into
+///    `$WAYLAND_HOME/systemd/user/` that systemd never reads, so
+///    `systemctl --user start` would fail with "Unit not found" and
+///    `gateway install` would silently register nothing.
+///
+/// Consumer 2 does not leak state out of the hermetic root: the unit file is a
+/// *pointer into* it. The generated unit carries
+/// `Environment=WAYLAND_HOME=<home>`, so every byte of gateway state the unit's
+/// process goes on to write lands inside the hermetic home. The unit itself is
+/// OS registration metadata, in the same class as the launchd plist the macOS
+/// sibling writes to `~/Library/LaunchAgents`.
+pub fn os_native_config_root() -> Option<PathBuf> {
     dirs::config_dir()
 }
 
