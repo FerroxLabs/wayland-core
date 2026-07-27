@@ -628,7 +628,12 @@ fn a_store_written_by_a_future_schema_is_refused_with_a_rebuild_hint() {
             assert!(message.contains("9999"), "{message}");
             assert!(message.contains("rebuild"), "{message}");
         }
-        other => panic!("expected a schema refusal, got {other:?}"),
+        Err(other) => panic!("expected a schema refusal, got {other:?}"),
+        Ok(_) => panic!(
+            "a store carrying schema_version 9999 opened successfully — a \
+             version this build does not understand must be refused, not \
+             silently read with the wrong assumptions"
+        ),
     }
 }
 
