@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use wcore_protocol::events::RecoveryCursor;
 use wcore_types::child_transaction::{ChildGatePlan, ChildTransactionReceipt};
-use wcore_types::goal::{GoalTerminalState, WaitKind};
+use wcore_types::goal::{GoalTerminalState, TaskUnknownReason, WaitKind};
 use wcore_types::spawner::{ChildId, DurableChildRecord, DurableChildTransition};
 use wcore_types::tool::ToolEffectContract;
 
@@ -881,6 +881,23 @@ pub enum SessionEvent {
         goal_id: String,
         terminal: GoalTerminalState,
     },
+    /// Durable Fleet task ledger records (F22-03).
+    ///
+    /// These extend the Goal's own chain rather than opening a second store, so
+    /// a crash cannot leave a Goal and its tasks disagreeing. Like every other
+    /// Goal variant they are refused by the public `append` path: only
+    /// `crate::goal::GoalLedger` may mint one.
+    GoalTaskDeclared {
+        goal_id: String,
+        task_id: String,
+        depends_on: BTreeSet<String>,
+        idempotency_key: String,
+    },
+    GoalTaskTransitioned {
+        goal_id: String,
+        task_id: String,
+        transition: GoalTaskTransition,
+    },
     DeliveryPrepared {
         delivery_id: String,
         origin: DeliveryOrigin,
@@ -1248,6 +1265,15 @@ pub struct GoalState {
     pub last_transition_seq: u64,
     /// Journal checksum at this Goal's most recent transition.
     pub last_transition_checksum: String,
+    /// The durable task ledger for this Goal (F22-03).
+    ///
+    /// Tasks hang off the Goal rather than off a second top-level map for the
+    /// reason 22-03 names: a Goal with two sources of truth can disagree after
+    /// a crash. `skip_serializing_if` carries the same weight it does on
+    /// `ReducedSessionState::goals` — a Goal with no tasks must serialize
+    /// exactly as it did before this field existed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tasks: BTreeMap<String, GoalTaskState>,
 }
 
 impl GoalState {
@@ -1269,6 +1295,249 @@ impl GoalState {
     #[must_use]
     pub fn is_terminal(&self) -> bool {
         matches!(self.lifecycle, GoalLifecycle::Terminated { .. })
+    }
+
+    /// Whether every dependency of `task` carries a durable completion.
+    ///
+    /// A dependency that is claimed, running, revoked or unknown does NOT
+    /// count: the ledger releases a dependent on a completion that survived to
+    /// disk, never on one that was merely observed in memory.
+    #[must_use]
+    pub fn dependencies_met(&self, task: &GoalTaskState) -> bool {
+        task.depends_on.iter().all(|dependency| {
+            self.tasks
+                .get(dependency)
+                .is_some_and(|state| state.completion.is_some())
+        })
+    }
+
+    /// The tasks a worker may claim right now, in deterministic order.
+    ///
+    /// Excludes tasks that already carry a completion, that hold a live claim,
+    /// that await explicit resolution, and whose dependencies are unmet.
+    #[must_use]
+    pub fn claimable_tasks(&self) -> Vec<&GoalTaskState> {
+        if self.is_terminal() {
+            return Vec::new();
+        }
+        self.tasks
+            .values()
+            .filter(|task| {
+                task.completion.is_none()
+                    && task.live_attempt().is_none()
+                    && !task.requires_resolution()
+                    && self.dependencies_met(task)
+            })
+            .collect()
+    }
+}
+
+/// What one attempt at a task is currently doing, or why it stopped (F22-03).
+///
+/// The set is closed and an attempt is in exactly one of these. `Unknown` is
+/// deliberately NOT a kind of failure: a failed attempt says the effect did not
+/// happen, an unknown one says the ledger cannot tell, and those are settled
+/// differently. Collapsing them is how a silent retry gets built.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum GoalTaskAttemptStatus {
+    /// Owned by a live claim.
+    Live,
+    /// The claim was revoked. The owner may still be running; that is exactly
+    /// what the epoch is for.
+    Revoked { reason: String },
+    /// The attempt produced a durable completion.
+    Completed,
+    /// The attempt's outcome could not be established.
+    Unknown { reason: TaskUnknownReason },
+}
+
+/// One claim on a task, and the budget reservation that paid for it.
+///
+/// `budget_reservation_id` names a reservation committed through the EXISTING
+/// budget events. The reducer refuses an attempt naming a reservation that does
+/// not exist, which is what stops a reassignment from minting a fresh budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalTaskAttempt {
+    /// The monotonic claim epoch this attempt owns.
+    pub epoch: u64,
+    pub worker_id: String,
+    pub budget_reservation_id: String,
+    pub lease_expires_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_liveness_unix_ms: Option<u64>,
+    pub status: GoalTaskAttemptStatus,
+}
+
+/// A task's completion, durable at the moment it was PRODUCED.
+///
+/// `delivered` is a separate field on purpose: production and delivery are two
+/// events, and a worker that finishes and dies before the parent observes it
+/// still has a completion here. That is the outbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalTaskCompletion {
+    /// The claim epoch that produced it.
+    pub epoch: u64,
+    /// The outcome, in the ONE canonical terminal taxonomy — never a second
+    /// vocabulary invented for tasks.
+    pub outcome: GoalTerminalState,
+    /// Digest identifying the effect the attempt produced.
+    pub effect_digest: String,
+    /// Whether the parent has observed this completion.
+    pub delivered: bool,
+}
+
+/// One workspace ownership handoff, and the delegated-mutation transaction that
+/// authorized it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalTaskHandoff {
+    pub from_epoch: u64,
+    pub to_epoch: u64,
+    pub transaction_id: String,
+    pub to_worker: String,
+}
+
+/// One transition in the durable task ledger.
+///
+/// EVERY variant that can produce or record an effect on behalf of a task
+/// carries `epoch`, and the reducer compares it against the task's committed
+/// epoch before applying anything. That comparison is the fencing property: a
+/// superseded owner presenting the epoch it won is refused at the durable
+/// boundary, not by each caller remembering to check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "transition", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum GoalTaskTransition {
+    /// A worker won the task. `epoch` must be the successor of the committed
+    /// epoch, so two workers racing cannot both win.
+    Claimed {
+        epoch: u64,
+        worker_id: String,
+        budget_reservation_id: String,
+        lease_expires_unix_ms: u64,
+    },
+    /// The owner proved it is still alive.
+    LivenessProved { epoch: u64, at_unix_ms: u64 },
+    /// A supervisor revoked the claim. The owner may still be running.
+    ClaimRevoked { epoch: u64, reason: String },
+    /// The owner produced a durable completion.
+    Completed {
+        epoch: u64,
+        outcome: GoalTerminalState,
+        effect_digest: String,
+    },
+    /// The attempt's outcome could not be established. Requires resolution;
+    /// never a silent retry.
+    OutcomeUnknown {
+        epoch: u64,
+        reason: TaskUnknownReason,
+    },
+    /// The parent observed a durable completion.
+    CompletionDelivered { epoch: u64 },
+    /// Workspace ownership moved to a new owner through a delegated-mutation
+    /// transaction that must already exist in reduced state.
+    WorkspaceHandedOff {
+        epoch: u64,
+        to_epoch: u64,
+        transaction_id: String,
+        to_worker: String,
+        budget_reservation_id: String,
+        lease_expires_unix_ms: u64,
+    },
+}
+
+impl GoalTaskTransition {
+    /// The claim epoch this transition presents as its authority.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        match self {
+            Self::Claimed { epoch, .. }
+            | Self::LivenessProved { epoch, .. }
+            | Self::ClaimRevoked { epoch, .. }
+            | Self::Completed { epoch, .. }
+            | Self::OutcomeUnknown { epoch, .. }
+            | Self::CompletionDelivered { epoch }
+            | Self::WorkspaceHandedOff { epoch, .. } => *epoch,
+        }
+    }
+}
+
+/// Deterministic replay projection for one durable task.
+///
+/// Every field is reconstructed by replaying the chain. There is no epoch
+/// counter, no claim table and no outbox held anywhere else: the in-memory
+/// ledger is this projection and nothing more.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalTaskState {
+    pub task_id: String,
+    /// Task ids that must carry a durable completion before this one is
+    /// claimable.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub depends_on: BTreeSet<String>,
+    /// The key that makes the task's EFFECT idempotent at the effect boundary.
+    /// The ledger fences who may record a completion; this is what stops the
+    /// effect itself from landing twice when an attempt is legitimately retried.
+    pub idempotency_key: String,
+    /// One entry per claim, oldest first. The last entry's epoch is the
+    /// committed epoch; there is no separate counter to disagree with it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<GoalTaskAttempt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<GoalTaskCompletion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handoffs: Vec<GoalTaskHandoff>,
+    /// How many times this task transitioned from blocked to claimable. The
+    /// exactly-once-unblock property is a count, not an assertion.
+    pub dependency_releases: u64,
+    pub last_transition_seq: u64,
+    pub last_transition_checksum: String,
+}
+
+impl GoalTaskState {
+    /// The committed claim epoch. Zero means never claimed.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.attempts.last().map_or(0, |attempt| attempt.epoch)
+    }
+
+    /// The attempt that currently holds a live claim, if any.
+    #[must_use]
+    pub fn live_attempt(&self) -> Option<&GoalTaskAttempt> {
+        self.attempts
+            .last()
+            .filter(|attempt| matches!(attempt.status, GoalTaskAttemptStatus::Live))
+    }
+
+    /// Whether an operator or reconciler must settle this task before anything
+    /// else may happen to it.
+    #[must_use]
+    pub fn requires_resolution(&self) -> bool {
+        self.attempts
+            .last()
+            .is_some_and(|attempt| matches!(attempt.status, GoalTaskAttemptStatus::Unknown { .. }))
+    }
+
+    /// Whether this task carries a durable completion the parent has not yet
+    /// observed. This is the outbox a restarted parent drains.
+    #[must_use]
+    pub fn completion_pending_delivery(&self) -> bool {
+        self.completion
+            .as_ref()
+            .is_some_and(|completion| !completion.delivered)
+    }
+
+    /// Total budget reserved across every attempt of this task.
+    #[must_use]
+    pub fn reserved_total(&self, budgets: &BTreeMap<String, BudgetState>) -> u64 {
+        self.attempts
+            .iter()
+            .filter_map(|attempt| budgets.get(&attempt.budget_reservation_id))
+            .map(|budget| budget.reserved.value)
+            .sum()
     }
 }
 

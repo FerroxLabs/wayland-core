@@ -1,0 +1,8 @@
+LEDGER-LIVE: declared tasks=10 pid=1713112
+LEDGER-LIVE: worker_effect key=idem-t00 label=t00 produced=yes
+LEDGER-LIVE: worker_effect key=idem-t01 label=t01 produced=yes
+LEDGER-LIVE: worker_effect key=idem-t02 label=t02 produced=yes
+LEDGER-LIVE: worker_effect key=idem-t03 label=t03 produced=yes
+LEDGER-LIVE: worker_effect key=idem-t04 label=t04 produced=yes
+LEDGER-LIVE: worker_effect key=idem-t05 label=t05 produced=yes
+LEDGER-LIVE: ready_for_kill pid=1713112

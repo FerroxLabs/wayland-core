@@ -389,6 +389,8 @@ impl SessionJournal {
                 | SessionEvent::GoalWaitResolved { .. }
                 | SessionEvent::GoalRunResumed { .. }
                 | SessionEvent::GoalTerminated { .. }
+                | SessionEvent::GoalTaskDeclared { .. }
+                | SessionEvent::GoalTaskTransitioned { .. }
         ) {
             return Err(JournalError::InvalidTransition(
                 "goal transitions require the goal kernel".to_owned(),
