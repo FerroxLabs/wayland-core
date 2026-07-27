@@ -106,9 +106,16 @@ fn seal(material: &[u8]) -> Vec<u8> {
     body
 }
 
-/// The tool intent that carries the hazardous shape. `pre_hook_phase_id` is
-/// `Some` so the legacy splice below has an unambiguous anchor: in declaration
-/// order `effect_receipt` sits immediately before it.
+/// The declared position of `effect_receipt`: immediately after
+/// `effect_contract`, in both `SessionEvent::ToolIntentRecordedV2` and
+/// `ToolState`. The splice anchors on the whole member so it cannot land
+/// anywhere else.
+const EFFECT_CONTRACT: &str =
+    "\"effect_contract\":{\"kind\":\"filesystem_transactional\",\"reconciler\":\"filesystem\"}";
+
+/// The tool intent that carries the hazardous shape. The contract names a
+/// reconciler because the reducer refuses an effect receipt without one — which
+/// is also what makes this shape reachable in production.
 fn tool_intent() -> SessionEvent {
     SessionEvent::ToolIntentRecordedV2 {
         tool_execution_id: "x1".into(),
@@ -127,7 +134,7 @@ fn tool_intent() -> SessionEvent {
             reconciler: Some("filesystem".into()),
         },
         effect_receipt: None,
-        pre_hook_phase_id: Some("hook-1".into()),
+        pre_hook_phase_id: None,
     }
 }
 
@@ -153,7 +160,7 @@ fn legacy_journal_bodies(session_id: &str) -> Vec<Vec<u8>> {
         event: &tool_intent(),
     })
     .expect("encode material");
-    let legacy = splice_null_receipt(&canonical, ",\"pre_hook_phase_id\"");
+    let legacy = splice_null_receipt(&canonical);
     assert_ne!(
         canonical, legacy,
         "the legacy fixture must actually differ from the canonical encoding"
@@ -166,17 +173,18 @@ fn journal_file(bodies: &[Vec<u8>]) -> Vec<u8> {
     bodies.iter().flat_map(|body| frame(body)).collect()
 }
 
-/// Insert `"effect_receipt":null` in its declared position — immediately before
-/// `anchor`. This is what the pre-fix `skip_serializing_if = "Option::is_none"`
-/// emitted for `Some(Value::Null)`.
-fn splice_null_receipt(bytes: &[u8], anchor: &str) -> Vec<u8> {
+/// Insert `"effect_receipt":null` in its declared position — immediately after
+/// the `effect_contract` member. This is what the pre-fix
+/// `skip_serializing_if = "Option::is_none"` emitted for `Some(Value::Null)`.
+fn splice_null_receipt(bytes: &[u8]) -> Vec<u8> {
     let text = std::str::from_utf8(bytes).expect("utf8");
-    let at = text.find(anchor).unwrap_or_else(|| {
-        panic!("anchor {anchor} must appear exactly once in the encoding: {text}")
-    });
+    let at = text
+        .find(EFFECT_CONTRACT)
+        .unwrap_or_else(|| panic!("effect_contract must appear in the encoding: {text}"))
+        + EFFECT_CONTRACT.len();
     assert!(
-        text[at + 1..].find(anchor).is_none(),
-        "anchor {anchor} must be unique"
+        text[at..].find(EFFECT_CONTRACT).is_none(),
+        "effect_contract must appear exactly once"
     );
     let mut out = text[..at].to_owned();
     out.push_str(",\"effect_receipt\":null");
@@ -210,7 +218,6 @@ fn journal_recovers_a_pre_fix_null_receipt_with_its_content_intact() {
     assert_eq!(tool.provider_call_id, "c1");
     assert_eq!(tool.requested_input_digest, "a".repeat(64));
     assert_eq!(tool.effective_input_digest, "b".repeat(64));
-    assert_eq!(tool.pre_hook_phase_id.as_deref(), Some("hook-1"));
     assert_eq!(
         tool.effect_contract.reconciler.as_deref(),
         Some("filesystem")
@@ -315,13 +322,7 @@ fn legacy_snapshot_bytes(published: &wcore_agent::session_journal::SessionSnapsh
         .strip_suffix('}')
         .expect("state is the last member of the snapshot object");
 
-    // In `ToolState` declaration order `effect_receipt` sits between
-    // `effect_contract` and `result` (`pre_hook_phase_id` is Some here).
-    let legacy_state = String::from_utf8(splice_null_receipt(
-        state.as_bytes(),
-        ",\"pre_hook_phase_id\"",
-    ))
-    .expect("utf8");
+    let legacy_state = String::from_utf8(splice_null_receipt(state.as_bytes())).expect("utf8");
     assert_ne!(
         state, legacy_state,
         "the fixture must differ from canonical"
