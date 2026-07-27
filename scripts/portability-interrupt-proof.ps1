@@ -162,7 +162,7 @@ Start-Sleep -Milliseconds $KillAtMs
 $KillLanded = 'no'
 $KillName = 'TerminateProcess'
 $KillCatchable = 'no'
-if ($HandlerControl) { $KillName = 'taskkill-close-request'; $KillCatchable = 'yes' }
+if ($HandlerControl) { $KillName = 'console-ctrl-c'; $KillCatchable = 'yes' }
 
 if (-not $proc.HasExited) {
     if ($HandlerControl) {
@@ -183,7 +183,13 @@ if (-not $proc.HasExited) {
             [W.K]::FreeConsole() | Out-Null
             if ([W.K]::AttachConsole([uint32]$proc.Id)) {
                 [W.K]::SetConsoleCtrlHandler([IntPtr]::Zero, $true) | Out-Null
-                [W.K]::GenerateConsoleCtrlEvent(1, 0) | Out-Null   # 1 = CTRL_BREAK_EVENT
+                # CTRL_C_EVENT (0), not CTRL_BREAK_EVENT (1). Measured: with
+                # CTRL_BREAK this script itself died with STATUS_CONTROL_C_EXIT
+                # (0xC000013A) and produced no output at all, because
+                # SetConsoleCtrlHandler(NULL, TRUE) suppresses CTRL+C ONLY -- it
+                # does not suppress CTRL+BREAK. That exit code is also the proof
+                # the event really is delivered through this path.
+                [W.K]::GenerateConsoleCtrlEvent(0, 0) | Out-Null   # 0 = CTRL_C_EVENT
                 Start-Sleep -Milliseconds 1200
                 [W.K]::FreeConsole() | Out-Null
                 [W.K]::SetConsoleCtrlHandler([IntPtr]::Zero, $false) | Out-Null
