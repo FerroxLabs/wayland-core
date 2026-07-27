@@ -570,6 +570,16 @@ impl IndexStore {
         self.set_meta("scope", &scope.fingerprint())?;
         self.set_meta("root", &self.root.to_string_lossy())?;
         self.set_meta("built_at_unix_secs", &now.to_string())?;
+
+        // Fold the write-ahead log back into the database before anyone reads
+        // the size. MEASURED, not assumed: immediately after a cold build of
+        // this workspace the pair reported 133,366,096 bytes and, once the
+        // WAL had been checkpointed, 66,420,792 — a 2x difference that is
+        // pure journalling transient. A size gate that sampled the first
+        // number would be measuring when it happened to look, not how large
+        // the index is. Best-effort: a checkpoint that cannot run (a reader
+        // still attached) is not a refresh failure.
+        let _ = self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
         Ok(stats)
     }
 
