@@ -1,0 +1,182 @@
+name: Supply Chain
+
+# Phase 29 (F29-01). Executes two properties that were declared but never
+# checked, measured at 2fd771d2:
+#
+#   1. The dependency policy in deny.toml. It has been a real, strict,
+#      four-section policy since v0.6.2 and NOTHING had ever run it —
+#      cargo-deny appeared in zero files under .github/ and zero times in the
+#      justfile, leaving 1,017 crates unevaluated against the licence
+#      allowlist. `cargo audit` (ci.yml) is the RUSTSEC advisory scanner only:
+#      it evaluates no licence, no ban and no source registry.
+#
+#   2. Byte-determinism of the generated SBOM. An SBOM that is not
+#      byte-deterministic is not evidence — its digest is bound into a signed
+#      release manifest, so a second party must be able to regenerate it and
+#      get the same bytes.
+#
+# THIS IS A NEW FILE ON PURPOSE. Phase 28 is adding native-certification jobs
+# to ci.yml, and release.yml is release coordination; editing either from a
+# concurrently-executing lane is a merge conflict waiting to happen. A new
+# workflow cannot collide with anything and is additive to CI rather than a
+# modification of it.
+#
+# EXPECT THE dependency-policy JOB TO BE RED ON ARRIVAL. The first-ever
+# execution of deny.toml exits 5: two quick-xml DoS advisories, three
+# unmaintained advisories, and one unlicensed first-party crate. Those are
+# enumerated with severities and remedies in
+# .planning/phases/29-supply-chain-release-integrity/29-02-CLEANROOM-RESULTS.md.
+# The job is NOT wired as a required check and NOT chained into `just
+# check-all`, so it blocks nobody; it is red because the policy is real and
+# the dependency set does not currently satisfy it. Recording that honestly is
+# the point. Do not silence it by widening deny.toml.
+#
+# NO `paths:` FILTER — core#193, learned the hard way. A paths filter stops the
+# whole workflow running, so a required context never arrives and the PR
+# deadlocks. Relevance is decided INSIDE the job, fail-safe, so the check
+# always reports.
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    # Nightly at 04:17 UTC. Offset from osv-scan.yml (06:23) and off the
+    # top of the hour. The advisory database is time-varying, so this job
+    # exists to catch drift on an unchanged dependency set.
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+# Read-only. This job reads the dependency graph and writes nothing back.
+# A supply-chain job holding write permissions it does not use is a
+# lateral-movement surface inside the release pipeline, and would be a finding
+# in its own right.
+permissions:
+  contents: read
+
+jobs:
+  dependency-policy:
+    name: Dependency policy (deny.toml)
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 so the PR base is reachable for the changed-files diff.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Non-PR runs (nightly, dispatch) always evaluate: they exist to catch
+      # advisory-DB drift on an unchanged graph. PR runs evaluate only when a
+      # policy-relevant file changed, and FAIL SAFE — `needed` is cleared only
+      # when the changed-file list was computed successfully AND nothing
+      # matched. Any diff failure evaluates. Event fields go through env and
+      # are never interpolated into the shell, so there is no injection
+      # surface.
+      - name: Determine relevance
+        id: relevance
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -uo pipefail
+          needed=true
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            if git fetch --no-tags --depth=1 origin "${BASE_REF}" 2>/dev/null \
+              && changed="$(git diff --name-only "origin/${BASE_REF}...HEAD" 2>/dev/null)"; then
+              echo "Changed files:"
+              printf '%s\n' "${changed}"
+              # Here-string, not a pipe: under `set -o pipefail` a matching
+              # `grep -q` closes the pipe early, printf takes SIGPIPE (141),
+              # and pipefail would surface 141 as the pipeline status even
+              # though grep MATCHED — silently flipping a real dependency
+              # change to needed=false. osv-scan.yml carries the same note for
+              # the same reason.
+              if ! grep -Eq '(^|/)Cargo\.(lock|toml)$|^deny\.toml$|^\.github/workflows/supply-chain\.yml$' <<<"${changed}"; then
+                needed=false
+                echo "No policy-relevant change; skipping evaluation and reporting success."
+              else
+                echo "Policy-relevant change detected; evaluating."
+              fi
+            else
+              echo "Could not compute changed files; evaluating (fail-safe)."
+            fi
+          else
+            echo "Non-PR event (${EVENT_NAME}); evaluating."
+          fi
+          echo "needed=${needed}" >> "$GITHUB_OUTPUT"
+
+      - name: Install cargo-deny
+        if: steps.relevance.outputs.needed == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      # Executes ALL FOUR sections of deny.toml: licenses, advisories, bans,
+      # sources. Exits non-zero on any violation, which is the whole point —
+      # this is the first thing in the repository's history to run it.
+      - name: Evaluate dependency policy
+        if: steps.relevance.outputs.needed == 'true'
+        run: cargo deny --manifest-path Cargo.toml check
+
+  sbom-determinism:
+    name: SBOM byte-determinism
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The offline half. Runs the pinned f29 fixture through the transform
+      # and compares against the checked-in expected document byte for byte —
+      # no cargo metadata, no network, no platform dependence. If this is green
+      # and the live half below is red, the difference is in the metadata, not
+      # in the transform.
+      - name: SBOM determinism contract (offline, pinned fixture)
+        run: cargo test --locked -p wcore-eval-scenarios --test sbom_contract
+
+      - name: Build wayland-release
+        run: cargo build --locked -p wcore-eval-scenarios --bin wayland-release
+
+      # The live half. Two generations from the same locked graph must be
+      # byte-identical.
+      #
+      # The size assertions are NOT decoration: `cmp` on two empty files
+      # succeeds, so a transform that silently produced nothing would pass a
+      # bare comparison. Both outputs must be substantial before the comparison
+      # is allowed to mean anything.
+      - name: Regenerate the SBOM twice and compare bytes
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --format-version 1 > metadata.json
+          ./target/debug/wayland-release sbom --metadata metadata.json --output sbom-1.json
+          ./target/debug/wayland-release sbom --metadata metadata.json --output sbom-2.json
+
+          for f in sbom-1.json sbom-2.json; do
+            size=$(wc -c < "$f")
+            echo "$f is $size bytes"
+            if [ "$size" -lt 1000 ]; then
+              echo "::error::$f is $size bytes — a real SBOM of this workspace is far larger; refusing to compare two stubs."
+              exit 1
+            fi
+          done
+
+          # Both documents must also actually be CycloneDX, so a pair of
+          # identical error messages cannot pass as a determinism result.
+          grep -q '"bomFormat": "CycloneDX"' sbom-1.json \
+            || { echo "::error::sbom-1.json is not a CycloneDX document"; exit 1; }
+
+          cmp sbom-1.json sbom-2.json \
+            || { echo "::error::SBOM regeneration is not byte-deterministic"; exit 1; }
+
+          echo "Byte-identical. sha256=$(sha256sum sbom-1.json | cut -d' ' -f1)"
+
+      # A wall-clock timestamp or a random serial is the classic way an SBOM
+      # stops being reproducible. Assert their absence directly, alongside the
+      # presence of the fields that must be there — so an empty document cannot
+      # satisfy this by having no timestamp.
+      - name: Assert no clock and no randomness in the document
+        run: |
+          set -euo pipefail
+          grep -q '"specVersion"' sbom-1.json
+          grep -q '"serialNumber"' sbom-1.json
+          if grep -q '"timestamp"' sbom-1.json; then
+            echo "::error::the SBOM carries a wall-clock timestamp and is therefore not reproducible"
+            exit 1
+          fi
+          echo "No timestamp; serial number present and derived from the graph."

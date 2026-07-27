@@ -1,0 +1,224 @@
+F29-02 / TASK 2 -- DEPENDENCY POLICY VERDICT
+The first execution of deny.toml in this repository's history.
+
+captured:   2026-07-27T23:24:22Z
+host:       Linux 6.8.0-101-generic x86_64
+commit:     148330aeadcb628c1a772171ce4de041b53e3d8c
+tool:       cargo-deny 0.20.2
+policy:     deny.toml sha256=05a8535b020aff63147acbc46a40afa44087ba50f76e2edc36407c5797abf3a8
+command:    cargo deny --manifest-path Cargo.toml check
+lockfile:   1017 crates
+
+F29-DENY-STATUS::FAIL::exit=5
+
+VERDICT (verbatim, final line of tool output):
+    advisories FAILED, bans ok, licenses FAILED, sources ok
+
+This file RECORDS the verdict; it does not assert a PASS. A gate demanding
+PASS would corner the executor into weakening deny.toml, which is the exact
+failure this wiring exists to prevent. deny.toml is UNCHANGED by this plan:
+the licence allowlist, exceptions=[], advisories.ignore=[],
+unknown-registry=deny and unknown-git=deny are all exactly as they were.
+
+Because the verdict is FAIL, 'deny' was NOT chained into 'just check-all'.
+
+==========================================================================
+FAILING SET
+==========================================================================
+      1 error[unlicensed]: wcore-fixture-harness = 0.1.0 is unlicensed
+      1 error[unmaintained]: Bincode is unmaintained
+      1 error[unmaintained]: proc-macro-error is unmaintained
+      1 error[unmaintained]: `ttf-parser` is unmaintained
+      2 error[vulnerability]: Quadratic run time when checking a start tag for duplicate attribute names
+      2 error[vulnerability]: Unbounded namespace-declaration allocation in `NsReader` enables memory-exhaustion denial of service
+
+Advisory ids:
+    RUSTSEC-2024-0370
+    RUSTSEC-2025-0141
+    RUSTSEC-2026-0192
+    RUSTSEC-2026-0194
+    RUSTSEC-2026-0195
+
+Affected lockfile entries:
+    bincode 1.3.3
+    proc-macro-error 1.0.4
+    quick-xml 0.31.0
+    quick-xml 0.39.4
+    ttf-parser 0.25.1
+
+Non-failing warning classes (bans.multiple-versions is 'warn' by policy):
+     60 warning[duplicate]
+      1 warning[no-license-field]
+      1 warning[unlicensed]
+
+==========================================================================
+CROSS-CHECK: what the EXISTING gates say about the same tree
+==========================================================================
+cargo audit exit: 0   (this is the gate ci.yml already runs and blocks on)
+cargo audit final line: warning: 7 allowed warnings found
+cargo audit mentions quick-xml: 0 times
+
+The divergence is NOT advisory-database staleness. The database cargo-audit
+loaded DOES contain both advisories:
+    RUSTSEC-2026-0194 present in /root/.cargo/advisory-db: 1
+    RUSTSEC-2026-0195 present in /root/.cargo/advisory-db: 1
+cargo audit is silent on them because .cargo/audit.toml line 54 carries
+    ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]
+and .github/osv-scanner.toml carries the same disposition. deny.toml's
+advisories.ignore is [], so cargo-deny re-raises them. That difference is
+the finding, not a bug in either tool.
+
+==========================================================================
+REACHABILITY OF THE IGNORED ADVISORIES (measured, not assumed)
+==========================================================================
+.cargo/audit.toml states: 'Parent trace (sole path): quick-xml 0.39.4
+<- plist 1.9.0 <- syntect 5.3.0 <- wcore-cli'. Measured reverse trees:
+
+--- cargo tree -i quick-xml@0.31.0 (depth 2) ---
+quick-xml v0.31.0
+└── calamine v0.26.1
+    └── wcore-tools v0.12.25 (/root/wayland-29-02/crates/wcore-tools)
+
+--- cargo tree -i quick-xml@0.39.4 (depth 2) ---
+quick-xml v0.39.4
+├── plist v1.9.0
+│   └── syntect v5.3.0
+└── wcore-tools v0.12.25 (/root/wayland-29-02/crates/wcore-tools)
+    ├── wcore-agent v0.12.25 (/root/wayland-29-02/crates/wcore-agent)
+    │   [dev-dependencies]
+    ├── wcore-browser v0.12.25 (/root/wayland-29-02/crates/wcore-browser)
+    ├── wcore-cli v0.12.25 (/root/wayland-29-02/crates/wcore-cli)
+
+So there are THREE consumer paths, not one. The two through wcore-tools
+are absent from the recorded justification.
+
+wcore-tools/src/doc_tool.rs reads USER-SUPPLIED documents:
+    11://! - `xlsx` → [`calamine`], read via its STREAMING cell reader (never the dense
+    15://! - `docx` → [`zip`] + [`quick_xml`] over `word/document.xml` (text + tables).
+    16://! - `pptx` → [`zip`] + [`quick_xml`] over `ppt/slides/slideN.xml`, per slide.
+
+Vulnerable-API usage, counted in the real sources:
+    calamine 0.26.1  .attributes() call sites : 25
+    calamine 0.26.1  with_checks(false)       : 0
+    calamine 0.26.1  NsReader                 : 0
+    doc_tool.rs      .attributes()            : 0
+    doc_tool.rs      NsReader                 : 0
+
+Reading: RUSTSEC-2026-0194 (quadratic duplicate-attribute check, active by
+default under with_checks(true)) is REACHABLE on attacker-supplied .xlsx
+through calamine. RUSTSEC-2026-0195 (NsReader) is NOT reachable -- NsReader
+appears nowhere in calamine or in the workspace. The recorded 'UNREACHABLE'
+justification is therefore correct for 0195 and falsified for 0194.
+
+NOT PROVEN HERE: no malicious .xlsx was crafted and no CPU cost was
+measured end to end. This is a static reachability argument from the real
+dependency graph and the real crate sources. Substitution point: a PoC
+document driven through the doc_tool surface, which belongs to whoever owns
+crates/wcore-tools -- this lane is fenced out of it.
+
+==========================================================================
+FULL OUTPUT: ERROR AND SUMMARY LINES
+==========================================================================
+The complete tool output is 21141 lines, almost all of it
+reverse-dependency trees repeated per finding. Reproduce it with the
+single command recorded above. The substantive lines:
+
+warning[duplicate]: found 2 duplicate entries for crate 'arrayvec'
+warning[duplicate]: found 3 duplicate entries for crate 'base64'
+warning[duplicate]: found 2 duplicate entries for crate 'bitflags'
+warning[duplicate]: found 2 duplicate entries for crate 'block-buffer'
+warning[duplicate]: found 2 duplicate entries for crate 'chacha20'
+warning[duplicate]: found 2 duplicate entries for crate 'const-oid'
+warning[duplicate]: found 2 duplicate entries for crate 'core-foundation'
+warning[duplicate]: found 2 duplicate entries for crate 'cpufeatures'
+warning[duplicate]: found 2 duplicate entries for crate 'crypto-bigint'
+warning[duplicate]: found 2 duplicate entries for crate 'crypto-common'
+warning[duplicate]: found 2 duplicate entries for crate 'der'
+warning[duplicate]: found 2 duplicate entries for crate 'digest'
+warning[duplicate]: found 2 duplicate entries for crate 'fallible-iterator'
+warning[duplicate]: found 2 duplicate entries for crate 'foldhash'
+warning[duplicate]: found 2 duplicate entries for crate 'foreign-types'
+warning[duplicate]: found 2 duplicate entries for crate 'foreign-types-shared'
+warning[no-license-field]: license expression was not specified in manifest for crate 'wcore-fixture-harness = 0.1.0'
+warning[unlicensed]: a valid license expression could not be retrieved for the crate
+error[unlicensed]: wcore-fixture-harness = 0.1.0 is unlicensed
+warning[duplicate]: found 3 duplicate entries for crate 'getrandom'
+warning[duplicate]: found 4 duplicate entries for crate 'hashbrown'
+warning[duplicate]: found 2 duplicate entries for crate 'hmac'
+warning[duplicate]: found 2 duplicate entries for crate 'http'
+warning[duplicate]: found 2 duplicate entries for crate 'http-body'
+warning[duplicate]: found 2 duplicate entries for crate 'linux-raw-sys'
+warning[duplicate]: found 2 duplicate entries for crate 'lru'
+warning[duplicate]: found 2 duplicate entries for crate 'md-5'
+warning[duplicate]: found 3 duplicate entries for crate 'nom'
+warning[duplicate]: found 2 duplicate entries for crate 'quick-xml'
+warning[duplicate]: found 2 duplicate entries for crate 'r-efi'
+warning[duplicate]: found 3 duplicate entries for crate 'rand'
+warning[duplicate]: found 2 duplicate entries for crate 'rand_chacha'
+warning[duplicate]: found 3 duplicate entries for crate 'rand_core'
+warning[duplicate]: found 2 duplicate entries for crate 'rustix'
+warning[duplicate]: found 2 duplicate entries for crate 'security-framework'
+warning[duplicate]: found 2 duplicate entries for crate 'sha2'
+warning[duplicate]: found 2 duplicate entries for crate 'signature'
+warning[duplicate]: found 2 duplicate entries for crate 'spki'
+warning[duplicate]: found 2 duplicate entries for crate 'syn'
+warning[duplicate]: found 2 duplicate entries for crate 'thiserror'
+warning[duplicate]: found 2 duplicate entries for crate 'thiserror-impl'
+warning[duplicate]: found 2 duplicate entries for crate 'tower-http'
+warning[duplicate]: found 2 duplicate entries for crate 'unicode-width'
+warning[duplicate]: found 2 duplicate entries for crate 'untrusted'
+warning[duplicate]: found 2 duplicate entries for crate 'wasi'
+warning[duplicate]: found 2 duplicate entries for crate 'webpki-roots'
+warning[duplicate]: found 2 duplicate entries for crate 'windows'
+warning[duplicate]: found 2 duplicate entries for crate 'windows-core'
+warning[duplicate]: found 2 duplicate entries for crate 'windows-implement'
+warning[duplicate]: found 2 duplicate entries for crate 'windows-interface'
+warning[duplicate]: found 2 duplicate entries for crate 'windows-link'
+warning[duplicate]: found 2 duplicate entries for crate 'windows-result'
+warning[duplicate]: found 4 duplicate entries for crate 'windows-sys'
+warning[duplicate]: found 2 duplicate entries for crate 'windows-targets'
+warning[duplicate]: found 2 duplicate entries for crate 'windows_aarch64_gnullvm'
+warning[duplicate]: found 2 duplicate entries for crate 'windows_aarch64_msvc'
+warning[duplicate]: found 2 duplicate entries for crate 'windows_i686_gnu'
+warning[duplicate]: found 2 duplicate entries for crate 'windows_i686_gnullvm'
+warning[duplicate]: found 2 duplicate entries for crate 'windows_i686_msvc'
+warning[duplicate]: found 2 duplicate entries for crate 'windows_x86_64_gnu'
+warning[duplicate]: found 2 duplicate entries for crate 'windows_x86_64_gnullvm'
+warning[duplicate]: found 2 duplicate entries for crate 'windows_x86_64_msvc'
+warning[duplicate]: found 2 duplicate entries for crate 'wit-bindgen'
+error[unmaintained]: Bincode is unmaintained
+   ├ ID: RUSTSEC-2025-0141
+   ├ Advisory: https://rustsec.org/advisories/RUSTSEC-2025-0141
+   ├ Announcement: https://git.sr.ht/~stygianentity/bincode/tree/v3.0/item/README.md
+   ├ Solution: No safe upgrade is available!
+error[unmaintained]: proc-macro-error is unmaintained
+    ├ ID: RUSTSEC-2024-0370
+    ├ Advisory: https://rustsec.org/advisories/RUSTSEC-2024-0370
+    ├ Announcement: https://gitlab.com/CreepySkeleton/proc-macro-error/-/issues/20
+    ├ Solution: No safe upgrade is available!
+error[vulnerability]: Quadratic run time when checking a start tag for duplicate attribute names
+    ├ ID: RUSTSEC-2026-0194
+    ├ Advisory: https://rustsec.org/advisories/RUSTSEC-2026-0194
+    ├ Announcement: https://github.com/tafia/quick-xml/issues/969
+    ├ Solution: Upgrade to >=0.41.0 (try `cargo update -p quick-xml`)
+error[vulnerability]: Unbounded namespace-declaration allocation in `NsReader` enables memory-exhaustion denial of service
+    ├ ID: RUSTSEC-2026-0195
+    ├ Advisory: https://rustsec.org/advisories/RUSTSEC-2026-0195
+    ├ Announcement: https://github.com/tafia/quick-xml/issues/970
+    ├ Solution: Upgrade to >=0.41.0 (try `cargo update -p quick-xml`)
+error[vulnerability]: Quadratic run time when checking a start tag for duplicate attribute names
+    ├ ID: RUSTSEC-2026-0194
+    ├ Advisory: https://rustsec.org/advisories/RUSTSEC-2026-0194
+    ├ Announcement: https://github.com/tafia/quick-xml/issues/969
+    ├ Solution: Upgrade to >=0.41.0 (try `cargo update -p quick-xml`)
+error[vulnerability]: Unbounded namespace-declaration allocation in `NsReader` enables memory-exhaustion denial of service
+    ├ ID: RUSTSEC-2026-0195
+    ├ Advisory: https://rustsec.org/advisories/RUSTSEC-2026-0195
+    ├ Announcement: https://github.com/tafia/quick-xml/issues/970
+    ├ Solution: Upgrade to >=0.41.0 (try `cargo update -p quick-xml`)
+error[unmaintained]: `ttf-parser` is unmaintained
+    ├ ID: RUSTSEC-2026-0192
+    ├ Advisory: https://rustsec.org/advisories/RUSTSEC-2026-0192
+    ├ Announcement: https://github.com/harfbuzz/ttf-parser/issues/217
+    ├ Solution: No safe upgrade is available!
+advisories FAILED, bans ok, licenses FAILED, sources ok

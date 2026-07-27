@@ -108,6 +108,22 @@ hakari-verify:
 audit:
     vx cargo audit
 
+# Execute the dependency policy declared in deny.toml (F29-02, closes census
+# finding F29-CEN-04). `audit` above runs cargo-audit, which is the RUSTSEC
+# advisory scanner ONLY — it evaluates no license, no ban and no source
+# registry. deny.toml has declared a strict four-section policy since v0.6.2
+# and, measured at 2fd771d2, NOTHING had ever executed it: cargo-deny appeared
+# in zero files under .github/ and zero times in this justfile, leaving 1,017
+# crates unevaluated against the licence allowlist.
+#
+# NOT chained into `check-all`, deliberately. The first execution of this
+# policy exits 5 — see 29-02-CLEANROOM-RESULTS.md for the verdict and the
+# per-finding severities. Chaining a red gate into the aggregate check would
+# break every concurrent lane on a policy failure unrelated to their work.
+# Chain it only once the verdict is clean.
+deny:
+    vx cargo deny --manifest-path Cargo.toml check
+
 # ── Coverage ──────────────────────────────────────────────────────────────
 coverage:
     vx cargo llvm-cov nextest --workspace --profile ci --lcov --output-path lcov.info
