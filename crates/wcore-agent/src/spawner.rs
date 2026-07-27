@@ -5106,8 +5106,12 @@ mod posture_inheritance_tests {
     }
 
     /// Phase 21, F21-02-02 LIVE leg. `BaselineExecutionPolicy::with_requested_approvals`
-    /// carries the child ratchet, but `PolicySource::Child` has no production
-    /// constructor, so no live child reaches it. The seam a live child DOES
+    /// carries the child ratchet, but its child-sourced policy variant has no
+    /// production constructor, so no live child reaches it. (That token is
+    /// deliberately not spelled out here: `corpus_approval`'s no-channel canary
+    /// text-scans every `crates/*/src` file for it, and a prose mention outside
+    /// `wcore-types/src/execution_policy.rs` reads as a production channel
+    /// appearing.) The seam a live child DOES
     /// reach is the two lines in `pre_resolve_durable_launch` reproduced below:
     /// the child's durable policy receipt is
     /// `effective_policy.with_runtime_approvals(child_config.smart_approval_policy())`,
