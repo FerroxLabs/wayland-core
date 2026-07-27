@@ -2,7 +2,7 @@
 phase: 23B-continuous-agency
 plan: "04"
 subsystem: multi-day-journey-and-clock-policy
-status: partial-clock-started
+status: partial-clock-started-two-platforms
 requirements:
   - F23-05
 requirements_disposition:
@@ -43,7 +43,7 @@ commits:
 
 # Phase 23B Plan 04: Multi-Day Journey — the started-clock dispatch
 
-**Task 1 is COMPLETE. Task 2 is STARTED on Linux and running. Task 3 is
+**Task 1 is COMPLETE. Task 2 is STARTED and running on Linux AND Windows. Task 3 is
 DELIBERATELY UNSTARTED.** This lane was dispatched early, before its declared
 dependency 23B-03 had landed, for one reason: Success Criterion 5's floor is
 three real calendar days and that is the only cost in this program that cannot
@@ -56,12 +56,17 @@ operator to Task 1 plus the start of Task 2, so the honest report is
 "termination state 4" move the brief names as a failure; this instead says
 plainly which tasks ran and which did not.
 
-## The two numbers that matter
+## The numbers that matter
 
 ```
-Linux day one   2026-07-27T14:21:19Z   on hetzner-dsm, pinned SHA 0ed05322
-Earliest close  2026-07-30T14:21:19Z   day one + the authorized 259,200 seconds
+Linux   day one 2026-07-27T14:21:19Z  hetzner-dsm   earliest close 2026-07-30T14:21:19Z
+Windows day one 2026-07-27T23:54:26Z  SEANDESKTOP   earliest close 2026-07-30T23:54:26Z
+macOS   NOT ACHIEVED — nothing run, nothing claimed
 ```
+
+Pinned journey SHA `0ed05322462e64cb44e2b80aa15b7357263b8187`, asserted through
+each binary's own `--build-info` on every invocation. **The journey as a whole
+cannot be closed before `2026-07-30T23:54:26Z`.**
 
 ---
 
@@ -152,11 +157,17 @@ cross-check and `shasum -c` go red.
 process gone afterwards. Days 2 and 3 are on systemd timers so the span cannot
 be lost to nobody invoking it; each day is idempotent.
 
-**Windows: day one NOT started.** The cold release build was still in flight at
-hand-off. It was also started at the previous SHA and must be moved to the
-pinned one before day one, or provenance fails.
+**Windows day one recorded** at `2026-07-27T23:54:26Z` on `SEANDESKTOP`, all six
+invariants PASS, driver exit `0` carried through an explicit `exit $LASTEXITCODE`
+and never through a pipeline, no resident process afterwards. Days 2 and 3 run
+as SYSTEM under the Task Scheduler so they survive an ssh session ending and a
+reboot of that shared box. Getting there closed two Windows traps that are now
+written up in the handoff: a `Start-Process` child both ignores the PowerShell
+location AND dies with the ssh session, and a SYSTEM scheduled task's
+`USERPROFILE` would have created a second, empty journey root in which every day
+looks like day one. Both were verified against day 1 rather than assumed.
 
-**macOS: OPEN, blocked.** `scripts/f23-macos-binary.sh` was never landed by
+**macOS: NOT ACHIEVED.** `scripts/f23-macos-binary.sh` was never landed by
 23B-01 or 23B-02; the plan instructs stopping and recording rather than
 improvising a second resolver, and that is what happened. Two measured
 corrections go with it, in `23B-04-LIVE-EVIDENCE.md`: `ci.yml` **does** now
@@ -264,11 +275,13 @@ No CRITICAL or HIGH finding is open.
 
 ## What is honestly NOT proved
 
-- Success Criterion 5 is **not met and not claimed**. One platform has one day of
-  three; one has none; one is blocked.
+- Success Criterion 5 is **not met and not claimed**. Two platforms have one day
+  of three recorded; the third has nothing.
 - F23-05 is **in progress**, not complete.
 - Nothing about Phase 23B's outcome, Success Criteria 2–6, or D2.
-- No Windows or macOS journey evidence of any kind exists.
+- No macOS journey evidence of any kind exists, and none is claimed.
+- Neither running leg has reached day two, so nothing about resume behaviour
+  across a REAL multi-day gap is yet evidenced — only day one is.
 
 ## Self-Check: PASSED
 
