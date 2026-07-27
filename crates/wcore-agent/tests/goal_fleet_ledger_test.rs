@@ -88,9 +88,18 @@ fn fixture(path: &Path) -> Fixture {
 }
 
 impl Fixture {
-    /// Commit a budget reservation through the EXISTING budget events, which is
-    /// the seam a claim must re-enter rather than mint a fresh budget beside.
+    /// Commit a budget reservation through the EXISTING budget events, owned by
+    /// a real durable child.
+    ///
+    /// This is the seam a claim must re-enter rather than mint a fresh budget
+    /// beside it: the reservation is charged to a declared child under
+    /// `BudgetPurpose::ChildExecution`, which is what a Fleet worker actually
+    /// is. Reserving against `BudgetOwner::Session` would have made the test
+    /// shorter and would have stopped proving the child half.
     fn reserve(&self, reservation_id: &str, tokens: u64) {
+        DurableChildStore::new(self.journal.clone())
+            .declare(child_record(reservation_id))
+            .expect("child declares");
         self.journal
             .append(SessionEvent::BudgetReserved {
                 event_id: format!("evt-{reservation_id}"),
@@ -418,12 +427,12 @@ fn an_attempt_whose_outcome_cannot_be_established_parks_rather_than_retrying() {
 // Behavior 7 — workspace handoff goes through the delegated-mutation lifecycle.
 // ---------------------------------------------------------------------------
 
-fn child_record() -> DurableChildRecord {
+fn child_record(child_id: &str) -> DurableChildRecord {
     let filled = |c: char| -> String { std::iter::repeat_n(c, 64).collect() };
     DurableChildRecord {
         schema_version: DURABLE_CHILD_SCHEMA_VERSION,
-        declaration_id: "declare-child-1".into(),
-        child_id: ChildId::new("child-1").unwrap(),
+        declaration_id: format!("declare-{child_id}"),
+        child_id: ChildId::new(child_id).unwrap(),
         parent: ChildParent {
             session_id: SESSION.into(),
             turn_id: None,
@@ -448,7 +457,7 @@ fn child_record() -> DurableChildRecord {
         model: Some("test-model".into()),
         workspace: ChildWorkspace {
             mode: ChildWorkspaceMode::Isolated,
-            workspace_id: "workspace-child-1".into(),
+            workspace_id: format!("workspace-{child_id}"),
         },
         status: DurableChildStatus::Prepared,
         desired_state: ChildDesiredState::Run,
@@ -490,14 +499,13 @@ fn workspace_ownership_moves_only_through_a_committed_delegated_mutation_transac
             .is_err()
     );
 
-    // Now open a real one through the Phase 20 store.
-    DurableChildStore::new(fixture.journal.clone())
-        .declare(child_record())
-        .expect("child declares");
+    // Now open a real one through the Phase 20 store, against the child that
+    // already owns the handoff's reservation.
+    fixture.reserve("res-handoff", 10);
     ChildTransactionStore::new(fixture.journal.clone())
         .open(
             "transaction-1",
-            ChildId::new("child-1").unwrap(),
+            ChildId::new("res-handoff").unwrap(),
             std::iter::repeat_n('1', 40).collect::<String>(),
             ChildGatePlan {
                 required_gates: vec![ChildGateRequirement {
@@ -508,7 +516,6 @@ fn workspace_ownership_moves_only_through_a_committed_delegated_mutation_transac
         )
         .expect("transaction opens");
 
-    fixture.reserve("res-handoff", 10);
     let new_owner = fixture
         .ledger
         .hand_off_workspace(&owner, "transaction-1", "w-new", "res-handoff", 30_000)
