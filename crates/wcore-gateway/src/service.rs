@@ -334,8 +334,19 @@ impl ServiceManager for SystemdManager {
         ))
     }
 
+    /// `<os-native config root>/systemd/user/<name>.service`.
+    ///
+    /// Routed through `wcore_config::config::os_native_config_root()` rather
+    /// than a raw `dirs::config_dir()` so the workspace keeps ONE call site for
+    /// the native root (the hermeticity audit, F-010/#270, gates exactly that).
+    /// It is deliberately NOT `wayland_config_dir()`: systemd's user manager
+    /// only scans `$XDG_CONFIG_HOME/systemd/user` (else `~/.config/systemd/user`),
+    /// so a unit written under `$WAYLAND_HOME` would never be discovered and
+    /// `install` would register nothing while reporting success. Hermeticity is
+    /// preserved by the unit's own `Environment=WAYLAND_HOME=` line — the unit
+    /// is a pointer INTO the hermetic home, not state inside it.
     fn unit_path(&self, spec: &ServiceSpec) -> Option<PathBuf> {
-        dirs::config_dir().map(|c| {
+        wcore_config::config::os_native_config_root().map(|c| {
             c.join("systemd")
                 .join("user")
                 .join(format!("{}.service", spec.service_name()))
