@@ -3341,11 +3341,11 @@ mod spawn_task_set_tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(CountingErrorProvider {
             calls: AtomicUsize::new(0),
         });
-        let mut engine = AgentEngine::new_with_provider(
+        let mut engine = crate::engine::AgentEngine::new_with_provider(
             provider,
             Config::default(),
-            crate::tools::ToolRegistry::new(),
-            Arc::new(NullSink),
+            ToolRegistry::new(),
+            Arc::new(crate::output::null_sink::NullSink),
         );
         spawner
             .bind_child_budget(&mut engine, child, true)
