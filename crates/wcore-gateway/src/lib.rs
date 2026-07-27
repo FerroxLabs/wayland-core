@@ -16,6 +16,7 @@ pub mod ledger;
 pub mod lifecycle;
 pub mod pidlock;
 pub mod service;
+pub mod support_bundle;
 
 use std::path::PathBuf;
 
