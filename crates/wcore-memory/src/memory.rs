@@ -280,6 +280,21 @@ impl MemoryApi for Memory {
     async fn search(&self, q: Query, tok: AccessToken) -> Result<Vec<Hit>> {
         self.dispatcher.search(q, tok).await
     }
+    // F23-03. These MUST delegate rather than inherit the trait defaults:
+    // `Memory` is the type the CLI actually holds, so a default `controls()`
+    // returning None here would leave every operator control refusing with
+    // "this backend exposes no operator controls" on the one backend that has
+    // them. A slash-surface test caught exactly that.
+    fn controls(&self) -> Option<crate::provenance::MemoryControls> {
+        self.dispatcher.controls()
+    }
+    async fn search_with_provenance(
+        &self,
+        q: Query,
+        tok: AccessToken,
+    ) -> Result<(Vec<Hit>, crate::provenance::RecallReport)> {
+        self.dispatcher.search_with_provenance(q, tok).await
+    }
     async fn get_episode(&self, id: &EpisodeId, tok: AccessToken) -> Result<Episode> {
         self.dispatcher.get_episode(id, tok).await
     }
