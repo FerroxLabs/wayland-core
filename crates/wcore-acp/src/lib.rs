@@ -9,8 +9,12 @@
 pub mod a2a;
 pub mod auth;
 pub mod client;
+pub mod cursor;
 pub mod error;
+pub mod idempotency;
+pub mod negotiate;
 pub mod protocol;
+pub mod roles;
 pub mod roster;
 pub mod router;
 pub mod server;
@@ -19,7 +23,11 @@ pub mod turn;
 
 pub use a2a::{A2aCapabilities, A2aError, A2aHandler, A2aHandshake, A2aMessage, DefaultA2aHandler};
 pub use client::AcpClient;
+pub use cursor::{Cursor, CursorError, EventLog, Positioned};
 pub use error::AcpError;
+pub use idempotency::{CommandLedger, LedgerOutcome};
+pub use negotiate::{NegotiateError, Negotiated, Version, negotiate};
+pub use roles::{AuthzOutcome, Role, RoledPrincipal, authorize};
 pub use roster::AgentRoster;
 pub use router::ProfileRouter;
 pub use server::AcpServer;

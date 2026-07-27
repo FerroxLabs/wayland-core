@@ -202,6 +202,10 @@ async fn auth_middleware(verifier: Arc<dyn Verifier>, req: Request, next: Next) 
 fn status_for(err: &AcpError) -> StatusCode {
     match err {
         AcpError::Auth(_) => StatusCode::UNAUTHORIZED,
+        // 403, never 401. A 401 tells the client its credential was not
+        // accepted and invites it to re-authenticate, which for a role refusal
+        // is a retry loop that can never succeed.
+        AcpError::Forbidden(_) => StatusCode::FORBIDDEN,
         // persona-profiles R3/R4: an unauthorized/unknown agent selector is a
         // 404 — it leaks no existence information (the roster only ever exposes
         // authorized agents, so "unknown" and "forbidden" are indistinguishable).
@@ -217,6 +221,7 @@ fn status_for(err: &AcpError) -> StatusCode {
 fn code_for(err: &AcpError) -> ErrorCode {
     match err {
         AcpError::Auth(_) => ErrorCode::AuthRequired,
+        AcpError::Forbidden(_) => ErrorCode::Forbidden,
         AcpError::Agent(_) => ErrorCode::AgentNotFound,
         AcpError::Session(_) => ErrorCode::SessionNotFound,
         AcpError::Protocol(_) | AcpError::Serde(_) => ErrorCode::InvalidRequest,
