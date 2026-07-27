@@ -145,6 +145,17 @@ pub enum BackupCmd {
         #[arg(long, value_name = "DIR")]
         home: PathBuf,
     },
+    /// Print the tree digest of a home, and the algorithm used.
+    ///
+    /// Exists so an interruption proof compares pre- and post-recovery state
+    /// using the SAME digest the journal itself records, on every platform. A
+    /// proof script that reimplemented the digest would be comparing its own
+    /// arithmetic across platforms rather than the product's.
+    Digest {
+        /// Home directory to digest.
+        #[arg(long, value_name = "DIR")]
+        home: PathBuf,
+    },
 }
 
 /// Synchronous dispatch, mirroring `TopCmd::Migrate`.
@@ -187,6 +198,10 @@ pub fn run(cmd: BackupCmd) -> Result<(), BackupError> {
             accept_missing_secrets,
             pace_ms,
         } => {
+            // Arm the uncatchable-kill measurement when the proof asks for it.
+            if let Ok(probe) = std::env::var("WAYLAND_BACKUP_KILL_PROBE") {
+                arm_kill_handler_probe(PathBuf::from(probe));
+            }
             let outcome = restore::restore_archive(
                 &path,
                 &home,
@@ -213,7 +228,52 @@ pub fn run(cmd: BackupCmd) -> Result<(), BackupError> {
             }
             Ok(())
         }
+        BackupCmd::Digest { home } => {
+            println!("DIGEST-ALGO: {}", archive::DIGEST_ALGO);
+            println!("DIGEST: {}", journal::target_digest(&home)?);
+            Ok(())
+        }
     }
+}
+
+/// Install a probe that records whether a CATCHABLE termination signal was
+/// delivered to this process.
+///
+/// This is what turns "the kill was uncatchable" from an assertion into a
+/// measurement. The interruption proof arms the probe, kills the process with a
+/// mechanism that cannot be trapped, and then requires the probe file to be
+/// ABSENT — having first shown, in a control run, that the same probe DOES fire
+/// for a catchable signal. Without that pair, "no probe file" is equally
+/// consistent with a probe that was never installed.
+///
+/// Runs on its own thread with its own single-threaded runtime, so it is
+/// independent of whatever the main runtime is doing while the restore blocks.
+fn arm_kill_handler_probe(path: PathBuf) {
+    std::thread::spawn(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        rt.block_on(async move {
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{SignalKind, signal};
+                if let Ok(mut sig) = signal(SignalKind::terminate()) {
+                    sig.recv().await;
+                    let _ = std::fs::write(&path, b"fired");
+                }
+            }
+            #[cfg(windows)]
+            {
+                if let Ok(mut sig) = tokio::signal::windows::ctrl_break() {
+                    sig.recv().await;
+                    let _ = std::fs::write(&path, b"fired");
+                }
+            }
+        });
+    });
 }
 
 /// One file that will be carried in an archive.
