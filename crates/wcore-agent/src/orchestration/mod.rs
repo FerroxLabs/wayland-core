@@ -75,6 +75,8 @@ pub mod template_routing;
 pub mod workflow;
 
 #[cfg(test)]
+mod d1_refusal_terminal_tests;
+#[cfg(test)]
 mod f13_durability_tests;
 
 use crate::confirm::{ConfirmResult, ToolConfirmer};
