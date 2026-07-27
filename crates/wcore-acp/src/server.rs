@@ -21,15 +21,39 @@ use async_trait::async_trait;
 use futures::stream::{self, Stream, StreamExt};
 use tokio::sync::RwLock;
 
+use crate::auth::Principal;
+use crate::cursor::{Cursor, EventLog, ResumeError, ResumeResponse};
 use crate::error::AcpError;
+use crate::idempotency::{CommandLedger, LedgerOutcome};
 use crate::protocol::{
     ACP_PROTOCOL_VERSION, AgentsListResponse, ErrorCode, InitializeResponse, JsonRpcError,
     MessageEvent, MessageSendRequest, ServerCapabilities, SessionCreateRequest,
     SessionCreateResponse, SessionGetResponse, SessionListResponse, SessionMetadata,
     ToolDefinition,
 };
+use crate::roles::RolePolicy;
 use crate::roster::AgentRoster;
 use crate::transport::HttpHandler;
+
+/// What an idempotency identity is bound to.
+///
+/// A canonical serialization of the method and its parameters, NOT the
+/// parameters alone: `session/delete` of `s1` and a hypothetical
+/// `session/archive` of `s1` must never look like the same command merely
+/// because their payloads coincide.
+type CommandFingerprint = String;
+
+/// The receipt replayed when an idempotency identity repeats.
+///
+/// Held as the already-formed response rather than as inputs to re-derive it,
+/// so a replay cannot produce a DIFFERENT answer from the one the first caller
+/// acted on — re-deriving would mint a fresh session id on every replay, which
+/// is the exact failure idempotency exists to prevent.
+#[derive(Debug, Clone)]
+pub(crate) enum CommandReceipt {
+    SessionCreated(SessionCreateResponse),
+    SessionDeleted,
+}
 
 /// Internal session record. Wraps [`SessionMetadata`] with the create-time
 /// configuration a real turn must honour.
@@ -64,9 +88,34 @@ struct SessionRecord {
 /// server is `Clone`-friendly via the inner `Arc`. Construct one and
 /// hand it to [`HttpSseTransport::new`] (and friends) to wire the wire
 /// transports to the same backing state.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AcpServer {
+    /// Identity of THIS process's run, minted once at construction and mixed
+    /// into every stream id. A restarted server therefore issues stream ids no
+    /// pre-restart cursor can match, so a stale cursor gets a named
+    /// `StreamMismatch` instead of being silently served positions of a
+    /// different stream — the failure `cursor.rs` was built to make impossible,
+    /// which only becomes impossible once something actually mints the id.
+    instance_id: String,
     sessions: Arc<RwLock<HashMap<String, SessionRecord>>>,
+    /// Per-session ordered event log. Every event `message/send` emits is
+    /// appended here as it leaves the engine, INDEPENDENTLY of whether the
+    /// client that asked for it is still connected — a client that disconnects
+    /// mid-turn is precisely the client that needs to resume, so logging only
+    /// what was successfully delivered would retain everything except the
+    /// events that matter.
+    events: Arc<RwLock<HashMap<String, EventLog<MessageEvent>>>>,
+    /// Retained events per session stream. See [`Self::with_event_retention`].
+    event_retention: usize,
+    /// Bounded ledger backing the `Idempotency-Key` header on the mutating
+    /// session commands.
+    commands: Arc<RwLock<CommandLedger<CommandFingerprint, CommandReceipt>>>,
+    /// Server-side role assignment. `None` means role gating is NOT configured
+    /// — every authenticated principal reaches every method, which is the
+    /// pre-role behaviour. Reported by [`Self::has_role_policy`] so an operator
+    /// surface can state it rather than implying enforcement that is not
+    /// happening.
+    role_policy: Option<Arc<RolePolicy>>,
     /// v0.8.1 U12 — optional A2A handler. When `Some`, the server
     /// dispatches `a2a/*` methods to it. When `None`, those methods
     /// return a "no handler installed" protocol error (the typed
@@ -119,10 +168,83 @@ impl std::fmt::Debug for AcpServer {
     }
 }
 
+impl Default for AcpServer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AcpServer {
     /// Construct an empty server.
+    ///
+    /// NOT `Self::default()` any more: the instance identity must be minted
+    /// here, and a derived `Default` would hand every server the empty string
+    /// — making every restart look like the same stream and re-opening exactly
+    /// the silent-resume hole the cursor contract closes.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            instance_id: uuid::Uuid::new_v4().to_string(),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            events: Arc::new(RwLock::new(HashMap::new())),
+            event_retention: crate::cursor::DEFAULT_RETENTION,
+            commands: Arc::new(RwLock::new(CommandLedger::new())),
+            role_policy: None,
+            a2a_handler: None,
+            turn_engine: None,
+            roster: None,
+            router: None,
+        }
+    }
+
+    /// This process's run identity — the suffix of every stream id it mints.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    /// How many events each session's stream retains for resumption.
+    ///
+    /// Retained history is memory a DISCONNECTED client makes the server hold
+    /// (T-24-03-05), so it is finite and the bound is the operator's to choose.
+    /// Lowering it does not lose events silently: a cursor that falls outside
+    /// the window gets [`crate::cursor::CursorError::TooOld`] naming the oldest
+    /// position still servable, so the client resynchronises deliberately.
+    pub fn with_event_retention(mut self, events: usize) -> Self {
+        self.event_retention = events.max(1);
+        self
+    }
+
+    /// The stream identity `session_id` has in THIS process run.
+    ///
+    /// Public because a client cannot verify the resume contract without it:
+    /// the property that matters is that a DIFFERENT run of this server names
+    /// the same session's stream differently, and that is only assertable if
+    /// the naming is observable. See
+    /// `tests/typed_client_recovery.rs::a_cursor_from_another_stream_is_refused…`,
+    /// which mints its stale cursor from a second server instance rather than
+    /// from a hand-written string — a hand-written foreign id is refused even
+    /// by a server whose stream ids carry no run identity at all, so it proves
+    /// the CHECK and not the IDENTITY.
+    pub fn stream_id_for(&self, session_id: &str) -> String {
+        format!("{session_id}@{}", self.instance_id)
+    }
+
+    /// Install the server-side role policy. When present, every request the
+    /// transport routes through [`HttpHandler::authorize_method`] is decided
+    /// against it before dispatch. When absent, no role gating happens —
+    /// see [`Self::has_role_policy`].
+    pub fn with_role_policy(mut self, policy: RolePolicy) -> Self {
+        self.role_policy = Some(Arc::new(policy));
+        self
+    }
+
+    /// Whether a role policy is installed.
+    ///
+    /// `false` does not mean "everything is denied" and does not mean
+    /// "everything is fine". It means role gating is NOT CONFIGURED, and any
+    /// surface reporting on authorization must say that rather than printing a
+    /// zero-refusals number that reads like enforcement.
+    pub fn has_role_policy(&self) -> bool {
+        self.role_policy.is_some()
     }
 
     /// Current session count — useful for tests + observability.
@@ -256,6 +378,132 @@ impl AcpServer {
             .await
             .map_err(|e| AcpError::Protocol(e.to_string()))
     }
+
+    // ── The event plane: what makes a cursor resumable in practice ─────────
+
+    /// Drain `upstream` to completion in its own task, appending every event to
+    /// the session's log, and hand the caller a stream fed from that drain.
+    ///
+    /// The tee is the whole point. Returning the engine's stream directly makes
+    /// the log a function of what the CLIENT consumed: axum drops the response
+    /// stream the moment the peer disconnects, the engine's remaining events
+    /// are never polled, and they are never recorded. The client then resumes
+    /// and is told — correctly, and uselessly — that there is nothing to
+    /// resume. Draining in a task decouples recording from delivery, so a
+    /// severed connection loses the DELIVERY and keeps the RECORD.
+    fn tee_into_log(
+        &self,
+        session_id: &str,
+        upstream: Pin<Box<dyn Stream<Item = MessageEvent> + Send>>,
+    ) -> Pin<Box<dyn Stream<Item = MessageEvent> + Send>> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<MessageEvent>();
+        let events = Arc::clone(&self.events);
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            let mut upstream = upstream;
+            while let Some(ev) = upstream.next().await {
+                {
+                    let mut guard = events.write().await;
+                    if let Some(log) = guard.get_mut(&session_id) {
+                        log.append(ev.clone());
+                    }
+                }
+                // A send error means the client is gone. That is not a reason
+                // to stop draining: the events after the disconnection are the
+                // ones the resume exists to deliver. The channel drops what it
+                // is holding when the receiver goes, so nothing accumulates.
+                let _ = tx.send(ev);
+            }
+        });
+        Box::pin(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|ev| (ev, rx))
+        }))
+    }
+
+    /// The tip cursor for a session's stream — what a live subscriber holds.
+    pub async fn event_tip(&self, session_id: &str) -> Option<Cursor> {
+        self.events.read().await.get(session_id).map(|l| l.tip())
+    }
+
+    /// Serve a resume: everything the cursor has not seen, or a NAMED refusal.
+    ///
+    /// A session this server does not hold is [`ResumeError::NoSuchSession`],
+    /// never an empty list. "I have nothing for you" and "I have never heard
+    /// of you" are different answers and a client acts differently on each.
+    pub async fn events_since(
+        &self,
+        session_id: &str,
+        cursor: &Cursor,
+    ) -> Result<ResumeResponse, ResumeError> {
+        let guard = self.events.read().await;
+        let Some(log) = guard.get(session_id) else {
+            return Err(ResumeError::NoSuchSession {
+                session_id: session_id.to_string(),
+            });
+        };
+        let events = log.since(cursor).map_err(ResumeError::Cursor)?;
+        Ok(ResumeResponse {
+            stream_id: log.stream_id().to_string(),
+            next_position: log.next_position(),
+            oldest_available: log.oldest_available(),
+            events,
+        })
+    }
+
+    // ── Command idempotency on the request path ───────────────────────────
+
+    /// Classify a command identity, returning a receipt to replay when the
+    /// identity has been used before with the same command.
+    async fn classify_command(
+        &self,
+        identity: &str,
+        fingerprint: &CommandFingerprint,
+    ) -> Result<Option<CommandReceipt>, AcpError> {
+        match self.commands.read().await.classify(identity, fingerprint) {
+            LedgerOutcome::Fresh => Ok(None),
+            LedgerOutcome::Replay(receipt) => Ok(Some(receipt)),
+            LedgerOutcome::Conflict => Err(AcpError::Protocol(format!(
+                "idempotency key {identity:?} is already bound to a different command; \
+                 reusing it would either perform a second effect or return another \
+                 caller's receipt"
+            ))),
+            LedgerOutcome::InvalidIdentity => Err(AcpError::Protocol(
+                "idempotency key is empty or longer than the accepted bound".to_string(),
+            )),
+            LedgerOutcome::Full => Err(AcpError::Protocol(
+                "the idempotency ledger is at capacity; this command is REFUSED rather \
+                 than admitted by discarding an older exactly-once guarantee"
+                    .to_string(),
+            )),
+        }
+    }
+
+    async fn record_command(
+        &self,
+        identity: &str,
+        fingerprint: &CommandFingerprint,
+        receipt: &CommandReceipt,
+    ) {
+        self.commands
+            .write()
+            .await
+            .record(identity, fingerprint, receipt);
+    }
+}
+
+/// Canonical fingerprint of a command: its method name plus a serialization of
+/// its parameters.
+///
+/// The method name is part of the fingerprint on purpose. Without it two
+/// different commands whose payloads happen to serialize identically would be
+/// indistinguishable to the ledger, and the second would be answered with the
+/// first one's receipt.
+fn fingerprint_of<T: serde::Serialize>(
+    method: &str,
+    params: &T,
+) -> Result<CommandFingerprint, AcpError> {
+    let body = serde_json::to_string(params)?;
+    Ok(format!("{method}\u{1e}{body}"))
 }
 
 fn now_secs() -> i64 {
@@ -307,6 +555,13 @@ impl HttpHandler for AcpServer {
             agent: req.agent.clone(),
         };
         self.sessions.write().await.insert(id.clone(), record);
+        // Open the session's event stream at create, not lazily at first send.
+        // Lazily would mean a resume issued between create and the first
+        // message could not tell "no events yet" from "no such session".
+        self.events.write().await.insert(
+            id.clone(),
+            EventLog::with_capacity(self.stream_id_for(&id), self.event_retention),
+        );
 
         // persona-profiles PR-7: a `profile:<name>` agent routes to a per-PROFILE
         // CHILD process (its own WAYLAND_HOME/identity). Spawn/open it now and map
@@ -324,6 +579,7 @@ impl HttpHandler for AcpServer {
             };
             if let Err(e) = opened {
                 self.sessions.write().await.remove(&id);
+                self.events.write().await.remove(&id);
                 return Err(e);
             }
         }
@@ -391,6 +647,7 @@ impl HttpHandler for AcpServer {
                 "session not found: {session_id}"
             )));
         };
+        self.events.write().await.remove(&session_id);
         // persona-profiles PR-7: reap the per-profile child session mapped to
         // this session (the router tears the child process down when its last
         // session goes away). Non-profile sessions have no child — nothing to do.
@@ -439,52 +696,133 @@ impl HttpHandler for AcpServer {
         // child process — forward the message to that child instead of the
         // in-process turn engine. The persona/tools overlay is the CHILD's
         // concern (it runs under the profile's own home/config).
-        if Self::is_profile_agent(agent.as_deref()) {
-            return match &self.router {
-                Some(router) => {
-                    router
-                        .send(MessageSendRequest {
-                            session_id: req.session_id,
-                            text: req.text,
-                            tools,
-                        })
-                        .await
+        // F24-04: BOTH dispatch paths converge on one `upstream` and one tee, so
+        // there is no branch through which events can reach a client without
+        // reaching the event log. An early `return` in either arm would be a
+        // path whose events are unresumable, and it would look identical from
+        // the outside until somebody disconnected and counted.
+        let session_id = req.session_id.clone();
+        let upstream: Pin<Box<dyn Stream<Item = MessageEvent> + Send>> =
+            if Self::is_profile_agent(agent.as_deref()) {
+                match &self.router {
+                    Some(router) => {
+                        router
+                            .send(MessageSendRequest {
+                                session_id: req.session_id,
+                                text: req.text,
+                                tools,
+                            })
+                            .await?
+                    }
+                    None => {
+                        return Err(AcpError::Session(format!(
+                            "session {} is bound to a profile agent but no supervisor is \
+                             installed",
+                            req.session_id
+                        )));
+                    }
                 }
-                None => Err(AcpError::Session(format!(
-                    "session {} is bound to a profile agent but no supervisor is installed",
-                    req.session_id
-                ))),
+            } else {
+                match &self.turn_engine {
+                    Some(engine) => {
+                        engine
+                            .run_turn(crate::turn::TurnRequest {
+                                session_id: req.session_id,
+                                text: req.text,
+                                tools,
+                                agent,
+                            })
+                            .await?
+                    }
+                    None => {
+                        // No engine installed: emit a typed, honest signal rather
+                        // than a misleading `Done{not_implemented}` (which is not a
+                        // valid StopReason and looks like a successful empty turn).
+                        let ev = MessageEvent::Error {
+                            error: JsonRpcError {
+                                code: ErrorCode::InternalError.code(),
+                                message: "no turn engine installed".to_string(),
+                                data: None,
+                            },
+                            // #787: a server-level frame with no turn context — there is
+                            // no per-turn id to stamp (no engine ran).
+                            turn_id: String::new(),
+                        };
+                        stream::iter(vec![ev]).boxed()
+                    }
+                }
             };
-        }
+        Ok(self.tee_into_log(&session_id, upstream))
+    }
 
-        match &self.turn_engine {
-            Some(engine) => {
-                engine
-                    .run_turn(crate::turn::TurnRequest {
-                        session_id: req.session_id,
-                        text: req.text,
-                        tools,
-                        agent,
-                    })
-                    .await
-            }
-            None => {
-                // No engine installed: emit a typed, honest signal rather
-                // than a misleading `Done{not_implemented}` (which is not a
-                // valid StopReason and looks like a successful empty turn).
-                let ev = MessageEvent::Error {
-                    error: JsonRpcError {
-                        code: ErrorCode::InternalError.code(),
-                        message: "no turn engine installed".to_string(),
-                        data: None,
-                    },
-                    // #787: a server-level frame with no turn context — there is
-                    // no per-turn id to stamp (no engine ran).
-                    turn_id: String::new(),
-                };
-                Ok(stream::iter(vec![ev]).boxed())
-            }
+    /// The server's authorization decision, taken from the principal the
+    /// TRANSPORT verified and the method the transport resolved from the route.
+    ///
+    /// With no policy installed this is `Ok` for everything — the pre-role
+    /// behaviour, kept deliberately so that shipping roles cannot lock an
+    /// operator out of a gateway they configured before roles existed.
+    /// [`Self::has_role_policy`] is how a caller learns which of the two states
+    /// it is in; a bare `Ok` must never be read as "the role check passed".
+    async fn authorize_method(&self, principal: &Principal, method: &str) -> Result<(), AcpError> {
+        match &self.role_policy {
+            Some(policy) => policy.authorize(principal, method),
+            None => Ok(()),
         }
+    }
+
+    async fn create_session_idempotent(
+        &self,
+        key: Option<&str>,
+        req: SessionCreateRequest,
+    ) -> Result<SessionCreateResponse, AcpError> {
+        let Some(key) = key else {
+            return self.create_session(req).await;
+        };
+        let fingerprint = fingerprint_of("session/create", &req)?;
+        if let Some(CommandReceipt::SessionCreated(resp)) =
+            self.classify_command(key, &fingerprint).await?
+        {
+            return Ok(resp);
+        }
+        let resp = self.create_session(req).await?;
+        self.record_command(
+            key,
+            &fingerprint,
+            &CommandReceipt::SessionCreated(resp.clone()),
+        )
+        .await;
+        Ok(resp)
+    }
+
+    async fn delete_session_idempotent(
+        &self,
+        key: Option<&str>,
+        session_id: String,
+    ) -> Result<(), AcpError> {
+        let Some(key) = key else {
+            return self.delete_session(session_id).await;
+        };
+        let fingerprint = fingerprint_of("session/delete", &session_id)?;
+        if let Some(CommandReceipt::SessionDeleted) =
+            self.classify_command(key, &fingerprint).await?
+        {
+            // The delete already happened. Re-issuing it would now report
+            // "session not found" — turning a successful retry into a spurious
+            // failure, which is the precise reason the caller sent a key.
+            return Ok(());
+        }
+        self.delete_session(session_id).await?;
+        self.record_command(key, &fingerprint, &CommandReceipt::SessionDeleted)
+            .await;
+        Ok(())
+    }
+
+    async fn resume_events(
+        &self,
+        session_id: String,
+        cursor: Cursor,
+    ) -> Result<ResumeResponse, ResumeError> {
+        self.events_since(&session_id, &cursor).await
     }
 
     async fn resolve_approval(

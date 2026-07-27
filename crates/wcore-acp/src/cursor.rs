@@ -109,6 +109,60 @@ impl std::fmt::Display for CursorError {
 
 impl std::error::Error for CursorError {}
 
+/// What a served resume returns.
+///
+/// Carries the stream identity and the retention window ALONGSIDE the events,
+/// so a client that has just resynchronised can mint its next cursor from the
+/// answer it was given rather than from what it remembered. A response of
+/// events alone forces the client to keep believing its own stream id, which is
+/// the belief that was wrong in the first place.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeResponse<E = crate::protocol::MessageEvent> {
+    pub stream_id: String,
+    pub next_position: u64,
+    pub oldest_available: u64,
+    pub events: Vec<Positioned<E>>,
+}
+
+/// Why a resume request could not be served.
+///
+/// [`Self::NoSuchSession`] is deliberately NOT a [`CursorError`]: "I hold no
+/// stream by that name" and "your position is wrong for the stream I hold" are
+/// different answers and a client retries differently on each. Neither is an
+/// empty list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ResumeError {
+    /// This server holds no event stream for that session.
+    NoSuchSession { session_id: String },
+    /// The stream exists and the cursor cannot be served against it.
+    Cursor(CursorError),
+    /// The handler does not host an event log at all.
+    ///
+    /// A NAMED nothing. The alternative — answering an unsupported resume with
+    /// an empty list — tells a client that asked "what did I miss?" that it
+    /// missed nothing, from a surface that never looked.
+    Unsupported,
+}
+
+impl std::fmt::Display for ResumeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResumeError::NoSuchSession { session_id } => {
+                write!(f, "no event stream for session {session_id}")
+            }
+            ResumeError::Cursor(e) => write!(f, "{e}"),
+            ResumeError::Unsupported => write!(
+                f,
+                "this handler does not retain an event stream, so it cannot say what \
+                 was missed"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResumeError {}
+
 /// One retained event and the position it was assigned.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Positioned<E> {

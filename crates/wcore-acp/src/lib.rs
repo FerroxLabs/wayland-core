@@ -22,12 +22,12 @@ pub mod transport;
 pub mod turn;
 
 pub use a2a::{A2aCapabilities, A2aError, A2aHandler, A2aHandshake, A2aMessage, DefaultA2aHandler};
-pub use client::AcpClient;
-pub use cursor::{Cursor, CursorError, EventLog, Positioned};
+pub use client::{AcpClient, ResumeOutcome, ResumeRefused};
+pub use cursor::{Cursor, CursorError, EventLog, Positioned, ResumeError, ResumeResponse};
 pub use error::AcpError;
 pub use idempotency::{CommandLedger, LedgerOutcome};
 pub use negotiate::{NegotiateError, Negotiated, Version, negotiate};
-pub use roles::{AuthzOutcome, Role, RoledPrincipal, authorize};
+pub use roles::{AuthzOutcome, Role, RolePolicy, RoledPrincipal, authorize};
 pub use roster::AgentRoster;
 pub use router::ProfileRouter;
 pub use server::AcpServer;

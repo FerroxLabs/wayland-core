@@ -37,13 +37,50 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::stream::{Stream, StreamExt};
 
-use crate::auth::Verifier;
+use crate::auth::{Principal, Verifier};
+use crate::cursor::{Cursor, CursorError, ResumeError, ResumeResponse};
 use crate::error::AcpError;
 use crate::protocol::{
     ACP_PROTOCOL_VERSION, AgentsListResponse, ErrorCode, InitializeResponse, JsonRpcError,
     MessageEvent, MessageSendRequest, ServerCapabilities, SessionCreateRequest,
     SessionCreateResponse, SessionGetResponse, SessionListResponse,
 };
+
+/// Header carrying a command's idempotency identity.
+pub const IDEMPOTENCY_HEADER: &str = "idempotency-key";
+/// Header a client uses to advertise the protocol version it speaks.
+pub const PROTOCOL_VERSION_HEADER: &str = "x-acp-protocol-version";
+/// Header carrying the version the handshake settled on.
+pub const NEGOTIATED_VERSION_HEADER: &str = "x-acp-negotiated-version";
+/// Header telling a newer client it was met at the server's version.
+pub const CLIENT_IS_NEWER_HEADER: &str = "x-acp-client-is-newer";
+
+/// The ACP method name a route+verb pair stands for.
+///
+/// # An unrecognised route resolves to its own path, and that is the point
+///
+/// The role table classifies METHODS, and its documented default for a method
+/// it does not know is `Admin` — the loud failure. Returning the raw path for
+/// an unmatched route feeds that default rather than defeating it: a route
+/// added without being classified stops working for ordinary principals,
+/// somebody notices, and the table gets an entry. Returning something like
+/// `"unknown"` and special-casing it would be the quiet version of the same
+/// omission.
+pub(crate) fn acp_method_for(path: &str, verb: &axum::http::Method) -> String {
+    use axum::http::Method;
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match (verb, segments.as_slice()) {
+        (&Method::GET, ["initialize"]) => "initialize".to_string(),
+        (&Method::GET, ["agents"]) => "agents/list".to_string(),
+        (&Method::POST, ["sessions"]) => "session/create".to_string(),
+        (&Method::GET, ["sessions"]) => "session/list".to_string(),
+        (&Method::GET, ["sessions", _]) => "session/get".to_string(),
+        (&Method::DELETE, ["sessions", _]) => "session/delete".to_string(),
+        (&Method::POST, ["sessions", _, "messages"]) => "message/send".to_string(),
+        (&Method::GET, ["sessions", _, "events"]) => "session/events".to_string(),
+        _ => path.to_string(),
+    }
+}
 
 /// Trait implemented by the ACP server to back the HTTP/SSE transport.
 #[async_trait]
@@ -87,6 +124,73 @@ pub trait HttpHandler: Send + Sync + 'static {
     /// returns only the AUTHORIZED agents (R3), each id/label-only (R4).
     async fn list_agents(&self) -> Result<AgentsListResponse, AcpError> {
         Ok(AgentsListResponse { agents: Vec::new() })
+    }
+
+    /// Decide `method` for the principal the transport just verified.
+    ///
+    /// The default performs no role gating, which is the behaviour of every
+    /// handler that existed before roles did. `AcpServer` overrides it to
+    /// consult an installed [`crate::roles::RolePolicy`]. A handler returning
+    /// `Ok` here has not necessarily CHECKED anything — the transport does not
+    /// and cannot know which, so nothing downstream may report a successful
+    /// request as an authorization that passed.
+    async fn authorize_method(
+        &self,
+        _principal: &Principal,
+        _method: &str,
+    ) -> Result<(), AcpError> {
+        Ok(())
+    }
+
+    /// `session/create` under an optional idempotency identity.
+    ///
+    /// The default REFUSES a request that carries a key rather than ignoring
+    /// it. Ignoring it is the dangerous option: the client believes its retry
+    /// is protected, retries, and gets a second session. A handler that cannot
+    /// honour the guarantee says so.
+    async fn create_session_idempotent(
+        &self,
+        key: Option<&str>,
+        req: SessionCreateRequest,
+    ) -> Result<SessionCreateResponse, AcpError> {
+        match key {
+            None => self.create_session(req).await,
+            Some(_) => Err(AcpError::Protocol(
+                "this handler does not implement command idempotency; honouring the \
+                 Idempotency-Key header would be a promise it cannot keep"
+                    .to_string(),
+            )),
+        }
+    }
+
+    /// `session/delete` under an optional idempotency identity. Same default
+    /// refusal, and for the same reason, as [`Self::create_session_idempotent`].
+    async fn delete_session_idempotent(
+        &self,
+        key: Option<&str>,
+        session_id: String,
+    ) -> Result<(), AcpError> {
+        match key {
+            None => self.delete_session(session_id).await,
+            Some(_) => Err(AcpError::Protocol(
+                "this handler does not implement command idempotency; honouring the \
+                 Idempotency-Key header would be a promise it cannot keep"
+                    .to_string(),
+            )),
+        }
+    }
+
+    /// Serve a resume — everything after `cursor` on the session's stream.
+    ///
+    /// The default is [`ResumeError::Unsupported`], NOT an empty list. A
+    /// handler with no event log answering "you missed nothing" is a surface
+    /// that was not looking reporting a zero.
+    async fn resume_events(
+        &self,
+        _session_id: String,
+        _cursor: Cursor,
+    ) -> Result<ResumeResponse, ResumeError> {
+        Err(ResumeError::Unsupported)
     }
 
     /// persona-profiles Phase A — the capability handshake (`initialize`, R2).
@@ -154,6 +258,10 @@ impl<H: HttpHandler> HttpSseTransport<H> {
                 get(get_session::<H>).delete(delete_session::<H>),
             )
             .route("/sessions/:id/messages", post(send_message::<H>))
+            // F24-04: the resume route. This is the transport half of the
+            // cursor contract — without it the event log is a structure no
+            // client can reach.
+            .route("/sessions/:id/events", get(resume_events::<H>))
             // persona-profiles Phase A: capability handshake + agent roster.
             // Both default-safe (empty roster / advertised capability only).
             .route("/initialize", get(initialize::<H>))
@@ -162,9 +270,11 @@ impl<H: HttpHandler> HttpSseTransport<H> {
 
         // F-017: wrap with auth middleware when a verifier is present.
         if let Some(v) = self.verifier.clone() {
+            let handler = self.handler.clone();
             base.layer(middleware::from_fn(move |req: Request, next: Next| {
                 let v = Arc::clone(&v);
-                async move { auth_middleware(v, req, next).await }
+                let h = Arc::clone(&handler);
+                async move { auth_middleware(v, h, req, next).await }
             }))
         } else {
             base
@@ -172,9 +282,28 @@ impl<H: HttpHandler> HttpSseTransport<H> {
     }
 }
 
-/// Axum middleware: extract headers, run the verifier, 401 on failure.
-/// (F-017)
-async fn auth_middleware(verifier: Arc<dyn Verifier>, req: Request, next: Next) -> Response {
+/// Axum middleware: extract headers, run the verifier, then put the verified
+/// principal through the handler's role decision. 401 on a failed
+/// verification, 403 on a refused role.
+///
+/// # The two refusals stay apart all the way to the wire
+///
+/// A 401 invites the client to re-authenticate. For a role refusal that is a
+/// retry loop that can never succeed, and it sends an operator to rotate a
+/// credential that was never the problem. The role decision therefore produces
+/// [`AcpError::Forbidden`], which [`status_for`] maps to 403 and [`code_for`]
+/// maps to [`ErrorCode::Forbidden`] — asserted over a real socket in
+/// `tests/roles_and_idempotency.rs`, not just at this function's boundary.
+///
+/// Authorization runs ONLY where a verifier is installed, because without one
+/// there is no verified principal to decide about, and deciding from an
+/// unverified identity is worse than not deciding. (F-017)
+async fn auth_middleware(
+    verifier: Arc<dyn Verifier>,
+    handler: Arc<dyn AuthorizesMethods>,
+    req: Request,
+    next: Next,
+) -> Response {
     let headers: Vec<(String, String)> = req
         .headers()
         .iter()
@@ -184,16 +313,45 @@ async fn auth_middleware(verifier: Arc<dyn Verifier>, req: Request, next: Next) 
         })
         .collect();
 
-    match verifier.verify(&headers) {
-        Ok(_) => next.run(req).await,
+    let principal = match verifier.verify(&headers) {
+        Ok(p) => p,
         Err(e) => {
             let body = JsonRpcError {
                 code: ErrorCode::AuthRequired.code(),
                 message: e.to_string(),
                 data: None,
             };
-            (StatusCode::UNAUTHORIZED, Json(body)).into_response()
+            return (StatusCode::UNAUTHORIZED, Json(body)).into_response();
         }
+    };
+
+    let method = acp_method_for(req.uri().path(), req.method());
+    if let Err(e) = handler.authorize_method_dyn(&principal, &method).await {
+        return AcpHttpError(e).into_response();
+    }
+    next.run(req).await
+}
+
+/// Object-safe view of [`HttpHandler::authorize_method`], so the middleware can
+/// hold the handler behind a trait object without making `HttpHandler` itself
+/// object-safe (it is not — `send_message` returns an `impl`-shaped stream).
+#[async_trait]
+pub(crate) trait AuthorizesMethods: Send + Sync + 'static {
+    async fn authorize_method_dyn(
+        &self,
+        principal: &Principal,
+        method: &str,
+    ) -> Result<(), AcpError>;
+}
+
+#[async_trait]
+impl<H: HttpHandler> AuthorizesMethods for H {
+    async fn authorize_method_dyn(
+        &self,
+        principal: &Principal,
+        method: &str,
+    ) -> Result<(), AcpError> {
+        self.authorize_method(principal, method).await
     }
 }
 
@@ -251,11 +409,30 @@ impl From<AcpError> for AcpHttpError {
 
 // ── Handlers ─────────────────────────────────────────────────────────────
 
+/// Read the idempotency identity off a request, if the client sent one.
+///
+/// An empty header value is passed through as `Some("")` rather than being
+/// normalised to `None`: the ledger names it `InvalidIdentity` and the client
+/// is told. Silently treating it as absent would answer a client that BELIEVES
+/// it sent a key with unprotected behaviour.
+fn idempotency_key(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get(IDEMPOTENCY_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
+
 async fn create_session<H: HttpHandler>(
     State(handler): State<Arc<H>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<SessionCreateRequest>,
 ) -> Result<Json<SessionCreateResponse>, AcpHttpError> {
-    Ok(Json(handler.create_session(req).await?))
+    let key = idempotency_key(&headers);
+    Ok(Json(
+        handler
+            .create_session_idempotent(key.as_deref(), req)
+            .await?,
+    ))
 }
 
 async fn list_sessions<H: HttpHandler>(
@@ -274,9 +451,66 @@ async fn get_session<H: HttpHandler>(
 async fn delete_session<H: HttpHandler>(
     State(handler): State<Arc<H>>,
     Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<StatusCode, AcpHttpError> {
-    handler.delete_session(id).await?;
+    let key = idempotency_key(&headers);
+    handler
+        .delete_session_idempotent(key.as_deref(), id)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Query parameters of a resume request.
+///
+/// Both are REQUIRED. A resume that omits the stream id is a bare position,
+/// and a bare position is the thing `cursor.rs` exists to refuse — accepting
+/// one here would reintroduce the silent wrong-stream resume at the transport
+/// after the core had closed it.
+#[derive(serde::Deserialize)]
+struct ResumeQuery {
+    stream_id: String,
+    position: u64,
+}
+
+/// `GET /sessions/:id/events?stream_id=…&position=…` — serve a resume.
+///
+/// Each refusal gets its OWN status, because a client's correct next action
+/// differs for each: re-subscribe from scratch (409, wrong stream), resynchronise
+/// from `oldest_available` (410, evicted), or fix its own bookkeeping (400,
+/// a position this stream never emitted).
+async fn resume_events<H: HttpHandler>(
+    State(handler): State<Arc<H>>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ResumeQuery>,
+) -> Response {
+    let cursor = Cursor {
+        stream_id: q.stream_id,
+        position: q.position,
+    };
+    match handler.resume_events(id, cursor).await {
+        Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
+        Err(e) => {
+            let status = match &e {
+                ResumeError::NoSuchSession { .. } => StatusCode::NOT_FOUND,
+                ResumeError::Unsupported => StatusCode::NOT_IMPLEMENTED,
+                ResumeError::Cursor(CursorError::StreamMismatch { .. }) => StatusCode::CONFLICT,
+                ResumeError::Cursor(CursorError::TooOld { .. }) => StatusCode::GONE,
+                ResumeError::Cursor(CursorError::Ahead { .. }) => StatusCode::BAD_REQUEST,
+            };
+            // The structured refusal travels in `data`, so a client can act on
+            // the named case rather than parsing a sentence.
+            let data = match &e {
+                ResumeError::Cursor(c) => serde_json::to_value(c).ok(),
+                _ => None,
+            };
+            let body = JsonRpcError {
+                code: ErrorCode::InvalidRequest.code(),
+                message: e.to_string(),
+                data,
+            };
+            (status, Json(body)).into_response()
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -322,10 +556,54 @@ async fn send_message<H: HttpHandler>(
 /// `GET /initialize` — persona-profiles capability handshake (R2). Advertises
 /// the server's [`crate::protocol::ServerCapabilities`] so clients can gate
 /// version-sensitive features (e.g. the `agent` selector) before using them.
+/// A client that advertises a version gets it NEGOTIATED; one that does not is
+/// served exactly as before.
+///
+/// The negotiated answer travels in response HEADERS rather than in
+/// [`InitializeResponse`], deliberately: the body is a published wire shape and
+/// widening it to carry a negotiation outcome would move a contract for a
+/// property that is per-connection, not per-server. A client below the floor is
+/// REFUSED here — a silent downgrade would let it connect and fail later,
+/// somewhere with no visible connection to a version.
 async fn initialize<H: HttpHandler>(
     State(handler): State<Arc<H>>,
-) -> Result<Json<InitializeResponse>, AcpHttpError> {
-    Ok(Json(handler.initialize().await?))
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let requested = headers
+        .get(PROTOCOL_VERSION_HEADER)
+        .and_then(|v| v.to_str().ok());
+
+    let negotiated = match requested {
+        None => None,
+        Some(v) => match crate::negotiate::negotiate(v) {
+            Ok(n) => Some(n),
+            Err(e) => {
+                let body = JsonRpcError {
+                    code: ErrorCode::InvalidRequest.code(),
+                    message: e.to_string(),
+                    data: None,
+                };
+                return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+            }
+        },
+    };
+
+    let resp = match handler.initialize().await {
+        Ok(r) => r,
+        Err(e) => return AcpHttpError(e).into_response(),
+    };
+
+    let mut out = Json(resp).into_response();
+    if let Some(n) = negotiated {
+        let h = out.headers_mut();
+        if let Ok(v) = n.agreed.to_string().parse() {
+            h.insert(NEGOTIATED_VERSION_HEADER, v);
+        }
+        if let Ok(v) = n.client_is_newer.to_string().parse() {
+            h.insert(CLIENT_IS_NEWER_HEADER, v);
+        }
+    }
+    out
 }
 
 /// `GET /agents` — persona-profiles agent roster (`agents/list`). Returns the

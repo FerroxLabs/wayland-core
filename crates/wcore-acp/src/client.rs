@@ -17,11 +17,36 @@ use futures::StreamExt;
 use futures::stream::Stream;
 use wcore_egress::EgressClient as HttpClient;
 
+use crate::cursor::{Cursor, CursorError, ResumeResponse};
 use crate::error::AcpError;
 use crate::protocol::{
-    MessageEvent, MessageSendRequest, SessionCreateRequest, SessionCreateResponse,
-    SessionGetResponse, SessionListResponse,
+    ErrorCode, JsonRpcError, MessageEvent, MessageSendRequest, SessionCreateRequest,
+    SessionCreateResponse, SessionGetResponse, SessionListResponse,
 };
+
+/// A resume the server declined to serve.
+///
+/// Carries the structured [`CursorError`] when the server named one, because
+/// the client's correct next action differs per case and a sentence is not
+/// something a program can branch on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeRefused {
+    pub status: u16,
+    pub message: String,
+    pub cursor: Option<CursorError>,
+}
+
+/// The answer to a resume request.
+///
+/// A refusal is an ANSWER, not a communication failure — hence `Ok(Refused)`
+/// rather than `Err`. Collapsing the two would make "the server told me my
+/// cursor is from a dead stream" indistinguishable from "I could not reach the
+/// server", and only one of those is worth retrying.
+#[derive(Debug, Clone)]
+pub enum ResumeOutcome {
+    Served(ResumeResponse),
+    Refused(ResumeRefused),
+}
 
 /// Default request timeout. Streaming endpoints (message/send) override
 /// this with their own infinite-ish timeout since events arrive over
@@ -104,10 +129,60 @@ impl AcpClient {
             .send()
             .await
             .map_err(|e| AcpError::Transport(format!("create_session: {e}")))?;
-        check_status(&resp).await?;
+        let resp = check(resp).await?;
         resp.json::<SessionCreateResponse>()
             .await
             .map_err(|e| AcpError::Transport(format!("create_session decode: {e}")))
+    }
+
+    /// `POST /sessions` under an idempotency identity.
+    ///
+    /// Retrying with the SAME key returns the SAME session rather than
+    /// creating a second one. Separate from [`Self::create_session`] on
+    /// purpose: sending the header is a promise the server must be able to
+    /// keep, and a server that cannot refuses rather than silently creating
+    /// two sessions for a caller that believed it was protected.
+    pub async fn create_session_idempotent(
+        &self,
+        idempotency_key: &str,
+        req: SessionCreateRequest,
+    ) -> Result<SessionCreateResponse, AcpError> {
+        let url = format!("{}/sessions", self.base_url);
+        let resp = self
+            .maybe_auth(
+                self.http
+                    .post(url)
+                    .header(crate::transport::http::IDEMPOTENCY_HEADER, idempotency_key)
+                    .json(&req),
+            )
+            .send()
+            .await
+            .map_err(|e| AcpError::Transport(format!("create_session: {e}")))?;
+        let resp = check(resp).await?;
+        resp.json::<SessionCreateResponse>()
+            .await
+            .map_err(|e| AcpError::Transport(format!("create_session decode: {e}")))
+    }
+
+    /// `DELETE /sessions/:id` under an idempotency identity. A repeat is a
+    /// success, not the spurious not-found a bare retry would produce.
+    pub async fn delete_session_idempotent(
+        &self,
+        idempotency_key: &str,
+        session_id: &str,
+    ) -> Result<(), AcpError> {
+        let url = format!("{}/sessions/{session_id}", self.base_url);
+        let resp = self
+            .maybe_auth(
+                self.http
+                    .delete(url)
+                    .header(crate::transport::http::IDEMPOTENCY_HEADER, idempotency_key),
+            )
+            .send()
+            .await
+            .map_err(|e| AcpError::Transport(format!("delete_session: {e}")))?;
+        check(resp).await?;
+        Ok(())
     }
 
     /// `GET /sessions` — list all sessions.
@@ -118,7 +193,7 @@ impl AcpClient {
             .send()
             .await
             .map_err(|e| AcpError::Transport(format!("list_sessions: {e}")))?;
-        check_status(&resp).await?;
+        let resp = check(resp).await?;
         resp.json::<SessionListResponse>()
             .await
             .map_err(|e| AcpError::Transport(format!("list_sessions decode: {e}")))
@@ -132,7 +207,7 @@ impl AcpClient {
             .send()
             .await
             .map_err(|e| AcpError::Transport(format!("get_session: {e}")))?;
-        check_status(&resp).await?;
+        let resp = check(resp).await?;
         resp.json::<SessionGetResponse>()
             .await
             .map_err(|e| AcpError::Transport(format!("get_session decode: {e}")))
@@ -146,8 +221,52 @@ impl AcpClient {
             .send()
             .await
             .map_err(|e| AcpError::Transport(format!("delete_session: {e}")))?;
-        check_status(&resp).await?;
+        check(resp).await?;
         Ok(())
+    }
+
+    /// `GET /sessions/:id/events` — ask what this cursor has not seen.
+    ///
+    /// This is the client half of the recovery contract. Without it the cursor
+    /// module is a structure with no caller and a disconnected client has no
+    /// way to find out what it missed — which is the difference between a
+    /// contract that COULD let clients recover gaps and one where a client
+    /// actually does.
+    pub async fn resume_events(
+        &self,
+        session_id: &str,
+        cursor: &Cursor,
+    ) -> Result<ResumeOutcome, AcpError> {
+        let url = format!("{}/sessions/{session_id}/events", self.base_url);
+        let resp = self
+            .maybe_auth(self.http.get(url).query(&[
+                ("stream_id", cursor.stream_id.as_str()),
+                ("position", &cursor.position.to_string()),
+            ]))
+            .send()
+            .await
+            .map_err(|e| AcpError::Transport(format!("resume_events: {e}")))?;
+        let status = resp.status().as_u16();
+        if resp.status().is_success() {
+            return resp
+                .json::<ResumeResponse>()
+                .await
+                .map(ResumeOutcome::Served)
+                .map_err(|e| AcpError::Transport(format!("resume_events decode: {e}")));
+        }
+        let body = resp
+            .json::<JsonRpcError>()
+            .await
+            .map_err(|e| AcpError::Transport(format!("resume_events error decode: {e}")))?;
+        let cursor = body
+            .data
+            .clone()
+            .and_then(|d| serde_json::from_value::<CursorError>(d).ok());
+        Ok(ResumeOutcome::Refused(ResumeRefused {
+            status,
+            message: body.message,
+            cursor,
+        }))
     }
 
     /// `POST /sessions/:id/messages` — send a message; returns an SSE
@@ -165,7 +284,7 @@ impl AcpClient {
             .send()
             .await
             .map_err(|e| AcpError::Transport(format!("send_message: {e}")))?;
-        check_status(&resp).await?;
+        let resp = check(resp).await?;
 
         // Parse the SSE byte stream into `MessageEvent` frames. Each
         // SSE event has the form `event: <name>\ndata: <json>\n\n`;
@@ -176,16 +295,45 @@ impl AcpClient {
     }
 }
 
-async fn check_status(resp: &reqwest::Response) -> Result<(), AcpError> {
+/// Turn a non-success response into the typed error the SERVER named.
+///
+/// # Why this reads the body's error CODE rather than the HTTP status
+///
+/// The status is a coarse projection the transport chose; the code is the
+/// server's own classification. Deriving meaning from the status alone throws
+/// that away, and F24-04 measured two places where it mattered: a role refusal
+/// arrived as a generic transport failure, so a typed client's only available
+/// reaction was to retry a refusal that can never succeed; and an idempotency
+/// CONFLICT — "this key is bound to a different command" — arrived as an
+/// anonymous `HTTP 400`, indistinguishable from a malformed body. Both are
+/// structured on the server and both were being flattened here.
+///
+/// A body that is not a `JsonRpcError` at all falls back to the status, which
+/// is then genuinely all the information there is.
+async fn check(resp: reqwest::Response) -> Result<reqwest::Response, AcpError> {
+    if resp.status().is_success() {
+        return Ok(resp);
+    }
     let status = resp.status();
-    if status.is_success() {
-        Ok(())
-    } else if status == reqwest::StatusCode::UNAUTHORIZED {
-        Err(AcpError::Auth(format!("HTTP {status}")))
-    } else if status == reqwest::StatusCode::NOT_FOUND {
-        Err(AcpError::Session(format!("HTTP {status}")))
-    } else {
-        Err(AcpError::Transport(format!("HTTP {status} from server")))
+    let fallback = || match status {
+        reqwest::StatusCode::UNAUTHORIZED => AcpError::Auth(format!("HTTP {status}")),
+        reqwest::StatusCode::FORBIDDEN => AcpError::Forbidden(format!("HTTP {status}")),
+        reqwest::StatusCode::NOT_FOUND => AcpError::Session(format!("HTTP {status}")),
+        _ => AcpError::Transport(format!("HTTP {status} from server")),
+    };
+    match resp.json::<JsonRpcError>().await {
+        Ok(body) => {
+            let msg = body.message;
+            Err(match body.code {
+                c if c == ErrorCode::AuthRequired.code() => AcpError::Auth(msg),
+                c if c == ErrorCode::Forbidden.code() => AcpError::Forbidden(msg),
+                c if c == ErrorCode::SessionNotFound.code() => AcpError::Session(msg),
+                c if c == ErrorCode::AgentNotFound.code() => AcpError::Agent(msg),
+                c if c == ErrorCode::InvalidRequest.code() => AcpError::Protocol(msg),
+                _ => AcpError::Transport(format!("HTTP {status}: {msg}")),
+            })
+        }
+        Err(_) => Err(fallback()),
     }
 }
 
