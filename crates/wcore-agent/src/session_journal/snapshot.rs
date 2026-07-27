@@ -52,6 +52,12 @@ fn run_after_authority_read_hook(_path: &Path) {}
 pub struct SessionSnapshot {
     pub schema_version: u32, pub session_id: String, pub cursor: Option<u64>,
     pub cursor_checksum: String, pub state_digest: String, pub state: ReducedSessionState,
+    /// 23B-H1 recovery: this snapshot's stored digest was proved against the
+    /// pre-fix `effect_receipt` encoding, so `validate` must re-hash under that
+    /// same encoding. Never serialized, never read from disk, and set in
+    /// exactly one place — `recover_legacy_effect_receipts`, and only after an
+    /// exact SHA-256 match.
+    #[serde(skip)] pub(crate) legacy_effect_receipt: bool,
 }
 
 impl SessionSnapshot {
@@ -81,6 +87,7 @@ impl SessionSnapshot {
             cursor_checksum: state.last_checksum.clone(),
             state_digest,
             state,
+            legacy_effect_receipt: false,
         })
     }
 
@@ -95,11 +102,72 @@ impl SessionSnapshot {
         if self.cursor != self.state.last_seq || self.cursor_checksum != self.state.last_checksum {
             return Err(JournalError::SnapshotCursorMismatch);
         }
-        if self.state.digest()? != self.state_digest {
+        if self.state_digest_under_stored_encoding()? != self.state_digest {
             return Err(JournalError::SnapshotDigestMismatch);
         }
         Ok(())
     }
+
+    fn state_digest_under_stored_encoding(&self) -> Result<String, JournalError> {
+        let _encoding =
+            super::model::LegacyEffectReceiptEncoding::scoped(self.legacy_effect_receipt);
+        self.state.digest()
+    }
+}
+
+/// 23B-H1 read-side recovery for snapshots — the `ToolState` half of the
+/// defect, and the same trade as `session_journal::recover_legacy_effect_receipt`.
+///
+/// The pre-fix writer serialized a tool's `Some(Value::Null)` receipt as an
+/// explicit `"effect_receipt":null`, hashed the state over those bytes, and
+/// stored the result. Decoding maps that null back to `None`, which the fixed
+/// predicate omits, so the recomputed digest covers different bytes and
+/// `SnapshotDigestMismatch` rejects a snapshot the writer wrote correctly.
+///
+/// The raw snapshot object is consulted only to decide WHICH tools to restore,
+/// which is what keeps this to a single candidate instead of one per subset of
+/// tools. The candidate is then accepted only if it re-hashes to the stored
+/// digest EXACTLY, so a genuinely corrupt snapshot still fails.
+fn recover_legacy_effect_receipts(
+    snapshot: &mut SessionSnapshot,
+    raw: &serde_json::Value,
+) -> Result<(), JournalError> {
+    if snapshot.state.digest()? == snapshot.state_digest {
+        return Ok(());
+    }
+    let Some(tools) = raw
+        .pointer("/state/tools")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(());
+    };
+    let mut restored = Vec::new();
+    for (id, raw_tool) in tools {
+        if raw_tool.get("effect_receipt") != Some(&serde_json::Value::Null) {
+            continue;
+        }
+        if let Some(tool) = snapshot.state.tools.get_mut(id)
+            && tool.effect_receipt.is_none()
+        {
+            tool.effect_receipt = Some(serde_json::Value::Null);
+            restored.push(id.clone());
+        }
+    }
+    if restored.is_empty() {
+        return Ok(());
+    }
+    snapshot.legacy_effect_receipt = true;
+    if snapshot.state_digest_under_stored_encoding()? != snapshot.state_digest {
+        // Not the 23B-H1 artifact. Leave the snapshot exactly as decoded so the
+        // unchanged digest check reports the real failure.
+        for id in restored {
+            if let Some(tool) = snapshot.state.tools.get_mut(&id) {
+                tool.effect_receipt = None;
+            }
+        }
+        snapshot.legacy_effect_receipt = false;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -319,17 +387,19 @@ pub fn load_snapshot(path: impl AsRef<Path>) -> Result<SessionSnapshot, JournalE
     if found_schema == LEGACY_SESSION_SNAPSHOT_SCHEMA_VERSION {
         reject_unknown_legacy_fields(&value)?;
     }
-    let snapshot = serde_json::from_value::<SessionSnapshot>(value.clone()).map_err(|source| {
-        JournalError::Json {
-            context: "decoding session snapshot",
-            source,
-        }
-    })?;
+    let mut snapshot =
+        serde_json::from_value::<SessionSnapshot>(value.clone()).map_err(|source| {
+            JournalError::Json {
+                context: "decoding session snapshot",
+                source,
+            }
+        })?;
     let canonical = serde_json::to_value(&snapshot).map_err(|source| JournalError::Json {
         context: "encoding canonical session snapshot",
         source,
     })?;
     super::reject_dropped_typed_fields(&value, &canonical, "session snapshot")?;
+    recover_legacy_effect_receipts(&mut snapshot, &value)?;
     snapshot.validate()?;
     Ok(snapshot)
 }

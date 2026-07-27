@@ -26,3 +26,23 @@ A_EXIT=1 (non-zero required)
 B_EXIT=1 (non-zero required)
 ### falsification C: wrong --sha must FAIL
 C_EXIT=3 (non-zero required)
+wrote /root/23Bb-a/s-d128db9462310469.journal session=s-d128db9462310469 nonce=d128db9462310469
+--- PRE-FIX read of the same fixture
+wayland-core session: journal '/root/23Bb-a/s-d128db9462310469.journal' could not be read: journal checksum mismatch at sequence 1
+prefix_exit=1
+--- FIXED reconcile
+F23_SESSION=reconcile id=s-d128db9462310469 outstanding=0
+exit=0
+--- FIXED cancel (must APPEND to the recovered journal)
+F23_SESSION=cancel_turn id=s-d128db9462310469 turn=t1
+F23_SESSION=cancel id=s-d128db9462310469 cancelled=1
+exit=0
+--- journal size after append
+total 36
+drwxr-xr-x   2 root root  4096 Jul 27 03:08 .
+drwx------ 172 root root 24576 Jul 27 03:08 ..
+-rw-------   1 root root  2088 Jul 27 03:08 s-d128db9462310469.journal
+-rw-------   1 root root     0 Jul 27 03:08 s-d128db9462310469.journal.writer.lock
+--- FIXED reconcile again (re-read after append)
+F23_SESSION=reconcile id=s-d128db9462310469 outstanding=0
+exit=0
