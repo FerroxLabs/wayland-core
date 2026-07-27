@@ -291,6 +291,141 @@ measurement rather than by review: *the gate was already green at base*.
 
 ---
 
+## 6.2 LIVE — the shipped binary, Linux
+
+`hetzner-dsm`, `/root/wayland-24/target/release/wayland-core` (`wayland-core 0.12.25`),
+`WAYLAND_HOME=/root/f24-02-live`. Verbatim.
+
+### Every trigger type added through the shipped binary
+
+```
+$ wayland-core cron add --trigger once:2027-01-01T09:00:00Z --slash /brief
+next[0]: 2027-01-01T09:00:00+00:00
+added 2e1a5155-212f-41e8-9967-44f49e75d268
+$ wayland-core cron add --trigger every:900 --slash /brief
+next[0]: 2026-07-27T01:49:54.730470955+00:00
+next[1]: 2026-07-27T02:04:54.730470955+00:00
+next[2]: 2026-07-27T02:19:54.730470955+00:00
+added b257cbdd-93ca-42ee-9d9b-7fa94a48088b
+$ wayland-core cron add --trigger "cron:0 9 * * *" --slash /brief
+next[0]: 2026-07-27T09:00:00+00:00 … added 16313186-8dd4-4d3d-862b-59761f226bcd
+$ wayland-core cron add --trigger event:build.finished --slash /brief
+next:    driven externally (event) — not predictable from the clock
+added d0ef23b4-ebd9-4dec-b3f4-c7c8125c0aa9
+$ wayland-core cron add --trigger webhook:/hooks/build --slash /brief
+next:    driven externally (webhook) — not predictable from the clock
+added c7905336-b743-4c93-9af7-0f20cc7b2d65
+$ wayland-core cron add --trigger poll:https://status.test/health:300 --slash /brief
+next[0]: 2026-07-27T01:39:54.925575998+00:00 … added f5e4bf24-72ef-4e45-9e1d-18fbf4c0a0ce
+$ wayland-core cron add --trigger commit:2027-01-01T17:00:00Z:900 --slash /brief
+next[0]: 2026-07-27T01:49:54.973596615+00:00 … added 8b2190de-2586-4b31-9452-3d08184bb7db
+```
+
+```
+$ wayland-core cron list
+on  2e1a5155-…  [once      ] @once 2027-01-01T09:00:00+00:00   slash /brief  last_fired=never
+on  b257cbdd-…  [interval  ] @every 900s                       slash /brief  last_fired=never
+on  16313186-…  [cron      ] 0 9 * * *                         slash /brief  last_fired=never
+on  d0ef23b4-…  [event     ] @event build.finished             slash /brief  last_fired=never
+on  c7905336-…  [webhook   ] @webhook /hooks/build (auth)      slash /brief  last_fired=never
+on  f5e4bf24-…  [poll      ] @poll https://status.test/health every 300s  slash /brief  last_fired=never
+on  8b2190de-…  [commitment] @commit by 2027-01-01T17:00:00+00:00 heartbeat 900s  slash /brief  last_fired=never
+```
+
+Seven types, one verb, every one listable. The two externally driven types
+print that they are not predictable rather than printing nothing.
+
+### Natural-language authoring writes nothing unreviewed
+
+```
+$ wayland-core cron add --describe "every weekday at 9am" --slash /standup
+phrase:  "every weekday at 9am"
+becomes: 0 9 * * 1-5
+next[0]: 2026-07-27T09:00:00+00:00
+next[1]: 2026-07-28T09:00:00+00:00
+next[2]: 2026-07-29T09:00:00+00:00
+
+nothing written. re-run with --confirm to persist this schedule.
+jobs before=7 after=7  (must be equal)
+
+$ wayland-core cron add --describe "whenever the vibes are right" --confirm --slash /x
+wayland-core cron: could not interpret "whenever the vibes are right" as a schedule; nothing was written
+EXIT=1
+jobs now=7
+
+$ wayland-core cron add --describe "every weekday at 9am" --confirm --slash /standup
+… added c8c701ae-3857-4ee5-aa86-386570b9c69f
+jobs now=8
+```
+
+The phrase is quoted back **verbatim** on refusal, and `--confirm` does not
+rescue an uninterpretable phrase.
+
+### Single ownership, two real processes, one schedule
+
+```
+$ setsid wayland-core cron daemon &   # daemon 1
+[cron-daemon] role=owner — this process fires the schedule
+$ cat $WAYLAND_HOME/cron/schedule.owner
+{ "pid": 3476747, "acquired_at": "2026-07-27T01:40:09.587086662+00:00", "holder": "cron-daemon" }
+
+$ setsid wayland-core cron daemon &   # daemon 2, same schedule
+[cron-daemon] role=observer — pid 3476747 already owns this schedule; firing nothing
+$ cat $WAYLAND_HOME/cron/schedule.owner    # unchanged — still daemon 1
+{ "pid": 3476747, … }
+
+$ kill -9 3476747                     # the owner dies with no chance to clean up
+$ setsid wayland-core cron daemon &   # daemon 3
+[cron-daemon] role=owner — this process fires the schedule
+$ cat $WAYLAND_HOME/cron/schedule.owner
+{ "pid": 3483613, "acquired_at": "2026-07-27T01:40:18.600837548+00:00", "holder": "cron-daemon" }
+
+# after every daemon is stopped:
+$ cat $WAYLAND_HOME/cron/schedule.owner
+(removed — no owner)
+```
+
+**Nine seconds** between the `SIGKILL` and the successor's claim, with no
+timeout anywhere: the OS released the lock when the killed process's
+descriptor closed, and that release is the whole reclamation mechanism.
+
+### The fire count under two daemons
+
+```
+$ wayland-core cron add --trigger every:60 --slash /brief   # job 99354343-…
+$ setsid wayland-core cron daemon &   # role=owner
+$ setsid wayland-core cron daemon &   # role=observer
+# … 150 seconds …
+$ wayland-core cron history 99354343-9ac5-4a3e-89f9-4552b9aaedbc -n 20
+2026-07-27T01:42:42Z  staged (no live dispatcher)
+2026-07-27T01:41:42Z  staged (no live dispatcher)
+$ wc -l < $WAYLAND_HOME/cron/history.jsonl
+2
+```
+
+Two fires in 150 seconds on a 60-second trigger, with two daemons attached.
+
+**What this does and does not prove, stated honestly.** The count is
+*consistent* with single ownership but is not by itself discriminating: the
+store's advance-on-fire bookkeeping would also produce two in the happy case,
+which is exactly why that bookkeeping looked adequate before. The
+discriminating evidence is elsewhere and is named rather than implied — the
+`role=` lines emitted by the shipped binary, and the mutation measurements in
+[§6.1](#61-gates-proved-capable-of-going-red) where deleting the ownership
+check reddens the unit gates. This transcript confirms the wiring reaches the
+product; it is not offered as the proof of exclusion.
+
+### Live finding, LOW
+
+When two daemons start within the same instant, the loser can read the owner
+record before the winner has written it and reports
+`role=observer — pid unknown already owns this schedule`. The exclusion is
+correct — the loser observes — but the diagnostic is less useful than it
+should be. Filed as **F24-02-L2**. Cosmetic; the ownership decision never
+depends on the record.
+
+---
+
 ## 7. Deviations, recorded
 
 | # | Deviation | Reason |

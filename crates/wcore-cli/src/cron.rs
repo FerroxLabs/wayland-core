@@ -510,8 +510,11 @@ pub fn parse_phrase(phrase: &str) -> Option<wcore_cron::Trigger> {
     let words: Vec<&str> = p.split_whitespace().collect();
 
     // "every N minutes|hours|days"
-    if words.len() >= 3 && words[0] == "every" {
-        if let Ok(n) = words[1].parse::<u64>() {
+    if words.len() >= 3
+        && words[0] == "every"
+        && let Ok(n) = words[1].parse::<u64>()
+    {
+        {
             let secs = match words[2].trim_end_matches('s') {
                 "second" => Some(1),
                 "minute" => Some(60),
