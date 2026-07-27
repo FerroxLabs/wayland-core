@@ -5,17 +5,20 @@
 //!
 //! ## Why this is an example and not the `wayland-core` subcommand
 //!
-//! Stated plainly rather than glossed: the shipped binary has NO Goal surface
-//! yet. Adding one is plan 22-04 (`crates/wcore-cli/src/goal_cmd.rs`), which
-//! this lane is explicitly not executing, and 22-04 is itself blocked on the
-//! kernel this file exercises. So the strongest honest live proof available at
-//! this commit is a real process running the real kernel against a real
-//! on-disk journal, killed with a real SIGKILL — not a mocked crash, not a
-//! cooperative shutdown, and not a test harness that never leaves the process.
+//! **This caveat is now OUT OF DATE, and is corrected here rather than left to
+//! mislead the next reader.** It used to say the shipped binary had no Goal
+//! surface, so an example was the strongest honest live proof available. That
+//! was true when it was written and is no longer: `wayland-core goal`
+//! (`crates/wcore-cli/src/goal_cmd.rs`) ships `open`, `task`, `run`, `status`,
+//! `exec-task` and `effects`, and the kill/restart proof for the task ledger now
+//! runs against the release binary — see
+//! `22-03-EVIDENCE/wire-live/linux/live-capture.txt`.
 //!
-//! What this does NOT prove is the shipped `wayland-core` binary resuming a
-//! Goal, because no user-reachable path can create one yet. That gap is real
-//! and is recorded as such.
+//! This instrument is retained because it exercises the KERNEL's own
+//! open/iterate/wait/resume path directly, which the CLI's `run` verb drives
+//! only incidentally. It is a focused instrument, not a substitute for the
+//! product, and it should not be cited as the strongest available evidence for
+//! anything the shipped surface can now demonstrate itself.
 //!
 //! Modes:
 //!   open   <journal> <goal-id> <parent-digest>  authorize a Goal, run one
