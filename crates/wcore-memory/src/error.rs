@@ -79,6 +79,23 @@ pub enum MemoryError {
     /// SwarmMemoryBridge).
     #[error("descendant read denied: {0}")]
     DescendantReadDenied(String),
+
+    /// F23-03 — an operator control named an item that does not exist in the
+    /// addressed grid cell. Distinct from a successful no-op: correcting or
+    /// forgetting something that was never there must not report success,
+    /// because a user who mistypes an id would otherwise believe the content
+    /// is gone when it is not.
+    #[error("memory item not found: partition={partition} tier={tier} id={id}")]
+    NotFound {
+        partition: String,
+        tier: String,
+        id: String,
+    },
+
+    /// F23-03 — an operator control was given an argument it cannot honour
+    /// (for example a negative retention bound).
+    #[error("invalid memory control: {0}")]
+    InvalidControl(String),
 }
 
 pub type Result<T> = std::result::Result<T, MemoryError>;

@@ -290,6 +290,46 @@ impl MemoryApi for PartitionDispatcher {
         result
     }
 
+    fn controls(&self) -> Option<crate::provenance::MemoryControls> {
+        // The dispatcher already owns exactly what a control needs: the same
+        // gate every read and write goes through, the same store, and the same
+        // changelog. Handing those three over means an operator control cannot
+        // reach a cell the ordinary paths cannot reach.
+        Some(crate::provenance::MemoryControls::new(
+            self.db.clone(),
+            self.gate.clone(),
+            (*self.cdc).clone(),
+        ))
+    }
+
+    async fn search_with_provenance(
+        &self,
+        q: Query,
+        tok: AccessToken,
+    ) -> Result<(Vec<Hit>, crate::provenance::RecallReport)> {
+        // Episodic only. The semantic-fact pass `search` appends afterwards is
+        // a separate retrieval with no fused rank, so claiming a fused
+        // provenance for its hits would be a fabrication; those hits are
+        // deliberately not reported here rather than reported wrongly.
+        let partition = q.partition.unwrap_or(Partition::Episodic);
+        let tier = q.tier;
+        let start = std::time::Instant::now();
+        let result = async {
+            self.gate.check_read(&tok, partition, tier)?;
+            crate::retrieve::search_basic_with_provenance(&self.db, self.embedder.as_ref(), &q)
+                .await
+        }
+        .await;
+        self.emit_trace(
+            "search_with_provenance",
+            partition.as_str(),
+            tier.as_str(),
+            start.elapsed().as_millis() as u64,
+            result.is_ok(),
+        );
+        result
+    }
+
     async fn get_episode(&self, id: &EpisodeId, tok: AccessToken) -> Result<Episode> {
         // We don't know the tier yet — let the caller hint via the Query
         // API for hot paths; for direct gets, try project then global.

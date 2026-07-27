@@ -7,6 +7,34 @@ use wcore_types::tool::ToolEffectContract;
 
 use super::GENESIS_CHECKSUM;
 
+/// Skip predicate for the `Option<serde_json::Value>` fields the journal and
+/// snapshot digests cover — 23B-H1.
+///
+/// The journal's integrity check re-serializes a decoded event and compares the
+/// hash against the one stored on disk, so the encoding has to be a round-trip
+/// fixed point. `Option::is_none` is not one for a `Value` field: serde writes
+/// `Some(Value::Null)` as an explicit `"field":null`, decodes that back to
+/// `None` (Option's Deserialize maps a JSON null to None), and then OMITS the
+/// field on re-serialization. The recomputed checksum differs from the stored
+/// one and the reader rejects a journal the writer wrote correctly, with
+/// `journal checksum mismatch at sequence N` — permanently, since every
+/// operator verb reads the journal.
+///
+/// Skipping `Some(Value::Null)` as well as `None` makes the encoding a fixed
+/// point without changing what anything means: the wire contract already
+/// treats an explicit null as equivalent to an absent field (pinned by
+/// `known_explicit_event_defaults_are_wire_compatible_but_unknowns_fail_closed`),
+/// so a null that is never written is a null nobody can miss.
+///
+/// LIMIT, stated plainly: this closes the write path. A journal ALREADY on
+/// disk carrying an explicit null still fails its checksum on read, because
+/// the stored hash covers bytes this encoding no longer produces. Repairing
+/// those would mean making the integrity check tolerant of two encodings,
+/// which is a worse trade than losing them.
+fn is_absent_json_value(value: &Option<serde_json::Value>) -> bool {
+    matches!(value, None | Some(serde_json::Value::Null))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CompletionOutcome {
@@ -625,7 +653,7 @@ pub enum SessionEvent {
         effective_input: StoredToolInput,
         effective_input_digest: String,
         effect_contract: ToolEffectContract,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "is_absent_json_value")]
         effect_receipt: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pre_hook_phase_id: Option<String>,
@@ -927,7 +955,7 @@ pub struct ToolState {
     pub effective_input: StoredToolInput,
     pub effective_input_digest: String,
     pub effect_contract: ToolEffectContract,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "is_absent_json_value")]
     pub effect_receipt: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pre_hook_phase_id: Option<String>,

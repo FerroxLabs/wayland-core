@@ -31,6 +31,7 @@ pub mod memory;
 pub mod null;
 pub mod partition;
 pub mod propagation;
+pub mod provenance;
 pub mod retrieve;
 pub mod schema;
 pub mod staleness;
@@ -45,6 +46,11 @@ pub use contradiction::{
 pub use memory::Memory;
 pub use null::NullMemory;
 pub use propagation::MemoryLineage;
+pub use provenance::{
+    ExclusionCause, MemoryControls, NudgeBudget, NudgeRefusal, RecallExclusion, RecallModality,
+    RecallProvenance, RecallReport,
+};
+pub use staleness::StalenessVerdict;
 pub use v2_types::AccessToken;
 
 /// Test-only constructor: returns a fully-wired in-memory `Memory`

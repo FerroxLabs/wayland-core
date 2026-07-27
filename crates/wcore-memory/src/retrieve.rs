@@ -4,15 +4,59 @@
 // `search` method compiles + roundtrips. Group D adds the full FTS5 +
 // vector + KG fusion + RRF + session-diversity capping.
 
+use rusqlite::OptionalExtension;
+
 use crate::db::{Db, vec_table_name_for_dim};
 use crate::embed::{Embedder, cosine, decode_blob, encode_blob};
 use crate::error::{MemoryError, Result};
+use crate::provenance::{
+    ExclusionCause, ModalityContribution, RecallContext, RecallExclusion, RecallModality,
+    RecallReport, provenance_for, read_privacy_scope, read_retention,
+};
+use crate::staleness::StalenessVerdict;
 use crate::v2_types::{Hit, Partition, Query, Tier};
 
 /// Cheap search used by Group C's dispatcher tests. Combines BM25 over
 /// `episodes_fts` with a vector top-k pass, fuses by RRF, applies session
 /// diversity, and trims to limit_per_modality.
+///
+/// Delegates to [`search_basic_with_provenance`] and drops the provenance, so
+/// there is exactly one retrieval implementation.
 pub async fn search_basic(db: &Db, embedder: &dyn Embedder, q: &Query) -> Result<Vec<Hit>> {
+    Ok(search_basic_with_provenance(db, embedder, q).await?.0)
+}
+
+/// F23-03 — the retrieval that answers "what is in my context window, and
+/// why".
+///
+/// Returns the same hits [`search_basic`] returns plus, for each, the
+/// modalities that selected it, its rank inside each, its fused score, its age
+/// and its staleness verdict; and separately the items and cells that were
+/// EXCLUDED, so a privacy scope or a retention bound is visible rather than
+/// silent.
+pub async fn search_basic_with_provenance(
+    db: &Db,
+    embedder: &dyn Embedder,
+    q: &Query,
+) -> Result<(Vec<Hit>, RecallReport)> {
+    let mut report = RecallReport::default();
+
+    // A privacy scope is decided before any row is read: an excluded cell
+    // must not have its contents loaded into this process at all, let alone
+    // ranked.
+    if let Some(scope) = read_privacy_scope(db, Partition::Episodic, q.tier)? {
+        report.exclusions.push(RecallExclusion {
+            partition: Partition::Episodic,
+            tier: q.tier,
+            id: None,
+            cause: ExclusionCause::PrivacyScope {
+                reason: scope.reason,
+            },
+        });
+        return Ok((Vec::new(), report));
+    }
+    let retention = read_retention(db, Partition::Episodic, q.tier)?.map(|r| r.max_age_secs);
+
     let tc = db.tier_or_global(q.tier);
 
     // BM25 pass (FTS5).
@@ -69,9 +113,38 @@ pub async fn search_basic(db: &Db, embedder: &dyn Embedder, q: &Query) -> Result
     let kg = kg_pass(&tc.conn, q)?;
 
     // RRF fuse (BM25 + vector + KG, k=60 canonical).
-    let mut combined = rrf_fuse(&bm25, &vector, &kg, 60);
+    let (mut combined, contributions) = rrf_fuse_with_contributions(&bm25, &vector, &kg, 60);
     // Session-diversity cap (max 3 per session_id).
     diversify_by_session(&mut combined, 3);
+
+    // Retention: an item past the operator's bound is excluded and REPORTED
+    // as expired. It is not deleted, so the exclusion is reversible by
+    // relaxing the bound — which is what makes reporting it worth anything.
+    let now = crate::audit::now_secs();
+    let timestamps = episode_timestamps(&tc.conn, &combined)?;
+    if retention.is_some() {
+        let mut kept = Vec::with_capacity(combined.len());
+        for hit in combined {
+            let ts = timestamps.get(&hit.id).copied().unwrap_or(now);
+            let age = crate::provenance::age_secs_at(now, ts);
+            match crate::staleness::verdict_for_age(age, retention) {
+                StalenessVerdict::Expired { max_age_secs } => {
+                    report.exclusions.push(RecallExclusion {
+                        partition: hit.partition,
+                        tier: hit.tier,
+                        id: Some(hit.id.clone()),
+                        cause: ExclusionCause::RetentionExpired {
+                            max_age_secs,
+                            age_secs: age,
+                        },
+                    });
+                }
+                _ => kept.push(hit),
+            }
+        }
+        combined = kept;
+    }
+
     // Token budget — approximate via summary length.
     if let Some(budget) = q.token_budget {
         let mut used = 0u32;
@@ -81,8 +154,54 @@ pub async fn search_basic(db: &Db, embedder: &dyn Embedder, q: &Query) -> Result
         });
     }
 
-    let _ = Partition::Episodic;
-    Ok(combined)
+    // Provenance is built LAST, over exactly the surviving list, so the rank
+    // it reports is the rank in the list that reached the prompt.
+    report.provenance = combined
+        .iter()
+        .enumerate()
+        .map(|(rank, hit)| {
+            let ts = timestamps.get(&hit.id).copied().unwrap_or(now);
+            provenance_for(
+                hit,
+                contributions.get(&hit.id).cloned().unwrap_or_default(),
+                rank,
+                ts,
+                RecallContext {
+                    now,
+                    max_age_secs: retention,
+                },
+            )
+        })
+        .collect();
+
+    Ok((combined, report))
+}
+
+/// Read the recorded timestamp of each surviving hit. This is a read of the
+/// same rows the fusion already selected, never a second ranking, so it
+/// cannot change which items are recalled.
+fn episode_timestamps(
+    conn: &parking_lot::Mutex<rusqlite::Connection>,
+    hits: &[Hit],
+) -> Result<std::collections::HashMap<String, i64>> {
+    let mut out = std::collections::HashMap::with_capacity(hits.len());
+    if hits.is_empty() {
+        return Ok(out);
+    }
+    let conn = conn.lock();
+    let mut stmt = conn
+        .prepare("SELECT ts FROM episodes WHERE id = ?1")
+        .map_err(MemoryError::Db)?;
+    for hit in hits {
+        if let Some(ts) = stmt
+            .query_row(rusqlite::params![hit.id], |r| r.get::<_, i64>(0))
+            .optional()
+            .map_err(MemoryError::Db)?
+        {
+            out.insert(hit.id.clone(), ts);
+        }
+    }
+    Ok(out)
 }
 
 /// Embedding-cosine recall over the P3 Semantic `facts` table.
@@ -409,28 +528,70 @@ fn kg_pass(conn: &parking_lot::Mutex<rusqlite::Connection>, q: &Query) -> Result
     Ok(out)
 }
 
-fn rrf_fuse(bm25: &[BmHit], vector: &[VecHit], kg: &[KgHit], k: usize) -> Vec<Hit> {
+/// F23-03 — the same fusion, additionally returning which modality selected
+/// each item and at what rank inside that modality's own list.
+///
+/// This is the ONLY fusion implementation; [`rrf_fuse`] delegates to it and
+/// discards the second return value. That is deliberate: a provenance record
+/// computed by a second, parallel pass could describe a ranking that never
+/// happened, and a user shown a provenance that does not match their context
+/// window is worse off than one shown nothing. There is no second pass to
+/// drift from.
+///
+/// The scoring math is byte-for-byte the pre-existing math — the golden RRF
+/// tests below pin it, and they were not touched.
+fn rrf_fuse_with_contributions(
+    bm25: &[BmHit],
+    vector: &[VecHit],
+    kg: &[KgHit],
+    k: usize,
+) -> (
+    Vec<Hit>,
+    std::collections::HashMap<String, Vec<ModalityContribution>>,
+) {
     use std::collections::HashMap;
     let mut scores: HashMap<String, f64> = HashMap::new();
     let mut meta: HashMap<String, (String, Option<String>)> = HashMap::new();
+    let mut contributions: HashMap<String, Vec<ModalityContribution>> = HashMap::new();
 
     for (rank, (id, summary, session)) in bm25.iter().enumerate() {
         let s = 1.0 / (k as f64 + rank as f64 + 1.0);
         *scores.entry(id.clone()).or_insert(0.0) += s;
         meta.entry(id.clone())
             .or_insert_with(|| (summary.clone(), session.clone()));
+        contributions
+            .entry(id.clone())
+            .or_default()
+            .push(ModalityContribution {
+                modality: RecallModality::Lexical,
+                rank,
+            });
     }
     for (rank, (_cos, id, summary, session)) in vector.iter().enumerate() {
         let s = 1.0 / (k as f64 + rank as f64 + 1.0);
         *scores.entry(id.clone()).or_insert(0.0) += s;
         meta.entry(id.clone())
             .or_insert_with(|| (summary.clone(), session.clone()));
+        contributions
+            .entry(id.clone())
+            .or_default()
+            .push(ModalityContribution {
+                modality: RecallModality::Vector,
+                rank,
+            });
     }
     for (rank, (_w, id, summary, session)) in kg.iter().enumerate() {
         let s = 1.0 / (k as f64 + rank as f64 + 1.0);
         *scores.entry(id.clone()).or_insert(0.0) += s;
         meta.entry(id.clone())
             .or_insert_with(|| (summary.clone(), session.clone()));
+        contributions
+            .entry(id.clone())
+            .or_default()
+            .push(ModalityContribution {
+                modality: RecallModality::Graph,
+                rank,
+            });
     }
 
     let mut out: Vec<Hit> = scores
@@ -451,7 +612,7 @@ fn rrf_fuse(bm25: &[BmHit], vector: &[VecHit], kg: &[KgHit], k: usize) -> Vec<Hi
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    out
+    (out, contributions)
 }
 
 pub fn diversify_by_session(hits: &mut Vec<Hit>, max_per_session: usize) {
@@ -482,7 +643,14 @@ mod rrf_kg_tests {
     //!
     //! Tie ordering is NOT stable (HashMap-iter source); ties are
     //! asserted via set-equality + score equality per design doc.
-    use super::{BmHit, KgHit, VecHit, rrf_fuse};
+    use super::{BmHit, KgHit, VecHit, rrf_fuse_with_contributions};
+
+    /// The golden values below pin the fusion math. They now call the one
+    /// surviving implementation, so the scoring they pin is exactly the
+    /// scoring provenance is captured from.
+    fn rrf_fuse(bm25: &[BmHit], vector: &[VecHit], kg: &[KgHit], k: usize) -> Vec<super::Hit> {
+        rrf_fuse_with_contributions(bm25, vector, kg, k).0
+    }
 
     fn b(id: &str) -> (String, String, Option<String>) {
         (id.to_string(), format!("summary-{id}"), None)

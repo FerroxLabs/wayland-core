@@ -1,0 +1,30 @@
+F23_01_PROVENANCE=ok platform=linux sha=cd021a011ddfc0387d840530d368ae6f3a916b9e
+F23_01_SEED=ok id=aaaac3ebab28a4160e31 nonce=c3ebab28a4160e31
+F23_01_VERB=list platform=linux status=PASS exit=0 nonce=c3ebab28a4160e31
+F23_01_VERB=search platform=linux status=PASS exit=0 nonce=c3ebab28a4160e31
+F23_01_VERB=search-miss platform=linux status=PASS exit=0 nonce=c3ebab28a4160e31
+F23_01_VERB=show platform=linux status=PASS exit=0 nonce=c3ebab28a4160e31
+F23_01_VERB=checkpoint platform=linux status=PASS exit=0 nonce=c3ebab28a4160e31
+F23_01_VERB=rewind platform=linux status=PASS exit=0 nonce=c3ebab28a4160e31
+F23_01_REWIND_BYTES_EQUAL=true
+F23_01_REWIND_LATER_FILE_REMOVED=true
+F23_01_VERB=fork platform=linux status=PASS exit=0 nonce=c3ebab28a4160e31
+F23_01_FORK_PARENT_BYTES_EQUAL=true
+F23_01_VERB=show-fork platform=linux status=PASS exit=0 nonce=c3ebab28a4160e31
+F23_01_VERB=retry platform=linux status=PASS exit=3 nonce=c3ebab28a4160e31
+F23_01_VERB=export platform=linux status=PASS exit=0 nonce=c3ebab28a4160e31
+F23_01_EXPORT_NONCE_OCCURRENCES=0
+F23_01_VERB=retain platform=linux status=PASS exit=0 nonce=c3ebab28a4160e31
+F23_01_VERB=retain-expired platform=linux status=PASS exit=0 nonce=c3ebab28a4160e31
+F23_01_VERB=reconcile platform=linux status=PASS exit=0 nonce=c3ebab28a4160e31
+scripts/f23-session-operator-drive.sh: line 268: 3700202 Killed                  ( while true; do
+    nc -l -p "$HANG_PORT" > /dev/null 2>&1 || sleep 1;
+done )
+F23_01_D2_FIXTURE_INTERRUPTED=true
+F23_01_D2_REFUSAL_OBSERVED=true
+F23_01_D2_RECONCILE_ITEMS_REPORTED=1
+F23_01_D2_RECONCILE_RESOLVED=1
+F23_01_VERB=cancel platform=linux status=PASS exit=0 nonce=c3ebab28a4160e31
+F23_01_D2_RESOLVED_PERSISTS_ACROSS_RESTART=true
+F23_01_D2_CONTINUE_UNBLOCKED=true
+F23_01_DRIVE=PASS platform=linux nonce=c3ebab28a4160e31

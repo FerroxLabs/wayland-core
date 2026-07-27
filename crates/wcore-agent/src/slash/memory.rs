@@ -39,7 +39,7 @@ impl SlashHandler for MemoryHandler {
         "memory"
     }
     fn one_line_help(&self) -> &str {
-        "Inspect or clear memory partitions."
+        "Inspect, correct, forget, privacy-scope or retention-bound memory."
     }
     fn invoke(&self, invocation: &SlashInvocation) -> Result<SlashOutcome, SlashError> {
         match invocation.args.split_first() {
@@ -47,11 +47,242 @@ impl SlashHandler for MemoryHandler {
             Some((first, rest)) => match first.as_str() {
                 "show" => self.show(rest.first().map(|s| s.as_str())),
                 "clear" => self.clear(rest.first().map(|s| s.as_str())),
+                // F23-03 control surface. Each is Runtime-only: the Stub has
+                // no store to act on, and reporting a control as applied
+                // against no store is the one thing these commands must never
+                // do.
+                "why" | "provenance" => self.provenance(rest),
+                "correct" => self.correct(rest),
+                "forget" => self.forget(rest),
+                "privacy" => self.privacy(rest),
+                "retention" => self.retention(rest),
                 other => Err(SlashError::Bad(format!(
-                    "/memory: unknown sub-action '{other}'. Try: /memory show [partition] | /memory clear <partition>"
+                    "/memory: unknown sub-action '{other}'. Try: /memory show [partition] | \
+                     /memory why <query> | /memory correct <id> <text> | /memory forget <id> | \
+                     /memory privacy <partition> [reason|--clear] | \
+                     /memory retention <partition> <days> | /memory clear <partition>"
                 ))),
             },
         }
+    }
+}
+
+/// Every control below reports what it did to WHICH item, or refuses out
+/// loud. There is deliberately no "applied 0 changes" success path: a user who
+/// mistypes an id and is told "ok" believes content is gone when it is not.
+impl MemoryHandler {
+    fn runtime_api(&self, verb: &str) -> Result<Arc<dyn MemoryApi>, SlashError> {
+        match self {
+            Self::Stub => Err(SlashError::Bad(format!(
+                "/memory {verb} needs a live memory store; this session has none"
+            ))),
+            Self::Runtime { api } => Ok(api.clone()),
+        }
+    }
+
+    fn controls(
+        &self,
+        verb: &str,
+    ) -> Result<(Arc<dyn MemoryApi>, wcore_memory::MemoryControls), SlashError> {
+        let api = self.runtime_api(verb)?;
+        let controls = api.controls().ok_or_else(|| {
+            SlashError::Bad(format!(
+                "/memory {verb}: this memory backend exposes no operator controls"
+            ))
+        })?;
+        Ok((api, controls))
+    }
+
+    fn provenance(&self, args: &[String]) -> Result<SlashOutcome, SlashError> {
+        let api = self.runtime_api("why")?;
+        if args.is_empty() {
+            return Err(SlashError::Bad(
+                "/memory why <query> — shows where each recalled item came from".to_string(),
+            ));
+        }
+        let query = wcore_memory::v2_types::Query {
+            text: args.join(" "),
+            tier: Tier::Project,
+            ..Default::default()
+        };
+        let outcome = block_on(api.search_with_provenance(query, AccessToken::MainAgent));
+        let (hits, report) = match outcome {
+            Ok(v) => v,
+            Err(e) => return Ok(handled(format!("/memory why: {e}"))),
+        };
+        let mut out = format!("/memory why: {} item(s) recalled\n", hits.len());
+        for p in &report.provenance {
+            out.push_str(&format!(
+                "  #{rank} {id} [{partition}/{tier}] via {modality} score={score:.5} \
+                 age={age}s {staleness}\n",
+                rank = p.rank,
+                id = p.id,
+                partition = p.partition.as_str(),
+                tier = p.tier.as_str(),
+                modality = p.modality_label(),
+                score = p.fused_score,
+                age = p.age_secs,
+                staleness = p.staleness.as_str(),
+            ));
+            for c in &p.contributions {
+                out.push_str(&format!(
+                    "      {} at rank {}\n",
+                    c.modality.as_str(),
+                    c.rank
+                ));
+            }
+        }
+        if report.provenance.is_empty() && !hits.is_empty() {
+            out.push_str("  (this backend cannot report where these came from)\n");
+        }
+        // Exclusions are the half a user cannot otherwise see.
+        for x in &report.exclusions {
+            out.push_str(&format!(
+                "  EXCLUDED {}{}: {}\n",
+                x.partition.as_str(),
+                x.id.as_ref()
+                    .map(|i| format!(" {i}"))
+                    .unwrap_or_else(|| " (whole cell)".to_string()),
+                match &x.cause {
+                    wcore_memory::ExclusionCause::PrivacyScope { reason } =>
+                        format!("privacy scope ({reason})"),
+                    wcore_memory::ExclusionCause::RetentionExpired {
+                        max_age_secs,
+                        age_secs,
+                    } => format!("expired: {age_secs}s old, bound is {max_age_secs}s"),
+                }
+            ));
+        }
+        Ok(handled(out))
+    }
+
+    fn correct(&self, args: &[String]) -> Result<SlashOutcome, SlashError> {
+        let (_api, controls) = self.controls("correct")?;
+        let (id, rest) = args
+            .split_first()
+            .ok_or_else(|| SlashError::Bad("/memory correct <id> <corrected text>".to_string()))?;
+        if rest.is_empty() {
+            return Err(SlashError::Bad(
+                "/memory correct <id> <corrected text> — the corrected text is required"
+                    .to_string(),
+            ));
+        }
+        match controls.correct_episode(
+            &AccessToken::MainAgent,
+            Tier::Project,
+            id,
+            &rest.join(" "),
+            "operator",
+        ) {
+            Ok(r) => Ok(handled(format!(
+                "/memory correct: {} corrected in {}/{}",
+                r.id,
+                r.partition.as_str(),
+                r.tier.as_str()
+            ))),
+            Err(e) => Ok(handled(format!("/memory correct refused: {e}"))),
+        }
+    }
+
+    fn forget(&self, args: &[String]) -> Result<SlashOutcome, SlashError> {
+        let (_api, controls) = self.controls("forget")?;
+        let id = args
+            .first()
+            .ok_or_else(|| SlashError::Bad("/memory forget <id>".to_string()))?;
+        match controls.forget_episode(&AccessToken::MainAgent, Tier::Project, id, "operator") {
+            Ok(r) => Ok(handled(format!(
+                "/memory forget: {} removed from {}/{} and recorded in the changelog",
+                r.id,
+                r.partition.as_str(),
+                r.tier.as_str()
+            ))),
+            Err(e) => Ok(handled(format!("/memory forget refused: {e}"))),
+        }
+    }
+
+    fn privacy(&self, args: &[String]) -> Result<SlashOutcome, SlashError> {
+        let (_api, controls) = self.controls("privacy")?;
+        let (name, rest) = args.split_first().ok_or_else(|| {
+            SlashError::Bad(
+                "/memory privacy <partition> [reason] | /memory privacy <partition> --clear"
+                    .to_string(),
+            )
+        })?;
+        let partition = parse_partition(name).map_err(SlashError::Bad)?;
+        if rest.first().map(|s| s.as_str()) == Some("--clear") {
+            return match controls.clear_privacy_scope(
+                &AccessToken::MainAgent,
+                partition,
+                Tier::Project,
+                "operator",
+            ) {
+                Ok(true) => Ok(handled(format!(
+                    "/memory privacy: {} is no longer excluded from recall",
+                    partition.as_str()
+                ))),
+                Ok(false) => Ok(handled(format!(
+                    "/memory privacy: {} was not excluded",
+                    partition.as_str()
+                ))),
+                Err(e) => Ok(handled(format!("/memory privacy refused: {e}"))),
+            };
+        }
+        let reason = if rest.is_empty() {
+            "operator request".to_string()
+        } else {
+            rest.join(" ")
+        };
+        match controls.set_privacy_scope(
+            &AccessToken::MainAgent,
+            partition,
+            Tier::Project,
+            &reason,
+            "operator",
+        ) {
+            Ok(s) => Ok(handled(format!(
+                "/memory privacy: {}/{} excluded from recall ({})",
+                s.partition.as_str(),
+                s.tier.as_str(),
+                s.reason
+            ))),
+            Err(e) => Ok(handled(format!("/memory privacy refused: {e}"))),
+        }
+    }
+
+    fn retention(&self, args: &[String]) -> Result<SlashOutcome, SlashError> {
+        let (_api, controls) = self.controls("retention")?;
+        let name = args
+            .first()
+            .ok_or_else(|| SlashError::Bad("/memory retention <partition> <days>".to_string()))?;
+        let partition = parse_partition(name).map_err(SlashError::Bad)?;
+        let days: i64 = args
+            .get(1)
+            .ok_or_else(|| SlashError::Bad("/memory retention <partition> <days>".to_string()))?
+            .parse()
+            .map_err(|_| {
+                SlashError::Bad("/memory retention: <days> must be a number".to_string())
+            })?;
+        match controls.set_retention(
+            &AccessToken::MainAgent,
+            partition,
+            Tier::Project,
+            days.saturating_mul(86_400),
+            "operator",
+        ) {
+            Ok(b) => Ok(handled(format!(
+                "/memory retention: {}/{} bounded to {} day(s); older items are reported expired, not deleted",
+                b.partition.as_str(),
+                b.tier.as_str(),
+                days
+            ))),
+            Err(e) => Ok(handled(format!("/memory retention refused: {e}"))),
+        }
+    }
+}
+
+fn handled(output: String) -> SlashOutcome {
+    SlashOutcome::Handled {
+        output: Some(output),
     }
 }
 
@@ -338,5 +569,139 @@ mod tests {
             assert!(parse_partition(name).is_ok(), "{name} should parse");
         }
         assert!(parse_partition("collaboration").is_err());
+    }
+
+    // ------------------------------------------------------------------
+    // F23-03 control surface
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn stub_refuses_every_control_instead_of_reporting_success() {
+        // The Stub has no store. Reporting "forgotten" against no store is
+        // the one failure these commands must never have.
+        for line in [
+            "/memory forget ep-1",
+            "/memory correct ep-1 new text",
+            "/memory privacy episodic",
+            "/memory retention episodic 7",
+            "/memory why aardvark",
+        ] {
+            let inv = parse(line).unwrap();
+            let err = MemoryHandler::Stub.invoke(&inv);
+            assert!(
+                matches!(err, Err(SlashError::Bad(_))),
+                "{line} must refuse on the Stub, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn runtime_without_controls_says_so_rather_than_claiming_success() {
+        // NullMemory implements MemoryApi but exposes no controls.
+        let api: Arc<dyn MemoryApi> = Arc::new(wcore_memory::NullMemory);
+        let handler = MemoryHandler::Runtime { api };
+        let inv = parse("/memory forget ep-1").unwrap();
+        let out = handler.invoke(&inv);
+        assert!(
+            matches!(out, Err(SlashError::Bad(ref m)) if m.contains("no operator controls")),
+            "got {out:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn controls_reach_a_real_store_and_report_the_item_they_acted_on() {
+        let mem = wcore_memory::open_for_test(std::path::Path::new("."))
+            .await
+            .unwrap();
+        let api: Arc<dyn MemoryApi> = Arc::new(mem);
+        let controls = api.controls().expect("a real store must expose controls");
+
+        // Seed one episode through the same store the controls act on.
+        let ep = wcore_memory::v2_types::Episode {
+            id: wcore_memory::v2_types::EpisodeId::new(),
+            tier: Tier::Project,
+            ts: 0,
+            episode_type: "note".into(),
+            summary: "the aardvark is blue".into(),
+            atomic_facts: vec![],
+            source: "test".into(),
+            source_product: "test".into(),
+            session_id: None,
+            project_root: None,
+            decay_score: 1.0,
+            status: wcore_memory::v2_types::EpisodeStatus::Active,
+        };
+        let id = api
+            .record_episode(ep, AccessToken::MainAgent)
+            .await
+            .unwrap()
+            .0
+            .to_string();
+
+        let handler = MemoryHandler::Runtime { api: api.clone() };
+
+        let inv = parse(&format!("/memory correct {id} the aardvark is brown")).unwrap();
+        let SlashOutcome::Handled { output: Some(s) } = handler.invoke(&inv).unwrap() else {
+            panic!("expected Handled");
+        };
+        assert!(s.contains(&id), "the correction must name the item: {s}");
+        assert!(!s.contains("refused"), "{s}");
+
+        let inv = parse(&format!("/memory forget {id}")).unwrap();
+        let SlashOutcome::Handled { output: Some(s) } = handler.invoke(&inv).unwrap() else {
+            panic!("expected Handled");
+        };
+        assert!(s.contains(&id), "the forget must name the item: {s}");
+        assert!(s.contains("changelog"), "{s}");
+
+        // Forgetting the same id again must NOT report success.
+        let inv = parse(&format!("/memory forget {id}")).unwrap();
+        let SlashOutcome::Handled { output: Some(s) } = handler.invoke(&inv).unwrap() else {
+            panic!("expected Handled");
+        };
+        assert!(
+            s.contains("refused") && s.contains("not found"),
+            "a second forget must refuse, not report success: {s}"
+        );
+
+        // Privacy scope round-trips through the surface.
+        let inv = parse("/memory privacy episodic medical notes").unwrap();
+        let SlashOutcome::Handled { output: Some(s) } = handler.invoke(&inv).unwrap() else {
+            panic!();
+        };
+        assert!(s.contains("excluded from recall"), "{s}");
+        assert!(
+            controls
+                .privacy_scope(wcore_memory::v2_types::Partition::Episodic, Tier::Project)
+                .unwrap()
+                .is_some()
+        );
+
+        let inv = parse("/memory privacy episodic --clear").unwrap();
+        let SlashOutcome::Handled { output: Some(s) } = handler.invoke(&inv).unwrap() else {
+            panic!();
+        };
+        assert!(s.contains("no longer excluded"), "{s}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_privacy_scope_is_reported_as_an_exclusion_not_as_an_empty_result() {
+        // The difference between "nothing matched" and "you excluded this" is
+        // the entire point of reporting exclusions.
+        let mem = wcore_memory::open_for_test(std::path::Path::new("."))
+            .await
+            .unwrap();
+        let api: Arc<dyn MemoryApi> = Arc::new(mem);
+        let handler = MemoryHandler::Runtime { api: api.clone() };
+
+        let inv = parse("/memory privacy episodic sealed").unwrap();
+        handler.invoke(&inv).unwrap();
+
+        let inv = parse("/memory why aardvark").unwrap();
+        let SlashOutcome::Handled { output: Some(s) } = handler.invoke(&inv).unwrap() else {
+            panic!();
+        };
+        assert!(s.contains("EXCLUDED"), "the scope must be visible: {s}");
+        assert!(s.contains("sealed"), "the reason must be visible: {s}");
     }
 }
