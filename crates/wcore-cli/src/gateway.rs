@@ -479,15 +479,30 @@ fn drain(scope: &ScopeArgs, budget_ms: u64) -> Result<()> {
             .unwrap_or_else(|| "-".into())
     );
 
-    // Wait for the runtime to publish a terminal state, bounded by the
-    // operator's own budget plus one tick of slack so a drain that used its
-    // whole budget is still observed rather than reported as a timeout.
+    // Wait for the runtime to publish a terminal state.
+    //
+    // F24-B-H3, measured: the earlier bound of `budget_ms + 2 ticks` was too
+    // tight and reported a timeout over a drain that was working. The
+    // runtime can legitimately consume the request-notice latency (up to one
+    // tick), then the operator's WHOLE budget, then a final publish. The
+    // bound is therefore the budget plus four ticks, and the failure message
+    // now names what was actually observed rather than only the budget.
     let deadline =
-        std::time::Instant::now() + std::time::Duration::from_millis(budget_ms + 2 * TICK_MS);
+        std::time::Instant::now() + std::time::Duration::from_millis(budget_ms + 4 * TICK_MS);
+    let mut last_seen = GatewayState::Running;
     while std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(200));
         match read_live_projection(&home) {
             Some(p) => {
+                if p.state != last_seen {
+                    // The observable half of the drain contract: the operator
+                    // sees the state move and the pending count with it.
+                    println!(
+                        "  {} (deliveries pending {})",
+                        p.state, p.deliveries_pending
+                    );
+                    last_seen = p.state;
+                }
                 if matches!(p.state, GatewayState::Drained | GatewayState::Stopped) {
                     println!(
                         "drain complete: {} (deliveries pending {})",
@@ -514,7 +529,9 @@ fn drain(scope: &ScopeArgs, budget_ms: u64) -> Result<()> {
             }
         }
     }
-    bail!("drain did not reach a terminal state within {budget_ms}ms + slack");
+    bail!(
+        "drain did not reach a terminal state within {budget_ms}ms + slack; last observed state was {last_seen}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -625,6 +642,15 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                     drain_budget = Some(raw.trim().parse::<u64>().unwrap_or(30_000));
                     let _ = std::fs::remove_file(drain_request_path(&home));
                     eprintln!("[gateway] drain requested (budget {:?}ms)", drain_budget);
+                    // F24-B-H3. Publish Draining BEFORE the drain runs. The
+                    // tick loop is about to exit, so nothing republishes
+                    // until the drain finishes; without this the projection
+                    // stays `Running` for the whole budget and an operator
+                    // watching `gateway drain` sees a state that contradicts
+                    // what it asked for. The drain contract is that the
+                    // counts are OBSERVABLE, and a projection frozen at
+                    // `Running` observes nothing.
+                    publish(&home, &project(&plane, GatewayState::Draining))?;
                     break;
                 }
                 if let Err(e) = plane.tick(chrono::Utc::now()).await {
