@@ -11,9 +11,10 @@ PINNED SHA        0ed05322462e64cb44e2b80aa15b7357263b8187
 BRANCH            lane/23B-04                (remote `gh` on the Mac, `origin` on the hosts)
 POLICY            real-time-full             (23B-04-CLOCK-DECISION.md)
 REQUIRED SPAN     259200 seconds, all three platforms
-LINUX DAY ONE     2026-07-27T14:21:19Z
-EARLIEST CLOSE    2026-07-30T14:21:19Z
-LINUX NONCE       4ab44763e42849fd           (also /root/.f23-journey-linux-nonce.txt)
+LINUX DAY ONE     2026-07-27T14:21:19Z    nonce 4ab44763e42849fd
+WINDOWS DAY ONE   2026-07-27T23:54:26Z    nonce acb1d0b24b3fdecf
+EARLIEST CLOSE    linux 2026-07-30T14:21:19Z, windows 2026-07-30T23:54:26Z
+                  the journey as a whole: 2026-07-30T23:54:26Z
 ```
 
 ## Linux — already scheduled; verify only
@@ -88,77 +89,81 @@ worktree  C:\ferrox-win-23B04          (detached; created by this lane)
 markers   C:\ferrox-win-23B04-DONE.txt, -rel.log, -harness.json, -harness.log
 ```
 
-At hand-off the Windows worktree is checked out at the pinned SHA and a cold
-release build plus harness build is in flight, launched at
-`2026-07-27T15:44Z`.
+**Windows day one IS recorded**, at `2026-07-27T23:54:26Z`, against a binary
+whose `--build-info` reports the pinned SHA. Days 2 and 3 are registered with
+the Task Scheduler as SYSTEM:
 
-### TRAP 3 — `Start-Process` ignores the PowerShell location
-
-The first launch of this build silently did nothing for ninety minutes. It used
-
-```powershell
-Set-Location C:\ferrox-win-23B04
-Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','cargo build …' -WindowStyle Hidden
 ```
+f23win23B04day2   2026-07-29 06:58 local  (2026-07-28 23:58Z)
+f23win23B04day3   2026-07-31 07:05 local  (2026-07-31 00:05Z)
+```
+
+Both call `C:\ferrox-win-23B04-resume.cmd <n>`. Check they landed, then verify
+after `2026-07-30T23:54:26Z`:
+
+```bash
+ssh SeanD@seandesktop "Get-Content C:\Users\seand\.f23-journey-windows\scheduled.log; exit 0"
+
+SHA=0ed05322462e64cb44e2b80aa15b7357263b8187
+NONCE=$(/usr/bin/openssl rand -hex 8)
+H='C:\ferrox-win-23B04\target\debug\deps\multi_day_journey_test-4f5c0f06a2c8fef9.exe'
+L=.planning/phases/23B-continuous-agency/evidence/23B-04-windows-verify.log
+ssh -o BatchMode=yes SeanD@seandesktop "Set-Location C:\ferrox-win-23B04; \
+  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\f23-multi-day-journey.ps1 \
+    -Verify -Binary target\release\wayland-core.exe -Sha $SHA -Nonce $NONCE \
+    -Harness $H -Root C:\Users\seand\.f23-journey-windows; exit \$LASTEXITCODE" > "$L" 2>&1
+rc=$?; test "$rc" -eq 0 && /usr/bin/grep -qF "F23_04_JOURNEY=PASS platform=windows nonce=$NONCE" "$L"
+```
+
+Never pipe the ssh command into a filter — `ssh host 'cmd' | grep` reports
+grep's status, not the command's. And `powershell -File <missing.ps1>` exits
+**0**, so the nonce-bound marker is the second, independent check; the status
+alone is not a gate.
+
+### TRAP 3 — `Start-Process` ignores the PowerShell location, and dies with the session
+
+Two separate defects, both of which cost this lane real time.
 
 `Set-Location` changes the PowerShell *provider* location, not the process's
 working directory, and `Start-Process` inherits the latter — so `cargo` ran in
-the ssh session's home directory. The symptom is deceptive on a shared box:
-`Get-Process rustc` reports a healthy count because ANOTHER lane is compiling,
-while `C:\ferrox-win-23B04\target` never appears and the redirect target stays
-at zero bytes. Two checks distinguish a real build from this:
+the ssh session's home directory and built nothing for ninety minutes. The
+symptom is deceptive on a shared box: `Get-Process rustc` reports a healthy
+count because ANOTHER lane is compiling, while the worktree's `target/` never
+appears and the redirect target stays at zero bytes.
+
+Even with `-WorkingDirectory` set correctly, the child was killed when the ssh
+session ended. **Anything that must outlive a session on this box has to be a
+scheduled task, not a `Start-Process` child.**
+
+Verify a build is genuinely running with these two, never with a process count:
 
 ```powershell
-(Get-Item C:\ferrox-win-23B04-rel.log).Length     # must be non-zero within ~30s
-Test-Path C:\ferrox-win-23B04\target              # must be true
+(Get-Item C:\ferrox-win-23B04-rel.log).Length     # non-zero within ~30s
+Test-Path C:\ferrox-win-23B04\target             # true
 ```
 
-Always pass `-WorkingDirectory` explicitly:
+### TRAP 4 — a SYSTEM scheduled task has a different USERPROFILE
 
-```powershell
-Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','…' `
-  -WorkingDirectory 'C:\ferrox-win-23B04' -WindowStyle Hidden
-```
+`schtasks /RU SeanD /IT` is "Interactive only" and does nothing at all unless
+that user is logged on at the console — it reports `Last Result: 0` while
+running nothing. Use `/RU SYSTEM /RL HIGHEST`.
 
-Because the worktree is already at the pinned SHA, no further checkout is needed
-before day one — only a `--build-info` confirmation.
+But SYSTEM's `USERPROFILE` is `C:\Windows\System32\config\systemprofile`, so a
+scheduled resume that lets the driver default its root would silently create a
+SECOND, empty journey root in which **every day looks like day one**. The
+resume command therefore passes `-Root C:\Users\seand\.f23-journey-windows`
+explicitly, and that argument must not be dropped. The build script sets
+`CARGO_HOME`, `RUSTUP_HOME`, `USERPROFILE` and `HOME` explicitly for the same
+reason.
 
-```powershell
-Set-Location C:\ferrox-win-23B04
-git fetch -q origin lane/23B-04
-git checkout -q --detach 0ed05322462e64cb44e2b80aa15b7357263b8187
-$env:PATH = 'C:\Users\seand\.cargo\bin;' + $env:PATH
-cargo build --release -p wcore-cli --bin wayland-core
-cargo test -p wcore-agent --test multi_day_journey_test --no-run --message-format=json > C:\ferrox-win-23B04-harness.json
-.\target\release\wayland-core.exe --build-info   # must print (source 0ed05322…)
-```
-
-Then start day one, and **never through a pipeline** — an `ssh host 'cmd' | grep`
-reports grep's status, not the command's:
-
-```bash
-SHA=0ed05322462e64cb44e2b80aa15b7357263b8187
-NONCE=$(/usr/bin/openssl rand -hex 8)
-L=.planning/phases/23B-continuous-agency/evidence/23B-04-windows-day1.log
-ssh -o BatchMode=yes SeanD@seandesktop "Set-Location C:\ferrox-win-23B04; \
-  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\f23-multi-day-journey.ps1 \
-    -Binary target\release\wayland-core.exe -Sha $SHA -Nonce $NONCE -Day 1 -Harness <path>; \
-  exit \$LASTEXITCODE" > "$L" 2>&1
-rc=$?; test "$rc" -eq 0
-```
-
-`powershell -File <missing.ps1>` exits **0**, so also assert the nonce-bound
-marker — the status alone is not a gate.
-
-**Windows day one has not started.** Under `real-time-full` with a 259,200s
-threshold, a Windows day one started later than three real days before the phase
-closes cannot meet its threshold. Start it immediately or record the leg OPEN.
-The box reboots and is shared; surviving that is a feature of the leg, and the
-driver should record whether a real reboot fell inside the span.
+Both were verified rather than assumed by running the scheduled path against
+day 1: it printed `F23_04_DAY_ALREADY_RECORDED=1`, exited 0, left the day count
+at exactly 1, and created no second root.
 
 ## macOS
 
-OPEN, blocked on the compiled test harness rather than on the product binary.
+NOT ACHIEVED — nothing was run, so nothing is claimed in either direction.
+Blocked on the compiled test harness rather than on the product binary.
 The full measurement, the two corrections to the plan's reasoning, and the exact
 route to unblock are in `23B-04-LIVE-EVIDENCE.md` under "macOS — OPEN, and
 precisely why". Do not improvise a second binary resolver; the plan forbids it
