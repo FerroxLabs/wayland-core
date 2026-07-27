@@ -42,7 +42,7 @@
 
 use serde_json::json;
 use wcore_agent::session_journal::{CompletionOutcome, SessionEvent, StoredToolInput};
-use wcore_types::tool::ToolEffectContract;
+use wcore_types::tool::{ToolEffectContract, ToolEffectKind};
 
 /// The invariant, expressed over one event.
 fn assert_round_trip_stable(event: &SessionEvent, what: &str) {
@@ -175,11 +175,23 @@ fn a_null_receipt_survives_a_real_journal_write_and_read() {
     // real reader rather than through serde alone. Before the fix this wrote a
     // journal that `JournalError::ChecksumMismatch` rejected on read — the
     // exact 23B-H1 symptom, from a run that exited normally.
+    //
+    // The contract declares a reconciler because the reducer refuses an effect
+    // receipt without one. That is also what makes this shape REACHABLE in
+    // production: any tool whose effect contract names a reconciler can supply
+    // a receipt, and `JournalEffectScope::prepare_tool_with_effect_receipt`
+    // takes a bare `Value` and does not reject a null one.
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("null-receipt.journal");
 
     let journal = wcore_agent::session_journal::SessionJournal::open(&path, "s-null")
         .expect("open journal for write");
+    journal
+        .append(SessionEvent::TurnStarted {
+            turn_id: "t1".into(),
+            user_message: "do a thing".into(),
+        })
+        .expect("turn must start");
     journal
         .append(SessionEvent::ToolIntentRecordedV2 {
             tool_execution_id: "x1".into(),
@@ -188,12 +200,15 @@ fn a_null_receipt_survives_a_real_journal_write_and_read() {
             provider_call_id: "c1".into(),
             turn_id: "t1".into(),
             ordinal: 0,
-            tool: "Read".into(),
+            tool: "Write".into(),
             requested_input: StoredToolInput::redacted("a".repeat(64)),
             requested_input_digest: "a".repeat(64),
             effective_input: StoredToolInput::redacted("b".repeat(64)),
             effective_input_digest: "b".repeat(64),
-            effect_contract: ToolEffectContract::default(),
+            effect_contract: ToolEffectContract {
+                kind: ToolEffectKind::FilesystemTransactional,
+                reconciler: Some("filesystem".into()),
+            },
             effect_receipt: Some(serde_json::Value::Null),
             pre_hook_phase_id: None,
         })
