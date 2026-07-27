@@ -43,7 +43,7 @@ import { openSync, fstatSync, readSync, closeSync, constants } from 'node:fs';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync, symlinkSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
-import { spawn, spawnSync, execFileSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -371,37 +371,92 @@ const RUNNERS = {
     return pass(`exit=${r.status}; the process table shows no surviving wayland-core descendant`);
   },
 
+  // The suspension is performed by a SYNCHRONOUS wrapper rather than from this
+  // process's event loop. An asynchronous child driven from a loop that this probe
+  // then blocks never gets its exit delivered, and the probe reports a timeout that
+  // belongs to the harness rather than to the product. That defect was found and
+  // repaired during this plan's first harness iteration; the shape is recorded here
+  // because "the measurement timed out" and "the product hung" are indistinguishable
+  // from the outside and only one of them is a finding.
   'suspend-resume'(bin, verb) {
     const baseline = runBin(bin, [...verb.split(' '), '--help']);
+    const args = verb.split(' ');
+
     if (IS_WINDOWS) {
-      // No portable suspend for a synchronously-waited child on Windows without a
-      // native helper. This measurement cannot be taken black-box here, and a
-      // measurement that cannot be taken must never render as a pass.
-      return red(
-        'suspend/resume cannot be driven black-box on Windows without a native helper; ' +
-          'the measurement was not taken and is therefore not a pass',
+      // NtSuspendProcess/NtResumeProcess through the in-box .NET compiler. This needs
+      // no toolchain install and does not build the product, so the probe stays
+      // black-box against the shipped binary.
+      const ps = [
+        '$ErrorActionPreference="Stop"',
+        'Add-Type -Namespace F28 -Name P -MemberDefinition \'[DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr h); [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr h);\'',
+        `$p = Start-Process -FilePath '${bin}' -ArgumentList ${args.map((a) => `'${a}'`).join(',')},'--help' -PassThru -NoNewWindow -RedirectStandardOutput $env:TEMP\\f28sr.out -RedirectStandardError $env:TEMP\\f28sr.err`,
+        // Suspend at the earliest possible moment, with NO sleep first: a short-lived
+        // invocation would otherwise finish before the suspension could be applied and
+        // the probe would report a race as a product result.
+        '$s = [F28.P]::NtSuspendProcess($p.Handle)',
+        'Start-Sleep -Milliseconds 400',
+        '$stopped = -not $p.HasExited',
+        '$r = [F28.P]::NtResumeProcess($p.Handle)',
+        '$p.WaitForExit(60000) | Out-Null',
+        'Write-Output "F28SR suspend=$s resume=$r stopped=$stopped exit=$($p.ExitCode)"',
+      ].join('; ');
+      const w = runBin('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], {
+        timeout: 90_000,
+      });
+      if (w.timedOut) return red('the suspend/resume wrapper did not complete within its budget');
+      const m = /F28SR suspend=(-?\d+) resume=(-?\d+) stopped=(\w+) exit=(-?\d+)/.exec(w.text);
+      if (!m) {
+        return red(`suspend/resume could not be driven on this host: ${firstLine(w.text)}`);
+      }
+      const [, s, r, stopped, exit] = m;
+      if (s !== '0' || r !== '0') {
+        return red(`NtSuspendProcess/NtResumeProcess refused (suspend=${s}, resume=${r}); no resume verdict is obtainable`);
+      }
+      if (stopped !== 'True') {
+        return red(
+          'the invocation completed before the suspension could be observed to hold; the ' +
+            'measurement was not taken and is therefore not a pass',
+        );
+      }
+      if (Number(exit) !== baseline.status) {
+        return red(`exit differs across the suspension (suspended=${exit}, baseline=${baseline.status})`);
+      }
+      return pass(
+        `exit=${exit} across NtSuspendProcess/NtResumeProcess, held suspended for 400ms ` +
+          `(observed not-exited while suspended), identical to the unsuspended baseline`,
       );
     }
-    const child = spawn(bin, [...verb.split(' '), '--help'], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '';
-    child.stdout.on('data', (d) => { out += d; });
-    child.stderr.on('data', (d) => { out += d; });
-    let killed = false;
-    try {
-      process.kill(child.pid, 'SIGSTOP');
-      sleep(300);
-      process.kill(child.pid, 'SIGCONT');
-    } catch {
-      killed = true;
+
+    // POSIX. The child is started ALREADY STOPPED — the wrapper shell signals itself
+    // before `exec`, so the suspension is deterministic rather than a race against a
+    // short-lived invocation. The stopped state is then OBSERVED in the process table
+    // (`state` begins with `T`) rather than assumed, which is what makes this a
+    // measurement instead of a hopeful sleep.
+    const script =
+      'sh -c \'kill -STOP $$; exec "$@"\' f28inner "$@" & p=$!; ' +
+      'st=""; i=0; while [ $i -lt 60 ]; do st=$(ps -o state= -p "$p" 2>/dev/null | tr -d " "); ' +
+      'case "$st" in T*) break;; esac; i=$((i+1)); sleep 0.05; done; ' +
+      'echo "F28SR observed_state=${st:-gone}"; ' +
+      'kill -CONT "$p" 2>/dev/null; wait "$p"; echo "F28SR exit=$?"';
+    const w = runBin('/bin/sh', ['-c', script, 'f28', bin, ...args, '--help'], { timeout: 90_000 });
+    if (w.timedOut) return red('the process did not complete within its budget after resume');
+    const state = /F28SR observed_state=(\S+)/.exec(w.text);
+    const m = /F28SR exit=(-?\d+)/.exec(w.text);
+    if (!state || !m) return red(`the process could not be suspended and resumed: ${firstLine(w.text)}`);
+    if (!state[1].startsWith('T')) {
+      return red(
+        `the process was never observed in a stopped state (process state was ` +
+          `'${state[1]}'); the suspension was not established, so this is not a pass`,
+      );
     }
-    const status = waitFor(child, BUDGET_MS);
-    if (killed) return red('the process could not be suspended, so no resume verdict is obtainable');
-    if (status === null) return red('the process did not complete within its budget after resume');
-    if (PANIC_RE.test(out)) return red(`panicked across the suspension: ${firstLine(out)}`);
-    if (status !== baseline.status) {
-      return red(`exit differs across the suspension (suspended=${status}, baseline=${baseline.status})`);
+    if (PANIC_RE.test(w.text)) return red(`panicked across the suspension: ${firstLine(w.text)}`);
+    if (Number(m[1]) !== baseline.status) {
+      return red(`exit differs across the suspension (suspended=${m[1]}, baseline=${baseline.status})`);
     }
-    return pass(`exit=${status} across SIGSTOP/SIGCONT, identical to the unsuspended baseline`);
+    return pass(
+      `exit=${m[1]} across SIGSTOP/SIGCONT with the stopped state OBSERVED in the process ` +
+        `table (state=${state[1]}), identical to the unsuspended baseline`,
+    );
   },
 
   'offline'(bin, verb) {
@@ -510,17 +565,6 @@ function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function waitFor(child, budgetMs) {
-  const deadline = Date.now() + budgetMs;
-  while (child.exitCode === null && child.signalCode === null) {
-    if (Date.now() > deadline) {
-      try { child.kill('SIGKILL'); } catch { /* already gone */ }
-      return null;
-    }
-    sleep(50);
-  }
-  return child.exitCode;
-}
 
 function descendantSnapshot() {
   try {

@@ -261,14 +261,21 @@ pub const PROBES: [ProbeSpec; 12] = [
         harness: Harness::BlackBox,
         emits_activeness: false,
         binding: SurfaceBinding::ProcessSuspension,
-        invocation: "{bin} {verb} --help, suspended mid-run and resumed (SIGSTOP/SIGCONT \
-                     on Unix, thread suspension on Windows)",
-        observable: "the surface completes with the same exit status and output it \
-                     produces without the suspension",
-        red_when: "the process dies, hangs past its budget, or produces different output \
-                   across the suspension",
-        failing_counterpart: "suspend without resuming: the budget assertion fires rather \
-                              than the run reporting a pass",
+        invocation: "{bin} {verb} --help started ALREADY SUSPENDED and then resumed — on \
+                     Unix a wrapper shell SIGSTOPs itself before `exec`, on Windows \
+                     NtSuspendProcess is called with no intervening sleep. Determinism \
+                     matters here: a suspension applied after a sleep loses the race \
+                     against a short-lived invocation, and the probe then reports the \
+                     race as a product result.",
+        observable: "the process is OBSERVED in a stopped state — `T` in the process \
+                     table on Unix, not-exited while suspended on Windows — and then \
+                     completes with the same exit status it produces unsuspended",
+        red_when: "the stopped state is never observed (so the suspension was never \
+                   established), the process dies or hangs past its budget, or its exit \
+                   status differs from the unsuspended baseline",
+        failing_counterpart: "resume without ever establishing the stop: the \
+                              observed-state assertion fires and the cell reports red \
+                              rather than passing on a suspension that never happened",
     },
     ProbeSpec {
         id: "offline",

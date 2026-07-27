@@ -1,0 +1,30 @@
+self-test: 25 assertions passed, 0 failed
+VERIFIER_SELFTEST_EXIT=0
+self-test: 62 assertions passed, 0 failed
+VALIDATOR_SELFTEST_EXIT=0
+   Compiling wcore-sandbox v0.12.25 (/root/wayland-p28/crates/wcore-sandbox)
+   Compiling lru v0.18.0
+   Compiling quick-xml v0.39.4
+   Compiling wcore-eval-scenarios v0.12.25 (/root/wayland-p28/crates/wcore-eval-scenarios)
+   Compiling wcore-observability v0.12.25 (/root/wayland-p28/crates/wcore-observability)
+   Compiling wcore-memory v0.12.25 (/root/wayland-p28/crates/wcore-memory)
+   Compiling image v0.25.10
+   Compiling pdf-extract v0.12.0
+   Compiling wcore-tools v0.12.25 (/root/wayland-p28/crates/wcore-tools)
+   Compiling wcore-mcp v0.12.25 (/root/wayland-p28/crates/wcore-mcp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.85s
+────────────
+ Nextest run ID 7469409a-c45d-4339-8f94-ebb958355e46 with nextest profile: default
+    Starting 9 tests across 1 binary
+        PASS [   0.005s] (1/9) wcore-eval-scenarios::e5_native_matrix the_executor_mirrors_the_canonical_probe_table_entry_for_entry
+        PASS [   0.005s] (2/9) wcore-eval-scenarios::e5_native_matrix the_nine_f28_01_dimensions_exist_verbatim_as_probes
+        PASS [   0.005s] (3/9) wcore-eval-scenarios::e5_native_matrix the_guard_against_harness_bound_macos_coverage_can_actually_fire
+        PASS [   0.006s] (4/9) wcore-eval-scenarios::e5_native_matrix every_generated_matrix_cell_has_exactly_one_probe
+        PASS [   0.006s] (5/9) wcore-eval-scenarios::e5_native_matrix the_executor_self_test_covers_the_marker_rejections_this_plan_relies_on
+        PASS [   0.006s] (6/9) wcore-eval-scenarios::e5_native_matrix all_three_mandatory_cells_are_probed_by_their_own_cell_specific_probe
+        PASS [   0.006s] (7/9) wcore-eval-scenarios::e5_native_matrix black_box_probes_require_no_cargo_harness
+        PASS [   0.009s] (8/9) wcore-eval-scenarios::e5_native_matrix every_probe_declares_the_mutation_that_makes_it_red
+        PASS [   0.010s] (9/9) wcore-eval-scenarios::e5_native_matrix a_harness_bound_probe_may_not_be_the_only_cover_of_a_critical_cell_on_macos
+────────────
+     Summary [   0.011s] 9 tests run: 9 passed, 0 skipped
+NEXTEST_EXIT=0

@@ -1,0 +1,33 @@
+HOST_SHA=7c54e030229bd9580be6f4591659474b34dbaefc
+HOST_TREE=7e42e3e1dab915ddf5b4e0e8fe452d3feb164b73
+    Checking hashlink v0.9.1
+    Checking euclid v0.20.14
+    Checking csv-core v0.1.13
+    Checking mutate_once v0.1.2
+    Checking postscript v0.14.1
+    Checking cff-parser v0.2.0
+    Checking byteorder v1.5.0
+    Checking kamadak-exif v0.6.1
+    Checking csv v1.4.0
+    Checking calamine v0.26.1
+    Checking wcore-repomap v0.12.25 (/root/wayland-p28/crates/wcore-repomap)
+    Checking mail-parser v0.11.3
+    Checking lru v0.18.0
+    Checking quick-xml v0.39.4
+    Checking hyper-rustls v0.27.9
+    Checking axum v0.7.9
+    Checking rusqlite v0.32.1
+    Checking reqwest v0.12.28
+    Checking image v0.25.10
+    Checking wcore-protocol v0.12.25 (/root/wayland-p28/crates/wcore-protocol)
+    Checking wcore-sandbox v0.12.25 (/root/wayland-p28/crates/wcore-sandbox)
+    Checking pdf-extract v0.12.0
+    Checking wcore-config v0.12.25 (/root/wayland-p28/crates/wcore-config)
+    Checking wcore-egress v0.12.25 (/root/wayland-p28/crates/wcore-egress)
+    Checking wcore-eval-scenarios v0.12.25 (/root/wayland-p28/crates/wcore-eval-scenarios)
+    Checking wcore-observability v0.12.25 (/root/wayland-p28/crates/wcore-observability)
+    Checking wcore-memory v0.12.25 (/root/wayland-p28/crates/wcore-memory)
+    Checking wcore-tools v0.12.25 (/root/wayland-p28/crates/wcore-tools)
+    Checking wcore-mcp v0.12.25 (/root/wayland-p28/crates/wcore-mcp)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 24.57s
+CLIPPY_EXIT=0
