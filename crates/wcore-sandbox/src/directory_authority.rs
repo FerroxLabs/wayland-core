@@ -1,7 +1,7 @@
 //! Retained filesystem identity for authority-bearing directories.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
