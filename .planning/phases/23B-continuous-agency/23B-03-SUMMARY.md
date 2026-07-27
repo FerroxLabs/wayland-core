@@ -2,11 +2,11 @@
 phase: 23B-continuous-agency
 plan: "03"
 subsystem: persistent-repository-index
-status: complete-with-named-open-clause
+status: complete-semantic-layer-deferred
 requirements:
   - F23-06
 requirements_disposition:
-  F23-06: incomplete
+  F23-06: complete-with-semantic-layer-deferred
 tags: [repomap, index, sqlite, fts5, bm25, incremental, provenance, staleness, secret-isolation]
 provides:
   - crates/wcore-repomap/src/store.rs
@@ -48,14 +48,13 @@ isolation proved against the store's own bytes. It is reachable as
 `23B-03-LIVE-EVIDENCE.md` was measured by driving that binary against this
 workspace.
 
-**Termination state: 3 — complete with one named open clause.**
+**Termination state: 2 — complete, semantic layer deferred.**
 
-Two of the three mandatory platform legs are PASS on real hardware with
-caller-generated nonces. The **macOS leg did not run** and is recorded as
-**NOT ACHIEVED** — not a pass, not a fail — with its exact blocking cause in
-`23B-03-LIVE-EVIDENCE.md` §6. Because the plan's mandatory clause is "measured
-on all three platforms", **F23-06 is not marked complete.** The optional
-semantic layer is separately deferred under state 2's allowance, with the
+All three mandatory platform legs are **PASS** on real hardware, each with a
+nonce the caller generated at run time and each against a binary whose own
+`--build-info` source SHA was asserted equal to the commit under test before
+any measurement was taken. Every mandatory clause of F23-06 is closed. The
+only thing deferred is the layer F23-06 itself marks OPTIONAL, with the
 non-claim recorded below.
 
 ## The dependency question, answered explicitly
@@ -179,8 +178,8 @@ finding 23B-03-M1 rather than presented as a quirk.
 | BM25 + symbol retrieval with an exact-search fallback | **MET** | `F23_03_FALLBACK_REPORTED=true` on both; the unit gate distinguishes "no matches" from "cannot be served" |
 | Provenance and staleness on every hit | **MET** | every hit carries path, line, per-modality rank, fused score, scope identity and a 3-axis staleness verdict; `F23_03_STALENESS_REPORTED=true` asserted **before and after** the edit |
 | Secret and authority isolation proved against the store's own bytes | **MET** | `F23_03_STORE_NONCE_OCCURRENCES=0` with `CONTROL_OCCURRENCES=1` on both platforms; red-proved by disabling gitignore |
-| Measured warm-start, size, latency and retrieval-quality gates | **PARTIALLY MET** | measured and recorded on Linux and Windows, three samples each, all samples published. **No macOS numbers exist.** |
-| Driven through the shipped binary on Linux, macOS **and** Windows | **NOT MET** | Linux PASS, Windows PASS, **macOS NOT ACHIEVED** |
+| Measured warm-start, size, latency and retrieval-quality gates | **MET** | measured and recorded on all three platforms, three samples each for cold build and warm start, all samples published |
+| Driven through the shipped binary on Linux, macOS **and** Windows | **MET** | Linux `nonce=d3b14061fc7a3735`, Windows `nonce=49a9ca44ae600fe8`, macOS `nonce=3a2127430e0437db`, all exit 0 |
 | Crate isolation rule holds; no new package in the lock | **MET** | `grep -cE '^wcore-' Cargo.toml` = 0; lock diff = 2 edges, **0** `[[package]]` entries |
 | Existing public API and live consumers unchanged | **MET** | `RepoMap::build` / `build_with_options` / every public type untouched; `wcore-tools` + CLI at-ref suites green (1244/1244) |
 | Optional semantic layer shipped behind an off-by-default flag **or** deferred with a recorded non-claim | **MET (deferred)** | not built; `semantic_status()` reports unavailability on every search and every `index status`, and a test pins that |
@@ -190,7 +189,7 @@ finding 23B-03-M1 rather than presented as a quirk.
 
 | Requirement | Disposition |
 |---|---|
-| **F23-06** | **INCOMPLETE.** The index is built, complete in function, and proved live on two of three platforms. The mandatory clause "measured on Linux, macOS and Windows" is unmet because the macOS leg did not run. Everything needed to close it is in place — the driver already resolves `PLATFORM=macos`, and §6 of the evidence gives the exact five-line procedure. What is missing is one CI `build`-job artifact. |
+| **F23-06** | **COMPLETE, with the OPTIONAL semantic layer deferred and the non-claim recorded.** Every mandatory clause is closed and measured on Linux, macOS and Windows through the shipped binary against this real 3,610-file workspace. The deferral is exactly what the requirement permits and the plan's termination state 2 describes. |
 
 ## Deviations from plan
 
@@ -204,11 +203,12 @@ finding 23B-03-M1 rather than presented as a quirk.
   `build` job independent of the failing contract-corpus check, and `lane/**`
   is already in `push.branches`. Downloading that artifact is not a second
   *Cargo* resolver — it is the rule-compliant path the plan's own premise
-  measured wrong. The route did not complete for a measured reason and not a
-  conceptual one: **11 CI runs queued, 0 in progress** across the repository —
-  the frontier execution saturated the org's Actions capacity — so run
-  `30277494031` sat at `pending` with zero jobs for the rest of the session.
-  Reported as NOT ACHIEVED rather than worked around.
+  measured wrong, and it needed no Cargo on the Mac. Verified end to end:
+  `wayland-core --build-info` on the downloaded artifact prints
+  `(source 1eb2d7c255b8cdc4f2f194e60cd82ab6bbddfc68)`, a commit on this lane
+  branch. The only cost was queueing — for about two hours the repository
+  showed **11 runs queued, 0 in progress**, and each push cancelled this
+  branch's own queued run. It completed once pushing stopped.
 - **Remote gates ran in a per-lane worktree, not in `/root/wayland` directly.**
   The plan's verify blocks say `cd /root/wayland && git checkout --detach $SHA`.
   Five lanes share that checkout concurrently; detaching it would yank the
@@ -282,7 +282,7 @@ not hidden, and not counted as this plan's green.
 | `cargo nextest run -p wcore-repomap --profile ci` | **native Windows** | **57/57** (58th is `#[cfg(unix)]`) |
 | `scripts/f23-index-drive.sh` | `hetzner-dsm` | **exit 0**, `F23_03_DRIVE=PASS platform=linux nonce=d3b14061fc7a3735` |
 | `scripts/f23-index-drive.ps1` | **SeanDesktop** | **exit 0**, `F23_03_DRIVE=PASS platform=windows nonce=49a9ca44ae600fe8` |
-| `scripts/f23-index-drive.sh` | macOS | **NOT RUN** — no binary; see evidence §6 |
+| `scripts/f23-index-drive.sh` | **this Mac, arm64** | **exit 0**, `F23_03_DRIVE=PASS platform=macos nonce=3a2127430e0437db`, against CI's own `wayland-core-aarch64-apple-darwin` artifact whose `--build-info` SHA equals the commit under test |
 | `cargo hakari verify` | — | **NOT RUN** — tool absent |
 
 Every remote gate pinned the exact commit with `git checkout -q --detach $SHA`
@@ -306,9 +306,28 @@ secret-isolation assertion, the rename assertion, and both halves of the
 Windows ssh gate shape (exit 92 on a missing file, exit 4 on `--no-tests=fail`).
 Full detail in `23B-03-LIVE-EVIDENCE.md` §3.
 
+## Coordinator notes, checked rather than assumed
+
+- **`atomic_write` / `wcore-config` long-path fix:** not inherited and not
+  applicable. `grep -rn 'atomic_write'` over `crates/wcore-repomap/`,
+  `crates/wcore-cli/src/index_cmd.rs` and the drive scripts returns nothing,
+  and `wcore-repomap` declares **zero** internal `wcore-*` dependencies, so it
+  cannot reach `wcore-config` at all. The store writes through `rusqlite`.
+- **Merge-base, not branch name:** the merge-base of `lane/23B-03` and
+  `plan/f20-unified-audit-repair` is
+  `32e2f57d09fe4b287e513081862217dc9daa5901`, confirmed with `git merge-base`.
+  That exact SHA is the one used to prove the four `wcore-cli` failures
+  pre-existing, so no other lane's merged work is attributed here. This branch
+  was **not** merged forward.
+- **EMFILE / `wcore-skills` watcher cluster:** not encountered. No
+  full-workspace test run was ever taken; every run was targeted
+  (`-p wcore-repomap`, `-p wcore-repomap -p wcore-tools`, `-p wcore-cli`), and
+  `wcore-skills` was never in scope. The only failure cluster seen was the
+  four `child_authority_corpus` tests, which were re-run **alone at the base
+  commit** before being reported, and fail identically there.
+
 ## What was NOT done
 
-- **No macOS leg.** No macOS numbers exist anywhere in this plan's output.
 - **The optional semantic / dense-vector layer was not built.** Recorded as an
   explicit non-claim; the product reports its own unavailability.
 - **No perf pass-fail thresholds were invented.** The four figures are
@@ -321,7 +340,11 @@ Full detail in `23B-03-LIVE-EVIDENCE.md` §3.
 
 ## Self-Check
 
-All nine created files exist on disk; both drive logs exist and carry their
-run's own nonce in a terminal PASS marker; every commit below resolves in
-`git log`. The macOS drive log is asserted **absent**, consistent with the
-NOT ACHIEVED disposition — there is no file to grep and no number claimed.
+All created files exist on disk. All **three** drive logs exist and each
+carries its own run's caller-generated nonce in a terminal
+`F23_03_DRIVE=PASS` marker (`d3b14061fc7a3735` linux, `3a2127430e0437db`
+macos, `49a9ca44ae600fe8` windows). Re-running the plan's own assertion gates
+over all three logs reports `ALL_THREE_PLATFORMS=PASS`. The failing first
+macOS run is retained beside the passing one as
+`evidence/23B-03-macos-drive-selfwrite-red.log`, and its numbers are not mixed
+into any table. Every commit resolves in `git log`.

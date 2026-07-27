@@ -21,7 +21,7 @@ a measurement against an unidentifiable binary is not a measurement.
 |---|---|---|---|
 | Linux (`hetzner-dsm`) | built on the host at the commit under test | `evidence/23B-03-linux-drive.log` | **PASS** |
 | Windows (`SeanDesktop`, native msvc) | built on the host at the commit under test | `evidence/23B-03-windows-drive.log` | **PASS** |
-| macOS (this Mac, arm64) | would be the CI `build` job artifact `wayland-core-aarch64-apple-darwin` | *no log — the leg did not run* | **NOT ACHIEVED** (§6) |
+| macOS (this Mac, arm64) | CI `build` job artifact `wayland-core-aarch64-apple-darwin`, run 30278953807 | `evidence/23B-03-macos-drive.log` | **PASS** |
 
 ---
 
@@ -33,7 +33,7 @@ loosened; where a measurement disappointed, the number is reported as it is.
 
 | Gate | Threshold | Chosen | Measured (Linux) |
 |---|---|---|---|
-| Warm start reads **zero** files | `read == 0` exactly | **BEFORE** — it is the plan's definition of incrementality, not a tuning knob | 0 / 0 / 0 |
+| Warm start reads **zero** files | `read == 0` exactly | **BEFORE** — it is the plan's definition of incrementality, not a tuning knob | 0 / 0 / 0 on all three platforms — and it went RED once, unprompted, on macOS (§6.1) |
 | Unchanged files not re-extracted | `extracted <= files touched` | **BEFORE** — same reason | 0 surplus on all 5 mutations |
 | Gitignored nonce in store bytes | `== 0` occurrences | **BEFORE** — it is a security property | 0 |
 | Retrieval `precision@1` (unit corpus) | `>= 0.90` | **AFTER**, from a measured 1.00 | 1.00 |
@@ -181,6 +181,8 @@ to fail on purpose, on real hardware, and the failure output was read.
 | `renaming_…_reuses_its_hash_and_re_extracts_nothing` | disabled rename detection | FAILED: `added: 1, deleted: 1, renamed: 0, files_extracted: 1` |
 | the Windows ssh gate shape | asserted a file that does not exist | exit **92**, propagated through `exit $LASTEXITCODE` |
 | the Windows ssh gate shape | `-E 'test(definitely_no_such_test)' --no-tests=fail` | exit **4** |
+| the plan's own Windows drive gate form | `powershell -File <missing>.ps1; exit $LASTEXITCODE` on SeanDesktop | exit **0** — it self-passes (§5.1); the guarded form exits **94** |
+| the warm-start read-count gate, **unprompted** | the driver's own log was written into the indexed tree | macOS exit **1**, `read=1 extracted=1` — it caught one changed file in 3,610 (§6.1) |
 
 After each red proof the modified file was restored from a backup copy and the
 tree confirmed clean. **No gate command in this plan is a pipeline into a
@@ -397,96 +399,136 @@ Fixed by switching the Windows port to `git archive --format=zip` plus
 
 ## 6. macOS — this Mac, arm64
 
-**NOT ACHIEVED.** Not a pass and not a fail: the leg did not run, and no
-macOS row in this document is filled from anything else.
+**PASS.** `MACOS_DRIVE_RC=0`, and the log carries
+`F23_03_DRIVE=PASS platform=macos nonce=3a2127430e0437db`.
 
-This is stated plainly rather than dressed up, and the earlier revision's
-mistake is explicitly not repeated: **no macOS number here was obtained by
-grepping an evidence file this executor wrote.** There are no macOS numbers.
+### Binary provenance — no Cargo was run on this Mac
 
-### Why the plan's own route was unavailable
-
-The plan decides "the macOS leg builds its own binary on this Mac, through
-`scripts/f23-macos-binary.sh`, which 23B-01 owns and this plan consumes
-unchanged", and instructs: *"If `scripts/f23-macos-binary.sh` is absent
-because 23B-01 did not land it, STOP and record that as a blocking dependency
-rather than improvising a second resolver."*
-
-Measured: `scripts/f23-macos-binary.sh` **does not exist**. `23B-01-SUMMARY.md`
-says so in its own deviations — *"`scripts/f23-macos-binary.sh` was NOT
-written… The phase's controlling instruction forbids running Cargo on the Mac.
-I honoured the controlling instruction and escalated the conflict."*
-`23B-02-SUMMARY.md` records the same conflict, unchanged. This lane's
-controlling instruction forbids Cargo on the Mac too (`cargo fmt --all --
---check` excepted, and that was run and is clean).
-
-### The route that IS correct, and exactly how far it got
-
-`.planning/intel/MACOS-BINARY-IS-OBTAINABLE.md` is right, and I verified its
-mechanism rather than taking it on trust:
-
-- `.github/workflows/ci.yml:484-490` uploads `wayland-core-${{ matrix.target }}`
-  containing `target/<target>/release/wayland-core`, `if-no-files-found: error`,
-  `retention-days: 14`, from a `build` job that is **independent** of the
-  failing Desktop contract-corpus drift check.
-- `ci.yml` `push.branches` already contains `'lane/**'`, so this branch fires
-  CI without any workflow edit. Confirmed: nine runs exist for `lane/23B-03`.
-
-So the artifact route is real and needed no rule bent. It did not complete
-for one measured reason:
+The binary is CI's own build artifact, downloaded and provenance-checked:
 
 ```
-$ gh api 'repos/FerroxLabs/wayland-core/actions/runs?status=queued'  --jq .total_count
-11
-$ gh api 'repos/FerroxLabs/wayland-core/actions/runs?status=in_progress' --jq .total_count
-0
+$ gh run download 30278953807 -R FerroxLabs/wayland-core -n wayland-core-aarch64-apple-darwin
+$ file wayland-core
+wayland-core: Mach-O 64-bit executable arm64
+$ ./wayland-core --build-info
+wayland-core 0.12.25 (source 1eb2d7c255b8cdc4f2f194e60cd82ab6bbddfc68)
 ```
 
-**Eleven runs queued, zero in progress** — `lane/29-01`, `lane/26c`,
-`lane/28-02`, `lane/red-repair`, `plan/f20-unified-audit-repair`,
-`lane/28-01`, `lane/24e`, `lane/23B-04`, `lane/23B-03`, `lane/24d`,
-`lane/26b`. The frontier execution itself has saturated the org's Actions
-capacity. Run `30277494031` (this lane's HEAD) sat at `status: pending` with
-**zero jobs started** for the remainder of the session, so no `build` job ran
-and no artifact was produced. Every earlier run on this branch shows
-`conclusion: cancelled` — trap #2 in the intel doc: `cancel-in-progress`
-protects a *started* run, not a queued one, and this lane pushed nine times.
+`1eb2d7c255b8cdc4f2f194e60cd82ab6bbddfc68` is a commit on `lane/23B-03`
+carrying this plan's code. The driver asserted that equality **before taking
+any measurement**, and would have exited 68 on a mismatch.
 
-I did not clear the queue. Cancelling ten other lanes' runs is not this
-lane's to do.
+Two things this route did NOT require, both worth stating because two earlier
+lanes escalated this leg as impossible:
 
-### What was explicitly NOT done to manufacture a macOS row
+- **No Cargo on the Mac.** The controlling instruction is intact.
+- **No `scripts/f23-macos-binary.sh`.** That script still does not exist;
+  23B-01 did not land it. It was not needed, because
+  `.github/workflows/ci.yml:484-490` already uploads
+  `wayland-core-${{ matrix.target }}` for all six targets from a `build` job
+  that is **independent** of the failing Desktop contract-corpus drift check,
+  and `'lane/**'` is already in `push.branches`.
 
-- **Not** built with Cargo on the Mac. Forbidden by the controlling
-  instruction, and the reason a previous lane escalated rather than proceed.
-- **Not** driven against `/opt/homebrew/bin/wayland-core`. That binary is
-  v0.12.12 and predates this work by many commits; the driver's `--build-info`
-  provenance assertion would have refused it, correctly.
-- **Not** driven against a darwin artifact from some *other* branch's run.
-  The driver asserts the binary's source SHA equals the commit under test, so
-  such a binary would redden — and a number measured against code that is not
-  this code is not evidence for this code.
-- **Not** closed by grepping this file. That is the specific tautology the
-  plan names by hand, and it is the reason this section says NOT ACHIEVED
-  instead.
+Run `30278953807` has `conclusion: failure` — the pre-existing contract-corpus
+drift check — and its artifacts are still good. That is trap #1 in
+`.planning/intel/MACOS-BINARY-IS-OBTAINABLE.md`, confirmed again here:
+**filter runs by artifact, never by conclusion.**
 
-### What it would take
+The one real cost was queueing. For roughly two hours the repository showed
+**11 runs queued, 0 in progress** — the frontier execution had saturated the
+org's Actions capacity — and each push of this branch cancelled its own queued
+run (trap #2: `cancel-in-progress` protects a *started* run, not a queued
+one). The leg completed once pushing stopped and the queue drained.
 
-One `build`-job run on `lane/23B-03` at commit
-`3cf304e90aaee21ed8993ee14163501ee020a81a` or later, then:
+Corpus: the lane worktree — **3,610 records, 37,868 symbols**.
 
-```bash
-gh run download <id> -R FerroxLabs/wayland-core -n wayland-core-aarch64-apple-darwin
-chmod +x wayland-core
-NONCE=$(/usr/bin/openssl rand -hex 8)
-bash scripts/f23-index-drive.sh --binary ./wayland-core --sha <sha> --nonce "$NONCE" \
-  > .planning/phases/23B-continuous-agency/evidence/23B-03-macos-drive.log 2>&1
-rc=$?; test "$rc" -eq 0 && /usr/bin/grep -qF "F23_03_DRIVE=PASS platform=macos nonce=$NONCE" \
-  .planning/phases/23B-continuous-agency/evidence/23B-03-macos-drive.log
+### Cold build / warm start / size
+
+| Sample | Cold (ms) | Warm (ms) | Warm reads | Warm re-extracts | Store bytes |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 4560 | 210 | **0** | **0** | 66,703,360 |
+| 2 | 6513 | 223 | **0** | **0** | 66,703,360 |
+| 3 | 4428 | 150 | **0** | **0** | 66,703,360 |
+
+**Warm : cold ratio ≈ 0.046.** Cold build is 3–4× Linux and Windows
+(1.5 s), on the noisiest of the three hosts — this Mac was concurrently
+hosting five lanes' worktrees and their ssh sessions. The spread across
+samples (4428–6513 ms) is itself the evidence that it is contention, not the
+index: the corpus, the binary and the code were identical across the three.
+
+Store size is within 4 KB of Windows and 148 KB of Linux. The format is
+platform-stable across all three.
+
+### Query latency
+
+`p50 = 6,662 µs`, `p95 = 13,004 µs`, n = 20. The p95 is 2× the p50 and 2.1×
+Windows' p95, and the sample spread (3,603 µs to 20,619 µs) is far wider than
+Linux's (5,485–7,171 µs) or Windows'. Same cause as the cold-build spread: a
+contended host. Recorded as measured, not smoothed, and not used to set any
+threshold.
+
+### Retrieval quality
+
+`precision@1 = 0.8125`, `recall@10 = 1.0000` — **identical to Linux and to
+Windows, query for query**, including which three queries lose top-1. Ranking
+is now measured as platform-stable across all three targets.
+
+### Incremental mutations
+
+All five PASS with `unchanged_reextracted=0` against a 3,614-file scratch
+tree with 3,609 records: `added=1` / `changed=1` / `deleted=1` /
+`renamed=1` (re-extracting **0**) / branch switch `added=1`.
+
+### Fallback, staleness, verify and secret isolation
+
+```
+F23_03_FALLBACK_REPORTED=true
+F23_03_STALENESS_REPORTED=true
+F23_03_VERIFY=agrees=false exit=6
+F23_03_STORE_CONTROL_OCCURRENCES=1
+F23_03_STORE_NONCE_OCCURRENCES=0
 ```
 
-The driver already resolves `PLATFORM=macos` from `uname -s` and needs no
-change. Nothing else blocks the leg.
+### 6.1 The macOS leg went RED first, and the index was right
+
+The first macOS run — `evidence/23B-03-macos-drive-selfwrite-red.log`, kept
+deliberately — **failed with exit 1 and three failures**, all the same one:
+
+```
+FAIL: warm start sample 1 opened 1 files and extracted 1 —
+      incrementality is a READ COUNT, and this one is not zero
+F23_03_WARM=sample=1 read=1 extracted=1
+```
+
+Exactly one file, on every sample, out of 3,610.
+
+The cause is the harness, not the product. On macOS the driver runs *locally*,
+and its stdout was redirected into
+`.planning/phases/23B-continuous-agency/evidence/23B-03-macos-drive.log` —
+a tracked, in-scope file **inside the repository being indexed**, growing on
+every line the driver printed. Between the cold build and the warm start,
+exactly one file's bytes changed, and the index noticed. The Linux and Windows
+legs never hit this because their logs are written by the `ssh` redirect on
+the *caller's* machine, not inside the remote tree.
+
+**Diagnosed by experiment, not by argument.** The identical driver, identical
+binary, identical corpus, with only the log redirected outside the tree:
+
+```
+$ bash scripts/f23-index-drive.sh --binary … --sha … --nonce 3a2127430e0437db \
+    > /tmp/f23-macos-drive-outside.log 2>&1
+MACOS_DRIVE_RC=0
+F23_03_WARM=sample=1 read=0 extracted=0
+F23_03_WARM=sample=2 read=0 extracted=0
+F23_03_WARM=sample=3 read=0 extracted=0
+```
+
+The red log is retained because it is the strongest single piece of evidence
+in this document that the read-count gate works: it detected **one** changed
+file among 3,610 and refused to call the run incremental. A stopwatch-based
+warm-start assertion would have passed it without noticing — 152 ms, well
+inside any plausible bound. The recorded macOS numbers above come from the
+passing run; the failing run's numbers are not mixed in.
 
 ---
 
