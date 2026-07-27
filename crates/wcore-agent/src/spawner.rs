@@ -3691,7 +3691,8 @@ mod production_durable_spawn_tests {
     use wcore_types::llm::{LlmEvent, LlmRequest};
     use wcore_types::message::{FinishReason, StopReason, TokenUsage};
     use wcore_types::spawner::{
-        ChildDesiredState, ChildOrigin, ChildRecoveryState, DurableChildStatus,
+        CHILD_ELIGIBLE_TOOLS, ChildDesiredState, ChildOrigin, ChildRecoveryState,
+        DurableChildStatus,
     };
 
     use super::{
