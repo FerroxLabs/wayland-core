@@ -76,6 +76,74 @@ fn retained_reservation_rejects_same_inode_truncate_and_rewrite() {
     assert!(error.to_string().contains("changed"), "{error}");
 }
 
+/// Two threads validating the SAME retained reservation receipt concurrently
+/// must both observe the receipt's real contents.
+///
+/// # The defect this closes (F-3)
+///
+/// A running worker validates this exact receipt from two threads at once, and
+/// has done since the workspace monitor was added: `dispatch::mirror_heartbeat`
+/// calls `TransactionWorkspace::validate_execution_authority` on the runtime
+/// thread every 20ms, while `WorkspaceMonitor`'s `spawn_blocking` scan calls it
+/// again on a blocking thread every 100ms. Both reach
+/// `validate_reservation_contents` on the one `Arc<RegularFileAuthority>` the
+/// transaction retains.
+///
+/// The read behind them rewound and drained a `try_clone()` of the retained
+/// descriptor. `try_clone` is `dup` on unix and `DuplicateHandle` on Windows;
+/// BOTH share the file offset with the original description rather than
+/// creating a new one. So the two readers raced on one offset — rewind, rewind,
+/// drain, drain — and the loser read ZERO bytes from a file that was never
+/// empty. `"".parse::<u64>()` then failed as
+/// `invalid retained workspace reservation`, and the worker was failed for a
+/// receipt that was intact the whole time.
+///
+/// That is why the observed failure rate scaled with how long a worker ran
+/// (4/4 workers at 1s, 1/4 at 10s) rather than with anything it did: elapsed
+/// time is just how many of these racing pairs occur.
+///
+/// The assertion is the SYMPTOM, not the mechanism: any read that cannot
+/// observe a receipt two threads are reading fails here, whatever the
+/// implementation. It is bounded by iteration count, never by a deadline, so it
+/// cannot pass by timing out.
+#[test]
+fn concurrent_reservation_validation_never_reads_a_truncated_receipt() {
+    const READERS: usize = 8;
+    const READS_PER_READER: usize = 4096;
+
+    let fixture = tempfile::tempdir().expect("fixture");
+    let reservation = fixture.path().join("reservation");
+    let reserved_bytes = 8_589_934_592_u64;
+    std::fs::write(&reservation, reserved_bytes.to_string()).unwrap();
+    let authority = Arc::new(RegularFileAuthority::open(&reservation).unwrap());
+
+    let readers: Vec<_> = (0..READERS)
+        .map(|_| {
+            let authority = Arc::clone(&authority);
+            let reservation = reservation.clone();
+            std::thread::spawn(move || {
+                for _ in 0..READS_PER_READER {
+                    validate_reservation_authority(&authority, &reservation, reserved_bytes)?;
+                }
+                Ok::<(), SwarmError>(())
+            })
+        })
+        .collect();
+
+    let mut failures = Vec::new();
+    for reader in readers {
+        if let Err(error) = reader.join().expect("reservation reader thread") {
+            failures.push(error.to_string());
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "concurrent readers of an unmodified reservation receipt observed {} failures: {}",
+        failures.len(),
+        failures.join("; ")
+    );
+}
+
 /// A held transaction lease must be observable as held by an INDEPENDENT
 /// observer, and must stop being observable once released.
 ///
