@@ -5116,12 +5116,25 @@ mod posture_inheritance_tests {
     /// while its legacy `auto_approve` says otherwise therefore minted a receipt
     /// asserting `posture: managed` and `managed_floor_active: true` alongside
     /// `approvals: bypass` — the floor reported as enforced and bypassed at once.
+    ///
+    /// The composition below is NOT synthetic: it is exactly what the live
+    /// `wayland-core forge` path builds. `AgentBootstrap` normalises the legacy
+    /// fields to the typed baseline (bootstrap.rs `set_smart_approval_policy`)
+    /// and installs the manager's managed floor, so every bootstrapped session
+    /// is already coherent. `orchestration::anvil::seat` bypasses that path
+    /// entirely: `resolve_driver_seat` FORCES `tools.auto_approve = true` on a
+    /// clone of the session config while leaving `execution_policy` managed, and
+    /// `materialize_standalone_driver_seat` hands that config to
+    /// `AgentSpawner::new` through `bootstrap::govern_standalone_spawner`, which
+    /// never calls `with_approval_manager`. With no manager, `child_config`
+    /// skips its clamp and the seam is handed a raw `Bypass`.
     #[test]
     fn child_durable_receipt_cannot_report_a_managed_floor_as_bypassed() {
         // A managed baseline whose legacy approval fields disagree with it.
         // `AgentSpawner::new` derives the session receipt from the TYPED
         // baseline; `child_config` derives the child's posture from the legacy
-        // fields, so the two sides of the seam genuinely diverge.
+        // fields, so the two sides of the seam genuinely diverge. No approval
+        // manager is installed, mirroring `govern_standalone_spawner`.
         let mut authority = config_with_posture(true, vec![]);
         authority.execution_policy =
             BaselineExecutionPolicy::managed(ApprovalPolicy::Prompt, ManagedDangerousPolicy::Allow);
@@ -5162,6 +5175,74 @@ mod posture_inheritance_tests {
             receipt.managed_floor_active,
             "the receipt must keep asserting the floor it now actually enforces",
         );
+    }
+
+    /// Wiring counterpart to
+    /// `child_durable_receipt_cannot_report_a_managed_floor_as_bypassed`.
+    ///
+    /// That test proves the ratchet holds on the contradictory state. This one
+    /// proves the state is what the PRODUCTION path actually composes, by
+    /// driving the real `bootstrap::govern_standalone_spawner` — the function
+    /// `orchestration::anvil::seat::materialize_standalone_driver_seat` calls,
+    /// which `wcore-cli`'s `run_forge` calls in turn. Without this, a later
+    /// change to the composition could leave the ratchet test green while the
+    /// defect ships: the mechanism would be tested but not the wiring.
+    ///
+    /// The config is built the way `resolve_driver_seat` builds it — a managed
+    /// session config with `tools.auto_approve` FORCED true (seat.rs) — and the
+    /// governance function is the real one, which notably never calls
+    /// `with_approval_manager`, so `child_config`'s clamp does not apply.
+    #[test]
+    fn govern_standalone_spawner_cannot_compose_a_contradictory_child_receipt() {
+        let home = tempfile::tempdir().expect("temp home");
+
+        // Exactly `resolve_driver_seat`'s composition: a managed session config
+        // whose legacy approval field is then forced on for the driver seat.
+        let mut session_cfg = config_with_posture(false, vec![]);
+        session_cfg.execution_policy =
+            BaselineExecutionPolicy::managed(ApprovalPolicy::Prompt, ManagedDangerousPolicy::Allow);
+        session_cfg.session.directory = home.path().join("sessions").to_string_lossy().into_owned();
+        session_cfg.model = "test-model".to_owned();
+        session_cfg.provider_label = "test-provider".to_owned();
+        let mut seat_cfg = session_cfg.clone();
+        seat_cfg.tools.auto_approve = true;
+
+        // The REAL production governance function.
+        let spawner = crate::bootstrap::govern_standalone_spawner(
+            AgentSpawner::new(Arc::new(NeverProvider), seat_cfg.clone()),
+            &seat_cfg,
+        )
+        .expect("standalone governance must succeed");
+
+        let child = spawner.child_config(&sub_config());
+        assert_eq!(
+            child.smart_approval_policy(),
+            ApprovalPolicy::Bypass,
+            "precondition: the production composition must still hand the seam a \
+             widening request, or this test has stopped covering the defect",
+        );
+
+        // Verbatim reproduction of `pre_resolve_durable_launch`.
+        let runtime_policy = spawner
+            .effective_policy
+            .with_runtime_approvals(child.smart_approval_policy());
+        let receipt = super::child_policy_snapshot(&runtime_policy)
+            .expect("child policy snapshot must encode");
+
+        assert!(
+            !(receipt.posture == "managed"
+                && receipt.managed_floor_active
+                && receipt.approvals == "bypass"),
+            "the production standalone-seat composition minted a receipt asserting an \
+             active Managed floor and reporting it bypassed: posture={} \
+             managed_floor_active={} approvals={}",
+            receipt.posture,
+            receipt.managed_floor_active,
+            receipt.approvals,
+        );
+        assert_eq!(receipt.approvals, "prompt");
+        assert_eq!(receipt.posture, "managed");
+        assert!(receipt.managed_floor_active);
     }
 
     #[test]
