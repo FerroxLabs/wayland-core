@@ -140,6 +140,13 @@ pub mod profile;
 // CLI surface: `wayland-core migrate` — import Hermes/OpenClaw setups (#228).
 pub mod migrate;
 
+// F26-03/F26-04: CLI surface `wayland-core backup` — archive / verify / restore /
+// recover a Wayland home, with a write-ahead operation journal whose recovery
+// pass undoes an interrupted operation to the exact pre-operation tree. Lives in
+// the lib so the journal, remap and rollback logic are testable under
+// `cargo test -p wcore-cli --lib` against tempdir-backed synthetic homes.
+pub mod backup;
+
 // F23-02 (Phase 23B) — `wayland-core session`: the operator surface for
 // Success Criterion 2's verbs (list, search, show, checkpoint, rewind, retry,
 // fork, export, retain, reconcile, cancel). Lives in the lib so the

@@ -742,6 +742,11 @@ enum TopCmd {
         #[command(subcommand)]
         cmd: wcore_cli::migrate::MigrateCmd,
     },
+    /// Archive, verify, restore and recover a Wayland home (F26-03).
+    Backup {
+        #[command(subcommand)]
+        cmd: wcore_cli::backup::BackupCmd,
+    },
 }
 
 /// F-089: `models` sub-subcommands.
@@ -1404,6 +1409,14 @@ async fn run() -> anyhow::Result<ExitCode> {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(e) => {
                     eprintln!("wayland-core migrate: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
+            // `backup::run` is synchronous — no `.await` (mirrors `TopCmd::Migrate`).
+            TopCmd::Backup { cmd } => match wcore_cli::backup::run(cmd) {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core backup: {e:#}");
                     Ok(ExitCode::FAILURE)
                 }
             },
