@@ -1,0 +1,14 @@
+HARNESS_SHA=9529c46a9412547a3d59aca394c23b91860ba1aa
+BINARY=/private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/f28/artifacts/wayland-core-aarch64-apple-darwin/wayland-core
+BINARY_SHA256=945534d6ebfab321bffc8ba6034201035f577031b496e0a72e08f87746ea5af7
+BINARY_DIGEST_BOUND_TO_CANDIDATE_LEDGER (945534d6... aarch64-apple-darwin)
+HOST=Seans-MacBook-Pro.local 26.3 arm64
+{
+ "observed": false,
+ "reason": "no worker could be spawned through the product's own sandbox path, so no containment differential is obtainable: {",
+ "raw": "{\n  \"workers\": [\n    {\n      \"branch\": \"swarm/cli/18b0f20c702b4ea0bcb8b323c241c75b-0\",\n      \"duration\": \"534ms 142us 625ns\",\n      \"status\": {\n        \"Failed\": \"sandbox backend sandbox_exec cannot own descendants that escape a process group; select Docker for delegated Swarm execution on this host; qualified Docker fallback is unavailable on this macOS host: docker backend disabled (feature `live-docker` off)\"\n      },\n      \"stderr\": \"\",\n      \"stdout\": \"\",\n      \"worker_id\": \"18b0f20c702b4ea0bcb8b323c241c75b-0\"\n    }\n  ]\n}\n"
+}
+cells=216 red=24
+RUN_RC=0
+VERIFIED platform=macos cells=216
+VERIFY_RC=0

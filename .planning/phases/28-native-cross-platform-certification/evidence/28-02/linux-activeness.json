@@ -1,0 +1,5 @@
+{
+ "observed": true,
+ "probe": "containment-differential",
+ "detail": "process-id namespace changed (NSpid:1277328 outside, NSpid:4 inside); filesystem root reduced from 52 entries to 9 (mount namespace); DNS resolves outside and does not inside (network namespace)"
+}

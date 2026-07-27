@@ -1,0 +1,222 @@
+=== F28 OBSERVABILITY CONTROL, COMBINED LOG ===
+run_id=f28ctl-20260727222551
+--- LEG 1: scheduled-task session ---
+F28 OBSERVABILITY CONTROL session=scheduled-task run=f28ctl-20260727222551
+started=2026-07-27T22:28:00.9259346+07:00
+QUIET_CHECK build_processes=0
+HOST_SHA=78b91444cd3a4d790b138591c624adfc326e1ca1
+HOST_TREE=ef9782a75a88d1875a2afefcef2ab5678f42e392
+BINARY=C:\f28\candidate-wayland-core.exe
+BINARY_SHA256=baf9bd692833eb7b9d54f00053739115b6ad5257fbdb0b0e99a8694a2ee996a6
+LOGON session_id=1 interactive=True ssh=False session_type=scheduled-task
+AS_FOUND_LEASES=0
+--- RAW session=scheduled-task lease=as-found leases=0 ---
+{
+  "workers": [
+    {
+      "branch": "swarm/cli/9b1775524dde4a58a100186117dfaa84-0",
+      "duration": "1s 584ms 943us 900ns",
+      "status": {
+        "Failed": "exit 1"
+      },
+      "stderr": "      0 [main] whoami (22964) C:\\Program Files\\Git\\usr\\bin\\whoami.exe: *** fatal error - NtCreateDirectoryObject(\\BaseNamedObjects\\msys-2.0S5-1888ae32e00d56aa): 0xC0000022\nAccess is denied.\r\n",
+      "stdout": "F28RAN \r\n",
+      "worker_id": "9b1775524dde4a58a100186117dfaa84-0"
+    }
+  ]
+}
+
+--- END RAW ---
+F28_CONTROL=session=scheduled-task;lease=as-found;leases=0;probe_report=available;product_behaviour=executed-sandboxed;ran=True;contained=True;high_il=False;disabled=False;mismatch=False
+--- RAW session=scheduled-task lease=cleared leases=0 ---
+{
+  "workers": [
+    {
+      "branch": "swarm/cli/c59d9cfd32df41338909243a7d037bc8-0",
+      "duration": "1s 661ms 504us 400ns",
+      "status": {
+        "Failed": "worker descendant still holds the retained checkout descriptor; transaction quarantined and its reservation held for retry"
+      },
+      "stderr": "worker descendant still holds the retained checkout descriptor; transaction quarantined and its reservation held for retry",
+      "stdout": "",
+      "worker_id": "c59d9cfd32df41338909243a7d037bc8-0"
+    }
+  ]
+}
+
+--- END RAW ---
+F28_CONTROL=session=scheduled-task;lease=cleared;leases=0;probe_report=available;product_behaviour=refused-fail-closed;ran=False;contained=False;high_il=False;disabled=False;mismatch=False
+WEDGE_INSTALLED=True
+--- RAW session=scheduled-task lease=wedged leases=1 ---
+candidate-wayland-core.exe : [2m2026-07-27T15:28:08.094876Z[0m [31mERROR[0m AppContainer real-spawn probe failed; 
+sandbox disabled. If the failure is transient (AV, disk contention), the probe re-runs after the negative-cache TTL. 
+[3merror[0m[2m=[0msandbox child execution failed: AppContainer ACL lease 
+\\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\WCore-storage-00002d20-00000000000000f2.toml was 
+written by wcore-sandbox's OWN TEST SUITE (it carries the test SID sentinel) and can NEVER reconcile against a real 
+AppContainer profile. This is not a platform limitation, not an SSH or session-0 effect, and not transient: the 
+sandbox stays disabled on this machine until this file is DELETED. Delete it and re-run. Tests must never write here; 
+lease_directory() resolves to a temp root under cfg(test) so this cannot recur.
+At C:\f28\control2.ps1:141 char:10
++   $out = & $exe swarm --workers 1 --worker-command $WC --repo $repo - ...
++          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([2m2026-07-27T...s cannot recur.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+{
+  "workers": [
+    {
+      "branch": "swarm/cli/dfe7fb7c90bb4a739a5da4c216f4d5cf-0",
+      "duration": "1s 82ms 143us 800ns",
+      "status": {
+        "Failed": "sandbox backend fail_closed cannot enforce delegated read denial"
+      },
+      "stderr": "",
+      "stdout": "",
+      "worker_id": "dfe7fb7c90bb4a739a5da4c216f4d5cf-0"
+    }
+  ]
+}
+
+--- END RAW ---
+F28_CONTROL=session=scheduled-task;lease=wedged;leases=1;probe_report=unavailable;product_behaviour=refused-fail-closed;ran=False;contained=False;high_il=False;disabled=True;mismatch=True
+LEASE_RESTORED count=0 expected=0
+--- RAW baseline-outside-product ---
+F28RAN 
+
+GROUP INFORMATION
+-----------------
+
+Group Name                                                    Type             SID                                                                                                           Attributes                                                     
+============================================================= ================ ============================================================================================================= ===============================================================
+Mandatory Label\High Mandatory Level                          Label            S-1-16-12288                                                                                                                                                                 
+Everyone                                                      Well-known group S-1-1-0                                                                                                       Mandatory group, Enabled by default, Enabled group             
+NT AUTHORITY\Local account and member of Administrators group Well-known group S-1-5-114                                                                                                     Mandatory group, Enabled by default, Enabled group             
+SeanDesktop\docker-users                                      Alias            S-1-5-21-3954847422-1325544036-2038804778-1002                                                                Mandatory group, Enabled by default, Enabled group             
+BUILTIN\Administrators                                        Alias            S-1-5-32-544                                                                                                  Mandatory group, Enabled by default, Enabled group, Group owner
+BUILTIN\Users                                                 Alias            S-1-5-32-545                                                                                                  Mandatory group, Enabled by default, Enabled group             
+NT AUTHORITY\INTERACTIVE                                      Well-known group S-1-5-4                                                                                                       Mandatory group, Enabled by default, Enabled group             
+CONSOLE LOGON                                                 Well-known group S-1-2-1                                                                                                       Mandatory group, Enabled by default, Enabled group             
+NT AUTHORITY\Authenticated Users                              Well-known group S-1-5-11                                                                                                      Mandatory group, Enabled by default, Enabled group             
+NT AUTHORITY\This Organization                                Well-known group S-1-5-15                                                                    
+--- END RAW ---
+F28_DIRECTION=id=neg-activeness-detector-scheduled-task;direction=negative;expected=activeness-absent;actual=activeness-absent
+F28_DIRECTION=id=neg-wedged-lease-scheduled-task;direction=negative;expected=unobservable;actual=unobservable
+F28_DIRECTION=id=pos-clean-lease-scheduled-task;direction=positive;expected=observable;actual=observable
+QUIET_CHECK_END build_processes=0
+finished=2026-07-27T22:28:08.2319888+07:00
+F28_TASK_EXIT=0
+--- LEG 2: ssh session ---
+F28 OBSERVABILITY CONTROL session=ssh run=f28ctl-20260727222551
+started=2026-07-27T22:28:13.5523557+07:00
+QUIET_CHECK build_processes=0
+HOST_SHA=78b91444cd3a4d790b138591c624adfc326e1ca1
+HOST_TREE=ef9782a75a88d1875a2afefcef2ab5678f42e392
+BINARY=C:\f28\candidate-wayland-core.exe
+BINARY_SHA256=baf9bd692833eb7b9d54f00053739115b6ad5257fbdb0b0e99a8694a2ee996a6
+LOGON session_id=0 interactive=False ssh=True session_type=ssh
+AS_FOUND_LEASES=0
+--- RAW session=ssh lease=as-found leases=0 ---
+{
+  "workers": [
+    {
+      "branch": "swarm/cli/f56c514211804a739577c0aa2bb821ad-0",
+      "duration": "1s 333ms 871us",
+      "status": {
+        "Failed": "exit 1"
+      },
+      "stderr": "      0 [main] whoami (32120) C:\\Program Files\\Git\\usr\\bin\\whoami.exe: *** fatal error - NtCreateDirectoryObject(\\BaseNamedObjects\\msys-2.0S5-1888ae32e00d56aa): 0xC0000022\nAccess is denied.\r\n",
+      "stdout": "F28RAN \r\n",
+      "worker_id": "f56c514211804a739577c0aa2bb821ad-0"
+    }
+  ]
+}
+
+--- END RAW ---
+F28_CONTROL=session=ssh;lease=as-found;leases=0;probe_report=available;product_behaviour=executed-sandboxed;ran=True;contained=True;high_il=False;disabled=False;mismatch=False
+--- RAW session=ssh lease=cleared leases=0 ---
+{
+  "workers": [
+    {
+      "branch": "swarm/cli/5747988ea6b648fe9cdf6bdc0c15bb8f-0",
+      "duration": "1s 364ms 709us 600ns",
+      "status": {
+        "Failed": "exit 1"
+      },
+      "stderr": "      0 [main] whoami (24228) C:\\Program Files\\Git\\usr\\bin\\whoami.exe: *** fatal error - NtCreateDirectoryObject(\\BaseNamedObjects\\msys-2.0S5-1888ae32e00d56aa): 0xC0000022\nAccess is denied.\r\n",
+      "stdout": "F28RAN \r\n",
+      "worker_id": "5747988ea6b648fe9cdf6bdc0c15bb8f-0"
+    }
+  ]
+}
+
+--- END RAW ---
+F28_CONTROL=session=ssh;lease=cleared;leases=0;probe_report=available;product_behaviour=executed-sandboxed;ran=True;contained=True;high_il=False;disabled=False;mismatch=False
+WEDGE_INSTALLED=True
+--- RAW session=ssh lease=wedged leases=1 ---
+candidate-wayland-core.exe : [2m2026-07-27T15:28:20.091146Z[0m [31mERROR[0m AppContainer 
+real-spawn probe failed; sandbox disabled. If the failure is transient (AV, disk contention), the 
+probe re-runs after the negative-cache TTL. [3merror[0m[2m=[0msandbox child execution failed: 
+AppContainer ACL lease \\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\WCore-s
+torage-00002d20-00000000000000f2.toml was written by wcore-sandbox's OWN TEST SUITE (it carries 
+the test SID sentinel) and can NEVER reconcile against a real AppContainer profile. This is not a 
+platform limitation, not an SSH or session-0 effect, and not transient: the sandbox stays 
+disabled on this machine until this file is DELETED. Delete it and re-run. Tests must never write 
+here; lease_directory() resolves to a temp root under cfg(test) so this cannot recur.
+At C:\f28\control2.ps1:141 char:10
++   $out = & $exe swarm --workers 1 --worker-command $WC --repo $repo - ...
++          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([2m2026-07-27T...s cannot recur.:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+{
+  "workers": [
+    {
+      "branch": "swarm/cli/b72256b6c3df488e9a9d2118ce670a83-0",
+      "duration": "1s 46ms 333us 600ns",
+      "status": {
+        "Failed": "sandbox backend fail_closed cannot enforce delegated read denial"
+      },
+      "stderr": "",
+      "stdout": "",
+      "worker_id": "b72256b6c3df488e9a9d2118ce670a83-0"
+    }
+  ]
+}
+
+--- END RAW ---
+F28_CONTROL=session=ssh;lease=wedged;leases=1;probe_report=unavailable;product_behaviour=refused-fail-closed;ran=False;contained=False;high_il=False;disabled=True;mismatch=True
+LEASE_RESTORED count=0 expected=0
+--- RAW baseline-outside-product ---
+F28RAN 
+cmd.exe : whoami: extra operand '/groups'
+At C:\f28\control2.ps1:183 char:13
++ $baseOut = (& cmd.exe /c "echo F28RAN & whoami /groups & C:\Windows\S ...
++             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (whoami: extra operand '/groups':String) [], RemoteEx 
+   ception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Try 'whoami --help' for more information.
+
+GROUP INFORMATION
+-----------------
+
+Group Name                                                    Type             SID                                                                                                           Attributes                                                     
+============================================================= ================ ============================================================================================================= ===============================================================
+Everyone                                                      Well-known group S-1-1-0                                                                                                       Mandatory group, Enabled by default, Enabled group             
+NT AUTHORITY\Local account and member of Administrators group Well-known group S-1-5-114                                                                                                     Mandatory group, Enabled by default, Enabled group             
+SeanDesktop\docker-users                                      Alias            S-1-5-21-3954847422-1325544036-2038804778-1002                                                                Mandatory group, Enabled by default, Enabled group             
+BUILTIN\Administrators                                        Alias            S-1-5-32-544                                                                                                  Mandatory group, Enabled by default, Enabled group, Group owner
+BUILTIN\Users                                                 Alias            S-1-5-32-545                                                                                                  Mandatory group, Enabled by default, Enabled group             
+NT AUTHORITY\NETWORK                                          Well-known group S-1-5-2                                                                                                       Mandatory group, Enabled by default, Enabled group             
+NT AUTHORITY\Authenticated Users                              Well-known group S-1-5-11                                                                                                      Mandatory group, Enabled by default, Enabled group             
+NT AUTHORITY\This Organization                                Well-known group S-1-5-15                                                                                                      Mandatory group, Enabled by default, 
+--- END RAW ---
+F28_DIRECTION=id=neg-activeness-detector-ssh;direction=negative;expected=activeness-absent;actual=activeness-absent
+F28_DIRECTION=id=neg-wedged-lease-ssh;direction=negative;expected=unobservable;actual=unobservable
+F28_DIRECTION=id=pos-clean-lease-ssh;direction=positive;expected=observable;actual=observable
+QUIET_CHECK_END build_processes=0
+finished=2026-07-27T22:28:20.2870224+07:00
+F28_TASK_EXIT=0
+EXIT=0
