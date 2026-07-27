@@ -388,3 +388,14 @@ a diagnosis cycle and it can mask a genuine red.
 
 **Until then:** use `cargo nextest run --profile ci`, or `--test-threads=1` for the raw harness,
 and do not report a parallel-run failure count as a regression without the serial control.
+
+### swarm-status-cap-flake — `status_output_cap_kills_git_descendant` flakes ~2/20 · MEDIUM
+
+Pre-existing and unrelated to the F-3 positional-read fix — **it flakes at base too**, confirmed
+across matched N=20 full-suite `nextest --profile ci` runs. It drives `assert_clean` through a
+fake git script, never creates a transaction root, and races its own 2s capture timeout against
+a 4096-byte stdout cap. Left untouched; its timeout was deliberately NOT raised.
+
+For contrast, so this is not confused with the defect that was fixed: F-3 produced **16 flaky
+events across 6 tests** at base and **2 events across 1 test** after the fix. This one is the
+residue, not the disease.

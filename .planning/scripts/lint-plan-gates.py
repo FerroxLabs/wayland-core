@@ -90,6 +90,16 @@ STATIC_RULES = [
         "literally instead. This is the only gate defect here whose correctness depends on "
         "which shell the operator happens to use.",
     ),
+    (
+        "HIGH",
+        "empty-equals-empty-passes",
+        re.compile(r"\btest\s+\"\$\([^)]*\)\"\s*=\s*\"\$\([^)]*\)\""),
+        "Comparing two command substitutions passes when BOTH produce empty output -- two "
+        "empty strings are equal. So `test \"$(shasum X)\" = \"$(cat Y)\"` is unconditionally "
+        "GREEN at base, when neither file exists yet. Demonstrated live at rc=0. This is the "
+        "default shape for every digest and tamper-evidence check, so it is worth checking "
+        "twice. Assert `test -s` on both operands FIRST, then compare.",
+    ),
     # ---- The mirror class: gates that cannot go GREEN. -------------------
     # Everything above catches a gate that always passes. These catch a gate
     # that always fails, which is just as useless and much more confusing --
@@ -113,7 +123,11 @@ STATIC_RULES = [
     (
         "HIGH",
         "grep-c-exit-1-breaks-chain",
-        re.compile(r"\w+=\"?\$\(\s*grep\b[^)]*-c\b[^)]*\)\"?\s*&&"),
+        # The path-qualified form matters: this repo's plans use `/usr/bin/grep`
+        # throughout (the bare name is rtk-proxied on the Mac), and the first
+        # version of this rule required a BARE `grep` after `$(`, so it missed
+        # every real instance. Phase 30's hand-audit caught one this had passed.
+        re.compile(r"\w+=\"?\$\(\s*(?:[\w./-]*/)?grep\b[^)]*-c\b[^)]*\)\"?\s*&&"),
         "`grep -c` exits 1 when the count is ZERO, and a command substitution assignment "
         "takes that exit status. So this `&&` chain breaks precisely when the count is 0 -- "
         "which is usually the PASSING condition. Split the assignment off the chain, or "
