@@ -45,6 +45,31 @@ path = "target/nextest/default/junit.xml"
 filter = 'binary(/bootstrap/) or binary(/registry_inventory_snapshot/) or test(/bootstrap/)'
 slow-timeout = { period = "90s", terminate-after = 2 }
 
+# `fix1_dispatch_budget_aborts_with_partial_result` is slow INHERENTLY, not
+# merely under load, which is why it gets its own entry rather than joining the
+# cohort above. Measured 2026-07-27: it completes in 65.97s under `cargo test`
+# and the abort it asserts on works correctly — the 60s death under this profile
+# (30s x kill-after-2) was a harness kill, never a hang, and the "it hangs"
+# reading was investigated and DISPROVED rather than assumed. The cost is real
+# and is recorded so it stays visible: ~47ms of inline CPU per dispatch in a
+# debug build, 44.8ms of it inside `engine.run()`, against 6.9ms in release.
+# Note this test already PASSES in CI, whose 90s x 2 = 180s budget covers it;
+# only the stricter local default profile killed it, so this aligns the two
+# rather than loosening either.
+#
+# A HIGH concurrency defect was suspected here (`buffer_unordered` measuring
+# 0.96x across widths 1/4/20) and then RETRACTED: varying only provider latency
+# gives 0.96x / 2.0x / 8.0x at 0 / 50 / 500ms, so the 1x was an artifact of a
+# zero-latency fixture and the pipeline does stream in production. Filed LOW as
+# `pipeline-cpu-floor`. If that LOW is ever fixed this override should shrink,
+# so it is deliberately scoped to the one test.
+#
+# `retries` is left at the profile default: this test shells out to no build, so
+# a retry costs only its own runtime (same reasoning as the packaged_f04 entry).
+[[profile.default.overrides]]
+filter = 'test(=fix1_dispatch_budget_aborts_with_partial_result)'
+slow-timeout = { period = "120s", terminate-after = 2 }
+
 # ── CI profile ─────────────────────────────────────────────────────────────
 [profile.ci]
 # In CI: always show output for failed tests, machine-readable JUnit
