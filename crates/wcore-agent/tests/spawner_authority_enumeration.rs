@@ -27,6 +27,16 @@
 //!
 //! A new production construction site fails this test with instructions rather
 //! than silently inheriting the unrestricted constructor default.
+//!
+//! # F21-02-03 — the dispatch gate rides the same enumeration
+//!
+//! The reconciliation gave `PolicyGate` (Layer 2) the same authority cell this
+//! guard covers, so everything above holds for the gate too. The one thing the
+//! construction-site enumeration cannot see is whether
+//! `AgentSpawner::execute_resolved_launch` still installs it —
+//! `set_policy_gate` had zero production callers before F21-02-03 and would be
+//! silently orphaned again if that single line were deleted as "redundant".
+//! [`child_launch_installs_the_dispatch_gate_from_the_authority_cell`] pins it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -223,6 +233,83 @@ fn every_production_spawner_construction_site_declares_parent_tool_authority() {
         problems.is_empty(),
         "F21-02-01 spawner-authority enumeration failed:\n\n{}\n",
         problems.join("\n\n")
+    );
+}
+
+/// F21-02-03 RECONCILIATION GUARD — the child dispatch gate must stay
+/// installed, and must stay fed from the authority cell.
+///
+/// `AgentEngine::set_policy_gate` had ZERO production callers workspace-wide
+/// before F21-02-03; that is the entire finding. The reconciliation gives it
+/// exactly one, in `AgentSpawner::execute_resolved_launch`. Because Layer 1
+/// (`build_tool_registry`'s intersection) already makes that call a no-op on
+/// today's frozen six-tool child registry, a future reader has every incentive
+/// to delete it as dead code — which would silently re-orphan the mechanism and
+/// remove the only dispatch-time check a child will ever have.
+///
+/// So pin three things from source:
+///   1. `set_policy_gate` is called in production `spawner.rs` at least once.
+///   2. The gate is constructed from `from_parent_tools(authority…)`, i.e. from
+///      the `ParentToolAuthority` snapshot — NOT from the parent's full
+///      `registry.tool_names()`, which would pre-authorise names the child
+///      cannot construct today (fail-open in advance), and NOT from a second
+///      cell, which could drift from Layer 1's.
+///   3. `execute_resolved_launch` takes exactly ONE authority snapshot. Two
+///      reads let a concurrent narrowing land between them and produce a gate
+///      stricter than the registry it guards.
+#[test]
+fn child_launch_installs_the_dispatch_gate_from_the_authority_cell() {
+    let spawner_src = std::fs::read_to_string(crates_root().join("wcore-agent/src/spawner.rs"))
+        .expect("spawner.rs is readable");
+    let test_lines = cfg_test_lines(&spawner_src);
+
+    let production_lines: Vec<(usize, &str)> = spawner_src
+        .lines()
+        .enumerate()
+        .filter(|(n, line)| !test_lines[*n] && !line.trim_start().starts_with("//"))
+        .collect();
+
+    let installs: Vec<usize> = production_lines
+        .iter()
+        .filter(|(_, line)| line.contains("set_policy_gate"))
+        .map(|(n, _)| n + 1)
+        .collect();
+    assert_eq!(
+        installs.len(),
+        1,
+        "expected exactly ONE production `set_policy_gate` call in spawner.rs, found {}. \
+         F21-02-03: this is the only production caller on the agent path. If it is gone, \
+         `PolicyGate` is orphan code again and children have no dispatch-time authority \
+         check; if there are several, the gate is being installed from more than one \
+         authority and the two can disagree. Found at lines: {installs:?}",
+        installs.len()
+    );
+
+    let from_cell = production_lines
+        .iter()
+        .any(|(_, line)| line.contains("PolicyGate::from_parent_tools"));
+    assert!(
+        from_cell,
+        "the child dispatch gate is no longer built via `PolicyGate::from_parent_tools`. \
+         It MUST be derived from the `ParentToolAuthority` snapshot so Layer 1 \
+         (build_tool_registry's intersection) and Layer 2 (this gate) can never disagree, \
+         and so the gate inherits all three declaring seams instead of just bootstrap's."
+    );
+
+    let snapshots: Vec<usize> = production_lines
+        .iter()
+        .filter(|(_, line)| line.contains("parent_tool_authority.snapshot()"))
+        .map(|(n, _)| n + 1)
+        .collect();
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "expected exactly ONE production read of `parent_tool_authority.snapshot()` in \
+         spawner.rs (in `execute_resolved_launch`), found {}. Both the child's registry and \
+         its dispatch gate must be built from the SAME snapshot: the cell narrows \
+         monotonically at any time, so two reads can yield a gate STRICTER than the \
+         registry, denying a child a tool it visibly holds. Found at lines: {snapshots:?}",
+        snapshots.len()
     );
 }
 

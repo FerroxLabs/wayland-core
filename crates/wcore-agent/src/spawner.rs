@@ -1127,14 +1127,27 @@ impl AgentSpawner {
         &self.sandbox_runtime
     }
 
-    fn child_tool_registry(&self, launch: &ResolvedChildLaunch) -> ToolRegistry {
+    /// Build a child's registry against an explicitly supplied parent
+    /// authority.
+    ///
+    /// The authority is a PARAMETER rather than a fresh
+    /// `self.parent_tool_authority.snapshot()` so that the caller owns the read.
+    /// `execute_resolved_launch` takes exactly one snapshot and uses it for both
+    /// this registry and the child's dispatch gate; reading the shared cell
+    /// twice would let a concurrent narrowing land between the two and leave the
+    /// gate stricter than the registry it guards.
+    fn child_tool_registry(
+        &self,
+        launch: &ResolvedChildLaunch,
+        parent_tool_authority: &BTreeSet<String>,
+    ) -> ToolRegistry {
         build_tool_registry(
             &launch.overrides.allowed_tools,
             launch.requested_workspace,
             launch.workspace_root(),
             &launch.authority_read_deny,
             Arc::clone(&self.sandbox_runtime),
-            &self.parent_tool_authority.snapshot(),
+            parent_tool_authority,
         )
     }
 
@@ -2149,7 +2162,15 @@ impl AgentSpawner {
                 return SubAgentResult::error(&launch.request.name, &error);
             }
         };
-        let tools = self.child_tool_registry(&launch);
+        // F21-02-01 + F21-02-03 — ONE read of the parent authority feeds BOTH
+        // child-authority layers. Taking two separate snapshots would let a
+        // concurrent `narrow_to` land between them and produce a gate STRICTER
+        // than the registry it is guarding: a child holding a tool in its own
+        // registry, denied at dispatch, for reasons nothing in the child's state
+        // can explain. One snapshot makes `child_registry ⊆ gate` an invariant
+        // rather than a race.
+        let authority = self.parent_tool_authority.snapshot();
+        let tools = self.child_tool_registry(&launch, &authority);
         let output: Arc<dyn OutputSink> = match extras.channel_sink {
             Some(sink) => sink as Arc<dyn OutputSink>,
             None => Arc::new(NullSink),
@@ -2164,6 +2185,54 @@ impl AgentSpawner {
             return SubAgentResult::error(&launch.request.name, &error);
         }
         engine.set_egress_policy(self.egress_policy.clone());
+        // ===================================================================
+        // F21-02-03 — LAYER 2 of the child tool authority. DO NOT DELETE AS
+        // "duplicate" of the intersection in `build_tool_registry`.
+        //
+        // The two layers enforce the SAME authority at DIFFERENT points, and
+        // each covers a failure the other structurally cannot:
+        //
+        //   Layer 1 (F21-02-01, `build_tool_registry`) — CONSTRUCTION. A tool
+        //     outside `authority` is never built, so it is never advertised to
+        //     the child's LLM. This is the primary control and the one that
+        //     closes the reachable escalation.
+        //   Layer 2 (this line) — DISPATCH. `filter_tool_calls_by_policy` runs
+        //     BEFORE the registry lookup, so any tool name the child emits is
+        //     checked against `authority` whether or not it is in the child's
+        //     registry.
+        //
+        // Today Layer 2 denies nothing Layer 1 already prevents: the child's
+        // registry is exactly `build_tool_registry`'s output, frozen behind an
+        // `Arc` at `AgentEngine::new_with_provider`, with no production path
+        // that registers a tool afterwards — so `child_registry ⊆ authority`
+        // holds by construction. That is a property of TODAY'S engine, not of
+        // the design. The moment a child gains a second tool source that does
+        // not route through `build_tool_registry` — child-side MCP, plugins, a
+        // widened table — Layer 1 is silently bypassed and Layer 2 is the only
+        // thing standing between a delegated child and a tool its parent's
+        // posture revoked. It is deliberately fail-CLOSED there: the new tool
+        // is denied, loudly and journalled, until someone widens the authority
+        // on purpose.
+        //
+        // The gate is built from `authority` — the SAME snapshot Layer 1 used
+        // above — and NOT from the parent's full `registry.tool_names()`.
+        // Granting the parent's MCP/skill names to a child that cannot
+        // construct them would pre-authorise a future feature nobody has
+        // decided on yet, which is fail-open in advance.
+        //
+        // This is also the first production caller of `set_policy_gate` on the
+        // agent path. Before it, every production `AgentEngine` constructor
+        // hard-coded `policy_gate: None` and the v0.6.1 ACL machinery could not
+        // run outside a test.
+        //
+        // Not dynamic revocation: the gate is a launch-time snapshot, matching
+        // the child's launch-time registry. A parent narrowed AFTER a child has
+        // started does not retract that child's tools under either layer. No
+        // current seam narrows post-spawn.
+        // ===================================================================
+        engine.set_policy_gate(crate::policy_gate::PolicyGate::from_parent_tools(
+            authority.iter(),
+        ));
         engine.set_cancel_token(child_cancel);
         engine.set_initial_reasoning_effort(launch.overrides.effort.clone());
 
@@ -2288,7 +2357,9 @@ impl AgentSpawner {
             // F21-02-01: SHARE the authority cell rather than snapshotting it.
             // A clone taken before bootstrap narrows the parent registry must
             // still observe that narrowing, and sharing a narrow-only cell
-            // cannot widen anything.
+            // cannot widen anything. F21-02-03 depended on exactly the same
+            // property for its (now deleted) `OnceLock`; sharing this one cell
+            // gives both child-authority layers that guarantee from one field.
             parent_tool_authority: self.parent_tool_authority.clone(),
         }
     }
@@ -3620,7 +3691,8 @@ mod production_durable_spawn_tests {
     use wcore_types::llm::{LlmEvent, LlmRequest};
     use wcore_types::message::{FinishReason, StopReason, TokenUsage};
     use wcore_types::spawner::{
-        ChildDesiredState, ChildOrigin, ChildRecoveryState, DurableChildStatus,
+        CHILD_ELIGIBLE_TOOLS, ChildDesiredState, ChildOrigin, ChildRecoveryState,
+        DurableChildStatus,
     };
 
     use super::{
@@ -4135,7 +4207,8 @@ mod production_durable_spawn_tests {
         assert!(launch.workspace_root().join(".git").is_dir());
         launch.validate_record(&record).unwrap();
         assert_eq!(launch.authority_read_deny.len(), 2);
-        let registry = spawner.child_tool_registry(&launch);
+        let registry =
+            spawner.child_tool_registry(&launch, &spawner.parent_tool_authority.snapshot());
         assert!(registry.get("Write").is_some());
         assert!(registry.get("Bash").is_some());
         let child_policy = registry.workspace_policy().expect("child workspace policy");
@@ -4220,7 +4293,8 @@ mod production_durable_spawn_tests {
             )
             .await
             .expect("prepare isolated workspace");
-        let registry = spawner.child_tool_registry(&launch);
+        let tool_authority = spawner.parent_tool_authority.snapshot();
+        let registry = spawner.child_tool_registry(&launch, &tool_authority);
 
         assert!(
             registry.get("Bash").is_none(),
@@ -4230,6 +4304,25 @@ mod production_durable_spawn_tests {
             registry.get("Write").is_some(),
             "an explicitly requested tool the parent DOES hold must survive the \
              intersection — the guard must narrow, not blanket-deny"
+        );
+
+        // F21-02-03 RECONCILIATION — Layer 2, built from the SAME snapshot the
+        // registry above was built from, must agree with it. `execute_resolved_
+        // launch` takes exactly one snapshot for precisely this reason; if it
+        // ever takes two, a concurrent narrowing can make the gate stricter than
+        // the registry and a child is denied a tool it visibly holds.
+        let gate = crate::policy_gate::PolicyGate::from_parent_tools(tool_authority.iter());
+        for name in registry.tool_names() {
+            assert!(
+                gate.check_tool(&name, None).is_ok(),
+                "the dispatch gate denied {name}, which the child's own registry \
+                 contains — the two layers were built from different snapshots"
+            );
+        }
+        assert!(
+            gate.check_tool("Bash", None).is_err(),
+            "the dispatch gate must also deny Bash, so a child that acquires it \
+             from any future source outside build_tool_registry is still stopped"
         );
     }
 
@@ -4260,6 +4353,62 @@ mod production_durable_spawn_tests {
             expected,
             "authority must never widen"
         );
+    }
+
+    /// F21-02-03 RECONCILIATION — the dispatch gate installed on every child
+    /// engine is derived from the authority CELL, so it inherits all three
+    /// declaring seams instead of only the bootstrap one.
+    ///
+    /// This is the property that was missing from F21-02-03 as authored. Its
+    /// gate lived in a separate `Arc<OnceLock<PolicyGate>>` that only
+    /// `AgentBootstrap::build` ever published into, so the two transient seams
+    /// (`AgentEngine::govern_transient_spawner`) and the three standalone ones
+    /// (`bootstrap::govern_standalone_spawner`) installed no gate at all — five
+    /// of six production construction sites fail-open. Reading the same cell
+    /// F21-02-01 declares means "which seams is the gate wired at?" has exactly
+    /// one answer: all of them, enforced by `spawner_authority_enumeration`.
+    #[test]
+    fn f21_02_03_dispatch_gate_follows_the_authority_cell_at_every_seam() {
+        let provider: Arc<dyn LlmProvider> = ControlledProvider::immediate();
+
+        // A ROOT spawner — what `govern_standalone_spawner` declares for the
+        // CLI crucible / workflow / Anvil-seat lane. It holds every
+        // child-eligible built-in, so the gate must grant every one of them.
+        let root = AgentSpawner::new(Arc::clone(&provider), Config::default());
+        root.declare_root_parent_tool_authority();
+        let root_gate = crate::policy_gate::PolicyGate::from_parent_tools(
+            root.parent_tool_authority.snapshot().iter(),
+        );
+        for name in CHILD_ELIGIBLE_TOOLS {
+            assert!(
+                root_gate.check_tool(name, None).is_ok(),
+                "a declared-root spawner's gate denied {name}, which the root \
+                 process genuinely holds — the gate is over-restricting"
+            );
+        }
+
+        // A TRANSIENT spawner — what `govern_transient_spawner` narrows from a
+        // channel-posture-narrowed engine's live registry. Its children must be
+        // gated even though nothing published a bootstrap `OnceLock`.
+        let transient = AgentSpawner::new(Arc::clone(&provider), Config::default());
+        transient.narrow_parent_tool_authority(["Read", "Write"]);
+        // Take the clone AFTER narrowing here and BEFORE below, so both orders
+        // are covered: the cell is shared, so neither can escape.
+        let shard = transient.clone_for_spawn();
+        let transient_gate = crate::policy_gate::PolicyGate::from_parent_tools(
+            shard.parent_tool_authority.snapshot().iter(),
+        );
+        assert!(
+            transient_gate.check_tool("Read", None).is_ok(),
+            "a tool the parent holds must survive"
+        );
+        for denied in ["Bash", "Grep", "Glob", "Edit"] {
+            assert!(
+                transient_gate.check_tool(denied, None).is_err(),
+                "a transient spawner's child gate granted {denied}, a tool the \
+                 parent engine does not hold — this seam is fail-open again"
+            );
+        }
     }
 
     #[tokio::test]

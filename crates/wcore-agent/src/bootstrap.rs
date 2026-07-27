@@ -2206,6 +2206,11 @@ impl AgentBootstrap {
                 wcore_budget::BudgetCap::default(),
             )))
         });
+        // F21-02-03 RECONCILIATION — no separate authority cell is created here.
+        // The spawner's own `ParentToolAuthority` (F21-02-01) already exists from
+        // `AgentSpawner::new`, is shared by `Arc` across every clone taken below,
+        // and is narrowed once the registry is final. It is the single source
+        // both child-authority layers read. See the narrowing call further down.
         let mut spawner_builder = session_budget
             .govern_spawner(
                 crate::spawner::AgentSpawner::new(provider.clone(), self.config.clone()),
@@ -2576,6 +2581,17 @@ impl AgentBootstrap {
         // precisely because their recursive scan escapes the jail — would hand a
         // delegated child Grep and Glob straight back through the read-only
         // spawn floor, reopening the exfiltration path the drop closes.
+        //
+        // F21-02-03 RECONCILIATION — this ONE call now feeds BOTH child-authority
+        // layers. F21-02-03 originally published a second, independent authority
+        // here (an `Arc<OnceLock<PolicyGate>>` built from `registry.tool_names()`)
+        // for the dispatch-time gate. That is deleted: two authorities derived
+        // from the same registry at the same line are two things that can drift,
+        // and the `OnceLock` was wired at THIS seam only, leaving the transient
+        // and standalone seams with no gate at all. `AgentSpawner` now derives the
+        // gate from this same `ParentToolAuthority` cell at child launch, so the
+        // gate inherits all three declaring seams and the enumeration guard for
+        // free. See `AgentSpawner::execute_resolved_launch`.
         spawner.narrow_parent_tool_authority(registry.tool_names());
         tracing::debug!(
             target: "wcore_agent::bootstrap",
