@@ -75,6 +75,8 @@ struct DelayedExecutor {
     indeterminate: BTreeSet<String>,
     /// Tasks whose attempt fails outright.
     failing: BTreeSet<String>,
+    /// Tasks whose attempt produces the effect and then reports failure.
+    produce_then_fail: BTreeSet<String>,
     started: Arc<AtomicUsize>,
     /// Assignments the executor actually saw, so the epoch each agent carried
     /// can be compared against what the chain committed.
@@ -89,6 +91,7 @@ impl DelayedExecutor {
             default_delay: Duration::ZERO,
             indeterminate: BTreeSet::new(),
             failing: BTreeSet::new(),
+            produce_then_fail: BTreeSet::new(),
             started: Arc::new(AtomicUsize::new(0)),
             seen: Arc::new(Mutex::new(Vec::new())),
         }
@@ -113,6 +116,13 @@ impl DelayedExecutor {
         self.failing.insert(task.to_owned());
         self
     }
+
+    /// Produce the effect and THEN report failure — a worker that did the work
+    /// and died before its outcome was recorded.
+    fn produce_then_fail(mut self, task: &str) -> Self {
+        self.produce_then_fail.insert(task.to_owned());
+        self
+    }
 }
 
 impl TaskExecutor for DelayedExecutor {
@@ -130,9 +140,16 @@ impl TaskExecutor for DelayedExecutor {
             .unwrap_or(self.default_delay);
         let indeterminate = self.indeterminate.contains(&assignment.task_id);
         let failing = self.failing.contains(&assignment.task_id);
+        let produce_then_fail = self.produce_then_fail.contains(&assignment.task_id);
         Box::pin(async move {
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
+            }
+            if produce_then_fail {
+                effects.produce(&assignment.idempotency_key, &assignment.task_id);
+                return TaskExecution::Failed {
+                    detail: "worker produced its effect and then died".to_owned(),
+                };
             }
             if failing {
                 return TaskExecution::Failed {
@@ -721,7 +738,80 @@ async fn run_to_completion_drives_a_dependency_graph_to_a_standstill_exactly_onc
 }
 
 // ---------------------------------------------------------------------------
-// 9. What actually stops two SUPERVISOR PROCESSES, and where it does not.
+// 9. The half the epoch fence structurally cannot reach.
+// ---------------------------------------------------------------------------
+
+/// A worker that PRODUCED its effect and then failed to have it recorded is the
+/// case the whole idempotency key exists for, and it is the one every clean
+/// scenario misses: a task that never ran, or ran and was recorded, both look
+/// correct with no key at all.
+///
+/// Here t00's executor produces the effect and *then* reports failure, so the
+/// first attempt leaves the effect on disk with no completion — exactly the
+/// state a kill leaves behind. The retry must find the key and not write again.
+#[tokio::test]
+async fn a_retry_whose_predecessor_already_produced_the_effect_does_not_produce_it_twice() {
+    let fixture = Fixture::new("idem");
+    let driver = fixture.driver("sup-a");
+    fixture.open(&driver, 8);
+    fixture.declare(&driver, "t00", &[]);
+    fixture.declare(&driver, "t01", &[]);
+
+    let effects = Arc::new(EffectLog::default());
+    // Produces, then fails. The ledger revokes the claim; the effect stays.
+    let executor = Arc::new(DelayedExecutor::new(effects.clone()).produce_then_fail("t00"));
+    let dispatcher = FleetDispatcher::new("wire-idem").with_shard_size(2);
+
+    let wave = driver
+        .run_wave(&dispatcher, executor, 4, 1_000, LEASE_MS)
+        .await
+        .expect("first wave runs");
+    assert_eq!(wave.failed, 1, "{wave:?}");
+    assert_eq!(wave.completed, 1, "{wave:?}");
+    // The effect IS on disk, with no completion recorded for it.
+    assert_eq!(effects.lines().len(), 2, "{:?}", effects.lines());
+    let t00 = driver
+        .ledger()
+        .task(&fixture.goal, &TaskId::new("t00"))
+        .expect("read")
+        .expect("task");
+    assert!(
+        t00.completion.is_none(),
+        "a failed attempt recorded a completion"
+    );
+
+    // Second wave retries t00. Its idempotency key is unchanged across attempts,
+    // which is what stops the effect landing a second time. A key that embedded
+    // the attempt number would pass every other assertion in this file and fail
+    // exactly here.
+    let executor = Arc::new(DelayedExecutor::new(effects.clone()));
+    let seen = executor.seen.clone();
+    let dispatcher = FleetDispatcher::new("wire-idem-2").with_shard_size(2);
+    let wave = driver
+        .run_wave(&dispatcher, executor, 4, 2_000, LEASE_MS)
+        .await
+        .expect("second wave runs");
+    assert_eq!(wave.completed, 1, "{wave:?}");
+
+    let retried = seen.lock().unwrap().clone();
+    assert_eq!(retried.len(), 1);
+    assert_eq!(retried[0].task_id, "t00");
+    assert_eq!(
+        retried[0].attempt, 2,
+        "the retry did not present as a second attempt"
+    );
+    assert_eq!(
+        retried[0].idempotency_key, "idem-t00",
+        "the retry was handed a DIFFERENT key, so the effect would land twice"
+    );
+
+    let lines = effects.lines();
+    assert_eq!(lines.len(), 2, "the effect landed twice: {lines:?}");
+    assert_eq!(effects.distinct(), 2, "{lines:?}");
+}
+
+// ---------------------------------------------------------------------------
+// 10. What actually stops two SUPERVISOR PROCESSES, and where it does not.
 // ---------------------------------------------------------------------------
 
 /// The first line of defence against two supervisors is not the epoch — it is
