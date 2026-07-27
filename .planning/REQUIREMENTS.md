@@ -60,21 +60,22 @@ Both candidate jobs ran the `Assert checkout is the authorized candidate` step w
 
 ### Phase 21 — Child Authority and Budget Inheritance
 
-- [ ] **F21-01**: Every child receives the intersection of parent and requested provider, model, tool, filesystem, egress, secret, and approval authority.
+- [x] **F21-01**: Every child receives the intersection of parent and requested provider, model, tool, filesystem, egress, secret, and approval authority.
 - [ ] **F21-02**: Nested children cannot exceed parent depth, fan-out, concurrency, token, cost, or time reservations.
 - [ ] **F21-03**: Approval, escalation, cancellation, reservation, refund, and result delivery remain attributable to the correct parent/session actor.
 - [ ] **F21-04**: Hostile child tests prove no authority or resource amplification across standalone and host protocol paths.
 
 **Adjudication at the close of plan 21-04** (`21-04-PHASE-VERDICT.md` §3, base
-SHA `f2d186f6`). All four are left OPEN — an explicit incomplete disposition,
-not an unfinished one. Three of the four are open on LIVE-evidence grounds
-rather than on in-process failure; no requirement here is marked complete on
-in-process evidence alone.
+SHA `f2d186f6`) left all four OPEN. **Superseded on 2026-07-27 by
+`21-REVERIFICATION.md` at `ac94b1d5`**, a third grading against the repaired
+product (F21-02-01 fixed at `6b0083b0`/`3e23b83d`, F21-02-03 reconciled and
+merged at `9c3e3687`, F21-04-03 fixed at `1eb9b5ca`, F21-04-02 disproved at
+`e879206e`). Linux evidence only; no Windows run was produced.
 
-- **F21-01 — OPEN.** The tool dimension of the intersection is confirmed absent (`build_tool_registry` registers a requested tool without consulting the parent) and F21-02-01 is DECLINED and open at Sean's authorization; provider intersection has no request channel to intersect. Marking this complete would claim an intersection the product does not compute.
-- **F21-02 — OPEN.** Depth, time, token and cost refuse at the in-process ancestor-rollup seam, but all four were NOT-EXPRESSIBLE on both live combinations because no shipped surface carries a child-fillable budget field. The property holds in part by absence of a request channel.
-- **F21-03 — OPEN.** Five of six lifecycle events attribute correctly at the real seam on both platforms with zero misattributions, and result delivery is proved correct live on the shipped wire. Refund across a crash is UNPROVEN (F21-04-02) and four of six events have no per-child observable on the host protocol at all (F21-04-01).
-- **F21-04 — OPEN.** The hostile corpora ran on both surfaces and both platforms and found no amplification on any dimension they could express, but tool authority stays confirmed-absent and DECLINED, and F21-04-03 shows two parallel `Spawn` siblings failing outright on the shipped binary.
+- **F21-01 — COMPLETE (2026-07-27).** The sentence that kept it open — *"marking this complete would claim an intersection the product does not compute"* — is no longer true. `build_tool_registry` intersects unconditionally against a shared narrow-only `ParentToolAuthority` declared at all six production spawner sites, a dispatch-time `PolicyGate` is installed from the same snapshot, and a source-derived enumeration guard fails if a seventh site appears. Proven LIVE on the shipped binary: `f21_02_01_delegated_child_cannot_obtain_a_tool_the_parent_lacks` plus its differential CONTROL, both green at `ac94b1d5`. Filesystem, egress and secret REFUSED live on both surfaces with real child provider turns; provider, model and approval are NO-CHANNEL with red-able canaries.
+- **F21-02 — OPEN.** Depth and fan-out refuse in-process with real numbers, and time/token/cost refuse at the ancestor-rollup seam — but NOT ONE of the six has live evidence, and four of them cannot obtain any: `engine.rs:6173` is still `begin_active_turn(turn_id, None)`, the only `sub_budget(Some(..))` call site is inside `#[cfg(test)]`, and `SubAgentConfig` carries no budget field. The property is still MERELY UNREQUESTABLE, not enforced-and-driven. Never complete on in-process evidence alone.
+- **F21-03 — FENCED.** All six lifecycle events now attribute CORRECTLY at the real in-process seam with zero misattributions; refund across a real crash and restart moved NOT-OBSERVABLE → CORRECT; result delivery is CORRECT on the shipped wire; approval and cancellation are CORRECT on the live rendered TUI screen. Its sole remaining blocker is F21-04-01 — no per-child observable on the host protocol — specified in `.planning/SEAM-REQUESTS/F21-04-01.md` as a coordinated Core/Desktop release, not a defect in Core product code.
+- **F21-04 — OPEN.** Tool authority is now present and live-proven, F21-04-03 is repaired (6 of 6 live two-sibling runs clean at HEAD), and F21-04-02 is disproved with executable counter-evidence. But the requirement demands proof across BOTH paths and Success Criterion 3 is still NOT MET: tool and fan-out have no host-protocol expression, fan-out is undetermined live on both surfaces, and Windows is unmeasured at this SHA.
 
 ### Phase 22 — Supervision, Durable Goals, Fleet, and Loops
 
@@ -274,7 +275,7 @@ below; full grading in
 | REQ-native-r1, r3, r4, r5, r6, r7, r9, r10, r11, r14, r15 | Phase 20A | Complete @ `9821ef76` (run `30184651330`) |
 | REQ-native-r2, r8 | Phase 20A | Complete @ `2cc1a285` — post-seal sweep 2026-07-26. `crates/` tree byte-identical to `9821ef76`. r2: both deny clauses PASS on `SEANDESKTOP` (run `30186873948`, job `89753061944`). r8: both production guards driven to rejection with the specific error, plus 7 regression cases. |
 | REQ-native-r12, r13 | Phase 20A | **Open** — unexercised acceptance clauses, not failing tests; see per-requirement notes above. Phase 20A closed COMPLETE on its three Success Criteria without them. |
-| F21-01, F21-02, F21-03, F21-04 | Phase 21 | **All four Open** — adjudicated at `21-04-PHASE-VERDICT.md` §3, base `f2d186f6`. Criterion 1 NOT MET (tool authority confirmed absent and DECLINED); Criteria 2 and 3 MET WITH STATED EXCEPTIONS. Six HIGH findings open: F21-02-01, F21-02-03, F21-02-02's live closure, F21-04-01, F21-04-02, F21-04-03. No seal claimed. |
+| F21-01, F21-02, F21-03, F21-04 | Phase 21 | **F21-01 complete; F21-03 fenced on F21-04-01; F21-02 and F21-04 open** — re-graded 2026-07-27 at `ac94b1d5` in `21-REVERIFICATION.md`. SC1 upgraded NOT-MET → MET WITH STATED EXCEPTIONS (the tool guard is present and live-proven); SC2 MET WITH STATED EXCEPTIONS (F21-04-02 discharged, F21-04-01 fenced); SC3 still NOT MET. Superseded prior text: **All four Open** — adjudicated at `21-04-PHASE-VERDICT.md` §3, base `f2d186f6`. Criterion 1 NOT MET (tool authority confirmed absent and DECLINED); Criteria 2 and 3 MET WITH STATED EXCEPTIONS. Six HIGH findings open: F21-02-01, F21-02-03, F21-02-02's live closure, F21-04-01, F21-04-02, F21-04-03. No seal claimed. |
 | F22-01, F22-02, F22-03, F22-04, F22-05, F22-06, F22-07 | Phase 22 | Pending |
 | F23-01, F23-02, F23-03, F23-04, F23-05, F23-06 | Phase 23 | Pending |
 | F24-01, F24-02, F24-03, F24-04, F24-05 | Phase 24 | **All five Open, with explicit incomplete dispositions** — only plan 24-01 of four executed, and it did not reach its own Complete state. F24-01 has partial evidence (runtime, lock, ledger, drain, service abstraction, one HIGH Windows defect fixed on hardware measurement) with four named unmet clauses. F24-02/03/04/05 have no evidence: plans 24-02, 24-03 and 24-04 were not started. Branch `worktree-wf_b7d743bd-954-4`; evidence `phases/24-.../24-01-SUMMARY.md`. |

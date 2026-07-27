@@ -1,0 +1,140 @@
+DECISION: c4-disposition, with the three internal amendments attached as executable rules.
+
+Phase 28 acceptance gate, decided 2026-07-27 at planning time, before any plan was written,
+because the answer determines the shape of the whole plan set rather than one task inside it.
+
+PANEL SPLIT: 4 of 4 for c4-disposition. This is the MAJORITY position, so no
+MINORITY-POSITION-ADOPTED clause applies, and the panel was not tied so no EVIDENTIARY-TIEBREAK
+applies. The internal adversarial pass concurred CONDITIONALLY and its conditions are adopted
+in full; they are not optional colour on a unanimous vote, they are part of the decision.
+
+=== THE CONFLICT ===
+
+ROADMAP Phase 28 Success Criterion 4: "Zero findings remain at every severity before
+acceptance." REQUIREMENTS F28-04: "No critical case is skipped and every finding at every
+severity is resolved before certification acceptance."
+
+Against AGENTS.md's standing policy: "CRITICAL/HIGH must be fixed, or disproved with executable
+evidence. MEDIUM and below go to BACKLOG, non-blocking. Do not invent a stricter rule — that is
+what turned Phase 20 into a 74-plan loop lasting two weeks."
+
+=== THE RULE ADOPTED ===
+
+"Resolved" is implemented as DISPOSITIONED, not as FIXED. The acceptance gate is:
+
+  ZERO findings at any severity lack an explicit, recorded, evidence-backed disposition.
+
+Four terminal dispositions exist, and every finding takes exactly one:
+
+  FIXED     — repaired, with the repair proved by an executable check.
+  DISPROVED — shown not to be a defect, with executable counter-evidence.
+  ACCEPTED  — real, not repaired, carried knowingly. Requires a named rationale, a named owner
+              and a BACKLOG id. Available at MEDIUM and LOW ONLY.
+  DEFERRED  — real, routed to a named later phase. Same three requirements. MEDIUM and LOW ONLY.
+
+CRITICAL and HIGH have exactly two available dispositions: FIXED or DISPROVED. Neither ACCEPTED
+nor DEFERRED is reachable at those severities, and the gate must fail closed rather than warn.
+
+Every ACCEPTED and DEFERRED finding is enumerated INSIDE the signed certification receipt, with
+its severity, rationale, owner and BACKLOG id, so it is visible at acceptance and again at
+release rather than absorbed into a backlog nobody re-reads.
+
+=== THE THREE BINDING AMENDMENTS (from the internal adversarial pass) ===
+
+A1. SEVERITY IS RE-SCORED AGAINST PHASE 28'S OWN FOUR SUCCESS CRITERIA. No finding enters the
+    ledger at a severity inherited from an earlier phase. The inherited severity is recorded as
+    provenance only. Rationale: the dangerous findings on this candidate do not need anyone to
+    downgrade them — they ARRIVE below HIGH, scored against a different phase's criteria.
+    Inherited severity is a laundering channel that requires no launderer.
+
+A2. A FINDING THAT CONTRADICTS A PHASE 28 SUCCESS CRITERION IS CRITICAL OR HIGH BY CONSTRUCTION
+    AND CANNOT TAKE THE ACCEPT OR DEFER PATH. Not by judgement — by construction, because the
+    criterion it contradicts is the thing being certified. Two named consequences, both of which
+    this program is currently carrying as sub-HIGH and both of which are hereby re-scored:
+      - `live_future_drop_reaps_descendant_job_tree` is a descendant-process-tree reap failure.
+        Criterion 2 says the soak completes with "no orphan process." Same subject. It is HIGH
+        for Phase 28 and cannot be accepted.
+      - The Windows AppContainer ACL lease SID/profile mismatch, under which the product can run
+        with the sandbox SILENTLY DISABLED, is a security control that reports itself active
+        while inactive. Criterion 1 is the hostile platform matrix including sandbox probes.
+        Same subject. It is CRITICAL for Phase 28 and cannot be accepted. Criterion 1 must force
+        it into the open rather than inherit it.
+    A2 is what stops c4-disposition from collapsing into c4-standing-with-paperwork.
+
+A3. THE RECEIPT MAY NOT CLAIM WHAT IT DOES NOT HAVE. Its defensible assertion is exactly: zero
+    undispositioned findings, zero skipped critical cases, zero unresolved CRITICAL/HIGH
+    findings. It may NOT assert "zero known defects" or "zero findings", and the receipt
+    verifier must REJECT a receipt that asserts either. A certification that overstates itself
+    is worse than one that reports a gap, because Phase 29 and the release consume it.
+
+=== WHY, ON THE EVIDENCE RATHER THAN THE COUNT ===
+
+1. The criterion's own requirement text says what it is protecting. F28-04 pairs "every finding
+   … resolved" with "no critical case is skipped." Those two clauses are coverage and
+   accounting. The protected property is that the ledger is COMPLETE and every entry has a
+   closed fate — not that every fate is "fixed." A program that fixed nothing but silently
+   deleted its MEDIUM findings would satisfy a literal empty-ledger gate while destroying
+   exactly what the criterion protects.
+
+2. The program has RUN both rules and measured both. The literal rule (block on LOW,
+   security_block_on=low) produced Phase 20: 74 plans, roughly two weeks. The amended rule
+   produced Phase 20A: three Success Criteria closed in 4 plans. Repealing the one measured
+   process improvement, on the phase with the largest matrix and the greatest finding surface,
+   is the worst possible place to repeal it.
+
+3. THE DECIDING FACT, and it is executable rather than arguable. The internal pass raised the
+   only argument that would have defeated the consensus: if Criterion 4 was authored while the
+   standing severity policy already existed, then it is a deliberate, informed, one-time
+   elevation of the bar and an agent must not read it back down. That claim was checked:
+
+     ROADMAP Criterion 4 text      -> 0192e3c0, 2026-07-19 19:01:55 +0700
+     REQUIREMENTS F28-04 text      -> 0192e3c0, 2026-07-19 19:01:55 +0700
+     severity-policy amendment     -> d0837aa7, 2026-07-25 12:20:08 +0700
+
+   Criterion 4 PREDATES the amendment by six days. It was written under the old regime — the one
+   the program then measured, found catastrophic, and replaced with an amendment whose own text
+   says "do not invent a stricter rule." Criterion 4 is therefore a survival of a superseded
+   rule, not an informed elevation above the current one. Applying it literally would honor a
+   superseded draft over the human's own later, measured correction. The later instrument
+   governs. This single check is what carries the decision; the 4-0 vote merely agrees with it.
+
+4. c4-literal is additionally UNREACHABLE as written, which matters because an unreachable gate
+   is met by reclassification rather than by fixing. Several open sub-HIGH items are
+   architectural: bash cannot run under Windows AppContainer at all, by construction — msys
+   needs \BaseNamedObjects and AppContainer confines to AppContainerNamedObjects. No budget
+   fixes that. A gate that can only be satisfied by relabelling FORCES the severity-laundering
+   attack that c4-disposition merely has to defend against.
+
+=== THE COST ACCEPTED, IN THE OPTION'S OWN TERMS ===
+
+"'Resolved' is being read as 'dispositioned', which is a weaker word than the criterion chose."
+Accepted, and it is the honest characterisation. The mitigation is A3: the receipt states the
+weaker claim it can actually support, in those words, and a verifier rejects the stronger claim.
+The reading is only honest because nothing is erased — every finding stays in the ledger and in
+the signed artifact.
+
+"A determined executor can still accept a genuinely serious MEDIUM." Partly accepted, and A2 is
+what narrows it: any finding that touches the subject matter of one of the four criteria cannot
+reach the accept path at all. What remains acceptable is, by construction, a finding that
+contradicts none of the four things this phase certifies. That residual risk is real and is
+carried knowingly.
+
+"It adds rubric and cross-audit machinery to the phase." Accepted. The rubric is written once in
+28-01 and consumed mechanically by 28-04.
+
+=== OPEN RISK CARRIED FORWARD, NOT CLOSED HERE ===
+
+The receipt is an accounting control, not a technical one. It records that a defect was known;
+it does not prevent that defect from reaching a user. This decision therefore makes Phase 29
+(supply chain and release integrity) and the release gate the places where an ACCEPTED finding
+gets its second look, and 28-04 must hand them a machine-readable list rather than prose. If
+Phase 29 does not read that list, the accounting control has no consumer and this decision is
+worth less than it looks. That is a real dependency and it is stated rather than assumed.
+
+=== WHAT IS NOT RESERVED TO SEAN ===
+
+This is an evidence-acceptance policy decision. Under the program's standing rule, the only
+reserved actions are merging to main, opening a PR, tagging, releasing, closing a GitHub issue,
+deleting a retained evidence ref, and supplying real credentials. Evidence-acceptance policy is
+explicitly NOT among them, and the measured cost of routing such decisions upward was 18
+blocking human gates across 32 plans. The decision is taken here and is final for Phase 28.

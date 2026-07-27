@@ -99,6 +99,14 @@ type ActiveReservationRegistry = Arc<StdMutex<HashMap<String, ActiveReservation>
 const RESERVATION_FILE: &str = ".wayland-reservation";
 const LEASE_FILE: &str = ".wayland-active-lease";
 const CONTROL_DIR: &str = ".wayland-control";
+/// Directory name [`WorktreeManager::new`] mints INSIDE the repository root to
+/// hold per-worker checkouts.
+///
+/// It is named here rather than spelled inline because two call sites must agree
+/// on it exactly: the constructor that creates it, and the dirty-checkout guard
+/// that must not mistake it for the user's own uncommitted work. See
+/// [`WorktreeManager::assert_clean`].
+pub(crate) const SWARM_ROOT_DIR: &str = ".swarm-worktrees";
 /// The swarm-root advisory-lock sentinel, resolved beneath [`CONTROL_DIR`].
 ///
 /// MIGRATION CONSEQUENCE, decided and accepted: the on-disk lock artifact moved

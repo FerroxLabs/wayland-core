@@ -164,7 +164,13 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
   2. The 1,000-session/concurrent-child soak has no secret leak, orphan process, unbounded resource use, or unacceptable quality/performance delta.
   3. Signed receipts bind exact candidate, platform, posture, corpus, environment, artifacts, logs, and skip policy.
   4. Zero findings remain at every severity before acceptance.
-**Plans**: TBD
+**Plans**: 4 plans (`28-01`…`28-04`), one per wave, parameterized over the candidate phases 24–27 produce.
+- [ ] `28-01-PLAN.md` — certification contract (acceptance rule, severity rubric, four-class skip taxonomy), candidate resolver, and the E5 matrix generator.
+- [ ] `28-02-PLAN.md` — measure Windows sandbox observability by control, then run the nine-dimension hostile matrix natively on macOS, Linux and Windows.
+- [ ] `28-03-PLAN.md` — decide the delta bands by cross-audit, then the 1,000-session/concurrent-child soak with a positive control behind every observable.
+- [ ] `28-04-PLAN.md` — signed certification receipt with independent recomputing verification, finding adjudication, and the four-criterion phase verdict.
+
+**Criterion 4 conflict, resolved at planning time (4-0, record in `28-01-decision-evidence/`).** Criterion 4 as written collides with the standing severity policy (CRITICAL/HIGH fixed or disproved; MEDIUM and below to BACKLOG, non-blocking). Decision: `c4-disposition` — "resolved" is implemented as DISPOSITIONED, so the gate is zero findings lacking a terminal disposition, with FIXED or DISPROVED the only options at CRITICAL/HIGH. Deciding fact, checked not argued: Criterion 4's text landed 2026-07-19 (`0192e3c0`) and the severity amendment superseding it landed 2026-07-25 (`d0837aa7`), so the criterion predates the rule that governs. Three binding amendments attach — A1 re-score every finding against Phase 28's own criteria, A2 a criterion-contradicting finding is CRITICAL/HIGH by construction with its accept path closed, A3 the receipt may not claim "zero known defects". **A2 is the decision**: without it this degrades to the standing policy with paperwork.
 
 ### Phase 29: Supply Chain and Release Integrity
 **Goal**: Users can verify that installed and updated artifacts correspond to the source, evidence, policy, and trust roots that earned acceptance.
@@ -175,7 +181,11 @@ This roadmap resumes the accepted Frontier program at F20, preserves F00-F19 as 
   2. Install and update paths verify source/artifact identity, rollback/freeze protection, revocation, and key rotation.
   3. Tampered artifacts, manifests, receipts, plugins, backends, or keys are rejected.
   4. Packaging, deployment preparation, rollback rehearsal, and release acceptance remain separate evidence and authorization states.
-**Plans**: TBD
+**Plans**: 4 plans (`29-01`…`29-04`), one per wave, planned 2026-07-27 at base `ac94b1d5`. Every proof runs against Ed25519 trust roots generated at run time and a local artifact store; no plan requires a real key, account or published release to pass a gate.
+- [ ] `29-01-PLAN.md` — measure the shipped supply chain, then land the signed release manifest, the role-scoped trust root and the CLOSED four-state release ledger; write the Phase 28 receipt input contract (R28-A…R28-F).
+- [ ] `29-02-PLAN.md` — clean-room provenance: a byte-deterministic CycloneDX SBOM from `cargo metadata --locked`, wire the `deny.toml` policy that measurably nothing runs today, and measure reproducibility as two build digests or a named variance class.
+- [ ] `29-03-PLAN.md` — install and update identity: ordered downgrade refusal, persisted freeze high-water mark, revocation, and a bundled release trust root that fails closed on a placeholder exactly as `IndexVerifier::bundled()` already does, with a full key-rotation drill.
+- [ ] `29-04-PLAN.md` — paired tamper corpus over all seven F29-03 object classes (control accepted, then one mutation refused), the four-state separation proof run twice (all keys, then acceptance key withheld), and the verbatim phase verdict.
 
 ### Phase 30: Continuous Scorecard and Frontier Review
 **Goal**: Sean can make a defensible release-positioning decision from repeated, comparable, independently reviewed evidence.
