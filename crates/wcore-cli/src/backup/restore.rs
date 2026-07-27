@@ -364,6 +364,109 @@ mod tests {
     }
 
     #[test]
+    fn a_partially_written_backup_leaves_an_OCCUPIED_target_byte_identical() {
+        // The scenario that matters: the target is a live profile, and the
+        // archive is one whose write was interrupted. Restoring into an empty
+        // directory would prove nothing here -- there would be nothing to lose.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        seed_source(&src);
+        let arc = dir.path().join("a.tar.gz");
+        create_archive(&src, &arc, false).unwrap();
+
+        let full = std::fs::read(&arc).unwrap();
+        let truncated = dir.path().join("truncated.tar.gz");
+        std::fs::write(&truncated, &full[..full.len() / 2]).unwrap();
+
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(target.join("skills")).unwrap();
+        std::fs::write(target.join("config.toml"), "LIVE PROFILE").unwrap();
+        std::fs::write(target.join("skills/live.md"), "LIVE SKILL").unwrap();
+        let pre = journal::target_digest(&target).unwrap();
+
+        // Even with --replace, which is the destructive mode.
+        let err = restore_archive(
+            &truncated,
+            &target,
+            RestoreOptions {
+                replace: true,
+                accept_missing_secrets: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            !matches!(err, BackupError::TargetOccupied(_)),
+            "should have failed on the archive, not the target: {err:?}"
+        );
+        assert_eq!(
+            journal::target_digest(&target).unwrap(),
+            pre,
+            "a partially-written backup damaged a live target"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("config.toml")).unwrap(),
+            "LIVE PROFILE"
+        );
+        assert!(
+            !target.join(journal::JOURNAL_DIR).exists(),
+            "verification failed before writing, so no journal should have opened"
+        );
+    }
+
+    #[test]
+    fn an_older_schema_archive_restores_over_an_existing_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        seed_source(&src);
+        let arc = dir.path().join("a.tar.gz");
+        let m = create_archive(&src, &arc, false).unwrap();
+        let src_digest = journal::target_digest(&src).unwrap();
+        let (_, payloads) = archive::unpack(&arc).unwrap();
+        let blobs: Vec<(String, Vec<u8>)> = payloads.into_iter().collect();
+
+        // An archive written by an older build: the manifest predates the
+        // fields this build added, so they are absent rather than empty.
+        let older: Manifest = serde_json::from_value(serde_json::json!({
+            "format": crate::backup::archive::FORMAT_ID,
+            "version": 1,
+            "created_utc": "1970-01-01T00:00:00Z",
+            "digest_algo": crate::backup::archive::DIGEST_ALGO,
+            "tree_digest": m.tree_digest,
+            "payloads": m.payloads,
+            "credentials": { "backend": "plaintext", "carried": true, "secrets_outside_tree": false }
+        }))
+        .unwrap();
+        let old_arc = dir.path().join("older.tar.gz");
+        std::fs::write(&old_arc, archive::pack(&older, &blobs).unwrap()).unwrap();
+
+        // A target that is an EXISTING, diverged profile.
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(target.join("stale")).unwrap();
+        std::fs::write(target.join("config.toml"), "OLD LIVE CONFIG").unwrap();
+        std::fs::write(target.join("stale/gone.txt"), "must not survive").unwrap();
+
+        let out = restore_archive(
+            &old_arc,
+            &target,
+            RestoreOptions {
+                replace: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(out.written, 2);
+        assert_eq!(
+            journal::target_digest(&target).unwrap(),
+            src_digest,
+            "an older-schema archive did not restore exactly over an existing profile"
+        );
+        assert!(!target.join("stale").exists());
+    }
+
+    #[test]
     fn a_partial_failure_part_way_through_rolls_back_to_the_exact_prior_tree() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");

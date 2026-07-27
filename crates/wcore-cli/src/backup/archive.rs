@@ -283,6 +283,23 @@ pub(crate) fn unpack(path: &Path) -> Result<(Manifest, BTreeMap<String, Vec<u8>>
             manifest.format
         )));
     }
+    // Schema versioning, in the only direction that can be handled honestly.
+    //
+    // An OLDER archive is restorable: every field this build added since is
+    // `#[serde(default)]`, so an older manifest parses and its absent fields
+    // mean what their defaults mean.
+    //
+    // A NEWER archive is REFUSED. It may declare payloads, exclusions or
+    // credential facts this build has no concept of, and restoring it while
+    // silently ignoring them would produce a home that is not what the archive
+    // describes -- with the operator believing they had recovered.
+    if manifest.version > FORMAT_VERSION {
+        return Err(BackupError::NotAnArchive(format!(
+            "archive declares schema version {} but this build understands at most {FORMAT_VERSION}; \
+             refusing rather than restoring an archive whose contents it cannot fully interpret",
+            manifest.version
+        )));
+    }
     Ok((manifest, payloads))
 }
 
@@ -624,6 +641,87 @@ mod tests {
                 "plain path was refused: {good:?}"
             );
         }
+    }
+
+    #[test]
+    fn verify_refuses_an_archive_from_a_NEWER_schema_and_accepts_an_OLDER_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        seed_home(&home);
+        let out = dir.path().join("b.tar.gz");
+        let m = create_archive(&home, &out, false).unwrap();
+        let (_, payloads) = unpack(&out).unwrap();
+        let blobs: Vec<(String, Vec<u8>)> = payloads.into_iter().collect();
+
+        // NEWER: must be refused rather than half-understood.
+        let mut newer = m.clone();
+        newer.version = FORMAT_VERSION + 1;
+        let p = dir.path().join("newer.tar.gz");
+        std::fs::write(&p, pack(&newer, &blobs).unwrap()).unwrap();
+        match verify_archive(&p).unwrap_err() {
+            BackupError::NotAnArchive(msg) => {
+                assert!(msg.contains("schema version"), "{msg}")
+            }
+            other => panic!("expected a schema refusal, got {other:?}"),
+        }
+
+        // OLDER: a manifest that predates the fields this build added must still
+        // verify, with those fields taking their documented defaults. Written as
+        // raw JSON so it is genuinely an older SHAPE, not a newer struct with
+        // fields cleared.
+        let older = serde_json::json!({
+            "format": FORMAT_ID,
+            "version": 1,
+            "created_utc": "1970-01-01T00:00:00Z",
+            "digest_algo": DIGEST_ALGO,
+            "tree_digest": m.tree_digest,
+            "payloads": m.payloads,
+            "credentials": {
+                "backend": "plaintext",
+                "carried": false,
+                "secrets_outside_tree": false
+                // no `external_paths`, and no top-level `absent_secrets`
+            }
+        });
+        let older: Manifest =
+            serde_json::from_value(older).expect("an older manifest shape must still deserialize");
+        assert!(older.absent_secrets.is_empty());
+        assert!(older.credentials.external_paths.is_empty());
+        let p2 = dir.path().join("older.tar.gz");
+        std::fs::write(&p2, pack(&older, &blobs).unwrap()).unwrap();
+        verify_archive(&p2).expect("an older-schema archive must remain restorable");
+    }
+
+    #[test]
+    fn verify_rejects_a_partially_written_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        seed_home(&home);
+        let out = dir.path().join("b.tar.gz");
+        create_archive(&home, &out, false).unwrap();
+
+        // A backup interrupted while being written to disk: the head of the
+        // file is genuine, the tail never arrived.
+        let full = std::fs::read(&out).unwrap();
+        assert!(
+            full.len() > 40,
+            "fixture too small to truncate meaningfully"
+        );
+        let truncated = dir.path().join("truncated.tar.gz");
+        std::fs::write(&truncated, &full[..full.len() / 2]).unwrap();
+
+        let err = verify_archive(&truncated).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BackupError::NotAnArchive(_)
+                    | BackupError::VerificationFailed(_)
+                    | BackupError::Io { .. }
+            ),
+            "a partially-written archive must not verify: {err:?}"
+        );
     }
 
     #[test]
