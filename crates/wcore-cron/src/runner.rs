@@ -254,6 +254,25 @@ pub trait JobHandler: Send + Sync {
     async fn dispatch_fire(&self, _fire: &FireContext<'_>, target: &Target) -> Result<()> {
         self.dispatch(target).await
     }
+
+    /// Whether a delivery to `target` can be safely REPEATED — that is,
+    /// whether the destination will recognise a replay carrying the same
+    /// delivery identity and collapse it to one message.
+    ///
+    /// Phase 24 lane 24c, and the default is `false` for a measured reason.
+    /// The delivery ledger keeps an outcome-UNKNOWN state precisely so a
+    /// restart can retry it, but a retry is only safe where the destination
+    /// can tell it is a retry. Against an independent sink on real `systemd`,
+    /// a gateway killed mid-delivery and restarted by the platform delivered
+    /// the same body TWICE — which is the duplicate the phase's first Success
+    /// Criterion forbids.
+    ///
+    /// So the answer defaults to "no", and the spine treats "no" as "record it
+    /// and name it, do not send it again". A handler that overrides this to
+    /// `true` is asserting the key reaches the wire.
+    async fn dispatch_is_idempotent(&self, _target: &Target) -> bool {
+        false
+    }
 }
 
 /// The identity of one scheduled fire.

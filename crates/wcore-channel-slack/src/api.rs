@@ -64,17 +64,45 @@ pub async fn post_message(
     req: &PostMessageRequest,
     max_attempts: u32,
 ) -> Result<PostMessageResponse, SlackError> {
+    post_message_keyed(http, api_base, bot_token, req, max_attempts, None).await
+}
+
+/// Header carrying the delivery ledger's stable idempotency key.
+///
+/// The de-facto standard spelling (Stripe, and every API that copied it). It is
+/// inert against real Slack, which ignores unknown request headers — so this
+/// adds nothing to the production wire beyond one header, and gives a
+/// destination that DOES honour it everything it needs to collapse a replay
+/// into one message.
+pub const IDEMPOTENCY_HEADER: &str = "Idempotency-Key";
+
+/// [`post_message`] carrying an idempotency key the destination may use to
+/// recognise a retry of the same logical delivery.
+///
+/// Note the key is attached OUTSIDE the retry loop and is identical on every
+/// attempt. That is the point: the internal retries here and the gateway's
+/// cross-restart retry must present the same key, or the destination sees two
+/// different deliveries and the guarantee is gone precisely when it matters.
+pub async fn post_message_keyed(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    bot_token: &str,
+    req: &PostMessageRequest,
+    max_attempts: u32,
+    idempotency_key: Option<&str>,
+) -> Result<PostMessageResponse, SlackError> {
     let url = format!("{}/api/chat.postMessage", api_base.trim_end_matches('/'));
     let mut last_err: Option<String> = None;
 
     for attempt in 1..=max_attempts {
-        let resp = http
+        let mut builder = http
             .post(&url)
             .bearer_auth(bot_token)
-            .header("Content-Type", "application/json; charset=utf-8")
-            .json(req)
-            .send()
-            .await;
+            .header("Content-Type", "application/json; charset=utf-8");
+        if let Some(k) = idempotency_key {
+            builder = builder.header(IDEMPOTENCY_HEADER, k);
+        }
+        let resp = builder.json(req).send().await;
 
         let resp = match resp {
             Ok(r) => r,

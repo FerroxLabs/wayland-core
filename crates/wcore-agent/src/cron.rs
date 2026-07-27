@@ -82,8 +82,98 @@ impl EngineJobHandler {
     }
 }
 
+impl EngineJobHandler {
+    /// Send a channel target, optionally carrying the delivery ledger's stable
+    /// idempotency key so the destination can recognise a replay.
+    ///
+    /// Phase 24 lane 24c. Split out of `dispatch` so that `dispatch_fire` — the
+    /// only caller that HAS a delivery identity — can hand it to the adapter.
+    /// `dispatch` has no fire context and therefore no key, which is why it
+    /// passes `None` rather than inventing one: a key that is not stable across
+    /// a restart duplicates on every recovery, which is the exact bug this
+    /// plumbing exists to close.
+    async fn send_channel(
+        &self,
+        channel_name: &str,
+        text: &str,
+        key: Option<&str>,
+    ) -> Result<(), CronError> {
+        let Some(mgr) = &self.channels else {
+            warn!(
+                target: "wcore_agent::cron",
+                channel = %channel_name,
+                "channel cron fire dropped — no ChannelManager wired"
+            );
+            // F-063: return Err so the runner does NOT persist last_fired
+            // for a no-op fire. A missing channel sink means nothing was
+            // sent; advancing the clock would make the job look healthy.
+            return Err(CronError::Dispatch("no channel sink available".to_string()));
+        };
+        let msg = OutgoingMessage::text(channel_name.to_string(), text.to_string());
+        let guard = mgr.read().await;
+        guard
+            .send_to_keyed(channel_name, msg, key)
+            .await
+            .map_err(|e| match e {
+                // A `Config` error (e.g. "unknown channel: X") is permanent:
+                // the channel is not registered in this process and won't be
+                // without a reconfigure. Map it to NoDispatcher so the runner
+                // advances `last_fired` (anti-hot-loop) and stages the fire,
+                // instead of re-firing every tick forever (the source of the
+                // "unknown channel: desktop" 30s retry storm). Genuine
+                // transient send failures stay `Dispatch` → retried.
+                ChannelError::Config(_) => CronError::NoDispatcher,
+                other => CronError::Dispatch(format!("channel send: {other}")),
+            })?;
+        debug!(
+            target: "wcore_agent::cron",
+            channel = %channel_name,
+            keyed = key.is_some(),
+            "channel cron fired"
+        );
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl JobHandler for EngineJobHandler {
+    /// Answers for the DESTINATION, not for this handler.
+    ///
+    /// The gateway's delivery spine reads this to decide whether an
+    /// outcome-unknown delivery may be retried. Only a channel target is a
+    /// delivery at all; for anything else the question does not arise and the
+    /// conservative answer is the correct one.
+    async fn dispatch_is_idempotent(&self, target: &Target) -> bool {
+        match target {
+            Target::Channel { channel_name, .. } => match &self.channels {
+                Some(mgr) => {
+                    mgr.read()
+                        .await
+                        .supports_outbound_idempotency(channel_name)
+                        .await
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// The keyed path. `dispatch` keeps the unkeyed behaviour for every caller
+    /// that has no fire identity.
+    async fn dispatch_fire(
+        &self,
+        fire: &wcore_cron::runner::FireContext<'_>,
+        target: &Target,
+    ) -> Result<(), CronError> {
+        match target {
+            Target::Channel { channel_name, text } => {
+                self.send_channel(channel_name, text, Some(&fire.delivery_id()))
+                    .await
+            }
+            other => self.dispatch(other).await,
+        }
+    }
+
     async fn dispatch(&self, target: &Target) -> Result<(), CronError> {
         match target {
             Target::Slash { command } => {
@@ -111,45 +201,12 @@ impl JobHandler for EngineJobHandler {
                 }
                 Ok(())
             }
+            // Convention: when bootstrap-side cron fires, the `channel_name`
+            // doubles as the conversation_id of the channel's default room.
+            // Per-platform overrides live on the cron job's text or as a future
+            // `conversation_id` field; v0.8.1 uses one-room semantics.
             Target::Channel { channel_name, text } => {
-                let Some(mgr) = &self.channels else {
-                    warn!(
-                        target: "wcore_agent::cron",
-                        channel = %channel_name,
-                        "channel cron fire dropped — no ChannelManager wired"
-                    );
-                    // F-063: return Err so the runner does NOT persist last_fired
-                    // for a no-op fire. A missing channel sink means nothing was
-                    // sent; advancing the clock would make the job look healthy.
-                    return Err(CronError::Dispatch("no channel sink available".to_string()));
-                };
-                // Convention: when bootstrap-side cron fires, the
-                // `channel_name` doubles as the conversation_id of the
-                // channel's default room. Per-platform overrides live
-                // on the cron job's text or as a future `conversation_id`
-                // field; v0.8.1 uses one-room semantics.
-                let msg = OutgoingMessage::text(channel_name.clone(), text.clone());
-                let guard = mgr.read().await;
-                guard
-                    .send_to(channel_name, msg)
-                    .await
-                    .map_err(|e| match e {
-                        // A `Config` error (e.g. "unknown channel: X") is permanent:
-                        // the channel is not registered in this process and won't be
-                        // without a reconfigure. Map it to NoDispatcher so the runner
-                        // advances `last_fired` (anti-hot-loop) and stages the fire,
-                        // instead of re-firing every tick forever (the source of the
-                        // "unknown channel: desktop" 30s retry storm). Genuine
-                        // transient send failures stay `Dispatch` → retried.
-                        ChannelError::Config(_) => CronError::NoDispatcher,
-                        other => CronError::Dispatch(format!("channel send: {other}")),
-                    })?;
-                debug!(
-                    target: "wcore_agent::cron",
-                    channel = %channel_name,
-                    "channel cron fired"
-                );
-                Ok(())
+                self.send_channel(channel_name, text, None).await
             }
             Target::Skill { name, args } => {
                 if let Some(sink) = &self.skill {

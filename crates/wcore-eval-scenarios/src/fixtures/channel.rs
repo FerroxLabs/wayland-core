@@ -103,6 +103,18 @@ pub struct Arrival {
     /// A stalled arrival is a delivery that LANDED and that the sender
     /// cannot know landed.
     pub answered: bool,
+    /// The `Idempotency-Key` the sender presented, if any.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+    /// True when this arrival repeated a key the sink had already served, so
+    /// the sink collapsed it instead of creating a second message.
+    ///
+    /// A suppressed arrival is still journalled. Hiding it would make the
+    /// suppression unfalsifiable — the point is to show the replay REACHED the
+    /// destination and was absorbed there, which is a different fact from it
+    /// never having been sent.
+    #[serde(default)]
+    pub suppressed: bool,
     /// Sink wall-clock, RFC3339.
     pub at: String,
 }
@@ -132,13 +144,22 @@ pub struct ArrivalTally {
     pub duplicated: Vec<String>,
     /// Arrivals the sink accepted but never answered.
     pub stalled: usize,
+    /// Replays the sink recognised by idempotency key and collapsed. These
+    /// REACHED the destination; they did not become a second message.
+    pub suppressed: usize,
 }
 
 impl ArrivalTally {
     /// Compute the tally over a journal's records.
+    ///
+    /// A SUPPRESSED arrival is excluded from the message count: it reached the
+    /// destination and the destination collapsed it into the message it had
+    /// already created, so there is one message there, not two. It is still
+    /// counted in [`Self::suppressed`] — the replay happened and hiding it
+    /// would make the suppression unfalsifiable.
     pub fn of(arrivals: &[Arrival]) -> Self {
         let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
-        for a in arrivals {
+        for a in arrivals.iter().filter(|a| !a.suppressed) {
             *counts.entry(a.text.as_str()).or_default() += 1;
         }
         let duplicated: Vec<String> = counts
@@ -147,10 +168,14 @@ impl ArrivalTally {
             .map(|(t, _)| (*t).to_string())
             .collect();
         Self {
-            total: arrivals.len(),
+            total: arrivals.iter().filter(|a| !a.suppressed).count(),
             unique: counts.len(),
             duplicated,
-            stalled: arrivals.iter().filter(|a| !a.answered).count(),
+            stalled: arrivals
+                .iter()
+                .filter(|a| !a.answered && !a.suppressed)
+                .count(),
+            suppressed: arrivals.iter().filter(|a| a.suppressed).count(),
         }
     }
 
@@ -203,12 +228,22 @@ struct SinkState {
     seq: AtomicU64,
     journal: Mutex<std::fs::File>,
     journal_path: PathBuf,
+    /// Idempotency key → the message identity the destination created for it.
+    ///
+    /// Populated when the message is JOURNALLED, not when it is answered. That
+    /// distinction is the whole reason the stall mode exists: a stalled arrival
+    /// is a message the destination holds and the sender never heard about, so
+    /// a replay of its key is still a duplicate of something already here.
+    /// Keying off "answered" instead would let exactly the dangerous case
+    /// through.
+    served: Mutex<std::collections::BTreeMap<String, String>>,
 }
 
 impl SinkState {
     /// Journal an arrival and flush it to a durable point BEFORE the caller
     /// gets an answer. A buffered arrival lost in the sink's own page cache
     /// would be indistinguishable from a delivery that never happened.
+    #[allow(clippy::too_many_arguments)]
     fn record(
         &self,
         endpoint: &str,
@@ -216,6 +251,8 @@ impl SinkState {
         text: &str,
         auth: &str,
         answered: bool,
+        key: Option<&str>,
+        suppressed: bool,
     ) {
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         let a = Arrival {
@@ -226,8 +263,16 @@ impl SinkState {
             text: text.to_string(),
             auth_fingerprint: fingerprint(auth),
             answered,
+            idempotency_key: key.map(str::to_string),
+            suppressed,
             at: chrono_now(),
         };
+        if !suppressed
+            && let Some(k) = key
+            && let Ok(mut m) = self.served.lock()
+        {
+            m.insert(k.to_string(), a.ts.clone());
+        }
         let line = serde_json::to_string(&a).unwrap_or_else(|e| {
             format!("{{\"seq\":{seq},\"error\":\"arrival could not be encoded: {e}\"}}")
         });
@@ -293,6 +338,7 @@ impl ChannelSink {
             seq: AtomicU64::new(0),
             journal: Mutex::new(file),
             journal_path: journal_path.clone(),
+            served: Mutex::new(std::collections::BTreeMap::new()),
         });
 
         let app = Router::new()
@@ -374,6 +420,36 @@ async fn post_message(
         text: body.clone(),
     });
     let auth = bearer(&headers);
+    let key = headers
+        .get("Idempotency-Key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
+    // A key this sink has already SERVED is a replay. It is journalled — the
+    // replay really did reach the destination — but it does not create a
+    // second message, and the sender gets back the identity of the message the
+    // first attempt created. That is what "one message at the destination"
+    // means when the sender could not learn the first attempt landed.
+    if let Some(k) = key.as_deref() {
+        let prior = state.served.lock().ok().and_then(|m| m.get(k).cloned());
+        if let Some(ts) = prior {
+            state.record(
+                "chat.postMessage",
+                &parsed.channel,
+                &parsed.text,
+                &auth,
+                true,
+                Some(k),
+                true,
+            );
+            return (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                json!({ "ok": true, "ts": ts, "channel": parsed.channel }).to_string(),
+            )
+                .into_response();
+        }
+    }
 
     // Decide BEFORE journalling, so the record states truthfully whether this
     // arrival was ever going to be answered.
@@ -388,6 +464,8 @@ async fn post_message(
         &parsed.text,
         &auth,
         will_answer,
+        key.as_deref(),
+        false,
     );
 
     if !will_answer {
@@ -431,6 +509,8 @@ async fn reactions_add(
         &format!("reaction:{}", parsed.name),
         &bearer(&headers),
         true,
+        None,
+        false,
     );
     (
         StatusCode::OK,
@@ -506,6 +586,8 @@ mod tests {
             text: text.into(),
             auth_fingerprint: "sha256:deadbeef".into(),
             answered,
+            idempotency_key: None,
+            suppressed: false,
             at: "0.0Z".into(),
         }
     }

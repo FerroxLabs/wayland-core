@@ -213,55 +213,26 @@ impl Channel for SlackChannel {
     }
 
     async fn send_message(&mut self, msg: OutgoingMessage) -> Result<MessageReceipt, ChannelError> {
-        if self.state != ConnectionState::Connected {
-            return Err(ChannelError::NotStarted);
-        }
-        let bot_token = self
-            .bot_token
-            .as_deref()
-            .ok_or_else(|| ChannelError::Auth("bot token not loaded".to_string()))?;
+        self.post(msg, None).await
+    }
 
-        let conversation_id = if msg.conversation_id.is_empty() {
-            if self.config.default_channel_id.is_empty() {
-                return Err(ChannelError::Rejected(
-                    "no conversation_id and no default_channel_id configured".to_string(),
-                ));
-            }
-            self.config.default_channel_id.clone()
-        } else {
-            msg.conversation_id.clone()
-        };
+    async fn send_message_idempotent(
+        &mut self,
+        msg: OutgoingMessage,
+        key: &str,
+    ) -> Result<MessageReceipt, ChannelError> {
+        self.post(msg, Some(key)).await
+    }
 
-        let req = api::PostMessageRequest {
-            channel: conversation_id.clone(),
-            text: msg.text.clone(),
-            thread_ts: msg.reply_to.clone(),
-        };
-
-        let resp = api::post_message(
-            &self.http,
-            &self.config.api_base_url,
-            bot_token,
-            &req,
-            self.config.max_retry_attempts,
-        )
-        .await
-        .map_err(ChannelError::from)?;
-
-        let ts = resp
-            .ts
-            .ok_or_else(|| ChannelError::Rejected("slack response missing ts".to_string()))?;
-        let secs: i64 = ts
-            .split('.')
-            .next()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-
-        Ok(MessageReceipt {
-            id: ts,
-            conversation_id: resp.channel.unwrap_or(conversation_id),
-            ts_secs: secs,
-        })
+    /// This adapter DOES transmit the key (see [`Self::post`]), so the delivery
+    /// spine is allowed to retry an outcome-unknown delivery through it.
+    ///
+    /// Returning `true` here is a claim the wire has to back: if the header
+    /// stopped being sent, the spine would keep retrying and every retry would
+    /// duplicate. `slack_declares_idempotency_only_because_it_sends_the_header`
+    /// is the test that binds the two together.
+    fn supports_outbound_idempotency(&self) -> bool {
+        true
     }
 
     fn config_schema(&self) -> &str {
@@ -336,6 +307,65 @@ impl Channel for SlackChannel {
             Ok(None) => Ok(WebhookResponse::ok()),
             Err(e) => Err(ChannelError::Rejected(e.to_string())),
         }
+    }
+}
+
+impl SlackChannel {
+    async fn post(
+        &mut self,
+        msg: OutgoingMessage,
+        idempotency_key: Option<&str>,
+    ) -> Result<MessageReceipt, ChannelError> {
+        if self.state != ConnectionState::Connected {
+            return Err(ChannelError::NotStarted);
+        }
+        let bot_token = self
+            .bot_token
+            .as_deref()
+            .ok_or_else(|| ChannelError::Auth("bot token not loaded".to_string()))?;
+
+        let conversation_id = if msg.conversation_id.is_empty() {
+            if self.config.default_channel_id.is_empty() {
+                return Err(ChannelError::Rejected(
+                    "no conversation_id and no default_channel_id configured".to_string(),
+                ));
+            }
+            self.config.default_channel_id.clone()
+        } else {
+            msg.conversation_id.clone()
+        };
+
+        let req = api::PostMessageRequest {
+            channel: conversation_id.clone(),
+            text: msg.text.clone(),
+            thread_ts: msg.reply_to.clone(),
+        };
+
+        let resp = api::post_message_keyed(
+            &self.http,
+            &self.config.api_base_url,
+            bot_token,
+            &req,
+            self.config.max_retry_attempts,
+            idempotency_key,
+        )
+        .await
+        .map_err(ChannelError::from)?;
+
+        let ts = resp
+            .ts
+            .ok_or_else(|| ChannelError::Rejected("slack response missing ts".to_string()))?;
+        let secs: i64 = ts
+            .split('.')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        Ok(MessageReceipt {
+            id: ts,
+            conversation_id: resp.channel.unwrap_or(conversation_id),
+            ts_secs: secs,
+        })
     }
 }
 
@@ -422,6 +452,68 @@ mod tests {
         assert_eq!(receipt.conversation_id, "C1");
         assert_eq!(receipt.ts_secs, 1234);
 
+        mock.assert_async().await;
+    }
+
+    /// The capability declaration and the wire must agree.
+    ///
+    /// `supports_outbound_idempotency()` returning `true` is what permits the
+    /// gateway's delivery spine to retry a delivery whose outcome is unknown.
+    /// If that claim were true while the header was not actually sent, every
+    /// such retry would become a second message at the destination — the exact
+    /// duplicate measured on 2026-07-27 against an independent sink. This test
+    /// binds the two: the mock matches on the header, so dropping it from
+    /// `post_message_keyed` reddens here rather than only in a live run.
+    #[tokio::test]
+    async fn slack_declares_idempotency_only_because_it_sends_the_header() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/chat.postMessage")
+            .match_header("idempotency-key", "cron:job-a:1785121776528")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true,"ts":"1.0","channel":"C1"}"#)
+            .create_async()
+            .await;
+
+        let mut ch = SlackChannel::new("test", cfg_for(&server.url()), store_for_test());
+        assert!(
+            ch.supports_outbound_idempotency(),
+            "slack claims it can deduplicate a replay"
+        );
+        ch.start().await.unwrap();
+        let _ = ch.poll_events().await.unwrap();
+
+        ch.send_message_idempotent(
+            OutgoingMessage::text("C1", "hello"),
+            "cron:job-a:1785121776528",
+        )
+        .await
+        .unwrap();
+
+        mock.assert_async().await;
+    }
+
+    /// An unkeyed send must NOT carry the header, or every ordinary message
+    /// would present a key the destination could collapse against.
+    #[tokio::test]
+    async fn an_unkeyed_send_carries_no_idempotency_header() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/chat.postMessage")
+            .match_header("idempotency-key", mockito::Matcher::Missing)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true,"ts":"1.0","channel":"C1"}"#)
+            .create_async()
+            .await;
+
+        let mut ch = SlackChannel::new("test", cfg_for(&server.url()), store_for_test());
+        ch.start().await.unwrap();
+        let _ = ch.poll_events().await.unwrap();
+        ch.send_message(OutgoingMessage::text("C1", "hello"))
+            .await
+            .unwrap();
         mock.assert_async().await;
     }
 

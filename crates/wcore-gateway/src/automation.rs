@@ -136,6 +136,10 @@ impl JobHandler for LedgeredHandler {
         }
         let id = fire.delivery_id();
 
+        // Asked BEFORE the ledger guard is taken, because it may touch the
+        // channel manager and no guard here is ever held across an await.
+        let destination_dedupes = self.inner.dispatch_is_idempotent(target).await;
+
         {
             let mut l = lock(&self.ledger);
             match l
@@ -149,6 +153,37 @@ impl JobHandler for LedgeredHandler {
                 // question, not this one's.
                 Accept::Duplicate => {
                     if matches!(l.state(&id), Some(DeliveryState::Settled)) {
+                        return Ok(());
+                    }
+                    // F24-C-H1, measured against an independent sink.
+                    //
+                    // This delivery was already ATTEMPTED and the process died
+                    // before it could settle, so its outcome is UNKNOWN. It may
+                    // have landed. Re-sending it to a destination that cannot
+                    // recognise the replay is not a recovery — it is the second
+                    // copy, and Success Criterion 1 forbids exactly that.
+                    //
+                    // Measured: `f24c-delivery-09` reached the sink, the
+                    // gateway was `kill -9`'d before settling, systemd brought
+                    // it back, and the sink recorded the SAME body again. The
+                    // ledger had the identical key both times and dispatched
+                    // anyway, because only `Settled` short-circuited here.
+                    //
+                    // The delivery is ABANDONED rather than dropped: recorded,
+                    // terminal, and nameable by an operator. That is the honest
+                    // outcome — a delivery whose fate is genuinely unknown must
+                    // be surfaced, not guessed at in either direction.
+                    if !destination_dedupes
+                        && matches!(l.state(&id), Some(DeliveryState::Attempted))
+                    {
+                        l.abandon(&id)
+                            .map_err(|e| CronError::Dispatch(e.to_string()))?;
+                        l.flush().map_err(|e| CronError::Dispatch(e.to_string()))?;
+                        tracing::warn!(
+                            delivery = %id,
+                            "delivery outcome is unknown and this destination cannot \
+                             recognise a replay; abandoning rather than duplicating it"
+                        );
                         return Ok(());
                     }
                 }
@@ -434,6 +469,153 @@ mod tests {
         .unwrap();
         assert_eq!(second.role(), LeaseRole::Observer);
         assert_eq!(second.observed_owner(), Some(std::process::id()));
+    }
+
+    /// A handler that counts dispatches and declares whether its destination
+    /// can recognise a replay.
+    #[derive(Clone)]
+    struct CountingHandler {
+        fires: Arc<Mutex<Vec<String>>>,
+        idempotent: bool,
+    }
+
+    #[async_trait]
+    impl JobHandler for CountingHandler {
+        async fn dispatch(&self, target: &Target) -> wcore_cron::Result<()> {
+            lock(&self.fires).push(format!("{target:?}"));
+            Ok(())
+        }
+        async fn dispatch_is_idempotent(&self, _t: &Target) -> bool {
+            self.idempotent
+        }
+    }
+
+    fn channel_target() -> Target {
+        Target::Channel {
+            channel_name: "sink".into(),
+            text: "body".into(),
+        }
+    }
+
+    fn fire_at(ms: i64) -> (String, DateTime<Utc>) {
+        let t = DateTime::from_timestamp_millis(ms).unwrap();
+        ("job-a".to_string(), t)
+    }
+
+    /// F24-C-H1, the regression this plan exists to close.
+    ///
+    /// Measured live on 2026-07-27: a delivery reached an INDEPENDENT sink, the
+    /// gateway was `kill -9`'d before it could settle, systemd restarted it,
+    /// and the sink recorded the same body a SECOND time. The ledger held the
+    /// identical key on both attempts and re-dispatched anyway, because only a
+    /// `Settled` state short-circuited.
+    ///
+    /// Deleting the `destination_dedupes` guard in `dispatch_fire` reddens
+    /// this and nothing else.
+    #[tokio::test]
+    async fn an_unknown_outcome_delivery_is_not_re_sent_to_a_destination_that_cannot_dedupe() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = CountingHandler {
+            fires: Arc::new(Mutex::new(Vec::new())),
+            idempotent: false,
+        };
+        let ledger = Arc::new(Mutex::new(DeliveryLedger::open(dir.path()).unwrap()));
+        let h = LedgeredHandler {
+            inner: Arc::new(inner.clone()),
+            ledger: Arc::clone(&ledger),
+        };
+        let (job, at) = fire_at(1_785_121_776_528);
+        let fire = FireContext {
+            job_id: &job,
+            scheduled_for: at,
+        };
+        let id = fire.delivery_id();
+
+        // Reproduce the state a hard kill leaves behind: accepted, attempted,
+        // never settled. This is the whole scenario — a clean ledger cannot
+        // reach the defect, which is why this test seeds it rather than
+        // starting from empty.
+        {
+            let mut l = lock(&ledger);
+            l.accept(&id).unwrap();
+            l.begin_attempt(&id).unwrap();
+        }
+
+        h.dispatch_fire(&fire, &channel_target()).await.unwrap();
+
+        assert!(
+            lock(&inner.fires).is_empty(),
+            "an outcome-unknown delivery must NOT be sent again to a destination \
+             that cannot recognise the replay — that is the duplicate"
+        );
+        assert_eq!(
+            lock(&ledger).state(&id),
+            Some(DeliveryState::Abandoned),
+            "it is recorded terminally and nameable, not silently dropped"
+        );
+    }
+
+    /// The other half: where the destination CAN recognise a replay, the retry
+    /// is safe and must still happen — otherwise the fix would convert every
+    /// duplicate into a loss, which is the same criterion failing the other way.
+    #[tokio::test]
+    async fn an_unknown_outcome_delivery_is_re_sent_when_the_destination_dedupes() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = CountingHandler {
+            fires: Arc::new(Mutex::new(Vec::new())),
+            idempotent: true,
+        };
+        let ledger = Arc::new(Mutex::new(DeliveryLedger::open(dir.path()).unwrap()));
+        let h = LedgeredHandler {
+            inner: Arc::new(inner.clone()),
+            ledger: Arc::clone(&ledger),
+        };
+        let (job, at) = fire_at(1_785_121_776_528);
+        let fire = FireContext {
+            job_id: &job,
+            scheduled_for: at,
+        };
+        let id = fire.delivery_id();
+        {
+            let mut l = lock(&ledger);
+            l.accept(&id).unwrap();
+            l.begin_attempt(&id).unwrap();
+        }
+
+        h.dispatch_fire(&fire, &channel_target()).await.unwrap();
+
+        assert_eq!(lock(&inner.fires).len(), 1, "the retry is safe here");
+        assert_eq!(lock(&ledger).state(&id), Some(DeliveryState::Settled));
+    }
+
+    /// A settled delivery is still short-circuited regardless of capability —
+    /// the pre-existing guarantee must not regress.
+    #[tokio::test]
+    async fn a_settled_delivery_is_never_re_sent_either_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = CountingHandler {
+            fires: Arc::new(Mutex::new(Vec::new())),
+            idempotent: true,
+        };
+        let ledger = Arc::new(Mutex::new(DeliveryLedger::open(dir.path()).unwrap()));
+        let h = LedgeredHandler {
+            inner: Arc::new(inner.clone()),
+            ledger: Arc::clone(&ledger),
+        };
+        let (job, at) = fire_at(1_785_121_776_528);
+        let fire = FireContext {
+            job_id: &job,
+            scheduled_for: at,
+        };
+        let id = fire.delivery_id();
+        {
+            let mut l = lock(&ledger);
+            l.accept(&id).unwrap();
+            l.begin_attempt(&id).unwrap();
+            l.settle(&id, true).unwrap();
+        }
+        h.dispatch_fire(&fire, &channel_target()).await.unwrap();
+        assert!(lock(&inner.fires).is_empty());
     }
 
     #[test]

@@ -81,6 +81,57 @@ pub trait Channel: Send + Sync {
     /// later `ChannelEvent::MessageReceived` echoes).
     async fn send_message(&mut self, msg: OutgoingMessage) -> Result<MessageReceipt, ChannelError>;
 
+    /// Send `msg` carrying a caller-supplied idempotency `key`, so a retry of
+    /// the SAME logical delivery produces one message at the destination.
+    ///
+    /// # Why this exists, measured
+    ///
+    /// Phase 24, lane 24c. The gateway's delivery ledger keeps four states so
+    /// that only an attempt whose outcome is UNKNOWN is retried on restart.
+    /// It does that correctly. But retrying an unknown-outcome delivery at a
+    /// destination that cannot recognise the replay **is** the duplicate the
+    /// phase's first Success Criterion forbids — and it was measured, against
+    /// an independent sink, on real `systemd`: delivery `f24c-delivery-09`
+    /// landed, the gateway was `kill -9`'d before it could settle, the
+    /// platform restarted it, and the destination recorded the SAME body a
+    /// second time. The ledger even knew the key was identical.
+    ///
+    /// The ledger's own module documentation named the missing half: the key
+    /// lives in the ledger and not on the wire, so "a destination which needs
+    /// the key transmitted must be handed it explicitly by its adapter". This
+    /// is that hand-off.
+    ///
+    /// # The default is deliberately a pass-through, and that is why
+    /// [`supports_outbound_idempotency`](Self::supports_outbound_idempotency)
+    /// exists
+    ///
+    /// An adapter whose platform has no idempotency surface cannot suppress a
+    /// replay, and pretending otherwise would be worse than not trying. So the
+    /// default ignores the key — and declares, through the capability method,
+    /// that it did. The gateway consults that declaration and refuses to
+    /// re-dispatch an unknown-outcome delivery to a destination that cannot
+    /// deduplicate it, recording it by name instead. A silent default here
+    /// would convert a visible duplicate into an invisible one.
+    async fn send_message_idempotent(
+        &mut self,
+        msg: OutgoingMessage,
+        _key: &str,
+    ) -> Result<MessageReceipt, ChannelError> {
+        self.send_message(msg).await
+    }
+
+    /// Whether this adapter actually transmits an idempotency key the
+    /// destination will honour.
+    ///
+    /// Default `false`, because most platforms have no such surface. This is a
+    /// CAPABILITY declaration, not a preference: the delivery spine reads it to
+    /// decide whether an outcome-unknown delivery may be retried at all, so an
+    /// adapter that returns `true` without transmitting the key would
+    /// reintroduce exactly the duplicate this method exists to prevent.
+    fn supports_outbound_idempotency(&self) -> bool {
+        false
+    }
+
     /// Returns the JSON-schema doc string for this channel's
     /// config TOML. UI uses this to render a setup form; tests use
     /// it to validate config files.

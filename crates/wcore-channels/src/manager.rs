@@ -266,6 +266,31 @@ impl ChannelManager {
         name: &str,
         msg: OutgoingMessage,
     ) -> Result<MessageReceipt, ChannelError> {
+        self.send_to_keyed(name, msg, None).await
+    }
+
+    /// Whether the named adapter transmits an idempotency key its destination
+    /// will honour.
+    ///
+    /// The delivery spine reads this BEFORE it retries an outcome-unknown
+    /// delivery. An unknown channel answers `false` rather than erroring: the
+    /// question being asked is "is a retry safe here", and the safe answer for
+    /// a destination that cannot even be resolved is no.
+    pub async fn supports_outbound_idempotency(&self, name: &str) -> bool {
+        match self.channels.get(name) {
+            Some(slot) => slot.lock().await.supports_outbound_idempotency(),
+            None => false,
+        }
+    }
+
+    /// [`send_to`](Self::send_to), optionally carrying the delivery ledger's
+    /// idempotency key so the destination can recognise a replay.
+    pub async fn send_to_keyed(
+        &self,
+        name: &str,
+        msg: OutgoingMessage,
+        key: Option<&str>,
+    ) -> Result<MessageReceipt, ChannelError> {
         let slot = self
             .channels
             .get(name)
@@ -281,7 +306,18 @@ impl ChannelManager {
             _ => vec![msg.text.clone()],
         };
         if chunks.len() <= 1 {
-            return guard.send_message(msg).await;
+            return match key {
+                // The key rides only the single-send path on purpose. A chunked
+                // body is N messages at the destination under one logical
+                // delivery, so one key cannot identify them; handing the same
+                // key to every chunk would make a correct destination suppress
+                // chunks 2..N as replays and silently truncate the message.
+                // `supports_outbound_idempotency` is what the caller consults
+                // before it decides a retry is safe, and `max_message_len` is
+                // what decides whether this branch is taken.
+                Some(k) => guard.send_message_idempotent(msg, k).await,
+                None => guard.send_message(msg).await,
+            };
         }
 
         // Multi-chunk: each piece keeps the conversation + reply target;
