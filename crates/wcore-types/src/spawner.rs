@@ -158,6 +158,20 @@ pub enum RequestedChildWorkspace {
 /// Built-in tools whose effects permit a child to share the parent workspace.
 pub const SHARED_READ_ONLY_CHILD_TOOLS: &[&str] = &["Read", "Grep", "Glob"];
 
+/// Every built-in a delegated child's registry can ever contain.
+///
+/// This is the CEILING of child tool authority, not a grant: a child receives a
+/// name from this list only when the spawn request names it (or it is in
+/// [`SHARED_READ_ONLY_CHILD_TOOLS`] and the request named nothing) AND the
+/// parent session itself holds that name. It exists as a named constant so the
+/// "parent authority is unrestricted" default is expressed once, next to the
+/// read-only floor it sits above, instead of being re-derived at each call site.
+///
+/// Kept in lockstep with the `all` table in
+/// `wcore_agent::spawner::build_tool_registry` by
+/// `child_eligible_tools_matches_registry_table`.
+pub const CHILD_ELIGIBLE_TOOLS: &[&str] = &["Read", "Write", "Edit", "Bash", "Grep", "Glob"];
+
 impl RequestedChildWorkspace {
     /// Whether a realized workspace is safe for this request.
     #[must_use]
