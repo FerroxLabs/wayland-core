@@ -3543,6 +3543,13 @@ impl AgentEngine {
         session_id: Option<&str>,
     ) -> anyhow::Result<()> {
         if let Some(mgr) = &self.session_manager {
+            // D3: a journaled session needs confidential recovery storage, and
+            // `credentials.backend = "plaintext"` can never provide it. That is
+            // decidable from config alone, so refuse here rather than accepting
+            // the session and failing every turn afterwards behind a message
+            // that names the wrong cause.
+            crate::recovery_confidential::reject_backend_without_confidential_storage(&self.config)
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
             let ActiveSession { session, journal } =
                 mgr.create_for_run(provider_name, &self.model, cwd, session_id)?;
             self.bind_budget_authority(journal.clone(), &session.id)?;

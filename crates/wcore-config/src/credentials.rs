@@ -61,6 +61,20 @@ pub enum CredentialsBackend {
     },
 }
 
+impl CredentialsBackend {
+    /// Whether this backend may hold confidential material — encryption keys
+    /// and sealed recovery requests, as opposed to ordinary API keys.
+    ///
+    /// This is the single source of the rule [`open_confidential_store`]
+    /// enforces, exposed so callers can decide it from config alone instead of
+    /// discovering it as a runtime failure. `Plaintext` never qualifies, by
+    /// design; that refusal is the security property, not the defect.
+    #[must_use]
+    pub fn supports_confidential_material(&self) -> bool {
+        !matches!(self, Self::Plaintext)
+    }
+}
+
 /// The `[storage.credentials]` config section.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct CredentialsStorageConfig {
@@ -1438,7 +1452,7 @@ pub fn open_confidential_store(
     cfg: &CredentialsStorageConfig,
     plaintext_path: &Path,
 ) -> Result<ConfidentialCredentialsStore, CredentialsError> {
-    if matches!(&cfg.backend, CredentialsBackend::Plaintext) {
+    if !cfg.backend.supports_confidential_material() {
         return Err(CredentialsError::BackendUnavailable(
             "plaintext credentials are not permitted for confidential material".to_string(),
         ));

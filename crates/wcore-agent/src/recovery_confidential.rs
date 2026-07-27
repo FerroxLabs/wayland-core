@@ -6,8 +6,9 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use wcore_config::confidential_blob::{
-    ConfidentialBlobAad, ConfidentialBlobKey, load_confidential_blob_key,
-    load_or_create_confidential_blob_key, open_confidential_blob, seal_confidential_blob,
+    ConfidentialBlobAad, ConfidentialBlobKey, ConfidentialKeyStoreError,
+    load_confidential_blob_key, load_or_create_confidential_blob_key, open_confidential_blob,
+    seal_confidential_blob,
 };
 use wcore_config::config::Config;
 
@@ -61,16 +62,65 @@ pub(crate) struct PreparedRequestBinding<'a> {
     pub(crate) posture_authority_digest: &'a str,
 }
 
-/// Confidential request failures intentionally omit backend, key, payload,
-/// ciphertext, and associated-data details.
+/// Confidential request failures omit key material, payload, ciphertext and
+/// associated-data details.
+///
+/// They do NOT omit which *configured* backend was refused. That value is
+/// written in the operator's own cleartext config file, so repeating it
+/// discloses nothing — while collapsing it produced the live UAT defect D3:
+/// three unrelated causes rendered as one string that told a user to configure
+/// a credentials backend they had already configured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub(crate) enum RecoveryConfidentialError {
     #[error(
-        "secure recovery storage is unavailable; configure an OS keyring or encrypted credentials vault"
+        "credentials.backend is set to \"plaintext\", which cannot hold the confidential key that \
+         durable session recovery requires. Set credentials.backend to \"keyring\" or \
+         \"encrypted-file\", or disable session persistence"
     )]
+    PlaintextBackendRejected,
+    #[error(
+        "secure recovery storage is unavailable: no OS keyring was usable and no encrypted \
+         credentials vault is unlocked. Configure an OS keyring, or set credentials.backend to \
+         \"encrypted-file\" and supply its unlock passphrase"
+    )]
+    NoSecureBackendAvailable,
+    #[error(
+        "secure recovery storage could not be read: the configured store rejected this profile's \
+         recovery key. An encrypted vault opened with the wrong unlock passphrase reads this way \
+         — re-check the passphrase for this profile"
+    )]
+    SecureStoreUnreadable,
+    #[error(
+        "this profile has no stored recovery key, so a sealed request cannot be opened. The key \
+         is created when a new turn starts on a confidential-capable backend"
+    )]
+    MissingRecoveryKey,
+    #[error("secure recovery storage is unavailable")]
     Unavailable,
     #[error("recovery confidential request is invalid")]
     Invalid,
+}
+
+/// The statically decidable half of the confidential-storage requirement.
+///
+/// `credentials.backend = "plaintext"` can never satisfy it — that refusal is
+/// deliberate security design and is unchanged here. What changes is *when* the
+/// operator hears about it: this is a pure function of config with no side
+/// effects, so a persisted session can refuse to open instead of accepting the
+/// session and failing every turn afterwards.
+pub(crate) fn reject_backend_without_confidential_storage(
+    config: &Config,
+) -> Result<(), RecoveryConfidentialError> {
+    if config
+        .storage
+        .credentials
+        .backend
+        .supports_confidential_material()
+    {
+        Ok(())
+    } else {
+        Err(RecoveryConfidentialError::PlaintextBackendRejected)
+    }
 }
 
 /// Lazily caches a successfully loaded key for one engine. Backend failures
@@ -147,15 +197,29 @@ impl RecoveryRequestProtector {
             .lock()
             .map_err(|_| RecoveryConfidentialError::Unavailable)?;
         if key.is_none() {
+            // Decide the config-determined cause before touching any store, so
+            // a plaintext backend is never reported as an environment problem.
+            reject_backend_without_confidential_storage(config)?;
             let store = config
                 .open_confidential_credentials_store()
-                .map_err(|_| RecoveryConfidentialError::Unavailable)?;
+                .map_err(|_| RecoveryConfidentialError::NoSecureBackendAvailable)?;
             let loaded = if create {
                 load_or_create_confidential_blob_key(&store, KEY_REF)
             } else {
                 load_confidential_blob_key(&store, KEY_REF)
             };
-            *key = Some(loaded.map_err(|_| RecoveryConfidentialError::Unavailable)?);
+            // The store opened, so the backend exists; a failure past this
+            // point is about the key itself, not about availability.
+            *key = Some(loaded.map_err(|error| match error {
+                ConfidentialKeyStoreError::ReadFailed
+                | ConfidentialKeyStoreError::MalformedStoredKey => {
+                    RecoveryConfidentialError::SecureStoreUnreadable
+                }
+                ConfidentialKeyStoreError::MissingStoredKey => {
+                    RecoveryConfidentialError::MissingRecoveryKey
+                }
+                _ => RecoveryConfidentialError::Unavailable,
+            })?);
         }
         operation(key.as_ref().ok_or(RecoveryConfidentialError::Unavailable)?)
     }
