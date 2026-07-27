@@ -97,4 +97,33 @@ pub trait MemoryApi: Send + Sync {
     async fn rebind_session(&self, _session_id: &str) -> Result<()> {
         Ok(())
     }
+
+    /// F23-03 — the operator control surface over recall, when this backend
+    /// has one.
+    ///
+    /// Returns `None` for `NullMemory` and test fixtures, which have no store
+    /// to correct, forget, scope or bound. A caller that gets `None` must say
+    /// so rather than reporting a control as applied: the whole value of these
+    /// controls is that a user can trust the answer.
+    fn controls(&self) -> Option<crate::provenance::MemoryControls> {
+        None
+    }
+
+    /// F23-03 — search, plus the provenance of everything it selected and
+    /// everything it excluded.
+    ///
+    /// The default impl returns the ordinary hits with an EMPTY report, which
+    /// reads as "this backend cannot tell you where these came from". It does
+    /// not fabricate a provenance record, because a wrong answer to "why is
+    /// this in my context window" is worse than no answer.
+    async fn search_with_provenance(
+        &self,
+        q: Query,
+        tok: AccessToken,
+    ) -> Result<(Vec<Hit>, crate::provenance::RecallReport)> {
+        Ok((
+            self.search(q, tok).await?,
+            crate::provenance::RecallReport::default(),
+        ))
+    }
 }
