@@ -40,7 +40,7 @@ use crate::db::Db;
 use crate::error::{MemoryError, Result};
 use crate::gate::MemoryAccessGate;
 use crate::staleness::{StalenessVerdict, verdict_for_age};
-use crate::v2_types::{AccessToken, Partition, Tier};
+use crate::v2_types::{AccessToken, Hit, Partition, Tier};
 
 // ---------------------------------------------------------------------------
 // Provenance records
@@ -493,29 +493,39 @@ pub fn age_secs_at(now: i64, ts: i64) -> i64 {
     (now - ts).max(0)
 }
 
+/// The inputs that are the same for every item in one recall, separated from
+/// the per-item ones so the record builder takes a signature a reader can hold
+/// in their head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecallContext {
+    /// The instant the recall happened. Passed in rather than read here so
+    /// every item in one recall is aged against the SAME clock reading — two
+    /// items in one prompt reporting ages a second apart would be a lie about
+    /// which is older.
+    pub now: i64,
+    /// The operator's retention bound for the cell, if one is set.
+    pub max_age_secs: Option<i64>,
+}
+
 /// Build the provenance record for one fused hit.
 #[must_use]
 pub fn provenance_for(
-    id: &str,
-    partition: Partition,
-    tier: Tier,
+    hit: &Hit,
     contributions: Vec<ModalityContribution>,
     rank: usize,
-    fused_score: f64,
-    now: i64,
     ts: i64,
-    max_age_secs: Option<i64>,
+    ctx: RecallContext,
 ) -> RecallProvenance {
-    let age_secs = age_secs_at(now, ts);
+    let age_secs = age_secs_at(ctx.now, ts);
     RecallProvenance {
-        id: id.to_owned(),
-        partition,
-        tier,
+        id: hit.id.clone(),
+        partition: hit.partition,
+        tier: hit.tier,
         contributions,
         rank,
-        fused_score,
+        fused_score: hit.score,
         age_secs,
-        staleness: verdict_for_age(age_secs, max_age_secs),
+        staleness: verdict_for_age(age_secs, ctx.max_age_secs),
     }
 }
 
@@ -867,27 +877,35 @@ mod tests {
 
     #[test]
     fn provenance_labels_a_single_modality_and_a_fusion_differently() {
+        let hit = |id: &str, score: f64| Hit {
+            partition: Partition::Episodic,
+            tier: Tier::Project,
+            id: id.to_owned(),
+            score,
+            session_id: None,
+            preview: String::new(),
+        };
+        let ctx = RecallContext {
+            now: 1_000,
+            max_age_secs: None,
+        };
+
         let single = provenance_for(
-            "a",
-            Partition::Episodic,
-            Tier::Project,
+            &hit("a", 0.016),
             vec![ModalityContribution {
                 modality: RecallModality::Lexical,
                 rank: 0,
             }],
             0,
-            0.016,
-            1_000,
             900,
-            None,
+            ctx,
         );
         assert_eq!(single.modality_label(), "lexical");
         assert_eq!(single.age_secs, 100);
+        assert!((single.fused_score - 0.016).abs() < f64::EPSILON);
 
         let fused = provenance_for(
-            "b",
-            Partition::Episodic,
-            Tier::Project,
+            &hit("b", 0.032),
             vec![
                 ModalityContribution {
                     modality: RecallModality::Lexical,
@@ -899,10 +917,8 @@ mod tests {
                 },
             ],
             1,
-            0.032,
-            1_000,
             900,
-            None,
+            ctx,
         );
         assert_eq!(fused.modality_label(), "fused");
         assert_eq!(fused.contributions.len(), 2);

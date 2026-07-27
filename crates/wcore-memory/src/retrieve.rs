@@ -10,8 +10,8 @@ use crate::db::{Db, vec_table_name_for_dim};
 use crate::embed::{Embedder, cosine, decode_blob, encode_blob};
 use crate::error::{MemoryError, Result};
 use crate::provenance::{
-    ExclusionCause, ModalityContribution, RecallExclusion, RecallModality, RecallReport,
-    provenance_for, read_privacy_scope, read_retention,
+    ExclusionCause, ModalityContribution, RecallContext, RecallExclusion, RecallModality,
+    RecallReport, provenance_for, read_privacy_scope, read_retention,
 };
 use crate::staleness::StalenessVerdict;
 use crate::v2_types::{Hit, Partition, Query, Tier};
@@ -162,15 +162,14 @@ pub async fn search_basic_with_provenance(
         .map(|(rank, hit)| {
             let ts = timestamps.get(&hit.id).copied().unwrap_or(now);
             provenance_for(
-                &hit.id,
-                hit.partition,
-                hit.tier,
+                hit,
                 contributions.get(&hit.id).cloned().unwrap_or_default(),
                 rank,
-                hit.score,
-                now,
                 ts,
-                retention,
+                RecallContext {
+                    now,
+                    max_age_secs: retention,
+                },
             )
         })
         .collect();
@@ -529,10 +528,6 @@ fn kg_pass(conn: &parking_lot::Mutex<rusqlite::Connection>, q: &Query) -> Result
     Ok(out)
 }
 
-fn rrf_fuse(bm25: &[BmHit], vector: &[VecHit], kg: &[KgHit], k: usize) -> Vec<Hit> {
-    rrf_fuse_with_contributions(bm25, vector, kg, k).0
-}
-
 /// F23-03 — the same fusion, additionally returning which modality selected
 /// each item and at what rank inside that modality's own list.
 ///
@@ -648,7 +643,14 @@ mod rrf_kg_tests {
     //!
     //! Tie ordering is NOT stable (HashMap-iter source); ties are
     //! asserted via set-equality + score equality per design doc.
-    use super::{BmHit, KgHit, VecHit, rrf_fuse};
+    use super::{BmHit, KgHit, VecHit, rrf_fuse_with_contributions};
+
+    /// The golden values below pin the fusion math. They now call the one
+    /// surviving implementation, so the scoring they pin is exactly the
+    /// scoring provenance is captured from.
+    fn rrf_fuse(bm25: &[BmHit], vector: &[VecHit], kg: &[KgHit], k: usize) -> Vec<super::Hit> {
+        rrf_fuse_with_contributions(bm25, vector, kg, k).0
+    }
 
     fn b(id: &str) -> (String, String, Option<String>) {
         (id.to_string(), format!("summary-{id}"), None)

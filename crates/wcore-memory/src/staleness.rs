@@ -122,10 +122,10 @@ pub const AGE_AGING_SECS: i64 = 7 * 24 * 60 * 60;
 /// setting zero is asking for.
 #[must_use]
 pub fn verdict_for_age(age_secs: i64, max_age_secs: Option<i64>) -> StalenessVerdict {
-    if let Some(max) = max_age_secs {
-        if age_secs > max {
-            return StalenessVerdict::Expired { max_age_secs: max };
-        }
+    if let Some(max) = max_age_secs
+        && age_secs > max
+    {
+        return StalenessVerdict::Expired { max_age_secs: max };
     }
     if age_secs < AGE_FRESH_SECS {
         StalenessVerdict::Fresh
