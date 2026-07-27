@@ -88,11 +88,40 @@ worktree  C:\ferrox-win-23B04          (detached; created by this lane)
 markers   C:\ferrox-win-23B04-DONE.txt, -rel.log, -harness.json, -harness.log
 ```
 
-At hand-off the Windows release build was still in flight, started at the
-PREVIOUS SHA `9be07203`. Only two shell scripts differ between `9be07203` and
-the pinned `0ed05322`, so the recompile is a relink rather than a cold build —
-but `--build-info` embeds the SHA, so the worktree MUST be moved to the pinned
-SHA and rebuilt before day one, or provenance fails with exit `68`.
+At hand-off the Windows worktree is checked out at the pinned SHA and a cold
+release build plus harness build is in flight, launched at
+`2026-07-27T15:44Z`.
+
+### TRAP 3 — `Start-Process` ignores the PowerShell location
+
+The first launch of this build silently did nothing for ninety minutes. It used
+
+```powershell
+Set-Location C:\ferrox-win-23B04
+Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','cargo build …' -WindowStyle Hidden
+```
+
+`Set-Location` changes the PowerShell *provider* location, not the process's
+working directory, and `Start-Process` inherits the latter — so `cargo` ran in
+the ssh session's home directory. The symptom is deceptive on a shared box:
+`Get-Process rustc` reports a healthy count because ANOTHER lane is compiling,
+while `C:\ferrox-win-23B04\target` never appears and the redirect target stays
+at zero bytes. Two checks distinguish a real build from this:
+
+```powershell
+(Get-Item C:\ferrox-win-23B04-rel.log).Length     # must be non-zero within ~30s
+Test-Path C:\ferrox-win-23B04\target              # must be true
+```
+
+Always pass `-WorkingDirectory` explicitly:
+
+```powershell
+Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','…' `
+  -WorkingDirectory 'C:\ferrox-win-23B04' -WindowStyle Hidden
+```
+
+Because the worktree is already at the pinned SHA, no further checkout is needed
+before day one — only a `--build-info` confirmation.
 
 ```powershell
 Set-Location C:\ferrox-win-23B04
