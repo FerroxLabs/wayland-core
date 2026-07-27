@@ -925,6 +925,64 @@ fn latest_budget_authority(events: &[Value]) -> &Value {
         .unwrap_or_else(|| panic!("journal has no committed budget authority: {events:?}"))
 }
 
+/// The two provider meters a durable budget authority carries for one actor:
+/// what is still admitted but unsettled, and what has actually been charged.
+///
+/// Read straight off the journal frame rather than through a live coordinator,
+/// because binding a coordinator IS the restart reconciliation — only the file
+/// can answer what the dead process left behind.
+#[derive(Debug, Clone, PartialEq)]
+struct ProviderBooks {
+    /// `(session_id, input_tokens, output_tokens, usd)` per in-flight reservation.
+    reserved: Vec<(String, u64, u64, f64)>,
+    /// `(session_id, tokens, usd)` per settled session, `tokens` = input + output.
+    charged: Vec<(String, u64, f64)>,
+}
+
+impl ProviderBooks {
+    fn charged_for(&self, session_id: &str) -> (u64, f64) {
+        self.charged
+            .iter()
+            .find(|(id, _, _)| id == session_id)
+            .map(|(_, tokens, usd)| (*tokens, *usd))
+            .unwrap_or((0, 0.0))
+    }
+}
+
+fn provider_books(authority: &Value) -> ProviderBooks {
+    let tracker = &authority["provider_tracker"];
+    let reserved = tracker["reservations"]
+        .as_array()
+        .unwrap_or_else(|| panic!("durable authority has no reservation ledger: {authority}"))
+        .iter()
+        .map(|entry| {
+            let reservation = &entry["reservation"];
+            (
+                reservation["session_id"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("reservation without a session: {entry}"))
+                    .to_owned(),
+                reservation["input_tokens"].as_u64().unwrap_or_default(),
+                reservation["output_tokens"].as_u64().unwrap_or_default(),
+                reservation["usd"].as_f64().unwrap_or_default(),
+            )
+        })
+        .collect();
+    let charged = tracker["per_session"]
+        .as_object()
+        .unwrap_or_else(|| panic!("durable authority has no per-session ledger: {authority}"))
+        .iter()
+        .map(|(session_id, totals)| {
+            (
+                session_id.clone(),
+                totals["tokens"].as_u64().unwrap_or_default(),
+                totals["usd"].as_f64().unwrap_or_default(),
+            )
+        })
+        .collect();
+    ProviderBooks { reserved, charged }
+}
+
 fn provider_dispatch_bindings(events: &[Value]) -> Vec<Value> {
     events
         .iter()
@@ -1154,6 +1212,113 @@ async fn sigkill_during_model_stream_resumes_as_provider_reconciliation_without_
             },
         ],
     );
+}
+
+/// F21-04-02. An in-flight provider reservation must SURVIVE a real process
+/// kill and be CHARGED by the restart — never silently handed back.
+///
+/// Phase 21's attribution corpus measured `reserved_totals == (0, 0.0)` and
+/// `release() == false` after a restart and escalated a suspected durability
+/// defect: "a crash silently returns spent budget". This test drives the real
+/// packaged binary through a real `SIGKILL` while a paid dispatch is in flight
+/// and reads the journal FILE on both sides of it, which is the only place the
+/// two candidate explanations separate:
+///
+/// * *not persisted* — the crashed process's journal carries no reservation, so
+///   the money simply vanished with the process; or
+/// * *persisted, then deliberately reconciled* — the journal carries the
+///   reservation, and the restart converts it into a charge because the send is
+///   journalled as having reached the provider.
+///
+/// The assertions below are written so those two outcomes cannot be confused:
+/// the reservation is required to be present, on its own session, at a non-zero
+/// amount, BEFORE any restart; and the restart is required to move exactly that
+/// amount from the reserved meter to the charged one. A restart that refunded
+/// instead — the failure the finding feared — leaves the charged meter where it
+/// was and fails the final assertion.
+#[tokio::test]
+async fn sigkill_mid_dispatch_charges_the_surviving_reservation_instead_of_refunding_it() {
+    let partial = "F21-0402-STREAM-STALLED-WITH-BUDGET-IN-FLIGHT";
+    let fixture = OpenAiFixtureScript::new([
+        OpenAiStep::text_then_stall(partial, 60_000),
+        OpenAiStep::text("F21-0402-MUST-NOT-REDISPATCH"),
+    ])
+    .start()
+    .await
+    .expect("start stalled-dispatch fixture");
+    let env = environment(&fixture);
+    let vault = VaultSecret::new();
+    let session_id = "f2100000000000000000000000000402";
+
+    let mut first = CoreProcess::launch(&env, &fixture, &vault, session_id, false).await;
+    send_message(&mut first, "f21-0402-msg", "reserve a dispatch, then die").await;
+    wait_for_requests(&fixture, 1).await;
+    // The stream has started, so the reservation is admitted and the physical
+    // send has demonstrably reached the provider. Killing here is the exact
+    // window the finding is about.
+    assert_eq!(first.next_type("text_delta").await["text"], partial);
+    let _first_diagnostics = first.sigkill().await;
+
+    // LEG 1 — the reservation is IN the dead process's journal, on the session
+    // that made it, for a non-zero amount. This is what "does not survive a
+    // process restart" would have to contradict.
+    let crashed_events = journal_events(env.home(), session_id);
+    let crashed_authority = latest_budget_authority(&crashed_events).clone();
+    let crashed_books = provider_books(&crashed_authority);
+    assert_eq!(
+        crashed_books.reserved.len(),
+        1,
+        "the killed process must leave exactly one in-flight reservation in its journal: \
+         {crashed_books:?}"
+    );
+    let (reserved_session, reserved_input, reserved_output, reserved_usd) =
+        crashed_books.reserved[0].clone();
+    assert!(
+        reserved_input + reserved_output > 0,
+        "a surviving reservation with no admitted tokens cannot distinguish a charge from a \
+         refund: {crashed_books:?}"
+    );
+    assert_eq!(
+        crashed_authority["provider_reservations"]
+            .as_object()
+            .map(serde_json::Map::len),
+        Some(1),
+        "the dispatch-to-reservation binding must survive the kill alongside the reservation: \
+         {crashed_authority}"
+    );
+    let charged_before = crashed_books.charged_for(&reserved_session);
+
+    // LEG 2 — the restart. Binding the durable authority in a fresh real
+    // process IS the reconciliation.
+    let mut resumed = CoreProcess::launch(&env, &fixture, &vault, session_id, true).await;
+    let current = resync_current(&mut resumed, session_id, "f21-0402-current").await;
+    assert_eq!(current["lifecycle"], "suspended");
+
+    let restarted_events = journal_events(env.home(), session_id);
+    let restarted_books = provider_books(latest_budget_authority(&restarted_events));
+    assert!(
+        restarted_books.reserved.is_empty(),
+        "the restart must not carry a dead process's reservation forward as still-admitted: \
+         {restarted_books:?}"
+    );
+    let charged_after = restarted_books.charged_for(&reserved_session);
+    let expected_tokens = charged_before.0 + reserved_input + reserved_output;
+    assert_eq!(
+        charged_after.0, expected_tokens,
+        "the restart returned the admitted tokens instead of charging them: the session was \
+         charged {} before the kill and {} after the restart, against {reserved_input} input + \
+         {reserved_output} output admitted and lost in flight",
+        charged_before.0, charged_after.0
+    );
+    assert!(
+        (charged_after.1 - (charged_before.1 + reserved_usd)).abs() < 1e-9,
+        "the restart returned the admitted cost instead of charging it: ${:.6} before the kill, \
+         ${:.6} after the restart, against ${reserved_usd:.6} admitted and lost in flight",
+        charged_before.1,
+        charged_after.1
+    );
+    assert_one_provider_request(&fixture);
+    let _resumed_diagnostics = resumed.sigkill().await;
 }
 
 #[tokio::test]

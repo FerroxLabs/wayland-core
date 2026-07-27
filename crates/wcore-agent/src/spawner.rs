@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -26,10 +26,10 @@ use wcore_tools::write::WriteTool;
 use wcore_types::execution_policy::EffectiveExecutionPolicy;
 use wcore_types::message::{FinishReason, TokenUsage};
 use wcore_types::spawner::{
-    ChildDeliveryState, ChildDesiredState, ChildId, ChildOrigin, ChildParent, ChildPolicySnapshot,
-    ChildRecoveryState, ChildRequestEvidence, ChildTimestamps, ChildWorkspace, ChildWorkspaceMode,
-    DURABLE_CHILD_SCHEMA_VERSION, DurableChildRecord, DurableChildStatus, RequestedChildWorkspace,
-    SHARED_READ_ONLY_CHILD_TOOLS,
+    CHILD_ELIGIBLE_TOOLS, ChildDeliveryState, ChildDesiredState, ChildId, ChildOrigin, ChildParent,
+    ChildPolicySnapshot, ChildRecoveryState, ChildRequestEvidence, ChildTimestamps, ChildWorkspace,
+    ChildWorkspaceMode, DURABLE_CHILD_SCHEMA_VERSION, DurableChildRecord, DurableChildStatus,
+    RequestedChildWorkspace, SHARED_READ_ONLY_CHILD_TOOLS,
 };
 
 use crate::agents::bus::{AgentBus, AgentMessage, now_ms, preview};
@@ -710,6 +710,63 @@ impl Drop for ChildBudgetGuard {
     }
 }
 
+/// The set of built-in tool names the PARENT session itself holds, used to
+/// intersect every child registry the spawner builds (F21-02-01).
+///
+/// # Why this is a shared, narrow-only cell rather than an `Option` field
+///
+/// An `Option<…>` whose `None` arm SKIPS the intersection is fail-open: every
+/// spawner construction site that forgets to populate it silently disables
+/// enforcement, and there is no way to tell "no parent" from "parent not wired"
+/// at the seam. This type has no skip arm. It always holds a concrete set —
+/// [`CHILD_ELIGIBLE_TOOLS`] at construction, which is exactly the pre-existing
+/// unrestricted behaviour — and the seam intersects against it unconditionally.
+/// A construction site can therefore only get the CONTENT wrong, never turn the
+/// check off.
+///
+/// It is shared (`Arc`) and MONOTONICALLY NARROWING ([`Self::narrow_to`] takes
+/// an intersection, never a replacement) for two reasons:
+///
+/// 1. Production bootstrap wraps the spawner in an `Arc` and moves clones into
+///    `SpawnTool`/`DelegateTool` BEFORE the parent registry's channel-posture
+///    and persona `retain` passes have run. A consuming builder could not reach
+///    those clones; a shared cell narrowed after the retains binds all of them.
+/// 2. Narrow-only means no path — present or future — can WIDEN a child's tool
+///    authority. Ordering mistakes can only ever make the envelope tighter.
+#[derive(Clone, Debug)]
+pub(crate) struct ParentToolAuthority(Arc<parking_lot::RwLock<Arc<BTreeSet<String>>>>);
+
+impl ParentToolAuthority {
+    /// No parent restriction in force: every child-eligible built-in is held.
+    /// This is the pre-F21-02-01 behaviour, expressed as data.
+    fn unrestricted() -> Self {
+        Self(Arc::new(parking_lot::RwLock::new(Arc::new(
+            CHILD_ELIGIBLE_TOOLS
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+        ))))
+    }
+
+    /// Intersect the held authority with `names`. Never widens: a name absent
+    /// from the current set stays absent even when `names` contains it.
+    fn narrow_to<I, S>(&self, names: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let incoming: BTreeSet<String> = names.into_iter().map(|n| n.as_ref().to_owned()).collect();
+        let mut held = self.0.write();
+        let narrowed: BTreeSet<String> = held.intersection(&incoming).cloned().collect();
+        *held = Arc::new(narrowed);
+    }
+
+    /// A stable snapshot for one child-registry construction.
+    fn snapshot(&self) -> Arc<BTreeSet<String>> {
+        Arc::clone(&self.0.read())
+    }
+}
+
 /// Spawns independent child agents that share the parent's LLM provider.
 ///
 /// Sub-agents use a [`NullSink`] so their streaming output is silently
@@ -731,19 +788,6 @@ pub struct AgentSpawner {
     /// Child engines must never fall back to a process-global compatibility
     /// policy after the bootstrap task-local scope has exited.
     egress_policy: wcore_egress::SharedPolicy,
-    /// F21-02-03 — the parent session's tool authority, as an inheritable
-    /// floor. Every child engine this spawner builds is gated by it, so a
-    /// child cannot invoke a tool the parent does not hold regardless of the
-    /// `allowed_tools` its spawn request asked for.
-    ///
-    /// A `OnceLock` because bootstrap must `Arc`-wrap the spawner (it is moved
-    /// into `SpawnTool` / `DelegateTool` / `WorkflowTool`) *before* the parent
-    /// registry stops changing: the channel-posture and persona narrowings run
-    /// several hundred lines later. Bootstrap therefore hands over the empty
-    /// cell at construction and publishes into it once the toolset is final.
-    /// Unset (every direct/test constructor, and any session whose bootstrap
-    /// never published) means no gate — identical to the pre-F21 child.
-    parent_tool_authority: Arc<std::sync::OnceLock<crate::policy_gate::PolicyGate>>,
     /// Shared live posture authority for host-backed sessions. Read only when
     /// deriving a child config so runtime de-escalation applies to descendants
     /// that have not started yet.
@@ -804,6 +848,13 @@ pub struct AgentSpawner {
     /// how much work may be scheduled; this semaphore independently bounds the
     /// number of full child engines that may own resources at once.
     active_child_permits: Arc<tokio::sync::Semaphore>,
+    /// F21-02-01 — the parent session's own built-in tool authority. Every
+    /// child registry this spawner builds is INTERSECTED with it, so a spawn
+    /// request can never name a tool the parent does not itself hold. Defaults
+    /// to unrestricted (the pre-existing behaviour) and is narrowed by
+    /// [`AgentSpawner::narrow_parent_tool_authority`]. See
+    /// [`ParentToolAuthority`] for why this is never an `Option`.
+    parent_tool_authority: ParentToolAuthority,
 }
 
 /// Provider-spend, execution, and cancellation authority inherited by a
@@ -886,7 +937,6 @@ impl AgentSpawner {
             sandbox_runtime,
             parent_workspace: None,
             egress_policy: wcore_egress::default_policy(),
-            parent_tool_authority: Arc::new(std::sync::OnceLock::new()),
             approval_manager: None,
             bus: None,
             cancel: tokio_util::sync::CancellationToken::new(),
@@ -904,19 +954,61 @@ impl AgentSpawner {
             active_child_permits: Arc::new(tokio::sync::Semaphore::new(
                 wcore_swarm::MAX_CONCURRENT_WORKERS,
             )),
+            parent_tool_authority: ParentToolAuthority::unrestricted(),
         }
     }
 
-    /// F21-02-03 — bind the cell carrying the parent session's tool
-    /// authority. Bootstrap calls this with a still-empty cell and fills it
-    /// once the parent registry is final; see the field docs for why the
-    /// publish cannot happen at construction time.
-    pub(crate) fn with_parent_tool_authority(
-        mut self,
-        cell: Arc<std::sync::OnceLock<crate::policy_gate::PolicyGate>>,
-    ) -> Self {
-        self.parent_tool_authority = cell;
-        self
+    /// F21-02-01 — narrow this spawner's parent tool authority to the tool
+    /// names the parent session actually holds.
+    ///
+    /// Takes `&self` (not `self`) deliberately: production bootstrap has
+    /// already `Arc`-wrapped the spawner and handed clones to
+    /// `SpawnTool`/`DelegateTool` by the time the parent registry's final
+    /// posture/persona `retain` passes run, and a consuming builder could not
+    /// reach those clones. The authority cell is shared by `Arc` and narrows
+    /// monotonically, so this can only ever tighten the envelope — for this
+    /// spawner and for every clone taken from it.
+    ///
+    /// Not calling it leaves the unrestricted default, which is the correct
+    /// authority for a spawner whose parent is a full, unnarrowed session.
+    pub fn narrow_parent_tool_authority<I, S>(&self, names: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.parent_tool_authority.narrow_to(names);
+    }
+
+    /// F21-02-01 — declare that this spawner sits at the ROOT of the authority
+    /// chain: a one-shot CLI process (`crucible`, `workflow run`, a standalone
+    /// Anvil driver seat) with no enclosing agent session above it.
+    ///
+    /// # This is a declaration, not a skip, and the distinction is the whole point
+    ///
+    /// The three standalone construction sites build their spawner straight from
+    /// a [`Config`], and no parent `ToolRegistry` exists anywhere in that process
+    /// to intersect against — the process itself IS the top of the chain, and its
+    /// authority is genuinely the complete built-in set. The failure mode this
+    /// method exists to prevent is not "the operand is too wide"; it is being
+    /// unable to tell **"this parent holds everything"** from **"nobody wired
+    /// this site"**. Those two states are byte-identical under an
+    /// `Option::None ⇒ skip` design, which is exactly the fail-open shape that
+    /// sank the first attempt at this repair.
+    ///
+    /// So every production site must call one of exactly two methods — this one
+    /// or [`Self::narrow_parent_tool_authority`] — and
+    /// `spawner_authority_enumeration` (`crates/wcore-agent/tests/`) re-derives
+    /// the production construction sites from source on every run and fails if a
+    /// new one appears without a declaration. The intersection at the seam is
+    /// unconditional either way; what this buys is that "everything" is a stated,
+    /// reviewable position rather than a silent default nobody chose.
+    ///
+    /// Narrowing to [`CHILD_ELIGIBLE_TOOLS`] is a no-op against the constructor
+    /// default by construction, and `narrow_to` cannot widen, so calling this on
+    /// an already-narrowed spawner (a clone taken from a session spawner) is
+    /// safe and leaves the tighter envelope in force.
+    pub fn declare_root_parent_tool_authority(&self) {
+        self.parent_tool_authority.narrow_to(CHILD_ELIGIBLE_TOOLS);
     }
 
     /// Install the one session authority shared by every transient spawner.
@@ -1035,13 +1127,27 @@ impl AgentSpawner {
         &self.sandbox_runtime
     }
 
-    fn child_tool_registry(&self, launch: &ResolvedChildLaunch) -> ToolRegistry {
+    /// Build a child's registry against an explicitly supplied parent
+    /// authority.
+    ///
+    /// The authority is a PARAMETER rather than a fresh
+    /// `self.parent_tool_authority.snapshot()` so that the caller owns the read.
+    /// `execute_resolved_launch` takes exactly one snapshot and uses it for both
+    /// this registry and the child's dispatch gate; reading the shared cell
+    /// twice would let a concurrent narrowing land between the two and leave the
+    /// gate stricter than the registry it guards.
+    fn child_tool_registry(
+        &self,
+        launch: &ResolvedChildLaunch,
+        parent_tool_authority: &BTreeSet<String>,
+    ) -> ToolRegistry {
         build_tool_registry(
             &launch.overrides.allowed_tools,
             launch.requested_workspace,
             launch.workspace_root(),
             &launch.authority_read_deny,
             Arc::clone(&self.sandbox_runtime),
+            parent_tool_authority,
         )
     }
 
@@ -2056,7 +2162,15 @@ impl AgentSpawner {
                 return SubAgentResult::error(&launch.request.name, &error);
             }
         };
-        let tools = self.child_tool_registry(&launch);
+        // F21-02-01 + F21-02-03 — ONE read of the parent authority feeds BOTH
+        // child-authority layers. Taking two separate snapshots would let a
+        // concurrent `narrow_to` land between them and produce a gate STRICTER
+        // than the registry it is guarding: a child holding a tool in its own
+        // registry, denied at dispatch, for reasons nothing in the child's state
+        // can explain. One snapshot makes `child_registry ⊆ gate` an invariant
+        // rather than a race.
+        let authority = self.parent_tool_authority.snapshot();
+        let tools = self.child_tool_registry(&launch, &authority);
         let output: Arc<dyn OutputSink> = match extras.channel_sink {
             Some(sink) => sink as Arc<dyn OutputSink>,
             None => Arc::new(NullSink),
@@ -2071,16 +2185,54 @@ impl AgentSpawner {
             return SubAgentResult::error(&launch.request.name, &error);
         }
         engine.set_egress_policy(self.egress_policy.clone());
-        // F21-02-03: inherit the parent session's tool authority, alongside
-        // the egress authority above. This is the production caller of
-        // `set_policy_gate` — before it, `policy_gate` was `None` at every
-        // production constructor and the gate could not run outside a test.
-        // The child's own registry is built from its requested
-        // `allowed_tools`; this gate is the parent-side floor that request
-        // cannot climb over.
-        if let Some(gate) = self.parent_tool_authority.get() {
-            engine.set_policy_gate(gate.clone());
-        }
+        // ===================================================================
+        // F21-02-03 — LAYER 2 of the child tool authority. DO NOT DELETE AS
+        // "duplicate" of the intersection in `build_tool_registry`.
+        //
+        // The two layers enforce the SAME authority at DIFFERENT points, and
+        // each covers a failure the other structurally cannot:
+        //
+        //   Layer 1 (F21-02-01, `build_tool_registry`) — CONSTRUCTION. A tool
+        //     outside `authority` is never built, so it is never advertised to
+        //     the child's LLM. This is the primary control and the one that
+        //     closes the reachable escalation.
+        //   Layer 2 (this line) — DISPATCH. `filter_tool_calls_by_policy` runs
+        //     BEFORE the registry lookup, so any tool name the child emits is
+        //     checked against `authority` whether or not it is in the child's
+        //     registry.
+        //
+        // Today Layer 2 denies nothing Layer 1 already prevents: the child's
+        // registry is exactly `build_tool_registry`'s output, frozen behind an
+        // `Arc` at `AgentEngine::new_with_provider`, with no production path
+        // that registers a tool afterwards — so `child_registry ⊆ authority`
+        // holds by construction. That is a property of TODAY'S engine, not of
+        // the design. The moment a child gains a second tool source that does
+        // not route through `build_tool_registry` — child-side MCP, plugins, a
+        // widened table — Layer 1 is silently bypassed and Layer 2 is the only
+        // thing standing between a delegated child and a tool its parent's
+        // posture revoked. It is deliberately fail-CLOSED there: the new tool
+        // is denied, loudly and journalled, until someone widens the authority
+        // on purpose.
+        //
+        // The gate is built from `authority` — the SAME snapshot Layer 1 used
+        // above — and NOT from the parent's full `registry.tool_names()`.
+        // Granting the parent's MCP/skill names to a child that cannot
+        // construct them would pre-authorise a future feature nobody has
+        // decided on yet, which is fail-open in advance.
+        //
+        // This is also the first production caller of `set_policy_gate` on the
+        // agent path. Before it, every production `AgentEngine` constructor
+        // hard-coded `policy_gate: None` and the v0.6.1 ACL machinery could not
+        // run outside a test.
+        //
+        // Not dynamic revocation: the gate is a launch-time snapshot, matching
+        // the child's launch-time registry. A parent narrowed AFTER a child has
+        // started does not retract that child's tools under either layer. No
+        // current seam narrows post-spawn.
+        // ===================================================================
+        engine.set_policy_gate(crate::policy_gate::PolicyGate::from_parent_tools(
+            authority.iter(),
+        ));
         engine.set_cancel_token(child_cancel);
         engine.set_initial_reasoning_effort(launch.overrides.effort.clone());
 
@@ -2178,12 +2330,6 @@ impl AgentSpawner {
             sandbox_runtime: Arc::clone(&self.sandbox_runtime),
             parent_workspace: self.parent_workspace.clone(),
             egress_policy: self.egress_policy.clone(),
-            // F21-02-03 CRITICAL: clone the `Arc`, never the contents. Every
-            // derived spawner (fleet shards, council proposers, transient
-            // engine spawners) must observe the SAME cell, or a spawn path
-            // that clones before bootstrap publishes would hand its children
-            // an empty authority and silently restore the fail-open child.
-            parent_tool_authority: Arc::clone(&self.parent_tool_authority),
             approval_manager: self.approval_manager.clone(),
             bus: self.bus.clone(),
             cancel: self.cancel.clone(),
@@ -2208,6 +2354,13 @@ impl AgentSpawner {
             durable_authority: self.durable_authority.clone(),
             effective_policy: self.effective_policy.clone(),
             active_child_permits: Arc::clone(&self.active_child_permits),
+            // F21-02-01: SHARE the authority cell rather than snapshotting it.
+            // A clone taken before bootstrap narrows the parent registry must
+            // still observe that narrowing, and sharing a narrow-only cell
+            // cannot widen anything. F21-02-03 depended on exactly the same
+            // property for its (now deleted) `OnceLock`; sharing this one cell
+            // gives both child-authority layers that guarantee from one field.
+            parent_tool_authority: self.parent_tool_authority.clone(),
         }
     }
 
@@ -2435,12 +2588,22 @@ type ToolFactory = fn() -> Box<dyn wcore_tools::Tool>;
 /// read-only subset (security audit H-7 / M-9): an empty `toolsets` on the
 /// model-facing `Delegate`/`Spawn` tool must NOT silently grant the child
 /// Bash/Write/Edit. Destructive tools require explicit opt-in via `allowed`.
+///
+/// F21-02-01: `parent_tool_authority` is a REQUIRED parameter, not an
+/// `Option`, and the intersection below has no skip arm. This is the single
+/// production construction site for a delegated child's registry, so making
+/// the parameter mandatory means no route into the seam — present or future —
+/// can build a child registry without the parent's own authority being
+/// consulted. `allowed` expresses what the spawn REQUESTED; this expresses
+/// what the parent may DELEGATE, and a request is only ever an intersection
+/// with it.
 fn build_tool_registry(
     allowed: &[String],
     requested_workspace: RequestedChildWorkspace,
     workspace_root: &Path,
     authority_read_deny: &[PathBuf],
     sandbox_runtime: Arc<wcore_sandbox::SandboxRegistry>,
+    parent_tool_authority: &BTreeSet<String>,
 ) -> ToolRegistry {
     let all: &[(&str, ToolFactory)] = &[
         ("Read", || Box::new(ReadTool::new(None))),
@@ -2479,6 +2642,11 @@ fn build_tool_registry(
         let permitted = permitted
             && (requested_workspace == RequestedChildWorkspace::IsolatedMutation
                 || SHARED_READ_ONLY_CHILD_TOOLS.contains(name));
+        // F21-02-01 — authority is an intersection, never a replacement. A
+        // request (or the read-only floor above) can only ever SELECT from what
+        // the parent session itself holds. Unconditional by construction: there
+        // is no "no authority supplied" arm to fall through.
+        let permitted = permitted && parent_tool_authority.contains(*name);
         if permitted {
             registry.register(make_tool());
         }
@@ -4038,7 +4206,8 @@ mod production_durable_spawn_tests {
         assert!(launch.workspace_root().join(".git").is_dir());
         launch.validate_record(&record).unwrap();
         assert_eq!(launch.authority_read_deny.len(), 2);
-        let registry = spawner.child_tool_registry(&launch);
+        let registry =
+            spawner.child_tool_registry(&launch, &spawner.parent_tool_authority.snapshot());
         assert!(registry.get("Write").is_some());
         assert!(registry.get("Bash").is_some());
         let child_policy = registry.workspace_policy().expect("child workspace policy");
@@ -4079,6 +4248,166 @@ mod production_durable_spawn_tests {
         assert!(lease.is_file(), "failed declaration lost workspace locator");
         assert!(DurableChildStore::new(journal_a).list().unwrap().is_empty());
         assert!(DurableChildStore::new(journal_b).list().unwrap().is_empty());
+    }
+
+    /// F21-02-01 REGRESSION — the child registry seam must INTERSECT the
+    /// spawn request with the parent session's own tool authority.
+    ///
+    /// Before the fix `build_tool_registry` never received, and `AgentSpawner`
+    /// never carried, any representation of what the parent itself holds: a
+    /// `Delegate` naming `toolsets: ["Bash"]` handed the child `Bash` whenever
+    /// an isolated worktree could be prepared, regardless of the parent. This
+    /// drives the REAL durable launch path (`prepare_durable_launch` →
+    /// `child_tool_registry`), not the raw helper, so it fails if the seam is
+    /// bypassed as well as if the intersection is wrong.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn f21_02_01_child_registry_intersects_parent_tool_authority() {
+        let workspace = tempfile::tempdir().unwrap();
+        init_git_workspace(workspace.path()).await;
+        let state = tempfile::tempdir().unwrap();
+        let sessions = state.path().join("sessions");
+        let authority = DurableSessionAuthority::new();
+        let (_manager, _journal, _token) =
+            canonical_binding(&state.path().join("a"), "f2101001", &authority);
+        let provider: Arc<dyn LlmProvider> = ControlledProvider::immediate();
+        let spawner = bound_spawner_with_session_root(
+            provider,
+            authority.clone(),
+            workspace.path(),
+            &sessions,
+        );
+
+        // The parent session holds Read and Write but NOT Bash — exactly the
+        // shape a persona allowlist or a narrowed channel posture leaves.
+        spawner.narrow_parent_tool_authority(["Read", "Write"]);
+
+        let launch = spawner
+            .prepare_durable_launch(
+                child("hostile-child"),
+                ForkOverrides {
+                    allowed_tools: vec!["Write".into(), "Bash".into()],
+                    ..ForkOverrides::default()
+                },
+            )
+            .await
+            .expect("prepare isolated workspace");
+        let tool_authority = spawner.parent_tool_authority.snapshot();
+        let registry = spawner.child_tool_registry(&launch, &tool_authority);
+
+        assert!(
+            registry.get("Bash").is_none(),
+            "a child obtained Bash, a tool the parent session does not hold"
+        );
+        assert!(
+            registry.get("Write").is_some(),
+            "an explicitly requested tool the parent DOES hold must survive the \
+             intersection — the guard must narrow, not blanket-deny"
+        );
+
+        // F21-02-03 RECONCILIATION — Layer 2, built from the SAME snapshot the
+        // registry above was built from, must agree with it. `execute_resolved_
+        // launch` takes exactly one snapshot for precisely this reason; if it
+        // ever takes two, a concurrent narrowing can make the gate stricter than
+        // the registry and a child is denied a tool it visibly holds.
+        let gate = crate::policy_gate::PolicyGate::from_parent_tools(tool_authority.iter());
+        for name in registry.tool_names() {
+            assert!(
+                gate.check_tool(&name, None).is_ok(),
+                "the dispatch gate denied {name}, which the child's own registry \
+                 contains — the two layers were built from different snapshots"
+            );
+        }
+        assert!(
+            gate.check_tool("Bash", None).is_err(),
+            "the dispatch gate must also deny Bash, so a child that acquires it \
+             from any future source outside build_tool_registry is still stopped"
+        );
+    }
+
+    /// F21-02-01 — the authority cell narrows monotonically and is SHARED with
+    /// every spawn clone. Both properties are load-bearing: production bootstrap
+    /// narrows after the spawner has been `Arc`-wrapped and cloned into
+    /// `SpawnTool`/`DelegateTool`, and nothing anywhere may widen a child's
+    /// tool envelope.
+    #[test]
+    fn f21_02_01_parent_tool_authority_narrows_monotonically_and_is_shared() {
+        let provider: Arc<dyn LlmProvider> = ControlledProvider::immediate();
+        let spawner = AgentSpawner::new(provider, Config::default());
+        let cloned = spawner.clone_for_spawn();
+
+        spawner.narrow_parent_tool_authority(["Read", "Grep"]);
+        let expected: std::collections::BTreeSet<String> =
+            ["Read", "Grep"].iter().map(|n| (*n).to_owned()).collect();
+        assert_eq!(
+            *cloned.parent_tool_authority.snapshot(),
+            expected,
+            "a clone taken BEFORE the narrowing must observe it"
+        );
+
+        // A later attempt to re-widen must not restore anything.
+        cloned.narrow_parent_tool_authority(["Read", "Grep", "Bash", "Write"]);
+        assert_eq!(
+            *spawner.parent_tool_authority.snapshot(),
+            expected,
+            "authority must never widen"
+        );
+    }
+
+    /// F21-02-03 RECONCILIATION — the dispatch gate installed on every child
+    /// engine is derived from the authority CELL, so it inherits all three
+    /// declaring seams instead of only the bootstrap one.
+    ///
+    /// This is the property that was missing from F21-02-03 as authored. Its
+    /// gate lived in a separate `Arc<OnceLock<PolicyGate>>` that only
+    /// `AgentBootstrap::build` ever published into, so the two transient seams
+    /// (`AgentEngine::govern_transient_spawner`) and the three standalone ones
+    /// (`bootstrap::govern_standalone_spawner`) installed no gate at all — five
+    /// of six production construction sites fail-open. Reading the same cell
+    /// F21-02-01 declares means "which seams is the gate wired at?" has exactly
+    /// one answer: all of them, enforced by `spawner_authority_enumeration`.
+    #[test]
+    fn f21_02_03_dispatch_gate_follows_the_authority_cell_at_every_seam() {
+        let provider: Arc<dyn LlmProvider> = ControlledProvider::immediate();
+
+        // A ROOT spawner — what `govern_standalone_spawner` declares for the
+        // CLI crucible / workflow / Anvil-seat lane. It holds every
+        // child-eligible built-in, so the gate must grant every one of them.
+        let root = AgentSpawner::new(Arc::clone(&provider), Config::default());
+        root.declare_root_parent_tool_authority();
+        let root_gate = crate::policy_gate::PolicyGate::from_parent_tools(
+            root.parent_tool_authority.snapshot().iter(),
+        );
+        for name in CHILD_ELIGIBLE_TOOLS {
+            assert!(
+                root_gate.check_tool(name, None).is_ok(),
+                "a declared-root spawner's gate denied {name}, which the root \
+                 process genuinely holds — the gate is over-restricting"
+            );
+        }
+
+        // A TRANSIENT spawner — what `govern_transient_spawner` narrows from a
+        // channel-posture-narrowed engine's live registry. Its children must be
+        // gated even though nothing published a bootstrap `OnceLock`.
+        let transient = AgentSpawner::new(Arc::clone(&provider), Config::default());
+        transient.narrow_parent_tool_authority(["Read", "Write"]);
+        // Take the clone AFTER narrowing here and BEFORE below, so both orders
+        // are covered: the cell is shared, so neither can escape.
+        let shard = transient.clone_for_spawn();
+        let transient_gate = crate::policy_gate::PolicyGate::from_parent_tools(
+            shard.parent_tool_authority.snapshot().iter(),
+        );
+        assert!(
+            transient_gate.check_tool("Read", None).is_ok(),
+            "a tool the parent holds must survive"
+        );
+        for denied in ["Bash", "Grep", "Glob", "Edit"] {
+            assert!(
+                transient_gate.check_tool(denied, None).is_err(),
+                "a transient spawner's child gate granted {denied}, a tool the \
+                 parent engine does not hold — this seam is fail-open again"
+            );
+        }
     }
 
     #[tokio::test]
@@ -4314,15 +4643,33 @@ mod production_durable_spawn_tests {
 
 #[cfg(test)]
 mod phase7_tests {
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     use super::{AgentSpawner, ForkOverrides, SubAgentConfig, build_tool_registry};
     use wcore_config::config::Config;
     use wcore_providers::LlmProvider;
-    use wcore_types::spawner::RequestedChildWorkspace;
+    use wcore_types::spawner::{CHILD_ELIGIBLE_TOOLS, RequestedChildWorkspace};
 
     fn test_sandbox_runtime() -> Arc<wcore_sandbox::SandboxRegistry> {
         wcore_tools::registry::ToolRegistry::new().sandbox_runtime()
+    }
+
+    /// A parent that holds every child-eligible built-in — the authority an
+    /// unnarrowed session has, and the value `AgentSpawner::new` installs. The
+    /// pre-F21-02-01 tests below assert REQUEST semantics, so they run against
+    /// this so their subject stays what it was.
+    fn unrestricted_parent() -> BTreeSet<String> {
+        CHILD_ELIGIBLE_TOOLS
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect()
+    }
+
+    /// A parent narrowed to `names` — what a `Full`-posture channel engine or a
+    /// persona allowlist leaves behind.
+    fn parent_holding(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
     }
 
     #[test]
@@ -4376,6 +4723,7 @@ mod phase7_tests {
             root.path(),
             &[],
             test_sandbox_runtime(),
+            &unrestricted_parent(),
         );
         // Read-only tools ARE registered.
         for name in &["Read", "Grep", "Glob"] {
@@ -4404,6 +4752,7 @@ mod phase7_tests {
             root.path(),
             &[],
             test_sandbox_runtime(),
+            &unrestricted_parent(),
         );
         assert!(
             registry.get("Bash").is_some(),
@@ -4431,10 +4780,102 @@ mod phase7_tests {
             root.path(),
             &[],
             test_sandbox_runtime(),
+            &unrestricted_parent(),
         );
         assert!(registry.get("Bash").is_some());
         assert!(registry.get("Read").is_some());
         assert!(registry.get("Write").is_none());
+    }
+
+    /// F21-02-01 REGRESSION — the read-only spawn floor is a CEILING on the
+    /// request, not a floor under the parent.
+    ///
+    /// This is the reachable escalation: a `Full`-posture channel/remote engine
+    /// has `Grep`/`Glob` dropped (`channel_tools::FULL_CHANNEL_DENY`) precisely
+    /// because their recursive scan shells out past the jail and can read
+    /// project secrets. It KEEPS `Delegate`. Before the fix, a bare `Delegate`
+    /// with no `toolsets` at all handed the child the
+    /// `SHARED_READ_ONLY_CHILD_TOOLS` floor — Read, Grep AND Glob — so a remote
+    /// sender recovered the exact unconfined search the posture removed,
+    /// without naming a single tool.
+    #[test]
+    fn f21_02_01_read_only_floor_cannot_exceed_parent_authority() {
+        let root = tempfile::tempdir().unwrap();
+        // A `Full` channel-remote parent: everything except Grep/Glob.
+        let parent = parent_holding(&["Read", "Write", "Edit", "Bash"]);
+        let registry = build_tool_registry(
+            &[],
+            RequestedChildWorkspace::SharedReadOnly,
+            root.path(),
+            &[],
+            test_sandbox_runtime(),
+            &parent,
+        );
+
+        assert!(
+            registry.get("Read").is_some(),
+            "Read is on the floor AND held by the parent, so it survives"
+        );
+        for name in ["Grep", "Glob"] {
+            assert!(
+                registry.get(name).is_none(),
+                "the default spawn floor handed a child {name}, which the parent's own \
+                 posture removed — the channel-remote exfiltration drop is reopened"
+            );
+        }
+    }
+
+    /// F21-02-01 REGRESSION — an explicitly requested tool the parent does not
+    /// hold is refused, while one it does hold survives. The guard must narrow,
+    /// not blanket-deny.
+    #[test]
+    fn f21_02_01_explicit_request_cannot_exceed_parent_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = parent_holding(&["Read", "Write"]);
+        let registry = build_tool_registry(
+            &["Write".to_owned(), "Bash".to_owned()],
+            RequestedChildWorkspace::IsolatedMutation,
+            root.path(),
+            &[],
+            test_sandbox_runtime(),
+            &parent,
+        );
+
+        assert!(
+            registry.get("Bash").is_none(),
+            "a child obtained Bash, a tool the parent session does not hold"
+        );
+        assert!(
+            registry.get("Write").is_some(),
+            "an explicitly requested tool the parent DOES hold must survive"
+        );
+    }
+
+    /// The unrestricted default must stay exactly the set the seam can build,
+    /// or a fresh spawner would silently deny a tool it used to grant.
+    #[test]
+    fn child_eligible_tools_matches_registry_table() {
+        let root = tempfile::tempdir().unwrap();
+        let every_name: Vec<String> = CHILD_ELIGIBLE_TOOLS
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        let registry = build_tool_registry(
+            &every_name,
+            RequestedChildWorkspace::IsolatedMutation,
+            root.path(),
+            &[],
+            test_sandbox_runtime(),
+            &unrestricted_parent(),
+        );
+        let mut built: Vec<String> = registry.tool_names();
+        built.sort();
+        let mut expected = every_name;
+        expected.sort();
+        assert_eq!(
+            built, expected,
+            "CHILD_ELIGIBLE_TOOLS has drifted from build_tool_registry's table"
+        );
     }
 
     #[test]
@@ -4452,6 +4893,7 @@ mod phase7_tests {
             root.path(),
             &[],
             test_sandbox_runtime(),
+            &unrestricted_parent(),
         );
 
         assert!(registry.get("Read").is_some());
@@ -4470,6 +4912,7 @@ mod phase7_tests {
             root.path(),
             &[],
             Arc::clone(&runtime),
+            &unrestricted_parent(),
         );
 
         assert!(Arc::ptr_eq(&runtime, &registry.sandbox_runtime()));

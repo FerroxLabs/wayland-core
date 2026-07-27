@@ -221,6 +221,14 @@ impl SessionBudgetEnvelope {
 /// defaults, provider ledger, execution root, stable session identity, and
 /// cancellation lineage. Every child created from the returned spawner shares
 /// these handles for the lifetime of the one-shot invocation.
+///
+/// F21-02-01 — this is one of the three seams through which EVERY production
+/// `AgentSpawner` passes, and it declares the child tool authority for the
+/// standalone lane (`wcore-cli/src/crucible.rs`, `wcore-cli/src/workflow.rs`,
+/// `orchestration/anvil/seat.rs`). See
+/// [`crate::spawner::AgentSpawner::declare_root_parent_tool_authority`] for why
+/// a root CLI process declares the complete set rather than leaving the field
+/// at its default.
 pub fn govern_standalone_spawner(
     spawner: crate::spawner::AgentSpawner,
     config: &Config,
@@ -264,6 +272,14 @@ pub fn govern_standalone_spawner(
             durable_authority.clone(),
             EffectiveExecutionPolicy::baseline(&config.execution_policy),
         )?;
+    // F21-02-01 — a one-shot CLI process has no enclosing agent session, so it
+    // is the root of the authority chain and holds every child-eligible
+    // built-in. State that here rather than letting the constructor default
+    // stand: a stated root position is reviewable and is what the enumeration
+    // guard checks for, whereas an omission is indistinguishable from an
+    // unwired site. `declare_root_parent_tool_authority` cannot widen, so a
+    // spawner that arrives here already narrowed keeps its tighter envelope.
+    spawner.declare_root_parent_tool_authority();
     durable_authority.bind_fresh(active.journal, &session_id)?;
     Ok(spawner)
 }
@@ -2190,20 +2206,16 @@ impl AgentBootstrap {
                 wcore_budget::BudgetCap::default(),
             )))
         });
-        // F21-02-03 — the cell that will carry this session's tool authority
-        // to every child it spawns. Created empty here because the spawner is
-        // `Arc`-wrapped (and moved into SpawnTool/DelegateTool/WorkflowTool)
-        // below, while the parent registry keeps changing until the channel
-        // posture and persona narrowings run. Published exactly once, further
-        // down, the moment the toolset is final.
-        let parent_tool_authority: Arc<std::sync::OnceLock<crate::policy_gate::PolicyGate>> =
-            Arc::new(std::sync::OnceLock::new());
+        // F21-02-03 RECONCILIATION — no separate authority cell is created here.
+        // The spawner's own `ParentToolAuthority` (F21-02-01) already exists from
+        // `AgentSpawner::new`, is shared by `Arc` across every clone taken below,
+        // and is narrowed once the registry is final. It is the single source
+        // both child-authority layers read. See the narrowing call further down.
         let mut spawner_builder = session_budget
             .govern_spawner(
                 crate::spawner::AgentSpawner::new(provider.clone(), self.config.clone()),
                 session_runtime.active_turn_token(),
             )
-            .with_parent_tool_authority(Arc::clone(&parent_tool_authority))
             .with_durable_session_authority(
                 durable_session_authority.clone(),
                 effective_execution_policy.clone(),
@@ -2556,27 +2568,34 @@ impl AgentBootstrap {
             );
         }
 
-        // F21-02-03 — publish the parent's tool authority to the session
-        // spawner. This is the LAST point at which the registry changes: every
-        // built-in, MCP, plugin and orchestration tool is registered above, and
-        // both narrowings (channel posture, persona allowlist) have just run.
-        // Snapshotting the registry rather than re-deriving the declarations
-        // keeps a single source of truth — a narrowing added later composes
-        // into the child floor for free instead of escaping it.
+        // F21-02-01 — bind the session spawner's parent tool authority to what
+        // the parent registry ACTUALLY holds, now that both narrowing passes
+        // above have run. Derived from the live registry rather than re-deriving
+        // the posture/persona predicates, so the two can never disagree.
         //
-        // Unconditional on purpose. Gating the install on "did the operator
-        // declare a restriction" would leave the enforcement absent by default,
-        // which is the property-by-absence shape this finding is about; and for
-        // an unrestricted session the snapshot grants everything the parent
-        // holds, so it denies a child nothing it could legitimately have had.
-        let parent_tool_names = registry.tool_names();
-        let _ = parent_tool_authority.set(crate::policy_gate::PolicyGate::from_parent_tools(
-            &parent_tool_names,
-        ));
+        // Placement is load-bearing: this must run AFTER `apply_posture` and the
+        // persona `retain`, and it works despite the spawner already being
+        // `Arc`-wrapped and shared into `SpawnTool`/`DelegateTool` (line ~2225)
+        // because `ParentToolAuthority` is a shared, narrow-only cell. Without
+        // this, a `Full` channel-remote parent — which has Grep/Glob/Git dropped
+        // precisely because their recursive scan escapes the jail — would hand a
+        // delegated child Grep and Glob straight back through the read-only
+        // spawn floor, reopening the exfiltration path the drop closes.
+        //
+        // F21-02-03 RECONCILIATION — this ONE call now feeds BOTH child-authority
+        // layers. F21-02-03 originally published a second, independent authority
+        // here (an `Arc<OnceLock<PolicyGate>>` built from `registry.tool_names()`)
+        // for the dispatch-time gate. That is deleted: two authorities derived
+        // from the same registry at the same line are two things that can drift,
+        // and the `OnceLock` was wired at THIS seam only, leaving the transient
+        // and standalone seams with no gate at all. `AgentSpawner` now derives the
+        // gate from this same `ParentToolAuthority` cell at child launch, so the
+        // gate inherits all three declaring seams and the enumeration guard for
+        // free. See `AgentSpawner::execute_resolved_launch`.
+        spawner.narrow_parent_tool_authority(registry.tool_names());
         tracing::debug!(
             target: "wcore_agent::bootstrap",
-            tools = parent_tool_names.len(),
-            "parent tool authority published to session spawner"
+            "child tool authority bound to the parent session registry"
         );
 
         // Every session gets a workspace policy so BashTool's OS sandbox is

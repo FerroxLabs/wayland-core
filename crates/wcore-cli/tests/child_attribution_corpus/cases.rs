@@ -180,8 +180,9 @@ pub const CORPUS: &[AttributionCase] = &[
         invariant: "the refund must remain attributable to the sibling whose reservation it \
                     releases, across a restart, and must not credit the other sibling",
         crash_and_restart: true,
-        in_process_seam: "BudgetAuthorityCoordinator::bind over a SessionJournal, dropped and \
-                          rebound, then BudgetTracker::release",
+        in_process_seam: "BudgetAuthorityCoordinator::bind over a SessionJournal, dropped, the \
+                          durable authority reloaded from the journal file, rebound, then \
+                          BudgetTracker::session_totals + reserved_totals + release",
         human_visible_surface: HumanVisibleSurface::Wire,
         live_observable: "a per-sibling refund observation on the host-protocol wire, keyed to \
                           the sibling whose reservation was released",

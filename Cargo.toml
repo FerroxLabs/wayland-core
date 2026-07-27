@@ -505,6 +505,32 @@ hound = "3"
 # `panic = "abort"` would make catch_unwind a no-op and tool panics fatal,
 # losing the fault-isolation invariant. The unwind-tables binary-size cost
 # is acceptable in exchange.
+# Debug-build size control. WHY: with no [profile.dev] the cargo default is
+# debug = true (full DWARF) for this crate AND every dependency, which on a
+# ~54-crate workspace produced test binaries over 1 GB each. Because every code
+# change mints a new hash-suffixed binary and nothing reaps the old ones, one
+# target/ dir reached 314 GB across 190,330 files and filled a 1.8 TB build host
+# to 95%, which then caused 39 spurious test failures that were initially read
+# as product reds.
+#
+# "line-tables-only" keeps exactly what a test failure needs -- panic backtraces
+# with file and line -- and drops the type/variable DWARF that a debugger would
+# want but CI never reads. Dependencies get nothing: we do not step through
+# tokio. Set debug = true locally if you need a full interactive debug session.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# nextest and `cargo test` build under the test profile, which inherits dev.
+# Stated explicitly so a future edit to dev does not silently re-inflate tests.
+[profile.test]
+debug = "line-tables-only"
+
+[profile.test.package."*"]
+debug = false
+
 [profile.release]
 lto           = "thin"
 codegen-units = 1

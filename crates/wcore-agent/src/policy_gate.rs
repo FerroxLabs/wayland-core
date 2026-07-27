@@ -25,14 +25,45 @@
 //! absence of any enforcement — the exact shape Phase 21 indicts.
 //!
 //! It is now installed on the **child** side of every spawn, without any
-//! new operator knob. `AgentBootstrap::build` snapshots the parent
-//! engine's final tool registry once the toolset stops changing, turns it
-//! into a gate via [`PolicyGate::from_parent_tools`], and publishes it to
-//! the session `AgentSpawner`. `AgentSpawner::execute_resolved_launch`
-//! installs that same gate on every child engine it constructs, beside
-//! the egress policy it already inherits. A child that requests a tool
-//! its parent does not hold is denied at dispatch, no matter what its
-//! own `allowed_tools` says.
+//! new operator knob. `AgentSpawner::execute_resolved_launch` reads the
+//! spawner's `ParentToolAuthority` — the shared, narrow-only cell every
+//! production seam declares (F21-02-01) — turns that one snapshot into a
+//! gate via [`PolicyGate::from_parent_tools`], and installs it on the
+//! child engine beside the egress policy it already inherits. A child
+//! that requests a tool its parent does not hold is denied at dispatch,
+//! no matter what its own `allowed_tools` says.
+//!
+//! ## Why the authority cell, and not a second one
+//!
+//! F21-02-03 was originally authored against a separate
+//! `Arc<OnceLock<PolicyGate>>` published by `AgentBootstrap::build`. That
+//! shape had two defects the reconciliation removes:
+//!
+//!  1. It was wired at the bootstrap seam ONLY. The transient
+//!     (`govern_transient_spawner`) and standalone
+//!     (`govern_standalone_spawner`) seams left the cell empty, so five of
+//!     the six production spawner construction sites installed no gate at
+//!     all — the same guard-at-one-of-five-doors shape that sank the first
+//!     attempt at F21-02-01.
+//!  2. It derived a second authority from the same registry at the same
+//!     line as F21-02-01's, so the two could drift apart under any later
+//!     edit that touched one and not the other.
+//!
+//! Reading `ParentToolAuthority` instead gives the gate all three
+//! declaring seams, and `spawner_authority_enumeration`'s coverage, for
+//! free — and leaves exactly one answer to "what may this child invoke".
+//!
+//! ## Layering — this is Layer 2, not a duplicate of Layer 1
+//!
+//! `build_tool_registry` intersects the same authority at CONSTRUCTION, so
+//! a denied tool is never built and never advertised to the child's model.
+//! That is the primary control. This gate runs at DISPATCH, ahead of the
+//! registry lookup, and therefore also covers tool names that reach the
+//! child from anywhere other than `build_tool_registry`. No such source
+//! exists today — which is precisely why the layer must be kept: the day
+//! one appears (child-side MCP, plugins, a widened table), Layer 1 is
+//! bypassed silently and this is the only remaining check. It is
+//! fail-closed there on purpose.
 //!
 //! The parent engine itself is deliberately NOT gated: its registry is
 //! already the authority on what it can invoke, and a snapshot would go
@@ -89,26 +120,36 @@ impl PolicyGate {
     /// F21-02-03 — the parent session's tool authority, as an inheritable
     /// floor for the children it spawns.
     ///
-    /// `names` is the parent engine's **final** registry contents, read
-    /// after every narrowing bootstrap applies (`channel_tool_posture`'s
-    /// `apply_posture`, the persona `allowed_tools` retain, and any
-    /// conditional built-in registration). Reading the registry rather
-    /// than reconstructing the declarations keeps one source of truth:
-    /// a future narrowing composes automatically instead of silently
-    /// escaping the floor.
+    /// `names` is one snapshot of the spawner's `ParentToolAuthority` — the
+    /// shared, narrow-only cell each production seam declares after every
+    /// narrowing has run (`channel_tool_posture`'s `apply_posture`, the
+    /// persona `allowed_tools` retain, and any conditional built-in
+    /// registration). Reading that cell rather than reconstructing the
+    /// declarations keeps ONE source of truth for both child-authority
+    /// layers, so a future narrowing composes into the child floor instead
+    /// of silently escaping it.
+    ///
+    /// Takes an iterator rather than a slice because the caller holds a
+    /// `BTreeSet` snapshot and must not have to allocate a `Vec` to hand it
+    /// over — the snapshot it passes here has to be the SAME value it built
+    /// the child registry from.
     ///
     /// One `Invoke` grant per surviving tool, for the same actor the gate
     /// resolves top-level calls to, so a child's dispatch — which passes
     /// `source_agent = None` — is checked against exactly the parent's
     /// set. A tool the parent does not hold is therefore denied to every
     /// descendant, which is the non-widening property Phase 21 requires.
-    pub fn from_parent_tools(names: &[String]) -> Self {
+    pub fn from_parent_tools<I, S>(names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
         let actor = Actor::User("default".into());
         let mut engine = PolicyEngine::new();
         for name in names {
             engine.grant(wcore_permissions::Permission {
                 actor: actor.clone(),
-                resource: Resource::Tool(name.clone()),
+                resource: Resource::Tool(name.as_ref().to_owned()),
                 action: Action::Invoke,
             });
         }

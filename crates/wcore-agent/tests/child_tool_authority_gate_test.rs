@@ -16,11 +16,30 @@
 //! and then echo the tool result back as its final text so the child's actual
 //! dispatch outcome is observable in `SubAgentResult::text`.
 //!
-//! RED-before evidence: with the `engine.set_policy_gate(..)` install in
-//! `AgentSpawner::execute_resolved_launch` removed, `child_cannot_read_when_
-//! parent_session_was_narrowed_away_from_read` fails with the sentinel file
-//! contents in the child's text — i.e. the child really did read a file its
-//! parent could not.
+//! ## What each assertion proves after the F21-02-01 reconciliation
+//!
+//! Two layers now enforce the same authority, so the two assertions in the
+//! regression below are no longer redundant with each other — they pin
+//! different layers, and the ORDER they fire in is what makes that possible:
+//!
+//!   * `!text.contains(SENTINEL)` — the SECURITY PROPERTY. It is what the
+//!     finding is actually about, and it holds if either layer works.
+//!   * `text.contains("Denied by policy")` — LAYER 2 SPECIFICALLY. Layer 1
+//!     (F21-02-01's intersection in `build_tool_registry`) leaves `Read` out of
+//!     the child's registry entirely, so if the dispatch gate were absent the
+//!     call would fail as `Unknown tool: Read`. `filter_tool_calls_by_policy`
+//!     runs AHEAD of the registry lookup, so `Denied by policy` in the child's
+//!     text is positive evidence that the inherited `PolicyGate` was installed
+//!     and consulted — not merely that the tool was missing.
+//!
+//! RED-before evidence, measured on the reconciled tree:
+//!   * With the `engine.set_policy_gate(..)` install in
+//!     `AgentSpawner::execute_resolved_launch` removed, this test fails on the
+//!     `Denied by policy` assertion (the child reports `Unknown tool: Read`) —
+//!     Layer 2 is gone, and the finding's orphan-`set_policy_gate` half is back.
+//!   * On the pre-F21-02-01 tree it failed on the SENTINEL assertion instead,
+//!     with the probe file's contents in the child's text — the child really
+//!     did read a file its parent could not.
 
 use std::sync::Arc;
 use std::sync::Mutex;

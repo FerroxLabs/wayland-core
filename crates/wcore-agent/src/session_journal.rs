@@ -406,6 +406,34 @@ impl SessionJournal {
         writer.append(event).map(Some)
     }
 
+    /// Build an event from the current journal head and append it under one
+    /// uninterrupted writer-lock operation.
+    ///
+    /// Events whose validity is bound to the head they were derived from — a
+    /// budget authority carries the prior cursor and the conversation digest it
+    /// captured — must never read that head through [`Self::state`] and append
+    /// afterwards. Between those two lock acquisitions any other writer may
+    /// advance `last_seq`, and the reducer then rejects the append for a
+    /// collision the caller had no way to observe. Capturing and appending in
+    /// one critical section removes the window rather than retrying after it.
+    ///
+    /// The builder must not re-enter this journal: the writer lock is held for
+    /// its whole execution and is not reentrant.
+    pub(crate) fn append_built_from_head<F>(
+        &self,
+        build_event: F,
+    ) -> Result<JournalEnvelope, JournalError>
+    where
+        F: FnOnce(&ReducedSessionState) -> Result<SessionEvent, JournalError>,
+    {
+        let mut writer = self
+            .inner
+            .lock()
+            .map_err(|_| JournalError::WriterPoisoned)?;
+        let event = build_event(&writer.state)?;
+        writer.append(event)
+    }
+
     /// Build and append an event from the exact committed state under one
     /// uninterrupted writer-authority operation.
     ///

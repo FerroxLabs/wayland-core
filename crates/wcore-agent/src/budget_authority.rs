@@ -22,8 +22,8 @@ use wcore_budget::{
 use crate::session_journal::{
     ActiveTurnBudgetAuthority, BUDGET_AUTHORITY_SCHEMA_VERSION, BudgetAuthorityCursor,
     BudgetAuthorityState, BudgetWallClockAuthority, ExternalEffectState, JournalEnvelope,
-    ProviderBudgetReservationAuthority, ReducedSessionState, SessionEvent, SessionJournal,
-    state_payload_digest,
+    JournalError, ProviderBudgetReservationAuthority, ReducedSessionState, SessionEvent,
+    SessionJournal, state_payload_digest,
 };
 
 /// Thread-safe owner used by engine surfaces. Every mutation must lock the
@@ -544,19 +544,19 @@ impl BudgetAuthorityCoordinator {
         }
     }
 
+    /// Capture the journal head and append this authority in ONE writer-lock
+    /// operation.
+    ///
+    /// The event carries the head it was derived from — `prior_cursor` and
+    /// `conversation_digest` — and the reducer rejects it unless both still
+    /// describe the head at append time. Reading the head through
+    /// `journal.state()` and appending afterwards therefore loses to any writer
+    /// that lands in between, and because a failed commit latches the
+    /// coordinator permanently faulted, a concurrent sibling's ordinary
+    /// conversation or child-lifecycle append would destroy this authority
+    /// (F21-04-03). Everything derived from runtime state is snapshotted before
+    /// the lock; only head-derived fields are read inside it.
     fn build_and_append(&mut self, journal: &SessionJournal) -> Result<JournalEnvelope, String> {
-        let reduced = journal.state().map_err(|error| error.to_string())?;
-        let durable_epoch = reduced
-            .budget_authority
-            .as_ref()
-            .map(|authority| authority.authority_epoch)
-            .unwrap_or(0);
-        if durable_epoch != self.authority_epoch {
-            return Err(format!(
-                "durable authority epoch {durable_epoch} does not match runtime epoch {}",
-                self.authority_epoch
-            ));
-        }
         let next_epoch = self
             .authority_epoch
             .checked_add(1)
@@ -568,27 +568,44 @@ impl BudgetAuthorityCoordinator {
             .snapshot()
             .map_err(|error| format!("capturing provider authority: {error}"))?;
         let (execution_root, active_turn) = self.execution_snapshots()?;
-        let conversation = serde_json::Value::Array(reduced.conversation);
-        let conversation_digest =
-            state_payload_digest(&conversation).map_err(|error| error.to_string())?;
-        let authority = BudgetAuthorityState {
-            schema_version: BUDGET_AUTHORITY_SCHEMA_VERSION,
-            authority_epoch: next_epoch,
-            prior_cursor: BudgetAuthorityCursor {
-                journal_sequence: reduced.last_seq,
-                journal_checksum: reduced.last_checksum,
-            },
-            budget_session_id: self.budget_session_id.clone(),
-            provider_tracker,
-            provider_reservations: self.provider_reservations.clone(),
-            execution_root,
-            active_turn,
-            captured_at_unix_millis: captured_at,
-            wall_clock: self.wall_clock.clone(),
-            conversation_digest,
-        };
+        let runtime_epoch = self.authority_epoch;
+        let budget_session_id = self.budget_session_id.clone();
+        let provider_reservations = self.provider_reservations.clone();
+        let wall_clock = self.wall_clock.clone();
+
         let envelope = journal
-            .append(SessionEvent::BudgetAuthorityCommitted { authority })
+            .append_built_from_head(move |reduced| {
+                let durable_epoch = reduced
+                    .budget_authority
+                    .as_ref()
+                    .map(|authority| authority.authority_epoch)
+                    .unwrap_or(0);
+                if durable_epoch != runtime_epoch {
+                    return Err(JournalError::InvalidTransition(format!(
+                        "durable authority epoch {durable_epoch} does not match runtime epoch {runtime_epoch}"
+                    )));
+                }
+                let conversation = serde_json::Value::Array(reduced.conversation.clone());
+                let conversation_digest = state_payload_digest(&conversation)?;
+                Ok(SessionEvent::BudgetAuthorityCommitted {
+                    authority: BudgetAuthorityState {
+                        schema_version: BUDGET_AUTHORITY_SCHEMA_VERSION,
+                        authority_epoch: next_epoch,
+                        prior_cursor: BudgetAuthorityCursor {
+                            journal_sequence: reduced.last_seq,
+                            journal_checksum: reduced.last_checksum.clone(),
+                        },
+                        budget_session_id,
+                        provider_tracker,
+                        provider_reservations,
+                        execution_root,
+                        active_turn,
+                        captured_at_unix_millis: captured_at,
+                        wall_clock,
+                        conversation_digest,
+                    },
+                })
+            })
             .map_err(|error| error.to_string())?;
         self.authority_epoch = next_epoch;
         self.captured_at_unix_millis = captured_at;
@@ -1211,6 +1228,125 @@ mod tests {
                 response_digest: Some(provider_response_digest(&events).unwrap()),
             })
             .unwrap();
+    }
+
+    /// Restart reconciliation must decide each SIBLING's reservation on that
+    /// sibling's own evidence, and must post the consequence to that sibling's
+    /// books only.
+    ///
+    /// Two siblings hold in-flight reservations across the same crash and are
+    /// owed opposite outcomes: sibling A's physical send is journalled, so its
+    /// admitted maximum must be charged; sibling B's never started, so its
+    /// reservation must be refunded outright. The failure this pins is the one
+    /// a single-session restart test cannot see — a restart that charges the
+    /// wrong sibling, refunds the wrong sibling, or applies one sibling's
+    /// disposition to both. It also pins the durability claim itself: the
+    /// reservations are read back out of the journal FILE, after the crash and
+    /// before any rebind, so "the reservations were not persisted" and "the
+    /// reservations were persisted and then deliberately reconciled" cannot be
+    /// confused for one another.
+    #[test]
+    fn restart_reconciliation_posts_each_siblings_outcome_to_that_sibling_alone() {
+        const SIBLING_A: &str = "parent/child-alpha";
+        const SIBLING_B: &str = "parent/child-beta";
+
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        baseline(&journal);
+        let mut first =
+            BudgetAuthorityCoordinator::bind(config(Some(journal.clone()), 100)).unwrap();
+        start_turn(&journal, &mut first);
+
+        // Sibling A: the send reached the provider, so the crash must not give
+        // its money back.
+        first
+            .reserve_provider_dispatch("dispatch-alpha", SIBLING_A, 60, 20, 1.0)
+            .unwrap()
+            .unwrap();
+        append_successful_dispatch(&journal, "dispatch-alpha", "attempt-alpha");
+        // Sibling B: no attempt is ever journalled, so the crash owes it a
+        // refund. The amounts differ from A's on every axis, so a disposition
+        // applied to the wrong sibling produces different numbers than a
+        // correct one rather than the same ones.
+        first
+            .reserve_provider_dispatch("dispatch-beta", SIBLING_B, 30, 10, 0.5)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            first
+                .inspect(|tracker, _| (
+                    tracker.reserved_totals(SIBLING_A),
+                    tracker.reserved_totals(SIBLING_B)
+                ))
+                .unwrap(),
+            ((80, 1.0), (40, 0.5))
+        );
+        drop(first);
+
+        // The crash has happened. Before anything rebinds, reload the durable
+        // authority straight out of the journal: both reservations are still
+        // there, on their own siblings, at their own amounts.
+        let durable = journal
+            .state()
+            .unwrap()
+            .budget_authority
+            .expect("the crashed process committed a durable budget authority");
+        assert_eq!(
+            durable
+                .provider_reservations
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["dispatch-alpha", "dispatch-beta"]
+        );
+        let persisted = BudgetTracker::from_snapshot_with_current_caps(
+            durable.provider_tracker.clone(),
+            BudgetCap::builder()
+                .per_session_tokens(100)
+                .per_session_usd(10.0)
+                .build(),
+        )
+        .unwrap();
+        assert_eq!(persisted.reserved_totals(SIBLING_A), (80, 1.0));
+        assert_eq!(persisted.reserved_totals(SIBLING_B), (40, 0.5));
+
+        let restored = BudgetAuthorityCoordinator::bind(config(Some(journal), 100)).unwrap();
+
+        // Sibling A is charged its admitted maximum, and sibling B's refund
+        // does not reduce it.
+        assert_eq!(
+            restored
+                .inspect(|tracker, _| tracker.session_totals(SIBLING_A))
+                .unwrap(),
+            (80, 1.0)
+        );
+        // Sibling B is refunded: nothing reserved and, critically, nothing
+        // charged. Sibling A's settlement did not land here.
+        assert_eq!(
+            restored
+                .inspect(|tracker, _| tracker.session_totals(SIBLING_B))
+                .unwrap(),
+            (0, 0.0)
+        );
+        assert_eq!(
+            restored
+                .inspect(|tracker, _| (
+                    tracker.reserved_totals(SIBLING_A),
+                    tracker.reserved_totals(SIBLING_B)
+                ))
+                .unwrap(),
+            ((0, 0.0), (0, 0.0))
+        );
+
+        // Exactly one settlement, carrying exactly sibling A's numbers. A
+        // reconciliation that settled both, or that settled B instead of A,
+        // reports a different count or different amounts here.
+        let reconciliation = restored.restored_reservation_reconciliation();
+        assert_eq!(reconciliation.reservations_settled, 1);
+        assert_eq!(reconciliation.input_tokens_charged, 60);
+        assert_eq!(reconciliation.output_tokens_charged, 20);
+        assert!((reconciliation.cost_usd_charged - 1.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1929,5 +2065,102 @@ mod tests {
             .unwrap();
         assert_eq!(coordinator.authority_epoch(), 0);
         assert!(coordinator.commit_current_authority().unwrap().is_none());
+    }
+
+    /// F21-04-03. Two parallel `Spawn` siblings share one coordinator over one
+    /// journal, and every sibling's engine also writes conversation authority to
+    /// that same journal. A budget commit must therefore capture the journal
+    /// head and append under ONE writer-lock operation: if it reads the head,
+    /// releases the lock, and only then appends, any interleaved append moves
+    /// `last_seq` and the reducer's compare-and-swap rejects the commit, which
+    /// latches the losing sibling's authority permanently faulted.
+    ///
+    /// This drives the exact production shape — a budget-committing thread
+    /// against a concurrent conversation writer on the same journal — and
+    /// asserts no commit is ever refused for a reason the coordinator could
+    /// have avoided. It fails before the atomic-capture repair and passes after.
+    #[test]
+    fn concurrent_journal_writer_never_faults_budget_authority() {
+        use std::sync::{
+            Arc as StdArc, Barrier,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        const COMMITS: usize = 200;
+
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        baseline(&journal);
+        let mut coordinator =
+            BudgetAuthorityCoordinator::bind(config(Some(journal.clone()), 100_000)).unwrap();
+        start_turn(&journal, &mut coordinator);
+        let coordinator = coordinator.into_shared();
+
+        let barrier = StdArc::new(Barrier::new(2));
+        let stop = StdArc::new(AtomicBool::new(false));
+
+        // The competing writer stands in for a sibling child's engine committing
+        // conversation authority to the shared journal. It is the sole
+        // conversation writer, so its own index sequencing is deterministic;
+        // only its interleaving with the budget commit is racy.
+        let writer = {
+            let journal = journal.clone();
+            let barrier = StdArc::clone(&barrier);
+            let stop = StdArc::clone(&stop);
+            std::thread::spawn(move || {
+                barrier.wait();
+                let mut index = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    let message = json!({ "role": "user", "content": format!("sibling {index}") });
+                    journal
+                        .append(SessionEvent::ConversationMessageCommitted {
+                            turn_id: "turn".to_owned(),
+                            message_index: index,
+                            message: message.clone(),
+                            message_digest: state_payload_digest(&message).unwrap(),
+                        })
+                        .expect("competing conversation append must stay valid");
+                    index += 1;
+                }
+                index
+            })
+        };
+
+        barrier.wait();
+        let mut refusals = Vec::new();
+        for commit in 0..COMMITS {
+            if let Err(error) = coordinator
+                .lock()
+                .transaction(|authority| authority.execution().record_tokens(1, 0))
+            {
+                refusals.push(format!("commit {commit}: {error}"));
+                break;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        let competing_appends = writer.join().unwrap();
+
+        assert!(
+            competing_appends > 0,
+            "the competing writer never appended, so nothing was raced"
+        );
+        assert!(
+            refusals.is_empty(),
+            "budget authority was refused while a concurrent writer held the same journal \
+             ({competing_appends} competing appends): {refusals:?}"
+        );
+        assert!(
+            coordinator.lock().fault_reason().is_none(),
+            "coordinator latched a permanent fault under concurrent journal writes"
+        );
+        // `bind` commits epoch 1 and `start_turn` commits epoch 2, so every one
+        // of the COMMITS attempts must have landed its own durable epoch. This
+        // separates "no error was returned" from "the authority was actually
+        // appended", which is the property the accounting depends on.
+        assert_eq!(
+            coordinator.lock().authority_epoch(),
+            (COMMITS as u64) + 2,
+            "not every commit advanced the durable authority epoch"
+        );
     }
 }
