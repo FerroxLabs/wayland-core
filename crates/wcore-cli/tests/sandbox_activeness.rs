@@ -49,12 +49,40 @@ fn probe(escape: &Path) -> String {
     format!("touch {} 2>/dev/null; echo {RAN}", escape.display())
 }
 
+/// Pick a path the contained workspace policy does NOT grant.
+///
+/// This is load-bearing and cost one red to learn: the first version of this
+/// test wrote into a `tempfile::tempdir()`, and `WorkspacePolicy::contained`
+/// deliberately grants the whole of `std::env::temp_dir()` as a scratch root.
+/// The child wrote there legitimately and the test read it as a containment
+/// failure. The home directory is granted by neither the `contained` writable
+/// set (workspace + temp) nor the macOS profile's read allowlist (`/usr`,
+/// `/System`, `/Library`, `/bin`, `/sbin`), so a write landing there really is
+/// an escape.
+fn escape_target() -> std::path::PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .expect("HOME or USERPROFILE must be set to site an out-of-policy path");
+    let home = std::path::PathBuf::from(home);
+    let temp = std::fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+    assert!(
+        !home.starts_with(&temp),
+        "HOME ({}) is inside the temp scratch root ({}), which the contained \
+         policy grants; this test cannot site an out-of-policy path here",
+        home.display(),
+        temp.display()
+    );
+    // Unique per run: a stale marker from an earlier run would otherwise be
+    // indistinguishable from a fresh escape.
+    home.join(format!("f28-escape-marker-{}", std::process::id()))
+}
+
 #[test]
 fn sandbox_exec_confines_a_write_that_escapes_the_workspace() {
     let workspace = tempfile::tempdir().expect("workspace");
-    // The escape target lives OUTSIDE the workspace the sandbox is scoped to.
-    let outside = tempfile::tempdir().expect("outside dir");
-    let escape = outside.path().join("f28-escape-marker");
+    // The escape target lives outside every root the contained policy grants.
+    let escape = escape_target();
+    let _ = std::fs::remove_file(&escape);
 
     let status = status_json();
     let backend = status["backend"].as_str().unwrap_or("<none>").to_owned();
@@ -103,6 +131,7 @@ fn sandbox_exec_confines_a_write_that_escapes_the_workspace() {
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
 
     if !available || bypasses {
+        let _ = std::fs::remove_file(&escape);
         assert!(
             !out.status.success(),
             "backend `{backend}` reports available={available} \
@@ -123,11 +152,16 @@ fn sandbox_exec_confines_a_write_that_escapes_the_workspace() {
     // THE DIFFERENTIAL. Same command, same path, proven-capable probe, child
     // proven to have run: the write is visible on the host uncontained and
     // must NOT be visible on the host through the sandbox.
+    //
+    // Read the observation BEFORE cleaning up, so a panic cannot leave the
+    // marker behind in the operator's home directory.
+    let escaped = escape.exists();
+    let _ = std::fs::remove_file(&escape);
     assert!(
-        !escape.exists(),
+        !escaped,
         "CONTAINMENT FAILURE on backend `{backend}`: a child run through \
-         `sandbox exec` wrote {} — outside the workspace it was scoped to. \
-         stdout={stdout}",
+         `sandbox exec` wrote {} — outside every root its workspace policy \
+         grants. stdout={stdout}",
         escape.display()
     );
 }
