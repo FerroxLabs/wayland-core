@@ -648,7 +648,7 @@ mod tests {
         let j = dir.path().join("arrivals.jsonl");
         let sink = ChannelSink::start(&j, SinkMode::Answer, 0).await.unwrap();
 
-        let c = reqwest::Client::new();
+        let c = wcore_egress::EgressClient::new();
         let r = c
             .post(format!("{}/api/chat.postMessage", sink.base_url()))
             .header("Authorization", "Bearer xoxb-fixture")
@@ -685,7 +685,7 @@ mod tests {
             .unwrap();
         let base = sink.base_url().to_string();
 
-        let c = reqwest::Client::new();
+        let c = wcore_egress::EgressClient::new();
         c.post(format!("{base}/api/chat.postMessage"))
             .header("Authorization", "Bearer t")
             .json(&json!({ "channel": "room", "text": "first" }))
