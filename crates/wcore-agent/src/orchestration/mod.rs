@@ -75,6 +75,8 @@ pub mod template_routing;
 pub mod workflow;
 
 #[cfg(test)]
+mod d1_refusal_terminal_tests;
+#[cfg(test)]
 mod f13_durability_tests;
 
 use crate::confirm::{ConfirmResult, ToolConfirmer};
@@ -86,8 +88,14 @@ use crate::journal_effects::{
 use crate::session_journal::{
     ApprovalDecision, ApprovalResolution, HookManifestSlot, HookPhaseConsumption,
     HookPhaseNotStartedReason, HookSlotReceipt, HookSlotSource, HookSlotTerminalStatus,
-    ToolHookPhase, ToolNotStartedReason, ToolUnknownReason, state_payload_digest,
+    ToolHookPhase, ToolNotStartedReason, ToolResolution, ToolResolutionSource, ToolUnknownReason,
+    state_payload_digest,
 };
+
+/// Reconciler identity recorded when this process resolves an ambiguous tool
+/// effect from a dispatch it watched finish, rather than from post-crash
+/// evidence. Named so an audit of a journal can tell the two apart.
+const DISPATCH_COMPLETION_RECONCILER: &str = "in-process:dispatch-completion";
 use wcore_plugin_api::registry::hooks::HookPhase;
 use wcore_protocol::events::{OutputType, ProtocolEvent, ToolCategory, ToolInfo, ToolStatus};
 use wcore_protocol::writer::ProtocolEmitter;
@@ -1967,21 +1975,22 @@ async fn execute_single_with_streaming(
             if cancel.is_cancelled() {
                 let reason =
                     "session cancellation was requested before physical tool start".to_string();
-                if let Some(prepared) = prepared_post_hook.take()
-                    && let Err(error) = prepared.lease.not_applicable()
-                {
-                    return (
-                        journal_authority_failure(id, error),
-                        None,
-                        pre_outcome,
-                        false,
-                    );
-                }
-                if let Some(prepared) = prepared_effect
-                    && let Err(error) = prepared.not_started(ToolNotStartedReason::Cancelled {
-                        reason: reason.clone(),
+                // Terminalize the tool lease FIRST. Closing the post-hook
+                // first and returning on its error left the prepared tool
+                // execution nonterminal, which is the same stranded-lease
+                // shape D1 was made of.
+                let tool_closed = prepared_effect
+                    .map(|prepared| {
+                        prepared.not_started(ToolNotStartedReason::Cancelled {
+                            reason: reason.clone(),
+                        })
                     })
-                {
+                    .transpose();
+                let post_hook_closed = prepared_post_hook
+                    .take()
+                    .map(|prepared| prepared.lease.not_applicable())
+                    .transpose();
+                if let Err(error) = tool_closed.and(post_hook_closed) {
                     return (
                         journal_authority_failure(id, error),
                         None,
@@ -2105,6 +2114,11 @@ async fn execute_single_with_streaming(
             #[cfg(test)]
             inject_dispatcher_crash(DispatcherCrashCut::AfterPhysicalEffect);
             let mut unknown_effect = None;
+            // Set only by the "dispatch ran to completion and reported an
+            // error" classifier below. Timeouts, panics, observed cancellation
+            // and a tool's own `Unknown` disposition never set it, because in
+            // those cases nothing in this process observed the call finish.
+            let mut ambiguity_observed_at_completion = false;
             let (r, observed_effect) = match timed {
                 Err(_elapsed) => {
                     // Dispatch exceeded its category deadline. Fire the
@@ -2229,6 +2243,7 @@ async fn execute_single_with_streaming(
                         "reported_error": true,
                     }),
                 ));
+                ambiguity_observed_at_completion = true;
             }
             // AUDIT B-4: record the dispatch outcome against the
             // breaker. A timeout or panic counts as a failure (synthetic
@@ -2273,6 +2288,16 @@ async fn execute_single_with_streaming(
                 let result_digest = match result_digest {
                     Ok(digest) => digest,
                     Err(error) => {
+                        // The lease is already Running. Returning here without
+                        // an append would strand it nonterminal and take the
+                        // whole turn down with it, so record the persistence
+                        // failure as the reconcilable unknown it is.
+                        let _ = lease.unknown(
+                            ToolUnknownReason::ResultPersistenceFailed {
+                                error: error.clone(),
+                            },
+                            serde_json::json!({"tool": name, "call_id": id}),
+                        );
                         return (
                             journal_authority_failure(id, error),
                             None,
@@ -2284,7 +2309,41 @@ async fn execute_single_with_streaming(
                 #[cfg(test)]
                 inject_dispatcher_crash(DispatcherCrashCut::BeforeTerminalAppend);
                 let journal_result = if let Some((reason, evidence)) = unknown_effect {
-                    lease.unknown(reason, evidence).map(|_| ())
+                    if ambiguity_observed_at_completion {
+                        // D1. The dispatch ran to completion and returned its
+                        // own terminal error report. The *effect* stays
+                        // ambiguous — an opaque tool may have changed the world
+                        // before failing — so the ambiguity and its evidence go
+                        // on the record first and are never erased. But the
+                        // execution itself is finished, and leaving it in the
+                        // nonterminal `Unknown` state made every ordinary tool
+                        // error (a refused path, a nonzero shell exit) fatal to
+                        // the session: the turn could no longer be committed,
+                        // cancelled or failed. Resolving it here, from the
+                        // completion this process actually observed, keeps both
+                        // facts. A crash between the two appends still leaves
+                        // `Unknown` for recovery to reconcile, exactly as before.
+                        durable_tool_result_digest = Some(result_digest);
+                        let resolution_evidence = serde_json::json!({
+                            "tool": name,
+                            "call_id": id,
+                            "observation": "dispatch completed and reported a terminal error",
+                        });
+                        lease.unknown(reason, evidence).and_then(|unknown| {
+                            unknown.resolve(
+                                ToolResolution::Failed {
+                                    error: content.clone(),
+                                    result: Some(durable_result),
+                                },
+                                ToolResolutionSource::Reconciler {
+                                    reconciler: DISPATCH_COMPLETION_RECONCILER.to_owned(),
+                                },
+                                resolution_evidence,
+                            )
+                        })
+                    } else {
+                        lease.unknown(reason, evidence).map(|_| ())
+                    }
                 } else if r.is_error {
                     durable_tool_result_digest = Some(result_digest);
                     lease.fail(content.clone(), durable_result)
@@ -3559,9 +3618,21 @@ mod tests {
         );
     }
 
+    /// An opaque tool's reported error must never be recorded as a bare
+    /// terminal failure — that would claim the external effect provably did not
+    /// happen. It is recorded as `Unknown { AmbiguousFailure }` and then
+    /// resolved by the dispatcher that watched the call finish, so the record
+    /// carries BOTH the ambiguity and a terminal outcome.
+    ///
+    /// This test previously asserted only that the record ended `Unknown`. That
+    /// state is nonterminal, which is what made every opaque tool error fatal
+    /// to the session (live UAT defect D1); the assertion below is the stronger
+    /// one — the ambiguity is still on the record (proven by the resolution
+    /// source, which the reducer only accepts after `ToolExecutionUnknown`)
+    /// *and* the execution is terminal.
     #[tokio::test]
-    async fn opaque_reported_error_is_unknown_not_false_terminal_failure() {
-        use crate::session_journal::{ToolEffectState, ToolUnknownReason};
+    async fn opaque_reported_error_is_unknown_then_resolved_not_false_terminal_failure() {
+        use crate::session_journal::{SessionEvent, ToolEffectState, ToolResolutionSource};
 
         let registry = make_registry_with_deferred();
         let (_dir, journal, scope) = effect_fixture();
@@ -3590,13 +3661,29 @@ mod tests {
         assert!(block_is_error(&result));
         let state = journal.state().unwrap();
         let tool = state.tools.values().next().expect("one durable tool");
-        assert!(matches!(
-            &tool.effect,
-            ToolEffectState::Unknown {
-                reason: ToolUnknownReason::AmbiguousFailure { .. },
-                ..
-            }
-        ));
+        assert!(
+            matches!(&tool.effect, ToolEffectState::Failed { .. }),
+            "a completed dispatch must end terminal, got {:?}",
+            tool.effect
+        );
+        assert_eq!(
+            tool.resolution_source,
+            Some(ToolResolutionSource::Reconciler {
+                reconciler: DISPATCH_COMPLETION_RECONCILER.to_owned(),
+            }),
+            "the terminal state must be a recorded resolution of the ambiguity, \
+             not a bare failure that erases it"
+        );
+        assert!(
+            tool.resolution_evidence.is_some(),
+            "the resolution must carry the observation it was made from"
+        );
+        journal
+            .append(SessionEvent::TurnCommitted {
+                turn_id: "turn".into(),
+                assistant_message: "turn survives an opaque tool error".into(),
+            })
+            .expect("the turn must remain committable");
     }
 
     struct CrashCutOpaqueTool {

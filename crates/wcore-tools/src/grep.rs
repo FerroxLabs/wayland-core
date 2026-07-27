@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use wcore_config::shell::shell_command_argv;
 
 use wcore_protocol::events::ToolCategory;
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolEffectKind, ToolResult};
 
 use crate::Tool;
 use crate::context::ToolContext;
@@ -98,6 +98,17 @@ impl Tool for GrepTool {
 
     fn execution_class_for(&self, _input: &Value) -> crate::ToolExecutionClass {
         crate::ToolExecutionClass::ProcessSpawning
+    }
+
+    /// Grep spawns a search process but mutates nothing, so a failure — a
+    /// refused traversal path, a missing target, a bad regex — is
+    /// authoritative rather than an ambiguous external effect. See the note on
+    /// `ReadTool::effect_contract` (live UAT D1).
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        ToolEffectContract {
+            kind: ToolEffectKind::RepeatSafe,
+            reconciler: None,
+        }
     }
 
     fn describe(&self, input: &Value) -> String {

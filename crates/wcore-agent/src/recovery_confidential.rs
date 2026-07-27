@@ -6,8 +6,9 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use wcore_config::confidential_blob::{
-    ConfidentialBlobAad, ConfidentialBlobKey, load_confidential_blob_key,
-    load_or_create_confidential_blob_key, open_confidential_blob, seal_confidential_blob,
+    ConfidentialBlobAad, ConfidentialBlobKey, ConfidentialKeyStoreError,
+    load_confidential_blob_key, load_or_create_confidential_blob_key, open_confidential_blob,
+    seal_confidential_blob,
 };
 use wcore_config::config::Config;
 
@@ -61,16 +62,65 @@ pub(crate) struct PreparedRequestBinding<'a> {
     pub(crate) posture_authority_digest: &'a str,
 }
 
-/// Confidential request failures intentionally omit backend, key, payload,
-/// ciphertext, and associated-data details.
+/// Confidential request failures omit key material, payload, ciphertext and
+/// associated-data details.
+///
+/// They do NOT omit which *configured* backend was refused. That value is
+/// written in the operator's own cleartext config file, so repeating it
+/// discloses nothing — while collapsing it produced the live UAT defect D3:
+/// three unrelated causes rendered as one string that told a user to configure
+/// a credentials backend they had already configured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub(crate) enum RecoveryConfidentialError {
     #[error(
-        "secure recovery storage is unavailable; configure an OS keyring or encrypted credentials vault"
+        "credentials.backend is set to \"plaintext\", which cannot hold the confidential key that \
+         durable session recovery requires. Set credentials.backend to \"keyring\" or \
+         \"encrypted-file\", or disable session persistence"
     )]
+    PlaintextBackendRejected,
+    #[error(
+        "secure recovery storage is unavailable: no OS keyring was usable and no encrypted \
+         credentials vault is unlocked. Configure an OS keyring, or set credentials.backend to \
+         \"encrypted-file\" and supply its unlock passphrase"
+    )]
+    NoSecureBackendAvailable,
+    #[error(
+        "secure recovery storage could not be read: the configured store rejected this profile's \
+         recovery key. An encrypted vault opened with the wrong unlock passphrase reads this way \
+         — re-check the passphrase for this profile"
+    )]
+    SecureStoreUnreadable,
+    #[error(
+        "this profile has no stored recovery key, so a sealed request cannot be opened. The key \
+         is created when a new turn starts on a confidential-capable backend"
+    )]
+    MissingRecoveryKey,
+    #[error("secure recovery storage is unavailable")]
     Unavailable,
     #[error("recovery confidential request is invalid")]
     Invalid,
+}
+
+/// The statically decidable half of the confidential-storage requirement.
+///
+/// `credentials.backend = "plaintext"` can never satisfy it — that refusal is
+/// deliberate security design and is unchanged here. What changes is *when* the
+/// operator hears about it: this is a pure function of config with no side
+/// effects, so a persisted session can refuse to open instead of accepting the
+/// session and failing every turn afterwards.
+pub(crate) fn reject_backend_without_confidential_storage(
+    config: &Config,
+) -> Result<(), RecoveryConfidentialError> {
+    if config
+        .storage
+        .credentials
+        .backend
+        .supports_confidential_material()
+    {
+        Ok(())
+    } else {
+        Err(RecoveryConfidentialError::PlaintextBackendRejected)
+    }
 }
 
 /// Lazily caches a successfully loaded key for one engine. Backend failures
@@ -147,15 +197,29 @@ impl RecoveryRequestProtector {
             .lock()
             .map_err(|_| RecoveryConfidentialError::Unavailable)?;
         if key.is_none() {
+            // Decide the config-determined cause before touching any store, so
+            // a plaintext backend is never reported as an environment problem.
+            reject_backend_without_confidential_storage(config)?;
             let store = config
                 .open_confidential_credentials_store()
-                .map_err(|_| RecoveryConfidentialError::Unavailable)?;
+                .map_err(|_| RecoveryConfidentialError::NoSecureBackendAvailable)?;
             let loaded = if create {
                 load_or_create_confidential_blob_key(&store, KEY_REF)
             } else {
                 load_confidential_blob_key(&store, KEY_REF)
             };
-            *key = Some(loaded.map_err(|_| RecoveryConfidentialError::Unavailable)?);
+            // The store opened, so the backend exists; a failure past this
+            // point is about the key itself, not about availability.
+            *key = Some(loaded.map_err(|error| match error {
+                ConfidentialKeyStoreError::ReadFailed
+                | ConfidentialKeyStoreError::MalformedStoredKey => {
+                    RecoveryConfidentialError::SecureStoreUnreadable
+                }
+                ConfidentialKeyStoreError::MissingStoredKey => {
+                    RecoveryConfidentialError::MissingRecoveryKey
+                }
+                _ => RecoveryConfidentialError::Unavailable,
+            })?);
         }
         operation(key.as_ref().ok_or(RecoveryConfidentialError::Unavailable)?)
     }
@@ -381,20 +445,103 @@ mod tests {
         assert!(!rendered.contains(binding_secret));
     }
 
-    #[test]
-    fn preflight_fails_with_actionable_guidance_before_request_persistence() {
+    fn config_with_backend(backend: CredentialsBackend) -> Config {
         let mut config = Config::default();
         config.storage.credentials = CredentialsStorageConfig {
-            backend: CredentialsBackend::Plaintext,
+            backend,
             service_name: None,
         };
+        config
+    }
 
+    /// D3: the plaintext backend used to be reported as "secure recovery
+    /// storage is unavailable; configure an OS keyring or encrypted credentials
+    /// vault" — guidance for a user who has configured nothing, given to a user
+    /// who has configured exactly the one value that is fatal. The failure must
+    /// name itself and name the setting to change.
+    #[test]
+    fn preflight_fails_with_actionable_guidance_before_request_persistence() {
         let error = RecoveryRequestProtector::default()
-            .preflight(&config)
+            .preflight(&config_with_backend(CredentialsBackend::Plaintext))
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("secure recovery storage is unavailable"));
-        assert!(error.contains("OS keyring or encrypted credentials vault"));
+        assert!(
+            error.contains("plaintext"),
+            "the cause must be named: {error}"
+        );
+        assert!(
+            error.contains("credentials.backend"),
+            "the setting to change must be named: {error}"
+        );
+        assert!(
+            error.contains("session"),
+            "the user must be told which capability requires it: {error}"
+        );
+    }
+
+    /// D3/D8: the plaintext backend and an unavailable secure backend are
+    /// different problems with different fixes, so they must not render as one
+    /// indistinguishable string.
+    #[test]
+    fn distinct_confidential_failures_do_not_share_one_message() {
+        let plaintext = RecoveryConfidentialError::PlaintextBackendRejected.to_string();
+        let unavailable = RecoveryConfidentialError::NoSecureBackendAvailable.to_string();
+        let unreadable = RecoveryConfidentialError::SecureStoreUnreadable.to_string();
+
+        assert_ne!(plaintext, unavailable);
+        assert_ne!(plaintext, unreadable);
+        assert_ne!(unavailable, unreadable);
+    }
+
+    /// The static rule the session-open check uses. Refusing plaintext for
+    /// confidential material is the security property being preserved, not
+    /// relaxed.
+    #[test]
+    fn only_plaintext_is_statically_rejected() {
+        assert_eq!(
+            reject_backend_without_confidential_storage(&config_with_backend(
+                CredentialsBackend::Plaintext
+            )),
+            Err(RecoveryConfidentialError::PlaintextBackendRejected)
+        );
+        assert_eq!(
+            reject_backend_without_confidential_storage(&config_with_backend(
+                CredentialsBackend::Auto
+            )),
+            Ok(())
+        );
+        assert_eq!(
+            reject_backend_without_confidential_storage(&config_with_backend(
+                CredentialsBackend::Keyring
+            )),
+            Ok(())
+        );
+    }
+
+    /// Naming the configured backend is not a disclosure — the value is written
+    /// in the user's own cleartext config. Key material, ciphertext and AAD
+    /// still must never appear.
+    #[test]
+    fn cause_specific_messages_still_render_no_secret_material() {
+        for error in [
+            RecoveryConfidentialError::PlaintextBackendRejected,
+            RecoveryConfidentialError::NoSecureBackendAvailable,
+            RecoveryConfidentialError::SecureStoreUnreadable,
+            RecoveryConfidentialError::MissingRecoveryKey,
+            RecoveryConfidentialError::Unavailable,
+            RecoveryConfidentialError::Invalid,
+        ] {
+            let rendered = error.to_string();
+            assert!(!rendered.contains(KEY_REF), "key ref leaked: {rendered}");
+            assert!(
+                !rendered.contains(PURPOSE),
+                "AAD purpose leaked: {rendered}"
+            );
+            assert!(
+                !rendered.contains(ALGORITHM),
+                "cipher detail leaked: {rendered}"
+            );
+        }
     }
 }

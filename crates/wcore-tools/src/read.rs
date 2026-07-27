@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use wcore_protocol::events::ToolCategory;
 use wcore_types::file_state::{FileState, Provenance};
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolEffectKind, ToolResult};
 
 use crate::Tool;
 use crate::context::ToolContext;
@@ -513,6 +513,19 @@ impl Tool for ReadTool {
 
     fn category(&self) -> ToolCategory {
         ToolCategory::Info
+    }
+
+    /// Reading a file mutates nothing outside this process, so there is no
+    /// external effect an interrupted invocation could have left behind and no
+    /// additional effect a repeat could create. Inheriting the conservative
+    /// `Opaque` default made every read error — including a refused malformed
+    /// path — an *ambiguous* effect, which is nonterminal and killed the
+    /// session (live UAT defect D1).
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        ToolEffectContract {
+            kind: ToolEffectKind::RepeatSafe,
+            reconciler: None,
+        }
     }
 
     fn describe(&self, input: &Value) -> String {

@@ -28,7 +28,8 @@ use crate::plugins::PluginToolAdapter;
 use crate::policy_gate::PolicyGate;
 use crate::session_journal::{
     ApprovalDecision, ApprovalResolution, HookPhaseState, SessionEvent, SessionJournal,
-    ToolEffectState, ToolNotStartedReason, ToolState, ToolUnknownReason, state_payload_digest,
+    ToolEffectState, ToolNotStartedReason, ToolResolutionSource, ToolState, ToolUnknownReason,
+    state_payload_digest,
 };
 use crate::tool_budget::ToolBudgetTracker;
 
@@ -1437,21 +1438,47 @@ async fn cancellation_during_preparation_is_durable_not_started() {
     });
 }
 
-async fn assert_actual_adapter_error_is_unknown(registry: ToolRegistry, call: ContentBlock) {
+/// An adapter error from a genuinely opaque tool must record the ambiguity —
+/// it may have reached the far side before failing — and must still leave the
+/// execution terminal so the turn can complete.
+///
+/// This helper previously asserted only that the record ended `Unknown`. That
+/// is the nonterminal state which made every MCP/plugin/script adapter error
+/// take the whole session down with it (live UAT defect D1); the assertions
+/// below are strictly stronger. `resolution_source` proves an
+/// `ToolExecutionUnknown` was recorded first, because the reducer refuses
+/// `ToolExecutionResolved` for any tool that is not `Unknown`.
+async fn assert_actual_adapter_error_is_recorded_ambiguous_and_terminal(
+    registry: ToolRegistry,
+    call: ContentBlock,
+) {
     let (_dir, journal, scope) = effect_fixture();
     let result = execute_durable(&registry, &call, None, &CancellationToken::new(), &scope).await;
     assert!(block_is_error(&result));
-    assert!(matches!(
-        only_tool(&journal).effect,
-        ToolEffectState::Unknown {
-            reason: ToolUnknownReason::AmbiguousFailure { .. },
-            ..
-        }
-    ));
+    let tool = only_tool(&journal);
+    assert!(
+        matches!(tool.effect, ToolEffectState::Failed { .. }),
+        "a completed adapter dispatch must end terminal, got {:?}",
+        tool.effect
+    );
+    assert!(
+        matches!(
+            tool.resolution_source,
+            Some(ToolResolutionSource::Reconciler { .. })
+        ),
+        "the ambiguity must remain on the record as a resolved unknown, got {:?}",
+        tool.resolution_source
+    );
+    journal
+        .append(SessionEvent::TurnCommitted {
+            turn_id: "turn".into(),
+            assistant_message: "turn survives an adapter error".into(),
+        })
+        .expect("the turn must remain committable after an adapter error");
 }
 
 #[tokio::test]
-async fn actual_mcp_adapter_error_is_durable_unknown() {
+async fn actual_mcp_adapter_error_is_ambiguous_and_terminal() {
     let manager = Arc::new(wcore_mcp::manager::McpManager::new_for_test(vec![]));
     let proxy = wcore_mcp::tool_proxy::McpToolProxy::new(
         "McpFailure".into(),
@@ -1464,7 +1491,7 @@ async fn actual_mcp_adapter_error_is_durable_unknown() {
     );
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(proxy));
-    assert_actual_adapter_error_is_unknown(
+    assert_actual_adapter_error_is_recorded_ambiguous_and_terminal(
         registry,
         tool_call("mcp-call", "McpFailure", json!({})),
     )
@@ -1472,7 +1499,7 @@ async fn actual_mcp_adapter_error_is_durable_unknown() {
 }
 
 #[tokio::test]
-async fn actual_plugin_adapter_error_is_durable_unknown() {
+async fn actual_plugin_adapter_error_is_ambiguous_and_terminal() {
     let plugin = wcore_plugin_api::tool::PluginTool {
         name: "PluginFailure".into(),
         description: "actual plugin adapter durability probe".into(),
@@ -1491,7 +1518,7 @@ async fn actual_plugin_adapter_error_is_durable_unknown() {
     };
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(PluginToolAdapter::new(plugin)));
-    assert_actual_adapter_error_is_unknown(
+    assert_actual_adapter_error_is_recorded_ambiguous_and_terminal(
         registry,
         tool_call("plugin-call", "PluginFailure", json!({})),
     )
@@ -1499,7 +1526,7 @@ async fn actual_plugin_adapter_error_is_durable_unknown() {
 }
 
 #[tokio::test]
-async fn actual_script_adapter_error_is_durable_unknown() {
+async fn actual_script_adapter_error_is_ambiguous_and_terminal() {
     let dispatcher = ClosureDispatcher::new(Box::new(|_tool, _input| {
         Box::pin(async {
             ToolResult {
@@ -1510,7 +1537,7 @@ async fn actual_script_adapter_error_is_durable_unknown() {
     }));
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(ScriptTool::new(Arc::new(dispatcher))));
-    assert_actual_adapter_error_is_unknown(
+    assert_actual_adapter_error_is_recorded_ambiguous_and_terminal(
         registry,
         tool_call(
             "script-call",
