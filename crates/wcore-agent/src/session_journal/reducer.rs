@@ -467,9 +467,14 @@ fn apply_goal_task_transition(
     let goal = required_goal_mut(state, goal_id)?;
     require_goal_live(goal)?;
     let effective_limits = goal.authority.effective_limits.clone();
-    if !goal.tasks.contains_key(task_id) {
+    let Some(existing) = goal.tasks.get(task_id) else {
         return Err(missing("goal task", task_id));
-    }
+    };
+    // Computed before the mutable borrow, and consulted at the DURABLE
+    // boundary rather than only in `claimable_tasks`. A worker that ignores the
+    // claimable query and claims a blocked task directly must still be refused;
+    // a query-surface-only check is advice, not a gate.
+    let dependencies_met = task_dependencies_met(&goal.tasks, existing);
 
     match transition {
         // `budget_reservation_id` is deliberately discarded here and read from
@@ -560,6 +565,13 @@ fn apply_goal_task_transition(
                 .ok_or_else(|| missing("goal task", task_id))?;
 
             if !is_handoff {
+                if !dependencies_met {
+                    return Err(invalid_task(
+                        goal_id,
+                        task_id,
+                        "the task's dependencies are not all durably completed",
+                    ));
+                }
                 if task.completion.is_some() {
                     return Err(invalid_task(
                         goal_id,

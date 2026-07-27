@@ -174,7 +174,9 @@ fn a_task_with_unmet_dependencies_is_not_claimable_and_unblocks_exactly_once() {
 
     // Replaying the whole chain must not accumulate a release per replay: the
     // count is a property of the transitions, not of how many times they were
-    // read back.
+    // read back. The writer lease is exclusive, so the first process has to be
+    // gone before a second one can replay — which is the situation a restart is.
+    drop(fixture);
     let replayed = GoalLedger::new(
         SessionJournal::open(&temp.path().join("session.journal"), SESSION).expect("reopen"),
     );
@@ -577,6 +579,7 @@ fn cancelling_a_goal_cascades_to_claimed_tasks_and_no_later_effect_lands() {
             .is_err()
     );
 
+    drop(fixture);
     let replayed = GoalLedger::new(SessionJournal::open(&path, SESSION).expect("reopen"));
     for name in ["a", "b"] {
         let state = replayed
