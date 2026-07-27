@@ -18,8 +18,8 @@ use wcore_eval_scenarios::receipt::{
     AssertionEvidenceV1, AuthorityClaimV1, BoundaryEvidenceV1, BuildProvenanceV1,
     CanaryScanEvidenceV1, CellResultV1, DecisionEvidenceV1, Evidence, EvidenceReceiptV1,
     IdentityEvidenceV1, PolicyEvidenceV1, ProcessEvidenceV1, ProviderEvidenceV1, ReceiptBodyV1,
-    ReceiptVerifier, RecoveryEvidenceV1, SummaryEvidenceV1, TargetEvidenceV1, TimingEvidenceV1,
-    VerificationPolicy, VerifiedAuthority,
+    ReceiptError, ReceiptVerifier, RecoveryEvidenceV1, SummaryEvidenceV1, TargetEvidenceV1,
+    TimingEvidenceV1, VerificationPolicy, VerifiedAuthority,
 };
 use wcore_eval_scenarios::release_integrity::{
     ArtifactKind, CANONICAL_RELEASE_STATES, CertificationBindingV1, DependencyPolicyOutcomeV1,
@@ -197,6 +197,12 @@ fn manifest_signature_does_not_verify_under_the_receipt_domain() {
     // MUTATION — feed that same manifest signature to the real ReceiptVerifier
     // as though it were a receipt signature over the same digest. The receipt
     // verifier must not accept it.
+    //
+    // The trusted key here is the MANIFEST's key, so the only reason this can
+    // fail is the domain separator. A fully populated `receipt_policy()` is
+    // supplied deliberately: `VerificationPolicy::default()` makes receipt.rs
+    // refuse EVERY CI receipt with `UnsignedAuthoritative`, which would make
+    // this assertion pass for a reason that has nothing to do with domains.
     let receipt = signed_receipt();
     let mut hijacked = receipt.clone();
     hijacked.authority = AuthorityClaimV1::Ci {
@@ -209,10 +215,12 @@ fn manifest_signature_does_not_verify_under_the_receipt_domain() {
         signing_key_for(ReleaseState::Packaging).verifying_key(),
     );
     let json = serde_json::to_vec(&hijacked).expect("serialize");
-    let outcome = verifier.parse_and_verify(&json, &VerificationPolicy::default());
-    assert!(
-        outcome.is_err(),
-        "a release-manifest signature must NOT verify as a receipt signature"
+    assert_eq!(
+        verifier
+            .parse_and_verify(&json, &receipt_policy())
+            .expect_err("a release-manifest signature must NOT verify as a receipt signature"),
+        ReceiptError::InvalidSignature,
+        "the refusal must be a signature refusal — i.e. caused by the domain separator"
     );
 }
 
@@ -974,17 +982,47 @@ fn signed_receipt() -> EvidenceReceiptV1 {
         .sign_ci("ci-eval-key", &key_for(7))
 }
 
+/// The trust inputs `receipt.rs` requires before it will grant CI authority.
+///
+/// All five fields must be populated: `validate_ci_provenance` refuses a CI
+/// receipt with `UnsignedAuthoritative` when ANY of them is `None`, so an empty
+/// policy can never confer authority. That is correct fail-closed behaviour in
+/// the product — and it is exactly why the anti-vacuity control below exists.
+fn receipt_policy() -> VerificationPolicy {
+    VerificationPolicy {
+        source_commit: Some(hex40('a')),
+        binary_sha256: Some(h64('b')),
+        repository: Some("FerroxLabs/wayland-core".to_string()),
+        source_ref: Some("refs/heads/frontier/m0".to_string()),
+        workflow: Some("frontier-eval".to_string()),
+    }
+}
+
 #[test]
 fn the_real_receipt_fixture_verifies_so_the_cross_domain_proof_is_not_vacuous() {
-    // If this receipt did not verify under its OWN domain, then
-    // `manifest_signature_does_not_verify_under_the_receipt_domain` would pass
-    // for the wrong reason — the receipt verifier would be rejecting everything.
+    // ANTI-VACUITY CONTROL. If this receipt did not verify under its OWN
+    // domain, `manifest_signature_does_not_verify_under_the_receipt_domain`
+    // would pass for the wrong reason — the receipt verifier would simply be
+    // rejecting everything handed to it.
+    //
+    // This control has already earned its place: the first version of this
+    // suite passed `VerificationPolicy::default()`, receipt.rs refused every CI
+    // receipt with `UnsignedAuthoritative`, and this test is what caught it.
     let receipt = signed_receipt();
     let mut verifier = ReceiptVerifier::new();
     verifier.trust_ci_key("ci-eval-key".to_string(), key_for(7).verifying_key());
     let json = serde_json::to_vec(&receipt).expect("serialize");
     let (_, verified) = verifier
-        .parse_and_verify(&json, &VerificationPolicy::default())
+        .parse_and_verify(&json, &receipt_policy())
         .expect("control: the receipt fixture must verify under the receipt domain");
     assert_eq!(verified.authority, VerifiedAuthority::AuthoritativeCi);
+
+    // And an empty policy must NOT confer authority — the product's own
+    // fail-closed rule, pinned here so a future change to it is visible.
+    assert_eq!(
+        verifier
+            .parse_and_verify(&json, &VerificationPolicy::default())
+            .expect_err("an empty verification policy must never confer CI authority"),
+        ReceiptError::UnsignedAuthoritative
+    );
 }
