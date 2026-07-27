@@ -372,6 +372,36 @@ pub fn read_live_projection(home: &Path) -> Option<StatusProjection> {
     Some(proj)
 }
 
+/// Whether a REGISTRATION exists for this spec — which is not the same
+/// question as whether anything is running.
+///
+/// F24-B-H2, found by the live Linux journey. This first read
+/// `status_argv`, which is `systemctl --user is-active`: that answers
+/// ACTIVITY, so during the five seconds systemd spent restarting the
+/// gateway after a hard kill, and again after a clean drain, the verb
+/// reported `Uninstalled` for a service whose unit was on disk and enabled.
+/// An operator debugging a service that will not stay up would have been
+/// told it was never installed.
+///
+/// The branch is on a CAPABILITY the trait already exposes rather than on
+/// the platform: a family that writes an on-disk unit has that file as its
+/// registration record, and a family that does not (Windows registers
+/// through a command line) is asked its query verb, which for `schtasks
+/// /query` genuinely answers registration rather than activity.
+async fn is_registered(
+    mgr: &dyn wcore_gateway::service::ServiceManager,
+    spec: &ServiceSpec,
+) -> bool {
+    if let Some(unit) = mgr.unit_path(spec) {
+        return unit.exists();
+    }
+    let argv = mgr.status_argv(spec);
+    run_argv(&argv)
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 async fn status(scope: &ScopeArgs, json: bool) -> Result<()> {
     let home = home()?;
     let profile = scope.profile();
@@ -385,12 +415,7 @@ async fn status(scope: &ScopeArgs, json: bool) -> Result<()> {
             // not start needs to know the registration exists.
             let mut p = StatusProjection::stopped(&profile);
             if let Ok(spec) = spec(scope) {
-                let argv = mgr.status_argv(&spec);
-                let registered = run_argv(&argv)
-                    .await
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                if !registered {
+                if !is_registered(&*mgr, &spec).await {
                     p.state = GatewayState::Uninstalled;
                 }
             }
@@ -870,6 +895,67 @@ mod tests {
         assert!(
             names.iter().any(|n| n == "run"),
             "`gateway run` must exist — the service units invoke it: {names:?}"
+        );
+    }
+
+    /// A unit-writing family whose unit path is under our control, so the
+    /// registration question can be asked without a real service registry.
+    struct UnitWritingFamily(PathBuf);
+    impl wcore_gateway::service::ServiceManager for UnitWritingFamily {
+        fn family(&self) -> &'static str {
+            "test-unit-writing"
+        }
+        fn install_argv(&self, _: &ServiceSpec) -> Vec<String> {
+            vec!["true".into()]
+        }
+        fn uninstall_argv(&self, _: &ServiceSpec) -> Vec<String> {
+            vec!["true".into()]
+        }
+        fn start_argv(&self, _: &ServiceSpec) -> Vec<String> {
+            vec!["true".into()]
+        }
+        fn stop_argv(&self, _: &ServiceSpec) -> Vec<String> {
+            vec!["true".into()]
+        }
+        /// The activity query, and it FAILS — exactly as `systemctl --user
+        /// is-active` does for an installed-but-stopped unit. If
+        /// `is_registered` ever consults this again, the test reddens.
+        fn status_argv(&self, _: &ServiceSpec) -> Vec<String> {
+            vec!["false".into()]
+        }
+        fn unit_text(&self, _: &ServiceSpec) -> Option<String> {
+            Some("unit".into())
+        }
+        fn unit_path(&self, _: &ServiceSpec) -> Option<PathBuf> {
+            Some(self.0.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_installed_but_stopped_service_is_not_reported_uninstalled() {
+        // F24-B-H2. The live journey caught this: during systemd's five-second
+        // restart window after a hard kill, and again after a clean drain, the
+        // status verb said `Uninstalled` about a unit that was on disk and
+        // enabled, because the registration question was being answered by an
+        // ACTIVITY query.
+        let dir = tempfile::tempdir().unwrap();
+        let unit = dir.path().join("registered.service");
+        let spec = ServiceSpec {
+            profile: "t".into(),
+            binary: PathBuf::from("/opt/x/wayland-core"),
+            home: dir.path().to_path_buf(),
+        };
+
+        let mgr = UnitWritingFamily(unit.clone());
+        assert!(
+            !is_registered(&mgr, &spec).await,
+            "no unit on disk means not registered"
+        );
+
+        std::fs::write(&unit, "unit").unwrap();
+        assert!(
+            is_registered(&mgr, &spec).await,
+            "a unit on disk IS a registration, even though the activity query fails"
         );
     }
 
