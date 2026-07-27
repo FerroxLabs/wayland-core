@@ -1,0 +1,80 @@
+FENCING SURFACE — RE-AUDITED after the ledger landed
+Measured against lane/22-ledger at f21e232c. Compare against fencing-surface.txt,
+which measured 6 paths at 91979ec8: 4 structurally guardable, 2 review-only.
+
+CONDITION 1 FROM THE CLAIM MODEL, RESTATED SO IT IS GRADED AND NOT PARAPHRASED:
+"Ship only once every authoritative effect path is routed through a structurally
+guarded commit API that requires the claim epoch and compares it atomically
+against the ledger's committed epoch. Status and diagnostic writes are exempt
+only if they cannot affect completion, reassignment, accounting, or dependency
+release — which means worktree_manager.rs:235 (reservation accounting) is NOT
+exempt."
+
+VERDICT: CONDITION 1 IS PARTIALLY MET. One path remains review-only, and it is
+the one the condition names by file and line. Reported unmet rather than
+declared closed.
+
+--- the ledger's own authoritative surface: 8 paths, 8 structurally guarded ---
+
+Every effect-bearing entry point on GoalLedger takes &TaskAuthority, a type with
+private fields, no public constructor and NO Deserialize. Its only producers are
+claim_task and hand_off_workspace, both of which return one only to the winner.
+A caller that never won a claim cannot express the call.
+
+FENCE-PATH: claim_task            cite=crates/wcore-agent/src/goal/ledger.rs:172 structural_guard=CLOSED (epoch derived from committed head inside the writer lock)
+FENCE-PATH: prove_liveness        cite=crates/wcore-agent/src/goal/ledger.rs:218 structural_guard=CLOSED (&TaskAuthority + reducer epoch equality)
+FENCE-PATH: complete_task         cite=crates/wcore-agent/src/goal/ledger.rs:267 structural_guard=CLOSED (&TaskAuthority + reducer epoch equality)
+FENCE-PATH: record_unknown_outcome cite=crates/wcore-agent/src/goal/ledger.rs:289 structural_guard=CLOSED (&TaskAuthority + reducer epoch equality)
+FENCE-PATH: hand_off_workspace    cite=crates/wcore-agent/src/goal/ledger.rs:309 structural_guard=CLOSED (&TaskAuthority + reducer epoch equality + committed transaction required)
+FENCE-PATH: revoke_claim          cite=crates/wcore-agent/src/goal/ledger.rs:240 structural_guard=CLOSED-BY-DESIGN-WITHOUT-AUTHORITY (see note 1)
+FENCE-PATH: deliver_completion    cite=crates/wcore-agent/src/goal/ledger.rs:342 structural_guard=CLOSED (epoch must equal the one that PRODUCED the completion)
+FENCE-PATH: declare_task          cite=crates/wcore-agent/src/goal/ledger.rs:139 structural_guard=CLOSED (pre-claim; no epoch exists yet, and it cannot touch an existing task)
+
+The second layer is the reducer, not the type system:
+crates/wcore-agent/src/session_journal/reducer.rs require_live_epoch. Every
+effect-bearing transition passes through it at the DURABLE boundary, so a
+hand-built journal record is refused too. FALSIFIED: neutralising that one
+comparison turned exactly two tests red
+(a_superseded_owners_late_completion_is_refused_while_it_is_still_alive and
+workspace_ownership_moves_only_through_a_committed_delegated_mutation_transaction)
+and left the other nine green.
+
+Third layer: SessionJournal::append refuses GoalTaskDeclared and
+GoalTaskTransitioned outright, so no journal handle can mint a task record
+beside the ledger. Pinned by
+the_public_append_path_refuses_to_mint_a_task_record_beside_the_ledger.
+
+--- the two previously review-only paths ---
+
+FENCE-PATH: worker heartbeat/status file write cite=crates/wcore-swarm/src/heartbeat.rs:56
+  WAS review-only. NOW: REMOVED FROM THE AUTHORITATIVE SURFACE.
+  The ledger's liveness evidence is GoalTaskTransition::LivenessProved, appended
+  through the epoch-checked API. The swarm status file is not read by the ledger
+  for any decision affecting completion, reassignment, accounting or dependency
+  release. Measured, not assumed: grep for heartbeat|read_status|wcore_swarm
+  across crates/wcore-agent/src/goal/ returns nothing.
+  This is a reduction by removal, not by guarding. The file itself is still
+  unfenced; it is now a diagnostic, which is what the condition's exemption
+  clause is for.
+
+FENCE-PATH: workspace reservation accounting cite=crates/wcore-swarm/src/worktree_manager.rs:235
+  WAS review-only. STILL REVIEW-ONLY. NOT CLOSED.
+  Why it was not closed, stated as a reason rather than an excuse: TaskAuthority
+  must be unforgeable, which means it must live in the crate that constructs it
+  (wcore-agent). wcore-swarm sits BELOW wcore-agent in the dependency graph
+  (wcore-agent depends on wcore-swarm; wcore-swarm depends on wcore-config,
+  wcore-sandbox, wcore-types, wcore-memory). So this accounting path cannot
+  require a &TaskAuthority without an upward dependency the crate map forbids.
+  Moving the type down to wcore-types would not help: a constructor public enough
+  for wcore-agent to call is public enough for anything else to call, and the
+  unforgeability is the whole mechanism.
+  Closing it properly needs one of: (a) lifting the admission decision up into
+  the ledger so the accounting read is downstream of a fenced claim, or (b)
+  passing a capability object down through the swarm API. Both change a seam this
+  plan's scope boundary puts out of bounds.
+
+COUNT AFTER: 10 paths considered. 8 newly created and all structurally guarded,
+1 removed from the authoritative surface, 1 STILL REVIEW-ONLY.
+
+The enumeration remains a lower bound, as the original said. That has not changed
+and should not be read as having changed.
