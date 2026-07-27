@@ -1,0 +1,365 @@
+=== F25-04 LIVE LIFECYCLE - host SeanDesktop - 2026-07-27T09:03:48.5622272+07:00 ===
+binary: C:\ferrox-win\target\release\wayland-core.exe
+commit: c5552e691928bc977b514b4a006a717f30fb45af
+
+### VERB 1/12 new
+$ wayland-core.exe plugin new smoke-plugin --path C:\f25-02-lab\scaffolded --install-root C:\f25-02-lab\home\plugins
+wayland-core.exe : error: quarantine: `cargo generate` is not installed, so the 'plugin-static' 
+template cannot be expanded. Install it with:
+At C:\f25-02-lifecycle.ps1:33 char:10
++   $out = & $BIN plugin @PluginArgs --install-root $ROOT 2>&1 | Out-St ...
++          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (error: quaranti...nstall it with::String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  cargo install cargo-generate
+(the template itself is present at C:\ferrox-win\templates\plugin-static)
+[exit=1]
+STATE: refused; scaffold dir present = False
+
+### VERB 2/12 test (against a deliberately RED fixture)
+$ wayland-core.exe plugin test C:\f25-02-lab\failing --install-root C:\f25-02-lab\home\plugins
+wayland-core.exe :    Compiling f25-failing-fixture v0.0.0 (C:\f25-02-lab\failing)
+At C:\f25-02-lifecycle.ps1:33 char:10
++   $out = & $BIN plugin @PluginArgs --install-root $ROOT 2>&1 | Out-St ...
++          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling f2...02-lab\failing):String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
+     Running unittests src\lib.rs (target\debug\deps\f25_failing_fixture-275084599f94253e.exe)
+
+running 1 test
+test always_fails ... FAILED
+
+failures:
+
+---- always_fails stdout ----
+
+thread 'always_fails' (46120) panicked at src\lib.rs:1:29:
+deliberate
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    always_fails
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+error: quarantine: plugin tests FAILED in C:\f25-02-lab\failing (exit code: 101)
+[exit=1]
+STATE: a failing plugin suite produced exit=1 - the verb is not a rubber stamp
+
+### VERB 3/12 verify
+$ wayland-core.exe plugin verify C:\f25-02-lab\src\lifecycle-demo --install-root C:\f25-02-lab\home\plugins
+plugin        lifecycle-demo 1.0.0
+runtime       subprocess
+digest        2e4e3b21da8cde163afb0dba48e8fe6a0a20c24ba1864fd346c1354f3fb38a21
+api version   declared=1.0 host=1.0 GåÆ COMPATIBLE
+entry         bin/run.py (present)
+signature     (unsigned)
+permissions:
+  - run hooks around the agent lifecycle
+VERIFIED
+[exit=0]
+
+### VERB 3/12 verify - NEGATIVE (incompatible api version)
+$ wayland-core.exe plugin verify C:\f25-02-lab\src\lifecycle-demo --install-root C:\f25-02-lab\home\plugins
+plugin        lifecycle-demo 1.0.0
+runtime       subprocess
+digest        d20950738ecf1b96d76c5d09d27771d5539685c17ae9190eff46c2131055e590
+api version   declared=999.0-from-the-future host=1.0 GåÆ INCOMPATIBLE
+              plugin lifecycle-demo: plugin_api_version `999.0-from-the-future` does not match engine `1.0`
+entry         bin/run.py (present)
+signature     (unsigned)
+permissions:
+  - run hooks around the agent lifecycle
+wayland-core.exe : error: quarantine: verification failed for lifecycle-demo: plugin 
+lifecycle-demo: plugin_api_version `999.0-from-the-future` does not match engine `1.0`
+At C:\f25-02-lifecycle.ps1:33 char:10
++   $out = & $BIN plugin @PluginArgs --install-root $ROOT 2>&1 | Out-St ...
++          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (error: quaranti...ch engine `1.0`:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+[exit=1]
+STATE: exit=1 (non-zero required)
+
+### VERB 4/12 sign - mint a key
+$ wayland-core.exe plugin sign --new-key C:\f25-02-lab\keys\author.key --install-root C:\f25-02-lab\home\plugins
+wrote signing key   C:\f25-02-lab\keys\author.key
+wrote verifying key C:\f25-02-lab\keys\author.pub
+install the verifying key as a trust anchor:
+  cp C:\f25-02-lab\keys\author.pub "${WAYLAND_TRUSTED_KEYS_DIR:-$HOME/.wayland/trusted-keys}/"
+[exit=0]
+
+### VERB 4/12 sign - sign the entry artifact
+$ wayland-core.exe plugin sign C:\f25-02-lab\src\lifecycle-demo --key C:\f25-02-lab\keys\author.key --install-root C:\f25-02-lab\home\plugins
+signed bin/run.py GåÆ C:\f25-02-lab\src\lifecycle-demo\bin\wayland-plugin.sig
+[exit=0]
+STATE: 64 bytes at bin\wayland-plugin.sig
+
+### VERB 5/12 publish
+$ wayland-core.exe plugin publish C:\f25-02-lab\src\lifecycle-demo --to C:\f25-02-lab\market --install-root C:\f25-02-lab\home\plugins
+published lifecycle-demo 1.0.0
+  digest   14b82c6c64bad8ed673a187055fc99e31d2f0089134a9e6aa437c66d2faa0cf9
+  signed   bin/run.py (wayland-plugin.sig)
+  target   C:\f25-02-lab\market\plugins\lifecycle-demo
+  install  wayland-core plugin marketplace add C:\f25-02-lab\market && wayland-core plugin install lifecycle-demo@market
+[exit=0]
+STATE: bundle.json: {
+  "name": "lifecycle-demo",
+  "version": "1.0.0",
+  "content_digest": "14b82c6c64bad8ed673a187055fc99e31d2f0089134a9e6aa437c66d2faa0cf9",
+  "signed_artifact": "bin/run.py",
+  "signature_file": "wayland-plugin.sig",
+  "published_at": "2026-07-27T02:03:49.300878900Z"
+}
+
+###         marketplace add
+$ wayland-core.exe plugin marketplace add C:\f25-02-lab\market --install-root C:\f25-02-lab\home\plugins
+added marketplace 'market'
+[exit=0]
+
+###         available
+$ wayland-core.exe plugin available --install-root C:\f25-02-lab\home\plugins
+wayland-browser	0.6.0	Browser tool plugin shell (Camoufox / chromiumoxide / Browserbase)
+wayland-cua	0.6.0	Computer-use plugin shell (multi-platform)
+wayland-honcho	0.6.0	Honcho user-model plugin (mock + live-gated)
+wayland-ollama	0.6.0	Local Ollama provider plugin
+[exit=0]
+
+### NEGATIVE 2/4 - install a TAMPERED bundle
+$ wayland-core.exe plugin install lifecycle-demo@market --install-root C:\f25-02-lab\home\plugins
+wayland-core.exe : error: quarantine: bundle integrity check FAILED for lifecycle-demo: 
+bundle.json records 14b82c6c64bad8ed673a187055fc99e31d2f0089134a9e6aa437c66d2faa0cf9 but the tree 
+hashes to 81d8d02a4da31e6057537ef6eeef546659ff431de03f28f640c7bc7ddf4461f4 GÇö the published 
+bytes were modified after publication
+At C:\f25-02-lifecycle.ps1:33 char:10
++   $out = & $BIN plugin @PluginArgs --install-root $ROOT 2>&1 | Out-St ...
++          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (error: quaranti...ter publication:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+[exit=1]
+STATE: refused (exit=1) and NOTHING landed in the install root
+
+### VERB 6/12 install
+$ wayland-core.exe plugin install lifecycle-demo@market --install-root C:\f25-02-lab\home\plugins
+bundle integrity OK (lifecycle-demo 1.0.0 @ 14b82c6c64ba)
+installed lifecycle-demo@market GåÆ C:\f25-02-lab\home\plugins\lifecycle-demo@market
+  digest c3fde03c35237f94813288ffb600cb1373cabf88b6b1f46fcf2f6e15c958d1d4
+  NOT YET APPROVED GÇö it will be refused at load until you run `wayland-core plugin approve lifecycle-demo`
+[exit=0]
+STATE: install dir contents: C:\f25-02-lab\home\plugins\lifecycle-demo@market\bundle.json, C:\f25-02-lab\home\plugins\lifecycle-demo@market\plugin.toml, C:\f25-02-lab\home\plugins\lifecycle-demo@market\provenance.json, C:\f25-02-lab\home\plugins\lifecycle-demo@market\bin\run.py, C:\f25-02-lab\home\plugins\lifecycle-demo@market\bin\wayland-plugin.sig
+STATE: generations.json: {
+  "plugins": {
+    "lifecycle-demo": {
+      "live": "c3fde03c35237f94813288ffb600cb1373cabf88b6b1f46fcf2f6e15c958d1d4",
+      "retained": [
+        {
+          "digest": "c3fde03c35237f94813288ffb600cb1373cabf88b6b1f46fcf2f6e15c958d1d4",
+          "version": "1.0.0",
+          "created_at": "2026-07-27T02:03:49.448618400Z"
+        }
+      ],
+      "live_path": "lifecycle-demo@market"
+    }
+  }
+}
+
+###         list
+$ wayland-core.exe plugin list --install-root C:\f25-02-lab\home\plugins
+lifecycle-demo@market	1.0.0	Native
+[exit=0]
+
+### VERB 7/12 inspect - while UNAPPROVED
+$ wayland-core.exe plugin inspect lifecycle-demo --install-root C:\f25-02-lab\home\plugins
+name          lifecycle-demo
+version       1.0.0
+path          C:\f25-02-lab\home\plugins\lifecycle-demo@market
+runtime       subprocess
+digest        c3fde03c35237f94813288ffb600cb1373cabf88b6b1f46fcf2f6e15c958d1d4
+source        path:./plugins/lifecycle-demo (marketplace 'market')
+resolved sha  (none)
+installed at  2026-07-27T02:03:49.448618400Z
+api version   declared=1.0 host=1.0 GåÆ COMPATIBLE
+signature     present (wayland-plugin.sig)
+bundle        intact (published 2026-07-27T02:03:49.300878900Z, signs bin/run.py)
+approval      REFUSED GÇö plugin approval required: lifecycle-demo: installed at digest c3fde03c3523 but never approved GÇö run `wayland-core plugin approve lifecycle-demo`
+loads         NO GÇö the loader will refuse this plugin
+live gen      c3fde03c3523
+retained      1 generation(s)
+  * live c3fde03c3523 v1.0.0 created 2026-07-27T02:03:49.448618400Z
+permissions:
+  - run hooks around the agent lifecycle
+[exit=0]
+
+### NEGATIVE 1/4 - the ENGINE refuses to load an unapproved plugin
+[2m2026-07-27T02:03:49.579320Z[0m [33m WARN[0m on-disk plugin load failed (continuing) 
+[3merror[0m[2m=[0mplugin approval required: lifecycle-demo: installed at digest c3fde03c3523 
+STATE: the engine refused the plugin at load
+
+### VERB 8/12 approve
+$ wayland-core.exe plugin approve lifecycle-demo --install-root C:\f25-02-lab\home\plugins
+approved lifecycle-demo at digest c3fde03c3523
+  C:\f25-02-lab\home\plugins\lifecycle-demo@market
+  grants: run hooks around the agent lifecycle
+[exit=0]
+STATE: approvals.json: {
+  "approvals": {
+    "lifecycle-demo": {
+      "plugin": "lifecycle-demo",
+      "digest": "c3fde03c35237f94813288ffb600cb1373cabf88b6b1f46fcf2f6e15c958d1d4",
+      "approved_at": "2026-07-27T02:04:39.073048600Z"
+    }
+  },
+  "revoked": []
+}
+
+### POSITIVE - the ENGINE loads the SAME plugin once approved
+[2m2026-07-27T02:04:39.132659Z[0m [33m WARN[0m on-disk plugin load failed (continuing) 
+STATE: approval refusal gone, but no completed-load line
+
+### VERB 8/12 approve --revoke
+$ wayland-core.exe plugin approve lifecycle-demo --revoke --install-root C:\f25-02-lab\home\plugins
+wayland-core.exe : wayland-core: warning: previous run did not shut down cleanly (crash sentinel 
+found at C:\f25-02-lab\home\.dirty-death.35296)
+At C:\f25-02-lifecycle.ps1:33 char:10
++   $out = & $BIN plugin @PluginArgs --install-root $ROOT 2>&1 | Out-St ...
++          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (wayland-core: w...ty-death.35296):String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+revoked approval for lifecycle-demo (was approved at digest c3fde03c3523)
+it will now be REFUSED at load until re-approved
+[exit=0]
+
+###         inspect after revoke
+$ wayland-core.exe plugin inspect lifecycle-demo --install-root C:\f25-02-lab\home\plugins
+name          lifecycle-demo
+version       1.0.0
+path          C:\f25-02-lab\home\plugins\lifecycle-demo@market
+runtime       subprocess
+digest        c3fde03c35237f94813288ffb600cb1373cabf88b6b1f46fcf2f6e15c958d1d4
+source        path:./plugins/lifecycle-demo (marketplace 'market')
+resolved sha  (none)
+installed at  2026-07-27T02:03:49.448618400Z
+api version   declared=1.0 host=1.0 GåÆ COMPATIBLE
+signature     present (wayland-plugin.sig)
+bundle        intact (published 2026-07-27T02:03:49.300878900Z, signs bin/run.py)
+approval      REFUSED GÇö plugin approval required: lifecycle-demo: installed at digest c3fde03c3523 but never approved GÇö run `wayland-core plugin approve lifecycle-demo`
+loads         NO GÇö the loader will refuse this plugin
+live gen      c3fde03c3523
+retained      1 generation(s)
+  * live c3fde03c3523 v1.0.0 created 2026-07-27T02:03:49.448618400Z
+permissions:
+  - run hooks around the agent lifecycle
+[exit=0]
+
+###         re-approve
+$ wayland-core.exe plugin approve lifecycle-demo --install-root C:\f25-02-lab\home\plugins
+approved lifecycle-demo at digest c3fde03c3523
+  C:\f25-02-lab\home\plugins\lifecycle-demo@market
+  grants: run hooks around the agent lifecycle
+[exit=0]
+
+###         re-sign v2
+$ wayland-core.exe plugin sign C:\f25-02-lab\src\lifecycle-demo --key C:\f25-02-lab\keys\author.key --install-root C:\f25-02-lab\home\plugins
+signed bin/run.py GåÆ C:\f25-02-lab\src\lifecycle-demo\bin\wayland-plugin.sig
+[exit=0]
+
+###         re-publish v2
+$ wayland-core.exe plugin publish C:\f25-02-lab\src\lifecycle-demo --to C:\f25-02-lab\market --install-root C:\f25-02-lab\home\plugins
+published lifecycle-demo 2.0.0
+  digest   2383ebc9286da9100beea11a62afd0cdee39e3afb163db2048ee3adb673b0699
+  signed   bin/run.py (wayland-plugin.sig)
+  target   C:\f25-02-lab\market\plugins\lifecycle-demo
+  install  wayland-core plugin marketplace add C:\f25-02-lab\market && wayland-core plugin install lifecycle-demo@market
+[exit=0]
+
+### VERB 9/12 update
+$ wayland-core.exe plugin update lifecycle-demo --install-root C:\f25-02-lab\home\plugins
+updating lifecycle-demo from marketplace 'market' (current digest c3fde03c3523)
+bundle integrity OK (lifecycle-demo 2.0.0 @ 2383ebc9286d)
+updated lifecycle-demo c3fde03c3523 GåÆ 55fa5cfd2ac5
+NOTE: the approval for the previous digest does not carry over. Run `wayland-core plugin approve lifecycle-demo` to admit the new bytes.
+[exit=0]
+STATE: live digest c3fde03c3523 -> 55fa5cfd2ac5; retained generation dirs = 2
+
+###         inspect after update
+$ wayland-core.exe plugin inspect lifecycle-demo --install-root C:\f25-02-lab\home\plugins
+name          lifecycle-demo
+version       2.0.0
+path          C:\f25-02-lab\home\plugins\lifecycle-demo@market
+runtime       subprocess
+digest        55fa5cfd2ac582ed42796c3c30bad032ea8ca7a9f142b019ee3109bde294b41f
+source        path:./plugins/lifecycle-demo (marketplace 'market')
+resolved sha  (none)
+installed at  2026-07-27T02:05:05.810303600Z
+api version   declared=1.0 host=1.0 GåÆ COMPATIBLE
+signature     present (wayland-plugin.sig)
+bundle        intact (published 2026-07-27T02:05:05.747260200Z, signs bin/run.py)
+approval      REFUSED GÇö plugin approval required: lifecycle-demo: approved digest c3fde03c3523 does not match installed digest 55fa5cfd2ac5 GÇö the plugin changed since it was approved; re-approve with `wayland-core plugin approve lifecycle-demo`
+loads         NO GÇö the loader will refuse this plugin
+live gen      55fa5cfd2ac5
+retained      2 generation(s)
+          c3fde03c3523 v1.0.0 created 2026-07-27T02:03:49.448618400Z
+  * live 55fa5cfd2ac5 v2.0.0 created 2026-07-27T02:05:05.810303600Z
+permissions:
+  - run hooks around the agent lifecycle
+[exit=0]
+
+### VERB 10/12 rollback
+$ wayland-core.exe plugin rollback lifecycle-demo --install-root C:\f25-02-lab\home\plugins
+rolled back lifecycle-demo 55fa5cfd2ac5 GåÆ c3fde03c3523 (v1.0.0)
+  restored digest equals retained generation digest: c3fde03c35237f94813288ffb600cb1373cabf88b6b1f46fcf2f6e15c958d1d4
+  the restored bytes are already approved and will load
+[exit=0]
+STATE: live digest now c3fde03c3523 (pre-update was c3fde03c3523)
+STATE: per-file SHA-256 comparison against the pre-update snapshot: BYTE-IDENTICAL to the pre-update snapshot
+
+###         recover on a SOUND store
+$ wayland-core.exe plugin recover --install-root C:\f25-02-lab\home\plugins
+plugin store is sound GÇö nothing to repair
+quarantine    absent
+  lifecycle-demo: approved at c3fde03c3523
+[exit=0]
+STATE: damage induced: removed the live install dir; left an interrupted staging dir
+
+### VERB 11/12 recover
+$ wayland-core.exe plugin recover --install-root C:\f25-02-lab\home\plugins
+repaired 2 item(s):
+  + removed interrupted staging directory .staging-deadbeef
+  + lifecycle-demo: install directory did not match live generation c3fde03c3523 GÇö restored it
+quarantine    absent
+  lifecycle-demo: approved at c3fde03c3523
+[exit=0]
+STATE: install dir restored = True; staging dir swept = True
+STATE: recover on a sound store had said: plugin store is sound GÇö nothing to repair
+
+### VERB 12/12 remove
+$ wayland-core.exe plugin remove lifecycle-demo --install-root C:\f25-02-lab\home\plugins
+removed lifecycle-demo
+[exit=0]
+STATE: install dir present = False
+STATE: approvals.json now: {
+  "approvals": {},
+  "revoked": []
+}
+
+###         inspect after remove (must be non-zero)
+$ wayland-core.exe plugin inspect lifecycle-demo --install-root C:\f25-02-lab\home\plugins
+wayland-core.exe : error: plugin not installed: lifecycle-demo
+At C:\f25-02-lifecycle.ps1:33 char:10
++   $out = & $BIN plugin @PluginArgs --install-root $ROOT 2>&1 | Out-St ...
++          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (error: plugin n... lifecycle-demo:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+[exit=1]
+STATE: inspect after remove exited 1

@@ -1,0 +1,40 @@
+live gen      a818b717bde6
+retained      2 generation(s)
+          c564afd22804 v1.0.0 created 2026-07-27T01:48:38.225255451Z
+  * live a818b717bde6 v2.0.0 created 2026-07-27T01:48:38.967188811Z
+permissions:
+  - run hooks around the agent lifecycle
+[exit=0]
+
+### VERB 10/12 rollback
+$ /root/wayland-25/target/release/wayland-core plugin rollback lifecycle-demo --install-root /root/f25-02-lab/home/plugins
+rolled back lifecycle-demo a818b717bde6 → c564afd22804 (v1.0.0)
+  restored digest equals retained generation digest: c564afd228049eb94853f9f2879c5313f97b37d802d3737f25b3cdd8c6caf5c3
+  the restored bytes are already approved and will load
+[exit=0]
+
+STATE: live digest is now c564afd22804 (pre-update was c564afd22804)
+STATE: recursive diff against the pre-update snapshot: BYTE-IDENTICAL to the pre-update snapshot
+STATE: installed entry artifact now reads:     print(json.dumps(out), flush=True)
+###         recover on a SOUND store (must report nothing to repair)
+$ /root/wayland-25/target/release/wayland-core plugin recover --install-root /root/f25-02-lab/home/plugins
+plugin store is sound — nothing to repair
+quarantine    absent
+  lifecycle-demo: approved at c564afd22804
+[exit=0]
+
+STATE (damage induced):
+  removed the live install directory /root/f25-02-lab/home/plugins/lifecycle-demo@market
+  left an interrupted staging directory .generations/lifecycle-demo/.staging-deadbeef
+### VERB 11/12 recover
+$ /root/wayland-25/target/release/wayland-core plugin recover --install-root /root/f25-02-lab/home/plugins
+repaired 2 item(s):
+  + removed interrupted staging directory .staging-deadbeef
+  + lifecycle-demo: install directory did not match live generation c564afd22804 — restored it
+quarantine    absent
+  lifecycle-demo: approved at c564afd22804
+[exit=0]
+
+STATE: install dir restored = YES
+STATE: staging dir swept    = YES
+STATE: recover on a sound store had said: plugin store is sound — nothing to repair

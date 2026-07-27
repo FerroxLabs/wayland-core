@@ -1,0 +1,40 @@
+wayland-honcho	0.6.0	Honcho user-model plugin (mock + live-gated)
+wayland-ollama	0.6.0	Local Ollama provider plugin
+[exit=0]
+
+### NEGATIVE 2/4 — install a TAMPERED bundle
+$ /root/wayland-25/target/release/wayland-core plugin install lifecycle-demo@market --install-root /root/f25-02-lab/home/plugins
+error: quarantine: bundle integrity check FAILED for lifecycle-demo: bundle.json records 4fa0ee587fbf59e75577a98dec1ce646cccb46283f96442716f82816a3642bac but the tree hashes to 305a0b31a636aa84e7a593bff3bbf4b9dfa999ea8264b5345e43a126fe43fb92 — the published bytes were modified after publication
+[exit=1]
+
+STATE: refused (exit=1) and NOTHING landed in the install root
+### VERB 6/12 install
+$ /root/wayland-25/target/release/wayland-core plugin install lifecycle-demo@market --install-root /root/f25-02-lab/home/plugins
+bundle integrity OK (lifecycle-demo 1.0.0 @ 4fa0ee587fbf)
+installed lifecycle-demo@market → /root/f25-02-lab/home/plugins/lifecycle-demo@market
+  digest c564afd228049eb94853f9f2879c5313f97b37d802d3737f25b3cdd8c6caf5c3
+  NOT YET APPROVED — it will be refused at load until you run `wayland-core plugin approve lifecycle-demo`
+[exit=0]
+
+STATE: install dir contents:
+/root/f25-02-lab/home/plugins/lifecycle-demo@market/bin/run
+/root/f25-02-lab/home/plugins/lifecycle-demo@market/bin/wayland-plugin.sig
+/root/f25-02-lab/home/plugins/lifecycle-demo@market/bundle.json
+/root/f25-02-lab/home/plugins/lifecycle-demo@market/plugin.toml
+/root/f25-02-lab/home/plugins/lifecycle-demo@market/provenance.json
+STATE: generations.json:
+{
+  "plugins": {
+    "lifecycle-demo": {
+      "live": "c564afd228049eb94853f9f2879c5313f97b37d802d3737f25b3cdd8c6caf5c3",
+      "retained": [
+        {
+          "digest": "c564afd228049eb94853f9f2879c5313f97b37d802d3737f25b3cdd8c6caf5c3",
+          "version": "1.0.0",
+          "created_at": "2026-07-27T01:48:38.225255451Z"
+        }
+      ],
+      "live_path": "lifecycle-demo@market"
+    }
+  }
+}

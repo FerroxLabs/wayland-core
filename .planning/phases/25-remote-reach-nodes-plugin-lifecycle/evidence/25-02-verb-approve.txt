@@ -1,0 +1,40 @@
+runtime       subprocess
+digest        c564afd228049eb94853f9f2879c5313f97b37d802d3737f25b3cdd8c6caf5c3
+source        path:./plugins/lifecycle-demo (marketplace 'market')
+resolved sha  (none)
+installed at  2026-07-27T01:48:38.225255451Z
+api version   declared=1.0 host=1.0 → COMPATIBLE
+signature     present (wayland-plugin.sig)
+bundle        intact (published 2026-07-27T01:48:38.010661817Z, signs bin/run)
+approval      REFUSED — plugin approval required: lifecycle-demo: installed at digest c564afd22804 but never approved — run `wayland-core plugin approve lifecycle-demo`
+loads         NO — the loader will refuse this plugin
+live gen      c564afd22804
+retained      1 generation(s)
+  * live c564afd22804 v1.0.0 created 2026-07-27T01:48:38.225255451Z
+permissions:
+  - run hooks around the agent lifecycle
+[exit=0]
+
+### NEGATIVE 1/4 — the ENGINE refuses to load an unapproved plugin
+$ WAYLAND_PLUGINS_DIR=/root/f25-02-lab/home/plugins /root/wayland-25/target/release/wayland-core --json-stream (boot only)
+[2m2026-07-27T01:48:38.396723Z[0m [33m WARN[0m on-disk plugin load failed (continuing) [3mplugin[0m[2m=[0mlifecycle-demo [3mmanifest[0m[2m=[0m/root/f25-02-lab/home/plugins/lifecycle-demo@market/plugin.toml [3merror[0m[2m=[0mplugin approval required: lifecycle-demo: installed at digest c564afd22804 but never approved — run `wayland-core plugin approve lifecycle-demo`
+
+STATE: the engine refused the plugin at load; the refusal reached stderr
+### VERB 8/12 approve
+$ /root/wayland-25/target/release/wayland-core plugin approve lifecycle-demo --install-root /root/f25-02-lab/home/plugins
+approved lifecycle-demo at digest c564afd22804
+  /root/f25-02-lab/home/plugins/lifecycle-demo@market
+  grants: run hooks around the agent lifecycle
+[exit=0]
+
+STATE: approvals.json:
+{
+  "approvals": {
+    "lifecycle-demo": {
+      "plugin": "lifecycle-demo",
+      "digest": "c564afd228049eb94853f9f2879c5313f97b37d802d3737f25b3cdd8c6caf5c3",
+      "approved_at": "2026-07-27T01:48:38.514645275Z"
+    }
+  },
+  "revoked": []
+}

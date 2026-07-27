@@ -1,0 +1,40 @@
+
+   Doc-tests smoke_plugin
+warning: type `Smoke_pluginPlugin` should have an upper camel case name
+ --> src/lib.rs:8:12
+  |
+8 | pub struct Smoke_pluginPlugin;
+  |            ^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `SmokePluginPlugin`
+  |
+  = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: type `Smoke_pluginFactory` should have an upper camel case name
+  --> src/lib.rs:36:12
+   |
+36 | pub struct Smoke_pluginFactory;
+   |            ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `SmokePluginFactory`
+
+warning: 2 warnings emitted
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+plugin tests passed in /root/f25-02-lab/scaffolded/smoke-plugin
+[exit=0]
+
+### VERB 3/12 verify
+$ /root/wayland-25/target/release/wayland-core plugin verify /root/f25-02-lab/src/lifecycle-demo --install-root /root/f25-02-lab/home/plugins
+plugin        lifecycle-demo 1.0.0
+runtime       subprocess
+digest        2f39eb5a9400474634dfb926116cc5357fa4be2cb5e53383e3e970332746446e
+api version   declared=1.0 host=1.0 → COMPATIBLE
+entry         bin/run (present)
+signature     (unsigned)
+permissions:
+  - run hooks around the agent lifecycle
+VERIFIED
+[exit=0]
+
+STATE: exit=0 (0 = compatible)

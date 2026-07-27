@@ -1,0 +1,40 @@
+  "plugins": {
+    "lifecycle-demo": {
+      "live": "c564afd228049eb94853f9f2879c5313f97b37d802d3737f25b3cdd8c6caf5c3",
+      "retained": [
+        {
+          "digest": "c564afd228049eb94853f9f2879c5313f97b37d802d3737f25b3cdd8c6caf5c3",
+          "version": "1.0.0",
+          "created_at": "2026-07-27T01:48:38.225255451Z"
+        }
+      ],
+      "live_path": "lifecycle-demo@market"
+    }
+  }
+}###         list (existing verb, unchanged)
+$ /root/wayland-25/target/release/wayland-core plugin list --install-root /root/f25-02-lab/home/plugins
+lifecycle-demo@market	1.0.0	Native
+[exit=0]
+
+### VERB 7/12 inspect — while UNAPPROVED
+$ /root/wayland-25/target/release/wayland-core plugin inspect lifecycle-demo --install-root /root/f25-02-lab/home/plugins
+name          lifecycle-demo
+version       1.0.0
+path          /root/f25-02-lab/home/plugins/lifecycle-demo@market
+runtime       subprocess
+digest        c564afd228049eb94853f9f2879c5313f97b37d802d3737f25b3cdd8c6caf5c3
+source        path:./plugins/lifecycle-demo (marketplace 'market')
+resolved sha  (none)
+installed at  2026-07-27T01:48:38.225255451Z
+api version   declared=1.0 host=1.0 → COMPATIBLE
+signature     present (wayland-plugin.sig)
+bundle        intact (published 2026-07-27T01:48:38.010661817Z, signs bin/run)
+approval      REFUSED — plugin approval required: lifecycle-demo: installed at digest c564afd22804 but never approved — run `wayland-core plugin approve lifecycle-demo`
+loads         NO — the loader will refuse this plugin
+live gen      c564afd22804
+retained      1 generation(s)
+  * live c564afd22804 v1.0.0 created 2026-07-27T01:48:38.225255451Z
+permissions:
+  - run hooks around the agent lifecycle
+[exit=0]
+
