@@ -16,6 +16,16 @@
 //! Workflow child terminals never share the diagnostic stream. The spawner
 //! emits exactly one typed [`SubAgentTerminalRelay`] after the child result is
 //! known; ordinary `Info`/`Error` diagnostics remain ordered with stream data.
+//!
+//! **F21-04-01 — this sink is a per-child observability boundary, not just a
+//! text pipe.** `OutputSink` gives every method a default empty body, so any
+//! method this type does not override is a SILENT DROP for every spawned child.
+//! Phase 21 measured the consequence: a host driving Core over the JSON-stream
+//! protocol could see a child's prose and its terminal, but not the structured
+//! lifecycle facts (budget caps, cancellation decisions) that Success Criterion
+//! 2 requires it to attribute per child. When adding a lifecycle-bearing method
+//! to `OutputSink`, decide explicitly whether a child's copy of it must reach
+//! the parent, and override it here if so.
 
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -229,6 +239,44 @@ impl OutputSink for ChannelSink {
             msg_id: String::new(),
             message: msg.to_string(),
         });
+    }
+
+    /// F21-04-01 — a child's budget-cap event is a PER-CHILD observable.
+    ///
+    /// `AgentEngine` raises this on `self.output` at every reservation,
+    /// settlement and mid-flight cap check, and for a spawned child
+    /// `self.output` IS this sink (`spawner.rs::execute_resolved_launch`).
+    /// Without this override the trait's empty default body swallowed it, so
+    /// the only trace a host got was the free-form `Error` that follows each
+    /// call site — text a host can render but cannot classify, address or
+    /// audit. Relaying it keeps the structured `reason`/`observed`/`limit`
+    /// triple and lets the parent tag it with `parent_call_id` + `agent_name`,
+    /// which is how the host attributes it to the sibling that raised it.
+    ///
+    /// This rides the EXISTING `sub_agent_event` wire shape: `inner` is an open
+    /// object in the pinned contract, so no event type is added and no contract
+    /// regeneration is required.
+    fn emit_budget_exceeded(&self, reason: &str, observed: &str, limit: &str) {
+        self.relay(ProtocolEvent::BudgetExceeded {
+            reason: reason.to_string(),
+            observed: observed.to_string(),
+            limit: limit.to_string(),
+        });
+    }
+
+    /// F21-04-01 — the mid-flight monitor's decision is the child's own
+    /// cancel/replan signal. `MidFlightMonitor` is constructed unconditionally
+    /// in `AgentEngine::new_with_provider`, so a child reaches it; a
+    /// `MonitorDirective::Stop` is a cancellation that terminated THAT child
+    /// and nothing else. Dropped by the default body before this override, it
+    /// left a host unable to distinguish a cancelled sibling from a sibling
+    /// that simply errored.
+    fn emit_midflight_monitor_decision(
+        &self,
+        directive: wcore_protocol::events::MonitorDirective,
+        reason: wcore_protocol::events::MonitorReason,
+    ) {
+        self.relay(ProtocolEvent::MidFlightMonitorDecision { directive, reason });
     }
 }
 
