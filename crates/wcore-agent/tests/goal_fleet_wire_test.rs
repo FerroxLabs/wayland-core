@@ -830,10 +830,12 @@ async fn a_second_opener_is_refused_the_writer_lease_on_unix() {
     fixture.open(&driver, 8);
     fixture.declare(&driver, "t00", &[]);
 
-    let second = SessionJournal::open(&fixture.journal_path, "wire-test");
-    let error = second
-        .err()
-        .expect("a second process opened the journal while a supervisor held it");
+    // Matched rather than `expect_err`, because the Ok arm holds a live writer
+    // handle and unwrapping it for a panic message would be a second opener in
+    // its own right.
+    let Err(error) = SessionJournal::open(&fixture.journal_path, "wire-test") else {
+        panic!("a second process opened the journal while a supervisor held it");
+    };
     assert!(
         error.to_string().contains("AlreadyOwned") || format!("{error:?}").contains("AlreadyOwned"),
         "refused for the wrong reason: {error:?}"
