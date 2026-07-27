@@ -128,11 +128,22 @@ if ($OpenHandle) {
 
 # --- the interrupted run ------------------------------------------------------
 $env:WAYLAND_BACKUP_KILL_PROBE = $Probe
-$proc = Start-Process -FilePath $Binary -PassThru -WindowStyle Hidden `
-    -ArgumentList @('backup', 'restore', $Archive, '--home', $Target, '--replace',
-                    '--accept-missing-secrets', '--pace-ms', "$PaceMs") `
-    -RedirectStandardOutput (Join-Path $Work 'restore.out') `
-    -RedirectStandardError  (Join-Path $Work 'restore.err')
+$restoreArgs = @('backup', 'restore', $Archive, '--home', $Target, '--replace',
+                 '--accept-missing-secrets', '--pace-ms', "$PaceMs")
+if ($HandlerControl) {
+    # The control child needs its OWN console, because a close request is
+    # delivered to a console window and is what turns into a catchable
+    # CTRL_CLOSE_EVENT inside the process. Measured: launched hidden with its
+    # stdio redirected, the child had no console to receive the close request,
+    # so the probe could not fire and the control was structurally unable to
+    # go green. Redirection is dropped only for this leg; the real run keeps it.
+    $proc = Start-Process -FilePath $Binary -PassThru -ArgumentList $restoreArgs
+} else {
+    $proc = Start-Process -FilePath $Binary -PassThru -WindowStyle Hidden `
+        -ArgumentList $restoreArgs `
+        -RedirectStandardOutput (Join-Path $Work 'restore.out') `
+        -RedirectStandardError  (Join-Path $Work 'restore.err')
+}
 
 Start-Sleep -Milliseconds $KillAtMs
 
@@ -235,6 +246,20 @@ if ($Undersized) {
     Fail 'the undersized fixture was still mid-flight; the negative control did not reproduce a late kill'
 }
 
+if ($OpenHandle) {
+    # This leg does not need a mid-flight kill and must not require one. Its
+    # documented assertion is that a restore contending with another handle
+    # either SUCCEEDS or FAILS CLEANLY with an exact rollback -- never a half
+    # state. Measured: the contended write fails fast, so the operation is over
+    # before any kill could land, and demanding a mid-flight kill scored a
+    # correct product outcome as a harness failure.
+    if ($DigestEqual -ne 'yes') {
+        Fail "open-handle contention left the target neither its old self nor its new one ($DigestPre vs $DigestPost)"
+    }
+    Write-Output 'OPEN-HANDLE-OUTCOME: resolved cleanly with an exact tree'
+    Write-Output 'PROOF-OK: a restore contending with another open handle left the target byte-identical to its pre-operation tree'
+    exit 0
+}
 if ($KillLanded -ne 'yes')                  { Fail 'the process had already exited when the kill was sent' }
 if ($MidflightJournalOpen -ne 'yes')        { Fail 'no open journal record: the kill did not land mid-flight' }
 if ($MidflightTargetIntermediate -ne 'yes') { Fail 'the target was not observably intermediate: the kill did not land mid-flight' }

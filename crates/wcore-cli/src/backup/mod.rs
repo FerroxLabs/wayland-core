@@ -290,10 +290,34 @@ fn arm_kill_handler_probe(path: PathBuf) {
             }
             #[cfg(windows)]
             {
-                if let Ok(mut sig) = tokio::signal::windows::ctrl_break() {
-                    sig.recv().await;
-                    let _ = std::fs::write(&path, b"fired");
+                // Listen on EVERY catchable console control event, not just
+                // one. Measured: the control leg delivered a close request
+                // (`taskkill` without `/F`) while the probe watched only
+                // CTRL_BREAK, so the probe could never fire and the control
+                // reported `fired=no` for a mechanism it called catchable —
+                // which left the real run's `fired=no` vacuous rather than a
+                // measurement.
+                //
+                // Widening makes the uncatchability claim STRONGER, not weaker:
+                // `fired=no` under TerminateProcess now means none of the five
+                // catchable mechanisms was delivered, rather than one.
+                use tokio::signal::windows;
+                let (Ok(mut brk), Ok(mut close), Ok(mut shutdown), Ok(mut logoff)) = (
+                    windows::ctrl_break(),
+                    windows::ctrl_close(),
+                    windows::ctrl_shutdown(),
+                    windows::ctrl_logoff(),
+                ) else {
+                    return;
+                };
+                tokio::select! {
+                    _ = brk.recv() => {}
+                    _ = close.recv() => {}
+                    _ = shutdown.recv() => {}
+                    _ = logoff.recv() => {}
+                    _ = tokio::signal::ctrl_c() => {}
                 }
+                let _ = std::fs::write(&path, b"fired");
             }
         });
     });
