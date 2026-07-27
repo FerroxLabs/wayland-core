@@ -176,3 +176,10 @@ pub mod gateway;
 // F25-03: CLI surface `wayland-core node` — the node/device operator surface
 // (identity / pair / list / show / probe / revoke / submit / attribution).
 pub mod node;
+
+// F22-04: CLI surface `wayland-core goal` — the user-reachable surface over the
+// durable Goal kernel and its Fleet task ledger (open / task / run / status /
+// exec-task). Lives in the lib so the idempotency gate at the effect boundary is
+// testable under `cargo test -p wcore-cli --lib`, and so the kill/restart proof
+// runs against the shipped binary rather than an `examples/` instrument.
+pub mod goal_cmd;

@@ -142,3 +142,81 @@ this program's environment, not a scheduling accident: a phase whose every task
 requires a serialized turn on one contended physical machine cannot be executed
 in one session, and planning that assumes otherwise will keep producing this
 outcome.
+
+---
+---
+
+# UPDATE — 2026-07-27, lane `lane/22-wire`
+
+The grades above were written on 2026-07-26 against a tree in which
+`crates/wcore-agent/src/goal/` did not exist. Three lanes have since run. This
+section re-grades every criterion against the current tree and supersedes the
+summary table above; nothing above it is edited, so the trajectory stays legible.
+
+## Re-graded
+
+| Criterion | Was | Now | Why |
+|---|---|---|---|
+| 1 — three surfaces observe identical state | FAILED, not attempted | **FAILED**, one surface of three | `wayland-core goal` exists and emits the canonical projection; no TUI surface, no host-protocol Goal events, no fixtures. Agreement needs at least two. |
+| 2 — fleet claims survive kill/restart | FAILED, not attempted | **PASSED, both platforms, against the shipped binary** | See below. |
+| 3 — one canonical terminal transition | FAILED, measured not built | **FAILED**, unchanged | The five engines still return `ClimbOutcome`, `CouncilRunResult`, `WorkflowRunError`, a caller-chosen `T`, and nothing. The ledger uses `GoalTerminalState` for task outcomes, which is one more real consumer of the taxonomy, but the adapter surface over the five owners was not built. No lane attempted 22-02 Task 3. |
+| 4 — bounded session-local loops | FAILED, vocabulary only | **PARTIAL** | `LoopPolicy::Fixed` is now enforced by the reducer at the durable boundary and the bound survives a restart, because the count lives in the chain. `Dynamic`, `EventDriven` and `Manual` still have no runtime enforcement, and preemption / missed intervals are untouched. |
+| 5 — journal compatibility proved or migrated | PARTIAL | **PARTIAL**, unchanged | The Windows M1–M5 legs were still not taken. The `tasks` field added by the ledger carries `skip_serializing_if`, and F-7 added the falsifiable guard the original grading said was missing, so the "no regression canary" half is better than it was. The Linux-only half is not. |
+
+**Phase goal — "users can supervise durable objectives and work graphs through one
+restart-safe lifecycle and one loop owner": STILL NOT ACHIEVED.**
+
+A user can now open a durable Goal, declare a task graph, run it, kill it, and
+restart it from a terminal, and the work survives — that is real and it is new,
+and it is why Criterion 2 moved. But "one loop owner" is Criterion 3, and
+Criterion 3 did not move: five engines still terminate five ways. A phase whose
+hard criterion is untouched has not achieved its goal, however much else landed.
+
+## Criterion 2, in detail
+
+> Fleet claims and dependencies survive kill/restart/reassignment without
+> duplicate execution or lost completion.
+
+**PASSED on Linux, against `wayland-core 0.12.25` release, driving only shipped
+verbs.** `kill -9` on the process group at 2026-07-27T12:13:53Z, mid-wave:
+7 process-group members → 0, 2 live worker children → 0, restart exit 0,
+2 claims revoked on lease expiry, 4 completions drained from the outbox that the
+dead parent never observed, effects **12 total / 12 distinct / 12 expected**,
+14 attempts (12 + 2 reassignments), 12 dependency releases, 0 unresolved. The
+counting gate was falsified in the same run: a duplicated effect took it to 13
+and exit 1.
+
+This retires the caveat three successive summaries carried honestly — that the
+proof was a real process but a test harness, not the product. It is now the
+product. Full record: `22-03-SUMMARY-WIRE.md`.
+
+**Windows: PASSED, same numbers.** `taskkill /T /F` on the process tree at
+2026-07-27T13:12:06Z: 7 descendants → 0 (2 `PING.EXE` workers, 2 `cmd.exe`, 2
+`wayland-core.exe` exec-task children, 1 `conhost.exe`), killed parent confirmed
+gone, restart exit 0, 2 claims revoked, 4 completions drained from the outbox,
+effects 12 / 12 / 12, 14 attempts, 12 dependency releases, 0 unresolved, and the
+same `produced=no reason=idempotency-key-present` on the reassigned task. Gate
+falsified to exit 1 and restored in the same run.
+
+## Claim-model conditions
+
+* **Condition 1 — MET.** Decided 3-of-4 and recorded as an explicit amendment
+  with the evidence: `22-03-CONDITION-1-DECISION.md`. `worktree_manager.rs:235`
+  is a read no task owner can reach, feeding a disk-retention quota, not the
+  budget accounting the condition protects.
+* **Condition 2 — MET.** The Windows kill leg for the ledger ran on the previous
+  lane. Note this is *not* the same as the Windows leg for the shipped binary,
+  which has not run; the condition binds the former.
+
+## What the next session should do first, in order
+
+1. **22-02 Task 3 — the adapter surface over the five loop owners.** This is
+   Criterion 3, it is the phase's hard criterion, and no lane has attempted it.
+   The census in `22-02-LOOP-OWNER-CENSUS.md` already says exactly what each of
+   the five produces and where Fleet must bind.
+2. **The TUI Goal surface and the typed host command set**, in that order. The
+   canonical projection they must consume already exists and is emitted by
+   `wayland-core goal status`; the contract seam request in `22-04-SUMMARY.md`
+   explains why command fixtures must wait for the typed command set.
+3. **The Windows M1–M5 journal-compatibility legs** (Criterion 5), unchanged from
+   the original list.

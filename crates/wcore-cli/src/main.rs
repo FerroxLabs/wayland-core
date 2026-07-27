@@ -731,6 +731,11 @@ enum TopCmd {
     /// F25-03: nodes — pair / list / show / probe / revoke / submit /
     /// attribution across paired machines that host execution backends.
     Node(wcore_cli::node::NodeArgs),
+    /// F22-04: durable Goals and their Fleet task ledger — open / task / run /
+    /// status / exec-task. `run` recovers a killed Goal, revokes expired claim
+    /// leases, drains completions the dead parent never observed, and drives the
+    /// remaining tasks through the Fleet dispatcher.
+    Goal(wcore_cli::goal_cmd::GoalArgs),
     /// Manage isolated profiles — each is an independent `WAYLAND_HOME`-rooted
     /// home with its own config, credentials, memory, and skills.
     Profile {
@@ -1393,6 +1398,13 @@ async fn run() -> anyhow::Result<ExitCode> {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(e) => {
                     eprintln!("wayland-core node: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
+            TopCmd::Goal(args) => match wcore_cli::goal_cmd::run(args).await {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core goal: {e:#}");
                     Ok(ExitCode::FAILURE)
                 }
             },

@@ -1,0 +1,130 @@
+You are one member of a four-way technical review panel on a Rust codebase. Answer the
+specific question at the end. Be adversarial and concrete. Do not hedge.
+
+# CONTEXT
+
+A durable task ledger fences task ownership with a "lease-with-fencing-token" model:
+a monotonic claim epoch per task, committed into an append-only session journal.
+An authority token `TaskAuthority` has private fields, no public constructor and no
+`Deserialize`; only the ledger's `claim_task`/`hand_off_workspace` produce one, and only
+to the winner of a claim race. Every effect-recording ledger method takes `&TaskAuthority`.
+The journal reducer independently re-compares the presented epoch against the committed
+epoch at the DURABLE boundary, so a hand-built journal record is refused too.
+
+An earlier decision record attached this BINDING condition to shipping:
+
+  "Condition 1. Ship only once every AUTHORITATIVE effect path is routed through a
+   structurally guarded commit API that requires the claim epoch and compares it
+   atomically against the ledger's committed epoch. Status and diagnostic writes are
+   exempt ONLY if they cannot affect completion, reassignment, accounting, or dependency
+   release -- which means worktree_manager.rs:235 (reservation accounting) is NOT exempt.
+   A half-closed fence is worse than an open one because it manufactures confidence."
+
+8 of 8 new ledger paths are structurally guarded. One earlier path (a worker heartbeat
+status-file write) was removed from the authoritative surface by showing nothing reads it
+for any decision affecting completion, reassignment, accounting or dependency release.
+
+One path remains open and is the subject of this question.
+
+# THE PATH IN QUESTION: worktree_manager.rs:235
+
+At the commit the condition was written against, line 235 is EXACTLY this function
+(verified by `git show <commit>:<file>`):
+
+```rust
+/// Count retained worker worktrees without following linked entries.
+/// Enumeration stops once `stop_after` is exceeded so an already-invalid
+/// worktree root cannot force an unbounded admission scan.
+pub fn retained_worker_count(&self, stop_after: usize) -> Result<usize> {
+    self.validate_repo_authority()?;
+    self.validate_swarm_root()?;
+    let mut count = 0_usize;
+    for entry in std::fs::read_dir(&self.swarm_root)? {
+        let entry = entry?;
+        if entry.file_name().as_os_str() == std::ffi::OsStr::new(CONTROL_DIR) { continue; }
+        let path = entry.path();
+        if !is_real_directory_entry(&path)? {
+            return Err(SwarmError::WorktreeIo(format!(
+                "refused non-directory worktree entry during admission: {}", path.display())));
+        }
+        count = count.checked_add(1).ok_or_else(|| {
+            SwarmError::DispatchAdmission("retained worktree count overflowed".into()) })?;
+        if count > stop_after { break; }
+    }
+    Ok(count)
+}
+```
+
+MEASURED FACTS about this function (all verified against the tree, not assumed):
+
+F1. It takes `&self`. It performs `read_dir` and returns a `usize`. It WRITES NOTHING.
+    It is a pure read of directory entries. The decision record labelled it
+    "workspace reservation accounting" and classed it as an effect-producing write
+    path; that label is inaccurate for what the code at that line actually does.
+
+F2. Its ONLY non-test caller in the entire workspace is `Swarm::dispatch`:
+        let reclaimed = self.manager.reclaim_abandoned_transactions()?;
+        let retained  = self.manager.retained_worker_count(MAX_RETAINED_WORKTREES)?;
+        let limits    = DispatchLimits::admit(count, retained)?;
+    i.e. a process-wide admission gate on how many worktrees may be retained, evaluated
+    ONCE at dispatch time, BEFORE any worker process exists, under a process-wide
+    `dispatch_gate` mutex.
+
+F3. It is not reachable from a task owner at all. Swarm workers are separate OS
+    processes running an arbitrary user-supplied `--worker-command`; they do not link
+    this crate. The sandbox manifest for a worker sets
+    `fs_write_allow = [workspace.checkout, workspace.scratch]` and `network = Deny`,
+    so a worker cannot write the shared journal or any sibling's state either.
+
+F4. The resource this admission gate accounts for (an abandoned transaction workspace)
+    is now reclaimed by `reclaim_abandoned_transactions()`, which discriminates on the
+    transaction's own kernel-enforced `flock` lease -- released by the OS only when the
+    holding process exits. So a workspace held by a DEAD owner is reclaimed, and a
+    workspace held by a LIVE-BUT-SUPERSEDED owner is NOT reclaimed and keeps being
+    counted. No timeout, age or heartbeat heuristic is involved.
+
+# THE DEPENDENCY CONSTRAINT (why it was not simply closed)
+
+`TaskAuthority` must be unforgeable, so it must live in the crate that constructs it,
+`wcore-agent`. `wcore-swarm` sits BELOW `wcore-agent` in the crate graph (`wcore-agent`
+depends on `wcore-swarm`). So this function cannot require a `&TaskAuthority` parameter
+without an upward dependency the crate map forbids. Moving `TaskAuthority` down to the
+shared types crate does not help: a constructor public enough for `wcore-agent` to call
+is public enough for anything to call, and the unforgeability IS the mechanism.
+
+Two routes were identified to close it structurally:
+  (a) lift the admission decision up into the ledger, so the accounting read happens
+      downstream of a fenced claim;
+  (b) pass a capability object down through the swarm API.
+
+# THE QUESTION
+
+Given F1-F4 and the dependency constraint, which of these is correct?
+
+  OPTION A -- REMOVE FROM THE AUTHORITATIVE SURFACE. `retained_worker_count` is a read,
+    not an effect path; it is unreachable by any task owner; and the resource it accounts
+    for is fenced by a kernel flock lease that is strictly stronger than an advisory
+    epoch. It therefore satisfies Condition 1's own exemption clause and Condition 1 is
+    FULLY MET, by the same reduction-by-removal already accepted for the heartbeat path.
+
+  OPTION B -- STAYS REVIEW-ONLY, CONDITION 1 PARTIALLY MET. The condition names this file
+    and line explicitly and says "accounting"; an admission counter IS accounting; report
+    it unmet and do not round up.
+
+  OPTION C -- CLOSE IT STRUCTURALLY via route (a) or (b), because there is a real
+    unfenced hazard here that A misses.
+
+If you pick C, you must name the CONCRETE attack: which actor, in which process, holding
+which stale state, causes which duplicate effect or lost completion, that routing this
+read through an epoch check would prevent. "It is unfenced" is not an attack.
+
+Also answer this sub-question explicitly: is there a hazard in TWO CONCURRENT PARENT
+PROCESSES (two `swarm dispatch` calls on the same repository from different OS processes)?
+`dispatch_gate` is a per-process `tokio::Mutex` and does NOT serialize across processes.
+
+Reply in exactly this format, with no other prose before it:
+
+PANEL_POSITION=<A|B|C>
+REASONING=<3-6 sentences>
+ATTACK=<the concrete attack if C, else the single strongest argument AGAINST your own pick>
+CROSS_PROCESS=<your answer to the two-concurrent-parents sub-question, 2-3 sentences>

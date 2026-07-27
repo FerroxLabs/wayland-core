@@ -6,17 +6,21 @@
 //!
 //! ## Why this is an example and not the `wayland-core` subcommand
 //!
-//! Carried forward verbatim from `p22_goal_live`, because the gap has not
-//! closed and quietly dropping it would be the dishonest move: **the shipped
-//! binary has no Goal surface yet.** Adding one is plan 22-04
-//! (`crates/wcore-cli/src/goal_cmd.rs`), which this lane is not executing. So
-//! the strongest honest live proof available at this commit is a real process
-//! running the real ledger against a real on-disk journal with real workers,
-//! killed with a real SIGKILL — not a mocked crash, not a cooperative shutdown,
-//! and not a test harness that never leaves the process.
+//! **The caveat that used to live here is CLOSED, and is corrected rather than
+//! carried forward.** Three successive summaries honestly repeated that the
+//! shipped binary had no Goal surface, so this instrument was the strongest
+//! available live proof and explicitly not the product. That is no longer true:
+//! `wayland-core goal run` drives this exact ledger through the real
+//! `FleetDispatcher`, and the kill/restart proof — `kill -9` on the process
+//! group, 12 effects / 12 distinct / 12 expected, completions drained from the
+//! outbox, a reassigned task refusing to produce its effect twice — now runs
+//! against the release binary. See
+//! `22-03-EVIDENCE/wire-live/linux/live-capture.txt`.
 //!
-//! What this does NOT prove is the shipped `wayland-core` binary resuming a
-//! Fleet ledger, because no user-reachable path can create one yet.
+//! This instrument is retained because it can stage a mid-flight state (an
+//! effect on disk with no completion, held open by a lingering worker) more
+//! precisely than the CLI can be driven into, which makes it a useful
+//! adversarial harness. It is no longer the evidence Criterion 2 rests on.
 //!
 //! ## The two halves of at-most-once, and why both are here
 //!
