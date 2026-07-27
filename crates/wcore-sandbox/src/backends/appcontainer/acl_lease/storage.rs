@@ -34,10 +34,87 @@ struct TrustedRoot {
 }
 
 pub(super) fn lease_directory() -> Result<PathBuf> {
-    let local = PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or_else(|| {
-        exec_error("LOCALAPPDATA is required for AppContainer ACL leases".into())
-    })?);
-    lease_directory_from(local)
+    lease_directory_from(lease_root()?)
+}
+
+/// Production lease root: the user's real `%LOCALAPPDATA%`.
+#[cfg(not(test))]
+fn lease_root() -> Result<PathBuf> {
+    Ok(PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or_else(
+        || exec_error("LOCALAPPDATA is required for AppContainer ACL leases".into()),
+    )?))
+}
+
+/// Unit-test lease root: one temp directory per test process.
+///
+/// This is the single chokepoint that makes it STRUCTURALLY impossible for a
+/// unit test to write a lease into the user's real lease directory. It is
+/// deliberately here rather than at the call sites: there are five call sites
+/// in this crate's tests, and the sixth one somebody adds is the one that
+/// forgets.
+///
+/// The stakes are not test hygiene. A lease written by a test carries a
+/// synthetic `WCore-storage-…` profile name for which no AppContainer profile
+/// is ever created, so `recover_dead_leases_locked` can never derive a matching
+/// SID, returns `Err`, and fails closed FOREVER — there is no quarantine path,
+/// and the negative probe cache is in-process only, so every later process
+/// re-reads the same file and fails again. That error reaches the caller
+/// through `probe_appcontainer_available()`, which maps it to `false` and logs
+/// "sandbox disabled"; the product then carries on running UNSANDBOXED. Running
+/// the native acceptance suite could therefore silently disable the sandbox on
+/// that machine until a human deleted a file nobody knew to look for — which is
+/// exactly what was found on a real developer box. See
+/// `.planning/intel/APPCONTAINER-SSH-LEASE-WEDGE.md`.
+///
+/// Integration tests under `tests/` compile the library WITHOUT `cfg(test)` and
+/// so still use the real directory. That is correct and intended: they drive
+/// `ExecutionIdentity::start`, whose leases carry a real profile and a real SID
+/// and therefore reconcile normally. They cannot reach the synthetic-lease
+/// helpers at all, because those are private to this module tree — visibility,
+/// not discipline, is what keeps them out.
+#[cfg(test)]
+fn lease_root() -> Result<PathBuf> {
+    test_lease_root()
+}
+
+/// Environment variable carrying the lease root to a spawned helper process.
+///
+/// `killed_owner_is_recovered_before_next_execution` spawns the test binary
+/// again and then looks for the lease that child deliberately abandoned. A root
+/// keyed only on the process id would put the child's lease somewhere the
+/// parent never looks, so the root travels to the child through the
+/// environment. Test-only.
+#[cfg(test)]
+pub(super) const TEST_LEASE_ROOT_ENV: &str = "WCORE_TEST_LEASE_ROOT";
+
+#[cfg(test)]
+pub(super) fn test_lease_root() -> Result<PathBuf> {
+    use std::sync::OnceLock;
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    let root = ROOT.get_or_init(|| match std::env::var_os(TEST_LEASE_ROOT_ENV) {
+        // Inherited from a parent test process: join it as-is, and never clear
+        // it — the lease this process is about to abandon is the whole point.
+        Some(inherited) => PathBuf::from(inherited),
+        None => {
+            let path =
+                std::env::temp_dir().join(format!("wcore-lease-test-{:08x}", std::process::id()));
+            // Start every run from an empty root. The name is keyed on the
+            // process id, Windows reuses process ids freely, and a lease left
+            // behind by an earlier run is not inert: `create_new` collides with
+            // it, and `recover_dead_leases_locked` refuses it outright. Both
+            // were observed on SEANDESKTOP when a reused id inherited a lease
+            // that an earlier failing run had abandoned here.
+            let _ = fs::remove_dir_all(&path);
+            path
+        }
+    });
+    fs::create_dir_all(root).map_err(|error| {
+        exec_error(format!(
+            "create test AppContainer ACL lease root {}: {error}",
+            root.display()
+        ))
+    })?;
+    Ok(root.clone())
 }
 
 fn lease_directory_from(local: PathBuf) -> Result<PathBuf> {
@@ -633,13 +710,92 @@ mod tests {
     fn test_lease(tag: u64, state: LeaseState) -> LeaseFile {
         let mut lease = LeaseFile::new(
             format!("WCore-storage-{:08x}-{tag:016x}", std::process::id()),
-            b"storage-test-sid",
+            TEST_SID_SENTINEL,
             Vec::new(),
         )
         .unwrap();
         lease.state = state;
         lease.refresh_digest();
         lease
+    }
+
+    /// Drop a `\\?\` verbatim prefix so two spellings of the same directory
+    /// compare equal.
+    ///
+    /// Without this the comparison below is VACUOUS: `lease_directory()`
+    /// returns the path via `GetFinalPathNameByHandleW`, which yields the
+    /// verbatim `\\?\C:\…` form, while the production path composed from
+    /// `%LOCALAPPDATA%` is the ordinary `C:\…` form. A plain string compare
+    /// therefore never matched and the assertion passed against the UNFIXED
+    /// tree — measured, not hypothesised, on SEANDESKTOP at 2419b868.
+    fn strip_verbatim(path: &Path) -> PathBuf {
+        let text = path.to_string_lossy();
+        match text.strip_prefix(r"\\?\") {
+            Some(rest) => PathBuf::from(rest),
+            None => PathBuf::from(text.as_ref()),
+        }
+    }
+
+    /// The real, user-facing lease directory: what `lease_directory()` resolves
+    /// to in a production build. Computed here WITHOUT creating anything, so
+    /// the check itself never brings the production tree into existence.
+    fn production_lease_directory() -> Option<PathBuf> {
+        let mut path = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+        for component in LEASE_DIRECTORY_COMPONENTS {
+            path.push(component);
+        }
+        Some(path)
+    }
+
+    /// A unit test must never resolve the production lease directory.
+    ///
+    /// Every lease this module's tests write goes to `lease_directory()`, so
+    /// this one path decides whether the whole test module writes into the
+    /// user's real sandbox state. It resolved to production, and the native
+    /// acceptance suite left two unreconcilable leases on a real developer box
+    /// that silently disabled its Windows sandbox until a human deleted them
+    /// (`.planning/intel/APPCONTAINER-SSH-LEASE-WEDGE.md`).
+    #[test]
+    fn unit_tests_never_resolve_the_production_lease_directory() {
+        let resolved = lease_directory().expect("test lease directory must resolve");
+        let Some(production) = production_lease_directory() else {
+            return;
+        };
+        assert!(
+            !same_windows_path(&strip_verbatim(&resolved), &strip_verbatim(&production)),
+            "lease_directory() resolved to the PRODUCTION lease directory under \
+             cfg(test): {}. Every lease written by this test module lands in the \
+             user's real sandbox state, where a synthetic test profile can never \
+             reconcile and disables the sandbox permanently.",
+            resolved.display()
+        );
+    }
+
+    /// End-to-end form of the same invariant: drive the real write path with
+    /// the same helper the acceptance tests use and prove nothing appeared in
+    /// production. The observation is captured and the lease removed BEFORE the
+    /// assertion, so even the failing (pre-fix) run leaves no residue behind —
+    /// a test that proves pollution must not itself pollute.
+    #[test]
+    fn a_lease_written_by_a_test_never_lands_in_the_production_directory() {
+        let root = lease_directory().expect("test lease directory must resolve");
+        let lease = test_lease(0xdead, LeaseState::Prepared);
+        let name = format!("{}.toml", lease.profile_name);
+        let path = root.join(&name);
+
+        write_new_synced_lease(&path, &lease).expect("write test lease");
+        let landed_in_production = production_lease_directory()
+            .map(|production| production.join(&name).exists())
+            .unwrap_or(false);
+        remove_validated_lease(&path).expect("remove test lease");
+
+        assert!(
+            !landed_in_production,
+            "a lease written by a test appeared in the PRODUCTION lease directory \
+             as {name}; it carries a synthetic profile name with no AppContainer \
+             profile behind it, so recovery can never reconcile it and every \
+             later sandboxed execution on this machine is refused."
+        );
     }
 
     #[test]
@@ -762,38 +918,95 @@ mod tests {
         let path = root_path.join(format!("{}.toml", lease.profile_name));
         write_new_synced_lease(&path, &lease).unwrap();
 
-        let ordinary_root = trusted_root_for(&path).unwrap();
-        let ordinary = open_existing_nofollow(&ordinary_root, &path, GENERIC_READ).unwrap();
-        let expected = file_identity(&ordinary, &path).unwrap();
+        // `lease_directory()` resolves through `GetFinalPathNameByHandleW`, so
+        // `path` is ALREADY the verbatim `\\?\C:\…` spelling. Every spelling
+        // below is therefore derived from the ordinary form, not from `path`:
+        // prepending `\\?\` to `path` produced `\\?\\\?\C:\…` and failed with
+        // os error 123, and the drive-letter leg silently never ran because
+        // byte 1 of a verbatim path is `\`, not `:`. Both were measured on
+        // SEANDESKTOP; the extended leg is what aborted this test before its
+        // cleanup below, which is how a lease leaked into the real lease
+        // directory and disabled the sandbox on that machine.
+        let ordinary_path = strip_verbatim(&path);
+        let ordinary_root = trusted_root_for(&ordinary_path).unwrap();
+        let ordinary =
+            open_existing_nofollow(&ordinary_root, &ordinary_path, GENERIC_READ).unwrap();
+        let expected = file_identity(&ordinary, &ordinary_path).unwrap();
 
-        let slash_path = PathBuf::from(path.to_string_lossy().replace('\\', "/"));
+        let slash_path = PathBuf::from(ordinary_path.to_string_lossy().replace('\\', "/"));
         let slash_root = trusted_root_for(&slash_path).unwrap();
         let slash = open_existing_nofollow(&slash_root, &slash_path, GENERIC_READ).unwrap();
         assert_eq!(file_identity(&slash, &slash_path).unwrap(), expected);
 
-        let mut drive_spelling = path.to_string_lossy().into_owned();
-        if drive_spelling.as_bytes().get(1) == Some(&b':') {
-            let toggled = if drive_spelling.as_bytes()[0].is_ascii_lowercase() {
-                drive_spelling[0..1].to_ascii_uppercase()
-            } else {
-                drive_spelling[0..1].to_ascii_lowercase()
-            };
-            drive_spelling.replace_range(0..1, &toggled);
-            let drive_path = PathBuf::from(drive_spelling);
-            let drive_root = trusted_root_for(&drive_path).unwrap();
-            let drive = open_existing_nofollow(&drive_root, &drive_path, GENERIC_READ).unwrap();
-            assert_eq!(file_identity(&drive, &drive_path).unwrap(), expected);
-        }
+        let mut drive_spelling = ordinary_path.to_string_lossy().into_owned();
+        assert_eq!(
+            drive_spelling.as_bytes().get(1),
+            Some(&b':'),
+            "the drive-letter leg must actually run: {drive_spelling}"
+        );
+        let toggled = if drive_spelling.as_bytes()[0].is_ascii_lowercase() {
+            drive_spelling[0..1].to_ascii_uppercase()
+        } else {
+            drive_spelling[0..1].to_ascii_lowercase()
+        };
+        drive_spelling.replace_range(0..1, &toggled);
+        let drive_path = PathBuf::from(drive_spelling);
+        let drive_root = trusted_root_for(&drive_path).unwrap();
+        let drive = open_existing_nofollow(&drive_root, &drive_path, GENERIC_READ).unwrap();
+        assert_eq!(file_identity(&drive, &drive_path).unwrap(), expected);
 
-        let spelling = path.to_string_lossy();
+        let spelling = ordinary_path.to_string_lossy();
         let extended_path = PathBuf::from(format!(r"\\?\{spelling}"));
         let extended_root = trusted_root_for(&extended_path).unwrap();
         let extended =
             open_existing_nofollow(&extended_root, &extended_path, GENERIC_READ).unwrap();
         assert_eq!(file_identity(&extended, &extended_path).unwrap(), expected);
 
-        drop((ordinary, slash, extended));
+        // `drive` belongs here too. Lease handles deliberately omit
+        // FILE_SHARE_DELETE, so any still-open handle makes the DELETE open
+        // inside `remove_validated_lease` fail with a sharing violation — the
+        // same property `opened_lease_cannot_be_swapped_under_validation`
+        // asserts. It was absent from this drop only because the drive-letter
+        // leg never used to run.
+        drop((ordinary, slash, drive, extended));
         remove_validated_lease(&path).unwrap();
+    }
+
+    /// The sentinel digest is frozen, because PRODUCTION reads it.
+    ///
+    /// `TEST_SID_SENTINEL_SHA256` is how a production build recognises a lease
+    /// that a test suite leaked into a real lease directory. The two files
+    /// found wedging a developer box carry exactly this digest; changing either
+    /// constant would make those files unrecognisable again. This also re-proves
+    /// on every run the byte-level identification that established the defect.
+    #[test]
+    fn test_sid_sentinel_digest_is_frozen() {
+        assert_eq!(sha256_hex(TEST_SID_SENTINEL), TEST_SID_SENTINEL_SHA256);
+    }
+
+    /// A leaked test lease must be named as such, not reported as a generic
+    /// mismatch. The generic text is what operators read as a platform limit.
+    #[test]
+    fn a_leaked_test_lease_is_diagnosed_by_name() {
+        let lease = test_lease(0xbeef, LeaseState::Prepared);
+        let message = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &lease);
+        assert!(
+            message.contains("OWN TEST SUITE"),
+            "test-origin lease must be named as test-origin, got: {message}"
+        );
+        assert!(
+            message.contains("DELETED") || message.contains("Delete it"),
+            "the diagnosis must state the remedy, got: {message}"
+        );
+
+        let mut genuine = lease.clone();
+        genuine.sid_sha256 = sha256_hex(b"a-real-appcontainer-package-sid");
+        genuine.refresh_digest();
+        let other = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &genuine);
+        assert!(
+            !other.contains("OWN TEST SUITE"),
+            "a genuine mismatch must NOT be blamed on the test suite, got: {other}"
+        );
     }
 
     #[test]

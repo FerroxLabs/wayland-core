@@ -144,6 +144,9 @@ fn killed_owner_is_recovered_before_next_execution() {
         .arg("crash_helper_entry")
         .arg("--nocapture")
         .env("WAYLAND_SANDBOX_LIVE_WINDOWS", "1")
+        // The helper must lease into the SAME root as this process, or the
+        // lease it abandons lands where this test never looks.
+        .env(TEST_LEASE_ROOT_ENV, test_lease_root().unwrap())
         .env("WCORE_ACL_CRASH_HELPER", "1")
         .env("WCORE_ACL_CRASH_GRANT", &grant)
         .env("WCORE_ACL_CRASH_MARKER", &marker)
