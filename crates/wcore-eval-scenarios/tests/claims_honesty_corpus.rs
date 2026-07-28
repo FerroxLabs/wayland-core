@@ -322,3 +322,439 @@ fn a_hedged_evidence_bound_ledger_sentence_verifies() {
     };
     verify(&supply).expect("the SUPPLY-* delta sentence must verify verbatim");
 }
+
+// ---------------------------------------------------------------------------
+// The paired adversarial corpus (Task 2)
+// ---------------------------------------------------------------------------
+//
+// Built from what this program would ACTUALLY want to say about its own trial
+// results, not from invented straw sentences.
+//
+// Every case is a PAIR carried by one value: a pristine claim the checker accepts and a
+// mutation of it the checker refuses. `AttackCase::new` takes both, so a case missing its
+// pristine control CANNOT BE CONSTRUCTED — the pairing is enforced by the data structure
+// rather than by a reviewer remembering to check for it a dozen times. That is the same
+// structural device 29-04 used for its tamper corpus, for the same reason.
+
+use std::fs;
+
+use wcore_eval_scenarios::claims::ConfoundV1;
+
+struct AttackCase {
+    id: &'static str,
+    what: &'static str,
+    pristine: ClaimV1,
+    mutation: ClaimV1,
+    expected_rule: &'static str,
+    confounds: Vec<ConfoundV1>,
+}
+
+impl AttackCase {
+    /// Both halves are required positionally. There is no constructor that takes only a
+    /// mutation, so a refusal-only case is not expressible.
+    fn new(
+        id: &'static str,
+        what: &'static str,
+        pristine: ClaimV1,
+        mutation: ClaimV1,
+        expected_rule: &'static str,
+        confounds: Vec<ConfoundV1>,
+    ) -> Self {
+        Self {
+            id,
+            what,
+            pristine,
+            mutation,
+            expected_rule,
+            confounds,
+        }
+    }
+}
+
+fn evidence_dir() -> PathBuf {
+    repo_root().join(".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-03")
+}
+
+/// A factual, non-comparative claim resting on a resolving static path.
+fn pristine_factual() -> ClaimV1 {
+    ClaimV1 {
+        id: "P".into(),
+        class: ClaimClassV1::Factual,
+        text: "30-02's trial accounting records fifteen legs, each naming a capture file.".into(),
+        scope: ScopeV1::StaticSource,
+        evidence: vec![static_path("LEG-ACCOUNTING", &legs_tsv())],
+        peer_baseline: None,
+        bounds: Evidence::Unavailable {
+            code: "a_census_is_not_a_sampled_quantity".into(),
+        },
+        substitution_point: None,
+    }
+}
+
+/// A hedged static-source comparative, i.e. the shape this program already publishes.
+fn pristine_hedged_comparative() -> ClaimV1 {
+    ClaimV1 {
+        id: "P".into(),
+        class: ClaimClassV1::Comparative,
+        text: "Sandbox/egress: Core architectural lead, operationally unproven".into(),
+        scope: ScopeV1::StaticSource,
+        evidence: vec![static_path(
+            "CTRL01-LEDGER",
+            ".planning/intel/COMPETITIVE-LEDGER.md",
+        )],
+        peer_baseline: Some(PINNED.into()),
+        bounds: Evidence::Unavailable {
+            code: "static_source_census_has_no_sampling_variance".into(),
+        },
+        substitution_point: None,
+    }
+}
+
+fn cases() -> Vec<AttackCase> {
+    let confound = |leg: &str| ConfoundV1 {
+        leg: leg.to_string(),
+        defect: "The canonical script emits a `write_file` tool call, a name only Hermes \
+                 exposes; OpenClaw also scored 0/30 on the identical script."
+            .to_string(),
+        evidence: ".planning/phases/30-continuous-scorecard-frontier-review/30-02-TRIAL-RESULTS.md"
+            .to_string(),
+        substitution_point: "Per-tool dialect compilation, then a re-run.".to_string(),
+    };
+
+    let mut v = Vec::new();
+
+    // ATK-01 — the claim with nothing behind it at all.
+    v.push(AttackCase::new(
+        "ATK-01",
+        "an evidence pointer is removed",
+        pristine_factual(),
+        ClaimV1 {
+            evidence: vec![],
+            ..pristine_factual()
+        },
+        "no_evidence_reference",
+        vec![],
+    ));
+
+    // ATK-02 — the pointer that LOOKS like evidence but opens nothing. This is the
+    // single cheapest defect to write and the hardest to see by reading.
+    v.push(AttackCase::new(
+        "ATK-02",
+        "an evidence pointer is repointed at a path that does not exist",
+        pristine_factual(),
+        ClaimV1 {
+            evidence: vec![static_path("GHOST", "evidence/30-02/does-not-exist.tsv")],
+            ..pristine_factual()
+        },
+        "evidence_does_not_resolve",
+        vec![],
+    ));
+
+    // ATK-03 — the security claim this program would most like to make. It rests on a
+    // leg 30-02 recorded UNPROVEN because the meter records digests, not bodies.
+    let leg_pristine = ClaimV1 {
+        id: "P".into(),
+        class: ClaimClassV1::Factual,
+        text: "The wayland correctness leg produced a recorded run of thirty trials.".into(),
+        scope: ScopeV1::ScriptedHarness,
+        evidence: vec![run_leg("WAYLAND-CORRECTNESS", "LEG-01")],
+        peer_baseline: None,
+        bounds: Evidence::Unavailable {
+            code: "a_trial_count_is_a_census".into(),
+        },
+        substitution_point: None,
+    };
+    v.push(AttackCase::new(
+        "ATK-03",
+        "a claim is moved onto a leg recorded UNPROVEN",
+        leg_pristine.clone(),
+        ClaimV1 {
+            text: "No canary value left the harness during the security trials.".into(),
+            evidence: vec![run_leg("WAYLAND-SECURITY", "LEG-03")],
+            ..leg_pristine.clone()
+        },
+        "evidence_leg_unproven",
+        vec![],
+    ));
+
+    // ATK-04 — 30-01's HIGH finding, made mechanical: PEER-PROBE-2026-07-26 names no
+    // openable artifact yet carries half the Delta column in six families.
+    let id_pristine = ClaimV1 {
+        id: "P".into(),
+        class: ClaimClassV1::Factual,
+        text: "The F03 receipt is a concrete committed object.".into(),
+        scope: ScopeV1::StaticSource,
+        evidence: vec![ClaimEvidenceRefV1::LedgerEvidenceId {
+            id: "F03".into(),
+            evidence_id: "F03-RECEIPT@1c644ccd".into(),
+            resolution_tsv: format!("{}/evidence/30-01/evidence-id-resolution.tsv", phase_dir()),
+            scope: ScopeV1::StaticSource,
+        }],
+        peer_baseline: None,
+        bounds: Evidence::Unavailable {
+            code: "object_existence_is_not_a_sampled_quantity".into(),
+        },
+        substitution_point: None,
+    };
+    v.push(AttackCase::new(
+        "ATK-04",
+        "a claim is rested on the CTRL-01 evidence ID that opens nothing",
+        id_pristine.clone(),
+        ClaimV1 {
+            text: "Structural probes confirm the peer baseline shape.".into(),
+            evidence: vec![ClaimEvidenceRefV1::LedgerEvidenceId {
+                id: "PEER-PROBE".into(),
+                evidence_id: "PEER-PROBE-2026-07-26".into(),
+                resolution_tsv: format!(
+                    "{}/evidence/30-01/evidence-id-resolution.tsv",
+                    phase_dir()
+                ),
+                scope: ScopeV1::StaticSource,
+            }],
+            ..id_pristine.clone()
+        },
+        "evidence_id_unresolved",
+        vec![],
+    ));
+
+    // ATK-05 — THE most important case in this corpus. A comparison built on a leg whose
+    // number is real but does not measure its own dimension.
+    v.push(AttackCase::new(
+        "ATK-05",
+        "a comparison is built on a leg carrying a recorded instrument defect",
+        pristine_hedged_comparative(),
+        ClaimV1 {
+            id: "P".into(),
+            class: ClaimClassV1::Comparative,
+            text: "wayland-core's cost is practically indistinguishable from both peers.".into(),
+            scope: ScopeV1::ScriptedHarness,
+            evidence: vec![run_leg("WAYLAND-COST", "LEG-04")],
+            peer_baseline: Some(PINNED.into()),
+            bounds: interval(0.0, 0.0),
+            substitution_point: None,
+        },
+        "confounded_leg_supports_no_comparison",
+        vec![confound("LEG-04")],
+    ));
+
+    // ATK-06 — a comparison against an unpinned peer is a comparison against nothing.
+    v.push(AttackCase::new(
+        "ATK-06",
+        "the pinned peer baseline is dropped from a comparative",
+        pristine_hedged_comparative(),
+        ClaimV1 {
+            peer_baseline: None,
+            ..pristine_hedged_comparative()
+        },
+        "comparative_without_pinned_baseline",
+        vec![],
+    ));
+
+    // ATK-07 — a point estimate offered where an interval is required.
+    let measured_pristine = ClaimV1 {
+        id: "P".into(),
+        class: ClaimClassV1::Comparative,
+        text: "Hermes completed the scripted task more reliably than wayland-core.".into(),
+        scope: ScopeV1::ScriptedHarness,
+        evidence: vec![run_leg("HERMES-CORRECTNESS", "LEG-06")],
+        peer_baseline: Some(PINNED.into()),
+        bounds: interval(-1.0, -0.7),
+        substitution_point: None,
+    };
+    v.push(AttackCase::new(
+        "ATK-07",
+        "a measured comparative's interval is replaced by a point estimate",
+        measured_pristine.clone(),
+        ClaimV1 {
+            bounds: Evidence::Unavailable {
+                code: "point_estimate_only".into(),
+            },
+            ..measured_pristine.clone()
+        },
+        "comparative_without_interval",
+        vec![],
+    ));
+
+    // ATK-08 — the real Wayland-vs-OpenClaw correctness row: [-0.1135, 0.1135].
+    v.push(AttackCase::new(
+        "ATK-08",
+        "a direction is asserted on an interval that straddles zero",
+        measured_pristine.clone(),
+        ClaimV1 {
+            text: "wayland-core is ahead of OpenClaw on scripted correctness.".into(),
+            bounds: interval(-0.1135, 0.1135),
+            ..measured_pristine.clone()
+        },
+        "directional_on_interval_containing_zero",
+        vec![],
+    ));
+
+    // ATK-09 — the one-field dodge. Without this rule every comparative requirement is
+    // skipped simply by declaring the sentence factual.
+    v.push(AttackCase::new(
+        "ATK-09",
+        "a comparative sentence is relabelled factual to skip the comparative rules",
+        pristine_hedged_comparative(),
+        ClaimV1 {
+            class: ClaimClassV1::Factual,
+            ..pristine_hedged_comparative()
+        },
+        "misclassification",
+        vec![],
+    ));
+
+    // ATK-10 — the generalisation this program is most tempted to make: a scripted
+    // measurement restated as a fact about real use.
+    v.push(AttackCase::new(
+        "ATK-10",
+        "a scripted-harness result is restated at real-world scope",
+        leg_pristine.clone(),
+        ClaimV1 {
+            scope: ScopeV1::LiveProvider,
+            ..leg_pristine.clone()
+        },
+        "scope_not_contained",
+        vec![],
+    ));
+
+    // ATK-11 — TRUNCATING A HEDGE IS ITSELF A WAY TO MANUFACTURE AN UNSUPPORTED CLAIM.
+    // The mutation is a real ledger fragment, quoted verbatim but severed from the
+    // qualifier its family carries. Same evidence, same scope, no hedge.
+    v.push(AttackCase::new(
+        "ATK-11",
+        "a real ledger sentence is quoted with its unproven-qualifier truncated away",
+        pristine_hedged_comparative(),
+        ClaimV1 {
+            text: "This is Core's clearest unique capability".into(),
+            ..pristine_hedged_comparative()
+        },
+        "unbounded_superiority",
+        vec![],
+    ));
+
+    // ATK-12 — a limitation that records a gap without saying what would close it is
+    // just an apology.
+    let lim_pristine = ClaimV1 {
+        id: "P".into(),
+        class: ClaimClassV1::Limitation,
+        text: "The security dimension was not measured: the meter records body digests.".into(),
+        scope: ScopeV1::ScriptedHarness,
+        evidence: vec![static_path("LEG-ACCOUNTING", &legs_tsv())],
+        peer_baseline: None,
+        bounds: Evidence::Unavailable {
+            code: "meter_records_digests_not_bodies".into(),
+        },
+        substitution_point: Some("Request-body retention under a redaction policy.".into()),
+    };
+    v.push(AttackCase::new(
+        "ATK-12",
+        "a limitation's substitution point is removed",
+        lim_pristine.clone(),
+        ClaimV1 {
+            substitution_point: None,
+            ..lim_pristine.clone()
+        },
+        "limitation_without_substitution_point",
+        vec![],
+    ));
+
+    v
+}
+
+/// Runs every pair and RECORDS the outcome. The TSV is a record of something that ran,
+/// not a set of lines someone typed.
+#[test]
+fn the_attack_corpus_pairs_every_case_and_records_what_fired() {
+    let root = repo_root();
+    let ev = evidence_dir();
+    let caps = ev.join("attack-captures");
+    fs::create_dir_all(&caps).expect("capture dir");
+
+    let mut tsv = String::new();
+    let mut accepted = 0usize;
+    let mut refused = 0usize;
+    let mut rules: BTreeSet<String> = BTreeSet::new();
+
+    for c in cases() {
+        // -- the pristine half MUST be accepted, or the case proves nothing: a checker
+        //    that refuses everything would pass a refusal-only corpus.
+        let p = c
+            .pristine
+            .verify_with_confounds(&root, TIE_BAND_DEFAULT, &c.confounds);
+        assert!(
+            p.is_ok(),
+            "{}: the pristine control MUST be accepted, got {:?}",
+            c.id,
+            p.err().map(|e| e.to_string())
+        );
+        let pcap = format!("attack-captures/{}-pristine.txt", c.id);
+        fs::write(
+            ev.join(&pcap),
+            format!(
+                "case: {}\nwhat: {}\nhalf: PRISTINE\nclass: {}\nscope: {}\ntext: {}\noutcome: \
+                 ACCEPTED\nrule: NONE\n",
+                c.id,
+                c.what,
+                c.pristine.class.token(),
+                c.pristine.scope.token(),
+                c.pristine.text
+            ),
+        )
+        .expect("write pristine capture");
+        let _ = writeln!(tsv, "{}::ACCEPTED::rule=NONE::evidence={}", c.id, pcap);
+        accepted += 1;
+
+        // -- the mutated half MUST be refused, by the rule the case is aimed at.
+        let m = c
+            .mutation
+            .verify_with_confounds(&root, TIE_BAND_DEFAULT, &c.confounds)
+            .expect_err("the mutation MUST be refused");
+        assert_eq!(
+            m.rule(),
+            c.expected_rule,
+            "{}: refused by the wrong rule: {m}",
+            c.id
+        );
+        let mcap = format!("attack-captures/{}-mutation.txt", c.id);
+        fs::write(
+            ev.join(&mcap),
+            format!(
+                "case: {}\nwhat: {}\nhalf: MUTATION\nclass: {}\nscope: {}\ntext: {}\noutcome: \
+                 REFUSED\nrule: {}\nrefusal: {}\nmissing: {}\n",
+                c.id,
+                c.what,
+                c.mutation.class.token(),
+                c.mutation.scope.token(),
+                c.mutation.text,
+                m.rule(),
+                m,
+                m.missing()
+            ),
+        )
+        .expect("write mutation capture");
+        let _ = writeln!(
+            tsv,
+            "{}::REFUSED::rule={}::evidence={}",
+            c.id,
+            m.rule(),
+            mcap
+        );
+        refused += 1;
+        rules.insert(m.rule().to_string());
+    }
+
+    fs::write(ev.join("attack-corpus.tsv"), &tsv).expect("write corpus tsv");
+
+    // A corpus that only refuses is passed by a checker that refuses everything; a
+    // corpus that only accepts proves nothing at all. Both halves are asserted.
+    assert!(accepted >= 8, "too few accepted rows: {accepted}");
+    assert!(refused >= 8, "too few refused rows: {refused}");
+    assert!(
+        rules.len() >= 8,
+        "too few DISTINCT rules actually fired: {} ({rules:?})",
+        rules.len()
+    );
+}
+
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
