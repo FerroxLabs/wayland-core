@@ -81,6 +81,13 @@ It stays contained. That is the half of GHSA-8r7g that actually holds.
 
 ## The live inertness proof — both legs
 
+**WINDOWS LEG RUN 2026-07-28 by the windows-requeue lane — MET.** The same two tests, `t19`
+and `t20`, were run on `SeanD@seandesktop`: **26 passed, 0 failed, 141.82s**, with `t19` and
+`t20` both `ok` and the positive control firing. All 22 authored tests `t1`-`t22` pass on both
+families; the 29-vs-26 count delta is 3 Unix-only PTY support self-tests not compiled on
+Windows. Evidence: `evidence/26-02-windows/RESULT.md`. The earlier `seandesktop` host-access
+blocker was false — the account is `SeanD`.
+
 - **NEGATIVE** (`t19`): after importing the corpus, the REAL binary is driven
   through a real agent turn (`--json-stream --force`, scripted mock provider,
   `Skill` tool call). Four assertions together: import discovered a non-zero
