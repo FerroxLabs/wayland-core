@@ -1,0 +1,11 @@
+SHAPE 1 — filing claims:
+  [PASS] A1 known-positive: absent id behind a filing claim is RED — 1 hit(s)
+  [PASS] A2 known-negative: id present in BACKLOG is GREEN — 0 hit(s)
+  [PASS] A3 the naive claim-reading matcher MISSES it (says filed, is not) — naive=filed, effect=absent
+  [PASS] A4 section-scoped catches the real 23A shape; the old line-scoped matcher MISSED it — section=['F23A-01-M1', 'F23A-01-M2'] old=[]
+SHAPE 2 — no-op mutation gates:
+  [PASS] B1 known-positive: the real BL-F30-FORCED-MET-SED gate is RED — 1 hit(s)
+  [PASS] B2 known-negative: the corrected 'grade' gate is GREEN — 0 hit(s)
+  [PASS] B3 the naive substring grep for 'verdict' MISSES it (type + filename hits) — naive=found, key-position=absent
+
+SELF-TEST: PASSED
