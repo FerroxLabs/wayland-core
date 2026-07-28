@@ -1,0 +1,26 @@
+PANEL-MEMBER: kimi
+PANEL-QUESTION-SHA256: daa6b1d1353c04b66b44e4b263e27dbf8f8be56bf30e9c3cd8d40cf0380b7db7
+---
+• I'll verify the load-bearing claims against the actual tree before issuing a verdict — the whole point is judging the replay, not the prose.
+
+• One last check — the replay verdicts file on disk should match the REPLAY block quoted in the prompt.
+
+• The replay file on disk looks shorter than the quoted block — checking its full contents.
+
+• PANEL-VERDICT: accept-with-named-open
+  PANEL-BASIS: The 2 OPEN keys are the right 2 — I independently confirmed both unmet clauses against the tree (zero F23-envelope references in `crates/wcore-cli/src/backup/`; ROADMAP SC3's interruption contract does name "profile migration, and reciprocal portability", which was never killed mid-apply) — and every CLOSED claim I spot-checked against the ROADMAP's own wording, the plan summaries, and the live replay logs held.
+
+  Reasoning:
+
+  **The 2 OPEN are correct.** F26-03's unmet clause is not a technicality: the requirement's first clause ("consume the F23 redacted session/evidence envelope") has literally zero footprint in `crates/wcore-cli/src/backup/` — grep for `envelope|f23` returns nothing, so "never started" is accurate, not conservative. F26-SC3's unmet clause is equally precise: the ROADMAP wording names four operations under the interruption contract, and only `backup restore` was ever interrupted. Both OPEN entries name their specific clause, satisfying the Phase 20A precedent.
+
+  **No CLOSED criterion is rounded up.** The strongest rounding-up candidate is F26-SC1's `platform=linux+macos` given the macOS leg ran at `b671f9ad` and the three scrub-hardening commits (`255d06ba`, `dd8579bc`, plus one more) are Linux-proven only. But the certification discloses this limit in its own section, the hardening moved redaction from call-site habit to type invariant (strictly more redaction, re-proven at 0 canary hits on Linux at the certified SHA), and the replay re-derives the macOS run from GitHub — `headSha`, job conclusion, live non-empty artifact — rather than transcribing it (confirmed in `replay-F26-SC1.log`). Disclosure plus re-derivation is the opposite of rounding up. F26-SC2 does the anti-rounding move explicitly: platform recorded `linux`, not `linux+windows`, because the load-bearing live agent turn only ever ran on Linux, with the Windows run described as corroboration and not counted.
+
+  **No HIGH fell.** Verified at source: 26-03-SUMMARY.md:436 records F26-03-D as HIGH; it stays HIGH and was fixed at the product with the fixture deepened. F26-01-HEADERS was recorded "HIGH-adjacent" at 26-01-SUMMARY.md:128 — explicitly not HIGH — and the re-measurement checks out (`headers` appears exactly once in `crates/wcore-cli/src/migrate/mod.rs:1102`, as `headers: None`). `send-back-finding-reclassified` has no trigger.
+
+  **The cap held.** Exactly four plan files (26-01 through 26-04) exist in the phase directory.
+
+  **The replay is real, not asserted.** The per-key logs on disk show actual re-execution at `9b2ed829`: 23/23 hostile-corpus tests passing under nextest, the remap capture writing 4 backend records, and the GitHub headSha match for the macOS leg.
+
+  One nit that does not change the verdict: the certification prose twice references `26-04-SUMMARY.md`, but the file on disk is `26-04-CERTIFICATION.md` — a stale cross-reference a reader will trip on, worth a one-line fix, not an evidence failure.
+

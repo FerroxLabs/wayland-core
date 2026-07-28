@@ -41,14 +41,14 @@ These nine lines are the machine-checkable form of the judgements below. The
 prose is what a human reads; the line is what makes the claim checkable, and
 Task 4 RE-EXECUTES the evidence every `CLOSED` line names.
 
-F26-SC1: CLOSED — typed, deterministic, structurally secret-redacted and non-mutating discovery for BOTH peer sources, proven on Linux canary corpora and on Sean's REAL macOS installs with live credentials, 0 secret hits and both homes unmutated. platform=linux+macos evidence=.planning/phases/26-migration-export-backup-restore/26-01-BASELINE.md
+F26-SC1: CLOSED — typed, deterministic, structurally secret-redacted and non-mutating discovery for BOTH peer sources, proven on Linux canary corpora and on Sean's REAL macOS installs with live credentials, 0 secret hits and both homes unmutated; the macOS leg ran at ancestor commit b671f9ad and NOT at this certified tree, so 26-01's three later hardening commits are Linux-proven only. platform=linux+macos evidence=.planning/phases/26-migration-export-backup-restore/26-01-BASELINE.md
 F26-SC2: CLOSED — selective import preserves per-item provenance and contains executable content by PLACEMENT outside every skill load root, proven live against the real binary with a paired positive control that fired in 2.4s while the negative leg exhausted its full 45s window. platform=linux evidence=crates/wcore-cli/tests/migrate_quarantine.rs
 F26-SC3: OPEN — `backup restore` survives interruption and rolls back exactly on Linux AND real Windows (26-03, lane 26c). But the criterion also names "profile migration, and reciprocal portability", and NEITHER was ever interrupted: no plan in this phase killed a `migrate hermes` or `migrate openclaw` mid-apply, so the exact-rollback contract for the migration path rests on a partial-failure argument rather than on a measured interruption. That specific clause is the unmet one.
-F26-SC4: CLOSED — hostile corpora with DECLARED outcomes prove conflict semantics for exact, case-folded and normal-form names; secret-source behaviour for secrets hidden in memory notes, persona bodies, skill bodies and dotenvs; isolation by an external sentinel tree digested before and after on BOTH platforms; and recovery semantics under refusal and manifest/payload mismatch. platform=linux+windows evidence=scripts/portability-native-matrix.sh
-F26-01: CLOSED — `migrate --json` emits the typed plan in which a credential VALUE is unrepresentable by type; byte-identical across independent walks; tree digest unchanged on both corpora and both REAL peer homes; the mandatory macOS leg RAN and its provenance re-derives from GitHub. platform=linux+macos evidence=.planning/phases/26-migration-export-backup-restore/26-01-BASELINE.md
+F26-SC4: CLOSED — hostile corpora with DECLARED outcomes prove conflict semantics for exact, case-folded and normal-form names; secret-source behaviour for secrets hidden in memory notes, persona bodies, skill bodies and dotenvs; isolation by an external sentinel tree digested before and after on BOTH platforms; and recovery semantics under refusal and manifest/payload mismatch. platform=linux+windows evidence=scripts/portability-native-matrix.ps1
+F26-01: CLOSED — `migrate --json` emits the typed plan in which a credential VALUE is unrepresentable by type; byte-identical across independent walks; tree digest unchanged on both corpora and both REAL peer homes; the mandatory macOS leg RAN and its provenance re-derives from GitHub, at ancestor commit b671f9ad rather than at this certified tree. platform=linux+macos evidence=.planning/phases/26-migration-export-backup-restore/26-01-BASELINE.md
 F26-02: CLOSED — profiles, skills, personas, memory, settings, MCP definitions and credentials migrate selectively by published identity with conflicts reported rather than silently applied, executable content quarantined, and provenance recorded per item. platform=linux evidence=crates/wcore-cli/tests/migrate_quarantine.rs
 F26-03: OPEN — authenticated backup, restore and reciprocal migration are built and proven, and imported content is never executed. But the requirement's FIRST clause — "consume the F23 redacted session/evidence envelope to export a portable profile/session corpus" — is entirely unaddressed: no plan in this phase reads an F23 envelope, `crates/wcore-cli/src/backup/` contains no reference to a session or evidence envelope, and 26-03's SUMMARY never mentions one. The session-corpus half of this requirement was never started.
-F26-04: CLOSED — secret sources are explicitly remapped across all four credential backends with the operator told the backend, the count and the action, and no refusal wrote its target (measured by digest, not read off the message); exact rollback from an uncatchable mid-flight kill holds on Linux and on real Windows. platform=linux+windows evidence=scripts/portability-remap-capture.sh
+F26-04: CLOSED — secret sources are explicitly remapped across all four credential backends with the operator told the backend, the count and the action, and no refusal wrote its target (measured by digest, not read off the message). platform=linux evidence=scripts/portability-remap-capture.sh
 F26-05: CLOSED — hostile corpora are generated on the target platform at run time, every case declares its expected outcome as data and the suite asserts that outcome against the REAL binary, isolation is proven by an external sentinel on both platforms, and the normalised report is byte-identical between Linux and real Windows. platform=linux+windows evidence=crates/wcore-cli/tests/portability_hostile_corpus.rs
 
 ---
@@ -180,6 +180,36 @@ Isolation is re-proven on Windows by the same external sentinel method:
 holds on both platforms by construction of the comparison.
 
 ---
+
+### Two claims the panel sent back, and what was done about them
+
+The acceptance panel's codex member voted `send-back-rounded-up` and named two
+specific claims. Both objections were correct, and both were ACTED ON here rather
+than argued with — a send-back is work this plan does, not a message it emits.
+
+1. **"F26-SC1/F26-01's macOS replay validates `b671f9ad`, not the certified SHA."**
+   True. The mandatory macOS real-state leg ran at an ancestor commit, and the
+   replay re-derives THAT run's provenance from GitHub — which is the strongest
+   thing obtainable, since re-running the leg requires a macOS host this phase
+   does not gate on. The prose already carried the limit; the STATUS LINE did
+   not, and a reader checking only the machine-parseable form would have
+   inferred the macOS evidence was at this tree. Both lines now carry the
+   ancestor SHA and the consequence.
+
+2. **"F26-04's named remap evidence does not prove its claimed Windows
+   interruption rollback."** True, and the sharper form of the same standard
+   already applied to SC2: the platform list must be covered by the NAMED,
+   REPLAYED evidence, not by everything the phase happens to know.
+   `portability-remap-capture.sh` covers the remap half on Linux and nothing on
+   Windows. F26-04 is therefore now `platform=linux`. The Windows half — exact
+   rollback from an uncatchable `TerminateProcess` mid-flight kill, with
+   `DIGEST-EQUAL: yes` over a target that carried state — is real, is 26-03's,
+   and is described in the Criterion 3 section above rather than counted here.
+
+Applying that standard consistently is why three of the nine lines
+(`F26-SC2`, `F26-02`, `F26-04`) name `platform=linux` even though a Windows run
+exists that corroborates each. Only `F26-SC4` and `F26-05` claim Windows, and
+they claim it because a Windows run IS their named evidence.
 
 ## Deliberately uncrossed seams
 

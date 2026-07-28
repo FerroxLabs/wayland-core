@@ -77,7 +77,7 @@ emit() {
 replay_linux_script() {
     KEY=$1; EV=$2; ARGS=$3
     LOG="$OUT/replay-$KEY.log"
-    ssh -o BatchMode=yes "$LINUX_HOST" \
+    ssh -n -o BatchMode=yes "$LINUX_HOST" \
         "set -e; export PATH=/root/.cargo/bin:\$PATH; cd $LINUX_WT; \
          test \"\$(git rev-parse HEAD)\" = $CERT_SHA; \
          cargo build --locked --release -p wcore-cli --bin wayland-core >/dev/null 2>&1; \
@@ -95,7 +95,7 @@ replay_linux_script() {
 replay_rust_tests() {
     KEY=$1; EV=$2; FILTER=$3
     LOG="$OUT/replay-$KEY.log"
-    ssh -o BatchMode=yes "$LINUX_HOST" \
+    ssh -n -o BatchMode=yes "$LINUX_HOST" \
         "set -e; export PATH=/root/.cargo/bin:\$PATH; cd $LINUX_WT; \
          test \"\$(git rev-parse HEAD)\" = $CERT_SHA; \
          cargo nextest run --locked -p wcore-cli --no-fail-fast -E '$FILTER'; \
@@ -112,6 +112,38 @@ replay_rust_tests() {
         emit "$KEY" "$EV" "$LINUX_HOST" reproduced "re-ran-$N-tests-at-certified-sha-all-passed"
     else
         emit "$KEY" "$EV" "$LINUX_HOST" failed "re-run-exited-$RC-with-$N-tests"
+        FAILED=$((FAILED + 1))
+    fi
+}
+
+# A Windows claim must be re-executed ON WINDOWS. Replaying a mirrored Linux
+# script and calling that a Windows proof is the same substitution this phase
+# rejects everywhere else: a corroborating run presented as the evidence.
+# Every step checks its OWN status, because a chain of `cmd /c` calls read
+# through one trailing $LASTEXITCODE reports only the last.
+replay_windows_script() {
+    KEY=$1; EV=$2; ARGS=$3
+    LOG="$OUT/replay-$KEY.log"
+    WINEV=$(printf '%s\n' "$EV" | /usr/bin/sed 's|/|\\|g')
+    # The SHA is proven from an ISOLATED capture, before and after.
+    ssh -n -o BatchMode=yes "$WIN_HOST" \
+        "cmd /c \"cd /d $WIN_WT && git rev-parse HEAD > $WIN_WT\\replay-head.txt\"" > "$LOG" 2>&1
+    scp -o BatchMode=yes "$WIN_HOST:C:/ferrox-win/replay-head.txt" "$OUT/$KEY-winhead.txt" >/dev/null 2>&1 || {
+        emit "$KEY" "$EV" "$WIN_HOST" failed "could-not-fetch-the-isolated-rev-parse-capture"
+        FAILED=$((FAILED + 1)); return; }
+    WH=$(tr -d ' \r\n' < "$OUT/$KEY-winhead.txt")
+    echo "windows_head=[$WH] certified=[$CERT_SHA]" >> "$LOG"
+    if [ "$WH" != "$CERT_SHA" ]; then
+        emit "$KEY" "$EV" "$WIN_HOST" failed "windows-checkout-is-at-$WH-not-the-certified-sha"
+        FAILED=$((FAILED + 1)); return
+    fi
+    ssh -n -o BatchMode=yes -o ServerAliveInterval=30 "$WIN_HOST" \
+        "powershell -NoProfile -File $WIN_WT\\$WINEV $ARGS; exit \$LASTEXITCODE" >> "$LOG" 2>&1
+    RC=$?
+    if [ $RC -eq 0 ]; then
+        emit "$KEY" "$EV" "$WIN_HOST" reproduced "re-ran-on-real-windows-at-certified-sha-exit-0"
+    else
+        emit "$KEY" "$EV" "$WIN_HOST" failed "re-run-on-windows-exited-$RC"
         FAILED=$((FAILED + 1))
     fi
 }
@@ -206,6 +238,7 @@ while IFS= read -r LINE; do
     fi
     case "$EV" in
         *26-01-BASELINE.md)            replay_macos_marker "$KEY" "$EV" ;;
+        *portability-native-matrix.ps1) replay_windows_script "$KEY" "$EV" '-Binary C:\ferrox-win\target\release\wayland-core.exe -Report C:\ferrox-win\replay-report-windows.txt' ;;
         *portability-native-matrix.sh) replay_linux_script "$KEY" "$EV" "./target/release/wayland-core /tmp/26-04-replay-$KEY.txt" ;;
         *portability-remap-capture.sh) replay_linux_script "$KEY" "$EV" "./target/release/wayland-core /tmp/26-04-replay-remap-$KEY" ;;
         *portability_hostile_corpus.rs) replay_rust_tests  "$KEY" "$EV" 'test(/hostile/)' ;;

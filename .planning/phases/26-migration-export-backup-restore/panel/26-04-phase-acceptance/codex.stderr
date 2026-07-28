@@ -1,0 +1,1595 @@
+Reading additional input from stdin...
+OpenAI Codex v0.144.4
+--------
+workdir: /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-26-04
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019fa81a-08a4-7803-b447-1b469f78dbe7
+--------
+user
+# Phase 26 acceptance — a four-way panel on a REPLAY, not on prose
+
+## The question
+
+**Does the certification's evidence support each claim it makes, or was a criterion rounded up?**
+
+Answer with exactly one line of the form `PANEL-VERDICT: <option-id>` using one of
+the four option ids below, plus `PANEL-BASIS: <one or two sentences>` and your
+reasoning. Do not invent an option id.
+
+## The four options (presented in rotated order; pros and cons are verbatim from the plan)
+
+### send-back-rounded-up
+**Send it back — a criterion is claimed CLOSED on evidence that does not support it**
+- Pros: Names the rounding-up instead of inheriting it. The fix is bounded: downgrade the claim to `LINUX-ONLY` or `OPEN` with the unmet clause, or produce the missing evidence.
+- Cons: Costs a re-certification pass, and a criterion downgraded here is one Phase 28 must plan around.
+
+### accept-with-named-open
+**Accept the phase with criteria properly recorded OPEN or LINUX-ONLY, each with its specific unmet clause**
+- Pros: The plan's own termination state 2 and this project's established precedent. An open item named precisely is cheap now and expensive after Phase 28 depends on it, and every claim that IS made replayed and held.
+- Cons: The phase does not close everything, and the named gaps are inherited by name.
+
+### send-back-finding-reclassified
+**Send it back — a HIGH finding was reclassified downward to avoid fixing it**
+- Pros: Catches the specific dodge where a phase closes by relabelling its problems. The phase's own rule is that CRITICAL and HIGH must be fixed or disproved.
+- Cons: Restoring the severity means fixing or disproving the finding before the phase can close.
+
+### accept-as-certified
+**Accept the phase as certified — every closed claim replayed and held**
+- Pros: Every `CLOSED` criterion's named evidence re-executed at the certified SHA and reproduced; each names a real-binary invocation and a platform; `F26-SC3` and `F26-SC4` carry Windows; the macOS leg re-derives from GitHub; no HIGH finding moved downward; the cap held.
+- Cons: None, if it is true — and the replay is what makes that checkable rather than assertable.
+
+## The seven things being judged
+
+1. Each criterion is judged against the ROADMAP's OWN wording rather than the certification's restatement, because a criterion restated more loosely is a criterion quietly lowered.
+2. Every closed criterion's named evidence is something a reader could go and RE-RUN. "Tests pass" is not evidence; a named gate on a named platform producing a named observable outcome is.
+3. Each criterion was closed by exercising the REAL binary rather than by a unit test alone.
+4. Nothing Linux-only is presented as proven. Criterion 3's interruption contract and Criterion 4's determinism claim both carry Windows legs precisely because Linux is the easy platform.
+5. Open items name their SPECIFIC unmet clause, following the precedent Phase 20A set when it closed with four requirements explicitly open.
+6. No HIGH finding was reclassified downward to avoid fixing it.
+7. The four-plan cap held.
+
+## Note on the two accept options
+
+They are distinguished by FACT, not mood. `accept-as-certified` requires all nine
+keys CLOSED. `accept-with-named-open` requires at least one OPEN or LINUX-ONLY key,
+each carrying its specific unmet clause. This certification marks 7 CLOSED and
+2 OPEN, so `accept-as-certified` is arithmetically unavailable; the live question
+is whether the 2 OPEN are the RIGHT 2, and whether any of the 7 CLOSED should
+have joined them.
+
+## THE ROADMAP'S OWN WORDING (verbatim extract, not retyped)
+
+```
+### Phase 26: Migration, Export, Backup, and Restore
+**Goal**: Users can move, preserve, and restore Wayland state without executing imported content or leaking secrets.
+**Depends on**: Phase 23
+**Requirements**: F26-01, F26-02, F26-03, F26-04, F26-05
+**Success Criteria** (what must be TRUE):
+  1. Hermes/OpenClaw discovery and dry-run are typed, deterministic, secret-redacted, and non-mutating.
+  2. Selective import/export preserves provenance and quarantines executable content.
+  3. Backup, restore, profile migration, and reciprocal portability survive interruption and restore exact pre-operation state on rollback.
+  4. Hostile fixture corpora prove conflict, secret-source remapping, isolation, and recovery semantics.
+**Plans**: TBD
+
+```
+
+## THE REPLAY — every CLOSED claim RE-EXECUTED at the certified SHA
+
+This is the load-bearing evidence. It is not a claim that the artifacts exist; it
+is the result of running them again.
+
+```
+REPLAY-CERT-SHA: 9b2ed8290264593d9b5105ea8985766b2db4914d
+REPLAY: F26-SC1 evidence=.planning/phases/26-migration-export-backup-restore/26-01-BASELINE.md host=github result=reproduced reason=run-30229917833-headSha-and-build-job-and-live-artifact-all-re-derived
+REPLAY: F26-SC2 evidence=crates/wcore-cli/tests/migrate_quarantine.rs host=hetzner-dsm result=reproduced reason=re-ran-30-tests-at-certified-sha-all-passed
+REPLAY: F26-SC4 evidence=scripts/portability-native-matrix.sh host=hetzner-dsm result=reproduced reason=re-ran-at-certified-sha-exit-0
+REPLAY: F26-01 evidence=.planning/phases/26-migration-export-backup-restore/26-01-BASELINE.md host=github result=reproduced reason=run-30229917833-headSha-and-build-job-and-live-artifact-all-re-derived
+REPLAY: F26-02 evidence=crates/wcore-cli/tests/migrate_quarantine.rs host=hetzner-dsm result=reproduced reason=re-ran-30-tests-at-certified-sha-all-passed
+REPLAY: F26-04 evidence=scripts/portability-remap-capture.sh host=hetzner-dsm result=reproduced reason=re-ran-at-certified-sha-exit-0
+REPLAY: F26-05 evidence=crates/wcore-cli/tests/portability_hostile_corpus.rs host=hetzner-dsm result=reproduced reason=re-ran-23-tests-at-certified-sha-all-passed
+REPLAY-SUMMARY: closed_keys=7 failed=0 not_replayable=0
+```
+
+## THE FINDINGS RECONCILIATION (built from each earlier plan's own SUMMARY)
+
+```
+FINDINGS RECONCILIATION — Phase 26
+==================================
+
+Reclassification is invisible when you read only the list that resulted from it.
+So this is built from each earlier plan's OWN SUMMARY, with the severity the
+finding carried THERE, and compared key by key against the certification's list.
+A severity falling from critical or high to anything lower forces
+`send-back-finding-reclassified` regardless of how the certification explains it.
+
+Sources: 26-01-SUMMARY.md, 26-02-SUMMARY.md, 26-03-SUMMARY.md (the completed
+lane-26c version, which supersedes the `partial` body it retains verbatim), and
+this plan's own findings.
+
+FINDING-RECON: id=F26-01-HEADERS was=medium now=medium disposition=backlog
+FINDING-RECON: id=F26-01-GATEWAY was=medium now=medium disposition=backlog
+FINDING-RECON: id=F26-02-A was=medium now=medium disposition=fixed
+FINDING-RECON: id=F26-02-B was=medium now=medium disposition=backlog
+FINDING-RECON: id=F26-02-C was=medium now=medium disposition=backlog
+FINDING-RECON: id=F26-02-D was=low now=low disposition=backlog
+FINDING-RECON: id=F26-02-E was=medium now=medium disposition=backlog
+FINDING-RECON: id=F26-03-A was=medium now=medium disposition=backlog
+FINDING-RECON: id=F26-03-B was=medium now=medium disposition=fixed
+FINDING-RECON: id=F26-03-C was=medium now=medium disposition=backlog
+FINDING-RECON: id=F26-03-D was=high now=high disposition=fixed
+FINDING-RECON: id=F26-03-E was=medium now=medium disposition=backlog
+FINDING-RECON: id=F26-04-A was=medium now=medium disposition=fixed
+FINDING-RECON: id=F26-04-B was=medium now=medium disposition=backlog
+FINDING-RECON: id=F26-04-C was=low now=low disposition=backlog
+
+NOT ONE SEVERITY FELL FROM CRITICAL OR HIGH.
+The only critical-or-high finding the phase recorded is F26-03-D, and it did not
+move: it is still HIGH and it was FIXED at the product with the fixture left
+intact and deeper than when it was red (342 relative / 377 absolute characters).
+
+Per-finding provenance
+----------------------
+
+F26-01-HEADERS  26-01 recorded this in "Still open" as a "HIGH-adjacent
+                residual", explicitly NOT as HIGH: `McpServerConfig::headers` is
+                not currently emitted, but a future edit that began emitting it
+                would reopen a value channel, and the redaction probe does not
+                cover it. RE-MEASURED at the certified SHA rather than taken on
+                the earlier plan's word: `crates/wcore-cli/src/migrate/mod.rs`
+                references `headers` exactly once, as `headers: None`, and
+                `MigrationPlan::to_portability` inserts only `transport`,
+                `command` and `url` into an item's details. The channel is
+                closed TODAY. Recorded medium/medium because "HIGH-adjacent" is
+                26-01's own words for "not high", and because the measurement
+                supports that reading rather than contradicting it. 26-01 asked
+                26-02 to close or fence it; 26-02 did neither, so it stays open.
+
+F26-01-GATEWAY  The pre-existing `wcore-config::hermeticity_audit_test::
+                no_dirs_config_dir_bypasses_outside_canonical_helper` failure,
+                naming `crates/wcore-gateway/src/service.rs`. Verified
+                pre-existing by BOTH 26-01 and 26-03 against their own bases, in
+                a file no plan in this phase touches. Lane 24's area.
+
+F26-02-A        Promotion aborted an entire set on the first name collision,
+                costing one operator invocation per item at real scale — the
+                "operator routes around containment" failure. FIXED in 26-02 and
+                regression-guarded; re-measured there at invocations=1.
+
+F26-02-B        The 512-item store ceiling refuses 29 of a realistic 541-item
+                executable surface and the NAIVE recovery does not work. A
+                working recovery exists and is discoverable from the tool's own
+                output. `MAX_EXECUTABLE_FILES` was NOT raised.
+
+F26-02-C        `scripts/panel-decision-check.sh` REJECTS a capture carrying a
+                repeated IDENTICAL verdict line, which is a shape codex
+                measurably emits. 26-02 escalated it to 26-01 rather than
+                editing a file outside its declared set, per that plan's own
+                direction. This plan is under the same direction and does the
+                same. See the trap-gate result in 26-04-SUMMARY.md, and the
+                measurement of whether a vote was ACTUALLY lost in this run.
+
+F26-02-D        The 540 scale point was materialised by the measurement script
+                rather than shipped by the corpus, and the script prints
+                `SCALE-CORPUS-MATERIALISED-SKILLS: 540` so it can never be
+                mistaken for a number the corpus carried.
+
+F26-02-E        `wcore-protocol::desktop_contract_corpus::…byte_for_byte` fails.
+                Verified PRE-EXISTING by 26-02 at its own merge-base with
+                byte-identical drift text. Sean authorised and ran the
+                regeneration at `c743f398` on 2026-07-28 (schema_digest
+                UNCHANGED); `wcore-protocol` now reports 302/302. Desktop still
+                owes the matching re-pin in the SAME release train.
+
+F26-03-A        `CredentialCapture.external_paths` copies `cipher_path` /
+                `key_params_path` verbatim into the embedded manifest — the same
+                untyped-string-channel shape 26-01 closed in
+                `DiscoveredItem.details`. No secret VALUE is carried, which is
+                why 26-03 rated it MEDIUM rather than HIGH.
+
+F26-03-B        `cargo fmt --all -- --check` was red at base for every lane, from
+                `crates/wcore-agent/examples/p22_goal_live.rs` landing
+                unformatted in lane 22. Fixed by 26-03 in a droppable commit.
+
+F26-03-C        `powershell -NoProfile -File <missing.ps1>; exit $LASTEXITCODE`
+                returns 0 — a live self-passing-gate shape on the shared Windows
+                box. This plan's Windows driver guards against it by proving the
+                matrix script RED against a binary that does not exist before
+                its real report is believed.
+
+F26-03-D        HIGH. `backup create` produced archives `backup restore` could
+                not restore on Windows past MAX_PATH. FIXED at the product in
+                lane 26c — in `wcore_config::atomic_io`, which is where the
+                defect actually lived — with the deep-path fixture left intact
+                and made deeper. Red at `d48f35b8`, green at `e570bf90` on the
+                identical fixture: a real red-to-green transition. STILL HIGH,
+                and closed by a fix rather than by a reclassification.
+
+F26-03-E        On Windows the handler probe does not fire, so `fired=no` there
+                is corroborated by documented Win32 semantics plus a
+                delivered-but-unrecorded event rather than by an instrumented
+                probe. None of the four load-bearing measurements depends on it,
+                which is why it is a control gap and not a vacuous leg.
+
+F26-04-A        NEW, this plan, FIXED in-plan. Found by the hostile case
+                `malformed-deepnest`: a 400-level-deep YAML document carrying no
+                key the importer recognises deserialises cleanly into an
+                all-`None` config, and the profile was then reported as imported
+                with nothing in it and NO warning — the silently-empty result
+                that reads as success. Fixed in
+                `crates/wcore-cli/src/migrate/hermes.rs` by naming it, with the
+                RELATIVE source path so a machine path does not cross the
+                boundary 26-01 closed. MEDIUM: no data is lost and the source is
+                untouched, but an operator believes a profile migrated when
+                nothing did.
+
+F26-04-B        NEW, this plan. On macOS (APFS) BOTH the case-only and the
+                normal-form-only peer name distinctions COLLAPSE at
+                materialisation — measured, not assumed, by the generator's own
+                post-creation verification on Sean's own Mac. On Windows (NTFS)
+                the case-only distinction collapses and the normal-form one does
+                NOT. Consequence: an operator migrating on macOS loses one of two
+                case-distinct peer profiles at the SOURCE, before the product
+                ever sees it, and the product cannot detect what it was never
+                shown. MEDIUM, and it belongs to Phase 28's native certification
+                because macOS is not a gate host in this phase.
+
+F26-04-C        NEW, this plan. `escape-symlink-dir` (an entire skill directory
+                replaced by a symlink out of the root) is not traversed at all,
+                so the product emits no refusal NAMING that item; the case's
+                evidence is the sentinel digest and the item's absence from the
+                store rather than a named refusal. That is a weaker signal than
+                the file-level escape cases, which do produce
+                `refused: imported executable content contains a symlink`. LOW,
+                and recorded so nobody later mistakes the case for stronger
+                evidence than it is.
+```
+
+## THE CERTIFICATION IN FULL
+
+# Phase 26 Certification — Migration, Export, Backup and Restore
+
+This is the phase's reconciliation. Every one of the four Success Criteria and
+every one of the five requirements is either mapped to evidence **this plan can
+name and re-run**, or recorded OPEN with its **specific unmet clause**. A
+criterion marked closed on another plan's say-so, without evidence this plan can
+point at, is not closed here.
+
+`accept-with-named-open` is the honest close, not a consolation. Phase 20A closed
+with four requirements explicitly open and each unmet clause named, and that was
+the right call. Two of these nine judgements are OPEN, and naming them precisely
+now is cheap; inheriting them unnamed into Phase 28 is not.
+
+F26-CERT-SHA: 9b2ed8290264593d9b5105ea8985766b2db4914d
+
+---
+
+## The four Success Criteria, in the ROADMAP's own wording
+
+Quoted verbatim from `.planning/ROADMAP.md`, never paraphrased — a criterion
+restated more loosely is a criterion quietly lowered.
+
+> 1. Hermes/OpenClaw discovery and dry-run are typed, deterministic, secret-redacted, and non-mutating.
+> 2. Selective import/export preserves provenance and quarantines executable content.
+> 3. Backup, restore, profile migration, and reciprocal portability survive interruption and restore exact pre-operation state on rollback.
+> 4. Hostile fixture corpora prove conflict, secret-source remapping, isolation, and recovery semantics.
+
+## The five requirements, in REQUIREMENTS.md's own wording
+
+> - **F26-01**: Hermes and OpenClaw discovery produces a typed dry-run plan without changing state or exposing secret values.
+> - **F26-02**: Persona, memory, skills, settings, assets, profiles, credentials, and provenance migrate selectively with conflicts and executable content quarantined.
+> - **F26-03**: Users can consume the F23 redacted session/evidence envelope to export a portable profile/session corpus and perform authenticated backup, restore, and reciprocal migration without executing imported content.
+> - **F26-04**: Secret sources are explicitly remapped; rollback restores the exact pre-operation state after interruption or partial failure.
+> - **F26-05**: Fixture installations and hostile import/export/restore corpora prove isolation, portability, and deterministic reporting.
+
+---
+
+## Status lines
+
+These nine lines are the machine-checkable form of the judgements below. The
+prose is what a human reads; the line is what makes the claim checkable, and
+Task 4 RE-EXECUTES the evidence every `CLOSED` line names.
+
+F26-SC1: CLOSED — typed, deterministic, structurally secret-redacted and non-mutating discovery for BOTH peer sources, proven on Linux canary corpora and on Sean's REAL macOS installs with live credentials, 0 secret hits and both homes unmutated. platform=linux+macos evidence=.planning/phases/26-migration-export-backup-restore/26-01-BASELINE.md
+F26-SC2: CLOSED — selective import preserves per-item provenance and contains executable content by PLACEMENT outside every skill load root, proven live against the real binary with a paired positive control that fired in 2.4s while the negative leg exhausted its full 45s window. platform=linux evidence=crates/wcore-cli/tests/migrate_quarantine.rs
+F26-SC3: OPEN — `backup restore` survives interruption and rolls back exactly on Linux AND real Windows (26-03, lane 26c). But the criterion also names "profile migration, and reciprocal portability", and NEITHER was ever interrupted: no plan in this phase killed a `migrate hermes` or `migrate openclaw` mid-apply, so the exact-rollback contract for the migration path rests on a partial-failure argument rather than on a measured interruption. That specific clause is the unmet one.
+F26-SC4: CLOSED — hostile corpora with DECLARED outcomes prove conflict semantics for exact, case-folded and normal-form names; secret-source behaviour for secrets hidden in memory notes, persona bodies, skill bodies and dotenvs; isolation by an external sentinel tree digested before and after on BOTH platforms; and recovery semantics under refusal and manifest/payload mismatch. platform=linux+windows evidence=scripts/portability-native-matrix.sh
+F26-01: CLOSED — `migrate --json` emits the typed plan in which a credential VALUE is unrepresentable by type; byte-identical across independent walks; tree digest unchanged on both corpora and both REAL peer homes; the mandatory macOS leg RAN and its provenance re-derives from GitHub. platform=linux+macos evidence=.planning/phases/26-migration-export-backup-restore/26-01-BASELINE.md
+F26-02: CLOSED — profiles, skills, personas, memory, settings, MCP definitions and credentials migrate selectively by published identity with conflicts reported rather than silently applied, executable content quarantined, and provenance recorded per item. platform=linux evidence=crates/wcore-cli/tests/migrate_quarantine.rs
+F26-03: OPEN — authenticated backup, restore and reciprocal migration are built and proven, and imported content is never executed. But the requirement's FIRST clause — "consume the F23 redacted session/evidence envelope to export a portable profile/session corpus" — is entirely unaddressed: no plan in this phase reads an F23 envelope, `crates/wcore-cli/src/backup/` contains no reference to a session or evidence envelope, and 26-03's SUMMARY never mentions one. The session-corpus half of this requirement was never started.
+F26-04: CLOSED — secret sources are explicitly remapped across all four credential backends with the operator told the backend, the count and the action, and no refusal wrote its target (measured by digest, not read off the message); exact rollback from an uncatchable mid-flight kill holds on Linux and on real Windows. platform=linux+windows evidence=scripts/portability-remap-capture.sh
+F26-05: CLOSED — hostile corpora are generated on the target platform at run time, every case declares its expected outcome as data and the suite asserts that outcome against the REAL binary, isolation is proven by an external sentinel on both platforms, and the normalised report is byte-identical between Linux and real Windows. platform=linux+windows evidence=crates/wcore-cli/tests/portability_hostile_corpus.rs
+
+---
+
+## Criterion by criterion
+
+### Success Criterion 1 — CLOSED (linux + macOS)
+
+| What | Evidence | Platform | What distinguished working from broken |
+|---|---|---|---|
+| Typed dry-run | `migrate hermes --json` / `migrate openclaw --json` | linux | A credential VALUE is unrepresentable in `PortabilityPlan` by type, with no inverse conversion |
+| Deterministic | two independent walks of the same corpus | linux | byte-identical emitted documents |
+| Secret-redacted | 36 hermes + 28 openclaw canaries | linux | **0** canaries in either emitted document, while 13 credential REFS were present (the positive half) |
+| Secret-redacted, real credentials | `scripts/portability-real-state-check.sh` against `~/.hermes` and `~/.openclaw` | **macos** | 7 REAL secret values extracted (non-vacuous), **0** hits in either document |
+| Non-mutating | tree digest before/after | linux + macos | digest unchanged on both corpora and both real homes |
+
+**The macOS leg is the one an earlier revision of this phase tried to certify
+around, so it is re-derived from GitHub rather than transcribed.** 26-01 records
+`F26-SC1-MACOS: RAN — run=30229917833 sha=b671f9ad557f85a36cc67da3d3ec0218f0bf08e8
+binary=… arch=arm64 hermes_profiles=12 openclaw_items=3 secret_hits=0`. Re-derived
+on 2026-07-28: that run's `headSha` is `b671f9ad557f85a36cc67da3d3ec0218f0bf08e8`,
+its `Build (aarch64-apple-darwin)` job concluded `success`, and it still publishes
+a LIVE non-empty `wayland-core-aarch64-apple-darwin` artifact — checked with
+`expired==false and size_in_bytes>0`, because an expired artifact still appears
+in the listing and the name alone proves nothing.
+
+**Honest limit, carried forward:** the macOS run was taken at `b671f9ad`. The
+three hardening commits 26-01 landed after it are Linux-proven only.
+
+### Success Criterion 2 — CLOSED (linux + windows)
+
+Provenance per item (tool, version, source-relative path, domain-separated
+digest, import time) is asserted field by field over every contained item.
+Executable content is inert **by placement**: the quarantine root
+(`<config dir>/migrate-quarantine`) is outside all four skill load roots, and
+the REAL loader lists a contained skill only after an explicit promotion.
+The live proof is paired: the negative leg drives a real agent turn and asserts
+the Skill tool RAN and reported the skill unavailable with the sentinel ABSENT;
+the positive control, identical but for `migrate promote`, produces the sentinel
+in 2.4s while the negative leg exhausts its full 45s window.
+
+**The platform claim is deliberately `linux`, and the reason is worth stating
+plainly because it is exactly where this certification could have rounded up.**
+26-02 had no Windows leg (`seandesktop` was believed unreachable at the time).
+This plan supplies a Windows leg for the migrate/quarantine path — the same
+classification, containment and accounting exercised on NTFS at the certified
+SHA, with its per-case outcomes in the Windows platform report. But the
+load-bearing evidence for THIS criterion is the paired LIVE inertness proof: a
+real agent turn, driven through the real binary against a scripted provider,
+asserting that the Skill tool RAN and reported the skill unavailable while the
+sentinel stayed absent. **That turn has only ever run on Linux.** Claiming
+`platform=linux+windows` here would present a corroborating run as if it were
+the proof, so the platform is recorded as `linux` and the Windows corroboration
+is described rather than counted.
+
+### Success Criterion 3 — OPEN
+
+**What IS proven.** `backup restore` interrupted by an uncatchable mid-flight
+kill rolls back to the exact pre-operation tree, on Linux (`SIGKILL`) and on real
+Windows (`TerminateProcess`), over a target that carried state, with
+`DIGEST-EQUAL: yes` on both and a negative control proving the mid-flight check
+can fire (exit 9). The Windows long-path defect F26-03-D was fixed at the
+product, not by narrowing the fixture, and re-proven at 377 absolute characters.
+This plan adds a refused-restore leg over an OCCUPIED target holding a live
+profile, measured by digest rather than read off the refusal message.
+
+**The specific unmet clause.** The criterion names four things —
+"Backup, restore, **profile migration, and reciprocal portability**". Only
+`backup restore` was ever interrupted. No plan in this phase killed a
+`migrate hermes` or `migrate openclaw` mid-apply, so exact rollback for the
+MIGRATION path rests on a partial-failure argument and on the atomic
+`patch_global_config` writer rather than on a measured interruption. Recording
+this as closed would be exactly the rounding-up this certification exists to
+prevent.
+
+**Also carried:** F26-03-E (MEDIUM) — on Windows the handler probe does not
+fire, so `fired=no` there is corroborated by documented Win32 semantics plus a
+delivered-but-unrecorded event rather than by an instrumented probe. None of the
+four load-bearing measurements depends on that probe.
+
+### Success Criterion 4 — CLOSED (linux + windows)
+
+| Clause | Evidence | Platform |
+|---|---|---|
+| conflict | exact, case-folded and Unicode normal-form name collisions, each with a declared outcome asserted | linux + windows |
+| secret-source remapping | canaries hidden in a memory note, a persona body, a skill body and a dotenv; **0** reached any plan, report or `migrate quarantined` listing, with the canary first proven PRESENT in the corpus | linux + windows |
+| isolation | a sentinel tree OUTSIDE every target home, digested by the product's own `backup digest` before and after every hostile operation, required unchanged | linux + windows |
+| recovery | a refused restore leaves an occupied target byte-identical; a manifest whose payload no longer matches it is refused by `backup verify`, with the untampered archive verifying first so the rejection is not vacuous | linux |
+
+Full per-case results, including what each case deforms and which field it
+attacks, are in `26-04-SUMMARY.md`.
+
+**The determinism half, measured rather than argued.** The normalised portable
+report is **3514 bytes on Linux and 3514 bytes on Windows and `diff` exits 0** —
+byte-identical, both files proven non-empty before the comparison so a missing
+report cannot pass as a match. That comparison also proves something the plan
+did not ask for and which is worth having: the two materialisers are
+INDEPENDENT (Python on Linux, a native PowerShell materialiser on Windows,
+because that box has no Python), and each portable case's `corpus_digest` is
+inside the compared report — so byte equality proves the two independently
+written materialisers built identical corpora rather than merely both having
+run.
+
+**The platform-variant cases are recorded per platform and never cross-compared,
+and that is a design decision this certification should be judged on.** A
+case-only name collision is TWO items on Linux and ONE on Windows; comparing
+them would guarantee a diff that says nothing about determinism, and the natural
+response to that diff would be to loosen the comparison — which this phase
+forbids. So the seven platform-variant cases assert their declared outcome
+SEPARATELY on each platform, in `<report>.platform` and in the hostile suite.
+What that measured, on real hardware, on 2026-07-28:
+
+| Case | Linux | Windows (NTFS) | macOS (APFS) |
+|---|---|---|---|
+| case-only name collision | distinct, `discovered=3` | **collapsed**, `discovered=2` | **collapsed** |
+| Unicode normal-form collision | distinct, `discovered=3` | **distinct**, `discovered=3` | **collapsed** |
+| trailing dot / trailing space | both written, `discovered=3` | one **unwritable**, `discovered=2` | both written |
+
+The middle row is the non-obvious one and it is the reason the generator carries
+`require_distinct_on` as data rather than a single rule: **NTFS is
+case-insensitive but NOT normalisation-insensitive**, so two peer items differing
+only by NFC/NFD stay distinct there and merge on APFS. A single "Windows and
+macOS both collapse" assumption would have been wrong in one of the two
+directions, and the generator's post-creation verification is what measured it
+instead of assuming it.
+
+Isolation is re-proven on Windows by the same external sentinel method:
+`SENTINEL-UNCHANGED: yes` appears in the byte-identical portable report, so it
+holds on both platforms by construction of the comparison.
+
+---
+
+## Deliberately uncrossed seams
+
+Recorded so a later phase finds them rather than rediscovering them.
+
+1. **`wcore-protocol` — untouched across the entire phase.** No migration,
+   quarantine, backup or restore event was added to the JSON stream protocol.
+   The D1 producer contract, its generated fixtures and every Desktop consumer
+   are unaffected by all four plans. If any of this work should become
+   observable to a host, that is a **contract change requiring the D1
+   checkpoint**, not an additive edit.
+2. **The credential backends were read, not changed.** Whether a home whose
+   secrets live in the OS keyring can ever be made portable without the operator
+   re-entering them is an open **product** question, not a defect. The remap
+   names the gap and prescribes the action; no plan proved that following the
+   prescribed action produces a working install.
+3. **No configuration key was added to `config.toml` by this plan.** Had one
+   been, it would be a shared-schema change, and this project's own standing
+   lesson requires verifying such a change with a workspace-wide check across
+   all targets rather than a per-crate one, because a per-crate check misses
+   downstream exhaustive matches. `cargo check --locked --workspace
+   --all-targets` was run at the certified SHA regardless, and passed.
+
+## Recorded unknowns — noted, not resolved here
+
+- **macOS is not a gate host in this phase.** Case and normal-form behaviour on
+  APFS is measured only by the generator's own post-creation verification (both
+  distinctions COLLAPSE there), not by running the product against those corpora.
+  Phase 28's native certification owns that.
+- Whether a hostile class exists that neither peer format suggests, and which
+  these corpora therefore omit.
+- Whether a keyring-backed home can be made portable at all without operator
+  re-entry.
+
+## The four-plan cap
+
+**Held.** Phase 26 executed exactly four plans. Work these corpora surfaced that
+does not fit is in `.planning/BACKLOG.md` with a severity; no plan five was
+created.
+
+## Answer now
+
+Give exactly one `PANEL-VERDICT: <option-id>` line, one `PANEL-BASIS:` line, and your reasoning.
+deprecated: `[features].codex_hooks` is deprecated. Use `[features].hooks` instead.
+Enable it with `--enable hooks` or `[features].hooks` in config.toml. See https://developers.openai.com/codex/config-basic#feature-flags for details.
+2026-07-28T09:41:50.728930Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(AuthRequiredError { www_authenticate_header: "Bearer realm=\"OAuth\", resource_metadata=\"https://mcp.canva.com/.well-known/oauth-protected-resource/mcp\", error=\"invalid_token\", error_description=\"Missing or invalid access token\"" })
+2026-07-28T09:41:52.101482Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Auth(AuthorizationRequired)
+hook: SessionStart
+hook: SessionStart Completed
+hook: UserPromptSubmit
+hook: UserPromptSubmit Completed
+codex
+I’m using the IJFW cross-audit skill because this is an acceptance panel, and I’ll judge the certified SHA by re-running or independently checking the named gates against the ROADMAP wording. I’m also loading the project’s required coordination and memory context before the replay.
+hook: PreToolUse
+hook: PreToolUse Completed
+exec
+/bin/zsh -lc "sed -n '1,240p' /Users/seandonahoe/.codex/RTK.md && sed -n '1,260p' /Users/seandonahoe/.codex/skills/ijfw-cross-audit/SKILL.md && export WL_LANE=core; wl queue" in /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-26-04
+hook: PostToolUse
+ exited 1 in 257ms:
+error connecting to api.github.com
+check your internet connection or https://githubstatus.com
+
+hook: PostToolUse Completed
+codex
+The required lane queue could not reach GitHub, so I’m treating coordination as unavailable and making no issue-state changes. The cross-audit skill’s generic report template conflicts with your exact output contract; your contract wins, while its independent-auditor/reconciliation procedure still applies.
+hook: PreToolUse
+hook: PreToolUse Completed
+mcp: ijfw-memory/ijfw_memory_prelude started
+mcp: ijfw-memory/ijfw_memory_prelude (completed)
+hook: PostToolUse
+hook: PostToolUse Completed
+hook: PreToolUse
+hook: PreToolUse Completed
+exec
+/bin/zsh -lc "rtk git status --short --branch && rtk git rev-parse HEAD && rtk rg -n \"Phase 26:|F26-SC[1-4]:|F26-0[1-5]:|F26-CERT-SHA|REPLAY-CERT-SHA\" .planning/ROADMAP.md .planning/phases/26-migration-export-backup-restore -g '*.md' && rtk ls .planning/phases/26-migration-export-backup-restore" in /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-26-04
+hook: PostToolUse
+ succeeded in 26890ms:
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-CQodafNS' (errno=Operation not permitted)
+2026-07-28 16:42:26.287 xcodebuild[81763:199198716]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-28 16:42:27.378 xcodebuild[81763:199198565] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-ncels68M' (errno=Operation not permitted)
+2026-07-28 16:42:31.302 xcodebuild[91857:199210895]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-28 16:42:32.217 xcodebuild[91857:199210399] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+## lane/26-04
+ M scripts/portability-evidence-replay.sh
+?? .planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/F26-01-art.txt
+?? .planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/F26-01-job.txt
+?? .planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/F26-SC1-art.txt
+?? .planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/F26-SC1-job.txt
+?? .planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/closed.txt
+?? .planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/codex.stderr
+?? .planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/question.md
+?? .planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/replay-F26-01.log
+?? .planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/replay-F26-02.log
+?? .planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/replay-F26-04.log
+?? .planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/replay-F26-05.log
+?? .planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/replay-F26-SC1.log
+?? .planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/replay-F26-SC2.log
+?? .planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/replay-F26-SC4.log
+?? .planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/replay-verdicts.txtgit: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-rMRdbldK' (errno=Operation not permitted)
+2026-07-28 16:42:41.493 xcodebuild[2410:199223456]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-28 16:42:42.553 xcodebuild[2410:199223435] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-oAnulPXZ' (errno=Operation not permitted)
+2026-07-28 16:42:45.693 xcodebuild[6105:199228479]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-28 16:42:46.450 xcodebuild[6105:199228449] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+3f4baea77a4c744fddaa48e6f47948631ddecf46
+.planning/ROADMAP.md:30:- [ ] **Phase 26: Migration, Export, Backup, and Restore** - Make state portable, quarantined, reversible, and secret-safe.
+.planning/ROADMAP.md:135:### Phase 26: Migration, Export, Backup, and Restore
+.planning/phases/26-migration-export-backup-restore/26-04-PLAN.md:235:    - Every one of those nine judgements is ALSO emitted as a machine-parseable status line, because a certification is a document its own author wrote and a gate that merely counts its words is a tautology. The grammar is fixed and the gate enforces it: exactly one line per key, `F26-SC1:`/`F26-SC2:`/`F26-SC3:`/`F26-SC4:` for the criteria and `F26-01:`…`F26-05:` for the requirements, each followed by exactly one of `CLOSED`, `LINUX-ONLY` or `OPEN`, then an em-dash and at least twenty characters of substance. Every `CLOSED` line additionally carries `platform=` naming `linux`, `windows` and/or `macos`, and `evidence=` naming something re-runnable. `F26-SC3` and `F26-SC4` cannot be `CLOSED` without `windows` among their platforms — Linux is the easy platform and those two exist precisely to cross it.
+.planning/phases/26-migration-export-backup-restore/26-04-PLAN.md:236:    - The certification names the tree it certifies on a single line `F26-CERT-SHA: <40-hex>`, and that SHA is a real commit that is an ancestor of this branch's head — so the evidence can be re-run against a known tree rather than an unstated one.
+.planning/phases/26-migration-export-backup-restore/26-04-PLAN.md:245:Emit the nine machine-parseable status lines the behaviors specify, plus the `F26-CERT-SHA` line, and treat that grammar as a floor rather than the whole job: the prose around each line is what a human reads, and the line is what makes the claim checkable. The grammar exists because every earlier draft of this gate counted lines in a file this very task writes, which is a tautology — an executor could satisfy it by typing sixty lines of anything. A malformed line, a missing key, a duplicated key, a `CLOSED` with no named platform or no named evidence, or `F26-SC3`/`F26-SC4` claimed `CLOSED` without Windows all go red.
+.planning/phases/26-migration-export-backup-restore/26-04-PLAN.md:264:    <automated>cd /Users/seandonahoe/dev/waylandcore-ferrox &amp;&amp; C=.planning/phases/26-migration-export-backup-restore/26-04-CERTIFICATION.md; test "$(/usr/bin/grep -cF 'wcore-protocol' "$C")" -ge "1" || { echo "GATE: the deliberately uncrossed wcore-protocol seam is not recorded"; exit 1; }; CS=$(/usr/bin/grep -oE '^F26-CERT-SHA: [0-9a-f]{40}$' "$C" | /usr/bin/sed 's/^F26-CERT-SHA: //'); test -n "$CS" || { echo "GATE: no 'F26-CERT-SHA: <40-hex>' line - the certification names no tree its evidence can be re-run against"; exit 1; }; /usr/bin/git cat-file -e "$CS^{commit}" 2&gt;/dev/null || { echo "GATE: F26-CERT-SHA $CS is not a commit in this repository"; exit 1; }; /usr/bin/git merge-base --is-ancestor "$CS" HEAD || { echo "GATE: F26-CERT-SHA $CS is not an ancestor of HEAD - the certification names a tree this branch never had"; exit 1; }; echo "certified_sha=$CS"</automated>
+.planning/phases/26-migration-export-backup-restore/26-04-PLAN.md:274:  <read_first>.planning/ROADMAP.md — the Phase 26 section, because the four Success Criteria in their AUTHORITATIVE wording are what is being judged and the gate below extracts that block mechanically rather than letting anyone retype it, .planning/phases/26-migration-export-backup-restore/26-04-CERTIFICATION.md as Task 3 wrote it (the nine status lines and the `F26-CERT-SHA` line this task replays against), .planning/phases/26-migration-export-backup-restore/26-01-BASELINE.md (the `F26-SC1-MACOS:` marker specifically — its CI run id and head SHA are re-derived from GitHub here, because that leg is the one an earlier revision of this phase tried to certify around), scripts/panel-ask.sh and scripts/panel-decision-check.sh (the phase's panel harness, built and self-tested in 26-01 — this task CALLS it and does not rebuild it)</read_first>
+.planning/phases/26-migration-export-backup-restore/26-04-PLAN.md:317:**STEP 1 — REPLAY EVERY CLOSED CLAIM, DO NOT READ IT.** Build `scripts/portability-evidence-replay.sh`, taking the certification path and an output directory. It parses the nine status lines, takes the `F26-CERT-SHA`, and for every key marked `CLOSED` it RE-EXECUTES that key's named evidence at that SHA and prints its own verdict line: `REPLAY: <key> evidence=<path> host=<host> result=reproduced|failed|not-replayable reason=<text>`.
+.planning/phases/26-migration-export-backup-restore/26-04-PLAN.md:351:cd /Users/seandonahoe/dev/waylandcore-ferrox &amp;&amp; D=.planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance; R="$D/roadmap-criteria.txt"; test -s "$R" || { echo "GATE: no verbatim ROADMAP criteria extract at $R - the panel had only the certification's restatement to judge against, which is the substitution this plan's own review list warns about first"; exit 1; }; test "$(/usr/bin/grep -c . "$R")" -ge 4 || { echo "GATE: the extract is too small to hold four Success Criteria"; exit 1; }; /usr/bin/awk '/^### Phase 26:/{f=1} f&amp;&amp;/^### Phase 27:/{f=0} f' .planning/ROADMAP.md &gt; /tmp/26-04-roadmap-phase26.txt; test -s /tmp/26-04-roadmap-phase26.txt || { echo "GATE: could not locate the Phase 26 section in ROADMAP.md"; exit 1; }; MISS=0; while IFS= read -r l; do test -n "$l" || continue; /usr/bin/grep -qF -- "$l" /tmp/26-04-roadmap-phase26.txt || { echo "NOT PRESENT VERBATIM IN ROADMAP.md: $l"; MISS=$((MISS+1)); }; done &lt; "$R"; echo "extract_lines=$(/usr/bin/grep -c . "$R") not_verbatim=$MISS"; test "$MISS" -eq 0 || { echo "GATE: the criteria block the panel was shown is not byte-for-byte what ROADMAP.md says. A criterion restated more loosely is a criterion quietly lowered, and that is the substitution this gate exists to make impossible"; exit 1; }
+.planning/phases/26-migration-export-backup-restore/26-04-PLAN.md:367:cd /Users/seandonahoe/dev/waylandcore-ferrox &amp;&amp; P=.planning/phases/26-migration-export-backup-restore; CERT="$P/26-04-CERTIFICATION.md"; BASE="$P/26-01-BASELINE.md"; test -s "$CERT" || { echo "GATE: no certification"; exit 1; }; if /usr/bin/grep -qE '^F26-(SC1|01): CLOSED — ' "$CERT"; then test -s "$BASE" || { echo "GATE: F26-SC1 or F26-01 is CLOSED but 26-01-BASELINE.md does not exist to carry the macOS marker"; exit 1; }; M=$(/usr/bin/grep -oE 'F26-SC1-MACOS: RAN — run=[0-9]+ sha=[0-9a-f]{40} binary=[^[:space:]]+ arch=arm64 hermes_profiles=12 openclaw_items=[1-9][0-9]* secret_hits=0' "$BASE" | /usr/bin/head -1); test -n "$M" || { echo "GATE: F26-SC1 or F26-01 is certified CLOSED but 26-01 records no well-formed RAN marker for the mandatory macOS real-state leg. That leg is MANDATORY and its binary is obtainable from CI's build job, so a missing leg is unfinished work - not an environmental limit, and not a criterion to certify around"; exit 1; }; echo "$M"; /usr/bin/grep -E '^F26-SC1: CLOSED — ' "$CERT" | /usr/bin/grep -q 'macos' || { echo "GATE: F26-SC1 is CLOSED without macos among its platforms, while the leg that closes it ran only there"; exit 1; }; RUN=$(echo "$M" | /usr/bin/sed -E 's/.* run=([0-9]+) .*/\1/'); SHA=$(echo "$M" | /usr/bin/sed -E 's/.* sha=([0-9a-f]{40}) .*/\1/'); command -v gh &gt;/dev/null 2&gt;&amp;1 || { echo "GATE: gh is unavailable, so the macOS artifact's provenance cannot be re-derived and the marker is only a claim"; exit 1; }; HS=$(gh run view "$RUN" -R FerroxLabs/wayland-core --json headSha --jq .headSha 2&gt;/dev/null); test "$HS" = "$SHA" || { echo "GATE: run $RUN reports headSha '$HS', not the recorded $SHA"; exit 1; }; gh run view "$RUN" -R FerroxLabs/wayland-core --json jobs --jq '.jobs[] | select(.name=="Build (aarch64-apple-darwin)") | .conclusion' 2&gt;/dev/null &gt; /tmp/26-04-t4-job.txt; /usr/bin/grep -qx 'success' /tmp/26-04-t4-job.txt || { echo "GATE: run $RUN has no successful Build (aarch64-apple-darwin) job"; exit 1; }; gh api "repos/FerroxLabs/wayland-core/actions/runs/$RUN/artifacts" --jq '.artifacts[] | select(.expired==false and .size_in_bytes&gt;0) | .name' 2&gt;/dev/null &gt; /tmp/26-04-t4-art.txt; /usr/bin/grep -qx 'wayland-core-aarch64-apple-darwin' /tmp/26-04-t4-art.txt || { echo "GATE: run $RUN publishes no LIVE non-empty aarch64 macOS artifact"; exit 1; }; echo "macOS leg re-derived from GitHub: run=$RUN sha=$SHA"; else echo "F26-SC1 and F26-01 are not certified CLOSED; the macOS provenance re-derivation does not apply and the open clause is checked by the certification gates in Task 3"; fi
+.planning/phases/26-migration-export-backup-restore/26-04-PLAN.md:423:Local gates (Mac, source level only): `cargo fmt --all -- --check` clean; the hostile generator is valid Python; the hostile suite demonstrably spawns the real binary; both matrix scripts exist, the shell one parses, and each is PROVEN able to go red by being handed a binary path that does not exist and required to exit non-zero — an existence check alone passes on an empty file, and `sh -n` passes on an empty file too, so neither is evidence about the script that carries this plan's whole cross-platform claim. The certification is gated on GRAMMAR rather than on length: exactly one conforming status line per criterion and per requirement, every `CLOSED` naming a platform and re-runnable evidence, `F26-SC3` and `F26-SC4` refused as `CLOSED` without Windows, the `wcore-protocol` non-change recorded, and a `F26-CERT-SHA` that is a real commit ancestral to this branch's head. Counting lines in a file this plan itself writes is a tautology and is not used.
+.planning/phases/26-migration-export-backup-restore/26-04-CERTIFICATION.md:14:F26-CERT-SHA: 9b2ed8290264593d9b5105ea8985766b2db4914d
+.planning/phases/26-migration-export-backup-restore/26-04-CERTIFICATION.md:44:F26-SC1: CLOSED — typed, deterministic, structurally secret-redacted and non-mutating discovery for BOTH peer sources, proven on Linux canary corpora and on Sean's REAL macOS installs with live credentials, 0 secret hits and both homes unmutated. platform=linux+macos evidence=.planning/phases/26-migration-export-backup-restore/26-01-BASELINE.md
+.planning/phases/26-migration-export-backup-restore/26-04-CERTIFICATION.md:45:F26-SC2: CLOSED — selective import preserves per-item provenance and contains executable content by PLACEMENT outside every skill load root, proven live against the real binary with a paired positive control that fired in 2.4s while the negative leg exhausted its full 45s window. platform=linux evidence=crates/wcore-cli/tests/migrate_quarantine.rs
+.planning/phases/26-migration-export-backup-restore/26-04-CERTIFICATION.md:46:F26-SC3: OPEN — `backup restore` survives interruption and rolls back exactly on Linux AND real Windows (26-03, lane 26c). But the criterion also names "profile migration, and reciprocal portability", and NEITHER was ever interrupted: no plan in this phase killed a `migrate hermes` or `migrate openclaw` mid-apply, so the exact-rollback contract for the migration path rests on a partial-failure argument rather than on a measured interruption. That specific clause is the unmet one.
+.planning/phases/26-migration-export-backup-restore/26-04-CERTIFICATION.md:47:F26-SC4: CLOSED — hostile corpora with DECLARED outcomes prove conflict semantics for exact, case-folded and normal-form names; secret-source behaviour for secrets hidden in memory notes, persona bodies, skill bodies and dotenvs; isolation by an external sentinel tree digested before and after on BOTH platforms; and recovery semantics under refusal and manifest/payload mismatch. platform=linux+windows evidence=scripts/portability-native-matrix.sh
+.planning/phases/26-migration-export-backup-restore/26-04-CERTIFICATION.md:48:F26-01: CLOSED — `migrate --json` emits the typed plan in which a credential VALUE is unrepresentable by type; byte-identical across independent walks; tree digest unchanged on both corpora and both REAL peer homes; the mandatory macOS leg RAN and its provenance re-derives from GitHub. platform=linux+macos evidence=.planning/phases/26-migration-export-backup-restore/26-01-BASELINE.md
+.planning/phases/26-migration-export-backup-restore/26-04-CERTIFICATION.md:49:F26-02: CLOSED — profiles, skills, personas, memory, settings, MCP definitions and credentials migrate selectively by published identity with conflicts reported rather than silently applied, executable content quarantined, and provenance recorded per item. platform=linux evidence=crates/wcore-cli/tests/migrate_quarantine.rs
+.planning/phases/26-migration-export-backup-restore/26-04-CERTIFICATION.md:50:F26-03: OPEN — authenticated backup, restore and reciprocal migration are built and proven, and imported content is never executed. But the requirement's FIRST clause — "consume the F23 redacted session/evidence envelope to export a portable profile/session corpus" — is entirely unaddressed: no plan in this phase reads an F23 envelope, `crates/wcore-cli/src/backup/` contains no reference to a session or evidence envelope, and 26-03's SUMMARY never mentions one. The session-corpus half of this requirement was never started.
+.planning/phases/26-migration-export-backup-restore/26-04-CERTIFICATION.md:51:F26-04: CLOSED — secret sources are explicitly remapped across all four credential backends with the operator told the backend, the count and the action, and no refusal wrote its target (measured by digest, not read off the message); exact rollback from an uncatchable mid-flight kill holds on Linux and on real Windows. platform=linux+windows evidence=scripts/portability-remap-capture.sh
+.planning/phases/26-migration-export-backup-restore/26-04-CERTIFICATION.md:52:F26-05: CLOSED — hostile corpora are generated on the target platform at run time, every case declares its expected outcome as data and the suite asserts that outcome against the REAL binary, isolation is proven by an external sentinel on both platforms, and the normalised report is byte-identical between Linux and real Windows. platform=linux+windows evidence=crates/wcore-cli/tests/portability_hostile_corpus.rs
+.planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/question.md:55:### Phase 26: Migration, Export, Backup, and Restore
+.planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/question.md:74:REPLAY-CERT-SHA: 9b2ed8290264593d9b5105ea8985766b2db4914d
+.planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/question.md:254:F26-CERT-SHA: 9b2ed8290264593d9b5105ea8985766b2db4914d
+.planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/question.md:284:F26-SC1: CLOSED — typed, deterministic, structurally secret-redacted and non-mutating discovery for BOTH peer sources, proven on Linux canary corpora and on Sean's REAL macOS installs with live credentials, 0 secret hits and both homes unmutated. platform=linux+macos evidence=.planning/phases/26-migration-export-backup-restore/26-01-BASELINE.md
+.planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/question.md:285:F26-SC2: CLOSED — selective import preserves per-item provenance and contains executable content by PLACEMENT outside every skill load root, proven live against the real binary with a paired positive control that fired in 2.4s while the negative leg exhausted its full 45s window. platform=linux evidence=crates/wcore-cli/tests/migrate_quarantine.rs
+.planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/question.md:286:F26-SC3: OPEN — `backup restore` survives interruption and rolls back exactly on Linux AND real Windows (26-03, lane 26c). But the criterion also names "profile migration, and reciprocal portability", and NEITHER was ever interrupted: no plan in this phase killed a `migrate hermes` or `migrate openclaw` mid-apply, so the exact-rollback contract for the migration path rests on a partial-failure argument rather than on a measured interruption. That specific clause is the unmet one.
+.planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/question.md:287:F26-SC4: CLOSED — hostile corpora with DECLARED outcomes prove conflict semantics for exact, case-folded and normal-form names; secret-source behaviour for secrets hidden in memory notes, persona bodies, skill bodies and dotenvs; isolation by an external sentinel tree digested before and after on BOTH platforms; and recovery semantics under refusal and manifest/payload mismatch. platform=linux+windows evidence=scripts/portability-native-matrix.sh
+.planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/question.md:288:F26-01: CLOSED — `migrate --json` emits the typed plan in which a credential VALUE is unrepresentable by type; byte-identical across independent walks; tree digest unchanged on both corpora and both REAL peer homes; the mandatory macOS leg RAN and its provenance re-derives from GitHub. platform=linux+macos evidence=.planning/phases/26-migration-export-backup-restore/26-01-BASELINE.md
+.planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/question.md:289:F26-02: CLOSED — profiles, skills, personas, memory, settings, MCP definitions and credentials migrate selectively by published identity with conflicts reported rather than silently applied, executable content quarantined, and provenance recorded per item. platform=linux evidence=crates/wcore-cli/tests/migrate_quarantine.rs
+.planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/question.md:290:F26-03: OPEN — authenticated backup, restore and reciprocal migration are built and proven, and imported content is never executed. But the requirement's FIRST clause — "consume the F23 redacted session/evidence envelope to export a portable profile/session corpus" — is entirely unaddressed: no plan in this phase reads an F23 envelope, `crates/wcore-cli/src/backup/` contains no reference to a session or evidence envelope, and 26-03's SUMMARY never mentions one. The session-corpus half of this requirement was never started.
+.planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/question.md:291:F26-04: CLOSED — secret sources are explicitly remapped across all four credential backends with the operator told the backend, the count and the action, and no refusal wrote its target (measured by digest, not read off the message); exact rollback from an uncatchable mid-flight kill holds on Linux and on real Windows. platform=linux+windows evidence=scripts/portability-remap-capture.sh
+.planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/question.md:292:F26-05: CLOSED — hostile corpora are generated on the target platform at run time, every case declares its expected outcome as data and the suite asserts that outcome against the REAL binary, isolation is proven by an external sentinel on both platforms, and the normalised report is byte-identical between Linux and real Windows. platform=linux+windows evidence=crates/wcore-cli/tests/portability_hostile_corpus.rs
+panel/
+26-01-BASELINE.md  17.2K
+26-01-PLAN.md  103.9K
+26-01-SUMMARY.md  8.0K
+26-02-PLAN.md  87.0K
+26-02-SUMMARY.md  17.2K
+26-03-PLAN.md  110.7K
+26-03-SUMMARY.md  32.1K
+26-04-CERTIFICATION.md  16.2K
+26-04-PLAN.md  103.5K
+
+hook: PostToolUse Completed
+hook: PreToolUse
+hook: PreToolUse Completed
+exec
+/bin/zsh -lc 'rtk which codex; rtk which gemini; rtk which /Users/seandonahoe/.kimi-code/bin/kimi; rtk git cat-file -e 9b2ed8290264593d9b5105ea8985766b2db4914d''^{commit}; rtk git merge-base --is-ancestor 9b2ed8290264593d9b5105ea8985766b2db4914d HEAD; rtk git diff -- scripts/portability-evidence-replay.sh; rtk git diff --stat; rtk git log --oneline --decorate -8' in /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-26-04
+hook: PostToolUse
+hook: PostToolUse Completed
+ succeeded in 16423ms:
+2026-07-28 16:43:09.858 xcodebuild[15421:199242818]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-28 16:43:10.050 xcodebuild[15421:199242817] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-wnaOpxfS' (errno=Operation not permitted)
+2026-07-28 16:43:10.762 xcodebuild[15423:199242841]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-28 16:43:10.950 xcodebuild[15423:199242834] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-V9ZQ408w' (errno=Operation not permitted)
+2026-07-28 16:43:12.552 xcodebuild[15529:199243095]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-28 16:43:12.753 xcodebuild[15529:199243094] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-RVA6f7e5' (errno=Operation not permitted)
+2026-07-28 16:43:13.451 xcodebuild[15537:199243148]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-28 16:43:13.648 xcodebuild[15537:199243147] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+scripts/portability-evidence-replay.sh | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+--- Changes ---
+
+scripts/portability-evidence-replay.sh
+  @@ -77,7 +77,7 @@ emit() {
+  -    ssh -o BatchMode=yes "$LINUX_HOST" \
+  +    ssh -n -o BatchMode=yes "$LINUX_HOST" \
+           "set -e; export PATH=/root/.cargo/bin:\$PATH; cd $LINUX_WT; \
+            test \"\$(git rev-parse HEAD)\" = $CERT_SHA; \
+            cargo build --locked --release -p wcore-cli --bin wayland-core >/dev/null 2>&1; \
+  @@ -95,7 +95,7 @@ replay_linux_script() {
+  -    ssh -o BatchMode=yes "$LINUX_HOST" \
+  +    ssh -n -o BatchMode=yes "$LINUX_HOST" \
+           "set -e; export PATH=/root/.cargo/bin:\$PATH; cd $LINUX_WT; \
+            test \"\$(git rev-parse HEAD)\" = $CERT_SHA; \
+            cargo nextest run --locked -p wcore-cli --no-fail-fast -E '$FILTER'; \
+  +2 -2
+scripts/portability-evidence-replay.sh | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+3f4baea7 (HEAD -> lane/26-04, gh/lane/26-04) docs(26-04): certify at the SHA both platform runs actually ran at
+9b2ed829 fix(26-04): record an unstatable path instead of dying on it
+536743af docs(26-04): phase certification and the evidence replay
+0a75efd9 test(26-04): scope the escape-admission assertion to the escaping item
+a816533e fix(26-04): carry the symlink materialisation result into the case entry
+cfee99e6 fix(26-04): warn when a peer profile maps to neither provider nor model
+1c13e9a2 test(26-04): hostile suite and the mirrored cross-platform matrix
+fc0b7964 test(26-04): adversarial corpus generator with declared outcomes as data
+
+codex
+The certified SHA is a real ancestor, but the checkout is not at it: HEAD is a later documentation commit, and the replay harness has an uncommitted `ssh -n` fix because its original SSH calls could consume the status-loop stdin. I’m separating that harness repair from whether the seven underlying evidence runs actually reproduced at `9b2ed829`.
+hook: PreToolUse
+hook: PreToolUse Completed
+exec
+/bin/zsh -lc "P=.planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance; rtk sed -n '1,220p' \""'$P/replay-verdicts.txt"; for f in "$P"/replay-*.log; do echo "FILE=$f"; rtk tail -n 35 "$f"; done; rtk git diff --stat 9b2ed8290264593d9b5105ea8985766b2db4914d..HEAD; rtk git diff --name-status 9b2ed8290264593d9b5105ea8985766b2db4914d..HEAD; rtk git show --stat --oneline 3f4baea77a4c744fddaa48e6f47948631ddecf46' in /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-26-04
+hook: PostToolUse
+hook: PostToolUse Completed
+ succeeded in 10773ms:
+ Nextest run ID ce561353-0fde-4a08-ac06-bb5ff550ed3f with nextest profile: default
+    Starting 30 tests across 1 binary (50 binaries skipped)
+        PASS [   0.006s] ( 1/30) wcore-cli::migrate_quarantine support::proving_ground::record::tests::redact_xai_key
+        PASS [   0.006s] ( 2/30) wcore-cli::migrate_quarantine t10_digest_is_domain_separated_and_platform_stable
+        PASS [   0.006s] ( 3/30) wcore-cli::migrate_quarantine support::proving_ground::record::tests::redact_leaves_normal_text_alone
+        PASS [   0.006s] ( 4/30) wcore-cli::migrate_quarantine support::mock_llm::self_tests::truncated_stream_is_detected
+        PASS [   0.006s] ( 5/30) wcore-cli::migrate_quarantine support::proving_ground::record::tests::redact_openai_key
+        PASS [   0.007s] ( 6/30) wcore-cli::migrate_quarantine support::mock_llm::self_tests::text_fixture_is_parser_conformant
+        PASS [   0.010s] ( 7/30) wcore-cli::migrate_quarantine support::proving_ground::record::tests::redact_multiple_keys_in_one_string
+        PASS [   0.012s] ( 8/30) wcore-cli::migrate_quarantine support::mock_llm::self_tests::every_builder_body_is_parser_conformant
+        PASS [   0.019s] ( 9/30) wcore-cli::migrate_quarantine t11_selecting_a_subset_imports_exactly_that_subset_by_published_identity
+        PASS [   0.007s] (10/30) wcore-cli::migrate_quarantine t17_quarantine_ceilings_match_workspace_trust_exactly
+        PASS [   0.021s] (11/30) wcore-cli::migrate_quarantine t21_provenance_document_is_deterministic_and_key_ordered
+        PASS [   0.021s] (12/30) wcore-cli::migrate_quarantine t14_a_non_exclusion_failure_is_named_and_still_balances
+        PASS [   0.023s] (13/30) wcore-cli::migrate_quarantine t15_export_carries_provenance_and_still_excludes_secrets_by_default
+        PASS [   0.023s] (14/30) wcore-cli::migrate_quarantine t4_hook_command_is_classified_executable
+        PASS [   0.010s] (15/30) wcore-cli::migrate_quarantine t22_promoting_a_set_that_reuses_one_name_costs_one_invocation
+        PASS [   0.024s] (16/30) wcore-cli::migrate_quarantine support::mock_llm::self_tests::tool_use_fixture_is_parser_conformant
+        PASS [   0.027s] (17/30) wcore-cli::migrate_quarantine t1_skill_with_a_shell_directive_is_executable_via_the_enforced_detector
+        PASS [   0.015s] (18/30) wcore-cli::migrate_quarantine t16_export_import_round_trip_preserves_provenance_and_does_not_launder_quarantine
+        PASS [   0.032s] (19/30) wcore-cli::migrate_quarantine t3_peer_mcp_launch_command_is_executable_and_never_lands_live
+        PASS [   0.032s] (20/30) wcore-cli::migrate_quarantine t12_excluding_a_subset_imports_everything_else
+        PASS [   0.033s] (21/30) wcore-cli::migrate_quarantine t2_skill_without_a_directive_is_data_and_needs_no_promotion
+        PASS [   0.018s] (22/30) wcore-cli::migrate_quarantine t9_every_contained_item_carries_a_full_provenance_record
+        PASS [   0.018s] (23/30) wcore-cli::migrate_quarantine t8_quarantining_is_reported_in_both_the_plan_and_the_apply_report
+        PASS [   0.019s] (24/30) wcore-cli::migrate_quarantine t6_nothing_the_imported_content_carries_can_promote_it
+        PASS [   0.035s] (25/30) wcore-cli::migrate_quarantine t13_conservation_holds_over_both_full_committed_corpora
+        PASS [   0.021s] (26/30) wcore-cli::migrate_quarantine t5_quarantined_content_is_absent_from_what_the_agent_would_load
+        PASS [   0.053s] (27/30) wcore-cli::migrate_quarantine t18_the_512_file_ceiling_refuses_a_realistic_540_directory_surface
+        PASS [   0.095s] (28/30) wcore-cli::migrate_quarantine t7_ceilings_refuse_symlink_oversized_file_and_oversized_surface
+        PASS [   2.388s] (29/30) wcore-cli::migrate_quarantine t20_live_positive_control_same_payload_executes_once_promoted
+        SLOW [> 30.000s] (─────) wcore-cli::migrate_quarantine t19_live_negative_leg_quarantined_payload_does_not_execute
+        PASS [  45.358s] (30/30) wcore-cli::migrate_quarantine t19_live_negative_leg_quarantined_payload_does_not_execute
+────────────
+     Summary [  45.373s] 30 tests run: 30 passed (1 slow), 0 skipped
+FILE=.planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/replay-F26-SC4.log
+MATRIX: portable_cases=12 platform_cases=7 sentinel_unchanged=yes failures=0
+.../26-04-CERTIFICATION.md                         | 61 +++++++++++++++++++---
+ 1 file changed, 54 insertions(+), 7 deletions(-)
+M	.planning/phases/26-migration-export-backup-restore/26-04-CERTIFICATION.md
+
+--- Changes ---
+
+3f4baea7 docs(26-04): certify at the SHA both platform runs actually ran at
+ .../26-04-CERTIFICATION.md                         | 61 +++++++++++++++++++---
+ 1 file changed, 54 insertions(+), 7 deletions(-)
+
+hook: PreToolUse
+hook: PreToolUse Completed
+exec
+/bin/zsh -lc "rtk sed -n '1,240p' scripts/portability-evidence-replay.sh; rtk sed -n '1,280p' scripts/portability-native-matrix.sh; rtk sed -n '1,260p' scripts/portability-remap-capture.sh; rtk rg -n \"TerminateProcess|SIGKILL|rollback|DIGEST-EQUAL|windows|seandesktop|platform\" scripts/portability-*.sh scripts/portability-*.ps1 crates/wcore-cli/tests -g '*.rs' -g '*.sh' -g '*.ps1'" in /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-26-04
+ succeeded in 0ms:
+#!/bin/sh
+# F26-05 / Task 4 - RE-EXECUTE every claim the certification marks CLOSED.
+#
+# Usage: portability-evidence-replay.sh <certification.md> <out-dir>
+#
+# WHY THIS EXISTS
+# ---------------
+# A certification is a document its author wrote. Reading it back proves the
+# artifact exists; it does not prove the claim still holds. This phase has
+# already been corrected once for precisely that distinction - an earlier
+# revision invented a fourth termination state so that F26-01 could close on
+# Linux evidence alone while its mandatory macOS leg went unrun. A certification
+# that reads well is the artifact that failure produced. A replay is the thing
+# it could not have survived.
+#
+# So for every key the certification marks CLOSED this RE-EXECUTES that key's
+# NAMED evidence at the certified SHA and prints its own verdict:
+#
+#   REPLAY: <key> evidence=<path> host=<host> result=reproduced|failed|not-replayable reason=<text>
+#
+# HOW EACH KIND OF EVIDENCE IS REPLAYED
+#   *.sh   re-run on hetzner-dsm in this plan's own worktree /root/wayland-f26-04
+#   *.ps1  re-run on SeanD@seandesktop in C:\ferrox-win
+#   *.rs   re-run through a nextest filter; a run that selected ZERO tests is
+#          FAILED, not reproduced - an empty filter is the oldest green here
+#   *.md   re-validated against its own fixed grammar, and where the artifact is
+#          26-01's macOS marker its provenance is re-derived from GitHub rather
+#          than transcribed
+#   *.txt  a captured report pair has its COMPARISON redone rather than believed
+#
+# `not-replayable` is honest for evidence that is inherently one-shot. It is not
+# a synonym for inconvenient: it requires a reason naming WHY, and the plan's
+# binding gate refuses to let either accept option rest on a key whose replay
+# was not `reproduced`.
+#
+# SELF-RED: handed a certification path that does not exist this exits non-zero.
+
+set -u
+
+CERT="${1:-}"
+OUT="${2:-}"
+
+if [ -z "$CERT" ] || [ -z "$OUT" ]; then
+    echo "usage: $0 <certification.md> <out-dir>" >&2
+    exit 2
+fi
+if [ ! -s "$CERT" ]; then
+    echo "REPLAY-FAIL: certification '$CERT' is missing or empty. There is nothing to replay." >&2
+    exit 3
+fi
+
+mkdir -p "$OUT" || exit 3
+VERDICTS="$OUT/replay-verdicts.txt"
+: > "$VERDICTS"
+
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO=$(dirname "$HERE")
+LINUX_HOST=hetzner-dsm
+LINUX_WT=/root/wayland-f26-04
+WIN_HOST=SeanD@seandesktop
+WIN_WT='C:\ferrox-win'
+
+CERT_SHA=$(/usr/bin/grep -oE '^F26-CERT-SHA: [0-9a-f]{40}$' "$CERT" | /usr/bin/sed 's/^F26-CERT-SHA: //' | /usr/bin/head -1)
+if [ -z "$CERT_SHA" ]; then
+    echo "REPLAY-FAIL: the certification names no 'F26-CERT-SHA: <40-hex>' tree, so there is no tree to re-run its evidence against." >&2
+    exit 4
+fi
+echo "REPLAY-CERT-SHA: $CERT_SHA" | tee -a "$VERDICTS"
+
+emit() {
+    printf 'REPLAY: %s evidence=%s host=%s result=%s reason=%s\n' "$1" "$2" "$3" "$4" "$5" |
+        tee -a "$VERDICTS"
+}
+
+# --- replay drivers ---------------------------------------------------------
+
+replay_linux_script() {
+    KEY=$1; EV=$2; ARGS=$3
+    LOG="$OUT/replay-$KEY.log"
+    ssh -n -o BatchMode=yes "$LINUX_HOST" \
+        "set -e; export PATH=/root/.cargo/bin:\$PATH; cd $LINUX_WT; \
+         test \"\$(git rev-parse HEAD)\" = $CERT_SHA; \
+         cargo build --locked --release -p wcore-cli --bin wayland-core >/dev/null 2>&1; \
+         sh $EV $ARGS; \
+         test \"\$(git rev-parse HEAD)\" = $CERT_SHA" > "$LOG" 2>&1
+    RC=$?
+    if [ $RC -eq 0 ]; then
+        emit "$KEY" "$EV" "$LINUX_HOST" reproduced "re-ran-at-certified-sha-exit-0"
+    else
+        emit "$KEY" "$EV" "$LINUX_HOST" failed "re-run-exited-$RC-see-$(basename "$LOG")"
+        FAILED=$((FAILED + 1))
+    fi
+}
+
+replay_rust_tests() {
+    KEY=$1; EV=$2; FILTER=$3
+    LOG="$OUT/replay-$KEY.log"
+    ssh -n -o BatchMode=yes "$LINUX_HOST" \
+        "set -e; export PATH=/root/.cargo/bin:\$PATH; cd $LINUX_WT; \
+         test \"\$(git rev-parse HEAD)\" = $CERT_SHA; \
+         cargo nextest run --locked -p wcore-cli --no-fail-fast -E '$FILTER'; \
+         test \"\$(git rev-parse HEAD)\" = $CERT_SHA" > "$LOG" 2>&1
+    RC=$?
+    # A run that selected ZERO tests is FAILED. An empty filter is the oldest
+    # green in this repository and it must never read as reproduction.
+    N=$(/usr/bin/grep -oE '[0-9]+ tests? run' "$LOG" | /usr/bin/tail -1 | /usr/bin/sed -E 's/ tests? run//')
+    [ -n "$N" ] || N=0
+    if [ "$N" -eq 0 ]; then
+        emit "$KEY" "$EV" "$LINUX_HOST" failed "filter-selected-zero-tests"
+        FAILED=$((FAILED + 1))
+    elif [ $RC -eq 0 ]; then
+        emit "$KEY" "$EV" "$LINUX_HOST" reproduced "re-ran-$N-tests-at-certified-sha-all-passed"
+    else
+        emit "$KEY" "$EV" "$LINUX_HOST" failed "re-run-exited-$RC-with-$N-tests"
+        FAILED=$((FAILED + 1))
+    fi
+}
+
+# 26-01's mandatory macOS real-state leg. Re-derived from GitHub, never
+# transcribed: an EXPIRED artifact still appears in the listing, so the name
+# alone proves nothing.
+replay_macos_marker() {
+    KEY=$1; EV=$2
+    BASE="$REPO/$EV"
+    LOG="$OUT/replay-$KEY.log"
+    : > "$LOG"
+    M=$(/usr/bin/grep -oE 'F26-SC1-MACOS: RAN — run=[0-9]+ sha=[0-9a-f]{40} binary=[^[:space:]]+ arch=arm64 hermes_profiles=12 openclaw_items=[1-9][0-9]* secret_hits=0' "$BASE" 2>/dev/null | /usr/bin/head -1)
+    if [ -z "$M" ]; then
+        emit "$KEY" "$EV" github failed "no-well-formed-F26-SC1-MACOS-RAN-marker"
+        FAILED=$((FAILED + 1))
+        return
+    fi
+    echo "$M" >> "$LOG"
+    RUN=$(echo "$M" | /usr/bin/sed -E 's/.* run=([0-9]+) .*/\1/')
+    SHA=$(echo "$M" | /usr/bin/sed -E 's/.* sha=([0-9a-f]{40}) .*/\1/')
+    if ! command -v gh >/dev/null 2>&1; then
+        emit "$KEY" "$EV" github not-replayable "gh-unavailable-so-provenance-cannot-be-re-derived"
+        NOTREPRO=$((NOTREPRO + 1))
+        return
+    fi
+    HS=$(gh run view "$RUN" -R FerroxLabs/wayland-core --json headSha --jq .headSha 2>>"$LOG")
+    echo "headSha=$HS expected=$SHA" >> "$LOG"
+    if [ "$HS" != "$SHA" ]; then
+        emit "$KEY" "$EV" github failed "run-$RUN-headSha-$HS-not-$SHA"
+        FAILED=$((FAILED + 1))
+        return
+    fi
+    gh run view "$RUN" -R FerroxLabs/wayland-core --json jobs \
+        --jq '.jobs[] | select(.name=="Build (aarch64-apple-darwin)") | .conclusion' \
+        > "$OUT/$KEY-job.txt" 2>>"$LOG"
+    if ! /usr/bin/grep -qx 'success' "$OUT/$KEY-job.txt"; then
+        emit "$KEY" "$EV" github failed "run-$RUN-has-no-successful-aarch64-apple-darwin-build"
+        FAILED=$((FAILED + 1))
+        return
+    fi
+    gh api "repos/FerroxLabs/wayland-core/actions/runs/$RUN/artifacts" \
+        --jq '.artifacts[] | select(.expired==false and .size_in_bytes>0) | .name' \
+        > "$OUT/$KEY-art.txt" 2>>"$LOG"
+    if ! /usr/bin/grep -qx 'wayland-core-aarch64-apple-darwin' "$OUT/$KEY-art.txt"; then
+        emit "$KEY" "$EV" github failed "run-$RUN-publishes-no-live-non-empty-macos-arm64-artifact"
+        FAILED=$((FAILED + 1))
+        return
+    fi
+    emit "$KEY" "$EV" github reproduced "run-$RUN-headSha-and-build-job-and-live-artifact-all-re-derived"
+}
+
+# The cross-platform report pair: the COMPARISON is redone, not believed.
+replay_report_pair() {
+    KEY=$1; EV=$2
+    LOG="$OUT/replay-$KEY.log"
+    L=/tmp/rep-linux.txt
+    W=/tmp/rep-windows.txt
+    {
+        echo "linux=$L windows=$W"
+        ls -l "$L" "$W" 2>&1
+    } > "$LOG"
+    if [ ! -s "$L" ] || [ ! -s "$W" ]; then
+        emit "$KEY" "$EV" both failed "one-or-both-normalised-reports-missing-or-empty"
+        FAILED=$((FAILED + 1))
+        return
+    fi
+    if /usr/bin/diff "$L" "$W" >> "$LOG" 2>&1; then
+        emit "$KEY" "$EV" both reproduced "normalised-reports-re-compared-and-byte-identical"
+    else
+        emit "$KEY" "$EV" both failed "normalised-reports-differ-on-re-comparison"
+        FAILED=$((FAILED + 1))
+    fi
+}
+
+# --- dispatch ---------------------------------------------------------------
+
+FAILED=0
+NOTREPRO=0
+CLOSED=0
+
+/usr/bin/grep -E '^F26-(SC[1-4]|0[1-5]): CLOSED — ' "$CERT" > "$OUT/closed.txt"
+while IFS= read -r LINE; do
+    [ -n "$LINE" ] || continue
+    KEY=$(printf '%s\n' "$LINE" | /usr/bin/sed -E 's/^([A-Z0-9-]+):.*/\1/')
+    EV=$(printf '%s\n' "$LINE" | /usr/bin/grep -oE 'evidence=[^[:space:]]+' | /usr/bin/sed 's/^evidence=//')
+    CLOSED=$((CLOSED + 1))
+    if [ -z "$EV" ]; then
+        emit "$KEY" NONE none failed "closed-without-named-evidence"
+        FAILED=$((FAILED + 1))
+        continue
+    fi
+    case "$EV" in
+        *26-01-BASELINE.md)            replay_macos_marker "$KEY" "$EV" ;;
+        *portability-native-matrix.sh) replay_linux_script "$KEY" "$EV" "./target/release/wayland-core /tmp/26-04-replay-$KEY.txt" ;;
+        *portability-remap-capture.sh) replay_linux_script "$KEY" "$EV" "./target/release/wayland-core /tmp/26-04-replay-remap-$KEY" ;;
+        *portability_hostile_corpus.rs) replay_rust_tests  "$KEY" "$EV" 'test(/hostile/)' ;;
+        *migrate_quarantine.rs)        replay_rust_tests   "$KEY" "$EV" 'binary(migrate_quarantine)' ;;
+        *rep-linux.txt|*report-pair*)  replay_report_pair  "$KEY" "$EV" ;;
+        *.sh)                          replay_linux_script "$KEY" "$EV" "" ;;
+        *)
+            emit "$KEY" "$EV" none not-replayable "no-replay-driver-for-this-evidence-kind"
+            NOTREPRO=$((NOTREPRO + 1))
+            ;;
+    esac
+done < "$OUT/closed.txt"
+
+echo "REPLAY-SUMMARY: closed_keys=$CLOSED failed=$FAILED not_replayable=$NOTREPRO" | tee -a "$VERDICTS"
+[ "$CLOSED" -ge 1 ] || {
+    echo "REPLAY-FAIL: the certification marks NOTHING closed, so this replayed nothing." >&2
+    exit 5
+}
+[ "$FAILED" -eq 0 ] && [ "$NOTREPRO" -eq 0 ] || exit 1
+exit 0
+#!/bin/sh
+# F26-05 — the POSIX half of the cross-platform determinism and isolation proof.
+#
+# Usage: portability-native-matrix.sh <wayland-core-binary> <portable-report-out>
+#
+# Writes TWO files:
+#   <report>            the PORTABLE report. Byte-compared against the Windows
+#                       run. Carries only claims that must hold identically on
+#                       both platforms.
+#   <report>.platform   the PLATFORM report. Carries the cases whose corpus
+#                       DIFFERS by construction on this filesystem (case-only
+#                       and normal-form-only name collisions, and the Windows
+#                       name hazards). These are recorded per platform and are
+#                       never cross-compared, because comparing them would be
+#                       comparing two different corpora and calling the
+#                       difference a defect.
+#
+# WHY THE SPLIT IS NOT A LOOSENED COMPARISON
+# ------------------------------------------
+# A case-only name collision is TWO items on Linux and ONE on Windows. That is
+# the filesystem, not the product. Putting it in the byte-compared report would
+# guarantee a diff that says nothing about determinism, and the honest response
+# to that diff would be to loosen the comparison — which this phase forbids. So
+# the platform-variant cases are asserted SEPARATELY on each platform against
+# their own declared outcome (in the .platform file, and in
+# crates/wcore-cli/tests/portability_hostile_corpus.rs), and the byte-compared
+# report carries the platform-invariant surface, in full, including each case's
+# corpus digest — so byte equality also proves the two INDEPENDENT materialisers
+# built identical corpora, rather than merely both having run.
+#
+# SELF-RED: handed a binary that does not exist this exits non-zero. A matrix
+# script that cannot go red produces two identical reports that prove nothing.
+
+set -u
+
+BIN="${1:-}"
+REPORT="${2:-}"
+
+die() {
+    echo "MATRIX-FAIL: $*" >&2
+    exit 2
+}
+
+[ -n "$BIN" ] && [ -n "$REPORT" ] || die "usage: $0 <binary> <report-out>"
+[ -f "$BIN" ] || die "binary '$BIN' does not exist"
+[ -x "$BIN" ] || die "binary '$BIN' is not executable"
+
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO=$(dirname "$HERE")
+GEN="$REPO/scripts/portability-hostile-gen.py"
+SPEC="$REPO/crates/wcore-cli/tests/fixtures/portability-hostile/corpus-spec.json"
+[ -f "$GEN" ] || die "the hostile generator is missing at $GEN"
+[ -f "$SPEC" ] || die "the committed corpus spec is missing at $SPEC"
+
+command -v python3 >/dev/null 2>&1 || die "python3 is required to materialise the corpora"
+command -v shasum >/dev/null 2>&1 && SHACMD="shasum -a 256" || SHACMD="sha256sum"
+
+WORK=$(mktemp -d) || die "cannot create a work directory"
+trap 'rm -rf "$WORK"' EXIT
+
+# --- 1. the spec, and proof that the committed copy has not drifted --------
+python3 "$GEN" --emit-spec "$WORK/spec.json" >/dev/null 2>"$WORK/spec.err" ||
+    die "spec emission failed: $(cat "$WORK/spec.err")"
+if ! /usr/bin/diff -q "$WORK/spec.json" "$SPEC" >/dev/null 2>&1; then
+    echo "MATRIX-FAIL: the committed corpus spec has drifted from the generator." >&2
+    /usr/bin/diff "$SPEC" "$WORK/spec.json" >&2
+    echo "The Windows leg materialises from the COMMITTED spec, so a drift here" >&2
+    echo "means the two platforms would build different corpora and the byte" >&2
+    echo "comparison would be measuring the drift rather than the product." >&2
+    exit 3
+fi
+SPEC_SHA=$($SHACMD "$SPEC" | /usr/bin/awk '{print $1}')
+
+# --- 2. materialise every corpus on THIS platform, at run time -------------
+python3 "$GEN" --out "$WORK/corpora" >"$WORK/gen.log" 2>&1 ||
+    { cat "$WORK/gen.log" >&2; die "corpus materialisation failed"; }
+
+# --- 3. the isolation sentinel, OUTSIDE every target home ------------------
+SENTINEL="$WORK/sentinel"
+mkdir -p "$SENTINEL/nested/deeper"
+printf 'sentinel-value-do-not-touch\n' > "$SENTINEL/credentials.toml"
+printf 'sentinel = true\n' > "$SENTINEL/nested/config.toml"
+printf 'sentinel skill body\n' > "$SENTINEL/nested/deeper/SKILL.md"
+
+"$BIN" backup digest --home "$SENTINEL" > "$WORK/sentinel-before.txt" 2>"$WORK/sentinel-before.err"
+RC=$?
+[ $RC -eq 0 ] || { cat "$WORK/sentinel-before.err" >&2; die "backup digest failed on the sentinel (rc=$RC)"; }
+DIGEST_ALGO=$(/usr/bin/grep '^DIGEST-ALGO: ' "$WORK/sentinel-before.txt" | /usr/bin/sed 's/^DIGEST-ALGO: //')
+SENTINEL_BEFORE=$(/usr/bin/grep '^DIGEST: ' "$WORK/sentinel-before.txt" | /usr/bin/sed 's/^DIGEST: //')
+[ -n "$SENTINEL_BEFORE" ] || die "no sentinel digest was produced"
+
+CANARIES=$(python3 - "$WORK/corpora/cases.json" <<'PY'
+import json, sys
+print("\n".join(json.load(open(sys.argv[1]))["canaries"]))
+PY
+)
+
+# --- 4. run every case ------------------------------------------------------
+PORTABLE="$WORK/portable.txt"
+PLATFORM="$WORK/platform.txt"
+: > "$PORTABLE"
+: > "$PLATFORM"
+MISMATCH=0
+
+CASE_IDS=$(python3 - "$WORK/corpora/cases.json" <<'PY'
+import json, sys
+for c in json.load(open(sys.argv[1]))["cases"]:
+    print(c["id"])
+PY
+)
+
+for ID in $CASE_IDS; do
+    META=$(python3 - "$WORK/corpora/cases.json" "$ID" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+c = next(x for x in m["cases"] if x["id"] == sys.argv[2])
+print(c["class"]); print(c["expect"]); print(c["scope"])
+print(c["corpus_digest"]); print(c["corpus"])
+print("yes" if c["collapsed"] else "no")
+PY
+)
+    KLASS=$(printf '%s\n' "$META" | /usr/bin/sed -n 1p)
+    EXPECT=$(printf '%s\n' "$META" | /usr/bin/sed -n 2p)
+    SCOPE=$(printf '%s\n' "$META" | /usr/bin/sed -n 3p)
+    CDIGEST=$(printf '%s\n' "$META" | /usr/bin/sed -n 4p)
+    CORPUS=$(printf '%s\n' "$META" | /usr/bin/sed -n 5p)
+    COLLAPSED=$(printf '%s\n' "$META" | /usr/bin/sed -n 6p)
+
+    HOME_DIR="$WORK/homes/$ID"
+    mkdir -p "$HOME_DIR"
+    OUT="$WORK/run-$ID.out"
+    ERR="$WORK/run-$ID.err"
+    ( WAYLAND_HOME="$HOME_DIR" HOME="$HOME_DIR" TERM=dumb \
+      "$BIN" migrate hermes --home "$CORPUS" --yes ) > "$OUT" 2> "$ERR"
+    EXIT=$?
+
+    ACC=$(/usr/bin/grep '^Accounting: ' "$OUT" 2>/dev/null | /usr/bin/head -1)
+    if [ -n "$ACC" ]; then
+        D=$(printf '%s\n' "$ACC" | /usr/bin/sed -E 's/.*discovered=([0-9]+).*/\1/')
+        I=$(printf '%s\n' "$ACC" | /usr/bin/sed -E 's/.*imported=([0-9]+).*/\1/')
+        Q=$(printf '%s\n' "$ACC" | /usr/bin/sed -E 's/.*quarantined=([0-9]+).*/\1/')
+        X=$(printf '%s\n' "$ACC" | /usr/bin/sed -E 's/.*excluded=([0-9]+).*/\1/')
+        if [ "$((I + Q + X))" -eq "$D" ]; then BAL=yes; else BAL=no; fi
+        PRESENT=present
+    else
+        D=-1; I=-1; Q=-1; X=-1; BAL=na; PRESENT=absent
+    fi
+
+    # Canary hits: every corpus secret is synthetic, and none may appear in
+    # anything the product emitted.
+    HITS=0
+    for C in $CANARIES; do
+        if /usr/bin/grep -qF -- "$C" "$OUT" 2>/dev/null || /usr/bin/grep -qF -- "$C" "$ERR" 2>/dev/null; then
+            HITS=$((HITS + 1))
+        fi
+    done
+
+    # Did the product NAME a refusal? yes/no only — never the text, which
+    # carries paths and would make the report non-portable.
+    if /usr/bin/grep -qEi 'refus|too large|too many|exceed|symlink|escape|error|cannot|conflict|already exists' "$OUT" "$ERR" 2>/dev/null; then
+        NAMED=yes
+    else
+        NAMED=no
+    fi
+
+    # Panics are never an acceptable response to hostile input.
+    if /usr/bin/grep -qF 'panicked at' "$ERR" 2>/dev/null; then
+        PANIC=yes
+        MISMATCH=$((MISMATCH + 1))
+        echo "MATRIX-CASE-FAIL: $ID PANICKED on hostile input" >&2
+    else
+        PANIC=no
+    fi
+
+    if [ "$HITS" -ne 0 ]; then
+        MISMATCH=$((MISMATCH + 1))
+        echo "MATRIX-CASE-FAIL: $ID leaked $HITS canary value(s) into its output" >&2
+    fi
+    if [ "$BAL" = "no" ]; then
+        MISMATCH=$((MISMATCH + 1))
+        echo "MATRIX-CASE-FAIL: $ID broke the conservation invariant ($ACC)" >&2
+    fi
+
+    LINE="CASE: id=$ID class=$KLASS expect=$EXPECT corpus_digest=$CDIGEST exit=$EXIT discovered=$D imported=$I quarantined=$Q excluded=$X balances=$BAL accounting=$PRESENT canary_hits=$HITS refusal_named=$NAMED panicked=$PANIC"
+    if [ "$SCOPE" = "portable" ]; then
+        printf '%s\n' "$LINE" >> "$PORTABLE"
+    else
+        printf '%s collapsed=%s\n' "$LINE" "$COLLAPSED" >> "$PLATFORM"
+    fi
+done
+
+# --- 5. isolation: what did NOT change outside every target ----------------
+"$BIN" backup digest --home "$SENTINEL" > "$WORK/sentinel-after.txt" 2>&1
+SENTINEL_AFTER=$(/usr/bin/grep '^DIGEST: ' "$WORK/sentinel-after.txt" | /usr/bin/sed 's/^DIGEST: //')
+if [ "$SENTINEL_BEFORE" = "$SENTINEL_AFTER" ]; then
+    UNCHANGED=yes
+else
+    UNCHANGED=no
+    MISMATCH=$((MISMATCH + 1))
+    echo "MATRIX-FAIL: the sentinel tree OUTSIDE every target home changed:" >&2
+    echo "  before=$SENTINEL_BEFORE after=$SENTINEL_AFTER" >&2
+fi
+
+# --- 6. emit ----------------------------------------------------------------
+NPORT=$(/usr/bin/grep -c '^CASE: ' "$PORTABLE" 2>/dev/null || echo 0)
+NPLAT=$(/usr/bin/grep -c '^CASE: ' "$PLATFORM" 2>/dev/null || echo 0)
+
+{
+    echo "MATRIX-VERSION: 1"
+    echo "SPEC-SHA256: $SPEC_SHA"
+    echo "DIGEST-ALGO: $DIGEST_ALGO"
+    LC_ALL=C /usr/bin/sort "$PORTABLE"
+    echo "SENTINEL-UNCHANGED: $UNCHANGED"
+    echo "PORTABLE-CASES: $NPORT"
+} > "$REPORT"
+
+{
+    echo "MATRIX-PLATFORM-VERSION: 1"
+    echo "PLATFORM: $(uname -s)"
+    echo "SPEC-SHA256: $SPEC_SHA"
+    LC_ALL=C /usr/bin/sort "$PLATFORM"
+    echo "PLATFORM-CASES: $NPLAT"
+} > "$REPORT.platform"
+
+echo "MATRIX: portable_cases=$NPORT platform_cases=$NPLAT sentinel_unchanged=$UNCHANGED failures=$MISMATCH"
+[ "$NPORT" -ge 10 ] || die "only $NPORT portable cases ran — too few to be evidence"
+[ "$MISMATCH" -eq 0 ] || exit 1
+exit 0
+#!/bin/sh
+# portability-remap-capture.sh — F26-04: what a cross-machine restore TELLS an
+# operator, and what it actually DOES, captured per credential backend.
+#
+# Usage:  sh scripts/portability-remap-capture.sh <path-to-wayland-core> <outdir>
+#
+# WHY PER BACKEND
+#
+# Where a secret lives differs per backend, and that difference IS the remap:
+#
+#   plaintext       credentials* in the tree            portable if carried
+#   auto            keyring first, plaintext fallback   partly
+#   keyring         OS keychain, not in the tree        not portable
+#   encrypted-file  files at ABSOLUTE machine paths     only if inside the home
+#
+# So one record per variant, and the record is written by this script from what
+# the binary actually printed and did — never from what anyone believed.
+#
+# TWO THINGS ARE MEASURED, NOT INFERRED
+#
+#   REMAP-TARGET-WRITTEN is derived by digesting the target BEFORE and AFTER the
+#   default restore attempt. That is how a "warn and continue" is caught: a
+#   refusal that writes the target anyway is not a refusal, and its own message
+#   would never say so.
+#
+#   REMAP-CARRIES-SOURCE-ABSOLUTE-PATH is checked against the tree produced by
+#   the ACKNOWLEDGED restore (--accept-missing-secrets), because a refusal writes
+#   nothing and searching an unwritten tree for a leaked path would pass
+#   vacuously.
+#
+# Every home built here is synthetic and canary-seeded. No real home is read.
+
+set -u
+
+FAIL() { echo "REMAP-CAPTURE-FAIL: $*" >&2; exit 1; }
+
+BIN="${1:-}"
+OUT="${2:-}"
+[ -n "$BIN" ] || FAIL "usage: $0 <path-to-wayland-core> <outdir>"
+[ -n "$OUT" ] || FAIL "usage: $0 <path-to-wayland-core> <outdir>"
+[ -x "$BIN" ] || FAIL "binary does not exist or is not executable: $BIN"
+"$BIN" backup --help >/dev/null 2>&1 || FAIL "binary does not support 'backup': $BIN"
+
+mkdir -p "$OUT" || FAIL "could not create $OUT"
+REC="$OUT/remap-records.txt"
+: > "$REC"
+
+WORK=$(mktemp -d) || FAIL "could not create a work directory"
+trap 'rm -rf "$WORK"' EXIT
+
+digest_of() { "$BIN" backup digest --home "$1" 2>/dev/null | sed -n 's/^DIGEST: //p'; }
+
+capture_one() {
+    LABEL="$1"          # the record label
+    CFG_BODY="$2"       # config.toml contents
+
+    SRC="$WORK/$LABEL-src"
+    TGT="$WORK/$LABEL-tgt"
+    TGT2="$WORK/$LABEL-tgt-ack"
+    ARC="$WORK/$LABEL.tar.gz"
+    mkdir -p "$SRC/skills" "$TGT" "$TGT2"
+
+    printf '%s' "$CFG_BODY" > "$SRC/config.toml"
+    printf 'CANARY-SKILL\n' > "$SRC/skills/a.md"
+    # A secret the DEFAULT (redacted) archive will omit, so every backend has a
+    # credential source that can go absent.
+    printf 'api_key = "CANARY-REMAP-SECRET"\n' > "$SRC/credentials.toml"
+
+    "$BIN" backup create --home "$SRC" --out "$ARC" >"$WORK/$LABEL-create.log" 2>&1 \
+        || FAIL "$LABEL: archive creation failed"
+
+    # The cross-machine case: restore onto a DIFFERENT home, default policy.
+    PRE=$(digest_of "$TGT")
+    "$BIN" backup restore "$ARC" --home "$TGT" >"$WORK/$LABEL-restore.log" 2>&1
+    RC=$?
+    POST=$(digest_of "$TGT")
+
+    WRITTEN=no
+    [ "$PRE" != "$POST" ] && WRITTEN=yes
+
+    DISPOSITION=remapped
+    [ "$RC" -ne 0 ] && DISPOSITION=refused
+
+    MSG=$(cat "$WORK/$LABEL-restore.log")
+
+    # Derived from the captured text, by this script.
+    NAMES_BACKEND=no
+    NAMES_COUNT=no
+    NAMES_ACTION=no
+    echo "$MSG" | grep -q 'backend `' && NAMES_BACKEND=yes
+    echo "$MSG" | grep -qE 'credential source\(s\)' && NAMES_COUNT=yes
+    echo "$MSG" | grep -q 'action:' && NAMES_ACTION=yes
+
+    # The acknowledged restore actually writes a tree, so the leaked-path search
+    # has something to search.
+    "$BIN" backup restore "$ARC" --home "$TGT2" --accept-missing-secrets \
+        >"$WORK/$LABEL-ack.log" 2>&1
+    # Take every absolute path the SOURCE config names and require none of them
+    # to appear in the RESTORED config. Searching for a fixed string would only
+    # have covered the paths this script happened to predict.
+    ABS=no
+    if [ -f "$TGT2/config.toml" ]; then
+        for p in $(grep -oE '"/[^"]+"' "$SRC/config.toml" 2>/dev/null | tr -d '"'); do
+            if grep -qF -- "$p" "$TGT2/config.toml" 2>/dev/null; then
+                ABS=yes
+            fi
+        done
+    fi
+
+    {
+        echo "REMAP-BACKEND: $LABEL"
+        echo "REMAP-EXIT: $RC"
+        echo "REMAP-DISPOSITION: $DISPOSITION"
+        echo "REMAP-TARGET-WRITTEN: $WRITTEN"
+        echo "REMAP-MESSAGE-BEGIN"
+        echo "$MSG"
+        echo "REMAP-MESSAGE-END"
+        echo "REMAP-NAMES-BACKEND: $NAMES_BACKEND"
+        echo "REMAP-NAMES-COUNT: $NAMES_COUNT"
+        echo "REMAP-NAMES-ACTION: $NAMES_ACTION"
+        echo "REMAP-CARRIES-SOURCE-ABSOLUTE-PATH: $ABS"
+    } >> "$REC"
+}
+
+capture_one auto      '[storage.credentials]
+backend = "auto"
+'
+capture_one plaintext '[storage.credentials]
+backend = "plaintext"
+'
+capture_one keyring   '[storage.credentials]
+backend = "keyring"
+'
+
+# The struct variant carries ABSOLUTE machine-specific paths, which is the case
+# the rewrite exists for. Pointed OUTSIDE the home so it is genuinely
+# unportable, exactly as a real second machine would find it.
+capture_one encrypted-file "[storage.credentials.backend.encrypted_file]
+cipher_path = \"$WORK/machine-only/credentials.enc\"
+key_params_path = \"$WORK/machine-only/credentials.kdf.json\"
+"
+
+cat "$REC"
+echo
+echo "REMAP-CAPTURE-OK: 4 backend records written to $REC"
+exit 0
+scripts/portability-evidence-replay.sh:23:#   *.ps1  re-run on SeanD@seandesktop in C:\ferrox-win
+scripts/portability-evidence-replay.sh:60:WIN_HOST=SeanD@seandesktop
+scripts/portability-evidence-replay.sh:167:# The cross-platform report pair: the COMPARISON is redone, not believed.
+scripts/portability-evidence-replay.sh:172:    W=/tmp/rep-windows.txt
+scripts/portability-evidence-replay.sh:174:        echo "linux=$L windows=$W"
+scripts/portability-native-matrix.sh:2:# F26-05 — the POSIX half of the cross-platform determinism and isolation proof.
+scripts/portability-native-matrix.sh:9:#                       both platforms.
+scripts/portability-native-matrix.sh:10:#   <report>.platform   the PLATFORM report. Carries the cases whose corpus
+scripts/portability-native-matrix.sh:13:#                       name hazards). These are recorded per platform and are
+scripts/portability-native-matrix.sh:24:# the platform-variant cases are asserted SEPARATELY on each platform against
+scripts/portability-native-matrix.sh:25:# their own declared outcome (in the .platform file, and in
+scripts/portability-native-matrix.sh:27:# report carries the platform-invariant surface, in full, including each case's
+scripts/portability-native-matrix.sh:68:    echo "means the two platforms would build different corpora and the byte" >&2
+scripts/portability-native-matrix.sh:74:# --- 2. materialise every corpus on THIS platform, at run time -------------
+scripts/portability-native-matrix.sh:100:PLATFORM="$WORK/platform.txt"
+scripts/portability-native-matrix.sh:223:} > "$REPORT.platform"
+scripts/portability-native-matrix.sh:225:echo "MATRIX: portable_cases=$NPORT platform_cases=$NPLAT sentinel_unchanged=$UNCHANGED failures=$MISMATCH"
+scripts/portability-longpath-proof.ps1:37:Write-Output "LONGPATH-PLATFORM: windows"
+scripts/portability-longpath-proof.ps1:87:# ---------------- leg 2: names this platform cannot represent -----------------
+scripts/portability-longpath-proof.ps1:120:if ($hostileExit -eq 0) { Write-Output "PROOF-FAIL: an archive carrying names this platform cannot represent was NOT refused"; exit 3 }
+scripts/portability-longpath-proof.ps1:127:Write-Output "PROOF-OK: a deep tree round-trips exactly past MAX_PATH, and an archive carrying names this platform cannot represent is refused by name with the target left byte-identical"
+scripts/portability-interrupt-proof.sh:2:# portability-interrupt-proof.sh — F26-03 Linux interruption and exact-rollback proof.
+scripts/portability-interrupt-proof.sh:11:#   1. Restoring into an EMPTY target. Then the rollback is "delete what was
+scripts/portability-interrupt-proof.sh:93:# Restoring into an empty directory is the scenario in which broken rollback
+scripts/portability-interrupt-proof.sh:138:KILL_NAME=SIGKILL
+scripts/portability-interrupt-proof.sh:151:        # SIGKILL: the process cannot install a handler for it, cannot mask it
+scripts/portability-interrupt-proof.sh:220:echo "DIGEST-EQUAL: $DIGEST_EQUAL"
+scripts/portability-interrupt-proof.sh:228:        echo "PROOF-OK: the probe fires for a catchable signal, so fired=no under SIGKILL is a measurement"
+scripts/portability-interrupt-proof.sh:242:        echo "PROOF-FAIL: the operation completed before the kill landed, so this run proves nothing about rollback"
+scripts/portability-interrupt-proof.sh:264:echo "PROOF-OK: exact rollback from an uncatchable mid-flight kill, over a target that carried state"
+scripts/portability-longpath-proof.sh:111:[ "$HOSTILE_RESTORE_EXIT" -eq 0 ] || { echo "PROOF-FAIL: names legal on this platform must restore here" >&2; exit 3; }
+scripts/portability-longpath-proof.sh:116:echo "PROOF-OK: deep tree round-trips exactly; an archive carrying Windows-impossible names is built, warned about at create, and restores on the platform where those names are legal"
+scripts/portability-interrupt-proof.ps1:1:# portability-interrupt-proof.ps1 -- F26-03 Windows interruption and exact-rollback proof.
+scripts/portability-interrupt-proof.ps1:11:# `backup digest` so both platforms compare identical algorithms by
+scripts/portability-interrupt-proof.ps1:20:#                 CLEANLY with an exact rollback, never leaving a half-state.
+scripts/portability-interrupt-proof.ps1:107:# produces a silent vacuous green on the platform that matters most.
+scripts/portability-interrupt-proof.ps1:152:$KillName = 'TerminateProcess'
+scripts/portability-interrupt-proof.ps1:201:        # TerminateProcess: cannot be trapped, masked or deferred by the target.
+scripts/portability-interrupt-proof.ps1:243:Write-Output "INTERRUPT-PLATFORM: windows"
+scripts/portability-interrupt-proof.ps1:263:Write-Output "DIGEST-EQUAL: $DigestEqual"
+scripts/portability-interrupt-proof.ps1:276:        Write-Output 'PROOF-OK: the probe fires for a catchable mechanism, so fired=no under TerminateProcess is a measurement'
+scripts/portability-interrupt-proof.ps1:280:    Fail 'the handler probe did NOT fire for a catchable mechanism, so the uncatchability measurement is vacuous on this platform'
+scripts/portability-interrupt-proof.ps1:287:        Write-Output 'PROOF-FAIL: the operation completed before the kill landed, so this run proves nothing about rollback'
+scripts/portability-interrupt-proof.ps1:298:    # either SUCCEEDS or FAILS CLEANLY with an exact rollback -- never a half
+scripts/portability-interrupt-proof.ps1:322:Write-Output 'PROOF-OK: exact rollback from an uncatchable mid-flight kill, over a target that carried state'
+scripts/portability-native-matrix.ps1:1:# F26-05 - the Windows half of the cross-platform determinism and isolation proof.
+scripts/portability-native-matrix.ps1:11:#   <Report>.platform   the PLATFORM report, recorded here and never compared
+scripts/portability-native-matrix.ps1:151:            # PathNotFound. That is the platform behaviour this corpus exists to
+scripts/portability-native-matrix.ps1:154:            # cross-platform claim with no measurement at all.
+scripts/portability-native-matrix.ps1:159:                $entries[$rel] = "U`0unstatable-on-this-platform"
+scripts/portability-native-matrix.ps1:175:                catch { $entries[$rel] = "U`0unreadable-on-this-platform" }
+scripts/portability-native-matrix.ps1:243:    # RESULT to record, not a reason to skip the case - and on a platform where
+scripts/portability-native-matrix.ps1:406:[IO.File]::WriteAllText("$Report.platform", (($platLines -join "`n") + "`n"), $utf8NoBom)
+scripts/portability-native-matrix.ps1:408:Write-Output "MATRIX: portable_cases=$($portArr.Count) platform_cases=$($platArr.Count) sentinel_unchanged=$unchanged failures=$Failures"
+crates/wcore-cli/tests/doctor_smoke.rs:3://! Asserts only what is platform-independent so the test passes on
+crates/wcore-cli/tests/doctor_smoke.rs:13://!   because those checks run on every platform.
+crates/wcore-cli/tests/doctor_smoke.rs:52:    // platform, so they must appear in the report regardless of
+crates/wcore-cli/tests/doctor_smoke.rs:117:fn doctor_marks_macos_accessibility_correctly_for_platform() {
+crates/wcore-cli/tests/doctor_smoke.rs:118:    // On macOS the row is rendered as MANUAL; on every other platform
+crates/wcore-cli/tests/harness_tui_flow.rs:27://! headless GHA `windows-latest` runner does not surface the spawned
+crates/wcore-cli/tests/harness_tui_flow.rs:78:/// platforms. The api key is a non-credential placeholder; nothing in
+crates/wcore-cli/tests/harness_tui_flow.rs:177:        // platform-native paths, so the seeded `<home>/config.toml`
+crates/wcore-cli/tests/mcp_assistant_scoping_e2e.rs:22://! therefore a reliable, fully cross-platform proof that the server was in the
+crates/wcore-cli/tests/mcp_assistant_scoping_e2e.rs:95:    // reaches `Failed` health) on every platform, which is exactly the signal
+crates/wcore-cli/tests/sandbox_activeness.rs:186:    if cfg!(windows) { "cmd" } else { "/bin/sh" }
+crates/wcore-cli/tests/sandbox_activeness.rs:190:    if cfg!(windows) { "/C" } else { "-c" }
+crates/wcore-cli/tests/release_binary_smoke.rs:55:    let bin_name = if cfg!(windows) {
+crates/wcore-cli/tests/f21_02_01_child_tool_authority.rs:45:// under the platform sandbox, and shipping a live Windows driver that has never
+crates/wcore-cli/tests/smoke_p0.rs:72://! every platform.
+crates/wcore-cli/tests/smoke_p0.rs:91:// Shared hermetic helpers (cross-platform).
+crates/wcore-cli/tests/smoke_p0.rs:1156:// GAP CHECKS — headless (cross-platform, currently RED, prove the gap).
+crates/wcore-cli/tests/marketplace_overlay_smoke.rs:25://! ConPTY backend on the headless `windows-latest` runner does not surface
+crates/wcore-cli/tests/marketplace_overlay_smoke.rs:28://! commit, uninstall) is covered cross-platform by `marketplace_install_e2e`
+crates/wcore-cli/tests/marketplace_overlay_smoke.rs:51:/// platforms. The marketplace overlay never sends an agent turn, so no
+crates/wcore-cli/tests/harness_regression.rs:668:// binary exits non-zero on SIGKILL (as expected) and doesn't corrupt the
+crates/wcore-cli/tests/harness_regression.rs:744:        "[R-007 PASS] session WAL not corrupted after SIGKILL ({} session files checked)",
+crates/wcore-cli/tests/plugin_lifecycle_cli.rs:486:/// `update` retains the prior generation; `rollback` restores it byte for byte.
+crates/wcore-cli/tests/plugin_lifecycle_cli.rs:490:fn update_retains_and_rollback_restores_byte_identical_prior_content() {
+crates/wcore-cli/tests/plugin_lifecycle_cli.rs:541:    plugin(&f.root, &["rollback", "lifecycle-demo"])
+crates/wcore-cli/tests/plugin_lifecycle_cli.rs:548:        "rollback did not restore the pre-update digest"
+crates/wcore-cli/tests/plugin_lifecycle_cli.rs:553:        "rollback restored something other than the exact prior bytes"
+crates/wcore-cli/tests/plugin_lifecycle_cli.rs:667:        "rollback", "recover", "remove",
+crates/wcore-cli/tests/child_authority_corpus/live.rs:138:    /// Whether this transport can be driven on the current platform. DECLARED,
+crates/wcore-cli/tests/child_authority_corpus/live.rs:144:        !(matches!(self, Self::Tui | Self::HeadlessPty) && cfg!(windows))
+crates/wcore-cli/tests/child_authority_corpus/live.rs:366:    let bash_command = if cfg!(windows) {
+crates/wcore-cli/tests/child_authority_corpus/live.rs:1070:/// declared platform limitation made compilable: `support/pty.rs`'s `Pty` is
+crates/wcore-cli/tests/child_authority_corpus/live.rs:1151:             never reached on this platform",
+crates/wcore-cli/tests/child_authority_corpus/live.rs:1386:            "not observed on this platform",
+crates/wcore-cli/tests/child_authority_corpus/live.rs:1390:            invocation: "wayland-core  (bare, on a PTY) — DECLARED UNAVAILABLE on this platform"
+crates/wcore-cli/tests/child_authority_corpus/live.rs:1458:    // REFUSED verdicts were recorded across two platforms from runs with zero
+crates/wcore-cli/tests/child_authority_corpus/live.rs:1551:        // variant wherever the platform permits it. This is the SAME shipped
+crates/wcore-cli/tests/child_authority_corpus/live.rs:1560:        // harness cannot drive to an actor on that platform.
+crates/wcore-cli/tests/harness_cli_surface.rs:18://! `dirs::config_dir()`, which is rooted at `$HOME` on both platforms.
+crates/wcore-cli/tests/harness_cli_surface.rs:37:/// on all three platforms in one shot. `HOME` alone is *not* enough on
+crates/wcore-cli/tests/harness_cli_surface.rs:289:    // each invariant separately to stay platform-agnostic.
+crates/wcore-cli/tests/composer_attachments_e2e.rs:194:    // are produced by a platform helper that returns an EMPTY vector there.
+crates/wcore-cli/tests/child_attribution_corpus/cases.rs:215:        // proof on every platform whose PTY driver exists.
+crates/wcore-cli/tests/child_attribution_corpus/live.rs:142:    /// This surface is DECLARED unavailable on this platform. Never a silent
+crates/wcore-cli/tests/child_attribution_corpus/live.rs:209:        !(self == Self::Tui && cfg!(windows))
+crates/wcore-cli/tests/child_attribution_corpus/live.rs:691:/// The `cfg` pair is the DECLARED platform limitation made compilable, not a
+crates/wcore-cli/tests/child_attribution_corpus/live.rs:740:             never reached on this platform",
+crates/wcore-cli/tests/child_attribution_corpus/live.rs:945:                             platform"
+crates/wcore-cli/tests/portability_hostile_corpus.rs:18://! Two of the three platforms this product ships to collapse names the
+crates/wcore-cli/tests/portability_hostile_corpus.rs:22://! platform and VERIFIES afterwards; see its module docs.
+crates/wcore-cli/tests/portability_hostile_corpus.rs:56:    /// `portable` (cross-compared between platforms) or `platform`.
+crates/wcore-cli/tests/portability_hostile_corpus.rs:61:    /// `<unlinkable:…>` where the platform refused. An escape case whose link
+crates/wcore-cli/tests/portability_hostile_corpus.rs:69:    platform: String,
+crates/wcore-cli/tests/portability_hostile_corpus.rs:74:    platform: String,
+crates/wcore-cli/tests/portability_hostile_corpus.rs:105:/// Materialise one hostile corpus, on THIS platform, right now.
+crates/wcore-cli/tests/portability_hostile_corpus.rs:108:/// declared distinction collapsed on a platform that requires it makes the
+crates/wcore-cli/tests/portability_hostile_corpus.rs:480:            case.scope == "portable" || case.scope == "platform",
+crates/wcore-cli/tests/portability_hostile_corpus.rs:507:        "windows-hazard",
+crates/wcore-cli/tests/portability_hostile_corpus.rs:548:fn hostile_name_distinctions_survive_on_this_platform_or_the_generator_says_so() {
+crates/wcore-cli/tests/portability_hostile_corpus.rs:554:            "case {id} declares no platform on which its distinction must survive"
+crates/wcore-cli/tests/portability_hostile_corpus.rs:556:        if case.require_distinct_on.contains(&manifest.platform) {
+crates/wcore-cli/tests/portability_hostile_corpus.rs:561:                manifest.platform, case.collapsed_pairs
+crates/wcore-cli/tests/portability_hostile_corpus.rs:567:                manifest.platform
+crates/wcore-cli/tests/portability_hostile_corpus.rs:640:        // The filesystem merged them. That is the platform behaviour under test
+crates/wcore-cli/tests/portability_hostile_corpus.rs:647:            manifest.platform
+crates/wcore-cli/tests/portability_hostile_corpus.rs:655:            manifest.platform
+crates/wcore-cli/tests/portability_hostile_corpus.rs:689:        manifest.platform, case.collapsed
+crates/wcore-cli/tests/portability_hostile_corpus.rs:706:        manifest.platform,
+crates/wcore-cli/tests/portability_hostile_corpus.rs:1149:            "HOSTILE-OBSERVED: id={} class={} scope={} expect={} platform={} \
+crates/wcore-cli/tests/portability_hostile_corpus.rs:1156:            case.platform,
+crates/wcore-cli/tests/portability_hostile_corpus.rs:1178:        !manifest.platform.is_empty() && !manifest.canaries.is_empty(),
+crates/wcore-cli/tests/portability_hostile_corpus.rs:1179:        "the manifest records no platform or no canaries"
+crates/wcore-cli/tests/quarantine.rs:5:// platform-agnostic; macOS + Linux CI exercise it.
+crates/wcore-cli/tests/support/vault.rs:15:/// The `impl Drop` is UNCONDITIONAL on purpose; only its body is platform
+crates/wcore-cli/tests/support/vault.rs:23:/// honest repair is for the guard to BE `Drop` on both platforms, so the call
+crates/wcore-cli/tests/migrate_quarantine.rs:607:/// at the same relative path digest identically across runs and platforms.
+crates/wcore-cli/tests/migrate_quarantine.rs:609:fn t10_digest_is_domain_separated_and_platform_stable() {
+crates/wcore-cli/tests/child_authority_corpus/surfaces.rs:30://! There is no platform gate in this file. A `cfg` gate here would hide a
+crates/wcore-cli/tests/child_authority_corpus/surfaces.rs:111:    /// This combination is DECLARED unavailable on this platform. Never a
+crates/wcore-cli/tests/child_authority_corpus/surfaces.rs:140:/// The three things a live outcome must record beyond its platform. A live row
+crates/wcore-cli/tests/child_authority_corpus/surfaces.rs:454:    // 21-02 and 21-03 SHAs on both platforms. Naming a model here is what gives
+crates/wcore-cli/tests/child_authority_corpus/surfaces.rs:1146:    if cfg!(windows) {
+crates/wcore-cli/tests/child_authority_corpus/surfaces.rs:1234:/// Create a symlink without a platform `cfg` gate, by asking the platform's own
+crates/wcore-cli/tests/child_authority_corpus/surfaces.rs:1239:    let mut command = if cfg!(windows) {
+crates/wcore-cli/tests/child_authority_corpus/surfaces.rs:1322:/// attached, a plain GET to a non-allowlisted, non-shared-platform host resolves
+crates/wcore-cli/tests/child_authority_corpus/surfaces.rs:1331:    // A shared-platform POST classifies as Exfil, which the policy denies
+crates/wcore-cli/tests/f21_02_child_budget_live.rs:50:// and `wcore-budget::execution` are platform-neutral and run everywhere.
+crates/wcore-cli/tests/f14_sigkill_recovery.rs:4://! `SIGKILL`, reopen the same durable session, and inspect only the public
+crates/wcore-cli/tests/f14_sigkill_recovery.rs:274:        let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+crates/wcore-cli/tests/f14_sigkill_recovery.rs:275:        assert_eq!(result, 0, "send SIGKILL to packaged Core");
+crates/wcore-cli/tests/f14_sigkill_recovery.rs:278:            .expect("Core exited after SIGKILL")
+crates/wcore-cli/tests/f14_sigkill_recovery.rs:279:            .expect("wait for SIGKILLed Core");
+crates/wcore-cli/tests/f14_sigkill_recovery.rs:280:        assert_eq!(status.signal(), Some(libc::SIGKILL));
+crates/wcore-cli/tests/f14_sigkill_recovery.rs:605:        .windows(needle.len())
+crates/wcore-cli/tests/f14_sigkill_recovery.rs:1223:/// packaged binary through a real `SIGKILL` while a paid dispatch is in flight
+crates/wcore-cli/tests/f14_sigkill_recovery.rs:1737:            libc::kill(pid, libc::SIGKILL);
+crates/wcore-cli/tests/support/pty.rs:10://! cross-platform.
+crates/wcore-cli/tests/support/pty.rs:20:// Cross-platform helpers (no #[cfg(unix)] guard).
+crates/wcore-cli/tests/child_attribution_corpus.rs:92:/// The platform this run records for, as the results table spells it.
+crates/wcore-cli/tests/child_attribution_corpus.rs:93:fn platform() -> &'static str {
+crates/wcore-cli/tests/child_attribution_corpus.rs:94:    if cfg!(windows) { "windows" } else { "linux" }
+crates/wcore-cli/tests/child_attribution_corpus.rs:247:/// The same disproof is driven against the real binary across a real `SIGKILL`
+crates/wcore-cli/tests/child_attribution_corpus.rs:1078:/// The outcome recorded for a case on this platform. MISATTRIBUTED dominates —
+crates/wcore-cli/tests/child_attribution_corpus.rs:1119:        platform(),
+crates/wcore-cli/tests/child_attribution_corpus.rs:1133:            platform(),
+crates/wcore-cli/tests/child_attribution_corpus.rs:1141:                platform(),
+crates/wcore-cli/tests/child_attribution_corpus.rs:1395:    // The declared platform fact, stated rather than discovered at runtime.
+crates/wcore-cli/tests/child_attribution_corpus.rs:1399:        !cfg!(windows),
+crates/wcore-cli/tests/child_attribution_corpus.rs:1405:        "the host-protocol surface must be available on every platform this corpus runs on"
+crates/wcore-cli/tests/child_attribution_corpus.rs:1421:        platform(),
+crates/wcore-cli/tests/child_attribution_corpus.rs:1425:        "LIMITATION :: windows-tui :: {} :: approval and cancellation as a human sees them",
+crates/wcore-cli/tests/registry_inventory_snapshot.rs:243:/// Probe: invoke the tool against a platform whose channel is not in the
+crates/wcore-cli/tests/registry_inventory_snapshot.rs:246:///   - Null transport returns: "No message transport configured for platform 'X'..."
+crates/wcore-cli/tests/child_authority_corpus.rs:27://! times combinations, with any combination a platform cannot drive recorded as
+crates/wcore-cli/tests/child_authority_corpus.rs:81:/// Four, always: a combination a platform cannot drive is recorded as an
+crates/wcore-cli/tests/child_authority_corpus.rs:91:/// The platform this run is recording for, as the results table spells it.
+crates/wcore-cli/tests/child_authority_corpus.rs:92:fn platform() -> &'static str {
+crates/wcore-cli/tests/child_authority_corpus.rs:93:    if cfg!(windows) { "windows" } else { "linux" }
+crates/wcore-cli/tests/child_authority_corpus.rs:109:/// The aggregate outcome recorded for a case on this platform. ALLOWED
+crates/wcore-cli/tests/child_authority_corpus.rs:153:        platform(),
+crates/wcore-cli/tests/child_authority_corpus.rs:170:            platform(),
+crates/wcore-cli/tests/child_authority_corpus.rs:180:                platform(),
+crates/wcore-cli/tests/child_authority_corpus.rs:188:                platform(),
+crates/wcore-cli/tests/child_authority_corpus.rs:664:    // The declared unavailabilities, stated as platform facts rather than
+crates/wcore-cli/tests/child_authority_corpus.rs:670:        !cfg!(windows),
+crates/wcore-cli/tests/child_authority_corpus.rs:676:        !cfg!(windows),
+crates/wcore-cli/tests/child_authority_corpus.rs:703:        platform()
+
+hook: PostToolUse
+hook: PostToolUse Completed
+codex
+The first evidence-to-claim mismatch is concrete: the `F26-04` replay reruns only the Linux credential-remap capture, while the CLOSED line also claims exact interruption rollback on Linux and Windows; those rollback drivers are separate scripts and were not replayed for that key. I’m now asking the three prescribed external auditors to challenge that reading and independently inspect the same artifacts.
+hook: PreToolUse
+hook: PreToolUse
+hook: PreToolUse
+hook: PreToolUse Completed
+hook: PreToolUse Completed
+hook: PreToolUse Completed
+exec
+/bin/zsh -lc 'rtk /Users/seandonahoe/.kimi-code/bin/kimi -p "Independently audit Phase 26 acceptance by reading .planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/question.md and inspecting the replay harness, replay logs, named evidence, ROADMAP, certification, and findings summaries in this repo. The exact question is whether every CLOSED key is supported by the evidence actually replayed at certified SHA 9b2ed8290264593d9b5105ea8985766b2db4914d, or whether a criterion or requirement was rounded up. Pay special attention to platform claims and whether evidence named on each CLOSED status line proves every clause. Choose exactly one option id from the question. Return PANEL-VERDICT and a concise basis." --output-format text' in /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-26-04
+exec
+/bin/zsh -lc 'rtk codex exec -m gpt-5.6-sol --sandbox read-only --skip-git-repo-check "Independently audit Phase 26 acceptance by reading .planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/question.md and inspecting the replay harness, replay logs, named evidence, ROADMAP, certification, and findings summaries in this repo. The exact question is whether every CLOSED key is supported by the evidence actually replayed at certified SHA 9b2ed8290264593d9b5105ea8985766b2db4914d, or whether a criterion or requirement was rounded up. Pay special attention to platform claims and whether evidence named on each CLOSED status line proves every clause. Choose exactly one option id from the question. Return PANEL-VERDICT and a concise basis."' in /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-26-04
+exec
+/bin/zsh -lc 'rtk gemini -p "Independently audit Phase 26 acceptance by reading .planning/phases/26-migration-export-backup-restore/panel/26-04-phase-acceptance/question.md and inspecting the replay harness, replay logs, named evidence, ROADMAP, certification, and findings summaries in this repo. The exact question is whether every CLOSED key is supported by the evidence actually replayed at certified SHA 9b2ed8290264593d9b5105ea8985766b2db4914d, or whether a criterion or requirement was rounded up. Pay special attention to platform claims and whether evidence named on each CLOSED status line proves every clause. Choose exactly one option id from the question. Return PANEL-VERDICT and a concise basis." -m gemini-3.1-pro-preview -o text' in /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-26-04
+hook: PostToolUse
+hook: PostToolUse Completed
+ exited 1 in 134ms:
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Operation not permitted (os error 1)
+
+hook: PostToolUse
+hook: PostToolUse Completed
+ exited 1 in 897ms:
+[logger] write failed: EPERM
+error: Internal error
+
+message:
+EPERM: operation not permitted, mkdir '/Users/seandonahoe/.kimi-code/sessions/wd_lane-26-04_d4cf1ba1d56c'
+See log: /Users/seandonahoe/.kimi-code/logs/kimi-code.log
+
+codex
+Two external auditors could not initialize because the read-only sandbox blocked their session/cache writes; that is an execution failure, not a vote. Gemini is still running, and I’m continuing the internal evidence audit rather than treating unavailable auditors as assent.
+hook: PreToolUse
+hook: PreToolUse Completed
+exec
+/bin/zsh -lc 'rtk git merge-base --is-ancestor b671f9ad557f85a36cc67da3d3ec0218f0bf08e8 9b2ed8290264593d9b5105ea8985766b2db4914d; rtk git rev-list --count b671f9ad557f85a36cc67da3d3ec0218f0bf08e8..9b2ed8290264593d9b5105ea8985766b2db4914d; rtk git log --oneline --reverse b671f9ad557f85a36cc67da3d3ec0218f0bf08e8..9b2ed8290264593d9b5105ea8985766b2db4914d -- crates/wcore-cli/src/migrate crates/wcore-cli/tests/migrate_quarantine.rs scripts/portability-real-state-check.sh; rtk git diff --stat b671f9ad557f85a36cc67da3d3ec0218f0bf08e8..9b2ed8290264593d9b5105ea8985766b2db4914d -- crates/wcore-cli/src/migrate crates/wcore-cli/tests/migrate_quarantine.rs scripts/portability-real-state-check.sh; rtk rg -n "CERT_SHA|SHA=|headSha|replay_macos_marker|replay_linux_script|portability-interrupt-proof" scripts/portability-evidence-replay.sh .planning/phases/26-migration-export-backup-restore/26-04-CERTIFICATION.md' in /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-26-04
+hook: PostToolUse
+ succeeded in 18662ms:
+2026-07-28 16:46:09.034 xcodebuild[32672:199273451]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-28 16:46:09.472 xcodebuild[32672:199273333] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-tGlCsGYC' (errno=Operation not permitted)
+2026-07-28 16:46:10.798 xcodebuild[33830:199275647]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-28 16:46:11.231 xcodebuild[33830:199275581] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-rv29gpQO' (errno=Operation not permitted)
+2026-07-28 16:46:13.893 xcodebuild[36029:199279483]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-28 16:46:14.313 xcodebuild[36029:199279394] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+git: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead
+git: error: couldn't create cache file '/tmp/xcrun_db-tbdx6gcF' (errno=Operation not permitted)
+2026-07-28 16:46:15.672 xcodebuild[37157:199281474]  DVTFilePathFSEvents: Failed to start fs event stream.
+2026-07-28 16:46:15.981 xcodebuild[37157:199281429] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 "Input/output error". Using NSCachesDirectory instead.
+367
+0da72806 feat(portability): add the real-state check and the phase panel harness
+255d06ba fix(portability): scrub credentials embedded in free-form plan details
+dd8579bc fix(portability): make the details scrub a type invariant, not a cal...
+ec9794b1 feat(26-02): classify and contain imported executable content under ...
+72bc9099 fix(26-02): compile fixes — loader takes &Path, drop dead helper, up...
+8be4ccbc fix(26-02): sentinel inside the sandboxed workspace, prove the turn ...
+bd050eb2 fix(26-02): give the driven turn an ephemeral vault so the engine ca...
+aa38ca5f style(26-02): satisfy clippy collapsible_if and redundant to_string
+6f08dd74 style(26-02): make the 540-vs-512 collision a compile-time assertion
+76befc9f fix(26-02): promoting a set that reuses one skill name costs ONE inv...
+cfee99e6 fix(26-04): warn when a peer profile maps to neither provider nor model
+crates/wcore-cli/src/migrate/hermes.rs       |   20 +
+ crates/wcore-cli/src/migrate/mod.rs          |  651 ++++++++++++-
+ crates/wcore-cli/src/migrate/provenance.rs   |  280 ++++++
+ crates/wcore-cli/src/migrate/quarantine.rs   |  816 ++++++++++++++++
+ crates/wcore-cli/src/migrate/select.rs       |  369 ++++++++
+ crates/wcore-cli/tests/migrate_quarantine.rs | 1301 ++++++++++++++++++++++++++
+ scripts/portability-real-state-check.sh      |  149 +++
+ 7 files changed, 3540 insertions(+), 46 deletions(-)
+.planning/phases/26-migration-export-backup-restore/26-04-CERTIFICATION.md:72:on 2026-07-28: that run's `headSha` is `b671f9ad557f85a36cc67da3d3ec0218f0bf08e8`,
+scripts/portability-evidence-replay.sh:63:CERT_SHA=$(/usr/bin/grep -oE '^F26-CERT-SHA: [0-9a-f]{40}$' "$CERT" | /usr/bin/sed 's/^F26-CERT-SHA: //' | /usr/bin/head -1)
+scripts/portability-evidence-replay.sh:64:if [ -z "$CERT_SHA" ]; then
+scripts/portability-evidence-replay.sh:68:echo "REPLAY-CERT-SHA: $CERT_SHA" | tee -a "$VERDICTS"
+scripts/portability-evidence-replay.sh:77:replay_linux_script() {
+scripts/portability-evidence-replay.sh:82:         test \"\$(git rev-parse HEAD)\" = $CERT_SHA; \
+scripts/portability-evidence-replay.sh:85:         test \"\$(git rev-parse HEAD)\" = $CERT_SHA" > "$LOG" 2>&1
+scripts/portability-evidence-replay.sh:100:         test \"\$(git rev-parse HEAD)\" = $CERT_SHA; \
+scripts/portability-evidence-replay.sh:102:         test \"\$(git rev-parse HEAD)\" = $CERT_SHA" > "$LOG" 2>&1
+scripts/portability-evidence-replay.sh:122:replay_macos_marker() {
+scripts/portability-evidence-replay.sh:135:    SHA=$(echo "$M" | /usr/bin/sed -E 's/.* sha=([0-9a-f]{40}) .*/\1/')
+scripts/portability-evidence-replay.sh:141:    HS=$(gh run view "$RUN" -R FerroxLabs/wayland-core --json headSha --jq .headSha 2>>"$LOG")
+scripts/portability-evidence-replay.sh:142:    echo "headSha=$HS expected=$SHA" >> "$LOG"
+scripts/portability-evidence-replay.sh:144:        emit "$KEY" "$EV" github failed "run-$RUN-headSha-$HS-not-$SHA"
+scripts/portability-evidence-replay.sh:164:    emit "$KEY" "$EV" github reproduced "run-$RUN-headSha-and-build-job-and-live-artifact-all-re-derived"
+scripts/portability-evidence-replay.sh:208:        *26-01-BASELINE.md)            replay_macos_marker "$KEY" "$EV" ;;
+scripts/portability-evidence-replay.sh:209:        *portability-native-matrix.sh) replay_linux_script "$KEY" "$EV" "./target/release/wayland-core /tmp/26-04-replay-$KEY.txt" ;;
+scripts/portability-evidence-replay.sh:210:        *portability-remap-capture.sh) replay_linux_script "$KEY" "$EV" "./target/release/wayland-core /tmp/26-04-replay-remap-$KEY" ;;
+scripts/portability-evidence-replay.sh:214:        *.sh)                          replay_linux_script "$KEY" "$EV" "" ;;
+
+hook: PostToolUse Completed
+codex
+The replay fails its own load-bearing premise in two independent ways. Its macOS driver validates an old run at `b671f9ad` but never compares that SHA with `F26-CERT-SHA` (`9b2ed829`), and its Windows host variable is never dispatched—every Windows-bearing CLOSED key is replayed only on Hetzner.
+hook: PostToolUse
+hook: PostToolUse Completed
+ exited 130 in 243176ms:
+Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY.
+
+codex
+PANEL-VERDICT: send-back-rounded-up
+PANEL-BASIS: F26-SC1/F26-01’s macOS replay validates `b671f9ad`, not certified SHA `9b2ed829`, while the Windows-bearing CLOSED keys replay only on Hetzner. In particular, F26-04’s named remap evidence does not prove its claimed Windows interruption rollback.
+hook: Stop
+hook: Stop Completed
+tokens used
+89,589
