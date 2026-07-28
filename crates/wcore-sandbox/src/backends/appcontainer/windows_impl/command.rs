@@ -219,13 +219,50 @@ pub(super) fn is_unc_or_device_path(p: &str) -> bool {
 /// UNC/device path. Genuine UNC (`\\?\UNC\...`), device (`\\.\...`),
 /// and other verbatim (`\\?\...`) prefixes are NOT VerbatimDisk and stay
 /// rejected. The OS path parser handles slash/case variants for us.
-#[cfg(test)]
 pub(super) fn is_verbatim_disk_path(path: &std::path::Path) -> bool {
     use std::path::{Component, Prefix};
     matches!(
         path.components().next(),
         Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::VerbatimDisk(_))
     )
+}
+
+/// Rewrite a VERBATIM DISK path `\\?\X:\…` into its ordinary `X:\…` spelling,
+/// leaving every other shape byte-identical.
+///
+/// This exists for one caller: `lpCurrentDirectory`. `std::fs::canonicalize`
+/// returns the verbatim form for EVERY local path on Windows, so any cwd that
+/// has been canonicalized anywhere upstream arrives here as `\\?\C:\…`. The
+/// Win32 command processor classifies a leading `\\` as UNC, refuses to make it
+/// current ("CMD does not support UNC paths as current directories"), and
+/// silently substitutes `%SystemRoot%` — so the child runs in `C:\Windows`
+/// instead of the directory the caller asked for, with no error anywhere.
+///
+/// **This does not widen the sandbox.** `\\?\C:\a` and `C:\a` name the same
+/// filesystem object; the AppContainer allow/deny ACEs are applied to the
+/// object, not to the spelling, so the child's reachable set is unchanged. The
+/// only thing that changes is whether the OS honours the cwd or discards it.
+///
+/// Deliberately NOT applied to verbatim-UNC (`\\?\UNC\…`), device (`\\.\…`) or
+/// plain UNC (`\\server\share`) paths: those are genuinely remote/device and
+/// stripping their prefix would change which object is named.
+///
+/// (Note the MAX_PATH question is moot: a Win32 process working directory is
+/// MAX_PATH-limited whichever spelling is passed to `lpCurrentDirectory`, so
+/// this is not a long-path regression.)
+pub(super) fn strip_verbatim_disk_prefix(path: &std::path::Path) -> std::borrow::Cow<'_, OsStr> {
+    use std::borrow::Cow;
+    if !is_verbatim_disk_path(path) {
+        return Cow::Borrowed(path.as_os_str());
+    }
+    // Only reached for VerbatimDisk, whose prefix is by construction the four
+    // ASCII UTF-16 units `\`, `\`, `?`, `\` followed by a drive letter.
+    // Dropping exactly four units is therefore exact even when the tail is not
+    // valid Unicode: no surrogate pair can straddle an ASCII boundary, so this
+    // cannot mangle a lone-surrogate filename the way a `to_str()` round-trip
+    // would (that path would silently return the unstripped original).
+    let stripped: Vec<u16> = path.as_os_str().encode_wide().skip(4).collect();
+    Cow::Owned(std::ffi::OsString::from_wide(&stripped))
 }
 
 /// Resolve a program reference into an absolute UTF-16 path suitable for
