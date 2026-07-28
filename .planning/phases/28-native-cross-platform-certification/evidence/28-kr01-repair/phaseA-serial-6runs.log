@@ -1,0 +1,207 @@
+﻿REPEAT_A_START 2026-07-28T18:49:24.9363564+07:00
+HEAD=ceae23b457d3a7fb5af6860e351bebd26557f67c
+===== RUN 1 (35.2s busy=32 profiles=564) =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 1.51s
+At C:\wl-kr01\out\RepeatA.ps1:17 char:8
++   $o = & $cargo test -p wcore-sandbox --test live_integrity -- --igno ...
++        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 1.51s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+
+running 5 tests
+test live_cmd_builtin_runs_under_hardened_sandbox ... ok
+test live_cmd_runs_when_allowlist_has_missing_path ... FAILED
+test live_future_drop_reaps_descendant_job_tree ... ok
+test live_lsa_dependent_tool_fails_under_hardened_sandbox ... ok
+test live_runaway_command_is_bounded_by_timeout ... ok
+
+failures:
+
+---- live_cmd_runs_when_allowlist_has_missing_path stdout ----
+
+thread 'live_cmd_runs_when_allowlist_has_missing_path' (23220) panicked at crates\wcore-sandbox\tests\live_integrity.rs:210:10:
+AppContainer spawn must succeed despite a non-existent allowlist path: Timeout
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    live_cmd_runs_when_allowlist_has_missing_path
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 32.57s
+
+error: test failed, to rerun pass `-p wcore-sandbox --test live_integrity`
+
+===== RUN 2 (32.01s busy=4 profiles=564) =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+At C:\wl-kr01\out\RepeatA.ps1:17 char:8
++   $o = & $cargo test -p wcore-sandbox --test live_integrity -- --igno ...
++        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.23s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+
+running 5 tests
+test live_cmd_builtin_runs_under_hardened_sandbox ... ok
+test live_cmd_runs_when_allowlist_has_missing_path ... FAILED
+test live_future_drop_reaps_descendant_job_tree ... ok
+test live_lsa_dependent_tool_fails_under_hardened_sandbox ... ok
+test live_runaway_command_is_bounded_by_timeout ... ok
+
+failures:
+
+---- live_cmd_runs_when_allowlist_has_missing_path stdout ----
+
+thread 'live_cmd_runs_when_allowlist_has_missing_path' (42068) panicked at crates\wcore-sandbox\tests\live_integrity.rs:210:10:
+AppContainer spawn must succeed despite a non-existent allowlist path: Timeout
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    live_cmd_runs_when_allowlist_has_missing_path
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 31.70s
+
+error: test failed, to rerun pass `-p wcore-sandbox --test live_integrity`
+
+===== RUN 3 (130.42s busy=4 profiles=564) =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+At C:\wl-kr01\out\RepeatA.ps1:17 char:8
++   $o = & $cargo test -p wcore-sandbox --test live_integrity -- --igno ...
++        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.22s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+
+running 5 tests
+test live_cmd_builtin_runs_under_hardened_sandbox ... ok
+test live_cmd_runs_when_allowlist_has_missing_path ... FAILED
+test live_future_drop_reaps_descendant_job_tree ... ok
+test live_lsa_dependent_tool_fails_under_hardened_sandbox ... ok
+test live_runaway_command_is_bounded_by_timeout ... ok
+
+failures:
+
+---- live_cmd_runs_when_allowlist_has_missing_path stdout ----
+
+thread 'live_cmd_runs_when_allowlist_has_missing_path' (28956) panicked at crates\wcore-sandbox\tests\live_integrity.rs:210:10:
+AppContainer spawn must succeed despite a non-existent allowlist path: Timeout
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    live_cmd_runs_when_allowlist_has_missing_path
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 130.09s
+
+error: test failed, to rerun pass `-p wcore-sandbox --test live_integrity`
+
+===== RUN 4 (34.74s busy=9 profiles=564) =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+At C:\wl-kr01\out\RepeatA.ps1:17 char:8
++   $o = & $cargo test -p wcore-sandbox --test live_integrity -- --igno ...
++        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.25s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+
+running 5 tests
+test live_cmd_builtin_runs_under_hardened_sandbox ... ok
+test live_cmd_runs_when_allowlist_has_missing_path ... FAILED
+test live_future_drop_reaps_descendant_job_tree ... ok
+test live_lsa_dependent_tool_fails_under_hardened_sandbox ... ok
+test live_runaway_command_is_bounded_by_timeout ... ok
+
+failures:
+
+---- live_cmd_runs_when_allowlist_has_missing_path stdout ----
+
+thread 'live_cmd_runs_when_allowlist_has_missing_path' (10816) panicked at crates\wcore-sandbox\tests\live_integrity.rs:210:10:
+AppContainer spawn must succeed despite a non-existent allowlist path: Timeout
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    live_cmd_runs_when_allowlist_has_missing_path
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 34.41s
+
+error: test failed, to rerun pass `-p wcore-sandbox --test live_integrity`
+
+===== RUN 5 (32.9s busy=5 profiles=564) =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+At C:\wl-kr01\out\RepeatA.ps1:17 char:8
++   $o = & $cargo test -p wcore-sandbox --test live_integrity -- --igno ...
++        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.23s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+
+running 5 tests
+test live_cmd_builtin_runs_under_hardened_sandbox ... ok
+test live_cmd_runs_when_allowlist_has_missing_path ... FAILED
+test live_future_drop_reaps_descendant_job_tree ... ok
+test live_lsa_dependent_tool_fails_under_hardened_sandbox ... ok
+test live_runaway_command_is_bounded_by_timeout ... ok
+
+failures:
+
+---- live_cmd_runs_when_allowlist_has_missing_path stdout ----
+
+thread 'live_cmd_runs_when_allowlist_has_missing_path' (46320) panicked at crates\wcore-sandbox\tests\live_integrity.rs:210:10:
+AppContainer spawn must succeed despite a non-existent allowlist path: Timeout
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    live_cmd_runs_when_allowlist_has_missing_path
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 32.59s
+
+error: test failed, to rerun pass `-p wcore-sandbox --test live_integrity`
+
+===== RUN 6 (33.26s busy=5 profiles=564) =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+At C:\wl-kr01\out\RepeatA.ps1:17 char:8
++   $o = & $cargo test -p wcore-sandbox --test live_integrity -- --igno ...
++        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.25s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+
+running 5 tests
+test live_cmd_builtin_runs_under_hardened_sandbox ... ok
+test live_cmd_runs_when_allowlist_has_missing_path ... FAILED
+test live_future_drop_reaps_descendant_job_tree ... ok
+test live_lsa_dependent_tool_fails_under_hardened_sandbox ... ok
+test live_runaway_command_is_bounded_by_timeout ... ok
+
+failures:
+
+---- live_cmd_runs_when_allowlist_has_missing_path stdout ----
+
+thread 'live_cmd_runs_when_allowlist_has_missing_path' (34844) panicked at crates\wcore-sandbox\tests\live_integrity.rs:210:10:
+AppContainer spawn must succeed despite a non-existent allowlist path: Timeout
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    live_cmd_runs_when_allowlist_has_missing_path
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 32.94s
+
+error: test failed, to rerun pass `-p wcore-sandbox --test live_integrity`
+
+REPEAT_A_END 2026-07-28T18:54:42.3738517+07:00

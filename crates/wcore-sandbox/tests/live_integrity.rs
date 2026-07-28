@@ -37,11 +37,59 @@ use wcore_sandbox::backends::SandboxBackend;
 use wcore_sandbox::backends::appcontainer::AppContainerBackend;
 use wcore_sandbox::{SandboxCommand, SandboxManifest};
 
-#[tokio::test(flavor = "current_thread")]
-async fn live_lsa_dependent_tool_fails_under_hardened_sandbox() {
-    if std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").is_err() {
+mod common;
+use common::{
+    capture_alive_descendant_pids, cmd_script, descendant_hold, inline_hold, live_descendant_count,
+    reap_stray_descendants, require_live_windows, surviving_captured_descendant_pids, wait_until,
+};
+
+/// Number of live acceptance cases in this binary, excluding the guard itself.
+/// Kept in lockstep with the `#[ignore]`d tests so a silently-dropped case is a
+/// failure rather than a quietly smaller proof.
+const LIVE_INTEGRITY_CASES: usize = 5;
+
+/// F-WR-02 guard. This binary's acceptance cases are `#[ignore]`d, so the
+/// obvious command — `cargo test -p wcore-sandbox --test live_integrity` —
+/// executes NONE of them and still exits 0. Worse, before this change the cases
+/// were not `#[ignore]`d at all but returned early when
+/// `WAYLAND_SANDBOX_LIVE_WINDOWS` was unset, so that command printed
+/// `5 passed` — an affirmative green for zero work, which is strictly harder to
+/// notice than `0 passed; 12 ignored`.
+///
+/// This test is deliberately NOT `#[ignore]`d, so it always runs. It fires only
+/// when the caller has declared live intent by setting the env var while asking
+/// for a run that cannot execute the ignored cases — i.e. exactly the case where
+/// a green would be read as certification. It is skipped under nextest, whose
+/// `--run-ignored`/`--no-tests=fail` handling covers the same ground and which
+/// runs each test in its own process (so this one would not see `--ignored`).
+///
+/// Falsifiable: set `WAYLAND_SANDBOX_LIVE_WINDOWS=1` and run this binary without
+/// `-- --ignored` and it FAILS. Add `-- --ignored` and it passes and the real
+/// cases run.
+#[test]
+fn live_acceptance_run_must_not_report_success_on_zero_tests() {
+    assert_eq!(LIVE_INTEGRITY_CASES, 5);
+    if std::env::var_os("NEXTEST").is_some() {
         return;
     }
+    if std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").as_deref() != Ok("1") {
+        return;
+    }
+    let asked_for_ignored = std::env::args().any(|a| a == "--ignored" || a == "--include-ignored");
+    assert!(
+        asked_for_ignored,
+        "WAYLAND_SANDBOX_LIVE_WINDOWS=1 declares a live acceptance run, but this \
+         invocation cannot execute any of the {LIVE_INTEGRITY_CASES} acceptance cases \
+         — they are #[ignore]d and neither --ignored nor --include-ignored was passed. \
+         Exiting 0 here would certify nothing. Re-run with: \
+         cargo test -p wcore-sandbox --test live_integrity -- --ignored --test-threads=1"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "explicit native Windows AppContainer acceptance"]
+async fn live_lsa_dependent_tool_fails_under_hardened_sandbox() {
+    require_live_windows();
 
     let b = AppContainerBackend::new();
     let m = SandboxManifest {
@@ -88,10 +136,9 @@ async fn live_lsa_dependent_tool_fails_under_hardened_sandbox() {
 /// above — together they prove the sandbox is "tight enough to block
 /// LSA, loose enough to run a shell builtin."
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "explicit native Windows AppContainer acceptance"]
 async fn live_cmd_builtin_runs_under_hardened_sandbox() {
-    if std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").is_err() {
-        return;
-    }
+    require_live_windows();
 
     let b = AppContainerBackend::new();
     let m = SandboxManifest {
@@ -130,10 +177,9 @@ async fn live_cmd_builtin_runs_under_hardened_sandbox() {
 /// sandboxed `cmd` still runs end-to-end when the allowlist contains a
 /// non-existent path alongside a real one.
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "explicit native Windows AppContainer acceptance"]
 async fn live_cmd_runs_when_allowlist_has_missing_path() {
-    if std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").is_err() {
-        return;
-    }
+    require_live_windows();
 
     let real = std::env::temp_dir();
     let missing = std::path::PathBuf::from(r"C:\__wcore_absent_cache__\.npm");
@@ -181,10 +227,9 @@ async fn live_cmd_runs_when_allowlist_has_missing_path() {
 /// a helper it spawned, e.g. a console host) is still alive — otherwise the call
 /// hangs far past the timeout (the 120s "command timed out, no output" symptom).
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "explicit native Windows AppContainer acceptance"]
 async fn live_runaway_command_is_bounded_by_timeout() {
-    if std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").is_err() {
-        return;
-    }
+    require_live_windows();
 
     let b = AppContainerBackend::new();
     let m = SandboxManifest {
@@ -217,89 +262,119 @@ async fn live_runaway_command_is_bounded_by_timeout() {
     );
 }
 
-/// Dropping the async execution future is the session-cancellation path. The
-/// nested `cmd.exe` is a real descendant, so a direct-child kill would leave
-/// its heartbeat advancing after this future is dropped.
-#[tokio::test(flavor = "current_thread")]
+/// Dropping the async execution future is the session-cancellation path: the
+/// whole descendant tree must be reaped, not just the direct child.
+///
+/// # Why this test was rebuilt (F-WR-01)
+///
+/// The original construction could not reach this assertion, and had not been
+/// able to since the commit that introduced it (`2b662fe8`, which added both the
+/// reap fix AND this test). It wrote a `.cmd` heartbeat script under `%PUBLIC%`,
+/// granted itself the directory, set `cwd` to it, and executed the script
+/// through a NESTED `cmd.exe /d /c cmd.exe /d /c <script>`. Measured on real
+/// hardware, that shape returns exit 1 / `Access is denied.` in ~2.7s — the
+/// nested spawn is refused — so no descendant was ever created, `heartbeat.txt`
+/// was never written, and the run aborted at the "exited before cancellation"
+/// arm. `rc=101` read exactly like "the reap is broken"; only the wall clock
+/// (0.53s against a body that sleeps 10+2+2s) revealed that the body had not
+/// run. A landed fix therefore carried its own acceptance test as a red for two
+/// weeks, and that red was attributed to the defect the fix had closed.
+///
+/// Two independent construction faults, both since proven by measurement:
+///   1. `choice.exe` — the heartbeat's only sleep primitive — exits in <80ms
+///      under the Low-IL AppContainer restricted token (console/DLL deps fail to
+///      load), so the loop could never have held even had it started. A bare
+///      `for /L` cmd BUILTIN is the only primitive that holds here.
+///   2. The descendant must be detached with `start "" /b`, the shape every
+///      PASSING descendant test on this platform uses, not a nested `/c`.
+///
+/// The witness was also weak: file length cannot distinguish "reaped" from
+/// "alive but starved past both sampling windows", and under competing load that
+/// bias runs toward a FALSE PASS. It is replaced by fixed-`ProcessId` liveness —
+/// the descendant's PID is captured WHILE it is provably alive, and the reap is
+/// asserted against those exact PIDs. `capture_alive_descendant_pids` panics if
+/// it never observes one, so a run that creates no descendant now FAILS as
+/// unmeasurable instead of aborting in setup or passing vacuously.
+///
+/// Requires serial execution within this binary (`--test-threads=1`, or nextest's
+/// process-per-test): `resolve_anchor_pid` fails closed on more than one
+/// concurrent anchor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "explicit native Windows AppContainer acceptance"]
 async fn live_future_drop_reaps_descendant_job_tree() {
-    if std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").is_err() {
-        return;
-    }
+    require_live_windows();
 
-    let public = std::env::var_os("PUBLIC").expect("PUBLIC must be set on Windows");
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock must follow Unix epoch")
-        .as_nanos();
-    let work = std::path::PathBuf::from(public)
-        .join(format!("wcore-job-cancel-{}-{unique}", std::process::id()));
-    std::fs::create_dir_all(&work).expect("create cancellation test directory");
-    let heartbeat = work.join("heartbeat.txt");
-    let script = work.join("heartbeat.cmd");
-    std::fs::write(
-        &script,
-        format!(
-            "@echo off\r\n:loop\r\necho x>>{}\r\nchoice.exe /t 1 /d y /n >nul\r\ngoto loop\r\n",
-            heartbeat.display()
-        ),
-    )
-    .expect("write descendant heartbeat script");
-    // The outer AppContainer process launches a second cmd process to execute
-    // the batch file. There are no nested shell metacharacters in this outer
-    // command, keeping the descendant relationship deterministic.
-    let command = format!("cmd.exe /d /c {}", script.display());
+    // The anchor detaches a `for /L` idler cmd.exe (a real descendant, child of
+    // the anchor) and then holds ITSELF alive with an inline `for /L`, so the
+    // execution future is still in flight when it is dropped below. The idler is
+    // asked to hold far longer than the anchor so that, absent job ownership, it
+    // would outlive the cancellation and stay observable.
+    let script = format!(
+        "start \"\" /b {idle} & {parent} & exit /b 0",
+        idle = descendant_hold(60),
+        parent = inline_hold(8),
+    );
     let manifest = SandboxManifest {
-        fs_read_allow: vec![work.clone()],
-        fs_write_allow: vec![work.clone()],
         timeout: Some(Duration::from_secs(60)),
         ..Default::default()
     };
-    let backend = AppContainerBackend::new();
 
+    let captured;
     {
-        let execution = backend.execute(
-            &manifest,
-            SandboxCommand {
-                argv: vec!["cmd.exe".into(), "/d".into(), "/c".into(), command],
-                cwd: Some(work.clone()),
-            },
-        );
+        let backend = AppContainerBackend::new();
+        let execution = backend.execute(&manifest, cmd_script(script));
         tokio::pin!(execution);
 
-        tokio::time::timeout(Duration::from_secs(10), async {
+        // Drive the execution future while observing the host, and REFUSE to
+        // proceed unless a descendant is genuinely seen alive. The future
+        // completing here means the anchor exited before we could cancel it —
+        // that is an unusable run, not a reap result.
+        let observed = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 tokio::select! {
                     result = &mut execution => {
-                        panic!("runaway descendant exited before cancellation: {result:?}");
+                        panic!(
+                            "anchor exited before cancellation could be applied, so the \
+                             future-drop path was never exercised: {result:?}"
+                        );
                     }
                     _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                        if std::fs::metadata(&heartbeat)
-                            .map(|meta| meta.len() > 0)
-                            .unwrap_or(false)
-                        {
+                        if tokio::task::block_in_place(live_descendant_count) >= 1 {
                             break;
                         }
                     }
                 }
             }
         })
-        .await
-        .expect("descendant must begin writing its heartbeat");
+        .await;
+        observed.expect("a detached descendant must be observed alive before cancellation");
+
+        // Capture by fixed ProcessId WHILE the anchor is alive. Panics if it
+        // cannot, so the post-drop check can never be vacuous.
+        captured = tokio::task::block_in_place(|| capture_alive_descendant_pids(1, 20));
+        println!("KR01_WITNESS_DESCENDANTS_ALIVE_BEFORE_DROP={captured:?}");
+
+        // Dropping `execution` here IS the session-cancellation path under test.
     }
 
-    // Allow one in-flight write to settle, then prove the descendant no longer
-    // advances. Before shared Job cancellation this file kept growing.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let settled = std::fs::metadata(&heartbeat)
-        .expect("heartbeat must remain readable")
-        .len();
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let final_len = std::fs::metadata(&heartbeat)
-        .expect("heartbeat must remain readable")
-        .len();
-    assert_eq!(
-        final_len, settled,
-        "descendant heartbeat advanced after execution future drop"
+    assert!(
+        !captured.is_empty(),
+        "descendant PID set was not captured — the reap check would be vacuous"
     );
-    std::fs::remove_dir_all(&work).expect("cancelled job must release test directory");
+
+    // The idler was asked to hold ~60s and the anchor only ~8s, so absent job
+    // ownership these exact PIDs would still be alive well past this deadline.
+    tokio::task::block_in_place(|| {
+        wait_until(
+            || surviving_captured_descendant_pids(&captured) == 0,
+            30,
+            "detached descendant reaped after execution future drop",
+        )
+    });
+    println!(
+        "KR01_WITNESS_SURVIVORS_AFTER_DROP={} of {}",
+        tokio::task::block_in_place(|| surviving_captured_descendant_pids(&captured)),
+        captured.len()
+    );
+    reap_stray_descendants();
 }

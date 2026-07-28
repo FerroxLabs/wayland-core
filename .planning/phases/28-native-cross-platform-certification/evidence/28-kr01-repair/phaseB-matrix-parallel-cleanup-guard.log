@@ -1,0 +1,497 @@
+﻿PHASEB_START 2026-07-28T18:57:05.6740188+07:00
+git.exe : From https://github.com/FerroxLabs/wayland-core
+At C:\wl-kr01\out\PhaseB.ps1:8 char:1
++ & git fetch --depth=1 origin lane/kr01-repair *>> $log
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (From https://gi...bs/wayland-core:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ * branch            lane/kr01-repair -> FETCH_HEAD
+ + ceae23b...8882305 lane/kr01-repair -> origin/lane/kr01-repair  (forced update)
+git.exe : Warning: you are leaving 1 commit behind, not connected to
+At C:\wl-kr01\out\PhaseB.ps1:9 char:1
++ & git checkout -f FETCH_HEAD *>> $log
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Warning: you ar...ot connected to:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+any of your branches:
+
+  ceae23b fix(F-WR-01): rebuild the KR-01 reap test on primitives that work
+
+If you want to keep it by creating a new branch, this may be a good time
+to do so with:
+
+ git branch <new-branch-name> ceae23b
+
+HEAD is now at 8882305 test(F-WR-01): print the descendant witness PIDs
+HEAD=888230522f6affb2a4abc87cde7984e34fcc1b82
+cargo.exe :    Compiling wcore-sandbox v0.12.25 (C:\wl-kr01\src\crates\wcore-sandbox)
+At C:\wl-kr01\out\PhaseB.ps1:12 char:1
++ & $cargo test -p wcore-sandbox --test live_integrity --no-run *>> $lo ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling wc...\wcore-sandbox):String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.92s
+  Executable tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+===== B0-parallel-dirty RUN 1 serial=False (25.54s busy=2 profiles=564) =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+At C:\wl-kr01\out\PhaseB.ps1:20 char:23
++ ...      { $o = & $cargo test -p wcore-sandbox --test live_integrity -- - ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.23s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+
+running 5 tests
+test live_cmd_builtin_runs_under_hardened_sandbox ... ok
+test live_lsa_dependent_tool_fails_under_hardened_sandbox ... ok
+test live_future_drop_reaps_descendant_job_tree ... FAILED
+test live_runaway_command_is_bounded_by_timeout ... FAILED
+test live_cmd_runs_when_allowlist_has_missing_path ... ok
+
+failures:
+
+---- live_future_drop_reaps_descendant_job_tree stdout ----
+
+thread 'live_future_drop_reaps_descendant_job_tree' (36092) panicked at crates\wcore-sandbox\tests\common\mod.rs:79:5:
+resolve_anchor_pid found 2 candidate anchors (cmd.exe children of pid 44108); the descendant scope would be ambiguous
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- live_runaway_command_is_bounded_by_timeout stdout ----
+
+thread 'live_runaway_command_is_bounded_by_timeout' (44184) panicked at crates\wcore-sandbox\tests\live_integrity.rs:255:5:
+runaway command must be bounded by the 3s timeout; took 9s (drain hung past timeout)
+
+
+failures:
+    live_future_drop_reaps_descendant_job_tree
+    live_runaway_command_is_bounded_by_timeout
+
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 1 filtered out; finished in 25.00s
+
+error: test failed, to rerun pass `-p wcore-sandbox --test live_integrity`
+
+===== B0-parallel-dirty RUN 2 serial=False (24.63s busy=4 profiles=564) =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+At C:\wl-kr01\out\PhaseB.ps1:20 char:23
++ ...      { $o = & $cargo test -p wcore-sandbox --test live_integrity -- - ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.22s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+
+running 5 tests
+test live_cmd_builtin_runs_under_hardened_sandbox ... ok
+test live_lsa_dependent_tool_fails_under_hardened_sandbox ... ok
+test live_future_drop_reaps_descendant_job_tree ... FAILED
+test live_runaway_command_is_bounded_by_timeout ... FAILED
+test live_cmd_runs_when_allowlist_has_missing_path ... ok
+
+failures:
+
+---- live_future_drop_reaps_descendant_job_tree stdout ----
+
+thread 'live_future_drop_reaps_descendant_job_tree' (17496) panicked at crates\wcore-sandbox\tests\common\mod.rs:79:5:
+resolve_anchor_pid found 2 candidate anchors (cmd.exe children of pid 33340); the descendant scope would be ambiguous
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- live_runaway_command_is_bounded_by_timeout stdout ----
+
+thread 'live_runaway_command_is_bounded_by_timeout' (11888) panicked at crates\wcore-sandbox\tests\live_integrity.rs:255:5:
+runaway command must be bounded by the 3s timeout; took 9s (drain hung past timeout)
+
+
+failures:
+    live_future_drop_reaps_descendant_job_tree
+    live_runaway_command_is_bounded_by_timeout
+
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 1 filtered out; finished in 24.34s
+
+error: test failed, to rerun pass `-p wcore-sandbox --test live_integrity`
+
+===== B0-parallel-dirty RUN 3 serial=False (22.97s busy=4 profiles=564) =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+At C:\wl-kr01\out\PhaseB.ps1:20 char:23
++ ...      { $o = & $cargo test -p wcore-sandbox --test live_integrity -- - ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.23s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+
+running 5 tests
+test live_cmd_builtin_runs_under_hardened_sandbox ... ok
+test live_lsa_dependent_tool_fails_under_hardened_sandbox ... ok
+test live_cmd_runs_when_allowlist_has_missing_path ... ok
+test live_future_drop_reaps_descendant_job_tree ... FAILED
+test live_runaway_command_is_bounded_by_timeout ... FAILED
+
+failures:
+
+---- live_future_drop_reaps_descendant_job_tree stdout ----
+
+thread 'live_future_drop_reaps_descendant_job_tree' (45892) panicked at crates\wcore-sandbox\tests\common\mod.rs:79:5:
+resolve_anchor_pid found 2 candidate anchors (cmd.exe children of pid 45992); the descendant scope would be ambiguous
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- live_runaway_command_is_bounded_by_timeout stdout ----
+
+thread 'live_runaway_command_is_bounded_by_timeout' (45504) panicked at crates\wcore-sandbox\tests\live_integrity.rs:255:5:
+runaway command must be bounded by the 3s timeout; took 18s (drain hung past timeout)
+
+
+failures:
+    live_future_drop_reaps_descendant_job_tree
+    live_runaway_command_is_bounded_by_timeout
+
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 1 filtered out; finished in 22.67s
+
+error: test failed, to rerun pass `-p wcore-sandbox --test live_integrity`
+
+CLEANUP_PROFILES_BEFORE=564
+CLEANUP_PROFILES_REMOVED=564 FAILED=0
+CLEANUP_WORKDIRS_BEFORE=68
+CLEANUP_WORKDIRS_REMOVED=68
+LEASES_REMAINING=0
+===== B1-serial-clean RUN 1 serial=True (31.19s busy=4 profiles=0) =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+At C:\wl-kr01\out\PhaseB.ps1:19 char:23
++ ... ial) { $o = & $cargo test -p wcore-sandbox --test live_integrity -- - ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.22s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+
+running 5 tests
+test live_cmd_builtin_runs_under_hardened_sandbox ... ok
+test live_cmd_runs_when_allowlist_has_missing_path ... FAILED
+test live_future_drop_reaps_descendant_job_tree ... ok
+test live_lsa_dependent_tool_fails_under_hardened_sandbox ... ok
+test live_runaway_command_is_bounded_by_timeout ... ok
+
+failures:
+
+---- live_cmd_runs_when_allowlist_has_missing_path stdout ----
+
+thread 'live_cmd_runs_when_allowlist_has_missing_path' (46220) panicked at crates\wcore-sandbox\tests\live_integrity.rs:210:10:
+AppContainer spawn must succeed despite a non-existent allowlist path: Timeout
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    live_cmd_runs_when_allowlist_has_missing_path
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 30.90s
+
+error: test failed, to rerun pass `-p wcore-sandbox --test live_integrity`
+
+===== B1-serial-clean RUN 2 serial=True (78.49s busy=4 profiles=0) =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+At C:\wl-kr01\out\PhaseB.ps1:19 char:23
++ ... ial) { $o = & $cargo test -p wcore-sandbox --test live_integrity -- - ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.22s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+
+running 5 tests
+test live_cmd_builtin_runs_under_hardened_sandbox ... ok
+test live_cmd_runs_when_allowlist_has_missing_path ... FAILED
+test live_future_drop_reaps_descendant_job_tree ... ok
+test live_lsa_dependent_tool_fails_under_hardened_sandbox ... ok
+test live_runaway_command_is_bounded_by_timeout ... ok
+
+failures:
+
+---- live_cmd_runs_when_allowlist_has_missing_path stdout ----
+
+thread 'live_cmd_runs_when_allowlist_has_missing_path' (42328) panicked at crates\wcore-sandbox\tests\live_integrity.rs:210:10:
+AppContainer spawn must succeed despite a non-existent allowlist path: Timeout
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    live_cmd_runs_when_allowlist_has_missing_path
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 78.21s
+
+error: test failed, to rerun pass `-p wcore-sandbox --test live_integrity`
+
+===== B1-serial-clean RUN 3 serial=True (40.64s busy=4 profiles=0) =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+At C:\wl-kr01\out\PhaseB.ps1:19 char:23
++ ... ial) { $o = & $cargo test -p wcore-sandbox --test live_integrity -- - ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.25s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+
+running 5 tests
+test live_cmd_builtin_runs_under_hardened_sandbox ... ok
+test live_cmd_runs_when_allowlist_has_missing_path ... FAILED
+test live_future_drop_reaps_descendant_job_tree ... ok
+test live_lsa_dependent_tool_fails_under_hardened_sandbox ... ok
+test live_runaway_command_is_bounded_by_timeout ... ok
+
+failures:
+
+---- live_cmd_runs_when_allowlist_has_missing_path stdout ----
+
+thread 'live_cmd_runs_when_allowlist_has_missing_path' (16428) panicked at crates\wcore-sandbox\tests\live_integrity.rs:210:10:
+AppContainer spawn must succeed despite a non-existent allowlist path: Timeout
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    live_cmd_runs_when_allowlist_has_missing_path
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 40.21s
+
+error: test failed, to rerun pass `-p wcore-sandbox --test live_integrity`
+
+===== B1-serial-clean RUN 4 serial=True (34.42s busy=4 profiles=0) =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.61s
+At C:\wl-kr01\out\PhaseB.ps1:19 char:23
++ ... ial) { $o = & $cargo test -p wcore-sandbox --test live_integrity -- - ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.61s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+
+running 5 tests
+test live_cmd_builtin_runs_under_hardened_sandbox ... ok
+test live_cmd_runs_when_allowlist_has_missing_path ... FAILED
+test live_future_drop_reaps_descendant_job_tree ... ok
+test live_lsa_dependent_tool_fails_under_hardened_sandbox ... ok
+test live_runaway_command_is_bounded_by_timeout ... ok
+
+failures:
+
+---- live_cmd_runs_when_allowlist_has_missing_path stdout ----
+
+thread 'live_cmd_runs_when_allowlist_has_missing_path' (15496) panicked at crates\wcore-sandbox\tests\live_integrity.rs:210:10:
+AppContainer spawn must succeed despite a non-existent allowlist path: Timeout
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    live_cmd_runs_when_allowlist_has_missing_path
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 33.63s
+
+error: test failed, to rerun pass `-p wcore-sandbox --test live_integrity`
+
+===== B2-parallel-clean RUN 1 serial=False (28.64s busy=4 profiles=0) =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+At C:\wl-kr01\out\PhaseB.ps1:20 char:23
++ ...      { $o = & $cargo test -p wcore-sandbox --test live_integrity -- - ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.24s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+
+running 5 tests
+test live_lsa_dependent_tool_fails_under_hardened_sandbox ... ok
+test live_cmd_builtin_runs_under_hardened_sandbox ... ok
+test live_future_drop_reaps_descendant_job_tree ... FAILED
+test live_runaway_command_is_bounded_by_timeout ... FAILED
+test live_cmd_runs_when_allowlist_has_missing_path ... FAILED
+
+failures:
+
+---- live_future_drop_reaps_descendant_job_tree stdout ----
+
+thread 'live_future_drop_reaps_descendant_job_tree' (19744) panicked at crates\wcore-sandbox\tests\common\mod.rs:79:5:
+resolve_anchor_pid found 2 candidate anchors (cmd.exe children of pid 37276); the descendant scope would be ambiguous
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- live_runaway_command_is_bounded_by_timeout stdout ----
+
+thread 'live_runaway_command_is_bounded_by_timeout' (9268) panicked at crates\wcore-sandbox\tests\live_integrity.rs:255:5:
+runaway command must be bounded by the 3s timeout; took 10s (drain hung past timeout)
+
+---- live_cmd_runs_when_allowlist_has_missing_path stdout ----
+
+thread 'live_cmd_runs_when_allowlist_has_missing_path' (39428) panicked at crates\wcore-sandbox\tests\live_integrity.rs:210:10:
+AppContainer spawn must succeed despite a non-existent allowlist path: Timeout
+
+
+failures:
+    live_cmd_runs_when_allowlist_has_missing_path
+    live_future_drop_reaps_descendant_job_tree
+    live_runaway_command_is_bounded_by_timeout
+
+test result: FAILED. 2 passed; 3 failed; 0 ignored; 0 measured; 1 filtered out; finished in 28.33s
+
+error: test failed, to rerun pass `-p wcore-sandbox --test live_integrity`
+
+===== B2-parallel-clean RUN 2 serial=False (26.4s busy=4 profiles=0) =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+At C:\wl-kr01\out\PhaseB.ps1:20 char:23
++ ...      { $o = & $cargo test -p wcore-sandbox --test live_integrity -- - ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.23s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+
+running 5 tests
+test live_lsa_dependent_tool_fails_under_hardened_sandbox ... ok
+test live_future_drop_reaps_descendant_job_tree ... FAILED
+test live_cmd_runs_when_allowlist_has_missing_path ... FAILED
+test live_cmd_builtin_runs_under_hardened_sandbox ... FAILED
+test live_runaway_command_is_bounded_by_timeout ... FAILED
+
+failures:
+
+---- live_future_drop_reaps_descendant_job_tree stdout ----
+
+thread 'live_future_drop_reaps_descendant_job_tree' (13188) panicked at crates\wcore-sandbox\tests\common\mod.rs:79:5:
+resolve_anchor_pid found 2 candidate anchors (cmd.exe children of pid 39228); the descendant scope would be ambiguous
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- live_cmd_runs_when_allowlist_has_missing_path stdout ----
+
+thread 'live_cmd_runs_when_allowlist_has_missing_path' (27988) panicked at crates\wcore-sandbox\tests\live_integrity.rs:210:10:
+AppContainer spawn must succeed despite a non-existent allowlist path: Timeout
+
+---- live_cmd_builtin_runs_under_hardened_sandbox stdout ----
+
+thread 'live_cmd_builtin_runs_under_hardened_sandbox' (45636) panicked at crates\wcore-sandbox\tests\live_integrity.rs:157:10:
+AppContainer cmd /c echo spawn failed: Timeout
+
+---- live_runaway_command_is_bounded_by_timeout stdout ----
+
+thread 'live_runaway_command_is_bounded_by_timeout' (44800) panicked at crates\wcore-sandbox\tests\live_integrity.rs:255:5:
+runaway command must be bounded by the 3s timeout; took 18s (drain hung past timeout)
+
+
+failures:
+    live_cmd_builtin_runs_under_hardened_sandbox
+    live_cmd_runs_when_allowlist_has_missing_path
+    live_future_drop_reaps_descendant_job_tree
+    live_runaway_command_is_bounded_by_timeout
+
+test result: FAILED. 1 passed; 4 failed; 0 ignored; 0 measured; 1 filtered out; finished in 26.10s
+
+error: test failed, to rerun pass `-p wcore-sandbox --test live_integrity`
+
+===== B2-parallel-clean RUN 3 serial=False (24.98s busy=4 profiles=1) =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+At C:\wl-kr01\out\PhaseB.ps1:20 char:23
++ ...      { $o = & $cargo test -p wcore-sandbox --test live_integrity -- - ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.23s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+
+running 5 tests
+test live_cmd_builtin_runs_under_hardened_sandbox ... ok
+test live_lsa_dependent_tool_fails_under_hardened_sandbox ... ok
+test live_future_drop_reaps_descendant_job_tree ... FAILED
+test live_cmd_runs_when_allowlist_has_missing_path ... ok
+test live_runaway_command_is_bounded_by_timeout ... FAILED
+
+failures:
+
+---- live_future_drop_reaps_descendant_job_tree stdout ----
+
+thread 'live_future_drop_reaps_descendant_job_tree' (40864) panicked at crates\wcore-sandbox\tests\common\mod.rs:79:5:
+resolve_anchor_pid found 2 candidate anchors (cmd.exe children of pid 19344); the descendant scope would be ambiguous
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- live_runaway_command_is_bounded_by_timeout stdout ----
+
+thread 'live_runaway_command_is_bounded_by_timeout' (17400) panicked at crates\wcore-sandbox\tests\live_integrity.rs:255:5:
+runaway command must be bounded by the 3s timeout; took 18s (drain hung past timeout)
+
+
+failures:
+    live_future_drop_reaps_descendant_job_tree
+    live_runaway_command_is_bounded_by_timeout
+
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 1 filtered out; finished in 24.68s
+
+error: test failed, to rerun pass `-p wcore-sandbox --test live_integrity`
+
+===== GUARD no-ignored, env SET (must FAIL) =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+At C:\wl-kr01\out\PhaseB.ps1:55 char:7
++ $g1 = & $cargo test -p wcore-sandbox --test live_integrity 2>&1 | Out ...
++       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.22s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+
+running 6 tests
+test live_cmd_builtin_runs_under_hardened_sandbox ... ignored, explicit native Windows AppContainer acceptance
+test live_cmd_runs_when_allowlist_has_missing_path ... ignored, explicit native Windows AppContainer acceptance
+test live_future_drop_reaps_descendant_job_tree ... ignored, explicit native Windows AppContainer acceptance
+test live_lsa_dependent_tool_fails_under_hardened_sandbox ... ignored, explicit native Windows AppContainer acceptance
+test live_runaway_command_is_bounded_by_timeout ... ignored, explicit native Windows AppContainer acceptance
+test live_acceptance_run_must_not_report_success_on_zero_tests ... FAILED
+
+failures:
+
+---- live_acceptance_run_must_not_report_success_on_zero_tests stdout ----
+
+thread 'live_acceptance_run_must_not_report_success_on_zero_tests' (46700) panicked at crates\wcore-sandbox\tests\live_integrity.rs:79:5:
+WAYLAND_SANDBOX_LIVE_WINDOWS=1 declares a live acceptance run, but this invocation cannot execute any of the 5 acceptance cases ΓÇö they are #[ignore]d and neither --ignored nor --include-ignored was passed. Exiting 0 here would certify nothing. Re-run with: cargo test -p wcore-sandbox --test live_integrity -- --ignored --test-threads=1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    live_acceptance_run_must_not_report_success_on_zero_tests
+
+test result: FAILED. 0 passed; 1 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p wcore-sandbox --test live_integrity`
+
+===== GUARD no-ignored, env UNSET (must PASS, honestly ignored) =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+At C:\wl-kr01\out\PhaseB.ps1:58 char:7
++ $g2 = & $cargo test -p wcore-sandbox --test live_integrity 2>&1 | Out ...
++       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.21s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+
+running 6 tests
+test live_cmd_builtin_runs_under_hardened_sandbox ... ignored, explicit native Windows AppContainer acceptance
+test live_cmd_runs_when_allowlist_has_missing_path ... ignored, explicit native Windows AppContainer acceptance
+test live_future_drop_reaps_descendant_job_tree ... ignored, explicit native Windows AppContainer acceptance
+test live_lsa_dependent_tool_fails_under_hardened_sandbox ... ignored, explicit native Windows AppContainer acceptance
+test live_runaway_command_is_bounded_by_timeout ... ignored, explicit native Windows AppContainer acceptance
+test live_acceptance_run_must_not_report_success_on_zero_tests ... ok
+
+test result: ok. 1 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+PHASEB_END 2026-07-28T19:02:50.4593711+07:00
