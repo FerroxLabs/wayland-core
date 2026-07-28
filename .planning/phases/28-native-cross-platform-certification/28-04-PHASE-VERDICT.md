@@ -376,3 +376,68 @@ phase can claim the Phase 28 acceptance gate passed.
 - **The acceptance rule was not softened.** A1, A2 and A3 are enforced as written, by two
   independent checkers.
 - **No fifth Phase 28 plan.** The phase is capped at four and this is the fourth.
+
+---
+
+# ADDENDUM — 2026-07-29 — `F-28-02-002` is FIXED, and a superseding receipt has been issued
+
+**Appended by lane `lane/28-receipt`. Nothing above this line has been altered.**
+
+The body of this verdict is left exactly as 28-04 wrote it. It was correct when written, and a
+later lane rewriting a prior plan's verdict in place is the specific hazard that made an
+independent adjudication lane necessary in the first place. What follows is what changed
+afterwards, recorded as an addition.
+
+## What changed
+
+`F-28-02-002` was repaired (`15821c03` + `3f3f93dc`) and then **independently adjudicated FIXED**
+by lane `28-adj`, which did not author the repair. The finding ledger and
+`evidence/28-04/findings.tsv` both read `FIXED`.
+
+The signed receipt did not, and could not: it was signed on 2026-07-28 over a ledger in which the
+finding was `OPEN`, and **a signed receipt is never edited**. Its signature is correct over what
+was true when it was made; rewriting it to follow the ledger would destroy the only property the
+signature provides.
+
+So the original receipt stands, byte-identical, and a **superseding receipt** has been issued
+beside it.
+
+| | Original | Superseding |
+|---|---|---|
+| file | `28-04-CERTIFICATION-RECEIPT.json` | `28-04-CERTIFICATION-RECEIPT-SUPERSEDING-001.json` |
+| `body_sha256` | `2037352cff1c2f2c8f8b35e59289ba73b514cd56977c8e22d599ed45e49e0fbb` | `8db1ef07600f644166b422956b13b4f9b5d75af5dc7d0822aa7a4a16746116fb` |
+| `key_id` | `phase-28-certification-2026-07-28` | `phase-28-certification-supersession-001-2026-07-29` |
+| `F-28-02-002` | `OPEN` | `FIXED` |
+| acceptance gate | `false` | **`true`** |
+
+Both verify under the Rust `CertificationVerifier`, each against its own recorded key, in the same
+run: `28 passed; 0 failed; 0 ignored; 0 filtered out` on `hetzner-dsm`.
+
+## Which lines above are superseded
+
+These read correctly as of 2026-07-28 and are superseded as of this addendum. **They are left in
+place deliberately** — the verdict is a record of what was concluded when, not a live dashboard:
+
+- **line 181** — `gate_passed=false, unresolved CRITICAL/HIGH = ["F-28-02-002"]`. Still the exact
+  output for the original receipt, and still printed by the test today. The superseding receipt
+  prints `gate_passed=true` in the same run.
+- **line 236** — `F-28-02-002 — HIGH — OPEN`. Now `FIXED`.
+- **line 281** — `F28-04 | Open`. Its second clause ("every finding resolved") is now met.
+- **line 308** — the strict ledger `--validate` "must fail with exactly one `F28L-002`". That
+  expectation belonged to the OPEN state; with no non-terminal row left it no longer applies.
+- **line 343** — "the one blocker: `F-28-02-002` is OPEN at HIGH". That blocker is cleared.
+
+## What has NOT changed, and must not be read as changed
+
+- **This is still not a seal, not a trust root, and not a release.** A superseding receipt is the
+  artifact most likely to be misread as a re-seal. It is not one. It confers no authority the
+  original lacked, and tagging, releasing, merging and issue closure remain reserved to Sean.
+- **Amendment A3 still binds, and three true claims are NOT "zero known defects".** The
+  adjudication itself opened two MEDIUM findings, `F-28-ADJ-001` and `F-28-ADJ-002`. Neither is a
+  row in `evidence/28-04/findings.tsv`, so neither is covered by any claim in either receipt. Both
+  are named explicitly in the superseding receipt's `posture` binding so that the accounting is
+  not silently improved by their absence. `F-28-ADJ-002` matters most to a reader of this section:
+  it is **the same permanent-wedge shape as `F-28-02-002`, surviving through a different door**
+  (a 0-byte lease `.toml` from a crash between create and write). `F-28-02-002` being FIXED does
+  **not** mean the wedge class is eliminated.
+- **The dissent recorded above stands.**

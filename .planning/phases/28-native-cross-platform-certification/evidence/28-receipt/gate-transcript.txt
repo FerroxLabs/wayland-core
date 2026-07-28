@@ -1,0 +1,38 @@
+# Gate transcript — lane/28-receipt — 2026-07-28T18:38:31Z
+
+All exit codes captured WITHOUT a pipeline (PIPESTATUS returns empty in this shell).
+
+## Python — f28-verify-bindings.py
+self-test                                   rc=0   0 failure(s)
+--verify   SUPERSEDING                      rc=0   OK
+--verify   ORIGINAL                         rc=1   REJECTED (4)  <-- the contradiction, machine-named
+--check-enumeration SUPERSEDING             rc=0   OK
+--check-enumeration ORIGINAL                rc=1   F28V-ENUM F-28-02-002.disposition receipt 'OPEN' vs ledger 'FIXED'
+--check-tamper-detection SUPERSEDING        rc=0   OK
+--check-tamper-detection ORIGINAL           rc=0   OK
+--check-verdict (with addendum)             rc=0   OK
+--check-requirements                        rc=0   OK
+
+## Python — f28-ledger.py
+--self-test                                 rc=0
+--validate  (strict, allow_open=False)      rc=0   63 findings OK   <-- was 1x F28L-002 while OPEN
+--check-a2                                  rc=0   63 findings OK
+--check-downgrades                          rc=0   63 findings OK
+
+## Rust — hetzner-dsm, cargo test -p wcore-eval-scenarios --test f28_receipt_contract
+BY FILE, never by filter. Executed count read back, not exit status.
+  28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+  (baseline was 26; the 2 new supersession tests are named in the log and ran)
+
+### non-vacuity — --nocapture proves the bodies executed, not early-returned
+  verified 63 findings, gate_passed=false, unresolved CRITICAL/HIGH = ["F-28-02-002"]
+  superseding receipt verified: 63 findings, gate_passed=true, supersedes 2037352cff1c... under phase-28-certification-2026-07-28
+
+### the gate can fail — surgical mutation, isolated
+  append ONE newline to 28-04-CERTIFICATION-RECEIPT.json (parsed body identical):
+    27 passed; 1 failed  -- only the_superseding_receipt_verifies_and_names_what_it_supersedes
+    'the bound digest of the superseded receipt disagrees with the file on disk'
+  restore -> 28 passed; 0 failed
+
+### tamper probe (probe-supersession-tamper.sh)
+  PASS -- 4 tampers rejected, 1 pristine control accepted
