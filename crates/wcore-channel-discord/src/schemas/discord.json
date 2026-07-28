@@ -26,6 +26,16 @@
       "minimum": 0,
       "default": 5000,
       "description": "Grace window (ms) after a heartbeat for the HEARTBEAT_ACK to arrive before the gateway connection is treated as dead."
+    },
+    "api_base_url": {
+      "type": "string",
+      "default": "https://discord.com",
+      "description": "Override the REST API base URL. Defaults to production Discord. Operator-owned, same trust level as credential_handle; not reachable from a message."
+    },
+    "gateway_url": {
+      "type": "string",
+      "default": "wss://gateway.discord.gg",
+      "description": "Override the Gateway WebSocket base URL. Defaults to production Discord. Discord needs this in addition to api_base_url because its inbound arrives over a WebSocket rather than by polling REST."
     }
   },
   "required": ["credential_handle"]
