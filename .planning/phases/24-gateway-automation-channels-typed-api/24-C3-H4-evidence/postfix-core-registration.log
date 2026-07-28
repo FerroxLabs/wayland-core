@@ -1,0 +1,7 @@
+[2m2026-07-28T17:56:19.564735Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24c3h4tg [3mplatform[0m[2m=[0mtelegram
+[gateway] channels registered=1
+[gateway] inbound: subscriber spawned, webhook host disabled policies=1
+[2m2026-07-28T17:56:21.359934Z[0m [32m INFO[0m headless cron handler: using the caller's ChannelManager; not registering or starting a second one
+[gateway] started pid=4099022 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+[2m2026-07-28T17:56:21.621932Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-28T17:56:21.844402Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24c3h4/guard1/B/home/cron

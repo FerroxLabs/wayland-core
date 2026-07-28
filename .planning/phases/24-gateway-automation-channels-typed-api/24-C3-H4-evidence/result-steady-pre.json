@@ -1,0 +1,65 @@
+{
+  "finding": "F24-C3-H4",
+  "binary": "/root/wl-24c3h4-prefix",
+  "binary_sha256": "402f7c70dbdf678eb9a07ed9aae000b1898f7e99dfee79dd5c91111df2149cf4",
+  "build_info": "wayland-core 0.12.25 (source 353a5f6e5b25fa622df2c50c17497b282f88d42f)",
+  "run_id": "51d2bf85",
+  "submitted_total": 6,
+  "preload": 0,
+  "live": 6,
+  "settle_ms": 45000,
+  "replied_total": 1,
+  "turns_total": 1,
+  "raw_replies_total": 1,
+  "instrument_fault": null,
+  "cron_requested": false,
+  "cron_text": null,
+  "cron_fires": null,
+  "lost_total": 5,
+  "lost": [
+    {
+      "token": "f24c3-h4-live-0-51d2bf85",
+      "phase": "live",
+      "update_id": 1
+    },
+    {
+      "token": "f24c3-h4-live-1-51d2bf85",
+      "phase": "live",
+      "update_id": 2
+    },
+    {
+      "token": "f24c3-h4-live-3-51d2bf85",
+      "phase": "live",
+      "update_id": 4
+    },
+    {
+      "token": "f24c3-h4-live-4-51d2bf85",
+      "phase": "live",
+      "update_id": 5
+    },
+    {
+      "token": "f24c3-h4-live-5-51d2bf85",
+      "phase": "live",
+      "update_id": 6
+    }
+  ],
+  "duplicated_total": 0,
+  "duplicated": [],
+  "max_concurrent_getupdates": 2,
+  "poll_total": 264,
+  "still_pending": [],
+  "replies": [
+    {
+      "seq": 209,
+      "chat_id": "770001",
+      "text": "F24C3\\-REPLY f24c3\\-h4\\-live\\-2\\-51d2bf85",
+      "at": "2026-07-28T18:17:19.696Z"
+    }
+  ],
+  "gateway_log_lines": [
+    "\u001b[2m2026-07-28T18:16:29.275958Z\u001b[0m \u001b[32m INFO\u001b[0m channel auto-registered \u001b[3mchannel\u001b[0m\u001b[2m=\u001b[0mf24c3h4tg \u001b[3mplatform\u001b[0m\u001b[2m=\u001b[0mtelegram",
+    "\u001b[2m2026-07-28T18:16:31.120355Z\u001b[0m \u001b[32m INFO\u001b[0m channel auto-registered \u001b[3mchannel\u001b[0m\u001b[2m=\u001b[0mf24c3h4tg \u001b[3mplatform\u001b[0m\u001b[2m=\u001b[0mtelegram",
+    "[gateway] channels registered=1",
+    "[gateway] inbound: subscriber spawned, webhook host disabled policies=1"
+  ]
+}

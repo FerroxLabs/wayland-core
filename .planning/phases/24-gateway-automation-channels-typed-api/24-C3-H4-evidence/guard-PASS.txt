@@ -1,0 +1,20 @@
+=== F24-C3-H4 gateway polling-race guard ===
+prefix  binary: /root/wl-24c3h4-prefix
+postfix binary: /root/wl-24c3h4-postfix
+prefix  sha256 402f7c70dbdf678eb9a07ed9aae000b1898f7e99dfee79dd5c91111df2149cf4
+postfix sha256 7a042868355c83851a9d397e5d1e62c563befba06809730feebb00bc4f93ce80
+--- leg A ---
+leg A driver rc=0
+F24C3H4 RACE submitted=8 turns=0 replied=0 lost=8 duplicated=0 max_concurrent_getupdates=2 polls=179 cron_fires=null instrument_fault=no
+--- leg B ---
+leg B driver rc=0
+F24C3H4 RACE submitted=8 turns=8 replied=8 lost=0 duplicated=0 max_concurrent_getupdates=1 polls=57 cron_fires=1 instrument_fault=no
+=== observations ===
+A prefix : pollers=2 submitted=8 turns=0 lost=8 raw_replies=0
+B postfix: pollers=1 submitted=8 turns=8 replied=8 lost=0 dup=0 cron_fires=1
+  ok A: the PRE-FIX gateway polled the one account with TWO managers
+  ok A: 8/8 inbound messages LOST, with 0 agent turns run
+  ok B: exactly ONE manager polled the account
+  ok B: 8 submitted, 8 turns, 8 replies, 0 lost, 0 duplicated
+  ok B: the cron schedule fired 1 time(s) through the SAME shared manager
+=== VERDICT: PASS ===

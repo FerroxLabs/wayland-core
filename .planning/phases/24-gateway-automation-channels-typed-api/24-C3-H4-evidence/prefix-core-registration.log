@@ -1,0 +1,6 @@
+[2m2026-07-28T17:54:42.088870Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24c3h4tg [3mplatform[0m[2m=[0mtelegram
+[2m2026-07-28T17:54:42.088922Z[0m [32m INFO[0m headless cron handler: channels auto-registered from ~/.wayland/channels [3mcount[0m[2m=[0m1
+[gateway] started pid=4066307 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+[2m2026-07-28T17:54:43.894915Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24c3h4tg [3mplatform[0m[2m=[0mtelegram
+[gateway] channels registered=1
+[gateway] inbound: subscriber spawned, webhook host disabled policies=1

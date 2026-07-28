@@ -1,0 +1,21 @@
+=== telegram rc=0
+test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+=== agentlib rc=101
+test result: FAILED. 2111 passed; 13 failed; 3 ignored; 0 measured; 0 filtered out; finished in 30.37s
+=== registry rc=0
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+=== channels rc=0
+test result: ok. 114 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.60s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+=== clilib rc=0
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1830 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 5.37s
+=== clippy rc=0
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 31s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+GATESRC=0
+GATESDONE

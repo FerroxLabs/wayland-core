@@ -1,0 +1,20 @@
+=== F24-C3-H4 gateway polling-race guard ===
+prefix  binary: /root/wl-24c3h4-prefix
+postfix binary: /root/wl-24c3h4-mutdeny
+prefix  sha256 402f7c70dbdf678eb9a07ed9aae000b1898f7e99dfee79dd5c91111df2149cf4
+postfix sha256 5f360e0a1a0ced02ad12dac7e240cd299dd77641c0abf3e18b9363c45f4aa897
+--- leg A ---
+leg A driver rc=0
+F24C3H4 RACE submitted=8 turns=0 replied=0 lost=8 duplicated=0 max_concurrent_getupdates=2 polls=179 cron_fires=null instrument_fault=no
+--- leg B ---
+leg B driver rc=0
+F24C3H4 RACE submitted=8 turns=0 replied=0 lost=8 duplicated=0 max_concurrent_getupdates=0 polls=0 cron_fires=0 instrument_fault=no
+=== observations ===
+A prefix : pollers=2 submitted=8 turns=0 lost=8 raw_replies=0
+B postfix: pollers=0 submitted=8 turns=0 replied=0 lost=8 dup=0 cron_fires=0
+  ok A: the PRE-FIX gateway polled the one account with TWO managers
+  ok A: 8/8 inbound messages LOST, with 0 agent turns run
+  !! B: the fixed gateway polled the account ZERO times. 'nothing starts' also satisfies 'no duplicate registration' — this is the universal-denial green, not a fix.
+  !! B: 8/8 inbound messages still lost after the fix
+  !! B: cron_fires=0. The cron handler no longer owns a manager; if the scheduler cannot reach a channel, this fix traded message loss for a dead scheduler.
+=== VERDICT: FAIL ===

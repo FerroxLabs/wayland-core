@@ -214,3 +214,71 @@ INCOMPLETE, never as loss. A loss claim now requires that NOTHING came back.
 - [x] fix written and compiled
 - [ ] guard re-run end to end with the corrected instrument (+ cron leg)
 - [ ] unit/integration gates
+
+---
+
+## T3 — the full matrix, the mutation, and the steady-state answer
+
+| Leg | Binary | Scenario | Pollers | Sub | Turns | Replied | Lost | Cron |
+|---|---|---|---|---|---|---|---|---|
+| A | pre `402f7c70` | 4 queued + 4 live @4s | **2** | 8 | 0 | 0 | **8** | — |
+| B | post `7a042868` | same, + a cron job | **1** | 8 | 8 | 8 | **0** | **1** |
+| M-DENY | mutant `5f360e0a` | same | **0** | 8 | 0 | 0 | 8 | 0 |
+| steady-pre | pre | 6 live after a 45s settle | **2** | 6 | 1 | 1 | **5** | — |
+| steady-post | post | same | **1** | 6 | 6 | 6 | **0** | — |
+
+Guard verdicts: `guard1` **PASS rc=0**; mutation `M-DENY` **FAIL rc=1**, tree
+restored `git diff --quiet` rc=0.
+
+### The steady-state leg is the one that decides the severity
+
+Legs A/B put every message inside the gateway's startup window, where the two
+managers start seconds apart. That alone would only have proved a startup
+artifact. `--settle-ms 45000` submits after both loops are established and
+long-polling: **5 of 6 lost, 1 turn**. So the loss is ONGOING, not a startup
+sweep. Its control — the same 45s settle against the fixed binary — is **6/6, 0
+lost**, which is what rules out "the adapter just stops working after 45s".
+
+### The mutation, and the branch it was built for
+
+M-DENY keeps the fix and changes `if registered_n > 0` to `if false`, so the
+gateway starts nothing. "No duplicate registration" is then trivially true. The
+guard fails it on the branch written for exactly this:
+
+```
+!! B: the fixed gateway polled the account ZERO times. 'nothing starts' also
+      satisfies 'no duplicate registration' — this is the universal-denial
+      green, not a fix.
+!! B: 8/8 inbound messages still lost after the fix
+!! B: cron_fires=0 ...
+=== VERDICT: FAIL ===
+```
+
+### `cargo test -p wcore-agent --lib` is not a trustworthy gate in parallel mode
+
+It reported 13 then 14 failures. All in `engine::` / `orchestration::` /
+`session::`, none near my diff, all of the form `session journal writer lease is
+already held at /tmp/...`. Three runs settle it:
+
+```
+HEAD, parallel   : 2110 passed; 14 failed
+HEAD, --test-threads=1 : 2124 passed; 0 failed   rc=0
+CONTROL (my cron.rs reverted to base), parallel : 2109 passed; 15 failed
+```
+
+The control fails MORE than HEAD, with a shifting, partly-different set. It is a
+pre-existing process-global-lease contention artifact in that suite, not a
+regression from this lane. Reported as a distinct open item, not folded into
+this finding.
+
+## Status
+
+- [x] source read
+- [x] double-start reproduced live (pollers 2 vs 1, measured externally)
+- [x] seam built, compiled, tested
+- [x] instrument built, self-proven, one real fault in it found and closed
+- [x] consumption race measured — startup window AND steady state, both with controls
+- [x] fix written, compiled, guarded, and mutation-proven
+- [x] positive proof — inbound arrives (8/8 turns + replies) AND cron fires (1)
+- [x] gates
+- [ ] SUMMARY
