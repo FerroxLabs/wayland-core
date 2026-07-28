@@ -7,9 +7,25 @@ writing session. Nothing here has been sent, and no GitHub action has been taken
 Evidence: `.planning/intel/CORE-254-MAINTAINER-PACKAGE.md`. Fixes re-authored on
 `lane/254-take` (`.planning/intel/CORE-254-TAKEN.md`).
 
-**Before posting, check** that `lane/254-take` has landed — the reply says two fixes were taken,
-and it should not be posted while that is still in flight or if either fix was dropped. Adjust
-the wording if the lane's outcome differed.
+**PRECONDITION CLEARED 2026-07-28.** `lane/254-take` landed and merged at `fcb52072`. Both
+fixes were taken as described, so the reply below is accurate as written and is ready to post
+unchanged.
+
+What actually landed, in case you want to speak to it:
+
+- **`%TEMP%` narrowing** — `scratch_dirs()` now takes a `WorkspaceTrust` and returns a bounded
+  dir. Three things beyond a literal re-author: keyed **by trust** (one shared name would have
+  created a trust-crossing writable dir *via the narrowing itself*), **fails closed** to an
+  empty grant rather than back to `%TEMP%`, and on unix the uid goes in the top component with
+  a symlink/ownership check, because `temp_dir()` there is world-writable `/tmp` and
+  `create_dir_all` follows symlinks.
+- **`\\?\` cwd strip** — `resolve_cwd()` extracted so the real `lpCurrentDirectory` buffer is
+  assertable; strips on the wide encoding rather than a `to_str()` round trip, so non-UTF-8
+  filenames stay byte-exact. **Live proof:** the un-fixed AppContainer child reported
+  `C:\WINDOWS`; the fixed one reported the requested directory.
+
+Both carry a red that was watched fail before the fix went in. `frankforges` is credited in
+both commit bodies in prose.
 
 ---
 
