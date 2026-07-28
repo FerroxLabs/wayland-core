@@ -34,6 +34,23 @@ IGNORE_ATTR = re.compile(r"^\s*#\[\s*ignore\b")
 FN = re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)")
 ENV_GATE = re.compile(r"\b(?:var|var_os)\s*\(\s*\"([A-Z0-9_]+)\"")
 
+# Flavour (d): a FILE-LEVEL inner attribute `#![cfg(...)]`. When the predicate
+# is false the binary contains zero tests, so `cargo test --test X` prints
+# `running 0 tests` / `test result: ok` and exits 0. It is invisible to the
+# attribute scan (there is no `#[ignore]`), to the env-gate scan (there is no
+# `env::var`) and to the filter sweep (the command names the binary correctly).
+#
+# Anchored to column 0: `#![cfg(...)]` is only file-scoped as an inner
+# attribute at the top of the file. An indented `#![...]` is inside a module
+# and does not blank the binary.
+FILE_CFG = re.compile(r"^#!\[cfg\((.+)\)\]")
+# A feature gate depends on how cargo was invoked, so it can silently blank a
+# binary on a host that could otherwise run it. A platform gate is a property
+# of the machine and blanking is correct there — but it still produces an
+# affirmative `ok` for zero work on the wrong platform, so both are reported
+# and kept in separate buckets.
+FEATURE_PRED = re.compile(r"\bfeature\s*=")
+
 
 def classify_file(path):
     """Return (total, ignored, names_ignored, names_live, env_gated_bodies)."""
@@ -73,6 +90,29 @@ def classify_file(path):
     return total, ignored, names_ignored, names_live, env_gated
 
 
+def file_level_cfg(path):
+    """Flavour (d) probe: return the file-level ``#![cfg(...)]`` predicate, or None.
+
+    Comment lines are skipped for the same reason ``classify_file`` skips them:
+    an earlier generator in this program matched ``#[ignore`` inside its own
+    doc-comment prose and reported documentation as code.
+    """
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("*"):
+            continue
+        m = FILE_CFG.match(line)
+        if m:
+            return m.group(1).split("]")[0].strip()
+        # Inner attributes must precede all items. The first non-comment,
+        # non-inner-attribute line ends the region where one can appear.
+        if not stripped.startswith("#!"):
+            return None
+    return None
+
+
 def test_binaries():
     for crate in sorted((ROOT / "crates").iterdir()):
         tests = crate / "tests"
@@ -105,9 +145,29 @@ def filtered_invocations():
 
 def main():
     flavour_a, some_ignored, flavour_b, clean = [], [], [], []
+    flavour_d_feature, flavour_d_platform = [], []
     for crate, f in test_binaries():
         total, ignored, ni, nl, env_gated = classify_file(f)
         rel = str(f.relative_to(ROOT))
+
+        # Flavour (d). Checked BEFORE the `total == 0` short-circuit below:
+        # that `continue` is exactly why the previous revision of this script
+        # could not see flavour (d) at all. A gated file still has test
+        # functions in its text, so `total` is non-zero here — what matters is
+        # that the compiler emits none of them when the predicate is false.
+        pred = file_level_cfg(f)
+        if pred is not None:
+            drec = {
+                "crate": crate,
+                "file": rel,
+                "predicate": pred,
+                "tests_blanked_when_false": total,
+            }
+            if FEATURE_PRED.search(pred):
+                flavour_d_feature.append(drec)
+            else:
+                flavour_d_platform.append(drec)
+
         if total == 0:
             continue
         rec = {
@@ -133,6 +193,10 @@ def main():
         "some_ignored_normal_excluded": [r["file"] for r in some_ignored],
         "some_ignored_count": len(some_ignored),
         "flavour_b_env_gated_candidates": flavour_b,
+        "flavour_d_file_level_feature_gate": flavour_d_feature,
+        "flavour_d_feature_count": len(flavour_d_feature),
+        "flavour_d_file_level_platform_gate": flavour_d_platform,
+        "flavour_d_platform_count": len(flavour_d_platform),
         "filtered_invocations": filtered_invocations(),
         "clean_count": len(clean),
     }
@@ -140,5 +204,102 @@ def main():
     return 0
 
 
+# ── Falsification ───────────────────────────────────────────────────────────
+# A detector nobody falsifies is the defect it hunts. The ancestor of this
+# script matched `#[ignore` inside its own doc-comment prose, so it reported
+# documentation as code and nobody noticed. `--self-test` writes a
+# known-POSITIVE and a known-NEGATIVE fixture and asserts the detector
+# SEPARATES them: it must flag the positive and must NOT flag the negative.
+# If it flags both, or neither, it is measuring nothing and this exits 1.
+
+SELF_TEST_CASES = [
+    # (name, source, expect_flagged, expect_bucket)
+    (
+        "positive_feature_gate",
+        '#![cfg(feature = "otlp")]\n\n#[test]\nfn a() {}\n',
+        True,
+        "feature",
+    ),
+    (
+        "positive_platform_gate",
+        '#![cfg(target_os = "macos")]\n\n#[test]\nfn a() {}\n',
+        True,
+        "platform",
+    ),
+    (
+        "positive_compound_gate",
+        '#![cfg(all(target_os = "linux", feature = "seccomp"))]\n\n#[test]\nfn a() {}\n',
+        True,
+        "feature",
+    ),
+    (
+        "positive_gate_below_doc_comment",
+        '//! A doc comment that mentions #![cfg(feature = "decoy")] in PROSE.\n'
+        '#![cfg(feature = "real")]\n\n#[test]\nfn a() {}\n',
+        True,
+        "feature",
+    ),
+    (
+        "negative_no_gate",
+        "#[test]\nfn a() {}\n",
+        False,
+        None,
+    ),
+    (
+        "negative_prose_only",
+        '//! This file DISCUSSES #![cfg(feature = "otlp")] but does not carry it.\n'
+        "\n#[test]\nfn a() {}\n",
+        False,
+        None,
+    ),
+    (
+        "negative_item_level_cfg",
+        '#[cfg(feature = "otlp")]\n#[test]\nfn a() {}\n',
+        False,
+        None,
+    ),
+    (
+        "negative_indented_inner_attr",
+        'mod m {\n    #![cfg(feature = "otlp")]\n}\n\n#[test]\nfn a() {}\n',
+        False,
+        None,
+    ),
+]
+
+
+def self_test():
+    import tempfile
+
+    failures = 0
+    with tempfile.TemporaryDirectory() as td:
+        tmp = pathlib.Path(td)
+        for name, src, expect_flagged, expect_bucket in SELF_TEST_CASES:
+            f = tmp / f"{name}.rs"
+            f.write_text(src, encoding="utf-8")
+            pred = file_level_cfg(f)
+            flagged = pred is not None
+            bucket = None
+            if flagged:
+                bucket = "feature" if FEATURE_PRED.search(pred) else "platform"
+            ok = flagged == expect_flagged and bucket == expect_bucket
+            if not ok:
+                failures += 1
+            print(
+                f"{'PASS' if ok else 'FAIL'}  {name:34s} "
+                f"flagged={flagged!s:5s} bucket={bucket!s:9s} "
+                f"expected flagged={expect_flagged!s:5s} bucket={expect_bucket!s}"
+            )
+    positives = sum(1 for c in SELF_TEST_CASES if c[2])
+    negatives = len(SELF_TEST_CASES) - positives
+    print(f"\n{positives} known-positive, {negatives} known-negative, {failures} mismatched")
+    if failures:
+        print("SELF-TEST FAILED: the detector does not separate positives from negatives")
+        return 1
+    print("SELF-TEST PASSED: detector separates known-positive from known-negative")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--self-test" in sys.argv[1:]:
+        sys.exit(self_test())
     sys.exit(main())
