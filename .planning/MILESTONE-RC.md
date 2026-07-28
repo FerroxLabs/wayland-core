@@ -132,3 +132,25 @@ restart-stable tokens and may then report `supports_outbound_idempotency` truthf
 
 **Not decided here, and not urgent:** whether to offer opt-in at-least-once per channel. It is
 cheap once the two adapters above are honest, and pointless before then.
+
+---
+
+## 8. New risk introduced 2026-07-29 — the public REST surface changed version
+
+`GET /openapi.json` now emits **OpenAPI 3.1.0**, not 3.0.3. This is a **side effect of a security
+fix** (the utoipa bump that removed RUSTSEC-2024-0370 from the lock), not a deliberate API change,
+and it was found by the lane driving the real binary rather than by review.
+
+**Why it needs a decision rather than a note.** The shape changed, not just the version string —
+measured live: **9 fields in 3.1's `type: [..., "null"]` form and 0 in 3.0's `nullable` form.** A
+strict 3.0 client will not read this document. **No fixture covers `/openapi.json`**, so nothing in
+CI would have caught it and nothing will catch the next one.
+
+**It must ride the same train as the Desktop digest re-pin.** Desktop is the primary consumer and
+`observation.rs:329` already makes a contract mismatch a hard error at `ready`; a REST surface that
+silently changes shape is the same failure with no gate in front of it.
+
+**Open question, not yet answered:** does any consumer actually parse this document strictly? If
+Desktop does not consume `/openapi.json` at all, this is free and should be recorded as free. If it
+does, we either pin the emitted version or co-release. **Nobody has checked** — and the pattern this
+week is that "no consumer" claims are wrong about as often as they are right.
