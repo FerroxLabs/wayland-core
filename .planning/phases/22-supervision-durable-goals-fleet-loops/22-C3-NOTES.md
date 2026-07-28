@@ -137,3 +137,87 @@ run doctests; they need `cargo test --doc -p wcore-agent` and the count read bac
 * `desktop_contract_corpus` is expected red — structural. Do NOT run
   `wcore-contract generate`.
 * Prove every gate can fail before trusting it.
+
+---
+
+## M4 — design revision after measuring the back door (committed before coding)
+
+Measured: `GoalKernel::terminate(goal_id, GoalTerminalState)` is called by three
+EXISTING test files (`goal_kernel_test.rs:237,325,369,378,479`,
+`goal_fleet_ledger_test.rs:599`, `multi_day_journey_test.rs:442`). Narrowing its
+signature would modify existing tests, which 22-02 Task 3 `<done>` forbids.
+
+So the back door is closed **durably in the reducer instead of by signature**:
+
+* New durable events `GoalLoopOwnerClaimed { goal_id, strategy, epoch }` and
+  `GoalLoopOwnerFinished { goal_id, epoch, terminal }`.
+* `GoalLoopOwnerFinished` releases the claim AND terminates in ONE event, so there
+  is no window between release and terminate for a racing plain terminate.
+* The reducer REFUSES a plain `GoalTerminated` while a loop-owner claim is live.
+* The reducer REFUSES a second `GoalLoopOwnerClaimed` while one is live — the
+  nesting refusal — and leaves the Goal non-terminal and resumable.
+
+Resulting property, stated exactly:
+
+> For a Goal that has claimed a loop owner — which is every Goal a strategy runs —
+> the canonical strategy transition is the ONLY route to a terminal state, refused
+> durably by the reducer. A Goal that never claims an owner can still be terminated
+> by hand, but by definition no engine ran it.
+
+`GoalState.loop_owner: Option<GoalLoopOwner>` carries
+`#[serde(default, skip_serializing_if = "Option::is_none")]` so 22-01's M1
+byte-identity property survives: a Goal with no claim serialises exactly as before.
+
+Measured blast radius of the Anvil subordination change: **every `ClimbOutcome { .. }`
+struct literal is inside `engine.rs`** (lines 584, 665, 688, 705 + the unit-test
+helper at 870). Zero test files construct one. So adding a field is contained.
+`grep -rn "ClimbOutcome {" crates --include='*.rs'` → 11 hits, all in engine.rs.
+
+### Anvil: the evidence gap I found, and the minimal subordination that closes it
+
+`stability_holds()` (engine.rs:603) computes the observed pass count and then
+**throws it away**, returning `bool`. `ClimbOutcome` therefore carries no stability
+evidence, and no honest `HostGateObservation` can be built from it — an adapter
+supplying `stability_repeats` would be paraphrasing, which is exactly what Test 6
+forbids.
+
+Minimal fix, inside `engine.rs` only: `stability_holds` returns the observed pass
+count; `check_keepable` builds a real `HostGateObservation` from the gate report's
+own `score()`/`total()`, the observed passes, and `params.gate_closure_digest`; and
+`ClimbOutcome` gains `gate_observation: Option<HostGateObservation>`, set ONLY on the
+keepable path and `None` at every other exit. The adapter then never constructs an
+observation — it forwards one the engine measured.
+
+### Terminal mapping, decided from the census (recorded so it can be argued with)
+
+| Engine outcome | Canonical terminal | Why |
+|---|---|---|
+| Direct completed | `NeedsEscalation` | Direct has NO verification owner. `SelfChecked` would claim self-generated checks ran; none did. Under-claim, never over-claim. |
+| Direct turn limit / context too long | `Exhausted{Resource}` | a resource envelope ran out |
+| Direct `UserAborted` / cancel | `Cancelled` | |
+| ForgeFlows `Ok` | `PartiallyCompleted{completed,failed}` from `StageResult::is_error` | lossless; makes no evidence claim |
+| ForgeFlows `SchemaValidationFailed` | `Exhausted{Quality, attempts}` | the census's headline distinction |
+| ForgeFlows `DispatchBudgetExceeded` | `Exhausted{Resource, attempted}` | the other half of it |
+| ForgeFlows `StageFailed{partial}` | `PartiallyCompleted` from the partial | the partial payload is not discarded |
+| ForgeFlows graph faults | `Blocked{reason}` | never started |
+| Fleet `Ok(shards)` | `PartiallyCompleted{Σsuccesses, Σfailures}` | bound at `ShardSummary`, NOT at the caller-chosen `T` (census §3 finding) |
+| Fleet `Timeout` | `TimedOut` | |
+| Fleet `Shard`/`Topology` | `Blocked{reason}` | |
+| Council `UnpriceableRoster` | `Unpriced{detail}` | the census's single most-cited need |
+| Council `OverBudget`/`DailyBudgetExhausted` | `Exhausted{Resource}` | |
+| Council `InsufficientProposals` | `Exhausted{Quality, got}` | |
+| Council `Council{outcome}` | `PartiallyCompleted{chosen_from, skipped}` | `skipped` survives — census §4 |
+| Council `Direct{..}` | `NeedsEscalation` | one model answer, no verification owner |
+| Anvil `TerminalState::Verified` + real observation clearing the bar | `Verified` | the ONLY route |
+| Anvil `Verified` whose observation does NOT clear the bar | `NeedsEscalation` | refusal, not a downgrade-but-still-verified |
+| Anvil other 9 states | 1:1 | the taxonomy was lifted from them |
+| Anvil `EngineError` | `Blocked{reason}` | aborted before terminal |
+
+**Two taxonomy gaps found and NOT papered over** (reported, not fixed — the task
+says the taxonomy is consumed, not extended):
+1. There is no "completed but unchecked" category. Direct is exactly that, and
+   `NeedsEscalation` is the least-wrong home for it.
+2. `PartiallyCompleted{completed:N, failed:0}` is the honest lossless encoding of a
+   clean Fleet/ForgeFlows/Council run, but the variant NAME reads as a partial
+   failure. The payload is exact; the name is not. Worth a rename or a
+   `Completed{unchecked}` variant in a later phase.
