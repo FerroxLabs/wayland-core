@@ -139,7 +139,14 @@ LEDGER_FIELDS = (
 )
 
 # Extra fields a fully-dispositioned ledger carries (plan 28-04). Optional here.
-LEDGER_OPTIONAL_FIELDS = ("owner", "backlog_id", "executable_check", "counter_evidence")
+LEDGER_OPTIONAL_FIELDS = (
+    "owner",
+    "backlog_id",
+    "executable_check",
+    "counter_evidence",
+    "origin",
+    "downgrade_review",
+)
 
 
 def parse_ledger(text: str) -> list[dict[str, str]]:
@@ -691,6 +698,8 @@ def _ledger_row(**over: str) -> str:
         "backlog_id": "BL-1",
         "executable_check": "cargo test x",
         "counter_evidence": "log.txt",
+        "origin": "matrix",
+        "downgrade_review": "",
     }
     base.update(over)
     names = list(LEDGER_FIELDS) + list(LEDGER_OPTIONAL_FIELDS)
@@ -1138,6 +1147,326 @@ def self_test() -> int:
 
 
 # --------------------------------------------------------------------------------------
+# Plan 28-04 acceptance checks (codes F28A-*)
+#
+# `--check-ledger` above proves a ledger obeys the contract's rules. These four prove the
+# things a ledger cannot prove about ITSELF:
+#   completeness  — against the upstream artifacts, in the direction that matters;
+#   A2            — that the named crossings are still crossings and still closed;
+#   downgrades    — that the one re-score direction with an incentive carries a review;
+#   backlog ids   — that a cited id is real rather than aspirational.
+# --------------------------------------------------------------------------------------
+
+SEVERITY_RANK = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+
+# The A2 crossings the 28-01 contract names. A ledger that drops one, or reopens its accept
+# path, has silently become c4-standing-with-paperwork — which is exactly what the dissent
+# warned a later reader to check for.
+NAMED_A2_CROSSINGS = ("KR-01", "KR-05")
+
+
+def _ids_from_json(value, out: set[str]) -> None:
+    """Collect every `id` that sits next to a finding-shaped record, at any depth.
+
+    Deliberately structural rather than keyed to one schema: the four upstream artifacts
+    have four different shapes, and a collector that only understood one of them would
+    report completeness while never having looked at the others.
+    """
+    if isinstance(value, dict):
+        if "id" in value and isinstance(value["id"], str):
+            siblings = set(value) & {
+                "p28_severity",
+                "disposition",
+                "contradicted_criterion",
+                "inherited_severity",
+                "severity",
+            }
+            if siblings:
+                out.add(value["id"])
+        for v in value.values():
+            _ids_from_json(v, out)
+    elif isinstance(value, list):
+        for v in value:
+            _ids_from_json(v, out)
+
+
+def upstream_finding_ids(path: Path) -> set[str]:
+    text = path.read_text(encoding="utf-8")
+    out: set[str] = set()
+    if path.suffix == ".json":
+        import json
+
+        _ids_from_json(json.loads(text), out)
+    else:
+        for row in parse_ledger(text):
+            if row.get("id"):
+                out.add(row["id"])
+    return out
+
+
+def check_completeness(
+    rows: list[dict[str, str]], upstream: list[tuple[Path, set[str]]]
+) -> list[Rejection]:
+    """Upstream -> ledger, and ONLY that direction.
+
+    A finding present in an upstream artifact and absent from the ledger is the failure
+    that makes the whole acceptance exercise pointless, so it is validated before anything
+    else. The reverse direction is deliberately NOT an error: plan 28-04 raises findings of
+    its own, and a ledger richer than its sources is not a defect.
+    """
+    have = {r.get("id", "") for r in rows}
+    out: list[Rejection] = []
+    for path, ids in upstream:
+        for fid in sorted(ids):
+            if fid not in have:
+                out.append(
+                    Rejection(
+                        "F28A-001",
+                        fid,
+                        f"present in {path.name} and ABSENT from the adjudicated ledger",
+                    )
+                )
+    return out
+
+
+def check_a2(rows: list[dict[str, str]]) -> list[Rejection]:
+    out: list[Rejection] = []
+    by_id = {r.get("id", ""): r for r in rows}
+    for row in rows:
+        where = f"{row.get('id') or '<no id>'} (line {row['_line']})"
+        contradicted = row.get("contradicted_criterion", "")
+        contradicts = contradicted not in ("", NONE)
+        if not contradicts:
+            continue
+        if row.get("disposition") in PAPER_DISPOSITIONS:
+            out.append(
+                Rejection(
+                    "F28A-002",
+                    where,
+                    f"{row['disposition']} while contradicting Success Criterion "
+                    f"{contradicted}; A2 closes accept and defer by construction",
+                )
+            )
+        if row.get("p28_severity") not in BLOCKING_SEVERITIES:
+            out.append(
+                Rejection(
+                    "F28A-003",
+                    where,
+                    f"contradicts Criterion {contradicted} but is scored "
+                    f"{row.get('p28_severity')!r}; a criterion-contradicting finding is "
+                    "CRITICAL or HIGH BY CONSTRUCTION",
+                )
+            )
+        if any(d in PAPER_DISPOSITIONS for d in row.get("available_dispositions", "").split(",")):
+            out.append(
+                Rejection(
+                    "F28A-002",
+                    where,
+                    "available_dispositions offers a paper path while contradicting "
+                    f"Criterion {contradicted}",
+                )
+            )
+    for required in NAMED_A2_CROSSINGS:
+        row = by_id.get(required)
+        if row is None:
+            out.append(
+                Rejection(
+                    "F28A-004",
+                    required,
+                    "the 28-01 contract names this as an A2 crossing and it is absent "
+                    "from the adjudicated ledger",
+                )
+            )
+            continue
+        if row.get("contradicted_criterion") in ("", NONE):
+            out.append(
+                Rejection(
+                    "F28A-004",
+                    required,
+                    "named by the contract as contradicting a Success Criterion, but its "
+                    "contradicted_criterion is none — A2 has been dropped",
+                )
+            )
+    return out
+
+
+def check_downgrades(rows: list[dict[str, str]]) -> list[Rejection]:
+    """A re-score DOWNWARD is the one move that opens a previously closed disposition.
+
+    An upward re-score needs no ceremony, so the ceremony sits exactly where the incentive
+    is. A downgrade must cite a recorded independent review; the comparison only runs when
+    the inherited label names one of the four bands, because a label like
+    `known-red/non-gating` has no rank to compare against and A1 already forbids using it.
+    """
+    out: list[Rejection] = []
+    for row in rows:
+        where = f"{row.get('id') or '<no id>'} (line {row['_line']})"
+        inherited = row.get("inherited_severity", "").strip().upper()
+        inherited_rank = SEVERITY_RANK.get(inherited)
+        current_rank = SEVERITY_RANK.get(row.get("p28_severity", "").strip().upper())
+        if inherited_rank is None or current_rank is None:
+            continue
+        if current_rank < inherited_rank and not row.get("downgrade_review", "").strip():
+            out.append(
+                Rejection(
+                    "F28A-005",
+                    where,
+                    f"re-scored DOWN from {inherited} to {row['p28_severity']} with no "
+                    "recorded independent review; a downgrade is the one direction that "
+                    "opens a closed disposition",
+                )
+            )
+    return out
+
+
+def check_backlog_ids(rows: list[dict[str, str]], backlog_text: str) -> list[Rejection]:
+    out: list[Rejection] = []
+    for row in rows:
+        where = f"{row.get('id') or '<no id>'} (line {row['_line']})"
+        if row.get("disposition") not in PAPER_DISPOSITIONS:
+            continue
+        bid = row.get("backlog_id", "").strip()
+        if not bid:
+            out.append(Rejection("F28A-006", where, "paper disposition with no backlog id"))
+            continue
+        if bid not in backlog_text:
+            out.append(
+                Rejection(
+                    "F28A-007",
+                    where,
+                    f"cites backlog id {bid!r}, which does not appear in BACKLOG.md; "
+                    "the id must be real rather than aspirational",
+                )
+            )
+        if not row.get("owner", "").strip():
+            out.append(Rejection("F28A-008", where, "paper disposition with no named owner"))
+    return out
+
+
+def acceptance_self_test() -> list[str]:
+    """Both directions for every F28A code. Returns the list of failures."""
+    failures: list[str] = []
+
+    def case(code: str, label: str, bad, good):
+        bad_codes = {r.code for r in bad}
+        good_codes = {r.code for r in good}
+        if code not in bad_codes:
+            failures.append(f"{code} ({label}): the BAD fixture did NOT trip it")
+        if code in good_codes:
+            failures.append(f"{code} ({label}): the GOOD fixture DID trip it")
+
+    def L(**over) -> list[dict[str, str]]:
+        base = dict(
+            id="F-X",
+            subject="s",
+            inherited_severity="-",
+            p28_severity="MEDIUM",
+            contradicted_criterion="-",
+            available_dispositions="FIXED,DISPROVED,ACCEPTED,DEFERRED",
+            disposition="DEFERRED",
+            rationale="r",
+            owner="an owner",
+            backlog_id="BL-REAL",
+            executable_check="",
+            counter_evidence="",
+            origin="matrix",
+            downgrade_review="",
+            _line="1",
+            _ncells="14",
+        )
+        base.update(over)
+        return [base]
+
+    tmp = Path("/dev/null")
+    case(
+        "F28A-001",
+        "an upstream finding never reaches the ledger",
+        check_completeness(L(), [(tmp, {"F-MISSING"})]),
+        check_completeness(L(), [(tmp, {"F-X"})]),
+    )
+    case(
+        "F28A-002",
+        "a criterion-contradicting finding takes the accept path",
+        check_a2(
+            L(id="KR-01", contradicted_criterion="2", p28_severity="HIGH",
+              available_dispositions="FIXED,DISPROVED", disposition="ACCEPTED")
+            + L(id="KR-05", contradicted_criterion="1", p28_severity="CRITICAL",
+                available_dispositions="FIXED,DISPROVED", disposition="FIXED")
+        ),
+        check_a2(
+            L(id="KR-01", contradicted_criterion="2", p28_severity="HIGH",
+              available_dispositions="FIXED,DISPROVED", disposition="DISPROVED")
+            + L(id="KR-05", contradicted_criterion="1", p28_severity="CRITICAL",
+                available_dispositions="FIXED,DISPROVED", disposition="FIXED")
+        ),
+    )
+    case(
+        "F28A-003",
+        "a criterion-contradicting finding scored below HIGH",
+        check_a2(
+            L(id="KR-01", contradicted_criterion="2", p28_severity="MEDIUM",
+              available_dispositions="FIXED,DISPROVED", disposition="FIXED")
+            + L(id="KR-05", contradicted_criterion="1", p28_severity="CRITICAL",
+                available_dispositions="FIXED,DISPROVED", disposition="FIXED")
+        ),
+        check_a2(
+            L(id="KR-01", contradicted_criterion="2", p28_severity="HIGH",
+              available_dispositions="FIXED,DISPROVED", disposition="FIXED")
+            + L(id="KR-05", contradicted_criterion="1", p28_severity="CRITICAL",
+                available_dispositions="FIXED,DISPROVED", disposition="FIXED")
+        ),
+    )
+    case(
+        "F28A-004",
+        "a named A2 crossing is missing from the ledger",
+        check_a2(L(id="KR-01", contradicted_criterion="2", p28_severity="HIGH",
+                   available_dispositions="FIXED,DISPROVED", disposition="FIXED")),
+        check_a2(
+            L(id="KR-01", contradicted_criterion="2", p28_severity="HIGH",
+              available_dispositions="FIXED,DISPROVED", disposition="FIXED")
+            + L(id="KR-05", contradicted_criterion="1", p28_severity="CRITICAL",
+                available_dispositions="FIXED,DISPROVED", disposition="FIXED")
+        ),
+    )
+    case(
+        "F28A-005",
+        "a downgrade with no recorded independent review",
+        check_downgrades(L(inherited_severity="HIGH", p28_severity="MEDIUM")),
+        check_downgrades(
+            L(inherited_severity="HIGH", p28_severity="MEDIUM",
+              downgrade_review="4-way panel, recorded at ...")
+        ),
+    )
+    # An UPWARD re-score must NOT need a review — the ceremony belongs only where the
+    # incentive is, and a rule that fired both ways would just be noise.
+    if check_downgrades(L(inherited_severity="LOW", p28_severity="CRITICAL")):
+        failures.append("F28A-005: an UPWARD re-score wrongly required a review")
+    case(
+        "F28A-006",
+        "a paper disposition with no backlog id",
+        check_backlog_ids(L(backlog_id=""), "BL-REAL"),
+        check_backlog_ids(L(), "BL-REAL"),
+    )
+    case(
+        "F28A-007",
+        "a backlog id that does not exist in BACKLOG.md",
+        check_backlog_ids(L(backlog_id="BL-INVENTED"), "BL-REAL"),
+        check_backlog_ids(L(), "BL-REAL"),
+    )
+    case(
+        "F28A-008",
+        "a paper disposition with no named owner",
+        check_backlog_ids(L(owner=""), "BL-REAL"),
+        check_backlog_ids(L(), "BL-REAL"),
+    )
+    # A FIXED/DISPROVED row needs neither owner nor backlog id, so the backlog rule must
+    # not fire on one.
+    if check_backlog_ids(L(disposition="FIXED", owner="", backlog_id=""), "BL-REAL"):
+        failures.append("F28A-006/7/8: fired on a repair-path row, which carries no backlog id")
+    return failures
+
+
+# --------------------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------------------
 
@@ -1168,6 +1497,12 @@ def main(argv: list[str]) -> int:
     g.add_argument("--check-ledger", metavar="ledger.tsv")
     g.add_argument("--check-matrix", metavar="matrix.tsv")
     g.add_argument("--check-no-uncontrolled-skips", metavar="matrix.tsv")
+    # Plan 28-04 acceptance gates.
+    g.add_argument("--validate", metavar="findings.tsv")
+    g.add_argument("--check-completeness", nargs="+", metavar="FILE")
+    g.add_argument("--check-a2", metavar="findings.tsv")
+    g.add_argument("--check-downgrades", metavar="findings.tsv")
+    g.add_argument("--check-backlog-ids", nargs=2, metavar=("findings.tsv", "BACKLOG.md"))
     ap.add_argument(
         "--allow-open",
         action="store_true",
@@ -1176,12 +1511,65 @@ def main(argv: list[str]) -> int:
     args = ap.parse_args(argv)
 
     if args.self_test:
-        return self_test()
+        rc = self_test()
+        failures = acceptance_self_test()
+        print(f"acceptance self-test: {len(failures)} failure(s)")
+        for f in failures:
+            print(f"  FAIL {f}")
+        if failures:
+            return 1
+        print("acceptance self-test: every F28A code tripped by a bad fixture and NOT by a")
+        print("                      good one, and neither an upward re-score nor a repair")
+        print("                      row was wrongly caught.")
+        return rc
+
+    # -- plan 28-04 acceptance gates ------------------------------------------------------
+    if args.check_completeness:
+        paths = [Path(p) for p in args.check_completeness]
+        for p in paths:
+            if not p.is_file():
+                print(f"F28C-000  input not found: {p}", file=sys.stderr)
+                return 2
+        rows = parse_ledger(paths[0].read_text(encoding="utf-8"))
+        if not rows:
+            print("F28C-000  ledger has no rows", file=sys.stderr)
+            return 2
+        upstream = [(p, upstream_finding_ids(p)) for p in paths[1:]]
+        total = sum(len(ids) for _, ids in upstream)
+        if total == 0:
+            # A completeness check over an empty upstream set is the tautology this whole
+            # phase exists to catch: it would pass having compared nothing.
+            print(
+                "F28C-000  no finding ids were extracted from any upstream artifact; a "
+                "completeness check over an empty set proves nothing",
+                file=sys.stderr,
+            )
+            return 2
+        print(
+            f"--check-completeness: {len(rows)} ledger row(s) against {total} upstream "
+            f"finding id(s) from {len(upstream)} artifact(s)"
+        )
+        return _report("--check-completeness", check_completeness(rows, upstream))
+
+    if args.check_backlog_ids:
+        ledger_path, backlog_path = (Path(p) for p in args.check_backlog_ids)
+        for p in (ledger_path, backlog_path):
+            if not p.is_file():
+                print(f"F28C-000  input not found: {p}", file=sys.stderr)
+                return 2
+        rows = parse_ledger(ledger_path.read_text(encoding="utf-8"))
+        backlog = backlog_path.read_text(encoding="utf-8")
+        paper = [r for r in rows if r.get("disposition") in PAPER_DISPOSITIONS]
+        print(f"--check-backlog-ids: {len(paper)} accepted/deferred finding(s)")
+        return _report("--check-backlog-ids", check_backlog_ids(rows, backlog))
 
     path = Path(
         args.check_contract
         or args.check_rescoring
         or args.check_ledger
+        or args.validate
+        or args.check_a2
+        or args.check_downgrades
         or args.check_matrix
         or args.check_no_uncontrolled_skips
     )
@@ -1203,14 +1591,22 @@ def main(argv: list[str]) -> int:
         print(f"--check-rescoring: {len(rows)} carried finding(s)")
         return _report("--check-rescoring", check_rescoring(rows))
 
-    if args.check_ledger:
+    if args.check_ledger or args.validate or args.check_a2 or args.check_downgrades:
         rows = parse_ledger(text)
         if not rows:
             print("F28C-000  ledger has no rows", file=sys.stderr)
             return 2
-        return _report(
-            "--check-ledger", validate_ledger(rows, allow_open=args.allow_open)
+        if args.check_a2:
+            print(f"--check-a2: {len(rows)} finding(s)")
+            return _report("--check-a2", check_a2(rows))
+        if args.check_downgrades:
+            print(f"--check-downgrades: {len(rows)} finding(s)")
+            return _report("--check-downgrades", check_downgrades(rows))
+        name = "--validate" if args.validate else "--check-ledger"
+        print(
+            f"{name}: {len(rows)} finding(s), allow_open={args.allow_open}"
         )
+        return _report(name, validate_ledger(rows, allow_open=args.allow_open))
 
     rows = parse_matrix(text)
     if not rows:
