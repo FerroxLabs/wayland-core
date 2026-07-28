@@ -1,0 +1,192 @@
+warning: in config file .config/nextest.toml, ignoring unknown configuration key: profile.default.no-tests
+   Compiling num-traits v0.2.19
+   Compiling serde_json v1.0.150
+   Compiling hyper v1.10.1
+   Compiling aho-corasick v1.1.4
+   Compiling tower v0.5.3
+   Compiling tokio-util v0.7.18
+   Compiling getrandom v0.3.4
+   Compiling ahash v0.8.12
+   Compiling humantime-serde v1.1.1
+   Compiling bytemuck v1.25.0
+   Compiling dunce v1.0.5
+   Compiling rand_core v0.9.5
+   Compiling hashbrown v0.14.5
+   Compiling rand_chacha v0.9.0
+   Compiling tower-http v0.6.11
+   Compiling rand v0.9.4
+   Compiling hashlink v0.9.1
+   Compiling hyper-util v0.1.20
+   Compiling chrono v0.4.44
+   Compiling regex-automata v0.4.14
+   Compiling rand_distr v0.5.1
+   Compiling hyper-rustls v0.27.9
+   Compiling wcore-types v0.12.25 (/root/wayland-red68/crates/wcore-types)
+   Compiling wcore-budget v0.12.25 (/root/wayland-red68/crates/wcore-budget)
+   Compiling rusqlite v0.32.1
+   Compiling reqwest v0.12.28
+   Compiling regex v1.12.3
+   Compiling wcore-compact v0.12.25 (/root/wayland-red68/crates/wcore-compact)
+   Compiling wcore-safety v0.12.25 (/root/wayland-red68/crates/wcore-safety)
+   Compiling wcore-egress v0.12.25 (/root/wayland-red68/crates/wcore-egress)
+   Compiling wcore-config v0.12.25 (/root/wayland-red68/crates/wcore-config)
+   Compiling wcore-sandbox v0.12.25 (/root/wayland-red68/crates/wcore-sandbox)
+   Compiling wcore-observability v0.12.25 (/root/wayland-red68/crates/wcore-observability)
+   Compiling wcore-memory v0.12.25 (/root/wayland-red68/crates/wcore-memory)
+   Compiling wcore-swarm v0.12.25 (/root/wayland-red68/crates/wcore-swarm)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.59s
+────────────
+ Nextest run ID 204d77d9-ffa3-40e3-919f-8304bf88d5ed with nextest profile: default
+    Starting 150 tests across 11 binaries (11 tests skipped)
+        PASS [   0.005s] (  1/150) wcore-swarm audit::tests::corrupted_db_open_errors
+        PASS [   0.006s] (  2/150) wcore-swarm audit::tests::count_tracks_inserts
+        PASS [   0.005s] (  3/150) wcore-swarm audit::tests::from_str_rejects_unknown_variants
+        PASS [   0.007s] (  4/150) wcore-swarm audit::tests::query_filter_by_outcome_and_session
+        PASS [   0.006s] (  5/150) wcore-swarm audit::tests::recent_orders_by_timestamp_desc
+        PASS [   0.007s] (  6/150) wcore-swarm audit::tests::record_all_risk_and_outcome_variants
+        PASS [   0.006s] (  7/150) wcore-swarm audit::tests::record_and_query_round_trip
+        PASS [   0.012s] (  8/150) wcore-swarm audit::tests::schema_migration_is_idempotent
+        PASS [   0.015s] (  9/150) wcore-swarm bridge::tests::cycle_rejected_by_record_child_lineage
+        PASS [   0.016s] ( 10/150) wcore-swarm bridge::tests::merge_child_into_parent_promotes_unique_procedures
+        PASS [   0.015s] ( 11/150) wcore-swarm bridge::tests::record_child_lineage_then_descendant_read_denied
+        PASS [   0.017s] ( 12/150) wcore-swarm bridge::tests::record_child_outcome_writes_episode_with_knn_mirror
+        PASS [   0.005s] ( 13/150) wcore-swarm dispatch_limit_tests::admission_bounds_requested_and_retained_workers
+        PASS [   0.005s] ( 14/150) wcore-swarm dispatch_limit_tests::aggregate_output_budget_is_fixed_across_worker_counts
+        PASS [   0.006s] ( 15/150) wcore-swarm dispatch_limit_tests::count_cap_fails_before_git_or_worker_side_effects
+        PASS [   0.007s] ( 16/150) wcore-swarm dispatch_limit_tests::overlapping_dispatch_across_same_repo_instances_fails_closed
+        PASS [   0.022s] ( 17/150) wcore-swarm dispatch_limit_tests::retained_worktrees_consume_admission_slots
+        PASS [   0.007s] ( 18/150) wcore-swarm fleet::tests::cap_enforced_at_101_agents
+        PASS [   0.006s] ( 19/150) wcore-swarm fleet::tests::custom_shard_reducer_runs
+        PASS [   0.005s] ( 20/150) wcore-swarm fleet::tests::default_shard_reducer_helper_works
+        PASS [   0.005s] ( 21/150) wcore-swarm fleet::tests::happy_path_30_agents_into_3_shards
+        PASS [   0.006s] ( 22/150) wcore-swarm fleet::tests::mixed_success_failure_aggregated
+        PASS [   0.005s] ( 23/150) wcore-swarm fleet::tests::partial_last_shard_handled
+        PASS [   0.057s] ( 24/150) wcore-swarm fleet::tests::shard_timeout_surfaces_as_shard_error
+        PASS [   0.006s] ( 25/150) wcore-swarm mesh::tests::happy_path_three_agents_each_post_and_succeed
+        PASS [   0.006s] ( 26/150) wcore-swarm mesh::tests::over_cap_errors_with_topology_exceeds_cap
+        PASS [   0.006s] ( 27/150) wcore-swarm mesh::tests::reducer_aggregates_mixed_success_failure
+        PASS [   0.028s] ( 28/150) wcore-swarm mesh::tests::shared_board_visible_across_agents
+        PASS [   0.057s] ( 29/150) wcore-swarm mesh::tests::timeout_surfaces_mesh_error
+        PASS [   0.006s] ( 30/150) wcore-swarm reduce::tests::consensus_mode_routes_to_majority
+        PASS [   0.005s] ( 31/150) wcore-swarm reduce::tests::debate_mode_diverges_without_majority
+        PASS [   0.006s] ( 32/150) wcore-swarm reduce::tests::debate_mode_routes_to_evaluate_single_round
+        PASS [   0.006s] ( 33/150) wcore-swarm reduce::tests::fleet_counts_success_and_failure
+        PASS [   0.006s] ( 34/150) wcore-swarm reduce::tests::mesh_passes_results_through
+        PASS [   0.006s] ( 35/150) wcore-swarm reduce::tests::parse_round_trips_all_modes
+        PASS [   0.006s] ( 36/150) wcore-swarm topology::tests::default_configs_match_locked_table
+        PASS [   0.005s] ( 37/150) wcore-swarm topology::tests::display_round_trips_through_from_str
+        PASS [   0.005s] ( 38/150) wcore-swarm topology::tests::from_str_parses_all_four_case_insensitive
+        PASS [   0.005s] ( 39/150) wcore-swarm topology::tests::from_str_rejects_unknown
+        PASS [   0.005s] ( 40/150) wcore-swarm topology::tests::topology_config_is_copy_and_serde_round_trip
+        PASS [   0.005s] ( 41/150) wcore-swarm topology::tests::validate_count_over_cap_errors
+        PASS [   0.005s] ( 42/150) wcore-swarm topology::tests::validate_count_under_cap_is_ok
+        PASS [   0.029s] ( 43/150) wcore-swarm worktree::manager::integration_checkout_tests::current_branch_reports_symbolic_head_and_fails_closed_on_detached
+        PASS [   0.114s] ( 44/150) wcore-swarm worktree::manager::integration_checkout_tests::integration_checkout_satisfies_bind_requirements
+        PASS [   0.257s] ( 45/150) wcore-swarm worktree::parent::tests::live::lands_candidate_working_tree_and_rolls_back
+        PASS [   0.121s] ( 46/150) wcore-swarm worktree::parent::tests::live::post_seal_filter_config_fails_closed_and_never_runs
+        PASS [   0.162s] ( 47/150) wcore-swarm worktree::parent::tests::live::stale_base_is_a_conflict
+        PASS [   0.006s] ( 48/150) wcore-swarm worktree::parent::tests::ref_slug_is_filesystem_safe
+        PASS [   0.005s] ( 49/150) wcore-swarm worktree::parent::tests::valid_object_id_accepts_sha1_and_sha256_only
+        PASS [   0.005s] ( 50/150) wcore-swarm worktree::parent::tests::validate_target_ref_rejects_flags_traversal_and_metacharacters
+        PASS [   0.005s] ( 51/150) wcore-swarm worktree::parent::tests::worktree_status_digest_is_order_independent_and_change_sensitive
+        PASS [   0.006s] ( 52/150) wcore-swarm worktree::tests::a_live_peer_transaction_is_never_reclaimed
+        PASS [   0.008s] ( 53/150) wcore-swarm worktree::tests::abandoned_transaction_reservations_are_reclaimed
+        PASS [   0.114s] ( 54/150) wcore-swarm worktree::tests::assert_clean_accepts_line_ending_only_dirt_and_still_refuses_every_other_kind
+        PASS [   0.055s] ( 55/150) wcore-swarm worktree::tests::assert_clean_ignores_the_swarm_root_it_mints_and_still_refuses_real_dirt
+        PASS [   0.005s] ( 56/150) wcore-swarm worktree::tests::candidate_config_scan_is_deny_by_default
+        PASS [   0.006s] ( 57/150) wcore-swarm worktree::tests::candidate_manifest_digest_binds_executable_bit
+        PASS [   0.006s] ( 58/150) wcore-swarm worktree::tests::candidate_manifest_digest_boundary_cases
+        PASS [   0.006s] ( 59/150) wcore-swarm worktree::tests::candidate_manifest_digest_tracks_git_owner_exec_bit
+        PASS [   0.006s] ( 60/150) wcore-swarm worktree::tests::candidate_manifest_digest_tracks_working_tree_changes
+        PASS [   0.092s] ( 61/150) wcore-swarm worktree::tests::candidate_seal_cannot_outlive_its_checkout
+        PASS [   0.091s] ( 62/150) wcore-swarm worktree::tests::candidate_seal_detects_executable_bit_drift_after_mint
+        PASS [   0.092s] ( 63/150) wcore-swarm worktree::tests::candidate_seal_fails_closed_after_transaction_release
+        PASS [   0.092s] ( 64/150) wcore-swarm worktree::tests::candidate_seal_mints_and_revalidates_from_fresh_checkout
+        PASS [   0.091s] ( 65/150) wcore-swarm worktree::tests::candidate_seal_rejects_commondir_redirect
+        PASS [   0.093s] ( 66/150) wcore-swarm worktree::tests::candidate_seal_rejects_fsmonitor_program
+        PASS [   0.092s] ( 67/150) wcore-swarm worktree::tests::candidate_seal_rejects_git_proxy_command
+        PASS [   0.090s] ( 68/150) wcore-swarm worktree::tests::candidate_seal_rejects_relocated_hooks_path
+        PASS [   0.091s] ( 69/150) wcore-swarm worktree::tests::candidate_seal_rejects_worktree_config_extension
+        PASS [   0.091s] ( 70/150) wcore-swarm worktree::tests::candidate_seal_rejects_worktree_scoped_config_file
+        PASS [   0.095s] ( 71/150) wcore-swarm worktree::tests::candidate_seal_reports_tracked_symlink_clearly
+        PASS [   0.093s] ( 72/150) wcore-swarm worktree::tests::candidate_seal_revalidates_repeatedly_while_quiescent
+        PASS [   0.097s] ( 73/150) wcore-swarm worktree::tests::candidate_seal_revalidation_detects_repository_substitution
+        PASS [   0.093s] ( 74/150) wcore-swarm worktree::tests::candidate_seal_revalidation_detects_source_drift
+        PASS [   0.091s] ( 75/150) wcore-swarm worktree::tests::candidate_seal_revalidation_fails_on_blocked_plumbing_inspection
+        PASS [   0.094s] ( 76/150) wcore-swarm worktree::tests::candidate_seal_revalidation_rejects_alternate_object_store
+        PASS [   0.097s] ( 77/150) wcore-swarm worktree::tests::candidate_seal_revalidation_rejects_config_poisoning
+        PASS [   0.094s] ( 78/150) wcore-swarm worktree::tests::candidate_seal_revalidation_rejects_planted_hook
+        PASS [   0.010s] ( 79/150) wcore-swarm worktree::tests::checkout_git_chdir_succeeds_while_workspace_authorities_are_alive
+        PASS [   0.059s] ( 80/150) wcore-swarm worktree::tests::concurrent_reservation_validation_never_reads_a_truncated_receipt
+        PASS [   0.006s] ( 81/150) wcore-swarm worktree::tests::failed_transaction_cleanup_remains_retryable
+        PASS [   0.007s] ( 82/150) wcore-swarm worktree::tests::git_commands_clear_ambient_overrides_and_disable_checkout_hooks
+        PASS [   0.042s] ( 83/150) wcore-swarm worktree::tests::git_status_succeeds_in_repo_root_while_manager_is_alive
+        PASS [   0.010s] ( 84/150) wcore-swarm worktree::tests::landing_git_chdir_succeeds_while_the_integration_checkout_authority_is_alive
+        PASS [   0.005s] ( 85/150) wcore-swarm worktree::tests::linked_swarm_root_is_rejected_without_touching_target
+        PASS [   0.046s] ( 86/150) wcore-swarm worktree::tests::linux::ambient_global_filter_is_ignored_and_repository_hook_is_disabled
+        PASS [   0.069s] ( 87/150) wcore-swarm worktree::tests::linux::cancelled_cleanup_kills_git_and_reports_residual
+        PASS [   0.065s] ( 88/150) wcore-swarm worktree::tests::linux::compressible_checkout_is_bounded_by_logical_size_not_git_storage
+        PASS [   0.018s] ( 89/150) wcore-swarm worktree::tests::linux::conditional_include_is_refused_before_checkout
+        PASS [   0.092s] ( 90/150) wcore-swarm worktree::tests::linux::exported_checkout_capability_survives_same_path_replacement
+        PASS [   0.043s] ( 91/150) wcore-swarm worktree::tests::linux::external_workspace_root_keeps_checkout_outside_parent_repository
+        PASS [   0.067s] ( 92/150) wcore-swarm worktree::tests::linux::failed_post_clone_setup_removes_only_the_owned_partial_transaction
+        PASS [   0.197s] ( 93/150) wcore-swarm worktree::tests::linux::isolated_checkout_keeps_git_useful_without_parent_history_or_authority
+        PASS [   0.040s] ( 94/150) wcore-swarm worktree::tests::linux::isolated_checkout_rejects_unproven_capacity_before_materialization
+        PASS [   0.022s] ( 95/150) wcore-swarm worktree::tests::linux::linked_worker_destination_and_cleanup_entry_never_touch_external_target
+        PASS [   0.021s] ( 96/150) wcore-swarm worktree::tests::linux::local_checkout_filter_is_refused_before_execution
+        PASS [   0.110s] ( 97/150) wcore-swarm worktree::tests::linux::persisted_reservation_enforces_aggregate_budget_and_owned_cleanup
+        PASS [   0.042s] ( 98/150) wcore-swarm worktree::tests::linux::status_output_cap_kills_git_descendant
+        PASS [   0.166s] ( 99/150) wcore-swarm worktree::tests::linux::transaction_workspace_rejects_checkout_and_scratch_replacements
+        PASS [   0.089s] (100/150) wcore-swarm worktree::tests::linux::transaction_workspace_rejects_smaller_same_path_reservation
+        PASS [   0.152s] (101/150) wcore-swarm worktree::tests::linux::valid_held_reservations_preserve_declared_concurrency
+        PASS [   0.287s] (102/150) wcore-swarm worktree::tests::linux::worktree_add_timeout_kills_tree_and_reports_preserved_residual
+        PASS [   0.040s] (103/150) wcore-swarm worktree::tests::linux::worktree_config_filter_and_include_are_refused_before_checkout
+        PASS [   0.007s] (104/150) wcore-swarm worktree::tests::release_refuses_while_checkout_loan_outstanding
+        PASS [   0.006s] (105/150) wcore-swarm worktree::tests::reservation_receipts_fail_closed_on_missing_zero_range_and_size
+        PASS [   0.005s] (106/150) wcore-swarm worktree::tests::retained_reservation_rejects_same_inode_truncate_and_rewrite
+        PASS [   0.006s] (107/150) wcore-swarm worktree::tests::swarm_lock_is_mutually_exclusive
+        PASS [   0.006s] (108/150) wcore-swarm worktree::tests::transaction_cleanup_never_deletes_swap_after_validation
+        PASS [   0.007s] (109/150) wcore-swarm worktree::tests::transaction_cleanup_preserves_same_path_replacement
+        PASS [   0.005s] (110/150) wcore-swarm worktree::tests::transaction_lease_is_mutually_exclusive
+        PASS [   0.093s] (111/150) wcore-swarm worktree::tests::transaction_workspace_paths_share_manager_representation
+        PASS [   0.006s] (112/150) wcore-swarm worktree::tests::unsafe_worker_ids_and_option_like_refs_fail_before_git
+        PASS [   0.007s] (113/150) wcore-swarm worktree::tests::workspace_authority_constructor_refuses_repo_overlap
+        PASS [   0.007s] (114/150) wcore-swarm worktree::tests::worktree_roots_share_one_path_representation
+        PASS [   0.014s] (115/150) wcore-swarm::bridge_smoke cycle_detection_rejects_descendant_read
+        PASS [   0.014s] (116/150) wcore-swarm::bridge_smoke cycle_rejected_on_record_child_lineage
+        PASS [   0.016s] (117/150) wcore-swarm::bridge_smoke parent_writes_episodic_worker_reads_recent
+        PASS [   0.016s] (118/150) wcore-swarm::bridge_smoke worker_outcome_records_episode_under_child_session
+        PASS [   0.014s] (119/150) wcore-swarm::bridge_smoke worker_writes_procedural_parent_receives_on_merge
+        PASS [   0.030s] (120/150) wcore-swarm::collision_test dirty_checkout_refuses_dispatch
+        PASS [   0.004s] (121/150) wcore-swarm::consensus_smoke all_failed_returns_empty_disputed
+        PASS [   0.006s] (122/150) wcore-swarm::consensus_smoke failed_workers_excluded_from_vote
+        PASS [   0.004s] (123/150) wcore-swarm::consensus_smoke majority_consensus_picks_dominant_output
+        PASS [   0.004s] (124/150) wcore-swarm::consensus_smoke no_majority_surfaces_dispute_top_k
+        PASS [   0.005s] (125/150) wcore-swarm::consensus_smoke normalized_scorer_buckets_whitespace_and_case
+        PASS [   0.004s] (126/150) wcore-swarm::debate_smoke debate_converges_when_rounds_collapse_to_majority
+        PASS [   0.004s] (127/150) wcore-swarm::debate_smoke debate_empty_rounds_is_diverged_zero
+        PASS [   0.004s] (128/150) wcore-swarm::debate_smoke debate_first_agreed_round_short_circuits
+        PASS [   0.004s] (129/150) wcore-swarm::debate_smoke debate_returns_diverged_when_no_round_yields_majority
+        PASS [   0.027s] (130/150) wcore-swarm::dispatch_smoke dispatch_rejects_different_head_repository_replacement
+        PASS [   0.034s] (131/150) wcore-swarm::dispatch_smoke dispatch_rejects_same_head_repository_replacement
+        PASS [   0.449s] (132/150) wcore-swarm::dispatch_smoke dispatches_4_noop_workers_in_parallel
+        PASS [   0.238s] (133/150) wcore-swarm::dispatch_smoke heartbeat_symlink_cannot_make_parent_disclose_host_data_or_hang
+        PASS [   0.244s] (134/150) wcore-swarm::dispatch_smoke malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic
+        PASS [   0.210s] (135/150) wcore-swarm::dispatch_smoke public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state
+        PASS [   0.016s] (136/150) wcore-swarm::dispatch_smoke repository_replaced_at_same_pathname_is_refused_by_retained_authority
+        PASS [   0.012s] (137/150) wcore-swarm::heartbeat_test heartbeat_mirror_publishes_through_a_retained_root_authority
+        PASS [   0.676s] (138/150) wcore-swarm::heartbeat_test worker_writes_heartbeat_during_long_running_task
+        PASS [   0.011s] (139/150) wcore-swarm::heartbeat_test writer_then_reader_roundtrip
+        PASS [   0.019s] (140/150) wcore-swarm::swarm_memory_e2e dispatch_outcome_round_trips_via_knn_substrate
+        PASS [   0.015s] (141/150) wcore-swarm::swarm_memory_e2e legacy_record_path_is_still_findable_via_cosine_fallback
+        PASS [   0.507s] (142/150) wcore-swarm::swarm_worker_failure_reporting_e2e swarm_reports_failed_worker_status_and_succeeding_workers_complete
+        PASS [   0.486s] (143/150) wcore-swarm::worker_runtime_limits aborting_dispatch_future_kills_tree_and_releases_workspace
+        PASS [   0.469s] (144/150) wcore-swarm::worker_runtime_limits cancellation_kills_worker_descendant_and_releases_owned_workspace
+        PASS [   0.282s] (145/150) wcore-swarm::worker_runtime_limits cleanup_preserves_live_worker_until_owner_releases_it
+        PASS [   1.195s] (146/150) wcore-swarm::worker_runtime_limits many_entry_accounting_does_not_block_cancellation
+        PASS [   1.682s] (147/150) wcore-swarm::worker_runtime_limits multi_worker_output_exhaustion_fails_without_retaining_buffers
+        PASS [   0.505s] (148/150) wcore-swarm::worker_runtime_limits timeout_releases_workspace_and_capacity_before_return
+        PASS [   0.492s] (149/150) wcore-swarm::worker_runtime_limits workspace_growth_observer_kills_worker_releases_reservation_and_admits_successor
+        PASS [   0.122s] (150/150) wcore-swarm::workspace_authority independent_cli_processes_cannot_overbook_shared_capacity
+────────────
+     Summary [  12.722s] 150 tests run: 150 passed, 11 skipped

@@ -1,0 +1,486 @@
+### wcore-agent child_transaction::gate_executor::tests::fails_closed_at_each_gate_execution_stage
+    thread 'child_transaction::gate_executor::tests::fails_closed_at_each_gate_execution_stage' (41520) panicked at crates\wcore-agent\src\child_transaction\gate_executor.rs:652:9:
+    stage 5: Filesystem(PathDenied("hard-containment candidate must be absolute: /srv/wayland/candidate/checkout"))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-agent engine::audit_2026_05_22_tests::corrupt_filesystem_checkpoint_blocks_restart_without_dispatch_or_mutation
+    thread 'engine::audit_2026_05_22_tests::corrupt_filesystem_checkpoint_blocks_restart_without_dispatch_or_mutation' (22640) panicked at crates\wcore-agent\src\engine.rs:25956:59:
+    called `Result::unwrap()` on an `Err` value: Io(Custom { kind: Unsupported, error: "identity-aware file observation is unavailable on this platform" })
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-agent engine::audit_2026_05_22_tests::missing_filesystem_checkpoint_blocks_restart_without_dispatch_or_mutation
+    thread 'engine::audit_2026_05_22_tests::missing_filesystem_checkpoint_blocks_restart_without_dispatch_or_mutation' (6728) panicked at crates\wcore-agent\src\engine.rs:25956:59:
+    called `Result::unwrap()` on an `Err` value: Io(Custom { kind: Unsupported, error: "identity-aware file observation is unavailable on this platform" })
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-agent journal_effects::tests::filesystem_receipt_is_durable_and_unknown_can_reconcile_not_started
+    thread 'journal_effects::tests::filesystem_receipt_is_durable_and_unknown_can_reconcile_not_started' (31272) panicked at crates\wcore-agent\src\journal_effects.rs:1565:14:
+    called `Result::unwrap()` on an `Err` value: InvalidTransition("filesystem-transactional tool execution tool-execution-87bc1e08-c408-4872-9094-9fb17e68f98a has an invalid effect receipt: io error: invalid filesystem effect receipt path: path must be absolute: \"/workspace/file.txt\"")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-agent orchestration::d1_refusal_terminal_tests::failed_grep_leaves_turn_committable
+    thread 'orchestration::d1_refusal_terminal_tests::failed_grep_leaves_turn_committable' (8284) panicked at crates\wcore-agent\src\orchestration\d1_refusal_terminal_tests.rs:131:5:
+    a traversal path must be refused as a tool error
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-agent session_journal::snapshot::tests::windows_private_dacl_accepts_restrictive_deny_ace
+    thread 'session_journal::snapshot::tests::windows_private_dacl_accepts_restrictive_deny_ace' (42468) panicked at crates\wcore-agent\src\session_journal\snapshot.rs:1468:14:
+    called `Result::unwrap()` on an `Err` value: Custom { kind: Other, error: Io { path: "C:\\WINDOWS\\SERVIC~1\\NETWOR~1\\AppData\\Local\\Temp\\.tmpgld8g2", source: Os { code: 5, kind: PermissionDenied, message: "Access is denied." } } }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-agent session_journal::snapshot::tests::windows_private_dacl_rejects_null_empty_and_broad_allow
+    thread 'session_journal::snapshot::tests::windows_private_dacl_rejects_null_empty_and_broad_allow' (29384) panicked at crates\wcore-agent\src\session_journal\snapshot.rs:1455:50:
+    called `Result::unwrap()` on an `Err` value: Custom { kind: Other, error: Io { path: "C:\\WINDOWS\\SERVIC~1\\NETWOR~1\\AppData\\Local\\Temp\\.tmpdZ0Ldm", source: Os { code: 5, kind: PermissionDenied, message: "Access is denied." } } }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-agent::session_journal_compaction_test restart_rejects_symlinked_snapshot
+    thread 'restart_rejects_symlinked_snapshot' (42524) panicked at crates\wcore-agent\tests\session_journal_compaction_test.rs:188:5:
+    assertion failed: matches!(SessionJournal::open(&path, "s1"),
+    Err(JournalError::SymbolicLink { path: rejected }) if rejected ==
+    snapshot_path)
+
+### wcore-agent::session_journal_compaction_test restart_rejects_hard_linked_snapshot
+    thread 'restart_rejects_hard_linked_snapshot' (4380) panicked at crates\wcore-agent\tests\session_journal_compaction_test.rs:206:5:
+    assertion failed: matches!(SessionJournal::open(&path, "s1"),
+    Err(JournalError::MultipleLinks { path: rejected }) if rejected ==
+    snapshot_path)
+
+### wcore-agent::session_journal_compaction_test restart_rejects_public_snapshot_dacl
+    thread 'restart_rejects_public_snapshot_dacl' (47432) panicked at crates\wcore-agent\tests\session_journal_compaction_test.rs:278:5:
+    assertion failed: matches!(SessionJournal::open(&path, "s1"),
+    Err(JournalError::SnapshotUnsafePermissions { path: rejected }) if
+    rejected == snapshot_path)
+
+### wcore-agent::session_journal_compaction_test restart_rejects_oversize_snapshot
+    thread 'restart_rejects_oversize_snapshot' (24488) panicked at crates\wcore-agent\tests\session_journal_compaction_test.rs:141:5:
+    assertion failed: matches!(SessionJournal::open(&path, "s1"),
+    Err(JournalError::SnapshotTooLarge { path: rejected, .. }) if rejected ==
+    snapshot_path)
+
+### wcore-cli::build_provenance binary_matches_repo_head
+    thread 'binary_matches_repo_head' (50308) panicked at crates\wcore-cli\tests\build_provenance.rs:99:9:
+    assertion `left == right` failed: STRICT: binary source 189599ca5af5b84661ce7f93d4318758155d26b9 != HEAD 189599c (stale build — rebuild required)
+    left: "189599ca5af5b84661ce7f93d4318758155d26b9"
+    right: "189599c"
+
+### wcore-cli::deterministic_openai_loop packaged_core_cancels_an_active_stream
+    thread 'packaged_core_cancels_an_active_stream' (53044) panicked at crates\wcore-cli\tests\deterministic_openai_loop.rs:366:5:
+    packaged candidate cancellation lifecycle exceeded the five-second bound: 5.8020419s
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::deterministic_openai_loop packaged_core_executes_an_approved_write
+    thread 'packaged_core_executes_an_approved_write' (49592) panicked at crates\wcore-cli\tests\deterministic_openai_loop.rs:303:5:
+    unexpected failures: [RunnerError("engine emitted error: {\"code\":\"engine_error\",\"message\":\"Session persistence authority unavailable: secure recovery storage is unavailable\",\"retryable\":false}"), CostMissing, AssertionFailed { assertion: "Contains(\"approved write completed\")", observed: "Contains(\"approved write completed\") FAIL: substring not found in output (0 chars)" }]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::deterministic_openai_loop packaged_core_blocks_a_denied_write
+    thread 'packaged_core_blocks_a_denied_write' (50660) panicked at crates\wcore-cli\tests\deterministic_openai_loop.rs:74:5:
+    unexpected failures: [RunnerError("engine emitted error: {\"code\":\"engine_error\",\"message\":\"Session persistence authority unavailable: secure recovery storage is unavailable\",\"retryable\":false}"), CostMissing, AssertionFailed { assertion: "Contains(\"denied write handled\")", observed: "Contains(\"denied write handled\") FAIL: substring not found in output (0 chars)" }]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::deterministic_openai_loop packaged_core_exhausts_a_real_read_timeout
+    thread 'packaged_core_exhausts_a_real_read_timeout' (50288) panicked at crates\wcore-cli\tests\deterministic_openai_loop.rs:218:5:
+    assertion `left == right` failed
+    left: 0
+    right: 3
+
+### wcore-cli::deterministic_openai_loop packaged_core_completes_a_scripted_openai_turn
+    thread 'packaged_core_completes_a_scripted_openai_turn' (50468) panicked at crates\wcore-cli\tests\deterministic_openai_loop.rs:74:5:
+    unexpected failures: [RunnerError("engine emitted error: {\"code\":\"engine_error\",\"message\":\"Session persistence authority unavailable: secure recovery storage is unavailable\",\"retryable\":false}"), CostMissing, AssertionFailed { assertion: "Contains(\"fixture answer\")", observed: "Contains(\"fixture answer\") FAIL: substring not found in output (0 chars)" }]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::deterministic_openai_loop packaged_core_preserves_declared_duplicate_deltas
+    thread 'packaged_core_preserves_declared_duplicate_deltas' (51816) panicked at crates\wcore-cli\tests\deterministic_openai_loop.rs:74:5:
+    unexpected failures: [RunnerError("engine emitted error: {\"code\":\"engine_error\",\"message\":\"Session persistence authority unavailable: secure recovery storage is unavailable\",\"retryable\":false}"), CostMissing, AssertionFailed { assertion: "Contains(\"repeatrepeat\")", observed: "Contains(\"repeatrepeat\") FAIL: substring not found in output (0 chars)" }]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::deterministic_openai_loop packaged_core_calls_a_streamable_http_mcp_tool
+    thread 'packaged_core_calls_a_streamable_http_mcp_tool' (51628) panicked at crates\wcore-cli\tests\deterministic_openai_loop.rs:446:5:
+    unexpected failures: [RunnerError("engine emitted error: {\"code\":\"engine_error\",\"message\":\"Session persistence authority unavailable: secure recovery storage is unavailable\",\"retryable\":false}"), CostMissing, AssertionFailed { assertion: "Contains(\"MCP roundtrip completed\")", observed: "Contains(\"MCP roundtrip completed\") FAIL: substring not found in output (0 chars)" }, ExpectedToolMissing("fixture_echo (turn 0)")]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_casefold_collision_keeps_both_peer_items_accounted
+    thread 'hostile_casefold_collision_keeps_both_peer_items_accounted' (2004) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_absolute_symlink_escape_is_refused_and_nothing_outside_changed
+    thread 'hostile_absolute_symlink_escape_is_refused_and_nothing_outside_changed' (45376) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_deeply_nested_configuration_is_named_not_panicked
+    thread 'hostile_deeply_nested_configuration_is_named_not_panicked' (42584) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_data_that_merely_looks_executable_is_not_contained
+    thread 'hostile_data_that_merely_looks_executable_is_not_contained' (52796) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_conservation_invariant_balances_across_every_corpus
+    thread 'hostile_conservation_invariant_balances_across_every_corpus' (52792) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:1115:10:
+    python3: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_env_credential_reports_its_name_and_never_its_value
+    thread 'hostile_env_credential_reports_its_name_and_never_its_value' (51072) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_directory_symlink_escape_is_refused_and_nothing_outside_changed
+    thread 'hostile_directory_symlink_escape_is_refused_and_nothing_outside_changed' (45864) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_executable_claiming_to_be_data_is_still_contained
+    thread 'hostile_executable_claiming_to_be_data_is_still_contained' (9560) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_every_case_declares_a_legitimate_outcome_and_what_it_attacks
+    thread 'hostile_every_case_declares_a_legitimate_outcome_and_what_it_attacks' (45400) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:438:10:
+    python3: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_exact_name_collision_is_reported_and_never_silently_overwrites
+    thread 'hostile_exact_name_collision_is_reported_and_never_silently_overwrites' (53120) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_excessive_item_count_hits_the_declared_refusal
+    thread 'hostile_excessive_item_count_hits_the_declared_refusal' (51700) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_name_distinctions_survive_on_this_platform_or_the_generator_says_so
+    thread 'hostile_name_distinctions_survive_on_this_platform_or_the_generator_says_so' (49440) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_oversized_member_hits_the_declared_refusal
+    thread 'hostile_oversized_member_hits_the_declared_refusal' (52920) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_manifest_payload_mismatch_is_refused_by_verification
+    thread 'hostile_manifest_payload_mismatch_is_refused_by_verification' (32384) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_generator_can_go_red
+    thread 'hostile_generator_can_go_red' (44788) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:527:10:
+    python3: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::deterministic_openai_loop packaged_core_recovers_after_a_real_read_timeout
+    thread 'packaged_core_recovers_after_a_real_read_timeout' (15164) panicked at crates\wcore-cli\tests\deterministic_openai_loop.rs:201:5:
+    unexpected failures: [RunnerError("engine emitted error: {\"code\":\"engine_error\",\"message\":\"Session persistence authority unavailable: secure recovery storage is unavailable\",\"retryable\":false}"), CostMissing]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::deterministic_openai_loop packaged_core_recovers_after_a_bounded_429
+    thread 'packaged_core_recovers_after_a_bounded_429' (47484) panicked at crates\wcore-cli\tests\deterministic_openai_loop.rs:74:5:
+    unexpected failures: [RunnerError("engine emitted error: {\"code\":\"engine_error\",\"message\":\"Session persistence authority unavailable: secure recovery storage is unavailable\",\"retryable\":false}"), CostMissing, AssertionFailed { assertion: "Contains(\"recovered after 429\")", observed: "Contains(\"recovered after 429\") FAIL: substring not found in output (0 chars)" }]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_normalform_collision_keeps_both_peer_items_accounted
+    thread 'hostile_normalform_collision_keeps_both_peer_items_accounted' (52560) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_refused_restore_leaves_an_occupied_target_byte_identical
+    thread 'hostile_refused_restore_leaves_an_occupied_target_byte_identical' (51536) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::deterministic_openai_loop packaged_core_recovers_after_a_truncated_stream
+    thread 'packaged_core_recovers_after_a_truncated_stream' (6180) panicked at crates\wcore-cli\tests\deterministic_openai_loop.rs:74:5:
+    unexpected failures: [RunnerError("engine emitted error: {\"code\":\"engine_error\",\"message\":\"Session persistence authority unavailable: secure recovery storage is unavailable\",\"retryable\":false}"), CostMissing, AssertionFailed { assertion: "Contains(\"recovered after truncation\")", observed: "Contains(\"recovered after truncation\") FAIL: substring not found in output (0 chars)" }]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::deterministic_openai_loop packaged_core_recovers_after_two_503_responses
+    thread 'packaged_core_recovers_after_two_503_responses' (48704) panicked at crates\wcore-cli\tests\deterministic_openai_loop.rs:74:5:
+    unexpected failures: [RunnerError("engine emitted error: {\"code\":\"engine_error\",\"message\":\"Session persistence authority unavailable: secure recovery storage is unavailable\",\"retryable\":false}"), CostMissing, AssertionFailed { assertion: "Contains(\"recovered after 503\")", observed: "Contains(\"recovered after 503\") FAIL: substring not found in output (0 chars)" }]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_secret_in_a_memory_note_never_reaches_a_plan_or_report
+    thread 'hostile_secret_in_a_memory_note_never_reaches_a_plan_or_report' (50736) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_secret_in_a_skill_body_is_contained_and_never_reported
+    thread 'hostile_secret_in_a_skill_body_is_contained_and_never_reported' (35952) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_secret_in_a_persona_body_never_reaches_a_plan_or_report
+    thread 'hostile_secret_in_a_persona_body_never_reaches_a_plan_or_report' (48348) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_wrong_typed_configuration_is_named_not_panicked
+    thread 'hostile_wrong_typed_configuration_is_named_not_panicked' (40248) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_truncated_configuration_is_named_not_panicked
+    thread 'hostile_truncated_configuration_is_named_not_panicked' (53140) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::portability_hostile_corpus hostile_traversal_symlink_escape_is_refused_and_nothing_outside_changed
+    thread 'hostile_traversal_symlink_escape_is_refused_and_nothing_outside_changed' (47160) panicked at crates\wcore-cli\tests\portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Error { kind: NotFound, message: "program not found" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::plugin_discovery_e2e ready_event_advertises_plugin_capabilities_when_backends_can_start
+    thread 'ready_event_advertises_plugin_capabilities_when_backends_can_start' (10792) panicked at crates\wcore-cli\tests\plugin_discovery_e2e.rs:204:10:
+    stdout read failed: "child closed stdout during startup events"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::deterministic_openai_loop packaged_core_satisfies_a_hidden_repository_outcome
+    thread 'packaged_core_satisfies_a_hidden_repository_outcome' (48736) panicked at crates\wcore-cli\tests\deterministic_openai_loop.rs:533:5:
+    unexpected failures: [RunnerError("engine emitted error: {\"code\":\"engine_error\",\"message\":\"Session persistence authority unavailable: secure recovery storage is unavailable\",\"retryable\":false}"), CostMissing, AssertionFailed { assertion: "Contains(\"Repository update completed\")", observed: "Contains(\"Repository update completed\") FAIL: substring not found in output (0 chars)" }, AssertionFailed { assertion: "FileContains { path: \"src/settings.toml\", needle: \"port = 9090\" }", observed: "FileContains(\"src/settings.toml\", \"port = 9090\") FAIL: needle not found in C:\\WINDOWS\\SERVIC~1\\NETWOR~1\\AppData\\Local\\Temp\\.tmpi1S9FX\\src/settings.toml (28 bytes)" }, ExpectedToolMissing("Read (turn 0)"), ExpectedToolMissing("Edit (turn 0)")]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::plugin_discovery_e2e ready_event_withdraws_plugin_capabilities_when_backends_cannot_start
+    thread 'ready_event_withdraws_plugin_capabilities_when_backends_cannot_start' (40436) panicked at crates\wcore-cli\tests\plugin_discovery_e2e.rs:204:10:
+    stdout read failed: "child closed stdout during startup events"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::sandbox_activeness sandbox_exec_confines_a_write_that_escapes_the_workspace
+    thread 'sandbox_exec_confines_a_write_that_escapes_the_workspace' (49944) panicked at crates\wcore-cli\tests\sandbox_activeness.rs:103:5:
+    the uncontained baseline did not run:
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-config credentials::tests::confidential_auto_uses_encrypted_vault_without_plaintext_fallback
+    thread 'credentials::tests::confidential_auto_uses_encrypted_vault_without_plaintext_fallback' (47480) panicked at crates\wcore-config\src\credentials.rs:2560:14:
+    called `Result::unwrap()` on an `Err` value: Keyring("Platform secure storage failure: Windows error code 8")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::smoke_p0 smoke_10_model_override_reaches_outgoing_request
+    thread 'smoke_10_model_override_reaches_outgoing_request' (53044) panicked at crates\wcore-cli\tests\smoke_p0.rs:276:5:
+    exit 0 expected; stderr: 2026-07-28T22:43:14.450186Z  INFO egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked allowlisted=37
+    2026-07-28T22:43:14.450726Z  INFO egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked allowlisted=37
+    2026-07-28T22:43:14.969813Z  WARN not advertising browser_suite: the plugin is loaded but no backend can start capability="browser_suite" reason=no browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health remedy=install @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+
+### wcore-cli::smoke_p0 smoke_06_first_prompt_uses_configured_provider_and_key
+    thread 'smoke_06_first_prompt_uses_configured_provider_and_key' (36264) panicked at crates\wcore-cli\tests\smoke_p0.rs:230:5:
+    headless first prompt should exit 0; stderr: 2026-07-28T22:43:14.901001Z  INFO egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked allowlisted=37
+    2026-07-28T22:43:14.901535Z  INFO egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked allowlisted=37
+    2026-07-28T22:43:15.429422Z  WARN not advertising browser_suite: the plugin is loaded but no backend can start capability="browser_suite" reason=no browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health remedy=install @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+
+### wcore-cli::release_binary_smoke release_binary_ready_event_advertises_plugin_capabilities
+    thread 'release_binary_ready_event_advertises_plugin_capabilities' (52780) panicked at crates\wcore-cli\tests\release_binary_smoke.rs:277:10:
+    release binary stdout read failed: "release child closed stdout before emitting Ready"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::release_binary_smoke release_binary_withdraws_plugin_capabilities_when_backends_cannot_start
+    thread 'release_binary_withdraws_plugin_capabilities_when_backends_cannot_start' (52936) panicked at crates\wcore-cli\tests\release_binary_smoke.rs:277:10:
+    release binary stdout read failed: "release child closed stdout before emitting Ready"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-config shell::executable_readiness::tests::native_windows_command_shell_resolves_cmd_and_bat_from_effective_cwd
+    thread 'shell::executable_readiness::tests::native_windows_command_shell_resolves_cmd_and_bat_from_effective_cwd' (23768) panicked at crates\wcore-config\src\shell\executable_readiness_tests.rs:721:9:
+    assertion `left == right` failed
+    left: "C:\\WINDOWS\\SERVIC~1\\NETWOR~1\\AppData\\Local\\Temp\\.tmpYoCzry\\native-cmd.CMD"
+    right: "C:\\WINDOWS\\SERVIC~1\\NETWOR~1\\AppData\\Local\\Temp\\.tmpYoCzry\\native-cmd.cmd"
+
+### wcore-egress tests::transport_failure_records_one_stable_error_class
+    thread 'tests::transport_failure_records_one_stable_error_class' (38736) panicked at crates\wcore-egress\src\lib.rs:563:9:
+    assertion `left == right` failed
+    left: TransportError { class: Timeout }
+    right: TransportError { class: Connect }
+
+### wcore-eval-scenarios::openai_fixture_contract workspace_aware_identity_is_root_independent_and_collision_free
+    thread 'workspace_aware_identity_is_root_independent_and_collision_free' (16840) panicked at crates\wcore-eval-scenarios\tests\openai_fixture_contract.rs:96:10:
+    first workspace fixture: InvalidScript("workspace must be an absolute non-root path")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-eval-scenarios::receipt_contract filesystem_evidence_is_observed_only_after_capture_completes
+    thread 'filesystem_evidence_is_observed_only_after_capture_completes' (48392) panicked at crates\wcore-eval-scenarios\tests\receipt_contract.rs:110:44:
+    receipt conversion: InvalidEvidence("workspace must be an absolute non-root path")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-eval-scenarios::receipt_contract scenario_receipt_normalizes_only_the_owned_workspace
+    thread 'scenario_receipt_normalizes_only_the_owned_workspace' (45088) panicked at crates\wcore-eval-scenarios\tests\receipt_contract.rs:110:44:
+    receipt conversion: InvalidEvidence("workspace must be an absolute non-root path")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-eval-scenarios::receipt_contract critical_usability_finding_is_a_receipt_gate_failure
+    thread 'critical_usability_finding_is_a_receipt_gate_failure' (50692) panicked at crates\wcore-eval-scenarios\tests\receipt_contract.rs:963:6:
+    receipt conversion: InvalidEvidence("workspace must be an absolute non-root path")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-eval-scenarios::receipt_contract workspace_token_cannot_collide_with_literal_or_sibling_paths
+    thread 'workspace_token_cannot_collide_with_literal_or_sibling_paths' (17060) panicked at crates\wcore-eval-scenarios\tests\receipt_contract.rs:110:44:
+    receipt conversion: InvalidEvidence("workspace must be an absolute non-root path")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-eval-scenarios::runner_contracts assertion_failure_still_reaps_owned_descendant_listener
+    thread 'assertion_failure_still_reaps_owned_descendant_listener' (49900) panicked at crates\wcore-eval-scenarios\tests\runner_contracts.rs:690:5:
+    assertion failed: result.failures.iter().any(|failure|
+    matches!(failure, Failure::AssertionFailed { assertion, .. } if
+    assertion.contains("deliberately absent")))
+
+### wcore-eval-scenarios::runner_contracts cancellation_reaps_owned_descendant_listener
+    thread 'cancellation_reaps_owned_descendant_listener' (48468) panicked at crates\wcore-eval-scenarios\tests\runner_contracts.rs:665:5:
+    assertion failed: !result.failures.iter().any(|failure|
+    matches!(failure, Failure::Hung { .. } | Failure::OverTime
+    { .. }))
+
+### wcore-eval-scenarios::runner_contracts direct_child_early_exit_reaps_owned_descendant_listener
+    thread 'direct_child_early_exit_reaps_owned_descendant_listener' (49236) panicked at crates\wcore-eval-scenarios\tests\runner_contracts.rs:711:5:
+    assertion failed: result.failures.iter().any(|failure|
+    matches!(failure, Failure::RunnerError(message) if
+    message.contains("stdout")))
+
+### wcore-eval-scenarios::runner_contracts normal_exit_reaps_owned_descendant_listener
+    thread 'normal_exit_reaps_owned_descendant_listener' (49632) panicked at crates\wcore-eval-scenarios\tests\runner_contracts.rs:598:5:
+    unexpected failures: [Hung { stderr_tail: "" }]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+    thread 'checked_corpus_matches_real_serializers_byte_for_byte' (23344) panicked at crates\wcore-protocol\tests\desktop_contract_corpus.rs:203:22:
+    checked-in Desktop contract corpus must match the generator: Custom { kind: Other, error: "Desktop contract corpus drift: missing=[], extra=[], drifted=[\"adversarial/events/fixture-mismatch.jsonl\", \"adversarial/events/schema-mismatch.jsonl\", \"adversarial/events/version-mismatch.jsonl\", \"events/ready.json\", \"manifest.json\"]; run `wcore-contract generate`" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::acp_gate_d012 d012_json_stream_gated_write_emits_approval_before_execution
+    thread 'd012_json_stream_gated_write_emits_approval_before_execution' (31400) panicked at crates\wcore-cli\tests\acp_gate_d012.rs:203:5:
+    a mutating Write over --json-stream (default posture) must emit an approval/gate event BEFORE executing; none seen (the gate is invisible to the host — D012). file_written=false
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::acp_gate_d012 d012_json_stream_force_does_not_gate_write
+    thread 'd012_json_stream_force_does_not_gate_write' (43924) panicked at crates\wcore-cli\tests\acp_gate_d012.rs:224:5:
+    under --force the auto-approved Write must execute (probe file must exist); it did not
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-swarm worktree::tests::a_live_peer_transaction_is_never_reclaimed
+    thread 'worktree::tests::a_live_peer_transaction_is_never_reclaimed' (50380) panicked at crates\wcore-swarm\src\worktree_tests.rs:260:5:
+    assertion `left == right` failed: the same root stayed unreclaimable after its owner released the lease, so the skip above was not the lease
+    left: 0
+    right: 1
+
+### wcore-swarm worktree::tests::abandoned_transaction_reservations_are_reclaimed
+    thread 'worktree::tests::abandoned_transaction_reservations_are_reclaimed' (40556) panicked at crates\wcore-swarm\src\worktree_tests.rs:193:5:
+    assertion `left == right` failed: a killed run's transaction roots were not reclaimed
+    left: 0
+    right: 2
+
+### wcore-cli::smoke_p0 stop_mid_turn_does_not_strand_json_stream_session
+    thread 'stop_mid_turn_does_not_strand_json_stream_session' (29484) panicked at crates\wcore-cli\tests\smoke_p0.rs:491:5:
+    turn 1 must pause on the Bash approval gate (deterministic mid-turn state); frames=["{\"type\":\"ready\",\"version\":\"0.12.25\",\"session_id\":\"009b80009576\",\"capabilities\":{\"tool_approval\":true,\"thinking\":true,\"effort\":false,\"effort_levels\":[],\"modes\":[\"default\",\"auto_edit\",\"force\"],\"current_mode\":\"default\",\"mcp\":false,\"sub_agent_traces\":true,\"cost_attribution\":true,\"computer_use\":true,\"plugins\":true,\"user_model_backend\":\"local\",\"memory_enabled\":true},\"contract\":{\"name\":\"wayland-desktop-core\",\"major\":1,\"minor\":8,\"generator\":\"wcore-desktop-contract-gen/11\",\"fixture_digest\":\"sha256:634bbbe96bc8c0fce173165841360c7eab1f5e9d0f33a8006c99e7d71f9f30fa\",\"schema_digest\":\"sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54\",\"source_inputs_digest\":\"sha256:251709961fcc5c30c72b04fa1e7965ed472ef24c134a216df2db196b66679336\",\"capabilities\":{\"anvil_receipts\":\"publication_bound\",\"browser_events\":\"shape_only\",\"contract_negotiation\":\"available\",\"cua_events\":\"shape_only\",\"durable_child_model_v1\":\"available\",\"effective_execution_policy_revisions\":\"available\",\"host_delegated_delivery\":\"available\",\"operator_tool_effect_resolution_v1\":\"available\",\"plugin_events\":\"shape_only\",\"runtime_diagnostics_v1\":\"available\",\"runtime_mcp_lifecycle_v1\":\"available\",\"semantic_failover_receipts\":\"available\",\"turn_recovery_v1\":\"available\",\"workflow_lifecycle_v1\":\"available\"}},\"execution_policy\":{\"critical\":true,\"contract_version\":\"1.0\",\"revision\":0,\"reason\":\"launch\",\"effective_at_unix_ms\":1785278638182,\"policy\":{\"posture\":\"smart\",\"approvals\":\"prompt\",\"sandbox\":\"required\",\"source\":\"desktop_local_launch\",\"managed_floor_active\":false}}}", "{\"type\":\"execution_policy\",\"critical\":true,\"contract_version\":\"1.0\",\"revision\":0,\"reason\":\"launch\",\"effective_at_unix_ms\":1785278638182,\"policy\":{\"posture\":\"smart\",\"approvals\":\"prompt\",\"sandbox\":\"required\",\"source\":\"desktop_local_launch\",\"managed_floor_active\":false}}", "{\"type\":\"workspace_policy\",\"policy\":{\"trust\":{\"level\":\"untrusted\",\"source\":\"default\",\"fingerprint\":\"4a5d561b2aab6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e\",\"explanation\":\"no current fingerprint-bound local trust decision\"},\"profile\":\"strict\",\"backend\":\"appcontainer\",\"writable_roots\":[\"\\\\\\\\?\\\\C:\\\\Windows\\\\ServiceProfiles\\\\NetworkService\\\\AppData\\\\Local\\\\Temp\\\\.tmpjr7Kt3\",\"\\\\\\\\?\\\\C:\\\\Windows\\\\ServiceProfiles\\\\NetworkService\\\\AppData\\\\Local\\\\Temp\\\\wayland-scratch\\\\contained\"],\"readable_roots\":[\"\\\\\\\\?\\\\C:\\\\Windows\\\\ServiceProfiles\\\\NetworkService\\\\AppData\\\\Local\\\\Temp\\\\.tmpjr7Kt3\",\"\\\\\\\\?\\\\C:\\\\Windows\\\\ServiceProfiles\\\\NetworkService\\\\AppData\\\\Local\\\\Temp\\\\wayland-scratch\\\\contained\",\"C:\\\\WINDOWS\\\\ServiceProfiles\\\\NetworkService\\\\.cargo/bin\",\"C:\\\\WINDOWS\\\\ServiceProfiles\\\\NetworkService\\\\.rustup\"],\"capabilities\":[]}}", "{\"type\":\"capability_activation\",\"capability\":\"pricing_refresher\",\"stage\":\"declared\"}", "{\"type\":\"capability_activation\",\"capability\":\"pricing_refresher\",\"stage\":\"unavailable\",\"reason\":\"disabled_by_config\"}", "{\"type\":\"capability_activation\",\"capability\":\"mid_flight_monitor\",\"stage\":\"declared\"}", "{\"type\":\"capability_activation\",\"capability\":\"mid_flight_monitor\",\"stage\":\"configured\"}", "{\"type\":\"capability_activation\",\"capability\":\"mid_flight_monitor\",\"stage\":\"constructed\"}", "{\"type\":\"capability_activation\",\"capability\":\"mid_flight_monitor\",\"stage\":\"ready\"}", "{\"type\":\"capability_activation\",\"capability\":\"cooldown_tracker\",\"stage\":\"declared\"}", "{\"type\":\"capability_activation\",\"capability\":\"cooldown_tracker\",\"stage\":\"configured\"}", "{\"type\":\"capability_activation\",\"capability\":\"cooldown_tracker\",\"stage\":\"constructed\"}", "{\"type\":\"capability_activation\",\"capability\":\"cooldown_tracker\",\"stage\":\"ready\"}", "{\"type\":\"capability_activation\",\"capability\":\"learned_policy\",\"stage\":\"declared\"}", "{\"type\":\"capability_activation\",\"capability\":\"learned_policy\",\"stage\":\"unavailable\",\"reason\":\"runtime_path_unwired\"}", "{\"type\":\"capability_activation\",\"capability\":\"smart_handoff\",\"stage\":\"declared\"}", "{\"type\":\"capability_activation\",\"capability\":\"smart_handoff\",\"stage\":\"unavailable\",\"reason\":\"disabled_by_config\"}", "{\"type\":\"capability_activation\",\"capability\":\"delegate_isolation\",\"stage\":\"declared\"}", "{\"type\":\"capability_activation\",\"capability\":\"delegate_isolation\",\"stage\":\"unavailable\",\"reason\":\"isolation_not_enforced\"}", "{\"type\":\"capability_activation\",\"capability\":\"procedure_skill_drafting\",\"stage\":\"declared\"}", "{\"type\":\"capability_activation\",\"capability\":\"procedure_skill_drafting\",\"stage\":\"configured\"}", "{\"type\":\"capability_activation\",\"capability\":\"procedure_skill_drafting\",\"stage\":\"constructed\"}", "{\"type\":\"capability_activation\",\"capability\":\"procedure_skill_drafting\",\"stage\":\"ready\"}", "{\"type\":\"capability_activation\",\"capability\":\"legacy_auto_skill_drafting\",\"stage\":\"declared\"}", "{\"type\":\"capability_activation\",\"capability\":\"legacy_auto_skill_drafting\",\"stage\":\"configured\"}", "{\"type\":\"capability_activation\",\"capability\":\"legacy_auto_skill_drafting\",\"stage\":\"constructed\"}", "{\"type\":\"capability_activation\",\"capability\":\"legacy_auto_skill_drafting\",\"stage\":\"ready\"}", "{\"type\":\"error\",\"error\":{\"code\":\"engine_error\",\"message\":\"Session persistence authority unavailable: secure recovery storage is unavailable\",\"retryable\":false}}", "{\"type\":\"stream_end\",\"msg_id\":\"m1\",\"finish_reason\":\"error\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}"]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::smoke_p0 smoke_17_force_posture_auto_approves_mutating_tool_in_engine
+    thread 'smoke_17_force_posture_auto_approves_mutating_tool_in_engine' (3592) panicked at crates\wcore-cli\tests\smoke_p0.rs:388:5:
+    under --force the engine must auto-approve and execute the mutating Write (probe file must exist); it did not - the Force posture did not reach the live engine gate. probe=C:\WINDOWS\SERVIC~1\NETWOR~1\AppData\Local\Temp\.tmp6yVx0n\force_probe.txt
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::smoke_p0 approval_mode_auto_edit_from_config_reaches_json_stream_session
+    thread 'approval_mode_auto_edit_from_config_reaches_json_stream_session' (44988) panicked at crates\wcore-cli\tests\smoke_p0.rs:611:5:
+    config approval_mode=auto-edit must auto-approve the edit-class Write in json-stream WITHOUT --force (the #241 regression); the probe never appeared, so the config posture did not reach the session. probe=C:\WINDOWS\SERVIC~1\NETWOR~1\AppData\Local\Temp\.tmpdHXSWG\auto_edit_probe.txt
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::smoke_p0 gap_d012_acp_protocol_gates_mutating_tools
+    thread 'gap_d012_acp_protocol_gates_mutating_tools' (50988) panicked at crates\wcore-cli\tests\smoke_p0.rs:1302:5:
+    a mutating tool over --json-stream must emit an approval/gate event before executing; none seen (ACP runs ungated — D012). file_written=false
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-agent::typed_execution_policy_e2e_test typed_bypass_executes_bash_inside_required_sandbox
+    thread 'typed_bypass_executes_bash_inside_required_sandbox' (30152) panicked at crates\wcore-agent\tests\typed_execution_policy_e2e_test.rs:181:5:
+    Bash must execute through the required sandbox runtime
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-tools::bash_sandbox_routing_test delegated_mutation_uses_only_owner_checkout_and_private_scratch
+    thread 'delegated_mutation_uses_only_owner_checkout_and_private_scratch' (40568) panicked at crates\wcore-tools\tests\bash_sandbox_routing_test.rs:246:9:
+    assertion failed: std::path::Path::new(value).starts_with(&scratch)
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::deterministic_openai_loop packaged_f04_run_is_repeatable_and_content_addressed
+    thread 'packaged_f04_run_is_repeatable_and_content_addressed' (25696) panicked at crates\wcore-cli\tests\deterministic_openai_loop.rs:847:5:
+    unexpected failures: [RunnerError("engine emitted error: {\"code\":\"engine_error\",\"message\":\"Session persistence authority unavailable: secure recovery storage is unavailable\",\"retryable\":false}"), CostMissing, AssertionFailed { assertion: "Contains(\"Repository and MCP verification completed\")", observed: "Contains(\"Repository and MCP verification completed\") FAIL: substring not found in output (0 chars)" }, AssertionFailed { assertion: "FileContains { path: \"repository/src/settings.toml\", needle: \"port = 9090\" }", observed: "FileContains(\"repository/src/settings.toml\", \"port = 9090\") FAIL: needle not found in C:\\WINDOWS\\SERVIC~1\\NETWOR~1\\AppData\\Local\\Temp\\.tmpmsUZSS\\repository/src/settings.toml (28 bytes)" }, ExpectedToolMissing("Read (turn 0)"), ExpectedToolMissing("Edit (turn 0)"), ExpectedToolMissing("fixture_echo (turn 0)")]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    stdout ───
+
+### wcore-cli::migrate_quarantine t19_live_negative_leg_quarantined_payload_does_not_execute
+    thread 't19_live_negative_leg_quarantined_payload_does_not_execute' (49336) panicked at crates\wcore-cli\tests\migrate_quarantine.rs:1131:5:
+    the driven turn never reached the Skill tool for the payload, so the absence below would measure a turn that never happened. stream:
+    {"type":"ready","version":"0.12.25","session_id":"ccb6703c113c","capabilities":{"tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edit","force"],"current_mode":"force","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enabled":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":8,"generator":"wcore-desktop-contract-gen/11","fixture_digest":"sha256:634bbbe96bc8c0fce173165841360c7eab1f5e9d0f33a8006c99e7d71f9f30fa","schema_digest":"sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54","source_inputs_digest":"sha256:251709961fcc5c30c72b04fa1e7965ed472ef24c134a216df2db196b66679336","capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_negotiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","effective_execution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_resolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runtime_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"available","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785278681101,"policy":{"posture":"smart","approvals":"bypass","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}}
+    {"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785278681101,"policy":{"posture":"smart","approvals":"bypass","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}
+
+### wcore-cli::migrate_quarantine t20_live_positive_control_same_payload_executes_once_promoted
+    thread 't20_live_positive_control_same_payload_executes_once_promoted' (42888) panicked at crates\wcore-cli\tests\migrate_quarantine.rs:1189:5:
+    the PROMOTED payload did NOT execute — so the negative leg measured a payload that never loads rather than containment, and proves nothing. sentinel=C:\WINDOWS\SERVIC~1\NETWOR~1\AppData\Local\Temp\.tmph5QHm2\positive-sentinel stream:
+    {"type":"ready","version":"0.12.25","session_id":"b39a97dfbb44","capabilities":{"tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edit","force"],"current_mode":"force","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enabled":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":8,"generator":"wcore-desktop-contract-gen/11","fixture_digest":"sha256:634bbbe96bc8c0fce173165841360c7eab1f5e9d0f33a8006c99e7d71f9f30fa","schema_digest":"sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54","source_inputs_digest":"sha256:251709961fcc5c30c72b04fa1e7965ed472ef24c134a216df2db196b66679336","capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_negotiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","effective_execution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_resolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runtime_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"available","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785278681151,"policy":{"posture":"smart","approvals":"bypass","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}}
+    {"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785278681151,"policy":{"posture":"smart","approvals":"bypass","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}
+
+### wcore-swarm::worker_runtime_limits multi_worker_output_exhaustion_fails_without_retaining_buffers
+    thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (49360) panicked at crates\wcore-swarm\tests\worker_runtime_limits.rs:39:9:
+    assertion failed: started.elapsed() < Duration::from_secs(20)
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    ────────────
+

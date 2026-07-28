@@ -1,0 +1,295 @@
+warning: in config file .config/nextest.toml, ignoring unknown configuration key: profile.default.no-tests
+   Compiling smallvec v1.15.1
+   Compiling serde_core v1.0.228
+   Compiling subtle v2.6.1
+   Compiling stable_deref_trait v1.2.1
+   Compiling bitflags v2.11.1
+   Compiling futures-core v0.3.32
+   Compiling syn v2.0.117
+   Compiling getrandom v0.2.17
+   Compiling find-msvc-tools v0.1.9
+   Compiling rustix v1.1.4
+   Compiling shlex v2.0.1
+   Compiling writeable v0.6.3
+   Compiling linux-raw-sys v0.12.1
+   Compiling litemap v0.8.2
+   Compiling icu_properties_data v2.2.0
+   Compiling rand_core v0.6.4
+   Compiling parking_lot_core v0.9.12
+   Compiling cc v1.2.63
+   Compiling icu_normalizer_data v2.2.0
+   Compiling utf8_iter v1.0.4
+   Compiling http v1.4.1
+   Compiling percent-encoding v2.3.2
+   Compiling ipnet v2.12.0
+   Compiling crypto-common v0.1.7
+   Compiling parking_lot v0.12.5
+   Compiling untrusted v0.9.0
+   Compiling digest v0.10.7
+   Compiling httparse v1.10.1
+   Compiling rustls v0.23.40
+   Compiling try-lock v0.2.5
+   Compiling tower-service v0.3.3
+   Compiling io-lifetimes v2.0.4
+   Compiling pkg-config v0.3.33
+   Compiling want v0.3.1
+   Compiling form_urlencoded v1.2.2
+   Compiling futures-channel v0.3.32
+   Compiling atomic-waker v1.1.2
+   Compiling unicase v2.9.0
+   Compiling getrandom v0.4.2
+   Compiling zerocopy v0.8.50
+   Compiling sha2 v0.10.9
+   Compiling sync_wrapper v1.0.2
+   Compiling mime_guess v2.0.5
+   Compiling futures-sink v0.3.32
+   Compiling tower-layer v0.3.3
+   Compiling http-body v1.0.1
+   Compiling ryu v1.0.23
+   Compiling libdbus-sys v0.2.7
+   Compiling winnow v1.0.3
+   Compiling io-extras v0.18.4
+   Compiling base64 v0.22.1
+   Compiling inout v0.1.4
+   Compiling mime v0.3.17
+   Compiling cap-primitives v3.4.5
+   Compiling log v0.4.30
+   Compiling rustix v0.38.44
+   Compiling toml_writer v1.1.1+spec-1.1.0
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling dbus v0.9.11
+   Compiling curve25519-dalek v4.1.3
+   Compiling http-body-util v0.1.3
+   Compiling ring v0.17.14
+   Compiling universal-hash v0.5.1
+   Compiling anyhow v1.0.103
+   Compiling ambient-authority v0.0.2
+   Compiling fastrand v2.4.1
+   Compiling linux-raw-sys v0.4.15
+   Compiling cap-std v3.4.5
+   Compiling maybe-owned v0.3.4
+   Compiling opaque-debug v0.3.1
+   Compiling base64ct v1.8.3
+   Compiling option-ext v0.2.0
+   Compiling poly1305 v0.8.0
+   Compiling dirs-sys v0.5.0
+   Compiling password-hash v0.5.0
+   Compiling blake2 v0.10.6
+   Compiling aead v0.5.2
+   Compiling filetime v0.2.29
+   Compiling rtoolbox v0.0.5
+   Compiling either v1.16.0
+   Compiling sha1_smol v1.0.1
+   Compiling serde_json v1.0.150
+   Compiling serde_spanned v1.1.1
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling signature v2.2.0
+   Compiling unsafe-libyaml v0.2.11
+   Compiling home v0.5.12
+   Compiling uuid v1.23.2
+   Compiling ed25519 v2.2.3
+   Compiling serde_ignored v0.1.14
+   Compiling toml v1.1.2+spec-1.1.0
+   Compiling rpassword v7.5.2
+   Compiling argon2 v0.5.3
+   Compiling rustix-linux-procfs v0.1.1
+   Compiling fs-set-times v0.20.3
+   Compiling xattr v1.6.1
+   Compiling tempfile v3.27.0
+   Compiling tar v0.4.46
+   Compiling fd-lock v4.0.4
+   Compiling dirs v6.0.0
+   Compiling which v6.0.3
+   Compiling synstructure v0.13.2
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zeroize_derive v1.4.3
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.6
+   Compiling tokio-macros v2.7.0
+   Compiling serde_derive v1.0.228
+   Compiling futures-macro v0.3.32
+   Compiling tracing-attributes v0.1.31
+   Compiling thiserror-impl v2.0.18
+   Compiling zeroize v1.8.2
+   Compiling tokio v1.52.3
+   Compiling rustls-pki-types v1.14.1
+   Compiling async-trait v0.1.89
+   Compiling cipher v0.4.4
+   Compiling futures-util v0.3.32
+   Compiling ppv-lite86 v0.2.21
+   Compiling webpki-roots v1.0.7
+   Compiling chacha20 v0.9.1
+   Compiling dbus-secret-service v4.1.0
+   Compiling curve25519-dalek-derive v0.1.1
+   Compiling zerofrom v0.1.8
+   Compiling rand_chacha v0.3.1
+   Compiling yoke v0.8.2
+   Compiling chacha20poly1305 v0.10.1
+   Compiling tracing v0.1.44
+   Compiling thiserror v2.0.18
+   Compiling rustls-webpki v0.103.13
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling rand v0.8.6
+   Compiling keyring v3.6.3
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling icu_collections v2.2.0
+   Compiling icu_locale_core v2.2.0
+   Compiling serde v1.0.228
+   Compiling ed25519-dalek v2.2.0
+   Compiling chrono v0.4.44
+   Compiling serde_urlencoded v0.7.1
+   Compiling wcore-compact v0.12.25 (/root/wayland-red68/crates/wcore-compact)
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling icu_provider v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling wcore-types v0.12.25 (/root/wayland-red68/crates/wcore-types)
+   Compiling wcore-budget v0.12.25 (/root/wayland-red68/crates/wcore-budget)
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling hyper v1.10.1
+   Compiling tokio-util v0.7.18
+   Compiling tower v0.5.3
+   Compiling tokio-rustls v0.26.4
+   Compiling tower-http v0.6.11
+   Compiling hyper-util v0.1.20
+   Compiling wcore-sandbox v0.12.25 (/root/wayland-red68/crates/wcore-sandbox)
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.12.28
+   Compiling wcore-egress v0.12.25 (/root/wayland-red68/crates/wcore-egress)
+   Compiling wcore-config v0.12.25 (/root/wayland-red68/crates/wcore-config)
+   Compiling wcore-exec-backend v0.12.25 (/root/wayland-red68/crates/wcore-exec-backend)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.26s
+────────────
+ Nextest run ID c47febfb-7e2c-4365-be16-52b8c1854568 with nextest profile: default
+    Starting 124 tests across 6 binaries (1 test skipped)
+        PASS [   0.006s] (  1/124) wcore-exec-backend backends::cloud::tests::a_created_machine_is_tagged_with_the_task_nonce
+        PASS [   0.005s] (  2/124) wcore-exec-backend backends::cloud::tests::a_real_suspend_resume_is_the_only_shape_that_reaches_observed
+        PASS [   0.004s] (  3/124) wcore-exec-backend backends::cloud::tests::a_stop_start_cycle_is_refused_by_every_clause_independently
+        PASS [   0.015s] (  4/124) wcore-exec-backend backends::cloud::tests::an_absent_credential_fails_closed_rather_than_falling_back
+        PASS [   0.005s] (  5/124) wcore-exec-backend backends::cloud::tests::an_error_string_echoing_the_token_is_redacted
+        PASS [   0.005s] (  6/124) wcore-exec-backend backends::cloud::tests::an_unparseable_probe_cannot_certify_hibernation
+        PASS [   0.005s] (  7/124) wcore-exec-backend backends::cloud::tests::each_clause_reddens_alone
+        PASS [   0.005s] (  8/124) wcore-exec-backend backends::cloud::tests::guest_memory_rounds_up_and_is_bounded
+        PASS [   0.005s] (  9/124) wcore-exec-backend backends::cloud::tests::no_raw_http_client_is_constructed_in_this_module
+        PASS [   0.005s] ( 10/124) wcore-exec-backend backends::cloud::tests::the_credential_never_renders_itself
+        PASS [   0.004s] ( 11/124) wcore-exec-backend backends::cloud::tests::the_hibernation_observation_can_say_it_did_not_observe
+        PASS [   0.004s] ( 12/124) wcore-exec-backend backends::cloud::tests::the_machine_is_held_open_and_not_auto_restarted
+        PASS [   0.005s] ( 13/124) wcore-exec-backend backends::cloud::tests::the_probe_parses_the_runner_output_shape
+        PASS [   0.005s] ( 14/124) wcore-exec-backend backends::cloud::tests::the_runner_binds_task_values_positionally_rather_than_interpolating_them
+        PASS [   0.004s] ( 15/124) wcore-exec-backend backends::ssh::tests::a_far_end_with_no_supported_ps_reports_not_measured_rather_than_zero
+        PASS [   0.004s] ( 16/124) wcore-exec-backend backends::ssh::tests::every_value_crossing_the_connection_is_quoted_for_the_far_end_shell
+        PASS [   0.005s] ( 17/124) wcore-exec-backend backends::ssh::tests::every_wire_path_quotes_its_arguments
+        PASS [   0.004s] ( 18/124) wcore-exec-backend backends::ssh::tests::input_bytes_never_reach_the_far_end_as_script_text
+        PASS [   0.005s] ( 19/124) wcore-exec-backend backends::ssh::tests::the_module_contains_no_shell_string_execution_path
+        PASS [   0.004s] ( 20/124) wcore-exec-backend backends::ssh::tests::the_quoting_assertions_would_fail_without_quoting
+        PASS [   0.004s] ( 21/124) wcore-exec-backend backends::ssh::tests::the_remote_runner_binds_task_values_as_positional_arguments
+        PASS [   0.005s] ( 22/124) wcore-exec-backend backends::ssh::tests::the_remote_runner_starts_its_own_session_so_cancellation_can_reach_it
+        PASS [   0.004s] ( 23/124) wcore-exec-backend backends::ssh::tests::the_remote_scan_and_kill_exclude_their_own_process
+        PASS [   0.005s] ( 24/124) wcore-exec-backend backends::ssh::tests::the_scan_can_see_work_whose_argv_does_not_carry_the_nonce
+        PASS [   0.036s] ( 25/124) wcore-exec-backend backends::tests::an_impossible_request_is_denied_before_acceptance_and_names_the_resource
+        PASS [   0.078s] ( 26/124) wcore-exec-backend backends::tests::every_terminal_outcome_produces_exactly_one_terminal_event
+        PASS [   0.029s] ( 27/124) wcore-exec-backend backends::tests::streamed_text_and_artifact_bytes_share_one_output_budget
+        PASS [   0.006s] ( 28/124) wcore-exec-backend contract::tests::a_zero_in_any_budget_field_is_invalid_not_unlimited
+        PASS [   0.006s] ( 29/124) wcore-exec-backend contract::tests::identifiers_reject_shell_metacharacters
+        PASS [   0.005s] ( 30/124) wcore-exec-backend contract::tests::workspace_digest_is_order_independent
+        PASS [   0.005s] ( 31/124) wcore-exec-backend contract::tests::workspace_paths_cannot_escape
+        PASS [   0.071s] ( 32/124) wcore-exec-backend node::attribution::tests::a_genuine_chain_holds
+        PASS [   0.059s] ( 33/124) wcore-exec-backend node::attribution::tests::a_receipt_with_no_node_identity_is_unattributed_not_broken
+        PASS [   0.070s] ( 34/124) wcore-exec-backend node::attribution::tests::a_well_signed_receipt_from_another_node_does_not_attribute_to_this_one
+        PASS [   0.058s] ( 35/124) wcore-exec-backend node::attribution::tests::altering_the_node_identity_breaks_verification_like_a_tampered_backend_does
+        PASS [   0.079s] ( 36/124) wcore-exec-backend node::attribution::tests::an_inconsistent_registry_record_is_reported_broken
+        PASS [   0.135s] ( 37/124) wcore-exec-backend node::attribution::tests::attribution_survives_offline_return_revoke_and_repair
+        PASS [   0.006s] ( 38/124) wcore-exec-backend node::capability::tests::a_path_in_an_advertisement_is_reported_as_a_leak
+        PASS [   0.005s] ( 39/124) wcore-exec-backend node::capability::tests::available_backends_excludes_the_unavailable_ones
+        PASS [   0.006s] ( 40/124) wcore-exec-backend node::capability::tests::staleness_is_measured_not_assumed
+        PASS [   0.004s] ( 41/124) wcore-exec-backend node::capability::tests::two_nodes_can_advertise_genuinely_different_capability_sets
+        PASS [   0.037s] ( 42/124) wcore-exec-backend node::pairing::tests::a_genuine_proof_verifies
+        PASS [   0.005s] ( 43/124) wcore-exec-backend node::pairing::tests::a_hostname_with_dots_still_produces_a_valid_machine_id
+        PASS [   0.026s] ( 44/124) wcore-exec-backend node::pairing::tests::a_proof_for_another_challenge_is_refused
+        PASS [   0.037s] ( 45/124) wcore-exec-backend node::pairing::tests::a_signature_that_does_not_verify_is_refused
+        PASS [   0.037s] ( 46/124) wcore-exec-backend node::pairing::tests::a_signature_without_the_domain_separator_is_refused
+        PASS [   0.037s] ( 47/124) wcore-exec-backend node::pairing::tests::an_identity_not_minted_by_the_presenting_key_is_refused
+        PASS [   0.016s] ( 48/124) wcore-exec-backend node::registry::tests::a_corrupt_registry_refuses_rather_than_reading_as_empty
+        PASS [   0.016s] ( 49/124) wcore-exec-backend node::registry::tests::a_node_last_observed_offline_is_refused_without_fallback
+        PASS [   0.016s] ( 50/124) wcore-exec-backend node::registry::tests::a_paired_node_accepts_work
+        PASS [   0.038s] ( 51/124) wcore-exec-backend node::registry::tests::a_revoked_node_cannot_re_pair_itself
+        PASS [   0.005s] ( 52/124) wcore-exec-backend node::registry::tests::an_unpaired_node_is_refused
+        PASS [   0.015s] ( 53/124) wcore-exec-backend node::registry::tests::an_unsupported_contract_version_refuses_work
+        PASS [   0.027s] ( 54/124) wcore-exec-backend node::registry::tests::revocation_refuses_subsequent_work_and_does_not_reroute
+        PASS [   0.017s] ( 55/124) wcore-exec-backend node::registry::tests::unknown_liveness_is_distinct_from_offline
+        PASS [   0.005s] ( 56/124) wcore-exec-backend node::version::tests::a_different_major_is_refused
+        PASS [   0.004s] ( 57/124) wcore-exec-backend node::version::tests::a_newer_minor_is_refused_rather_than_optimistically_accepted
+        PASS [   0.005s] ( 58/124) wcore-exec-backend node::version::tests::all_three_verdicts_are_reachable
+        PASS [   0.004s] ( 59/124) wcore-exec-backend node::version::tests::an_identical_version_is_same_and_accepts_work
+        PASS [   0.004s] ( 60/124) wcore-exec-backend node::version::tests::an_older_minor_with_no_recorded_delta_is_refused_not_silently_accepted
+        PASS [   0.005s] ( 61/124) wcore-exec-backend node::version::tests::the_label_names_the_node_version_so_node_list_is_actionable
+        PASS [   0.006s] ( 62/124) wcore-exec-backend orphan::tests::a_found_orphan_is_carried_with_its_raw_row
+        PASS [   0.006s] ( 63/124) wcore-exec-backend orphan::tests::a_healthy_enumeration_passes_the_self_test
+        PASS [   0.004s] ( 64/124) wcore-exec-backend orphan::tests::a_row_whose_pid_cannot_be_parsed_is_kept_rather_than_dropped
+        PASS [   0.005s] ( 65/124) wcore-exec-backend orphan::tests::an_enumeration_that_cannot_see_its_own_process_is_cannot_determine
+        PASS [   0.004s] ( 66/124) wcore-exec-backend orphan::tests::an_unenumerable_surface_yields_no_count_at_all_rather_than_zero
+        PASS [   0.006s] ( 67/124) wcore-exec-backend orphan::tests::cannot_determine_carries_no_count_at_all
+        PASS [   0.005s] ( 68/124) wcore-exec-backend orphan::tests::container_inherits_the_proven_docker_reap
+        PASS [   0.005s] ( 69/124) wcore-exec-backend orphan::tests::only_the_three_proven_mechanism_names_are_ever_spelled
+        PASS [   0.005s] ( 70/124) wcore-exec-backend orphan::tests::ssh_and_cloud_are_not_claimed_kernel_backed
+        PASS [   0.005s] ( 71/124) wcore-exec-backend orphan::tests::the_command_line_column_is_found_on_each_platform_shape
+        PASS [   1.007s] ( 72/124) wcore-exec-backend orphan::tests::the_local_scanner_finds_a_descendant_that_was_deliberately_left_behind
+        PASS [   0.085s] ( 73/124) wcore-exec-backend orphan::tests::the_real_process_table_passes_its_own_self_test_on_this_host
+        PASS [   0.084s] ( 74/124) wcore-exec-backend orphan::tests::the_scanner_does_not_count_its_own_process
+        PASS [   0.007s] ( 75/124) wcore-exec-backend orphan::tests::windows_null_command_lines_are_cannot_determine_not_zero
+        PASS [   0.007s] ( 76/124) wcore-exec-backend policy::tests::a_policy_carrying_a_secret_value_shaped_name_is_refused
+        PASS [   0.005s] ( 77/124) wcore-exec-backend policy::tests::no_reference_backend_provisions_a_secret_into_the_task
+        PASS [   0.016s] ( 78/124) wcore-exec-backend receipt::tests::a_gap_in_the_event_sequence_is_rejected
+        PASS [   0.016s] ( 79/124) wcore-exec-backend receipt::tests::a_pre_acceptance_denial_carries_no_accepted_event
+        PASS [   0.049s] ( 80/124) wcore-exec-backend receipt::tests::a_sealed_receipt_verifies_against_its_pinned_identity
+        PASS [   0.037s] ( 81/124) wcore-exec-backend receipt::tests::an_altered_body_fails_verification
+        PASS [   0.037s] ( 82/124) wcore-exec-backend receipt::tests::an_unpinned_backend_identity_is_rejected
+        PASS [   0.028s] ( 83/124) wcore-exec-backend receipt::tests::normalization_does_not_hide_a_real_disagreement
+        PASS [   0.027s] ( 84/124) wcore-exec-backend receipt::tests::normalization_elides_only_identity_and_reports_it_as_divergent
+        PASS [   0.017s] ( 85/124) wcore-exec-backend receipt::tests::normalization_keeps_every_field_two_backends_must_agree_on
+        PASS [   0.016s] ( 86/124) wcore-exec-backend receipt::tests::two_terminal_events_are_rejected
+        PASS [   0.006s] ( 87/124) wcore-exec-backend registry::tests::a_recorded_task_is_readable_by_another_caller_and_removable
+        PASS [   0.005s] ( 88/124) wcore-exec-backend registry::tests::a_task_id_cannot_traverse_out_of_the_state_directory
+        PASS [   1.450s] ( 89/124) wcore-exec-backend::conformance_matrix every_reference_backend_passes_the_same_harness_or_reports_why_it_did_not
+        PASS [   0.181s] ( 90/124) wcore-exec-backend::conformance_matrix the_local_backend_is_always_exercised_because_it_needs_nothing_external
+        PASS [   0.006s] ( 91/124) wcore-exec-backend::fail_closed_matrix case_a_value_shaped_secret_name_is_refused
+        PASS [   0.036s] ( 92/124) wcore-exec-backend::fail_closed_matrix case_attestation_mismatch_is_refused_before_the_receipt_is_believed
+        PASS [   0.047s] ( 93/124) wcore-exec-backend::fail_closed_matrix case_denied_secret_is_decided_before_execution_and_no_value_can_be_carried
+        PASS [   0.047s] ( 94/124) wcore-exec-backend::fail_closed_matrix case_egress_decision_is_read_from_the_shared_policy_and_never_re_derived
+        PASS [   0.037s] ( 95/124) wcore-exec-backend::fail_closed_matrix case_integrity_only_verification_does_not_establish_identity
+        PASS [   0.072s] ( 96/124) wcore-exec-backend::fail_closed_matrix case_no_fallback_a_refused_node_does_not_hand_its_work_to_a_healthy_one
+        PASS [   0.074s] ( 97/124) wcore-exec-backend::fail_closed_matrix case_no_fallback_an_unavailable_backend_refuses_rather_than_degrading
+        PASS [   0.048s] ( 98/124) wcore-exec-backend::fail_closed_matrix case_rotated_key_is_refused_against_the_new_pinned_identity
+        PASS [   0.057s] ( 99/124) wcore-exec-backend::fail_closed_matrix case_rotated_key_plugin_signature_is_refused_by_the_engine_verifier
+        PASS [   0.039s] (100/124) wcore-exec-backend::fail_closed_matrix case_tampered_plugin_bundle_fails_the_digest_and_the_signature_and_the_approval
+        PASS [   0.048s] (101/124) wcore-exec-backend::fail_closed_matrix case_tampered_receipt_is_refused_at_every_mutable_field
+        PASS [   0.006s] (102/124) wcore-exec-backend::fail_closed_matrix no_backend_claims_a_reaping_mechanism_it_does_not_have
+        LEAK [   0.839s] (103/124) wcore-exec-backend::fail_closed_matrix the_local_scan_finds_an_orphan_that_no_registry_remembers
+        PASS [   0.006s] (104/124) wcore-exec-backend::live_equivalence zero_execution_guard
+        PASS [   0.072s] (105/124) wcore-exec-backend::node_contract a_node_observed_offline_refuses_work_and_does_not_reroute
+        PASS [   0.069s] (106/124) wcore-exec-backend::node_contract a_receipt_without_a_node_identity_is_unattributed_not_broken
+        PASS [   0.039s] (107/124) wcore-exec-backend::node_contract a_refreshed_advertisement_drops_a_backend_that_died
+        PASS [   0.102s] (108/124) wcore-exec-backend::node_contract a_revoked_node_cannot_re_pair_itself_but_an_operator_can
+        PASS [   0.079s] (109/124) wcore-exec-backend::node_contract a_tampered_node_identity_fails_verification_like_a_tampered_backend_one
+        PASS [   0.037s] (110/124) wcore-exec-backend::node_contract adding_the_node_slot_did_not_invalidate_receipts_that_predate_it
+        PASS [   0.004s] (111/124) wcore-exec-backend::node_contract an_older_supported_node_names_its_reduced_capability_set
+        PASS [   0.025s] (112/124) wcore-exec-backend::node_contract an_unprovable_far_end_is_refused_and_leaves_no_record
+        PASS [   0.038s] (113/124) wcore-exec-backend::node_contract an_unsupported_version_refuses_work_at_the_registry
+        PASS [   0.079s] (114/124) wcore-exec-backend::node_contract attribution_does_break_when_it_should
+        PASS [   0.079s] (115/124) wcore-exec-backend::node_contract attribution_holds_for_work_a_paired_node_did
+        PASS [   0.189s] (116/124) wcore-exec-backend::node_contract attribution_survives_every_disruption_the_criterion_names
+        PASS [   0.038s] (117/124) wcore-exec-backend::node_contract pairing_records_a_node_only_after_a_real_proof
+        PASS [   0.069s] (118/124) wcore-exec-backend::node_contract revocation_refuses_work_terminates_nothing_silently_and_never_reroutes
+        PASS [   0.005s] (119/124) wcore-exec-backend::node_contract the_disconnected_terminal_status_exists_and_is_terminal
+        PASS [   0.069s] (120/124) wcore-exec-backend::node_contract two_nodes_on_different_operating_systems_advertise_differently
+        PASS [   0.037s] (121/124) wcore-exec-backend::node_contract unknown_liveness_is_not_the_same_as_offline
+        PASS [   0.006s] (122/124) wcore-exec-backend::node_contract version_handling_produces_exactly_three_distinct_verdicts
+        PASS [   0.007s] (123/124) wcore-exec-backend::ssh_far_end_quoting quoted_values_reach_the_far_end_shell_byte_for_byte
+        PASS [   0.008s] (124/124) wcore-exec-backend::ssh_far_end_quoting without_quoting_the_same_round_trip_is_corrupted_and_executes
+────────────
+     Summary [   6.700s] 124 tests run: 124 passed (1 leaky), 1 skipped

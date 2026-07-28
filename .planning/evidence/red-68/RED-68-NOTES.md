@@ -88,13 +88,101 @@ another way a load-bearing command silently 127s inside a pipeline.
 
 ---
 
+## T+1 — the CI container is missing three binaries the suite needs
+
+The Linux CI image is built inline in `ci.yml`:
+
+```
+FROM rust:1.95-slim-bookworm
+RUN apt-get install ... libdbus-1-dev libseccomp-dev libssl-dev libasound2-dev pkg-config mold ca-certificates git
+```
+
+**No `python3`, no `procps` (`ps`), no `bubblewrap`.** Read back from the job log,
+lines 147-165. Failure messages name all three directly:
+
+| missing | message | Linux failures |
+|---|---|---|
+| `python3` | `python3 must be available to materialise a hostile corpus: Os { code: 2, NotFound }` | 23 |
+| `ps` | `could not run 'ps' to enumerate processes: No such file or directory` | 5 |
+| `bwrap` | `required live bwrap must be installed and usable` / `sandbox backend fail_closed cannot enforce delegated read denial` | ~24 |
+
+## T+1 — serial re-run on hetzner, per test, not per crate
+
+hetzner has all three (`/usr/bin/python3`, `/usr/bin/ps`, `/usr/bin/bwrap`).
+Re-ran the affected crates **serially** (`--test-threads 1 --no-fail-fast`) at this
+lane's HEAD `82288335`:
+
+| target | Summary |
+|---|---|
+| `-p wcore-protocol --test desktop_contract_corpus` | `15 tests run: 14 passed, 1 failed` |
+| `-p wcore-exec-backend` | `124 tests run: 124 passed (1 leaky), 1 skipped` |
+| `-p wcore-eval-scenarios` | `507 tests run: 507 passed, 5 skipped` |
+| `-p wcore-sandbox` | `100 tests run: 100 passed, 2 skipped` |
+| `-p wcore-swarm` | `150 tests run: 150 passed, 11 skipped` |
+| `-p wcore-tools --test bash_sandbox_routing_test` | `18 tests run: 18 passed` |
+
+**A crate total is not evidence about a specific test** — a crate can pass 100/100
+without ever executing the test that failed in CI. Checked per test with
+`.planning/scripts/verify-serial-outcome.py` (3-assertion self-test passes; A3 proves
+the old "read the crate's N-passed summary" method would have cleared a test the
+re-run never touched):
+
+```
+PASS_SERIAL=37   FAIL_SERIAL=1   ABSENT=30
+```
+
+The 30 ABSENT are `wcore-cli` and `wcore-agent` tests not in that batch — a second
+serial batch is running for those. **They are NOT yet classified and must not be
+counted as environment.**
+
+## T+2 — the one that fails serially too: the Desktop contract corpus (HIGH)
+
+`wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte`
+fails on hetzner, serially, at HEAD. Not environment, not parallelism.
+
+```
+Desktop contract corpus drift: missing=[], extra=[],
+drifted=["adversarial/events/fixture-mismatch.jsonl", "adversarial/events/schema-mismatch.jsonl",
+         "adversarial/events/version-mismatch.jsonl", "events/ready.json", "manifest.json"]
+```
+
+Those five files are exactly the five that carry the contract descriptor. **No schema
+file, no event file and no command file drifted** — the wire shape did not change;
+the digests over it did.
+
+`source_inputs_digest` recomputed outside cargo (`contract-source-digest.py`, mirrors
+`generate::source_digest`; 3-assertion self-test passes):
+
+| rev | computed | pinned | match |
+|---|---|---|---|
+| `5f74d559` (the authorized re-stamp) | `sha256:2517099…` | `sha256:2517099…` | **True** |
+| `189599ca` (the CI run) | `sha256:e434c46…` | `sha256:2517099…` | False |
+| `3cfc336f` / worktree | `sha256:3d760cf…` | `sha256:2517099…` | False |
+
+So the re-stamp was correct when it landed and has been invalidated twice since.
+`SOURCE_INPUTS` is **40 files, not the 20** a `head`-truncated read shows — and the
+three that moved are:
+
+```
+crates/wcore-agent/src/output/protocol_sink.rs
+crates/wcore-agent/src/bootstrap.rs
+crates/wcore-cli/src/main.rs        <-- the LANE-BRIEF §6 shared-file fence
+```
+
+Seven commits from five lanes moved them since the re-stamp. One of them is
+`bf959017 fix(24-c3): restore AgentBootstrap's own doc comment`.
+
+**A restored doc comment moved a cryptographic wire-contract digest.** `main.rs` being
+in the digest is worse still: the brief instructs *every* lane to make additive edits
+to that exact file, so the guard is designed to be re-reddened by the workflow itself.
+
+I did NOT run `wcore-contract generate` (brief §0). A fenced seam request goes in the
+report.
+
 ## Still to establish
 
-- [ ] Serial (non-parallel) re-run of each cluster on hetzner, per the brief's
-      standing warning that a full-workspace run under lane contention is not a
-      measurement.
-- [ ] Per-cluster root cause and classification (real defect / stale test /
-      environment / already-known).
-- [ ] Rank the real defects by customer impact — looking first for the
-      silent-message-loss shape: loses data, reports success it did not achieve,
-      or wedges permanently.
+- [ ] Second serial batch (`wcore-cli --lib`, `portability_hostile_corpus`,
+      `f14_sigkill_recovery`, `sandbox_activeness`) — the 30 currently ABSENT.
+- [ ] Windows: whether `--json-stream` really emits no `ready`, measured with a
+      probe that isolates config properly and reads stderr.
+- [ ] Rank the real defects by customer impact.

@@ -1,0 +1,123 @@
+warning: in config file .config/nextest.toml, ignoring unknown configuration key: profile.default.no-tests
+   Compiling syn v2.0.117
+   Compiling serde_derive v1.0.228
+   Compiling futures-macro v0.3.32
+   Compiling tokio-macros v2.7.0
+   Compiling thiserror-impl v2.0.18
+   Compiling tracing-attributes v0.1.31
+   Compiling async-trait v0.1.89
+   Compiling tokio v1.52.3
+   Compiling futures-util v0.3.32
+   Compiling tracing v0.1.44
+   Compiling thiserror v2.0.18
+   Compiling serde v1.0.228
+   Compiling chrono v0.4.44
+   Compiling wcore-types v0.12.25 (/root/wayland-red68/crates/wcore-types)
+   Compiling tokio-util v0.7.18
+   Compiling wcore-sandbox v0.12.25 (/root/wayland-red68/crates/wcore-sandbox)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.14s
+────────────
+ Nextest run ID 32ab5c47-f9f4-4ea9-aef0-efbda7064f88 with nextest profile: default
+    Starting 100 tests across 19 binaries (2 tests skipped)
+        PASS [   0.005s] (  1/100) wcore-sandbox authority_boundary_tests::buffered_authority_rejects_same_path_replacement_before_backend
+        PASS [   0.005s] (  2/100) wcore-sandbox authority_boundary_tests::streaming_authority_rejects_same_path_replacement_before_backend
+        PASS [   0.004s] (  3/100) wcore-sandbox backends::appcontainer::hard_containment_identity_tests::appcontainer_identity_names_job_object_mechanism
+        PASS [   0.005s] (  4/100) wcore-sandbox backends::appcontainer::probe_cache_tests::late_negative_never_downgrades_a_sticky_positive
+        PASS [   0.005s] (  5/100) wcore-sandbox backends::appcontainer::probe_cache_tests::negative_is_cached_then_self_heals
+        PASS [   0.004s] (  6/100) wcore-sandbox backends::appcontainer::probe_cache_tests::negative_then_positive_recovers_and_sticks
+        PASS [   0.004s] (  7/100) wcore-sandbox backends::appcontainer::probe_cache_tests::positive_is_sticky
+        PASS [   0.012s] (  8/100) wcore-sandbox backends::appcontainer::probe_cache_tests::single_flight_fails_closed_once_under_concurrency
+        PASS [   0.012s] (  9/100) wcore-sandbox backends::appcontainer::probe_cache_tests::single_flight_runs_probe_once_under_concurrency
+        PASS [   0.004s] ( 10/100) wcore-sandbox backends::appcontainer::probe_cache_tests::unknown_forces_a_probe
+        PASS [   0.005s] ( 11/100) wcore-sandbox backends::appcontainer::stub_impl::tests::stub_is_unavailable
+        PASS [   0.005s] ( 12/100) wcore-sandbox backends::appcontainer::stub_impl::tests::stub_name
+        PASS [   0.005s] ( 13/100) wcore-sandbox backends::bwrap::tests::allow_hosts_unsupported
+        PASS [   0.077s] ( 14/100) wcore-sandbox backends::bwrap::tests::bwrap_denied_directory_is_not_writable
+        PASS [   0.079s] ( 15/100) wcore-sandbox backends::bwrap::tests::bwrap_denies_read_of_secret_under_allowed_root
+        PASS [   0.005s] ( 16/100) wcore-sandbox backends::bwrap::tests::bwrap_enforces_read_deny_returns_true
+        PASS [   0.071s] ( 17/100) wcore-sandbox backends::bwrap::tests::echo_runs_under_bwrap
+        PASS [   0.005s] ( 18/100) wcore-sandbox backends::bwrap::tests::is_available_reflects_path
+        PASS [   0.073s] ( 19/100) wcore-sandbox backends::bwrap::tests::missing_bind_source_is_skipped_not_fatal
+        PASS [   0.005s] ( 20/100) wcore-sandbox backends::bwrap::tests::multiline_bwrap_status_yields_child_pid_without_waiting_for_eof
+        PASS [   0.007s] ( 21/100) wcore-sandbox backends::bwrap::tests::relative_path_rejected
+        PASS [   0.074s] ( 22/100) wcore-sandbox backends::bwrap::tests::required_live_bwrap_admission
+        PASS [   0.075s] ( 23/100) wcore-sandbox backends::bwrap::tests::required_live_bwrap_hard_containment_mint_and_drift
+        PASS [   0.077s] ( 24/100) wcore-sandbox backends::bwrap::tests::required_live_bwrap_retained_cwd_enforcement
+        PASS [   0.005s] ( 25/100) wcore-sandbox backends::bwrap::tests::truncated_bwrap_status_fails_closed
+        PASS [   0.005s] ( 26/100) wcore-sandbox backends::docker::tests::backend_name_is_stable
+        PASS [   0.006s] ( 27/100) wcore-sandbox backends::docker::tests::docker_disabled_is_unavailable_and_refuses
+        PASS [   0.005s] ( 28/100) wcore-sandbox backends::docker::tests::enforces_read_deny_is_false_without_live_docker
+        PASS [   0.044s] ( 29/100) wcore-sandbox backends::no_sandbox::tests::buffered_output_is_bounded
+        PASS [   1.298s] ( 30/100) wcore-sandbox backends::no_sandbox::tests::dropping_execute_future_prevents_delayed_descendant_effect
+        PASS [   0.039s] ( 31/100) wcore-sandbox backends::no_sandbox::tests::dropping_stream_kills_direct_child_and_background_descendant
+        PASS [   0.009s] ( 32/100) wcore-sandbox backends::no_sandbox::tests::echo_runs
+        PASS [   0.005s] ( 33/100) wcore-sandbox backends::no_sandbox::tests::empty_argv_is_error
+        PASS [   0.007s] ( 34/100) wcore-sandbox backends::no_sandbox::tests::env_is_scrubbed_then_repopulated
+        PASS [   0.006s] ( 35/100) wcore-sandbox backends::no_sandbox::tests::execute_streaming_yields_chunks_then_exit
+        PASS [   1.258s] ( 36/100) wcore-sandbox backends::no_sandbox::tests::successful_direct_child_cannot_leave_background_descendant
+        PASS [   0.006s] ( 37/100) wcore-sandbox backends::no_sandbox::tests::warn_once_is_idempotent
+        PASS [   0.005s] ( 38/100) wcore-sandbox backends::process_tree::linux_tests::identity_drift_never_signals_foreign_process
+        PASS [   0.068s] ( 39/100) wcore-sandbox backends::process_tree::linux_tests::required_live_descendant_teardown_before_workspace_cleanup
+        PASS [   0.005s] ( 40/100) wcore-sandbox backends::tests::dropping_stream_receiver_drops_backend_execution
+        PASS [   0.010s] ( 41/100) wcore-sandbox directory_authority::archive::tests::crash_after_descendant_removal_recovers_original_before_reads
+        PASS [   0.008s] ( 42/100) wcore-sandbox directory_authority::archive::tests::mid_import_failure_rolls_back_to_original_tree
+        PASS [   0.004s] ( 43/100) wcore-sandbox directory_authority::tests::duplicated_directory_handles_are_tracked_until_drop
+        PASS [   0.006s] ( 44/100) wcore-sandbox directory_authority::tests::rejects_real_directory_swap_during_acquisition
+        PASS [   0.005s] ( 45/100) wcore-sandbox directory_authority::tests::rejects_real_directory_swap_during_validation
+        PASS [   0.007s] ( 46/100) wcore-sandbox directory_authority::tests::relative_creation_stays_bound_to_renamed_parent_object
+        PASS [   0.006s] ( 47/100) wcore-sandbox directory_authority::tests::retained_regular_file_detects_same_inode_rewrite
+        PASS [   0.007s] ( 48/100) wcore-sandbox directory_authority::tests::retained_regular_file_read_is_bounded_and_identity_checked
+        PASS [   0.005s] ( 49/100) wcore-sandbox fail_closed_tests::environment_passthrough_is_owned_by_each_session_runtime
+        PASS [   0.005s] ( 50/100) wcore-sandbox fail_closed_tests::fail_closed_backend_does_not_enforce_read_deny
+        PASS [   0.005s] ( 51/100) wcore-sandbox fail_closed_tests::fail_closed_backend_refuses_execution
+        PASS [   0.004s] ( 52/100) wcore-sandbox fail_closed_tests::opt_in_parsing_accepts_1_and_true
+        PASS [   0.004s] ( 53/100) wcore-sandbox fail_closed_tests::required_session_rejects_environment_bypass_pair
+        PASS [   0.005s] ( 54/100) wcore-sandbox fail_closed_tests::required_session_rejects_persisted_none
+        PASS [   0.004s] ( 55/100) wcore-sandbox fail_closed_tests::sandbox_none_fails_closed_without_opt_in
+        PASS [   0.005s] ( 56/100) wcore-sandbox fail_closed_tests::sandbox_none_honored_with_opt_in
+        PASS [   0.005s] ( 57/100) wcore-sandbox fail_closed_tests::session_runtimes_do_not_follow_later_global_changes
+        PASS [   0.006s] ( 58/100) wcore-sandbox fail_closed_tests::unsandboxed_fallback_fails_closed_without_opt_in
+        PASS [   0.004s] ( 59/100) wcore-sandbox fail_closed_tests::unsandboxed_fallback_runs_no_sandbox_with_opt_in
+        PASS [   0.006s] ( 60/100) wcore-sandbox hard_containment_tests::authority_debug_is_redacted
+        PASS [   0.005s] ( 61/100) wcore-sandbox hard_containment_tests::backend_drift_refuses
+        PASS [   0.005s] ( 62/100) wcore-sandbox hard_containment_tests::bypass_registry_cannot_mint
+        PASS [   0.004s] ( 63/100) wcore-sandbox hard_containment_tests::executable_and_runtime_drift_refuses
+        PASS [   0.005s] ( 64/100) wcore-sandbox hard_containment_tests::non_qualifying_backend_at_spawn_refuses
+        PASS [   0.005s] ( 65/100) wcore-sandbox hard_containment_tests::non_qualifying_backends_cannot_mint
+        PASS [   0.005s] ( 66/100) wcore-sandbox hard_containment_tests::policy_drift_refuses
+        PASS [   0.007s] ( 67/100) wcore-sandbox hard_containment_tests::probe_failure_at_every_stage_fails_closed
+        PASS [   0.006s] ( 68/100) wcore-sandbox hard_containment_tests::probe_identity_disagreement_fails_closed
+        PASS [   0.006s] ( 69/100) wcore-sandbox hard_containment_tests::qualifying_backend_mints_and_verifies_with_no_drift
+        PASS [   0.005s] ( 70/100) wcore-sandbox hard_containment_tests::spawn_parameter_drift_refuses
+        PASS [   0.004s] ( 71/100) wcore-sandbox manifest::tests::denied_location_flags_temp_and_credentials
+        PASS [   0.004s] ( 72/100) wcore-sandbox manifest::tests::fs_read_deny_defaults_empty
+        PASS [   0.004s] ( 73/100) wcore-sandbox manifest::tests::fs_read_deny_missing_from_toml_defaults_empty
+        PASS [   0.004s] ( 74/100) wcore-sandbox manifest::tests::fs_read_deny_roundtrips_toml
+        PASS [   0.004s] ( 75/100) wcore-sandbox manifest::tests::hard_containment_denies_candidate_under_global_temp
+        PASS [   0.004s] ( 76/100) wcore-sandbox manifest::tests::hard_containment_filesystem_is_read_only_candidate_plus_private_writes
+        PASS [   0.006s] ( 77/100) wcore-sandbox manifest::tests::hard_containment_rejects_relative_candidate
+        PASS [   0.005s] ( 78/100) wcore-sandbox manifest::tests::hard_containment_rejects_traversal_components
+        PASS [   0.004s] ( 79/100) wcore-sandbox manifest::tests::hard_containment_rejects_writable_root_overlapping_candidate
+        PASS [   0.004s] ( 80/100) wcore-sandbox manifest::tests::policy_identity_is_order_independent
+        PASS [   0.073s] ( 81/100) wcore-sandbox::backend_integration bwrap_confines_filesystem_writes_outside_allowlist
+        PASS [   0.074s] ( 82/100) wcore-sandbox::backend_integration bwrap_execute_echo_returns_exit_zero
+        PASS [   0.007s] ( 83/100) wcore-sandbox::backend_integration no_sandbox_execute_echo_returns_exit_zero_and_stdout
+        PASS [   0.006s] ( 84/100) wcore-sandbox::backend_integration no_sandbox_execute_streaming_yields_chunks_then_exit
+        PASS [   0.006s] ( 85/100) wcore-sandbox::backend_integration no_sandbox_honors_manifest_cwd_and_env
+        PASS [   0.006s] ( 86/100) wcore-sandbox::backend_integration no_sandbox_reports_nonzero_exit_code
+        PASS [   0.282s] ( 87/100) wcore-sandbox::hard_process_containment qualified_hard_containment_backend_preflight
+        PASS [   0.005s] ( 88/100) wcore-sandbox::manifest_parse defaults_when_all_fields_missing
+        PASS [   0.005s] ( 89/100) wcore-sandbox::manifest_parse network_deny_parses
+        PASS [   0.005s] ( 90/100) wcore-sandbox::manifest_parse parses_full_manifest
+        PASS [   0.005s] ( 91/100) wcore-sandbox::manifest_parse rejects_unknown_network_policy_kind
+        PASS [   0.068s] ( 92/100) wcore-sandbox::process_capture linux::cancellation_kills_the_owned_process_tree
+        PASS [   0.037s] ( 93/100) wcore-sandbox::process_capture linux::stderr_flood_is_bounded
+        PASS [   0.008s] ( 94/100) wcore-sandbox::process_capture linux::stdin_is_closed_for_noninteractive_helpers
+        PASS [   0.059s] ( 95/100) wcore-sandbox::process_capture linux::stdout_flood_is_bounded_and_kills_descendant
+        PASS [   0.078s] ( 96/100) wcore-sandbox::secret_read_deny secret_read_deny_case_a_project_env_under_allowed_root
+        PASS [   0.077s] ( 97/100) wcore-sandbox::secret_read_deny secret_read_deny_case_b_symlink_to_env
+        PASS [   0.079s] ( 98/100) wcore-sandbox::secret_read_deny secret_read_deny_case_c_symlink_to_external_non_secret_is_readable
+        PASS [   0.078s] ( 99/100) wcore-sandbox::secret_read_deny secret_read_deny_case_d_credential_dir_deny
+        PASS [   0.079s] (100/100) wcore-sandbox::secret_read_deny secret_read_deny_case_e_ordinary_file_remains_readable
+────────────
+     Summary [   4.649s] 100 tests run: 100 passed, 2 skipped
