@@ -63,6 +63,8 @@ pub(crate) fn reduce(
         | SessionEvent::GoalWaitResolved { .. }
         | SessionEvent::GoalRunResumed { .. }
         | SessionEvent::GoalTerminated { .. }
+        | SessionEvent::GoalLoopOwnerClaimed { .. }
+        | SessionEvent::GoalLoopOwnerFinished { .. }
         | SessionEvent::GoalTaskDeclared { .. }
         | SessionEvent::GoalTaskTransitioned { .. } => {
             apply_goal_event(
@@ -191,6 +193,57 @@ fn require_live_epoch<'a>(
 /// This is what makes a stale command explicit rather than absorbed: a command
 /// that raced a terminal transition is rejected instead of quietly overwriting
 /// a committed outcome.
+/// Apply a terminal state to a Goal, whatever route produced it.
+///
+/// Shared by the plain `GoalTerminated` path and the canonical
+/// `GoalLoopOwnerFinished` path so the two can never drift: the anti-forgery
+/// check and the task cancellation cascade are written once. If a future
+/// terminal route appears, it lands here or it does not land.
+fn apply_goal_terminal(
+    state: &mut ReducedSessionState,
+    goal_id: &str,
+    terminal: &GoalTerminalState,
+    seq: u64,
+    checksum: &str,
+) -> Result<(), JournalError> {
+    let goal = required_goal_mut(state, goal_id)?;
+    // The durable half of the anti-forgery property. The compiler closes the
+    // model-authored route (`HostGateObservation` is not `Deserialize`); this
+    // closes the remaining one, a same-UID writer appending a hand-built record
+    // that stamps `verified` on a strategy whose verification owner is a model
+    // judge, a shape validator or a boolean count.
+    if terminal.is_verified() && !goal.authority.strategy.can_produce_host_observed_evidence() {
+        return Err(invalid_goal(
+            goal_id,
+            "strategy has no host-observed verification owner and cannot reach verified",
+        ));
+    }
+    goal.lifecycle = GoalLifecycle::Terminated {
+        terminal: terminal.clone(),
+    };
+    // The cancellation cascade. A Goal that terminates revokes every live task
+    // claim, so the epoch every in-flight owner holds is now superseded and
+    // `require_live_epoch` refuses its completion. That is what makes "no
+    // cancelled task's effect lands afterward" a property of the durable
+    // boundary rather than of the shutdown path — which is the one path a killed
+    // process never runs.
+    let reason = format!("goal terminated: {terminal:?}");
+    for task in goal.tasks.values_mut() {
+        if let Some(attempt) = task.attempts.last_mut()
+            && matches!(attempt.status, GoalTaskAttemptStatus::Live)
+        {
+            attempt.status = GoalTaskAttemptStatus::Revoked {
+                reason: reason.clone(),
+            };
+            task.last_transition_seq = seq;
+            task.last_transition_checksum = checksum.to_owned();
+        }
+    }
+    goal.last_transition_seq = seq;
+    goal.last_transition_checksum = checksum.to_owned();
+    Ok(())
+}
+
 fn require_goal_live(goal: &GoalState) -> Result<(), JournalError> {
     if goal.is_terminal() {
         return Err(invalid_goal(
@@ -241,6 +294,9 @@ fn apply_goal_event(
                     last_transition_seq: seq,
                     last_transition_checksum: checksum.to_owned(),
                     tasks: BTreeMap::new(),
+                    // No loop owner until a strategy claims one.
+                    loop_owner: None,
+                    loop_owner_epochs: 0,
                 },
             );
         }
@@ -319,46 +375,107 @@ fn apply_goal_event(
             goal.last_transition_seq = seq;
             goal.last_transition_checksum = checksum.to_owned();
         }
+        SessionEvent::GoalLoopOwnerClaimed {
+            goal_id,
+            strategy,
+            epoch,
+        } => {
+            let goal = required_goal_mut(state, goal_id)?;
+            require_goal_live(goal)?;
+            // THE NESTING REFUSAL (F22C, Success Criterion 3 — "no nested
+            // verification/retry owner"). A Goal has at most one loop owner, and
+            // this is where that stops being a convention. Note what it does NOT
+            // do: it does not terminate the Goal. A refusal that poisoned the
+            // Goal would be worse than the nesting it prevented, so the Goal is
+            // left exactly as it was — live, claimed by its original owner, and
+            // resumable.
+            if let Some(existing) = &goal.loop_owner {
+                return Err(invalid_goal(
+                    goal_id,
+                    &format!(
+                        "loop owner {:?} (epoch {}) is already live; a nested loop owner is refused",
+                        existing.strategy, existing.epoch
+                    ),
+                ));
+            }
+            // The claim must name the strategy the DURABLE record authorized.
+            // Strategy selection is a property of the Goal, not of whatever the
+            // heuristic intent router felt like at dispatch time.
+            if *strategy != goal.authority.strategy {
+                return Err(invalid_goal(
+                    goal_id,
+                    &format!(
+                        "claim names strategy {:?} but the goal record authorized {:?}",
+                        strategy, goal.authority.strategy
+                    ),
+                ));
+            }
+            let expected = goal.loop_owner_epochs.saturating_add(1);
+            if *epoch != expected {
+                return Err(invalid_goal(
+                    goal_id,
+                    &format!("loop owner epoch {epoch} is not the successor {expected}"),
+                ));
+            }
+            goal.loop_owner_epochs = expected;
+            goal.loop_owner = Some(GoalLoopOwner {
+                strategy: *strategy,
+                epoch: expected,
+            });
+            goal.last_transition_seq = seq;
+            goal.last_transition_checksum = checksum.to_owned();
+        }
+        SessionEvent::GoalLoopOwnerFinished {
+            goal_id,
+            epoch,
+            terminal,
+        } => {
+            let goal = required_goal_mut(state, goal_id)?;
+            require_goal_live(goal)?;
+            // A termination must come from the claim that is actually live. A
+            // stale epoch means a termination value produced by an earlier run,
+            // and letting it through would terminate a Goal a different owner is
+            // currently executing.
+            let owner = goal
+                .loop_owner
+                .clone()
+                .ok_or_else(|| invalid_goal(goal_id, "no loop owner is live; nothing to finish"))?;
+            if owner.epoch != *epoch {
+                return Err(invalid_goal(
+                    goal_id,
+                    &format!(
+                        "finish names epoch {} but the live loop owner holds epoch {}",
+                        epoch, owner.epoch
+                    ),
+                ));
+            }
+            apply_goal_terminal(state, goal_id, terminal, seq, checksum)?;
+            // Released only after the terminal applied, so a refused terminal
+            // leaves the claim intact and the Goal resumable by its owner.
+            required_goal_mut(state, goal_id)?.loop_owner = None;
+        }
         SessionEvent::GoalTerminated { goal_id, terminal } => {
             let goal = required_goal_mut(state, goal_id)?;
             require_goal_live(goal)?;
-            // The durable half of the anti-forgery property. The compiler closes
-            // the model-authored route (`HostGateObservation` is not
-            // `Deserialize`); this closes the remaining one, a same-UID writer
-            // appending a hand-built record that stamps `verified` on a strategy
-            // whose verification owner is a model judge, a shape validator or a
-            // boolean count.
-            if terminal.is_verified()
-                && !goal.authority.strategy.can_produce_host_observed_evidence()
-            {
+            // THE BYPASS REFUSAL (F22C). While a loop owner is live, the plain
+            // terminate path is closed: the Goal terminates through its owner's
+            // canonical transition or not at all. This is what makes "nothing
+            // can terminate any other way" a durable rule rather than a naming
+            // convention over an API nobody was forced to use.
+            //
+            // A Goal that never claimed an owner is still terminable this way —
+            // but by definition no engine ran it, so there was no loop owner to
+            // be canonical about.
+            if let Some(owner) = &goal.loop_owner {
                 return Err(invalid_goal(
                     goal_id,
-                    "strategy has no host-observed verification owner and cannot reach verified",
+                    &format!(
+                        "loop owner {:?} (epoch {}) is live; terminate through the canonical strategy transition",
+                        owner.strategy, owner.epoch
+                    ),
                 ));
             }
-            goal.lifecycle = GoalLifecycle::Terminated {
-                terminal: terminal.clone(),
-            };
-            // The cancellation cascade. A Goal that terminates revokes every
-            // live task claim, so the epoch every in-flight owner holds is now
-            // superseded and `require_live_epoch` refuses its completion. That
-            // is what makes "no cancelled task's effect lands afterward" a
-            // property of the durable boundary rather than of the shutdown path
-            // — which is the one path a killed process never runs.
-            let reason = format!("goal terminated: {terminal:?}");
-            for task in goal.tasks.values_mut() {
-                if let Some(attempt) = task.attempts.last_mut()
-                    && matches!(attempt.status, GoalTaskAttemptStatus::Live)
-                {
-                    attempt.status = GoalTaskAttemptStatus::Revoked {
-                        reason: reason.clone(),
-                    };
-                    task.last_transition_seq = seq;
-                    task.last_transition_checksum = checksum.to_owned();
-                }
-            }
-            goal.last_transition_seq = seq;
-            goal.last_transition_checksum = checksum.to_owned();
+            apply_goal_terminal(state, goal_id, terminal, seq, checksum)?;
         }
         SessionEvent::GoalTaskDeclared {
             goal_id,
@@ -3683,6 +3800,8 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
         | SessionEvent::GoalWaitResolved { .. }
         | SessionEvent::GoalRunResumed { .. }
         | SessionEvent::GoalTerminated { .. }
+        | SessionEvent::GoalLoopOwnerClaimed { .. }
+        | SessionEvent::GoalLoopOwnerFinished { .. }
         | SessionEvent::GoalTaskDeclared { .. }
         | SessionEvent::GoalTaskTransitioned { .. } => {
             return Err(JournalError::InvalidTransition(

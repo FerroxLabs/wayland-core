@@ -397,6 +397,8 @@ impl SessionJournal {
                 | SessionEvent::GoalWaitResolved { .. }
                 | SessionEvent::GoalRunResumed { .. }
                 | SessionEvent::GoalTerminated { .. }
+                | SessionEvent::GoalLoopOwnerClaimed { .. }
+                | SessionEvent::GoalLoopOwnerFinished { .. }
                 | SessionEvent::GoalTaskDeclared { .. }
                 | SessionEvent::GoalTaskTransitioned { .. }
         ) {

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use wcore_protocol::events::RecoveryCursor;
 use wcore_types::child_transaction::{ChildGatePlan, ChildTransactionReceipt};
-use wcore_types::goal::{GoalTerminalState, TaskUnknownReason, WaitKind};
+use wcore_types::goal::{GoalStrategy, GoalTerminalState, TaskUnknownReason, WaitKind};
 use wcore_types::spawner::{ChildId, DurableChildRecord, DurableChildTransition};
 use wcore_types::tool::ToolEffectContract;
 
@@ -919,6 +919,34 @@ pub enum SessionEvent {
         goal_id: String,
         terminal: GoalTerminalState,
     },
+    /// A strategy claimed the Goal's ONE loop owner (F22C, Success Criterion 3).
+    ///
+    /// The claim is durable rather than a call-stack frame precisely because a
+    /// call stack does not survive the restart 22-03 inflicts. The reducer
+    /// refuses a second claim while one is live, which is the nesting refusal:
+    /// "no nested verification/retry owner" becomes a durable rule instead of a
+    /// comment. A refused claim leaves the Goal non-terminal and resumable — a
+    /// refusal that poisoned the Goal would be worse than the nesting it
+    /// prevented.
+    GoalLoopOwnerClaimed {
+        goal_id: String,
+        strategy: GoalStrategy,
+        epoch: u32,
+    },
+    /// The claimed loop owner released its claim AND terminated the Goal, in ONE
+    /// event (F22C).
+    ///
+    /// Atomic on purpose. Splitting it into a release followed by a terminate
+    /// would open a window in which a plain `GoalTerminated` could be appended
+    /// by something that never held the claim, which is the exact bypass this
+    /// pair exists to close: while a claim is live the reducer refuses a plain
+    /// `GoalTerminated`, so the canonical strategy transition is the only route
+    /// to a terminal state for any Goal that ever claimed an owner.
+    GoalLoopOwnerFinished {
+        goal_id: String,
+        epoch: u32,
+        terminal: GoalTerminalState,
+    },
     /// Durable Fleet task ledger records (F22-03).
     ///
     /// These extend the Goal's own chain rather than opening a second store, so
@@ -1312,6 +1340,42 @@ pub struct GoalState {
     /// exactly as it did before this field existed.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tasks: BTreeMap<String, GoalTaskState>,
+    /// The ONE loop owner currently executing this Goal (F22C), if any.
+    ///
+    /// `skip_serializing_if` carries the same weight it does on `tasks`: a Goal
+    /// that never claimed an owner must serialize EXACTLY as it did before this
+    /// field existed, or 22-01's M1 byte-identity determination stops holding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_owner: Option<GoalLoopOwner>,
+    /// How many loop-owner claims this Goal has ever granted (F22C).
+    ///
+    /// Kept separately from [`Self::loop_owner`] because the claim is cleared on
+    /// finish and the next epoch must still be the successor of the last one —
+    /// a counter that reset with the claim would let a stale termination value
+    /// match a fresh claim. Same `skip_serializing_if` reasoning: a Goal that
+    /// never claimed an owner serializes exactly as it did before F22C.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub loop_owner_epochs: u32,
+}
+
+/// `skip_serializing_if` predicate for a counter whose absence means zero.
+/// Takes `&u32` because that is the signature serde requires.
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+/// The single strategy currently executing a Goal (F22C, Success Criterion 3).
+///
+/// Durable, not a call-stack frame. The `epoch` binds a termination to the claim
+/// it came from: a `GoalLoopOwnerFinished` naming a stale epoch is refused, so a
+/// termination value produced by an earlier run cannot terminate a later one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalLoopOwner {
+    /// Which of the five engines owns the loop.
+    pub strategy: GoalStrategy,
+    /// Monotonic claim counter for this Goal.
+    pub epoch: u32,
 }
 
 impl GoalState {

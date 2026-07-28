@@ -27,7 +27,7 @@
 
 use wcore_protocol::events::RecoveryCursor;
 use wcore_types::goal::{
-    GoalAuthoritySnapshot, GoalId, GoalTerminalState, VerifiedTerminal, WaitKind,
+    GoalAuthoritySnapshot, GoalId, GoalStrategy, GoalTerminalState, VerifiedTerminal, WaitKind,
 };
 
 use crate::session_journal::{
@@ -163,6 +163,77 @@ impl GoalKernel {
         verified: VerifiedTerminal,
     ) -> Result<RecoveryCursor, JournalError> {
         self.append_terminal(goal_id, verified.into_terminal())
+    }
+
+    /// Claim the Goal's ONE loop owner for `strategy` (F22C).
+    ///
+    /// `pub(crate)`, not public: a caller must go through [`GoalLoop`], which is
+    /// the only thing that mints the [`LoopOwner`] token the adapters consume.
+    /// A claim taken without that token would be a claim nobody could ever
+    /// finish, which is a durable deadlock, not a feature.
+    ///
+    /// The strategy is NOT a parameter the caller chooses freely — the reducer
+    /// refuses a claim naming anything other than the strategy on the durable
+    /// Goal record.
+    ///
+    /// [`GoalLoop`]: super::strategy::GoalLoop
+    /// [`LoopOwner`]: super::strategy::LoopOwner
+    pub(crate) fn claim_loop_owner(
+        &self,
+        goal_id: &GoalId,
+        strategy: GoalStrategy,
+    ) -> Result<u32, JournalError> {
+        let id = goal_id.as_str().to_owned();
+        self.append(move |state| {
+            let goal = require_goal(state, &id)?;
+            Ok(SessionEvent::GoalLoopOwnerClaimed {
+                goal_id: id.clone(),
+                strategy,
+                // Derived from the committed head INSIDE the writer lock, the
+                // same reason `start_iteration` does: two callers racing must
+                // not both believe they hold epoch N.
+                epoch: goal.loop_owner_epochs.saturating_add(1),
+            })
+        })?;
+        let epoch = self
+            .goal(goal_id)?
+            .and_then(|goal| goal.loop_owner.map(|owner| owner.epoch))
+            .ok_or_else(|| {
+                JournalError::InvalidTransition(format!("goal {goal_id} holds no loop owner claim"))
+            })?;
+        Ok(epoch)
+    }
+
+    /// THE canonical Goal terminal transition (F22C, Success Criterion 3).
+    ///
+    /// This is the only function in the codebase that can terminate a Goal
+    /// under a live loop owner, and the only value it accepts is a
+    /// [`StrategyTermination`] — which has no public constructor other than the
+    /// five engine adapters. The chain is therefore closed at both ends:
+    ///
+    /// * upward, `SessionJournal::append` refuses every `Goal*` variant, so only
+    ///   this kernel can mint the record;
+    /// * downward, the reducer refuses a plain `GoalTerminated` while a claim is
+    ///   live, so a caller cannot route around this function;
+    /// * sideways, `StrategyTermination` cannot be built except by adapting one
+    ///   of the five engines' real outcomes.
+    ///
+    /// [`StrategyTermination`]: super::strategy::StrategyTermination
+    pub(crate) fn finish_loop_owner(
+        &self,
+        goal_id: &GoalId,
+        epoch: u32,
+        terminal: GoalTerminalState,
+    ) -> Result<RecoveryCursor, JournalError> {
+        let id = goal_id.as_str().to_owned();
+        self.append(move |_state| {
+            Ok(SessionEvent::GoalLoopOwnerFinished {
+                goal_id: id.clone(),
+                epoch,
+                terminal: terminal.clone(),
+            })
+        })?;
+        self.require_cursor(goal_id)
     }
 
     fn append_terminal(
