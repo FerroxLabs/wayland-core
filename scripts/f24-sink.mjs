@@ -152,6 +152,54 @@ const server = http.createServer((req, res) => {
       return;
     }
 
+    // ── ADDITIVE (lane 24-c3): the outbound endpoints of the OTHER two
+    // webhook-driven connectors. Purely additive — the journey never calls
+    // these, so no count it takes can change. They exist because the inbound
+    // matrix needs the SAME independent journal to be the arrival source for
+    // every adapter it measures; measuring one adapter at this sink and
+    // another somewhere else would make the per-adapter numbers
+    // incomparable, which is the confound the criterion is asking about.
+    //
+    // Each records into the identical `Arrival` shape, so one tally reads all
+    // of them and the `endpoint` field is what separates the adapters.
+
+    // WhatsApp Cloud API: POST {base}/{graph_version}/{phone_number_id}/messages
+    if (/^\/[^/]+\/[^/]+\/messages$/.test(url.pathname)) {
+      let parsed;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        parsed = {};
+      }
+      const to = parsed.to ?? '';
+      const text = parsed.text?.body ?? '';
+      const arrival = record('whatsapp.messages', to, text, auth, true, null, false);
+      json(res, 200, {
+        messaging_product: 'whatsapp',
+        contacts: [{ input: to, wa_id: to }],
+        messages: [{ id: `wamid.f24c3-${arrival.seq}` }],
+      });
+      return;
+    }
+
+    // Twilio: POST /2010-04-01/Accounts/<sid>/Messages.json (form-encoded)
+    if (/^\/2010-04-01\/Accounts\/[^/]+\/Messages\.json$/.test(url.pathname)) {
+      const form = new URLSearchParams(body);
+      const to = form.get('To') ?? '';
+      const text = form.get('Body') ?? '';
+      // Twilio authenticates with HTTP Basic, so the token rides in the same
+      // Authorization header the fingerprint already digests. It is never
+      // journalled in the clear, same as the Slack bearer.
+      const arrival = record('twilio.messages', to, text, auth, true, null, false);
+      json(res, 201, {
+        sid: `SMf24c3${String(arrival.seq).padStart(26, '0')}`,
+        status: 'queued',
+        to,
+        body: text,
+      });
+      return;
+    }
+
     json(res, 404, { ok: false, error: 'unknown_endpoint' });
   });
 });
