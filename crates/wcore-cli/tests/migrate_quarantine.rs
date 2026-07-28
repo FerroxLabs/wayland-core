@@ -270,9 +270,16 @@ fn t3_peer_mcp_launch_command_is_executable_and_never_lands_live() {
 
     let toml = std::fs::read_to_string(home.path().join("config.toml")).unwrap_or_default();
     assert!(
-        !toml.contains("peer-launcher"),
+        !toml.contains("[mcp.servers.peer-launcher]"),
         "an MCP definition carrying a launch command must NOT reach config.toml, \
          where it is launchable; got:\n{toml}"
+    );
+    // …and no imported profile may keep a DANGLING reference to it either: a
+    // reference that resolves to nothing today would silently resolve to a
+    // server of that name defined tomorrow, quietly undoing this containment.
+    assert!(
+        !toml.contains("\"peer-launcher\""),
+        "an imported profile still references the withheld server; got:\n{toml}"
     );
     assert!(
         QuarantineStore::for_current_home()
@@ -958,9 +965,17 @@ fn binary() -> &'static str {
 }
 
 /// Drive the REAL binary through an agent turn that calls the `Skill` tool for
-/// `skill_name`, against a scripted mock provider. Returns nothing — the legs
-/// assert on the sentinel file, which is the observable effect.
-fn drive_skill_turn(home: &Path, skill_name: &str) {
+/// `skill_name`, against a scripted mock provider.
+///
+/// Returns every stdout line the run emitted. The legs assert on the sentinel
+/// file (the observable effect) AND on these lines, because a binary that
+/// crashed at boot would also leave the sentinel absent — and that would be a
+/// negative leg measuring a dead process rather than containment.
+///
+/// Waits for `sentinel` to appear, up to a bounded deadline, and returns as
+/// soon as it does. The negative leg therefore waits the FULL window before
+/// concluding absence.
+fn drive_skill_turn(home: &Path, skill_name: &str, sentinel: &Path) -> Vec<String> {
     use std::io::{BufRead, BufReader, Write};
     use std::time::{Duration, Instant};
 
@@ -1024,25 +1039,30 @@ fn drive_skill_turn(home: &Path, skill_name: &str) {
     )
     .expect("write message");
 
-    // Bounded drain: give the turn time to reach the tool and finish.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let mut saw_result = false;
+    // Bounded drain: wait for the sentinel to appear, and keep the stdout pipe
+    // drained so the child never blocks on a full pipe. Returning early on the
+    // sentinel keeps the POSITIVE leg fast; the NEGATIVE leg waits the whole
+    // window before concluding absence.
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut lines = Vec::new();
     while Instant::now() < deadline {
-        match rx.recv_timeout(Duration::from_millis(250)) {
-            Ok(line) => {
-                if line.contains("tool_result") || line.contains("\"done\"") {
-                    saw_result = true;
-                }
-            }
-            Err(_) if saw_result => break,
-            Err(_) => {}
+        if sentinel.exists() {
+            break;
+        }
+        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
+            lines.push(line);
         }
     }
     let _ = writeln!(stdin, "{{\"type\":\"stop\"}}");
+    // Drain whatever is still buffered before tearing the child down.
+    while let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
+        lines.push(line);
+    }
     let _ = child.kill();
     let _ = child.wait();
     drop(server);
     drop(rt);
+    lines
 }
 
 /// NEGATIVE LEG. After importing the peer corpus containing the payload,
@@ -1057,8 +1077,13 @@ fn drive_skill_turn(home: &Path, skill_name: &str) {
 #[serial]
 fn t19_live_negative_leg_quarantined_payload_does_not_execute() {
     let (_g, home) = rooted();
-    let run_dir = tempfile::tempdir().unwrap();
-    let sentinel = run_dir.path().join("negative-sentinel");
+    // The sentinel lives INSIDE the per-run home, which is both the session
+    // workspace and a tempdir unique to this run. Inside the workspace because
+    // the real binary runs its shell under the sandbox, which correctly refuses
+    // writes outside the workspace — a sentinel out there would be blocked by
+    // the SANDBOX, and the positive control would then be measuring the sandbox
+    // rather than the quarantine boundary.
+    let sentinel = home.path().join("negative-sentinel");
     assert!(
         !sentinel.exists(),
         "the per-run sentinel must be absent BEFORE the leg begins"
@@ -1084,9 +1109,24 @@ fn t19_live_negative_leg_quarantined_payload_does_not_execute() {
         "the payload must be reported quarantined, not vanished: {report:?}"
     );
 
-    drive_skill_turn(home.path(), "repo-status");
+    let lines = drive_skill_turn(home.path(), "repo-status", &sentinel);
 
-    // (3) the sentinel is ABSENT.
+    // (3) the TURN ACTUALLY RAN and reached the Skill tool. Without this, a
+    // binary that crashed at boot would leave the sentinel absent too, and the
+    // leg would be measuring a dead process rather than containment.
+    let stream = lines.join("\n");
+    assert!(
+        stream.contains("repo-status"),
+        "the driven turn never reached the Skill tool for the payload, so the \
+         absence below would measure a turn that never happened. stream:\n{stream}"
+    );
+    assert!(
+        stream.contains("not found") || stream.contains("Available skills"),
+        "the Skill tool must report the quarantined skill as unavailable — that \
+         is what containment looks like from the agent's side. stream:\n{stream}"
+    );
+
+    // (4) the sentinel is ABSENT.
     assert!(
         !sentinel.exists(),
         "the quarantined payload EXECUTED during a real agent turn — containment failed"
@@ -1101,8 +1141,8 @@ fn t19_live_negative_leg_quarantined_payload_does_not_execute() {
 #[serial]
 fn t20_live_positive_control_same_payload_executes_once_promoted() {
     let (_g, home) = rooted();
-    let run_dir = tempfile::tempdir().unwrap();
-    let sentinel = run_dir.path().join("positive-sentinel");
+    // Same placement rule as the negative leg — see there.
+    let sentinel = home.path().join("positive-sentinel");
     assert!(
         !sentinel.exists(),
         "the per-run sentinel must be absent BEFORE the leg begins"
@@ -1131,14 +1171,15 @@ fn t20_live_positive_control_same_payload_executes_once_promoted() {
         "promotion must have placed the payload on the load path"
     );
 
-    drive_skill_turn(home.path(), "repo-status");
+    let lines = drive_skill_turn(home.path(), "repo-status", &sentinel);
 
     assert!(
         sentinel.exists(),
         "the PROMOTED payload did NOT execute — so the negative leg measured a \
          payload that never loads rather than containment, and proves nothing. \
-         sentinel={}",
-        sentinel.display()
+         sentinel={} stream:\n{}",
+        sentinel.display(),
+        lines.join("\n")
     );
 }
 

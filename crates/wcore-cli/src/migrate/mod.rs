@@ -647,10 +647,17 @@ fn apply_plan(
 
     // --- MCP: a launch command is a child process, not a setting ------------
     let mut mcp_live: BTreeMap<String, McpServerConfig> = BTreeMap::new();
+    // Names that will NOT exist in `[mcp.servers]` after this apply, so an
+    // imported profile must not keep referencing them. A dangling reference is
+    // not merely untidy: if a server of that name is defined later, the profile
+    // silently picks it up — the containment decision made here would then be
+    // quietly undone by an unrelated future edit.
+    let mut mcp_withheld: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (name, srv) in &plan.mcp_servers {
         let identity = plan_identity(ItemKind::McpServer, name);
         if !selection.wants(&identity) {
             acct.record(&identity, Outcome::Excluded);
+            mcp_withheld.insert(name.clone());
             continue;
         }
         match quarantine::classify_mcp_server(srv) {
@@ -666,6 +673,7 @@ fn apply_plan(
                     source_path: format!("mcp_servers/{name}"),
                     promote_as: name.clone(),
                 };
+                mcp_withheld.insert(name.clone());
                 match store.admit(&req) {
                     Ok(_) => {
                         acct.record(
@@ -772,7 +780,7 @@ fn apply_plan(
                     existing.provider = incoming.provider.clone();
                     existing.model = incoming.model.clone();
                     existing.base_url = incoming.base_url.clone();
-                    existing.mcp_servers = incoming.mcp_servers.clone();
+                    existing.mcp_servers = strip_withheld(&incoming.mcp_servers, &mcp_withheld);
                     if include_credentials && incoming.api_key.is_some() {
                         existing.api_key = incoming.api_key.clone();
                     }
@@ -783,6 +791,7 @@ fn apply_plan(
                 // Fresh profile.
                 None => {
                     let mut cfg = incoming.clone();
+                    cfg.mcp_servers = strip_withheld(&incoming.mcp_servers, &mcp_withheld);
                     if !include_credentials {
                         cfg.api_key = None;
                     }
@@ -802,6 +811,20 @@ fn apply_plan(
     })?;
 
     Ok(report)
+}
+
+/// Drop references to MCP servers this apply withheld, so an imported profile
+/// never names a server that is not defined.
+fn strip_withheld(
+    refs: &Option<Vec<String>>,
+    withheld: &std::collections::BTreeSet<String>,
+) -> Option<Vec<String>> {
+    refs.as_ref().map(|list| {
+        list.iter()
+            .filter(|n| !withheld.contains(n.as_str()))
+            .cloned()
+            .collect()
+    })
 }
 
 /// The version the SOURCE declares, if it declares one.
