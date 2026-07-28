@@ -277,12 +277,31 @@ the subscriber spawns on all three OS families** — previously unknown — and 
 **F24-C3-H1 is not Linux-specific**.
 
 - **macOS**, driving `wayland-core 0.12.25 (source a8ed7322)`, an existing debug
-  binary: host bound on `127.0.0.1:18787`, subscriber spawned, three channels
-  registered, then `inbound denied channel=f24c3slack reason=sender not in dm
-  allowlist` — H1, reproduced verbatim on a second platform.
+  binary. The run **completed**: `INBOUND MATRIX RED platform=macos legs=15
+  failed=15 arrivals_total=0 turns_total=0`. Host bound on `127.0.0.1:18787`,
+  subscriber spawned, three channels registered, then `inbound denied
+  channel=f24c3slack reason=sender not in dm allowlist` — H1, reproduced verbatim
+  on a second platform. All 15 legs red, including every `access` leg, which now
+  reports `CONTROL FAILED — a zero here is not a refusal, it is a dead path`.
+  That is the repaired gate from §7 doing its job on a second platform: at the
+  pre-fix Linux binary the same three legs read PASS.
 - **Windows**, driving `wayland-core 0.12.25 (source 978f49d7)` copied out of
-  `C:\ferrox-win` (read only; sha256 `49A0A55E…`): reached the same point, host
-  bound, then the same denial.
+  `C:\ferrox-win` (read only; sha256 `49A0A55E22F6BB69…`). The run **did not
+  complete** — the detached node driver did not survive its launching ssh session
+  (`Get-Process node` returns nothing), so there is no leg table. What it did
+  establish before dying, from the binary's own log:
+
+  ```
+  channel auto-registered × 3
+  Phase 1B-2: inbound channel subscriber spawned
+  inbound webhook host listening bind=127.0.0.1:18787
+  inbound denied channel=f24c3slack reason=sender not in dm allowlist
+  ```
+
+  So the host binds and the subscriber spawns on Windows, and **H1 reproduces on
+  the third platform**. Nothing more is claimed. A completed Windows run needs
+  the scheduled-task launch pattern lane 24-journey used, not `Start-Process`
+  over ssh.
 
 Both binaries **predate both fixes**, so their matrix legs are a foregone red for
 a cause already diagnosed. Reporting them as matrix results would be dishonest,
@@ -305,7 +324,8 @@ run, which is the contention I was told to back off from.
 | Mutation M1 (policy home) | mutated **RED**, restored **GREEN** |
 | Mutation M2 (SMS conversation), ×2 tests | mutated **RED** ×2, restored **GREEN** ×2 |
 | Tree restored after mutations | `git diff --quiet` rc=0 |
-| Inbound matrix, pre-fix binary | **RED, 12/15 failed** |
+| Inbound matrix, pre-fix binary (linux, `15ad7b0e`) | **RED, 12/15 failed**, 0 arrivals |
+| Inbound matrix, macOS `a8ed7322` (pre-fix) | **RED, 15/15 failed**, 0 arrivals — H1 reproduced |
 | Inbound matrix, post-fix binary | **GREEN, 15/15**, 9 arrivals / 9 turns |
 | Gateway inbound probe | rc=0 = *nothing listening* (the finding); exits 1 if the port answers |
 
