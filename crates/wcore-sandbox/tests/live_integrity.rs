@@ -245,7 +245,8 @@ async fn live_cmd_runs_when_allowlist_has_missing_path() {
         )
         .await;
     let _ = std::fs::remove_dir_all(&real);
-    let out = spawned.expect("AppContainer spawn must succeed despite a non-existent allowlist path");
+    let out =
+        spawned.expect("AppContainer spawn must succeed despite a non-existent allowlist path");
     assert_eq!(
         out.exit_code,
         0,
