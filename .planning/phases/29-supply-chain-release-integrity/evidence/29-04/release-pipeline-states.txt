@@ -1,0 +1,47 @@
+=== 29-04 re-measurement: are the four release states separate IN THE SHIPPED PIPELINE? ===
+commit: f6196a3275d41eaf769d4271b38d145e18739f26
+captured: 2026-07-28T03:49:56Z
+
+### 1. Does ANY workflow job declare a GitHub Environment (the only native approval gate)?
+ZERO MATCHES: no job in any workflow declares an environment, so no manual approval gate exists anywhere in the release pipeline.
+
+### 2. Does ANY workflow step rehearse a rollback?
+ZERO MATCHES: no workflow mentions rollback in any form.
+
+### 3. Does the release pipeline append or verify a release-state ledger?
+.github/workflows/supply-chain.yml:133:      - name: Build wayland-release
+.github/workflows/supply-chain.yml:134:        run: cargo build --locked -p wcore-eval-scenarios --bin wayland-release
+.github/workflows/supply-chain.yml:147:          ./target/debug/wayland-release sbom --metadata metadata.json --output sbom-1.json
+.github/workflows/supply-chain.yml:148:          ./target/debug/wayland-release sbom --metadata metadata.json --output sbom-2.json
+
+### 4. What triggers the pipeline?
+name: Release
+
+on:
+  push:
+    tags:
+      # Superset of the wayland release tag convention: vX.Y.Z-wayland-<suffix>
+      # (e.g. -base, -safety, -spawner-wired, -multi-agent-nav, -tui-*). The
+      # v0.9.x series used new suffixes that the old two explicit patterns
+      # never matched, so the pipeline silently never fired for any v0.9.x tag
+      # (release run history: nothing between v0.8.1 and v0.9.4.2). This single
+      # glob catches the whole family so future tags auto-publish on push.
+      - 'v*-wayland-*'
+  workflow_call:
+    inputs:
+      tag_name:
+        description: "Release tag to build and publish (e.g., v0.2.0)"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag to build and publish (e.g., v0.2.0)"
+        required: true
+        type: string
+
+
+=> CONCLUSION, MEASURED NOT ARGUED: one tag push drives packaging (build), deployment
+   preparation (github-release) and release acceptance (publish-npm) with no approval
+   between them, no rollback rehearsal at all, and the four-state ledger Phase 29 built
+   is not wired into the pipeline in any form.

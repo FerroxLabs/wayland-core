@@ -1,0 +1,30 @@
+=== RUN B — THE SEPARATION PROOF: the release-acceptance key is WITHHELD ===
+[trust-root-init(B)] rc=0
+    TRUST ROOT READY path=/tmp/29-04-GTjIF2/trustB/trust-root.json
+    KEY key_id=packaging-key role=packaging public_key_base64=eMMNMV6+w5LxdIrcB2XHBDXBOcZ2TC70NvlP4B5mEN4=
+    KEY key_id=deployment-preparation-key role=deployment_preparation public_key_base64=rBMjH4qVZv9aZmLxHrpaqbS+AZwqlNpHK71EPoZbkk0=
+    KEY key_id=rollback-rehearsal-key role=rollback_rehearsal public_key_base64=bCxKxgd9vB1ZYMCLkT1Om2Pegm+b4EW4EQNnTrpYMBg=
+    KEY key_id=release-acceptance-key role=release_acceptance public_key_base64=Z5D1lQqFvqy8vmb5Zm2X4L7w03yGadD4tIkjQoXRnnY=
+    trust root reduced from 4 keys to 3: no release_acceptance role
+the release-acceptance seed is gone from run B's key directory:
+    total 16
+    -rw------- 1 root root  44 Jul 28 03:46 deployment-preparation-key.seed
+    -rw------- 1 root root  44 Jul 28 03:46 packaging-key.seed
+    -rw------- 1 root root  44 Jul 28 03:46 rollback-rehearsal-key.seed
+    -rw-r--r-- 1 root root 715 Jul 28 03:46 trust-root.json
+run B therefore CANNOT mint an acceptance record at all — there is nothing to sign with.
+[manifest-sign(B)] rc=0
+    MANIFEST SIGNED body_sha256=f60d20159e1ea74f1c0a862e32e0aac74856162128335bd6624196330813343c
+[B append packaging] rc=0
+    STATE APPENDED state=packaging body_sha256=007a407c5e6a93ecb97783e7b604a27bd463a75993737bcbdbf6b3d446851d33
+[B append deployment_preparation] rc=0
+    STATE APPENDED state=deployment_preparation body_sha256=bbb6512407e9d7159e6f78604fc31666251970a7b4c6e0c70de304f3e75c5f5c
+[B append rollback_rehearsal] rc=0
+    STATE APPENDED state=rollback_rehearsal body_sha256=8bf387b3eee748a1a2a9d8d955c5e766eafa9fc3fb8df0a4ac3ab7157bcd1018
+[B state-verify] rc=0
+    CHAIN VERIFIED highest_state=rollback_rehearsal records=3 accepted=false
+B_VERIFY_RC=0
+=> rc=0 with highest_state=rollback_rehearsal and accepted=false. A missing
+   record is a STOPPING POINT, not a corrupt chain — which is the honest
+   answer when a state's key is legitimately unavailable.
+

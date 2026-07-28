@@ -1,0 +1,8 @@
+--- COLLAPSE-2: sign a release-acceptance record with the PACKAGING role key ---
+    starting from run A's first three records
+[COLLAPSE-2 append] rc=0
+    STATE APPENDED state=release_acceptance body_sha256=8f04fe7110bff355bad513476b1be8e4da2c8e6fdba056ba36bf092a2b47d209
+[COLLAPSE-2 state-verify] rc=1
+    wayland-release: key id packaging-key signs more than one state in the same chain
+C2_RC=1
+

@@ -1,0 +1,6 @@
+--- COLLAPSE-1: relabel the packaging record as release acceptance ---
+    record[0].body.state: packaging -> release_acceptance (nothing else changed)
+[COLLAPSE-1 state-verify] rc=1
+    wayland-release: record at position 0 is ReleaseAcceptance but canonical order requires Packaging
+C1_RC=1
+

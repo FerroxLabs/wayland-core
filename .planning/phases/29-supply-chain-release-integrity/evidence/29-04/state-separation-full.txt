@@ -1,0 +1,248 @@
+=== 29-04 RELEASE-STATE SEPARATION — live on hetzner-dsm through the real binary ===
+commit: f6196a3275d41eaf769d4271b38d145e18739f26
+captured: 2026-07-28T03:46:20Z
+workspace: /tmp/29-04-GTjIF2   (a temp dir; every key generated here dies with it)
+binary:    /root/wayland-29-04/target/release/wayland-release
+
+--- 0. the release binary reports itself ---
+[help] rc=0
+    Usage: wayland-release <COMMAND>
+    
+    Commands:
+      trust-root-init        Generate one throwaway keypair per release state into a directory. Prints key ids and PUBLIC keys only — never a seed
+      sbom                   Transform `cargo metadata --locked --format-version 1` output into a byte-deterministic CycloneDX SBOM. Pure: no clock, no randomness, no environment read, so two runs over the same metadata file produce identical bytes and therefore an identical digest
+      manifest-build         Build an unsigned manifest over a directory of artifacts
+      trust-root-add-key     Rotation, half one: generate a NEW key for `role` and add it to an existing trust root. Prints the key id and PUBLIC key only
+      trust-root-retire-key  Rotation, half two: retire a key. The key stays in the root — a retirement is a recorded fact, not a deletion — and verification refuses it from `retired_at` on, even though its signatures remain cryptographically valid
+      manifest-sign          Sign a manifest. The base64 32-byte Ed25519 seed is read from stdin
+      manifest-verify        Verify a manifest against an independently supplied trust root
+      state-append           Append a signed state record to a chain. Seed is read from stdin
+      state-verify           Verify a chain and report the highest contiguously reached state
+      help                   Print this message or the help of the given subcommand(s)
+    
+    Options:
+      -h, --help  Print help
+
+=== STEP 1 — trust root with ALL FOUR role keys (run A) ===
+[trust-root-init(A)] rc=0
+    TRUST ROOT READY path=/tmp/29-04-GTjIF2/trustA/trust-root.json
+    KEY key_id=packaging-key role=packaging public_key_base64=dz7hUh/Tm8wdpOKDBYfUlHbt2zjiLu/JXJ087L2L2R0=
+    KEY key_id=deployment-preparation-key role=deployment_preparation public_key_base64=B8gYmScZGp7/BI7bTicoE9bsJGCaG3CmqvxzNNHXIU8=
+    KEY key_id=rollback-rehearsal-key role=rollback_rehearsal public_key_base64=CiWUi69znCYLdek0bFtozjv7BPhqBaHkWf8eOPrxKL8=
+    KEY key_id=release-acceptance-key role=release_acceptance public_key_base64=30PxKrOcyHlaWST3rLurlwtcSU+eIUW1bVc49e22YU8=
+seed file modes (owner-only; contents never read by this script except on stdin):
+    total 20
+    -rw------- 1 root root  44 Jul 28 03:46 deployment-preparation-key.seed
+    -rw------- 1 root root  44 Jul 28 03:46 packaging-key.seed
+    -rw------- 1 root root  44 Jul 28 03:46 release-acceptance-key.seed
+    -rw------- 1 root root  44 Jul 28 03:46 rollback-rehearsal-key.seed
+    -rw-r--r-- 1 root root 929 Jul 28 03:46 trust-root.json
+
+=== STEP 2 — a real clean-room artifact store, SBOM and dependency policy ===
+[sbom] rc=0
+    SBOM WRITTEN path=/tmp/29-04-GTjIF2/artifacts/wayland-core-sbom.cdx.json bytes=2809 sha256=28f7c0538ed86bc70af9a90a18799aa597943f9375838956006c208fdfc9e3b3
+
+=== STEP 3 — build and sign the manifest through the shipped tool ===
+[manifest-build] rc=0
+    MANIFEST BUILT body_sha256=1c9eb21c3224494194cc6e5e8b466b7e541551c6612a1297863c09864b39d6bc
+certification field the SHIPPED tool emits:
+    {"state": "unavailable", "code": "phase_28_certification_binding_not_yet_available"}
+[manifest-sign] rc=0
+    MANIFEST SIGNED body_sha256=1c9eb21c3224494194cc6e5e8b466b7e541551c6612a1297863c09864b39d6bc
+[manifest-verify(A1)] rc=0
+    MANIFEST VERIFIED body_sha256=1c9eb21c3224494194cc6e5e8b466b7e541551c6612a1297863c09864b39d6bc
+
+=== RUN A-1 — ALL FOUR ROLE KEYS HELD, through the shipped tool ONLY ===
+This is the honest shipped-tooling measurement. Holding every key is not
+sufficient: acceptance has a SECOND, independent gate.
+[A1 append packaging] rc=0
+    STATE APPENDED state=packaging body_sha256=f9452fdf0ca22c58eb291b62e18b57da3311984c8a727777c3efb192bed645e9
+[A1 append deployment_preparation] rc=0
+    STATE APPENDED state=deployment_preparation body_sha256=2d0451fd564b99e39383adb7509eac6fbe2dfca6aad26dede6c05c8c42905c9d
+[A1 append rollback_rehearsal] rc=0
+    STATE APPENDED state=rollback_rehearsal body_sha256=b0c38f2e2fc7447760c329c46be8b43823fb35a7d01f2dae9b28a2b2596d2ab1
+[A1 append release_acceptance] rc=0
+    STATE APPENDED state=release_acceptance body_sha256=8c35ac4bfeaed12bc93df4beba52b095dd4762417661f34f9e9249337c2afdab
+[A1 state-verify] rc=1
+    wayland-release: release acceptance requires an observed certification binding
+A1_VERIFY_RC=1
+=> The acceptance RECORD was minted (append rc=0). The chain still refuses to
+   be accepted. Possession of the acceptance key is not authority.
+
+=== STEP 4 — instantiate the Phase 28 seam IN THE CLEAN ROOM ===
+The shipped 'manifest build' hardcodes certification = Unavailable (finding
+F29-04-01). To obtain the POSITIVE CONTROL that criterion 4 needs, the
+binding is filled from a receipt the REAL evaluation pipeline produced here,
+and the manifest is then signed and verified by the real binary.
+[wayland-eval fixture run] rc=0
+    PASS canary deepseek os=linux approval=yolo
+    SUMMARY pass=1 fail=0 skip=0 aborted=0
+receipt produced at: /tmp/29-04-GTjIF2/reports/000-canary-deepseek/receipt.json
+[wayland-receipt sign] rc=1
+    wayland-receipt: fixture digest is a synthetic binary/scenario label, not fixture provenance
+=> MEASURED, NOT WORKED AROUND. The product REFUSES to mint a CI authority
+   claim over a receipt whose fixture provenance is synthetic. That guard is
+   correct and this lane does not bypass it, so the clean-room binding below
+   names a LOCAL-authority receipt and says so in its key-id field. A real
+   release binding needs a real CI-signed receipt from Phase 28 on real
+   hardware; that is enumerated as a phase limit, not papered over here.
+    certification binding installed from the real receipt:
+      receipt_body_sha256 = 7ca52d3b6ad2a3e7b9922da96a040be02a4e8b19affcc3cb43eb5690209fe69a
+      receipt_schema = wayland.eval.receipt
+      receipt_schema_version = 1
+      receipt_signing_key_id = local-authority-unsigned-no-ci-signature
+      source_commit = 0123456789abcdef0123456789abcdef01234567
+      binary_sha256 = 2d868f5eff0d952ab88b4ba4f2b5036a47e6d672424cbdfc22ba5cba931e39f4
+      target_os = linux
+      target_architecture = x86_64
+    recomputed manifest body_sha256 = f60d20159e1ea74f1c0a862e32e0aac74856162128335bd6624196330813343c
+[manifest-sign(A)] rc=0
+    MANIFEST SIGNED body_sha256=f60d20159e1ea74f1c0a862e32e0aac74856162128335bd6624196330813343c
+[manifest-verify(A)] rc=0
+    MANIFEST VERIFIED body_sha256=f60d20159e1ea74f1c0a862e32e0aac74856162128335bd6624196330813343c
+=> manifest-verify rc=0 proves the spliced body digest is EXACTLY what the
+   product computes; a wrong digest would have failed here.
+
+=== RUN A — THE POSITIVE CONTROL: four role keys, four states, chain accepted ===
+[A append packaging] rc=0
+    STATE APPENDED state=packaging body_sha256=a2d3975079cad122cc6a238ee45569f794cf91919588aefe29ba469502bc7454
+[A verify prefix[1]] rc=0
+    CHAIN VERIFIED highest_state=packaging records=1 accepted=false
+[A append deployment_preparation] rc=0
+    STATE APPENDED state=deployment_preparation body_sha256=b9ff08e25a8cd9df52d710f783468e7c6d21c73689a6375aa14d0051fa3c6b14
+[A verify prefix[2]] rc=0
+    CHAIN VERIFIED highest_state=deployment_preparation records=2 accepted=false
+[A append rollback_rehearsal] rc=0
+    STATE APPENDED state=rollback_rehearsal body_sha256=5b559f05118bc1d179b35e3b90e7934a1e5a59a4aa8595c7b225f3fea68a9b2a
+[A verify prefix[3]] rc=0
+    CHAIN VERIFIED highest_state=rollback_rehearsal records=3 accepted=false
+[A append release_acceptance] rc=0
+    STATE APPENDED state=release_acceptance body_sha256=21b76eeb3f0a4e4c0c325f9e3b811a060240018418a51aef2c9460a623e534cd
+[A verify prefix[4]] rc=0
+    CHAIN VERIFIED highest_state=release_acceptance records=4 accepted=true
+A_FINAL_VERIFY_RC=0
+
+=== STANDALONE VERIFICATION — each record against ONLY its own role key ===
+A chain that verifies only as a chain is sequential, not separable. Each
+record's signature is checked here by OpenSSL — an implementation with no
+stake in the outcome — using ONLY that record's own role public key, and
+then AGAINST every other role's key, which must all fail.
+    packaging: body_sha256=a2d3975079cad122cc6a238ee45569f794cf91919588aefe29ba469502bc7454 key_id=packaging-key
+    deployment_preparation: body_sha256=b9ff08e25a8cd9df52d710f783468e7c6d21c73689a6375aa14d0051fa3c6b14 key_id=deployment-preparation-key
+    rollback_rehearsal: body_sha256=5b559f05118bc1d179b35e3b90e7934a1e5a59a4aa8595c7b225f3fea68a9b2a key_id=rollback-rehearsal-key
+    release_acceptance: body_sha256=21b76eeb3f0a4e4c0c325f9e3b811a060240018418a51aef2c9460a623e534cd key_id=release-acceptance-key
+[STANDALONE packaging with role=packaging key] rc=0 out=Signature Verified Successfully
+[STANDALONE deployment_preparation with role=deployment_preparation key] rc=0 out=Signature Verified Successfully
+[STANDALONE rollback_rehearsal with role=rollback_rehearsal key] rc=0 out=Signature Verified Successfully
+[STANDALONE release_acceptance with role=release_acceptance key] rc=0 out=Signature Verified Successfully
+--- cross-role controls: every other role's key MUST fail ---
+[CROSS record=packaging key=deployment_preparation] rc=1 out=Signature Verification Failure
+[CROSS record=packaging key=rollback_rehearsal] rc=1 out=Signature Verification Failure
+[CROSS record=packaging key=release_acceptance] rc=1 out=Signature Verification Failure
+[CROSS record=deployment_preparation key=packaging] rc=1 out=Signature Verification Failure
+[CROSS record=deployment_preparation key=rollback_rehearsal] rc=1 out=Signature Verification Failure
+[CROSS record=deployment_preparation key=release_acceptance] rc=1 out=Signature Verification Failure
+[CROSS record=rollback_rehearsal key=packaging] rc=1 out=Signature Verification Failure
+[CROSS record=rollback_rehearsal key=deployment_preparation] rc=1 out=Signature Verification Failure
+[CROSS record=rollback_rehearsal key=release_acceptance] rc=1 out=Signature Verification Failure
+[CROSS record=release_acceptance key=packaging] rc=1 out=Signature Verification Failure
+[CROSS record=release_acceptance key=deployment_preparation] rc=1 out=Signature Verification Failure
+[CROSS record=release_acceptance key=rollback_rehearsal] rc=1 out=Signature Verification Failure
+
+=== RUN B — THE SEPARATION PROOF: the release-acceptance key is WITHHELD ===
+[trust-root-init(B)] rc=0
+    TRUST ROOT READY path=/tmp/29-04-GTjIF2/trustB/trust-root.json
+    KEY key_id=packaging-key role=packaging public_key_base64=eMMNMV6+w5LxdIrcB2XHBDXBOcZ2TC70NvlP4B5mEN4=
+    KEY key_id=deployment-preparation-key role=deployment_preparation public_key_base64=rBMjH4qVZv9aZmLxHrpaqbS+AZwqlNpHK71EPoZbkk0=
+    KEY key_id=rollback-rehearsal-key role=rollback_rehearsal public_key_base64=bCxKxgd9vB1ZYMCLkT1Om2Pegm+b4EW4EQNnTrpYMBg=
+    KEY key_id=release-acceptance-key role=release_acceptance public_key_base64=Z5D1lQqFvqy8vmb5Zm2X4L7w03yGadD4tIkjQoXRnnY=
+    trust root reduced from 4 keys to 3: no release_acceptance role
+the release-acceptance seed is gone from run B's key directory:
+    total 16
+    -rw------- 1 root root  44 Jul 28 03:46 deployment-preparation-key.seed
+    -rw------- 1 root root  44 Jul 28 03:46 packaging-key.seed
+    -rw------- 1 root root  44 Jul 28 03:46 rollback-rehearsal-key.seed
+    -rw-r--r-- 1 root root 715 Jul 28 03:46 trust-root.json
+run B therefore CANNOT mint an acceptance record at all — there is nothing to sign with.
+[manifest-sign(B)] rc=0
+    MANIFEST SIGNED body_sha256=f60d20159e1ea74f1c0a862e32e0aac74856162128335bd6624196330813343c
+[B append packaging] rc=0
+    STATE APPENDED state=packaging body_sha256=007a407c5e6a93ecb97783e7b604a27bd463a75993737bcbdbf6b3d446851d33
+[B append deployment_preparation] rc=0
+    STATE APPENDED state=deployment_preparation body_sha256=bbb6512407e9d7159e6f78604fc31666251970a7b4c6e0c70de304f3e75c5f5c
+[B append rollback_rehearsal] rc=0
+    STATE APPENDED state=rollback_rehearsal body_sha256=8bf387b3eee748a1a2a9d8d955c5e766eafa9fc3fb8df0a4ac3ab7157bcd1018
+[B state-verify] rc=0
+    CHAIN VERIFIED highest_state=rollback_rehearsal records=3 accepted=false
+B_VERIFY_RC=0
+=> rc=0 with highest_state=rollback_rehearsal and accepted=false. A missing
+   record is a STOPPING POINT, not a corrupt chain — which is the honest
+   answer when a state's key is legitimately unavailable.
+
+=== SIX COLLAPSE ATTEMPTS — each a real invocation against run A's valid chain ===
+--- COLLAPSE-1: relabel the packaging record as release acceptance ---
+    record[0].body.state: packaging -> release_acceptance (nothing else changed)
+[COLLAPSE-1 state-verify] rc=1
+    wayland-release: record at position 0 is ReleaseAcceptance but canonical order requires Packaging
+C1_RC=1
+
+--- COLLAPSE-2: sign a release-acceptance record with the PACKAGING role key ---
+    starting from run A's first three records
+[COLLAPSE-2 append] rc=0
+    STATE APPENDED state=release_acceptance body_sha256=8f04fe7110bff355bad513476b1be8e4da2c8e6fdba056ba36bf092a2b47d209
+[COLLAPSE-2 state-verify] rc=1
+    wayland-release: key id packaging-key signs more than one state in the same chain
+C2_RC=1
+
+--- COLLAPSE-3: an acceptance record whose evidence REUSES the packaging digest ---
+    starting from run A's first three records
+[COLLAPSE-3 append] rc=0
+    STATE APPENDED state=release_acceptance body_sha256=5adb2e9c31ade76fe76d33bde1afb3c21dcd1e3dc6914a9834b93db4f6c87d2f
+[COLLAPSE-3 state-verify] rc=1
+    wayland-release: state ReleaseAcceptance reuses evidence digest 0ee286808098d9bdb47a5d629c78d03e04603e6f6a009b83d780ac6ee1be3c69 from an earlier state
+C3_RC=1
+
+--- COLLAPSE-4: verify a chain with deployment preparation REMOVED ---
+    deployment_preparation deleted; the other three records are untouched
+[COLLAPSE-4 state-verify] rc=1
+    wayland-release: record at position 1 is RollbackRehearsal but canonical order requires DeploymentPreparation
+C4_RC=1
+
+--- COLLAPSE-5: verify a chain with rollback rehearsal and deployment preparation SWAPPED ---
+    positions 1 and 2 swapped; no record's contents were altered
+[COLLAPSE-5 state-verify] rc=1
+    wayland-release: record at position 1 is RollbackRehearsal but canonical order requires DeploymentPreparation
+C5_RC=1
+
+--- COLLAPSE-6: append a FIFTH record named termination_state_4 ---
+That name is not hypothetical. It is the exact state an agent on this
+program invented to route around an artifact it wrongly believed
+unobtainable, so the defence is tied to the real incident.
+[COLLAPSE-6a append termination_state_4] rc=2
+    error: invalid value 'termination_state_4' for '--state <STATE>': unknown release state: termination_state_4
+    
+    For more information, try '--help'.
+C6a_RC=2   (the CLI's value parser refuses the name before any logic runs)
+    a fifth record with state=termination_state_4 spliced straight into the chain JSON
+[COLLAPSE-6b state-verify] rc=1
+    wayland-release: invalid JSON in /tmp/29-04-GTjIF2/c6b.json: unknown variant `termination_state_4`, expected one of `packaging`, `deployment_preparation`, `rollback_rehearsal`, `release_acceptance` at line 91 column 36
+C6b_RC=1   (the closed enum refuses it at DESERIALIZATION)
+
+--- COLLAPSE-7: acceptance signed by a key the trust root binds to PACKAGING ---
+COLLAPSE-2 was refused by the distinct-key-per-state rule, which fires before
+the role check. This attempt uses a FRESH packaging-role key, so no key id
+repeats and the refusal must come from the ROLE binding itself.
+[COLLAPSE-7 add spare packaging key] rc=0
+    KEY ADDED key_id=spare-packaging-key role=packaging public_key_base64=Nu83NB2AuBC9IjbD+gaiWSwWr5rcjwoiFwG8bV9MBXc=
+    starting from run A's first three records
+[COLLAPSE-7 append] rc=0
+    STATE APPENDED state=release_acceptance body_sha256=ad4e27d315825d8fd38df754101129291f06347be7cd5f6b947c90e6638ca418
+[COLLAPSE-7 state-verify] rc=1
+    wayland-release: key spare-packaging-key is bound to role Packaging but role ReleaseAcceptance is required
+C7_RC=1
+
+=== END OF RUN ===
+The acceptance MECHANISM is proved by run A with a key this lane generated
+in a temporary directory. NO RELEASE WAS ACCEPTED: the real
+release-acceptance key is Sean's, this lane neither holds it nor requests
+it, and nothing here was published anywhere.
