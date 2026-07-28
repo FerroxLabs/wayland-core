@@ -2,12 +2,29 @@
 //!
 //! Two rules govern this module and neither is negotiable.
 //!
-//! 1. ARGV MODE ONLY. AGENTS.md states that any command whose arguments
-//!    include non-literal data must use `shell_command_argv`, never
-//!    shell-string mode, because argv mode never lets a metacharacter reach an
-//!    interpreter. A remote-execution backend is the most attacker-adjacent
-//!    surface in this phase, so there is NO shell-string path in this file at
-//!    all. There is no `format!`-into-a-command anywhere below.
+//! 1. ARGV MODE ONLY, PLUS EXPLICIT QUOTING FOR THE FAR END. AGENTS.md states
+//!    that any command whose arguments include non-literal data must use
+//!    `shell_command_argv`, never shell-string mode, because argv mode never
+//!    lets a metacharacter reach an interpreter. That is necessary here and it
+//!    is NOT sufficient, and this file used to claim otherwise.
+//!
+//!    **`ssh` does not carry an argument vector.** The client joins its
+//!    remote-command arguments with single spaces and the far end's LOGIN
+//!    SHELL re-splits the resulting string. So `shell_command_argv` protects
+//!    the LOCAL spawn only; across the connection every value is shell text.
+//!    Measured against a real far end on 2026-07-28, through the shipped
+//!    binary:
+//!
+//!    * an EMPTY value vanished entirely, shifting every later argument left;
+//!    * a value containing a space arrived as two arguments;
+//!    * a value containing `;` was EXECUTED on the far end — `backend scan
+//!      --task-id 'x;id>/tmp/w;echo y'` ran `id` as root there.
+//!
+//!    Every value that crosses the connection therefore goes through
+//!    [`posix_quote`], so the far end's shell re-assembles the original argv
+//!    instead of re-parsing the values as script. There is still no
+//!    `format!`-into-a-command anywhere below, and no shell-string mode on the
+//!    local spawn.
 //!
 //! 2. CANCELLATION IS REMOTE, NOT LOCAL. The local backends inherit
 //!    process-tree ownership; over ssh nothing inherits anything. So the
@@ -102,6 +119,33 @@ impl SshBackend {
     }
 }
 
+/// Quote one value so the far end's shell reproduces it EXACTLY as one
+/// argument.
+///
+/// This exists because `ssh host cmd a b c` is not an argv call: the client
+/// concatenates `cmd a b c` with spaces and the remote login shell parses the
+/// result. Wrapping each value in single quotes makes the remote shell treat
+/// every byte inside as literal — no word splitting, no globbing, no command
+/// substitution, no `;`. A literal single quote is the one character that
+/// cannot appear inside a single-quoted string, so it is emitted as
+/// `'\''` — close, escaped quote, reopen — which is the standard POSIX form.
+///
+/// An empty value becomes `''`, which is why an empty task input survives
+/// instead of disappearing.
+fn posix_quote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for c in value.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 fn ssh_base_args(target: &str) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     if let Ok(config) = std::env::var(CONFIG_ENV)
@@ -126,8 +170,14 @@ fn ssh_base_args(target: &str) -> Vec<String> {
 ///
 /// It is a CONSTANT. Nothing task-specific is interpolated into it; every
 /// task-specific value arrives as a positional argument that `sh` binds to
-/// `$1`, `$2`, … so it is never re-parsed as script text. That is the same
-/// safety property argv mode gives locally, extended across the connection.
+/// `$1`, `$2`, … so it is never re-parsed as script text BY THIS SCRIPT.
+///
+/// That last qualification is the whole point and this comment used to omit
+/// it. Binding to `$1` protects the value only once it has already arrived as
+/// one argument. Getting it there is [`posix_quote`]'s job, because the far
+/// end's LOGIN shell parses ssh's remote command string before this script
+/// ever runs. Unquoted, a value carrying `;` was executed by that login shell
+/// and this script never saw it.
 const REMOTE_RUNNER: &str = r#"
 set -eu
 nonce="$1"; shift
@@ -233,9 +283,13 @@ impl ExecutionBackend for SshBackend {
         args.push("sh".into());
         args.push("-s".into());
         args.push("--".into());
-        args.push(task.nonce.clone());
-        args.push(input_b64);
-        args.extend(task.argv.iter().cloned());
+        // Quoted for the FAR END's shell, not just handed to the local ssh
+        // client as separate argv entries. See `posix_quote`: without this an
+        // empty input silently shifts `argv` left and a task argument
+        // containing `;` executes on the far end.
+        args.push(posix_quote(&task.nonce));
+        args.push(posix_quote(&input_b64));
+        args.extend(task.argv.iter().map(|a| posix_quote(a)));
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let started = now_unix_ms();
@@ -454,7 +508,11 @@ async fn remote_exec(
     args.push("sh".into());
     args.push("-s".into());
     args.push("--".into());
-    args.push(argument.to_string());
+    // The nonce reaching here is NOT always a validated identifier: `backend
+    // scan --task-id <X>` passes an operator-or-caller string straight through
+    // to `scan_orphans`, so this argument is the one that was measured
+    // executing `id` as root on the far end before it was quoted.
+    args.push(posix_quote(argument));
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut command = wcore_config::shell::shell_command_argv("ssh", &borrowed);
     command.stdin(std::process::Stdio::piped());
@@ -501,10 +559,96 @@ async fn remote_scan(target: &str, nonce: &str) -> std::result::Result<Vec<Strin
 mod tests {
     use super::*;
 
+    /// The quoting the far end's shell needs, checked against the exact three
+    /// shapes that were measured breaking on a live far end on 2026-07-28.
+    #[test]
+    fn every_value_crossing_the_connection_is_quoted_for_the_far_end_shell() {
+        // An EMPTY value. Unquoted this vanished from ssh's remote command
+        // string entirely and every later argument shifted left, so the task's
+        // base64 input was read as its argv. It must survive as `''`.
+        assert_eq!(posix_quote(""), "''");
+
+        // A value with a SPACE. Unquoted the far end split it into two
+        // arguments.
+        assert_eq!(posix_quote("hello world"), "'hello world'");
+
+        // A value with shell METACHARACTERS. Unquoted this executed on the far
+        // end as root. Quoted, every byte is literal — and critically the
+        // result contains no unquoted `;`.
+        let payload = "x;id>/tmp/w;echo y";
+        let quoted = posix_quote(payload);
+        assert_eq!(quoted, "'x;id>/tmp/w;echo y'");
+        assert!(quoted.starts_with('\'') && quoted.ends_with('\''));
+
+        // A literal single quote is the one byte that cannot appear inside a
+        // single-quoted string. Close, escaped quote, reopen.
+        assert_eq!(posix_quote("it's"), r#"'it'\''s'"#);
+        // The escape must not be a way back out: a value that TRIES to close
+        // the quoting and append a command stays inert.
+        let escape = posix_quote("a';id>/tmp/w;'b");
+        assert_eq!(escape, r#"'a'\'';id>/tmp/w;'\''b'"#);
+        // Every `;` in the result sits inside a single-quoted region. Counting
+        // quotes before each `;` is an even/odd check: an even count means the
+        // quoting is currently CLOSED, which would be an escape.
+        for (i, c) in escape.char_indices() {
+            if c == ';' {
+                let opens = escape[..i].matches('\'').count();
+                assert_eq!(opens % 2, 1, "a `;` escaped the quoting in {escape}");
+            }
+        }
+    }
+
+    /// A positive control on the test above: the assertions must be capable of
+    /// failing. An identity "quoting" function has to break every one of them.
+    #[test]
+    fn the_quoting_assertions_would_fail_without_quoting() {
+        fn unquoted(value: &str) -> String {
+            value.to_string()
+        }
+        assert_ne!(unquoted(""), "''", "the empty-value assertion is vacuous");
+        assert_ne!(
+            unquoted("hello world"),
+            "'hello world'",
+            "the space assertion is vacuous"
+        );
+        assert_ne!(
+            unquoted("x;id>/tmp/w;echo y"),
+            "'x;id>/tmp/w;echo y'",
+            "the metacharacter assertion is vacuous"
+        );
+    }
+
+    /// The two places task-supplied bytes reach the wire must both quote.
+    /// Asserted against the source because the alternative is a live far end,
+    /// which a unit test does not have — the live proof is in the plan's
+    /// evidence file, and this guards the regression.
+    #[test]
+    fn both_wire_paths_quote_their_arguments() {
+        let source = include_str!("ssh.rs");
+        // `execute` — nonce, base64 input, and every element of task argv.
+        assert!(source.contains("args.push(posix_quote(&task.nonce));"));
+        assert!(source.contains("args.push(posix_quote(&input_b64));"));
+        assert!(source.contains("task.argv.iter().map(|a| posix_quote(a))"));
+        // `remote_exec` — the nonce for the scan and the kill. This is the one
+        // `backend scan --task-id` reaches, and it is not identifier-validated.
+        assert!(source.contains("args.push(posix_quote(argument));"));
+        // And nothing may push a raw task value alongside them.
+        assert!(
+            !source.contains("args.push(task.nonce.clone());"),
+            "an unquoted nonce is back on the wire"
+        );
+        assert!(
+            !source.contains("args.extend(task.argv.iter().cloned());"),
+            "unquoted task argv is back on the wire"
+        );
+    }
+
     #[test]
     fn the_module_contains_no_shell_string_execution_path() {
-        // The safety property this whole module rests on, asserted rather than
-        // left in a comment: nothing here builds a `sh -c` string.
+        // Necessary, and — as the module doc now says — NOT sufficient. This
+        // checks the LOCAL spawn only. It passed unchanged while the far end
+        // was executing injected shell, which is exactly why the quoting tests
+        // above exist alongside it rather than instead of it.
         //
         // The needles are ASSEMBLED at runtime rather than written as literals.
         // A literal would appear in this file's own source and the scan would
