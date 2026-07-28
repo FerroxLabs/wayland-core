@@ -1,0 +1,33 @@
+EVIDENCE ID : F28-CANDIDATE@32e2f57d
+LEDGER ROW  : 33
+ARTIFACT    : `phases/28-native-cross-platform-certification/28-01-CANDIDATE-LEDGER.md` + `28-02-SUMMARY.md` §1 — candidate `32e2f57d09fe4b287e513081862217dc9daa5901`, tree `63ec0e6c…`, **6 of 6 per-target CI release artifacts digest-bound** (linux `e8431ba2…`, macOS `945534d6…`, windows `baf9bd69…`). Every family ran **the CI release artifact itself**, sha256-asserted on the host before the run. **This certification covers `32e2f57d` and NOT the current tip**
+
+== PATH RESOLUTION ==
+[OK]   stat phases/28-native-cross-platform-certification/28-01-CANDIDATE-LEDGER.md
+       -> .planning/phases/28-native-cross-platform-certification/28-01-CANDIDATE-LEDGER.md  size=16391
+       head:
+# Phase 28 Candidate Ledger
+
+**GENERATED — do not edit.** Produced from `evidence/28-01/candidate.json` by
+`.planning/scripts/f28-resolve-candidate.py --render`. The JSON is authoritative;
+this file is its human rendering, so the two cannot disagree.
+
+
+== SIBLING (bare-filename) RESOLUTION ==
+[OK]   sibling 28-02-SUMMARY.md -> .planning/phases/28-native-cross-platform-certification/28-02-SUMMARY.md
+
+== GIT OBJECT RESOLUTION ==
+[OK]   COMMIT git cat-file -t 32e2f57d09fe4b287e513081862217dc9daa5901 -> commit
+       git log -1 32e2f57d09fe4b287e513081862217dc9daa5901 -> 32e2f57d09fe4b287e513081862217dc9daa5901 2026-07-27 docs: handoff — seventh gate shape, and the linter's own failure pattern
+[OK]   DIGEST 63ec0e6c found 1x in .planning/phases/28-native-cross-platform-certification/28-01-CANDIDATE-LEDGER.md
+       cmd: /usr/bin/grep -c -F 63ec0e6c .planning/phases/28-native-cross-platform-certification/28-01-CANDIDATE-LEDGER.md
+[OK]   DIGEST e8431ba2 found 1x in .planning/phases/28-native-cross-platform-certification/28-02-SUMMARY.md
+       cmd: /usr/bin/grep -c -F e8431ba2 .planning/phases/28-native-cross-platform-certification/28-02-SUMMARY.md
+[OK]   DIGEST 945534d6 found 1x in .planning/phases/28-native-cross-platform-certification/28-02-SUMMARY.md
+       cmd: /usr/bin/grep -c -F 945534d6 .planning/phases/28-native-cross-platform-certification/28-02-SUMMARY.md
+[OK]   DIGEST baf9bd69 found 1x in .planning/phases/28-native-cross-platform-certification/28-02-SUMMARY.md
+       cmd: /usr/bin/grep -c -F baf9bd69 .planning/phases/28-native-cross-platform-certification/28-02-SUMMARY.md
+[OK]   COMMIT git cat-file -t 32e2f57d -> commit
+       git log -1 32e2f57d -> 32e2f57d09fe4b287e513081862217dc9daa5901 2026-07-27 docs: handoff — seventh gate shape, and the linter's own failure pattern
+
+== VERDICT == CONFIRMED

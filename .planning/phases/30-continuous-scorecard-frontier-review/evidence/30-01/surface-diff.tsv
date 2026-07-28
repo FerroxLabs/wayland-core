@@ -1,0 +1,152 @@
+SURF-001::BINARY_ONLY::path=acp::family=GATEWAY-*
+SURF-002::BINARY_ONLY::path=acp request::family=GATEWAY-*
+SURF-003::BINARY_ONLY::path=acp request create-session::family=GATEWAY-*
+SURF-004::BINARY_ONLY::path=acp request delete-session::family=GATEWAY-*
+SURF-005::BINARY_ONLY::path=acp request get-session::family=GATEWAY-*
+SURF-006::BINARY_ONLY::path=acp request list-sessions::family=GATEWAY-*
+SURF-007::BINARY_ONLY::path=acp request send::family=GATEWAY-*
+SURF-008::BINARY_ONLY::path=acp serve::family=GATEWAY-*
+SURF-009::BINARY_ONLY::path=agent::family=CONT-*
+SURF-010::BINARY_ONLY::path=agent create::family=CONT-*
+SURF-011::BINARY_ONLY::path=agent delete::family=CONT-*
+SURF-012::BINARY_ONLY::path=agent edit::family=CONT-*
+SURF-013::BINARY_ONLY::path=agent list::family=CONT-*
+SURF-014::BINARY_ONLY::path=agent show::family=CONT-*
+SURF-015::BINARY_AND_DOCS::path=auth::family=AUTH-*
+SURF-016::BINARY_AND_DOCS::path=auth add::family=AUTH-*
+SURF-017::BINARY_AND_DOCS::path=auth list::family=AUTH-*
+SURF-018::BINARY_AND_DOCS::path=auth login::family=AUTH-*
+SURF-019::BINARY_AND_DOCS::path=auth logout::family=AUTH-*
+SURF-020::BINARY_AND_DOCS::path=auth remove::family=AUTH-*
+SURF-021::BINARY_AND_DOCS::path=auth status::family=AUTH-*
+SURF-022::BINARY_ONLY::path=backend::family=REACH-*
+SURF-023::BINARY_ONLY::path=backend cancel::family=REACH-*
+SURF-024::BINARY_ONLY::path=backend diff::family=REACH-*
+SURF-025::BINARY_ONLY::path=backend list::family=REACH-*
+SURF-026::BINARY_ONLY::path=backend orphans::family=REACH-*
+SURF-027::BINARY_ONLY::path=backend probe::family=REACH-*
+SURF-028::BINARY_ONLY::path=backend receipt::family=REACH-*
+SURF-029::BINARY_ONLY::path=backend receipt verify::family=REACH-*
+SURF-030::BINARY_ONLY::path=backend run::family=REACH-*
+SURF-031::BINARY_ONLY::path=backend scan::family=REACH-*
+SURF-032::BINARY_ONLY::path=backup::family=PORT-*
+SURF-033::BINARY_ONLY::path=backup create::family=PORT-*
+SURF-034::BINARY_ONLY::path=backup digest::family=PORT-*
+SURF-035::BINARY_ONLY::path=backup recover::family=PORT-*
+SURF-036::BINARY_ONLY::path=backup restore::family=PORT-*
+SURF-037::BINARY_ONLY::path=backup verify::family=PORT-*
+SURF-038::BINARY_ONLY::path=channel::family=GATEWAY-*
+SURF-039::BINARY_ONLY::path=channel health::family=GATEWAY-*
+SURF-040::BINARY_ONLY::path=channel list::family=GATEWAY-*
+SURF-041::BINARY_ONLY::path=channel probe::family=GATEWAY-*
+SURF-042::BINARY_ONLY::path=channel reload::family=GATEWAY-*
+SURF-043::BINARY_AND_DOCS::path=cron::family=GOAL-*
+SURF-044::BINARY_AND_DOCS::path=cron add::family=GOAL-*
+SURF-045::BINARY_AND_DOCS::path=cron daemon::family=GOAL-*
+SURF-046::BINARY_AND_DOCS::path=cron disable::family=GOAL-*
+SURF-047::BINARY_AND_DOCS::path=cron enable::family=GOAL-*
+SURF-048::BINARY_AND_DOCS::path=cron history::family=GOAL-*
+SURF-049::BINARY_AND_DOCS::path=cron list::family=GOAL-*
+SURF-050::BINARY_AND_DOCS::path=cron logs::family=GOAL-*
+SURF-051::BINARY_AND_DOCS::path=cron publish::family=GOAL-*
+SURF-052::BINARY_AND_DOCS::path=cron remove::family=GOAL-*
+SURF-053::BINARY_AND_DOCS::path=cron status::family=GOAL-*
+SURF-054::BINARY_ONLY::path=crucible::family=TXN-*
+SURF-055::BINARY_ONLY::path=fetch::family=MEDIA-*
+SURF-056::BINARY_AND_DOCS::path=forge::family=TXN-*
+SURF-057::BINARY_ONLY::path=gateway::family=GATEWAY-*
+SURF-058::BINARY_ONLY::path=gateway drain::family=GATEWAY-*
+SURF-059::BINARY_ONLY::path=gateway install::family=GATEWAY-*
+SURF-060::BINARY_ONLY::path=gateway restart::family=GATEWAY-*
+SURF-061::BINARY_ONLY::path=gateway run::family=GATEWAY-*
+SURF-062::BINARY_ONLY::path=gateway start::family=GATEWAY-*
+SURF-063::BINARY_ONLY::path=gateway status::family=GATEWAY-*
+SURF-064::BINARY_ONLY::path=gateway stop::family=GATEWAY-*
+SURF-065::BINARY_ONLY::path=gateway uninstall::family=GATEWAY-*
+SURF-066::BINARY_ONLY::path=goal::family=GOAL-*
+SURF-067::BINARY_ONLY::path=goal effects::family=GOAL-*
+SURF-068::BINARY_ONLY::path=goal exec-task::family=GOAL-*
+SURF-069::BINARY_ONLY::path=goal open::family=GOAL-*
+SURF-070::BINARY_ONLY::path=goal run::family=GOAL-*
+SURF-071::BINARY_ONLY::path=goal status::family=GOAL-*
+SURF-072::BINARY_ONLY::path=goal task::family=GOAL-*
+SURF-073::BINARY_ONLY::path=image::family=MEDIA-*
+SURF-074::BINARY_ONLY::path=index::family=CONT-*
+SURF-075::BINARY_ONLY::path=index build::family=CONT-*
+SURF-076::BINARY_ONLY::path=index search::family=CONT-*
+SURF-077::BINARY_ONLY::path=index status::family=CONT-*
+SURF-078::BINARY_ONLY::path=index verify::family=CONT-*
+SURF-079::NO_FAMILY::path=init::family=NONE
+SURF-080::NO_FAMILY::path=mcp-serve::family=NONE
+SURF-081::BINARY_ONLY::path=migrate::family=PORT-*
+SURF-082::BINARY_ONLY::path=migrate hermes::family=PORT-*
+SURF-083::BINARY_ONLY::path=migrate openclaw::family=PORT-*
+SURF-084::BINARY_ONLY::path=migrate promote::family=PORT-*
+SURF-085::BINARY_ONLY::path=migrate quarantined::family=PORT-*
+SURF-086::NO_FAMILY::path=models::family=NONE
+SURF-087::NO_FAMILY::path=models list::family=NONE
+SURF-088::BINARY_ONLY::path=node::family=REACH-*
+SURF-089::BINARY_ONLY::path=node advertise::family=REACH-*
+SURF-090::BINARY_ONLY::path=node attribution::family=REACH-*
+SURF-091::BINARY_ONLY::path=node identity::family=REACH-*
+SURF-092::BINARY_ONLY::path=node list::family=REACH-*
+SURF-093::BINARY_ONLY::path=node pair::family=REACH-*
+SURF-094::BINARY_ONLY::path=node probe::family=REACH-*
+SURF-095::BINARY_ONLY::path=node revoke::family=REACH-*
+SURF-096::BINARY_ONLY::path=node show::family=REACH-*
+SURF-097::BINARY_ONLY::path=node submit::family=REACH-*
+SURF-098::BINARY_AND_DOCS::path=plugin::family=REACH-*
+SURF-099::BINARY_AND_DOCS::path=plugin approve::family=REACH-*
+SURF-100::BINARY_AND_DOCS::path=plugin available::family=REACH-*
+SURF-101::BINARY_AND_DOCS::path=plugin inspect::family=REACH-*
+SURF-102::BINARY_AND_DOCS::path=plugin install::family=REACH-*
+SURF-103::BINARY_AND_DOCS::path=plugin list::family=REACH-*
+SURF-104::BINARY_AND_DOCS::path=plugin marketplace::family=REACH-*
+SURF-105::BINARY_AND_DOCS::path=plugin marketplace add::family=REACH-*
+SURF-106::BINARY_AND_DOCS::path=plugin marketplace list::family=REACH-*
+SURF-107::BINARY_AND_DOCS::path=plugin marketplace remove::family=REACH-*
+SURF-108::BINARY_AND_DOCS::path=plugin new::family=REACH-*
+SURF-109::BINARY_AND_DOCS::path=plugin publish::family=REACH-*
+SURF-110::BINARY_AND_DOCS::path=plugin recover::family=REACH-*
+SURF-111::BINARY_AND_DOCS::path=plugin remove::family=REACH-*
+SURF-112::BINARY_AND_DOCS::path=plugin rollback::family=REACH-*
+SURF-113::BINARY_AND_DOCS::path=plugin sign::family=REACH-*
+SURF-114::BINARY_AND_DOCS::path=plugin test::family=REACH-*
+SURF-115::BINARY_AND_DOCS::path=plugin update::family=REACH-*
+SURF-116::BINARY_AND_DOCS::path=plugin verify::family=REACH-*
+SURF-117::NO_FAMILY::path=profile::family=NONE
+SURF-118::NO_FAMILY::path=profile create::family=NONE
+SURF-119::NO_FAMILY::path=profile delete::family=NONE
+SURF-120::NO_FAMILY::path=profile export::family=NONE
+SURF-121::NO_FAMILY::path=profile import::family=NONE
+SURF-122::NO_FAMILY::path=profile list::family=NONE
+SURF-123::NO_FAMILY::path=profile rename::family=NONE
+SURF-124::NO_FAMILY::path=profile show::family=NONE
+SURF-125::NO_FAMILY::path=profile use::family=NONE
+SURF-126::NO_FAMILY::path=project-context::family=NONE
+SURF-127::BINARY_ONLY::path=sandbox::family=AUTH-*
+SURF-128::BINARY_ONLY::path=sandbox exec::family=AUTH-*
+SURF-129::BINARY_ONLY::path=sandbox status::family=AUTH-*
+SURF-130::BINARY_ONLY::path=self-update::family=SUPPLY-*
+SURF-131::BINARY_ONLY::path=session::family=CONT-*
+SURF-132::BINARY_ONLY::path=session cancel::family=CONT-*
+SURF-133::BINARY_ONLY::path=session checkpoint::family=CONT-*
+SURF-134::BINARY_ONLY::path=session export::family=CONT-*
+SURF-135::BINARY_ONLY::path=session fork::family=CONT-*
+SURF-136::BINARY_ONLY::path=session list::family=CONT-*
+SURF-137::BINARY_ONLY::path=session reconcile::family=CONT-*
+SURF-138::BINARY_ONLY::path=session retain::family=CONT-*
+SURF-139::BINARY_ONLY::path=session retry::family=CONT-*
+SURF-140::BINARY_ONLY::path=session rewind::family=CONT-*
+SURF-141::BINARY_ONLY::path=session search::family=CONT-*
+SURF-142::BINARY_ONLY::path=session show::family=CONT-*
+SURF-143::NO_FAMILY::path=setup::family=NONE
+SURF-144::BINARY_ONLY::path=swarm::family=GOAL-*
+SURF-145::BINARY_AND_DOCS::path=workflow::family=GOAL-*
+SURF-146::BINARY_AND_DOCS::path=workflow list::family=GOAL-*
+SURF-147::BINARY_AND_DOCS::path=workflow run::family=GOAL-*
+SURF-148::BINARY_AND_DOCS::path=workflow validate::family=GOAL-*
+SURF-149::DOCS_ONLY::path=forgeflows::family=NONE
+SURF-150::DOCS_ONLY::path=version::family=NONE
+SURF-151::DOCS_ONLY::path=wayland-core::family=NONE
+SURF-152::DOCS_ONLY::path=wcore-cli::family=NONE

@@ -1,0 +1,19 @@
+EVIDENCE ID : F23B-02-MEMORY
+LEDGER ROW  : 17
+ARTIFACT    : `phases/23B-continuous-agency/23B-02-SUMMARY.md` — recall provenance plus correct/forget/privacy/retention through the unmodified `MemoryAccessGate`, reachable from `/memory`. **F23-04 (cache/compaction cost truth) NOT STARTED**
+
+== PATH RESOLUTION ==
+[OK]   stat phases/23B-continuous-agency/23B-02-SUMMARY.md
+       -> .planning/phases/23B-continuous-agency/23B-02-SUMMARY.md  size=9212
+       head:
+---
+phase: 23B-continuous-agency
+plan: "02"
+subsystem: memory-provenance-and-control
+status: complete-with-named-open-controls
+requirements:
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

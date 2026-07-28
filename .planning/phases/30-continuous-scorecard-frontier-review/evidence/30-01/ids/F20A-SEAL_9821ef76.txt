@@ -1,0 +1,15 @@
+EVIDENCE ID : F20A-SEAL@9821ef76
+LEDGER ROW  : 5
+ARTIFACT    : Phase 20A close, SHA `9821ef7603ac1e687b600cda591af1657c883484` (tree `0a1267a9`, tag `f20a-candidate-9821ef76`)
+
+== PATH RESOLUTION ==
+(no path token in the artifact cell)
+
+== GIT OBJECT RESOLUTION ==
+[OK]   COMMIT git cat-file -t 9821ef7603ac1e687b600cda591af1657c883484 -> commit
+       git log -1 9821ef7603ac1e687b600cda591af1657c883484 -> 9821ef7603ac1e687b600cda591af1657c883484 2026-07-26 test(journal): make the snapshot unit-test fixtures private on Windows too
+[OK]   COMMIT git cat-file -t 0a1267a9 -> tree
+[OK]   COMMIT git cat-file -t 9821ef76 -> commit
+       git log -1 9821ef76 -> 9821ef7603ac1e687b600cda591af1657c883484 2026-07-26 test(journal): make the snapshot unit-test fixtures private on Windows too
+
+== VERDICT == CONFIRMED

@@ -83,6 +83,9 @@ pub mod runner;
 /// Phase 29 deterministic CycloneDX SBOM transform (F29-01, closes F29-CEN-05).
 pub mod sbom;
 pub mod scenario;
+/// Phase 30 scorecard types (F30-01, F30-02): the closed maturity and criterion
+/// verdict enums, the seven-truth surface row, and the asymmetric verifier.
+pub mod scorecard;
 pub mod stderr_capture;
 pub mod tempenv;
 pub mod trace;

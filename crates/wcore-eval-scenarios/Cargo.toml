@@ -52,6 +52,14 @@ path = "bin/wayland-channel-sink.rs"
 name = "wayland-journey"
 path = "bin/wayland-journey.rs"
 
+# Phase 30 (F30-01/F30-02): walks the shipped binary's own command tree so the
+# surface inventory is a measurement of the artifact rather than a reading of a
+# document, and verifies a scorecard document. Adds NO dependency — clap, serde,
+# serde_json and anyhow are already declared below.
+[[bin]]
+name = "wayland-scorecard"
+path = "bin/wayland-scorecard.rs"
+
 [dependencies]
 # Async runtime — used by the runner for spawn/timeout/stderr-drain.
 tokio        = { workspace = true }

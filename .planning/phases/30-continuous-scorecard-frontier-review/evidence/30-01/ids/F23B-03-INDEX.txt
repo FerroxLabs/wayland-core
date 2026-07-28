@@ -1,0 +1,22 @@
+EVIDENCE ID : F23B-03-INDEX
+LEDGER ROW  : 18
+ARTIFACT    : `phases/23B-continuous-agency/23B-03-SUMMARY.md` + `23B-03-LIVE-EVIDENCE.md` — persistent incremental SQLite index reachable as `wayland-core index build\|status\|search\|verify`; **all three mandatory platform legs PASS on real hardware**, each nonce-bound and each against a binary whose `--build-info` source SHA was asserted equal to the commit under test before any measurement. Every mandatory F23-06 clause closed; the OPTIONAL semantic layer deferred
+
+== PATH RESOLUTION ==
+[OK]   stat phases/23B-continuous-agency/23B-03-SUMMARY.md
+       -> .planning/phases/23B-continuous-agency/23B-03-SUMMARY.md  size=22120
+       head:
+---
+phase: 23B-continuous-agency
+plan: "03"
+subsystem: persistent-repository-index
+status: complete-semantic-layer-deferred
+requirements:
+
+== SIBLING (bare-filename) RESOLUTION ==
+[OK]   sibling 23B-03-LIVE-EVIDENCE.md -> .planning/phases/23B-continuous-agency/23B-03-LIVE-EVIDENCE.md
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

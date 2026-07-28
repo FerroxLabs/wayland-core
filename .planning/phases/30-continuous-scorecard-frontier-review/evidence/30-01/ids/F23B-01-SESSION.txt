@@ -1,0 +1,22 @@
+EVIDENCE ID : F23B-01-SESSION
+LEDGER ROW  : 16
+ARTIFACT    : `phases/23B-continuous-agency/23B-01-SUMMARY.md` + `23B-01-LIVE-EVIDENCE.md` — `wayland-core session` search/inspect/fork/retry/export/retain/reconcile/cancel driven against the shipped binary on Linux; closes live Windows UAT defect D2. macOS, Windows and TUI legs explicitly open
+
+== PATH RESOLUTION ==
+[OK]   stat phases/23B-continuous-agency/23B-01-SUMMARY.md
+       -> .planning/phases/23B-continuous-agency/23B-01-SUMMARY.md  size=8335
+       head:
+---
+phase: 23B-continuous-agency
+plan: "01"
+subsystem: session-operator-lifecycle
+status: complete-with-named-open-verbs
+requirements:
+
+== SIBLING (bare-filename) RESOLUTION ==
+[OK]   sibling 23B-01-LIVE-EVIDENCE.md -> .planning/phases/23B-continuous-agency/23B-01-LIVE-EVIDENCE.md
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

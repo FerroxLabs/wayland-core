@@ -1,0 +1,11 @@
+EVIDENCE ID : PEER-PROBE-2026-07-26
+LEDGER ROW  : 8
+ARTIFACT    : Structural probes (`git ls-tree`, `git grep`) executed against both peer trees **at the `BASE-2026-07-13` commits** on 2026-07-26. Records presence/absence of a counterpart, never a performance claim.
+
+== PATH RESOLUTION ==
+(no path token in the artifact cell)
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == UNRESOLVED

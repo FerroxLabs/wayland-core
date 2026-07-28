@@ -1,0 +1,15 @@
+=== KNOWN-GOOD / KNOWN-BAD SEPARATION — resolve-evidence-ids.py
+ledger : /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-30-01/.planning/intel/COMPETITIVE-LEDGER.md
+date   : 2026-07-28T14:49:05Z
+
+BASELINE (pristine real ledger)  CONFIRMED PARTIAL UNRESOLVED = 39 1 2
+
+PASS  M1 path repointed at a nonexistent file : 39 1 2 -> 38 1 3
+PASS  M2 one flipped byte in a pinned commit SHA : 39 1 2 -> 38 2 2
+PASS  M3 fabricated evidence-ID row appended : 39 1 2 -> 39 1 3
+PASS  M4 altered artifact sha256 digest : 39 1 2 -> 38 2 2
+PASS  C1 CONTROL prose reworded, no citation touched : 39 1 2 -> 39 1 2 (control, correctly unchanged)
+
+real ledger unmodified check: 0 modified paths (expect 0)
+
+SEPARATION_RESULT=PASS  (4 mutations detected, 1 control held)

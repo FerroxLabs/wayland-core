@@ -1,0 +1,23 @@
+EVIDENCE ID : F28-MATRIX-651
+LEDGER ROW  : 34
+ARTIFACT    : `phases/28-native-cross-platform-certification/28-02-MATRIX-RESULTS.md` (rendered from `results.json`) — **651 of 651 cells with an outcome, 0 skipped; 627 pass / 24 red; 147 of 147 unskippable critical cells ran.** linux 216-0-0, macos 192-**24**-0, windows 219-0-0. All 50 sandbox greens carry a differential activeness observation; absence of a violation is not expressible as a green. 32 mutations each rejected with the control re-run green after every one
+
+== PATH RESOLUTION ==
+[OK]   stat phases/28-native-cross-platform-certification/28-02-MATRIX-RESULTS.md
+       -> .planning/phases/28-native-cross-platform-certification/28-02-MATRIX-RESULTS.md  size=6077
+       head:
+# 28-02 — E5 hostile matrix results
+
+**GENERATED from `evidence/28-02/results.json`. Do not edit by hand** — the prose and the
+data cannot disagree because this file is rendered from that file.
+Validated by `f28-check-matrix-results.py --verify`, `--check-control-precedence`,
+`--check-activeness`, `--check-skips` and `--check-binary-binding`.
+
+== SIBLING (bare-filename) RESOLUTION ==
+[FAIL] sibling results.json not found beside .planning/phases/28-native-cross-platform-certification
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == PARTIAL
+unresolved members: sibling:results.json

@@ -1,0 +1,22 @@
+EVIDENCE ID : F26-01-DISCOVERY
+LEDGER ROW  : 30
+ARTIFACT    : `phases/26-migration-export-backup-restore/26-01-SUMMARY.md` + `26-01-BASELINE.md` — Hermes AND OpenClaw discovery typed, deterministic, structurally secret-redacted and non-mutating; proved on Linux against canary corpora **and on macOS against Sean's REAL peer installs with live credentials** (7 real secret values extracted, **0 hits** in either emitted document, both homes unmutated). `migrate --help` lists both peers on the real binary. F26-01 claimed
+
+== PATH RESOLUTION ==
+[OK]   stat phases/26-migration-export-backup-restore/26-01-SUMMARY.md
+       -> .planning/phases/26-migration-export-backup-restore/26-01-SUMMARY.md  size=8155
+       head:
+---
+phase: 26-migration-export-backup-restore
+plan: "01"
+status: complete
+termination_state: 1 (Complete)
+requirements: [F26-01]
+
+== SIBLING (bare-filename) RESOLUTION ==
+[OK]   sibling 26-01-BASELINE.md -> .planning/phases/26-migration-export-backup-restore/26-01-BASELINE.md
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

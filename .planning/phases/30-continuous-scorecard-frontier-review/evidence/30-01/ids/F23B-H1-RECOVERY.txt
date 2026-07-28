@@ -1,0 +1,19 @@
+EVIDENCE ID : F23B-H1-RECOVERY
+LEDGER ROW  : 20
+ARTIFACT    : `phases/23B-continuous-agency/23B-H1-RECOVERY-SUMMARY.md` — journals already on disk carrying an explicit `"effect_receipt":null` failed their checksum on read (silent permanent user data loss); recovered with content intact on Linux, macOS and Windows against real binaries, without loosening the integrity check
+
+== PATH RESOLUTION ==
+[OK]   stat phases/23B-continuous-agency/23B-H1-RECOVERY-SUMMARY.md
+       -> .planning/phases/23B-continuous-agency/23B-H1-RECOVERY-SUMMARY.md  size=14002
+       head:
+---
+phase: 23B-continuous-agency
+plan: "H1-recovery"
+subsystem: session-journal-durability
+status: complete
+supersedes_residual_in: 23B-H1-DISPOSITION.md §4
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

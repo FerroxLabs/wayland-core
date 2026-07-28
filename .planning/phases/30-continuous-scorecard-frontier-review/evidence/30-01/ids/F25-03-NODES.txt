@@ -1,0 +1,22 @@
+EVIDENCE ID : F25-03-NODES
+LEDGER ROW  : 28
+ARTIFACT    : `phases/25-remote-reach-nodes-plugin-lifecycle/25-03-SUMMARY.md` + `25-03-NODE-EVIDENCE.md` — node identity attested INSIDE the signed receipt body; all six F25-03 properties driven through the shipped binary with attribution re-verified after all five disruptions. **Success Criterion 2 NOT MET** — no second physical host; no SSH trust relationship exists between `hetzner-dsm` and `SeanD@seandesktop` and creating one is reserved to Sean
+
+== PATH RESOLUTION ==
+[OK]   stat phases/25-remote-reach-nodes-plugin-lifecycle/25-03-SUMMARY.md
+       -> .planning/phases/25-remote-reach-nodes-plugin-lifecycle/25-03-SUMMARY.md  size=13292
+       head:
+---
+phase: 25-remote-reach-nodes-plugin-lifecycle
+plan: "03"
+subsystem: nodes
+tags: [f25-03, node, pairing, revocation, attribution, liveness, mixed-version]
+status: complete
+
+== SIBLING (bare-filename) RESOLUTION ==
+[OK]   sibling 25-03-NODE-EVIDENCE.md -> .planning/phases/25-remote-reach-nodes-plugin-lifecycle/25-03-NODE-EVIDENCE.md
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

@@ -1,0 +1,19 @@
+EVIDENCE ID : F25-01-BACKENDS
+LEDGER ROW  : 26
+ARTIFACT    : `phases/25-remote-reach-nodes-plugin-lifecycle/25-01-SUMMARY.md` — `wcore-exec-backend` provider-neutral contract; four reference backends behind one conformance harness; **three of them ran the same deterministic task through the shipped binary on `hetzner-dsm` and diffed to EQUIVALENT**. Success Criterion 1 **NOT MET** — the hibernating cloud leg is unexercised for want of a credential only Sean can mint
+
+== PATH RESOLUTION ==
+[OK]   stat phases/25-remote-reach-nodes-plugin-lifecycle/25-01-SUMMARY.md
+       -> .planning/phases/25-remote-reach-nodes-plugin-lifecycle/25-01-SUMMARY.md  size=13961
+       head:
+---
+phase: 25-remote-reach-nodes-plugin-lifecycle
+plan: "01"
+subsystem: execution-backends
+tags: [f25-01, f25-02, execution-backend, receipts, attestation, ssh, container, cloud, egress]
+status: complete
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

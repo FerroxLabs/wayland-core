@@ -1,0 +1,135 @@
+CTRL-01 COVERAGE-FAMILY SEVEN-CLAUSE CHECK
+ledger: .planning/intel/COMPETITIVE-LEDGER.md
+families parsed: 10
+declared evidence IDs: 42
+
+== AUTH-*
+   maturity        : CONSTRUCTED (raw: CONSTRUCTED *(unchanged)*)
+   security owner  : core
+   evidence IDs    : 10 cited, 0 undeclared
+   peer baseline   : `BASE-2026-07-13` — Hermes 0.17.0 @ `dbe734be`; OpenClaw 202
+   delta chars     : 612
+   limitation chars: 1535
+   last refresh    : Phases 21 + 25-04 + 28-02, 2026-07-28
+   next proof      : Phase 30 (F30-01 independent CTRL-01 review); a Windows run at or after `ac94b1d5`; a re-read of the `delegate
+   seven-clause    : ALL SEVEN PRESENT
+   dated-by-tree   : none
+   VERDICT         : CONFIRMED sev=NONE
+
+== TXN-*
+   maturity        : REACHED (raw: **REACHED — REOPENED** *(was EFFECTIVE)*)
+   security owner  : core
+   evidence IDs    : 10 cited, 0 undeclared
+   peer baseline   : `BASE-2026-07-13` — Hermes 0.17.0 @ `dbe734be`; OpenClaw 202
+   delta chars     : 508
+   limitation chars: 1708
+   last refresh    : Phases 21 + 22 + 23B-H1 + 28, 2026-07-28
+   next proof      : Windows re-proof of F21-04-03 and of Phase 22's M1–M5 legs; plans 28-03 (soak) and 28-04 (signed receipt)
+   seven-clause    : ALL SEVEN PRESENT
+   dated-by-tree   : 28-03, 28-04 already on disk — the row's own stated next proof has landed since the refresh
+   VERDICT         : CONFIRMED sev=MEDIUM
+
+== GOAL-*
+   maturity        : SOURCE (raw: **CONSTRUCTED** *(was SOURCE)*)
+   security owner  : core
+   evidence IDs    : 6 cited, 0 undeclared
+   peer baseline   : `BASE-2026-07-13` — Hermes 0.17.0 @ `dbe734be`; OpenClaw 202
+   delta chars     : 575
+   limitation chars: 1592
+   last refresh    : Phases 22 + 24-02, 2026-07-28
+   next proof      : Phase 22 carry-over: 22-02 Task 3 (the adapter surface over the five loop owners); the TUI Goal surface and ty
+   seven-clause    : ALL SEVEN PRESENT
+   dated-by-tree   : 22-02 already on disk — the row's own stated next proof has landed since the refresh
+   VERDICT         : CONFIRMED sev=MEDIUM
+
+== CONT-*
+   maturity        : REACHED (raw: REACHED *(unchanged)*)
+   security owner  : core
+   evidence IDs    : 12 cited, 0 undeclared
+   peer baseline   : `BASE-2026-07-13` — Hermes 0.17.0 @ `dbe734be`; OpenClaw 202
+   delta chars     : 469
+   limitation chars: 1590
+   last refresh    : Phases 23A + 23B, 2026-07-28
+   next proof      : 23B-04 Tasks 2-3, not closable before `2026-07-30T23:54:26Z`; governed promotion (F23-01) and cache economics 
+   seven-clause    : ALL SEVEN PRESENT
+   dated-by-tree   : 23B-04 already on disk — the row's own stated next proof has landed since the refresh
+   VERDICT         : CONFIRMED sev=MEDIUM
+
+== GATEWAY-*
+   maturity        : ABSENT (raw: **CONSTRUCTED** *(was ABSENT)*)
+   security owner  : core
+   evidence IDs    : 8 cited, 0 undeclared
+   peer baseline   : `BASE-2026-07-13` — Hermes 0.17.0 @ `dbe734be`; OpenClaw 202
+   delta chars     : 697
+   limitation chars: 2017
+   last refresh    : Phase 24 (24-01, 24-02, 24-B, 24-C, 24-04), 2026-07-28
+   next proof      : Phase 24 carry-over: the macOS and Windows gateway legs, and Criterion 5's three-platform journey
+   seven-clause    : ALL SEVEN PRESENT
+   dated-by-tree   : none
+   VERDICT         : CONFIRMED sev=NONE
+
+== REACH-*
+   maturity        : SOURCE (raw: **REACHED** *(was SOURCE)*)
+   security owner  : core
+   evidence IDs    : 6 cited, 0 undeclared
+   peer baseline   : `BASE-2026-07-13` — Hermes 0.17.0 @ `dbe734be`; OpenClaw 202
+   delta chars     : 581
+   limitation chars: 1977
+   last refresh    : Phase 25, 2026-07-28
+   next proof      : A Sean-minted cloud credential (C1); an authorized second-host SSH trust relationship (C2); SSH/cloud orphan e
+   seven-clause    : ALL SEVEN PRESENT
+   dated-by-tree   : none
+   VERDICT         : CONFIRMED sev=NONE
+
+== PORT-*
+   maturity        : SOURCE (raw: **REACHED** *(was SOURCE)*)
+   security owner  : core
+   evidence IDs    : 4 cited, 0 undeclared
+   peer baseline   : `BASE-2026-07-13` — Hermes 0.17.0 @ `dbe734be`; OpenClaw 202
+   delta chars     : 770
+   limitation chars: 1575
+   last refresh    : Phase 26 (26-01, 26-03), 2026-07-28
+   next proof      : Plans 26-02 (import/apply + executable-content quarantine) and 26-04 (hostile corpora), both unstarted
+   seven-clause    : ALL SEVEN PRESENT
+   dated-by-tree   : 26-02, 26-04 already on disk — the row's own stated next proof has landed since the refresh
+   VERDICT         : CONFIRMED sev=MEDIUM
+
+== MEDIA-*
+   maturity        : SOURCE (raw: SOURCE *(unchanged)*)
+   security owner  : core
+   evidence IDs    : 4 cited, 0 undeclared
+   peer baseline   : `BASE-2026-07-13` — Hermes 0.17.0 @ `dbe734be`; OpenClaw 202
+   delta chars     : 618
+   limitation chars: 1506
+   last refresh    : Phase 27, 2026-07-28
+   next proof      : Phase 27 carry-over: the fenced readiness protocol seam (`.planning/SEAM-REQUESTS/27.md`), the four generation
+   seven-clause    : ALL SEVEN PRESENT
+   dated-by-tree   : none
+   VERDICT         : CONFIRMED sev=NONE
+
+== NATIVE-*
+   maturity        : SOURCE (raw: **REACHED** *(was SOURCE)*)
+   security owner  : shared
+   evidence IDs    : 8 cited, 0 undeclared
+   peer baseline   : `BASE-2026-07-13` — Hermes 0.17.0 @ `dbe734be`; OpenClaw 202
+   delta chars     : 402
+   limitation chars: 1880
+   last refresh    : Phase 28 (28-01, 28-02, F-28-02-001), 2026-07-28
+   next proof      : A matrix re-run at a candidate carrying the F-28-02-001 fix; plans 28-03 (soak) and 28-04 (signed receipt + ad
+   seven-clause    : ALL SEVEN PRESENT
+   dated-by-tree   : 28-02, 28-03, 28-04 already on disk — the row's own stated next proof has landed since the refresh
+   VERDICT         : CONFIRMED sev=MEDIUM
+
+== SUPPLY-*
+   maturity        : SOURCE (raw: **CONSTRUCTED** *(was SOURCE)*)
+   security owner  : shared
+   evidence IDs    : 8 cited, 0 undeclared
+   peer baseline   : `BASE-2026-07-13` — Hermes 0.17.0 @ `dbe734be`; OpenClaw 202
+   delta chars     : 730
+   limitation chars: 2545
+   last refresh    : Phase 29 (29-01, 29-02), 2026-07-28
+   next proof      : Plans 29-03 (install/update identity, revocation, key rotation) and 29-04 (tamper corpus, four-state separatio
+   seven-clause    : ALL SEVEN PRESENT
+   dated-by-tree   : 29-03, 29-04 already on disk — the row's own stated next proof has landed since the refresh
+   VERDICT         : CONFIRMED sev=MEDIUM
+
