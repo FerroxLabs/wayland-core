@@ -452,9 +452,30 @@ class InboundMatrix {
       process.stdout.write(`[inbound] waiting for webhook host: ${i}s ${new Date().toISOString()}\n`);
       sleep(1000);
     }
-    throw new Error(
-      `webhook host never bound 127.0.0.1:${WEBHOOK_PORT}\n--- core log ---\n${fs.readFileSync(this.coreLog, 'utf8').slice(-4000)}`,
+    // F24-C3-H2. Returning null rather than throwing. A throw produced no
+    // result JSON and no leg table, so the single most important measurement
+    // this driver can make — "the runtime bound NOTHING" — was the one outcome
+    // it could not record. The caller turns this into 15 explicit FAILs with
+    // the reason, which is both faster than waiting out 15 arrival budgets
+    // against a dead socket and far better evidence than a stack trace.
+    this.note(
+      `webhook host never bound 127.0.0.1:${WEBHOOK_PORT} after 60s; ` +
+        `runtime=${this.args.runtime} hosts no inbound listener`,
     );
+    this.coreLogTail = fs.readFileSync(this.coreLog, 'utf8').slice(-4000);
+    return null;
+  }
+
+  /// Every leg, failed, with the one reason that caused all of them. Used when
+  /// the runtime bound no inbound listener at all: each leg is reported
+  /// individually so the count in the banner is the real leg count and not a
+  /// zero that a reader could mistake for "nothing ran".
+  failEveryLeg(reason) {
+    for (const adapter of ADAPTERS) {
+      for (const leg of LEGS) {
+        this.record(adapter, leg, false, reason);
+      }
+    }
   }
 
   // ── evidence readers ──────────────────────────────────────────────────────
@@ -664,6 +685,18 @@ class InboundMatrix {
     this.startBinary();
     const healthz = this.waitForWebhookHost();
 
+    // The runtime bound no inbound listener. Do NOT proceed into the matrix:
+    // every POST would go to a closed port and every leg would fail after its
+    // full 90s arrival budget, reporting fifteen separate mysteries instead of
+    // the one fact that explains all of them.
+    if (healthz === null) {
+      this.failEveryLeg(
+        `no inbound listener on 127.0.0.1:${WEBHOOK_PORT} — runtime=${this.args.runtime} ` +
+          `hosts no inbound webhook host`,
+      );
+      return this.finish(info, digest, null);
+    }
+
     this.runMatrix('slack', {
       channelName: 'f24c3slack',
       allowed: 'U24C3ALLOWED',
@@ -733,6 +766,14 @@ class InboundMatrix {
         }),
     });
 
+    return this.finish(info, digest, healthz);
+  }
+
+  /// Assemble, persist and return the result document. Split out of `execute`
+  /// so the "runtime bound no listener" path produces the SAME document shape
+  /// as a full run — a result a reader has to interpret differently depending
+  /// on how the run ended is a result that gets misread.
+  finish(info, digest, healthz) {
     const result = {
       schema: RESULT_SCHEMA,
       platform: this.args.platform,
@@ -753,6 +794,11 @@ class InboundMatrix {
       arrivals_journal: this.journalPath,
       turns_journal: this.llmJournalPath,
       healthz,
+      // The observable that F24-C3-H2 turns on, recorded as its own field so a
+      // reader never has to infer it from a leg detail string. False here means
+      // the runtime under test binds no inbound webhook host at all.
+      webhook_host_bound: healthz !== null,
+      core_log_tail: this.coreLogTail ?? null,
       arrivals_total: this.arrivals().length,
       turns_total: this.turns().length,
       results: this.results,
