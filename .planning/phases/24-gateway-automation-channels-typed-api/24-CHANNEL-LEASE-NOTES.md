@@ -82,3 +82,88 @@ credential. **Other lanes own `scripts/f24-inbound.mjs` and the Discord/Telegram
   in this environment.
 - Assert executed test counts (`N passed`), never exit status.
 - No cargo on the Mac except `cargo fmt --all -- --check`. Builds on hetzner.
+
+---
+
+## T+35 — reproduction design fixed, before writing any harness code
+
+### Facts established by execution (not reading)
+
+- hetzner worktree `hz/channel-lease` at `3d7d4a01`; `/root/wayland-channel-lease`.
+  `cargo build -p wcore-cli` → **BUILDRC=0**, binary 328465528 bytes at
+  `target/debug/wayland-core`. Disk 717G free (well over the 150G floor).
+- node v22.21.1 present on hetzner.
+- `wayland-core [PROMPT]...` — a one-shot prompt IS an ordinary session. `--help` confirms
+  "Initial prompt (if omitted, enters interactive REPL mode)".
+- `wayland-core cron daemon` exists — "Spawn the cron runner as a detached background daemon".
+- `.without_channels(true)` callers, whole repo: **20 hits, every one a test**, plus
+  `channel_dispatch.rs:230` (the per-session recursion guard). ZERO production callers.
+  So every ordinary session starts channels. The brief's claim is exact.
+
+### The fixture already carries the right observable — and I must not edit it
+
+`scripts/f24-tg-fixture.mjs` (owned by another lane; I USE it, I do NOT modify it) serves
+real Telegram offset semantics and exposes `/__control/submit` and `/__control/report`.
+`report` returns `max_concurrent_getupdates`, counted **in another process** from
+overlapping open requests. That is the anti-universal-denial discriminator, and the fixture's
+own header already names the property I need:
+
+> two managers polling one token show up as 2, one manager as 1, and a runtime that polls
+> NOTHING shows up as 0 — which is a distinct, failing answer, so a fix that works by making
+> nothing start cannot pass.
+
+`report` also gives per-update `deleted_by` (which poll destroyed it), `served_to`, and
+`still_pending`.
+
+### Setup recipe (learned by reading the prior lane's driver; reimplemented in my own file)
+
+- `$WAYLAND_HOME/credentials.toml` `[secrets]` `"telegram.<h>.bot_token" = "<minted>"`
+- **`WAYLAND_VAULT_PASSPHRASE` must be set** or every turn refuses host-wide with
+  "Session persistence authority unavailable" — 24-C3-H2 measured this. Without it I would
+  attribute a credentials-posture refusal to the polling path. Minted per run, never printed.
+- channel toml: `api_base_url = <fixture>`, `long_poll_timeout_secs = 1`
+- `[inbound_webhook] enabled = false` — this measures the POLLING path.
+
+### The two legs, and why attribution is not a problem
+
+The hard part is attributing a poll to a process; the fixture sees TCP, not pids. I am NOT
+solving that by trusting the binary's own stderr (that would be the tautology the brief
+warns about). Instead the **delta between process counts is the attribution**:
+
+**Leg 1 — startup / backlog theft (sequential, zero ambiguity).**
+Submit N updates. Run ONLY the ordinary session B; it starts channels, polls, CONFIRMS
+(server-side delete), exits. Then start gateway A and let it poll. A receives **0 of N**
+and `still_pending` is empty. No concurrency, so nothing to attribute — the messages are
+provably destroyed by a process that then died with them. This is the brief's headline
+scenario exactly: service installed, user opens a session, backlog gone.
+
+**Leg 2 — steady state (concurrent).**
+A running and polling alone → report `max_concurrent_getupdates == 1`. Start B alongside;
+submit updates continuously. If `max` goes to **2**, two processes are polling one account.
+`poll_total` rate over equal windows is the second, independent signal for the same claim,
+so an alternating (non-overlapping) pair cannot silently read as 1.
+
+Steady state is included deliberately: it is what raised the in-process version of this from
+MEDIUM to HIGH, and a startup-only run would have missed it.
+
+**Leg 3 — the loser must be loud.** Fixture `max == 1` AND the second process emits an
+observable refusal. A second process that silently has no channels is a NEW silent failure
+replacing the old one, so `max == 1` alone is not a pass.
+
+**Leg 4 — ungraceful release.** `SIGKILL` the holder; the second process must take over.
+Observable purely from the fixture: polls continue after the holder's death.
+
+**Anti-universal-denial:** every leg asserts the POSITIVE path too — the holder receives
+every message, counted from `report.updates[].served_to`, and `max == 0` is a FAIL.
+
+### Instrument discipline I am pre-committing to (§6b-ii)
+
+`instrument_fault` state: any run where the fixture is unreachable, the journal is
+zero-byte, the binary never emitted a poll at all, or the process lifetimes did not overlap
+as intended → graded **INCOMPLETE, never LOSS**. Self-test with three assertions:
+known-positive passes, known-negative fails, and **the naive matcher would have missed it**.
+
+### Deviation from the brief's suggested order
+
+The brief lists "reproduce, then apply the lease". I am reproducing first as instructed.
+If Leg 1/Leg 2 do NOT reproduce, that is the result and I stop and say so.
