@@ -1,0 +1,11 @@
+LEG LEG-13 - openclaw / security - UNPROVEN
+==============================================================================
+BLOCKER AND SUBSTITUTION POINT:
+
+Blocked twice over: the shared-meter extraction limitation above, AND openclaw was never
+provisioned on the build host (see openclaw:correctness). SUBSTITUTION POINT: both the meter
+change and a completed openclaw delivery.
+
+An UNPROVEN leg is NOT a win for any tool. No comparative result exists for
+any dimension in which a tool did not run: ComparativeResultV1 cannot be
+constructed without every compared tool's measurement.

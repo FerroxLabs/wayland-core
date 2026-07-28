@@ -1,0 +1,19 @@
+LEG LEG-11 - openclaw / correctness - UNPROVEN
+==============================================================================
+BLOCKER AND SUBSTITUTION POINT:
+
+PEER NEVER DELIVERED TO THE BUILD HOST. The pinned commit
+11a0ad10e91a50d5a0e636494eea4d7ad3eaf9fc was bundled read-only from Sean's reference
+checkout (392,186,966 bytes) but the transfer to hetzner-dsm dropped at 164,766,720 bytes --
+42% -- with 'Read from remote host: Operation timed out / lost connection'. git clone
+refused the truncated bundle with 'error: index-pack died / fatal: remote transport reported
+error'. A resumable rsync retry was started and had not completed within this plan's window.
+NOTHING WAS SUBSTITUTED: the HEAD snapshot was not used, no npm-registry copy was fetched,
+and no version other than the pin was measured. THIS IS NOT A WAYLAND WIN -- no comparison
+exists for this dimension at all. SUBSTITUTION POINT: complete the bundle transfer (rsync
+--partial --append resumes from 164,766,720), clone at the pin, install from the
+repository's own committed lockfile, then re-run this leg unchanged.
+
+An UNPROVEN leg is NOT a win for any tool. No comparative result exists for
+any dimension in which a tool did not run: ComparativeResultV1 cannot be
+constructed without every compared tool's measurement.

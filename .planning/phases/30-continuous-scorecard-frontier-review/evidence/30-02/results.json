@@ -1,0 +1,346 @@
+{
+  "protocol_sha256": "d18407e0b96bf753f66adc1eab7d21cbaeca1b9e627cecf0159095938b83ef25",
+  "scope": "SCRIPTED_HARNESS",
+  "measurements": [
+    {
+      "tool": "wayland",
+      "dimension": "correctness",
+      "scope": "SCRIPTED_HARNESS",
+      "trials": 30,
+      "samples_sha256": "2dfba633817046c7f559ed4b93076048435f7e1a90f14eb8035c04b9ebae2537",
+      "estimate": 0.0,
+      "interval": {
+        "lower": 0.0,
+        "upper": 0.11351339317396876,
+        "method": "wilson_score_95",
+        "confidence": 0.95
+      }
+    },
+    {
+      "tool": "wayland",
+      "dimension": "recovery",
+      "scope": "SCRIPTED_HARNESS",
+      "trials": 30,
+      "samples_sha256": "2dfba633817046c7f559ed4b93076048435f7e1a90f14eb8035c04b9ebae2537",
+      "estimate": 0.0,
+      "interval": {
+        "lower": 0.0,
+        "upper": 0.11351339317396876,
+        "method": "wilson_score_95",
+        "confidence": 0.95
+      }
+    },
+    {
+      "tool": "wayland",
+      "dimension": "cost",
+      "scope": "SCRIPTED_HARNESS",
+      "trials": 15,
+      "samples_sha256": "311085194e71f86d0f94d2548294b4d0b4a822808e460fe4ddb4713e215bf49f",
+      "estimate": 20.0,
+      "interval": {
+        "lower": 20.0,
+        "upper": 20.0,
+        "method": "zero_empirical_variance",
+        "confidence": 0.95
+      }
+    },
+    {
+      "tool": "hermes",
+      "dimension": "correctness",
+      "scope": "SCRIPTED_HARNESS",
+      "trials": 30,
+      "samples_sha256": "e42525eb4cc15dad829adb4091ce89504d3475f1c86eab179f918246cb870539",
+      "estimate": 1.0,
+      "interval": {
+        "lower": 0.8864866068260312,
+        "upper": 0.9999999999999999,
+        "method": "wilson_score_95",
+        "confidence": 0.95
+      }
+    },
+    {
+      "tool": "hermes",
+      "dimension": "recovery",
+      "scope": "SCRIPTED_HARNESS",
+      "trials": 30,
+      "samples_sha256": "e42525eb4cc15dad829adb4091ce89504d3475f1c86eab179f918246cb870539",
+      "estimate": 1.0,
+      "interval": {
+        "lower": 0.8864866068260312,
+        "upper": 0.9999999999999999,
+        "method": "wilson_score_95",
+        "confidence": 0.95
+      }
+    },
+    {
+      "tool": "hermes",
+      "dimension": "cost",
+      "scope": "SCRIPTED_HARNESS",
+      "trials": 15,
+      "samples_sha256": "311085194e71f86d0f94d2548294b4d0b4a822808e460fe4ddb4713e215bf49f",
+      "estimate": 20.0,
+      "interval": {
+        "lower": 20.0,
+        "upper": 20.0,
+        "method": "zero_empirical_variance",
+        "confidence": 0.95
+      }
+    }
+  ],
+  "comparatives": [
+    {
+      "dimension": "correctness",
+      "measurements": {
+        "wayland": {
+          "tool": "wayland",
+          "dimension": "correctness",
+          "scope": "SCRIPTED_HARNESS",
+          "trials": 30,
+          "samples_sha256": "2dfba633817046c7f559ed4b93076048435f7e1a90f14eb8035c04b9ebae2537",
+          "estimate": 0.0,
+          "interval": {
+            "lower": 0.0,
+            "upper": 0.11351339317396876,
+            "method": "wilson_score_95",
+            "confidence": 0.95
+          }
+        },
+        "hermes": {
+          "tool": "hermes",
+          "dimension": "correctness",
+          "scope": "SCRIPTED_HARNESS",
+          "trials": 30,
+          "samples_sha256": "e42525eb4cc15dad829adb4091ce89504d3475f1c86eab179f918246cb870539",
+          "estimate": 1.0,
+          "interval": {
+            "lower": 0.8864866068260312,
+            "upper": 0.9999999999999999,
+            "method": "wilson_score_95",
+            "confidence": 0.95
+          }
+        }
+      },
+      "delta": {
+        "estimate": -0.9197339099311919,
+        "interval": {
+          "lower": -1.0,
+          "upper": -0.8394678198623838,
+          "method": "newcombe_wilson_95",
+          "confidence": 0.95
+        }
+      },
+      "tie_band": 0.05,
+      "direction": "PEER_AHEAD"
+    },
+    {
+      "dimension": "recovery",
+      "measurements": {
+        "wayland": {
+          "tool": "wayland",
+          "dimension": "recovery",
+          "scope": "SCRIPTED_HARNESS",
+          "trials": 30,
+          "samples_sha256": "2dfba633817046c7f559ed4b93076048435f7e1a90f14eb8035c04b9ebae2537",
+          "estimate": 0.0,
+          "interval": {
+            "lower": 0.0,
+            "upper": 0.11351339317396876,
+            "method": "wilson_score_95",
+            "confidence": 0.95
+          }
+        },
+        "hermes": {
+          "tool": "hermes",
+          "dimension": "recovery",
+          "scope": "SCRIPTED_HARNESS",
+          "trials": 30,
+          "samples_sha256": "e42525eb4cc15dad829adb4091ce89504d3475f1c86eab179f918246cb870539",
+          "estimate": 1.0,
+          "interval": {
+            "lower": 0.8864866068260312,
+            "upper": 0.9999999999999999,
+            "method": "wilson_score_95",
+            "confidence": 0.95
+          }
+        }
+      },
+      "delta": {
+        "estimate": -0.9197339099311919,
+        "interval": {
+          "lower": -1.0,
+          "upper": -0.8394678198623838,
+          "method": "newcombe_wilson_95",
+          "confidence": 0.95
+        }
+      },
+      "tie_band": 0.05,
+      "direction": "PEER_AHEAD"
+    },
+    {
+      "dimension": "cost",
+      "measurements": {
+        "wayland": {
+          "tool": "wayland",
+          "dimension": "cost",
+          "scope": "SCRIPTED_HARNESS",
+          "trials": 15,
+          "samples_sha256": "311085194e71f86d0f94d2548294b4d0b4a822808e460fe4ddb4713e215bf49f",
+          "estimate": 20.0,
+          "interval": {
+            "lower": 20.0,
+            "upper": 20.0,
+            "method": "zero_empirical_variance",
+            "confidence": 0.95
+          }
+        },
+        "hermes": {
+          "tool": "hermes",
+          "dimension": "cost",
+          "scope": "SCRIPTED_HARNESS",
+          "trials": 15,
+          "samples_sha256": "311085194e71f86d0f94d2548294b4d0b4a822808e460fe4ddb4713e215bf49f",
+          "estimate": 20.0,
+          "interval": {
+            "lower": 20.0,
+            "upper": 20.0,
+            "method": "zero_empirical_variance",
+            "confidence": 0.95
+          }
+        }
+      },
+      "delta": {
+        "estimate": 0.0,
+        "interval": {
+          "lower": 0.0,
+          "upper": 0.0,
+          "method": "zero_empirical_variance",
+          "confidence": 0.95
+        }
+      },
+      "tie_band": 0.05,
+      "direction": "PRACTICALLY_INDISTINGUISHABLE"
+    }
+  ],
+  "legs": [
+    {
+      "id": "LEG-01",
+      "tool": "wayland",
+      "dimension": "correctness",
+      "status": "RUN",
+      "evidence": "records/wayland-correctness.jsonl",
+      "blocker": null
+    },
+    {
+      "id": "LEG-02",
+      "tool": "wayland",
+      "dimension": "recovery",
+      "status": "RUN",
+      "evidence": "records/wayland-recovery.jsonl",
+      "blocker": null
+    },
+    {
+      "id": "LEG-03",
+      "tool": "wayland",
+      "dimension": "security",
+      "status": "UNPROVEN",
+      "evidence": "blockers/wayland-security.txt",
+      "blocker": "EXTRACTION NOT IMPLEMENTABLE AGAINST THE FROZEN METER. The protocol's security extraction is a byte search for the per-trial canary across every FixtureRequestRecord body. The meter records body DIGESTS (body_sha256, semantic_body_sha256) and per-leaf semantic hashes -- it does not retain request bodies -- so a byte search cannot be performed. Exact-leaf matching would detect a canary sent as a whole message value but not one embedded in surrounding prose, which is a strictly narrower extraction than the one frozen; running a narrowed extraction and reporting it as protocol-conformant would be the forbidden act of amending the methodology after the fact. src/fixtures/openai.rs is a hard scope fence in this plan. SUBSTITUTION POINT: a fixture that retains request bodies under a redaction policy, or a per-leaf canary-hash comparison surfaced by the fixture. Both require editing the shared meter and are filed as a seam request."
+    },
+    {
+      "id": "LEG-04",
+      "tool": "wayland",
+      "dimension": "cost",
+      "status": "RUN",
+      "evidence": "records/wayland-cost.jsonl",
+      "blocker": null
+    },
+    {
+      "id": "LEG-05",
+      "tool": "wayland",
+      "dimension": "cognitive_tax",
+      "status": "UNPROVEN",
+      "evidence": "blockers/wayland-cognitive_tax.txt",
+      "blocker": "NOT MEASURABLE IN THIS TIER, decided by unanimous cross-audit panel BEFORE any trial ran and frozen in the protocol. Cognitive tax is a property of the human-operator loop -- interruptions, approval prompts, disambiguation. A loopback fixture does not exercise that loop. Configuration-line counts, command counts, intervention counts and elapsed time are NOT cognitive tax; every external panel member refused to proxy it. F30-03 is therefore INCOMPLETE on this dimension and this plan says so rather than inventing a number. SUBSTITUTION POINT: a live-tier protocol with a scripted human operator and a pre-registered intervention taxonomy, run by a human evaluator."
+    },
+    {
+      "id": "LEG-06",
+      "tool": "hermes",
+      "dimension": "correctness",
+      "status": "RUN",
+      "evidence": "records/hermes-correctness.jsonl",
+      "blocker": null
+    },
+    {
+      "id": "LEG-07",
+      "tool": "hermes",
+      "dimension": "recovery",
+      "status": "RUN",
+      "evidence": "records/hermes-recovery.jsonl",
+      "blocker": null
+    },
+    {
+      "id": "LEG-08",
+      "tool": "hermes",
+      "dimension": "security",
+      "status": "UNPROVEN",
+      "evidence": "blockers/hermes-security.txt",
+      "blocker": "Identical blocker to wayland:security -- the limitation is in the shared meter, not in the tool. The frozen byte-search extraction cannot be performed because the fixture records body digests rather than bodies. Recorded UNPROVEN rather than substituting a narrower extraction. SUBSTITUTION POINT: as above, a body-retaining or leaf-hash-exposing fixture, which is a change to the shared meter this plan is fenced from."
+    },
+    {
+      "id": "LEG-09",
+      "tool": "hermes",
+      "dimension": "cost",
+      "status": "RUN",
+      "evidence": "records/hermes-cost.jsonl",
+      "blocker": null
+    },
+    {
+      "id": "LEG-10",
+      "tool": "hermes",
+      "dimension": "cognitive_tax",
+      "status": "UNPROVEN",
+      "evidence": "blockers/hermes-cognitive_tax.txt",
+      "blocker": "NOT MEASURABLE IN THIS TIER -- same unanimous panel finding, frozen in the protocol before any trial ran. SUBSTITUTION POINT: a live-tier protocol with a scripted human operator and a pre-registered intervention taxonomy."
+    },
+    {
+      "id": "LEG-11",
+      "tool": "openclaw",
+      "dimension": "correctness",
+      "status": "UNPROVEN",
+      "evidence": "blockers/openclaw-correctness.txt",
+      "blocker": "PEER NEVER DELIVERED TO THE BUILD HOST. The pinned commit 11a0ad10e91a50d5a0e636494eea4d7ad3eaf9fc was bundled read-only from Sean's reference checkout (392,186,966 bytes) but the transfer to hetzner-dsm dropped at 164,766,720 bytes -- 42% -- with 'Read from remote host: Operation timed out / lost connection'. git clone refused the truncated bundle with 'error: index-pack died / fatal: remote transport reported error'. A resumable rsync retry was started and had not completed within this plan's window. NOTHING WAS SUBSTITUTED: the HEAD snapshot was not used, no npm-registry copy was fetched, and no version other than the pin was measured. THIS IS NOT A WAYLAND WIN -- no comparison exists for this dimension at all. SUBSTITUTION POINT: complete the bundle transfer (rsync --partial --append resumes from 164,766,720), clone at the pin, install from the repository's own committed lockfile, then re-run this leg unchanged."
+    },
+    {
+      "id": "LEG-12",
+      "tool": "openclaw",
+      "dimension": "recovery",
+      "status": "UNPROVEN",
+      "evidence": "blockers/openclaw-recovery.txt",
+      "blocker": "PEER NEVER DELIVERED TO THE BUILD HOST -- identical blocker to openclaw:correctness: the 392 MB read-only bundle transfer dropped at 42% and git clone refused the truncated file. No substitute version was measured. NOT a Wayland win; no comparison exists. SUBSTITUTION POINT: complete the resumable transfer, clone at the pin, install from its own lockfile, re-run unchanged."
+    },
+    {
+      "id": "LEG-13",
+      "tool": "openclaw",
+      "dimension": "security",
+      "status": "UNPROVEN",
+      "evidence": "blockers/openclaw-security.txt",
+      "blocker": "Blocked twice over: the shared-meter extraction limitation above, AND openclaw was never provisioned on the build host (see openclaw:correctness). SUBSTITUTION POINT: both the meter change and a completed openclaw delivery."
+    },
+    {
+      "id": "LEG-14",
+      "tool": "openclaw",
+      "dimension": "cost",
+      "status": "UNPROVEN",
+      "evidence": "blockers/openclaw-cost.txt",
+      "blocker": "PEER NEVER DELIVERED TO THE BUILD HOST -- identical blocker to openclaw:correctness. The bundle is truncated at 164,766,720 of 392,186,966 bytes. No substitute version was measured. NOT a Wayland win; no comparison exists. SUBSTITUTION POINT: complete the resumable transfer, clone at the pin, install from its own lockfile, re-run unchanged."
+    },
+    {
+      "id": "LEG-15",
+      "tool": "openclaw",
+      "dimension": "cognitive_tax",
+      "status": "UNPROVEN",
+      "evidence": "blockers/openclaw-cognitive_tax.txt",
+      "blocker": "NOT MEASURABLE IN THIS TIER -- same unanimous panel finding, frozen before any trial ran; and openclaw was additionally never provisioned. SUBSTITUTION POINT: as above, plus a completed openclaw delivery."
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+LEG LEG-15 - openclaw / cognitive_tax - UNPROVEN
+==============================================================================
+BLOCKER AND SUBSTITUTION POINT:
+
+NOT MEASURABLE IN THIS TIER -- same unanimous panel finding, frozen before any trial ran;
+and openclaw was additionally never provisioned. SUBSTITUTION POINT: as above, plus a
+completed openclaw delivery.
+
+An UNPROVEN leg is NOT a win for any tool. No comparative result exists for
+any dimension in which a tool did not run: ComparativeResultV1 cannot be
+constructed without every compared tool's measurement.

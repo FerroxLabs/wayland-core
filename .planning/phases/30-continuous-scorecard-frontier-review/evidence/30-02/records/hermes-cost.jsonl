@@ -1,0 +1,15 @@
+{"tool":"hermes","dimension":"cost","index":0,"outcome":"SUCCESS","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":3268,"exit_status":0}
+{"tool":"hermes","dimension":"cost","index":1,"outcome":"SUCCESS","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":3267,"exit_status":0}
+{"tool":"hermes","dimension":"cost","index":2,"outcome":"SUCCESS","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":3267,"exit_status":0}
+{"tool":"hermes","dimension":"cost","index":3,"outcome":"SUCCESS","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":3265,"exit_status":0}
+{"tool":"hermes","dimension":"cost","index":4,"outcome":"SUCCESS","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":3268,"exit_status":0}
+{"tool":"hermes","dimension":"cost","index":5,"outcome":"SUCCESS","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":3266,"exit_status":0}
+{"tool":"hermes","dimension":"cost","index":6,"outcome":"SUCCESS","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":3266,"exit_status":0}
+{"tool":"hermes","dimension":"cost","index":7,"outcome":"SUCCESS","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":3265,"exit_status":0}
+{"tool":"hermes","dimension":"cost","index":8,"outcome":"SUCCESS","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":3266,"exit_status":0}
+{"tool":"hermes","dimension":"cost","index":9,"outcome":"SUCCESS","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":3266,"exit_status":0}
+{"tool":"hermes","dimension":"cost","index":10,"outcome":"SUCCESS","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":3267,"exit_status":0}
+{"tool":"hermes","dimension":"cost","index":11,"outcome":"SUCCESS","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":3267,"exit_status":0}
+{"tool":"hermes","dimension":"cost","index":12,"outcome":"SUCCESS","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":3266,"exit_status":0}
+{"tool":"hermes","dimension":"cost","index":13,"outcome":"SUCCESS","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":3265,"exit_status":0}
+{"tool":"hermes","dimension":"cost","index":14,"outcome":"SUCCESS","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":3268,"exit_status":0}

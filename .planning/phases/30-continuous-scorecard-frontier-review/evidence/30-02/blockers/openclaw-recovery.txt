@@ -1,0 +1,13 @@
+LEG LEG-12 - openclaw / recovery - UNPROVEN
+==============================================================================
+BLOCKER AND SUBSTITUTION POINT:
+
+PEER NEVER DELIVERED TO THE BUILD HOST -- identical blocker to openclaw:correctness: the 392
+MB read-only bundle transfer dropped at 42% and git clone refused the truncated file. No
+substitute version was measured. NOT a Wayland win; no comparison exists. SUBSTITUTION
+POINT: complete the resumable transfer, clone at the pin, install from its own lockfile, re-
+run unchanged.
+
+An UNPROVEN leg is NOT a win for any tool. No comparative result exists for
+any dimension in which a tool did not run: ComparativeResultV1 cannot be
+constructed without every compared tool's measurement.
