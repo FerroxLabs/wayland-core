@@ -11,18 +11,22 @@
 // be always-on went silently idle, and mail simply stopped arriving. That is
 // quieter than the defect it replaced, which is what makes it dangerous.
 //
-// FOUR LEGS, and every one of them requires a POSITIVE delivery:
+// FIVE LEGS, and every one of them requires a POSITIVE delivery:
 //
 //   A  the service starts SECOND and still ends up polling  (the fix)
 //   B  the service starts FIRST and is not disturbed        (no regression)
 //   C  nothing is lost while the session is the observer    (accounting)
 //   D  an ALREADY-RUNNING observer takes over on the holder's death, with no
 //      operator action                                       (residual (2))
+//   E  a DEAD claimant does NOT wedge the home into having no poller at all
+//      (the failure that would be WORSE than the starvation being fixed)
 //
 // THE TRAP THIS DRIVER IS BUILT AGAINST. "No duplicate consumption" passes
-// trivially if NOBODY polls. So `max_open == 0` in a steady window is graded
+// trivially if NOBODY polls. So a steady window with ZERO POLLS is graded
 // DENIAL — a FAILURE, not a pass — every leg establishes a positive baseline in
-// the same run, and every leg counts messages actually delivered.
+// the same run, and every leg counts messages actually delivered. Leg E is the
+// one that creates a real zero-poller window, so it is the one that proves this
+// grader can fire on something other than a hypothetical.
 //
 // ATTRIBUTION IS NOT SELF-REPORTED. Which process is polling is read from
 // `ss -tnpH` by THIS driver — a third OS process — as the set of pids holding
@@ -37,7 +41,7 @@
 // credited at its definition.
 //
 // usage:
-//   f24-channel-starvation.mjs --binary <path> --run-dir <dir> [--legs a,b,c,d]
+//   f24-channel-starvation.mjs --binary <path> --run-dir <dir> [--legs a,b,d,e,c]
 //   f24-channel-starvation.mjs --self-test
 
 import http from 'node:http';
