@@ -411,7 +411,18 @@ class Driver {
       );
     }
     if (rep.max_concurrent_gateway_connections === 0) {
-      faults.push('the binary never authenticated a gateway connection — NOT MEASURED');
+      // Distinguish the two very different zero-states.
+      if ((rep.tcp_connections ?? 0) > 0) {
+        faults.push(
+          `the binary DIALLED the fixture (${rep.tcp_connections} TCP connection(s)) but no WebSocket ` +
+            `handshake completed — a protocol/URL fault, NOT inbound loss and NOT "nothing started"` +
+            (rep.client_errors?.length ? ` (client_errors: ${rep.client_errors.join(',')})` : ''),
+        );
+      } else {
+        faults.push(
+          'the binary never opened a TCP connection to the fixture — NOT MEASURED (nothing dialled)',
+        );
+      }
     }
 
     const zeroArrivals = rep.sent_total === 0;

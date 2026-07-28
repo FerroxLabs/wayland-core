@@ -172,6 +172,29 @@ export class DiscordFixture {
     return new Promise((resolve) => {
       this.server = http.createServer((req, res) => this.onRest(req, res));
       this.server.on('upgrade', (req, socket) => this.onUpgrade(req, socket));
+
+      // INSTRUMENT REPAIR (found while diagnosing a real run). `totalConns`
+      // only increments inside `onUpgrade`, so a client that opened a TCP
+      // connection but whose HTTP request line Node rejected never appeared in
+      // any counter — making "nothing ever dialled this port" and "something
+      // dialled and the handshake was refused" the SAME observation, namely 0.
+      // Those are opposite diagnoses (nothing started vs. a URL/protocol bug),
+      // so counting raw sockets and malformed requests separately is the
+      // difference between a usable measurement and a dead end.
+      this.tcpConns = 0;
+      this.clientErrors = [];
+      this.server.on('connection', () => {
+        this.tcpConns += 1;
+      });
+      this.server.on('clientError', (err, socket) => {
+        this.clientErrors.push(String(err?.code ?? err?.message ?? err));
+        try {
+          socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+        } catch {
+          /* noop */
+        }
+      });
+
       this.server.listen(0, '127.0.0.1', () => {
         this.port = this.server.address().port;
         resolve(this.port);
@@ -446,6 +469,11 @@ export class DiscordFixture {
     return {
       bot_id: this.botId,
       port: this.port,
+      // Raw TCP sockets accepted, vs. sockets that completed the WS upgrade.
+      // tcp > 0 with upgrades == 0 means the client DIALLED and the handshake
+      // failed — a different defect from "the client never started".
+      tcp_connections: this.tcpConns ?? 0,
+      client_errors: this.clientErrors ?? [],
       total_gateway_connections: this.totalConns,
       max_concurrent_gateway_connections: this.maxConcurrentConns,
       live_gateway_connections: this.conns.size,
