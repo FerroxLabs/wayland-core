@@ -7,5 +7,6 @@ SHAPE 2 — no-op mutation gates:
   [PASS] B1 known-positive: the real BL-F30-FORCED-MET-SED gate is RED — 1 hit(s)
   [PASS] B2 known-negative: the corrected 'grade' gate is GREEN — 0 hit(s)
   [PASS] B3 the naive substring grep for 'verdict' MISSES it (type + filename hits) — naive=found, key-position=absent
+  [PASS] B4 dotted repo-relative target resolves; the old lstrip('./') resolver MISSED it — new=1 hit(s), old_resolved=None
 
 SELF-TEST: PASSED

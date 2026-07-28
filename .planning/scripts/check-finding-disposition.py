@@ -200,9 +200,26 @@ def _unescape_shell(s: str) -> str:
 
 
 def _find_target(line: str, root: Path) -> Path | None:
-    """The first repo-relative path on the line that exists and looks like a document."""
+    """
+    The first repo-relative path on the line that exists and looks like a document.
+
+    NOTE the `./` handling. An earlier version used `cand.lstrip("./")`, which
+    strips leading `.` AND `/` characters individually — so `.planning/...`
+    became `planning/...`, resolved to nothing, and the checker silently found
+    NOTHING to check on the one real historical case it was built for. It
+    reported CLEAN by failing to look. That is the self-passing shape this
+    script exists to catch, committed by the script itself; assertion B4 pins
+    the repair.
+    """
     for cand in re.findall(r"[\w./-]*\.(?:json|tsv|md|txt|toml)\b", line):
-        cand = cand.lstrip("./")
+        if cand.startswith("./"):
+            cand = cand[2:]
+        # An absolute path is a scratch/host path (`/tmp/...`), not a repo
+        # document. `root / "/tmp/x"` silently yields `/tmp/x` under pathlib
+        # join semantics, which both escapes the repo and crashes the later
+        # `relative_to`. Reject it outright.
+        if cand.startswith("/"):
+            continue
         p = root / cand
         if p.is_file():
             return p
@@ -242,7 +259,15 @@ def scan_mutation_gates(root: Path, extra_roots: list[Path] | None = None) -> li
                 clean = _unescape_shell(line)
                 for m in SED_RE.finditer(clean):
                     pattern = m.group("pat")
-                    target = _find_target(clean, root)
+                    # PRECISION. Only a file passed as a direct ARGUMENT to this
+                    # sed is its target. Everything after the expression up to
+                    # the next pipe, redirect or `&&` is that argument list.
+                    # Without this, a pipeline sed (`find ... | sed 's/^\.\///'`)
+                    # is mis-paired with whatever `.md` happens to appear later
+                    # on the line, which produced 5 false positives on the first
+                    # real run. A checker that cries wolf gets switched off.
+                    tail = re.split(r"[|>]|&&", clean[m.end():], maxsplit=1)[0]
+                    target = _find_target(tail, root)
                     if target is None:
                         continue
                     if not _sed_changes_file(pattern, target):
@@ -408,6 +433,38 @@ def self_test(root: Path) -> int:
             "B3 the naive substring grep for 'verdict' MISSES it (type + filename hits)",
             naive_grep_passes and any("p-bad.md" in h.source for h in scan_mutation_gates(tmp)),
             "naive=found, key-position=absent",
+        )
+
+        # B4 the dotted-path resolver. The real gate names its target as
+        # `.planning/phases/.../phase-verdict.json`. The first version of
+        # `_find_target` used `lstrip("./")`, which strips leading `.` and `/`
+        # CHARACTERS, turning `.planning` into `planning` — so the target never
+        # resolved, nothing was checked, and the scan reported CLEAN by failing
+        # to look. Assertion B4 is the only one that proves the repair does
+        # anything; without it the suite passes on the broken resolver too.
+        deep = tmp / ".planning" / "phases" / "30-x" / "evidence"
+        deep.mkdir(parents=True)
+        deep_doc = deep / "phase-verdict.json"
+        deep_doc.write_text('{"criteria":[{"id":"C1","grade":"NOT_MET"}]}\n', encoding="utf-8")
+        gate_line = (
+            "<automated>ssh host \"sed 's#\\\"verdict\\\": *\\\"NOT_MET\\\"#\\\"verdict\\\": \\\"MET\\\"#' "
+            ".planning/phases/30-x/evidence/phase-verdict.json &gt; /tmp/f.json\"</automated>\n"
+        )
+        (tmp / ".planning" / "p-deep.md").write_text(gate_line, encoding="utf-8")
+
+        def old_find_target(line: str, root: Path) -> Path | None:
+            for cand in re.findall(r"[\w./-]*\.(?:json|tsv|md|txt|toml)\b", line):
+                p = root / cand.lstrip("./")
+                if p.is_file():
+                    return p
+            return None
+
+        old_resolved = old_find_target(_unescape_shell(gate_line), tmp)
+        new_hits = [h for h in scan_mutation_gates(tmp) if "p-deep.md" in h.source]
+        report(
+            "B4 dotted repo-relative target resolves; the old lstrip('./') resolver MISSED it",
+            bool(new_hits) and old_resolved is None,
+            f"new={len(new_hits)} hit(s), old_resolved={old_resolved}",
         )
 
     print()

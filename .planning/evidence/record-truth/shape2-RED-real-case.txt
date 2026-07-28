@@ -1,0 +1,11 @@
+# SHAPE 2 RED on the real BL-F30-FORCED-MET-SED case
+# real 30-04-PLAN.md + real evidence/30-04/phase-verdict.json (32cc7ac8)
+# "grade" keys in the real target: 4
+# "verdict" keys in the real target: 0
+
+SHAPE 2 — mutation gates whose sed matches nothing in its target: 1
+  NO-OP    .planning/phases/30-continuous-scorecard-frontier-review/30-04-PLAN.md:271
+           pattern: "verdict": *"NOT_MET"
+           target : .planning/phases/30-continuous-scorecard-frontier-review/evidence/30-04/phase-verdict.json
+
+RESULT: FINDINGS PRESENT

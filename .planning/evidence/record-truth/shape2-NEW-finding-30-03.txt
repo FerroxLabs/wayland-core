@@ -1,0 +1,16 @@
+# NEW FINDING found by this instrument on its first real run
+# 30-03-PLAN.md:251 falsification gate seds a path absent from its target
+# occurrences of 'evidence/30-02/results.json' in claims-register.json: 0
+# what the register actually references:
+#   evidence/30-02/legs.tsv
+#   evidence/30-02/peer-clones.txt
+#   evidence/30-02/protocol.json
+#   evidence/30-02/protocol.sha256
+#   evidence/30-02/verifier-known-good-bad.txt
+
+SHAPE 2 — mutation gates whose sed matches nothing in its target: 1
+  NO-OP    .planning/phases/30-continuous-scorecard-frontier-review/30-03-PLAN.md:251
+           pattern: evidence/30-02/results.json
+           target : .planning/phases/30-continuous-scorecard-frontier-review/evidence/30-03/claims-register.json
+
+RESULT: FINDINGS PRESENT
