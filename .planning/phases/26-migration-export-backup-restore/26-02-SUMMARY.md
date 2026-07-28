@@ -143,6 +143,7 @@ consensus and pressed `contract-reject` and `contract-amend-ergonomics` by name.
 | **F26-02-A** | *(fixed in-plan)* | Promotion aborted an entire set on the first name collision, costing one operator invocation per item at real scale. Fixed: collisions resolve to a digest-disambiguated name, mapping reported, nothing overwritten or dropped. |
 | **F26-02-B** | **MEDIUM** | The 512-item store ceiling refuses 29 of a realistic 541-item executable surface, and the **naive recovery does not work** — measured: after `promote --all`, a plain re-import reports `discovered=554 imported=0 quarantined=554` and refills with the same first 512, because scan order is stable. A recovery DOES exist and is discoverable from the tool's own output: every refusal is named, and `--select` on those identities gives `quarantined=29 excluded=525` (balancing), after which one `promote --all` leaves **541 skills on the load path — the complete corpus**, in four invocations total. `MAX_EXECUTABLE_FILES` was NOT raised. → BACKLOG. |
 | **F26-02-C** | **MEDIUM** | `scripts/panel-decision-check.sh` (26-01's file) **rejects a capture carrying a repeated IDENTICAL verdict line** — `capture for 'codex' carries 2 PANEL-VERDICT lines; exactly 1 required` — which is a shape codex measurably emits. Isolated: kimi's bullet-prefixed verdict IS tolerated (rc=0); only the codex duplicate shape fails (rc=1). The ambiguity direction is correct (two DIFFERENT verdicts → rejected). **Not fixed here**: `panel-decision-check.sh` is not in this plan's `files_modified`, and the plan directs that a red trap gate is "a 26-01 defect to record and escalate rather than a file for this plan to edit". **No vote was lost in this run** — codex emitted exactly one verdict line, and the real panel record passes the checker. → escalate to 26-01. |
+| **F26-02-E** | **MEDIUM** | `wcore-protocol::desktop_contract_corpus::checked_corpus_matches_real_serializers_byte_for_byte` fails: `Desktop contract corpus drift: drifted=["adversarial/events/fixture-mismatch.jsonl", "adversarial/events/schema-mismatch.jsonl", "adversarial/events/version-mismatch.jsonl", "events/ready.json", "manifest.json"]; run \`wcore-contract generate\``. **Verified PRE-EXISTING**: re-run alone at my merge-base `6df10dab` in a separate worktree it fails with byte-identical drift text (`BASE_RC=100`). This lane touches no `wcore-protocol` source and adds no protocol event — the scope fence forbids it. The repair is `wcore-contract generate`, which this lane is **forbidden** to run (release-coordination action). → BACKLOG + **seam request to the orchestrator**, below. |
 | **F26-02-D** | **LOW** | The 540 scale point was **materialised** by the measurement script into 26-01's structural corpus, which ships those directories as markers with no `SKILL.md` (26-01 deviation 5, bounded generator). Structure is the real install's, body is the committed fixture. The script prints `SCALE-CORPUS-MATERIALISED-SKILLS: 540` so it can never be mistaken for a number the corpus shipped. |
 
 Residual noted by every panel member: `CLASSIFY-EXEC-UNCONTAINED: 0` is a floor
@@ -167,6 +168,28 @@ exhaustiveness over surfaces nobody has named.
 - Panel secret-hygiene gate: **PASS, non-vacuous** — 7 real secret values
   extracted from both real peer homes, **0 hits** under the panel directory.
 - Trap gate: **PARTIAL** — see F26-02-C.
+- Aggregate `cargo nextest run --locked --profile ci --no-fail-fast`:
+  **12502 run, 12501 passed, 1 failed**, 50 skipped, 2 flaky, 1 leaky.
+  The single failure is
+  `wcore-protocol::desktop_contract_corpus::checked_corpus_matches_real_serializers_byte_for_byte`
+  — **PRE-EXISTING, see F26-02-E.** Delta against the two-crate run above:
+  `wcore-config` + `wcore-cli` contribute 2840/2840 green in both.
+
+**Two measurement traps this lane walked into and caught**, recorded because
+either would have produced a false report:
+
+1. The background harness reported the aggregate run as **"exit code 0"**. It
+   was not — `AGG_RC=100`. The harness reported the status of the trailing
+   `tail`, not of the `ssh`. The status was captured on its own line and read
+   there; the log content is what the numbers above come from.
+2. The trap-gate fixtures were first built with `tail -2` (as the plan's gate
+   text suggests), which in THIS capture duplicated prose rather than the
+   verdict line, so the "two different verdicts" fixture carried only one and
+   the gate passed vacuously. Rebuilt to append the verdict lines explicitly —
+   at which point it correctly went red on F26-02-C.
+3. The trap gate was also first run under the tool's **zsh**, where
+   `for o in $OPTS` does not word-split, so the "other" option expanded to all
+   four ids and the mutation was a no-op. Re-run under POSIX `sh`.
 
 ## Deviations, each with its reason
 
@@ -204,6 +227,14 @@ exhaustiveness over surfaces nobody has named.
   four kinds handled here.
 - How quarantined content behaves under Windows path semantics — 26-04 owns it,
   and no Windows leg ran (see below).
+
+## Seam request for the orchestrator (do not let this merge silently)
+
+`wcore-contract generate` needs to be run by whoever owns the Desktop wire
+contract, to reconcile the five drifted corpus files listed in F26-02-E. It is
+**pre-existing at `6df10dab`**, so it is not this lane's to fix and not this
+lane's to hide — but the aggregate suite is red at HEAD because of it, and a
+reviewer who runs the full suite will see that red.
 
 ## Not achieved
 
