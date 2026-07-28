@@ -852,14 +852,27 @@ mod tests {
         // argv, so an unguarded `ps | grep <nonce>` matches the scan itself.
         // The scan then always reports one orphan that does not exist, and the
         // killer kills itself mid-run and reports a failure that did not happen.
+        //
+        // The exclusion is unchanged in intent; only its spelling moved. The
+        // pid/ppid COLUMNS differ between `ps -eo pid,ppid,args` and the
+        // `ps -ef` fallback added for far ends whose ps rejects `-eo`, so the
+        // comparison is now against the column variables rather than the
+        // literal `$1`/`$2`. Weakening this guard was never an option — a scan
+        // that finds itself reports an orphan that does not exist.
         for script in [REMOTE_SCAN, REMOTE_KILL] {
             assert!(
                 script.contains("self=$$"),
                 "the script must know its own pid to exclude itself"
             );
             assert!(
-                script.contains(r#"'$1 != s && $2 != s"#),
+                script.contains(r#"$p != s && $q != s"#),
                 "the script must exclude its own pid and its children from the match"
+            );
+            // And the columns must actually be set for BOTH readers, or the
+            // exclusion compares the wrong field and silently stops working.
+            assert!(
+                script.contains("pidcol=1; ppidcol=2") && script.contains("pidcol=2; ppidcol=3"),
+                "the self-exclusion columns must track the reader that was chosen"
             );
         }
     }
