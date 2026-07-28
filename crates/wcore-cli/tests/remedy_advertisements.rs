@@ -364,9 +364,20 @@ fn advertised_assignments(text: &str, file: &str, line: usize, context: &str) ->
         }
 
         let before = heads.iter().filter(|(s, _, _)| *s < at).next_back();
-        let same_line_after = heads
-            .iter()
-            .find(|(s, _, _)| *s >= whole.end() && line_start(*s) == line_start(at));
+        // The forward fallback applies ONLY to a bare key. A dotted key is
+        // already self-qualifying, and prefixing it with a section that happens
+        // to appear later in the same sentence invents a path nobody advertised:
+        // reverting case 5 produced `session.credentials.backend` because the
+        // string's second clause names `[session]`. The verdict was right by
+        // luck there (both paths are dropped), but the same mis-binding on
+        // CORRECT text would red the gate for a key that is perfectly fine.
+        let same_line_after = if key.contains('.') {
+            None
+        } else {
+            heads
+                .iter()
+                .find(|(s, _, _)| *s >= whole.end() && line_start(*s) == line_start(at))
+        };
 
         let section = before.or(same_line_after).map(|(_, _, name)| name.clone());
 
@@ -763,6 +774,17 @@ fn extractor_binds_sections_the_way_shipped_strings_phrase_them() {
         // the prose `to` form -- case 5's pre-fix wording
         (
             "Configure an OS keyring, or set `credentials.backend` to \"encrypted-file\"",
+            "credentials.backend",
+            "\"encrypted-file\"",
+        ),
+        // case 5's pre-fix wording IN FULL: a dotted key whose sentence goes on
+        // to name an unrelated section. The dotted key is self-qualifying and
+        // must NOT absorb `[session]`. Measured: it did, yielding
+        // `session.credentials.backend`, a path nobody ever advertised.
+        (
+            "Configure an OS keyring, or set `credentials.backend` to \
+             \"encrypted-file\", or turn durable sessions off with [session] \
+             enabled = false",
             "credentials.backend",
             "\"encrypted-file\"",
         ),
