@@ -1,6 +1,6 @@
-# Gate transcript — lane/28-drift — 2026-07-28T19:36:23Z
+# Gate transcript — lane/28-drift — 2026-07-28T19:43:42Z
 # Exit codes captured WITHOUT a pipeline (PIPESTATUS returns empty in this shell).
-# HEAD: ca271612d9750f7803392efeadfbb12755c5e42d
+# HEAD: 3d14c2855582e18cae497d810d80dc6bc2c1a9c9
 
 ## HARNESS SELF-TEST — a known-good gate must return 0 here, or every rc below is noise.
 f28-ledger.py --self-test                                  rc=0  bytes=395
@@ -76,16 +76,16 @@ f28-ledger.py --self-test                                  rc=0  bytes=395
     --self-test: 3 assertions, 0 failure(s) (known-negative / known-positive / old-instrument-missed-it); fixture = 28-04-CERTIFICATION-RECEIPT-SUPERSEDING-002.json
   --receipt 28-04-CERTIFICATION-RECEIPT.json --ref HEAD    rc=1  bytes=788
     --check-drift: DRIFT (2) against HEAD
-      F28D-003  candidate[matrix-linux-windows]: certified commit 32e2f57d is 194 commit(s) behind HEAD under crates/ (457 overall), across 199 changed file(s). The certification is VALID for that commit and STALE for this ref; both are true and neither cancels the other.
-      F28D-003  candidate[matrix-macos-rerun-and-soak]: certified commit e4a3f5fc is 147 commit(s) behind HEAD under crates/ (374 overall), across 149 changed file(s). The certification is VALID for that commit and STALE for this ref; both are true and neither cancels the other.
+      F28D-003  candidate[matrix-linux-windows]: certified commit 32e2f57d is 195 commit(s) behind HEAD under crates/ (459 overall), across 199 changed file(s). The certification is VALID for that commit and STALE for this ref; both are true and neither cancels the other.
+      F28D-003  candidate[matrix-macos-rerun-and-soak]: certified commit e4a3f5fc is 148 commit(s) behind HEAD under crates/ (376 overall), across 149 changed file(s). The certification is VALID for that commit and STALE for this ref; both are true and neither cancels the other.
   --receipt 28-04-CERTIFICATION-RECEIPT-SUPERSEDING-001.json --ref HEAD rc=1  bytes=788
     --check-drift: DRIFT (2) against HEAD
-      F28D-003  candidate[matrix-linux-windows]: certified commit 32e2f57d is 194 commit(s) behind HEAD under crates/ (457 overall), across 199 changed file(s). The certification is VALID for that commit and STALE for this ref; both are true and neither cancels the other.
-      F28D-003  candidate[matrix-macos-rerun-and-soak]: certified commit e4a3f5fc is 147 commit(s) behind HEAD under crates/ (374 overall), across 149 changed file(s). The certification is VALID for that commit and STALE for this ref; both are true and neither cancels the other.
+      F28D-003  candidate[matrix-linux-windows]: certified commit 32e2f57d is 195 commit(s) behind HEAD under crates/ (459 overall), across 199 changed file(s). The certification is VALID for that commit and STALE for this ref; both are true and neither cancels the other.
+      F28D-003  candidate[matrix-macos-rerun-and-soak]: certified commit e4a3f5fc is 148 commit(s) behind HEAD under crates/ (376 overall), across 149 changed file(s). The certification is VALID for that commit and STALE for this ref; both are true and neither cancels the other.
   --receipt 28-04-CERTIFICATION-RECEIPT-SUPERSEDING-002.json --ref HEAD rc=1  bytes=788
     --check-drift: DRIFT (2) against HEAD
-      F28D-003  candidate[matrix-linux-windows]: certified commit 32e2f57d is 194 commit(s) behind HEAD under crates/ (457 overall), across 199 changed file(s). The certification is VALID for that commit and STALE for this ref; both are true and neither cancels the other.
-      F28D-003  candidate[matrix-macos-rerun-and-soak]: certified commit e4a3f5fc is 147 commit(s) behind HEAD under crates/ (374 overall), across 149 changed file(s). The certification is VALID for that commit and STALE for this ref; both are true and neither cancels the other.
+      F28D-003  candidate[matrix-linux-windows]: certified commit 32e2f57d is 195 commit(s) behind HEAD under crates/ (459 overall), across 199 changed file(s). The certification is VALID for that commit and STALE for this ref; both are true and neither cancels the other.
+      F28D-003  candidate[matrix-macos-rerun-and-soak]: certified commit e4a3f5fc is 148 commit(s) behind HEAD under crates/ (376 overall), across 149 changed file(s). The certification is VALID for that commit and STALE for this ref; both are true and neither cancels the other.
 
 ## PROOF EVERY F28D CODE CAN FIRE
 non-ancestor ref used for F28D-002: refs/heads/f20-win-diag-daf27337 37f698bd

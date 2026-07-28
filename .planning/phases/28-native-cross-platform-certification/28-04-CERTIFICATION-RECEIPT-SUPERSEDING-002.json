@@ -1,7 +1,7 @@
 {
   "schema": "wayland.cert.receipt",
   "schema_version": 2,
-  "body_sha256": "41665d2cf5867fb952b7d4b69f85062f8172304437e11b6c260d778a7f47ac56",
+  "body_sha256": "bdfc5026cf7c7e5be8b5ae049a9ff7d7ba7d8b7f8ced5938487124e878504abb",
   "body": {
     "certification_id": "f28-native-cross-platform-certification-supersession-002",
     "phase": "28-native-cross-platform-certification",
@@ -109,7 +109,7 @@
         },
         {
           "name": "certified-code-is-STALE-relative-to-the-integration-branch",
-          "description": "MEASURED 2026-07-29 by lane 28-drift, and it is the single most important thing a reader of this receipt must know. The two candidate commits bound above, 32e2f57d09fe4b287e513081862217dc9daa5901 and e4a3f5fc0f92a7b0126f594146c4b71182e9e378, are 194 and 147 commits behind the integration branch under crates/ (456 and 373 overall). Six files under crates/wcore-sandbox/src changed in that window, 874 insertions and 69 deletions, INCLUDING commits 15821c03, 3f3f93dc and 9c4d2612 - the repair of F-28-02-002, whose FIXED disposition is exactly what takes this receipt's acceptance gate from false to true. The certification is therefore VALID for the commits it names and STALE for the code the project now carries. Both are true and neither cancels the other. This receipt does NOT certify the integration branch, does NOT certify any release candidate, and must not be read as covering either. Reproduce with: python3 .planning/scripts/f28-check-drift.py --receipt <this file> --ref HEAD",
+          "description": "MEASURED 2026-07-29 by lane 28-drift, and it is the single most important thing a reader of this receipt must know. The two candidate commits bound above, 32e2f57d09fe4b287e513081862217dc9daa5901 and e4a3f5fc0f92a7b0126f594146c4b71182e9e378, are 194 and 147 commits behind the integration branch under crates/. Six files under crates/wcore-sandbox/src changed in that window, 874 insertions and 69 deletions, INCLUDING commits 15821c03, 3f3f93dc and 9c4d2612 - the repair of F-28-02-002, whose FIXED disposition is exactly what takes this receipt's acceptance gate from false to true. The certification is therefore VALID for the commits it names and STALE for the code the project now carries. Both are true and neither cancels the other. This receipt does NOT certify the integration branch, does NOT certify any release candidate, and must not be read as covering either. Reproduce with: python3 .planning/scripts/f28-check-drift.py --receipt <this file> --ref HEAD",
           "evidence_ref": "28-DRIFT.md"
         },
         {
@@ -118,8 +118,8 @@
           "evidence_ref": ".planning/scripts/f28-check-drift.py"
         },
         {
-          "name": "known-defects-outside-this-ledger",
-          "description": "Amendment A3 forbids reading three true claims as zero known defects, so these are named inside the signature. (1) A PARTIAL write of an AppContainer ACL lease - power loss after some bytes reach disk - leaves a non-empty unparseable lease that still wedges recovery permanently. Lane 28-adj2 named it and deliberately did NOT fix it: a non-empty unreadable lease is not safely distinguishable from a tampered one, so widening the reclaim would trade a denial of service for a weakened security control. It is described in F-28-ADJ-002's rationale but is not itself a row. (2) The accounting control this receipt implements has NO CONSUMER: Phase 29 binds receipt_body_sha256 and receipt_signing_key_id via CertificationBindingV1 and never reads body.findings, which is the failure 28-04-SUMMARY.md:310 predicted for itself. (3) Three required_live_bwrap_* live-acceptance tests fail on Windows as an environmental pre-existing red, reported rather than silenced.",
+          "name": "known-open-findings-outside-this-ledger",
+          "description": "Amendment A3 forbids reading three true claims as zero known defects, so these are named inside the signature. (1) A PARTIAL write of an AppContainer ACL lease - power loss after some bytes reach disk - leaves a non-empty unparseable lease that still wedges recovery permanently. Lane 28-adj2 named it and deliberately did NOT fix it: a non-empty unreadable lease is not safely distinguishable from a tampered one, so widening the reclaim would trade a denial of service for a weakened security control. It is described in F-28-ADJ-002's rationale but is not itself a row. (2) The accounting control this receipt implements has NO CONSUMER: Phase 29 binds receipt_body_sha256 and receipt_signing_key_id via CertificationBindingV1 and never reads body.findings, which is the failure 28-04-SUMMARY.md:310 predicted for itself. (3) Three required_live_bwrap_* live-acceptance tests fail on Windows as an environmental pre-existing red, reported rather than silenced. (4) The repair of F-28-02-002 has NEVER been exercised by the E5 certification matrix on any platform: it landed after both certified candidates and its only proof is unit tests plus one manual live reproduction on a single Windows host.",
           "evidence_ref": "28-ADJ2-SUMMARY.md"
         }
       ],
@@ -1598,7 +1598,7 @@
     "key_id": "phase-28-certification-supersession-002-2026-07-29",
     "public_key_base64": "IvA2SmMMsHxBljYagDGq4VeodxToBnB+whXBymS/VDI=",
     "fingerprint_sha256": "b6254320293852db18cb6d10c684750c1314c199de1d6f314ab785db49d0c093",
-    "signature_base64": "zBs8MzJ7D0qdgWYj4Ah2jkDx9r+vqMRDj5yuX50kZjO+kiXsTWj/x1YRmCEdLsZRfrCFvNtxKE+0BkkYBluSCg==",
+    "signature_base64": "1l0Ri1s3XcMuma8y5sHn1+jXs1u+lUT8hhp2u3Y0ZbiYjB7Xxm58B5989KfNd6K7MRz/31W+WzqNObc/rbQQCw==",
     "scope": "PHASE-SCOPED. This signature binds authorship and integrity of the assembled evidence for Phase 28 only. It is NOT a release trust root, NOT a seal, and NOT an authorization to release. Trust-root binding, rotation and revocation belong to Phase 29; tagging, releasing, merging and issue closure are reserved to Sean."
   }
 }
