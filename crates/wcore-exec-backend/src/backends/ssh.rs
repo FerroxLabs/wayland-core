@@ -448,6 +448,20 @@ impl ExecutionBackend for SshBackend {
 ///    leader in `$root/.pid`, so the scan now checks that pid for liveness as
 ///    its primary signal and keeps the `ps` sweep as a secondary one for a
 ///    stray that escaped the session.
+/// Emitted by [`REMOTE_SCAN`] when no process-table reader on the far end
+/// worked. The Rust side turns it into `enumerated: false`, so the surface
+/// reports NOT MEASURED instead of a clean zero.
+///
+/// THIRD defect found live, on 2026-07-28, against a real Windows far end:
+/// `ps -eo pid,ppid,args` is procps-specific and Git-for-Windows' msys `ps`
+/// rejects it (`ps: unknown option -- o`). Its stderr went to `/dev/null` and
+/// the pipeline ended in `|| true`, so a sweep that could not run produced an
+/// empty result indistinguishable from a clean one. The surface reported
+/// `0 (MEASURED)` while two independent instruments — msys `ps -ef` and
+/// `Win32_Process` — both showed the orphan. Same class as the `tasklist`
+/// false zero plan 25-04 found, on a different surface.
+const SWEEP_UNAVAILABLE: &str = "__WAYLAND_SWEEP_UNAVAILABLE__";
+
 const REMOTE_SCAN: &str = r#"
 set -u
 nonce="$1"
@@ -460,13 +474,34 @@ if [ -f "$root/.pid" ]; then
     echo "session-leader $pid still alive for nonce $nonce"
   fi
 fi
-# Secondary sweep for a stray that left the session, excluding this scan's own
-# process and its children.
-ps -eo pid,ppid,args 2>/dev/null \
-  | grep -F -- "$nonce" \
-  | grep -v -F -- "grep" \
-  | awk -v s="$self" '$1 != s && $2 != s' \
-  || true
+# Secondary sweep for a stray that left the session.
+#
+# Pick a reader this far end actually SUPPORTS, and say so when none does.
+# `ps -eo` is procps; msys and BusyBox ps both reject it. The column layout
+# differs between the two forms, so the self-exclusion columns move with it:
+#   ps -eo pid,ppid,args  ->  pid $1, ppid $2
+#   ps -ef                ->  pid $2, ppid $3
+table=""
+pidcol=1
+ppidcol=2
+if table=$(ps -eo pid,ppid,args 2>/dev/null) && [ -n "$table" ]; then
+  pidcol=1; ppidcol=2
+elif table=$(ps -ef 2>/dev/null) && [ -n "$table" ]; then
+  pidcol=2; ppidcol=3
+else
+  # A sweep that could not run is NOT a sweep that found nothing.
+  echo "__WAYLAND_SWEEP_UNAVAILABLE__ no supported ps invocation on this far end"
+  table=""
+fi
+if [ -n "$table" ]; then
+  # Exclude this scan's own process and its children: the nonce travels on
+  # this script's own argv, so an unguarded match finds the scan itself.
+  echo "$table" \
+    | grep -F -- "$nonce" \
+    | grep -v -F -- "grep" \
+    | awk -v s="$self" -v p="$pidcol" -v q="$ppidcol" '$p != s && $q != s' \
+    || true
+fi
 "#;
 
 /// Constant remote killer. Signals the remote SESSION, not the connection.
@@ -490,12 +525,27 @@ if [ -f "$root/.pid" ]; then
   fi
 fi
 # Sweep any stray that left the session, never this script or its children.
-for p in $(ps -eo pid,ppid,args 2>/dev/null \
-             | grep -F -- "$nonce" \
-             | grep -v -F -- "grep" \
-             | awk -v s="$self" '$1 != s && $2 != s {print $1}'); do
-  kill -KILL "$p" 2>/dev/null || true
-done
+# Same reader selection as REMOTE_SCAN: `ps -eo` is procps-only, so a far end
+# with msys or BusyBox ps would otherwise sweep nothing while looking fine.
+table=""
+pidcol=1
+ppidcol=2
+if table=$(ps -eo pid,ppid,args 2>/dev/null) && [ -n "$table" ]; then
+  pidcol=1; ppidcol=2
+elif table=$(ps -ef 2>/dev/null) && [ -n "$table" ]; then
+  pidcol=2; ppidcol=3
+fi
+if [ -n "$table" ]; then
+  for p in $(echo "$table" \
+               | grep -F -- "$nonce" \
+               | grep -v -F -- "grep" \
+               | awk -v s="$self" -v p="$pidcol" -v q="$ppidcol" \
+                     '$p != s && $q != s {print $p}'); do
+    kill -KILL "$p" 2>/dev/null || true
+  done
+else
+  echo "stray-sweep-unavailable: no supported ps invocation on this far end"
+fi
 rm -rf "$root" 2>/dev/null || true
 echo "remote-kill-issued"
 exit 0
@@ -550,14 +600,32 @@ async fn remote_kill(target: &str, nonce: &str) -> String {
     }
 }
 
+/// Rows the far end reported, or an error naming why the sweep could not run.
+///
+/// An `Err` here becomes `enumerated: false` at the call site, i.e. NOT
+/// MEASURED — never zero. When the primary signal DID find something before
+/// the sweep failed, those rows are carried into the error text so the operator
+/// still sees them: the count is unknowable, but "at least this one" is not.
 async fn remote_scan(target: &str, nonce: &str) -> std::result::Result<Vec<String>, String> {
     let out = remote_exec(target, REMOTE_SCAN, nonce).await?;
-    Ok(out
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect())
+    let mut rows: Vec<String> = Vec::new();
+    for line in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if let Some(detail) = line.strip_prefix(SWEEP_UNAVAILABLE) {
+            let mut reason = format!(
+                "the far end's process table could not be enumerated ({}), so a count \
+                 would omit an unknown number of processes",
+                detail.trim()
+            );
+            if !rows.is_empty() {
+                // Do not lose a positive finding to an unmeasurable total.
+                reason.push_str(" — and the primary signal DID find: ");
+                reason.push_str(&rows.join("; "));
+            }
+            return Err(reason);
+        }
+        rows.push(line.to_string());
+    }
+    Ok(rows)
 }
 
 #[cfg(test)]
@@ -664,6 +732,63 @@ mod tests {
         let absent = ["args.push(nothing_like_this", "_exists());"].concat();
         assert!(!source.contains(&absent));
         assert!(source.contains(&q), "the assembled needle matches nothing");
+    }
+
+    /// A sweep that could not run must be distinguishable from one that found
+    /// nothing. Measured against a real Windows far end on 2026-07-28: msys
+    /// `ps` rejects `-eo`, stderr went to `/dev/null`, the pipeline ended in
+    /// `|| true`, and the surface reported `0 (MEASURED)` while two independent
+    /// instruments saw the orphan.
+    #[test]
+    fn a_far_end_with_no_supported_ps_reports_not_measured_rather_than_zero() {
+        // The scan must offer a fallback reader and a marker when neither works.
+        assert!(REMOTE_SCAN.contains("ps -eo pid,ppid,args"));
+        assert!(
+            REMOTE_SCAN.contains("ps -ef"),
+            "a far end whose ps rejects -eo must still be enumerable"
+        );
+        assert!(
+            REMOTE_SCAN.contains(SWEEP_UNAVAILABLE),
+            "an unrunnable sweep must announce itself, not return empty"
+        );
+        // The column layout differs between the two readers, so the
+        // self-exclusion must move with it or the scan excludes the wrong pid.
+        assert!(REMOTE_SCAN.contains("pidcol=2; ppidcol=3"));
+        assert!(REMOTE_SCAN.contains(r#"'$p != s && $q != s'"#));
+        // The kill's stray sweep has the same blindness and the same fallback.
+        assert!(REMOTE_KILL.contains("ps -ef"));
+
+        // And the parser must turn the marker into an error — which the call
+        // site renders as NOT MEASURED — rather than treating it as a row.
+        let marked = format!("session-leader 42 still alive\n{SWEEP_UNAVAILABLE} msys ps\n");
+        let mut rows: Vec<String> = Vec::new();
+        let mut failed: Option<String> = None;
+        for line in marked.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            if line.starts_with(SWEEP_UNAVAILABLE) {
+                failed = Some(line.to_string());
+                break;
+            }
+            rows.push(line.to_string());
+        }
+        assert!(
+            failed.is_some(),
+            "the marker must stop the scan being read as a clean list"
+        );
+        assert_eq!(
+            rows.len(),
+            1,
+            "a positive primary finding must survive to be reported in the reason"
+        );
+
+        // Positive control: an ordinary two-row answer must NOT trip the marker,
+        // or every scan would report NOT MEASURED and the check proves nothing.
+        let ordinary = "session-leader 42 still alive\n123 456 sh -c work\n";
+        assert!(
+            !ordinary
+                .lines()
+                .any(|l| l.trim().starts_with(SWEEP_UNAVAILABLE)),
+            "an ordinary scan must still be measurable"
+        );
     }
 
     #[test]
