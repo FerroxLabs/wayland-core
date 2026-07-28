@@ -1,0 +1,29 @@
+  ok   git/known-positive: agreeing readers yield the sha
+  ok   git/known-negative: disagreeing readers are REFUSED, not guessed at
+  ok   git/OLD SHAPE WOULD HAVE MISSED IT: the single-reader form silently returns the wrong commit
+  ok   ss/known-positive: the real poller is attributed
+  ok   ss/known-negative: fixture, unrelated and same-number-different-host are all excluded
+  ok   ss/OLD SHAPE WOULD HAVE MISSED IT: an unanchored pid= sweep collects 4 pids and reports a phantom race
+  ok   token/known-positive: a console-wrapped token is found
+  ok   token/known-negative: an absent token is still absent
+  ok   token/OLD SHAPE WOULD HAVE MISSED IT: String.includes reports absence on the same log
+  ok   denial/known-positive: zero pollers grades DENIAL, not pass
+  ok   denial/known-negative: exactly one attributed poller grades OK
+  ok   denial/OLD SHAPE WOULD HAVE MISSED IT: a `max_open <= 1` check passes on ZERO pollers
+  ok   falsedenial/known-positive: polls>0 with no open-side sample is UNREADABLE, not DENIAL
+  ok   falsedenial/known-negative: polls===0 is still DENIAL
+  ok   falsedenial/OLD SHAPE WOULD HAVE MISSED IT: maxOpen-first grading calls a polling window DENIAL
+  ok   serialise/known-positive: an array of pids survives JSON.stringify
+  ok   serialise/known-negative: the grader accepts an array and still grades correctly
+  ok   serialise/OLD SHAPE WOULD HAVE MISSED IT: a Set stringifies to {} and loses every pid
+  ok   owner/known-positive: the wrong pid polling is caught
+  ok   owner/known-negative: the right pid polling is OK
+  ok   owner/OLD SHAPE WOULD HAVE MISSED IT: counting concurrency alone cannot tell WHICH process polled
+  ok   window/known-positive: only in-window samples count
+  ok   window/known-negative: the earlier spike is visible in its own window
+  ok   window/OLD SHAPE WOULD HAVE MISSED IT: the global max reports 2 for a window that only ever saw 1
+  ok   incomplete/known-positive: an absent process makes the run INCOMPLETE
+  ok   incomplete/known-negative: a healthy run is not faulted
+  ok   incomplete/OLD SHAPE WOULD HAVE MISSED IT: a zero-byte log passes any check that only reads exit status
+
+self-test: 27 passed, 0 failed

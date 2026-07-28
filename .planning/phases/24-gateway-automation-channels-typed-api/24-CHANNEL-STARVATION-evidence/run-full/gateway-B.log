@@ -1,0 +1,72 @@
+[2m2026-07-28T20:56:58.174555Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24cstg [3mplatform[0m[2m=[0mtelegram
+[gateway] channels registered=1
+[2m2026-07-28T20:56:58.175142Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-28T20:56:58.175158Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden
+[gateway] inbound: subscriber spawned, webhook host disabled policies=1
+[2m2026-07-28T20:56:58.175849Z[0m [32m INFO[0m F24_CHANNEL_LEASE=owner — this process owns inbound polling for this home [3mholder[0m[2m=[0m"gateway" [3mpid[0m[2m=[0m3356349 [3mdir[0m[2m=[0m/root/f24cs-run-full/home/channels
+[2m2026-07-28T20:56:58.175913Z[0m [33m WARN[0m WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+[2m2026-07-28T20:57:01.971328Z[0m [32m INFO[0m headless cron handler: using the caller's ChannelManager; not registering or starting a second one
+[gateway] started pid=3356349 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+[2m2026-07-28T20:57:02.972216Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:03.972110Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:04.972617Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:05.972571Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:06.972009Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:07.971535Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:08.972278Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:09.971787Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:10.971691Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:11.972549Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:12.972056Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:13.972252Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:14.972120Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:15.972392Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:16.972090Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:17.972148Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:18.972073Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:19.971917Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:20.972113Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:21.971692Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:22.972114Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:23.972047Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:24.971668Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:25.972141Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:26.972010Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:27.971881Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:28.972104Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:29.971534Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:30.971890Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:31.971564Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:32.972572Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:33.972106Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:34.972203Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:35.971773Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:36.971838Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:37.972196Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:38.972096Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:39.972183Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:40.972018Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:41.972046Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:42.972530Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:43.972110Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:44.972005Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:45.972499Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:46.972257Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:47.972376Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:48.971846Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:49.972032Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:50.972673Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:51.971969Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:52.972385Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:53.972153Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:54.972255Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:55.971889Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:56.972130Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:57.971842Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:58.971929Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:57:59.972265Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:58:00.972303Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:58:01.971840Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:58:02.972456Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:58:03.971919Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:58:04.972302Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner

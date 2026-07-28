@@ -1,0 +1,64 @@
+{
+  "run_id": "acc467ec",
+  "started_at": "2026-07-28T20:50:21.182Z",
+  "legs": [
+    {
+      "leg": "A",
+      "verdict": "FAILED",
+      "session_pid": 3263598,
+      "gateway_pid": 3279859,
+      "session_owned_first": false,
+      "window_session_alone": {
+        "label": "legA/W1 session alone",
+        "start": "2026-07-28T20:51:22.241Z",
+        "end": "2026-07-28T20:51:31.428Z",
+        "maxOpen": 1,
+        "polls": 10,
+        "pids": {},
+        "grade": {
+          "grade": "OK",
+          "why": "exactly one poller, attributed to pid(s) 3263598"
+        }
+      },
+      "window_gateway_owns": {
+        "label": "legA/W2 gateway owns",
+        "start": "2026-07-28T20:51:46.803Z",
+        "end": "2026-07-28T20:51:55.989Z",
+        "maxOpen": 1,
+        "polls": 10,
+        "pids": {},
+        "grade": {
+          "grade": "OK",
+          "why": "exactly one poller, attributed to pid(s) 3279859"
+        }
+      },
+      "session_emitted_yield_token": true,
+      "gateway_emitted_acquire_token": true,
+      "delivered_while_session_owned": {
+        "delivered": true,
+        "serve_count": 1,
+        "deleted_by": 12
+      },
+      "delivered_after_handover": {
+        "delivered": true,
+        "serve_count": 1,
+        "deleted_by": 33
+      },
+      "session_still_alive_at_measurement": true,
+      "gateway_still_alive_at_measurement": true,
+      "log_bytes": {
+        "legA session": 23801,
+        "legA gateway": 4549
+      }
+    }
+  ],
+  "instrument": {
+    "fault": false,
+    "reasons": []
+  },
+  "llm_stub_hits": 1,
+  "poll_total": 33,
+  "conn_samples": 86,
+  "ss_available": true,
+  "finished_at": "2026-07-28T20:51:56.142Z"
+}
