@@ -55,7 +55,16 @@ NOT_MEASURED = "NOT MEASURED"
 # NOTE (measured 2026-07-29): `flux-fast` is a REASONING model. A 16-token
 # budget returns HTTP 200 with empty content and every token spent as
 # `reasoning_tokens`. Budget generously or starvation reads as a defect.
-TURN_MODEL = "flux-router:flux-fast"
+#
+# NOTE (measured 2026-07-29): the `provider:model` prefix form that works for
+# `ollama:` does NOT work here. `-m flux-router:flux-fast` with a populated
+# `[providers.flux-router]` block boots into provider `anthropic` and dies with
+# `init_failed: No API key found ... (API_KEY, ANTHROPIC_API_KEY, or
+# OPENAI_API_KEY)` -- naming neither Flux nor the key that was present. The
+# working form is an explicit provider: `-p flux-router -m flux-fast`, plus a
+# `[default] provider` block.
+TURN_PROVIDER = "flux-router"
+TURN_MODEL = "flux-fast"
 
 _KEY = os.environ.get("FLUX_API_KEY", "")
 
@@ -97,6 +106,8 @@ class Session:
             [
                 str(self.binary),
                 "--json-stream",
+                "-p",
+                TURN_PROVIDER,
                 "-m",
                 TURN_MODEL,
                 "--assistant",
@@ -142,6 +153,10 @@ def write_config(home: Path, fixture: Path, contact_log: Path, with_mcp: bool) -
     capture only ever sees `redact()`ed strings.
     """
     lines = [
+        "[default]\n",
+        f'provider = "{TURN_PROVIDER}"\n',
+        f'model = "{TURN_MODEL}"\n',
+        "max_tokens = 2000\n",
         "[providers.flux-router]\n",
         f'api_key = "{_KEY}"\n',
         'base_url = "https://api.fluxrouter.ai/v1"\n',
