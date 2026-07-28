@@ -1,0 +1,19 @@
+# AUTH-08/AUTH-09 -- what this lane genuinely CANNOT observe
+#
+# The main-merge half of the ceiling turned out to be CLOSABLE (see AUTH-07): a
+# read-only ls-remote answers it and a falsification control proves the check can say
+# YES. So the plan's premise -- 'this repository has NO remote-tracking refs at all,
+# which is what bounds the audit' -- is FALSE, and the ceiling is narrower than stated.
+#
+# What remains genuinely unobservable is everything that leaves NO git ref at all:
+AUTH-08 pull requests    : a PR is GitHub state, not a git ref. refs/pull/* is not fetched here.
+AUTH-09 issue closure, release publication, deployment, and frontier positioning:
+        none of these writes a git object. No command in this repository can observe them.
+#
+# Evidence that refs/pull is not present:
+REFS_PULL_COUNT=0
+#
+# The honest statement, and this lane claims no more than it:
+# no reserved action was taken within this repository's reach; the main-merge half is
+# MEASURED not merely asserted; and the PR / issue / release / deployment /
+# positioning half is Sean's to confirm. No credential was obtained to close it.

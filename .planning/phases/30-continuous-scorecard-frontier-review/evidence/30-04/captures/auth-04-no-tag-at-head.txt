@@ -1,0 +1,7 @@
+# AUTH-04 -- does any tag point at this lane's HEAD?
+# command: git tag --points-at HEAD
+HEAD=5d48ec270f642498cc095bd21ad4a256e628c4c3
+--- tags pointing at HEAD ---
+TAGS_AT_HEAD=0
+--- total tags in the repository ---
+TOTAL_TAGS=36

@@ -1,0 +1,13 @@
+INIT_RC=0
+SEED_LEN=44
+--- does the seed appear in stdout or stderr? ---
+SEED_LEAKED=NO
+--- FALSIFICATION: the same grep for a string that IS in stdout must find it ---
+CONTROL_GREP=FOUND
+--- seed file mode ---
+600 /tmp/tmp.HXSjcVLp9D/throwaway-not-seans-key-d1c689467a0a14c6.seed
+--- stdout as captured ---
+AUTHORITY_INIT_ROOT=OK root_kind=throwaway_generated_at_run_time
+key_id=throwaway-not-seans-key-d1c689467a0a14c6 public_key_hex=d1c689467a0a14c6b86718157a1adbe447bceee8b7dcc401c1052a72f44e8269
+root=/tmp/tmp.HXSjcVLp9D/root.json approval=/tmp/tmp.HXSjcVLp9D/frontier-positioning.approval.json subject_sha256=2960913cb22b68b10661b2f91ccfcde1b1ac59ff4b627d2d2daa718d87217de1
+NOTE: this root was generated at run time and is NOT Sean's approval key. It exists to prove the mechanism can ACCEPT a valid approval; an acceptance under it authorises nothing.
