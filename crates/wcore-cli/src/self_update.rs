@@ -134,6 +134,19 @@ pub async fn run(check_only: bool) -> Result<()> {
     let archive_path = tmp.path().join(&archive_name);
     download_to(&asset.browser_download_url, &archive_path).await?;
 
+    // Bind the bytes we actually downloaded to the artifact the signed
+    // manifest names. Without this the manifest's artifact digests would be
+    // decorative: a correctly signed manifest would sit beside whatever
+    // archive the source chose to hand over. ANDed with the attestation check
+    // below, never a substitute for it.
+    if let Some(manifest) = manifest.as_ref() {
+        let (digest, bytes) = digest_file(&archive_path)?;
+        manifest
+            .check_archive(&archive_name, &digest, bytes)
+            .map_err(|error| anyhow::anyhow!("{error}"))
+            .context("refusing to install an archive the signed manifest does not vouch for")?;
+    }
+
     // Keyless provenance check BEFORE we extract or swap anything.
     verify_provenance(&archive_path, RELEASES_REPO)
         .await
@@ -155,6 +168,17 @@ pub async fn run(check_only: bool) -> Result<()> {
 
     println!("upgraded to v{latest_version}");
     Ok(())
+}
+
+/// SHA-256 and byte length of a file on disk, streamed so a large archive is
+/// never held whole in memory.
+fn digest_file(path: &Path) -> Result<(String, u64)> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let bytes = std::io::copy(&mut file, &mut hasher)
+        .with_context(|| format!("digest {}", path.display()))?;
+    Ok((format!("{:x}", hasher.finalize()), bytes))
 }
 
 /// Seconds since the Unix epoch. A clock that predates the epoch yields 0,

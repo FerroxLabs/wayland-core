@@ -153,6 +153,22 @@ pub enum UpdateTrustError {
     InvalidSignature,
     #[error("version string cannot be ordered: {value:?} ({detail})")]
     UnorderableVersion { value: String, detail: String },
+    #[error(
+        "the signed release manifest does not name the artifact {0} that was downloaded for \
+         this host"
+    )]
+    ArtifactNotInManifest(String),
+    #[error(
+        "downloaded artifact {name} does not match the signed manifest: expected sha256 \
+         {expected} ({expected_bytes} bytes), got {actual} ({actual_bytes} bytes)"
+    )]
+    ArtifactDigestMismatch {
+        name: String,
+        expected: String,
+        actual: String,
+        expected_bytes: u64,
+        actual_bytes: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -638,6 +654,40 @@ impl VerifiedManifest {
             matches!(revocation.kind, WireRevocationKind::Version)
                 && normalize_version_tag(revocation.value.trim()) == wanted
         })
+    }
+
+    /// Bind bytes actually downloaded to the artifact the signed manifest
+    /// names. Without this the manifest's artifact digests are decorative: a
+    /// correctly signed manifest would sit next to whatever archive the source
+    /// chose to hand over.
+    ///
+    /// ANDed with — never a substitute for — the keyless attestation check,
+    /// which independently establishes that the archive was built by the
+    /// pinned repository's release workflow.
+    pub fn check_archive(
+        &self,
+        archive_name: &str,
+        actual_sha256: &str,
+        actual_bytes: u64,
+    ) -> Result<(), UpdateTrustError> {
+        let artifact = self
+            .body
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.name == archive_name)
+            .ok_or_else(|| UpdateTrustError::ArtifactNotInManifest(archive_name.to_string()))?;
+        if !artifact.sha256.eq_ignore_ascii_case(actual_sha256)
+            || artifact.byte_length != actual_bytes
+        {
+            return Err(UpdateTrustError::ArtifactDigestMismatch {
+                name: archive_name.to_string(),
+                expected: artifact.sha256.clone(),
+                actual: actual_sha256.to_string(),
+                expected_bytes: artifact.byte_length,
+                actual_bytes,
+            });
+        }
+        Ok(())
     }
 
     /// The first artifact in this manifest whose digest has been revoked.

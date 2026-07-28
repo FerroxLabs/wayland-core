@@ -33,9 +33,9 @@ use wcore_cli::self_update::update_trust::{
 };
 use wcore_eval_scenarios::receipt::Evidence;
 use wcore_eval_scenarios::release_integrity::{
-    ArtifactKind, PackagedArtifactV1, ReleaseManifestBodyV1, ReleaseManifestV1, ReleaseRevocationV1,
-    ReleaseState, ReleaseTrustRootV1, ReproducibilityVerdictV1, RevocationKind, TrustedKeyV1,
-    verify_manifest,
+    ArtifactKind, PackagedArtifactV1, ReleaseManifestBodyV1, ReleaseManifestV1,
+    ReleaseRevocationV1, ReleaseState, ReleaseTrustRootV1, ReproducibilityVerdictV1,
+    RevocationKind, TrustedKeyV1, verify_manifest,
 };
 
 // ---------------------------------------------------------------------------
@@ -209,7 +209,10 @@ fn an_offer_older_than_the_running_version_is_refused() {
         message.contains("older") || message.contains("downgrade"),
         "refusal must name the direction: {message}"
     );
-    assert!(message.contains("0.11.0") && message.contains("0.12.25"), "{message}");
+    assert!(
+        message.contains("0.11.0") && message.contains("0.12.25"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -229,7 +232,10 @@ fn an_offer_equal_to_the_running_version_is_a_clean_no_op() {
     // And it stays a clean no-op with no manifest at all, exactly as today:
     // the equality branch never needed one.
     let bare = decide_update(&offer("0.12.25", "0.12.25", None, &state));
-    assert!(matches!(bare, UpdateDecision::AlreadyUpToDate { .. }), "{bare:?}");
+    assert!(
+        matches!(bare, UpdateDecision::AlreadyUpToDate { .. }),
+        "{bare:?}"
+    );
 }
 
 #[test]
@@ -277,14 +283,21 @@ fn a_manifest_sequence_at_or_below_the_high_water_mark_is_refused_as_stale() {
             matches!(decision, UpdateDecision::RefusedStaleSequence { .. }),
             "sequence {stale_sequence} at or below mark 20 must be refused, got {decision:?}"
         );
-        assert!(decision.message().contains("stale"), "{}", decision.message());
+        assert!(
+            decision.message().contains("stale"),
+            "{}",
+            decision.message()
+        );
     }
 
     // Control at the same high-water mark: one past it is accepted.
     let bytes = signer.mint(body("0.13.0", 21, NOW - 60));
     let verified = signer.verifier().verify_manifest_json(&bytes, NOW).unwrap();
     let decision = decide_update(&offer("0.12.25", "0.13.0", Some(&verified), &state));
-    assert!(decision.proceeds(), "sequence 21 past mark 20 must proceed: {decision:?}");
+    assert!(
+        decision.proceeds(),
+        "sequence 21 past mark 20 must proceed: {decision:?}"
+    );
 }
 
 #[test]
@@ -310,7 +323,10 @@ fn a_manifest_older_than_the_maximum_age_is_refused_on_a_first_run() {
     let fresh = signer.mint(body("0.13.0", 11, NOW - DEFAULT_MAX_MANIFEST_AGE_SECS + 1));
     let verified = signer.verifier().verify_manifest_json(&fresh, NOW).unwrap();
     let decision = decide_update(&offer("0.12.25", "0.13.0", Some(&verified), &state));
-    assert!(decision.proceeds(), "a manifest inside the window must proceed: {decision:?}");
+    assert!(
+        decision.proceeds(),
+        "a manifest inside the window must proceed: {decision:?}"
+    );
 }
 
 #[test]
@@ -380,7 +396,9 @@ fn an_unorderable_version_string_is_refused_rather_than_guessed() {
     let state = first_run();
 
     // A guess here installs something, so every one of these must refuse.
-    for bad in ["", "latest", "0.13", "0.13.x", "0.13.0.1", "nightly", "v", "0.-1.0"] {
+    for bad in [
+        "", "latest", "0.13", "0.13.x", "0.13.0.1", "nightly", "v", "0.-1.0",
+    ] {
         assert!(
             parse_release_version(bad).is_err(),
             "{bad:?} must not be orderable"
@@ -402,7 +420,10 @@ fn an_unorderable_version_string_is_refused_rather_than_guessed() {
     // Controls: the shapes that ARE orderable, including the release-tag form
     // the GitHub API hands us and a pre-release ordered below its release.
     for good in ["0.13.0", "v0.13.0", "1.2.3-rc.1", "1.2.3+build.5"] {
-        assert!(parse_release_version(good).is_ok(), "{good:?} must be orderable");
+        assert!(
+            parse_release_version(good).is_ok(),
+            "{good:?} must be orderable"
+        );
     }
     let pre = parse_release_version("1.2.3-rc.1").unwrap();
     let rel = parse_release_version("1.2.3").unwrap();
@@ -573,7 +594,10 @@ fn a_manifest_signed_by_a_retired_key_is_refused() {
     let error = verifier
         .verify_manifest_json(&bytes, NOW)
         .expect_err("a retired key must be refused");
-    assert!(matches!(error, UpdateTrustError::RetiredKey(_)), "got {error:?}");
+    assert!(
+        matches!(error, UpdateTrustError::RetiredKey(_)),
+        "got {error:?}"
+    );
 
     // A key that is not yet valid is equally refused.
     let future = ReleaseTrustRootV1::new(vec![trusted_key(
@@ -584,8 +608,13 @@ fn a_manifest_signed_by_a_retired_key_is_refused() {
     )]);
     let verifier =
         ReleaseVerifier::with_trust_root_json(&serde_json::to_vec(&future).unwrap()).unwrap();
-    let error = verifier.verify_manifest_json(&bytes, NOW).expect_err("not yet valid");
-    assert!(matches!(error, UpdateTrustError::KeyNotYetValid(_)), "got {error:?}");
+    let error = verifier
+        .verify_manifest_json(&bytes, NOW)
+        .expect_err("not yet valid");
+    assert!(
+        matches!(error, UpdateTrustError::KeyNotYetValid(_)),
+        "got {error:?}"
+    );
 }
 
 #[test]
@@ -616,8 +645,13 @@ fn a_manifest_signed_by_a_newly_rotated_key_is_accepted() {
         .unwrap()
         .sign("release-key-a", &key_a);
     let bytes = serde_json::to_vec_pretty(&signed_by_a).unwrap();
-    let error = verifier.verify_manifest_json(&bytes, NOW).expect_err("retired");
-    assert!(matches!(error, UpdateTrustError::RetiredKey(_)), "got {error:?}");
+    let error = verifier
+        .verify_manifest_json(&bytes, NOW)
+        .expect_err("retired");
+    assert!(
+        matches!(error, UpdateTrustError::RetiredKey(_)),
+        "got {error:?}"
+    );
 }
 
 #[test]
@@ -633,8 +667,8 @@ fn the_shipped_crate_exposes_no_manifest_signing_entry_point() {
     // separator, different trust root), and it is out of this plan's scope.
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     for file in ["self_update.rs", "update_trust.rs"] {
-        let text = std::fs::read_to_string(src.join(file))
-            .unwrap_or_else(|e| panic!("read {file}: {e}"));
+        let text =
+            std::fs::read_to_string(src.join(file)).unwrap_or_else(|e| panic!("read {file}: {e}"));
         for forbidden in ["SigningKey", ".sign(", "Signer"] {
             assert!(
                 !text.contains(forbidden),
@@ -741,8 +775,8 @@ fn a_signature_minted_for_another_domain_does_not_verify_as_a_manifest() {
     let manifest = ReleaseManifestV1::unsigned(body("0.13.0", 11, NOW - 60)).unwrap();
 
     // The pristine control: the manifest domain verifies.
-    let control = serde_json::to_vec_pretty(&manifest.clone().sign(&signer.key_id, &signer.key))
-        .unwrap();
+    let control =
+        serde_json::to_vec_pretty(&manifest.clone().sign(&signer.key_id, &signer.key)).unwrap();
     signer
         .verifier()
         .verify_manifest_json(&control, NOW)
@@ -816,6 +850,37 @@ fn a_newer_offer_with_no_manifest_at_all_is_refused_fail_closed() {
 }
 
 #[test]
+fn the_downloaded_archive_must_match_the_digest_the_manifest_signed() {
+    // Without this the manifest's artifact digests are decorative: a correctly
+    // signed manifest would sit beside whatever archive the source handed over.
+    let signer = Signer::fresh("release-acceptance-key");
+    let bytes = signer.mint(body("0.13.0", 11, NOW - 60));
+    let verified = signer.verifier().verify_manifest_json(&bytes, NOW).unwrap();
+    let name = "wayland-core-v0.13.0-x86_64-unknown-linux-gnu.tar.gz";
+
+    // Pristine control: the digest and length the manifest names are accepted.
+    verified
+        .check_archive(name, &hexed('b', 64), 4096)
+        .expect("CONTROL: the artifact the manifest names must be accepted");
+
+    // A different digest at the right length.
+    assert!(matches!(
+        verified.check_archive(name, &hexed('c', 64), 4096),
+        Err(UpdateTrustError::ArtifactDigestMismatch { .. })
+    ));
+    // The right digest at a different length.
+    assert!(matches!(
+        verified.check_archive(name, &hexed('b', 64), 4097),
+        Err(UpdateTrustError::ArtifactDigestMismatch { .. })
+    ));
+    // An archive the manifest never names at all.
+    assert!(matches!(
+        verified.check_archive("something-else.tar.gz", &hexed('b', 64), 4096),
+        Err(UpdateTrustError::ArtifactNotInManifest(_))
+    ));
+}
+
+#[test]
 fn the_release_manifest_role_is_pinned_to_release_acceptance() {
     // A manifest signed by a key bound to any EARLIER release state must not
     // authorise a shipped install: reaching packaging is not reaching
@@ -842,5 +907,8 @@ fn the_release_manifest_role_is_pinned_to_release_acceptance() {
     let error = verifier
         .verify_manifest_json(&bytes, NOW)
         .expect_err("a packaging key must not authorise an install");
-    assert!(matches!(error, UpdateTrustError::RoleMismatch { .. }), "got {error:?}");
+    assert!(
+        matches!(error, UpdateTrustError::RoleMismatch { .. }),
+        "got {error:?}"
+    );
 }
