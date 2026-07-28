@@ -20,7 +20,10 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand};
 use wcore_eval_scenarios::fixtures::openai::{OpenAiFixtureScript, OpenAiStep};
 use wcore_eval_scenarios::frontier_trials::{
-    DimensionV1, ResultSetV1, ToolInvocationV1, TrialOutcomeV1, TrialRecordV1,
+    ALL_DIMENSIONS, ALL_TOOLS, ComparativeResultV1, DeltaV1, DimensionV1, LegStatusV1, LegV1,
+    MeasurementV1, ResultSetV1, ScopeV1, ToolInvocationV1, ToolV1, TrialOutcomeV1, TrialRecordV1,
+    bootstrap_difference, continuous_measurement, newcombe_wilson_difference,
+    proportion_measurement, protocol_sha256,
 };
 use wcore_eval_scenarios::scorecard::{
     ScorecardDocumentV1, render_surfaces_tsv, walk_command_tree,
@@ -84,6 +87,24 @@ enum TrialsCommand {
         #[arg(long)]
         workspace_root: PathBuf,
         /// JSON Lines output, one `TrialRecordV1` per trial.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Fold per-trial records into the bounded result set.
+    ///
+    /// Every number in the output is produced by the SAME verified functions the contract
+    /// suite exercises. Nothing is computed by a second implementation that could disagree
+    /// with the one under test.
+    Assemble {
+        #[arg(long)]
+        protocol: PathBuf,
+        /// Directory of `<tool>-<dimension>.jsonl` per-trial records.
+        #[arg(long)]
+        records_dir: PathBuf,
+        /// JSON map from `"<tool>:<dimension>"` to the blocker text for every leg that did
+        /// not run. A leg with neither records nor a blocker is a REFUSAL, not a default.
+        #[arg(long)]
+        blockers: PathBuf,
         #[arg(long)]
         out: PathBuf,
     },
@@ -169,6 +190,12 @@ fn run_trials(command: TrialsCommand) -> anyhow::Result<String> {
                 set.protocol_sha256
             ))
         }
+        TrialsCommand::Assemble {
+            protocol,
+            records_dir,
+            blockers,
+            out,
+        } => assemble(&protocol, &records_dir, &blockers, &out),
         TrialsCommand::Run {
             protocol,
             invocation,
@@ -429,4 +456,182 @@ async fn drive_leg(
         }
     }
     Ok(records)
+}
+
+/// Fold the per-trial records into a bounded, verifiable result set.
+fn assemble(
+    protocol: &Path,
+    records_dir: &Path,
+    blockers: &Path,
+    out: &Path,
+) -> anyhow::Result<String> {
+    let protocol_bytes = std::fs::read(protocol)?;
+    let protocol_json: serde_json::Value = serde_json::from_slice(&protocol_bytes)?;
+    let blockers: std::collections::BTreeMap<String, String> =
+        serde_json::from_slice(&std::fs::read(blockers)?)?;
+
+    let mut records: std::collections::BTreeMap<(ToolV1, DimensionV1), Vec<TrialRecordV1>> =
+        std::collections::BTreeMap::new();
+    for tool in ALL_TOOLS {
+        for dimension in ALL_DIMENSIONS {
+            let path = records_dir.join(format!("{}-{}.jsonl", tool.token(), dimension.token()));
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let mut parsed = Vec::new();
+            for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+                parsed.push(serde_json::from_str::<TrialRecordV1>(line)?);
+            }
+            if !parsed.is_empty() {
+                records.insert((tool, dimension), parsed);
+            }
+        }
+    }
+
+    let seed_for = |dimension: DimensionV1| -> u64 {
+        protocol_json
+            .get("dimension_specs")
+            .and_then(|d| d.get(dimension.token()))
+            .and_then(|d| d.get("seed"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    let band_for = |dimension: DimensionV1| -> f64 {
+        protocol_json
+            .get("dimension_specs")
+            .and_then(|d| d.get(dimension.token()))
+            .and_then(|d| d.get("tie_band"))
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.05)
+    };
+
+    let mut measurements: Vec<MeasurementV1> = Vec::new();
+    let mut cost_samples: std::collections::BTreeMap<ToolV1, Vec<f64>> =
+        std::collections::BTreeMap::new();
+    for ((tool, dimension), trials) in &records {
+        let measurement = if *dimension == DimensionV1::Cost {
+            let samples: Vec<f64> = trials.iter().map(|t| t.token_units as f64).collect();
+            cost_samples.insert(*tool, samples.clone());
+            continuous_measurement(
+                *tool,
+                *dimension,
+                ScopeV1::ScriptedHarness,
+                &samples,
+                10_000,
+                seed_for(*dimension),
+            )?
+        } else {
+            proportion_measurement(*tool, *dimension, ScopeV1::ScriptedHarness, trials)?
+        };
+        measurements.push(measurement);
+    }
+
+    // A comparative is built ONLY where every compared tool measured. Where a peer did not
+    // run there is no comparative at all - never an implicit win.
+    let mut comparatives: Vec<ComparativeResultV1> = Vec::new();
+    for dimension in ALL_DIMENSIONS {
+        for peer in [ToolV1::Hermes, ToolV1::Openclaw] {
+            let (Some(w), Some(p)) = (
+                records.get(&(ToolV1::Wayland, dimension)),
+                records.get(&(peer, dimension)),
+            ) else {
+                continue;
+            };
+            let band = band_for(dimension);
+            let interval = if dimension == DimensionV1::Cost {
+                bootstrap_difference(
+                    cost_samples
+                        .get(&ToolV1::Wayland)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]),
+                    cost_samples.get(&peer).map(Vec::as_slice).unwrap_or(&[]),
+                    10_000,
+                    seed_for(dimension),
+                )?
+            } else {
+                let scored = |t: &Vec<TrialRecordV1>| -> (u32, u32) {
+                    let s: Vec<&TrialRecordV1> =
+                        t.iter().filter(|r| r.outcome.enters_proportion()).collect();
+                    (
+                        s.iter().filter(|r| r.outcome.is_success()).count() as u32,
+                        s.len() as u32,
+                    )
+                };
+                let (ws, wn) = scored(w);
+                let (ps, pn) = scored(p);
+                newcombe_wilson_difference(ws, wn, ps, pn)?
+            };
+            let mut set = std::collections::BTreeMap::new();
+            for m in &measurements {
+                if m.dimension == dimension && (m.tool == ToolV1::Wayland || m.tool == peer) {
+                    set.insert(m.tool, m.clone());
+                }
+            }
+            let estimate = (interval.lower + interval.upper) / 2.0;
+            comparatives.push(ComparativeResultV1::try_new(
+                dimension,
+                set,
+                DeltaV1 { estimate, interval },
+                band,
+                &[ToolV1::Wayland, peer],
+            )?);
+        }
+    }
+
+    let mut legs = Vec::new();
+    let mut n = 0;
+    for tool in ALL_TOOLS {
+        for dimension in ALL_DIMENSIONS {
+            n += 1;
+            let key = format!("{}:{}", tool.token(), dimension.token());
+            let has_records = records.contains_key(&(tool, dimension));
+            let (status, blocker, evidence) = if has_records {
+                (
+                    LegStatusV1::Run,
+                    None,
+                    format!("records/{}-{}.jsonl", tool.token(), dimension.token()),
+                )
+            } else {
+                let blocker = blockers.get(&key).cloned().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "leg {key} has neither per-trial records nor a named blocker;                          silence about a leg is refused rather than defaulted"
+                    )
+                })?;
+                (
+                    LegStatusV1::Unproven,
+                    Some(blocker),
+                    format!("blockers/{}-{}.txt", tool.token(), dimension.token()),
+                )
+            };
+            legs.push(LegV1 {
+                id: format!("LEG-{n:02}"),
+                tool,
+                dimension,
+                status,
+                evidence,
+                blocker,
+            });
+        }
+    }
+
+    let set = ResultSetV1 {
+        protocol_sha256: protocol_sha256(&protocol_bytes),
+        scope: ScopeV1::ScriptedHarness,
+        measurements,
+        comparatives,
+        legs,
+    };
+    set.verify(&protocol_bytes)?;
+    std::fs::write(out, serde_json::to_string_pretty(&set)?)?;
+    Ok(format!(
+        "TRIALS_ASSEMBLE=OK measurements={} comparatives={} legs={} run={} out={}\n",
+        set.measurements.len(),
+        set.comparatives.len(),
+        set.legs.len(),
+        set.legs
+            .iter()
+            .filter(|l| matches!(l.status, LegStatusV1::Run))
+            .count(),
+        out.display()
+    ))
 }

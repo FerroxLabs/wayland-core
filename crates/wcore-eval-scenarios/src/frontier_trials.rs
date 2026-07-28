@@ -666,6 +666,54 @@ fn percentile(sorted: &[f64], q: f64) -> f64 {
     sorted[rank.min(sorted.len() - 1)]
 }
 
+/// 95% percentile bootstrap over the DIFFERENCE of two means (Wayland minus peer),
+/// seeded from the frozen protocol. The two samples are resampled independently from one
+/// deterministic stream, so a rerun reproduces the bound exactly.
+pub fn bootstrap_difference(
+    a: &[f64],
+    b: &[f64],
+    resamples: u32,
+    seed: u64,
+) -> Result<IntervalV1, FrontierTrialError> {
+    if a.is_empty() || b.is_empty() || resamples == 0 {
+        return Err(FrontierTrialError::EmptyBootstrap);
+    }
+    let first_a = a[0];
+    let first_b = b[0];
+    if a.iter().all(|s| *s == first_a) && b.iter().all(|s| *s == first_b) {
+        // Both legs are perfectly deterministic. A zero-width interval here is a real
+        // statement about the harness, not spurious precision, but it is labelled so a
+        // reader cannot mistake it for a tight estimate over noisy data.
+        let d = first_a - first_b;
+        return Ok(IntervalV1 {
+            lower: d,
+            upper: d,
+            method: IntervalMethodV1::ZeroEmpiricalVariance,
+            confidence: 0.95,
+        });
+    }
+    let mut rng = SplitMix64(seed);
+    let mut deltas = Vec::with_capacity(resamples as usize);
+    for _ in 0..resamples {
+        let mut sum_a = 0.0;
+        for _ in 0..a.len() {
+            sum_a += a[rng.next_index(a.len())];
+        }
+        let mut sum_b = 0.0;
+        for _ in 0..b.len() {
+            sum_b += b[rng.next_index(b.len())];
+        }
+        deltas.push(sum_a / a.len() as f64 - sum_b / b.len() as f64);
+    }
+    deltas.sort_by(|x, y| x.partial_cmp(y).expect("bootstrap deltas are finite"));
+    Ok(IntervalV1 {
+        lower: percentile(&deltas, 0.025),
+        upper: percentile(&deltas, 0.975),
+        method: IntervalMethodV1::PercentileBootstrap95,
+        confidence: 0.95,
+    })
+}
+
 /// The content address a result set is bound to.
 pub fn protocol_sha256(protocol: &[u8]) -> String {
     format!("{:x}", Sha256::digest(protocol))
