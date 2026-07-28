@@ -1111,6 +1111,67 @@ fn real_tool_names() -> BTreeSet<String> {
     out
 }
 
+/// Tool names a string tells the operator to reach for.
+///
+/// See the narrowness note on
+/// [`advertised_tool_names_resolve_to_a_real_tool`]; the shape of this pattern
+/// is a measurement, not a guess.
+fn advertised_tool_mentions(text: &str) -> Vec<String> {
+    let via = Regex::new(r"\bvia\s+`?([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`?").unwrap();
+    let ticked =
+        Regex::new(r"\b(?:use|using|run|invoke|call)\s+`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`").unwrap();
+    via.captures_iter(text)
+        .chain(ticked.captures_iter(text))
+        .map(|c| c[1].to_string())
+        .collect()
+}
+
+/// The extractor must read the phrasing that actually shipped, and must not
+/// read the phrasings that would flood it.
+///
+/// This control carries the anti-vacuity weight for the corpus sweep, because
+/// the corpus itself is now down to a single mention — this lane's own fix
+/// removed the other two. A regex that stops matching fails HERE, loudly,
+/// whatever the tree happens to contain.
+#[test]
+fn tool_mention_extraction_reads_the_phrasing_that_shipped() {
+    // Case 7's string, verbatim as it shipped.
+    let shipped = "tts: no TTS backend configured — set OPENAI_API_KEY or \
+                   ELEVENLABS_API_KEY (or download Piper voices via piper_download). \
+                   Tool hidden.";
+    assert_eq!(
+        advertised_tool_mentions(shipped),
+        vec!["piper_download".to_string()],
+        "the extractor no longer reads the phrasing this check was built for"
+    );
+    // ...and the name it advertises really is absent from the tool set, which is
+    // what made it a defect rather than a stylistic quibble.
+    assert!(
+        !real_tool_names().contains("piper_download"),
+        "`piper_download` resolves as a tool now. If a real tool by that name \
+         was added, delete this control deliberately -- do not leave it asserting \
+         something false."
+    );
+
+    // The rejected phrasings. Every one of these is a real string from this
+    // workspace that an earlier, broader pattern picked up as a "tool": 11 false
+    // positives to 1 true one. They must stay rejected.
+    for noise in [
+        "Retrying with a different finish_reason",
+        "pass the job_id you got from list",
+        "the access_token expired",
+        "use replace_all to change every occurrence",
+        "Use the `mcp_echo` tool to echo back this exact string",
+    ] {
+        assert!(
+            advertised_tool_mentions(noise).is_empty(),
+            "extractor widened and now reads struct fields as tools: {noise:?} -> \
+             {:?}",
+            advertised_tool_mentions(noise)
+        );
+    }
+}
+
 /// A remediation that tells an operator to reach for a TOOL must name a tool
 /// that exists.
 ///
@@ -1160,10 +1221,6 @@ fn advertised_tool_names_resolve_to_a_real_tool() {
         tools.len()
     );
 
-    let via = Regex::new(r"\bvia\s+`?([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`?").unwrap();
-    let ticked =
-        Regex::new(r"\b(?:use|using|run|invoke|call)\s+`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`").unwrap();
-
     let root = workspace_root();
     let mut checked = 0usize;
     let mut resolved = 0usize;
@@ -1180,8 +1237,7 @@ fn advertised_tool_names_resolve_to_a_real_tool() {
             .to_string_lossy()
             .to_string();
         for (line, text) in string_literals(&src) {
-            for cap in via.captures_iter(&text).chain(ticked.captures_iter(&text)) {
-                let name = cap[1].to_string();
+            for name in advertised_tool_mentions(&text) {
                 checked += 1;
                 if tools.contains(&name) {
                     resolved += 1;
@@ -1197,10 +1253,25 @@ fn advertised_tool_names_resolve_to_a_real_tool() {
     }
 
     eprintln!("remedy-gate: {checked} advertised tool names, {resolved} resolved");
+
+    // Anti-vacuity, in two parts.
+    //
+    // The corpus floor is 1, not a larger number, and deliberately so: this
+    // lane's own fix removed two of the three `via <tool>` mentions that existed
+    // when the pattern was calibrated. Raising a floor above what the corpus can
+    // supply would make the gate red for a reason unconnected to any defect --
+    // and lowering a floor to reach green is exactly the move this program has
+    // been burned by, so the weight is moved rather than removed.
+    //
+    // It moves onto `tool_mention_extraction_reads_the_phrasing_that_shipped`,
+    // which pins the extractor against literal known input. The corpus count can
+    // now fall to 1 without the check becoming meaningless, because a broken
+    // regex fails that control regardless of what the tree happens to contain.
     assert!(
-        checked >= 2,
-        "only {checked} advertised tool name(s) extracted -- the pattern is broken \
-         and this check is vacuous. Fix the extraction, do NOT lower this floor."
+        checked >= 1,
+        "no advertised tool name was extracted from the whole workspace. Either \
+         the pattern broke or the phrasing vanished entirely; check \
+         tool_mention_extraction_reads_the_phrasing_that_shipped first."
     );
     // The resolution side must be exercised too. A run where NOTHING resolves
     // would mean `real_tool_names()` is returning junk, and every report below
