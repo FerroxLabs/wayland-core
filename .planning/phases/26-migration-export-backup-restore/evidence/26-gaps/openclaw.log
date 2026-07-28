@@ -1,0 +1,54 @@
+PEER: openclaw
+TRIALS: 21
+ITEMS: 440
+KILL-ENABLED: yes
+BINARY: target/release/wayland-core
+BUILD-INFO: wayland-core 0.12.25 (source c23a08b9d990a729005792f871eeab323a1543d6)
+SENTINEL-DIGEST-PRE: 080403a916669851499985ac962320f9731d54ba627ce23d5414e8efc6f880d4
+CORPUS-MCP_SERVERS: 440
+CORPUS-PROVIDERS: 2
+CORPUS-KIND: openclaw
+CORPUS-ROOT: /tmp/tmp.NHCRRMiryS/peer-home
+REFERENCE-RC: 0
+REFERENCE-DURATION-MS: 270
+REFERENCE-FINGERPRINT: 1b228157a3048cd4e9e5bc0d99ef75b942e18fc57eb0b858c4bbbb5e8546a07d
+REFERENCE-ENTRIES: 440
+REFERENCE-PROFILES: 3
+REFERENCE-PAYLOAD-FILES: 440
+DETERMINISM-CONTROL: pass
+SENSITIVITY-CONTROL: pass (profile-drop, payload-byte, index-entry all detected)
+TRIAL-TABLE: trial delay_ms class index entries payloads orphans cfg redrive_rc recovered
+TRIAL: 1 12 pre absent 0 0 0 0 0 yes
+TRIAL: 2 24 pre absent 0 0 0 0 0 yes
+TRIAL: 3 36 mid ok 25 26 1 0 0 yes
+TRIAL: 4 49 mid corrupt 0 87 87 0 0 no
+TRIAL: 5 61 mid ok 131 131 0 0 0 yes
+TRIAL: 6 73 mid ok 162 163 1 0 0 yes
+TRIAL: 7 85 mid ok 195 195 0 0 0 yes
+TRIAL: 8 98 mid ok 220 220 0 0 0 yes
+TRIAL: 9 110 mid ok 247 247 0 0 0 yes
+TRIAL: 10 122 mid ok 265 265 0 0 0 yes
+TRIAL: 11 135 mid ok 288 288 0 0 0 yes
+TRIAL: 12 147 mid ok 310 311 1 0 0 yes
+TRIAL: 13 159 mid ok 332 333 1 0 0 yes
+TRIAL: 14 171 mid ok 347 347 0 0 0 yes
+TRIAL: 15 184 mid corrupt 0 365 365 0 0 no
+TRIAL: 16 196 mid corrupt 0 379 379 0 0 no
+TRIAL: 17 208 mid ok 392 392 0 0 0 yes
+TRIAL: 18 220 mid ok 415 415 0 0 0 yes
+TRIAL: 19 233 mid corrupt 0 425 425 0 0 no
+TRIAL: 20 245 mid ok 440 440 0 0 0 yes
+TRIAL: 21 257 post ok 440 440 0 3 0 yes
+SENTINEL-DIGEST-POST: 080403a916669851499985ac962320f9731d54ba627ce23d5414e8efc6f880d4
+SENTINEL-UNCHANGED: yes
+CLASS-PRE: 2
+CLASS-MID: 18
+CLASS-POST: 1
+RECOVERED: 17
+NOT-RECOVERED: 4
+REDRIVE-NONZERO: 0
+CORRUPT-INDEX-TRIALS: 4
+EMPTY-INDEX-TRIALS: 0
+ORPHAN-PAYLOAD-TRIALS: 8
+PROOF-FAIL: 4 trial(s) did not return to the reference state after re-driving the product
+PROOF: FAIL peer=openclaw trials=21 mid=18 recovered=17 not_recovered=4
