@@ -164,7 +164,7 @@ All on `hetzner-dsm`, isolated per crate.
 | suite | result |
 |---|---|
 | `cargo test -p wcore-cron` | **108 passed, 0 failed** (73 unit + 11 `event_producer` + 3 + 8 + 13) |
-| `cargo test -p wcore-gateway` | **63 passed, 0 failed** (34 + 7 + 9 + 8 + 5, 1 pre-existing `live_bundle_canary` ignored at base) |
+| `cargo test -p wcore-gateway` | **62 passed, 0 failed** (1 pre-existing `live_bundle_canary` ignored at base — it needs a bundle from a running gateway) |
 | `cargo test -p wcore-cli` | **2280 passed, 0 failed** |
 | `cargo clippy -p wcore-cron -p wcore-gateway --all-targets` | clean, no warnings |
 
