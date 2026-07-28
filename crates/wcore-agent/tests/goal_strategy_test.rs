@@ -29,7 +29,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use wcore_agent::goal::strategy::{
-    DirectOutcome, GoalLoop, GoalLoopError, StrategyTermination, strategy_tag_name,
+    DirectOutcome, FleetOutcome, GoalLoop, GoalLoopError, StrategyTermination, strategy_tag_name,
 };
 use wcore_agent::goal::{GoalKernel, GoalLifecycle};
 use wcore_agent::orchestration::anvil::TerminalState;
@@ -188,7 +188,7 @@ async fn each_of_the_five_strategies_produces_exactly_one_canonical_transition()
                     .run_fleet(&id, |owner| async move {
                         StrategyTermination::from_fleet(
                             owner,
-                            Err(&FleetError::Timeout(Duration::from_secs(1))),
+                            FleetOutcome::Failed(&FleetError::Timeout(Duration::from_secs(1))),
                         )
                     })
                     .await
@@ -615,7 +615,7 @@ async fn a_fleet_run_is_bound_at_shard_summary_and_keeps_the_success_failure_spl
     let shards = vec![shard(50, 2), shard(47, 1)];
     driver
         .run_fleet(&id, |owner| async move {
-            StrategyTermination::from_fleet(owner, Ok(&shards))
+            StrategyTermination::from_fleet(owner, FleetOutcome::Dispatched(&shards))
         })
         .await
         .expect("fleet terminates");

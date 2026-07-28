@@ -227,6 +227,23 @@ pub enum DirectOutcome<'a> {
     Failed(&'a AgentError),
 }
 
+/// What a Fleet dispatch produced.
+///
+/// Modelled like [`DirectOutcome`] rather than as a bare `Result` because the
+/// Goal's fleet driver can fail in a way `FleetError` cannot express — a claim
+/// refusal, a ledger fence, an aborted wave. Squeezing that into
+/// `FleetError::Timeout` to satisfy a signature would be a fabricated terminal,
+/// so it gets its own carrier and lands in `Blocked` with a stated reason.
+#[derive(Debug)]
+pub enum FleetOutcome<'a> {
+    /// Shards came back. Bound at [`ShardSummary`] — see [`StrategyTermination::from_fleet`].
+    Dispatched(&'a [ShardSummary]),
+    /// The dispatcher itself failed.
+    Failed(&'a FleetError),
+    /// The Goal's fleet driver failed around dispatch, for a stated reason.
+    DriverFailed { detail: String },
+}
+
 impl StrategyTermination {
     /// Adapt a Direct run.
     ///
@@ -325,19 +342,17 @@ impl StrategyTermination {
     /// when `failed == 0`. 97-of-100 is neither success nor failure, and Fleet's
     /// "verification owner" is a count of `succeeded` booleans — nothing checked
     /// whether the work was right — so no evidence-bearing category is honest.
-    pub fn from_fleet(
-        owner: LoopOwner<FleetTag>,
-        result: Result<&[ShardSummary], &FleetError>,
-    ) -> Self {
-        let terminal = match result {
-            Ok(shards) => GoalTerminalState::PartiallyCompleted {
+    pub fn from_fleet(owner: LoopOwner<FleetTag>, outcome: FleetOutcome<'_>) -> Self {
+        let terminal = match outcome {
+            FleetOutcome::Dispatched(shards) => GoalTerminalState::PartiallyCompleted {
                 completed: shards.iter().map(|s| s.successes as u64).sum(),
                 failed: shards.iter().map(|s| s.failures as u64).sum(),
             },
-            Err(FleetError::Timeout(_)) => GoalTerminalState::TimedOut,
-            Err(other) => GoalTerminalState::Blocked {
+            FleetOutcome::Failed(FleetError::Timeout(_)) => GoalTerminalState::TimedOut,
+            FleetOutcome::Failed(other) => GoalTerminalState::Blocked {
                 reason: other.to_string(),
             },
+            FleetOutcome::DriverFailed { detail } => GoalTerminalState::Blocked { reason: detail },
         };
         owner.terminate(terminal)
     }

@@ -43,10 +43,11 @@ use std::time::Duration;
 use clap::{Args, Subcommand};
 
 use wcore_agent::goal::{
-    GoalFleetDriver, TaskAssignment, TaskExecution, TaskExecutor, WaveOutcome,
+    FleetOutcome, GoalFleetDriver, GoalKernel, GoalLoop, StrategyTermination, TaskAssignment,
+    TaskExecution, TaskExecutor, WaveOutcome,
 };
 use wcore_agent::session_journal::SessionJournal;
-use wcore_swarm::fleet::FleetDispatcher;
+use wcore_swarm::fleet::{FleetDispatcher, ShardSummary};
 use wcore_types::goal::{
     GoalAuthorityRequest, GoalId, GoalStrategy, GoalTerminalState, LoopPolicy, TaskId,
     TaskUnknownReason, resolve_goal_authority,
@@ -155,6 +156,17 @@ pub enum GoalCommand {
         /// Recover and report, then stop without dispatching anything.
         #[arg(long)]
         recover_only: bool,
+        /// Terminate the Goal through the ONE canonical Goal terminal
+        /// transition when the run finishes (F22C, Success Criterion 3).
+        ///
+        /// Opt-in, and deliberately so. `goal run` is the verb 22-03's
+        /// kill/restart proof re-enters after killing the parent, and a run that
+        /// terminated the Goal every time would make that restart impossible.
+        /// With this flag the run claims the Goal's ONE loop owner before
+        /// dispatching and terminates through `StrategyTermination::from_fleet`
+        /// afterwards; without it the Goal stays live exactly as before.
+        #[arg(long)]
+        terminate: bool,
     },
     /// The canonical JSON projection of a Goal and its task ledger.
     Status {
@@ -227,6 +239,7 @@ pub async fn run(args: GoalArgs) -> anyhow::Result<()> {
             shard_timeout,
             parent_envelope,
             recover_only,
+            terminate,
         } => {
             run_goal(RunOptions {
                 journal,
@@ -242,6 +255,7 @@ pub async fn run(args: GoalArgs) -> anyhow::Result<()> {
                 })?,
                 parent_envelope,
                 recover_only,
+                terminate,
             })
             .await
         }
@@ -365,6 +379,7 @@ struct RunOptions {
     shard_timeout: Duration,
     parent_envelope: String,
     recover_only: bool,
+    terminate: bool,
 }
 
 async fn run_goal(options: RunOptions) -> anyhow::Result<()> {
@@ -423,6 +438,86 @@ async fn run_goal(options: RunOptions) -> anyhow::Result<()> {
     let executor: Arc<dyn TaskExecutor> = Arc::new(ChildProcessExecutor { effects_dir, argv });
 
     let lease_ms = u64::try_from(options.lease.as_millis()).unwrap_or(u64::MAX);
+
+    // ── F22C: the canonical terminal transition, when asked for ─────────────
+    //
+    // Without `--terminate` this is byte-for-byte the pre-F22C path: dispatch,
+    // print, leave the Goal live for the next restart. With it, the whole
+    // dispatch runs INSIDE `GoalLoop::run_fleet`, which claims the Goal's one
+    // loop owner before the first wave and terminates through
+    // `StrategyTermination::from_fleet` after the last. The closure's return
+    // type is `StrategyTermination`, so there is no path out of it that reaches
+    // a terminal state any other way.
+    if options.terminate {
+        let goal_id = GoalId::new(&options.goal);
+        let loop_driver = GoalLoop::new(GoalKernel::new(open_journal(&options.journal)?));
+
+        let cursor = loop_driver
+            .run_fleet(&goal_id, |owner| async move {
+                match driver
+                    .run_to_completion(&dispatcher, executor, options.width, lease_ms, &now_unix_ms)
+                    .await
+                {
+                    Ok(run) => {
+                        for (index, wave) in run.waves.iter().enumerate() {
+                            print_wave(index, wave);
+                        }
+                        println!(
+                            "GOAL: run_complete waves={} iterations={} completed={} \
+                             delivered={} stopped_because={}",
+                            run.waves.len(),
+                            run.iterations_consumed,
+                            run.completed(),
+                            run.delivered(),
+                            run.stopped_because
+                        );
+                        // Bound at shard level, never at a caller-chosen `T`:
+                        // one `ShardSummary` per wave, carrying the
+                        // completed/failed counts the driver itself measured.
+                        // Nothing here invents a number or rounds the split away.
+                        let shards: Vec<ShardSummary> = run
+                            .waves
+                            .iter()
+                            .enumerate()
+                            .map(|(index, wave)| ShardSummary {
+                                shard_id: index,
+                                agent_count: wave.claimed,
+                                successes: wave.completed,
+                                failures: wave.failed,
+                                payload: serde_json::Value::Null,
+                            })
+                            .collect();
+                        StrategyTermination::from_fleet(owner, FleetOutcome::Dispatched(&shards))
+                    }
+                    // Carried into the terminal transition as a stated reason,
+                    // never swallowed into a clean terminal and never squeezed
+                    // into a `FleetError` variant that did not happen.
+                    Err(error) => StrategyTermination::from_fleet(
+                        owner,
+                        FleetOutcome::DriverFailed {
+                            detail: error.to_string(),
+                        },
+                    ),
+                }
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("goal {} did not terminate: {e}", options.goal))?;
+
+        let terminal = open_journal(&options.journal)
+            .ok()
+            .map(GoalKernel::new)
+            .and_then(|kernel| kernel.goal(&goal_id).ok().flatten())
+            .map_or_else(
+                || "unknown".to_owned(),
+                |state| format!("{:?}", state.lifecycle),
+            );
+        println!(
+            "GOAL: canonical_transition strategy=fleet terminal={terminal} cursor_seq={:?}",
+            cursor.journal_sequence
+        );
+        return Ok(());
+    }
+
     let run = driver
         .run_to_completion(&dispatcher, executor, options.width, lease_ms, &now_unix_ms)
         .await

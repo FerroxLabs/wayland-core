@@ -36,8 +36,8 @@ pub use kernel::{GoalKernel, GoalRecovery};
 pub use ledger::{ClaimOutcome, GoalLedger, TaskAuthority};
 pub use record::{AuthorityUnreconstructable, GoalAuthorityRecord};
 pub use strategy::{
-    AnvilTag, CouncilTag, DirectOutcome, DirectTag, FleetTag, ForgeFlowsTag, GoalLoop,
-    GoalLoopError, LoopOwner, StrategyTag, StrategyTermination,
+    AnvilTag, CouncilTag, DirectOutcome, DirectTag, FleetOutcome, FleetTag, ForgeFlowsTag,
+    GoalLoop, GoalLoopError, LoopOwner, StrategyTag, StrategyTermination,
 };
 
 // Re-exported so callers work in one vocabulary: the durable projection and the
