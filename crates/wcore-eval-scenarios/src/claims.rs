@@ -262,18 +262,65 @@ pub enum ClaimEvidenceRefV1 {
         legs_tsv: String,
         scope: ScopeV1,
     },
+    /// A CTRL-01 evidence ID, resolved against 30-01's OWN resolution table rather than
+    /// against the ledger sentence that cites it.
+    ///
+    /// 30-01 filed a HIGH finding that `PEER-PROBE-2026-07-26` names no openable artifact
+    /// while carrying half the Delta column in six families, and concluded: *"Any 30-03
+    /// claim resting on a peer comparison inherits it."* That finding is made MECHANICAL
+    /// here instead of advisory — a claim citing an ID 30-01 recorded `UNRESOLVED` is
+    /// refused, exactly as a claim resting on an `UNPROVEN` leg is refused, and for the
+    /// same reason: the citation cannot be checked by a reader.
+    LedgerEvidenceId {
+        id: String,
+        evidence_id: String,
+        resolution_tsv: String,
+        scope: ScopeV1,
+    },
+}
+
+/// A leg whose measurement is subject to a recorded INSTRUMENT defect.
+///
+/// 30-02 found, by running its own frozen protocol, that the canonical script emits a tool
+/// call named `write_file` — a name only Hermes exposes — and that **OpenClaw also scored
+/// 0/30 on the identical script**. Two of three harnesses failing one script is evidence
+/// about the script's dialect, not about two products.
+///
+/// A leg like that is not UNPROVEN: it ran, and its number is real. But the number does not
+/// measure what the dimension is named after, so a DIRECTIONAL claim built on it would be
+/// the single most misleading sentence this phase could publish. It is refused mechanically
+/// rather than left to an author's restraint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfoundV1 {
+    pub leg: String,
+    pub defect: String,
+    pub evidence: String,
+    pub substitution_point: String,
 }
 
 impl ClaimEvidenceRefV1 {
     pub fn id(&self) -> &str {
         match self {
-            Self::Path { id, .. } | Self::TrialLeg { id, .. } => id,
+            Self::Path { id, .. }
+            | Self::TrialLeg { id, .. }
+            | Self::LedgerEvidenceId { id, .. } => id,
         }
     }
 
     pub fn scope(&self) -> ScopeV1 {
         match self {
-            Self::Path { scope, .. } | Self::TrialLeg { scope, .. } => *scope,
+            Self::Path { scope, .. }
+            | Self::TrialLeg { scope, .. }
+            | Self::LedgerEvidenceId { scope, .. } => *scope,
+        }
+    }
+
+    /// The leg this reference names, if it names one. Used by the confound rule.
+    pub fn leg(&self) -> Option<&str> {
+        match self {
+            Self::TrialLeg { leg, .. } => Some(leg),
+            _ => None,
         }
     }
 
@@ -282,6 +329,11 @@ impl ClaimEvidenceRefV1 {
         match self {
             Self::Path { path, .. } => path.clone(),
             Self::TrialLeg { leg, legs_tsv, .. } => format!("{leg} in {legs_tsv}"),
+            Self::LedgerEvidenceId {
+                evidence_id,
+                resolution_tsv,
+                ..
+            } => format!("{evidence_id} in {resolution_tsv}"),
         }
     }
 }
@@ -307,6 +359,28 @@ pub enum ClaimRefusal {
         claim: String,
         leg: String,
         blocker: String,
+    },
+
+    #[error(
+        "claim `{claim}` cites CTRL-01 evidence ID `{evidence_id}`, which 30-01 recorded \
+         `{outcome}`: {detail}"
+    )]
+    EvidenceIdUnresolved {
+        claim: String,
+        evidence_id: String,
+        outcome: String,
+        detail: String,
+    },
+
+    #[error(
+        "claim `{claim}` compares ({why}) on `{leg}`, whose measurement 30-02 recorded as \
+         confounded by an instrument defect: {defect}"
+    )]
+    ConfoundedLegSupportsNoComparison {
+        claim: String,
+        why: String,
+        leg: String,
+        defect: String,
     },
 
     #[error("comparative claim `{claim}` names no pinned peer baseline")]
@@ -379,6 +453,10 @@ impl ClaimRefusal {
             Self::NoEvidenceReference { .. } => "no_evidence_reference",
             Self::EvidenceDoesNotResolve { .. } => "evidence_does_not_resolve",
             Self::EvidenceLegUnproven { .. } => "evidence_leg_unproven",
+            Self::EvidenceIdUnresolved { .. } => "evidence_id_unresolved",
+            Self::ConfoundedLegSupportsNoComparison { .. } => {
+                "confounded_leg_supports_no_comparison"
+            }
             Self::ComparativeWithoutPinnedBaseline { .. } => "comparative_without_pinned_baseline",
             Self::ComparativeWithoutInterval { .. } => "comparative_without_interval",
             Self::DirectionalOnIntervalContainingZero { .. } => {
@@ -404,6 +482,16 @@ impl ClaimRefusal {
                 format!("a resolving reference (`{reference}` does not exist)")
             }
             Self::EvidenceLegUnproven { leg, .. } => format!("a RUN leg (`{leg}` is UNPROVEN)"),
+            Self::EvidenceIdUnresolved {
+                evidence_id,
+                outcome,
+                ..
+            } => format!("a resolvable citation (`{evidence_id}` is {outcome})"),
+            Self::ConfoundedLegSupportsNoComparison { leg, .. } => {
+                format!(
+                    "an unconfounded measurement (`{leg}` carries a recorded instrument defect)"
+                )
+            }
             Self::ComparativeWithoutPinnedBaseline { .. } => "a pinned peer baseline token".into(),
             Self::ComparativeWithoutInterval { .. } => "a real confidence interval".into(),
             Self::DirectionalOnIntervalContainingZero { lower, upper, .. } => {
@@ -471,6 +559,17 @@ impl ClaimV1 {
     /// fundamental one — a reader learns "it points at nothing" before "and also its
     /// scope is wrong".
     pub fn verify(&self, repo_root: &Path, tie_band: f64) -> Result<(), ClaimRefusal> {
+        self.verify_with_confounds(repo_root, tie_band, &[])
+    }
+
+    /// As [`ClaimV1::verify`], plus the recorded-confound rule. The register always calls
+    /// this form; the two-argument form exists for corpus cases that declare no confounds.
+    pub fn verify_with_confounds(
+        &self,
+        repo_root: &Path,
+        tie_band: f64,
+        confounds: &[ConfoundV1],
+    ) -> Result<(), ClaimRefusal> {
         // 1. A claim with no evidence reference is refused, whatever its class.
         if self.evidence.is_empty() {
             return Err(ClaimRefusal::NoEvidenceReference {
@@ -508,6 +607,41 @@ impl ClaimV1 {
             return Err(ClaimRefusal::LimitationWithoutSubstitutionPoint {
                 claim: self.id.clone(),
             });
+        }
+
+        // 6. A COMPARISON resting on a leg with a RECORDED INSTRUMENT DEFECT is refused.
+        //    The leg is not UNPROVEN — it ran and its number is real — but the number does
+        //    not measure the thing its dimension is named after.
+        //
+        //    This covers EQUIVALENCE as well as direction, and deliberately so: on this
+        //    phase's data an equivalence claim is the more dangerous of the two. All three
+        //    tools spent an identical 20.00 cost units, but two of them completed 0/30 of
+        //    the task, so "cost is indistinguishable" would read as a positive finding
+        //    while actually describing equal spend for unequal work.
+        //
+        //    A FACTUAL, non-directional statement ABOUT the measurement — "two of the three
+        //    harnesses scored 0/30 on the identical script" — stays publishable, because it
+        //    describes what was observed rather than comparing the products.
+        if !confounds.is_empty() {
+            let why = if self.class == ClaimClassV1::Comparative {
+                Some("declared comparative".to_string())
+            } else {
+                lexicon_hit(&self.text, DIRECTIONAL_LEXICON).map(|t| format!("directional `{t}`"))
+            };
+            if let Some(why) = why {
+                for r in &self.evidence {
+                    if let Some(leg) = r.leg()
+                        && let Some(c) = confounds.iter().find(|c| c.leg == leg)
+                    {
+                        return Err(ClaimRefusal::ConfoundedLegSupportsNoComparison {
+                            claim: self.id.clone(),
+                            why,
+                            leg: leg.to_string(),
+                            defect: c.defect.clone(),
+                        });
+                    }
+                }
+            }
         }
 
         if self.class == ClaimClassV1::Comparative {
@@ -662,6 +796,45 @@ impl ClaimV1 {
                 }
                 Ok(())
             }
+            ClaimEvidenceRefV1::LedgerEvidenceId {
+                evidence_id,
+                resolution_tsv,
+                ..
+            } => {
+                let full = repo_root.join(resolution_tsv);
+                let body = std::fs::read_to_string(&full).map_err(|e| {
+                    ClaimRefusal::EvidenceDoesNotResolve {
+                        claim: self.id.clone(),
+                        reference: resolution_tsv.clone(),
+                        detail: format!("cannot read {}: {e}", full.display()),
+                    }
+                })?;
+                let row = body
+                    .lines()
+                    .find(|l| l.split('\t').next().map(str::trim) == Some(evidence_id.as_str()))
+                    .ok_or_else(|| ClaimRefusal::EvidenceDoesNotResolve {
+                        claim: self.id.clone(),
+                        reference: format!("{evidence_id} in {resolution_tsv}"),
+                        detail: "30-01 recorded no determination for this evidence ID".into(),
+                    })?;
+                let fields: Vec<&str> = row.split('\t').collect();
+                let outcome = fields.get(1).copied().unwrap_or("").trim();
+                match outcome {
+                    // PARTIAL means the artifact is real and only the citation is
+                    // imprecise, so it still supports a claim.
+                    "CONFIRMED" | "PARTIAL" => Ok(()),
+                    other => Err(ClaimRefusal::EvidenceIdUnresolved {
+                        claim: self.id.clone(),
+                        evidence_id: evidence_id.clone(),
+                        outcome: other.to_string(),
+                        detail: fields
+                            .get(2)
+                            .copied()
+                            .unwrap_or("no capture recorded")
+                            .to_string(),
+                    }),
+                }
+            }
         }
     }
 
@@ -700,6 +873,11 @@ pub struct ClaimRegisterV1 {
     /// be refused; one that verifies is itself an error, because it belongs in `claims`.
     #[serde(default)]
     pub attempted: Vec<ClaimV1>,
+    /// Legs whose measurement carries a recorded instrument defect. Declared in the
+    /// register — and therefore digest-bound and published — rather than hidden in code,
+    /// so a reader can check each one against 30-02's own findings.
+    #[serde(default)]
+    pub confounded_legs: Vec<ConfoundV1>,
 }
 
 /// One refused claim, as rendered into the prohibited document.
@@ -713,10 +891,12 @@ impl ClaimRegisterV1 {
     /// Publication calls this first and does nothing at all if it fails.
     pub fn verify(&self, repo_root: &Path) -> Result<(), ClaimRefusal> {
         for c in &self.claims {
-            c.verify(repo_root, self.tie_band)?;
+            c.verify_with_confounds(repo_root, self.tie_band, &self.confounded_legs)?;
         }
         for c in &self.attempted {
-            if c.verify(repo_root, self.tie_band).is_ok() {
+            if c.verify_with_confounds(repo_root, self.tie_band, &self.confounded_legs)
+                .is_ok()
+            {
                 return Err(ClaimRefusal::AttemptedClaimUnexpectedlyVerifies {
                     claim: c.id.clone(),
                 });
@@ -732,7 +912,7 @@ impl ClaimRegisterV1 {
             .attempted
             .iter()
             .filter_map(|c| {
-                c.verify(repo_root, self.tie_band)
+                c.verify_with_confounds(repo_root, self.tie_band, &self.confounded_legs)
                     .err()
                     .map(|refusal| RefusedClaim { claim: c, refusal })
             })
@@ -869,6 +1049,30 @@ impl ClaimRegisterV1 {
                 "| substitution point | {} |\n",
                 c.substitution_point.as_deref().unwrap_or("—")
             );
+        }
+        if !self.confounded_legs.is_empty() {
+            let _ = writeln!(s, "## Confounded legs — measured, but not measuring\n");
+            let _ = writeln!(
+                s,
+                "These legs RAN and their numbers are real. They are recorded here because \
+                 the number does not measure the thing its dimension is named after, so no \
+                 directional claim may rest on one — the checker refuses it by rule \
+                 `directional_claim_on_confounded_leg`. This is a stronger statement than \
+                 UNPROVEN: an unproven leg produced nothing, whereas a confounded leg \
+                 produced something that would be READ WRONGLY.\n"
+            );
+            let _ = writeln!(s, "| leg | defect | evidence | substitution point |");
+            let _ = writeln!(s, "|---|---|---|---|");
+            let mut cs: Vec<&ConfoundV1> = self.confounded_legs.iter().collect();
+            cs.sort_by(|a, b| a.leg.cmp(&b.leg));
+            for c in cs {
+                let _ = writeln!(
+                    s,
+                    "| `{}` | {} | {} | {} |",
+                    c.leg, c.defect, c.evidence, c.substitution_point
+                );
+            }
+            let _ = writeln!(s);
         }
         s
     }

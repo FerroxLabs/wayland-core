@@ -1,0 +1,813 @@
+{
+  "schema": "wayland.eval.claims",
+  "schema_version": 1,
+  "tie_band": 0.05,
+  "confounded_legs": [
+    {
+      "leg": "LEG-01",
+      "defect": "The single canonical script emits a tool call named `write_file`, a name only Hermes exposes; Wayland's equivalent is named `Write`. OpenClaw scored 0/30 on the identical script, so two of three harnesses failed it.",
+      "evidence": ".planning/phases/30-continuous-scorecard-frontier-review/30-02-TRIAL-RESULTS.md",
+      "substitution_point": "Per-tool dialect compilation of the canonical script (prescribed by panel member codex and not adopted by the frozen protocol), then a re-run under an amended and re-pre-registered protocol."
+    },
+    {
+      "leg": "LEG-02",
+      "defect": "Same canonical-script dialect defect as LEG-01: recovery was scored from the same `write_file` script that two of three harnesses could not execute.",
+      "evidence": ".planning/phases/30-continuous-scorecard-frontier-review/30-02-TRIAL-RESULTS.md",
+      "substitution_point": "Per-tool dialect compilation, then a re-run under an amended and re-pre-registered protocol."
+    },
+    {
+      "leg": "LEG-04",
+      "defect": "Cost was metered against a script two of the three tools could not complete. All three spent an identical 20.00 units, so equal spend here represents unequal work and does not support a cost comparison.",
+      "evidence": ".planning/phases/30-continuous-scorecard-frontier-review/30-02-TRIAL-RESULTS.md",
+      "substitution_point": "A cost measurement taken over a task all three tools actually complete, so that spend is comparable per unit of work delivered."
+    },
+    {
+      "leg": "LEG-06",
+      "defect": "Hermes' 30/30 was scored on a script written in Hermes' own tool dialect, which is the confound rather than a Hermes defect.",
+      "evidence": ".planning/phases/30-continuous-scorecard-frontier-review/30-02-TRIAL-RESULTS.md",
+      "substitution_point": "Per-tool dialect compilation, then a re-run under an amended and re-pre-registered protocol."
+    },
+    {
+      "leg": "LEG-07",
+      "defect": "Same dialect confound as LEG-06, on the recovery dimension.",
+      "evidence": ".planning/phases/30-continuous-scorecard-frontier-review/30-02-TRIAL-RESULTS.md",
+      "substitution_point": "Per-tool dialect compilation, then a re-run under an amended and re-pre-registered protocol."
+    },
+    {
+      "leg": "LEG-09",
+      "defect": "Cost metered against a script only this tool could complete; equal spend represents unequal work.",
+      "evidence": ".planning/phases/30-continuous-scorecard-frontier-review/30-02-TRIAL-RESULTS.md",
+      "substitution_point": "A cost measurement over a task all three tools complete."
+    },
+    {
+      "leg": "LEG-11",
+      "defect": "OpenClaw scored 0/30 on the same `write_file` script. Two of three harnesses failing one script is evidence about the script's dialect, not about two products.",
+      "evidence": ".planning/phases/30-continuous-scorecard-frontier-review/30-02-TRIAL-RESULTS.md",
+      "substitution_point": "Per-tool dialect compilation, then a re-run under an amended and re-pre-registered protocol."
+    },
+    {
+      "leg": "LEG-12",
+      "defect": "Same dialect confound as LEG-11, on the recovery dimension.",
+      "evidence": ".planning/phases/30-continuous-scorecard-frontier-review/30-02-TRIAL-RESULTS.md",
+      "substitution_point": "Per-tool dialect compilation, then a re-run under an amended and re-pre-registered protocol."
+    },
+    {
+      "leg": "LEG-14",
+      "defect": "Cost metered against a script this tool could not complete; equal spend represents unequal work.",
+      "evidence": ".planning/phases/30-continuous-scorecard-frontier-review/30-02-TRIAL-RESULTS.md",
+      "substitution_point": "A cost measurement over a task all three tools complete."
+    }
+  ],
+  "claims": [
+    {
+      "id": "ALW-01",
+      "class": "factual",
+      "text": "30-02's comparative protocol was content-addressed and committed before any measurement of any kind existed: the pre-registration commit a7bd5d87 contains no measurement, the results commit abf652af is a distinct later commit, and git merge-base --is-ancestor confirms the ordering.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "PROTOCOL-DIGEST",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-02/protocol.sha256",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "ordering_is_a_history_fact_not_a_sampled_measurement"
+      }
+    },
+    {
+      "id": "ALW-02",
+      "class": "factual",
+      "text": "Both pinned peer baselines re-resolve exactly under an independent read: Hermes at dbe734be reports version 0.17.0 and OpenClaw at 11a0ad10 reports 2026.6.2, matching what CTRL-01 records, with no write verb used in either reference tree.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "PEER-BASELINES",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-01/peer-baselines.txt",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "pin_resolution_is_exact_not_estimated"
+      }
+    },
+    {
+      "id": "ALW-03",
+      "class": "factual",
+      "text": "All three tools were provisioned at their own pinned commits from their own committed lockfiles. No HEAD snapshot, no registry build and no substitute version was used for any of them.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "PEER-CLONES",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-02/peer-clones.txt",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "provisioning_is_a_recorded_procedure_not_a_measurement"
+      }
+    },
+    {
+      "id": "ALW-04",
+      "class": "factual",
+      "text": "30-02's trial accounting is complete and closed: fifteen legs, nine recorded RUN and six recorded UNPROVEN, with every leg naming a capture file that exists. No leg is absent and none is recorded as skipped.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "LEG-ACCOUNTING",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-02/legs.tsv",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "an_accounting_count_is_a_census"
+      }
+    },
+    {
+      "id": "ALW-05",
+      "class": "factual",
+      "text": "CTRL-01's ten coverage families each satisfy all seven of its own declared required clauses, with zero clause defects, zero undeclared evidence IDs and zero unpinned peer baselines.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "FAMILY-CLAUSES",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-01/family-clause-check.txt",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "a_clause_check_is_a_census"
+      }
+    },
+    {
+      "id": "ALW-06",
+      "class": "factual",
+      "text": "Thirty-nine of CTRL-01's forty-two declared evidence IDs resolve to concrete objects; one is PARTIAL because its citation omits a directory, and two do not resolve at all.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "ID-RESOLUTION",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-01/evidence-id-resolution.tsv",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "a_resolution_count_is_a_census"
+      }
+    },
+    {
+      "id": "ALW-07",
+      "class": "factual",
+      "text": "Thirteen claims the tracking documents make are falsified by the tree, and every one of the thirteen understates what has landed. Two deliberate control claims were re-checked in the same run and both correctly held.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "STALENESS",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-01/staleness-check.txt",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "a_falsification_count_is_a_census"
+      }
+    },
+    {
+      "id": "ALW-08",
+      "class": "factual",
+      "text": "Two of the three harnesses scored zero of thirty on the identical canonical script, which emits a tool call named write_file. That is a property of the script that was run, and it is recorded here because it is what the correctness and recovery numbers actually reflect.",
+      "scope": "SCRIPTED_HARNESS",
+      "evidence": [
+        {
+          "kind": "trial_leg",
+          "id": "WAYLAND-CORRECTNESS",
+          "leg": "LEG-01",
+          "legs_tsv": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-02/legs.tsv",
+          "scope": "SCRIPTED_HARNESS"
+        },
+        {
+          "kind": "trial_leg",
+          "id": "OPENCLAW-CORRECTNESS",
+          "leg": "LEG-11",
+          "legs_tsv": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-02/legs.tsv",
+          "scope": "SCRIPTED_HARNESS"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "a_statement_about_which_script_ran_is_not_a_sampled_quantity"
+      }
+    },
+    {
+      "id": "ALW-09",
+      "class": "factual",
+      "text": "30-02's trial verifier is able to fail. Run against the shipped release binary it produced one pass and four distinct refusals: a one-byte protocol mutation, a dropped leg, an UNPROVEN leg with its blocker removed, and an invented scope tag rejected at deserialization.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "VERIFIER-KNOWN-GOOD-BAD",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-02/verifier-known-good-bad.txt",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "a_refusal_count_is_a_census"
+      }
+    },
+
+    {
+      "id": "LIM-01",
+      "class": "limitation",
+      "text": "The security dimension was not measured for wayland-core. The shared loopback meter records request body digests and per-leaf hashes, not bodies, so the byte-search extraction the frozen protocol specified was never possible. A narrower exact-leaf comparison was deliberately NOT substituted, because silently narrowing an extraction after the fact is how a protocol stops meaning what it said.",
+      "scope": "SCRIPTED_HARNESS",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "LEG-03-BLOCKER",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-02/legs.tsv",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "meter_records_digests_not_bodies"
+      },
+      "substitution_point": "Request-body retention under a redaction policy, or leaf-hash exposure, in crates/wcore-eval-scenarios/src/fixtures/openai.rs. A seam request is open; the change touches the shared meter and is release-coordinated."
+    },
+    {
+      "id": "LIM-02",
+      "class": "limitation",
+      "text": "The security dimension was not measured for Hermes, for the same instrument reason as wayland-core: the shared meter records digests rather than bodies.",
+      "scope": "SCRIPTED_HARNESS",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "LEG-08-BLOCKER",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-02/legs.tsv",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "meter_records_digests_not_bodies"
+      },
+      "substitution_point": "The same meter seam as LIM-01."
+    },
+    {
+      "id": "LIM-03",
+      "class": "limitation",
+      "text": "The security dimension was not measured for OpenClaw, for the same instrument reason as the other two tools.",
+      "scope": "SCRIPTED_HARNESS",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "LEG-13-BLOCKER",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-02/legs.tsv",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "meter_records_digests_not_bodies"
+      },
+      "substitution_point": "The same meter seam as LIM-01."
+    },
+    {
+      "id": "LIM-04",
+      "class": "limitation",
+      "text": "Cognitive tax was not measured for wayland-core. The cross-audit panel ruled unanimously, before any trial ran, that the dimension is not measurable in a scripted tier at all. F30-03 is therefore incomplete on one of its five named dimensions.",
+      "scope": "SCRIPTED_HARNESS",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "LEG-05-BLOCKER",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-02/legs.tsv",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "panel_ruled_not_measurable_in_this_tier"
+      },
+      "substitution_point": "A human-subject or task-completion study outside the scripted tier. No fixture substitution can produce it, which is why the panel refused to proxy it."
+    },
+    {
+      "id": "LIM-05",
+      "class": "limitation",
+      "text": "Cognitive tax was not measured for Hermes, on the same unanimous pre-trial panel finding.",
+      "scope": "SCRIPTED_HARNESS",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "LEG-10-BLOCKER",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-02/legs.tsv",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "panel_ruled_not_measurable_in_this_tier"
+      },
+      "substitution_point": "The same out-of-tier study as LIM-04."
+    },
+    {
+      "id": "LIM-06",
+      "class": "limitation",
+      "text": "Cognitive tax was not measured for OpenClaw, on the same unanimous pre-trial panel finding.",
+      "scope": "SCRIPTED_HARNESS",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "LEG-15-BLOCKER",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-02/legs.tsv",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "panel_ruled_not_measurable_in_this_tier"
+      },
+      "substitution_point": "The same out-of-tier study as LIM-04."
+    },
+    {
+      "id": "LIM-07",
+      "class": "limitation",
+      "text": "The shipped command `init` is owned by no CTRL-01 coverage family, so it has no security authority owner, no recorded maturity, no evidence IDs and no peer baseline. It is unreviewed surface, and it is a first-run credential-adjacent path.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "SURFACE-INVENTORY",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/30-01-SURFACE-INVENTORY.md",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "surface_owned_by_no_family"
+      },
+      "substitution_point": "Assignment of the command to a coverage family in CTRL-01, which is the owning phase's action and not a review's."
+    },
+    {
+      "id": "LIM-08",
+      "class": "limitation",
+      "text": "The shipped command `setup` is owned by no CTRL-01 coverage family. It is unreviewed surface, and it is a first-run credential-adjacent path.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "SURFACE-INVENTORY",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/30-01-SURFACE-INVENTORY.md",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "surface_owned_by_no_family"
+      },
+      "substitution_point": "Assignment of the command to a coverage family in CTRL-01."
+    },
+    {
+      "id": "LIM-09",
+      "class": "limitation",
+      "text": "The shipped command `profile` is owned by no CTRL-01 coverage family. It is unreviewed surface, and it is a first-run credential-adjacent path.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "SURFACE-INVENTORY",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/30-01-SURFACE-INVENTORY.md",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "surface_owned_by_no_family"
+      },
+      "substitution_point": "Assignment of the command to a coverage family in CTRL-01."
+    },
+    {
+      "id": "LIM-10",
+      "class": "limitation",
+      "text": "The shipped command `mcp-serve` is owned by no CTRL-01 coverage family, so it carries no security authority owner and no recorded maturity.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "SURFACE-INVENTORY",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/30-01-SURFACE-INVENTORY.md",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "surface_owned_by_no_family"
+      },
+      "substitution_point": "Assignment of the command to a coverage family in CTRL-01."
+    },
+    {
+      "id": "LIM-11",
+      "class": "limitation",
+      "text": "The shipped command `models` is owned by no CTRL-01 coverage family, so it carries no security authority owner and no recorded maturity.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "SURFACE-INVENTORY",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/30-01-SURFACE-INVENTORY.md",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "surface_owned_by_no_family"
+      },
+      "substitution_point": "Assignment of the command to a coverage family in CTRL-01."
+    },
+    {
+      "id": "LIM-12",
+      "class": "limitation",
+      "text": "The shipped command `project-context` is owned by no CTRL-01 coverage family, so it carries no security authority owner and no recorded maturity. Across the six unowned commands there are fifteen unreviewed surface rows in total.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "SURFACE-INVENTORY",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/30-01-SURFACE-INVENTORY.md",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "surface_owned_by_no_family"
+      },
+      "substitution_point": "Assignment of the command to a coverage family in CTRL-01."
+    },
+    {
+      "id": "LIM-13",
+      "class": "limitation",
+      "text": "The evidence ID PEER-PROBE-2026-07-26 names no openable artifact anywhere in the repository. It describes a method rather than an object, and no captured output exists. Six coverage families cite it, and in each of them it carries roughly half the Delta column, so every probe finding in those families is uncheckable by a reader. This is why no claim in this phase rests on it.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "ID-RESOLUTION",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-01/evidence-id-resolution.tsv",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "evidence_id_names_no_openable_artifact"
+      },
+      "substitution_point": "Re-running the structural probes against both peer trees at the BASE-2026-07-13 commits and committing the captured output under a named evidence ID."
+    },
+    {
+      "id": "LIM-14",
+      "class": "limitation",
+      "text": "The evidence ID F05-TRUTH-{n} is a template rather than an instance, so it does not mechanically resolve. Its concrete uses in family rows do resolve for a reader who cross-references the row above them.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "ID-RESOLUTION",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-01/evidence-id-resolution.tsv",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "template_id_not_an_instance"
+      },
+      "substitution_point": "Expanding the template into its concrete instances in CTRL-01's evidence index."
+    },
+    {
+      "id": "LIM-15",
+      "class": "limitation",
+      "text": "Every measurement in this phase was taken against a scripted loopback fixture that holds the model constant by construction. Nothing here says anything about model quality, real-world task success, or dollar cost at provider rates. No claim about real-world use is publishable from this evidence, and the checker refuses every attempt at one.",
+      "scope": "SCRIPTED_HARNESS",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "PROTOCOL",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-02/protocol.json",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "no_live_provider_measurement_exists_in_this_phase"
+      },
+      "substitution_point": "A live-provider tier run with real credentials against real provider endpoints. That requires a credential only Sean can supply, and no gate in this phase may be passed by supplying one."
+    },
+    {
+      "id": "LIM-16",
+      "class": "limitation",
+      "text": "The peer delta truth is recorded UNPROVEN on all one hundred and forty-eight surface rows, unchanged by this phase. 30-02's comparatives are dimension-level rather than surface-level, so nothing in it produced a per-surface peer comparison.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "SURFACE-TRUTHS",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-01/surface-truths.tsv",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "no_per_surface_peer_comparison_has_run"
+      },
+      "substitution_point": "A per-surface comparative pass against both pinned peer trees, which no plan in this phase performs."
+    },
+    {
+      "id": "LIM-17",
+      "class": "limitation",
+      "text": "Real dollar cost at provider rates was not measured. The cost dimension was metered in synthetic fixture units against a scripted script, and those units do not convert to money.",
+      "scope": "SCRIPTED_HARNESS",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "TRIAL-RESULTS",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/30-02-TRIAL-RESULTS.md",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "no_real_provider_billing_was_observed"
+      },
+      "substitution_point": "A live-provider tier run with real credentials and real billing records. Requires a credential this phase may not use."
+    },
+    {
+      "id": "LIM-18",
+      "class": "limitation",
+      "text": "wayland-core did not start on the headless trial host until an encrypted-file credentials configuration and a vault passphrase were supplied, reporting that no OS keyring was usable. Neither reference tool required an equivalent step. Whether the remedy for this is effective is being tested elsewhere and is NOT settled here, so nothing in this phase positions on it.",
+      "scope": "SCRIPTED_HARNESS",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "TRIAL-RESULTS",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/30-02-TRIAL-RESULTS.md",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "remedy_under_test_by_another_lane_result_not_in"
+      },
+      "substitution_point": "The concurrent lane's result on whether the keyring remedy actually works on a headless host, then a re-run of the startup leg at that commit."
+    },
+    {
+      "id": "LIM-19",
+      "class": "limitation",
+      "text": "The fixture is FIFO-cursored and is the same dialect wayland-core's own contract tests were built against. All four panel members named this bias independently. The frozen protocol bounds it by treating a 409 as HARNESS_INCOMPATIBLE, which is neither success nor failure, but no trial ever triggered that state, so the bound was never exercised and the bias remains open.",
+      "scope": "SCRIPTED_HARNESS",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "TRIAL-RESULTS",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/30-02-TRIAL-RESULTS.md",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "bound_never_exercised_by_any_trial"
+      },
+      "substitution_point": "Content-routed rather than FIFO-cursored fixture matching, so a tool whose request order differs is not penalised. This is the second half of the open meter seam request."
+    },
+    {
+      "id": "LIM-20",
+      "class": "limitation",
+      "text": "The correctness and recovery comparatives are not yet measurable. They ran and produced real numbers, but the canonical script speaks one tool's dialect and two of the three harnesses could not execute it, so the numbers do not measure the dimension they are named after. This phase therefore publishes no correctness or recovery comparison in either direction, including none favourable to wayland-core.",
+      "scope": "SCRIPTED_HARNESS",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "TRIAL-RESULTS",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/30-02-TRIAL-RESULTS.md",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "measurement_confounded_by_script_dialect"
+      },
+      "substitution_point": "Per-tool dialect compilation of the canonical script, a re-pre-registered protocol carrying it, and a full re-run of the nine RUN legs."
+    }
+  ],
+  "attempted": [
+    {
+      "id": "ATT-01",
+      "class": "comparative",
+      "text": "wayland-core's cost is practically indistinguishable from both peers.",
+      "scope": "SCRIPTED_HARNESS",
+      "evidence": [
+        {
+          "kind": "trial_leg",
+          "id": "WAYLAND-COST",
+          "leg": "LEG-04",
+          "legs_tsv": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-02/legs.tsv",
+          "scope": "SCRIPTED_HARNESS"
+        }
+      ],
+      "peer_baseline": "BASE-2026-07-13",
+      "bounds": {
+        "state": "observed",
+        "value": {
+          "lower": 0.0,
+          "upper": 0.0,
+          "method": "zero_empirical_variance",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "id": "ATT-02",
+      "class": "comparative",
+      "text": "wayland-core is ahead of OpenClaw on scripted correctness.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "TRIAL-RESULTS",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/30-02-TRIAL-RESULTS.md",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "peer_baseline": "BASE-2026-07-13",
+      "bounds": {
+        "state": "observed",
+        "value": {
+          "lower": -0.1135,
+          "upper": 0.1135,
+          "method": "newcombe_wilson_95",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "id": "ATT-03",
+      "class": "comparative",
+      "text": "Neither peer ships an SBOM at baseline, so wayland-core's SBOM requirement has no counterpart to match and is therefore a supply-chain lead.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "ledger_evidence_id",
+          "id": "PEER-PROBE",
+          "evidence_id": "PEER-PROBE-2026-07-26",
+          "resolution_tsv": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-01/evidence-id-resolution.tsv",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "peer_baseline": "BASE-2026-07-13",
+      "bounds": {
+        "state": "unavailable",
+        "code": "static_source_census_has_no_sampling_variance"
+      }
+    },
+    {
+      "id": "ATT-04",
+      "class": "factual",
+      "text": "No canary value left the harness during the security trials, so wayland-core did not exfiltrate secrets.",
+      "scope": "SCRIPTED_HARNESS",
+      "evidence": [
+        {
+          "kind": "trial_leg",
+          "id": "WAYLAND-SECURITY",
+          "leg": "LEG-03",
+          "legs_tsv": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-02/legs.tsv",
+          "scope": "SCRIPTED_HARNESS"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "asserted_from_an_unproven_leg"
+      }
+    },
+    {
+      "id": "ATT-05",
+      "class": "factual",
+      "text": "In real-world deployments wayland-core starts cleanly on a headless host without additional credential configuration.",
+      "scope": "LIVE_PROVIDER",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "TRIAL-RESULTS",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/30-02-TRIAL-RESULTS.md",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "no_live_provider_measurement_exists"
+      }
+    },
+    {
+      "id": "ATT-06",
+      "class": "comparative",
+      "text": "wayland-core is architecturally superior to both peers on sandbox and egress.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "CTRL01-LEDGER",
+          "path": ".planning/intel/COMPETITIVE-LEDGER.md",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "peer_baseline": "BASE-2026-07-13",
+      "bounds": {
+        "state": "unavailable",
+        "code": "static_source_census_has_no_sampling_variance"
+      }
+    },
+    {
+      "id": "ATT-07",
+      "class": "factual",
+      "text": "wayland-core recovers from induced failures better than Hermes.",
+      "scope": "SCRIPTED_HARNESS",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "TRIAL-RESULTS",
+          "path": ".planning/phases/30-continuous-scorecard-frontier-review/30-02-TRIAL-RESULTS.md",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "peer_baseline": "BASE-2026-07-13",
+      "bounds": {
+        "state": "observed",
+        "value": {
+          "lower": 0.6,
+          "upper": 0.9,
+          "method": "newcombe_wilson_95",
+          "confidence": 0.95
+        }
+      }
+    },
+    {
+      "id": "ATT-08",
+      "class": "comparative",
+      "text": "This is wayland-core's clearest unique capability.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "CTRL01-LEDGER",
+          "path": ".planning/intel/COMPETITIVE-LEDGER.md",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "peer_baseline": "BASE-2026-07-13",
+      "bounds": {
+        "state": "unavailable",
+        "code": "static_source_census_has_no_sampling_variance"
+      }
+    },
+    {
+      "id": "ATT-09",
+      "class": "comparative",
+      "text": "wayland-core leads on autonomous coding.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [
+        {
+          "kind": "path",
+          "id": "CTRL01-LEDGER",
+          "path": ".planning/intel/COMPETITIVE-LEDGER.md",
+          "scope": "STATIC_SOURCE"
+        }
+      ],
+      "bounds": {
+        "state": "unavailable",
+        "code": "static_source_census_has_no_sampling_variance"
+      }
+    },
+    {
+      "id": "ATT-10",
+      "class": "factual",
+      "text": "wayland-core is certified with zero known defects across every supported platform.",
+      "scope": "STATIC_SOURCE",
+      "evidence": [],
+      "bounds": {
+        "state": "unavailable",
+        "code": "no_evidence_was_ever_offered_for_this"
+      }
+    }
+  ]
+}
