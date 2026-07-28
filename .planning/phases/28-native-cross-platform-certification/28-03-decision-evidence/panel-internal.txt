@@ -1,0 +1,109 @@
+INTERNAL ADVERSARIAL PASS — argued AGAINST the emerging consensus, not for it.
+
+The external members converged on C (drift primary + absolute sanity floors). This pass
+exists to attack C, and it lands three hits. Two are fatal to C *as the externals specified
+it*; one is fatal to nothing but must be written into the bands or it becomes a lie of
+omission. The conclusion is still C, but C amended — and the amendments are the reason this
+pass exists rather than a rubber stamp.
+
+--------------------------------------------------------------------------------------
+HIT 1 (the serious one). In THIS soak, latency drift is structurally close to blind, and
+C therefore risks being B wearing drift's clothes.
+
+A session here is one invocation of a CLI binary. It is a FRESH PROCESS. When it exits, its
+heap, its file descriptors, its threads and its address space go with it. The classic thing a
+soak detects — a leak accumulating inside one long-lived process — CANNOT accumulate across
+1,000 separate processes. So the mechanism by which "1,000 sessions degrade the product" could
+show up in latency is narrow, and it is worth naming exactly, because if it were empty the
+drift gate would be decorative:
+
+  (a) on-disk state the product accumulates and then re-reads — a session index, a journal, a
+      log directory. `session list` over 1,000 accumulated sessions is an O(N) read that a
+      1-session run never performs. THIS IS REAL and it is precisely what a soak of a stateful
+      CLI should find.
+  (b) orphaned children surviving between sessions and competing for CPU. Real, and already
+      separately observed by the orphan census.
+  (c) OS-level table growth the harness itself provokes.
+
+(a) is a genuine detection path, so the drift gate is not decorative. But it is much narrower
+than the externals implied, and pretending otherwise would oversell it.
+
+CONSEQUENCE, and it is a change to the design rather than a caveat on it: THE DETECTION WEIGHT
+SITS ON THE RESOURCE SLOPE OBSERVABLE, NOT ON LATENCY DRIFT. Disk bytes of the state directory,
+live child count and handle count across the run are where an unbounded-growth defect actually
+becomes visible in a fresh-process soak. The bands must therefore carry slope bands with the
+same force as the drift bands, and the results document must not present a green latency drift
+as though it were the finding of a leak. It is not. It is the absence of one narrow symptom.
+
+--------------------------------------------------------------------------------------
+HIT 2. A p95 taken over a single 200-session window is a statistic with about ten samples
+above it, on a host whose load average is 3-5 and not ours to control. Gemini's own key
+objection concedes the failure mode: one external cron job landing in sessions 801-1000
+manufactures a breach. Gemini's remedy — re-run the entire 1,000-session soak — costs the most
+expensive thing this phase has, and on the single physical Windows box it may not be
+affordable at all.
+
+Kimi's construction is better and this pass adopts it over gemini's: compare BLOCK AGGREGATES,
+not raw window percentiles. Compute the statistic per 100-session block, then compare the
+MEDIAN OF THE EARLY BLOCKS against the MEDIAN OF THE LATE BLOCKS. A single spike then has to
+move the median of three separate blocks to move the verdict, which is a far higher bar for
+noise and a barely-changed bar for a real monotone degradation. This is not a loosening: it is
+the same threshold applied to a less noisy estimator.
+
+--------------------------------------------------------------------------------------
+HIT 3. Every number below is invented. None has a measurement behind it. That is not an
+argument against setting them — a threshold set after the run cannot fail the run, so option D
+is worse — but it is an argument against letting them acquire the authority of measurements.
+
+The bands file must SAY SO IN ITSELF, in a machine-readable field, so that a later reader
+cannot mistake a pre-registered guess for a derived limit; and it must carry kimi's supersedes
+clause, so today's guesses become a bootstrap rather than a precedent. A number nobody labelled
+as invented is a number that gets widened by the next person who needs it wider.
+
+--------------------------------------------------------------------------------------
+WHERE THE EXTERNALS ARE WRONG AND THIS PASS OVERRULES THEM
+
+- Gemini's early window "sessions 101-300, discarding 1-100 for cold start". REJECTED as
+  specified. Discarding the coldest sessions makes the baseline FASTER, which makes the late
+  window's ratio to it LARGER, which makes the gate STRICTER — so the direction is safe — but
+  it also silently removes cold-start pathology from the measurement, and cold start is a real
+  product property. Adopted instead: blocks 1-3 are the early window INCLUDING block 1, and the
+  cold-start effect is recorded as a labelled per-block series so a reader can see it rather
+  than having it deleted for them.
+
+- Kimi's "load-adjusted INCONCLUSIVE" verdict. REJECTED. A third verdict that is neither pass
+  nor fail is exactly the shape an agent on this program previously abused when it invented a
+  termination state to escape an artifact it did not want to produce. A regression adjustment
+  on a covariate the certifier also chooses is a dismissal lever with a statistician's
+  vocabulary. Adopted instead, and it is strictly weaker for the certifier: record the load
+  covariate in the results as evidence, and let it justify a RE-RUN — but a breach is RED until
+  a re-run is green on its own numbers, and there is no verdict between them.
+
+- Kimi's "structural digest of output" for the quality invariant. ADOPTED, in the affordable
+  half: the warm-up captures exit-status class, output-non-emptiness AND a normalised
+  structural signature (top-level JSON key set where the output parses as JSON; otherwise line
+  count and the absence of panic/error sentinels). "Exits 0 but silently malformed" is the most
+  plausible quality-rot mode under resource pressure and it is free to catch here.
+
+- Both externals' framing of the quality proxy as "quality". OVERRULED IN THE WRITE-UP, not in
+  the design: this is a determinism-and-stability measurement, not a semantic quality
+  measurement, and the results document must say that in those words. Calling it quality
+  without qualification is the kind of quiet overclaim this phase exists to catch.
+
+--------------------------------------------------------------------------------------
+THE STRONGEST ARGUMENT AGAINST MY OWN POSITION
+
+Everything above still leaves a soak that can pass while the product is semantically wrong on
+every one of its 1,000 sessions, provided it is wrong CONSISTENTLY and was already wrong at
+warm-up. The absolute quality floor does not close this, because the invariant is defined
+against warm-up behaviour, and a surface broken at warm-up simply establishes a broken
+invariant and then matches it. The only real mitigation available at this cost is the
+warm-up-validity gate: a surface whose warm-up is not a SUCCESS (exit 0, non-empty output, no
+panic sentinel) does not establish an invariant at all — it is recorded as BROKEN INVENTORY,
+and if broken inventory exceeds a pre-registered share of the resolved surfaces the whole run
+is VOID rather than passed. That is adopted. It is a mitigation, not a cure, and the write-up
+must say which.
+
+PANEL_POSITION=C
+PANEL_CONFIDENCE=medium
+PANEL_KEY_OBJECTION=In a soak of 1,000 fresh short-lived processes the latency-drift gate can only fire through accumulated on-disk state, so most of C's apparent coverage rests on the resource-slope and floor mechanisms rather than on the drift mechanism the option is named after.

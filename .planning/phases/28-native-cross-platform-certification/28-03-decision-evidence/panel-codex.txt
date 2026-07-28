@@ -1,0 +1,136 @@
+Reading additional input from stdin...
+OpenAI Codex v0.144.4
+--------
+workdir: /private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/panel28-03
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019fa621-6c19-74e3-92ec-19877f74733a
+--------
+user
+You are one member of a four-way adversarial review panel. Answer from your own reasoning; use no tools. Disagree if the recommendation is wrong.
+
+DECISION: A certification requires a 1,000-session soak of a Rust CLI agent binary (`wayland-core`) to complete with "no unacceptable quality/performance delta". Nothing in the program defines "unacceptable". You must decide the definition, mechanically enough that a Python validator computes PASS/FAIL from a JSON file with no human judgement. The decision is committed to git BEFORE the soak runs; a threshold chosen after seeing the numbers cannot fail the run it judges.
+
+ENVIRONMENT: three OS families, no per-platform baseline exists. linux = shared Hetzner box, load average 3-5, not ours to control. macos = arm64 laptop. windows = one physical box, slowest, long runs via scheduled task. A "session" is ONE INVOCATION of the shipped binary against one of ~116 command surfaces read off its own command tree — a fresh short-lived process each time. Concurrent children run throughout.
+
+QUALITY IS SAMPLED WITHOUT AN LLM PROVIDER (1,000 real model sessions would cost more than the certification and add third-party nondeterminism): each session records exit status and whether output matches a per-surface invariant established in a warm-up window at the start of the same run. Performance = per-session wall-clock latency. Resource use (disk, handles, threads, live children) is a SEPARATE observable evaluated by slope.
+
+OPTIONS:
+A) drift-within-run: late window vs early window, same host, same run; band on the ratio. Blind to a run that is uniformly bad from session 1.
+B) absolute per-platform ceilings fixed in advance. Catches uniformly-bad, but every number is invented today and encodes the hardware it was written on.
+C) drift primary PLUS deliberately loose absolute sanity floors. Covers both failure modes; two mechanisms to explain; a loose floor invites the charge of being decorative.
+D) run the soak first, then set bands from the observed distribution. A threshold derived from the run it judges cannot fail that run.
+
+ANSWER: (1) which option and why; (2) exact window definition and exact statistic (p50/p95/mean/trimmed?) and why; (3) the specific numbers you would set, and what makes an invented number defensible; (4) whether quality is banded separately from performance; (5) whether a soak failing identically from session 1 should pass a drift-only gate and what you do about it; (6) how you stop a noisy shared host manufacturing drift WITHOUT giving the certifier a lever to dismiss a real red as noise.
+
+Last three lines of your answer, exactly:
+PANEL_POSITION=<A|B|C|D>
+PANEL_CONFIDENCE=<low|medium|high>
+PANEL_KEY_OBJECTION=<one sentence naming the strongest argument AGAINST your own position>
+deprecated: `[features].codex_hooks` is deprecated. Use `[features].hooks` instead.
+Enable it with `--enable hooks` or `[features].hooks` in config.toml. See https://developers.openai.com/codex/config-basic#feature-flags for details.
+2026-07-28T00:30:39.744993Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(AuthRequiredError { www_authenticate_header: "Bearer realm=\"OAuth\", resource_metadata=\"https://mcp.canva.com/.well-known/oauth-protected-resource/mcp\", error=\"invalid_token\", error_description=\"Missing or invalid access token\"" })
+2026-07-28T00:30:40.636319Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Auth(AuthorizationRequired)
+hook: SessionStart
+hook: SessionStart Completed
+hook: UserPromptSubmit
+hook: UserPromptSubmit Completed
+codex
+1. **Choose C: drift primary plus loose absolute sanity ceilings.** A misses a binary that is broken or uniformly slow from invocation one. B pretends unsupported hardware-specific numbers are empirical. D is circular and cannot certify anything. Each OS must pass independently; results are never pooled.
+
+2. **Windows and statistics.** Commit the 116-surface roster, hash, and deterministic cycle schedule before execution. Across the 1,000 invocations:
+
+   - Occurrence 1 of each surface: warm-up.
+   - Occurrences 2–4: early window, 348 sessions.
+   - Occurrence 5: guard interval.
+   - Occurrences 6–8: late window, 348 sessions.
+   - Remaining 72 ninth occurrences: excluded from drift, included in absolute gates.
+
+   For each surface, calculate the median of its three early latencies and its three late latencies. Define:
+
+   `drift_s = (late_median_s - early_median_s) / max(early_median_s, 0.100 seconds)`
+
+   Sort the 116 surface drifts. Use nearest-rank p50 (item 58) and p95 (item 111). Medians suppress one transient spike among three observations; surface-level p50 detects broad degradation, while p95 prevents regressions concentrated in several commands. A mean would be too hostage to shared-host outliers and could obscure which surfaces deteriorated.
+
+3. **Committed numbers.** Performance passes only when all are true on every OS:
+
+   - Surface-drift p50 ≤ 15%.
+   - Surface-drift p95 ≤ 35%.
+   - All-session wall-clock p95 ≤ 10 seconds.
+   - No invocation exceeds 60 seconds; 60 seconds is also the harness timeout.
+
+   The 100 ms denominator floor prevents meaningless percentage explosions for millisecond commands. The absolute ceilings are intentionally loose but not decorative: an offline, supposedly short-lived CLI taking over 10 seconds routinely—or over one minute once—is operationally defective regardless of hardware. These numbers are not empirically “discovered”; they are defensible only as prospective product limits whose consequences the project accepts before observing results. Using the same limits on every platform is more honest than fabricating platform-specific baselines.
+
+4. **Quality is gated separately from performance.** It is not averaged into a composite score and does not receive a latency-style percentage allowance:
+
+   - Zero unexpected exits, signals, panics, or timeouts across all 1,000 sessions.
+   - Zero exit-class or output-invariant mismatches after warm-up.
+   - Every warm-up result must satisfy a committed invariant constructor and generic sanity schema.
+
+   Warm-up may bind variable values, but it may not define “whatever happened” as correct. Required fields, allowed exit classes, parseability, and surface-specific invariant logic must already be committed. Otherwise a uniformly broken response could teach the validator that broken output is normal.
+
+5. **An identically failing soak must not pass.** Drift-only would permit that, which is the decisive defect in A. Uniform quality failure trips the absolute quality gate. Uniformly pathological latency trips the 10-second p95 or 60-second hard ceiling. A run that is merely slower than desired but remains under those ceilings can pass; that is an explicit consequence of having no external latency baseline.
+
+6. **Shared-host noise receives a precommitted rerun rule, never discretionary forgiveness.** Run a fixed CPU/process/filesystem reference probe adjacent to every invocation and record host CPU time attributable outside the harness process tree. A run is mechanically marked contaminated only if both conditions hold:
+
+   - Reference-probe late/early p50 ratio exceeds 1.25.
+   - At least 20% of late-window intervals show external processes consuming at least 80% of available CPU capacity.
+
+   Contamination is calculated before considering whether the agent passed or failed and forces exactly one complete rerun. It never converts red to green, never excuses quality or resource-slope failures, and cannot be asserted manually. A valid red fails immediately; a contaminated first run requires the rerun; a contaminated rerun fails certification. This prevents host noise from manufacturing a final red while denying the certifier an unlimited “noisy machine” escape hatch.
+
+PANEL_POSITION=C
+PANEL_CONFIDENCE=high
+PANEL_KEY_OBJECTION=The strongest argument against C is that its absolute 10-second and 60-second ceilings remain policy inventions that may be either decorative or unfair without command-specific empirical baselines.
+hook: Stop
+hook: Stop Completed
+tokens used
+31,214
+1. **Choose C: drift primary plus loose absolute sanity ceilings.** A misses a binary that is broken or uniformly slow from invocation one. B pretends unsupported hardware-specific numbers are empirical. D is circular and cannot certify anything. Each OS must pass independently; results are never pooled.
+
+2. **Windows and statistics.** Commit the 116-surface roster, hash, and deterministic cycle schedule before execution. Across the 1,000 invocations:
+
+   - Occurrence 1 of each surface: warm-up.
+   - Occurrences 2–4: early window, 348 sessions.
+   - Occurrence 5: guard interval.
+   - Occurrences 6–8: late window, 348 sessions.
+   - Remaining 72 ninth occurrences: excluded from drift, included in absolute gates.
+
+   For each surface, calculate the median of its three early latencies and its three late latencies. Define:
+
+   `drift_s = (late_median_s - early_median_s) / max(early_median_s, 0.100 seconds)`
+
+   Sort the 116 surface drifts. Use nearest-rank p50 (item 58) and p95 (item 111). Medians suppress one transient spike among three observations; surface-level p50 detects broad degradation, while p95 prevents regressions concentrated in several commands. A mean would be too hostage to shared-host outliers and could obscure which surfaces deteriorated.
+
+3. **Committed numbers.** Performance passes only when all are true on every OS:
+
+   - Surface-drift p50 ≤ 15%.
+   - Surface-drift p95 ≤ 35%.
+   - All-session wall-clock p95 ≤ 10 seconds.
+   - No invocation exceeds 60 seconds; 60 seconds is also the harness timeout.
+
+   The 100 ms denominator floor prevents meaningless percentage explosions for millisecond commands. The absolute ceilings are intentionally loose but not decorative: an offline, supposedly short-lived CLI taking over 10 seconds routinely—or over one minute once—is operationally defective regardless of hardware. These numbers are not empirically “discovered”; they are defensible only as prospective product limits whose consequences the project accepts before observing results. Using the same limits on every platform is more honest than fabricating platform-specific baselines.
+
+4. **Quality is gated separately from performance.** It is not averaged into a composite score and does not receive a latency-style percentage allowance:
+
+   - Zero unexpected exits, signals, panics, or timeouts across all 1,000 sessions.
+   - Zero exit-class or output-invariant mismatches after warm-up.
+   - Every warm-up result must satisfy a committed invariant constructor and generic sanity schema.
+
+   Warm-up may bind variable values, but it may not define “whatever happened” as correct. Required fields, allowed exit classes, parseability, and surface-specific invariant logic must already be committed. Otherwise a uniformly broken response could teach the validator that broken output is normal.
+
+5. **An identically failing soak must not pass.** Drift-only would permit that, which is the decisive defect in A. Uniform quality failure trips the absolute quality gate. Uniformly pathological latency trips the 10-second p95 or 60-second hard ceiling. A run that is merely slower than desired but remains under those ceilings can pass; that is an explicit consequence of having no external latency baseline.
+
+6. **Shared-host noise receives a precommitted rerun rule, never discretionary forgiveness.** Run a fixed CPU/process/filesystem reference probe adjacent to every invocation and record host CPU time attributable outside the harness process tree. A run is mechanically marked contaminated only if both conditions hold:
+
+   - Reference-probe late/early p50 ratio exceeds 1.25.
+   - At least 20% of late-window intervals show external processes consuming at least 80% of available CPU capacity.
+
+   Contamination is calculated before considering whether the agent passed or failed and forces exactly one complete rerun. It never converts red to green, never excuses quality or resource-slope failures, and cannot be asserted manually. A valid red fails immediately; a contaminated first run requires the rerun; a contaminated rerun fails certification. This prevents host noise from manufacturing a final red while denying the certifier an unlimited “noisy machine” escape hatch.
+
+PANEL_POSITION=C
+PANEL_CONFIDENCE=high
+PANEL_KEY_OBJECTION=The strongest argument against C is that its absolute 10-second and 60-second ceilings remain policy inventions that may be either decorative or unfair without command-specific empirical baselines.

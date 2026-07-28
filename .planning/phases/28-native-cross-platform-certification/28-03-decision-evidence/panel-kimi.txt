@@ -1,0 +1,96 @@
+• The user asks for a direct reasoning answer, no tools. Answer as one panel member with verdict block.
+
+• ## 1. Option, and why
+
+  **C** — drift-within-run as the primary gate, plus a small set of deliberately loose absolute catastrophe floors.
+
+  The evidence argument is about what a soak exists to detect. The criterion says "a 1,000-session and concurrent-child soak must complete with no ... unacceptable quality/performance delta." The word "delta" names a *change*. A soak's diagnostic value is detecting degradation under sustained load: leaks, lock contention growth, handle accumulation, GC/allocator pressure, scheduler starvation of children. Option A measures exactly that. Option B measures something different — whether the product is fast in absolute terms — and cannot be done honestly here because no per-platform baseline exists anywhere in the program; every ceiling would be invented today, and an invented ceiling that binds is arbitrary, while one that doesn't bind is decoration.
+
+  But A alone has one real hole, not a rhetorical one: the flat-bad run. If the binary is broken on a platform such that every session from session 1 is slow or wrong, late-vs-early shows no drift and the soak passes a certification that the product cannot actually fulfill. That is not an edge case — the Windows box is described as slow through a scheduled-task path that kills children; a systematic misbehavior there would present exactly as flat-bad. The sanity floors exist solely to close that hole. Their job statement is written down: "catch catastrophe, not grade performance," and their looseness is the defense against the charge of being decorative — a floor set at 10× any plausible healthy value cannot be accused of silently grading, and there is no pressure to widen it because nothing plausible approaches it.
+
+  D is rejected outright for the reason stated in the brief: it makes the criterion unfalsifiable for this candidate. It is, however, the right answer for the *next* candidate — see §7.
+
+  ## 2. Window definition and statistic
+
+  **Windows, fixed before the run:**
+
+  - Sessions are indexed 1..N (N≈1000) in completion order per host, per surface-tag. Analysis is **per (host, surface-class)** and then aggregated; never pooled across hosts.
+  - **Warm-up: sessions 1–50 — excluded from both windows.** The brief says warm-up establishes per-surface invariants; those same sessions are also settling the host (cold caches, first-touch allocations). They pollute an "early" window if included.
+  - **Early window: sessions 51–250** (200 sessions).
+  - **Guard band: sessions 251–450 — excluded from both windows.** This is the key protection against window-placement gaming: a product that degrades monotonically cannot straddle the boundary to hide degradation inside one window, because 200 sessions separate the two measurement windows. Any real degradation trend must manifest across that gap.
+  - **Late window: sessions 751–950** (200 sessions). The final 50 (951–1000) are excluded because shutdown-phase contention (finalizers, log flush, child reaping at teardown) is not representative of steady-state behavior.
+
+  Why not first-200/last-200 adjacent? Because a linear degradation of 30% across the run shows only ~15% between adjacent windows if they're placed 1–200 vs 801–1000 with no guard; the guard band makes the windows span the *interior* of the run so the measured drift approximates the full-run drift.
+
+  **Statistic: per-surface-class trimmed mean (10% trim each tail) for the primary gate; p95 as a secondary gate.**
+
+  - The **mean is required** because the failure mode a soak hunts (gradual degradation) moves the center of the distribution. A p95-only gate can miss a uniform 40% slowdown that stays under the tail threshold.
+  - **Trimmed, not raw,** because the Linux host carries load average 3–5 from *other work* — foreign load spikes will inject outliers into the tails, and an untrimmed mean lets the noisy host manufacture drift (see §6). Trimming 10% each side discards transient foreign-load interference without discarding systematic slowdown, which shifts the whole distribution and survives trimming.
+  - **p95 is retained** as a secondary gate because tail latency is where resource-pressure degradation (allocator contention, fd churn) shows up first. Two gates, two statistics, both must pass.
+
+  Per-surface-class, not per-surface: with ~116 surfaces and 1000 sessions, individual surfaces have too few samples (~8–9 each) for stable quantiles. Surfaces are grouped into a small number of latency-homogeneous classes (defined from warm-up medians — e.g. fast <100ms, medium, slow) **before the soak**, and windows are compared within classes. This also prevents a shift in the per-session surface mix from masquerading as drift — if session order isn't surface-balanced, pooling all surfaces would let composition change look like performance change. Mitigation, stated as a rule: the harness must interleave surfaces in a fixed round-robin so early and late windows sample the same mix.
+
+  **Concurrent-child dimension:** latency of sessions launched under peak concurrency is a separate stream with its own early/late comparison, same statistic. Child counts are sampled as a covariate at each session start (see §6).
+
+  ## 3. The numeric bands
+
+  Stated plainly, per the question's own framing: **these numbers cannot be justified from measurement, because no measurement exists.** What makes a number defensible in that absence is not its provenance but (a) it is committed before the run and provably so via git history, (b) it is tight enough to catch the failure class the soak exists for, and loose enough not to false-positive on documented host noise, and (c) its looseness/tightness is argued from the measurement's statistical power, which *can* be computed in advance.
+
+  **Primary gate (trimmed-mean drift): late-window trimmed mean ≤ 1.25 × early-window trimmed mean, per surface class, per host.**
+
+  Reasoning: with 200 samples per window per class, the standard error of a trimmed mean is roughly σ/√200 ≈ 0.07σ. A two-window ratio has relative standard error ≈ √2 × CV/√200. For a CLI binary whose within-class CV on a quiet host is typically 0.2–0.4, the measurement noise on the ratio is ~2–4%. On the loaded Linux host, foreign load inflates CV; trimming suppresses it, but I budget the ratio noise at up to ~10% there. A 25% band therefore sits ~2.5σ above measurement noise — meaningfully falsifiable, and any degradation ≥25% over the run interior is exactly the "soak degrades the product" signal. A 10% band would false-positive on the Hetzner box; a 50% band would sleep through a real leak-driven slowdown.
+
+  **Secondary gate (p95 drift): late p95 ≤ 1.5 × early p95.** Tails are noisier, so the band is wider. Catches tail-only degradation that the trimmed mean tolerates.
+
+  **Quality gate (separate — see §4): late-window correctness rate ≥ early-window correctness rate − 0.5 percentage points, AND late-window correctness rate ≥ 99.5% absolute.** With ~200 samples per window per class, 0.5pp is one session — this is effectively "no new failures appear late in the run beyond single-sample noise," plus an absolute bar.
+
+  **Catastrophe floors (the C-part), per host, stated as multiples of warm-up:**
+
+  - No surface class's late-window trimmed mean may exceed **20× its own warm-up median** on the same host. (Self-normalising, so it doesn't encode hardware; catches "this surface is uniformly 20× slow from the start" only if warm-up was also slow — see §5 for the honest limitation and the fix.)
+  - Absolute backstop: no single session may exceed **60 seconds wall-clock**. A CLI command surface taking >60s is broken on any hardware including the slow Windows box. This is the only number with an absolute unit, and it's defensible as a product property, not a measurement.
+  - Correctness floor: overall run correctness rate **≥ 98%** on every host. Below 98% the quality proxy itself is telling you the platform port is broken regardless of drift.
+
+  ## 4. Quality banded separately from performance
+
+  **Yes, separately, and asymmetrically.** A composite "quality/performance delta" score would let a performance regression be bought off with perfect correctness or vice versa — the criterion lists them conjunctively, so each must pass alone. But they need different band shapes:
+
+  - Performance is a ratio (continuous, multiplicative) — drift expressed as a ratio is natural.
+  - Quality is a rate bounded at 100% — a ratio is meaningless (100→99.5 is "0.995×" and tells you nothing; 50→25 is the same ratio and is catastrophic). Quality drift must be banded as an **absolute percentage-point delta**, plus the absolute floor, exactly as in §3.
+
+  One more rule: a surface whose warm-up *itself* fails (non-zero exit, empty output in warm-up) on a host is not silently excused — it's recorded as a **warm-up failure**, and the count of warm-up failures per host is itself reported. If >2% of surfaces fail warm-up on a host, the host's soak fails at the quality gate before drift is even computed, because the product cannot demonstrate baseline competence there.
+
+  ## 5. Should an identically-broken-from-session-1 run pass a drift-only gate?
+
+  **No, and this is precisely why the answer is C and not A.** A drift-only gate certifies "the soak does not make things worse." The criterion certifies the product for cross-platform release; a product that fails identically on every session on Windows has an "unacceptable quality delta" against any reasonable reading of the criterion — the delta being against the product's own specification (the command surfaces are supposed to work). My handling:
+
+  - The **warm-up failure rule** (§4) catches surfaces broken from the start: their warm-up invariant never establishes, they count as warm-up failures, and >2% of surfaces in that state fails the host outright.
+  - The **98% absolute correctness floor** catches a uniformly-degraded-but-not-dead run.
+  - The **20× warm-up median floor** has an honest blind spot: if warm-up is *also* uniformly slow, the floor inherits the slowness. That is what the 60-second absolute backstop is for — it's the one non-self-normalising number, retained deliberately as the fixed point the self-normalising system needs.
+
+  So: flat-bad quality → caught by warm-up rule and absolute floor. Flat-bad performance → caught only by the 60s backstop, and I concede that a run uniformly at 30s/session would pass C. I accept that residual hole because the alternative (absolute latency ceilings per platform, invented today) does more damage: it either false-fails the slow Windows box or is set so loose it catches nothing, and unlike the residual hole, it contaminates the primary gate. The hole is documented in the criterion's definition, and §7 closes it permanently.
+
+  ## 6. Noisy-host drift vs. the no-dismissal-lever requirement
+
+  The load-3–5 Hetzner box can manufacture a 25% trimmed-mean drift through foreign load alone. The mechanism must be **evidentiary and pre-registered, not discretionary**. Rules, committed with the bands:
+
+  1. **Covariate sampling, always on.** At every session start, the harness records host load average (1-min), free memory, and the count of live soak children. This is part of the results JSON, not optional.
+  2. **Regression-adjusted comparison.** The validator computes, per surface class, a linear fit of session latency on load-average across the full run. If load explains drift (drift is significant in raw terms but the late-vs-early difference vanishes within tolerance after removing the load term), the gate outcome is **INCONCLUSIVE — not PASS and not PASS-with-note.** Inconclusive requires a re-run; it never converts to a pass.
+  3. **No noise-based dismissal of a red.** If drift is real in raw terms AND survives load-adjustment, the gate is RED, full stop. Nobody — not the certifier, not a human reviewer — may annotate it green. The only remedies for a red are a fix or a re-run that is green on its own numbers. This is stated in the validator spec as: "the load covariate can convert FAIL to INCONCLUSIVE; it can never convert FAIL to PASS."
+  4. **Interleave, don't block.** Session order is surface-interleaved round-robin (§2), so foreign load epochs hit early and late windows symmetrically in expectation; load-manufactured drift then requires sustained load growth over the whole run, which is itself visible in the covariate series.
+  5. **Windows-host special case:** because long runs go through a scheduled task, the validator records the task-execution context as a field; a run whose early and late windows span a scheduled-task restart boundary is automatically INCONCLUSIVE for latency gates (quality gates still apply). This is pre-registered, so it can't be invoked selectively.
+
+  This gives the noisy host exactly one honest out (prove it with the covariate, then re-run) and zero discretionary outs.
+
+  ## 7. What happens after this run (so the invented numbers don't fossilize)
+
+  The committed bands file carries a `supersedes` clause: after the first soak completes on all three platforms, the observed distributions are archived as the program's first baseline, and a follow-up phase is REQUIRED to re-derive the bands from that baseline (option D, legitimately — for the *next* candidate, not this one). This converts the one-time invented numbers into a bootstrap: falsifiable now, evidence-grounded from candidate two onward. Without this clause, today's 25% becomes precedent and never gets revisited — that is how invented numbers widen.
+
+  ## On the quality proxy itself
+
+  You asked for plain speaking: **the proxy is not a quality measurement; it is a liveness/consistency measurement.** "Exited 0 and produced non-empty output" would pass a surface emitting garbage. It is, however, the right measurement *for a soak* — a soak tests endurance, not competence, and competence testing belongs to the per-surface test suite that should gate certification elsewhere (if it doesn't, that's a gap in the program, not in this decision). One affordable, deterministic upgrade worth mandating: warm-up captures not just exit class and non-emptiness but a **structural digest** of output — for surfaces emitting JSON, the set of top-level keys and value types; for text, line count within a tolerance and absence of the binary's known error sentinel strings. That is still provider-free, deterministic, and catches "exits 0 but silently malformed," which is the most plausible quality-rot mode under resource pressure. It costs one warm-up diff per surface and belongs in the validator.
+
+  PANEL_POSITION=C
+  PANEL_CONFIDENCE=medium
+  PANEL_KEY_OBJECTION=The 25% drift band and 20×/60s floors are invented numbers with no measurement behind them, so on the noisy Linux host they may simultaneously false-positive on foreign load and false-negative a real sub-25% degradation, meaning C's extra machinery over A may be theatre around arbitrary constants.
+
+To resume this session: kimi -r session_011ac350-63fc-4df5-a31f-b630d571c6b9

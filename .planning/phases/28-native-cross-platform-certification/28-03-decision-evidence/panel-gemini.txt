@@ -1,0 +1,160 @@
+[ijfw] Smart mode
+[ijfw] Ready.
+Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY.
+Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY.
+MCP issues detected. Run /mcp list for status.
+Tool with name "mcp_ijfw-memory_ijfw_memory_recall" is already registered. Overwriting.
+Tool with name "mcp_ijfw-memory_ijfw_memory_store" is already registered. Overwriting.
+Tool with name "mcp_ijfw-memory_ijfw_memory_search" is already registered. Overwriting.
+Tool with name "mcp_ijfw-memory_ijfw_memory_prelude" is already registered. Overwriting.
+Tool with name "mcp_ijfw-memory_ijfw_memory_facts" is already registered. Overwriting.
+Tool with name "mcp_ijfw-memory_ijfw_prompt_check" is already registered. Overwriting.
+Tool with name "mcp_ijfw-memory_ijfw_metrics" is already registered. Overwriting.
+Tool with name "mcp_ijfw-memory_ijfw_cross_project_search" is already registered. Overwriting.
+Tool with name "mcp_ijfw-memory_ijfw_update_check" is already registered. Overwriting.
+Tool with name "mcp_ijfw-memory_ijfw_run" is already registered. Overwriting.
+Tool with name "mcp_ijfw-memory_ijfw_brain" is already registered. Overwriting.
+Tool with name "mcp_ijfw-memory_ijfw_state" is already registered. Overwriting.
+Tool with name "mcp_ijfw-memory_ijfw_cross_audit_converge" is already registered. Overwriting.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_start_google_auth" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_search_gmail_messages" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_gmail_message_content" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_gmail_messages_content_batch" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_gmail_attachment_content" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_send_gmail_message" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_draft_gmail_message" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_gmail_thread_content" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_gmail_threads_content_batch" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_list_gmail_labels" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_manage_gmail_label" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_list_gmail_filters" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_manage_gmail_filter" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_modify_gmail_message_labels" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_batch_modify_gmail_message_labels" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_search_drive_files" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_drive_file_content" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_drive_file_download_url" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_list_drive_items" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_create_drive_folder" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_create_drive_file" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_import_to_google_doc" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_import_to_google_slides" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_import_to_google_sheets" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_drive_file_permissions" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_check_drive_file_public_access" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_update_drive_file" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_drive_shareable_link" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_manage_drive_access" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_copy_drive_file" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_set_drive_file_permissions" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_manage_out_of_office" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_manage_focus_time" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_create_calendar" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_doc_content" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_list_docs_in_folder" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_modify_doc_text" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_find_and_replace_doc" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_insert_doc_elements" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_insert_doc_image" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_update_doc_headers_footers" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_batch_update_doc" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_inspect_doc_structure" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_debug_docs_runtime_info" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_create_table_with_data" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_debug_table_structure" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_export_doc_to_pdf" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_update_paragraph_style" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_doc_as_markdown" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_list_document_comments" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_manage_document_comment" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_list_spreadsheets" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_spreadsheet_info" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_read_sheet_values" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_modify_sheet_values" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_format_sheet_range" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_manage_conditional_formatting" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_create_spreadsheet" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_list_sheet_tables" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_append_table_rows" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_resize_sheet_dimensions" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_move_sheet_rows" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_list_spreadsheet_comments" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_manage_spreadsheet_comment" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_search_messages" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_create_reaction" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_download_chat_attachment" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_set_publish_settings" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_form_response" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_list_form_responses" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_batch_update_form" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_create_presentation" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_presentation" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_batch_update_presentation" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_page_thumbnail" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_list_presentation_comments" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_manage_presentation_comment" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_list_task_lists" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_manage_task_list" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_search_contacts" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_list_contact_groups" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_contact_group" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_manage_contacts_batch" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_manage_contact_group" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_search_engine_info" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_list_script_projects" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_script_project" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_script_content" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_create_script_project" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_update_script_content" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_run_script_function" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_manage_deployment" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_list_deployments" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_list_script_processes" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_delete_script_project" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_script_metrics" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_generate_trigger_code" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_com.github-github-mcp-server_add_reply_to_pull_request_comment" to fit within the 64 character limit. This tool may require user approval.
+Hook system message: [ijfw] Smart mode
+[ijfw] Ready.
+Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY.
+Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY.
+Option C is the only defensible choice. 
+
+Option A (drift-only) is dangerously blind to a product that is consistently broken from the first invocation. A flatline failure yields a drift of zero and falsely passes. Option B (absolute ceilings) guarantees failure via arbitrary specification; inventing rigid latency numbers today without a baseline guarantees they will be violated by hardware realities (especially on the Windows scheduled task runner) and subsequently widened by humans, defeating the gate. Option D is mathematically invalid; setting the threshold after observing the run is not a test, it is a post-hoc rationalization. 
+
+Option C uses drift to measure the actual intent of a soak (degradation over scale) while deploying absolute, deliberately loose sanity floors to prevent a dead-on-arrival binary from coasting to a pass.
+
+Here is the mechanical definition the certification must enforce.
+
+### 1. The Quality Proxy
+First, I am validating your quality proxy. Measuring invariant adherence against a warm-up window is NOT a semantic "quality" test—it is a determinism and stability test. However, it is the correct choice here. Injecting live LLM calls introduces network jitter and third-party model variance, which would make mechanical gating impossible. Comparing a surface against its own warm-up behavior on the same host is the only way to isolate the binary's integrity from the ecosystem. Quality and performance must be banded separately, as one is a binomial proportion (pass/fail) and the other is a continuous variable (time).
+
+### 2. Window Definition and Statistics
+- **Early Window:** Sessions 101 to 300. (Sessions 1-100 are discarded from baseline to eliminate cold-start OS paging, JIT, and filesystem cache warming, which artificially inflate early latency and mask later degradation).
+- **Late Window:** Sessions 801 to 1000.
+- **Statistic for Performance:** **p95 wall-clock latency**. p50 is too blind to tail degradation (where resource exhaustion typically manifests). p100 (Max) is hostage to Hetzner's noisy neighbor CPU spikes. p95 mathematically shears off the top 5% of host-induced outlier spikes while retaining visibility into systemic algorithmic degradation.
+- **Statistic for Quality:** **Invariant failure rate** (failed sessions / total sessions in the window). 
+
+### 3. The Numeric Bands (The Mechanical Gate)
+Since we have no historical baseline, the absolute floors must be indisputable sanity checks, and the drift bands must be wide enough to absorb ambient host noise but tight enough to catch O(N) resource exhaustion.
+
+**Performance (Latency) Bands:**
+*   **Absolute Floor:** Early Window p50 latency MUST BE `< 1.5 seconds`. (Reasoning: It is a local CLI. If basic command surfaces average more than 1.5 seconds to execute when the system is fresh, the architecture is fundamentally broken on that platform. This is loose enough for the Windows runner but tight enough to catch a hanging initialization).
+*   **Drift Limit:** Late Window p95 latency MUST BE `<= 1.5x` Early Window p95 latency. (Reasoning: A 50% degradation at the 95th percentile is a generous allowance for Hetzner system load variations. A true resource leak, fd exhaustion, or O(N) state accumulation will compound well beyond a 50% hit by session 800).
+
+**Quality (Determinism) Bands:**
+*   **Absolute Floor:** Total run invariant failure rate MUST BE `< 2%`. (Reasoning: Solves the "uniformly bad from session 1" problem. If the binary fails its own invariants >2% of the time, the build is unstable).
+*   **Drift Limit:** Late Window failure rate MUST NOT EXCEED Early Window failure rate by more than `0.02` (2 percentage points). (Reasoning: Degradation in quality usually means the agent starts dropping contexts or crashing due to memory fragmentation late in the run. A 2% spike in failures late in the soak is a definitive red flag).
+
+### 4. Handling Uniformly Bad Runs
+As specified in the Quality Absolute Floor above, a soak that fails identically from session 1 will pass the drift gate (Late - Early = 0) but will immediately trigger the Absolute Floor (Failure rate > 2%) and fail the certification mechanically.
+
+### 5. Resolving the Noisy Host Problem (Without Human Waivers)
+A shared Hetzner host running other workloads *will* occasionally manufacture a 50% p95 drift due purely to I/O or CPU starvation during the Late Window. 
+If we allow a human to look at the graph and say, "That was just host noise, let's pass it," we destroy the mechanical integrity of the gate. 
+**The Rule:** A drift breach is a mechanical FAIL. The ONLY permitted remedy for a suspected noise-induced failure is an automated, blind re-queue of the entire 1,000-session soak at a different time of day. If the degradation is in the binary, it will fail again. Two consecutive mechanical fails is a permanent blocker. The human certifier is given no lever to override the validator script.
+
+PANEL_POSITION=C
+PANEL_CONFIDENCE=high
+PANEL_KEY_OBJECTION=Comparing windows of 200 sessions on a highly variable shared host might still yield false positives for drift if a heavy external cron job perfectly aligns with the 801-1000 window, forcing expensive and time-consuming soak re-runs.
+Hook system message: [ijfw] Session 1 complete (0 memory entries).
