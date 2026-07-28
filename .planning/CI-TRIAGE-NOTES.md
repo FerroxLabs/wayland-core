@@ -182,3 +182,22 @@ Action: removed the job rather than ship a red I introduced. The test-side
 qualify-or-skip stands (panel-unanimous, gate proven able to fail). The residual
 blocker + full recipe recorded in CI-TRIAGE.md §2; job recoverable from
 `git show 189599ca -- .github/workflows/ci.yml`.
+
+## Minute 200-260 — CI run 1 verdict
+
+`ci-linux` (job 90424728480): `12820 tests run: 12752 passed, 68 failed, 50 skipped`.
+**3 reported before, 68 real.** All six tests this lane touched PASS. The skip surfaced
+in CI exactly as designed:
+`##[warning] ... WCORE_SANDBOX_SKIP test=drive_climb_full_... reason=bubblewrap is not installed`.
+
+**The loop closes:** the anvil containment test is test **2,348 of 12,820** — precisely
+where the brief recorded the old fail-fast run stopping. That single sandbox failure
+truncated the suite; qualifying it honestly is what made the other 65 visible. The
+"3 failures" and the "stopped at 2,348" were the same fact.
+
+Windows (`CI (Array)`): `12469 tests run: 12388 passed, 81 failed` — first enumeration
+in the blind window. 4 of the 81 are tests I touched, all "child closed stdout before
+emitting Ready". **Measured on SeanD@seandesktop against the runner's own release
+binary: the OLD env (HOME only) produces NO ready line either.** Not my regression;
+`--json-stream` emits no ready event on that host at all. Also found: HOME override does
+not isolate config on Windows (engine read C:\Users\seand\.wayland\). Both -> BACKLOG.

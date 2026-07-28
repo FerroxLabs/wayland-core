@@ -224,8 +224,36 @@ Fixed, with the consequence recorded in the workflow itself:
 > total**, and any triage that treated a count as complete was reading a truncated
 > suite.
 
-A companion step reports any recorded sandbox skips as a `::warning::` with a count,
-so the compensated skip in the main leg stays visible.
+A companion step reports any recorded sandbox skips as a `::warning::` with a count.
+Confirmed working in real CI (run 1, `ci-linux`):
+
+```
+##[warning]sandbox-qualified skips in this leg:
+WCORE_SANDBOX_SKIP test=drive_climb_full_lands_the_winner_surface_for_accept reason=bubblewrap is not installed (bwrap not on PATH)
+```
+
+### What the flag was actually hiding: 3 reported, **68 real**
+
+With `--no-fail-fast`, the containerized leg ran to completion for the first time:
+
+```
+Summary [586.307s] 12820 tests run: 12752 passed (2 slow, 2 flaky), 68 failed, 50 skipped
+```
+
+**68 failures where 3 were reported.** None of them are this lane's — all six of the
+tests I touched PASS in that run. The clusters are pre-existing and were simply never
+reachable: `portability_hostile_corpus` (20), `runner_contracts` PTY/descendant reaping
+(7), `sandbox_activeness`, `typed_execution_policy_e2e_test`, `f14_sigkill_recovery`,
+`wcore-exec-backend orphan::tests`, and the two `deterministic_openai_loop` cases.
+Several are plainly sandbox/process-group behaviours in a container without bubblewrap.
+
+**And the truncation point closes the loop exactly.** The anvil hard-containment test
+runs at index **2,348 of 12,820** — precisely where the brief recorded the old run
+stopping. That one sandbox failure is what truncated the suite; making it qualify
+honestly is what let the other 65 become visible. The two facts were the same fact.
+
+So the claim in the workflow comment is not rhetorical: **every historical CI failure
+count on this repository is a lower bound.** For this commit the correction is 3 -> 68.
 
 ---
 
@@ -275,6 +303,44 @@ silently killed one remote harness run at line 2.
 
 ---
 
+## 4b. HIGH, NEW, unrelated to this lane — `--json-stream` emits no `ready` on Windows
+
+Run 1's self-hosted Windows leg reported **`12469 tests run: 12388 passed, 81 failed`**
+— the first Windows enumeration anyone has seen in the blind window. Four of those 81
+are the tests this lane touched, all failing with the child dying at startup:
+
+```
+plugin_discovery_e2e   -> "child closed stdout during startup events"
+release_binary_smoke   -> "release child closed stdout before emitting Ready"
+```
+
+**I checked whether I caused it rather than assuming either way, and I did not.**
+Measured directly on `SeanD@seandesktop` against the runner's own
+`target\release\wayland-core.exe`, driving `--json-stream` under three environments and
+reading the first stdout line with a 25s budget:
+
+| environment | first stdout line |
+|---|---|
+| **`HOME` only — exactly the OLD test's environment** | **`<NO LINE>`** |
+| `WAYLAND_CAMOUFOX_BIN` resolvable + `DISPLAY` (my Live leg) | `<NO LINE>` |
+| `WAYLAND_CAMOUFOX_BIN` unresolvable (my Dead leg) | `<NO LINE>` |
+
+The baseline environment reproduces it identically, so **the env vars this lane adds
+are not the cause** — `--json-stream` does not produce a `ready` event on that Windows
+host at all. On Linux the same handshake completes in under 0.2s.
+
+That is a **host-integration-level defect**: `ready` is the first thing the Desktop app
+consumes. It is out of this lane's scope and is NOT claimed as fixed here, but it
+should not sit unreported — it was invisible until `--no-fail-fast` and the restored
+signal made the Windows leg enumerate.
+
+Incidental observation from the same probe, also unreported until now: the engine read
+config from `C:\Users\seand\.wayland\` despite `HOME` being redirected to a temp dir,
+i.e. **the `HOME` override the tests rely on for isolation does not isolate on
+Windows** (which uses `USERPROFILE`). Both belong in BACKLOG for a Windows lane.
+
+---
+
 ## 5. CI runs
 
 **Run 1 — `30403867920`** (HEAD `189599ca`). The one that produced the finding above.
@@ -288,7 +354,21 @@ silently killed one remote harness run at line 2.
 That job is removed in run 2. Its log is the evidence for section 2 and is worth
 keeping: job id `90424728437`.
 
-**Run 2 — HEAD after removing the job.** Id and per-job conclusions appended below.
+Run 1's authoritative result, `ci-linux` job `90424728480`:
+
+| | |
+|---|---|
+| `Summary [586.307s]` | **12820 tests run: 12752 passed, 68 failed, 50 skipped** |
+| the six tests this lane touched | **all PASS** |
+| anvil containment test | PASS (qualified-and-skipped, skip recorded and surfaced as `::warning::`) |
+| `CI (Array)` self-hosted Windows | `12469 tests run: 12388 passed, 81 failed` — see section 4b |
+
+**Run 2 — `30404931798`** (HEAD `4b094870`, the containment job removed). Queued behind
+run 1; branch pushes are never cancelled (`cancel-in-progress` is false for them), so it
+starts when runners free up. It is expected to differ from run 1 in exactly one way: no
+`Hard-containment gate` job. **It will still be RED**, because of the 68 pre-existing
+Linux failures and the 81 pre-existing Windows ones. That is the honest state of the
+branch, not a result of this lane.
 
 ---
 
@@ -304,5 +384,18 @@ keeping: job id `90424728437`.
   option (i) is disproved with a measurement table; the residual blocker is isolated
   to the engine's sandboxed gate against a bind-mounted workspace. **This is not a
   complete fix and is not claimed as one.**
-- **Failure 3 (`--no-fail-fast`): FIXED**, with the "every historical count is a lower
-  bound" consequence recorded in the workflow itself.
+- **Failure 3 (`--no-fail-fast`): FIXED**, and it turned out to be the largest of the
+  three. The corrected count for this commit is **3 -> 68 on Linux**, and the Windows
+  leg enumerated **81** for the first time. The consequence is recorded in the workflow
+  itself.
+
+**The branch is still RED, and should be.** 68 pre-existing Linux failures and 81
+pre-existing Windows failures are now visible that were not before. None are this
+lane's — all six touched tests pass. Making them visible was the point; fixing them is
+several lanes of work, and pretending otherwise would be the engineered green this
+program keeps warning about.
+
+**What I did NOT do:** did not fix the 68/81 newly-visible pre-existing failures; did
+not close the containment gate in CI (isolated the blocker instead); did not fix the
+Windows `--json-stream` defect; did not merge, PR, tag, or touch `main`; did not set
+`WAYLAND_ALLOW_NO_SANDBOX` anywhere; did not weaken, `#[ignore]`, or delete any test.
