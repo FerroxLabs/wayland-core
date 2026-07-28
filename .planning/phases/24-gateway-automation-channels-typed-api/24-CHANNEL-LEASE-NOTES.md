@@ -276,3 +276,71 @@ an installed service plus a user opening a normal session is the intended produc
 ### Next
 
 Apply `ScheduleLease` to channel polling. Open question still open: the dependency edge.
+
+---
+
+## T+180 — FIX LANDED. All four proof legs green on the real binary.
+
+Fixed binary `wayland-core 0.12.25 (source e41dbd0e…)`.
+
+### The fix
+
+`ScheduleLease` (the cron schedule lease Phase 24 already shipped) reused via a new
+**additive** `attempt_named`, applied at all three `start_all()` sites:
+`bootstrap.rs` (session), `cron.rs` (cron daemon), `wcore-cli/gateway.rs` (service).
+No new crate edges — `wcore-agent` and `wcore-cli` already depend on `wcore-cron`, and
+`lease` is already `pub mod`. **Zero `Cargo.toml` / `Cargo.lock` churn.**
+
+Loser behaviour = **(c) run without polling, loudly**. Cross-audit 3/3 unanimous
+(codex `PANEL_POSITION=c`, gemini `c`, kimi `c`).
+
+Unit tests: `channel_lease` **4 passed** (expected 4, 0 ignored); `wcore-cron lease`
+**6 passed** (expected 6) — the pre-existing lease tests still pass, so `attempt_named`
+did not regress the schedule lease.
+
+### The four legs
+
+| leg | measure | result |
+|---|---|---|
+| 3 — service owns, session arrives | `max_open=1`, `delivered_to_holder=8/8`, observer token `true`, owner token `true` | **LEASE HOLDS** |
+| 2 — steady state | window A `max_open=1` polls 18; window B `max_open=1` polls 21; ratio **1.17** (was **2.16**) | **NO RACE** |
+| 4 — SIGKILL the holder | `polls_in_8s_after_kill=0`, successor alive, owner token, takeover polls **true**, message **delivered** | **TAKEOVER OK** |
+| 1 — backlog (pre-fix characterisation) | 8 submitted, 8 destroyed, gateway got 0 | **LOSS REPRODUCED** |
+
+`instrument.fault = false` on every one.
+
+**The positive path is asserted everywhere**, so universal denial cannot manufacture a
+green: leg 3 counts 8/8 delivered to the holder, leg 4 requires a message delivered after
+takeover, and `max_open == 0` is graded **DENIAL**, a failure.
+
+`polls_in_8s_after_kill = 0` is worth naming: it proves the holder really was the sole
+poller (so leg 3's `max_open=1` is not "the fixture stopped working"), and it shows that
+until a successor acquires, nothing is received — which is exactly why the release
+property matters.
+
+### Instrument defects found and REPAIRED IN THIS LANE (§6b-ii) — five
+
+1. **LLM stub in-process → deadlock.** Blocking wait held the loop that had to `accept`.
+2. **Stub answered JSON, not SSE** → engine retried, tripped its circuit, session hung 90s.
+3. **Pooled HTTP agent → `socket hang up`** at the measurement point.
+4. **Unretried `submit()`** turned one transient failure into a destroyed run.
+5. **Leg 4 graded WEDGED on a run with no successor.** The gateway's *pre-existing* PID
+   lock refused a second gateway per home ("gateway already running for this home",
+   106-byte log), so "no polls after the kill" measured nothing. **A false CRITICAL is as
+   damaging as a false green.** The grader now refuses to interpret takeover unless the
+   successor was alive.
+
+Every repair carries a three-assertion self-test whose third assertion shows the OLD shape
+would have missed it. **21 assertions, 21 passed.** Two were caught by the self-test going
+red first (the SSE change, and the pooling claim below), which is the evidence the suite
+can fail.
+
+### One claim I could NOT prove, and did not keep
+
+The pooling repair was first self-tested as "the old pooled agent FAILS across the idle
+gap". **That assertion went red** — the failure is a race needing the server's idle close
+to land in flight, and a graceful close is normally detected and the socket evicted. I did
+not delete the inconvenient assertion; I replaced it with a deterministic one that proves
+what the repair actually does (default agent reuses ONE socket for two requests,
+`agent:false` opens TWO, so the reuse the race needs is gone by construction). **The race
+is not reproduced on demand and is not claimed to be.**
