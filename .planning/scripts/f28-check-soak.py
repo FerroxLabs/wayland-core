@@ -392,6 +392,32 @@ def do_verify(soak: dict, bands: dict | None) -> list[str]:
                 f"the required minimum {MIN_CONCURRENCY}; a sibling-dependent defect is "
                 "invisible to a serial run",
             )
+        wl = fam.get("workload")
+        if not isinstance(wl, dict):
+            reject(
+                "F28S-006",
+                f"family {fam.get('family')!r} records no workload census, so a soak of "
+                "three trivial surfaces would be indistinguishable from a soak of the "
+                "candidate's resolved surfaces",
+            )
+        candidate_surfaces = int(wl.get("candidate_surfaces", 0))
+        established = int(wl.get("established", 0))
+        broken = int(wl.get("broken_inventory", 0))
+        max_broken = float(((bands or {}).get("warmup") or {}).get("max_broken_inventory_fraction", 0.05))
+        if candidate_surfaces and broken / candidate_surfaces > max_broken:
+            reject(
+                "F28S-006",
+                f"family {fam.get('family')!r}: broken inventory {broken}/{candidate_surfaces} "
+                f"exceeds the decided {max_broken:.2%}; an invariant learned from a broken "
+                "baseline cannot fail, so the run is VOID rather than passed",
+            )
+        if established < 20 or (candidate_surfaces and established / candidate_surfaces < 0.25):
+            reject(
+                "F28S-007",
+                f"family {fam.get('family')!r}: only {established} of {candidate_surfaces} "
+                "resolved surfaces established an invariant; a thousand sessions over a "
+                "collapsed workload certify the collapse",
+            )
         recorded = fam.get("observable_verdicts") or {}
         computed = family_verdicts(fam, bands)
         for obs, (kind, code, detail) in computed.items():
@@ -593,10 +619,11 @@ def _bands_fixture() -> dict:
         "windows": {"early_blocks": [1, 2, 3], "late_blocks": [8, 9, 10]},
         "sampling": {"resource_interval_sessions": 10, "resource_min_samples": 4},
         "warmup": {
+            "max_broken_inventory_fraction": 0.05,
             "sanity_schema": {
                 "required_exit_status": 0,
                 "forbidden_output_sentinels": FORBIDDEN_SENTINELS,
-            }
+            },
         },
         "drift": [{"metric": "latency_p50_block_median_ms", "max_ratio": 1.5}],
         "floors": [{"metric": "quality_correct_rate_run", "op": ">=", "value": 0.99}],
@@ -622,6 +649,12 @@ def _family_fixture() -> dict:
         "sessions_completed": 1000,
         "session_target": 1000,
         "concurrency": 4,
+        "workload": {
+            "candidate_surfaces": 116,
+            "established": 93,
+            "precondition_unavailable": 21,
+            "broken_inventory": 2,
+        },
         "blocks": [{"block": i + 1, "sessions": 100} for i in range(10)],
         "canary": {
             "channels": {c: 0 for c in CHANNELS},
@@ -800,6 +833,30 @@ def self_test() -> int:
 
     results.append(_expect_reject("RED: uniformly broken run trips the absolute floor",
                                   "F28S-005", red_floor))
+
+    def void_broken_inventory():
+        s = _soak_fixture()
+        s["families"][0]["workload"]["broken_inventory"] = 40
+        do_verify(s, _bands_fixture())
+
+    results.append(_expect_reject("VOID: warm-up baseline is mostly broken", "F28S-006",
+                                  void_broken_inventory))
+
+    def void_collapsed_workload():
+        s = _soak_fixture()
+        s["families"][0]["workload"]["established"] = 3
+        do_verify(s, _bands_fixture())
+
+    results.append(_expect_reject("VOID: workload collapsed to a handful of surfaces",
+                                  "F28S-007", void_collapsed_workload))
+
+    def void_no_workload_census():
+        s = _soak_fixture()
+        s["families"][0].pop("workload")
+        do_verify(s, _bands_fixture())
+
+    results.append(_expect_reject("VOID: no workload census at all", "F28S-006",
+                                  void_no_workload_census))
 
     def red_zero_concurrency():
         s = _soak_fixture()

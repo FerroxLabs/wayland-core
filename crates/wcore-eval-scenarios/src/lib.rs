@@ -50,6 +50,9 @@ pub mod cross_session;
 pub mod e5_cases;
 /// Phase 28 E5 certification matrix generator (F28-01).
 pub mod e5_matrix;
+/// Phase 28 E5 soak definitions, VOID rules and verdicts (F28-02). Executed by
+/// `scripts/f28-native-soak.mjs`.
+pub mod e5_soak;
 mod egress_evidence;
 mod filesystem_evidence;
 pub mod fixtures;
