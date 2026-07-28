@@ -872,8 +872,16 @@ impl AgentBootstrap {
                 )
             })
             .collect();
+        // 27-C2(b): `from_verified` answers "is the plugin present and
+        // genuine?" — necessary for the capability, not sufficient. Narrow the
+        // result to what can actually START on this host, so the desktop app
+        // stops rendering a capability whose first operation dies with
+        // `spawn camoufox: No such file or directory`. Clears flags only; the
+        // identity guarantee above is untouched.
         let plugin_capabilities =
-            crate::output::protocol_sink::PluginCapabilitySet::from_verified(&verified_plugins);
+            crate::output::protocol_sink::PluginCapabilitySet::from_verified(&verified_plugins)
+                .narrowed_to_live()
+                .await;
         // Backwards-compat alias for any consumer that still expects
         // the raw name list (handler-side log lines etc.).
         let loaded_plugin_names: Vec<String> =
