@@ -1,0 +1,24 @@
+=== cargo test -p wcore-config --test local_model_no_credential_test ===
+
+running 3 tests
+test only_the_exact_prefix_counts_as_local ... ok
+test remote_model_without_credential_still_refuses ... ok
+test local_model_resolves_without_any_credential ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+=== cargo test -p wcore-config (parallel, default threads) ===
+    config::tests::migrate_legacy_yaml_reads_from_wayland_home_when_set
+test result: FAILED. 550 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 107.69s
+
+=== control: the same failing test alone at HEAD ===
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 550 filtered out
+
+=== control: full lib suite serialised (--test-threads=1) ===
+test result: ok. 551 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 131.55s
+
+=== cargo test -p wcore-types ===
+test result: ok. 137 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
