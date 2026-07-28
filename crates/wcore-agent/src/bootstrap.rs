@@ -284,15 +284,6 @@ pub fn govern_standalone_spawner(
     Ok(spawner)
 }
 
-/// Builder for creating a fully-initialized `AgentEngine`.
-///
-/// Encapsulates the complete initialization pipeline so all consumers
-/// (CLI, backend, sub-agents) get consistent behavior:
-///
-/// - System prompt always includes model identity, working directory, date
-/// - Tool usage guidance is always injected
-/// - AGENTS.md is loaded from the workspace hierarchy
-/// - Skills, MCP, plan mode, spawn are enabled based on `Config` fields
 /// Load the channel configs the inbound subscriber derives its ACCESS POLICY
 /// and TOOL POSTURE from.
 ///
@@ -308,6 +299,15 @@ pub fn load_channel_policy_configs() -> Vec<wcore_channels::config::ChannelConfi
         .unwrap_or_default()
 }
 
+/// Builder for creating a fully-initialized `AgentEngine`.
+///
+/// Encapsulates the complete initialization pipeline so all consumers
+/// (CLI, backend, sub-agents) get consistent behavior:
+///
+/// - System prompt always includes model identity, working directory, date
+/// - Tool usage guidance is always injected
+/// - AGENTS.md is loaded from the workspace hierarchy
+/// - Skills, MCP, plan mode, spawn are enabled based on `Config` fields
 pub struct AgentBootstrap {
     config: Config,
     workspace: String,
