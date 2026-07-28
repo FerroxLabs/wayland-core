@@ -326,7 +326,10 @@ pub fn build_piper_tts_backend() -> Option<Arc<dyn TtsBackend>> {
         tracing::info!(
             voice = %voice,
             dir = %voices_dir.display(),
-            "piper: no cached voice on disk — Piper TTS hidden (download via piper_download first)"
+            // No `via piper_download` here either: that name is a module, not a
+            // registered tool, so it named nothing an operator could run. See
+            // the note in `tts.rs::build_tts_backend`.
+            "piper: no cached voice on disk — Piper TTS hidden"
         );
         return None;
     }

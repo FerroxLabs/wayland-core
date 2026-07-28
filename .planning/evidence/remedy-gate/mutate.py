@@ -64,6 +64,16 @@ MUTATIONS = [
         '#[arg(long, value_name = "PROCEDURE_ID", hide = true)]',
         '#[arg(long, value_name = "PROCEDURE_ID")]',
     ),
+    (
+        "case7-piper-tool-name",
+        "RED",
+        "TTS keyless warning re-advertises `piper_download`, which is a module "
+        "name, not a tool anyone can run",
+        "crates/wcore-agent/src/tool_backends/tts.rs",
+        "set OPENAI_API_KEY or ELEVENLABS_API_KEY. \\\n         Tool hidden.",
+        "set OPENAI_API_KEY or ELEVENLABS_API_KEY \\\n"
+        "         (or download Piper voices via piper_download). Tool hidden.",
+    ),
     # ---- measured coverage LIMITS: the gate is expected NOT to see these ----
     (
         "case3-24-C2-NOT-COVERED",

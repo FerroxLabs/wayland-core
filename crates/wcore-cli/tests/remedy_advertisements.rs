@@ -1068,6 +1068,159 @@ fn no_unconditional_dead_end_is_reachable_from_an_advertised_flag() {
     );
 }
 
+// ---------------------------------------------------------------- tool names
+
+/// Every tool name the workspace actually defines.
+///
+/// Taken from the `Tool::name` implementations themselves — the one string the
+/// model and the registry both key on — rather than from a hand-kept list,
+/// which would go stale the first time somebody added a tool.
+fn real_tool_names() -> BTreeSet<String> {
+    let re = Regex::new(r#"fn\s+name\s*\(\s*&self\s*\)\s*->\s*&(?:'\w+\s+)?str\s*\{\s*"([^"]+)""#)
+        .unwrap();
+    let mut out = BTreeSet::new();
+    // Deliberately NOT restricted to production sources: a tool that only a
+    // test defines is still a real name, and counting it can only make this
+    // check more conservative (fewer reports), never more trigger-happy.
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            let n = e.file_name();
+            if p.is_dir() {
+                if n == "target" || n == ".git" {
+                    continue;
+                }
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(&workspace_root().join("crates"), &mut files);
+    for f in files {
+        if let Ok(src) = std::fs::read_to_string(&f) {
+            for cap in re.captures_iter(&src) {
+                out.insert(cap[1].to_string());
+            }
+        }
+    }
+    out
+}
+
+/// A remediation that tells an operator to reach for a TOOL must name a tool
+/// that exists.
+///
+/// Case 7, handed over mid-lane: `tool_backends/tts.rs` told every keyless user
+/// to "download Piper voices via `piper_download`". That name is not a tool. It
+/// is a *module* (`wcore_tools::piper_download`) and a builder function that no
+/// production caller invokes, so the thing the message names has no runtime
+/// existence at all. Three further defects sit behind it — see the coverage
+/// note below.
+///
+/// # Extraction is deliberately narrow, and that is measured
+///
+/// A sweep for "any snake_case token after any verb" produced 16 candidates on
+/// this workspace of which 11 were struct fields and JSON keys (`access_token`,
+/// `finish_reason`, `max_tokens`, `job_id`, `replace_all`, …). At 11 false
+/// positives to 1 true one it would have been deleted within a week.
+///
+/// Restricting to `via <name>` (plus a backticked form after the invocation
+/// verbs) gives 3 extractions on the same corpus: one real tool (`meet_say`,
+/// which resolves), and the two Piper mentions, which do not. Zero false
+/// positives. Narrow and true beats broad and noisy — but it IS narrow, and the
+/// phrasings it does not read are listed in `.planning/REMEDY-GATE.md`.
+///
+/// # What this check does NOT reach
+///
+/// Name existence only. The Piper defect was dead in four independent ways and
+/// this catches the first:
+///   1. **caught** — `piper_download` is not a tool name anywhere;
+///   2. not caught — `build_piper_tts_backend()` returns `None` unconditionally;
+///   3. not caught — `PiperTtsBackend::synthesize` is a stub returning
+///      `DependencyMissing`;
+///   4. not caught — `piper_tts` is a non-default feature, so the branch is not
+///      even compiled into the shipped binary.
+///
+/// (2) and (3) are the same *unconditional dead end* shape that
+/// `no_unconditional_dead_end_is_reachable_from_an_advertised_flag` models for
+/// CLI flags; extending that detector past `wcore-cli` and past `bail!` to a
+/// bare `Err(..)` return is the obvious next step and is NOT done here. Do not
+/// read this test as proving a tool is reachable — only that it is named.
+#[test]
+fn advertised_tool_names_resolve_to_a_real_tool() {
+    let tools = real_tool_names();
+    assert!(
+        tools.len() > 50,
+        "only {} tool names were recovered from the workspace; the extractor is \
+         broken and every name below would be reported missing",
+        tools.len()
+    );
+
+    let via = Regex::new(r"\bvia\s+`?([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`?").unwrap();
+    let ticked =
+        Regex::new(r"\b(?:use|using|run|invoke|call)\s+`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`").unwrap();
+
+    let root = workspace_root();
+    let mut checked = 0usize;
+    let mut resolved = 0usize;
+    let mut missing: Vec<String> = Vec::new();
+
+    for path in production_sources() {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let src = strip_test_modules(&raw);
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .to_string();
+        for (line, text) in string_literals(&src) {
+            for cap in via.captures_iter(&text).chain(ticked.captures_iter(&text)) {
+                let name = cap[1].to_string();
+                checked += 1;
+                if tools.contains(&name) {
+                    resolved += 1;
+                } else {
+                    missing.push(format!(
+                        "{rel}:{line} tells the operator to reach for `{name}`, which is \
+                         not a tool this product defines. Nothing by that name can be \
+                         called at runtime."
+                    ));
+                }
+            }
+        }
+    }
+
+    eprintln!("remedy-gate: {checked} advertised tool names, {resolved} resolved");
+    assert!(
+        checked >= 2,
+        "only {checked} advertised tool name(s) extracted -- the pattern is broken \
+         and this check is vacuous. Fix the extraction, do NOT lower this floor."
+    );
+    // The resolution side must be exercised too. A run where NOTHING resolves
+    // would mean `real_tool_names()` is returning junk, and every report below
+    // would be an artefact rather than a finding.
+    assert!(
+        resolved >= 1,
+        "no advertised tool name resolved against the real tool set ({checked} \
+         extracted, {} names known). The resolver, not the product, is broken.",
+        tools.len()
+    );
+
+    assert!(
+        missing.is_empty(),
+        "{} advertised tool name(s) that do not exist ({checked} checked, \
+         {resolved} resolved):\n{}",
+        missing.len(),
+        missing.join("\n")
+    );
+}
+
 // ---------------------------------------------------------------- doc paths
 
 /// A remediation that cites a document must cite one that exists.

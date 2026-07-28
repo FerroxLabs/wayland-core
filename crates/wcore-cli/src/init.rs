@@ -427,8 +427,9 @@ mod tests {
             Some(true),
             "[memory] enabled did not survive the loader:\n{body}"
         );
-        assert!(
+        assert_eq!(
             cfg.observability.skills_lifecycle,
+            Some(true),
             "[observability] skills_lifecycle did not survive the loader:\n{body}"
         );
     }
