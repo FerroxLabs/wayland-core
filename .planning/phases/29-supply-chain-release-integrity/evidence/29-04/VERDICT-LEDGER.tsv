@@ -1,0 +1,16 @@
+# Phase 29's four Success Criteria, graded. Machine-readable index into
+# 29-PHASE-VERDICT.md.
+#
+# Shape: F29-SC-<n>::<MET|PARTIAL|NOT-MET>::evidence=<path relative to evidence/29-04>
+#
+# Every grade is against the criterion QUOTED VERBATIM from .planning/ROADMAP.md,
+# never against a reworded version that happens to fit the evidence. A grade with
+# no artifact behind it is an opinion, so each row names one.
+#
+# Criteria 1 and 2 are settled by ledgers 29-02 and 29-03 wrote and this plan
+# read; the relative paths reach them. Criteria 3 and 4 are settled by this
+# plan's own ledgers.
+F29-SC-1::PARTIAL::evidence=../29-02/CLAUSE-LEDGER.tsv
+F29-SC-2::PARTIAL::evidence=../29-03/CLAUSE-LEDGER.tsv
+F29-SC-3::PARTIAL::evidence=TAMPER-LEDGER.tsv
+F29-SC-4::PARTIAL::evidence=release-pipeline-states.txt

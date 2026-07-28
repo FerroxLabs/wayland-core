@@ -1,0 +1,26 @@
+# Seven attempts to collapse the four release states into fewer, each executed
+# as a REAL invocation of the shipped `wayland-release` binary against run A's
+# otherwise-valid chain, so exactly one thing is wrong per attempt.
+#
+# Shape: F29-04-COLLAPSE-<n>::REFUSED::attempt=<name>::evidence=<path>
+#
+# Every refusal has a capture behind it with the exit status in it. A refusal
+# claimed without a capture is an assertion, not a measurement.
+#
+# COLLAPSE-7 exists because COLLAPSE-2 was refused by the distinct-key-per-state
+# rule, which fires BEFORE the role check -- so COLLAPSE-2 alone does not prove
+# the role binding. COLLAPSE-7 repeats it with a freshly rotated packaging-role
+# key so no key id repeats and the refusal must come from the ROLE.
+#
+# COLLAPSE-6 uses the exact state name an agent on this program actually
+# invented to route around an artifact it wrongly believed unobtainable. Both
+# doors are tried: the CLI value parser (rc=2) and a fifth record spliced
+# straight into the chain JSON (rc=1, refused at deserialization by the closed
+# enum, before any logic runs).
+F29-04-COLLAPSE-1::REFUSED::attempt=relabel-packaging-as-acceptance::evidence=collapse-1-relabel.txt
+F29-04-COLLAPSE-2::REFUSED::attempt=acceptance-signed-by-packaging-key::evidence=collapse-2-wrong-role-signature.txt
+F29-04-COLLAPSE-3::REFUSED::attempt=acceptance-reuses-packaging-evidence::evidence=collapse-3-reused-evidence.txt
+F29-04-COLLAPSE-4::REFUSED::attempt=skip-deployment-preparation::evidence=collapse-4-skipped-state.txt
+F29-04-COLLAPSE-5::REFUSED::attempt=reorder-the-chain::evidence=collapse-5-reordered-chain.txt
+F29-04-COLLAPSE-6::REFUSED::attempt=invented-fifth-state-termination_state_4::evidence=collapse-6-invented-fifth-state.txt
+F29-04-COLLAPSE-7::REFUSED::attempt=acceptance-signed-by-a-packaging-role-key::evidence=collapse-7-role-mismatch.txt

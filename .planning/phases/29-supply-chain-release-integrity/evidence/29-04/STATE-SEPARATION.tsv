@@ -1,0 +1,25 @@
+# The four release states, run twice through the REAL `wayland-release` binary
+# on hetzner-dsm at commit f6196a3275d41eaf769d4271b38d145e18739f26.
+#
+# Shape: F29-04-STATE-<ordinal>::<REACHED|NOT-REACHED>::run=<A|A1|B>::evidence=<path>
+#
+# Run A  — all four role keys held, the Phase 28 certification seam instantiated
+#          in the clean room from a receipt the real evaluation pipeline emitted.
+#          This is the POSITIVE CONTROL. Without it the separation proof would be
+#          rejection-only, which any over-strict verifier passes.
+# Run A-1 — the same four role keys, but through the SHIPPED TOOL ONLY, whose
+#          `manifest build` hardcodes certification = Unavailable. Recorded
+#          because it is the honest production measurement: holding every key is
+#          NOT sufficient, because acceptance has a second, independent gate.
+# Run B  — the release-acceptance key withheld entirely: three keys in the trust
+#          root, three seeds on disk. This is the SEPARATION itself.
+#
+# Run A completing proves the MECHANISM works with a key this lane generated in
+# a temp directory. NO RELEASE WAS ACCEPTED. The real release-acceptance key is
+# Sean's, this lane neither holds it nor requests it, and nothing was published.
+F29-04-STATE-0::REACHED::run=A::evidence=run-a-positive-control.txt
+F29-04-STATE-1::REACHED::run=A::evidence=run-a-positive-control.txt
+F29-04-STATE-2::REACHED::run=A::evidence=run-a-positive-control.txt
+F29-04-STATE-3::REACHED::run=A::evidence=run-a-positive-control.txt
+F29-04-STATE-3::NOT-REACHED::run=B::evidence=run-b-withheld-acceptance-key.txt
+F29-04-STATE-3::NOT-REACHED::run=A1::evidence=run-a1-shipped-tool-only.txt
