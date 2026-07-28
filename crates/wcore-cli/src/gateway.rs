@@ -720,18 +720,21 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
     // no channels". Every failure below is therefore carried into
     // `registration_error` and surfaced against an independently-counted
     // `configured`.
-    let mut channels = wcore_channels_registry::wcore_channels::ChannelManager::new();
+    let mut channel_manager = wcore_channels_registry::wcore_channels::ChannelManager::new();
     let channels_dir = home.join("channels");
     let mut registration_error: Option<String> = None;
     let mut registered_n = 0usize;
+    let mut gateway_config: Option<wcore_config::config::Config> = None;
     match crate::channel::resolve_config_for_credentials().and_then(|c| {
         c.open_credentials_store()
             .map_err(|e| anyhow::anyhow!("{e}"))
+            .map(|s| (c, s))
     }) {
-        Ok(store) => {
+        Ok((resolved, store)) => {
+            gateway_config = Some(resolved);
             let creds: Arc<dyn wcore_config::credentials::CredentialsStore> = Arc::from(store);
             match wcore_channels_registry::auto_register_from_dir(
-                &mut channels,
+                &mut channel_manager,
                 &channels_dir,
                 creds,
             )
@@ -739,12 +742,6 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
             {
                 Ok(n) => {
                     registered_n = n;
-                    if n > 0
-                        && let Err(e) = channels.start_all().await
-                    {
-                        eprintln!("[gateway] channel start_all: {e}");
-                        registration_error = Some(format!("start_all: {e}"));
-                    }
                     eprintln!("[gateway] channels registered={n}");
                 }
                 Err(e) => {
@@ -758,9 +755,102 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
             registration_error = Some(format!("credentials store unavailable: {e}"));
         }
     }
+
+    // F24-C3-H2. Everything above this point existed before, and produced a
+    // gateway that polled its adapters and dropped every inbound event: it
+    // constructed no `InboundSubscriber` on the manager's broadcast and no
+    // inbound webhook host. Both lived only in `AgentBootstrap`, which the
+    // gateway does not use, so inbound dispatch was opted into at exactly three
+    // interactive call sites and `gateway run` — the systemd unit, the launchd
+    // plist, the scheduled task — was not one of them.
+    //
+    // Measured against the running gateway at `e88cf43f`, not read off the
+    // source: process alive, `[inbound_webhook] enabled = true` in its own
+    // config, and a request to the configured bind got ECONNREFUSED. A config
+    // key that reads `enabled = true` over a socket nobody is listening on is
+    // the same silent-false-advertising defect as a trigger that never fires.
+    //
+    // The manager is lifted to `Arc<RwLock<..>>` because both the subscriber
+    // and the webhook host hold it for the life of the process.
+    let channels = Arc::new(tokio::sync::RwLock::new(channel_manager));
+
+    // ORDER IS LOAD-BEARING. The subscriber acquires its broadcast receiver in
+    // `spawn`, and tokio's broadcast drops events published before a receiver
+    // exists. `start_all` therefore runs AFTER this, not before — arming the
+    // poll loops first would lose every message that arrived in the gap.
+    let inbound_host = match &gateway_config {
+        Some(config) => {
+            match wcore_agent::channel_inbound_host::spawn(
+                Arc::clone(&channels),
+                config,
+                cwd.clone(),
+            )
+            .await
+            {
+                Ok(host) => {
+                    match &host.webhook_bind {
+                        Some(bind) => eprintln!(
+                            "[gateway] inbound: subscriber spawned, webhook host listening bind={bind} policies={}",
+                            host.policies_loaded
+                        ),
+                        None => eprintln!(
+                            "[gateway] inbound: subscriber spawned, webhook host disabled policies={}",
+                            host.policies_loaded
+                        ),
+                    }
+                    Some(host)
+                }
+                // The refusal. `[inbound_webhook] enabled = true` is an explicit
+                // operator opt-in; if the gateway cannot serve it, starting
+                // healthy and listening on nothing is precisely the defect. So
+                // it refuses, and the error names what is unsupported.
+                //
+                // With the webhook NOT enabled the same failure is degraded
+                // rather than fatal — a gateway with no model still runs its
+                // schedule — but it is carried into `registration_error`, which
+                // `channel health` reads, rather than left as a log line.
+                Err(e) if config.inbound_webhook.enabled => {
+                    return Err(anyhow::anyhow!(
+                        "gateway refusing to start: [inbound_webhook] enabled = true but \
+                         this runtime cannot host inbound. {e}"
+                    ));
+                }
+                Err(e) => {
+                    eprintln!("[gateway] inbound dispatch unavailable: {e}");
+                    registration_error = Some(match registration_error.take() {
+                        Some(prev) => format!("{prev}; inbound dispatch unavailable: {e}"),
+                        None => format!("inbound dispatch unavailable: {e}"),
+                    });
+                    None
+                }
+            }
+        }
+        None => {
+            // No resolvable config means no credentials store either, so no
+            // adapter registered and there is nothing to receive on. Already
+            // carried into `registration_error` above.
+            None
+        }
+    };
+
+    if registered_n > 0
+        && let Err(e) = channels.write().await.start_all().await
+    {
+        eprintln!("[gateway] channel start_all: {e}");
+        registration_error = Some(match registration_error.take() {
+            Some(prev) => format!("{prev}; start_all: {e}"),
+            None => format!("start_all: {e}"),
+        });
+    }
+
     let _ = crate::channel::publish_health(
         &home,
-        &channel_health_report(&home, registered_n, &registration_error, &channels),
+        &channel_health_report(
+            &home,
+            registered_n,
+            &registration_error,
+            &*channels.read().await,
+        ),
     );
 
     let binary_path = std::env::current_exe().ok();
@@ -840,8 +930,20 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                             {
                                 Ok(_) => {
                                     let desired = staging.take_registered().await;
-                                    let report = channels.reload(desired).await;
-                                    registered_n = channels.list_names().len();
+                                    // One write guard covers reload + recount so
+                                    // a health republish on the same tick cannot
+                                    // read a half-swapped adapter set. The
+                                    // subscriber and webhook host hold the SAME
+                                    // Arc, so a reloaded adapter is delivered
+                                    // through the already-running inbound stack
+                                    // without re-spawning it.
+                                    let (report, names) = {
+                                        let mut guard = channels.write().await;
+                                        let report = guard.reload(desired).await;
+                                        let names = guard.list_names().len();
+                                        (report, names)
+                                    };
+                                    registered_n = names;
                                     registration_error = None;
                                     eprintln!(
                                         "[gateway] channel reload: added={:?} replaced={:?} removed={:?} unchanged={:?}",
@@ -870,7 +972,7 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                 publish(&home, &project(&plane, plane.state()))?;
                 // Republished on the SAME tick as the projection so the two
                 // surfaces can never disagree about when they were observed.
-                let _ = crate::channel::publish_health(&home, &channel_health_report(&home, registered_n, &registration_error, &channels));
+                let _ = crate::channel::publish_health(&home, &channel_health_report(&home, registered_n, &registration_error, &*channels.read().await));
             }
         }
     }
@@ -900,7 +1002,14 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
     // rather than left describing a set of adapters that no longer exists —
     // `channel health` already refuses on a dead pid, and leaving a file
     // behind gives a second reader a chance to get it wrong.
-    let _ = channels.stop_all().await;
+    // The inbound stack is torn down BEFORE the adapters stop, so the webhook
+    // host stops accepting POSTs while the connectors that would have to send
+    // the replies are still alive. Stopping the adapters first would leave a
+    // window in which an accepted inbound message could never be answered.
+    if let Some(host) = inbound_host {
+        host.shutdown();
+    }
+    let _ = channels.write().await.stop_all().await;
     let _ = std::fs::remove_file(crate::channel::channel_health_path(&home));
 
     let mut final_proj = project(&plane, GatewayState::Drained);
