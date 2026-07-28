@@ -125,6 +125,56 @@ shipped schema's advertised default has drifted from the real one. Descriptive-o
 supplies the real default, and `default_intents()` is what actually runs), so LOW → BACKLOG.
 I did not fix it: it predates this change and is not required by it.
 
+---
+
+## M4 — fixture scope decision: BUILD IT (measured surface, not a guess)
+
+Read the exact protocol surface the Rust client requires before estimating. It is small:
+
+| need | source | size |
+|------|--------|------|
+| RFC6455 server handshake + frame codec | hand-rolled, zero npm deps | ~120 lines |
+| `op=10 HELLO` on connect | gateway.rs:264 reads `d.heartbeat_interval` | trivial |
+| accept `op=2 IDENTIFY` | gateway.rs:216 `identify_frame` — `{token,intents,properties}` | trivial |
+| `op=0 t="READY"` | gateway.rs:280-283; `d.session_id` required, `resume_gateway_url` optional | trivial |
+| `op=1` → `op=11 HEARTBEAT_ACK` | gateway.rs:232 `heartbeat_frame` | trivial |
+| `op=0 t="MESSAGE_CREATE"` | gateway.rs:81-109; **only `id` + `channel_id` are required**, everything else `#[serde(default)]` | trivial |
+
+`with_gateway_query()` appends `?v=10&encoding=json`, and the client accepts plain `ws://`
+(existing unit tests already dial `ws://127.0.0.1:1`). No TLS needed. **Well inside budget** —
+so the brief's fallback ("land the seam and say so") is NOT the outcome; I am building it.
+
+One-server design: WS is an HTTP Upgrade, so a single Node server serves BOTH
+`api_base_url=http://127.0.0.1:PORT` (REST: `/users/@me`, `POST /channels/{id}/messages`) and
+`gateway_url=ws://127.0.0.1:PORT`. This is only possible because the seam has two independent
+fields.
+
+### M4a. The consumption race has a DIFFERENT SHAPE on Discord — and the naive port would measure nothing
+
+This is the most important thing I have worked out, and getting it wrong would have produced a
+confident false green.
+
+Telegram is POLLING with a destructive server-side read: two `ChannelManager`s poll one bot
+token, and whoever calls `getUpdates` first CONSUMES the update. The other gets nothing.
+Symptom = **LOSS**. Instrument = `max_concurrent_getupdates`.
+
+Discord is PUSH over a per-connection session. Two `ChannelManager`s do NOT contend for one
+queue — each builds its own `DiscordChannel` with its own `inbox` (`lib.rs:63`) and its own WS
+connection, and Discord delivers MESSAGE_CREATE to **every** connected session. So the same
+root cause (double manager) produces the **opposite** symptom: **DUPLICATION**, not loss.
+
+`poll_events` (`lib.rs:238-240`) is `inbox.lock().await.drain(..)` — destructive — but the
+inbox is per-instance and not shared between managers, so it is not the contention point that
+`getUpdates` was.
+
+Consequences for the instrument, both of which I have built in:
+1. The Discord analogue of `max_concurrent_getupdates` is **concurrent gateway connections
+   authenticated with the same bot token**. 2 = the double-manager defect reaches Discord.
+   0 = a runtime that connected nothing, which must be a DISTINCT and FAILING answer so a
+   "fix" that works by starting nothing cannot pass.
+2. Loss and duplication are graded and reported **separately**. A driver that only counted
+   loss would report Discord CLEAN under the very defect it was built to find.
+
 ## Risk register (live)
 
 - The instrument tends to carry the defect class it hunts (11 recorded instances). My fixture
