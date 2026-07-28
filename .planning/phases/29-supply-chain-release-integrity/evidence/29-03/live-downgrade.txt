@@ -1,0 +1,29 @@
+# live downgrade leg — 2026-07-28T02:15:55Z
+# commit: e5952311eb0b6938d9078f86c2a46c95e779ed86
+# baseline package version: version = "0.12.25"
+
+# throwaway build version: version = "0.99.0"
+# built ok
+
+--- ./target/release/wayland-core --version ---
+wayland-core 0.99.0
+
+--- self-update --check-only against the REAL api.github.com, no credential ---
+current: v0.99.0
+latest:  v0.12.25
+manifest: UNAVAILABLE — the bundled release trust root is a placeholder and is refused: it holds no keys. Replace RELEASE_TRUST_ROOT_JSON in crates/wcore-cli/src/update_trust.rs with the real FerroxLabs release trust root before release-manifest verification can work.
+REFUSED: the offered release v0.12.25 is OLDER than the running v0.99.0. An update must move forward; installing a downgrade would reintroduce every defect fixed since v0.12.25. Nothing was installed.
+exit status: 0
+
+--- self-update (INSTALL path, same conditions) ---
+current: v0.99.0
+latest:  v0.12.25
+manifest: UNAVAILABLE — the bundled release trust root is a placeholder and is refused: it holds no keys. Replace RELEASE_TRUST_ROOT_JSON in crates/wcore-cli/src/update_trust.rs with the real FerroxLabs release trust root before release-manifest verification can work.
+wayland-core self-update: REFUSED: the offered release v0.12.25 is OLDER than the running v0.99.0. An update must move forward; installing a downgrade would reintroduce every defect fixed since v0.12.25. Nothing was installed.
+exit status: 1
+
+--- did the binary swap itself? ---
+version after the refused install: wayland-core 0.99.0
+freeze state written: 
+
+F29-02-LIVE-DOWNGRADE::check-only-refusals=1::check-rc=0::install-rc=1

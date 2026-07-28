@@ -1,0 +1,12 @@
+# F29-02, clause by clause. MET means proved here on the named platform.
+# PARTIAL means the mechanism is proved and a named real-key or real-release
+# input is missing. NOT-PROVABLE-HERE means the clause belongs to another
+# owner or needs an input this lane must not manufacture. Nothing is graded on
+# reasoning alone; every row names a captured artifact.
+F29-02-SIGNED-MANIFESTS::PARTIAL::platform=linux-x86_64::evidence=rotation-drill.txt
+F29-02-SOURCE-ARTIFACT-IDENTITY::PARTIAL::platform=linux-x86_64::evidence=source-artifact-identity.txt
+F29-02-ROLLBACK-PROTECTION::MET::platform=linux-x86_64::evidence=live-downgrade.txt
+F29-02-FREEZE-PROTECTION::PARTIAL::platform=linux-x86_64::evidence=mutation-drill.txt
+F29-02-REVOCATION::PARTIAL::platform=linux-x86_64::evidence=mutation-drill.txt
+F29-02-KEY-ROTATION::MET::platform=linux-x86_64::evidence=rotation-drill.txt
+F29-02-PLUGIN-BACKEND-TRUST-ROOTS::NOT-PROVABLE-HERE::platform=linux-x86_64::evidence=plugin-backend-trust-root-gap.txt

@@ -1,0 +1,56 @@
+F29-02-LIVE-TRUST-ROOT-PLACEHOLDER — the shipped binary refuses its own
+placeholder trust root, and says exactly what to replace
+=======================================================================
+Commit:    3658c4281fe228af1f700a56a42e662d3d6a9c7c
+Platform:  hetzner-dsm, Linux x86_64
+Binary:    ./target/release/wayland-core
+
+The observable outcome required is that the PROCESS refuses, names what must be
+replaced, and exits cleanly — not that an internal error type was constructed.
+All three are captured below.
+
+Exact invocation (no credential; throwaway HOME and WAYLAND_HOME):
+
+    env -u GH_TOKEN -u GITHUB_TOKEN HOME=/tmp/throwaway-29-03 \
+        WAYLAND_HOME=/tmp/throwaway-29-03 \
+        ./target/release/wayland-core self-update --check-only
+
+The line the user sees, verbatim:
+
+    manifest: UNAVAILABLE — the bundled release trust root is a placeholder and
+    is refused: it holds no keys. Replace RELEASE_TRUST_ROOT_JSON in
+    crates/wcore-cli/src/update_trust.rs with the real FerroxLabs release trust
+    root before release-manifest verification can work.
+
+Process exit status: 0 on the check-only path (a check REPORTS, it does not
+fail), and 1 on the install path when the refusal blocks an install — see
+live-downgrade.txt for a captured non-zero install refusal. Neither path hung
+and neither panicked.
+
+WHY THE BUNDLED ROOT IS EMPTY, STATED AS INTENT AND NOT AS AN OVERSIGHT
+-----------------------------------------------------------------------
+    pub const RELEASE_TRUST_ROOT_JSON: &str =
+        r#"{"schema":"wayland.release.trust-root","schema_version":1,"keys":[]}"#;
+
+Sean's real release public keys do not exist in this tree and this lane will
+not produce them. A permissive default would neutralise every check in the
+module, so the constructor refuses an empty root AND refuses any root holding
+the all-zeros Ed25519 identity point, whose signatures can be forged with no
+secret. That is the same discipline `IndexVerifier::bundled()` already applies
+for finding F-021, copied in shape and not moved.
+
+The refusal is enforced on the INJECTED path too — a test cannot smuggle a
+placeholder root past it either. Proved by
+`the_bundled_trust_root_refuses_to_construct_from_a_placeholder`, and by
+mutations M09 (empty root trusted) and M10 (all-zeros key trusted), each of
+which was caught by exactly that test. See mutation-drill.txt.
+
+CONSEQUENCE, STATED PLAINLY
+----------------------------
+Until RELEASE_TRUST_ROOT_JSON holds real keys AND releases publish a
+`*-release-manifest.json` asset, `wayland-core self-update` will not install
+anything. That is the intended fail-closed posture and it is not a silent one:
+the refusal names the alternative, `npm install -g @ferroxlabs/wayland-core@latest`,
+which is itself provenance-backed. It is also a real product consequence on a
+release path and is recorded as finding F29-03-01 (HIGH) in
+29-03-UPDATE-TRUST-RESULTS.md rather than buried here.

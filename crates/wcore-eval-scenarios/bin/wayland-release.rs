@@ -22,9 +22,9 @@ use sha2::{Digest, Sha256};
 use wcore_eval_scenarios::receipt::Evidence;
 use wcore_eval_scenarios::release_integrity::{
     ArtifactKind, CANONICAL_RELEASE_STATES, DependencyPolicyOutcomeV1, PackagedArtifactV1,
-    PolicyResult, ReleaseManifestBodyV1, ReleaseManifestV1, ReleaseState, ReleaseTrustRootV1,
-    ReproducibilityVerdictV1, SbomFormat, SbomReferenceV1, TrustedKeyV1, VarianceClass,
-    signing_key_from_seed_base64, verify_manifest, wipe,
+    PolicyResult, ReleaseManifestBodyV1, ReleaseManifestV1, ReleaseRevocationV1, ReleaseState,
+    ReleaseTrustRootV1, ReproducibilityVerdictV1, RevocationKind, SbomFormat, SbomReferenceV1,
+    TrustedKeyV1, VarianceClass, signing_key_from_seed_base64, verify_manifest, wipe,
 };
 use wcore_eval_scenarios::release_states::{
     ReleaseStateRecordV1, StateEvidenceV1, verify_state_chain,
@@ -92,6 +92,47 @@ enum Command {
         /// The measurement that identified the variance. Digested.
         #[arg(long)]
         variance_evidence: Option<PathBuf>,
+        /// Monotonic manifest sequence, starting at 1. A client refuses a
+        /// sequence at or below the highest it has already accepted.
+        #[arg(long)]
+        sequence: u64,
+        /// Unix seconds this manifest was issued. Non-zero; a client refuses a
+        /// manifest older than its maximum accepted age.
+        #[arg(long)]
+        issued_at: u64,
+        /// Repeatable `<version>=<reason>`. Revokes a release version.
+        #[arg(long = "revoke-version")]
+        revoke_version: Vec<String>,
+        /// Repeatable `<sha256>=<reason>`. Revokes an artifact by digest.
+        #[arg(long = "revoke-artifact")]
+        revoke_artifact: Vec<String>,
+    },
+    /// Rotation, half one: generate a NEW key for `role` and add it to an
+    /// existing trust root. Prints the key id and PUBLIC key only.
+    TrustRootAddKey {
+        #[arg(long)]
+        trust_root: PathBuf,
+        #[arg(long)]
+        key_id: String,
+        #[arg(long, value_parser = parse_state)]
+        role: ReleaseState,
+        #[arg(long, default_value = "0")]
+        valid_from: u64,
+        /// Directory the owner-only seed file is written into.
+        #[arg(long)]
+        directory: PathBuf,
+    },
+    /// Rotation, half two: retire a key. The key stays in the root — a
+    /// retirement is a recorded fact, not a deletion — and verification
+    /// refuses it from `retired_at` on, even though its signatures remain
+    /// cryptographically valid.
+    TrustRootRetireKey {
+        #[arg(long)]
+        trust_root: PathBuf,
+        #[arg(long)]
+        key_id: String,
+        #[arg(long)]
+        retired_at: u64,
     },
     /// Sign a manifest. The base64 32-byte Ed25519 seed is read from stdin.
     ManifestSign {
@@ -212,6 +253,10 @@ fn execute(cli: Cli) -> Result<(), String> {
             reproducibility,
             variance_class,
             variance_evidence,
+            sequence,
+            issued_at,
+            revoke_version,
+            revoke_artifact,
         } => manifest_build(
             &artifacts,
             &output,
@@ -225,7 +270,25 @@ fn execute(cli: Cli) -> Result<(), String> {
                 variance_class,
                 variance_evidence: variance_evidence.as_deref(),
             },
+            LifecycleInputs {
+                sequence,
+                issued_at,
+                revoke_version: &revoke_version,
+                revoke_artifact: &revoke_artifact,
+            },
         ),
+        Command::TrustRootAddKey {
+            trust_root,
+            key_id,
+            role,
+            valid_from,
+            directory,
+        } => trust_root_add_key(&trust_root, &key_id, role, valid_from, &directory),
+        Command::TrustRootRetireKey {
+            trust_root,
+            key_id,
+            retired_at,
+        } => trust_root_retire_key(&trust_root, &key_id, retired_at),
         Command::ManifestSign {
             manifest,
             output,
@@ -259,25 +322,8 @@ fn trust_root_init(directory: &Path, valid_from: u64) -> Result<(), String> {
 
     let mut keys = Vec::new();
     for state in CANONICAL_RELEASE_STATES {
-        let mut seed = SecretBytes(vec![0u8; 32]);
-        rand::rngs::OsRng.fill_bytes(&mut seed.0);
-        let seed_array = <[u8; 32]>::try_from(seed.0.as_slice())
-            .map_err(|_| "generated seed was not 32 bytes".to_string())?;
-        let signing_key = SigningKey::from_bytes(&seed_array);
         let key_id = format!("{}-key", state.as_str().replace('_', "-"));
-
-        // The seed goes to a mode-0600 file and NOWHERE else. It is never
-        // printed, never logged, and never returned from this function.
-        let seed_path = directory.join(format!("{key_id}.seed"));
-        write_secret_file(&seed_path, BASE64.encode(seed_array).as_bytes())?;
-
-        keys.push(TrustedKeyV1 {
-            key_id: key_id.clone(),
-            public_key_base64: BASE64.encode(signing_key.verifying_key().to_bytes()),
-            role: state,
-            valid_from,
-            retired_at: None,
-        });
+        keys.push(generate_key_into(directory, &key_id, state, valid_from)?);
     }
 
     let trust_root = ReleaseTrustRootV1::new(keys);
@@ -297,6 +343,70 @@ fn trust_root_init(directory: &Path, valid_from: u64) -> Result<(), String> {
             key.public_key_base64
         );
     }
+    Ok(())
+}
+
+/// Generate one keypair, persist the seed to an owner-only file, and return the
+/// PUBLIC half as a trust-root entry. The seed goes to that file and NOWHERE
+/// else: it is never printed, never logged, and never returned.
+fn generate_key_into(
+    directory: &Path,
+    key_id: &str,
+    role: ReleaseState,
+    valid_from: u64,
+) -> Result<TrustedKeyV1, String> {
+    let mut seed = SecretBytes(vec![0u8; 32]);
+    rand::rngs::OsRng.fill_bytes(&mut seed.0);
+    let seed_array = <[u8; 32]>::try_from(seed.0.as_slice())
+        .map_err(|_| "generated seed was not 32 bytes".to_string())?;
+    let signing_key = SigningKey::from_bytes(&seed_array);
+
+    let seed_path = directory.join(format!("{key_id}.seed"));
+    write_secret_file(&seed_path, BASE64.encode(seed_array).as_bytes())?;
+
+    Ok(TrustedKeyV1 {
+        key_id: key_id.to_string(),
+        public_key_base64: BASE64.encode(signing_key.verifying_key().to_bytes()),
+        role,
+        valid_from,
+        retired_at: None,
+    })
+}
+
+fn trust_root_add_key(
+    trust_root_path: &Path,
+    key_id: &str,
+    role: ReleaseState,
+    valid_from: u64,
+    directory: &Path,
+) -> Result<(), String> {
+    std::fs::create_dir_all(directory)
+        .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
+    let trust_root: ReleaseTrustRootV1 = read_json(trust_root_path)?;
+    let key = generate_key_into(directory, key_id, role, valid_from)?;
+    let public_key_base64 = key.public_key_base64.clone();
+    let rotated = trust_root
+        .with_key_added(key)
+        .map_err(|error| error.to_string())?;
+    write_json(trust_root_path, &rotated)?;
+    println!(
+        "KEY ADDED key_id={key_id} role={} public_key_base64={public_key_base64}",
+        role.as_str()
+    );
+    Ok(())
+}
+
+fn trust_root_retire_key(
+    trust_root_path: &Path,
+    key_id: &str,
+    retired_at: u64,
+) -> Result<(), String> {
+    let trust_root: ReleaseTrustRootV1 = read_json(trust_root_path)?;
+    let rotated = trust_root
+        .with_key_retired(key_id, retired_at)
+        .map_err(|error| error.to_string())?;
+    write_json(trust_root_path, &rotated)?;
+    println!("KEY RETIRED key_id={key_id} retired_at={retired_at}");
     Ok(())
 }
 
@@ -447,12 +557,36 @@ fn clean_room_evidence(
     Ok((sbom, dependency_policy, reproducibility))
 }
 
+/// The lifecycle facts a keyless build attestation structurally cannot carry:
+/// where this manifest sits in the sequence, when it was issued, and what has
+/// been revoked.
+struct LifecycleInputs<'a> {
+    sequence: u64,
+    issued_at: u64,
+    revoke_version: &'a [String],
+    revoke_artifact: &'a [String],
+}
+
+/// Parse a repeatable `<value>=<reason>` argument. `split_once` on the FIRST
+/// `=` so a reason may itself contain one.
+fn parse_revocation(spec: &str, kind: RevocationKind) -> Result<ReleaseRevocationV1, String> {
+    let (value, reason) = spec
+        .split_once('=')
+        .ok_or_else(|| format!("revocation must be <value>=<reason>: {spec}"))?;
+    Ok(ReleaseRevocationV1 {
+        kind,
+        value: value.to_string(),
+        reason: reason.to_string(),
+    })
+}
+
 fn manifest_build(
     artifacts_dir: &Path,
     output: &Path,
     release_id: &str,
     source_commit: &str,
     inputs: CleanRoomInputs<'_>,
+    lifecycle: LifecycleInputs<'_>,
 ) -> Result<(), String> {
     let mut entries: Vec<_> = std::fs::read_dir(artifacts_dir)
         .map_err(|error| format!("could not read {}: {error}", artifacts_dir.display()))?
@@ -488,6 +622,14 @@ fn manifest_build(
 
     let (sbom, dependency_policy, reproducibility) = clean_room_evidence(&inputs)?;
 
+    let mut revocations = Vec::new();
+    for spec in lifecycle.revoke_version {
+        revocations.push(parse_revocation(spec, RevocationKind::Version)?);
+    }
+    for spec in lifecycle.revoke_artifact {
+        revocations.push(parse_revocation(spec, RevocationKind::ArtifactSha256)?);
+    }
+
     let body = ReleaseManifestBodyV1 {
         release_id: release_id.to_string(),
         source_commit: source_commit.to_string(),
@@ -498,6 +640,9 @@ fn manifest_build(
         certification: Evidence::Unavailable {
             code: "phase_28_certification_binding_not_yet_available".to_string(),
         },
+        sequence: lifecycle.sequence,
+        issued_at: lifecycle.issued_at,
+        revocations,
     };
     let manifest = ReleaseManifestV1::unsigned(body).map_err(|error| error.to_string())?;
     write_json(output, &manifest)?;

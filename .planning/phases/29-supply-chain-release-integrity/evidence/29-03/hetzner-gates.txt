@@ -1,0 +1,21 @@
+Hetzner authoritative gates — 29-03
+Commit: 3658c4281fe228af1f700a56a42e662d3d6a9c7c
+Host:   hetzner-dsm, Linux x86_64, /root/wayland-29-03
+
+=== cargo clippy -p wcore-cli -p wcore-eval-scenarios --all-targets -- -D warnings ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.15s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+rc=0 (captured before any filtering; no pipe on the ssh line)
+
+=== cargo nextest run -p wcore-cli -p wcore-eval-scenarios --no-fail-fast ===
+     Summary [  59.939s] 2605 tests run: 2605 passed (2 slow, 1 flaky), 14 skipped
+
+=== the same command at the lane BASE 6df10dab, for a true delta ===
+     Summary [  59.763s] 2575 tests run: 2575 passed (2 slow, 1 flaky), 14 skipped
+BASE_RC=0
+
+DELTA: 2575 -> 2605 = +30 tests, 0 residual failures at either end.
+The single retried test (packaged_core_cancels_an_active_stream) is the
+known wall-clock-budgeted flake recorded in .planning/BACKLOG.md; it passed
+on retry and is unrelated to this change - it touches no file in this plan.
