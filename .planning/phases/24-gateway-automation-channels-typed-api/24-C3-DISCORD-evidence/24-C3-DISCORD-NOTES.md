@@ -175,6 +175,45 @@ Consequences for the instrument, both of which I have built in:
 2. Loss and duplication are graded and reported **separately**. A driver that only counted
    loss would report Discord CLEAN under the very defect it was built to find.
 
+---
+
+## M5 — fixture + instrument built and self-tested (commit `292bd38a`)
+
+`scripts/f24-discord-fixture.mjs` (WS gateway + REST, hand-rolled RFC6455, zero npm deps),
+`scripts/f24-discord-inbound.mjs` (6-leg driver), `scripts/f24-discord-selftest.mjs`.
+
+**Self-test: `passed=13 failed=0`, rc=0.** Proven working against a hand-rolled WS client in a
+separate socket: HELLO → IDENTIFY → READY → HEARTBEAT_ACK completes, MESSAGE_CREATE dispatches
+with the two fields the Rust decoder actually requires (`id`, `channel_id`), a non-minted token
+yields op9 and is COUNTED as an auth failure rather than dropped.
+
+### M5a. HIGH (instrument, mine, found AND fixed in-lane) — `check()` reported async failures as passes
+
+Writing the self-test I put one test (`fixture C`) behind an `async` arrow. `check()` was
+`try { fn(); passed += 1 }`. An async fn's assertion failure REJECTS rather than throws, so
+`check` saw no exception, printed `ok`, and incremented `passed`.
+
+Measured on node v22, both shapes:
+
+| shape | reported | rc |
+|-------|----------|-----|
+| no trailing `process.exit` | `ok` + `passed=1 failed=0`, then unhandled-rejection crash | 1 (AFTER a green summary) |
+| **with** the trailing `process.exit(failed===0?0:1)` this file actually had | `ok` + `passed=1 failed=0` | **0** |
+
+So the exact shape I had shipped reported a **deliberately false assertion** as a pass with a
+**zero exit status** — completely silent. A self-passing gate living inside the file whose job
+is to prove the other instruments cannot self-pass.
+
+**Repaired structurally, not locally.** I did not just make `fixture C` synchronous — `check()`
+now hard-fails on any thenable, so a future async test cannot reintroduce it. Per §6b-ii the
+repair carries its own three assertions (`harness A/B/C` + `-verify` partners): a passing sync
+test still reports ok; a false sync test is counted; and **the async-false test is now counted
+as a FAILURE and specifically NOT as a pass** — that last one is the assertion that proves the
+guard does anything, since the pre-repair harness incremented `passed` and exited 0 there.
+
+The two `FAIL harness B/C (expected FAIL)` lines in the output are deliberate, and each is
+verified by its `-verify` partner; the intentional failures are un-counted afterwards.
+
 ## Risk register (live)
 
 - The instrument tends to carry the defect class it hunts (11 recorded instances). My fixture
