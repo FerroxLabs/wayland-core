@@ -59,15 +59,20 @@ pub struct EngineJobHandler {
     channels: Option<Arc<RwLock<ChannelManager>>>,
     slash: Option<SlashSink>,
     skill: Option<SkillSink>,
-    /// F24-CL — the inbound-polling lease this handler's process holds, in
-    /// EITHER role.
+    /// F24-CL/F24-CS — this process's inbound-polling participation, in EITHER
+    /// role.
     ///
-    /// Carried purely so the claim outlives `build_headless_cron_handler_*`.
-    /// The lease releases on drop, so without an owner living as long as the
-    /// pollers do, the `cron daemon` would surrender inbound polling the
-    /// instant its handler was built and a third process could immediately
-    /// start polling alongside it — reinstating the race in a subtler form.
-    channel_poll_lease: Option<crate::channel_lease::ChannelPollLease>,
+    /// Carried so the claim outlives `build_headless_cron_handler_*`. The lease
+    /// releases on drop, so without an owner living as long as the pollers do,
+    /// the `cron daemon` would surrender inbound polling the instant its
+    /// handler was built and a third process could immediately start polling
+    /// alongside it — reinstating the race in a subtler form.
+    ///
+    /// F24-CS: it is a SUPERVISOR now, not a one-shot claim. `cron-daemon`
+    /// outranks a session and is outranked by the gateway, so this process
+    /// takes polling from an ordinary session and hands it to an installed
+    /// service.
+    channel_poll_lease: Option<crate::channel_lease::ChannelPollSupervisor>,
 }
 
 impl EngineJobHandler {
@@ -84,13 +89,13 @@ impl EngineJobHandler {
         }
     }
 
-    /// Attach the inbound-polling lease this process holds, so it lives as
+    /// Attach the inbound-polling supervisor this process holds, so it lives as
     /// long as the handler does. See the field docs for why that matters.
     pub fn with_channel_poll_lease(
         mut self,
-        lease: crate::channel_lease::ChannelPollLease,
+        supervisor: crate::channel_lease::ChannelPollSupervisor,
     ) -> Self {
-        self.channel_poll_lease = Some(lease);
+        self.channel_poll_lease = Some(supervisor);
         self
     }
 
@@ -477,8 +482,19 @@ pub async fn build_headless_cron_handler_with_channels(
         );
     }
 
+    // F24-CS. Supervise the role rather than fixing it at boot: a cron daemon
+    // that lost to an ordinary session used to stay an observer for that
+    // session's whole life, and a cron daemon that lost to a gateway which then
+    // exited never took over. Both are now continuous decisions.
+    let supervisor = crate::channel_lease::ChannelPollSupervisor::spawn(
+        &wcore_config::config::wayland_config_dir(),
+        "cron-daemon",
+        poll_lease,
+        crate::channel_lease::ChannelManagerPollControl::new(Arc::clone(&channels)),
+    );
+
     EngineJobHandler::new(Some(channels), None, Some(skill_sink))
-        .with_channel_poll_lease(poll_lease)
+        .with_channel_poll_lease(supervisor)
 }
 
 #[cfg(test)]
