@@ -74,3 +74,73 @@ message loss with no error anywhere.
 - [ ] consumption race measured
 - [ ] fix
 - [ ] positive proof (inbound + cron)
+
+---
+
+## T1 — the seam, the fix, and the instrument (Mac; nothing compiled yet)
+
+### The seam, and why it is a two-line change rather than a new subsystem
+
+Telegram is the ONLY HTTP channel adapter without a config-level base-URL
+override. Slack, WhatsApp and SMS all already carry
+`#[serde(default = "default_api_base")] pub api_base_url: String` — which is
+precisely why 24-C3's matrix could drive those three and not telegram.
+`TelegramChannel::with_api_base` existed but is `#[doc(hidden)]` and
+`wcore_channels_registry::make_telegram` calls `new`, so no config a shipped
+binary can load could point the polling adapter anywhere but api.telegram.org.
+
+Added `api_base_url` to `TelegramConfig` with the same default-to-production
+pattern, and made `new` honour it. Two tests: `new_honours_the_configs_api_base_url`
+(through `new`, the constructor the registry calls) and the control
+`new_without_an_override_still_points_at_production_telegram`.
+
+### The fix
+
+`build_headless_cron_handler_with_channels(cwd, Some(arc))` adopts a
+caller-owned manager and registers/starts nothing. `run_gateway` now builds its
+channel stack (register → Arc → subscriber → `start_all`) BEFORE the automation
+plane, and hands the plane's handler that same Arc. Plane after channels,
+because `plane.resume()` dispatches carried deliveries and adapters that resolve
+their credential in `start()` cannot send before `start_all` has run.
+
+### The instrument, proven before use
+
+`scripts/f24-tg-fixture.mjs` — a Telegram-shaped endpoint with faithful
+consumption semantics: `offset=N` permanently deletes every pending update with
+id < N, and the deletion is attributed to the poll that caused it. It counts
+`max_concurrent_getupdates` from overlapping open requests, in another OS
+process — so the number of pollers is measured from real HTTP traffic, not from
+a log line the binary prints about itself.
+
+It deliberately does NOT answer a second concurrent `getUpdates` with real
+Telegram's `409 Conflict`. 409ing would make the second poller fail loudly,
+which is the easy case. Serving both is the quiet case that produces silent
+loss, and it is the one worth measuring.
+
+`scripts/f24-c3-h4-fixture-selftest.mjs` — the instrument against a
+known-positive and a known-negative, run on the Mac at this commit:
+
+```
+ok  1 NEGATIVE single poller is served all four — served 1,2,3,4
+ok  1 NEGATIVE nothing was deleted before it was served — [1,1,1,1]
+ok  1 NEGATIVE exactly one poller was seen — max=1
+ok  2 POSITIVE the thief was served all four — thief got 4
+ok  2 POSITIVE the victim is served ZERO after the confirm — victim got 0
+ok  2 POSITIVE every deletion is attributed to the poll that caused it — [2,2,2,2]
+ok  3 CONCURRENCY two overlapping getUpdates read as 2 — max=2
+ok  4 FLOOR a run with no poller reads as 0 — max=0 polls=0
+SELFTEST failures=0
+```
+
+Assertion 4 is the anti-universal-denial guard: a "fix" that works by making
+NOTHING start reads as 0, not as 1, so it cannot pass as "one manager".
+
+## Status
+
+- [x] source read
+- [ ] double-start reproduced live  ← next, needs a hetzner build
+- [x] seam built (not yet compiled)
+- [x] instrument built and self-proven
+- [ ] consumption race measured
+- [x] fix written (not yet compiled)
+- [ ] positive proof (inbound + cron)
