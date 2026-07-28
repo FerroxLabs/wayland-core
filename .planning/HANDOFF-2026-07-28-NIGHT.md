@@ -63,7 +63,7 @@ real hardware, none visible from source review, two actively masked by gates tha
 |---|---|
 | `lane/30-02` | Phase 30 trial protocol. Owns `peer_delta`, **UNPROVEN on all 148 surface rows** |
 | ~~`lane/24-c3-h2`~~ | **MERGED.** Gateway hosts inbound; `F24-C3-H4` spun out |
-| `lane/27-gaps` | Phase 27, the weakest phase and the largest genuine parity gap |
+| ~~`lane/27-gaps`~~ | **MERGED.** Goal still NOT ACHIEVED and the lane says so — but audio flowed for the first time, and the credential-free path was made real |
 | `lane/22-c3` | Phase 22 Criterion 3 — "one loop owner", **never attempted in three passes** |
 | ~~`lane/29-h1`~~ | **MERGED.** `F29-02-H1` closed at source; `ignore = []`, both vulnerable versions out of the lock |
 | `lane/28-h2` | `F-28-02-002` — the stale-lease DoS, **the one finding blocking Phase 28's acceptance gate** |
@@ -129,6 +129,31 @@ write-ups:
 
 ---
 
+## 4b. Voice ships in no artifact — and that is NOT the advertised-but-dead class
+
+`27-gaps` found `voice_mode` behind `#[cfg(feature = "voice")]`, present in neither `wcore-cli`'s
+default features nor `release.yml`. **No shipped artifact contains voice at all**, confirmed live —
+the default build exits 2.
+
+**I checked whether this is the false-advertising class before escalating it, and it is not.**
+`grep -rn -i "voice mode\|voice_mode" README.md docs/*.md` returns **zero matches**; `Cargo.toml:56`
+documents it as an opt-in `cargo build -p wcore-cli --features voice`. The README's only voice
+claim is inbound voice-note transcription, and it already discloses that as inert without a key.
+So nothing user-visible promises a voice mode that isn't there.
+
+**Therefore it is NOT added to the release blockers**, on the same reasoning that keeps the 11
+can-ship-open criteria off that list. What it is: Phase 27 Criterion 4 **cannot be met by any
+shipped artifact**, so C4 is a decision — ship voice in the default build, or grade C4 against an
+opt-in build and say so. That is Sean's call and it is cheap either way; it is not a defect.
+
+The genuine HIGH from that lane was elsewhere, and it was unlisted: the engine's own
+missing-credential message tells the operator to select a model prefixed `ollama:` because no API
+key is needed — and **doing exactly that reproduced the identical error**, because config
+resolution returned `MissingApiKey` before the model string was read. The advertised credential-free
+route was unreachable. Fixed at `9fe6ad86`. Same shape as the `[browser.policy]` HIGH.
+
+---
+
 ## 5. Owed to Sean — nothing is blocked on him
 
 - **core#254 reply** — drafted, precondition cleared, ready to post unchanged:
@@ -137,6 +162,11 @@ write-ups:
   updating itself.
 - **Discord and Telegram vendor credentials** — the two adapters `24-03` designated the reference
   pair. Criterion 3 cannot close without them.
+- **Phase 27 credentials, named exactly** — `FLUX_API_KEY` (C3 accounting); `GROQ_API_KEY` **or**
+  `OPENAI_API_KEY` (C4 transcription — **there is no local STT path in the tree**);
+  `OPENAI_API_KEY`/`ELEVENLABS_API_KEY` for TTS→barge-in. **Piper's local voices are the one
+  credential-free route to a real interruption test**, and are worth taking for that reason alone.
+- **The C4 voice decision** — default build or opt-in (§4b). Cheap either way, but it is a call.
 - **Tag / publish**, and the **Desktop digest re-pin** on the same train
   (`CLASS-CONTRACT-01`; `observation.rs:329` makes a mismatch a hard error at `ready`).
 
