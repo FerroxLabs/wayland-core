@@ -98,7 +98,23 @@ meant "the fixture cannot run here", not "containment leaked".
 29-vs-26 count delta against Linux is **3 Unix-only PTY support self-tests**; all 22 authored
 tests `t1`–`t22` pass on both families.
 
-### Leg 4 — 29-03's Windows downgrade refusal. *(see below)*
+### Leg 4 — 29-03's Windows downgrade refusal. **MET.**
+
+Same construction as Linux: through the shipped binary, against the **real public GitHub API**,
+**no update-source redirect**, **no credential**, rebuilt at `0.99.0` so `v0.12.25` is a
+downgrade.
+
+```
+wayland-core 0.99.0
+current: v0.99.0   latest: v0.12.25
+REFUSED: the offered release v0.12.25 is OLDER than the running v0.99.0. ... Nothing was installed.
+check-only rc=0     install rc=1     version after: 0.99.0 (did not swap itself)
+```
+
+**Identical to Linux on every clause** — Linux's `check-rc=0` / `install-rc=1` reproduced
+exactly. `F29-LIMIT-06` is closed; it was never a real-credential limit. The other five
+`F29-LIMIT-*` rows are untouched and remain open — they need Sean's real release keys or a real
+published signed release.
 
 ---
 
@@ -157,3 +173,40 @@ exactly the condition under which an early-vs-late drift comparison is trustwort
 For `KR-01` the asymmetry runs the **other** way — a starved-but-alive descendant could miss
 its sampling windows and be scored as reaped — so that leg carried an independent
 survivor witness (`choice.exe`) that does not depend on file length at all.
+
+---
+
+## State left behind
+
+- **`C:\ferrox-win-23B04` untouched.** Asserted rather than assumed: its `LastWriteTime` is
+  `2026-07-27 22:42:18`, which predates this lane's first action. The live multi-day journey
+  bound to those binaries' provenance until 2026-07-30T23:54:26Z is intact. `/root/wayland-p28-03*`,
+  `/root/wayland-29-03` and `/root/wayland-f26-02` were never touched — this lane used hetzner not at all.
+- **All six of this lane's scheduled tasks unregistered**; `LEFTOVER_TASKS=0`.
+- This lane's own tree is `C:\wl-winrequeue` (source at `C:\wl-winrequeue\src`, cloned
+  read-only from `C:\ferrox-win`, never mutating it). Its root `Cargo.toml` version is
+  restored to `0.12.25`, verified after the run.
+- **This lane changed no source file.** `git diff --name-only <merge-base> HEAD` outside
+  `.planning/` is empty, and both shared-fence files (`crates/wcore-cli/src/{lib,main}.rs`) are
+  untouched. Diffed against the captured merge-base SHA `c743f398`, never the branch name.
+
+## What remains genuinely unrunnable, and why
+
+- **`hetzner-dsm` → `seandesktop` SSH.** Real, measured (`Permission denied (publickey)`), and a
+  separate pending authorization with Sean. Nothing in this lane needed it — the Mac reaches
+  both hosts.
+- **`F29-LIMIT-01..05`** (29-03): Sean's real release trust root, a published signed release
+  manifest, the runtime plugin trust root, the `gh attestation verify` accept path, and an
+  end-to-end install of a real signed artifact. All genuinely need inputs this lane may not
+  supply. Untouched and still open.
+- **The `KR-01` reap property itself.** Its scenario cannot currently run (F-WR-01/F-WR-03), so
+  whether descendants are reaped on future-drop is **unproven** — not proven, and not refuted.
+  Closing it needs the test's own setup repaired first.
+
+## To serialize
+
+- `seandesktop` is **one physical box** hosting two GitHub runners. Any lane taking a Windows
+  measurement should record competing load alongside it, and state which direction load biases
+  that particular measurement — it is not the same direction for every leg (it biased the soak
+  toward a false red and `KR-01` toward a false green).
+- No protocol seam, contract request or shared-file edit is produced by this lane.
