@@ -57,6 +57,10 @@ struct CaseEntry {
     scope: String,
     note: String,
     corpus: PathBuf,
+    /// Every symlink the generator was asked to create, or
+    /// `<unlinkable:…>` where the platform refused. An escape case whose link
+    /// could not be created tested nothing, and a test asserts that.
+    symlinks: Vec<String>,
     entries: usize,
     corpus_digest: String,
     collapsed: bool,
