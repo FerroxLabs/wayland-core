@@ -68,11 +68,38 @@ const SANDBOX_ACTIVE_PROCESS_LIMIT: usize = 512;
 /// by a source-grep, not by scale.
 const TEST_JOB_CAP: u32 = 4;
 
+/// Zero-execution guard — and it has to RUN to be one.
+///
+/// This test used to carry `#[ignore]`, which made it inert against the exact
+/// scenario it exists for: with every test in the binary ignored,
+/// `cargo test -p wcore-sandbox --test hard_process_containment_windows`
+/// executed 0 of 6 and still exited 0 printing `test result: ok`. The guard
+/// could only fire under `--ignored`, by which point the real cases were running
+/// anyway and nothing needed guarding.
+///
+/// It now always runs, so this binary can never report success on zero executed
+/// tests, and it FAILS when a caller declares live intent by setting
+/// `WAYLAND_SANDBOX_LIVE_WINDOWS=1` while asking for a run that cannot execute
+/// any containment case. Skipped under nextest, which covers the same ground via
+/// `--run-ignored`/`--no-tests=fail` and runs each test in its own process.
 #[test]
-#[ignore = "zero-execution guard for explicit native Windows containment acceptance"]
 fn native_containment_gate_marker() {
-    require_live_windows();
     assert_eq!(NATIVE_CONTAINMENT_CASES, 5);
+    if std::env::var_os("NEXTEST").is_some() {
+        return;
+    }
+    if std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").as_deref() != Ok("1") {
+        return;
+    }
+    let asked_for_ignored = std::env::args().any(|a| a == "--ignored" || a == "--include-ignored");
+    assert!(
+        asked_for_ignored,
+        "WAYLAND_SANDBOX_LIVE_WINDOWS=1 declares a live containment run, but this \
+         invocation cannot execute any of the {NATIVE_CONTAINMENT_CASES} containment cases \
+         — they are #[ignore]d and neither --ignored nor --include-ignored was passed. \
+         Exiting 0 here would certify nothing. Re-run with: cargo test -p wcore-sandbox \
+         --test hard_process_containment_windows -- --ignored --test-threads=1"
+    );
 }
 
 /// Exit-code fidelity through the Job-Object-wrapped execution on BOTH terminal

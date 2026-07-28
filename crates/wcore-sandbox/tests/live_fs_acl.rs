@@ -37,11 +37,43 @@ fn require_live_acceptance() {
     );
 }
 
+/// Zero-execution guard — and it has to RUN to be one.
+///
+/// This test used to carry `#[ignore]`, which made it inert against the exact
+/// scenario it exists for: with every test in the binary ignored,
+/// `cargo test -p wcore-sandbox --test live_fs_acl` executed 0 of 12 and still
+/// exited 0 printing `test result: ok`. The guard could only fire under
+/// `--ignored`, by which point the real cases were running anyway and nothing
+/// needed guarding. An instrument that can only report success is not an
+/// instrument.
+///
+/// It now always runs, so this binary can never report success on zero executed
+/// tests, and it FAILS when a caller declares live intent by setting
+/// `WAYLAND_SANDBOX_LIVE_WINDOWS=1` while asking for a run that cannot execute
+/// any acceptance case — precisely the case where a green would be misread as
+/// certification. Skipped under nextest, whose `--run-ignored`/`--no-tests=fail`
+/// handling covers the same ground and which runs each test in its own process.
+///
+/// Falsifiable: `WAYLAND_SANDBOX_LIVE_WINDOWS=1 cargo test --test live_fs_acl`
+/// FAILS; adding `-- --ignored` passes and runs the real cases.
 #[test]
-#[ignore = "zero-execution guard for explicit native Windows acceptance"]
 fn native_acceptance_gate_marker() {
-    require_live_acceptance();
     assert_eq!(NATIVE_ACCEPTANCE_CASES, 11);
+    if std::env::var_os("NEXTEST").is_some() {
+        return;
+    }
+    if std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").as_deref() != Ok("1") {
+        return;
+    }
+    let asked_for_ignored = std::env::args().any(|a| a == "--ignored" || a == "--include-ignored");
+    assert!(
+        asked_for_ignored,
+        "WAYLAND_SANDBOX_LIVE_WINDOWS=1 declares a live acceptance run, but this \
+         invocation cannot execute any of the {NATIVE_ACCEPTANCE_CASES} acceptance cases \
+         — they are #[ignore]d and neither --ignored nor --include-ignored was passed. \
+         Exiting 0 here would certify nothing. Re-run with: \
+         cargo test -p wcore-sandbox --test live_fs_acl -- --ignored --test-threads=1"
+    );
 }
 
 /// Seed a unique test dir under `%PUBLIC%` holding a file containing [`MARKER`].
