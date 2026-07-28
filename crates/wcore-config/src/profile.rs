@@ -644,14 +644,29 @@ pub fn delete_profile(name: &str) -> Result<(), ProfileOpError> {
 /// of the tree.
 fn copy_tree_filtered(src: &Path, dst: &Path, skip_secrets: bool) -> Result<(), ProfileOpError> {
     std::fs::create_dir_all(dst).map_err(ProfileOpError::io("create export dir"))?;
-    copy_tree_inner(src, dst, skip_secrets, true)
+    let mut sink = Vec::new();
+    copy_tree_inner(src, dst, skip_secrets, true, "", &mut None, &mut sink)
 }
 
+/// Normalize a copied entry's path to one platform-independent rendering, so a
+/// corpus exported on Windows and imported on Linux names the same items.
+fn normalized_join(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}/{name}")
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn copy_tree_inner(
     src: &Path,
     dst: &Path,
     skip_secrets: bool,
     is_top_level: bool,
+    rel_prefix: &str,
+    keep: &mut Option<&dyn Fn(&str) -> bool>,
+    copied: &mut Vec<String>,
 ) -> Result<(), ProfileOpError> {
     for entry in std::fs::read_dir(src).map_err(ProfileOpError::io("read source dir"))? {
         let entry = entry.map_err(ProfileOpError::io("read source entry"))?;
@@ -659,6 +674,17 @@ fn copy_tree_inner(
         let name_str = name.to_string_lossy();
         if is_top_level && skip_secrets && is_secret_entry(&name_str) {
             continue;
+        }
+        // Selection is applied at the TOP LEVEL only, on the same relative
+        // names an export publishes. A selection never reaches inside an item,
+        // so it cannot half-copy one.
+        let rel = normalized_join(rel_prefix, &name_str);
+        if is_top_level {
+            if let Some(f) = keep.as_ref() {
+                if !f(&rel) {
+                    continue;
+                }
+            }
         }
         let from = entry.path();
         // Use symlink_metadata so a symlink is detected as a symlink (not its
@@ -685,9 +711,10 @@ fn copy_tree_inner(
         }
         if meta.is_dir() {
             std::fs::create_dir_all(&to).map_err(ProfileOpError::io("create dir"))?;
-            copy_tree_inner(&from, &to, skip_secrets, false)?;
+            copy_tree_inner(&from, &to, skip_secrets, false, &rel, keep, copied)?;
         } else {
             std::fs::copy(&from, &to).map_err(ProfileOpError::io("copy file"))?;
+            copied.push(rel);
         }
     }
     Ok(())
@@ -713,6 +740,72 @@ pub fn export_profile(
     }
     copy_tree_filtered(&src, dst_dir, !include_secrets)?;
     Ok(dst_dir.to_path_buf())
+}
+
+/// File name a portable corpus carries its per-item provenance records in.
+///
+/// Declared HERE, beside the export it accompanies, so the writer (the CLI) and
+/// any reader agree on one name. The record CONTENT is composed by
+/// `wcore_cli::migrate::provenance`, which owns the domain-separated digest —
+/// this crate does not grow a second definition of it.
+pub const EXPORT_PROVENANCE_FILE: &str = "PROVENANCE.json";
+
+/// The top-level entries an export would publish, in a stable order.
+///
+/// These are the identities `export --select` / `--exclude` address, so a user
+/// narrows an export using exactly the names a preview showed them. Secret
+/// entries are omitted unless `include_secrets`, so a selection can never be
+/// the thing that pulls a credential into a corpus.
+pub fn export_entries(name: &str, include_secrets: bool) -> Result<Vec<String>, ProfileOpError> {
+    let src = profile_dir(name)?;
+    if !src.is_dir() {
+        return Err(ProfileOpError::NotFound(name.to_ascii_lowercase()));
+    }
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(&src).map_err(ProfileOpError::io("read profile dir"))? {
+        let entry = entry.map_err(ProfileOpError::io("read profile entry"))?;
+        let name_str = entry.file_name().to_string_lossy().into_owned();
+        if !include_secrets && is_secret_entry(&name_str) {
+            continue;
+        }
+        out.push(name_str);
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Export a profile, narrowed to the top-level entries `keep` accepts.
+///
+/// Identical to [`export_profile`] in every security-relevant respect — the
+/// same secret exclusion by default, the same symlink/reparse-point refusal,
+/// the same recursive copy — and returns the normalized relative path of every
+/// FILE it copied, so the caller can attach a provenance record to each without
+/// re-walking the tree (and therefore without a second walk that could disagree
+/// with what was actually written).
+pub fn export_profile_selected(
+    name: &str,
+    dst_dir: &Path,
+    include_secrets: bool,
+    keep: Option<&dyn Fn(&str) -> bool>,
+) -> Result<Vec<String>, ProfileOpError> {
+    let src = profile_dir(name)?;
+    if !src.is_dir() {
+        return Err(ProfileOpError::NotFound(name.to_ascii_lowercase()));
+    }
+    std::fs::create_dir_all(dst_dir).map_err(ProfileOpError::io("create export dir"))?;
+    let mut copied = Vec::new();
+    let mut keep = keep;
+    copy_tree_inner(
+        &src,
+        dst_dir,
+        !include_secrets,
+        true,
+        "",
+        &mut keep,
+        &mut copied,
+    )?;
+    copied.sort();
+    Ok(copied)
 }
 
 /// Import (adopt) a directory tree `src_dir` as a NEW profile `name`. The new

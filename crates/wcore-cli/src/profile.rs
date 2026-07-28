@@ -23,6 +23,10 @@ use clap::Subcommand;
 
 use wcore_config::profile;
 
+use crate::migrate::provenance::{Provenance, ProvenanceDocument, item_digest};
+use crate::migrate::quarantine::{self, Classification, QuarantineRequest, QuarantineStore};
+use crate::migrate::select::Selection;
+
 /// Isolated-profile management subcommands.
 #[derive(Subcommand, Debug)]
 pub enum ProfileCmd {
@@ -95,6 +99,13 @@ pub enum ProfileCmd {
         /// Include secrets (`credentials*` and `oauth/`) in the export.
         #[arg(long)]
         include_secrets: bool,
+        /// Export ONLY these top-level entries (repeatable). The names are the
+        /// ones the export publishes; an unpublished name is REFUSED.
+        #[arg(long = "select", value_name = "ENTRY")]
+        select: Vec<String>,
+        /// Export everything EXCEPT these top-level entries (repeatable).
+        #[arg(long = "exclude", value_name = "ENTRY")]
+        exclude: Vec<String>,
     },
     /// Import a directory tree as a new profile.
     ///
@@ -129,7 +140,9 @@ pub fn run(cmd: ProfileCmd) -> Result<()> {
             name,
             out,
             include_secrets,
-        } => export_cmd(&name, out.as_deref(), include_secrets),
+            select,
+            exclude,
+        } => export_cmd(&name, out.as_deref(), include_secrets, &select, &exclude),
         ProfileCmd::Import { path, new_name } => import_cmd(&path, new_name.as_deref()),
     }
 }
@@ -259,7 +272,19 @@ fn delete_cmd(name: &str, yes: bool, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn export_cmd(name: &str, out: Option<&Path>, include_secrets: bool) -> Result<()> {
+/// Export a profile as a PORTABLE CORPUS: the tree, plus a provenance record
+/// per copied file, narrowable by the same identity vocabulary an import uses.
+///
+/// The secret-exclusion default is untouched — the filter runs inside
+/// `wcore_config::profile`, ahead of selection, so a selection cannot be the
+/// thing that pulls a credential into a corpus.
+fn export_cmd(
+    name: &str,
+    out: Option<&Path>,
+    include_secrets: bool,
+    select: &[String],
+    exclude: &[String],
+) -> Result<()> {
     if !profile::profile_exists(name) {
         bail!("profile {name:?} does not exist");
     }
@@ -273,20 +298,63 @@ fn export_cmd(name: &str, out: Option<&Path>, include_secrets: bool) -> Result<(
             dst.display()
         );
     }
-    let written = profile::export_profile(name, &dst, include_secrets)
+
+    // Refuse an entry the export never publishes, rather than silently
+    // exporting nothing under a typo.
+    let published = profile::export_entries(name, include_secrets)
+        .with_context(|| format!("listing exportable entries of profile {name:?}"))?;
+    let selection = Selection::from_flags(select, exclude);
+    selection.resolve(&published)?;
+    let keep_fn = |rel: &str| selection.wants(rel);
+    let keep: Option<&dyn Fn(&str) -> bool> = selection
+        .is_narrowed()
+        .then_some(&keep_fn as &dyn Fn(&str) -> bool);
+
+    let copied = profile::export_profile_selected(name, &dst, include_secrets, keep)
         .with_context(|| format!("exporting profile {name:?}"))?;
+
+    // Attach provenance to exactly what was written — composed from the copied
+    // list rather than from a second walk that could disagree with it.
+    let mut doc = ProvenanceDocument::new();
+    for rel in &copied {
+        let bytes = std::fs::read(dst.join(rel)).unwrap_or_default();
+        doc.insert(
+            rel.clone(),
+            Provenance::new(
+                "wayland-core",
+                Some(env!("CARGO_PKG_VERSION").to_string()),
+                rel,
+                item_digest(rel, &bytes),
+            ),
+        );
+    }
+    std::fs::write(dst.join(profile::EXPORT_PROVENANCE_FILE), doc.to_json()?)
+        .with_context(|| format!("writing provenance into {}", dst.display()))?;
+
     println!(
-        "Exported profile {name:?} to {} ({}).",
-        written.display(),
+        "Exported profile {name:?} to {} ({}); {} file{} with provenance in {}.",
+        dst.display(),
         if include_secrets {
             "including secrets"
         } else {
             "secrets excluded"
-        }
+        },
+        copied.len(),
+        if copied.len() == 1 { "" } else { "s" },
+        profile::EXPORT_PROVENANCE_FILE,
     );
     Ok(())
 }
 
+/// Import a directory tree as a new profile, then CONTAIN any executable
+/// content it carried.
+///
+/// An export/import round trip that left executable content live would be a
+/// promotion path the operator never authorized — laundering quarantine
+/// through a corpus. So the same classification that guards a peer import
+/// guards this one: a skill body carrying a shell directive is moved out of the
+/// new profile into the quarantine store, inert by placement, promotable only
+/// by `migrate promote`.
 fn import_cmd(path: &Path, new_name: Option<&str>) -> Result<()> {
     let name = match new_name {
         Some(n) => n.to_string(),
@@ -298,11 +366,69 @@ fn import_cmd(path: &Path, new_name: Option<&str>) -> Result<()> {
     };
     let dir = profile::import_profile(&name, path)
         .with_context(|| format!("importing profile {name:?} from {}", path.display()))?;
+
+    let source_provenance = std::fs::read_to_string(dir.join(profile::EXPORT_PROVENANCE_FILE))
+        .ok()
+        .and_then(|s| ProvenanceDocument::from_json(&s).ok());
+
+    let store = QuarantineStore::for_current_home();
+    let mut contained = Vec::new();
+    for (found, class) in quarantine::scan_peer_skills(&dir) {
+        let Classification::Executable(reason) = class else {
+            continue;
+        };
+        let req = QuarantineRequest {
+            id: format!("profile:{name}/{}", found.relative),
+            reason,
+            source_dir: Some(found.dir.clone()),
+            inline: None,
+            source_tool: "wayland-core".to_string(),
+            source_version: source_provenance
+                .as_ref()
+                .and_then(|d| d.entries.values().next())
+                .and_then(|p| p.source_version.clone()),
+            source_path: found.relative.clone(),
+            promote_as: found.name.clone(),
+        };
+        match store.admit(&req) {
+            Ok(entry) => {
+                // Containment is by PLACEMENT: the live copy is removed from
+                // the profile once the store holds it, so the imported tree
+                // carries no runnable body.
+                std::fs::remove_dir_all(&found.dir).ok();
+                contained.push(format!("{} — {reason}", entry.id));
+            }
+            Err(e) => {
+                // A refusal must not leave the payload live either.
+                std::fs::remove_dir_all(&found.dir).ok();
+                contained.push(format!("{} — refused and removed: {e}", found.relative));
+            }
+        }
+    }
+
     println!(
         "Imported profile {name:?} from {} into {}.",
         path.display(),
         dir.display()
     );
+    if let Some(doc) = &source_provenance {
+        println!(
+            "Provenance preserved for {} entr{}.",
+            doc.len(),
+            if doc.len() == 1 { "y" } else { "ies" }
+        );
+    }
+    if !contained.is_empty() {
+        println!(
+            "\nQuarantined {} item{} of executable content — inert until an explicit promotion:",
+            contained.len(),
+            if contained.len() == 1 { "" } else { "s" }
+        );
+        for c in &contained {
+            println!("  • {c}");
+        }
+        println!("  Review with: wayland-core migrate quarantined");
+    }
     Ok(())
 }
 
