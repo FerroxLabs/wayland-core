@@ -144,3 +144,73 @@ NOTHING start reads as 0, not as 1, so it cannot pass as "one manager".
 - [ ] consumption race measured
 - [x] fix written (not yet compiled)
 - [ ] positive proof (inbound + cron)
+
+---
+
+## T2 — REPRODUCED, and the race is REAL (hetzner, first pass)
+
+Binaries: post-fix `7a042868…` at lane HEAD `353a5f6e`; pre-fix `402f7c70…`,
+built from the SAME tree with only `gateway.rs` + `cron.rs` reverted to
+`e6abc748` (telegram seam kept, so the two differ in exactly one thing).
+`--build-info` prints the same source sha for BOTH — it reads git HEAD, not the
+working tree — so binary identity is decided by sha256, never by the banner.
+
+### Pre-fix
+
+```
+F24C3H4 RACE submitted=8 replied=0 lost=8 duplicated=0 max_concurrent_getupdates=2 polls=179
+```
+
+`max_concurrent_getupdates=2`, measured by the fixture from overlapping open
+requests in a different OS process. The double start reproduces.
+
+The fixture journal shows the mechanism exactly:
+
+```
+17:45:01.531  channel auto-registered f24c3h4tg      <- manager #1 (cron handler)
+17:45:03.331  deleteWebhook                          <- manager #1 starts polling
+17:45:03.334  getUpdates poll=1 offset=0  served=[1,2,3,4,5,6,7]
+17:45:03.335  channel auto-registered f24c3h4tg      <- manager #2 registers
+17:45:03.3357 [gateway] inbound: subscriber spawned
+17:45:03.337  getUpdates poll=2 offset=8  DELETED=[1,2,3,4,5,6,7] served=[8]
+17:45:03.365  getUpdates poll=3 offset=9  DELETED=[8]
+17:45:07.028  deleteWebhook                          <- manager #2 starts polling
+17:45:07.030  getUpdates poll=7 offset=9  served=[]  <- nothing left
+```
+
+Manager #1 took all eight and confirmed them away **3ms before manager #2 had
+even registered**, and 3.7 SECONDS before manager #2 polled. The manager that
+won has no subscriber. **LLM journal: 0 turns.** Eight messages, nothing logged,
+nothing failed, no error anywhere — gone.
+
+### Post-fix
+
+```
+F24C3H4 RACE submitted=8 ... max_concurrent_getupdates=1 polls=91
+LLM journal: 8 turns.   Fixture sendMessage journal: 8 replies.
+```
+
+### An instrument fault I caught, and what it nearly cost
+
+Both runs first printed `replied=0`. That reading was WRONG for the post-fix
+run: all eight replies had arrived. Telegram's default parse mode is MarkdownV2
+and the adapter escapes every reserved character, so the correlation token
+leaves the product as `f24c3\-h4\-pre\-0\-…` and a plain `includes(token)` never
+matches. **I was about to write up a working path as total inbound loss** — the
+instrument carrying the exact defect class it was hunting.
+
+Fixed two ways: un-escape before matching, and add an explicit
+`instrument_fault` state — "the adapter delivered N replies but none matched a
+submitted token" is now reported as an instrument fault that makes the run
+INCOMPLETE, never as loss. A loss claim now requires that NOTHING came back.
+
+## Status
+
+- [x] source read
+- [x] double-start reproduced live — pollers 2 (pre) vs 1 (post), measured externally
+- [x] seam built and compiled
+- [x] instrument built, self-proven, and one real fault in it found and closed
+- [x] consumption race measured — 8/8 lost pre-fix, 0 turns
+- [x] fix written and compiled
+- [ ] guard re-run end to end with the corrected instrument (+ cron leg)
+- [ ] unit/integration gates

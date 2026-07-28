@@ -58,6 +58,20 @@ function sha256File(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
+// Telegram's default parse mode is MarkdownV2, and the adapter escapes EVERY
+// reserved character in the body before sending — so the correlation token
+// `f24c3-h4-pre-0-ab12` leaves the product as `f24c3\-h4\-pre\-0\-ab12`.
+//
+// This cost a whole measurement pass. A naive `text.includes(token)` reported
+// `replied=0/8` on a run whose eight replies had all arrived correctly, which
+// would have been written up as total inbound loss on a WORKING path. The
+// instrument was carrying the exact defect class it was hunting. Un-escape
+// before matching, and see `instrument_fault` below for the check that now
+// refuses to report that shape as loss ever again.
+function unescapeMarkdownV2(s) {
+  return String(s).replace(/\\(.)/g, '$1');
+}
+
 function httpJson(url, method, body) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
@@ -200,6 +214,27 @@ class Race {
     );
   }
 
+  // THE OTHER HALF OF THE FIX'S PROOF. The cron handler's manager was removed;
+  // if the scheduler quietly stopped being able to reach a channel, this lane
+  // would have traded a message-loss risk for a dead scheduler and every
+  // "no duplicate registration" check would still be green.
+  //
+  // `cron add` writes to `$WAYLAND_HOME/cron/jobs.json`, which is the same
+  // store `run_gateway` opens, so this is the product's own surface rather than
+  // a file this driver forged.
+  addCronJob() {
+    const text = `F24C3H4-CRON ${this.runId}`;
+    const r = spawnSync(
+      this.args.binary,
+      ['cron', 'add', '* * * * *', '--channel', 'f24c3h4tg', '--text', text],
+      { encoding: 'utf8', env: { ...process.env, WAYLAND_HOME: this.home } },
+    );
+    this.note(`cron add rc=${r.status}: ${`${r.stdout}${r.stderr}`.trim().split('\n')[0]}`);
+    if (r.status !== 0) throw new Error(`cron add failed rc=${r.status}: ${r.stdout}${r.stderr}`);
+    this.cronText = text;
+    return text;
+  }
+
   buildInfo() {
     const r = spawnSync(this.args.binary, ['--build-info'], { encoding: 'utf8' });
     if (r.status !== 0) throw new Error(`--build-info failed rc=${r.status}`);
@@ -248,6 +283,21 @@ class Race {
 
   async report() {
     return httpJson(`${this.tgUrl}/__control/report`, 'GET');
+  }
+
+  // Turns that actually ran, counted from the model fixture's own journal in a
+  // third OS process. "A turn ran" and "a reply came back out of the adapter"
+  // are different claims and a run where they disagree is telling you
+  // something, so they are never collapsed into one number.
+  llmTurns() {
+    try {
+      return fs
+        .readFileSync(this.llmJournal, 'utf8')
+        .split('\n')
+        .filter((l) => l.includes('"kind":"chat.completions"')).length;
+    } catch {
+      return 0;
+    }
   }
 
   cleanup() {
@@ -307,6 +357,8 @@ class Race {
     }
     this.note(`preloaded ${this.args.preload} pending updates before start`);
 
+    if (this.args.cron) this.addCronJob();
+
     this.startBinary();
 
     // ── live: messages arriving while the gateway is up ────────────────────
@@ -329,19 +381,23 @@ class Race {
       rep = await this.report();
       const seen = new Set();
       for (const r of rep.replies) {
-        for (const t of tokens) if (r.text.includes(t.token)) seen.add(t.token);
+        const plain = unescapeMarkdownV2(r.text);
+        for (const t of tokens) if (plain.includes(t.token)) seen.add(t.token);
       }
       this.note(
-        `wait ${iteration}: replied=${seen.size}/${tokens.length} ` +
+        `wait ${iteration}: replied=${seen.size}/${tokens.length} turns=${this.llmTurns()} ` +
           `pollers_max=${rep.max_concurrent_getupdates} polls=${rep.poll_total} ` +
           `pending=${rep.still_pending.length}`,
       );
-      if (seen.size === tokens.length) break;
+      const cronDone =
+        !this.args.cron ||
+        rep.replies.some((r) => unescapeMarkdownV2(r.text).includes(this.cronText));
+      if (seen.size === tokens.length && cronDone) break;
       sleep(5000);
     }
 
     rep = await this.report();
-    const replyTexts = rep.replies.map((r) => r.text);
+    const replyTexts = rep.replies.map((r) => unescapeMarkdownV2(r.text));
     const perToken = tokens.map((t) => {
       const hits = replyTexts.filter((x) => x.includes(t.token)).length;
       const h = rep.updates.find((u) => u.update_id === t.update_id);
@@ -355,6 +411,21 @@ class Race {
 
     const lost = perToken.filter((t) => t.replies === 0);
     const duplicated = perToken.filter((t) => t.replies > 1);
+    const turns = this.llmTurns();
+
+    // THE INSTRUMENT-FAULT CHECK. The adapter physically delivered replies to
+    // the fixture, but none of them matched a token we submitted. That is not
+    // message loss — it is this driver failing to recognise the product's own
+    // output, which is precisely what the MarkdownV2 escaping did on the first
+    // pass. Reporting it as loss would have been a fabricated defect. Loss is
+    // only loss when NOTHING came back.
+    const instrumentFault =
+      rep.replies.length > 0 && lost.length === perToken.length
+        ? `the adapter delivered ${rep.replies.length} replies but none matched a submitted ` +
+          `correlation token — this driver cannot read the product's output, so no loss ` +
+          `claim may be made from this run. Sample: ${JSON.stringify(rep.replies[0]?.text ?? '')}`
+        : null;
+    if (instrumentFault) this.note(`INSTRUMENT FAULT: ${instrumentFault}`);
 
     const coreLog = fs.readFileSync(this.coreLog, 'utf8');
     // The gateway's own account of itself, kept ONLY as corroboration. The
@@ -376,6 +447,14 @@ class Race {
       preload: this.args.preload,
       live: this.args.live,
       replied_total: perToken.filter((t) => t.replies >= 1).length,
+      turns_total: turns,
+      raw_replies_total: rep.replies.length,
+      instrument_fault: instrumentFault,
+      cron_requested: Boolean(this.args.cron),
+      cron_text: this.cronText ?? null,
+      cron_fires: this.args.cron
+        ? replyTexts.filter((t) => t.includes(this.cronText)).length
+        : null,
       lost_total: lost.length,
       lost: lost.map((t) => ({ token: t.token, phase: t.phase, update_id: t.update_id })),
       duplicated_total: duplicated.length,
@@ -392,9 +471,11 @@ class Race {
     const out = path.join(this.runDir, 'f24-c3-h4-race-result.json');
     fs.writeFileSync(out, `${JSON.stringify(result, null, 2)}\n`);
     process.stdout.write(
-      `\nF24C3H4 RACE submitted=${result.submitted_total} replied=${result.replied_total} ` +
-        `lost=${result.lost_total} duplicated=${result.duplicated_total} ` +
-        `max_concurrent_getupdates=${result.max_concurrent_getupdates} polls=${result.poll_total}\n`,
+      `\nF24C3H4 RACE submitted=${result.submitted_total} turns=${result.turns_total} ` +
+        `replied=${result.replied_total} lost=${result.lost_total} ` +
+        `duplicated=${result.duplicated_total} ` +
+        `max_concurrent_getupdates=${result.max_concurrent_getupdates} polls=${result.poll_total} ` +
+        `cron_fires=${result.cron_fires} instrument_fault=${result.instrument_fault ? 'YES' : 'no'}\n`,
     );
     process.stdout.write(`F24C3H4 RESULT ${out}\n`);
     return result;
@@ -408,6 +489,7 @@ function parseArgs(argv) {
     preload: 4,
     live: 4,
     budgetMs: 120_000,
+    cron: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -416,6 +498,7 @@ function parseArgs(argv) {
     else if (a === '--preload') out.preload = Number(argv[++i]);
     else if (a === '--live') out.live = Number(argv[++i]);
     else if (a === '--budget-ms') out.budgetMs = Number(argv[++i]);
+    else if (a === '--cron') out.cron = true;
     else {
       process.stderr.write(`f24-c3-h4-polling-race: unknown argument ${a}\n`);
       process.exit(2);
