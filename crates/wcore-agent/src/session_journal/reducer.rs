@@ -8,6 +8,7 @@ use crate::durable_child::{TransitionDisposition, apply_transition};
 use crate::provider_recovery::{
     provider_response_digest, validate_appended_provider_events, validate_finished_provider_events,
 };
+use wcore_types::goal::GoalTerminalState;
 use wcore_types::spawner::{ChildDeliveryTarget, DurableChildRecord, DurableChildStatus};
 
 impl ReducedSessionState {
