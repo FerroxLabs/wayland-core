@@ -473,7 +473,11 @@ fn zero_length_lease_is_reclaimed_not_refused_forever() {
         "it must be MOVED to quarantine, not deleted: {quarantined:?}"
     );
     let reports = take_emitted_reclamations();
-    assert_eq!(reports.len(), 1, "the reclamation must be reported: {reports:?}");
+    assert_eq!(
+        reports.len(),
+        1,
+        "the reclamation must be reported: {reports:?}"
+    );
     assert!(
         reports[0].contains("0-byte"),
         "the report must name the actual cause: {}",
