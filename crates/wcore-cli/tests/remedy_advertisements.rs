@@ -3,11 +3,11 @@
 //!
 //! # Why this file exists
 //!
-//! Five separate defects on this program share exactly one shape: **the product
-//! tells the operator to do something that does not work.** Each was found by a
-//! human driving the real binary; none was visible from source review, because
-//! the string and its consumer are in different crates and nothing ever compared
-//! them.
+//! Seven separate defects on this program share exactly one shape: **the product
+//! tells the operator to do something that does not work.** Every one of the
+//! first five was found by a human driving the real binary; none was visible
+//! from source review, because the string and its consumer live in different
+//! crates and nothing ever compared them.
 //!
 //! | # | ledger | advertised | why it was dead |
 //! |---|---|---|---|
@@ -16,6 +16,13 @@
 //! | 3 | `24-C2` | `--trigger webhook:` / `poll:` | accepted at add, never fired |
 //! | 4 | ollama hint | "select a model id prefixed `ollama:` — no API key is needed" | credential resolution returns `MissingApiKey` before the model string is read |
 //! | 5 | headless keyring | `credentials.backend = "encrypted-file"` | wrong section, unparseable value, struct variant, and a passphrase mechanism named in 0 docs / 0 help / 0 errors |
+//! | 6 | *(none — found by this file)* | `wayland-core init --model X` wrote root-level `model = "X"` | loader reads `default.model`; dropped in silence, so the model the operator chose never took effect |
+//! | 7 | *(handed over mid-lane)* | "download Piper voices via `piper_download`" | `piper_download` is a module name, not a tool; nothing by that name exists at runtime |
+//!
+//! Case 6 was found by this file, on its first green run, with no prior report
+//! to work from. That is the only evidence worth much: the five historical cases
+//! were known before the gate was written, so catching them proves the gate was
+//! aimed correctly, not that it sees.
 //!
 //! `wcore-agent/src/recovery_confidential.rs` already carries the countermeasure
 //! *in miniature* for case 5: it re-parses the value its own error message
@@ -55,6 +62,14 @@
 //!   in this workspace and are not this product's config. Admitting them would
 //!   red the gate on correct text, and a gate that reds on correct text gets
 //!   deleted.
+//! * **Tool REACHABILITY.** Case 7 was dead four ways; the tool check reads only
+//!   the first (the name does not exist). A tool that is named, registered, and
+//!   then returns `None` unconditionally still passes. See the coverage note on
+//!   `advertised_tool_names_resolve_to_a_real_tool`.
+//!
+//! The two STILL-GREEN rows in `.planning/evidence/remedy-gate/mutate.py` exist
+//! so these limits are **measured** rather than asserted: they re-introduce
+//! cases 3 and 4 and record that the gate does not see them.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -363,7 +378,7 @@ fn advertised_assignments(text: &str, file: &str, line: usize, context: &str) ->
             continue;
         }
 
-        let before = heads.iter().filter(|(s, _, _)| *s < at).next_back();
+        let before = heads.iter().rfind(|(s, _, _)| *s < at);
         // The forward fallback applies ONLY to a bare key. A dotted key is
         // already self-qualifying, and prefixing it with a section that happens
         // to appear later in the same sentence invents a path nobody advertised:
@@ -681,14 +696,14 @@ fn advertised_config_assignments_survive_the_real_loader() {
                         )),
                         Some(got) => {
                             let want = as_generic.as_ref().and_then(|v| json_at(v, &a.path));
-                            if let Some(want) = want {
-                                if got != want {
-                                    failures.push(format!(
-                                        "{}:{} [{}] advertises `{} = {}` but the \
-                                         loader ends up holding {} at `{}`",
-                                        a.file, a.line, a.context, a.path, a.value, got, a.path
-                                    ));
-                                }
+                            if let Some(want) = want
+                                && got != want
+                            {
+                                failures.push(format!(
+                                    "{}:{} [{}] advertises `{} = {}` but the \
+                                     loader ends up holding {} at `{}`",
+                                    a.file, a.line, a.context, a.path, a.value, got, a.path
+                                ));
                             }
                         }
                     }
