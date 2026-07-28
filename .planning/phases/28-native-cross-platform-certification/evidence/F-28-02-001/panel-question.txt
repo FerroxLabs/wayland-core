@@ -1,0 +1,40 @@
+A certification phase for a Rust AI-agent CLI found this. On macOS the product's OS sandbox
+(macOS `sandbox-exec`, deny-default SBPL profile) is used for EVERY shell command the agent
+runs. But there is NO surface -- CLI or otherwise -- by which an operator, or a black-box
+test driving only the shipped binary, can obtain POSITIVE evidence that the sandbox was
+actually ACTIVE for a given execution.
+
+The only existing surface that runs a caller-supplied command through a sandbox is the
+delegated "swarm" worker path. It deliberately REFUSES on macOS because sandbox-exec cannot
+own descendants that escape a process group. That refusal is a correct fail-closed security
+decision and must NOT be weakened. A Docker fallback exists but is compiled out.
+
+Consequently 24 certification cells are RED under a governing rule: "a green on a sandbox
+cell requires positive evidence the sandbox was ACTIVE; absence of an observed violation is
+not evidence of a sandbox; a cell that cannot produce positive activeness evidence is a RED,
+never a green and never a skip." The finding may only be FIXED or DISPROVED. Accept and defer
+are closed by contract. Making the probe stop asking, or converting the cells to skips, are
+both explicitly forbidden.
+
+PROPOSED FIX: add an operator-facing CLI surface
+  `wayland-core sandbox exec [--workspace DIR] -- <argv...>`
+that runs the caller-supplied argv through the SAME platform sandbox backend the shell tool
+uses (fail-closed selection; the selector already refuses a "none" backend and returns an
+error), with a deny-default filesystem/network manifest scoped to the caller-supplied
+workspace, printing the child's own stdout/stderr and propagating its exit code. A black-box
+test can then run the same probe script OUTSIDE the product and INSIDE it and assert
+activeness from the DIFFERENCE (DNS resolves outside / denied inside; a write outside the
+workspace succeeds outside / is denied inside; a read of /etc/hosts succeeds outside / denied
+inside). Plus `wayland-core sandbox status` reporting backend name, availability and
+capability flags.
+
+Answer BOTH, directly and briefly, and lead with your verdict:
+
+(1) Is this a legitimate product FIX for the finding, or is it gaming the certification by
+adding a test hook that exists only to turn cells green? Make the STRONGEST possible argument
+for "gaming" before you give your verdict.
+
+(2) Does exposing "run this argv through the platform sandbox" as an operator CLI verb
+introduce a security regression, given the caller already has full unsandboxed shell
+authority on the host and the sandboxed child strictly has LESS authority than the caller's
+own shell? Name any concrete attack this enables that was not already available.
