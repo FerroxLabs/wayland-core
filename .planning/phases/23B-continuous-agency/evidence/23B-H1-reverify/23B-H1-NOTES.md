@@ -186,11 +186,148 @@ The coordinator's lead — 16 red journal-durability tests at HEAD, and a measur
 candidate for a load-sensitive within-run race than the encoding asymmetry is. Q4 now has a
 specific hypothesis to test rather than a blind re-run.
 
+---
+
+## T+60 — coordinator's lead resolved: the 16/17 red tests are a PARALLELISM ARTEFACT
+
+Run on `hetzner-dsm`, worktree `/root/wayland-23b-h1`, commit `ef1d97be`, both runs against
+the **same** build (`cargo test -p wcore-agent --lib --no-run` first, rc=0).
+
+| Run | Command | `test result:` line |
+|---|---|---|
+| SERIAL | `cargo test -p wcore-agent --lib -- --test-threads=1` | **ok. 2131 passed; 0 failed;** 3 ignored; finished in 138.28s |
+| PARALLEL | `cargo test -p wcore-agent --lib` | FAILED. 2114 passed; **17 failed**; 3 ignored; finished in 30.37s |
+
+**The suite is green serially at HEAD. There is no real journal-durability regression in
+these 17.** Counts read from the `test result:` line, not from exit status (§3.2). Status file
+carried `WLRC_BUILD=0 / WLRC_SERIAL=0 / WLRC_PARALLEL=101 / WLDONE`.
+
+The failure mode is `JournalError::AlreadyOwned` — `session journal writer lease is already
+held at <path>` — raised at `session_journal/lease.rs:226` when `try_lock_authority` returns
+`Contended`. **Each failing test names its own distinct tempdir**
+(`/tmp/.tmpV9U4R1/880fb529d4dc.journal`, `/tmp/.tmpqyPuCv/f14de111a101.journal`, …), so this is
+not several tests colliding on one shared path; it is each test contending with itself, because
+a previous handle on that same path has not released its advisory lock by the time the test
+re-opens. Serialising the suite gives the drop time to complete.
+
+Failing set (17), all in the durability area: 12 × `engine::audit_2026_05_22_tests::*`,
+`child_transaction::tests::rejects_append_reopen_reduce_corruption`,
+`engine::retry_wedge_protection_tests::ceiling_abort_does_not_persist_unrecoverable_session`,
+`orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects`,
+`session::tests::cleanup_error_attempts_all_artifacts_but_retains_index_authority`,
+`session_journal::fault_tests::session_retirement_never_deletes_a_replacement_journal_or_collateral`.
+
+**This is NOT 23B-01's defect**, and I am not folding it in. 23B-01's symptom is
+`ChecksumMismatch` — a journal that reads back wrong. This is `AlreadyOwned` — a journal that
+will not open at all. Different error, different check, different failure surface. Reporting
+it as the same thing would be exactly the kind of convenient merge this program keeps catching.
+It is a genuine test-isolation weakness worth its own BACKLOG entry, at MEDIUM: it makes the
+durability suite unable to run under the default harness, which is how it stayed invisible.
+
+## T+70 — Q2 and Q3: the two prior fixes DO hold at HEAD, and the gate can fail
+
+Run by **file** (`--test <name>`), never by filter, and the `N passed` count read back (§3.2
+flavour (c)).
+
+| Leg | Command | Result |
+|---|---|---|
+| Q2 write-path invariant | `--test journal_envelope_roundtrip` | **ok. 5 passed; 0 failed** |
+| Q2 recovery path | `--test journal_legacy_null_receipt_recovery` | **ok. 4 passed; 0 failed** |
+| Q3 mutation: predicate reverted to `Option::is_none` | `--test journal_envelope_roundtrip` | **FAILED. 4 passed; 1 failed** — `option_value_null_is_stable_across_a_round_trip` |
+| Q3 mutation | `--test journal_legacy_null_receipt_recovery` | ok. 4 passed; 0 failed |
+| restore | `git diff --quiet -- model.rs` | `RESTORED_CLEAN=yes` |
+
+So the write-path gate **can** fail — it is not green-at-base.
+
+### But note the discrepancy, because it weakens the protection
+
+23B-H1's disposition reported the same mutation as **2 FAILED / 3 passed**, including the
+end-to-end `ChecksumMismatch { seq: 1 }`. I measure **1 FAILED / 4 passed**. The difference is
+`4b9512a0`: with the recovery path now in the tree, the end-to-end test no longer goes red
+under the mutation, because the recovery layer sees the explicit null, re-hashes under the
+legacy encoding — which under the mutation *is* the current encoding — and succeeds.
+
+**The recovery path masks a regression in the write path.** If someone reverted `a7beafe5`
+today, only one of nine tests across the two files would notice. That is a real reduction in
+regression protection that neither prior lane could have seen, since each only existed on one
+side of it. Worth a BACKLOG entry.
+
+## T+75 — Q2b: the recovery summary's exhaustiveness claim is WRONG
+
+`23B-H1-RECOVERY-SUMMARY.md` §4.4 says the defect *"requires a field typed
+`Option<serde_json::Value>` with a `skip_serializing_if` predicate. Across the journal and
+snapshot type tree those are exactly the two `effect_receipt` fields."*
+
+The type is not what makes the shape hazardous. The hazard is: **`#[serde(default,
+skip_serializing_if = P)]` where the skipped value has an explicit JSON spelling that decodes
+back to that same skipped value.** Then `explicit spelling written+hashed` → decode → re-encode
+skips it → the recomputed hash covers different bytes. `Option<serde_json::Value>` is one
+instance; it is not the class.
+
+Predicate census over `crates/wcore-agent/src/session_journal{,/}`:
+
+| Predicate | Count | Explicit spelling that round-trips to the skipped value |
+|---|---|---|
+| `Option::is_none` | 21 | `null` |
+| `BTreeMap::is_empty` | 5 | `{}` |
+| `Vec::is_empty` | 4 | `[]` |
+| `is_absent_json_value` | 2 | `null` — **the only two the recovery repairs** |
+| `BTreeSet::is_empty` | 1 | `[]` |
+| `is_zero_u32` | 1 | `0` |
+
+Every one carries `#[serde(default, …)]`, verified by reading the attribute lines — e.g.
+`model.rs:397 prior_attempt_ids: Vec<String>`, `model.rs:594 consumed_hook_phases`,
+`model.rs:1348 tasks: BTreeMap<..>`, `model.rs:1615 depends_on: BTreeSet<String>`,
+`model.rs:1622 attempts`, `model.rs:1626 handoffs`, `model.rs:1712 hook_phases`,
+`model.rs:1721 child_transactions`, `model.rs:1731 goals`, `model.rs:1732 deliveries`,
+`model.rs:1364 loop_owner_epochs: u32`.
+
+So **~32 fields carry the hazardous shape, and the recovery repairs 2 of them.** A producer
+writing `"handoffs":[]` or `"approvals":{}` explicitly and hashing those bytes creates exactly
+the 23B-01 symptom, and the repair path does not fire because it only looks for
+`"effect_receipt":null`.
+
+Severity is the same class as what was already fixed — engine-unreachable, third-party
+reachable — so this does not change the product's own exposure. But the exhaustiveness claim
+is load-bearing for anyone reading §4.4 as "no further journals can be unreadable", and it does
+not hold. BACKLOG, MEDIUM.
+
+## T+80 — my own instrument was defective; repaired in-lane (§6b-ii)
+
+My first mutation gate read `MUTATION_SITES=$(grep -c 'Option::is_none' model.rs)` and printed
+`23`. Uninterpretable: `model.rs` already had **21** such predicates at base, so 23 = 21 + the
+2 I flipped — but 21 (sed silently matching nothing) would have looked equally plausible, and I
+captured no baseline. An unapplied mutation would have produced a green "reverted, still
+passes", i.e. the self-passing class.
+
+Repaired as `scripts/f23-h1-mutation-check.sh`: count the **target** predicate
+`is_absent_json_value`, whose exact population is 2, and require 2 → 0.
+
+Three assertions, run on this Mac:
+
+```
+SELFTEST_1_KNOWN_POSITIVE=PASS
+SELFTEST_2_KNOWN_NEGATIVE=PASS
+SELFTEST_3_OLD_MATCHER_BLIND=PASS old_on_fixed=MUTATED old_on_mutated=MUTATED
+SELFTEST_RC=0
+$ ./scripts/f23-h1-mutation-check.sh state crates/wcore-agent/src/session_journal/model.rs
+FIX_PRESENT
+```
+
+Assertion 3 is the one that proves the repair does anything: the old matcher labels the
+**unmutated** file `MUTATED` exactly as it labels the mutated one — it never discriminated.
+
 ## STATUS
 
 - [x] worktree created, HEAD confirmed
 - [x] brief premise checked against tree — premise is stale
 - [x] **Q1 — engine CANNOT emit `Some(Value::Null)`; fix does not explain 23B-01**
+- [x] coordinator's 17 reds — parallelism artefact, serial is 2131/0, NOT this defect
+- [x] Q2 — both fixes hold at HEAD (5/5, 4/4)
+- [x] Q3 — mutation reddens the write-path gate (1 failed), but recovery masks 4 of 5
+- [x] Q2b — recovery's exhaustiveness claim false; ~32 fields share the shape, 2 repaired
+- [x] instrument defect found in my own harness and REPAIRED with a 3-assertion self-test
+- [ ] Q4 — original symptom at HEAD (binary building)
 - [ ] Q2 tests hold at HEAD
 - [ ] Q3 mutation proves the gates can fail
 - [ ] Q4 original symptom at HEAD
