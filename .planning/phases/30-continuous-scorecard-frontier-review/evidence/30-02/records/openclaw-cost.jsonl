@@ -1,0 +1,15 @@
+{"tool":"openclaw","dimension":"cost","index":0,"outcome":"FAILURE","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":11303,"exit_status":0}
+{"tool":"openclaw","dimension":"cost","index":1,"outcome":"FAILURE","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":10548,"exit_status":0}
+{"tool":"openclaw","dimension":"cost","index":2,"outcome":"FAILURE","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":9794,"exit_status":0}
+{"tool":"openclaw","dimension":"cost","index":3,"outcome":"FAILURE","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":10052,"exit_status":0}
+{"tool":"openclaw","dimension":"cost","index":4,"outcome":"FAILURE","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":10046,"exit_status":0}
+{"tool":"openclaw","dimension":"cost","index":5,"outcome":"FAILURE","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":10049,"exit_status":0}
+{"tool":"openclaw","dimension":"cost","index":6,"outcome":"FAILURE","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":10049,"exit_status":0}
+{"tool":"openclaw","dimension":"cost","index":7,"outcome":"FAILURE","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":10048,"exit_status":0}
+{"tool":"openclaw","dimension":"cost","index":8,"outcome":"FAILURE","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":10048,"exit_status":0}
+{"tool":"openclaw","dimension":"cost","index":9,"outcome":"FAILURE","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":10047,"exit_status":0}
+{"tool":"openclaw","dimension":"cost","index":10,"outcome":"FAILURE","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":9794,"exit_status":0}
+{"tool":"openclaw","dimension":"cost","index":11,"outcome":"FAILURE","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":9794,"exit_status":0}
+{"tool":"openclaw","dimension":"cost","index":12,"outcome":"FAILURE","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":10049,"exit_status":0}
+{"tool":"openclaw","dimension":"cost","index":13,"outcome":"FAILURE","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":10047,"exit_status":0}
+{"tool":"openclaw","dimension":"cost","index":14,"outcome":"FAILURE","fixture_requests":2,"token_units":20,"fixture_violations":[],"elapsed_ms":10051,"exit_status":0}

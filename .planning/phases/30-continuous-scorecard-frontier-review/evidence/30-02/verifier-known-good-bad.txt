@@ -1,0 +1,21 @@
+# 30-02 Task 2 - PROOF THAT THE VERIFIER CAN FAIL, not merely that it passed.
+# Run on hetzner-dsm at lane HEAD cee109f6 against the shipped release binary
+# target/release/wayland-scorecard. One known-good leg, four known-bad legs.
+# A verifier that only ever refuses would pass a rejection-only suite; a verifier that
+# only ever accepts proves nothing. Both directions are exercised here.
+
+=== LEG 1: pristine protocol (must PASS) ===
+TRIALS_VERIFY=OK legs=15 run=0 unproven=15 comparatives=0 scope=SCRIPTED_HARNESS protocol_sha256=d18407e0b96bf753f66adc1eab7d21cbaeca1b9e627cecf0159095938b83ef25
+RC_PRISTINE=0
+=== LEG 2: ONE-BYTE-MUTATED protocol (must REFUSE) ===
+wayland-scorecard: result set records protocol digest `d18407e0b96bf753f66adc1eab7d21cbaeca1b9e627cecf0159095938b83ef25` but the protocol supplied hashes to `447d0d7e7f7b33cc7c03904cc81d0e160d4d4e11f0988e6f8884f658e94df729`; the methodology was amended after the measurement, or these results belong to a different protocol
+RC_MUTATED=1
+=== LEG 3: results with one leg dropped (must REFUSE) ===
+RC_SHORT=1
+=== LEG 4: UNPROVEN leg with blocker removed (must REFUSE) ===
+wayland-scorecard: leg accounting is wrong: expected exactly 15 legs, found 14
+wayland-scorecard: leg `LEG-03` is UNPROVEN but names no blocker; silence about why a leg did not run is exactly how a peer that would not install quietly disappears
+RC_NOBLOCKER=1
+=== LEG 5: invented scope tag (must REFUSE at deserialization) ===
+RC_BADSCOPE=1
+wayland-scorecard: unknown variant `REAL_WORLD`, expected one of `SCRIPTED_HARNESS`, `LIVE_PROVIDER`, `STATIC_SOURCE` at line 1 column 109

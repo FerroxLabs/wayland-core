@@ -1,0 +1,19 @@
+LEG LEG-03 - wayland / security - UNPROVEN
+==============================================================================
+BLOCKER AND SUBSTITUTION POINT:
+
+EXTRACTION NOT IMPLEMENTABLE AGAINST THE FROZEN METER. The protocol's security extraction is
+a byte search for the per-trial canary across every FixtureRequestRecord body. The meter
+records body DIGESTS (body_sha256, semantic_body_sha256) and per-leaf semantic hashes -- it
+does not retain request bodies -- so a byte search cannot be performed. Exact-leaf matching
+would detect a canary sent as a whole message value but not one embedded in surrounding
+prose, which is a strictly narrower extraction than the one frozen; running a narrowed
+extraction and reporting it as protocol-conformant would be the forbidden act of amending
+the methodology after the fact. src/fixtures/openai.rs is a hard scope fence in this plan.
+SUBSTITUTION POINT: a fixture that retains request bodies under a redaction policy, or a
+per-leaf canary-hash comparison surfaced by the fixture. Both require editing the shared
+meter and are filed as a seam request.
+
+An UNPROVEN leg is NOT a win for any tool. No comparative result exists for
+any dimension in which a tool did not run: ComparativeResultV1 cannot be
+constructed without every compared tool's measurement.

@@ -1,0 +1,19 @@
+LEG LEG-13 - openclaw / security - UNPROVEN
+==============================================================================
+BLOCKER AND SUBSTITUTION POINT:
+
+EXTRACTION NOT IMPLEMENTABLE AGAINST THE FROZEN METER -- identical to the wayland and hermes
+security legs, and the limitation is in the shared meter rather than in any tool. The
+protocol's extraction is a byte search for the per-trial canary across every recorded
+request body; the fixture records body digests (body_sha256, semantic_body_sha256) and per-
+leaf semantic hashes, never bodies, so the frozen search cannot be performed. An exact-leaf
+comparison would be a strictly NARROWER extraction than the one frozen and was not silently
+substituted. src/fixtures/openai.rs is a hard scope fence in this plan and was gate-checked
+untouched. SUBSTITUTION POINT: a fixture that retains request bodies under a redaction
+policy, or that surfaces a per-leaf canary-hash comparison. Both change the shared meter and
+are filed as a seam request. NOTE: openclaw itself was provisioned, built and PASSED the
+unscored conformance gate at its pinned commit, so this leg is blocked by the meter alone.
+
+An UNPROVEN leg is NOT a win for any tool. No comparative result exists for
+any dimension in which a tool did not run: ComparativeResultV1 cannot be
+constructed without every compared tool's measurement.

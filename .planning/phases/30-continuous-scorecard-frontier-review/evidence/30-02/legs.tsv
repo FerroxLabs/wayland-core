@@ -1,0 +1,15 @@
+LEG-01::wayland::correctness::RUN::evidence=records/wayland-correctness.jsonl
+LEG-02::wayland::recovery::RUN::evidence=records/wayland-recovery.jsonl
+LEG-03::wayland::security::UNPROVEN::evidence=blockers/wayland-security.txt
+LEG-04::wayland::cost::RUN::evidence=records/wayland-cost.jsonl
+LEG-05::wayland::cognitive_tax::UNPROVEN::evidence=blockers/wayland-cognitive_tax.txt
+LEG-06::hermes::correctness::RUN::evidence=records/hermes-correctness.jsonl
+LEG-07::hermes::recovery::RUN::evidence=records/hermes-recovery.jsonl
+LEG-08::hermes::security::UNPROVEN::evidence=blockers/hermes-security.txt
+LEG-09::hermes::cost::RUN::evidence=records/hermes-cost.jsonl
+LEG-10::hermes::cognitive_tax::UNPROVEN::evidence=blockers/hermes-cognitive_tax.txt
+LEG-11::openclaw::correctness::RUN::evidence=records/openclaw-correctness.jsonl
+LEG-12::openclaw::recovery::RUN::evidence=records/openclaw-recovery.jsonl
+LEG-13::openclaw::security::UNPROVEN::evidence=blockers/openclaw-security.txt
+LEG-14::openclaw::cost::RUN::evidence=records/openclaw-cost.jsonl
+LEG-15::openclaw::cognitive_tax::UNPROVEN::evidence=blockers/openclaw-cognitive_tax.txt

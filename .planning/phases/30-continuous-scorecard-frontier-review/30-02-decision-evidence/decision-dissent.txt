@@ -1,0 +1,152 @@
+# 30-02 Task 1 — the decision, the split, and the dissent that changed the artifact
+# Recorded 2026-07-28, BEFORE any measurement exists. Lane lane/30-02.
+
+## The split
+
+    codex (gpt-5.6-sol)      CONFIRM_WITH_AMENDMENT
+    gemini-3.1-pro-preview   CONFIRM_WITH_AMENDMENT
+    kimi (K3)                CONFIRM_WITH_AMENDMENT
+    internal adversarial     CONFIRM_WITH_AMENDMENT (arguing against; see panel-internal.txt)
+
+4/4. No member overturned the recommended position (`hybrid-scripted-plus-declared-live`).
+Nobody proposed live-provider trials (impossible without credentials) and only the internal
+pass argued for the static-source option, which it then withdrew on the ground that F30-03
+names trials and bounds, so a structural probe is a redefinition of the requirement rather
+than an answer to it.
+
+**Unanimity here is weak evidence and is treated as such.** All four were handed the same
+recommendation with its reasoning attached — which the plan required, so that the panel
+would confirm or overturn on evidence rather than rank four neutral options, and which is
+also the condition under which a panel agrees most easily. The decision below therefore
+rests on the AMENDMENTS, where the members genuinely disagreed with the starting position
+and with each other, not on the 4/4 headline.
+
+## A vote-extraction defect measured, not assumed
+
+At 22:39 a poll loop reported codex as having voted. It had not: `codex exec` ECHOES the
+prompt, and the prompt contains the literal string `PANEL_POSITION=<CONFIRM|OVERTURN|...>`,
+so `grep -c 'PANEL_POSITION='` matched the question rather than an answer. Codex did not
+actually return until 22:44. Extraction was tightened to
+`grep -oE 'PANEL_POSITION=(CONFIRM_WITH_AMENDMENT|CONFIRM|OVERTURN)'` with `tail -1`, which
+cannot match the echoed template because the next character there is `<`.
+
+The converse trap was also measured on the same artifacts:
+
+    grep -cE '^PANEL_POSITION=' panel-kimi.txt   ->  0     (anchored: kimi's vote is LOST)
+    grep -cE  'PANEL_POSITION=' panel-kimi.txt   ->  3     (unanchored: vote present)
+
+kimi indents and bullet-prefixes. An anchored regex would have silently turned this into a
+three-way panel. Both defects are the same class as a self-passing gate and both were caught
+only by reading the captured output.
+
+## The decision
+
+Adopt `hybrid-scripted-plus-declared-live`, amended by the panel as follows. Where members
+differed, the choice and its reason are stated.
+
+**A1 — Scope. Unanimous.** Every measurement carries a required closed-enum scope tag. The
+loopback tier is `SCRIPTED_HARNESS`. No measurement taken under it may be read as model
+quality, real-world task success, or dollar cost. Codex's exact framing is adopted: call it a
+scripted agent-harness benchmark, never an agent-quality benchmark.
+
+**A2 — Cognitive tax is NOT MEASURABLE in this tier. Unanimous, and this is the amendment
+that costs us a dimension.** All three external members refused to proxy it. Gemini: "drop
+this dimension; proxying via wall-clock measures performance, not cognitive load." Codex:
+"configuration-line counts, command counts and elapsed time are not cognitive tax — encode
+NOT_MEASURED, not zero." Kimi: an intervention-count proxy is real but "measures prompt
+frequency, not cognitive load, and the three tools have different interaction models so the
+counts are not on a common scale." Accepted in full: all three cognitive-tax legs are
+UNPROVEN by construction of the protocol, before any trial runs, with the substitution point
+named (a scripted human-operator protocol in the live tier). F30-03 is therefore
+INCOMPLETE on one of its five dimensions and this plan says so rather than inventing a number.
+
+**A3 — Four verdict states, not three. Kimi's amendment, adopted over the plan's own text.**
+The plan specifies a closed THREE-member direction enum (ahead / behind / indistinguishable).
+Kimi's objection is decisive and neither of the others contradicts it: "'CI contains zero →
+tie' silently converts low power into declared equivalence." A wide interval means
+INCONCLUSIVE, not indistinguishable. Codex independently reached the same four-state shape
+(`A_BETTER / A_WORSE / PRACTICAL_TIE / INCONCLUSIVE`); gemini's two-state shape is the
+weakest of the three on exactly this point and is not followed. The enum therefore carries
+four members. Both added members are NON-DIRECTIONAL, so the plan's hard rule — refuse a
+directional verdict whenever the delta interval contains zero — is preserved exactly and is
+in fact strengthened: a directional verdict now additionally requires the nearer interval
+endpoint to clear the tie band. Deviation from the plan's letter, recorded here and in the
+summary, in the direction of refusing MORE claims rather than fewer.
+
+**A4 — Trial counts. Members split 30 / 30 / 10.** Codex 30 per leg with the rule-of-three
+justification and the explicit limitation that 30/30 successes still yields a Wilson lower
+bound near 88.6%, so no "better than 95% reliability" claim is available. Kimi 30 for
+proportions, 15 for continuous. Gemini 10, on the ground that a scripted fixture leaves only
+scheduling jitter. Taken: **30 for proportions, 15 for continuous.** Gemini's 10 is rejected
+because its own reasoning cuts the other way — if the informative event is a rare
+nondeterministic failure, a small n is exactly what fails to observe it. This count is frozen
+now, before feasibility is known. If a leg cannot reach its count it is UNPROVEN; the count
+is never lowered to make a leg reportable.
+
+**A5 — Intervals. Unanimous on Wilson + percentile bootstrap; codex adds one correction.**
+Wilson for single proportions; **Newcombe's Wilson-based interval for a DIFFERENCE of
+proportions**, not the subtraction of two Wilson endpoints, which codex flagged and the
+others did not raise. Percentile bootstrap with 10,000 resamples for continuous quantities,
+seeded from the protocol so a rerun reproduces the bounds. Clopper-Pearson rejected by both
+members who addressed it: conservative, wider at n=30, and it does not repair an
+underpowered design. Kimi's BCa suggestion is NOT taken — plain percentile is what the plan
+budgets for and BCa's extra machinery is not worth the surface here; kimi's accompanying
+requirement IS taken, that the raw min/max is reported alongside every continuous interval.
+Codex's degenerate case is taken: identical observations emit ZERO_EMPIRICAL_VARIANCE rather
+than a zero-width interval presented as precision.
+
+**A6 — Tie band, and it is not double-counting. Codex and kimi agree; both give the same
+reason.** The zero rule is a DIFFERENCE test; the tie band is an EQUIVALENCE test. They
+answer different questions, which is why A3's fourth state is needed to hold the difference.
+Band frozen at 0.05 absolute for proportions (both members proposed exactly this) and, for
+cost, codex's ln(1.05) on the mean-ratio scale — 5% — rather than kimi's 10%, taking the
+tighter of the two because a wider band declares more ties and a tie is the verdict that
+costs us nothing to claim.
+
+**A7 — Stop rule. Codex's numbers, kimi's scoring policy.** 120 s to first fixture request,
+120 s inactivity, 600 s absolute; SIGTERM to the process group, 5 s, SIGKILL. A timeout is a
+SCORED FAILURE and is never discarded — kimi: "excluding hangs flattens flaky tools into
+looking reliable; a hang is a failure the user experiences." Three consecutive timeouts halt
+that leg as FAILED_INCOMPLETE with the trials actually run recorded.
+
+**A8 — Per-trial isolation. Kimi and codex; not in the starting position.** A fresh fixture
+instance, a fresh workspace and a fresh process tree per trial, with a unique security
+canary per trial. The starting position said "ONE shared loopback fixture"; both members
+objected that one shared FIFO instance across trials couples them. The fixture binds port 0,
+so this costs nothing. The starting position is amended.
+
+**A9 — The 409 reclassification. This is the dissent's amendment and it is binding.** A
+fixture `unexpected_request` violation is classified HARNESS_INCOMPATIBLE and is scored as
+neither success nor task failure. Codex: "protocol incompatibility must be distinguished
+from scored task failure." Without this, gemini's Q7 scenario — a peer that requests B then A
+gets a 409 and is recorded as failing — silently converts a difference in request ORDER into
+a Wayland win.
+
+## The dissent, recorded because it is not resolved
+
+**All four members independently named the same defect, and this plan is fenced from fixing
+it.** The fixture is FIFO-cursored and is the dialect Wayland's own contract tests were built
+against. Gemini's countermeasure is a content-routing fixture; kimi's is a corpus derived
+from the peers' own recorded traffic plus external sign-off; codex's is an
+independently-controlled task corpus with peer-approved adapters. Every one of those requires
+editing the shared meter or authoring a peer-derived corpus, and
+`crates/wcore-eval-scenarios/src/fixtures/openai.rs` is a hard scope fence in this plan,
+gate-checked untouched.
+
+So the home-field bias is REAL, NAMED BY EVERY MEMBER, and OPEN. A9 bounds it — it can no
+longer be banked as a peer failure — but it does not remove it. This is carried as a seam
+request rather than papered over, and any 30-03 claim resting on a cross-tool comparison
+inherits it, exactly as 30-01's finding on `PEER-PROBE-2026-07-26` propagates.
+
+**The internal pass's second objection is unanswered by any type and becomes a binding
+requirement on task 3.** `ComparativeResultV1` prevents a false comparative NUMBER for an
+unrun peer; it does nothing about the impression left by a one-sided results PAGE. Task 3
+must therefore lead with the leg accounting before any number, must state in plain words that
+an UNPROVEN peer leg is not a Wayland win and yields no comparison at all, and must quote
+every provisioning failure verbatim so a reader can see a peer failed to BUILD rather than
+failed to PERFORM.
+
+## Escalation
+
+None. This is evidence-acceptance policy, which the program assigns to the panel and does not
+reserve to Sean. No deadlock arose.

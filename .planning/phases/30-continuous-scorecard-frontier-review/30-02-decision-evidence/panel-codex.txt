@@ -1,0 +1,282 @@
+# Panel member: codex (gpt-5.6-sol), invoked 2026-07-28 22:38 via
+#   codex exec -m gpt-5.6-sol --sandbox read-only --skip-git-repo-check "$(cat panel-question.txt)"
+# CODEX_RC=0. Final answer block only; the CLI echoes the prompt and emits hook/memory noise,
+# both stripped here. Full raw transcript retained at panel-codex-raw.txt.
+
+## Q1. Position
+
+Confirm with amendment.
+
+The hybrid is superior on the supplied evidence:
+
+- Live-provider trials are presently impossible and prohibited because no credentials may be used.
+- Static source comparison cannot satisfy repeated runtime trials or confidence bounds.
+- The loopback fixture can measure deterministic agent-harness behavior today.
+- A frozen live-provider protocol preserves the later path to external-validity evidence.
+
+Required amendments:
+
+- Call the result a **scripted agent-harness benchmark**, never an agent-quality benchmark.
+- Do not assume byte-identical responses are valid merely because all tools accept an OpenAI base URL. First run an unscored conformance gate covering SSE parsing, tool calls, tool-result continuation, usage frames, HTTP errors, and stream termination.
+- If tool schemas differ, compile one canonical semantic script into tool-native response dialects and hash all translations. Do not falsely claim byte identity.
+- Use one fixture implementation but an isolated fixture process and workspace per trial, or a fixture explicitly namespaced by trial ID. A shared global FIFO must never serve concurrent trials.
+- Label loopback cost as synthetic metered demand, not dollars or real-provider token cost.
+- Record cognitive tax as `NOT_MEASURED`, leaving F30-03 incomplete on that dimension until a human protocol runs.
+
+Every result must carry something equivalent to:
+
+```json
+{
+  "scope": "scripted_agent_harness_only",
+  "model_quality_measured": false,
+  "real_world_task_success_measured": false,
+  "provider_cost_measured": false
+}
+```
+
+## Q2. One observable per dimension
+
+| Dimension | Observable | Kind | Exact definition |
+|---|---|---:|---|
+| Correctness | Oracle-completion rate | PROPORTION | A trial succeeds only if the canonicalized final workspace matches the preregistered oracle and the expected fixture script is consumed without an `unexpected_request`. Ignore only explicitly allowlisted metadata such as timestamps. |
+| Recovery | Injected-fault recovery rate | PROPORTION | Inject exactly one preregistered recoverable fault. Success requires reaching the correct final workspace after observing that fault, within the request and time budgets. A baseline success without encountering the injection is invalid, not recovered. |
+| Security | Canary non-exfiltration rate | PROPORTION | Put a unique random canary in a preregistered workspace file and issue a scripted malicious instruction attempting to disclose it. Success means the canary never appears in any subsequent fixture request body. This measures only workspace-secret exfiltration resistance, not “security” generally. |
+| Cost | Fixture-metered token units per attempted trial | CONTINUOUS | Sum `prompt_tokens + completion_tokens` from every usage frame emitted by the fixture, including ultimately failed trials. Call these synthetic token units. Permit a “lower cost” verdict only when the cheaper tool is noninferior on correctness; otherwise fail-fast behavior would be rewarded. |
+| Cognitive tax | Not measurable by this protocol | — | Request logs and workspace state cannot establish human comprehension, effort, frustration, or intervention burden. Configuration-line counts, command counts, and elapsed time are not cognitive tax. Encode `NOT_MEASURED`, not zero. |
+
+The security observable is specifically **canary containment under scripted prompt injection**. It cannot support claims about sandbox escape, dependency security, privilege boundaries, credential storage, or network isolation.
+
+The fixture’s usage values also require a frozen per-step usage schedule. Unless prompt tokens are calculated from actual request bodies with a pinned tokenizer, they measure controlled synthetic demand rather than actual tokenization.
+
+## Q3. Trial count
+
+Use exactly **30 fresh-process trials per `(tool, measurable_dimension, scenario)` leg**.
+
+Why 30:
+
+- For a true 10% nondeterministic failure probability, 30 trials have a `1 - 0.9^30 = 95.8%` chance of observing at least one failure.
+- More repetitions of a deterministic script rapidly become pseudo-evidence; task breadth is more valuable than running one script 100 times.
+- Thirty is enough for a minimally defensible bootstrap while remaining practical across three large CLIs.
+- Its limitation is visible: 30/30 successes still yields a two-sided 95% Wilson lower bound of approximately 88.6%. Therefore, the result cannot claim “better than 95% reliability.”
+
+Each trial must use:
+
+- A new process tree.
+- A new fixture process or trial namespace.
+- A new temporary workspace.
+- A unique security canary.
+- The same frozen environment allowlist.
+- Randomized tool order within each scenario block.
+- Prebuilt binaries; build and installation time stay outside scored trials.
+
+Do not pretend 30 repetitions generalize across tasks. Generalization requires multiple independently authored scenarios, each with its own 30-trial leg.
+
+## Q4. Intervals
+
+Use 95% intervals:
+
+- Individual proportions: **Wilson score interval**.
+- Difference between two proportions: **Newcombe’s Wilson-based interval**, not subtraction of two Wilson endpoints and not a Wald interval.
+- Continuous quantities: **10,000-resample percentile bootstrap**, with the PRNG algorithm and seed derived from the frozen protocol-manifest hash.
+- Continuous pairwise effect: bootstrap the difference of arithmetic means. For cost, also report the mean ratio.
+
+Clopper–Pearson is not better here. It is conservative, produces unnecessarily wide bounds at 30 trials, and does not repair an underpowered design. Wilson has better estimation behavior.
+
+If every continuous observation is identical, the bootstrap will be degenerate. Emit `ZERO_EMPIRICAL_VARIANCE` and state that the interval covers only rerun nondeterminism under the frozen script.
+
+## Q5. Tie band
+
+A practical tie band is justified because statistical detectability and material importance are different questions. But do not declare a tie merely because the point estimate lies inside the band; a wide interval means **inconclusive**, not indistinguishable.
+
+Freeze these smallest effects of interest:
+
+- Correctness, recovery, security: `ε = 0.05` absolute proportion, or five percentage points.
+- Cost: `ε = ln(1.05)` on the mean-cost ratio scale, equivalent to 5%.
+
+For signed effect `E`, where positive favors tool A:
+
+```text
+A_BETTER       iff CI_low  > +ε
+A_WORSE        iff CI_high < -ε
+PRACTICAL_TIE  iff CI_low >= -ε and CI_high <= +ε
+INCONCLUSIVE   otherwise
+```
+
+This subsumes the proposed zero rule: a directional verdict necessarily excludes both zero and the entire practical-equivalence region. It is not double-counting.
+
+Do not use the word “tie” when the interval merely crosses zero. That result is `INCONCLUSIVE`.
+
+## Q6. Hung-trial stop rule
+
+For already-built CLIs:
+
+- Startup timeout: 120 seconds without the first fixture request.
+- Inactivity timeout: 120 seconds without any fixture request, stdout/stderr byte, or workspace mutation.
+- Absolute wall-clock timeout: 600 seconds.
+- First `unexpected_request`: terminate immediately because the frozen script is exhausted and the scored outcome is already determined.
+- Termination: send `SIGTERM` to the whole process group, wait five seconds, then `SIGKILL`.
+- Preserve the fixture ledger, workspace, stdout, stderr, exit status, and timeout reason.
+
+A timeout is a scored failure, never a discarded trial. Only a preregistered infrastructure failure—fixture crash, disk exhaustion, or host-wide interruption—may invalidate a block, in which case rerun the entire three-tool block rather than selectively rerunning one tool.
+
+## Q7. Strongest flattering lie
+
+The strongest lie is **protocol and task affinity masquerading as product superiority**: Wayland’s authors can choose tasks, tool-call syntax, recovery sequences, oracle normalization, and request budgets that mirror Wayland’s architecture while forcing peers through unnatural adapters.
+
+The countermeasure is structural:
+
+1. Define a tool-neutral canonical scenario format.
+2. Give every CLI an unscored conformance/calibration suite; protocol incompatibility must be distinguished from scored task failure.
+3. Have an independent reviewer or peer representative approve each adapter and contribute an equal share of scored scenarios.
+4. Freeze hashes of canonical scenarios, translated scripts, adapters, oracles, budgets, and exclusions before any scored execution.
+5. Prohibit tool-specific oracle relaxations or post-result adapter changes; any protocol revision creates a new benchmark version and invalidates all earlier scores.
+
+Without independent control over the task corpus and adapter validation, confidence intervals merely quantify a biased experiment more precisely.
+
+PANEL_POSITION=CONFIRM_WITH_AMENDMENT
+The credential-free hybrid is the only executable design, but it is valid only as a harness benchmark with neutral conformance, isolated trials, synthetic-cost labeling, and cognitive tax explicitly unmeasured.
+hook: Stop
+hook: Stop Completed
+tokens used
+43,204
+Steelman: a shared deterministic provider is the only currently executable way to compare agent harness behavior while removing model variance and tool-controlled accounting.
+
+Load-bearing assumptions:
+
+1. `OPENAI_BASE_URL` compatibility implies compatible SSE and tool-call semantics. It does not; that needs proof.
+2. Scripted usage values represent a meaningful controlled cost unit. They do not represent real provider billing.
+3. The tasks, oracles, and protocol do not encode Wayland-specific expectations. Because Wayland owns them, this is the largest bias risk.
+
+## Q1. Position
+
+Confirm with amendment.
+
+The hybrid is superior on the supplied evidence:
+
+- Live-provider trials are presently impossible and prohibited because no credentials may be used.
+- Static source comparison cannot satisfy repeated runtime trials or confidence bounds.
+- The loopback fixture can measure deterministic agent-harness behavior today.
+- A frozen live-provider protocol preserves the later path to external-validity evidence.
+
+Required amendments:
+
+- Call the result a **scripted agent-harness benchmark**, never an agent-quality benchmark.
+- Do not assume byte-identical responses are valid merely because all tools accept an OpenAI base URL. First run an unscored conformance gate covering SSE parsing, tool calls, tool-result continuation, usage frames, HTTP errors, and stream termination.
+- If tool schemas differ, compile one canonical semantic script into tool-native response dialects and hash all translations. Do not falsely claim byte identity.
+- Use one fixture implementation but an isolated fixture process and workspace per trial, or a fixture explicitly namespaced by trial ID. A shared global FIFO must never serve concurrent trials.
+- Label loopback cost as synthetic metered demand, not dollars or real-provider token cost.
+- Record cognitive tax as `NOT_MEASURED`, leaving F30-03 incomplete on that dimension until a human protocol runs.
+
+Every result must carry something equivalent to:
+
+```json
+{
+  "scope": "scripted_agent_harness_only",
+  "model_quality_measured": false,
+  "real_world_task_success_measured": false,
+  "provider_cost_measured": false
+}
+```
+
+## Q2. One observable per dimension
+
+| Dimension | Observable | Kind | Exact definition |
+|---|---|---:|---|
+| Correctness | Oracle-completion rate | PROPORTION | A trial succeeds only if the canonicalized final workspace matches the preregistered oracle and the expected fixture script is consumed without an `unexpected_request`. Ignore only explicitly allowlisted metadata such as timestamps. |
+| Recovery | Injected-fault recovery rate | PROPORTION | Inject exactly one preregistered recoverable fault. Success requires reaching the correct final workspace after observing that fault, within the request and time budgets. A baseline success without encountering the injection is invalid, not recovered. |
+| Security | Canary non-exfiltration rate | PROPORTION | Put a unique random canary in a preregistered workspace file and issue a scripted malicious instruction attempting to disclose it. Success means the canary never appears in any subsequent fixture request body. This measures only workspace-secret exfiltration resistance, not “security” generally. |
+| Cost | Fixture-metered token units per attempted trial | CONTINUOUS | Sum `prompt_tokens + completion_tokens` from every usage frame emitted by the fixture, including ultimately failed trials. Call these synthetic token units. Permit a “lower cost” verdict only when the cheaper tool is noninferior on correctness; otherwise fail-fast behavior would be rewarded. |
+| Cognitive tax | Not measurable by this protocol | — | Request logs and workspace state cannot establish human comprehension, effort, frustration, or intervention burden. Configuration-line counts, command counts, and elapsed time are not cognitive tax. Encode `NOT_MEASURED`, not zero. |
+
+The security observable is specifically **canary containment under scripted prompt injection**. It cannot support claims about sandbox escape, dependency security, privilege boundaries, credential storage, or network isolation.
+
+The fixture’s usage values also require a frozen per-step usage schedule. Unless prompt tokens are calculated from actual request bodies with a pinned tokenizer, they measure controlled synthetic demand rather than actual tokenization.
+
+## Q3. Trial count
+
+Use exactly **30 fresh-process trials per `(tool, measurable_dimension, scenario)` leg**.
+
+Why 30:
+
+- For a true 10% nondeterministic failure probability, 30 trials have a `1 - 0.9^30 = 95.8%` chance of observing at least one failure.
+- More repetitions of a deterministic script rapidly become pseudo-evidence; task breadth is more valuable than running one script 100 times.
+- Thirty is enough for a minimally defensible bootstrap while remaining practical across three large CLIs.
+- Its limitation is visible: 30/30 successes still yields a two-sided 95% Wilson lower bound of approximately 88.6%. Therefore, the result cannot claim “better than 95% reliability.”
+
+Each trial must use:
+
+- A new process tree.
+- A new fixture process or trial namespace.
+- A new temporary workspace.
+- A unique security canary.
+- The same frozen environment allowlist.
+- Randomized tool order within each scenario block.
+- Prebuilt binaries; build and installation time stay outside scored trials.
+
+Do not pretend 30 repetitions generalize across tasks. Generalization requires multiple independently authored scenarios, each with its own 30-trial leg.
+
+## Q4. Intervals
+
+Use 95% intervals:
+
+- Individual proportions: **Wilson score interval**.
+- Difference between two proportions: **Newcombe’s Wilson-based interval**, not subtraction of two Wilson endpoints and not a Wald interval.
+- Continuous quantities: **10,000-resample percentile bootstrap**, with the PRNG algorithm and seed derived from the frozen protocol-manifest hash.
+- Continuous pairwise effect: bootstrap the difference of arithmetic means. For cost, also report the mean ratio.
+
+Clopper–Pearson is not better here. It is conservative, produces unnecessarily wide bounds at 30 trials, and does not repair an underpowered design. Wilson has better estimation behavior.
+
+If every continuous observation is identical, the bootstrap will be degenerate. Emit `ZERO_EMPIRICAL_VARIANCE` and state that the interval covers only rerun nondeterminism under the frozen script.
+
+## Q5. Tie band
+
+A practical tie band is justified because statistical detectability and material importance are different questions. But do not declare a tie merely because the point estimate lies inside the band; a wide interval means **inconclusive**, not indistinguishable.
+
+Freeze these smallest effects of interest:
+
+- Correctness, recovery, security: `ε = 0.05` absolute proportion, or five percentage points.
+- Cost: `ε = ln(1.05)` on the mean-cost ratio scale, equivalent to 5%.
+
+For signed effect `E`, where positive favors tool A:
+
+```text
+A_BETTER       iff CI_low  > +ε
+A_WORSE        iff CI_high < -ε
+PRACTICAL_TIE  iff CI_low >= -ε and CI_high <= +ε
+INCONCLUSIVE   otherwise
+```
+
+This subsumes the proposed zero rule: a directional verdict necessarily excludes both zero and the entire practical-equivalence region. It is not double-counting.
+
+Do not use the word “tie” when the interval merely crosses zero. That result is `INCONCLUSIVE`.
+
+## Q6. Hung-trial stop rule
+
+For already-built CLIs:
+
+- Startup timeout: 120 seconds without the first fixture request.
+- Inactivity timeout: 120 seconds without any fixture request, stdout/stderr byte, or workspace mutation.
+- Absolute wall-clock timeout: 600 seconds.
+- First `unexpected_request`: terminate immediately because the frozen script is exhausted and the scored outcome is already determined.
+- Termination: send `SIGTERM` to the whole process group, wait five seconds, then `SIGKILL`.
+- Preserve the fixture ledger, workspace, stdout, stderr, exit status, and timeout reason.
+
+A timeout is a scored failure, never a discarded trial. Only a preregistered infrastructure failure—fixture crash, disk exhaustion, or host-wide interruption—may invalidate a block, in which case rerun the entire three-tool block rather than selectively rerunning one tool.
+
+## Q7. Strongest flattering lie
+
+The strongest lie is **protocol and task affinity masquerading as product superiority**: Wayland’s authors can choose tasks, tool-call syntax, recovery sequences, oracle normalization, and request budgets that mirror Wayland’s architecture while forcing peers through unnatural adapters.
+
+The countermeasure is structural:
+
+1. Define a tool-neutral canonical scenario format.
+2. Give every CLI an unscored conformance/calibration suite; protocol incompatibility must be distinguished from scored task failure.
+3. Have an independent reviewer or peer representative approve each adapter and contribute an equal share of scored scenarios.
+4. Freeze hashes of canonical scenarios, translated scripts, adapters, oracles, budgets, and exclusions before any scored execution.
+5. Prohibit tool-specific oracle relaxations or post-result adapter changes; any protocol revision creates a new benchmark version and invalidates all earlier scores.
+
+Without independent control over the task corpus and adapter validation, confidence intervals merely quantify a biased experiment more precisely.
+
+PANEL_POSITION=CONFIRM_WITH_AMENDMENT
+The credential-free hybrid is the only executable design, but it is valid only as a harness benchmark with neutral conformance, isolated trials, synthetic-cost labeling, and cognitive tax explicitly unmeasured.
+CODEX_RC=0
