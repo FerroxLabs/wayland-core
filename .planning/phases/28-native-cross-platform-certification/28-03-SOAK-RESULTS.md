@@ -292,8 +292,27 @@ easy to attribute.
 
 The one red this plan **expected** — carried entry `KR-01`, the Windows descendant-process-tree
 reap failure, `p28_severity` HIGH, `contradicted_criterion` 2, dispositions FIXED/DISPROVED
-only — **was not reproduced, because the platform that carries it was not run.** It remains
-OPEN and untested by this plan. Under amendment A2 its accept path stays closed.
+only — has now been **TESTED** by the windows-requeue lane (2026-07-28), which this plan could
+not do. **It does NOT reproduce as characterised.**
+
+The test fails, but it aborts at `live_integrity.rs:273` with the sandboxed command exiting 1
+on `Access is denied.` — no descendant is ever created, `heartbeat.txt` is never written, and
+the reap assertion is never reached. The carried red is therefore **misattributed**: it is not
+evidence that a process survives its owner. This is sharper than a stale known-red, because
+`2b662fe8` (which added both the reap fix AND this test) is ancestral to the candidate, so a
+landed fix has had its own acceptance test red ever since and the red was read as the defect
+the fix was meant to close.
+
+`KR-01` accordingly stays **OPEN**, and may take **neither FIXED nor DISPROVED** on this
+evidence — nothing was fixed and the property was not refuted, it was never exercised. Under
+amendment A2 its accept path stays closed. Full analysis and the four non-vacuity witnesses:
+`evidence/28-03-windows-requeue/KR-01.md`.
+
+**Independent evidence on the property `KR-01` stands in for:** this soak's own Windows orphan
+census found **0 orphans over 1,000 sessions with the deliberately orphaned control process
+FOUND**, so the detector is proven able to see what it is looking for. That is positive
+evidence on Criterion 2's actual subject matter, and it is stronger than the misattributed red
+it replaces.
 
 ---
 
