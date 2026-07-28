@@ -151,7 +151,11 @@ fn a_comparative_claim_without_a_pinned_peer_baseline_is_refused() {
         substitution_point: None,
     };
     let err = verify(&claim).expect_err("a comparative without a pinned baseline must be refused");
-    assert_eq!(err.rule(), "comparative_without_pinned_baseline", "got: {err}");
+    assert_eq!(
+        err.rule(),
+        "comparative_without_pinned_baseline",
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -194,7 +198,11 @@ fn a_comparative_claim_whose_interval_contains_zero_is_refused() {
         substitution_point: None,
     };
     let err = verify(&claim).expect_err("a direction on an interval containing zero is refused");
-    assert_eq!(err.rule(), "directional_on_interval_containing_zero", "got: {err}");
+    assert_eq!(
+        err.rule(),
+        "directional_on_interval_containing_zero",
+        "got: {err}"
+    );
 }
 
 #[test]

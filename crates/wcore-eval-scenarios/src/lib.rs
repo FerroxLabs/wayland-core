@@ -41,6 +41,10 @@ pub mod assertions;
 mod capability_honesty;
 pub mod catalog;
 mod child_env;
+/// Phase 30 claims register, checker and renderer (F30-04): a claim carrying no resolving
+/// evidence pointer, no bounds, or a scope its evidence does not contain cannot be rendered,
+/// and the published documents are produced only by this module's renderer.
+pub mod claims;
 pub mod cost;
 pub mod coverage;
 pub mod cron_scenarios;
