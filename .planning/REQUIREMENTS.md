@@ -248,6 +248,34 @@ Evidence: `24-01-SUMMARY.md`, `24-02-SUMMARY.md`, `24-03-SUMMARY.md`,
 - [ ] **F26-04**: Secret sources are explicitly remapped; rollback restores the exact pre-operation state after interruption or partial failure.
 - [ ] **F26-05**: Fixture installations and hostile import/export/restore corpora prove isolation, portability, and deterministic reporting.
 
+**Amendment 2026-07-28 (lane/26-gaps), on the two clauses 26-04's certification left
+OPEN.** Both were measured on real hardware; neither is closed, and the remaining unmet
+text is named rather than summarised. Full grading in `26-GAPS-SUMMARY.md`.
+
+- **F26-03, first clause — GENUINELY UNIMPLEMENTED, not superseded, and now evidenced.**
+  26-04 measured zero footprint and could not say whether the clause was still wanted.
+  It is. Measured at `a170ee24`: `session export` really does emit the redacted envelope
+  (874 bytes, names the session, a planted transcript canary ABSENT), while the portable
+  artefact `backup create` produces carries that same canary in TWO files — the session
+  JSON and the session index's `summary` field — and contains no envelope at all. The
+  clause names two different artefacts, and only one is missing: a same-user backup that
+  redacted its own transcripts could not restore them, so `backup create`'s behaviour is
+  correct for ITS artefact. What does not exist is the portable, share-to-another-party
+  corpus. Disposition decided 4-0 (codex, gemini, kimi, plus an internal pass arguing the
+  other way and failing to survive rebuttal): record it with these facts and scope it to
+  a follow-up plan rather than build a new export surface inside a repair lane. Evidence:
+  `evidence/26-gaps/envelope-probe.log`, `scripts/portability-session-envelope-probe.sh`.
+- **F26-04 / SC3, the interruption clause — STILL OPEN, for a sharper reason than before.**
+  `migrate hermes` and `migrate openclaw` have now been killed mid-apply (35 landed
+  mid-flight interruptions across the two paths, `SIGKILL`, swept across the measured
+  apply window), which closes 26-04's "never interrupted" objection. But the measurement
+  also shows the criterion's literal text is not met by the migration path: **`migrate`
+  has no rollback.** It does not return to the pre-operation home; it converges on the
+  completed state when the product is driven again. That is a reasonable contract for an
+  import and it is now proven (35/35 recovered, external sentinel unchanged), but it is
+  not "restore exact pre-operation state on rollback", and the Windows leg does not exist
+  for this path. One HIGH was found and fixed on the way — see `F26-GAPS-H1`.
+
 ### Phase 27 — Multimodal, Browser, Generation, and Voice Contracts
 
 **All five remain OPEN after the 2026-07-26 execution pass.** Nothing here is

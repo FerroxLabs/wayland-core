@@ -1003,3 +1003,53 @@ different mechanism and the opposite direction: the cwd fix *strips* a verbatim 
 `cmd.exe` will accept a current directory, whereas long-path support requires *adding* one so
 a >MAX_PATH path can be opened. Fixing one neither causes nor cures the other. Needs its own
 investigation before anyone acts on it — do not treat this entry as a confirmed defect.
+
+---
+
+## From lane/26-gaps — the two gaps Phase 26 left open (2026-07-28)
+
+### F26-GAPS-01 — `config.toml` profile ORDER is nondeterministic, and it flakes a shipped test · MEDIUM
+
+`Config::profiles` is a `HashMap<String, ProfileConfig>` (`crates/wcore-config/src/config.rs:319`)
+and Rust's default hasher is randomly seeded per process, so two IDENTICAL clean runs of
+`migrate hermes` against one corpus emit the same profile sections in different orders.
+Measured directly on the base binary at `c23a08b9`: two runs, same corpus, same set of
+profiles, `[profiles.prof02]` in a different position, every other byte equal.
+
+This is not cosmetic in one respect — it makes a shipped test a coin flip.
+`crates/wcore-cli/tests/migrate_hermes.rs:287` (`import_is_idempotent_without_overwrite`)
+asserts the re-imported `config.toml` is byte-equal, and **fails 13 of 20 runs** measured
+at `a170ee24` on `hetzner-dsm`. The assertion is correct; the product's output is not
+stable. It predates this lane: the ordering was measured on the base binary before any
+change here, and the only product change this lane makes is to
+`QuarantineStore::save_index`, which writes `migrate-quarantine/index.json` and never
+touches `config.toml`.
+
+**Prescribed fix, deliberately NOT taken here:** `HashMap` → `BTreeMap` for
+`Config::profiles` (and, on the same grounds, `providers`). That is a public shared-type
+change in `wcore-config`, which this project's own standing lesson requires verifying with
+`cargo check --locked --workspace --all-targets` rather than a per-crate check, because a
+per-crate check misses downstream exhaustive matches. Four lanes were building concurrently
+when this was found, and a shared-schema change taken mid-flight is exactly the seam the
+Phase 26 certification records as deliberately uncrossed. MEDIUM, so non-blocking by the
+standing severity policy.
+
+### F26-GAPS-02 — an interrupted `migrate` leaves ORPHAN payload directories · LOW
+
+Separate from `F26-GAPS-H1` (fixed in this lane). `apply_plan` writes each quarantined
+payload with `write_tree` and only then saves the index, so a kill in that gap leaves a
+payload directory on disk that no index entry claims. Measured across 35 mid-apply
+interruptions at `a170ee24`: 20 trials carried between 1 and 379 orphan directories.
+
+Every one of them recovered when the product was driven again, because `write_tree` merges
+over the existing directory with identical bytes for an identical corpus, and the re-drive
+re-admits the item. **The residual risk is narrower and was NOT measured here:**
+`write_tree` does not clear the destination first, so if the SOURCE item changed between
+the interrupted run and the re-drive, a stale file from the first attempt can survive
+alongside the new ones while the index records the NEW digest. Recorded as the unmeasured
+observation it is, with its code reference, rather than as a finding this lane proved.
+
+### F26-GAPS-03 — F26-03's first clause is genuinely unimplemented, and now has its facts · MEDIUM
+
+See `26-GAPS-SUMMARY.md`. The disposition is recorded so the clause cannot reach another
+phase unnoticed the way it reached this one.

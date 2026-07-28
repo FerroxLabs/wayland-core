@@ -1,0 +1,20 @@
+# TRIMMED. Original      917 lines; the middle is 440 identical refusals.
+wayland-core: warning: previous run did not shut down cleanly (crash sentinel found at /tmp/tmp.4g3D0SMCpK/trial-13/.dirty-death.2311563)
+Migration plan: hermes → wayland-core
+Source: /tmp/tmp.4g3D0SMCpK/peer-home
+
+Profiles (9):
+  • hermes/root
+[911 more lines]# ... ...
+  • skill:skills/skill0429 — refused: quarantine index is invalid: EOF while parsing a string at line 3758 column 13
+  • skill:skills/skill0430 — refused: quarantine index is invalid: EOF while parsing a string at line 3758 column 13
+  • skill:skills/skill0431 — refused: quarantine index is invalid: EOF while parsing a string at line 3758 column 13
+  • skill:skills/skill0432 — refused: quarantine index is invalid: EOF while parsing a string at line 3758 column 13
+  • skill:skills/skill0433 — refused: quarantine index is invalid: EOF while parsing a string at line 3758 column 13
+  • skill:skills/skill0434 — refused: quarantine index is invalid: EOF while parsing a string at line 3758 column 13
+  • skill:skills/skill0435 — refused: quarantine index is invalid: EOF while parsing a string at line 3758 column 13
+  • skill:skills/skill0436 — refused: quarantine index is invalid: EOF while parsing a string at line 3758 column 13
+  • skill:skills/skill0437 — refused: quarantine index is invalid: EOF while parsing a string at line 3758 column 13
+  • skill:skills/skill0438 — refused: quarantine index is invalid: EOF while parsing a string at line 3758 column 13
+  • skill:skills/skill0439 — refused: quarantine index is invalid: EOF while parsing a string at line 3758 column 13
+  Review with: wayland-core migrate quarantined
