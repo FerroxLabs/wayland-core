@@ -64,7 +64,45 @@ the brief's stated trap in its purest form: to follow the remedy I had to read
 which is the `PlaintextBackendRejected` arm, a DIFFERENT arm from the one 30-02 hit. Two
 distinct arms, same operator-visible dead end. Must keep them apart in the report.
 
-## Still to establish (live, hetzner, no OS keyring installed)
+### E5. **R4 ANSWERED — the gate is conditional, and hetzner has a live keyring.**
+
+Measured on `hetzner-dsm` (`Ubuntu-2404-noble-amd64-base`):
+
+```
+DBUS_SESSION_BUS_ADDRESS=[unix:path=/run/user/0/bus]
+/usr/bin/gnome-keyring-daemon
+2531915 /usr/bin/gnome-keyring-daemon --start --foreground --components=secrets
+2693804 /usr/bin/gnome-keyring-daemon --start --foreground --components=secrets
+2694287 /usr/bin/gnome-keyring-daemon --foreground --components=pkcs11,secrets \
+        --control-directory=/run/user/0/keyring
+$ dbus-send --session ... ListNames | grep -i secret
+      string "org.freedesktop.secrets"
+```
+
+So the other lanes ran `wayland-core` headless successfully **because the box has a working
+Secret Service on the session bus** — not because the gate is narrow. `hetzner-dsm` is a
+headless box that nevertheless has a desktop keyring daemon running, so it is NOT a valid
+stand-in for a real keyring-free host. Answer to R4: **conditional gate, and the other lanes
+were simply never in the condition.** A second, partial route also exists — `22-01-JOURNAL-COMPAT.md:26`
+documents `export WAYLAND_VAULT_PASSPHRASE=<throwaway>`, i.e. at least one lane *did*
+configure around it, with a comment saying an isolated profile refuses durable sessions
+without it.
+
+Consequence for method: the condition under test must be **created** (no session bus / no
+secrets service), which is what a container, a CI runner or a minimal cloud VM actually is.
+
+### E6. Structural: the gate is reached ONLY on the journaled path
+
+`crates/wcore-agent/src/engine.rs:6078` — `if self.session_journal.is_none() { … return }`
+runs the turn WITHOUT ever calling `preflight`. The preflight at `engine.rs:6105-6108` is
+therefore only reachable when a session journal is bound. `config.session.enabled`
+(`wcore-config/src/config.rs:991-1008`) defaults to **`true`** (`#[serde(default = "default_true")]`),
+so the journaled path is the DEFAULT path.
+
+This also identifies what remedy route 2 ("disable session persistence") must mean in
+practice: `[session] enabled = false`. Note that key is not named anywhere in the error text.
+
+## Still to establish (live, no OS keyring reachable)
 
 - [ ] R0: reproduce the bare failure headless (control — the gate must be able to fail)
 - [ ] R1: remedy route 1 — `credentials.backend = "encrypted-file"` + passphrase. Does it
