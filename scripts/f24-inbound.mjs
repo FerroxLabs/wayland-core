@@ -401,12 +401,19 @@ class InboundMatrix {
     const logPath = path.join(this.runDir, 'core.log');
     fs.writeFileSync(logPath, '');
     const fd = fs.openSync(logPath, 'a');
-    // `--json-stream` is the shipped long-running headless surface, and it is
-    // one of exactly three entry points that opt into inbound channel dispatch
-    // (`enable_inbound_dispatch(true)`); `gateway run` is NOT one of them, which
-    // is this lane's principal finding. stdin is held open by a pipe we never
-    // write to, so the process stays up for the whole matrix.
-    const child = spawn(this.args.binary, ['--json-stream'], {
+    // `--json-stream` is the shipped long-running headless surface, and it was
+    // one of exactly three entry points that opted into inbound channel
+    // dispatch (`enable_inbound_dispatch(true)`); `gateway run` was NOT one of
+    // them, which was 24-C3's principal open finding (F24-C3-H2).
+    //
+    // `gateway run` is the persistent runtime an operator installs. It is run
+    // in the FOREGROUND here (no `--detach`): a detached gateway re-execs and
+    // this driver would lose the child it must reap, and the run would then
+    // measure a process it does not own. stdin is held open by a pipe we never
+    // write to, so either surface stays up for the whole matrix.
+    const argv = this.args.runtime === 'gateway' ? ['gateway', 'run'] : ['--json-stream'];
+    this.note(`runtime=${this.args.runtime} argv=${JSON.stringify(argv)}`);
+    const child = spawn(this.args.binary, argv, {
       stdio: ['pipe', fd, fd],
       env: {
         ...process.env,
@@ -729,6 +736,10 @@ class InboundMatrix {
     const result = {
       schema: RESULT_SCHEMA,
       platform: this.args.platform,
+      // Which runtime surface hosted this matrix. Written into the result JSON
+      // and echoed in the banner so a saved result can never be mistaken for
+      // the other surface's.
+      runtime: this.args.runtime,
       binary: this.args.binary,
       build_info: info,
       binary_sha256: digest,
@@ -749,7 +760,7 @@ class InboundMatrix {
       finished_at: new Date().toISOString(),
     };
     fs.writeFileSync(
-      path.join(this.runDir, `${this.args.platform}-inbound-result.json`),
+      path.join(this.runDir, `${this.args.platform}-${this.args.runtime}-inbound-result.json`),
       `${JSON.stringify(result, null, 2)}\n`,
     );
     return result;
@@ -769,12 +780,23 @@ class InboundMatrix {
 // ── entry point ──────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
-  const out = { binary: null, runDir: path.join(os.tmpdir(), 'f24-inbound'), platform: process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux' };
+  const out = { binary: null, runDir: path.join(os.tmpdir(), 'f24-inbound'), platform: process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux', runtime: 'json-stream' };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--binary') out.binary = argv[++i];
     else if (a === '--run-dir') out.runDir = argv[++i];
     else if (a === '--platform') out.platform = argv[++i];
+    // F24-C3-H2. Which RUNTIME SURFACE hosts the matrix. `json-stream` is the
+    // headless host surface 24-C3 measured; `gateway` is the persistent runtime
+    // an operator installs as a systemd unit / launchd plist / scheduled task.
+    //
+    // The two are not interchangeable and that is the whole point: at
+    // `e88cf43f` the SAME binary scores 15/15 GREEN under `json-stream` and 0
+    // arrivals under `gateway`, because `run_gateway` constructed no
+    // InboundSubscriber and no webhook host. Running the identical driver,
+    // fixtures and legs across the switch isolates the defect to the runtime
+    // surface rather than to the binary, the config or the instrument.
+    else if (a === '--runtime') out.runtime = argv[++i];
     else {
       process.stderr.write(`f24-inbound: unknown argument ${a}\n`);
       process.exit(2);
@@ -782,6 +804,13 @@ function parseArgs(argv) {
   }
   if (!out.binary) {
     process.stderr.write('f24-inbound: --binary is required\n');
+    process.exit(2);
+  }
+  // An unknown --runtime must NOT silently fall back to json-stream: a typo
+  // would then measure the surface that already worked and report it as the
+  // gateway's result.
+  if (!['json-stream', 'gateway'].includes(out.runtime)) {
+    process.stderr.write(`f24-inbound: --runtime must be json-stream|gateway, got ${out.runtime}\n`);
     process.exit(2);
   }
   return out;
@@ -800,6 +829,7 @@ if (isMain) {
   const failed = result.results.filter((r) => !r.ok);
   process.stdout.write(
     `\nINBOUND MATRIX ${failed.length === 0 ? 'GREEN' : 'RED'} platform=${result.platform} ` +
+      `runtime=${result.runtime} ` +
       `legs=${result.results.length} failed=${failed.length} ` +
       `arrivals_total=${result.arrivals_total} turns_total=${result.turns_total}\n`,
   );

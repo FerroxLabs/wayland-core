@@ -21,6 +21,13 @@ pub mod cancel;
 // drives an agent turn through the TurnDispatcher seam, then sends the
 // reply back. Completes the inbound path that was structurally missing.
 pub mod channel_inbound;
+// F24-C3-H2 — the inbound stack (subscriber + dispatcher + webhook host)
+// assembled once, for any runtime that hosts channels. It was previously only
+// ever built inside `AgentBootstrap`, so the persistent `gateway run` runtime —
+// the systemd unit / launchd plist / scheduled task an operator installs —
+// polled its adapters and received nothing, while its own
+// `[inbound_webhook] enabled = true` said otherwise.
+pub mod channel_inbound_host;
 // Channel tool posture: maps a per-channel `ChannelToolPosture` onto a
 // reduced/jailed toolset for channel-originated engines (closes remote
 // host-secret exfiltration). Consumed by `bootstrap` + `channel_dispatch`.
