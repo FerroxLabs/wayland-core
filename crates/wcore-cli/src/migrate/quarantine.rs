@@ -647,12 +647,8 @@ pub fn scan_peer_skills(home: &Path) -> Vec<(ScannedExecutable, Classification)>
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
-            let relative = normalize_relative_path(
-                &dir.strip_prefix(home)
-                    .unwrap_or(&dir)
-                    .to_string_lossy()
-                    .to_string(),
-            );
+            let relative =
+                normalize_relative_path(&dir.strip_prefix(home).unwrap_or(&dir).to_string_lossy());
             let class = classify_skill_body(&body, LoadedFrom::Skills);
             out.push((
                 ScannedExecutable {

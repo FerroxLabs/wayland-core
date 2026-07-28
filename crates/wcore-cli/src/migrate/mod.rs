@@ -846,14 +846,13 @@ fn peer_version(home: &std::path::Path, source: PeerSource) -> Option<String> {
         }
     }
     // Both peers also record a version inside their manifest, when present.
-    if let Ok(s) = std::fs::read_to_string(home.join("MANIFEST.json")) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-            if let Some(ver) = v.get("source_version").and_then(|x| x.as_str()) {
-                if !ver.is_empty() && ver.len() <= 64 {
-                    return Some(ver.to_string());
-                }
-            }
-        }
+    if let Ok(s) = std::fs::read_to_string(home.join("MANIFEST.json"))
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&s)
+        && let Some(ver) = v.get("source_version").and_then(|x| x.as_str())
+        && !ver.is_empty()
+        && ver.len() <= 64
+    {
+        return Some(ver.to_string());
     }
     None
 }
