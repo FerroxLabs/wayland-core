@@ -182,8 +182,11 @@ impl GoalKernel {
         &self,
         goal_id: &GoalId,
         strategy: GoalStrategy,
+        now_unix_ms: u64,
+        lease_ms: u64,
     ) -> Result<u32, JournalError> {
         let id = goal_id.as_str().to_owned();
+        let lease_expires_unix_ms = now_unix_ms.saturating_add(lease_ms.max(1));
         self.append(move |state| {
             let goal = require_goal(state, &id)?;
             Ok(SessionEvent::GoalLoopOwnerClaimed {
@@ -193,6 +196,8 @@ impl GoalKernel {
                 // same reason `start_iteration` does: two callers racing must
                 // not both believe they hold epoch N.
                 epoch: goal.loop_owner_epochs.saturating_add(1),
+                now_unix_ms,
+                lease_expires_unix_ms,
             })
         })?;
         let epoch = self

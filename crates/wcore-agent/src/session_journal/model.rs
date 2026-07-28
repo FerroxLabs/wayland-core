@@ -932,6 +932,12 @@ pub enum SessionEvent {
         goal_id: String,
         strategy: GoalStrategy,
         epoch: u32,
+        /// Wall clock at the claim, supplied by the claimant. The reducer is a
+        /// deterministic replay and cannot read a clock, so time enters the
+        /// durable boundary as data — the same way the task ledger's claim does.
+        now_unix_ms: u64,
+        /// When this claim stops being evidence that an owner is alive.
+        lease_expires_unix_ms: u64,
     },
     /// The claimed loop owner released its claim AND terminated the Goal, in ONE
     /// event (F22C).
@@ -1376,6 +1382,33 @@ pub struct GoalLoopOwner {
     pub strategy: GoalStrategy,
     /// Monotonic claim counter for this Goal.
     pub epoch: u32,
+    /// When this claim stops being evidence that an owner is alive.
+    ///
+    /// Without this a `kill -9` deadlocked the Goal permanently: the claim
+    /// outlived the process holding it and no successor could ever claim or
+    /// terminate. Measured live, on the shipped binary, by killing a run
+    /// mid-wave. Task claims in the same ledger already carried a lease for
+    /// exactly this reason and the loop-owner claim did not, which was an
+    /// asymmetry rather than a design.
+    ///
+    /// Reclaim is safe because of the epoch, not in spite of it:
+    /// `GoalLoopOwnerFinished` requires the LIVE epoch, so the moment a
+    /// successor claims `epoch + 1` a resurrected predecessor's termination is
+    /// refused. The lease supplies only the liveness evidence; the epoch
+    /// supplies the exclusion.
+    pub lease_expires_unix_ms: u64,
+}
+
+impl GoalLoopOwner {
+    /// Whether this claim is still evidence that an owner is alive.
+    ///
+    /// A live claim refuses a nested one. An expired claim does not — the owner
+    /// that held it is gone, and refusing forever would be a durable deadlock
+    /// dressed up as a safety property.
+    #[must_use]
+    pub fn is_live_at(&self, now_unix_ms: u64) -> bool {
+        now_unix_ms < self.lease_expires_unix_ms
+    }
 }
 
 impl GoalState {

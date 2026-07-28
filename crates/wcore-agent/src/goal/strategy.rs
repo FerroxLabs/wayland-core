@@ -52,6 +52,8 @@
 //! `cargo test --doc -p wcore-agent`, and the executed count must be read back.
 
 use std::marker::PhantomData;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use wcore_protocol::events::RecoveryCursor;
 use wcore_swarm::fleet::{FleetError, ShardSummary};
@@ -518,6 +520,13 @@ fn partial_from_stages(run: &WorkflowRunResult) -> GoalTerminalState {
     }
 }
 
+/// Wall clock in unix milliseconds.
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
 /// Why a loop-owner claim could not be taken or finished.
 #[derive(Debug, thiserror::Error)]
 pub enum GoalLoopError {
@@ -552,12 +561,41 @@ pub enum GoalLoopError {
 #[derive(Clone)]
 pub struct GoalLoop {
     kernel: GoalKernel,
+    lease_ms: u64,
+    clock: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
+
+/// Default liveness window for a loop-owner claim.
+///
+/// Matches the `goal run --lease` default. A claim is evidence that an owner is
+/// alive; once it expires a successor may supersede it, which is what stops a
+/// `kill -9` from deadlocking the Goal permanently.
+pub const DEFAULT_LOOP_OWNER_LEASE_MS: u64 = 60_000;
 
 impl GoalLoop {
     #[must_use]
     pub fn new(kernel: GoalKernel) -> Self {
-        Self { kernel }
+        Self {
+            kernel,
+            lease_ms: DEFAULT_LOOP_OWNER_LEASE_MS,
+            clock: Arc::new(now_unix_ms),
+        }
+    }
+
+    /// How long this driver's claims stay evidence that an owner is alive.
+    #[must_use]
+    pub fn with_lease_ms(mut self, lease_ms: u64) -> Self {
+        self.lease_ms = lease_ms.max(1);
+        self
+    }
+
+    /// Replace the wall clock. Exists so lease expiry is EXERCISABLE rather than
+    /// only reasoned about — a lease whose expiry path is only reachable by
+    /// sleeping in a test is a lease whose expiry path never gets tested.
+    #[must_use]
+    pub fn with_clock(mut self, clock: Arc<dyn Fn() -> u64 + Send + Sync>) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// The kernel underneath, for callers that also need to open or inspect a
@@ -582,7 +620,9 @@ impl GoalLoop {
                 requested: S::STRATEGY,
             });
         }
-        let epoch = self.kernel.claim_loop_owner(goal_id, S::STRATEGY)?;
+        let epoch =
+            self.kernel
+                .claim_loop_owner(goal_id, S::STRATEGY, (self.clock)(), self.lease_ms)?;
         Ok(LoopOwner {
             goal_id: goal_id.clone(),
             epoch,
@@ -648,7 +688,165 @@ run_entry_points! {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use wcore_types::goal::{GoalAuthorityRequest, GoalAuthoritySnapshot, LoopPolicy};
+
+    use crate::session_journal::SessionJournal;
+
     use super::*;
+
+    // ── The loop-owner lease ────────────────────────────────────────────────
+    //
+    // These live here rather than in `tests/goal_strategy_test.rs` because they
+    // exercise `claim_loop_owner` / `finish_loop_owner`, which are `pub(crate)`
+    // on purpose: `finish_loop_owner` taking a raw terminal is the one route
+    // that would bypass the adapter chain, so it must not be public just to
+    // make a test convenient.
+    //
+    // The lease exists because a live kill found its absence. Before it, a
+    // `kill -9` left the claim held by nobody and the Goal could never be
+    // claimed or terminated again.
+
+    /// A clock the test moves by hand. Sleeping to reach an expiry is how a
+    /// lease's expiry path ends up never being tested at all.
+    #[derive(Clone)]
+    struct TestClock(Arc<AtomicU64>);
+
+    impl TestClock {
+        fn new(start: u64) -> Self {
+            Self(Arc::new(AtomicU64::new(start)))
+        }
+        fn now(&self) -> u64 {
+            self.0.load(Ordering::SeqCst)
+        }
+        fn advance(&self, ms: u64) {
+            self.0.fetch_add(ms, Ordering::SeqCst);
+        }
+        fn as_fn(&self) -> Arc<dyn Fn() -> u64 + Send + Sync> {
+            let inner = Arc::clone(&self.0);
+            Arc::new(move || inner.load(Ordering::SeqCst))
+        }
+    }
+
+    fn direct_snapshot() -> GoalAuthoritySnapshot {
+        wcore_types::goal::resolve_goal_authority(
+            &GoalAuthorityRequest {
+                requested_limits: std::collections::BTreeMap::new(),
+                strategy: GoalStrategy::Direct,
+                loop_policy: LoopPolicy::Once,
+            },
+            &std::collections::BTreeMap::new(),
+            "parent-envelope-digest",
+        )
+    }
+
+    fn leased_loop(path: &std::path::Path, clock: &TestClock, lease_ms: u64) -> (GoalLoop, GoalId) {
+        let driver = GoalLoop::new(GoalKernel::new(
+            SessionJournal::open(path, "goal-strategy-lease").expect("journal opens"),
+        ))
+        .with_lease_ms(lease_ms)
+        .with_clock(clock.as_fn());
+        let id = GoalId::new("g-lease");
+        driver
+            .kernel()
+            .open_goal(&id, "close criterion 3", &direct_snapshot(), 1_700_000_000)
+            .expect("goal opens");
+        (driver, id)
+    }
+
+    #[tokio::test]
+    async fn a_live_claim_refuses_a_second_owner_but_an_expired_one_is_superseded() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("session.journal");
+        let clock = TestClock::new(1_000_000);
+        let (driver, id) = leased_loop(&path, &clock, 60_000);
+
+        // An owner that died holding its claim: claim, then never finish.
+        driver
+            .kernel()
+            .claim_loop_owner(&id, GoalStrategy::Direct, clock.now(), 60_000)
+            .expect("first claim");
+
+        let nested = driver
+            .run_direct(&id, |owner| async move {
+                StrategyTermination::from_direct(owner, DirectOutcome::Completed)
+            })
+            .await;
+        assert!(nested.is_err(), "a live claim must refuse a second owner");
+        assert!(!driver.kernel().goal(&id).unwrap().unwrap().is_terminal());
+
+        // Past the lease, the dead owner's claim is superseded rather than
+        // refused forever — otherwise a kill -9 deadlocks the Goal permanently.
+        clock.advance(60_001);
+        let reclaimed = driver
+            .run_direct(&id, |owner| async move {
+                StrategyTermination::from_direct(owner, DirectOutcome::Completed)
+            })
+            .await;
+        assert!(
+            reclaimed.is_ok(),
+            "an expired claim must be reclaimable: {reclaimed:?}"
+        );
+        assert!(driver.kernel().goal(&id).unwrap().unwrap().is_terminal());
+    }
+
+    #[tokio::test]
+    async fn a_superseded_owner_cannot_terminate_the_goal_it_no_longer_holds() {
+        // Reclaim is safe only because the epoch fences it. A predecessor that
+        // comes back to life after its lease expired holds epoch N while the
+        // live owner holds N+1, and the finish requires the LIVE epoch.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("session.journal");
+        let clock = TestClock::new(1_000_000);
+        let (driver, id) = leased_loop(&path, &clock, 1_000);
+
+        let stale_epoch = driver
+            .kernel()
+            .claim_loop_owner(&id, GoalStrategy::Direct, clock.now(), 1_000)
+            .expect("first claim");
+        clock.advance(1_001);
+        let live_epoch = driver
+            .kernel()
+            .claim_loop_owner(&id, GoalStrategy::Direct, clock.now(), 1_000)
+            .expect("successor claims");
+        assert_ne!(stale_epoch, live_epoch);
+
+        let stale =
+            driver
+                .kernel()
+                .finish_loop_owner(&id, stale_epoch, GoalTerminalState::CriteriaChecked);
+        assert!(
+            stale.is_err(),
+            "a superseded owner must not terminate the Goal"
+        );
+        assert!(!driver.kernel().goal(&id).unwrap().unwrap().is_terminal());
+    }
+
+    #[tokio::test]
+    async fn the_lease_liveness_detector_can_report_both_answers() {
+        // Falsification: if `is_live_at` always said "expired", the refusal
+        // above would go green for the wrong reason. Assert the detector on both
+        // sides of the boundary.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("session.journal");
+        let clock = TestClock::new(1_000_000);
+        let (driver, id) = leased_loop(&path, &clock, 5_000);
+        driver
+            .kernel()
+            .claim_loop_owner(&id, GoalStrategy::Direct, clock.now(), 5_000)
+            .expect("claim");
+
+        let owner = driver
+            .kernel()
+            .goal(&id)
+            .unwrap()
+            .unwrap()
+            .loop_owner
+            .expect("claim is live");
+        assert!(owner.is_live_at(clock.now()), "live before expiry");
+        assert!(!owner.is_live_at(clock.now() + 5_001), "expired after it");
+    }
 
     #[test]
     fn every_strategy_has_exactly_one_compile_time_tag() {

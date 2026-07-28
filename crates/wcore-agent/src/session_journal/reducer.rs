@@ -380,6 +380,8 @@ fn apply_goal_event(
             goal_id,
             strategy,
             epoch,
+            now_unix_ms,
+            lease_expires_unix_ms,
         } => {
             let goal = required_goal_mut(state, goal_id)?;
             require_goal_live(goal)?;
@@ -390,13 +392,27 @@ fn apply_goal_event(
             // Goal would be worse than the nesting it prevented, so the Goal is
             // left exactly as it was — live, claimed by its original owner, and
             // resumable.
-            if let Some(existing) = &goal.loop_owner {
+            if let Some(existing) = &goal.loop_owner
+                && existing.is_live_at(*now_unix_ms)
+            {
                 return Err(invalid_goal(
                     goal_id,
                     &format!(
                         "loop owner {:?} (epoch {}) is already live; a nested loop owner is refused",
                         existing.strategy, existing.epoch
                     ),
+                ));
+            }
+            // An EXPIRED claim is superseded rather than refused. The owner that
+            // held it is gone — a `kill -9` proved that live — and refusing
+            // forever would be a durable deadlock wearing a safety property's
+            // clothes. Exclusion is not weakened by this: the successor takes
+            // `epoch + 1`, and `GoalLoopOwnerFinished` requires the LIVE epoch,
+            // so a resurrected predecessor still cannot terminate the Goal.
+            if lease_expires_unix_ms <= now_unix_ms {
+                return Err(invalid_goal(
+                    goal_id,
+                    "a loop-owner claim must carry a lease that expires in the future",
                 ));
             }
             // The claim must name the strategy the DURABLE record authorized.
@@ -422,6 +438,7 @@ fn apply_goal_event(
             goal.loop_owner = Some(GoalLoopOwner {
                 strategy: *strategy,
                 epoch: expected,
+                lease_expires_unix_ms: *lease_expires_unix_ms,
             });
             goal.last_transition_seq = seq;
             goal.last_transition_checksum = checksum.to_owned();
@@ -471,7 +488,7 @@ fn apply_goal_event(
                 return Err(invalid_goal(
                     goal_id,
                     &format!(
-                        "loop owner {:?} (epoch {}) is live; terminate through the canonical strategy transition",
+                        "loop owner {:?} (epoch {}) holds this goal; terminate through the canonical strategy transition",
                         owner.strategy, owner.epoch
                     ),
                 ));
