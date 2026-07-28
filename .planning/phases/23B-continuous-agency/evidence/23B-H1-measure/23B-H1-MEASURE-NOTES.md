@@ -126,3 +126,75 @@ and compares to the stored digest. So `ChecksumMismatch` ⟺ `serialize(deserial
 
 `LegacyEffectReceiptEncoding` (`model.rs:65`) is a thread-local encoding switch, but the guard
 restores on drop, so it is not a leak hazard.
+
+---
+
+## T+70 — REACH ACHIEVED. This is the precondition nobody had.
+
+`scripts/f23-h1-repro-live.sh`, hetzner, HEAD release binary `97a2602e1ef9a3c4`:
+
+```
+F23_H1_REACH=1 id=ee638d231dded0 tool_events=1 file_written=yes seed_exit=0 bytes=94409
+```
+
+A real provider call, a real `Write` tool dispatch, a real file on disk, a real
+`tool_intent_recorded` in the journal. Every previous 23B-H1 measurement — 12 by the last
+lane, 34 before it — was taken by a harness that could not get here.
+
+### Batch 1 — HEAD, quiet host (`b1.log`)
+
+```
+F23_H1_LIVE runs=10 tool_runs=10 tool_events=30 no_tool_event=0 resume_ok=10
+            checksum_mismatch=0 other_journal_failure=0 seed_failure=0
+```
+10/10 runs reached tool events, 30 events total, journals 94 KB – 242 KB.
+
+### Batch 2 — HEAD, host under concurrent `cargo build` (`b2.log`)
+
+```
+uptime before: load average: 10.18 …
+F23_H1_LIVE runs=12 tool_runs=12 tool_events=21 no_tool_event=0 resume_ok=12
+            checksum_mismatch=0 other_journal_failure=0 seed_failure=0
+```
+Honest caveat: load reached only ~10-11, not the ~28 that 23B-01 correlated with. This is
+**not** a load arm; it is a second quiet-host arm and is labelled as such.
+
+### Batch 3 — the PRE-FIX binary, `dba9b9e5` = `a7beafe5^` (`pf1.log`)
+
+Binary `8a6e9ee4f434a771`, built from the parent of the commit that claimed to fix 23B-H1.
+
+```
+F23_H1_LIVE runs=12 tool_runs=12 tool_events=18 no_tool_event=0 resume_ok=12
+            checksum_mismatch=0 other_journal_failure=0 seed_failure=0
+```
+
+**This is the most important number so far. The pre-fix binary does not reproduce either,
+with full reach.** So `a7beafe5` is not what changed the outcome — consistent with the
+previous lane's reachability argument, and now shown empirically rather than only
+structurally.
+
+Running total with reach: **0 reproductions in 34 runs across two binaries, 69 tool events.**
+
+## T+70 — a size correlation that reframes 23B-01
+
+23B-01 recorded failing journals ≈ **203 KB** and passing ≈ **71 KB**, and inferred "the
+failing runs get further through the turn". My runs split cleanly the same way:
+
+| tool events in run | journal size |
+|---|---|
+| 1 | 94 – 100 KB |
+| 4 – 7 | 224 – 242 KB |
+
+The ratio is the same, and the thing that moves it is **the number of tool records**. So
+23B-01's failing runs almost certainly DID contain tool events and its passing ones did
+not — which means reach was a real confound all along, and also that my harness is now
+producing journals of the shape that failed.
+
+## T+70 — control still outstanding
+
+Neither HEAD nor `a7beafe5^` reproduces. The remaining control is 23B-01's own base,
+**`15971d1b`** (61 commits before `dba9b9e5`, 841 before HEAD). Building it now. Either:
+- it reproduces → there is a bisectable window `15971d1b..dba9b9e5` containing the real
+  fix, 23B-H1 is genuinely closed, and `a7beafe5` was not the thing that closed it; or
+- it does not → my harness still differs from 23B-01's procedure in a way I have to name,
+  and I will name it rather than bank the zeros.
