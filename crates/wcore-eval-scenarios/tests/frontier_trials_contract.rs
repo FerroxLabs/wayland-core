@@ -139,7 +139,10 @@ fn a_proportion_over_zero_trials_is_refused() {
     // CONTROL: a real proportion over real trials produces a real interval.
     let ok = wilson_score_interval(27, 30).expect("control: 27/30 must produce an interval");
     assert!(ok.lower > 0.0 && ok.upper < 1.0, "got {ok:?}");
-    assert!(ok.lower < 0.9 && ok.upper > 0.9, "interval must cover 0.9: {ok:?}");
+    assert!(
+        ok.lower < 0.9 && ok.upper > 0.9,
+        "interval must cover 0.9: {ok:?}"
+    );
 
     // Even the degenerate-but-real case of 30/30 is accepted, and its lower bound is
     // strictly below 1.0 - a perfect score is not a claim of perfect reliability.
@@ -189,7 +192,10 @@ fn a_comparative_result_with_a_missing_peer_measurement_cannot_be_constructed() 
         &[ToolV1::Wayland, ToolV1::Hermes],
     );
     assert!(
-        matches!(refused, Err(FrontierTrialError::MissingPeerMeasurement { .. })),
+        matches!(
+            refused,
+            Err(FrontierTrialError::MissingPeerMeasurement { .. })
+        ),
         "a comparative result missing a required tool's measurement must be UNCONSTRUCTIBLE; got {refused:?}"
     );
 
@@ -203,7 +209,10 @@ fn a_comparative_result_with_a_missing_peer_measurement_cannot_be_constructed() 
         ComparativeResultV1::try_new(
             DimensionV1::Correctness,
             peer_only,
-            DeltaV1 { estimate: 0.0, interval: interval(-0.02, 0.03) },
+            DeltaV1 {
+                estimate: 0.0,
+                interval: interval(-0.02, 0.03)
+            },
             0.05,
             &[ToolV1::Wayland, ToolV1::Hermes],
         )
@@ -346,7 +355,10 @@ fn a_result_set_does_not_verify_against_a_protocol_whose_digest_differs() {
     let amended = br#"{"protocol_version":"F30-03-TRIAL-PROTOCOL-V2"}"#;
     let refused = results.verify(amended);
     assert!(
-        matches!(refused, Err(FrontierTrialError::ProtocolDigestMismatch { .. })),
+        matches!(
+            refused,
+            Err(FrontierTrialError::ProtocolDigestMismatch { .. })
+        ),
         "a result set must NOT verify against a protocol whose digest differs; got {refused:?}"
     );
 
@@ -429,8 +441,7 @@ fn two_bootstrap_runs_under_the_same_seed_produce_identical_bounds() {
 
 #[test]
 fn an_unknown_field_is_refused_at_every_boundary_struct() {
-    let interval_json =
-        r#"{"lower":0.1,"upper":0.2,"method":"wilson_score_95","confidence":0.95}"#;
+    let interval_json = r#"{"lower":0.1,"upper":0.2,"method":"wilson_score_95","confidence":0.95}"#;
     serde_json::from_str::<IntervalV1>(interval_json).expect("control: the interval deserializes");
     let with_extra = interval_json.replace("}", ",\"note\":\"looks harmless\"}");
     assert!(
