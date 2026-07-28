@@ -344,10 +344,32 @@ impl QuarantineStore {
         Ok(serde_json::from_str(&raw)?)
     }
 
+    /// Persist the index.
+    ///
+    /// # Why this is `atomic_write` and not `fs::write` (F26-GAPS-H1)
+    ///
+    /// [`Self::admit`] is called once per executable item, and each call
+    /// re-serialises and rewrites the WHOLE index. A `fs::write` truncates in
+    /// place, so a process killed inside that window leaves a partially-written
+    /// document — and because [`Self::load_index`] parses the file, a truncated
+    /// index makes EVERY subsequent admit, listing and promotion fail. The
+    /// contained payloads stay on disk with nothing claiming them, `migrate
+    /// quarantined` exits 1, and re-running the migration re-hits the same
+    /// unparseable file, so the state is terminal.
+    ///
+    /// Measured on `hetzner-dsm` at `c23a08b9` with an uncatchable `SIGKILL`
+    /// swept across the apply window over a 440-item corpus: **5 of 35
+    /// mid-apply interruptions** across the two peer paths ended there, each
+    /// with a re-drive that still exited **0** while refusing all 440 items.
+    ///
+    /// [`wcore_config::atomic_write`] is the project's existing helper for
+    /// exactly this — sibling tempfile, `sync_all`, rename — and it already
+    /// carries the Windows long-path handling 26-03 added for F26-03-D. A
+    /// second definition here would be the duplication the crate map forbids.
     fn save_index(&self, file: &QuarantineIndexFile) -> Result<(), QuarantineError> {
         fs::create_dir_all(&self.root)?;
         let json = serde_json::to_string_pretty(file)?;
-        fs::write(self.index_path(), json)?;
+        wcore_config::atomic_write(self.index_path(), json.as_bytes())?;
         Ok(())
     }
 
@@ -761,6 +783,61 @@ mod tests {
                 contains_shell_commands(body, from)
             );
         }
+    }
+
+    /// F26-GAPS-H1 mechanism guard: the index is REPLACED, never truncated in
+    /// place.
+    ///
+    /// This asserts the mechanism, not the behaviour: a rename-into-place gives
+    /// the destination a new inode, while `fs::write` reuses the existing one.
+    /// It is deliberately paired with, and does NOT substitute for,
+    /// `scripts/portability-migrate-interrupt-proof.sh`, which is what actually
+    /// kills a real apply mid-flight and measures the surviving state — a unit
+    /// test cannot deliver an uncatchable signal to itself at a chosen offset,
+    /// and a test that tried would be the kind that passes without proving
+    /// anything.
+    ///
+    /// Unix-only because inode identity is the observable being used; the
+    /// behaviour on Windows is proven by the same harness's PowerShell peer.
+    #[cfg(unix)]
+    #[test]
+    fn saving_the_index_replaces_the_file_rather_than_truncating_it() {
+        use std::os::unix::fs::MetadataExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = QuarantineStore::new(tmp.path().join("q"));
+        let body = b"---\nname: t\n---\nrun: !`echo x`\n".to_vec();
+
+        let admit = |id: &str| {
+            store
+                .admit(&QuarantineRequest {
+                    id: id.to_string(),
+                    reason: ExecutableReason::SkillShellDirective,
+                    source_dir: None,
+                    inline: Some(("SKILL.md".to_string(), body.clone())),
+                    source_tool: "hermes".to_string(),
+                    source_version: None,
+                    source_path: format!("skills/{id}"),
+                    promote_as: id.to_string(),
+                })
+                .expect("admit")
+        };
+
+        admit("skill:a");
+        let index = store.root().join(QUARANTINE_INDEX);
+        let first = std::fs::metadata(&index).expect("index exists").ino();
+
+        admit("skill:b");
+        let second = std::fs::metadata(&index).expect("index exists").ino();
+
+        assert_ne!(
+            first, second,
+            "the index kept its inode across a save, so it was written in place \
+             and a kill inside that write can leave a truncated document"
+        );
+        // And the replacement is a COMPLETE document, so the guard cannot pass
+        // by writing a fresh but broken file.
+        assert_eq!(store.entries().expect("entries readable").len(), 2);
     }
 
     #[test]
