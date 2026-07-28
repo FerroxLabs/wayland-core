@@ -9,7 +9,7 @@ verdict: "REPRODUCED, MEASURED, AND FIXED. The double start is real; the consump
 severity-as-filed: "MEDIUM (measured) / potentially HIGH (unmeasured)"
 severity-as-measured: "HIGH"
 merge-base: e6abc748ecca0127545e8b34e949d6ad1d741cf5
-head: d1044bb5
+head: fb7822ac (summary commit; final tip recorded in the lane report)
 new-seam: "TelegramConfig.api_base_url — the first fixture seam for a POLLING inbound adapter"
 ---
 
