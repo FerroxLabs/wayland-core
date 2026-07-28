@@ -18,10 +18,18 @@ later reader can re-derive it and re-verify without this run's machine. That is 
 EXACTLY BECAUSE the signature is not an authorization: it is an integrity binding over
 evidence, and the seed being public costs nothing a release trust root would care about.
 Phase 29's trust root must NOT be derived this way.
+
+A RECEIPT IS NEVER EDITED. When the evidence moves under a receipt that has already been
+signed -- a finding repaired and re-adjudicated after signing, say -- the signed artifact is
+left byte-identical and a SUPERSEDING receipt is issued beside it (`--supersede`). The prior
+signature stays valid over what was true when it was made; rewriting it in place would destroy
+the one property the signature exists to provide. Supersession is phase-scoped evidence
+maintenance, NOT a release action and NOT a re-seal.
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import sys
@@ -70,9 +78,13 @@ def load(rel: str):
     return json.loads((PHASE / rel).read_text(encoding="utf-8"))
 
 
-def ledger_rows() -> list[dict]:
+DEFAULT_LEDGER = "evidence/28-04/findings.tsv"
+DEFAULT_OUT = "28-04-CERTIFICATION-RECEIPT.json"
+
+
+def ledger_rows(ledger_rel: str = DEFAULT_LEDGER) -> list[dict]:
     rows = []
-    text = (PHASE / "evidence/28-04/findings.tsv").read_text(encoding="utf-8")
+    text = (PHASE / ledger_rel).read_text(encoding="utf-8")
     for raw in text.splitlines():
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue
@@ -82,7 +94,85 @@ def ledger_rows() -> list[dict]:
     return rows
 
 
-def main() -> int:
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    """Defaults reproduce the historical single-shot behaviour EXACTLY.
+
+    `f28-build-receipt.py` with no arguments builds the same receipt, from the same ledger, to
+    the same path, under the same certification id and key id as it always did. Every flag
+    below is opt-in, and the regression control for that claim is recorded in
+    `evidence/28-receipt/` : rebuilding with `--ledger` pinned to the pre-adjudication ledger
+    reproduces the ORIGINAL signed receipt byte for byte.
+    """
+    p = argparse.ArgumentParser(description="assemble and sign a Phase 28 certification receipt")
+    p.add_argument("--ledger", default=DEFAULT_LEDGER,
+                   help="finding ledger TSV, relative to the phase directory")
+    p.add_argument("--cert-id", default=CERT_ID,
+                   help="certification id; the signing key is DERIVED from it, so a distinct "
+                        "id yields a distinct key")
+    p.add_argument("--key-id", default=KEY_ID, help="key id recorded in the authority block")
+    p.add_argument("--out", default=DEFAULT_OUT,
+                   help="output filename, relative to the phase directory")
+    p.add_argument("--supersede", metavar="RECEIPT.json",
+                   help="issue this receipt as SUPERSEDING the named signed receipt. The "
+                        "superseded body_sha256 and key_id are READ OUT OF THAT FILE rather "
+                        "than retyped, and the file itself is bound into artifacts, so the "
+                        "supersession names the exact bytes it supersedes.")
+    p.add_argument("--extra-evidence-dir", action="append", default=[], metavar="DIR",
+                   help="additional evidence directory to digest into the artifact/log "
+                        "bindings (repeatable)")
+    p.add_argument("--disclose", action="append", default=[],
+                   metavar="NAME=EVIDENCE_REF=TEXT",
+                   help="record a posture statement. Used to name defects that are NOT rows "
+                        "in the ledger, so three true claims cannot read as 'zero known "
+                        "defects', which amendment A3 forbids. (repeatable)")
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv if argv is not None else sys.argv[1:])
+    cert_id, key_id = args.cert_id, args.key_id
+
+    # NEVER overwrite a signed receipt with a different body. That is the one operation this
+    # tool must be unable to perform: a signature over evidence is worthless if the tool that
+    # made it will silently replace it when the evidence moves. Supersede instead.
+    out = PHASE / args.out
+    if out.is_file():
+        try:
+            prior = json.loads(out.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            prior = {}
+        if prior.get("authority", {}).get("kind") == "phase_scoped":
+            print(f"refusing to overwrite {args.out}: it carries a phase-scoped signature. "
+                  "Issue a superseding receipt instead:\n"
+                  f"  --supersede {args.out} --cert-id <new> --key-id <new> --out <new>",
+                  file=sys.stderr)
+            return 2
+
+    prior_receipt = None
+    if args.supersede:
+        sp = PHASE / args.supersede
+        if not sp.is_file():
+            print(f"--supersede: {args.supersede} is not on disk", file=sys.stderr)
+            return 2
+        prior = json.loads(sp.read_text(encoding="utf-8"))
+        auth = prior.get("authority", {})
+        if auth.get("kind") != "phase_scoped":
+            print(f"--supersede: {args.supersede} carries no phase-scoped signature; there "
+                  "is nothing to supersede", file=sys.stderr)
+            return 2
+        if cert_id == CERT_ID or key_id == KEY_ID:
+            print("--supersede: refusing to reuse the superseded receipt's certification id "
+                  "or key id. A superseding receipt must be independently identifiable, and "
+                  "its key must be its own.", file=sys.stderr)
+            return 2
+        prior_receipt = {
+            "path": args.supersede,
+            "body_sha256": prior["body_sha256"],
+            "key_id": auth["key_id"],
+            "sha256": sha256_file(sp),
+            "bytes": sp.stat().st_size,
+        }
+
     results = load("evidence/28-02/results.json")
     soak = load("evidence/28-03/soak.json")
     macos_cells = load("evidence/28-03/macos-cells.json")
@@ -206,6 +296,40 @@ def main() -> int:
         },
     ]
 
+    # A supersession is a POSTURE statement, inside the signed body, so the claim that this
+    # receipt replaces another is itself covered by the signature rather than asserted in a
+    # sidecar document nobody digests.
+    if prior_receipt:
+        posture.append({
+            "name": "supersedes-a-prior-signed-phase-28-receipt",
+            "description": (
+                f"This receipt SUPERSEDES the Phase 28 certification receipt whose "
+                f"body_sha256 is {prior_receipt['body_sha256']} and whose signing key_id is "
+                f"{prior_receipt['key_id']} ({prior_receipt['path']}, bound byte-exactly in the "
+                "artifacts binding). The superseded receipt is NOT withdrawn, NOT altered and "
+                "NOT invalid: its signature remains correct over the evidence as it stood when "
+                "it was signed, and it accurately records the dispositions of that moment. It "
+                "is superseded because the LEDGER MOVED after signing, and a signed artifact "
+                "is never edited to follow it. Supersession is phase-scoped evidence "
+                "maintenance. It is NOT a release trust root, NOT a seal, NOT a re-seal and "
+                "NOT an authorization to release, and it confers no authority the superseded "
+                "receipt did not already have."
+            ),
+            "evidence_ref": prior_receipt["path"],
+        })
+    for spec in args.disclose:
+        name, _, rest = spec.partition("=")
+        ref, _, text = rest.partition("=")
+        if not name.strip() or not ref.strip() or not text.strip():
+            print(f"--disclose {spec!r}: expected NAME=EVIDENCE_REF=TEXT, all three non-empty",
+                  file=sys.stderr)
+            return 2
+        posture.append({
+            "name": name.strip(),
+            "description": text.strip(),
+            "evidence_ref": ref.strip(),
+        })
+
     # ---- B4 fixture corpus ------------------------------------------------------------
     corpus_srcs = [
         ("e5-matrix-cases", "crates/wcore-eval-scenarios/src/e5_cases.rs"),
@@ -272,19 +396,30 @@ def main() -> int:
 
     artifact_paths = rels(
         ["evidence/28-01", "evidence/28-02", "evidence/28-03", "evidence/28-04",
-         "evidence/28-03-windows-requeue", "evidence/F-28-02-001"],
+         "evidence/28-03-windows-requeue", "evidence/F-28-02-001",
+         *args.extra_evidence_dir],
         {".json", ".tsv"},
     )
     log_paths = rels(
         ["evidence/28-01", "evidence/28-02", "evidence/28-03", "evidence/28-04",
          "evidence/28-03-windows-requeue", "evidence/28-kr01-repair",
-         "evidence/28-kr07-suites", "evidence/F-28-02-001"],
+         "evidence/28-kr07-suites", "evidence/F-28-02-001",
+         *args.extra_evidence_dir],
         {".log", ".err", ".txt"},
     )
     artifacts = [
         {"path": r, "sha256": sha256_file(PHASE / r), "bytes": (PHASE / r).stat().st_size}
         for r in artifact_paths
     ]
+    # Bind the superseded receipt's EXACT BYTES. Without this the supersession names a digest
+    # in prose; with it, a verifier recomputing the artifact binding off disk will reject the
+    # pairing if anyone ever alters the file this receipt claims to supersede.
+    if prior_receipt:
+        artifacts.append({
+            "path": prior_receipt["path"],
+            "sha256": prior_receipt["sha256"],
+            "bytes": prior_receipt["bytes"],
+        })
     logs = [
         {
             "path": r,
@@ -313,7 +448,7 @@ def main() -> int:
     }
 
     # ---- findings: every row, verbatim from the adjudicated ledger --------------------
-    rows = ledger_rows()
+    rows = ledger_rows(args.ledger)
     findings = [
         {
             "id": r["id"],
@@ -345,7 +480,7 @@ def main() -> int:
     }
 
     body = {
-        "certification_id": CERT_ID,
+        "certification_id": cert_id,
         "phase": "28-native-cross-platform-certification",
         "bindings": {
             "candidate": candidate,
@@ -371,7 +506,7 @@ def main() -> int:
 
     # Deterministic phase-scoped key. See the module docstring for why this is acceptable
     # for an evidence binding and forbidden for a trust root.
-    seed = hashlib.sha256(f"wayland.phase28.certification.{CERT_ID}".encode()).digest()
+    seed = hashlib.sha256(f"wayland.phase28.certification.{cert_id}".encode()).digest()
     sk = Ed25519PrivateKey.from_private_bytes(seed)
     pk = sk.public_key().public_bytes(
         encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw
@@ -386,7 +521,7 @@ def main() -> int:
         "body": body,
         "authority": {
             "kind": "phase_scoped",
-            "key_id": KEY_ID,
+            "key_id": key_id,
             "public_key_base64": base64.b64encode(pk).decode(),
             "fingerprint_sha256": hashlib.sha256(pk).hexdigest(),
             "signature_base64": base64.b64encode(signature).decode(),
@@ -394,9 +529,15 @@ def main() -> int:
         },
     }
 
-    out = PHASE / "28-04-CERTIFICATION-RECEIPT.json"
     out.write_text(json.dumps(receipt, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"wrote {out.relative_to(ROOT)}")
+    if prior_receipt:
+        print(f"  SUPERSEDES           {prior_receipt['body_sha256']}")
+        print(f"    signed under key   {prior_receipt['key_id']}")
+        print(f"    file bound at      {prior_receipt['sha256']} ({prior_receipt['bytes']} bytes)")
+    print(f"  certification id     {cert_id}")
+    print(f"  key id               {key_id}")
+    print(f"  ledger               {args.ledger}")
     print(f"  body_sha256          {body_sha256}")
     print(f"  key fingerprint      {receipt['authority']['fingerprint_sha256']}")
     print(f"  public key (base64)  {receipt['authority']['public_key_base64']}")
