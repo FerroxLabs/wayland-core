@@ -167,3 +167,58 @@ known-positive passes, known-negative fails, and **the naive matcher would have 
 
 The brief lists "reproduce, then apply the lease". I am reproducing first as instructed.
 If Leg 1/Leg 2 do NOT reproduce, that is the result and I stop and say so.
+
+---
+
+## T+80 — **THE DEFECT IS REPRODUCED.** Raw wire evidence, base commit, unfixed binary
+
+Binary: `wayland-core 0.12.25 (source 3d7d4a016f3eed830f9f4b8824f638e98d68e2e7)`
+Run dir `/root/f24cl-run-base`, tg journal 19354 bytes.
+
+Eight updates submitted to the fixture. **Nothing else running.** Then a single ordinary
+session — `wayland-core "f24cl session l1 <runid>"`, the shipped one-shot prompt surface,
+no flags, no test hooks — was started. Its channel poller armed and, on its SECOND poll,
+two milliseconds after its first:
+
+```
+{'kind': 'getUpdates.open', 'at': '19:40:02.076Z', 'poll': 1, 'offset': 0, 'open': 1}
+{'kind': 'confirm',        'at': '19:40:02.078Z', 'poll': 2, 'offset': 9,
+                            'deleted': [1, 2, 3, 4, 5, 6, 7, 8]}
+```
+
+**`offset=9` deleted updates 1-8. All eight. Permanently, server-side, for every consumer.**
+Journal kind counts for the whole leg: `submit 8, deleteWebhook 1, getUpdates.open 70,
+getUpdates.close 70, confirm 1`.
+
+An ordinary interactive session, which the user opened to do something entirely unrelated,
+consumed the entire inbound backlog of the account the installed service is supposed to be
+serving — and the service had not even started yet. Nothing errored. Nothing warned. The
+messages are simply gone.
+
+This is the brief's headline scenario, measured on the real binary against a
+destructive-read endpoint, not argued from source.
+
+### What this does NOT yet establish
+
+- The gateway leg did not run (harness aborted first), so "the service then receives 0 of 8"
+  is INFERRED from `deleted: [1..8]` rather than measured. The deletion itself is measured
+  and is the load-bearing fact — the updates cannot be served to anybody again.
+- The steady-state (concurrent) leg has not run yet.
+
+### Two harness defects found, both repaired in-lane (§6b-ii), neither affecting the above
+
+1. **The LLM stub answered plain JSON, not SSE.** The session logged
+   `OpenAI SSE stream closed before any terminal event ... retrying (attempt 2/2)` then
+   `primary circuit is open`, so it hung ~90s instead of exiting. Note this did NOT taint
+   the measurement: the consumption happened at 19:40:02, seven seconds BEFORE the first LLM
+   hit at 19:40:09. The channel poller is armed during bootstrap, ahead of the turn.
+2. `write EPIPE` aborted the leg after the 90s hang. Gateway stdin moved to `ignore`;
+   `report()` given a retry.
+
+### Instrument behaved correctly under both faults
+
+Both runs graded **INCOMPLETE**, never LOSS — reasons `llm stub never bound` and
+`write EPIPE`. That is the `instrument_fault` discipline working in the field on the first
+two attempts: neither degraded run was allowed to be reported as a result, in either
+direction. The evidence above was recovered from the fixture's own journal, which is written
+by a different process and fsync'd before each answer.
