@@ -161,10 +161,21 @@ echo "DETERMINISM-CONTROL: pass"
 #
 # Three independent deformations, one per thing the fingerprint must see:
 # a missing profile, a missing quarantine entry, and a mutated payload byte.
+#
+# Each control home is produced by a REAL clean migration rather than by copying
+# one, because `config.toml` records the absolute home in derived keys such as
+# `sessions.directory`: a copied home still names the home it was created in, so
+# a copy would fail for a reason that has nothing to do with the deformation.
+sens_home() {
+    mkdir -p "$1" || FAIL "could not create $1"
+    run_migrate "$1" > "$1.log" 2>&1 || FAIL "the sensitivity control migration failed for $1"
+    fp=$(fingerprint "$1" | sed -n 's/^FINGERPRINT: //p')
+    [ "$fp" = "$REF_FP" ] || FAIL "an undeformed control home did not equal the reference ($fp)"
+}
+
 SENS_HOME="$WORK/sens-home"
-cp -a "$DET_HOME" "$SENS_HOME" || FAIL "could not copy a home for the sensitivity control"
-SENS_BASE=$(fingerprint "$SENS_HOME" | sed -n 's/^FINGERPRINT: //p')
-[ "$SENS_BASE" = "$REF_FP" ] || FAIL "a plain copy of a clean home did not fingerprint equal; the comparand is path-sensitive"
+sens_home "$SENS_HOME"
+SENS_BASE="$REF_FP"
 
 python3 - "$SENS_HOME" <<'PY' || FAIL "could not deform the sensitivity copy"
 import json, os, re, sys
@@ -187,7 +198,7 @@ SENS_CFG=$(fingerprint "$SENS_HOME" | sed -n 's/^FINGERPRINT: //p')
 [ "$SENS_CFG" != "$SENS_BASE" ] || FAIL "the fingerprint did NOT change when a profile was removed from config.toml"
 
 SENS2="$WORK/sens-home-2"
-cp -a "$DET_HOME" "$SENS2" || FAIL "could not copy a home for the payload sensitivity control"
+sens_home "$SENS2"
 PAY=$(find "$SENS2/migrate-quarantine/payloads" -type f | head -1)
 [ -n "$PAY" ] || FAIL "no payload file to deform"
 printf 'DEFORMED\n' >> "$PAY"
@@ -195,7 +206,7 @@ SENS_PAY=$(fingerprint "$SENS2" | sed -n 's/^FINGERPRINT: //p')
 [ "$SENS_PAY" != "$SENS_BASE" ] || FAIL "the fingerprint did NOT change when a quarantined payload byte changed"
 
 SENS3="$WORK/sens-home-3"
-cp -a "$DET_HOME" "$SENS3" || FAIL "could not copy a home for the index sensitivity control"
+sens_home "$SENS3"
 python3 - "$SENS3" <<'PY' || FAIL "could not deform the index copy"
 import json, os, sys
 p = os.path.join(sys.argv[1], "migrate-quarantine", "index.json")
