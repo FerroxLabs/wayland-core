@@ -194,9 +194,14 @@ def qualified_keyvals(text: str):
     key that does not exist. That is a FALSE POSITIVE, which is strictly worse
     than a miss -- a gate that reds on correct text gets deleted.
     """
-    heads = [(m.start(), m.group(1)) for m in SECTION.finditer(text)]
-    # comment lines in a pasted snippet are not instruction
-    masked = "\n".join("" if ln.strip().startswith("#") else ln for ln in text.split("\n"))
+    # Comment lines in a pasted snippet are not instruction. Mask them to
+    # SPACES, not to empty: deleting them shifts every later offset, which
+    # silently mis-binds section headers to keys further down the snippet.
+    # Measured: it re-pointed five `[tools]`/`[session]` keys at `[default]`.
+    masked = "\n".join(
+        " " * len(ln) if ln.strip().startswith("#") else ln for ln in text.split("\n")
+    )
+    heads = [(m.start(), m.group(1)) for m in SECTION.finditer(masked)]
     for m in KEYVAL.finditer(masked):
         key, value = m.group(1), m.group(2)
         section = None
