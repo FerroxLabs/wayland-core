@@ -292,14 +292,19 @@ Enumerated individually with substitution points in
 | F29-LIMIT-03 | REAL-KEY | `INDEX_PUBKEY_HEX` — the runtime plugin trust root (Phase 25) |
 | F29-LIMIT-04 | REAL-RELEASE | the `gh attestation verify` ACCEPT path against the real Sigstore log |
 | F29-LIMIT-05 | REAL-RELEASE | an end-to-end install of a real signed artifact |
-| F29-LIMIT-06 | REAL-ACCOUNT | the Windows leg — `seandesktop` refusing SSH auth |
+| ~~F29-LIMIT-06~~ | ~~REAL-ACCOUNT~~ | **CLOSED 2026-07-28** — never a real-credential limit. `seandesktop` is reachable as `SeanD`; the Windows leg RAN and is MET. See `evidence/29-03-windows/RESULT.md`. |
 
 **macOS: NOT RUN.** No macOS binary exists for this commit; CI run `30323212984`
 for SHA `3658c428` had not started its jobs, and this lane may not run Cargo on
 the Mac. `evidence/29-03/macos-leg.txt` carries the reason and the exact command
 that completes it. **No Linux result is presented as a macOS result.**
 
-**Windows: NOT ACHIEVED**, blocked on a Sean-reserved credential.
+**Windows: ACHIEVED 2026-07-28** by the windows-requeue lane. The blocker was false — the
+account is `SeanD`, and `ssh -o BatchMode=yes SeanD@seandesktop` succeeds with no credential
+supplied. The leg was run with the SAME construction as Linux (rebuilt at `0.99.0`, real
+`api.github.com`, no update-source redirect, no credential) and matches Linux on every clause:
+`--check-only` REFUSED at rc=0, INSTALL path REFUSED at rc=1, version after the refused install
+still `0.99.0`. Evidence: `evidence/29-03-windows/RESULT.md`.
 
 ---
 
