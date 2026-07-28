@@ -1,0 +1,8 @@
+case: ATK-04
+what: a claim is rested on the CTRL-01 evidence ID that opens nothing
+half: PRISTINE
+class: factual
+scope: STATIC_SOURCE
+text: The F03 receipt is a concrete committed object.
+outcome: ACCEPTED
+rule: NONE

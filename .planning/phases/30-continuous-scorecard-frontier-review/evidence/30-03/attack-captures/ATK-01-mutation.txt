@@ -1,0 +1,10 @@
+case: ATK-01
+what: an evidence pointer is removed
+half: MUTATION
+class: factual
+scope: STATIC_SOURCE
+text: 30-02's trial accounting records fifteen legs, each naming a capture file.
+outcome: REFUSED
+rule: no_evidence_reference
+refusal: claim `P` carries no evidence reference
+missing: any evidence reference at all

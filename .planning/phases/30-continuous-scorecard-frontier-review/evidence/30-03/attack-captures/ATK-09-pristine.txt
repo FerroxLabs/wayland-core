@@ -1,0 +1,8 @@
+case: ATK-09
+what: a comparative sentence is relabelled factual to skip the comparative rules
+half: PRISTINE
+class: comparative
+scope: STATIC_SOURCE
+text: Sandbox/egress: Core architectural lead, operationally unproven
+outcome: ACCEPTED
+rule: NONE

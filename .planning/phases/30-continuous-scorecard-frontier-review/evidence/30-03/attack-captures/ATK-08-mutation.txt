@@ -1,0 +1,10 @@
+case: ATK-08
+what: a direction is asserted on an interval that straddles zero
+half: MUTATION
+class: comparative
+scope: SCRIPTED_HARNESS
+text: wayland-core is ahead of OpenClaw on scripted correctness.
+outcome: REFUSED
+rule: directional_on_interval_containing_zero
+refusal: claim `P` asserts a direction (`ahead`) on delta interval [-0.1135, 0.1135], which frontier_trials::direction_for entails `INCONCLUSIVE` rather than a direction
+missing: separation from zero (interval [-0.1135, 0.1135] contains it)

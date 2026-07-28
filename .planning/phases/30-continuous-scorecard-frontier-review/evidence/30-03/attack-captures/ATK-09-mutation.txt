@@ -1,0 +1,10 @@
+case: ATK-09
+what: a comparative sentence is relabelled factual to skip the comparative rules
+half: MUTATION
+class: factual
+scope: STATIC_SOURCE
+text: Sandbox/egress: Core architectural lead, operationally unproven
+outcome: REFUSED
+rule: misclassification
+refusal: claim `P` is declared `factual` but its text is comparative (`lead`); relabelling does not dodge the classifier
+missing: a class consistent with its own text (`lead`)

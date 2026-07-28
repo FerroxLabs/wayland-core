@@ -18,6 +18,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
+use wcore_eval_scenarios::claims::{ClaimRegisterV1, publish, register_digest};
 use wcore_eval_scenarios::fixtures::openai::{OpenAiFixtureScript, OpenAiStep};
 use wcore_eval_scenarios::frontier_trials::{
     ALL_DIMENSIONS, ALL_TOOLS, ComparativeResultV1, DeltaV1, DimensionV1, LegStatusV1, LegV1,
@@ -61,6 +62,35 @@ enum Command {
     Trials {
         #[command(subcommand)]
         command: TrialsCommand,
+    },
+    /// Phase 30 (F30-04) claims register. ADDITIVE alongside `surfaces`, `verify` and
+    /// `trials`; none of them is reordered or restructured.
+    Claims {
+        #[command(subcommand)]
+        command: ClaimsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ClaimsCommand {
+    /// Check every entry in a claims register, exiting non-zero naming the first refusal.
+    Verify {
+        #[arg(long)]
+        register: PathBuf,
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+    },
+    /// Render the published documents from a VERIFIED register.
+    ///
+    /// Refuses to write anything at all if `verify` would refuse the register, so there is
+    /// no path from an unverified claim to a published sentence.
+    Publish {
+        #[arg(long)]
+        register: PathBuf,
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
     },
 }
 
@@ -154,6 +184,53 @@ fn run(cli: Cli) -> anyhow::Result<String> {
             ))
         }
         Command::Trials { command } => run_trials(command),
+        Command::Claims { command } => run_claims(command),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 30 F30-04 claims — one contiguous additive block.
+// ---------------------------------------------------------------------------
+
+fn run_claims(command: ClaimsCommand) -> anyhow::Result<String> {
+    match command {
+        ClaimsCommand::Verify {
+            register,
+            repo_root,
+        } => {
+            let raw = std::fs::read(&register)?;
+            // Unknown fields are refused HERE, before any rule runs.
+            let reg: ClaimRegisterV1 = serde_json::from_slice(&raw)?;
+            reg.verify(&repo_root)?;
+            let rules = reg.rules_fired(&repo_root);
+            // `allowed` counts ONLY the claims that reach CLAIMS-ALLOWED.md. Limitations
+            // are counted separately: reporting one total would overstate the allowed set
+            // by the size of the limitations list, which is the larger of the two here.
+            Ok(format!(
+                "CLAIMS_VERIFY=OK allowed={} limitations={} attempted_and_refused={} \
+                 rules_fired={} register_sha256={}\n",
+                reg.allowed_count(),
+                reg.limitation_count(),
+                reg.refusals(&repo_root).len(),
+                rules.len(),
+                register_digest(&raw)
+            ))
+        }
+        ClaimsCommand::Publish {
+            register,
+            repo_root,
+            out,
+        } => {
+            let raw = std::fs::read(&register)?;
+            // No secret is read, accepted on argv, or required. The bundle scan runs over
+            // an empty secret set because this phase holds no credential at all.
+            let set = publish(&raw, &repo_root, &out, Vec::new())?;
+            Ok(format!(
+                "CLAIMS_PUBLISH=OK register_sha256={} out={}\n",
+                set.digest,
+                out.display()
+            ))
+        }
     }
 }
 

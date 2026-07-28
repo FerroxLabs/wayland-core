@@ -1,0 +1,8 @@
+case: ATK-12
+what: a limitation's substitution point is removed
+half: PRISTINE
+class: limitation
+scope: SCRIPTED_HARNESS
+text: The security dimension was not measured: the meter records body digests.
+outcome: ACCEPTED
+rule: NONE

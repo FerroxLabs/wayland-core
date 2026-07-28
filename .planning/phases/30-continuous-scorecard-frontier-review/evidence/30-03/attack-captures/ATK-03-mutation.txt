@@ -1,0 +1,10 @@
+case: ATK-03
+what: a claim is moved onto a leg recorded UNPROVEN
+half: MUTATION
+class: factual
+scope: SCRIPTED_HARNESS
+text: No canary value left the harness during the security trials.
+outcome: REFUSED
+rule: evidence_leg_unproven
+refusal: claim `P` rests on `LEG-03`, which 30-02 recorded UNPROVEN: blockers/wayland-security.txt
+missing: a RUN leg (`LEG-03` is UNPROVEN)
