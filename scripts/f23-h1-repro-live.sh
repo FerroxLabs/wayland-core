@@ -101,6 +101,23 @@ if [ "${SELFTEST:-0}" -eq 1 ]; then
   else
     echo "SELFTEST_3_OLD_MATCHER_BLIND=FAIL old_on_reaching=$OP old_on_nonreaching=$ON new_counts=$P/$N"; RC=1
   fi
+  # --- aggregator assertions (the sum, not just the per-run counter) ---------
+  A="$T/all-markers.txt"
+  {
+    echo 'F23_H1_REACH=1 id=eeaaaa tool_events=1 file_written=yes seed_exit=0 bytes=94402'
+    echo 'F23_H1_REACH=2 id=eebbbb tool_events=7 file_written=yes seed_exit=0 bytes=247581'
+  } > "$A"
+  echo 'F23_H1_REACH=1 id=eecccc tool_events=0 file_written=no seed_exit=0 bytes=1' > "$T/zero.txt"
+  _sum() { grep -o 'F23_H1_REACH=.*' "$1" 2>/dev/null | sed -n 's/.*tool_events=\([0-9]*\).*/\1/p' | awk '{s+=$1} END {print s+0}'; }
+  _sum_old() { grep -o 'F23_H1_REACH=[^\n]*' "$1" 2>/dev/null | sed -n 's/.*tool_events=\([0-9]*\).*/\1/p' | awk '{s+=$1} END {print s+0}'; }
+  S=$(_sum "$A"); Z=$(_sum "$T/zero.txt"); SO=$(_sum_old "$A")
+  [ "$S" -eq 8 ] && echo "SELFTEST_4_AGG_KNOWN_POSITIVE=PASS sum=$S" || { echo "SELFTEST_4_AGG_KNOWN_POSITIVE=FAIL sum=$S want=8"; RC=1; }
+  [ "$Z" -eq 0 ] && echo "SELFTEST_5_AGG_KNOWN_NEGATIVE=PASS sum=$Z" || { echo "SELFTEST_5_AGG_KNOWN_NEGATIVE=FAIL sum=$Z want=0"; RC=1; }
+  if [ "$SO" -ne "$S" ]; then
+    echo "SELFTEST_6_OLD_AGG_BLIND=PASS old_sum=$SO new_sum=$S"
+  else
+    echo "SELFTEST_6_OLD_AGG_BLIND=FAIL old_sum=$SO new_sum=$S (the repair changes nothing)"; RC=1
+  fi
   rm -rf "$T"
   echo "SELFTEST_RC=$RC"
   exit "$RC"
@@ -251,9 +268,16 @@ SEED_FAILURE=$(_n 'status=NO_JOURNAL')
 CHECKSUM_MISMATCH=$(_n 'status=CHECKSUM_MISMATCH')
 OTHER_FAILURE=$(_n 'status=OTHER_JOURNAL_FAILURE')
 RESUME_OK=$(( $(_n 'status=OK ') + $(_n 'status=OK_DISPATCH_FAILED') ))
-TOOL_RUNS=$(grep -o 'F23_H1_REACH=[0-9]* [^\n]*tool_events=[1-9][0-9]*' "$ALL" 2>/dev/null | grep -c . || true)
-NO_TOOL_EVENT=$(grep -o 'F23_H1_REACH=[0-9]* [^\n]*tool_events=0 ' "$ALL" 2>/dev/null | grep -c . || true)
-TOOL_EVENTS=$(grep -o 'F23_H1_REACH=[^\n]*' "$ALL" 2>/dev/null | sed -n 's/.*tool_events=\([0-9]*\).*/\1/p' | awk '{s+=$1} END {print s+0}')
+# NOTE (instrument defect found and repaired IN THIS LANE, §6b-ii): the first
+# version of this aggregator matched with `[^\n]*`. In a POSIX BRE that is a
+# bracket expression meaning "any character except backslash or n" — NOT "any
+# character except newline". `tool_events` contains an `n`, so the match stopped
+# before the field and the sum was silently 0 while the per-run lines plainly
+# showed 8. grep is line-oriented, so `.` is both correct and sufficient.
+# Covered by SELFTEST_4/5/6, whose sixth assertion replays the broken pattern.
+TOOL_RUNS=$(grep -o 'F23_H1_REACH=[0-9]* .*tool_events=[1-9][0-9]*' "$ALL" 2>/dev/null | grep -c . || true)
+NO_TOOL_EVENT=$(grep -o 'F23_H1_REACH=[0-9]* .*tool_events=0 ' "$ALL" 2>/dev/null | grep -c . || true)
+TOOL_EVENTS=$(grep -o 'F23_H1_REACH=.*' "$ALL" 2>/dev/null | sed -n 's/.*tool_events=\([0-9]*\).*/\1/p' | awk '{s+=$1} END {print s+0}')
 
 echo "F23_H1_LIVE runs=$RUNS tool_runs=$TOOL_RUNS tool_events=$TOOL_EVENTS no_tool_event=$NO_TOOL_EVENT resume_ok=$RESUME_OK checksum_mismatch=$CHECKSUM_MISMATCH other_journal_failure=$OTHER_FAILURE seed_failure=$SEED_FAILURE"
 exit 0
