@@ -181,24 +181,53 @@ replay_macos_marker() {
         NOTREPRO=$((NOTREPRO + 1))
         return
     fi
-    HS=$(gh run view "$RUN" -R FerroxLabs/wayland-core --json headSha --jq .headSha 2>>"$LOG")
+    # A TRANSPORT failure is not a CLAIM failure, and conflating them makes this
+    # script produce false reds — which is exactly as useless as a false green.
+    # Measured on 2026-07-28: `gh` returned an empty body twice in one run with
+    # `net/http: TLS handshake timeout`, while the same query answered correctly
+    # seconds later. So every GitHub read is retried, and an EMPTY result after
+    # the retries is reported as `not-replayable` naming the transport — never as
+    # `failed`, which would assert the claim is broken, and never as
+    # `reproduced`, which would assert it holds. `not-replayable` still blocks
+    # acceptance, which is the correct treatment of a claim this run could not
+    # check.
+    gh_retry() {
+        _out=""
+        _n=0
+        while [ $_n -lt 3 ]; do
+            _out=$(eval "$1" 2>>"$LOG")
+            if [ -n "$_out" ]; then
+                printf '%s\n' "$_out"
+                return 0
+            fi
+            _n=$((_n + 1))
+            sleep 3
+        done
+        return 1
+    }
+
+    HS=$(gh_retry "gh run view $RUN -R FerroxLabs/wayland-core --json headSha --jq .headSha") || {
+        emit "$KEY" "$EV" github not-replayable "github-unreachable-after-3-attempts-transport-not-claim"
+        NOTREPRO=$((NOTREPRO + 1)); return; }
     echo "headSha=$HS expected=$SHA" >> "$LOG"
     if [ "$HS" != "$SHA" ]; then
         emit "$KEY" "$EV" github failed "run-$RUN-headSha-$HS-not-$SHA"
         FAILED=$((FAILED + 1))
         return
     fi
-    gh run view "$RUN" -R FerroxLabs/wayland-core --json jobs \
-        --jq '.jobs[] | select(.name=="Build (aarch64-apple-darwin)") | .conclusion' \
-        > "$OUT/$KEY-job.txt" 2>>"$LOG"
+    JOB=$(gh_retry "gh run view $RUN -R FerroxLabs/wayland-core --json jobs --jq '.jobs[] | select(.name==\"Build (aarch64-apple-darwin)\") | .conclusion'") || {
+        emit "$KEY" "$EV" github not-replayable "github-unreachable-reading-the-build-job"
+        NOTREPRO=$((NOTREPRO + 1)); return; }
+    printf '%s\n' "$JOB" > "$OUT/$KEY-job.txt"
     if ! /usr/bin/grep -qx 'success' "$OUT/$KEY-job.txt"; then
         emit "$KEY" "$EV" github failed "run-$RUN-has-no-successful-aarch64-apple-darwin-build"
         FAILED=$((FAILED + 1))
         return
     fi
-    gh api "repos/FerroxLabs/wayland-core/actions/runs/$RUN/artifacts" \
-        --jq '.artifacts[] | select(.expired==false and .size_in_bytes>0) | .name' \
-        > "$OUT/$KEY-art.txt" 2>>"$LOG"
+    ART=$(gh_retry "gh api repos/FerroxLabs/wayland-core/actions/runs/$RUN/artifacts --jq '.artifacts[] | select(.expired==false and .size_in_bytes>0) | .name'") || {
+        emit "$KEY" "$EV" github not-replayable "github-unreachable-reading-the-artifact-listing"
+        NOTREPRO=$((NOTREPRO + 1)); return; }
+    printf '%s\n' "$ART" > "$OUT/$KEY-art.txt"
     if ! /usr/bin/grep -qx 'wayland-core-aarch64-apple-darwin' "$OUT/$KEY-art.txt"; then
         emit "$KEY" "$EV" github failed "run-$RUN-publishes-no-live-non-empty-macos-arm64-artifact"
         FAILED=$((FAILED + 1))

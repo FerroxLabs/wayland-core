@@ -321,6 +321,24 @@ Recorded because each would have shipped as a pass:
    item.
 6. **The Windows digest walk died on `skills\aux`.** Fixed to record an unstatable
    entry, because a crash there leaves the whole cross-platform claim unmeasured.
+7. **The replay's Windows driver ran `powershell -File <script>` with no
+   existence check** — the shape F26-03-C measured as returning **0** for a
+   script that is not there, which the plan-gate linter flags as the
+   highest-leverage self-passing bug in this program. A missing `.ps1` would
+   have reported `result=reproduced`. Guarded with `Test-Path`, and the guard
+   PROVEN in both directions on the real box: absent → non-zero, present → 0.
+8. **The replay reported a FALSE RED, and the fix is the more interesting half.**
+   A re-run reported `F26-SC1` and `F26-01` as `failed` with an EMPTY `headSha`.
+   Measured rather than concluded: `gh` was hitting
+   `net/http: TLS handshake timeout`, and the identical query answered correctly
+   seconds later. A replay that scores a network blip as a failed CLAIM produces
+   false reds, which is exactly as useless as a false green — and worse here,
+   because it would have forced a spurious `send-back-rounded-up`. Every GitHub
+   read now retries three times, and an empty result after the retries is
+   `not-replayable` NAMING the transport — never `failed` (which would assert
+   the claim is broken) and never `reproduced` (which would assert it holds).
+   `not-replayable` still blocks acceptance, which is the correct treatment of a
+   claim a given run could not check.
 
 ## Not achieved — stated plainly
 

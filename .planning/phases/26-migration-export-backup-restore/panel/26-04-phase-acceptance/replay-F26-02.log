@@ -1,39 +1,39 @@
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.44s
 warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
 note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
 ────────────
- Nextest run ID f9b91e35-c44e-4143-8e45-10f7b0458c1a with nextest profile: default
+ Nextest run ID f3f48e75-3490-42ca-9331-63d63b0d31bf with nextest profile: default
     Starting 30 tests across 1 binary (50 binaries skipped)
-        PASS [   0.006s] ( 1/30) wcore-cli::migrate_quarantine support::proving_ground::record::tests::redact_multiple_keys_in_one_string
-        PASS [   0.007s] ( 2/30) wcore-cli::migrate_quarantine t10_digest_is_domain_separated_and_platform_stable
-        PASS [   0.007s] ( 3/30) wcore-cli::migrate_quarantine support::proving_ground::record::tests::redact_leaves_normal_text_alone
-        PASS [   0.007s] ( 4/30) wcore-cli::migrate_quarantine support::mock_llm::self_tests::truncated_stream_is_detected
-        PASS [   0.007s] ( 5/30) wcore-cli::migrate_quarantine support::mock_llm::self_tests::text_fixture_is_parser_conformant
+        PASS [   0.006s] ( 1/30) wcore-cli::migrate_quarantine support::proving_ground::record::tests::redact_leaves_normal_text_alone
+        PASS [   0.006s] ( 2/30) wcore-cli::migrate_quarantine support::proving_ground::record::tests::redact_openai_key
+        PASS [   0.006s] ( 3/30) wcore-cli::migrate_quarantine support::mock_llm::self_tests::every_builder_body_is_parser_conformant
+        PASS [   0.007s] ( 4/30) wcore-cli::migrate_quarantine support::proving_ground::record::tests::redact_xai_key
+        PASS [   0.006s] ( 5/30) wcore-cli::migrate_quarantine t17_quarantine_ceilings_match_workspace_trust_exactly
         PASS [   0.007s] ( 6/30) wcore-cli::migrate_quarantine support::mock_llm::self_tests::tool_use_fixture_is_parser_conformant
-        PASS [   0.007s] ( 7/30) wcore-cli::migrate_quarantine support::mock_llm::self_tests::every_builder_body_is_parser_conformant
-        PASS [   0.010s] ( 8/30) wcore-cli::migrate_quarantine support::proving_ground::record::tests::redact_xai_key
-        PASS [   0.021s] ( 9/30) wcore-cli::migrate_quarantine t12_excluding_a_subset_imports_everything_else
-        PASS [   0.023s] (10/30) wcore-cli::migrate_quarantine support::proving_ground::record::tests::redact_openai_key
-        PASS [   0.023s] (11/30) wcore-cli::migrate_quarantine t14_a_non_exclusion_failure_is_named_and_still_balances
-        PASS [   0.007s] (12/30) wcore-cli::migrate_quarantine t4_hook_command_is_classified_executable
-        PASS [   0.007s] (13/30) wcore-cli::migrate_quarantine t17_quarantine_ceilings_match_workspace_trust_exactly
-        PASS [   0.007s] (14/30) wcore-cli::migrate_quarantine t21_provenance_document_is_deterministic_and_key_ordered
-        PASS [   0.024s] (15/30) wcore-cli::migrate_quarantine t11_selecting_a_subset_imports_exactly_that_subset_by_published_identity
-        PASS [   0.025s] (16/30) wcore-cli::migrate_quarantine t15_export_carries_provenance_and_still_excludes_secrets_by_default
-        PASS [   0.009s] (17/30) wcore-cli::migrate_quarantine t22_promoting_a_set_that_reuses_one_name_costs_one_invocation
-        PASS [   0.012s] (18/30) wcore-cli::migrate_quarantine t1_skill_with_a_shell_directive_is_executable_via_the_enforced_detector
-        PASS [   0.031s] (19/30) wcore-cli::migrate_quarantine t16_export_import_round_trip_preserves_provenance_and_does_not_launder_quarantine
-        PASS [   0.018s] (20/30) wcore-cli::migrate_quarantine t2_skill_without_a_directive_is_data_and_needs_no_promotion
-        PASS [   0.018s] (21/30) wcore-cli::migrate_quarantine t9_every_contained_item_carries_a_full_provenance_record
-        PASS [   0.018s] (22/30) wcore-cli::migrate_quarantine t8_quarantining_is_reported_in_both_the_plan_and_the_apply_report
-        PASS [   0.018s] (23/30) wcore-cli::migrate_quarantine t3_peer_mcp_launch_command_is_executable_and_never_lands_live
-        PASS [   0.019s] (24/30) wcore-cli::migrate_quarantine t6_nothing_the_imported_content_carries_can_promote_it
-        PASS [   0.019s] (25/30) wcore-cli::migrate_quarantine t5_quarantined_content_is_absent_from_what_the_agent_would_load
-        PASS [   0.052s] (26/30) wcore-cli::migrate_quarantine t13_conservation_holds_over_both_full_committed_corpora
-        PASS [   0.040s] (27/30) wcore-cli::migrate_quarantine t18_the_512_file_ceiling_refuses_a_realistic_540_directory_surface
-        PASS [   0.095s] (28/30) wcore-cli::migrate_quarantine t7_ceilings_refuse_symlink_oversized_file_and_oversized_surface
-        PASS [   2.430s] (29/30) wcore-cli::migrate_quarantine t20_live_positive_control_same_payload_executes_once_promoted
+        PASS [   0.008s] ( 7/30) wcore-cli::migrate_quarantine t10_digest_is_domain_separated_and_platform_stable
+        PASS [   0.010s] ( 8/30) wcore-cli::migrate_quarantine support::mock_llm::self_tests::truncated_stream_is_detected
+        PASS [   0.011s] ( 9/30) wcore-cli::migrate_quarantine support::proving_ground::record::tests::redact_multiple_keys_in_one_string
+        PASS [   0.011s] (10/30) wcore-cli::migrate_quarantine support::mock_llm::self_tests::text_fixture_is_parser_conformant
+        PASS [   0.023s] (11/30) wcore-cli::migrate_quarantine t11_selecting_a_subset_imports_exactly_that_subset_by_published_identity
+        PASS [   0.030s] (12/30) wcore-cli::migrate_quarantine t21_provenance_document_is_deterministic_and_key_ordered
+        PASS [   0.031s] (13/30) wcore-cli::migrate_quarantine t4_hook_command_is_classified_executable
+        PASS [   0.008s] (14/30) wcore-cli::migrate_quarantine t15_export_carries_provenance_and_still_excludes_secrets_by_default
+        PASS [   0.032s] (15/30) wcore-cli::migrate_quarantine t22_promoting_a_set_that_reuses_one_name_costs_one_invocation
+        PASS [   0.032s] (16/30) wcore-cli::migrate_quarantine t14_a_non_exclusion_failure_is_named_and_still_balances
+        PASS [   0.037s] (17/30) wcore-cli::migrate_quarantine t16_export_import_round_trip_preserves_provenance_and_does_not_launder_quarantine
+        PASS [   0.014s] (18/30) wcore-cli::migrate_quarantine t1_skill_with_a_shell_directive_is_executable_via_the_enforced_detector
+        PASS [   0.042s] (19/30) wcore-cli::migrate_quarantine t3_peer_mcp_launch_command_is_executable_and_never_lands_live
+        PASS [   0.042s] (20/30) wcore-cli::migrate_quarantine t2_skill_without_a_directive_is_data_and_needs_no_promotion
+        PASS [   0.042s] (21/30) wcore-cli::migrate_quarantine t12_excluding_a_subset_imports_everything_else
+        PASS [   0.043s] (22/30) wcore-cli::migrate_quarantine t8_quarantining_is_reported_in_both_the_plan_and_the_apply_report
+        PASS [   0.020s] (23/30) wcore-cli::migrate_quarantine t6_nothing_the_imported_content_carries_can_promote_it
+        PASS [   0.043s] (24/30) wcore-cli::migrate_quarantine t5_quarantined_content_is_absent_from_what_the_agent_would_load
+        PASS [   0.043s] (25/30) wcore-cli::migrate_quarantine t9_every_contained_item_carries_a_full_provenance_record
+        PASS [   0.056s] (26/30) wcore-cli::migrate_quarantine t13_conservation_holds_over_both_full_committed_corpora
+        PASS [   0.066s] (27/30) wcore-cli::migrate_quarantine t18_the_512_file_ceiling_refuses_a_realistic_540_directory_surface
+        PASS [   0.100s] (28/30) wcore-cli::migrate_quarantine t7_ceilings_refuse_symlink_oversized_file_and_oversized_surface
+        PASS [   2.357s] (29/30) wcore-cli::migrate_quarantine t20_live_positive_control_same_payload_executes_once_promoted
         SLOW [> 30.000s] (─────) wcore-cli::migrate_quarantine t19_live_negative_leg_quarantined_payload_does_not_execute
-        PASS [  45.304s] (30/30) wcore-cli::migrate_quarantine t19_live_negative_leg_quarantined_payload_does_not_execute
+        PASS [  45.259s] (30/30) wcore-cli::migrate_quarantine t19_live_negative_leg_quarantined_payload_does_not_execute
 ────────────
-     Summary [  45.321s] 30 tests run: 30 passed (1 slow), 0 skipped
+     Summary [  45.283s] 30 tests run: 30 passed (1 slow), 0 skipped

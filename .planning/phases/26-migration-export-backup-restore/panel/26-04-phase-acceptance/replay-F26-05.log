@@ -1,31 +1,31 @@
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.56s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.44s
 warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
 note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
 ────────────
- Nextest run ID 780dd6a1-3902-475d-bde9-1d76c5778278 with nextest profile: default
+ Nextest run ID 38aa1ec6-6aff-4415-bc87-7a0106b4d362 with nextest profile: default
     Starting 23 tests across 51 binaries (2288 tests skipped)
-        PASS [   0.038s] ( 1/23) wcore-cli::portability_hostile_corpus hostile_every_case_declares_a_legitimate_outcome_and_what_it_attacks
-        PASS [   0.068s] ( 2/23) wcore-cli::portability_hostile_corpus hostile_generator_can_go_red
-        PASS [   0.076s] ( 3/23) wcore-cli::portability_hostile_corpus hostile_name_distinctions_survive_on_this_platform_or_the_generator_says_so
-        PASS [   0.144s] ( 4/23) wcore-cli::portability_hostile_corpus hostile_normalform_collision_keeps_both_peer_items_accounted
-        PASS [   0.144s] ( 5/23) wcore-cli::portability_hostile_corpus hostile_executable_claiming_to_be_data_is_still_contained
-        PASS [   0.145s] ( 6/23) wcore-cli::portability_hostile_corpus hostile_data_that_merely_looks_executable_is_not_contained
-        PASS [   0.145s] ( 7/23) wcore-cli::portability_hostile_corpus hostile_casefold_collision_keeps_both_peer_items_accounted
-        PASS [   0.210s] ( 8/23) wcore-cli::portability_hostile_corpus hostile_secret_in_a_persona_body_never_reaches_a_plan_or_report
-        PASS [   0.211s] ( 9/23) wcore-cli::portability_hostile_corpus hostile_exact_name_collision_is_reported_and_never_silently_overwrites
-        PASS [   0.213s] (10/23) wcore-cli::portability_hostile_corpus hostile_wrong_typed_configuration_is_named_not_panicked
-        PASS [   0.213s] (11/23) wcore-cli::portability_hostile_corpus hostile_secret_in_a_memory_note_never_reaches_a_plan_or_report
-        PASS [   0.213s] (12/23) wcore-cli::portability_hostile_corpus hostile_truncated_configuration_is_named_not_panicked
-        PASS [   0.215s] (13/23) wcore-cli::portability_hostile_corpus hostile_env_credential_reports_its_name_and_never_its_value
-        PASS [   0.219s] (14/23) wcore-cli::portability_hostile_corpus hostile_deeply_nested_configuration_is_named_not_panicked
-        PASS [   0.293s] (15/23) wcore-cli::portability_hostile_corpus hostile_secret_in_a_skill_body_is_contained_and_never_reported
-        PASS [   0.294s] (16/23) wcore-cli::portability_hostile_corpus hostile_directory_symlink_escape_is_refused_and_nothing_outside_changed
-        PASS [   0.299s] (17/23) wcore-cli::portability_hostile_corpus hostile_traversal_symlink_escape_is_refused_and_nothing_outside_changed
-        PASS [   0.300s] (18/23) wcore-cli::portability_hostile_corpus hostile_absolute_symlink_escape_is_refused_and_nothing_outside_changed
-        PASS [   0.303s] (19/23) wcore-cli::portability_hostile_corpus hostile_refused_restore_leaves_an_occupied_target_byte_identical
-        PASS [   0.361s] (20/23) wcore-cli::portability_hostile_corpus hostile_manifest_payload_mismatch_is_refused_by_verification
-        PASS [   0.392s] (21/23) wcore-cli::portability_hostile_corpus hostile_oversized_member_hits_the_declared_refusal
-        PASS [   2.933s] (22/23) wcore-cli::portability_hostile_corpus hostile_excessive_item_count_hits_the_declared_refusal
-        PASS [   4.400s] (23/23) wcore-cli::portability_hostile_corpus hostile_conservation_invariant_balances_across_every_corpus
+        PASS [   0.037s] ( 1/23) wcore-cli::portability_hostile_corpus hostile_every_case_declares_a_legitimate_outcome_and_what_it_attacks
+        PASS [   0.067s] ( 2/23) wcore-cli::portability_hostile_corpus hostile_name_distinctions_survive_on_this_platform_or_the_generator_says_so
+        PASS [   0.068s] ( 3/23) wcore-cli::portability_hostile_corpus hostile_generator_can_go_red
+        PASS [   0.152s] ( 4/23) wcore-cli::portability_hostile_corpus hostile_data_that_merely_looks_executable_is_not_contained
+        PASS [   0.153s] ( 5/23) wcore-cli::portability_hostile_corpus hostile_casefold_collision_keeps_both_peer_items_accounted
+        PASS [   0.154s] ( 6/23) wcore-cli::portability_hostile_corpus hostile_executable_claiming_to_be_data_is_still_contained
+        PASS [   0.154s] ( 7/23) wcore-cli::portability_hostile_corpus hostile_normalform_collision_keeps_both_peer_items_accounted
+        PASS [   0.220s] ( 8/23) wcore-cli::portability_hostile_corpus hostile_wrong_typed_configuration_is_named_not_panicked
+        PASS [   0.222s] ( 9/23) wcore-cli::portability_hostile_corpus hostile_truncated_configuration_is_named_not_panicked
+        PASS [   0.222s] (10/23) wcore-cli::portability_hostile_corpus hostile_secret_in_a_persona_body_never_reaches_a_plan_or_report
+        PASS [   0.222s] (11/23) wcore-cli::portability_hostile_corpus hostile_exact_name_collision_is_reported_and_never_silently_overwrites
+        PASS [   0.222s] (12/23) wcore-cli::portability_hostile_corpus hostile_env_credential_reports_its_name_and_never_its_value
+        PASS [   0.222s] (13/23) wcore-cli::portability_hostile_corpus hostile_secret_in_a_memory_note_never_reaches_a_plan_or_report
+        PASS [   0.229s] (14/23) wcore-cli::portability_hostile_corpus hostile_deeply_nested_configuration_is_named_not_panicked
+        PASS [   0.303s] (15/23) wcore-cli::portability_hostile_corpus hostile_secret_in_a_skill_body_is_contained_and_never_reported
+        PASS [   0.303s] (16/23) wcore-cli::portability_hostile_corpus hostile_absolute_symlink_escape_is_refused_and_nothing_outside_changed
+        PASS [   0.303s] (17/23) wcore-cli::portability_hostile_corpus hostile_traversal_symlink_escape_is_refused_and_nothing_outside_changed
+        PASS [   0.304s] (18/23) wcore-cli::portability_hostile_corpus hostile_directory_symlink_escape_is_refused_and_nothing_outside_changed
+        PASS [   0.306s] (19/23) wcore-cli::portability_hostile_corpus hostile_refused_restore_leaves_an_occupied_target_byte_identical
+        PASS [   0.378s] (20/23) wcore-cli::portability_hostile_corpus hostile_manifest_payload_mismatch_is_refused_by_verification
+        PASS [   0.386s] (21/23) wcore-cli::portability_hostile_corpus hostile_oversized_member_hits_the_declared_refusal
+        PASS [   2.939s] (22/23) wcore-cli::portability_hostile_corpus hostile_excessive_item_count_hits_the_declared_refusal
+        PASS [   4.428s] (23/23) wcore-cli::portability_hostile_corpus hostile_conservation_invariant_balances_across_every_corpus
 ────────────
-     Summary [   4.406s] 23 tests run: 23 passed, 2288 skipped
+     Summary [   4.435s] 23 tests run: 23 passed, 2288 skipped
