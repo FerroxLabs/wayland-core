@@ -930,10 +930,12 @@ fn t17_quarantine_ceilings_match_workspace_trust_exactly() {
 #[test]
 fn t18_the_512_file_ceiling_refuses_a_realistic_540_directory_surface() {
     const REAL_INSTALL_SKILL_DIRS: usize = 540;
-    assert!(
-        REAL_INSTALL_SKILL_DIRS > MAX_QUARANTINE_FILES,
-        "if this ever passes, the ceiling was raised to admit the import"
-    );
+    // A COMPILE-TIME assertion: 540 must exceed the ceiling. If a future edit
+    // raises MAX_QUARANTINE_FILES to admit a realistic import — which this plan
+    // expressly forbids, because it would widen the executable-surface bound
+    // for every workspace-trust consumer — this stops the build rather than
+    // going quietly green.
+    const { assert!(REAL_INSTALL_SKILL_DIRS > MAX_QUARANTINE_FILES) };
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("surface");
     std::fs::create_dir_all(&src).unwrap();
