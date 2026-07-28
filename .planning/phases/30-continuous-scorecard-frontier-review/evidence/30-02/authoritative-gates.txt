@@ -1,0 +1,19 @@
+# 30-02 authoritative gates on hetzner-dsm at lane commit abf652af
+
+## trials verify against the COMMITTED protocol and COMMITTED results
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/md2        1.8T  924G  742G  56% /
+    Finished `release` profile [optimized] target(s) in 0.26s
+TRIALS_VERIFY=OK legs=15 run=6 unproven=9 comparatives=3 scope=SCRIPTED_HARNESS protocol_sha256=d18407e0b96bf753f66adc1eab7d21cbaeca1b9e627cecf0159095938b83ef25
+
+## cargo nextest run -p wcore-eval-scenarios --no-fail-fast
+     Summary [   3.546s] 470 tests run: 470 passed, 5 skipped
+
+## clippy attribution: 4 errors, all in Phase 24 journey.rs, none in this lane
+--- error file attribution:
+      1    --> crates/wcore-eval-scenarios/src/journey.rs:683:13
+      1    --> crates/wcore-eval-scenarios/src/journey.rs:695:13
+      1    --> crates/wcore-eval-scenarios/src/journey.rs:707:34
+      1    --> crates/wcore-eval-scenarios/src/journey.rs:717:13
+--- CONTRACT SUITE:
+   Compiling wcore-eval-scenarios v0.12.25 (/root/wayland-30-02/crates/wcore-eval-scenarios)
