@@ -695,13 +695,47 @@ mod production_landing {
         }
     }
 
-    /// Emit the skip so it is impossible to miss in a 12,775-test log, and count
-    /// it in a machine-readable form a CI step can aggregate.
+    /// The workspace `target/` directory, resolved so the skip record lands
+    /// somewhere a CI step can actually find it.
     ///
-    /// A silent skip is the same defect as a self-passing gate wearing a
-    /// different hat, so this prints a single greppable token on BOTH streams
-    /// and appends one line per occurrence to `$CARGO_TARGET_DIR/sandbox-skips`
-    /// (best-effort — a failure to record must not itself fail the run).
+    /// A relative `"target"` is WRONG here: the test's working directory is the
+    /// crate root (`crates/wcore-agent`), not the workspace root, so the first
+    /// version of this helper wrote to a `crates/wcore-agent/target/` that does
+    /// not exist — the open failed, the failure was swallowed by `if let Ok`,
+    /// and the "counted" skip counted nothing. Measured 2026-07-29: CASE A
+    /// produced `5 tests run, 5 passed` with no record written anywhere.
+    fn target_dir() -> std::path::PathBuf {
+        if let Ok(d) = std::env::var("CARGO_TARGET_DIR") {
+            return std::path::PathBuf::from(d);
+        }
+        // CARGO_TARGET_TMPDIR is an absolute path INSIDE the real target dir,
+        // so the nearest ancestor named `target` is the target dir itself.
+        let mut p: &std::path::Path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+        loop {
+            if p.file_name().is_some_and(|n| n == "target") {
+                return p.to_path_buf();
+            }
+            match p.parent() {
+                Some(parent) => p = parent,
+                None => return std::path::PathBuf::from("target"),
+            }
+        }
+    }
+
+    /// Emit the skip so it cannot pass unnoticed, and COUNT it somewhere a CI
+    /// step can aggregate.
+    ///
+    /// Two things this has to survive, both measured rather than assumed:
+    ///
+    /// 1. **nextest captures the output of a PASSING test.** A skip that only
+    ///    prints is therefore invisible in the very run that matters, so the
+    ///    file — not the print — is the load-bearing channel. The prints remain
+    ///    for `--no-capture` and for plain `cargo test`.
+    /// 2. **A recording failure must not be swallowed.** If the count cannot be
+    ///    written, nothing downstream can tell a compensated skip from an
+    ///    uncompensated one, and "counted" becomes a claim rather than a fact.
+    ///    So this panics rather than silently degrading — which is also the only
+    ///    way the failure becomes visible, since a panic un-captures the output.
     fn record_loud_skip(test: &str, reason: &str) {
         let line = format!("WCORE_SANDBOX_SKIP test={test} reason={reason}");
         println!("!!!! {line}");
@@ -711,16 +745,21 @@ mod production_landing {
              enforcing sandbox. It did NOT run. Set {REQUIRE_ENFORCING_SANDBOX}=1 to make \
              this a hard failure."
         );
-        let dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".to_string());
-        let path = std::path::Path::new(&dir).join("sandbox-skips.txt");
-        if let Ok(mut f) = std::fs::OpenOptions::new()
+
+        let dir = target_dir();
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|e| panic!("cannot create {} to record the skip: {e}", dir.display()));
+        let path = dir.join("sandbox-skips.txt");
+        let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
-        {
-            use std::io::Write as _;
-            let _ = writeln!(f, "{line}");
-        }
+            .unwrap_or_else(|e| {
+                panic!("cannot record the sandbox skip at {}: {e}", path.display())
+            });
+        use std::io::Write as _;
+        writeln!(f, "{line}")
+            .unwrap_or_else(|e| panic!("cannot write the sandbox skip to {}: {e}", path.display()));
     }
 
     /// The production forge lands the selected winner into a Wayland-owned clone
@@ -745,7 +784,10 @@ mod production_landing {
                      skipping it here would make the gate unfalsifiable."
                 );
             }
-            record_loud_skip("drive_climb_full_lands_the_winner_surface_for_accept", &reason);
+            record_loud_skip(
+                "drive_climb_full_lands_the_winner_surface_for_accept",
+                &reason,
+            );
             return;
         }
         // The landing future (climb → 06C hard-containment gate re-run → parent

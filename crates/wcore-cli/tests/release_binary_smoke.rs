@@ -214,6 +214,19 @@ fn apply_backend_env(cmd: &mut Command, backends: Backends) {
     }
 }
 
+/// Read a capability flag the way a host reads it. These fields are
+/// `#[serde(skip_serializing_if = "is_false")]`, so a withdrawn capability is
+/// omitted from the wire rather than sent as `false`; absent and `false` are
+/// the same claim.
+fn advertises(caps: &serde_json::Value, key: &str) -> bool {
+    match &caps[key] {
+        serde_json::Value::Null => false,
+        v => v
+            .as_bool()
+            .unwrap_or_else(|| panic!("capabilities.{key} was not a bool: {v}")),
+    }
+}
+
 /// Drive `--json-stream` against the release binary, capture the first
 /// stdout line (the Ready event), and assert the plugin-capability flags
 /// the v0.2.0 release-time dead-code-strip regression hid.
@@ -307,24 +320,24 @@ fn release_binary_ready_event_advertises_plugin_capabilities() {
     );
 
     // wayland-browser plugin inventory items survived release LTO.
-    assert_eq!(
-        caps["browser_suite"], true,
-        "release binary: WAYLAND_CAMOUFOX_BIN resolves so liveness cannot narrow; a false \
+    assert!(
+        advertises(caps, "browser_suite"),
+        "release binary: WAYLAND_CAMOUFOX_BIN resolves so liveness cannot narrow; withdrawn \
          means wayland-browser was stripped by release LTO; caps: {caps}"
     );
 
     // wayland-cua plugin presence flips this — independent of the
     // separate `HostCuaRegistrar.computer_use_advertised` runtime gate
     // (which defaults false and controls per-tool registration).
-    assert_eq!(
-        caps["computer_use"], true,
-        "release binary: a display server is nominated so liveness cannot narrow; a false \
+    assert!(
+        advertises(caps, "computer_use"),
+        "release binary: a display server is nominated so liveness cannot narrow; withdrawn \
          means wayland-cua was stripped by release LTO; caps: {caps}"
     );
 
     // Umbrella plugins flag — any discovered plugin trips it.
-    assert_eq!(
-        caps["plugins"], true,
+    assert!(
+        advertises(caps, "plugins"),
         "release binary: expected capabilities.plugins=true (no plugins discovered at all); \
          caps: {caps}"
     );
@@ -347,14 +360,14 @@ fn release_binary_withdraws_plugin_capabilities_when_backends_cannot_start() {
     let caps = &event["capabilities"];
 
     // Proves this leg differs from the positive leg ONLY in backend liveness.
-    assert_eq!(
-        caps["plugins"], true,
-        "release binary: plugins=false means the plugin system is inert, so a false \
+    assert!(
+        advertises(caps, "plugins"),
+        "release binary: plugins=false means the plugin system is inert, so a withdrawn \
          browser_suite below would prove nothing; caps: {caps}"
     );
 
-    assert_eq!(
-        caps["browser_suite"], false,
+    assert!(
+        !advertises(caps, "browser_suite"),
         "release binary: no browser backend can start yet browser_suite is still \
          advertised — this is the 27-C2(b) false advertisement, in the profile that \
          ships. (A `chromium`/`browserbase` build probes Indeterminate by design and \
@@ -364,7 +377,8 @@ fn release_binary_withdraws_plugin_capabilities_when_backends_cannot_start() {
     // Indeterminate must NOT narrow, so the honest expectation is platform-dependent.
     let expected_cua = !cfg!(target_os = "linux");
     assert_eq!(
-        caps["computer_use"], expected_cua,
+        advertises(caps, "computer_use"),
+        expected_cua,
         "release binary: computer_use should be {expected_cua} with no display on {}; \
          Linux must narrow, macOS/Windows report Indeterminate and must not; caps: {caps}",
         std::env::consts::OS

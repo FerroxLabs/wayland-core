@@ -110,6 +110,24 @@ fn apply_backend_env(cmd: &mut Command, backends: Backends) {
     }
 }
 
+/// Read a capability flag the way a host actually reads it.
+///
+/// `AdvertisedCapabilities` marks these fields
+/// `#[serde(skip_serializing_if = "is_false")]`, so a withdrawn capability is
+/// **omitted from the wire entirely** rather than sent as `false`. Absent and
+/// `false` are therefore the same claim — "not advertised" — and comparing
+/// against a literal `false` would fail against a correctly withdrawn flag.
+/// Measured: the negative leg's `ready` event carries `plugins: true` with no
+/// `browser_suite` key at all.
+fn advertises(caps: &serde_json::Value, key: &str) -> bool {
+    match &caps[key] {
+        serde_json::Value::Null => false,
+        v => v
+            .as_bool()
+            .unwrap_or_else(|| panic!("capabilities.{key} was not a bool: {v}")),
+    }
+}
+
 /// Spawn the release-or-debug binary with the minimal flags needed to
 /// reach `protocol_sink.emit_ready_with_plugins(...)` and return the
 /// parsed Ready event and first capability activation. Additive policy receipts
@@ -238,26 +256,26 @@ fn ready_event_advertises_plugin_capabilities_when_backends_can_start() {
     );
 
     // The wayland-browser plugin must produce a true `browser_suite` flag.
-    assert_eq!(
-        caps["browser_suite"], true,
+    assert!(
+        advertises(caps, "browser_suite"),
         "WAYLAND_CAMOUFOX_BIN resolves, so the liveness probe reports Ready and cannot \
-         narrow: browser_suite=true is pure linkage here. A false means the wayland-browser \
+         narrow: browser_suite is pure linkage here. Withdrawn means the wayland-browser \
          plugin was not discovered (dropped `use wayland_browser as _;`?); caps: {caps}"
     );
 
     // The wayland-cua plugin must produce a true `computer_use` flag.
-    assert_eq!(
-        caps["computer_use"], true,
+    assert!(
+        advertises(caps, "computer_use"),
         "a display server is nominated, so the CUA probe reports Ready and cannot narrow: \
-         computer_use=true is pure linkage here. A false means the wayland-cua plugin was \
+         computer_use is pure linkage here. Withdrawn means the wayland-cua plugin was \
          not discovered (dropped `use wayland_cua as _;`?); caps: {caps}"
     );
 
     // The umbrella `plugins` flag must be true once any plugin loaded. This one
     // is never narrowed, so it is an independent link anchor: if it is false the
     // whole inventory mechanism is inert, whatever the two flags above say.
-    assert_eq!(
-        caps["plugins"], true,
+    assert!(
+        advertises(caps, "plugins"),
         "expected capabilities.plugins=true (no plugins loaded at all); caps: {caps}"
     );
 }
@@ -281,15 +299,15 @@ fn ready_event_withdraws_plugin_capabilities_when_backends_cannot_start() {
     // so a `false` below is liveness narrowing and nothing else. Without this
     // the negative leg could pass for the wrong reason (plugins missing
     // entirely), which would make the differential meaningless.
-    assert_eq!(
-        caps["plugins"], true,
+    assert!(
+        advertises(caps, "plugins"),
         "the negative leg must differ from the positive leg ONLY in backend liveness; \
          plugins=false means the plugin system itself is inert and this leg proves \
          nothing; caps: {caps}"
     );
 
-    assert_eq!(
-        caps["browser_suite"], false,
+    assert!(
+        !advertises(caps, "browser_suite"),
         "no browser backend can start (WAYLAND_CAMOUFOX_BIN does not resolve, no sidecar \
          on the healthcheck URL) yet browser_suite is still advertised — this is 27-C2(b), \
          the host is being shown a capability that cannot work. (If this build enables the \
@@ -302,10 +320,11 @@ fn ready_event_withdraws_plugin_capabilities_when_backends_cannot_start() {
     // anything. macOS and Windows return Indeterminate, and Indeterminate
     // deliberately KEEPS the capability — under-advertising a working feature is
     // the same defect as over-advertising a broken one. So the honest expectation
-    // is platform-dependent, and asserting `false` everywhere would be wrong.
+    // is platform-dependent, and asserting "withdrawn" everywhere would be wrong.
     let expected_cua = !cfg!(target_os = "linux");
     assert_eq!(
-        caps["computer_use"], expected_cua,
+        advertises(caps, "computer_use"),
+        expected_cua,
         "computer_use should be {expected_cua} with no DISPLAY/WAYLAND_DISPLAY on \
          {}: Linux can prove the X11 backend cannot connect and must narrow, while \
          macOS/Windows report Indeterminate and must NOT narrow; caps: {caps}",

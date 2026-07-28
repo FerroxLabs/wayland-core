@@ -140,3 +140,18 @@ the containerized leg fail-fasted.
 
 `WAYLAND_ALLOW_NO_SANDBOX=1` was never used anywhere. It is forbidden and would make the
 test prove nothing.
+
+## Minute 70-150 — verification complete
+
+- Falsification proof: re-broke `narrowed_to_live` to linkage-only on the build host,
+  rebuilt the release binary, re-ran. The two `withdraws` tests FAIL; the two
+  `advertises` tests (the old shape) PASS. Restored, `diff -q` IDENTICAL.
+- Wire-shape correction: flags are `skip_serializing_if = "is_false"`, so withdrawn ==
+  ABSENT, not `false`. First implementation failed with `left: Null`. Found by running.
+- clippy `-p wcore-cli -p wcore-agent --all-targets -- -D warnings` rc=0.
+- wcore-cli FULL: 2317 run, my 6 tests all PASS. Two anomalies, neither mine:
+  one known MEDIUM load-flake (passes isolated), one caused by MY rsync excluding
+  `.git` (13/13 pass with WAYLAND_BUILD_SOURCE_SHA set).
+- Sandbox gate three-case proof: A skip+recorded / B hard-fail rc=100 / C real-sandbox
+  pass. Timing 0.866s (ran) vs 0.275s (skipped) corroborates.
+- Fence: `git diff $BASE -- wcore-cli/src/lib.rs wcore-cli/src/main.rs` is EMPTY.
