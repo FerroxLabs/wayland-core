@@ -1,0 +1,42 @@
+﻿F28E5 WEDGE DIFFERENTIAL started=2026-07-29T03:45:38.1875838+07:00
+WHOAMI=seand
+PRE_EXE=C:\f28e5\pre-repair-wayland-core.exe SHA256=baf9bd692833eb7b9d54f00053739115b6ad5257fbdb0b0e99a8694a2ee996a6
+POST_EXE=C:\f28e5\candidate-wayland-core.exe SHA256=4c48d6656f1d640fe1dbff7f2cceaaa260bca3b12ce51b930d7b9541d6d41f9d
+BOTH_BINARIES_DIGEST_BOUND
+AS_FOUND_LEASES=0
+WEDGE_INSTALLED=True
+WEDGE_SHA256=B2AE390AA486DDE8950594F36F9ADB2DD3BC39F53F1C6A56A28640580C05F89C
+LEASES tag=after-plant active=1 quarantined=0
+act-A-pre> {
+act-A-pre>  "observed": false,
+act-A-pre>  "reason": "no worker could be spawned through the product's own sandbox path, so no containment differential is obtainable: {; nor through `sandbox exec`: Error: No API key found. Provide via --api-key, config file, or environment variable (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY).",
+act-A-pre>  "raw": "{\n  \"workers\": [\n    {\n      \"branch\": \"swarm/cli/aa20e7af8dca4109be176c8aacb5d019-0\",\n      \"duration\": \"1s 527ms 945us 400ns\",\n      \"status\": {\n        \"Failed\": \"sandbox backend fail_closed cannot enforce delegated read denial\"\n      },\n      \"stderr\": \"\",\n      \"stdout\": \"\",\n      \"worker_id\": \"aa20e7af8dca4109be176c8aacb5d019-0\"\n    }\n  ]\n}\n\u001b[2m2026-07-28T20:45:41.909695Z\u001b[0m \u001b[31mERROR\u001b[0m AppContainer real-spawn probe failed; sandbox disabled. If the failure is transient (AV, disk contention), the probe re-runs after the negative-cache TTL. \u001b[3merror\u001b[0m\u001b[2m=\u001b[0msandbox child execution failed: AppContainer ACL lease \\\\?\\C:\\Users\\seand\\AppData\\Local\\Wayland\\Core\\AppContainerLeases\\v1\\WCore-storage-00002d20-00000000000000f2.toml was written by wcore-sandbox's OWN TEST SUITE (it carries the test SID sentinel) and can NEVER reconcile against a real AppContainer profile. This is not a platform limitation, not an SSH or session-0 effect, and not transient: the sandbox stays disabled on this machine until this file is DELETED. Delete it and re-run. Tests must never write here; lease_directory() resolves to a temp root under cfg(test) so this cannot recur.\n\nError: No API key found."
+act-A-pre> }
+ACT_RC_A-pre=0
+ACT_OBSERVED_A-pre=False
+mat-A-pre> F28_FINAL_WINDOWS cells=219 commit=32e2f57d09fe4b287e513081862217dc9daa5901 tree=63ec0e6c36ff8e63789aab2f9760870304b671df nonce=c8a7d356adc3c81d48805b4b6d081c08
+mat-A-pre> cells=219 red=26
+RUN_RC_A-pre=0
+ver-A-pre> VERIFIED platform=windows cells=219
+VERIFY_RC_A-pre=0
+MATRIX_A-pre CELLS=219 PASS=193 RED=26 SANDBOX_CELLS=26 SANDBOX_PASS=0 SANDBOX_RED=26
+LEASES tag=after-A active=1 quarantined=0
+WEDGE_SURVIVED_PRE=True
+act-B-post> {
+act-B-post>  "observed": true,
+act-B-post>  "probe": "containment-differential",
+act-B-post>  "detail": "the child was refused \\BaseNamedObjects with 0xC0000022, which AppContainer confines by construction [inside reading via swarm]"
+act-B-post> }
+ACT_RC_B-post=0
+ACT_OBSERVED_B-post=True
+mat-B-post> F28_FINAL_WINDOWS cells=219 commit=6db9e56b8b6c68a2b7939a0728beb06a92ceed0b tree=1533c6a42b26522ee553e90954dd159bbaed2c3b nonce=50e0808f020eca09dfe9c6f2058d7f04
+mat-B-post> cells=219 red=0
+RUN_RC_B-post=0
+ver-B-post> VERIFIED platform=windows cells=219
+VERIFY_RC_B-post=0
+MATRIX_B-post CELLS=219 PASS=219 RED=0 SANDBOX_CELLS=26 SANDBOX_PASS=26 SANDBOX_RED=0
+LEASES tag=after-B active=0 quarantined=1
+WEDGE_RECLAIMED_BY_POST=True
+LEASE_RESTORED count=0 expected=0 quarantine=0
+finished=2026-07-29T03:48:19.4094566+07:00
+EXIT=0
