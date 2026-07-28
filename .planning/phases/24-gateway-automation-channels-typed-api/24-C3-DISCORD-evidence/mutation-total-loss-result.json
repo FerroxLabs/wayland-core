@@ -1,0 +1,115 @@
+{
+  "schema": "wayland.discord.inbound/1",
+  "verdict": "FAIL",
+  "instrument_fault": false,
+  "instrument_faults": [],
+  "legs": [
+    {
+      "leg": "admit",
+      "ok": false,
+      "detail": "replies=0 (want exactly 1), dispatched_to_sockets=0"
+    },
+    {
+      "leg": "dedupe",
+      "ok": false,
+      "detail": "first=0 after_replay=0 (want unchanged), positive_control=0 (want 1)"
+    },
+    {
+      "leg": "access",
+      "ok": false,
+      "detail": "stranger_replies=0 (want 0), allowed_control=0 (want 1)"
+    },
+    {
+      "leg": "bind",
+      "ok": false,
+      "detail": "A->none (want 900000001), B->none (want 900000002)"
+    },
+    {
+      "leg": "route",
+      "ok": false,
+      "detail": "A_reply_carries_A=false, A_reply_leaks_B=false"
+    },
+    {
+      "leg": "steady",
+      "ok": false,
+      "detail": "submitted=4 answered=0 lost=4 duplicated=0"
+    }
+  ],
+  "legs_passed": 0,
+  "legs_total": 6,
+  "max_concurrent_gateway_connections": 1,
+  "total_gateway_connections": 1,
+  "identify_count": 1,
+  "resume_count": 0,
+  "heartbeats": 33,
+  "dispatched_total": 12,
+  "dispatch_socket_deliveries": 0,
+  "arrivals_total": 0,
+  "llm_turns": 0,
+  "steady_per_token": [
+    {
+      "token": "f24c3-disc-steady0-5ae722",
+      "replies": 0
+    },
+    {
+      "token": "f24c3-disc-steady1-5ae722",
+      "replies": 0
+    },
+    {
+      "token": "f24c3-disc-steady2-5ae722",
+      "replies": 0
+    },
+    {
+      "token": "f24c3-disc-steady3-5ae722",
+      "replies": 0
+    }
+  ],
+  "steady_lost": [
+    {
+      "token": "f24c3-disc-steady0-5ae722",
+      "replies": 0
+    },
+    {
+      "token": "f24c3-disc-steady1-5ae722",
+      "replies": 0
+    },
+    {
+      "token": "f24c3-disc-steady2-5ae722",
+      "replies": 0
+    },
+    {
+      "token": "f24c3-disc-steady3-5ae722",
+      "replies": 0
+    }
+  ],
+  "steady_duplicated": [],
+  "fixture_coverage": {
+    "implemented": [
+      "op10_hello",
+      "op2_identify",
+      "op0_ready",
+      "op1_heartbeat/op11_ack",
+      "op6_resume_with_replay",
+      "op0_message_create_dispatch",
+      "rest_users_me",
+      "rest_create_message",
+      "rest_typing",
+      "rest_reactions"
+    ],
+    "not_implemented": [
+      "zlib/etf_compression",
+      "shard_negotiation",
+      "rate_limit_buckets",
+      "guild_or_permission_state",
+      "voice",
+      "op9_invalid_session_negotiation"
+    ]
+  },
+  "fixture_notes": [],
+  "notes": [
+    "discord fixture on http://127.0.0.1:35121 (gateway ws://127.0.0.1:35121)",
+    "llm fixture http://127.0.0.1:40045",
+    "gateway IDENTIFYed after ~5750ms (tcp=25 upgrades=1 live=1)",
+    "settling 5000ms before the steady-state leg"
+  ]
+}
