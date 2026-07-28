@@ -88,8 +88,20 @@ class Session:
         been misread as "the server was never registered".
         """
         payload = "".join(json.dumps(c) + "\n" for c in commands)
+        # `--assistant` is REQUIRED for the late-MCP shape. Measured: without
+        # it, `AddMcpServer` is refused with "active assistant identity is
+        # required for a runtime MCP declaration" -- a deliberate fail-closed
+        # scoping rule (#111), not a defect. It is set for every shape so the
+        # four are compared under identical conditions.
         proc = subprocess.Popen(
-            [str(self.binary), "--json-stream", "-m", LOCAL_MODEL],
+            [
+                str(self.binary),
+                "--json-stream",
+                "-m",
+                LOCAL_MODEL,
+                "--assistant",
+                "f27-shapes",
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
