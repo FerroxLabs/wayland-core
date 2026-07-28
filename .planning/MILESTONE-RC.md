@@ -89,6 +89,17 @@ API — Telegram's seam landed; Discord's is the same two-field change), the RC 
 **Genuine but near-worthless:** Phase 27 vendor keys. They buy grades on voice, which is compiled
 into no shipped artifact.
 
+**ADDED 2026-07-29, and this one is worth more than any other credential on the list —
+6. A REAL PROVIDER CREDENTIAL for the durability harness.** `23B-H1` — a clean exit writing a
+session journal the product cannot read back — was independently re-verified and **reproduces as
+unresolved at HIGH**. The lane could neither reproduce nor disprove it, because every attempt failed
+before reaching a tool event: the harness cannot dispatch without a real provider key. **So a HIGH
+data-loss defect is currently unmeasurable by anyone.**
+
+That is a different class from the Phase 27 keys. Those buy grades on a feature we do not ship;
+this one restores the ability to measure a defect that is in the product now. **It is the single
+highest-value credential you can supply.**
+
 ---
 
 ## 6. What we are deliberately NOT doing
