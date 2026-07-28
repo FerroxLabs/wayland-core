@@ -81,6 +81,13 @@ function httpJson(url, { method = 'GET', body = null, timeoutMs = 15000 } = {}) 
         port: u.port,
         path: `${u.pathname}${u.search}`,
         method,
+        // `agent: false` — do NOT pool. Node 19+ turns keepAlive ON for
+        // `http.globalAgent`, while a Node server closes an idle connection
+        // after `keepAliveTimeout` (5s). This driver deliberately blocks for
+        // longer than that between calls while a process under test boots, so
+        // a pooled socket is already dead when it is reused and the next call
+        // throws `socket hang up`. That killed a leg AT THE MEASUREMENT POINT.
+        agent: false,
         timeout: timeoutMs,
         headers: payload
           ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }
@@ -118,6 +125,7 @@ function httpText(url, { method = 'GET', body = null, timeoutMs = 15000 } = {}) 
         port: u.port,
         path: `${u.pathname}${u.search}`,
         method,
+        agent: false, // see httpJson — pooled sockets die across this driver's blocking waits
         timeout: timeoutMs,
         headers: payload
           ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }
@@ -136,6 +144,28 @@ function httpText(url, { method = 'GET', body = null, timeoutMs = 15000 } = {}) 
     if (payload) req.write(payload);
     req.end();
   });
+}
+
+/**
+ * Retrying JSON client.
+ *
+ * A measurement that took minutes of real process time to arrange must not be
+ * destroyed by one transient socket failure. `report()` already retried; the
+ * first post-fix run died on an unretried `submit()` AT the measurement point,
+ * with the run otherwise healthy.
+ */
+async function retryJson(url, opts = {}, attempts = 5, backoffMs = 1000, note = () => {}) {
+  let lastErr = null;
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      return await httpJson(url, opts);
+    } catch (e) {
+      lastErr = e;
+      note(`http retry ${i + 1}/${attempts} for ${url}: ${e.message}`);
+      sleep(backoffMs);
+    }
+  }
+  throw lastErr;
 }
 
 /** Byte-count every capture. A zero-byte log is an instrument fault, not a result. */
@@ -556,30 +586,26 @@ class Run {
   // ── fixture control ─────────────────────────────────────────────────────
 
   async submit(text) {
-    return httpJson(`${this.tgUrl}/__control/submit`, {
-      method: 'POST',
-      body: {
-        token: this.botToken,
-        chatId: this.chatId,
-        senderId: this.senderId,
-        username: 'f24cl',
-        text,
+    return retryJson(
+      `${this.tgUrl}/__control/submit`,
+      {
+        method: 'POST',
+        body: {
+          token: this.botToken,
+          chatId: this.chatId,
+          senderId: this.senderId,
+          username: 'f24cl',
+          text,
+        },
       },
-    });
+      5,
+      1000,
+      (m) => this.note(m),
+    );
   }
 
   async report() {
-    let lastErr = null;
-    for (let i = 0; i < 5; i += 1) {
-      try {
-        return await httpJson(`${this.tgUrl}/__control/report`);
-      } catch (e) {
-        lastErr = e;
-        this.note(`report retry ${i + 1}/5 after ${e.message}`);
-        sleep(1000);
-      }
-    }
-    throw lastErr;
+    return retryJson(`${this.tgUrl}/__control/report`, {}, 5, 1000, (m) => this.note(m));
   }
 
   async waitForPolls(minPolls, budgetMs, label) {
@@ -1203,6 +1229,149 @@ function selfTestMatcher(assert) {
   );
 }
 
+/**
+ * Self-test for the connection-pooling repair.
+ *
+ * HONESTY NOTE. The failure this repairs — `socket hang up` mid-leg — is a
+ * RACE: it needs the server's idle close to land in flight with the client's
+ * reuse of that same pooled socket. An earlier version of this self-test tried
+ * to assert "the old shape fails across the gap" and that assertion WENT RED,
+ * because a graceful close is normally detected and the socket evicted. Rather
+ * than delete the inconvenient assertion, it is replaced with one that is
+ * deterministic and actually proves the repair: `agent: false` removes the
+ * REUSE the race requires, so no pooled socket can be stale because there is no
+ * pool. The race is not reproduced on demand and is not claimed to be.
+ */
+async function selfTestPooling(assert) {
+  let connections = 0;
+  const srv = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"ok":true}');
+  });
+  srv.on('connection', () => {
+    connections += 1;
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${srv.address().port}/probe`;
+
+  const pooledOnce = () =>
+    new Promise((resolve, reject) => {
+      const req = http.request(url, { agent: http.globalAgent }, (res) => {
+        res.on('data', () => {});
+        res.on('end', resolve);
+      });
+      req.on('error', reject);
+      req.end();
+    });
+
+  // 1. KNOWN-POSITIVE: the default agent DOES pool, so the reuse the race needs
+  //    is real and present in the shape this driver used to have.
+  connections = 0;
+  await pooledOnce();
+  await pooledOnce();
+  const pooledConns = connections;
+  assert(
+    'pooling known-positive: the OLD default agent reuses ONE socket for two requests',
+    pooledConns === 1,
+    `connections=${pooledConns}`,
+  );
+
+  // 2. KNOWN-NEGATIVE: the repaired client never reuses, so a stale pooled
+  //    socket cannot exist for it.
+  connections = 0;
+  await httpJson(url);
+  await httpJson(url);
+  const freshConns = connections;
+  assert(
+    'pooling known-negative: agent:false opens a FRESH socket per request (no pool to go stale)',
+    freshConns === 2,
+    `connections=${freshConns}`,
+  );
+
+  // 3. The repair provably changes behaviour. Without this the two counts above
+  //    could both be satisfied by a client that did nothing at all.
+  assert(
+    'the OLD shape and the repaired shape differ exactly where the race lives (reuse)',
+    pooledConns === 1 && freshConns === 2,
+    `pooled=${pooledConns} fresh=${freshConns}`,
+  );
+
+  http.globalAgent.destroy();
+  await new Promise((r) => srv.close(r));
+}
+
+/**
+ * Self-test for the RETRY repair — the belt-and-braces half.
+ *
+ * The pooling change removes one known cause of a mid-leg abort. Retry removes
+ * the CONSEQUENCE for any cause, known or not: a single transient failure must
+ * never destroy a measurement that took minutes of real process time to set up.
+ */
+async function selfTestRetry(assert) {
+  // A server that fails the first N requests, then succeeds.
+  let seen = 0;
+  const failFirst = 2;
+  const srv = http.createServer((_req, res) => {
+    seen += 1;
+    if (seen <= failFirst) {
+      res.destroy(); // exactly the shape of `socket hang up`
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"ok":true,"n":' + seen + '}');
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${srv.address().port}/x`;
+
+  // 1. KNOWN-POSITIVE: transient failures are ridden out.
+  let ok = false;
+  try {
+    const r = await retryJson(url, {}, 5, 10, () => {});
+    ok = r.ok === true;
+  } catch {
+    ok = false;
+  }
+  assert('retry known-positive: two transient hang-ups are ridden out', ok, `attempts=${seen}`);
+
+  // 2. KNOWN-NEGATIVE: a permanently broken endpoint still RAISES. A retry that
+  //    swallowed everything would turn a real failure into a silent zero.
+  await new Promise((r) => srv.close(r));
+  let raised = false;
+  try {
+    await retryJson(url, { timeoutMs: 1500 }, 2, 10, () => {});
+  } catch {
+    raised = true;
+  }
+  assert('retry known-negative: a permanently dead endpoint still raises', raised);
+
+  // 3. THE OLD SHAPE WOULD HAVE ABORTED. A single-shot client against the same
+  //    fail-first server dies on attempt one — which is precisely what killed
+  //    the first post-fix run at its measurement point.
+  let seen2 = 0;
+  const srv2 = http.createServer((_req, res) => {
+    seen2 += 1;
+    if (seen2 <= 1) {
+      res.destroy();
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"ok":true}');
+  });
+  await new Promise((r) => srv2.listen(0, '127.0.0.1', r));
+  const url2 = `http://127.0.0.1:${srv2.address().port}/y`;
+  let oldAborted = false;
+  try {
+    await httpJson(url2); // the OLD single-shot call
+  } catch {
+    oldAborted = true;
+  }
+  assert(
+    'the OLD single-shot client would have ABORTED on the first transient failure',
+    oldAborted,
+  );
+  await new Promise((r) => srv2.close(r));
+}
+
 async function runSelfTests() {
   const results = [];
   const assert = (name, cond, detail) => {
@@ -1212,6 +1381,8 @@ async function runSelfTests() {
   selfTest(assert);
   selfTestMatcher(assert);
   await selfTestStub(results, assert);
+  await selfTestPooling(assert);
+  await selfTestRetry(assert);
   const failed = results.filter((r) => !r.pass);
   process.stdout.write(
     `\nSELFTEST_TOTAL=${results.length} SELFTEST_PASSED=${results.length - failed.length} SELFTEST_FAILED=${failed.length}\n`,
