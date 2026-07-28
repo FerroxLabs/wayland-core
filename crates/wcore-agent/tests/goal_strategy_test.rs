@@ -29,8 +29,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use wcore_agent::goal::strategy::{
-    AnvilTag, CouncilTag, DirectOutcome, DirectTag, FleetTag, ForgeFlowsTag, GoalLoop,
-    GoalLoopError, StrategyTag, StrategyTermination, strategy_tag_name,
+    DirectOutcome, GoalLoop, GoalLoopError, StrategyTermination, strategy_tag_name,
 };
 use wcore_agent::goal::{GoalKernel, GoalLifecycle};
 use wcore_agent::orchestration::anvil::TerminalState;
