@@ -1,0 +1,2 @@
+--check-enumeration: REJECTED (1)
+  F28V-ENUM  F-28-02-002.disposition: receipt says 'OPEN', ledger says 'FIXED'
