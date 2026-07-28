@@ -1,0 +1,19 @@
+{"seq": 762, "kind": "imap.uid_search", "at": "2026-07-28T20:07:10.787Z", "session": 111, "query": "1004:*", "low": 1004, "hits": [1003]}
+{"seq": 769, "kind": "imap.uid_search", "at": "2026-07-28T20:07:12.876Z", "session": 112, "query": "1004:*", "low": 1004, "hits": [1003]}
+{"seq": 773, "kind": "deliver", "at": "2026-07-28T20:07:14.846Z", "uid": 1004, "message_id": "<cbb3af44.0004@fixture.invalid>", "from": "second@fixture.invalid", "to": "bot@fixture.invalid", "subject": "f24c3 inbound", "bytes": 295}
+{"seq": 777, "kind": "imap.uid_search", "at": "2026-07-28T20:07:14.965Z", "session": 113, "query": "1004:*", "low": 1004, "hits": [1004]}
+{"seq": 778, "kind": "imap.uid_fetch", "at": "2026-07-28T20:07:15.006Z", "session": 113, "uid": 1004, "bytes": 295, "set_seen": true, "already_seen_by": null}
+{"seq": 787, "kind": "deliver", "at": "2026-07-28T20:07:15.875Z", "uid": 1005, "message_id": "<cbb3af44.100@fixture.invalid>", "from": "allowed@fixture.invalid", "to": "bot@fixture.invalid", "subject": "f24c3 inbound", "bytes": 299}
+{"seq": 788, "kind": "deliver", "at": "2026-07-28T20:07:15.901Z", "uid": 1006, "message_id": "<cbb3af44.101@fixture.invalid>", "from": "allowed@fixture.invalid", "to": "bot@fixture.invalid", "subject": "f24c3 inbound", "bytes": 299}
+{"seq": 789, "kind": "deliver", "at": "2026-07-28T20:07:15.927Z", "uid": 1007, "message_id": "<cbb3af44.102@fixture.invalid>", "from": "allowed@fixture.invalid", "to": "bot@fixture.invalid", "subject": "f24c3 inbound", "bytes": 299}
+{"seq": 790, "kind": "deliver", "at": "2026-07-28T20:07:15.953Z", "uid": 1008, "message_id": "<cbb3af44.103@fixture.invalid>", "from": "allowed@fixture.invalid", "to": "bot@fixture.invalid", "subject": "f24c3 inbound", "bytes": 299}
+{"seq": 793, "kind": "deliver", "at": "2026-07-28T20:07:15.979Z", "uid": 1009, "message_id": "<cbb3af44.104@fixture.invalid>", "from": "allowed@fixture.invalid", "to": "bot@fixture.invalid", "subject": "f24c3 inbound", "bytes": 299}
+{"seq": 794, "kind": "deliver", "at": "2026-07-28T20:07:16.005Z", "uid": 1010, "message_id": "<cbb3af44.105@fixture.invalid>", "from": "allowed@fixture.invalid", "to": "bot@fixture.invalid", "subject": "f24c3 inbound", "bytes": 299}
+{"seq": 806, "kind": "imap.uid_search", "at": "2026-07-28T20:07:17.096Z", "session": 117, "query": "1005:*", "low": 1005, "hits": [1005, 1006, 1007, 1008, 1009, 1010]}
+{"seq": 807, "kind": "imap.uid_fetch", "at": "2026-07-28T20:07:17.137Z", "session": 117, "uid": 1010, "bytes": 299, "set_seen": true, "already_seen_by": null}
+{"seq": 829, "kind": "imap.uid_search", "at": "2026-07-28T20:07:19.229Z", "session": 121, "query": "1011:*", "low": 1011, "hits": [1010]}
+{"seq": 851, "kind": "imap.uid_search", "at": "2026-07-28T20:07:21.319Z", "session": 125, "query": "1011:*", "low": 1011, "hits": [1010]}
+{"seq": 863, "kind": "imap.uid_search", "at": "2026-07-28T20:07:23.409Z", "session": 127, "query": "1011:*", "low": 1011, "hits": [1010]}
+{"seq": 870, "kind": "imap.uid_search", "at": "2026-07-28T20:07:25.498Z", "session": 128, "query": "1011:*", "low": 1011, "hits": [1010]}
+{"seq": 877, "kind": "imap.uid_search", "at": "2026-07-28T20:07:27.590Z", "session": 129, "query": "1011:*", "low": 1011, "hits": [1010]}
+{"seq": 884, "kind": "imap.uid_search", "at": "2026-07-28T20:07:29.679Z", "session": 130, "query": "1011:*", "low": 1011, "hits": [1010]}

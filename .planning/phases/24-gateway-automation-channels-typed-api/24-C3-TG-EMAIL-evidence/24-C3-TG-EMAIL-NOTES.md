@@ -264,3 +264,71 @@ So the driver was manufacturing a product defect out of its own latency. Repairs
 **Had this been reported, it would have been a fabricated HIGH against working code.** It is the
 mirror image of the telegram/route defect four hours earlier: there the instrument under-counted
 a real arrival, here it over-counted a real duplicate. Same class, opposite sign.
+
+---
+
+## T+~150min — run 4: email inbound measured clean; run 5: the steady-state leg finds a HIGH
+
+### Run 4 (driver `2631f7ba`) — the timing repair holds
+
+```
+INBOUND MATRIX RED legs=20/25 failed=0 not_measured=5 accounted=25/25
+arrivals_total=9 telegram_arrivals=3 mail_arrivals=0 turns_total=15 instrument_fault=false
+mail fixture: mailbox=5 imap_sessions=114 max_concurrent_imap=1 smtp_delivered=0 smtp_failures=22
+```
+
+`RED` here means "not everything could be asked", not "something misbehaved": **zero legs failed**,
+and the five email arrival legs are NOT MEASURED with the SMTP reason. Telegram stayed 5/5.
+
+`email-admission/dedupe` PASSED at **+3054ms** — the same message that "failed" at +90 141 ms in
+run 3. Proof the run-3 FAIL was the driver's latency and not the product.
+
+### Run 5 (driver `0ed5a5d7`) — steady state, and it is a real defect
+
+```
+FAIL email-admission/steady-state: 6 messages delivered back-to-back |
+turns per message=[0,0,0,0,0,1] (want all 1) | delivered-and-never-fetched=5 want=0 |
+fetched-more-than-once=0 want=0 | imap.uid_fetch 5->6 |
+max_concurrent_imap_sessions=1
+```
+
+Before attributing anything, the fixture's own trace was read:
+
+```
+20:07:15.875 DELIVER uid 1005 ... 20:07:16.005 DELIVER uid 1010     (six, back-to-back)
+20:07:17.096 SEARCH q=1005:*  hits [1005,1006,1007,1008,1009,1010]  <- server answered ALL SIX
+20:07:17.137 FETCH  uid 1010                                        <- exactly ONE fetch
+20:07:19.229 SEARCH q=1011:*                                        <- watermark past all of them
+```
+
+The server returned six; the binary fetched one and advanced past the rest. `fetches=0,
+seen_by=null` on uids 1005-1009 in the fixture report. So the fixture is not the cause, and
+`max_concurrent_imap=1` rules out the two-poller mechanism from F24-C3-H4 — **this is a second,
+independent loss mode, exactly as the brief suspected email might have.**
+
+Root cause, `crates/wcore-channel-email/src/imap.rs`:
+
+```rust
+let mut high_water = *last_seen_uid.lock().unwrap();
+for uid in uids {                     // uids is HashSet<Uid> — ARBITRARY ORDER
+    if uid <= high_water { continue; }
+    ... fetch ...
+    high_water = high_water.max(uid); // mutated inside the loop it filters on
+}
+```
+
+`Session::uid_search` returns `HashSet<Uid>` (imap-2.4.1 client.rs:1276). Iteration order is
+arbitrary and re-randomised per process. Visit the largest UID first and every remaining new
+message satisfies `uid <= high_water` and is skipped — then `uid_store::save` persists that
+maximum, so the skipped mail can never be searched for again. **Silent, total, unrecoverable
+loss of every message in a batch except the largest, whenever more than one arrives between
+polls — the normal case for a real mailbox.** Severity HIGH.
+
+Fix committed at `f12cffb7`: freeze the watermark for the batch, and sort ascending (which also
+repairs a second, milder defect — mail reached the engine in arbitrary rather than arrival
+order). Selection extracted to `new_uids` so the invariant is testable, with the **pre-fix filter
+kept executable in the test module** so the repair is proven to change an outcome:
+`the_old_filter_loses_five_of_six_when_the_largest_uid_comes_first` asserts `vec![1010]`.
+
+`cargo test -p wcore-channel-email --lib` on hetzner: **80 passed, 0 failed**, and all four new
+tests confirmed present by name (guarding the "filter matched no test" trap).
