@@ -1,7 +1,7 @@
 {
   "schema": "wayland.cert.receipt",
   "schema_version": 2,
-  "body_sha256": "6f78f103bd138d4b7b770b7f4b4065cdb096d5e4153b78021c2d69556cf9c2b1",
+  "body_sha256": "2037352cff1c2f2c8f8b35e59289ba73b514cd56977c8e22d599ed45e49e0fbb",
   "body": {
     "certification_id": "f28-native-cross-platform-certification",
     "phase": "28-native-cross-platform-certification",
@@ -403,6 +403,30 @@
           "sha256": "43e6dbde22288ab06c2350e2c63e8e889b95cc9852a9bab7ee960e249f9813d4",
           "bytes": 38463,
           "produced_by": "28-03"
+        },
+        {
+          "path": "evidence/28-04/hz-clippy.log",
+          "sha256": "107e075d252f9c5ad4148b40566000e3a4d4fa5142844cac5dbba5794381adbe",
+          "bytes": 166,
+          "produced_by": "28-04"
+        },
+        {
+          "path": "evidence/28-04/hz-crate.log",
+          "sha256": "12c0f0984428c777aa28ce17cfec887282f67cfa96f751021938760053dbaeb8",
+          "bytes": 51024,
+          "produced_by": "28-04"
+        },
+        {
+          "path": "evidence/28-04/hz-receipt.log",
+          "sha256": "378a39573ac9f7f20a0ed77420f1b04a28ae06756edfb4c44e6b044b889375ae",
+          "bytes": 7268,
+          "produced_by": "28-04"
+        },
+        {
+          "path": "evidence/28-04/local-gates.log",
+          "sha256": "9de8f1389dbc5cec006f48bf26c8a77fceee1e139ec11fd6fdcf0db115ee8d46",
+          "bytes": 4680,
+          "produced_by": "28-04"
         },
         {
           "path": "evidence/28-04/macos-ci-30364529551.log",
@@ -1437,7 +1461,7 @@
     "key_id": "phase-28-certification-2026-07-28",
     "public_key_base64": "Ks20+wo/p7Jeaa0c5DY4ex6ylMrIDfhs4TsWQ/6apIE=",
     "fingerprint_sha256": "f0ef7d06c620b23c1ad84cc083d0a3a01c0c1ca7270a1cfdd5e46c9b050ed466",
-    "signature_base64": "sRDDHE5HoMNTdDVCH2Q3dFT8Em2Je4rTWCLPkIH7e17/ROY27LB5KBblfQj2P9FxgibCOjRSz+Mld5b/leX6CA==",
+    "signature_base64": "nlVPEDuk+qacwsHaTJB8ce6s80lFJ6cj+dpCztURaFEQeurHf4nWoOWwQFW6/Arp2ne5gS9f+PLz1V1PyUUSBQ==",
     "scope": "PHASE-SCOPED. This signature binds authorship and integrity of the assembled evidence for Phase 28 only. It is NOT a release trust root, NOT a seal, and NOT an authorization to release. Trust-root binding, rotation and revocation belong to Phase 29; tagging, releasing, merging and issue closure are reserved to Sean."
   }
 }

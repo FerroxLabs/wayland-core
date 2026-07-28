@@ -1,0 +1,413 @@
+warning: in config file .config/nextest.toml, ignoring unknown configuration key: profile.default.no-tests
+   Compiling wcore-eval-scenarios v0.12.25 (/root/wayland-p28-04/crates/wcore-eval-scenarios)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.59s
+────────────
+ Nextest run ID cef917c2-a003-40aa-a442-b7c706e96a74 with nextest profile: default
+    Starting 405 tests across 31 binaries (5 tests skipped)
+        PASS [   0.008s] (  1/405) wcore-eval-scenarios artifact::tests::execution_artifact_is_a_private_sealed_copy
+        PASS [   0.008s] (  2/405) wcore-eval-scenarios assertions::tests::contains_any_fail
+        PASS [   0.009s] (  3/405) wcore-eval-scenarios assertions::tests::json_path_nested
+        PASS [   0.009s] (  4/405) wcore-eval-scenarios assertions::tests::min_distinct_matches_literal_pass
+        PASS [   0.009s] (  5/405) wcore-eval-scenarios assertions::tests::jsonpath_fail_wrong_value
+        PASS [   0.009s] (  6/405) wcore-eval-scenarios assertions::tests::contains_any_pass
+        PASS [   0.009s] (  7/405) wcore-eval-scenarios assertions::tests::contains_fail
+        PASS [   0.009s] (  8/405) wcore-eval-scenarios assertions::tests::count_at_least_fail
+        PASS [   0.010s] (  9/405) wcore-eval-scenarios assertions::tests::contains_pass
+        PASS [   0.010s] ( 10/405) wcore-eval-scenarios assertions::tests::artifact_variants_redirect_from_check
+        PASS [   0.010s] ( 11/405) wcore-eval-scenarios artifact::tests::selected_directory_is_rejected
+        PASS [   0.010s] ( 12/405) wcore-eval-scenarios assertions::tests::regex_end_anchor_fail
+        PASS [   0.010s] ( 13/405) wcore-eval-scenarios assertions::tests::min_distinct_matches_literal_fail
+        PASS [   0.010s] ( 14/405) wcore-eval-scenarios assertions::tests::count_at_most_fail
+        PASS [   0.011s] ( 15/405) wcore-eval-scenarios assertions::tests::file_exists_pass_and_empty_and_missing
+        PASS [   0.010s] ( 16/405) wcore-eval-scenarios assertions::tests::jsonpath_pass
+        PASS [   0.010s] ( 17/405) wcore-eval-scenarios assertions::tests::ordered_before_pass
+        PASS [   0.010s] ( 18/405) wcore-eval-scenarios assertions::tests::jsonpath_fail_not_json
+        PASS [   0.011s] ( 19/405) wcore-eval-scenarios assertions::tests::min_length_fail
+        PASS [   0.011s] ( 20/405) wcore-eval-scenarios assertions::tests::file_contains_pass_and_fail
+        PASS [   0.010s] ( 21/405) wcore-eval-scenarios assertions::wave_1_1_tests::cost_within_tolerance_pass_exact
+        PASS [   0.010s] ( 22/405) wcore-eval-scenarios assertions::wave_1_1_tests::cost_within_tolerance_fail_no_event
+        PASS [   0.010s] ( 23/405) wcore-eval-scenarios assertions::tests::regex_end_anchor_pass
+        PASS [   0.012s] ( 24/405) wcore-eval-scenarios artifact::tests::mutation_during_the_identity_probe_is_rejected
+        PASS [   0.011s] ( 25/405) wcore-eval-scenarios assertions::tests::regex_start_anchor_fail
+        PASS [   0.011s] ( 26/405) wcore-eval-scenarios artifact::tests::malformed_unknown_and_nonzero_probes_are_rejected
+        PASS [   0.012s] ( 27/405) wcore-eval-scenarios assertions::tests::count_at_most_pass
+        PASS [   0.011s] ( 28/405) wcore-eval-scenarios assertions::tests::no_errors_on_tool_fail
+        PASS [   0.012s] ( 29/405) wcore-eval-scenarios assertions::tests::file_parses_as_pdf_json_html_md
+        PASS [   0.012s] ( 30/405) wcore-eval-scenarios assertions::tests::count_at_least_pass
+        PASS [   0.011s] ( 31/405) wcore-eval-scenarios assertions::wave_1_1_tests::check_returns_err_for_wave11_cost
+        PASS [   0.012s] ( 32/405) wcore-eval-scenarios assertions::tests::no_errors_fail
+        PASS [   0.011s] ( 33/405) wcore-eval-scenarios e5_soak::tests::census_backend_authority_mirrors_process_tree_semantics
+        PASS [   0.012s] ( 34/405) wcore-eval-scenarios assertions::tests::not_contains_pass
+        PASS [   0.011s] ( 35/405) wcore-eval-scenarios assertions::tests::tool_trace_count
+        PASS [   0.012s] ( 36/405) wcore-eval-scenarios artifact::tests::explicit_then_environment_then_release_then_debug
+        PASS [   0.012s] ( 37/405) wcore-eval-scenarios assertions::tests::min_length_pass
+        PASS [   0.012s] ( 38/405) wcore-eval-scenarios artifact::tests::version_and_source_mismatches_are_rejected
+        PASS [   0.012s] ( 39/405) wcore-eval-scenarios assertions::tests::ordered_before_fail_missing
+        PASS [   0.012s] ( 40/405) wcore-eval-scenarios assertions::tests::json_path_missing
+        PASS [   0.012s] ( 41/405) wcore-eval-scenarios assertions::tests::no_errors_pass
+        PASS [   0.012s] ( 42/405) wcore-eval-scenarios assertions::tests::ordered_before_fail_reversed
+        PASS [   0.012s] ( 43/405) wcore-eval-scenarios assertions::wave_1_1_tests::check_returns_err_for_wave11_stderr_contains
+        PASS [   0.012s] ( 44/405) wcore-eval-scenarios assertions::tests::regex_wildcard_pass
+        PASS [   0.013s] ( 45/405) wcore-eval-scenarios assertions::tests::regex_literal_pass
+        PASS [   0.013s] ( 46/405) wcore-eval-scenarios assertions::tests::not_contains_fail
+        PASS [   0.012s] ( 47/405) wcore-eval-scenarios assertions::wave_1_1_tests::stderr_contains_any_fail_when_none_match
+        PASS [   0.012s] ( 48/405) wcore-eval-scenarios assertions::wave_1_1_tests::cost_within_tolerance_pass_edge
+        PASS [   0.013s] ( 49/405) wcore-eval-scenarios assertions::tests::regex_literal_fail
+        PASS [   0.013s] ( 50/405) wcore-eval-scenarios assertions::tests::no_errors_on_tool_pass_different_tool_errors
+        PASS [   0.013s] ( 51/405) wcore-eval-scenarios assertions::wave_1_1_tests::cost_within_tolerance_fail_over
+        PASS [   0.013s] ( 52/405) wcore-eval-scenarios assertions::tests::regex_wildcard_fail
+        PASS [   0.012s] ( 53/405) wcore-eval-scenarios assertions::tests::regex_start_anchor_pass
+        PASS [   0.011s] ( 54/405) wcore-eval-scenarios filesystem_evidence::tests::disjoint_sibling_roots_cannot_merge_matching_relative_paths
+        PASS [   0.012s] ( 55/405) wcore-eval-scenarios filesystem_evidence::tests::classifies_evaluator_owned_engine_state_separately
+        PASS [   0.017s] ( 56/405) wcore-eval-scenarios artifact::tests::matching_artifact_records_known_digest_and_identity
+        PASS [   0.009s] ( 57/405) wcore-eval-scenarios fixtures::channel::tests::a_stalled_arrival_still_counts_as_arrived
+        PASS [   0.011s] ( 58/405) wcore-eval-scenarios filesystem_evidence::tests::failure_of_any_required_root_prevents_a_snapshot
+        PASS [   0.011s] ( 59/405) wcore-eval-scenarios fixtures::channel::tests::a_loss_is_named_by_the_body_that_never_arrived
+        PASS [   0.019s] ( 60/405) wcore-eval-scenarios assertions::wave_1_1_tests::stderr_contains_fail_when_absent
+        PASS [   0.011s] ( 61/405) wcore-eval-scenarios fixtures::channel::tests::a_duplicate_at_the_sink_is_named_not_merely_counted
+        PASS [   0.012s] ( 62/405) wcore-eval-scenarios filesystem_evidence::tests::observes_disjoint_home_mutation_with_engine_state_scope
+        PASS [   0.013s] ( 63/405) wcore-eval-scenarios filesystem_evidence::tests::equal_and_nested_roots_are_walked_once_without_omission
+        PASS [   0.012s] ( 64/405) wcore-eval-scenarios filesystem_evidence::tests::records_created_modified_and_deleted_files_without_paths
+        PASS [   0.021s] ( 65/405) wcore-eval-scenarios catalog::tests::validation_rejects_invalid_and_duplicate_ids
+        PASS [   0.021s] ( 66/405) wcore-eval-scenarios e5_cases::tests::a_mandatory_cell_is_claimed_by_exactly_one_probe
+        PASS [   0.021s] ( 67/405) wcore-eval-scenarios e5_cases::tests::every_probe_names_a_failing_counterpart
+        PASS [   0.021s] ( 68/405) wcore-eval-scenarios assertions::wave_1_1_tests::stderr_contains_any_pass_second
+        PASS [   0.021s] ( 69/405) wcore-eval-scenarios assertions::wave_1_1_tests::stderr_contains_fail_on_empty_stderr
+        PASS [   0.022s] ( 70/405) wcore-eval-scenarios assertions::wave_1_1_tests::stderr_contains_any_pass_first
+        PASS [   0.021s] ( 71/405) wcore-eval-scenarios capability_honesty::tests::exact_unavailable_expectation_rejects_ready_or_wrong_reason
+        PASS [   0.022s] ( 72/405) wcore-eval-scenarios capability_honesty::tests::outcome_expectation_requires_complete_runtime_cycle
+        PASS [   0.022s] ( 73/405) wcore-eval-scenarios cross_session::tests::session_dir_lives_under_home_not_project
+        PASS [   0.022s] ( 74/405) wcore-eval-scenarios e5_soak::tests::a_shortfall_is_never_a_pass
+        PASS [   0.022s] ( 75/405) wcore-eval-scenarios e5_cases::tests::families_are_derived_from_the_surface_binding
+        PASS [   0.022s] ( 76/405) wcore-eval-scenarios catalog::tests::standard_catalog_is_valid_and_canary_first
+        PASS [   0.022s] ( 77/405) wcore-eval-scenarios cross_session::tests::home_and_project_are_distinct
+        PASS [   0.013s] ( 78/405) wcore-eval-scenarios cost::tests::parse_returns_none_for_non_cost_event
+        PASS [   0.022s] ( 79/405) wcore-eval-scenarios e5_matrix::tests::generation_covers_every_dimension_on_every_os_family
+        PASS [   0.023s] ( 80/405) wcore-eval-scenarios e5_matrix::tests::a_sandbox_pass_needs_positive_evidence_and_not_measured_is_a_red
+        PASS [   0.023s] ( 81/405) wcore-eval-scenarios e5_soak::tests::a_clean_scan_with_an_undetected_control_is_void_not_green
+        PASS [   0.023s] ( 82/405) wcore-eval-scenarios e5_matrix::tests::a_control_reference_is_required_and_a_document_is_not_one
+        PASS [   0.023s] ( 83/405) wcore-eval-scenarios e5_soak::tests::a_dropped_channel_voids_the_scan
+        PASS [   0.015s] ( 84/405) wcore-eval-scenarios fixtures::channel::tests::the_sink_assigns_the_message_identity_and_journals_before_answering
+        PASS [   0.024s] ( 85/405) wcore-eval-scenarios capability_honesty::tests::rejects_missing_advertised_capability_proof
+        PASS [   0.025s] ( 86/405) wcore-eval-scenarios cost::tests::parse_rejects_negative_totals_and_rows
+        PASS [   0.015s] ( 87/405) wcore-eval-scenarios e5_cases::tests::probe_ids_are_unique
+        PASS [   0.016s] ( 88/405) wcore-eval-scenarios fixtures::channel::tests::the_bearer_is_never_journalled_only_a_fingerprint
+        PASS [   0.025s] ( 89/405) wcore-eval-scenarios e5_cases::tests::all_nine_dimensions_have_exactly_one_dimension_probe
+        PASS [   0.025s] ( 90/405) wcore-eval-scenarios assertions::wave_1_1_tests::stderr_contains_pass
+        PASS [   0.017s] ( 91/405) wcore-eval-scenarios judge::tests::extract_content_surfaces_provider_error
+        PASS [   0.026s] ( 92/405) wcore-eval-scenarios capability_honesty::tests::rejects_unreasoned_unavailability
+        PASS [   0.017s] ( 93/405) wcore-eval-scenarios e5_cases::tests::sandbox_probes_emit_activeness_and_others_do_not_claim_to
+        PASS [   0.017s] ( 94/405) wcore-eval-scenarios e5_cases::tests::unc_verbatim_paths_are_windows_only_and_the_guard_says_so
+        PASS [   0.026s] ( 95/405) wcore-eval-scenarios cost::tests::parse_session_cost_event
+        PASS [   0.026s] ( 96/405) wcore-eval-scenarios cost::tests::parse_returns_none_for_non_object
+        PASS [   0.017s] ( 97/405) wcore-eval-scenarios judge::tests::extract_content_pulls_message_content
+        PASS [   0.014s] ( 98/405) wcore-eval-scenarios judge::tests::truncate_respects_char_boundaries
+        PASS [   0.018s] ( 99/405) wcore-eval-scenarios e5_matrix::tests::nine_dimensions_exactly_and_ids_are_unique
+        PASS [   0.018s] (100/405) wcore-eval-scenarios judge::tests::extract_content_rejects_bad_envelope
+        PASS [   0.018s] (101/405) wcore-eval-scenarios capability_honesty::tests::accepts_all_startup_proofs_and_complete_runtime_cycles
+        PASS [   0.028s] (102/405) wcore-eval-scenarios capability_honesty::tests::rejects_out_of_order_runtime_evidence
+        PASS [   0.014s] (103/405) wcore-eval-scenarios judge::tests::parse_verdict_plain_json
+        PASS [   0.018s] (104/405) wcore-eval-scenarios judge::tests::parse_verdict_clamps_out_of_range_score
+        PASS [   0.018s] (105/405) wcore-eval-scenarios catalog::tests::repeated_exact_ids_select_once_in_catalog_order
+        PASS [   0.018s] (106/405) wcore-eval-scenarios judge::tests::judge_defaults_to_deepseek_v4_pro
+        PASS [   0.014s] (107/405) wcore-eval-scenarios process_tree::linux::tests::maps_current_path_through_mount_root
+        PASS [   0.014s] (108/405) wcore-eval-scenarios process_tree::linux::tests::descriptor_walk_rejects_concurrent_directory_swap
+        PASS [   0.014s] (109/405) wcore-eval-scenarios judge::tests::request_body_pins_model_temperature_and_roles
+        PASS [   0.014s] (110/405) wcore-eval-scenarios judge::tests::parse_verdict_malformed_errors
+        PASS [   0.014s] (111/405) wcore-eval-scenarios judge::tests::user_prompt_embeds_criterion_and_output_in_delimiters
+        PASS [   0.014s] (112/405) wcore-eval-scenarios judge::tests::parse_verdict_strips_json_fence
+        PASS [   0.014s] (113/405) wcore-eval-scenarios process_tree::linux::tests::parses_kernel_resource_counters
+        PASS [   0.019s] (114/405) wcore-eval-scenarios cross_session::tests::seeded_config_enables_memory_with_no_dream_throttle
+        PASS [   0.015s] (115/405) wcore-eval-scenarios judge::tests::parse_verdict_strips_bare_fence
+        PASS [   0.019s] (116/405) wcore-eval-scenarios e5_soak::tests::the_census_backend_table_agrees_with_the_real_process_tree
+        PASS [   0.014s] (117/405) wcore-eval-scenarios process_tree::linux::tests::pinned_executable_is_cloexec_in_supervisor
+        PASS [   0.014s] (118/405) wcore-eval-scenarios process_tree::linux::tests::parses_unified_self_cgroup_entry
+        PASS [   0.014s] (119/405) wcore-eval-scenarios providers::tests::matrix_is_stable_and_lenient_mode_records_skips
+        PASS [   0.014s] (120/405) wcore-eval-scenarios providers::tests::invalid_override_is_rejected_before_execution
+        PASS [   0.014s] (121/405) wcore-eval-scenarios providers::tests::provider_debug_redacts_credentials_and_base_url
+        PASS [   0.015s] (122/405) wcore-eval-scenarios process_tree::linux::tests::persistent_cleanup_failure_is_surfaced
+        PASS [   0.015s] (123/405) wcore-eval-scenarios providers::tests::whitespace_only_credentials_are_absent
+        PASS [   0.016s] (124/405) wcore-eval-scenarios providers::tests::forced_and_overridden_providers_use_explicit_models
+        PASS [   0.016s] (125/405) wcore-eval-scenarios providers::tests::strict_mode_rejects_any_missing_required_provider
+        PASS [   0.016s] (126/405) wcore-eval-scenarios pty_capture::tests::strip_ansi_removes_cursor_motion_and_osc
+        PASS [   0.016s] (127/405) wcore-eval-scenarios providers::tests::override_precedence_is_cli_then_environment
+        PASS [   0.016s] (128/405) wcore-eval-scenarios pty_capture::tests::strip_ansi_handles_st_terminated_osc
+        PASS [   0.017s] (129/405) wcore-eval-scenarios process_tree::linux::tests::descriptor_walk_rejects_hard_link_alias_without_touching_external_inode
+        PASS [   0.017s] (130/405) wcore-eval-scenarios process_tree::linux::tests::pre_exchange_failure_retains_private_materialization_for_recovery
+        PASS [   0.016s] (131/405) wcore-eval-scenarios providers::tests::zero_runnable_providers_is_never_an_unexplained_success
+        PASS [   0.017s] (132/405) wcore-eval-scenarios process_tree::linux::tests::cleanup_reaper_handles_burst_on_one_worker
+        PASS [   0.016s] (133/405) wcore-eval-scenarios pty_capture::tests::strip_ansi_removes_csi_color_sequences
+        PASS [   0.017s] (134/405) wcore-eval-scenarios process_tree::linux::tests::rollback_failure_retains_displaced_original_inode_for_recovery
+        PASS [   0.017s] (135/405) wcore-eval-scenarios process_tree::linux::tests::private_materialization_preserves_alias_created_after_link_check
+        PASS [   0.013s] (136/405) wcore-eval-scenarios release_integrity::tests::an_unrecognised_revocation_kind_fails_to_deserialize
+        PASS [   0.013s] (137/405) wcore-eval-scenarios release_integrity::tests::ordinals_match_canonical_positions
+        PASS [   0.019s] (138/405) wcore-eval-scenarios release_integrity::tests::a_revocation_must_carry_a_reason_and_a_well_formed_target
+        PASS [   0.019s] (139/405) wcore-eval-scenarios pty_capture::tests::strip_ansi_preserves_layout_whitespace
+        PASS [   0.019s] (140/405) wcore-eval-scenarios pty_capture::tests::default_geometry_is_100x30
+        PASS [   0.019s] (141/405) wcore-eval-scenarios pty_capture::tests::strip_ansi_drops_trailing_lone_esc
+        PASS [   0.020s] (142/405) wcore-eval-scenarios pty_capture::tests::screenshot_png_is_an_honest_stub_not_a_panic
+        PASS [   0.020s] (143/405) wcore-eval-scenarios redaction::tests::redacts_nested_protocol_values_at_capture_time
+        PASS [   0.016s] (144/405) wcore-eval-scenarios release_integrity::tests::every_state_has_a_distinct_signature_domain
+        PASS [   0.014s] (145/405) wcore-eval-scenarios runner::structured_trace_tests::structured_trace_rejects_call_id_name_conflict
+        PASS [   0.014s] (146/405) wcore-eval-scenarios runner::structured_trace_tests::structured_trace_fills_auto_approved_tool_input
+        PASS [   0.016s] (147/405) wcore-eval-scenarios release_integrity::tests::body_validation_rejects_an_empty_artifact_list
+        PASS [   0.034s] (148/405) wcore-eval-scenarios egress_evidence::tests::rejects_missing_footer_and_unresolved_attempt
+        PASS [   0.014s] (149/405) wcore-eval-scenarios runner::evidence_root_tests::unavailable_required_root_makes_artifact_scan_incomplete
+        PASS [   0.016s] (150/405) wcore-eval-scenarios providers::tests::matrix_override_and_blank_values_are_explicit
+        PASS [   0.016s] (151/405) wcore-eval-scenarios release_integrity::tests::rotation_adds_a_key_and_retires_another_without_mutating_the_original
+        PASS [   0.016s] (152/405) wcore-eval-scenarios release_states::tests::an_unknown_state_name_fails_to_deserialize_before_any_logic_runs
+        PASS [   0.016s] (153/405) wcore-eval-scenarios release_states::tests::chain_progress_is_accepted_only_at_release_acceptance
+        PASS [   0.018s] (154/405) wcore-eval-scenarios release_integrity::tests::an_unrecognised_role_name_fails_to_deserialize
+        PASS [   0.021s] (155/405) wcore-eval-scenarios redaction::tests::removes_contaminated_artifacts_without_touching_clean_files
+        PASS [   0.015s] (156/405) wcore-eval-scenarios sbom::tests::a_git_source_is_named_rather_than_grouped_with_registry_crates
+        PASS [   0.016s] (157/405) wcore-eval-scenarios runner::evidence_root_tests::secret_canary_only_in_wayland_home_is_detected_with_scope
+        PASS [   0.012s] (158/405) wcore-eval-scenarios tempenv::tests::known_free_declaration_rejects_non_loopback_provider
+        PASS [   0.016s] (159/405) wcore-eval-scenarios sbom::tests::the_derived_serial_is_a_urn_uuid_that_moves_with_its_input
+        PASS [   0.014s] (160/405) wcore-eval-scenarios sbom::tests::purl_encoding_escapes_build_metadata_but_not_ordinary_names
+        PASS [   0.020s] (161/405) wcore-eval-scenarios release_integrity::tests::a_zero_sequence_or_a_zero_issue_time_is_refused
+        PASS [   0.013s] (162/405) wcore-eval-scenarios stderr_capture::tests::redacts_and_flags_secret_before_retention
+        PASS [   0.014s] (163/405) wcore-eval-scenarios tempenv::tests::escape_quotes_and_backslashes
+        PASS [   0.014s] (164/405) wcore-eval-scenarios usability::tests::flags_broken_subsystem_kg
+        PASS [   0.014s] (165/405) wcore-eval-scenarios tempenv::tests::seeded_config_has_absolute_session_dir
+        PASS [   0.014s] (166/405) wcore-eval-scenarios usability::tests::clean_run_has_no_findings
+        PASS [   0.014s] (167/405) wcore-eval-scenarios trace::tests::dispatched_count_excludes_unknown_tool_rejections
+        PASS [   0.014s] (168/405) wcore-eval-scenarios usability::tests::flags_boot_latency_over_budget
+        PASS [   0.014s] (169/405) wcore-eval-scenarios usability::tests::flags_honcho_nag
+        PASS [   0.015s] (170/405) wcore-eval-scenarios tempenv::tests::optional_budget_block_appears_when_set
+        PASS [   0.015s] (171/405) wcore-eval-scenarios workspace_evidence::tests::line_ending_is_a_workspace_boundary
+        PASS [   0.015s] (172/405) wcore-eval-scenarios tempenv::tests::known_free_provider_fixture_is_declared_through_compat
+        PASS [   0.014s] (173/405) wcore-eval-scenarios tempenv::tests::seeded_config_never_contains_provider_api_key
+        PASS [   0.014s] (174/405) wcore-eval-scenarios usability::tests::dedupes_same_finding_across_scenarios
+        PASS [   0.012s] (175/405) wcore-eval-scenarios workspace_evidence::tests::markdown_code_span_is_a_workspace_boundary
+        PASS [   0.010s] (176/405) wcore-eval-scenarios::e5_matrix_contract all_three_mandatory_cells_are_present_critical_and_unskippable
+        PASS [   0.015s] (177/405) wcore-eval-scenarios tempenv::tests::config_digest_ignores_the_hermetic_root
+        PASS [   0.012s] (178/405) wcore-eval-scenarios::cross_session_live zero_execution_guard
+        PASS [   0.010s] (179/405) wcore-eval-scenarios::e5_matrix_contract downgrading_a_mandatory_cell_off_critical_fails
+        PASS [   0.010s] (180/405) wcore-eval-scenarios::e5_matrix_contract a_sandbox_cell_stripped_of_its_activeness_requirement_fails_validation
+        PASS [   0.011s] (181/405) wcore-eval-scenarios::e5_matrix_contract every_sandbox_dimension_cell_requires_activeness_not_only_the_mandatory_one
+        PASS [   0.016s] (182/405) wcore-eval-scenarios tempenv::tests::config_digest_ignores_only_loopback_fixture_ports
+        PASS [   0.011s] (183/405) wcore-eval-scenarios::e5_matrix_contract every_dimension_appears_on_every_os_family
+        PASS [   0.011s] (184/405) wcore-eval-scenarios::e5_matrix_contract duplicate_cell_ids_are_refused
+        PASS [   0.012s] (185/405) wcore-eval-scenarios::e5_matrix_contract a_critical_cell_carrying_any_skip_fails
+        PASS [   0.012s] (186/405) wcore-eval-scenarios::e5_matrix_contract a_classified_skip_with_empty_evidence_fails
+        PASS [   0.012s] (187/405) wcore-eval-scenarios::e5_matrix_contract a_measured_runtime_control_does_not_trip_the_observation_blocked_rule
+        PASS [   0.012s] (188/405) wcore-eval-scenarios::e5_matrix_contract an_observation_blocked_skip_citing_a_document_fails_even_when_it_favours_the_product
+        PASS [   0.012s] (189/405) wcore-eval-scenarios::e5_matrix_contract a_declared_applicability_skip_on_a_critical_dimension_is_refused_at_generation
+        PASS [   0.012s] (190/405) wcore-eval-scenarios::e5_matrix_contract an_observation_blocked_skip_without_a_runtime_control_fails
+        PASS [   0.013s] (191/405) wcore-eval-scenarios::e5_matrix_contract a_sandbox_cell_cannot_be_recorded_passed_without_positive_activeness
+        PASS [   0.013s] (192/405) wcore-eval-scenarios::e5_matrix_contract a_dimension_missing_from_an_os_family_fails
+        PASS [   0.013s] (193/405) wcore-eval-scenarios::e5_matrix_contract a_non_sandbox_cell_passes_without_activeness_evidence
+        PASS [   0.010s] (194/405) wcore-eval-scenarios::e5_matrix_contract removing_a_mandatory_cell_fails
+        PASS [   0.013s] (195/405) wcore-eval-scenarios::e5_matrix_contract nine_f28_01_dimensions_exist_verbatim_and_none_was_renamed_or_merged
+        PASS [   0.010s] (196/405) wcore-eval-scenarios::e5_matrix_contract generation_is_stable_across_runs_so_three_hosts_execute_the_same_matrix
+        PASS [   0.013s] (197/405) wcore-eval-scenarios::e5_matrix_contract a_matrix_over_no_surfaces_is_refused_rather_than_certifying_nothing
+        PASS [   0.043s] (198/405) wcore-eval-scenarios egress_evidence::tests::accepts_complete_partition
+        PASS [   0.010s] (199/405) wcore-eval-scenarios::e5_matrix_contract unclassified_skip_is_unrepresentable_and_every_class_carries_its_evidence
+        PASS [   0.015s] (200/405) wcore-eval-scenarios::e5_matrix_contract a_complete_matrix_does_not_trip_the_missing_dimension_rule
+        PASS [   0.011s] (201/405) wcore-eval-scenarios::e5_matrix_contract three_os_families_are_fixed
+        PASS [   0.011s] (202/405) wcore-eval-scenarios::e5_matrix_contract the_same_skip_on_a_standard_cell_does_not_trip_it
+        PASS [   0.011s] (203/405) wcore-eval-scenarios::e5_matrix_contract the_critical_dimensions_are_the_two_named_by_the_success_criteria
+        PASS [   0.015s] (204/405) wcore-eval-scenarios::e5_matrix_contract a_mandatory_cell_is_emitted_regardless_of_what_surface_resolution_produces
+        PASS [   0.012s] (205/405) wcore-eval-scenarios::e5_matrix_contract the_emitted_matrix_carries_no_observation_blocked_skip_at_construction_time
+        PASS [   0.012s] (206/405) wcore-eval-scenarios::e5_matrix_contract the_tsv_has_one_header_and_one_row_per_cell_with_nine_fields
+        PASS [   0.011s] (207/405) wcore-eval-scenarios::e5_native_matrix every_probe_declares_the_mutation_that_makes_it_red
+        PASS [   0.044s] (208/405) wcore-eval-scenarios egress_evidence::tests::rejects_footer_completeness_mutation
+        PASS [   0.012s] (209/405) wcore-eval-scenarios::e5_native_matrix the_executor_mirrors_the_canonical_probe_table_entry_for_entry
+        PASS [   0.013s] (210/405) wcore-eval-scenarios::e5_native_matrix black_box_probes_require_no_cargo_harness
+        PASS [   0.012s] (211/405) wcore-eval-scenarios::e5_native_matrix the_executor_self_test_covers_the_marker_rejections_this_plan_relies_on
+        PASS [   0.013s] (212/405) wcore-eval-scenarios::e5_native_matrix a_harness_bound_probe_may_not_be_the_only_cover_of_a_critical_cell_on_macos
+        PASS [   0.012s] (213/405) wcore-eval-scenarios::e5_soak_contract void_a_clean_canary_scan_whose_control_went_undetected
+        PASS [   0.013s] (214/405) wcore-eval-scenarios::e5_native_matrix the_guard_against_harness_bound_macos_coverage_can_actually_fire
+        PASS [   0.012s] (215/405) wcore-eval-scenarios::e5_soak_contract the_executor_mirrors_the_census_backend_table_including_its_caveat
+        PASS [   0.012s] (216/405) wcore-eval-scenarios::e5_soak_contract the_executor_declares_the_same_panic_sentinels_the_bands_committed
+        PASS [   0.012s] (217/405) wcore-eval-scenarios::e5_soak_contract red_late_latency_exceeds_the_decided_ratio
+        PASS [   0.012s] (218/405) wcore-eval-scenarios::e5_soak_contract the_accept_path_is_reachable_so_every_rejection_below_is_the_rule_and_not_the_fixture
+        PASS [   0.012s] (219/405) wcore-eval-scenarios::e5_soak_contract red_a_resource_metric_grew_past_its_decided_band
+        PASS [   0.010s] (220/405) wcore-eval-scenarios::e5_soak_contract void_a_resource_series_that_retained_only_its_endpoints
+        PASS [   0.012s] (221/405) wcore-eval-scenarios::e5_soak_contract void_a_drift_verdict_with_no_bands_rather_than_a_defaulted_one
+        PASS [   0.012s] (222/405) wcore-eval-scenarios::e5_soak_contract a_zero_concurrency_soak_fails_the_contract_and_cannot_be_configured_away
+        PASS [   0.010s] (223/405) wcore-eval-scenarios::e5_soak_contract void_a_family_whose_binary_is_not_the_candidate
+        PASS [   0.010s] (224/405) wcore-eval-scenarios::f28_receipt_contract a2_closes_the_paper_path_on_a_contradicted_criterion_at_any_recorded_severity
+        PASS [   0.012s] (225/405) wcore-eval-scenarios::e5_soak_contract void_a_banded_metric_that_was_never_sampled
+        PASS [   0.010s] (226/405) wcore-eval-scenarios::e5_soak_contract void_a_family_with_no_ledger_digest_at_all
+        PASS [   0.012s] (227/405) wcore-eval-scenarios::e5_soak_contract void_a_canary_scan_that_dropped_a_channel
+        PASS [   0.012s] (228/405) wcore-eval-scenarios::e5_soak_contract red_is_not_void_and_void_is_not_red
+        PASS [   0.013s] (229/405) wcore-eval-scenarios::e5_soak_contract a_high_water_mark_and_a_leak_are_distinguished_by_the_series
+        PASS [   0.013s] (230/405) wcore-eval-scenarios::e5_native_matrix the_nine_f28_01_dimensions_exist_verbatim_as_probes
+        PASS [   0.013s] (231/405) wcore-eval-scenarios::e5_soak_contract void_a_census_that_claims_authority_its_backend_does_not_have
+        PASS [   0.012s] (232/405) wcore-eval-scenarios::e5_soak_contract red_an_orphaned_process_survived_the_run
+        PASS [   0.011s] (233/405) wcore-eval-scenarios::e5_soak_contract void_a_resource_verdict_whose_growth_control_was_never_flagged
+        PASS [   0.010s] (234/405) wcore-eval-scenarios::f28_receipt_contract an_empty_contradicted_criterion_is_rejected_so_an_omission_cannot_read_as_a_none
+        PASS [   0.011s] (235/405) wcore-eval-scenarios::f28_receipt_contract a1_requires_the_inherited_severity_as_provenance_and_the_p28_score_as_the_operative_value
+        PASS [   0.009s] (236/405) wcore-eval-scenarios::f28_receipt_contract each_missing_binding_is_rejected_with_its_own_code
+        PASS [   0.010s] (237/405) wcore-eval-scenarios::f28_receipt_contract all_three_permitted_claims_must_be_stated_and_exactly_three_exist
+        PASS [   0.018s] (238/405) wcore-eval-scenarios::e5_native_matrix every_generated_matrix_cell_has_exactly_one_probe
+        PASS [   0.013s] (239/405) wcore-eval-scenarios::e5_soak_contract the_executor_scans_exactly_the_six_modelled_channels
+        PASS [   0.012s] (240/405) wcore-eval-scenarios::e5_soak_contract void_an_orphan_census_whose_control_orphan_was_never_found
+        PASS [   0.012s] (241/405) wcore-eval-scenarios::f28_receipt_contract a_skipped_critical_case_is_rejected_two_ways_because_criterion_1_forbids_one
+        PASS [   0.014s] (242/405) wcore-eval-scenarios::e5_soak_contract the_executor_mirrors_the_canonical_geometry
+        PASS [   0.012s] (243/405) wcore-eval-scenarios::f28_receipt_contract accept_and_defer_are_unreachable_at_critical_and_high
+        PASS [   0.013s] (244/405) wcore-eval-scenarios::e5_soak_contract a_shortfall_against_the_thousand_session_target_is_never_a_pass
+        PASS [   0.012s] (245/405) wcore-eval-scenarios::f28_receipt_contract a_skip_class_outside_the_four_is_rejected_and_each_of_the_four_is_accepted
+        PASS [   0.012s] (246/405) wcore-eval-scenarios::f28_receipt_contract a_receipt_asserting_zero_known_defects_or_zero_findings_is_rejected_under_a3
+        PASS [   0.013s] (247/405) wcore-eval-scenarios::e5_soak_contract the_executor_never_puts_a_mutating_verb_in_the_workload
+        PASS [   0.020s] (248/405) wcore-eval-scenarios::e5_matrix_contract generates_over_the_real_resolved_candidate
+        PASS [   0.010s] (249/405) wcore-eval-scenarios::f28_receipt_contract platform_cell_counts_must_sum_so_a_red_cannot_be_dropped_from_the_arithmetic
+        PASS [   0.009s] (250/405) wcore-eval-scenarios::fixture_manifest_contract artifact_binding_rejects_traversal_and_symlinks
+        PASS [   0.013s] (251/405) wcore-eval-scenarios::e5_native_matrix all_three_mandatory_cells_are_probed_by_their_own_cell_specific_probe
+        PASS [   0.010s] (252/405) wcore-eval-scenarios::fixture_manifest_contract artifact_mutation_after_manifest_creation_fails_verification
+        PASS [   0.015s] (253/405) wcore-eval-scenarios::f28_receipt_contract a_claim_asserted_true_is_recomputed_against_the_ledger_and_rejected_if_it_disagrees
+        PASS [   0.015s] (254/405) wcore-eval-scenarios::f28_receipt_contract a_skipped_cell_with_no_required_evidence_is_rejected
+        PASS [   0.013s] (255/405) wcore-eval-scenarios::f28_receipt_contract the_paper_path_requires_an_owner_and_a_backlog_id_and_the_repair_path_requires_evidence
+        PASS [   0.012s] (256/405) wcore-eval-scenarios::live_personas zero_execution_guard
+        PASS [   0.013s] (257/405) wcore-eval-scenarios::fixture_manifest_contract serialized_manifest_round_trips_and_verifies
+        PASS [   0.056s] (258/405) wcore-eval-scenarios egress_evidence::tests::rejects_candidate_replacement_signed_by_an_untrusted_key
+        PASS [   0.013s] (259/405) wcore-eval-scenarios::mcp_fixture_contract streamable_http_direct_json_round_trip
+        PASS [   0.014s] (260/405) wcore-eval-scenarios::fixture_manifest_contract supplied_manifest_cannot_label_artifact_b_as_artifact_a
+        PASS [   0.015s] (261/405) wcore-eval-scenarios::fixture_manifest_contract composite_identity_is_deterministic_and_binds_every_component
+        PASS [   0.029s] (262/405) wcore-eval-scenarios::driver_cli strict_mode_fails_before_spawn_when_required_key_is_absent
+        PASS [   0.016s] (263/405) wcore-eval-scenarios::fixture_manifest_contract deserialized_manifest_rejects_tampered_identity_component_and_schema
+        PASS [   0.009s] (264/405) wcore-eval-scenarios::platform_planning unsupported_platform_fails_preflight_in_strict_mode
+        PASS [   0.015s] (265/405) wcore-eval-scenarios::mcp_fixture_contract legacy_sse_round_trip
+        PASS [   0.009s] (266/405) wcore-eval-scenarios::receipt_contract behavior_digest_excludes_volatile_execution_identity
+        PASS [   0.033s] (267/405) wcore-eval-scenarios::catalog_cli zero_match_filter_exits_nonzero_before_execution
+        PASS [   0.011s] (268/405) wcore-eval-scenarios::openai_fixture_contract success_is_valid_sse_and_records_one_redacted_request
+        PASS [   0.010s] (269/405) wcore-eval-scenarios::platform_planning unsupported_platform_is_an_explicit_skip_in_lenient_mode
+        PASS [   0.010s] (270/405) wcore-eval-scenarios::receipt_contract explicit_unavailable_measurements_cannot_satisfy_the_milestone_gate
+        PASS [   0.010s] (271/405) wcore-eval-scenarios::receipt_contract filesystem_evidence_is_observed_only_after_capture_completes
+        PASS [   0.010s] (272/405) wcore-eval-scenarios::platform_planning scenarios_are_portable_by_default
+        PASS [   0.035s] (273/405) wcore-eval-scenarios::catalog_cli scenario_rejects_a_substring_near_match
+        PASS [   0.011s] (274/405) wcore-eval-scenarios::receipt_contract body_mutation_is_rejected_as_corruption
+        PASS [   0.011s] (275/405) wcore-eval-scenarios::receipt_contract critical_usability_finding_is_a_receipt_gate_failure
+        PASS [   0.013s] (276/405) wcore-eval-scenarios::f28_receipt_contract an_unrecognised_disposition_is_rejected_and_all_five_recognised_ones_are_accepted
+        PASS [   0.036s] (277/405) wcore-eval-scenarios::catalog_cli list_output_can_be_persisted_atomically
+        PASS [   0.012s] (278/405) wcore-eval-scenarios::receipt_contract golden_redacted_projection_digests_are_stable
+        PASS [   0.013s] (279/405) wcore-eval-scenarios::receipt_contract behavior_digest_binds_fixture_tool_and_result_semantics
+        PASS [   0.013s] (280/405) wcore-eval-scenarios::mcp_fixture_contract streamable_http_sse_round_trip
+        PASS [   0.019s] (281/405) wcore-eval-scenarios::mcp_fixture_contract stdio_round_trip_uses_portable_fixture_binary
+        PASS [   0.013s] (282/405) wcore-eval-scenarios::receipt_contract local_receipt_is_valid_but_never_authoritative
+        PASS [   0.014s] (283/405) wcore-eval-scenarios::openai_fixture_contract stalled_response_is_cancelled_by_bounded_shutdown
+        PASS [   0.014s] (284/405) wcore-eval-scenarios::openai_fixture_contract fault_steps_are_fifo_and_extra_requests_fail_closed
+        PASS [   0.013s] (285/405) wcore-eval-scenarios::receipt_contract parser_accepts_additive_v1_fields_and_rejects_ambiguous_json
+        PASS [   0.013s] (286/405) wcore-eval-scenarios::receipt_contract managed_http_egress_must_be_a_valid_complete_partition
+        PASS [   0.014s] (287/405) wcore-eval-scenarios::receipt_contract projection_secret_scan_fails_before_any_report_is_returned
+        PASS [   0.014s] (288/405) wcore-eval-scenarios::receipt_contract all_projections_share_the_receipt_and_exact_failure_identity
+        PASS [   0.023s] (289/405) wcore-eval-scenarios::f28_receipt_contract the_produced_receipt_rejects_a_single_flipped_byte
+        PASS [   0.039s] (290/405) wcore-eval-scenarios::catalog_cli scenario_is_repeatable_exact_and_catalog_ordered
+        PASS [   0.015s] (291/405) wcore-eval-scenarios::receipt_contract unsupported_schema_major_is_rejected
+        PASS [   0.041s] (292/405) wcore-eval-scenarios::driver_cli dry_matrix_renders_the_offline_plan_without_binary_discovery
+        PASS [   0.027s] (293/405) wcore-eval-scenarios::f28_receipt_contract an_unsigned_receipt_is_structurally_valid_but_carries_no_authority
+        PASS [   0.017s] (294/405) wcore-eval-scenarios::receipt_contract workspace_token_cannot_collide_with_literal_or_sibling_paths
+        PASS [   0.017s] (295/405) wcore-eval-scenarios::receipt_contract scenario_receipt_normalizes_only_the_owned_workspace
+        PASS [   0.017s] (296/405) wcore-eval-scenarios::receipt_contract incomplete_and_internally_inconsistent_receipts_are_rejected
+        PASS [   0.041s] (297/405) wcore-eval-scenarios::catalog_cli filter_selects_substrings_in_catalog_order
+        PASS [   0.018s] (298/405) wcore-eval-scenarios::receipt_contract trace_evidence_rejects_an_unsafe_workspace_root
+        PASS [   0.018s] (299/405) wcore-eval-scenarios::receipt_contract claimed_ci_authority_cannot_be_unsigned
+        PASS [   0.018s] (300/405) wcore-eval-scenarios::pty_tui_smoke zero_execution_guard
+        PASS [   0.019s] (301/405) wcore-eval-scenarios::openai_fixture_contract workspace_aware_identity_is_root_independent_and_collision_free
+        PASS [   0.007s] (302/405) wcore-eval-scenarios::repository_fixture_contract repository_seed_rejects_paths_outside_its_root
+        PASS [   0.008s] (303/405) wcore-eval-scenarios::repository_fixture_contract materialized_tree_digest_tracks_outcomes_not_roots
+        PASS [   0.008s] (304/405) wcore-eval-scenarios::repository_fixture_contract repository_seed_is_content_addressed_and_root_independent
+        PASS [   0.009s] (305/405) wcore-eval-scenarios::report_contract renderers_identify_the_exact_failed_cell
+        PASS [   0.008s] (306/405) wcore-eval-scenarios::runner_contracts provider_debug_never_exposes_api_key
+        PASS [   0.012s] (307/405) wcore-eval-scenarios::report_contract renderers_never_emit_raw_result_payloads
+        PASS [   0.012s] (308/405) wcore-eval-scenarios::runner_contracts candidate_cannot_migrate_descendants_to_parent_or_sibling_cgroups
+        PASS [   0.035s] (309/405) wcore-eval-scenarios::f28_receipt_contract the_produced_phase_28_receipt_parses_and_verifies_under_the_rust_verifier
+        PASS [   0.012s] (310/405) wcore-eval-scenarios::runner_contracts timeout_reaps_detached_descendant_and_listener
+        PASS [   0.007s] (311/405) wcore-eval-scenarios::sbom_contract a_package_with_no_declared_license_is_explicitly_unknown
+        PASS [   0.007s] (312/405) wcore-eval-scenarios::sbom_contract no_absolute_path_from_the_input_reaches_the_output
+        PASS [   0.007s] (313/405) wcore-eval-scenarios::sbom_contract components_are_sorted_by_package_url
+        PASS [   0.008s] (314/405) wcore-eval-scenarios::sbom_contract the_serial_number_is_derived_from_the_canonical_output_not_the_raw_input
+        PASS [   0.007s] (315/405) wcore-eval-scenarios::sbom_contract workspace_members_are_distinguishable_from_registry_dependencies
+        PASS [   0.008s] (316/405) wcore-eval-scenarios::sbom_contract identical_metadata_produces_byte_identical_sbom
+        PASS [   0.008s] (317/405) wcore-eval-scenarios::sbom_contract a_source_carrying_a_filesystem_path_is_refused
+        PASS [   0.008s] (318/405) wcore-eval-scenarios::sbom_contract malformed_or_empty_metadata_is_a_typed_error
+        PASS [   0.006s] (319/405) wcore-eval-scenarios::smoke binary_discovery_rejects_missing_override
+        PASS [   0.008s] (320/405) wcore-eval-scenarios::sbom_contract a_duplicate_package_url_is_an_error_rather_than_a_silent_deduplication
+        PASS [   0.008s] (321/405) wcore-eval-scenarios::sbom_contract the_document_carries_no_timestamp_and_no_random_serial
+        PASS [   0.038s] (322/405) wcore-eval-scenarios::f28_receipt_contract an_unknown_schema_or_version_fails_closed_rather_than_ignoring_the_new_sections
+        PASS [   0.009s] (323/405) wcore-eval-scenarios::sbom_contract a_version_with_build_metadata_is_percent_encoded_in_the_package_url
+        PASS [   0.008s] (324/405) wcore-eval-scenarios::sbom_contract the_pinned_fixture_reproduces_its_recorded_digest
+        PASS [   0.007s] (325/405) wcore-eval-scenarios::smoke binary_discovery_honors_absolute_cargo_target_dir
+        PASS [   0.007s] (326/405) wcore-eval-scenarios::smoke spawns_and_captures_help
+        PASS [   0.016s] (327/405) wcore-eval-scenarios::runner_contracts cleanup_runs_when_setup_fails
+        PASS [   0.008s] (328/405) wcore-eval-scenarios::smoke hung_scenario_does_not_leak_pid
+        PASS [   0.017s] (329/405) wcore-eval-scenarios::runner_contracts assertion_failure_still_reaps_owned_descendant_listener
+        PASS [   0.019s] (330/405) wcore-eval-scenarios::runner_contracts cleanup_runs_after_a_successful_scenario
+        PASS [   0.019s] (331/405) wcore-eval-scenarios::remote_execution_fixture_contract fixture_rejects_non_portable_artifacts_and_unbounded_inputs
+        PASS [   0.019s] (332/405) wcore-eval-scenarios::runner_contracts capability_startup_events_after_ready_satisfy_frozen_gate
+        PASS [   0.019s] (333/405) wcore-eval-scenarios::runner_contracts missing_cost_evidence_fails_closed
+        PASS [   0.020s] (334/405) wcore-eval-scenarios::runner_contracts missing_capability_startup_event_fails_frozen_gate
+        PASS [   0.020s] (335/405) wcore-eval-scenarios::runner_contracts completed_tool_calls_obey_the_per_turn_step_ceiling
+        PASS [   0.020s] (336/405) wcore-eval-scenarios::runner_contracts run_is_hermetic_and_redacts_child_secret_exfiltration
+        PASS [   0.020s] (337/405) wcore-eval-scenarios::runner_contracts ready_without_construction_fails_frozen_capability_gate
+        PASS [   0.021s] (338/405) wcore-eval-scenarios::runner_contracts latest_multi_turn_cost_aggregate_wins
+        PASS [   0.014s] (339/405) wcore-eval-scenarios::runner_cost_capture captures_session_cost_emitted_before_stream_end
+        PASS [   0.021s] (340/405) wcore-eval-scenarios::runner_contracts cancellation_reaps_owned_descendant_listener
+        PASS [   0.058s] (341/405) wcore-eval-scenarios::driver_cli non_finite_budgets_are_usage_errors
+        PASS [   0.046s] (342/405) wcore-eval-scenarios::f28_receipt_contract a_recorded_public_half_that_disagrees_with_its_fingerprint_is_rejected
+        PASS [   0.059s] (343/405) wcore-eval-scenarios::catalog_cli list_is_exact_unique_and_byte_stable
+        PASS [   0.066s] (344/405) wcore-eval-scenarios stderr_capture::tests::captures_lines_into_ring
+        PASS [   0.023s] (345/405) wcore-eval-scenarios::remote_execution_fixture_contract duplicate_and_out_of_order_script_events_are_rejected_before_execution
+        PASS [   0.064s] (346/405) wcore-eval-scenarios stderr_capture::tests::newline_free_payload_is_byte_bounded
+        PASS [   0.024s] (347/405) wcore-eval-scenarios::runner_contracts direct_child_early_exit_reaps_owned_descendant_listener
+        PASS [   0.024s] (348/405) wcore-eval-scenarios::runner_contracts dropping_runner_future_reaps_owned_descendant_listener
+        PASS [   0.048s] (349/405) wcore-eval-scenarios::f28_receipt_contract an_unknown_field_anywhere_in_the_body_is_rejected_rather_than_silently_dropped
+        PASS [   0.065s] (350/405) wcore-eval-scenarios stderr_capture::tests::ring_caps_at_50_lines
+        PASS [   0.039s] (351/405) wcore-eval-scenarios::receipt_contract unsigned_or_mismatched_ci_provenance_is_rejected
+        PASS [   0.078s] (352/405) wcore-eval-scenarios pty_capture::tests::drop_reaps_live_pty_process_group
+        PASS [   0.052s] (353/405) wcore-eval-scenarios::f28_receipt_contract a_signature_over_a_different_body_does_not_verify
+        PASS [   0.078s] (354/405) wcore-eval-scenarios pty_capture::tests::direct_child_exit_reaps_pty_descendant_group
+        PASS [   0.043s] (355/405) wcore-eval-scenarios::receipt_contract ci_authority_requires_an_external_trust_anchor
+        PASS [   0.052s] (356/405) wcore-eval-scenarios::f28_receipt_contract known_good_receipt_is_accepted_and_verifies_under_a_trusted_phase_key
+        PASS [   0.055s] (357/405) wcore-eval-scenarios::f28_receipt_contract an_open_finding_is_recordable_and_forces_the_receipt_to_report_its_gate_as_not_passed
+        PASS [   0.054s] (358/405) wcore-eval-scenarios::f28_receipt_contract the_recorded_public_half_is_really_the_key_that_is_checked
+        PASS [   0.036s] (359/405) wcore-eval-scenarios::runner_contracts oversized_unterminated_stdout_is_a_bounded_runner_error
+        PASS [   0.039s] (360/405) wcore-eval-scenarios::remote_execution_fixture_contract resource_request_is_denied_before_task_acceptance
+        PASS [   0.053s] (361/405) wcore-eval-scenarios::receipt_contract authoritative_workflow_rejects_local_incomplete_and_synthetic_receipts
+        PASS [   0.040s] (362/405) wcore-eval-scenarios::remote_execution_fixture_contract receipt_tampering_or_unpinned_backend_is_rejected
+        PASS [   0.040s] (363/405) wcore-eval-scenarios::remote_execution_fixture_contract output_budget_counts_streamed_text_and_artifact_together
+        PASS [   0.041s] (364/405) wcore-eval-scenarios::runner_contracts normal_exit_reaps_owned_descendant_listener
+        PASS [   0.043s] (365/405) wcore-eval-scenarios::remote_execution_fixture_contract artifact_over_task_output_budget_is_denied_after_acceptance
+        PASS [   0.066s] (366/405) wcore-eval-scenarios::f28_receipt_contract flipping_any_byte_of_the_body_breaks_verification
+        PASS [   0.067s] (367/405) wcore-eval-scenarios::f28_receipt_contract authority_is_derived_from_an_externally_configured_key_not_from_the_body
+        PASS [   0.049s] (368/405) wcore-eval-scenarios::release_integrity_contract an_invented_state_name_fails_to_deserialize
+        PASS [   0.051s] (369/405) wcore-eval-scenarios::remote_execution_fixture_contract accepted_success_is_ordered_content_addressed_and_attested
+        PASS [   0.067s] (370/405) wcore-eval-scenarios::receipt_contract receipt_cli_builds_external_policy_and_signs_only_through_stdin
+        PASS [   0.055s] (371/405) wcore-eval-scenarios::release_integrity_contract the_real_receipt_fixture_verifies_so_the_cross_domain_proof_is_not_vacuous
+        PASS [   0.057s] (372/405) wcore-eval-scenarios::release_integrity_contract trust_root_init_never_prints_the_signing_seed
+        PASS [   0.064s] (373/405) wcore-eval-scenarios::runner_contracts turn_deadline_is_enforced_as_over_time
+        PASS [   0.080s] (374/405) wcore-eval-scenarios::release_integrity_contract an_unknown_field_in_a_manifest_is_refused_at_deserialization
+        PASS [   0.095s] (375/405) wcore-eval-scenarios::receipt_contract authoritative_workflow_requires_external_key_and_complete_exact_policy
+        PASS [   0.091s] (376/405) wcore-eval-scenarios::release_integrity_contract an_unknown_key_id_is_refused_rather_than_trusted
+        PASS [   0.091s] (377/405) wcore-eval-scenarios::release_integrity_contract a_tampered_manifest_body_is_refused_by_digest
+        PASS [   0.107s] (378/405) wcore-eval-scenarios::remote_execution_fixture_contract every_non_success_lifecycle_has_one_attested_terminal_event
+        PASS [   0.120s] (379/405) wcore-eval-scenarios::release_integrity_contract receipt_signature_does_not_verify_as_a_manifest_signature
+        PASS [   0.121s] (380/405) wcore-eval-scenarios::release_integrity_contract an_unavailable_certification_binding_is_representable_and_verifies
+        PASS [   0.130s] (381/405) wcore-eval-scenarios::release_integrity_contract manifest_signature_does_not_verify_under_the_receipt_domain
+        PASS [   0.162s] (382/405) wcore-eval-scenarios::release_integrity_contract a_retired_key_is_refused_although_its_signature_is_valid
+        PASS [   0.169s] (383/405) wcore-eval-scenarios::release_integrity_contract a_record_bound_to_a_different_manifest_is_rejected
+        PASS [   0.214s] (384/405) wcore-eval-scenarios::release_integrity_contract a_broken_previous_record_digest_is_rejected
+        PASS [   0.222s] (385/405) wcore-eval-scenarios::release_integrity_contract a_reordered_chain_is_rejected
+        PASS [   0.226s] (386/405) wcore-eval-scenarios::release_integrity_contract a_fifth_state_record_is_rejected
+        PASS [   0.258s] (387/405) wcore-eval-scenarios::release_integrity_contract release_acceptance_signed_by_the_packaging_key_is_rejected
+        PASS [   0.275s] (388/405) wcore-eval-scenarios::release_integrity_contract all_four_records_signed_by_one_key_is_rejected
+        PASS [   0.266s] (389/405) wcore-eval-scenarios::release_integrity_contract evidence_reused_from_an_earlier_state_is_rejected
+        PASS [   0.269s] (390/405) wcore-eval-scenarios::runner_contracts timeout_reaps_owned_descendant_listener
+        PASS [   0.324s] (391/405) wcore-eval-scenarios::release_integrity_contract a_packaging_signature_replayed_into_the_acceptance_slot_is_rejected
+        PASS [   0.432s] (392/405) wcore-eval-scenarios::release_integrity_contract an_unavailable_certification_binding_cannot_reach_release_acceptance
+        PASS [   0.460s] (393/405) wcore-eval-scenarios::release_integrity_contract withholding_the_acceptance_key_caps_progress_at_rollback_rehearsal
+        PASS [   0.561s] (394/405) wcore-eval-scenarios::driver_cli budget_reservation_aborts_before_spending
+        PASS [   0.563s] (395/405) wcore-eval-scenarios::driver_cli verify_binary_proves_identity_without_provider_credentials
+        PASS [   0.572s] (396/405) wcore-eval-scenarios::driver_cli stale_expected_source_is_rejected_before_scenario_execution
+        PASS [   0.613s] (397/405) wcore-eval-scenarios fixtures::channel::tests::a_replay_of_a_stalled_deliverys_key_is_suppressed_not_duplicated
+        PASS [   0.614s] (398/405) wcore-eval-scenarios fixtures::channel::tests::a_stalling_sink_journals_the_arrival_it_never_answers
+        PASS [   1.015s] (399/405) wcore-eval-scenarios::runner_contracts outer_deadline_reaps_owned_descendant_listener
+        PASS [   1.063s] (400/405) wcore-eval-scenarios::driver_cli fixture_scenario_runs_through_exact_artifact_and_json_stream
+        PASS [   1.063s] (401/405) wcore-eval-scenarios::driver_cli fixture_run_publishes_one_redacted_receipt_bundle
+        PASS [   1.085s] (402/405) wcore-eval-scenarios::driver_cli failed_canary_aborts_every_remaining_run_cell
+        PASS [   2.870s] (403/405) wcore-eval-scenarios::supply_chain_tamper_corpus the_corpus_covers_every_f29_03_object_class
+        PASS [   3.335s] (404/405) wcore-eval-scenarios::supply_chain_tamper_corpus every_tamper_case_has_a_pristine_control_that_is_accepted
+        PASS [   3.429s] (405/405) wcore-eval-scenarios::supply_chain_tamper_corpus every_tamper_case_is_accepted_pristine_then_refused_after_one_mutation
+────────────
+     Summary [   3.509s] 405 tests run: 405 passed, 5 skipped

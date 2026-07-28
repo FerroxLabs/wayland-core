@@ -2,7 +2,7 @@
 
 **Adjudicated** 2026-07-28 at base `cf48b349d3aa84f85168511431b0a248fd50ded9`, lane `lane/28-04`.
 **Receipt** `28-04-CERTIFICATION-RECEIPT.json`, body digest
-`6b24b9c93fe0d5785887040a13aadd109ee400f391f8949c725c9e15d9de5da7`.
+`2037352cff1c2f2c8f8b35e59289ba73b514cd56977c8e22d599ed45e49e0fbb`.
 **Phase-scoped key** `phase-28-certification-2026-07-28`, public half
 `Ks20+wo/p7Jeaa0c5DY4ex6ylMrIDfhs4TsWQ/6apIE=`, fingerprint
 `f0ef7d06c620b23c1ad84cc083d0a3a01c0c1ca7270a1cfdd5e46c9b050ed466`.
