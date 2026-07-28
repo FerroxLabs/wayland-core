@@ -102,6 +102,9 @@ class Session:
             proc.stdin.flush()
             time.sleep(settle)
             proc.stdin.close()
+            # `communicate` re-flushes `proc.stdin` if it is still bound, which
+            # raises on the handle we just closed. Detach it first.
+            proc.stdin = None
             out, err = proc.communicate(timeout=self.timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
