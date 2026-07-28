@@ -777,15 +777,20 @@ def check_verdict(verdict_path: Path, roadmap_path: Path) -> list[Rejection]:
                 )
             )
             continue
+        # SYMMETRIC window. The first version searched only FORWARD from the quote and
+        # rejected a verdict that puts the grade in the heading immediately ABOVE it, which
+        # is if anything the clearer layout. The rule's intent is "the grade must be
+        # adjacent to the verbatim quote"; adjacency has two directions.
         idx = nverdict.index(norm(text))
-        window = nverdict[idx : idx + len(norm(text)) + 400]
+        start = max(0, idx - 400)
+        window = nverdict[start : idx + len(norm(text)) + 400]
         if not any(g in window for g in grades):
             out.append(
                 Rejection(
                     "F28V-GRADE",
                     f"criterion {number}",
                     "quoted verbatim but carries none of MET / MET WITH STATED EXCEPTIONS / "
-                    "NOT MET within 400 characters",
+                    "NOT MET within 400 characters either side",
                 )
             )
 

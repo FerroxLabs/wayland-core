@@ -753,25 +753,41 @@ fn platform_cell_counts_must_sum_so_a_red_cannot_be_dropped_from_the_arithmetic(
 // recomputation, and nobody checking that the Rust verifier can read the real file at all.
 // ---------------------------------------------------------------------------------------
 
-fn real_receipt_path() -> std::path::PathBuf {
+fn phase_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../.planning/phases/28-native-cross-platform-certification")
-        .join("28-04-CERTIFICATION-RECEIPT.json")
+}
+
+/// Locate the produced receipt, and FAIL rather than skip when it ought to exist.
+///
+/// The first version of this helper early-returned into a green whenever the file was
+/// absent. That is flavour B — the exact self-passing shape this phase inventoried across 16
+/// binaries and then found again in three "zero-execution guards" that were themselves
+/// `#[ignore]`d. A checkout carrying no `.planning/` at all (a consumer crate, a sparse
+/// clone) legitimately has nothing to check; a checkout that DOES carry the phase directory
+/// and does not carry its receipt is a real failure, and now says so instead of passing.
+fn real_receipt_path() -> Option<std::path::PathBuf> {
+    let dir = phase_dir();
+    if !dir.is_dir() {
+        return None;
+    }
+    let path = dir.join("28-04-CERTIFICATION-RECEIPT.json");
+    assert!(
+        path.is_file(),
+        "the Phase 28 directory exists at {} but carries no certification receipt; run \
+         `python3 .planning/scripts/f28-build-receipt.py`. Skipping here would let the Rust \
+         verifier and the produced artifact drift apart while both halves stayed green.",
+        dir.display()
+    );
+    Some(path)
 }
 
 #[test]
 fn the_produced_phase_28_receipt_parses_and_verifies_under_the_rust_verifier() {
-    let path = real_receipt_path();
-    if !path.exists() {
-        // The receipt is produced by `.planning/scripts/f28-build-receipt.py` during plan
-        // 28-04. A checkout without it (a consumer crate, a sparse clone) must not fail
-        // here — but a checkout WITH it must verify, which is the case that matters.
-        eprintln!(
-            "no phase-28 receipt at {}; nothing to check",
-            path.display()
-        );
+    let Some(path) = real_receipt_path() else {
+        eprintln!("no .planning phase directory in this checkout; nothing to check");
         return;
-    }
+    };
     let bytes = std::fs::read(&path).expect("read the produced receipt");
 
     // Trust the key the receipt itself records. That is legitimate ONLY because this test
@@ -861,10 +877,9 @@ fn the_produced_phase_28_receipt_parses_and_verifies_under_the_rust_verifier() {
 
 #[test]
 fn the_produced_receipt_rejects_a_single_flipped_byte() {
-    let path = real_receipt_path();
-    if !path.exists() {
+    let Some(path) = real_receipt_path() else {
         return;
-    }
+    };
     let text = std::fs::read_to_string(&path).expect("read the produced receipt");
     let receipt: CertificationReceiptV2 = serde_json::from_str(&text).unwrap();
     let CertAuthorityClaimV2::PhaseScoped {

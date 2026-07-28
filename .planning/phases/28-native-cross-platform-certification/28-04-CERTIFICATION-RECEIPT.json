@@ -1,7 +1,7 @@
 {
   "schema": "wayland.cert.receipt",
   "schema_version": 2,
-  "body_sha256": "6b24b9c93fe0d5785887040a13aadd109ee400f391f8949c725c9e15d9de5da7",
+  "body_sha256": "6f78f103bd138d4b7b770b7f4b4065cdb096d5e4153b78021c2d69556cf9c2b1",
   "body": {
     "certification_id": "f28-native-cross-platform-certification",
     "phase": "28-native-cross-platform-certification",
@@ -408,6 +408,12 @@
           "path": "evidence/28-04/macos-ci-30364529551.log",
           "sha256": "89d28572a8d732b97d4c98f2e7b4ab4af95ee7aa68ea8b1a7f9b7803ba421e65",
           "bytes": 97244,
+          "produced_by": "28-04"
+        },
+        {
+          "path": "evidence/28-04/verifier-rejections.log",
+          "sha256": "e7f4c37a283a6d1ff346cf220be602b352c0352fa5b4d67b7c520733c58b6976",
+          "bytes": 3219,
           "produced_by": "28-04"
         },
         {
@@ -1431,7 +1437,7 @@
     "key_id": "phase-28-certification-2026-07-28",
     "public_key_base64": "Ks20+wo/p7Jeaa0c5DY4ex6ylMrIDfhs4TsWQ/6apIE=",
     "fingerprint_sha256": "f0ef7d06c620b23c1ad84cc083d0a3a01c0c1ca7270a1cfdd5e46c9b050ed466",
-    "signature_base64": "H2fL0s6hi9IVtyt4ZCSQ1TzokylbdrtApM8eKDYtiI4AwS+y+mFcc0jCS3HqPeXg+cwYAfzqGomwgy1tdlDKAw==",
+    "signature_base64": "sRDDHE5HoMNTdDVCH2Q3dFT8Em2Je4rTWCLPkIH7e17/ROY27LB5KBblfQj2P9FxgibCOjRSz+Mld5b/leX6CA==",
     "scope": "PHASE-SCOPED. This signature binds authorship and integrity of the assembled evidence for Phase 28 only. It is NOT a release trust root, NOT a seal, and NOT an authorization to release. Trust-root binding, rotation and revocation belong to Phase 29; tagging, releasing, merging and issue closure are reserved to Sean."
   }
 }
