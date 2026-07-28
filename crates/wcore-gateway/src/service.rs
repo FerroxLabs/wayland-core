@@ -143,11 +143,51 @@ pub trait ServiceManager {
     fn status_argv(&self, spec: &ServiceSpec) -> Vec<String>;
 
     /// The unit/plist/task definition written to disk, when the family
-    /// needs one. Windows registers through a command line and needs none.
+    /// needs one.
     fn unit_text(&self, spec: &ServiceSpec) -> Option<String>;
 
     /// Where [`Self::unit_text`] is written.
     fn unit_path(&self, spec: &ServiceSpec) -> Option<PathBuf>;
+
+    /// Whether [`Self::unit_path`] is this family's REGISTRATION RECORD — a
+    /// file the platform itself reads to decide the service exists.
+    ///
+    /// F24-J-H3. This was previously inferred from `unit_path().is_some()`,
+    /// which was correct only while Windows was the sole family without a
+    /// unit file. Windows now writes one, but Task Scheduler COPIES it into
+    /// its own store at `/create` time and never reads it again — the file is
+    /// an import artifact, not a registration. Inferring from its presence
+    /// would report `Registered` for a task deleted out of band, which is
+    /// exactly the misreport F24-B-H2 closed for systemd. A family that
+    /// answers `false` is asked its query verb instead.
+    fn unit_is_registration_record(&self) -> bool {
+        true
+    }
+}
+
+/// Escape a value for XML ELEMENT TEXT.
+///
+/// The binary path and the gateway home cross a trust boundary from the
+/// operator (T-24-01-01) and, on Windows, they are now interpolated into a
+/// Task Scheduler XML document rather than only into an argv. A path
+/// containing `&` or `<` would otherwise produce a malformed document —
+/// `schtasks` rejects it with `The task XML is malformed`, which is a refusal
+/// rather than a breach, but a `]]>`-shaped value in a less careful document
+/// shape is not. Escaping at the single point of interpolation is the
+/// invariant, not the fact that today's rejection happens to be safe.
+fn xml_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// The single platform-selection point in the workspace.
@@ -367,11 +407,56 @@ impl ServiceManager for SystemdManager {
 ///   its heartbeat from a LATER, SEPARATE session after the registration
 ///   had already been deleted.
 ///
-/// OPEN RISK, carried to 24-04 rather than closed here: task
-/// restart-on-failure is capped in count and delayed in time, and is
-/// genuinely weaker than a service control manager recovery policy.
-/// Criterion 5 requires the PLATFORM to bring the runtime back after a hard
-/// kill; nothing measured in 24-01 shows that it does.
+/// # Recovery after a hard kill (F24-J-H3) — measured, not assumed
+///
+/// 24-01 carried this forward as an OPEN RISK in its own words: *"Criterion 5
+/// requires the PLATFORM to bring the runtime back after a hard kill; nothing
+/// measured in 24-01 shows that it does."* 24-C5 measured it on the real box,
+/// and the answer under the original `/create /sc onlogon` registration was
+/// **no** — `schtasks /create /sc onlogon` sets no recovery policy at all, so
+/// after `taskkill /F` the task returned to `Ready` with `Last Result: 1` and
+/// stayed there. The registration is therefore built from an XML document
+/// (`/create /xml`), which is the only `schtasks` path that can express one.
+///
+/// Three things about that document were established by measurement on
+/// Windows 11 26100, and each contradicts the obvious guess:
+///
+/// 1. **`<RestartOnFailure>` alone does NOT recover this service.** It
+///    registers, and Task Scheduler's own `/query /xml` reads it back, and
+///    after a `taskkill /F` of a task started on demand the runtime was still
+///    down 3m20s later against a `PT1M` interval. It is kept below because it
+///    covers the *fails to start* case, but it is NOT what recovers a killed
+///    process, and a gate asserting only its presence in the XML would have
+///    passed over a service that never came back.
+/// 2. **A repetition trigger is what recovers it.** A `<TimeTrigger>` with a
+///    one-minute `<Repetition>` and `MultipleInstancesPolicy=IgnoreNew` is a
+///    supervisor: every minute the platform tries to start the task, an
+///    already-running instance makes that a no-op, and a dead one is
+///    replaced. Measured: pid killed at 21:21:25 with **no** manual start,
+///    platform-started replacement pid at 21:22:01, and a single instance
+///    still (`INSTANCE_COUNT=1`) minutes of repetitions later.
+/// 3. **The declaration must say `encoding="UTF-16"`.** `schtasks` rejects
+///    `encoding="UTF-8"` with `ERROR: unable to switch the encoding` even
+///    when the bytes genuinely are UTF-8; with the UTF-16 declaration the
+///    same UTF-8 bytes are accepted. The file this crate writes is a Rust
+///    `String`, so it is UTF-8; the declaration is what Windows insists on.
+///
+/// No `<Principals>` block is emitted, and that is also measured rather than
+/// stylistic: `schtasks` supplies the invoking user with `Logon Mode:
+/// Interactive only` when the element is absent, which is the per-user,
+/// non-elevated identity this module wants, while an explicit
+/// `<UserId>%USERDOMAIN%\%USERNAME%</UserId>` is REJECTED on a workgroup
+/// machine (`No mapping between account names and security IDs was done`,
+/// because `USERDOMAIN` is `WORKGROUP`). Deriving the principal from the
+/// environment would have failed on every non-domain-joined desktop.
+///
+/// KNOWN DIVERGENCE, deliberate: while the task is registered, `gateway stop`
+/// (`schtasks /end`) is not durable — the repetition restarts the runtime
+/// within a minute. That is the same trade macOS already makes, where
+/// `KeepAlive` undoes `launchctl stop`; systemd is the outlier in
+/// distinguishing an explicit stop from a failure. `uninstall` removes the
+/// task and therefore the supervisor, so the drain-then-uninstall path is
+/// unaffected.
 #[derive(Debug, Default)]
 pub struct ScheduledTaskManager;
 
@@ -381,39 +466,24 @@ impl ServiceManager for ScheduledTaskManager {
     }
 
     fn install_argv(&self, spec: &ServiceSpec) -> Vec<String> {
-        // ARGV mode. The binary path and home cross a trust boundary from
-        // the operator; in argv mode a metacharacter in either reaches the
-        // child as a literal byte rather than being interpreted (T-24-01-01).
+        // ARGV mode. The task name and the XML path cross a trust boundary
+        // from the operator; in argv mode a metacharacter in either reaches
+        // the child as a literal byte rather than being interpreted
+        // (T-24-01-01).
+        //
+        // F24-J-H3: `/xml` rather than `/sc onlogon`. The recovery policy the
+        // criterion requires cannot be expressed on the `/sc` command line at
+        // all — see the type's own documentation for what was measured.
         vec![
             "schtasks".into(),
             "/create".into(),
             "/tn".into(),
             spec.service_name(),
-            "/tr".into(),
-            // F24-J-H1. `--home` is here because Task Scheduler has NO
-            // mechanism for setting an environment variable on a registered
-            // task, while the other two families do: the launchd plist carries
-            // `EnvironmentVariables/WAYLAND_HOME` and the systemd unit carries
-            // `Environment=WAYLAND_HOME=`. Without it the Windows task started
-            // the runtime against the DEFAULT home rather than the home it was
-            // installed for, so `gateway status --profile <p>` reported
-            // `stopped` with a null pid for a gateway that was running — the
-            // same misreport shape as F24-B-H1, one field over. Measured live
-            // on the real box: task Last Run Time recorded, `wayland-core.exe`
-            // in the process table, status `stopped`.
-            //
-            // The home is passed as an ARGUMENT, not by wrapping the command in
-            // a shell that sets a variable. A `cmd /c "set WAYLAND_HOME=..."`
-            // wrapper would interpolate an operator-supplied path into a
-            // shell string, which is the injection shape AGENTS.md forbids.
-            format!(
-                "\"{}\" gateway run --profile {} --home \"{}\"",
-                spec.binary.display(),
-                spec.sanitised_profile(),
-                spec.home.display()
-            ),
-            "/sc".into(),
-            "onlogon".into(),
+            "/xml".into(),
+            self.unit_path(spec)
+                .expect("the scheduled-task family always has a unit path")
+                .to_string_lossy()
+                .into_owned(),
             "/f".into(),
         ]
     }
@@ -462,14 +532,89 @@ impl ServiceManager for ScheduledTaskManager {
         ]
     }
 
-    fn unit_text(&self, _spec: &ServiceSpec) -> Option<String> {
-        // Windows registers through a command line; there is no on-disk
-        // unit to write.
-        None
+    fn unit_text(&self, spec: &ServiceSpec) -> Option<String> {
+        // F24-J-H1 is preserved verbatim through the `<Arguments>` element:
+        // Task Scheduler has NO mechanism for setting an environment variable
+        // on a task, while the launchd plist carries
+        // `EnvironmentVariables/WAYLAND_HOME` and the systemd unit carries
+        // `Environment=WAYLAND_HOME=`. Without `--home` the task ran the
+        // runtime against the DEFAULT home rather than the one it was
+        // installed for. The home is an ARGUMENT, never a `cmd /c "set ..."`
+        // wrapper, which would interpolate an operator path into a shell
+        // string — the injection shape AGENTS.md forbids.
+        //
+        // `<Command>` and `<Arguments>` are separate elements, so the binary
+        // path is not part of any string Windows has to re-split.
+        Some(format!(
+            r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Wayland Core gateway ({profile})</Description>
+  </RegistrationInfo>
+  <Settings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <Priority>7</Priority>
+  </Settings>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+    <TimeTrigger>
+      <StartBoundary>2000-01-01T00:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <Repetition>
+        <Interval>PT1M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+    </TimeTrigger>
+  </Triggers>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{binary}</Command>
+      <Arguments>gateway run --profile {profile} --home "{home}"</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"#,
+            profile = xml_escape(&spec.sanitised_profile()),
+            binary = xml_escape(&spec.binary.display().to_string()),
+            home = xml_escape(&spec.home.display().to_string()),
+        ))
     }
 
-    fn unit_path(&self, _spec: &ServiceSpec) -> Option<PathBuf> {
-        None
+    /// `<gateway home>/<service name>.task.xml`.
+    ///
+    /// Inside the hermetic home, unlike the two Unix families, because this
+    /// file is an IMPORT ARTIFACT rather than a registration: Task Scheduler
+    /// copies it into its own store at `/create` time and never reads the
+    /// path again. Nothing outside `$WAYLAND_HOME` needs to scan for it, so
+    /// nothing outside `$WAYLAND_HOME` is written. See
+    /// [`ServiceManager::unit_is_registration_record`].
+    fn unit_path(&self, spec: &ServiceSpec) -> Option<PathBuf> {
+        Some(spec.home.join(format!("{}.task.xml", spec.service_name())))
+    }
+
+    fn unit_is_registration_record(&self) -> bool {
+        false
     }
 }
 
@@ -577,12 +722,33 @@ mod tests {
     }
 
     #[test]
-    fn the_windows_manager_writes_no_unit_and_the_unix_families_do() {
+    fn all_three_families_write_a_unit_but_only_two_of_them_are_registrations() {
+        // F24-J-H3. Windows gained a unit file, and the distinction that
+        // used to be carried by `unit_path().is_none()` had to move somewhere
+        // explicit or `is_registered` would silently start answering from a
+        // file Task Scheduler never reads.
         let s = spec();
-        assert!(ScheduledTaskManager.unit_text(&s).is_none());
-        assert!(ScheduledTaskManager.unit_path(&s).is_none());
+        assert!(ScheduledTaskManager.unit_text(&s).is_some());
+        assert!(ScheduledTaskManager.unit_path(&s).is_some());
         assert!(SystemdManager.unit_text(&s).is_some());
         assert!(LaunchdManager.unit_text(&s).is_some());
+
+        assert!(SystemdManager.unit_is_registration_record());
+        assert!(LaunchdManager.unit_is_registration_record());
+        assert!(
+            !ScheduledTaskManager.unit_is_registration_record(),
+            "the schtasks XML is an import artifact, not a registration record"
+        );
+
+        // The import artifact belongs inside the hermetic home; the two Unix
+        // units are pointers INTO the home from a directory their platform
+        // scans, so they do not.
+        let p = ScheduledTaskManager.unit_path(&s).unwrap();
+        assert!(
+            p.starts_with(&s.home),
+            "the task XML must live inside the gateway home, got {}",
+            p.display()
+        );
     }
 
     #[test]
@@ -608,11 +774,127 @@ mod tests {
     }
 
     #[test]
-    fn the_windows_task_is_registered_at_logon_and_forced() {
-        let argv = ScheduledTaskManager.install_argv(&spec());
+    fn the_windows_task_is_registered_from_xml_at_logon_and_forced() {
+        let s = spec();
+        let argv = ScheduledTaskManager.install_argv(&s);
         assert_eq!(argv[0], "schtasks");
-        assert!(argv.iter().any(|a| a == "onlogon"));
         assert!(argv.iter().any(|a| a == "/f"));
+        // F24-J-H3: `/sc onlogon` cannot express a recovery policy at all, so
+        // the registration is an XML import. Going back to `/sc` is exactly
+        // the regression this asserts against.
+        assert!(
+            argv.iter().any(|a| a == "/xml"),
+            "the registration must be an XML import: {argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|a| a == "/sc"),
+            "a `/sc` registration carries no recovery policy: {argv:?}"
+        );
+        let xml_path = ScheduledTaskManager.unit_path(&s).unwrap();
+        assert!(
+            argv.iter().any(|a| a == &xml_path.to_string_lossy()),
+            "the argv must name the file the caller writes: {argv:?}"
+        );
+        // The logon trigger did not go away; it moved into the document.
+        let xml = ScheduledTaskManager.unit_text(&s).unwrap();
+        assert!(xml.contains("<LogonTrigger>"), "{xml}");
+    }
+
+    #[test]
+    fn the_windows_task_recovers_through_a_repetition_supervisor_not_restart_on_failure() {
+        // MEASURED on Windows 11 26100, and the measurement is the reason
+        // this test is shaped the way it is: a task carrying ONLY
+        // `<RestartOnFailure>` registered, read back through Task
+        // Scheduler's own `/query /xml`, and then did NOT bring the runtime
+        // back — 3m20s after `taskkill /F` against a `PT1M` interval the
+        // status was still `Ready`, `Last Result: 1`. A gate asserting the
+        // presence of `<RestartOnFailure>` would have passed a service that
+        // stays dead, which is the same self-passing shape as asserting on a
+        // file the executor itself wrote.
+        //
+        // What recovers it is a repetition trigger plus `IgnoreNew`: the
+        // platform attempts a start every minute, an already-running
+        // instance makes that a no-op, a dead one is replaced. Measured: pid
+        // killed 21:21:25, no manual start, platform-started replacement at
+        // 21:22:01, single instance still minutes later.
+        let xml = ScheduledTaskManager.unit_text(&spec()).unwrap();
+        assert!(
+            xml.contains("<Repetition>"),
+            "no repetition trigger: nothing restarts a killed runtime\n{xml}"
+        );
+        assert!(
+            xml.contains("<Interval>PT1M</Interval>"),
+            "the repetition interval is the recovery latency bound\n{xml}"
+        );
+        assert!(
+            xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"),
+            "without IgnoreNew the repetition stacks a new gateway every minute\n{xml}"
+        );
+        assert!(
+            xml.contains("<StopAtDurationEnd>false</StopAtDurationEnd>"),
+            "the supervisor must not expire\n{xml}"
+        );
+        // Kept for the fails-to-start case, but never the load-bearing part.
+        assert!(xml.contains("<RestartOnFailure>"), "{xml}");
+    }
+
+    #[test]
+    fn the_windows_task_xml_is_in_the_only_form_schtasks_accepts() {
+        // MEASURED, and it contradicts the obvious guess. `schtasks
+        // /create /xml` rejects a declaration of `encoding="UTF-8"` with
+        // `ERROR: unable to switch the encoding` even when the bytes are
+        // genuinely UTF-8; the same bytes are accepted under an
+        // `encoding="UTF-16"` declaration. This crate writes a Rust `String`,
+        // so the bytes are always UTF-8 and the declaration is the part that
+        // has to say UTF-16.
+        let xml = ScheduledTaskManager.unit_text(&spec()).unwrap();
+        assert!(
+            xml.starts_with(r#"<?xml version="1.0" encoding="UTF-16"?>"#),
+            "schtasks refuses any other declaration\n{xml}"
+        );
+        // Also measured: with the element absent, `schtasks` supplies the
+        // invoking user and `Logon Mode: Interactive only`, which is the
+        // per-user non-elevated identity this module wants. An explicit
+        // `%USERDOMAIN%\%USERNAME%` principal is REJECTED on a workgroup
+        // machine — `No mapping between account names and security IDs was
+        // done`, because USERDOMAIN is `WORKGROUP` — so deriving one from
+        // the environment would fail on every non-domain-joined desktop.
+        assert!(
+            !xml.contains("<Principals>"),
+            "an environment-derived principal does not resolve on a workgroup machine\n{xml}"
+        );
+    }
+
+    #[test]
+    fn a_hostile_path_cannot_break_out_of_the_windows_task_document() {
+        // The binary path and the home cross a trust boundary from the
+        // operator, and on Windows they are now interpolated into XML rather
+        // than only into an argv.
+        let s = ServiceSpec {
+            profile: "default".into(),
+            binary: PathBuf::from(r"C:\a&b\<x>\wayland-core.exe"),
+            home: PathBuf::from(r"C:\home\o'p\a&b"),
+        };
+        let xml = ScheduledTaskManager.unit_text(&s).unwrap();
+        assert!(!xml.contains("a&b"), "an unescaped & survived:\n{xml}");
+        assert!(
+            !xml.contains("<x>"),
+            "an unescaped element survived:\n{xml}"
+        );
+        assert!(xml.contains("a&amp;b"), "the & was not escaped:\n{xml}");
+        assert!(
+            xml.contains("&lt;x&gt;"),
+            "the brackets were not escaped:\n{xml}"
+        );
+        assert!(
+            xml.contains("o&apos;p"),
+            "the quote was not escaped:\n{xml}"
+        );
+
+        // The document must still be the shape Task Scheduler parses: one
+        // `<Exec>`, and the escaping must not have eaten a real element.
+        assert_eq!(xml.matches("<Exec>").count(), 1, "{xml}");
+        assert_eq!(xml.matches("</Task>").count(), 1, "{xml}");
     }
 
     #[test]
@@ -642,16 +924,23 @@ mod tests {
             "launchd plist lost the home:\n{launchd}"
         );
 
-        // Windows registers through a command line and has no unit, so the
-        // home has to appear in the argv or it appears nowhere.
-        let argv = ScheduledTaskManager.install_argv(&s);
+        // Windows has no environment-variable mechanism on a task, so the
+        // home has to reach the runtime as an ARGUMENT or it reaches it
+        // nowhere. Since F24-J-H3 that argument lives in the XML the
+        // registration imports rather than in a `/tr` command string.
+        let task = ScheduledTaskManager
+            .unit_text(&s)
+            .expect("the scheduled-task family always writes a document");
+        assert!(task.contains(&home), "the task XML lost the home:\n{task}");
         assert!(
-            argv.iter().any(|a| a.contains(&home)),
-            "the schtasks registration lost the home: {argv:?}"
+            task.contains("--home"),
+            "the task XML must pass --home explicitly:\n{task}"
         );
+        // And a shell wrapper is still forbidden: `cmd /c "set WAYLAND_HOME=…"`
+        // would interpolate an operator path into a shell string.
         assert!(
-            argv.iter().any(|a| a.contains("--home")),
-            "the schtasks registration must pass --home explicitly: {argv:?}"
+            !task.contains("cmd /c") && !task.contains("cmd.exe"),
+            "the home must not be carried by a shell wrapper:\n{task}"
         );
     }
 

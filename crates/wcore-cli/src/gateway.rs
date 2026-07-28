@@ -406,16 +406,24 @@ pub fn read_live_projection(home: &Path) -> Option<StatusProjection> {
 /// An operator debugging a service that will not stay up would have been
 /// told it was never installed.
 ///
-/// The branch is on a CAPABILITY the trait already exposes rather than on
-/// the platform: a family that writes an on-disk unit has that file as its
-/// registration record, and a family that does not (Windows registers
-/// through a command line) is asked its query verb, which for `schtasks
-/// /query` genuinely answers registration rather than activity.
+/// The branch is on a CAPABILITY the trait exposes rather than on the
+/// platform: a family whose on-disk unit IS its registration record has that
+/// file as the answer, and a family whose unit is not (Windows now writes an
+/// XML document, but Task Scheduler copies it into its own store at create
+/// time and never reads it again) is asked its query verb, which for
+/// `schtasks /query` genuinely answers registration rather than activity.
+///
+/// F24-J-H3 moved this off `unit_path().is_some()`. That inference was
+/// correct only while Windows was the sole family without a unit file; once
+/// it had one, presence-of-file would have reported `Registered` for a task
+/// deleted out of band.
 async fn is_registered(
     mgr: &dyn wcore_gateway::service::ServiceManager,
     spec: &ServiceSpec,
 ) -> bool {
-    if let Some(unit) = mgr.unit_path(spec) {
+    if mgr.unit_is_registration_record()
+        && let Some(unit) = mgr.unit_path(spec)
+    {
         return unit.exists();
     }
     let argv = mgr.status_argv(spec);
@@ -986,7 +994,10 @@ mod tests {
 
     #[test]
     fn the_default_profile_is_named_not_empty() {
-        let s = ScopeArgs { profile: None };
+        let s = ScopeArgs {
+            profile: None,
+            home: None,
+        };
         // An empty profile would produce the service identifier
         // `wayland-core-gateway-`, which every family accepts and no operator
         // can tell apart from another empty one.
@@ -997,6 +1008,7 @@ mod tests {
     fn an_explicit_profile_wins_over_the_environment() {
         let s = ScopeArgs {
             profile: Some("explicit".into()),
+            home: None,
         };
         assert_eq!(s.profile(), "explicit");
     }
