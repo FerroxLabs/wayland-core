@@ -566,7 +566,10 @@ mod tests {
             ChannelEvent::MessageReceived { msg } => {
                 assert_eq!(msg.id, "SM123");
                 assert_eq!(msg.author, "+15551234567");
-                assert_eq!(msg.conversation_id, "+15559876543");
+                // F24-C3-H3: the conversation is the peer (`From`), not the
+                // bot's own number (`To`). See `inbound::pairs_to_incoming`.
+                assert_eq!(msg.conversation_id, "+15551234567");
+                assert_eq!(msg.account_id.as_deref(), Some("+15559876543"));
                 assert_eq!(msg.text, "hi there");
             }
             other => panic!("expected MessageReceived, got {other:?}"),
