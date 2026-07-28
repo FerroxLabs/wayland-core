@@ -70,6 +70,39 @@ echo "### CTRL-01 SUPPLY-* : 'Plans 29-03 ... and 29-04 ...' listed as the NEXT 
 claim "STALE-07" "29-03 is still the next proof" "$P/29-supply-chain-release-integrity/29-03-SUMMARY.md" ABSENT "-"
 claim "STALE-08" "29-04 is still the next proof" "$P/29-supply-chain-release-integrity/29-04-SUMMARY.md" ABSENT "-"
 
+echo "### CTRL-01 REACH-* : 'three of four criteria are NOT MET. C1 fails on the"
+echo "###                   hibernating cloud leg, unexercised for want of a"
+echo "###                   credential only Sean can mint. C2 fails ... not a second"
+echo "###                   physical host. C4 fails ... orphan counts are NOT MEASURED'"
+echo "-- STALE-11"
+echo "   claim : Phase 25 has 1 of 4 Success Criteria MET"
+echo "   cmd   : grep -cE '\\*\\*MET' 25-PHASE-STATUS.md verdict table rows 7-10"
+SP=$P/25-remote-reach-nodes-plugin-lifecycle/25-PHASE-STATUS.md
+MET=$(/usr/bin/sed -n '7,10p' "$SP" | /usr/bin/grep -c '\*\*MET')
+echo "   out   : $MET of 4 criteria rows now carry a bolded MET"
+/usr/bin/sed -n '7,10p' "$SP" | cut -c1-110 | /usr/bin/sed 's/^/          /'
+if [ "$MET" -ge 3 ]; then echo "   VERDICT: CLAIM FALSIFIED BY THE TREE — the ledger UNDERSTATES this family"
+else echo "   VERDICT: claim holds"; fi
+echo
+
+echo "-- STALE-12"
+echo "   claim : the cloud leg is blocked for want of a credential only Sean can mint"
+echo "   cmd   : test -f 25-CLOUD-SUMMARY.md  (the lane that ran it)"
+if [ -f "$P/25-remote-reach-nodes-plugin-lifecycle/25-CLOUD-SUMMARY.md" ]; then
+  echo "   out   : EXISTS — $(/usr/bin/grep -m1 -o 'Criterion 1 is now MET' "$SP" || echo 'cloud lane landed')"
+  echo "   VERDICT: CLAIM FALSIFIED BY THE TREE"
+else echo "   out   : ABSENT"; echo "   VERDICT: claim holds"; fi
+echo
+
+echo "-- STALE-13"
+echo "   claim : no second physical host / no SSH trust relationship exists (C2)"
+echo "   cmd   : test -f 25-HOSTS-SUMMARY.md"
+if [ -f "$P/25-remote-reach-nodes-plugin-lifecycle/25-HOSTS-SUMMARY.md" ]; then
+  echo "   out   : EXISTS ($(/usr/bin/wc -c < "$P/25-remote-reach-nodes-plugin-lifecycle/25-HOSTS-SUMMARY.md" | tr -d ' ') bytes)"
+  echo "   VERDICT: CLAIM FALSIFIED BY THE TREE"
+else echo "   out   : ABSENT"; echo "   VERDICT: claim holds"; fi
+echo
+
 echo "### CTRL-01 refresh obligations : two sibling registers said to be stale"
 echo "-- STALE-09"
 echo "   claim : ROADMAP.md's progress table still reads 'Not started' for phases 21-29"

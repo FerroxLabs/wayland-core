@@ -51,5 +51,10 @@ F30-LR-50::CONFIRMED::sev=NONE::evidence=family-clause-check.txt
 F30-LR-51::CONFIRMED::sev=MEDIUM::evidence=family-clause-check.txt
 F30-LR-52::CONFIRMED::sev=MEDIUM::evidence=family-clause-check.txt
 F30-LR-53::CONFIRMED::sev=NONE::evidence=peer-baselines.txt
-F30-LR-54::CONFIRMED::sev=MEDIUM::evidence=staleness-check.txt
-F30-LR-55::CONFIRMED::sev=NONE::evidence=SEPARATION-PROOF.txt
+F30-LR-54::CONFIRMED::sev=NONE::evidence=SEPARATION-PROOF.txt
+F30-LR-55::CONFIRMED::sev=NONE::evidence=live-verify-transcript.txt
+F30-LR-56::CONFIRMED::sev=NONE::evidence=regeneration-gate.txt
+F30-LR-57::CONFIRMED::sev=HIGH::evidence=staleness-check.txt
+F30-LR-58::CONFIRMED::sev=MEDIUM::evidence=staleness-check.txt
+F30-LR-59::CONFIRMED::sev=MEDIUM::evidence=surface-diff-summary.txt
+F30-LR-60::CONFIRMED::sev=HIGH::evidence=surface-diff-summary.txt

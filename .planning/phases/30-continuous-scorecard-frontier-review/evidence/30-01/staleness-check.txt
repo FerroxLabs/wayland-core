@@ -1,6 +1,6 @@
 CLAIM-vs-TREE CHECK
-date : 2026-07-28T14:54:20Z
-base : a3003096a931f80965ace85fd8e553b13da519cc
+date : 2026-07-28T15:28:26Z
+base : 9a6a1f2ffe38860ec3b7e4aab98db98d95292a11
 ledger refreshed at : 77e20891 2026-07-28 08:28:39 +0700
 roadmap reconciled  : e007b907 2026-07-28 08:42:14 +0700
 
@@ -59,6 +59,32 @@ roadmap reconciled  : e007b907 2026-07-28 08:42:14 +0700
    claim : 29-04 is still the next proof
    cmd   : test -f .planning/phases/29-supply-chain-release-integrity/29-04-SUMMARY.md
    out   : EXISTS  (13145 bytes)  status: complete  termination_state: 2 (Complete, goal not achieved)
+   VERDICT: CLAIM FALSIFIED BY THE TREE
+
+### CTRL-01 REACH-* : 'three of four criteria are NOT MET. C1 fails on the
+###                   hibernating cloud leg, unexercised for want of a
+###                   credential only Sean can mint. C2 fails ... not a second
+###                   physical host. C4 fails ... orphan counts are NOT MEASURED'
+-- STALE-11
+   claim : Phase 25 has 1 of 4 Success Criteria MET
+   cmd   : grep -cE '\*\*MET' 25-PHASE-STATUS.md verdict table rows 7-10
+   out   : 4 of 4 criteria rows now carry a bolded MET
+          | 1 — one task across local / container / ssh / cloud | **MET** | `lane/25-cloud`, 2026-07-28 |
+          | 2 — nodes pair, advertise, revoke, recover, mixed versions, attribution | **MET on every named property**, o
+          | 3 — twelve-verb plugin lifecycle | **MET on Linux**, PARTIAL on Windows | `lane/25`, 2026-07-27 |
+          | 4 — fail closed, no orphaned execution | **MET** | `lane/25-hosts`, 2026-07-28 |
+   VERDICT: CLAIM FALSIFIED BY THE TREE — the ledger UNDERSTATES this family
+
+-- STALE-12
+   claim : the cloud leg is blocked for want of a credential only Sean can mint
+   cmd   : test -f 25-CLOUD-SUMMARY.md  (the lane that ran it)
+   out   : EXISTS — Criterion 1 is now MET
+   VERDICT: CLAIM FALSIFIED BY THE TREE
+
+-- STALE-13
+   claim : no second physical host / no SSH trust relationship exists (C2)
+   cmd   : test -f 25-HOSTS-SUMMARY.md
+   out   : EXISTS (22157 bytes)
    VERDICT: CLAIM FALSIFIED BY THE TREE
 
 ### CTRL-01 refresh obligations : two sibling registers said to be stale
