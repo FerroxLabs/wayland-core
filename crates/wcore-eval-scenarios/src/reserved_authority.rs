@@ -665,7 +665,19 @@ mod tests {
     fn civil_from_days_matches_known_dates() {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(19_723), (2024, 1, 1));
-        assert_eq!(civil_from_days(11_016), (2000, 3, 1));
+        // The 2000 leap day, covered on BOTH sides. The first run of this test asserted
+        // day 11_016 was 2000-03-01; the implementation answered 2000-02-29 and the
+        // implementation was right — 2000 is a leap year because it divides by 400, which is
+        // the exact case a naive four-year rule gets wrong. The oracle was corrected, not the
+        // code, and the boundary is now pinned from both directions so a regression that
+        // dropped the 400-year rule could not pass.
+        assert_eq!(civil_from_days(11_015), (2000, 2, 28));
+        assert_eq!(civil_from_days(11_016), (2000, 2, 29));
+        assert_eq!(civil_from_days(11_017), (2000, 3, 1));
+        // 1900 is NOT a leap year (divides by 100, not by 400). Negative days exercise the
+        // Euclidean-remainder path, which a plain `%` would get wrong before the epoch.
+        assert_eq!(civil_from_days(-25_509), (1900, 2, 28));
+        assert_eq!(civil_from_days(-25_508), (1900, 3, 1));
     }
 
     #[test]
