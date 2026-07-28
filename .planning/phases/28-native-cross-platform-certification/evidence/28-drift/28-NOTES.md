@@ -131,11 +131,47 @@ candidate each one tests. **This is correct, not a defect:** E5 is a black-box p
 runs *against* an already-built candidate binary, so it necessarily post-dates it. Recorded so a
 later reader does not mistake it for one.
 
+### M10 — the two rows are in, and the toolchain confirms it INDEPENDENTLY
+
+`F-28-ADJ-001` / `-002` added as MEDIUM/FIXED rows at the severity lane `28-adj` gave them
+(`28-ADJUDICATION.md` §6), carrying lane `28-adj2`'s fix evidence. Ledger: 63 → 65 rows, all gates
+green at `allow_open=False`.
+
+The strongest confirmation is one I did not write: `f28-verify-bindings.py --check-enumeration`
+now says, of the receipt that disclosed them only in prose —
+
+```
+F28V-ENUM  F-28-ADJ-001: FIXED in the ledger and ABSENT from the signed receipt
+F28V-ENUM  F-28-ADJ-002: FIXED in the ledger and ABSENT from the signed receipt
+```
+
+That is the incompleteness argument, restated by the tool, in reverse.
+
+### M11 — `SUPERSEDING-002` issued
+
+`f28-build-receipt.py --supersede …-SUPERSEDING-001.json`, its own derived key, 65 findings,
+`--verify rc=0`, `--check-enumeration rc=0`. Three A3 disclosures inside the signed body: the
+drift, the toolchain blindness, and the defects outside the ledger.
+
+### M12 — TWO defects in MY OWN instruments, found by reading output, repaired in-lane
+
+1. **`f28-check-drift.py --self-test` pinned its fixture to `SUPERSEDING-001`.** The moment `-002`
+   was issued, `-001`'s ledger digest went stale *by design* and assertion 3 began reporting a
+   failure that was not one. Repaired to select the highest-numbered supersession, and the fixture
+   name is now printed so the reader can see what was measured. Proven: the pre-repair file
+   (`git show ca271612:…`) run from the correct path → **rc=1**; repaired → **rc=0, fixture =
+   SUPERSEDING-002**.
+2. **My first gate harness silently ran nothing.** It built `"--validate $L"` as one string and
+   passed it unquoted. In bash that word-splits; **this shell is zsh, which does not word-split
+   unquoted expansions**, so argparse got one argv entry and three gates returned `rc=2` while
+   looking run. Repaired to explicit argv arrays in `gates.sh`, plus a **harness self-test** — a
+   known-good gate must return 0 first, or every rc below it is noise.
+
+Both are the same shape this program keeps measuring, now in the instrument built to hunt it.
+
 ## Still to establish
 
-- [ ] Re-run both verifiers myself (`f28-verify-bindings.py`, `f28-ledger.py --validate`) and read
-      the counts back; prove each can still say no.
-- [ ] Read `28-ADJ2-SUMMARY.md` for the severity its finder gave `F-28-ADJ-001`/`-002` and the fix
-      evidence, so the new ledger rows carry the finder's severity, not mine.
-- [ ] Add the two rows; re-issue via `f28-build-receipt.py --supersede` (-002).
+- [ ] Generalise the Rust supersession test off the hardcoded `SUPERSEDING-001` filename, so
+      `-002` is covered by the Rust half too; run it on `hetzner-dsm` and read the count back.
 - [ ] Cost out re-certification at HEAD; decide whether it should happen at all on a moving branch.
+- [ ] Write `28-DRIFT.md`.

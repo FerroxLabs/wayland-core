@@ -167,19 +167,35 @@ def measure(
 #                        would pass just as happily on an instrument that adds nothing.
 # ---------------------------------------------------------------------------------------
 
+def current_receipt() -> Path | None:
+    """The receipt a reader would treat as current: the highest-numbered supersession.
+
+    Pinning a specific filename here was a real defect, found by this lane's own gate
+    transcript. `f28-check-drift.py --self-test` hardcoded `SUPERSEDING-001`, and the moment
+    `SUPERSEDING-002` was issued, `-001`'s ledger digest went stale exactly as designed — so
+    assertion 3 started reporting a failure that was not a failure. A self-test pinned to a
+    superseded artifact measures history, not the present.
+    """
+    d = ROOT / ".planning/phases/28-native-cross-platform-certification"
+    if not d.is_dir():
+        return None
+    supers = sorted(d.glob("28-04-CERTIFICATION-RECEIPT-SUPERSEDING-*.json"))
+    if supers:
+        return supers[-1]
+    original = d / "28-04-CERTIFICATION-RECEIPT.json"
+    return original if original.is_file() else None
+
+
 def self_test() -> list[str]:
     failures: list[str] = []
-    receipt_path = (
-        ROOT
-        / ".planning/phases/28-native-cross-platform-certification"
-        / "28-04-CERTIFICATION-RECEIPT-SUPERSEDING-001.json"
-    )
+    receipt_path = current_receipt()
     verifier = ROOT / ".planning/scripts/f28-verify-bindings.py"
+    if receipt_path is None:
+        return ["no Phase 28 certification receipt on disk — cannot self-test, and a skip is "
+                "not a pass"]
 
     # A missing fixture must FAIL, never skip. A self-test that skips its own assertions is
     # the vacuity shape this program has now measured three separate ways.
-    if not receipt_path.is_file():
-        return [f"fixture absent: {receipt_path} — cannot self-test, and a skip is not a pass"]
     if not verifier.is_file():
         return [f"fixture absent: {verifier} — assertion 3 cannot run, and a skip is not a pass"]
 
@@ -251,9 +267,11 @@ def main(argv: list[str] | None = None) -> int:
         failures = self_test()
         for f in failures:
             print(f"SELF-TEST FAILURE: {f}", file=sys.stderr)
+        cur = current_receipt()
         print(
             f"--self-test: 3 assertions, {len(failures)} failure(s) "
-            "(known-negative / known-positive / old-instrument-missed-it)"
+            "(known-negative / known-positive / old-instrument-missed-it); "
+            f"fixture = {cur.name if cur else '<none>'}"
         )
         return 1 if failures else 0
 
