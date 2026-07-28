@@ -36,6 +36,24 @@ what he can honestly claim — it is not a gate on shipping.
 
 ---
 
+## 0b. Phase 28's acceptance gate PASSES — first time, 2026-07-29
+
+`F-28-02-002` was the single finding holding it. Repaired, **independently adjudicated FIXED** by a
+lane that did not author the repair, ledger row moved within its allowed set, and the receipt
+reconciled by **supersession rather than edit** — the original stays byte-identical because its
+signature correctly binds what was true when it was signed. Strict `--validate` now `rc=0` at
+`allow_open=False`.
+
+**Read the gate's meaning precisely, because it is narrow.** It does **not** mean Phase 28 has zero
+defects — Amendment A3 forbids that claim and two MEDIUMs (`F-28-ADJ-001`, `F-28-ADJ-002`) are named
+in the signed posture binding for exactly that reason, including that `-002` is *the same wedge
+shape through a different door*. `KR-05`'s unmeasured half also remains in a separate DEFERRED row.
+
+**Serialise:** Phase 29 pins `receipt_body_sha256` and `receipt_signing_key_id`. **Both changed.**
+A future release manifest must pin the superseding pair.
+
+---
+
 ## 1. What closed today
 
 **Phases complete:** 25 (all four criteria MET), 26 (SC3 open — `migrate` has no rollback), 28
