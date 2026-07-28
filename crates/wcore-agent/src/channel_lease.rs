@@ -906,6 +906,14 @@ mod tests {
         fn stops(&self) -> u32 {
             self.stops.load(Ordering::SeqCst)
         }
+        /// The `start_all` the boot path performs before the supervisor exists.
+        /// Not `start_polling`: that returns a future, and a helper that built
+        /// one without awaiting it would be relying on a side effect the trait
+        /// does not promise.
+        fn simulate_boot_start(&self) {
+            self.polling.store(true, Ordering::SeqCst);
+            self.starts.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     impl PollControl for FakeControl {
@@ -936,7 +944,7 @@ mod tests {
             inner.is_some(),
             "{holder} was supposed to win the boot lease"
         );
-        ctl.start_polling();
+        ctl.simulate_boot_start();
         PollSupervisorState::new(
             home.to_path_buf(),
             holder.to_string(),
