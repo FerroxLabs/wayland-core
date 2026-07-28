@@ -4,7 +4,7 @@ criterion: "24-C5 (setup-to-recovery journeys) + 24-C1 (upgrade/rollback, platfo
 lane: 24-journey
 branch: lane/24-journey
 status: partial
-grade-24-C5: "MET on Linux. NOT MET on Windows (red, cause isolated, two fixes landed, re-proof incomplete). NOT RUN on macOS (artifact never produced within the session)."
+grade-24-C5: "MET on Linux. NOT MET on Windows — red at platform-recover; two HIGH defects found and fixed, a third (F24-J-H3, no restart-on-failure policy) found and open. NOT RUN on macOS."
 grade-24-C1: "upgrade and rollback now PERFORMED and observed — on Linux only. The platform half of the clause is unchanged."
 merge-base: f5966d61e0b70cedd907acada1c9b5d4b135e6a7
 candidate-proved: d89b81b6f4460d6c493552c3eb91eb0b8ad0eb56
@@ -14,9 +14,11 @@ head: cccdf14d6ea51de8377691d2afab156e6f012f01
 # 24-C5 — the setup-to-recovery journey
 
 **One sentence: the instrument now exists and is honest, Linux passes it end to
-end with a recomputable receipt, Windows fails it and the failure found two real
-Windows defects, and macOS was never driven because the artifact it depends on
-never came out of the queue.**
+end with a recomputable receipt, Windows fails it at the recovery step itself and
+that failure found three real Windows defects — two now fixed and live-proven,
+the third being 24-01's own carried-forward open risk turned into a measurement —
+and macOS was never driven because the artifact it depends on never came out of
+the CI queue.**
 
 Nothing here was merged, pushed to `main`, tagged, released, or used to close an
 issue. No requirement is marked complete.
@@ -158,13 +160,21 @@ disconnect. The journey is a **single sequential process** — it is not `cargo
 test` and there is no parallelism to serialise; no other work was run on the box
 during it.
 
-Three runs, each failing later than the last, each failure a real defect:
+Four runs, each failing later than the last, each failure a real defect:
 
 | Run | Reached | Failure |
 |---|---|---|
 | 1 | step 5 | `gateway install` → `schtasks … ERROR: Access is denied.` |
 | 2 (elevated) | step 7 | `gateway status` reported `stopped, pid: null` for a gateway that was in the task list |
-| 3 (after fix 1) | **step 10** | 12 submitted, **0 arrived** — `no value for credential handle "slack.f24j.bot_token"` |
+| 3 (after H1 fix) | step 10 | 12 submitted, **0 arrived** — `no value for credential handle "slack.f24j.bot_token"` |
+| 4 (after H2 fix) | **step 12** | deliveries **do** arrive; the platform never brings the runtime back after the hard kill |
+
+**Both fixes are live-proven by run 4.** Steps 5–11 now pass where run 1 stopped
+at 5. Step 10 read `arrivals_total=3` from the independent sink's own journal,
+with a real record — `{"seq":1,…,"text":"f24j-heartbeat","answered":true,…}` —
+so install, start, status, automation, submission and **arrival at an
+out-of-process destination all work on Windows**. The hard kill of pid 38640
+also succeeded.
 
 ### F24-J-H1 — HIGH — the Windows registration carried no home. FIXED, live-improved.
 
@@ -182,7 +192,7 @@ Windows was the only family without such a test, which is why it was the only on
 that lost it. **Live effect: steps 5–9 now pass where the run previously stopped
 at 5, then 7.**
 
-### F24-J-H2 — HIGH — `--home` was a narrower carrier than the env var. FIXED, NOT re-proven.
+### F24-J-H2 — HIGH — `--home` was a narrower carrier than the env var. FIXED, live-proven.
 
 The run that H1 unblocked failed at step 10 with every delivery refused:
 `no value for credential handle "slack.f24j.bot_token"`, `channel-health.json`
@@ -191,12 +201,43 @@ files but not `wcore_config::wayland_config_dir`, so the credentials store
 resolved under `%APPDATA%\wayland-core` while the credentials file sat in the home
 the task was registered for. `gateway run --home` now exports what the units
 export, deferring to an already-set `WAYLAND_HOME` so a unit keeps authority over
-a flag.
+a flag. Re-driven at `cccdf14d`: deliveries arrive.
 
-**This fix is landed at `cccdf14d` and has NOT been re-driven on Windows.** The
-rebuild was still running when this lane ended. **Windows is therefore RED.** It
-is not "green pending a rebuild"; it is red, with a named cause and a candidate
-fix awaiting proof.
+### F24-J-H3 — HIGH — the Windows task does not restart the runtime after a hard kill. NOT FIXED.
+
+**This is the criterion's core clause failing on Windows, and it is the exact
+risk `24-01` recorded and deferred to this plan.** `service.rs` says so in its
+own words:
+
+> *"OPEN RISK, carried to 24-04 rather than closed here: task restart-on-failure
+> is capped in count and delayed in time… Criterion 5 requires the PLATFORM to
+> bring the runtime back after a hard kill; nothing measured in 24-01 shows that
+> it does."*
+
+It is now measured, and it does not. After `taskkill /F /PID 38640`, across a
+120-second budget with **no** manual start:
+
+```
+Status:          Ready
+Last Run Time:   7/28/2026 8:54:16 PM
+Last Result:     1
+Schedule Type:   At logon time
+Repeat: Every:   N/A
+```
+
+The task went back to `Ready` and stayed there; `gateway status` reported
+`stopped, pid: null`. `schtasks /create /sc onlogon` sets **no restart policy at
+all** — not even the capped, delayed one the comment anticipated. Linux recovers
+(`NRestarts=1`, new pid) and macOS would through `KeepAlive`; Windows has no
+equivalent configured.
+
+**Not fixed, and deliberately not bodged.** Expressing restart-on-failure needs
+`schtasks /create /xml` with a `<RestartOnFailure>` element, which is a rewrite
+of the Windows registration path rather than a flag — and Task Scheduler's
+minimum restart interval is one minute, so even once written the recovery
+semantics will differ from systemd's and launchd's and must be measured, not
+assumed. That is a scoped follow-up, not something to improvise at the end of a
+lane. **Windows is RED at step 12.**
 
 ### A wrong conclusion I caught before reporting it
 
@@ -260,7 +301,7 @@ cannot be forged from Linux.
 | `cargo fmt --all -- --check` | rc=0 | Mac |
 | Linux journey | 17/17, `JOURNEY_RC=0` | hetzner |
 | `wayland-journey verify` (linux) | rc=0, `duplicates=0 losses=0` | hetzner |
-| Windows journey | **9/17, `JOURNEY_RC=1`** | seandesktop |
+| Windows journey | **11/17, `JOURNEY_RC=1`** (red at `platform-recover`) | seandesktop |
 
 **One self-passing gate caught in my own work.** `cargo test -p
 wcore-eval-scenarios --lib journey:: --test journey_receipt_contract` printed
@@ -289,13 +330,21 @@ Both clauses were exercised against the running service and observed through
 
 **Open, named:**
 1. macOS journey never driven.
-2. Windows red at step 10; `cccdf14d` is a candidate fix with no live proof.
+2. **F24-J-H3 open and unfixed** — the Windows task has no restart-on-failure
+   policy, so the platform does not bring the runtime back. Windows red at step
+   12. Needs the `schtasks /xml` registration path, and the resulting recovery
+   latency measured rather than assumed.
 3. `wayland-journey scan` and `bind` are unit-proved but were never run over three
    real receipts, because there is only one.
 4. F24-J-M1 (Windows elevation) → BACKLOG.
 5. The `unsafe { set_var }` in the H2 fix is sound where it sits (before any
    config read, before the gateway spawns work) but is a pattern worth a
    reviewer's eye.
+
+**The single most useful thing this lane produced** is not the Linux green: it is
+that `24-01`'s own carried-forward open risk — *"nothing measured shows the
+platform brings the runtime back on Windows"* — is now a measurement rather than a
+risk, and the answer is no.
 
 ## Self-check
 
