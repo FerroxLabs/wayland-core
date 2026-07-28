@@ -875,6 +875,199 @@ fn the_produced_phase_28_receipt_parses_and_verifies_under_the_rust_verifier() {
     );
 }
 
+// ---------------------------------------------------------------------------------------
+// SUPERSESSION. A signed receipt is never edited, so when the ledger moves under one a new
+// receipt is issued beside it. Both must remain verifiable, and the NEW one must name the
+// OLD one in a way a machine can check — otherwise "supersedes" is prose and a later reader
+// has to take it on trust.
+// ---------------------------------------------------------------------------------------
+
+fn superseding_receipt_path() -> Option<std::path::PathBuf> {
+    let dir = phase_dir();
+    if !dir.is_dir() {
+        return None;
+    }
+    let path = dir.join("28-04-CERTIFICATION-RECEIPT-SUPERSEDING-001.json");
+    // Deliberately NOT an assert. Unlike the original receipt, a supersession exists only
+    // once something has been superseded; a checkout that legitimately has none must not fail
+    // here. The test below FAILS rather than skips once the file is present, which is the
+    // half that matters.
+    path.is_file().then_some(path)
+}
+
+#[test]
+fn the_superseding_receipt_verifies_and_names_what_it_supersedes() {
+    let (Some(new_path), Some(old_path)) = (superseding_receipt_path(), real_receipt_path()) else {
+        eprintln!("no superseding receipt in this checkout; nothing to check");
+        return;
+    };
+    let new_bytes = std::fs::read(&new_path).expect("read the superseding receipt");
+    let old_bytes = std::fs::read(&old_path).expect("read the superseded receipt");
+
+    let new_receipt: CertificationReceiptV2 =
+        serde_json::from_slice(&new_bytes).expect("the superseding receipt must parse under v2");
+    let old_receipt: CertificationReceiptV2 =
+        serde_json::from_slice(&old_bytes).expect("the superseded receipt must parse under v2");
+
+    let CertAuthorityClaimV2::PhaseScoped {
+        key_id: ref new_key_id,
+        public_key_base64: ref new_pk,
+        scope: ref new_scope,
+        ..
+    } = new_receipt.authority
+    else {
+        panic!("the superseding receipt must carry a phase-scoped signature");
+    };
+    let CertAuthorityClaimV2::PhaseScoped {
+        key_id: ref old_key_id,
+        public_key_base64: ref old_pk,
+        ..
+    } = old_receipt.authority
+    else {
+        panic!("the superseded receipt must carry a phase-scoped signature");
+    };
+
+    // A supersession issued under the SAME key would be indistinguishable from a rewrite of
+    // the original, which is the exact thing supersession exists to avoid.
+    assert_ne!(
+        new_key_id, old_key_id,
+        "the superseding receipt must carry its own key id"
+    );
+    assert_ne!(
+        new_pk, old_pk,
+        "the superseding receipt must carry its own key, not re-use the superseded one"
+    );
+    assert_ne!(
+        new_receipt.body_sha256, old_receipt.body_sha256,
+        "a supersession that digests identically to what it supersedes is a no-op"
+    );
+
+    // It must VERIFY, under its own recorded key. Integrity, not authority — the stranger and
+    // wrong-key tests above prove possession of the artifact confers nothing.
+    let raw = BASE64
+        .decode(new_pk)
+        .expect("recorded public half must be base64");
+    let verifying = ed25519_dalek::VerifyingKey::from_bytes(
+        &<[u8; 32]>::try_from(raw.as_slice()).expect("32-byte ed25519 public key"),
+    )
+    .expect("recorded public half must be a valid ed25519 key");
+    let mut v = CertificationVerifier::new();
+    v.trust_phase_key(new_key_id.clone(), verifying);
+    let (parsed, verified) = v
+        .parse_and_verify(&new_bytes)
+        .expect("the superseding receipt must verify under the Rust verifier");
+    assert_eq!(verified.authority, CertAuthority::PhaseScopedSigned);
+
+    // The scope must still disclaim release authority. A superseding receipt is the artifact
+    // most likely to be mistaken for a re-seal, so this matters more here, not less.
+    let lower = new_scope.to_lowercase();
+    for phrase in ["not a release trust root", "not a seal"] {
+        assert!(
+            lower.contains(phrase),
+            "the superseding receipt's scope must state {phrase:?}"
+        );
+    }
+
+    // THE SUPERSESSION ITSELF, MACHINE-CHECKED. The posture statement must name the exact
+    // body digest and key id of the receipt on disk that it claims to supersede. Comparing
+    // against `old_receipt` rather than against a constant is what makes this a check instead
+    // of a restatement: if either file is swapped, this stops holding.
+    let posture = parsed
+        .body
+        .bindings
+        .posture
+        .iter()
+        .find(|p| p.name.contains("supersede"))
+        .expect("a superseding receipt must carry a posture statement recording the supersession");
+    assert!(
+        posture.description.contains(&old_receipt.body_sha256),
+        "the supersession must name the body_sha256 it supersedes ({}); it said: {}",
+        old_receipt.body_sha256,
+        posture.description
+    );
+    assert!(
+        posture.description.contains(old_key_id.as_str()),
+        "the supersession must name the key_id it supersedes ({old_key_id})"
+    );
+
+    // And it must bind the superseded receipt's BYTES, so editing that file is detectable.
+    let bound = parsed
+        .body
+        .bindings
+        .artifacts
+        .iter()
+        .find(|a| a.path.ends_with("28-04-CERTIFICATION-RECEIPT.json"))
+        .expect("the superseding receipt must bind the superseded receipt as an artifact");
+    let actual = format!("{:x}", Sha256::digest(&old_bytes));
+    assert_eq!(
+        bound.sha256, actual,
+        "the bound digest of the superseded receipt disagrees with the file on disk"
+    );
+    assert_eq!(bound.bytes as usize, old_bytes.len());
+
+    // Amendment A3 is about what a receipt may CLAIM; it does not license silence about known
+    // defects. Findings opened after the ledger closed live in posture, and a superseding
+    // receipt whose claims are all true must still carry that disclosure.
+    if parsed.body.claims.values().all(|v| *v) {
+        assert!(
+            parsed
+                .body
+                .bindings
+                .posture
+                .iter()
+                .any(|p| p.name.contains("known-open-findings")),
+            "a receipt asserting all three claims true must disclose known findings that are \
+             outside its ledger, or three trues read as 'zero known defects'"
+        );
+    }
+
+    eprintln!(
+        "superseding receipt verified: {} findings, gate_passed={}, supersedes {} under {}",
+        parsed.body.findings.len(),
+        verified.acceptance_gate_passed,
+        old_receipt.body_sha256,
+        old_key_id
+    );
+}
+
+#[test]
+fn the_superseding_receipt_rejects_a_single_flipped_byte() {
+    let Some(path) = superseding_receipt_path() else {
+        return;
+    };
+    let text = std::fs::read_to_string(&path).expect("read the superseding receipt");
+    let receipt: CertificationReceiptV2 = serde_json::from_str(&text).unwrap();
+    let CertAuthorityClaimV2::PhaseScoped {
+        ref key_id,
+        ref public_key_base64,
+        ..
+    } = receipt.authority
+    else {
+        panic!("expected a phase-scoped claim");
+    };
+    let raw = BASE64.decode(public_key_base64).unwrap();
+    let verifying =
+        ed25519_dalek::VerifyingKey::from_bytes(&<[u8; 32]>::try_from(raw.as_slice()).unwrap())
+            .unwrap();
+    let mut v = CertificationVerifier::new();
+    v.trust_phase_key(key_id.clone(), verifying);
+
+    // Flip one byte INSIDE the supersession statement — the field this artifact exists to
+    // carry. A digest that covered the receipt but not its supersession clause would let the
+    // superseded identity be rewritten under a valid signature.
+    let tampered = text.replacen(
+        "phase-28-certification-2026-07-28",
+        "phase-28-certification-2026-07-27",
+        1,
+    );
+    assert_ne!(tampered, text, "the mutation must actually mutate");
+    assert_eq!(
+        v.parse_and_verify(tampered.as_bytes()).unwrap_err().code(),
+        "F28R-DIGEST",
+        "rewriting the superseded key id must break verification"
+    );
+}
+
 #[test]
 fn the_produced_receipt_rejects_a_single_flipped_byte() {
     let Some(path) = real_receipt_path() else {
