@@ -1,0 +1,12 @@
+provenance: wayland-core 0.12.25 (source ef1d97beb61f1b084bdfba745e8f49830924d757)
+wrote /tmp/tmp.tFZCNFy456/s-1d6da9bcf3ce125c.journal session=s-1d6da9bcf3ce125c nonce=1d6da9bcf3ce125c
+--- session reconcile s-1d6da9bcf3ce125c (exit 0)
+F23_SESSION=reconcile_item id=s-1d6da9bcf3ce125c kind=tool_execution ref=x1 tool=Write turn=t1 reason=Prepared resolvable=false
+F23_SESSION=reconcile id=s-1d6da9bcf3ce125c outstanding=1
+FAIL: reconcile exited 0 on a pre-fix journal
+FAIL: expected the 23B-01 error from reconcile, got: F23_SESSION=reconcile_item id=s-1d6da9bcf3ce125c kind=tool_execution ref=x1 tool=Write turn=t1 reason=Prepared resolvable=false
+F23_SESSION=reconcile id=s-1d6da9bcf3ce125c outstanding=1
+--- session cancel s-1d6da9bcf3ce125c (exit 5)
+wayland-core session: session 's-1d6da9bcf3ce125c' has 1 outstanding reconcile item(s)
+FAIL: expected the 23B-01 error from cancel, got: wayland-core session: session 's-1d6da9bcf3ce125c' has 1 outstanding reconcile item(s)
+F23_H1_DRIVE=FAIL platform=linux mode=unreadable nonce=1d6da9bcf3ce125c

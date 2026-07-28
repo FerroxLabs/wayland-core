@@ -1,0 +1,15 @@
+   Compiling wcore-agent v0.12.25 (/root/wayland-23b-h1/crates/wcore-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.93s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/journal_envelope_roundtrip.rs (target/debug/deps/journal_envelope_roundtrip-aed7978480c53715)
+
+running 5 tests
+test nested_object_key_order_is_stable_across_a_round_trip ... ok
+test option_value_null_is_stable_across_a_round_trip ... ok
+test plain_events_are_stable_across_a_round_trip ... ok
+test float_bearing_values_are_stable_across_a_round_trip ... ok
+test a_null_receipt_survives_a_real_journal_write_and_read ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
