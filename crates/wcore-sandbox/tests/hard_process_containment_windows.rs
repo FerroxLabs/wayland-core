@@ -31,18 +31,16 @@
 
 #![cfg(windows)]
 
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use wcore_sandbox::backends::SandboxBackend;
 use wcore_sandbox::backends::appcontainer::AppContainerBackend;
-use wcore_sandbox::{SandboxCommand, SandboxManifest};
 
 mod common;
 use common::{
-    capture_alive_descendant_pids, cmd_script, descendant_hold, hold_iterations, inline_hold,
-    live_descendant_count, live_descendant_pids, manifest, reap_stray_descendants,
-    require_live_windows, resolve_anchor_pid, surviving_captured_descendant_pids, wait_until,
+    capture_alive_descendant_pids, cmd_script, descendant_hold, inline_hold, live_descendant_count,
+    manifest, reap_stray_descendants, require_live_windows, surviving_captured_descendant_pids,
+    wait_until,
 };
 
 /// The number of authored Job-Object containment acceptance cases. Kept in
