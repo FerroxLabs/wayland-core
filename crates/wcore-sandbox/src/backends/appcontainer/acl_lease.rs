@@ -20,8 +20,8 @@ use self::sha256::sha256_hex;
 #[cfg(test)]
 use self::storage::{TEST_LEASE_ROOT_ENV, test_lease_root};
 use self::storage::{
-    lease_directory, read_validated_lease, recover_rewrite_temps, remove_validated_lease,
-    rewrite_synced_lease, write_new_synced_lease,
+    lease_directory, quarantine_lease, read_validated_lease, recover_rewrite_temps,
+    remove_validated_lease, rewrite_synced_lease, write_new_synced_lease,
 };
 
 use crate::error::{Result, SandboxError};
@@ -62,6 +62,13 @@ use windows_sys::Win32::System::Threading::{
 
 const LEASE_VERSION: u32 = 1;
 const LEASE_DIRECTORY_COMPONENTS: [&str; 4] = ["Wayland", "Core", "AppContainerLeases", "v1"];
+/// Sub-directory of the lease directory holding leases that were reclaimed
+/// because they can never reconcile against their own AppContainer profile.
+///
+/// Reclaimed leases are MOVED here rather than deleted: the file is the only
+/// evidence of how the wedge was produced, and destroying it would replace one
+/// invisible failure with another.
+const QUARANTINE_DIRECTORY: &str = "quarantine";
 const PROFILE_PREFIX: &str = "WCore";
 const MAX_PROFILE_ATTEMPTS: u64 = 64;
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
@@ -615,12 +622,22 @@ unsafe fn recover_dead_leases_locked(lease_dir: &Path) -> Result<()> {
     })? {
         let entry = entry.map_err(|error| exec_error(format!("read ACL lease entry: {error}")))?;
         let path = entry.path();
-        if !entry
+        let file_type = entry
             .file_type()
-            .map_err(|error| exec_error(format!("stat ACL lease {}: {error}", path.display())))?
-            .is_file()
-            || path.extension().and_then(OsStr::to_str) != Some("toml")
+            .map_err(|error| exec_error(format!("stat ACL lease {}: {error}", path.display())))?;
+        // The quarantine directory is the one non-lease entry that legitimately
+        // lives here, and it MUST be skipped explicitly. The rejection below
+        // treats every unrecognised entry as a hard error that aborts the whole
+        // recovery pass, so a quarantine directory that was not allow-listed
+        // would itself wedge the sandbox permanently on the very next
+        // acquisition — reproducing the exact defect this quarantine path
+        // exists to remove.
+        if file_type.is_dir()
+            && path.file_name().and_then(OsStr::to_str) == Some(QUARANTINE_DIRECTORY)
         {
+            continue;
+        }
+        if !file_type.is_file() || path.extension().and_then(OsStr::to_str) != Some("toml") {
             return Err(exec_error(format!(
                 "unknown entry in AppContainer ACL lease directory: {}",
                 path.display()
@@ -660,61 +677,109 @@ unsafe fn recover_dead_leases_locked(lease_dir: &Path) -> Result<()> {
             )
         };
         if derive_hr != 0 || derived_sid.is_null() {
-            return Err(exec_error(format!(
-                "unreconciled AppContainer ACL lease {}: profile SID cannot be derived (hr={derive_hr:#x})",
-                path.display()
-            )));
+            reclaim_unreconcilable_lease(
+                &path,
+                &lease,
+                &format!(
+                    "no AppContainer SID can be derived from its profile name {:?} (hr={derive_hr:#x})",
+                    lease.profile_name
+                ),
+            )?;
+            continue;
         }
         let sid_guard = SidFreeGuard(derived_sid);
         let bytes = unsafe { sid_bytes(sid_guard.0)? };
         if !constant_time_eq(sha256_hex(&bytes).as_bytes(), lease.sid_sha256.as_bytes()) {
-            return Err(exec_error(unreconcilable_lease_message(&path, &lease)));
+            reclaim_unreconcilable_lease(&path, &lease, &unreconcilable_lease_reason(&lease))?;
+            continue;
         }
         unsafe { cleanup_locked(&path, &lease, sid_guard.0)? };
     }
     Ok(())
 }
 
-/// Diagnose a dead lease that can never reconcile against its own profile.
+/// Why a dead-owner lease can never reconcile against its own profile.
 ///
 /// A lease bearing the test SID sentinel is called out by name and never
-/// reported as a generic mismatch. Both cases still fail closed — refusing to
-/// run unsandboxed is the correct behaviour and is unchanged here — but they
-/// need different remedies, and conflating them cost this program weeks.
-///
-/// The generic text surfaces at `probe_appcontainer_available()` as "sandbox
-/// disabled … may be transient (AV, disk contention)", which reads like a
-/// platform limitation and points the reader AWAY from persistent on-disk
-/// state. Operators who only reached the machine over SSH saw it on every run
-/// and concluded that a session-0 logon was the cause. That inference became a
-/// standing rule that Windows sandbox reds observed over SSH are environment
-/// artifacts — and it was false: measured 2026-07-27, the probe is green under
-/// session 0 whenever the lease directory is clean, and red only when it is
-/// wedged.
-fn unreconcilable_lease_message(path: &Path, lease: &LeaseFile) -> String {
+/// reported as a generic mismatch: the two need different remedies, and
+/// conflating them cost this program weeks.
+fn unreconcilable_lease_reason(lease: &LeaseFile) -> String {
     if constant_time_eq(
         lease.sid_sha256.as_bytes(),
         TEST_SID_SENTINEL_SHA256.as_bytes(),
     ) {
-        return format!(
-            "AppContainer ACL lease {} was written by wcore-sandbox's OWN TEST SUITE \
-             (it carries the test SID sentinel) and can NEVER reconcile against a real \
-             AppContainer profile. This is not a platform limitation, not an SSH or \
-             session-0 effect, and not transient: the sandbox stays disabled on this \
-             machine until this file is DELETED. Delete it and re-run. Tests must never \
-             write here; lease_directory() resolves to a temp root under cfg(test) so \
-             this cannot recur.",
-            path.display()
-        );
+        return "it was written by wcore-sandbox's OWN TEST SUITE (it carries the test SID \
+                sentinel) and can never match a real AppContainer profile"
+            .to_string();
     }
     format!(
-        "AppContainer ACL lease SID/profile mismatch in {} (the recorded SID does not \
-         match the SID derived from profile {:?}). The sandbox stays disabled until this \
-         lease is reconciled or removed; this is persistent on-disk state, not a \
-         transient or environment fault.",
-        path.display(),
+        "the SID recorded in it does not match the SID derived from its profile {:?}",
         lease.profile_name
     )
+}
+
+/// Reclaim a dead-owner lease that can never reconcile, and say so in terms an
+/// operator can act on.
+///
+/// This is the path whose ABSENCE was `F-28-02-002`. Before it existed, both
+/// unreconcilable cases returned `Err`, which aborted the whole recovery pass
+/// and therefore every later `ExecutionIdentity::start`. Nothing expired the
+/// file and nothing reclaimed it, the negative probe cache is in-process only,
+/// and so every subsequent process re-read the same file and failed the same
+/// way: a permanent denial of sandboxed execution caused by a file nobody knew
+/// to look for. Measured on `seandesktop` 2026-07-27 (`28-02`, observations 3
+/// and 6): probe `unavailable`, `ran=False`, the product refusing to execute.
+///
+/// Reclamation is gated on the owning process being provably gone — the caller
+/// reaches this only after `owner_is_live` returned false — so a lease held by
+/// a RUNNING owner is still honoured untouched. That leg matters as much as
+/// this one: reclaiming a live owner's lease would revoke the ACLs of a
+/// container that is still executing.
+///
+/// The refusal itself was never the bug. Failing closed is correct, and it is
+/// unchanged for every condition that still warrants it. The bug was that this
+/// particular condition is **self-clearing** — a dead owner's unreconcilable
+/// lease has no authority over anything — and the product treated it as
+/// permanent, behind a message that read like a platform limitation.
+fn reclaim_unreconcilable_lease(path: &Path, lease: &LeaseFile, reason: &str) -> Result<()> {
+    let destination = quarantine_lease(path)?;
+    // Stated rather than glossed: a mismatching SID cannot be reconstructed
+    // from its digest, so any ACL grant the lease recorded cannot be revoked
+    // automatically. Refusing forever did not revoke them either — it only
+    // also disabled the sandbox — so quarantining strictly dominates, but the
+    // operator is told exactly what may remain.
+    let residual = if lease.intents.is_empty() {
+        "It recorded NO filesystem ACL grant, so nothing was left behind on this machine."
+            .to_string()
+    } else {
+        format!(
+            "It recorded {} filesystem ACL grant(s) under a SID that cannot be \
+             reconstructed from its digest, so they could NOT be revoked automatically \
+             and may remain on: {}. Review those paths.",
+            lease.intents.len(),
+            lease
+                .intents
+                .iter()
+                .map(|intent| intent.path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    tracing::error!(
+        target: "wcore_sandbox",
+        lease = %path.display(),
+        quarantined_to = %destination.display(),
+        owner_pid = lease.owner_pid,
+        "RECLAIMED a stale AppContainer ACL lease: {reason}, and its owning process \
+         {} is gone. This was persistent on-disk state — NOT a platform limitation, \
+         NOT an SSH or session-0 effect, and NOT transient. Until this reclamation \
+         landed, a file in this state disabled ALL sandboxed execution on this machine \
+         until a human deleted it. The file has been MOVED (not deleted) to {} so the \
+         cause stays inspectable. {residual}",
+        lease.owner_pid,
+        destination.display()
+    );
+    Ok(())
 }
 
 fn owner_is_live(lease: &LeaseFile) -> Result<bool> {

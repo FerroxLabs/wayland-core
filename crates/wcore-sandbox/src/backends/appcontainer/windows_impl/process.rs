@@ -344,9 +344,15 @@ pub(super) fn probe_appcontainer_available() -> bool {
             tracing::error!(
                 target: "wcore_sandbox",
                 error = %e,
-                "AppContainer real-spawn probe failed; sandbox disabled. \
-                 If the failure is transient (AV, disk contention), the probe \
-                 re-runs after the negative-cache TTL."
+                "AppContainer real-spawn probe failed; sandbox disabled. This is NOT a \
+                 statement that Windows cannot sandbox: the cause is the `error` field \
+                 on this line, verbatim, and it names the call or file that failed. \
+                 Read it first. A stale ACL lease is no longer a cause — an \
+                 unreconcilable lease whose owner is gone is now reclaimed to the \
+                 quarantine directory and reported by name. Treat this as transient (AV, \
+                 disk contention), and wait for the probe to re-run after the \
+                 negative-cache TTL, ONLY when the error names no persistent on-disk \
+                 state."
             );
             false
         }

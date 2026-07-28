@@ -181,6 +181,207 @@ fn killed_owner_is_recovered_before_next_execution() {
     next.cleanup().unwrap();
 }
 
+// ---------------------------------------------------------------------------
+// F-28-02-002 — the stale-lease wedge.
+//
+// These do NOT need `WAYLAND_SANDBOX_LIVE_WINDOWS` and are NOT `#[ignore]`d, on
+// purpose: they run in the ordinary `cargo test -p wcore-sandbox` pass. Every
+// wedge-adjacent test in this file before them was gated AND ignored, which is
+// the same shape as the suites on this program that reported `test result: ok`
+// having executed zero tests. Nothing here needs a real AppContainer profile —
+// the whole defect lives in file-and-liveness handling — so nothing here buys a
+// gate it does not need.
+//
+// Both legs are proved, because only proving the reclaim leg would be satisfied
+// by an implementation that reclaims unconditionally, which would revoke the
+// ACLs of a container that is still running.
+// ---------------------------------------------------------------------------
+
+static SYNTHETIC_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Serialize the wedge tests against each other.
+///
+/// Deliberately a plain in-process mutex rather than [`MutationLock`]: these
+/// four tests share one per-process temp lease root, and all they need is that
+/// one of them is not deleting its lease while another enumerates the
+/// directory. Taking the real cross-process lock instead would make them depend
+/// on `SeCreateGlobalPrivilege` (its mutex lives in the `Global\` namespace),
+/// which would test the privileges of whoever ran `cargo test` rather than the
+/// repair. The lock is intentionally NOT poisoned-propagating: one failing
+/// assertion must not cascade into three misleading secondary failures.
+fn wedge_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// Write a lease that can never reconcile (it carries the test SID sentinel,
+/// exactly like the two files found wedging a real developer box).
+///
+/// `owner_live` selects the ONLY difference between the two legs: a live leg
+/// stamps this process's real creation time, so `owner_is_live` sees a running
+/// owner; a dead leg stamps a creation time no process has, so the recorded
+/// owner identity provably does not exist. Using a mismatched creation time
+/// rather than an exited pid is deliberate — it cannot flake on Windows pid
+/// reuse, which would silently turn the "dead" leg into a "live" one.
+fn write_unreconcilable_lease(tag: &str, owner_live: bool, intents: Vec<AclIntent>) -> PathBuf {
+    let sequence = SYNTHETIC_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let profile_name = format!(
+        "{PROFILE_PREFIX}-h2{tag}-{:08x}-{sequence:04x}",
+        std::process::id()
+    );
+    validate_profile_name(&profile_name).unwrap();
+    let real_creation = current_process_creation_time().unwrap();
+    let mut lease = LeaseFile {
+        version: LEASE_VERSION,
+        state: LeaseState::Prepared,
+        profile_name: profile_name.clone(),
+        sid_sha256: sha256_hex(TEST_SID_SENTINEL),
+        owner_pid: std::process::id(),
+        owner_creation_time: if owner_live {
+            real_creation
+        } else {
+            real_creation.wrapping_add(1)
+        },
+        intents,
+        lease_sha256: String::new(),
+    };
+    lease.refresh_digest();
+    assert_eq!(
+        owner_is_live(&lease).unwrap(),
+        owner_live,
+        "the synthetic lease must present the owner liveness this leg is testing"
+    );
+    let path = lease_directory()
+        .unwrap()
+        .join(format!("{profile_name}.toml"));
+    write_new_synced_lease(&path, &lease).unwrap();
+    path
+}
+
+/// Files sitting in the quarantine directory whose name came from `lease_path`.
+///
+/// Scoped to one lease rather than counting the whole directory: these tests
+/// share a per-process lease root, and a global count would couple them.
+fn quarantined_for(lease_path: &Path) -> Vec<PathBuf> {
+    let name = lease_path.file_name().and_then(OsStr::to_str).unwrap();
+    let quarantine = lease_directory().unwrap().join(QUARANTINE_DIRECTORY);
+    fs::read_dir(quarantine)
+        .into_iter()
+        .flatten()
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(|found| found.starts_with(name))
+        })
+        .collect()
+}
+
+#[test]
+fn dead_owner_unreconcilable_lease_is_reclaimed_not_refused_forever() {
+    let _lock = wedge_test_lock();
+    let directory = lease_directory().unwrap();
+    let path = write_unreconcilable_lease("dead", false, Vec::new());
+    assert!(path.exists(), "the wedge lease must start on disk");
+
+    // Before F-28-02-002 was repaired this returned Err, and did so on every
+    // later call, which is what made the denial of service permanent.
+    unsafe { recover_dead_leases_locked(&directory) }
+        .expect("a dead owner's unreconcilable lease must not refuse acquisition forever");
+
+    assert!(
+        !path.exists(),
+        "the reclaimed lease must be gone from the ACTIVE lease directory"
+    );
+    let quarantined = quarantined_for(&path);
+    assert_eq!(
+        quarantined.len(),
+        1,
+        "the lease must be MOVED to quarantine, not deleted: {quarantined:?}"
+    );
+    let preserved = fs::read_to_string(&quarantined[0]).unwrap();
+    assert!(
+        preserved.contains(TEST_SID_SENTINEL_SHA256),
+        "quarantine must preserve the evidence verbatim"
+    );
+    fs::remove_file(&quarantined[0]).unwrap();
+}
+
+#[test]
+fn live_owner_unreconcilable_lease_is_honoured_not_reclaimed() {
+    let _lock = wedge_test_lock();
+    let directory = lease_directory().unwrap();
+    // Identical to the leg above in every respect EXCEPT that the recorded
+    // owner is this running process. Reclaiming this would revoke the ACLs of a
+    // container that is still executing.
+    let path = write_unreconcilable_lease("live", true, Vec::new());
+
+    unsafe { recover_dead_leases_locked(&directory) }
+        .expect("a live owner's lease must be skipped, not error");
+
+    assert!(
+        path.exists(),
+        "a lease whose owning process is RUNNING must never be reclaimed"
+    );
+    assert!(
+        quarantined_for(&path).is_empty(),
+        "a live owner's lease must never reach quarantine"
+    );
+    fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn quarantine_directory_does_not_become_a_second_wedge() {
+    // Recovery rejects every unrecognised entry in the lease directory with a
+    // hard error. The quarantine directory it creates IS such an entry, so an
+    // implementation that reclaimed the lease but did not allow-list its own
+    // quarantine directory would refuse forever from the second pass onward —
+    // the identical defect, one indirection further down.
+    let _lock = wedge_test_lock();
+    let directory = lease_directory().unwrap();
+    let path = write_unreconcilable_lease("reentry", false, Vec::new());
+    unsafe { recover_dead_leases_locked(&directory) }.unwrap();
+    assert!(
+        directory.join(QUARANTINE_DIRECTORY).is_dir(),
+        "the first reclamation must create the quarantine directory"
+    );
+
+    unsafe { recover_dead_leases_locked(&directory) }
+        .expect("a lease directory that CONTAINS a quarantine directory must still recover");
+
+    for stale in quarantined_for(&path) {
+        fs::remove_file(stale).unwrap();
+    }
+}
+
+#[test]
+fn reclamation_reports_grants_it_could_not_revoke() {
+    // A lease with recorded intents cannot have those grants revoked: the SID
+    // is stored as a digest and cannot be reconstructed. Refusing forever never
+    // revoked them either, so reclaiming is strictly better — but the operator
+    // has to be TOLD, and that is what this pins.
+    let _lock = wedge_test_lock();
+    let directory = lease_directory().unwrap();
+    let intents = vec![AclIntent {
+        path: "C:\\f28h2-residual".to_string(),
+        kind: IntentKind::Allow,
+        mask: ACL_READ_MASK,
+    }];
+    let path = write_unreconcilable_lease("residual", false, intents.clone());
+
+    unsafe { recover_dead_leases_locked(&directory) }.unwrap();
+
+    let quarantined = quarantined_for(&path);
+    assert_eq!(quarantined.len(), 1);
+    let preserved = fs::read_to_string(&quarantined[0]).unwrap();
+    assert!(
+        preserved.contains("C:\\\\f28h2-residual") || preserved.contains("C:\\f28h2-residual"),
+        "quarantine must preserve the unrevoked grant paths for the operator: {preserved}"
+    );
+    fs::remove_file(&quarantined[0]).unwrap();
+}
+
 fn require_live_acceptance() {
     assert_eq!(
         std::env::var_os("WAYLAND_SANDBOX_LIVE_WINDOWS").as_deref(),
