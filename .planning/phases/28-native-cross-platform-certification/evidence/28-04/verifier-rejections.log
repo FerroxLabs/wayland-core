@@ -1,0 +1,64 @@
+# Demonstrations that the verifier REJECTS, run against MUTATED COPIES OF THE REAL RECEIPT.
+# A verifier nobody has seen say no is a verifier nobody should believe, and this program
+# has measured that failure at scale: 177 unfailable gates that each passed three rounds
+# of adversarial human review.
+#
+# Each mutant is written NEXT TO the real receipt so its relative evidence paths resolve;
+# a mutant run from elsewhere produces 68 path errors that bury the signal it is testing.
+# Generated 2026-07-28T14:21:55Z
+
+=== MUTATION: overclaim_zero_known_defects ===
+--verify: REJECTED (1)
+  F28V-OVERCLAIM  body.claims.zero_known_defects: outside the three claims amendment A3 permits; the receipt may assert zero undispositioned findings, zero skipped critical cases and zero unresolved CRITICAL/HIGH, and NOTHING else — this is a known over-claim
+--check-claim-limit: REJECTED (1)
+--check-enumeration: OK
+
+=== MUTATION: overclaim_zero_findings ===
+--verify: REJECTED (1)
+  F28V-OVERCLAIM  body.claims.zero_findings: outside the three claims amendment A3 permits; the receipt may assert zero undispositioned findings, zero skipped critical cases and zero unresolved CRITICAL/HIGH, and NOTHING else — this is a known over-claim
+--check-claim-limit: REJECTED (1)
+--check-enumeration: OK
+
+=== MUTATION: skipped_critical_case ===
+--verify: REJECTED (3)
+  F28V-SKIPCRIT  skip_policy.skipped_cells[sandbox-probes-windows-acp]: a skipped CRITICAL case; Success Criterion 1 forbids one
+  F28V-SKIP  skip_policy.skipped_cells: receipt records 1 skipped cells, recomputed 0 from the raw cell list
+--check-claim-limit: OK
+--check-enumeration: OK
+
+=== MUTATION: flip_claim_true ===
+--verify: REJECTED (1)
+  F28V-CLAIM  body.claims.zero_unresolved_critical_or_high: receipt asserts True, recomputed False from the raw ledger and cell list
+--check-claim-limit: OK
+--check-enumeration: OK
+
+=== MUTATION: drop_a_finding ===
+--verify: OK
+--check-claim-limit: OK
+--check-enumeration: REJECTED (1)
+
+=== MUTATION: inflate_cell_count ===
+--verify: REJECTED (2)
+  F28V-PLATFORM  platform[linux].cells_total: receipt claims 217, recomputed from the raw cell list 216
+  F28V-PLATFORM  platform[linux].cells_pass: receipt claims 217, recomputed from the raw cell list 216
+--check-claim-limit: OK
+--check-enumeration: OK
+
+=== MUTATION: rename_candidate_commit ===
+--verify: REJECTED (2)
+  F28V-CANDIDATE  candidate[matrix-linux-windows].commit: receipt claims 0000000000000000000000000000000000000000, raw evidence says 32e2f57d09fe4b287e513081862217dc9daa5901
+  F28V-CANDIDATE  candidate[matrix-linux-windows].commit: disagrees with evidence/28-02/candidate.json (32e2f57d09fe4b287e513081862217dc9daa5901)
+--check-claim-limit: OK
+--check-enumeration: OK
+
+=== MUTATION: forge_a_log_digest ===
+--verify: REJECTED (1)
+  F28V-LOG  logs[evidence/28-01/hz-clippy.log].sha256: receipt claims 0000000000000000000000000000000000000000000000000000000000000000, recomputed 062d11b201a16bf1fde6c1c7ce5ea213653fa61cd2390f44784693ebb336c853
+--check-claim-limit: OK
+--check-enumeration: OK
+
+=== CONTROL: the real, unmutated receipt — all four gates must PASS ===
+--verify: OK
+--check-claim-limit: OK
+--check-enumeration: OK
+--check-tamper-detection: OK

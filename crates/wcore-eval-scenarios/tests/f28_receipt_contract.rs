@@ -743,3 +743,155 @@ fn platform_cell_counts_must_sum_so_a_red_cannot_be_dropped_from_the_arithmetic(
     b.bindings.platform[0].cells_red = 24;
     assert!(CertificationReceiptV2::unsigned(b).is_ok());
 }
+
+// ---------------------------------------------------------------------------------------
+// THE REAL ARTIFACT. Everything above proves the schema behaves; this proves the schema was
+// actually applied to the receipt this phase produced.
+//
+// Without this, the Rust verifier and the produced receipt could drift apart forever while
+// both halves stayed green — the Rust side passing its fixtures, the Python side passing its
+// recomputation, and nobody checking that the Rust verifier can read the real file at all.
+// ---------------------------------------------------------------------------------------
+
+fn real_receipt_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.planning/phases/28-native-cross-platform-certification")
+        .join("28-04-CERTIFICATION-RECEIPT.json")
+}
+
+#[test]
+fn the_produced_phase_28_receipt_parses_and_verifies_under_the_rust_verifier() {
+    let path = real_receipt_path();
+    if !path.exists() {
+        // The receipt is produced by `.planning/scripts/f28-build-receipt.py` during plan
+        // 28-04. A checkout without it (a consumer crate, a sparse clone) must not fail
+        // here — but a checkout WITH it must verify, which is the case that matters.
+        eprintln!(
+            "no phase-28 receipt at {}; nothing to check",
+            path.display()
+        );
+        return;
+    }
+    let bytes = std::fs::read(&path).expect("read the produced receipt");
+
+    // Trust the key the receipt itself records. That is legitimate ONLY because this test
+    // asserts integrity — that the body has not been altered since it was signed — and NOT
+    // authority. A caller deriving authority this way would be trusting the artifact to
+    // vouch for itself, which is the tautology the whole schema exists to prevent, so the
+    // preceding tests prove a stranger verifier rejects this same receipt with F28R-KEY.
+    let receipt: CertificationReceiptV2 =
+        serde_json::from_slice(&bytes).expect("the produced receipt must parse under v2");
+    let CertAuthorityClaimV2::PhaseScoped {
+        ref key_id,
+        ref public_key_base64,
+        ref scope,
+        ..
+    } = receipt.authority
+    else {
+        panic!("the produced receipt must carry a phase-scoped signature");
+    };
+    let raw = BASE64
+        .decode(public_key_base64)
+        .expect("recorded public half must be base64");
+    let verifying = ed25519_dalek::VerifyingKey::from_bytes(
+        &<[u8; 32]>::try_from(raw.as_slice()).expect("32-byte ed25519 public key"),
+    )
+    .expect("recorded public half must be a valid ed25519 key");
+
+    let mut v = CertificationVerifier::new();
+    v.trust_phase_key(key_id.clone(), verifying);
+    let (parsed, verified) = v
+        .parse_and_verify(&bytes)
+        .expect("the produced receipt must verify under the Rust verifier");
+
+    assert_eq!(verified.authority, CertAuthority::PhaseScopedSigned);
+    assert_eq!(parsed.schema, CERT_RECEIPT_SCHEMA);
+    assert_eq!(parsed.schema_version, CERT_RECEIPT_SCHEMA_VERSION);
+
+    // The scope must say what it is NOT, inside the artifact, for a reader who never sees
+    // the verdict.
+    let lower = scope.to_lowercase();
+    for phrase in ["not a release trust root", "not a seal"] {
+        assert!(
+            lower.contains(phrase),
+            "the phase-scoped signature must state {phrase:?} in its own scope text"
+        );
+    }
+
+    // The A3 claim set must be exactly the three, on the real artifact.
+    let mut keys: Vec<&str> = parsed.body.claims.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    let mut expected: Vec<&str> = CERT_PERMITTED_CLAIMS.to_vec();
+    expected.sort_unstable();
+    assert_eq!(
+        keys, expected,
+        "the real receipt asserts exactly the three A3 claims"
+    );
+
+    // And the acceptance gate the receipt reports must agree with its own ledger, computed
+    // here rather than read out of the claims.
+    let unresolved: Vec<&str> = parsed
+        .body
+        .findings
+        .iter()
+        .filter(|f| {
+            ["CRITICAL", "HIGH"].contains(&f.p28_severity.as_str())
+                && !["FIXED", "DISPROVED"].contains(&f.disposition.as_str())
+        })
+        .map(|f| f.id.as_str())
+        .collect();
+    assert_eq!(
+        parsed.body.claims["zero_unresolved_critical_or_high"],
+        unresolved.is_empty(),
+        "the receipt's own claim disagrees with its own ledger; unresolved = {unresolved:?}"
+    );
+    assert_eq!(
+        verified.acceptance_gate_passed,
+        parsed.body.claims.values().all(|v| *v),
+        "the verifier's gate verdict must follow the three claims and nothing else"
+    );
+
+    eprintln!(
+        "verified {} findings, gate_passed={}, unresolved CRITICAL/HIGH = {:?}",
+        parsed.body.findings.len(),
+        verified.acceptance_gate_passed,
+        unresolved
+    );
+}
+
+#[test]
+fn the_produced_receipt_rejects_a_single_flipped_byte() {
+    let path = real_receipt_path();
+    if !path.exists() {
+        return;
+    }
+    let text = std::fs::read_to_string(&path).expect("read the produced receipt");
+    let receipt: CertificationReceiptV2 = serde_json::from_str(&text).unwrap();
+    let CertAuthorityClaimV2::PhaseScoped {
+        ref key_id,
+        ref public_key_base64,
+        ..
+    } = receipt.authority
+    else {
+        panic!("expected a phase-scoped claim");
+    };
+    let raw = BASE64.decode(public_key_base64).unwrap();
+    let verifying =
+        ed25519_dalek::VerifyingKey::from_bytes(&<[u8; 32]>::try_from(raw.as_slice()).unwrap())
+            .unwrap();
+    let mut v = CertificationVerifier::new();
+    v.trust_phase_key(key_id.clone(), verifying);
+
+    // Flip one byte of the body: a single character inside the phase name.
+    let tampered = text.replacen(
+        "\"phase\": \"28-native-cross-platform-certification\"",
+        "\"phase\": \"28-native-cross-platform-certificatioN\"",
+        1,
+    );
+    assert_ne!(tampered, text, "the mutation must actually mutate");
+    assert_eq!(
+        v.parse_and_verify(tampered.as_bytes()).unwrap_err().code(),
+        "F28R-DIGEST",
+        "one flipped byte in the real receipt must break verification"
+    );
+}

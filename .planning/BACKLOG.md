@@ -1272,3 +1272,33 @@ cell set would be a silent reduction of coverage.
 `CLASS-CONTRACT-01`, structural. Closing it would require `wcore-contract generate`, a
 release-coordination action explicitly reserved and **not** performed by this phase. Recorded for
 completeness because three separate lanes named it and declined it.
+
+### `BL-F28-VACUOUS-GREENS` — four of five `actor_acl_test` tests cannot fail (MEDIUM)
+
+All four assert *"the tool runs"*, which is trivially true when the deny pre-filter they exist
+to test does not exist in production. The asserted enforcement string
+(`"Denied by sub-agent learned policy"`) occurs in **exactly one file in the workspace — the
+test itself**; `CallActor::SubAgent` has no production construction site; every production site
+sets `learned_policy: None`. Same class as an all-ignored suite, one layer deeper: not zero
+tests executed, but four executed tests that cannot fail. **Read the suite as a forward spec,
+not a certification input.**
+
+### `BL-F28-COUNT-INFLATION` — `acp_engine_turn` reports `8 passed` while running neither named case (MEDIUM)
+
+`#[path = "support/mod.rs"] mod support;` compiles 8 further non-ignored tests into the binary,
+so `cargo test --test acp_engine_turn` prints `8 passed` and exits 0 having executed **neither**
+of the two cases the binary is named for. This defeats the program's own counter-rule — *"read
+the `N passed` count back"* sees a healthy 8 and is satisfied. A guard worded for this specific
+hazard was added, but it was produced by the same generator as nine others and its falsification
+was measured for three suites rather than for this binary individually, and the count inflation
+itself is unchanged. **Not claimed FIXED.**
+
+### `BL-F28-MACOS-INSTRUMENTS` — the macOS matrix members use no containment differential (LOW)
+
+`hard_process_containment_macos` infers reaping from a **wall-clock bound** (`sleep 45 &` under
+sandbox-exec must return in < 20 s, so a non-reaping backend holding the stdout pipe cannot
+pass) and `live_integrity_macos` from a **matched write pair** (inside the allowlist succeeds
+and lands on disk; outside is denied and never reaches the filesystem). Both are substantive and
+the bound is **one-sided in the safe direction** — runner load can only produce a false FAIL.
+The residual: neither forms a containment *differential*, so macOS evidence for Criterion 1
+rests on two different instruments rather than one.
