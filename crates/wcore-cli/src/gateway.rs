@@ -994,7 +994,10 @@ mod tests {
 
     #[test]
     fn the_default_profile_is_named_not_empty() {
-        let s = ScopeArgs { profile: None };
+        let s = ScopeArgs {
+            profile: None,
+            home: None,
+        };
         // An empty profile would produce the service identifier
         // `wayland-core-gateway-`, which every family accepts and no operator
         // can tell apart from another empty one.
@@ -1005,6 +1008,7 @@ mod tests {
     fn an_explicit_profile_wins_over_the_environment() {
         let s = ScopeArgs {
             profile: Some("explicit".into()),
+            home: None,
         };
         assert_eq!(s.profile(), "explicit");
     }
