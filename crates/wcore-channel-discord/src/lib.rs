@@ -72,19 +72,21 @@ pub struct DiscordChannel {
 }
 
 impl DiscordChannel {
-    /// Construct a Discord channel pointed at the production endpoints.
+    /// Construct a Discord channel from config.
+    ///
+    /// Both base URLs come from the config, which defaults them to the
+    /// production endpoints ([`DISCORD_API_BASE`] / [`DISCORD_GATEWAY_BASE`]).
+    /// This is the constructor `wcore-channels-registry` uses, so it is the
+    /// only path by which a shipped binary can be pointed at a local fixture
+    /// (F24-C3-DISCORD).
     pub fn new(
         name: impl Into<String>,
         config: DiscordConfig,
         creds: Arc<dyn CredentialsStore>,
     ) -> Self {
-        Self::with_bases(
-            name,
-            config,
-            creds,
-            DISCORD_API_BASE.to_string(),
-            DISCORD_GATEWAY_BASE.to_string(),
-        )
+        let api_base = config.api_base_url.clone();
+        let gateway_base = config.gateway_url.clone();
+        Self::with_bases(name, config, creds, api_base, gateway_base)
     }
 
     /// Test-only constructor that overrides both base URLs so `mockito`
@@ -457,6 +459,8 @@ mod tests {
             allowed_channel_ids: Vec::new(),
             intents: DEFAULT_INTENTS,
             heartbeat_grace_ms: 5_000,
+            api_base_url: DISCORD_API_BASE.to_string(),
+            gateway_url: DISCORD_GATEWAY_BASE.to_string(),
         }
     }
 
@@ -650,6 +654,53 @@ heartbeat_grace_ms = 8000
         assert_eq!(cfg.allowed_channel_ids, vec!["111", "222"]);
         assert_eq!(cfg.intents, 513);
         assert_eq!(cfg.heartbeat_grace_ms, 8_000);
+    }
+
+    // -----------------------------------------------------------------
+    // F24-C3-DISCORD — `new()` must honour the config seam.
+    //
+    // `with_bases` already existed, but it is doc(hidden) and only ever
+    // called in-process by unit tests. `wcore-channels-registry` builds the
+    // SHIPPED adapter via `new()`, so if `new()` ignores the config the
+    // seam is invisible to every out-of-process harness — which is the
+    // state Phase 24 was actually in.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn new_honours_the_config_bases_so_the_shipped_path_is_redirectable() {
+        let creds = InMemoryCreds::with_token("discord.test.bot_token", TEST_TOKEN);
+        let ch = DiscordChannel::new(
+            "test",
+            DiscordConfig {
+                api_base_url: "http://127.0.0.1:18211".to_string(),
+                gateway_url: "ws://127.0.0.1:18212".to_string(),
+                ..cfg()
+            },
+            creds,
+        );
+        assert_eq!(
+            ch.api_base, "http://127.0.0.1:18211",
+            "new() must take the REST base from config, not the constant"
+        );
+        assert_eq!(
+            ch.gateway_base, "ws://127.0.0.1:18212",
+            "new() must take the gateway base from config; without this the \
+             binary's INBOUND stays on production while outbound is redirected"
+        );
+    }
+
+    #[test]
+    fn control_new_with_a_default_config_still_points_at_production() {
+        // The paired control. Parse from TOML that names neither key, so this
+        // exercises the real operator path rather than a struct literal.
+        let parsed: DiscordConfig =
+            toml::from_str(r#"credential_handle = "discord.test.bot_token""#).unwrap();
+        let creds = InMemoryCreds::with_token("discord.test.bot_token", TEST_TOKEN);
+        let ch = DiscordChannel::new("test", parsed, creds);
+        assert_eq!(ch.api_base, DISCORD_API_BASE);
+        assert_eq!(ch.gateway_base, DISCORD_GATEWAY_BASE);
+        assert_eq!(ch.api_base, "https://discord.com");
+        assert_eq!(ch.gateway_base, "wss://gateway.discord.gg");
     }
 
     #[test]
