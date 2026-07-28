@@ -1,5 +1,22 @@
 # Phase 23B — Continuous Agency: phase disposition, revision 2
 
+> ## SUPERSEDED on the plan-count claim — 2026-07-28
+>
+> This revision's statement that "23B-03 and 23B-04 were not executed at all, and no
+> SUMMARY was written for them" was true when written and is **now false**. Both have
+> since executed and both have summaries:
+>
+> - **23B-03** — complete. F23-06's persistent incremental index, live-proven on all three
+>   platforms; the OPTIONAL semantic/RRF layer is deferred and reports its own
+>   unavailability rather than being half-wired. See `23B-03-SUMMARY.md`.
+> - **23B-04** — Task 1 complete, Task 2 started, **Task 3 deliberately unstarted**. Day one
+>   of the multi-day journey is recorded on Linux and Windows; macOS is NOT ACHIEVED. The
+>   journey **cannot close before 2026-07-30T23:54:26Z** — a real elapsed-time floor, not a
+>   scheduling estimate. See `23B-04-SUMMARY.md` and `23B-04-JOURNEY-HANDOFF.md`.
+>
+> The phase goal remains **NOT achieved**, and the reasoning below still holds on every
+> other point. Only the plan-count sentence is superseded.
+
 **Status: PARTIAL. Two plans of four executed. The phase goal is NOT achieved.**
 
 Revision 1 (`23B-PHASE-DISPOSITION.md`) graded the phase after 23B-01. This revision adds

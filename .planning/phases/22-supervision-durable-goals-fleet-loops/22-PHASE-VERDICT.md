@@ -29,6 +29,16 @@ state at all.
 > Fleet claims and dependencies survive kill/restart/reassignment without
 > duplicate execution or lost completion.
 
+> **SUPERSEDED 2026-07-27 — Criterion 2 now PASSES. See the `UPDATE — 2026-07-27`
+> section at the foot of this file, which carries the governing grades.** 22-03 was
+> subsequently executed: the ledger drives `FleetDispatcher` through `GoalFleetDriver`,
+> and the criterion was proven on Linux **and** Windows against the shipped 0.12.25
+> binary — 7→0 descendants after kill, 4 drained from the outbox, effects 12/12/12, with
+> the effects gate falsified to exit 1 and restored in the same run. The paragraph below
+> is retained as the 2026-07-26 grading, not as the current answer.
+>
+> **Criterion 3 remains untouched, so the phase goal is still NOT ACHIEVED.**
+
 **FAILED — not attempted.** Plan 22-03 was not executed. No task ledger, no
 claim, no heartbeat, no revocation model. No process was killed mid-fanout on
 either platform.
