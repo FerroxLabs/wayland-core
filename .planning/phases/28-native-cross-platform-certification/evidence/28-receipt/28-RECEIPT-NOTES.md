@@ -52,9 +52,63 @@ deserializes strictly, I cannot add a disclosure field and must find another car
   Ed25519 signature + schema. This is the only thing that verifies a signature. Rust ⇒ hetzner
   (no cargo on the Mac).
 
+## M4 — schema strictness: the disclosure CANNOT be a new body field
+
+`CertificationBodyV2`, `CertBindingsV2`, `CertFindingV2` are all `#[serde(deny_unknown_fields)]`.
+So a `supersedes:` key added to `body` is an immediate parse failure in the Rust verifier.
+Carriers that ARE available inside the signed body:
+
+- `bindings.posture[]` — `{name, description, evidence_ref}`, free text. Python `--verify` only
+  requires posture to be NON-EMPTY; it resolves refs for `fixture_corpus` only. Rust requires
+  each field non-empty. **This is the carrier for both the supersession record and the ADJ
+  disclosure**, and it is inside the digest, so the statement is itself signed.
+- `bindings.artifacts[]` — python recomputes each listed entry's sha256/bytes off disk but does
+  NOT require the list to be exhaustive. So the ORIGINAL receipt file can be bound as an
+  artifact, making the superseding receipt cryptographically name the exact bytes it supersedes.
+  Its path resolves because `base = receipt.resolve().parent` = the phase dir.
+
+Rust rules that constrain the F-28-02-002 row (checked against the ledger, all satisfied):
+`disposition == "FIXED"` requires a NON-EMPTY `executable_check` (`F28R-REPAIREVID`) — the TSV
+row carries one (the SeanDesktop re-measurement, 133/0/23 + mutant M3). `origin` must be
+non-empty — it is `control`. Row has NF=13, so `downgrade_review` pads to `""`; harmless.
+
+## M5 — the acceptance gate, and why re-signing changes its verdict
+
+`cert_acceptance_gate` = AND of the three claims. Original receipt = `false` (two claims false).
+Recomputed over today's ledger all three are true ⇒ a superseding receipt reports
+`acceptance_gate_passed = true`. That is a REAL change in verdict, not a cosmetic one, and it is
+the reason this lane is not a documentation edit.
+
+## M6 — Phase 29 does NOT consume `body.findings`. MEASURED, not assumed.
+
+28-04-SUMMARY.md:310 asserts "Phase 29 must consume `body.findings` in the signed receipt".
+**It does not.**
+
+- `grep -rn "findings" .planning/phases/29-*/` returns only prose about Phase 29's OWN findings.
+  No reference to the certification receipt's findings list anywhere in Phase 29.
+- `CertificationBindingV1` (`crates/wcore-eval-scenarios/src/release_integrity.rs:393`) is the
+  struct Phase 29 actually binds. Its fields are: `receipt_body_sha256`, `receipt_schema`,
+  `receipt_schema_version`, `receipt_signing_key_id`, `source_commit`, `binary_sha256`,
+  `target_os`, `target_architecture`. **There is no findings field.**
+- 29-01-RECEIPT-INTERFACE.md consumes `EvidenceReceiptV1` / `wayland.eval.receipt` /
+  `AuthorityClaimV1::Ci` — the **v1 per-run eval receipt**, a DIFFERENT artifact from the v2
+  `wayland.cert.receipt` this lane is repairing.
+- Phase 30's `check-staleness.sh` touches the receipt with `test -f` only. Not a semantic reader.
+
+Two consequences, and they point opposite ways:
+
+1. **Blast radius is smaller than feared.** No consumer reads the stale `disposition: OPEN`, so
+   the contradiction did not silently corrupt a downstream decision.
+2. **The accounting control has no consumer at all** — exactly the failure 28-04-SUMMARY.md
+   predicted for itself in the same sentence ("worth less than it looks"). That is a live gap,
+   and it is NOT this lane's to fix.
+
+What Phase 29 *does* pin is `receipt_body_sha256` + `receipt_signing_key_id`. A superseding
+receipt has BOTH new. So any future release manifest must pin the superseding pair, not the
+original — that is a seam consequence to surface, not to act on unilaterally.
+
 ## Still to establish
 
-1. receipt.rs schema strictness + how signature verification is invoked (test? binary?).
-2. Whether Phase 29 actually consumes `body.findings` from the signed receipt (28-04-SUMMARY.md:310
-   claims it must) — check, do not assume.
-3. Prove any verifier I rely on can REJECT a tampered superseding receipt before trusting a pass.
+1. Prove the verifier REJECTS a tampered superseding receipt before trusting it accepting a good
+   one (the instrument-carries-the-defect trap).
+2. Rust verification of both receipts — needs hetzner (no cargo on the Mac).
