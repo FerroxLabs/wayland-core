@@ -264,12 +264,18 @@ pub fn attempt(home: &Path, holder: &str) -> ChannelPollLease {
     attempt_inner(home, holder, true)
 }
 
-/// [`attempt`] without the stderr announcements.
+/// [`attempt`] without the announcements.
 ///
-/// The supervisor re-attempts on every tick. Announcing each of those would
-/// bury the transitions that matter in a per-tick stream, so it announces on
-/// ROLE CHANGE only — see [`PollSupervisorState::tick`]. The tracing events are
-/// still emitted, at their normal levels, on every attempt.
+/// The supervisor re-attempts on EVERY TICK. The boot attempt is the one an
+/// operator needs to see; the rest are routine and go to `trace`.
+///
+/// Measured, not assumed: the first live run of this supervisor emitted **23
+/// `WARN` lines** from one observer session in ninety seconds, because the
+/// per-tick re-attempt reused the boot attempt's log levels. At the production
+/// two-second cadence that is a `WARN` every two seconds for the whole life of
+/// any process that is not the poller — which would bury the ONE line that
+/// matters, the role change, in the noise it created. Loudness that is always
+/// on is not loudness.
 fn attempt_quiet(home: &Path, holder: &str) -> ChannelPollLease {
     attempt_inner(home, holder, false)
 }
@@ -278,13 +284,21 @@ fn attempt_inner(home: &Path, holder: &str, announce: bool) -> ChannelPollLease 
     let dir = lease_dir(home);
     match ScheduleLease::attempt_named(&dir, holder, CHANNEL_LOCK_FILE, CHANNEL_RECORD_FILE) {
         Ok(LeaseAttempt::Owner(lease)) => {
-            tracing::info!(
-                target: "wcore_agent::channel_lease",
-                holder,
-                pid = std::process::id(),
-                dir = %dir.display(),
-                "{CHANNEL_LEASE_TOKEN}=owner — this process owns inbound polling for this home"
-            );
+            if announce {
+                tracing::info!(
+                    target: "wcore_agent::channel_lease",
+                    holder,
+                    pid = std::process::id(),
+                    dir = %dir.display(),
+                    "{CHANNEL_LEASE_TOKEN}=owner — this process owns inbound polling for this home"
+                );
+            } else {
+                tracing::trace!(
+                    target: "wcore_agent::channel_lease",
+                    holder,
+                    "{CHANNEL_LEASE_TOKEN}=owner (supervisor re-attempt)"
+                );
+            }
             ChannelPollLease {
                 role: ChannelPollRole::Owner,
                 owner_pid: Some(std::process::id()),
@@ -298,14 +312,23 @@ fn attempt_inner(home: &Path, holder: &str, announce: bool) -> ChannelPollLease 
             let owner = holder_pid
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            tracing::warn!(
-                target: "wcore_agent::channel_lease",
-                holder,
-                owner_pid = owner.as_str(),
-                dir = %dir.display(),
-                "{CHANNEL_LEASE_TOKEN}=observer — another process owns inbound polling; \
-                 this process will NOT poll (sending is unaffected)"
-            );
+            if announce {
+                tracing::warn!(
+                    target: "wcore_agent::channel_lease",
+                    holder,
+                    owner_pid = owner.as_str(),
+                    dir = %dir.display(),
+                    "{CHANNEL_LEASE_TOKEN}=observer — another process owns inbound polling; \
+                     this process will NOT poll (sending is unaffected)"
+                );
+            } else {
+                tracing::trace!(
+                    target: "wcore_agent::channel_lease",
+                    holder,
+                    owner_pid = owner.as_str(),
+                    "{CHANNEL_LEASE_TOKEN}=observer (supervisor re-attempt)"
+                );
+            }
             if announce {
                 eprintln!(
                     "{CHANNEL_LEASE_TOKEN}=observer owner_pid={owner} holder={holder}: \
@@ -319,6 +342,9 @@ fn attempt_inner(home: &Path, holder: &str, announce: bool) -> ChannelPollLease 
             // Fail CLOSED. If ownership cannot be established it has not been
             // established, and polling anyway is the exact defect this module
             // exists to prevent.
+            // Always at WARN, announce or not: a lease that cannot be TAKEN is
+            // an error condition rather than a routine role, and it does not
+            // recur every tick in any healthy configuration.
             tracing::warn!(
                 target: "wcore_agent::channel_lease",
                 holder,

@@ -324,16 +324,24 @@ function gradeWindow({ maxOpen, polls, expectPids, sawPids }) {
   if (sawPids === null) {
     return { grade: 'UNATTRIBUTED', why: 'ss was unavailable; polling happened but no pid could be attributed' };
   }
+  // INSTRUMENT DEFECT #4 OF THIS LANE. This used to take a `Set` and the window
+  // result carried the same `Set` straight into `JSON.stringify`, which
+  // serialises a Set as `{}`. The first live run's evidence file therefore
+  // recorded `"pids": {}` for every window — a reader would take that as "no
+  // process was attributed", i.e. the strongest possible negative, from a run
+  // where attribution had in fact SUCCEEDED. Both sides now speak arrays, and
+  // the evidence carries a sorted list of pids.
+  const saw = new Set(sawPids);
   const expected = new Set(expectPids);
-  const extra = [...sawPids].filter((p) => !expected.has(p));
-  const missing = [...expected].filter((p) => !sawPids.has(p));
+  const extra = [...saw].filter((p) => !expected.has(p));
+  const missing = [...expected].filter((p) => !saw.has(p));
   if (extra.length > 0) {
     return { grade: 'WRONG_OWNER', why: `unexpected poller pid(s) ${extra.join(',')}` };
   }
   if (missing.length > 0) {
     return { grade: 'WRONG_OWNER', why: `expected poller pid(s) ${missing.join(',')} held no connection` };
   }
-  return { grade: 'OK', why: `exactly one poller, attributed to pid(s) ${[...sawPids].join(',')}` };
+  return { grade: 'OK', why: `exactly one poller, attributed to pid(s) ${[...saw].join(',')}` };
 }
 
 /**
@@ -425,6 +433,18 @@ const TICK_MS = 1000;
 const SETTLE_MS = 9000;
 /** How long a steady-state observation window is held open. */
 const WINDOW_MS = 8000;
+/**
+ * How long a process gets to boot far enough to poll, or to change role.
+ *
+ * MEASURED, not guessed. The first live run set this at 60s and the leg failed
+ * on it: a debug-build session on a box at load 13 took **exactly 61 seconds**
+ * to reach its first `getUpdates`, so `session_owned_first` read false while
+ * every substantive assertion in the same leg passed. A budget that expires
+ * just before the thing it waits for produces a FALSE NEGATIVE, which is the
+ * same class of damage as a false green — it would have reported this fix as
+ * not working.
+ */
+const BOOT_BUDGET_MS = 240_000;
 
 class Run {
   constructor(args) {
@@ -684,7 +704,11 @@ class Run {
       end,
       maxOpen: maxOpenInWindow(rep.concurrency_trace, start, end),
       polls: pollsInWindow(rep.concurrency_trace, start, end),
-      pids: this.pidsInWindow(start, end),
+      // An ARRAY, never a Set — see instrument defect #4 in `gradeWindow`.
+      pids: (() => {
+        const s = this.pidsInWindow(start, end);
+        return s === null ? null : [...s].sort((a, b) => a - b);
+      })(),
       report: rep,
     };
   }
@@ -763,7 +787,7 @@ class Run {
 async function legA(run) {
   run.note('=== LEG A: session first, service second — the service must take over ===');
   const session = run.startSession('A');
-  const gotFirst = await run.waitForPolls(2, 60_000, 'legA/session-owns');
+  const gotFirst = await run.waitForPolls(2, BOOT_BUDGET_MS, 'legA/session-owns');
 
   // Positive baseline IN THE SAME RUN: exactly one poller, and it is the
   // session. A post-handover `1` is only meaningful against this.
@@ -773,8 +797,8 @@ async function legA(run) {
 
   // Now the installed service arrives.
   const gateway = run.startGateway('A');
-  const yielded = run.waitForToken(session.logPath, 'F24_CHANNEL_LEASE=yielded', 60_000, 'legA/session-yields');
-  const acquired = run.waitForToken(gateway.logPath, 'F24_CHANNEL_LEASE=acquired', 60_000, 'legA/gateway-acquires');
+  const yielded = run.waitForToken(session.logPath, 'F24_CHANNEL_LEASE=yielded', BOOT_BUDGET_MS, 'legA/session-yields');
+  const acquired = run.waitForToken(gateway.logPath, 'F24_CHANNEL_LEASE=acquired', BOOT_BUDGET_MS, 'legA/gateway-acquires');
 
   run.note(`legA: settling ${SETTLE_MS}ms before the post-handover window`);
   for (let i = 0; i < SETTLE_MS / 1000; i += 1) { run.sampleConns(); sleep(1000); }
@@ -822,11 +846,11 @@ async function legA(run) {
 async function legB(run) {
   run.note('=== LEG B: service first, session second — the service must keep polling ===');
   const gateway = run.startGateway('B');
-  const gotFirst = await run.waitForPolls(2, 60_000, 'legB/gateway-owns');
+  const gotFirst = await run.waitForPolls(2, BOOT_BUDGET_MS, 'legB/gateway-owns');
   const w1 = await run.window('legB/W1 gateway alone', WINDOW_MS);
 
   const session = run.startSession('B');
-  const sessionObserves = run.waitForToken(session.logPath, 'F24_CHANNEL_LEASE=observer', 60_000, 'legB/session-observes');
+  const sessionObserves = run.waitForToken(session.logPath, 'F24_CHANNEL_LEASE=observer', BOOT_BUDGET_MS, 'legB/session-observes');
 
   run.note(`legB: settling ${SETTLE_MS}ms with both processes alive`);
   for (let i = 0; i < SETTLE_MS / 1000; i += 1) { run.sampleConns(); sleep(1000); }
@@ -885,10 +909,10 @@ async function legB(run) {
 async function legD(run) {
   run.note('=== LEG D: kill the holder; a live observer must take over unaided ===');
   const gateway = run.startGateway('D');
-  const gotFirst = await run.waitForPolls(2, 60_000, 'legD/gateway-owns');
+  const gotFirst = await run.waitForPolls(2, BOOT_BUDGET_MS, 'legD/gateway-owns');
 
   const session = run.startSession('D');
-  const observed = run.waitForToken(session.logPath, 'F24_CHANNEL_LEASE=observer', 60_000, 'legD/session-observes');
+  const observed = run.waitForToken(session.logPath, 'F24_CHANNEL_LEASE=observer', BOOT_BUDGET_MS, 'legD/session-observes');
   const sessionAliveBefore = run.alive(session);
 
   run.note(`legD: killing the holder pid=${gateway.child.pid} with SIGKILL — no operator action follows`);
@@ -896,7 +920,7 @@ async function legD(run) {
   try { gateway.child.kill('SIGKILL'); } catch { /* gone */ }
 
   // NOTHING is started here. That is the point of the leg.
-  const tookOver = run.waitForToken(session.logPath, 'F24_CHANNEL_LEASE=acquired', 60_000, 'legD/session-takes-over');
+  const tookOver = run.waitForToken(session.logPath, 'F24_CHANNEL_LEASE=acquired', BOOT_BUDGET_MS, 'legD/session-takes-over');
   const sessionAliveAfter = run.alive(session);
 
   const w = await run.window('legD/W after takeover', WINDOW_MS);
@@ -1032,6 +1056,18 @@ function selfTest(assert) {
   const oldShapeGrade = (maxOpen) => (maxOpen === 0 ? 'DENIAL' : 'OK');
   assert('falsedenial/OLD SHAPE WOULD HAVE MISSED IT: maxOpen-first grading calls a polling window DENIAL',
     oldShapeGrade(0) === 'DENIAL' && tailOnly.grade !== 'DENIAL');
+
+  // ── 4c. INSTRUMENT DEFECT #4 OF THIS LANE: a Set serialises to `{}` ─────
+  // The evidence file is the deliverable. A window whose attribution succeeded
+  // must not be RECORDED as `"pids": {}`, which reads as the strongest possible
+  // negative.
+  const winLike = { pids: [7, 3] };
+  assert('serialise/known-positive: an array of pids survives JSON.stringify',
+    JSON.stringify(winLike) === '{"pids":[7,3]}');
+  assert('serialise/known-negative: the grader accepts an array and still grades correctly',
+    gradeWindow({ maxOpen: 1, polls: 3, expectPids: [7, 3], sawPids: [7, 3] }).grade === 'OK');
+  assert('serialise/OLD SHAPE WOULD HAVE MISSED IT: a Set stringifies to {} and loses every pid',
+    JSON.stringify({ pids: new Set([7, 3]) }) === '{"pids":{}}');
 
   // ── 5. wrong-owner detection ────────────────────────────────────────────
   assert('owner/known-positive: the wrong pid polling is caught',
