@@ -508,8 +508,20 @@ fn run_promote(args: PromoteArgs) -> Result<()> {
         plural(promoted.len(), "", "s"),
         dest.display()
     );
-    for id in &promoted {
-        println!("  • {id}");
+    let renamed = promoted.iter().filter(|p| p.renamed).count();
+    for p in &promoted {
+        if p.renamed {
+            println!("  • {} → {} (name already taken)", p.id, p.promoted_as);
+        } else {
+            println!("  • {}", p.id);
+        }
+    }
+    if renamed > 0 {
+        println!(
+            "\n{renamed} item{} landed under a disambiguated name because a peer install \
+             reuses one skill name across profiles. Nothing was overwritten.",
+            plural(renamed, "", "s")
+        );
     }
     Ok(())
 }

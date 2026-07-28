@@ -253,6 +253,17 @@ pub struct QuarantineEntry {
     pub promote_as: String,
 }
 
+/// One item that left containment, and the name it landed under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromotedItem {
+    pub id: String,
+    /// The directory name it was written as. Differs from the item's own name
+    /// only when that name was already taken.
+    pub promoted_as: String,
+    /// True when a collision forced a disambiguated name.
+    pub renamed: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct QuarantineIndexFile {
     #[serde(default = "index_schema")]
@@ -422,11 +433,23 @@ impl QuarantineStore {
     ///
     /// Promotion of a whole set costs ONE invocation, so promoting a realistic
     /// subset does not cost one operator action per item.
+    ///
+    /// # Why a name collision must not abort the set
+    ///
+    /// A real peer install carries the SAME skill name under many profiles —
+    /// measured on 26-01's structural corpus, 256 quarantined items shared just
+    /// 46 distinct directory names. Aborting the whole promotion on the first
+    /// collision forces the operator to promote one item at a time, which is
+    /// precisely the cost that makes an operator route around containment
+    /// altogether. So a collision is RESOLVED, not fatal: the item is promoted
+    /// under a name disambiguated by a digest of its identity, and the mapping
+    /// is returned so the caller can report it. Nothing is silently overwritten
+    /// and nothing is silently dropped.
     pub fn promote(
         &self,
         ids: &[String],
         dest_root: &Path,
-    ) -> Result<Vec<String>, QuarantineError> {
+    ) -> Result<Vec<PromotedItem>, QuarantineError> {
         let mut index = self.load_index()?;
         // Validate every identity BEFORE moving anything, so a typo in a set
         // cannot leave half a promotion applied.
@@ -437,17 +460,40 @@ impl QuarantineStore {
         }
         fs::create_dir_all(dest_root)?;
         let mut promoted = Vec::new();
+        let mut taken: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for id in ids {
             let entry = index.entries.get(id).expect("validated above").clone();
             let from = self.root.join(&entry.stored_path);
-            let to = dest_root.join(&entry.promote_as);
-            if to.exists() {
-                return Err(QuarantineError::PromotionTargetExists(to));
+
+            // Resolve a unique on-disk name. The plain name is preferred; on a
+            // collision the identity's digest disambiguates, so two items never
+            // land on one directory and neither is lost.
+            let mut name = entry.promote_as.clone();
+            let mut renamed = false;
+            if name.is_empty() || taken.contains(&name) || dest_root.join(&name).exists() {
+                let digest = item_digest("id", entry.id.as_bytes());
+                let base = if name.is_empty() { "item" } else { &name };
+                name = format!("{}-{}", base, &digest[..12]);
+                renamed = true;
             }
-            copy_tree(&from, &to)?;
+            if taken.contains(&name) || dest_root.join(&name).exists() {
+                // Two DISTINCT identities cannot produce one digest, so reaching
+                // here means the disambiguated name was already on disk — a real
+                // conflict the operator must resolve rather than one to paper over.
+                return Err(QuarantineError::PromotionTargetExists(
+                    dest_root.join(&name),
+                ));
+            }
+
+            copy_tree(&from, &dest_root.join(&name))?;
             fs::remove_dir_all(&from).ok();
             index.entries.remove(id);
-            promoted.push(entry.id);
+            taken.insert(name.clone());
+            promoted.push(PromotedItem {
+                id: entry.id,
+                promoted_as: name,
+                renamed,
+            });
         }
         self.save_index(&index)?;
         Ok(promoted)

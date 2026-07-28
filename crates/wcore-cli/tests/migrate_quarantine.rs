@@ -409,7 +409,9 @@ fn t6_nothing_the_imported_content_carries_can_promote_it() {
     // Positive control: the EXPLICIT operator action does promote it, so the
     // refusals above are not a promotion path that never works.
     let promoted = store.promote(&[id.to_string()], &skills_dir).unwrap();
-    assert_eq!(promoted, vec![id.to_string()]);
+    assert_eq!(promoted.len(), 1);
+    assert_eq!(promoted[0].id, id);
+    assert!(!promoted[0].renamed);
     assert!(skills_dir.join("self-promoting").join("SKILL.md").is_file());
     assert!(!store.contains(id).unwrap());
     let _ = home;
@@ -1197,6 +1199,90 @@ fn t20_live_positive_control_same_payload_executes_once_promoted() {
 // ===========================================================================
 // Provenance document behaviour used by the scale measurement
 // ===========================================================================
+
+/// A real peer install reuses ONE skill name across many profiles — measured
+/// on 26-01's structural corpus, 256 quarantined items shared 46 distinct
+/// directory names. Promoting such a set must cost ONE operator invocation, not
+/// one per item: a promotion path that aborts on the first collision is one the
+/// operator routes around, and a containment users bypass is worse than none.
+///
+/// This is the regression guard for the ergonomics defect the 540-scale
+/// measurement caught (F26-02-A).
+#[test]
+fn t22_promoting_a_set_that_reuses_one_name_costs_one_invocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = QuarantineStore::new(dir.path().join("store"));
+    let src = dir.path().join("src");
+
+    // Three DISTINCT items whose directory basename is identical, exactly as
+    // `profiles/<a>/skills/apple` and `profiles/<b>/skills/apple` are.
+    let mut ids = Vec::new();
+    for profile in ["alpha", "beta", "gamma"] {
+        let d = src.join(profile).join("skills").join("apple");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join("SKILL.md"),
+            format!("---\nname: apple\n---\n{profile}"),
+        )
+        .unwrap();
+        let id = format!("skill:profiles/{profile}/skills/apple");
+        store
+            .admit(&QuarantineRequest {
+                id: id.clone(),
+                reason: ExecutableReason::SkillShellDirective,
+                source_dir: Some(d),
+                inline: None,
+                source_tool: "hermes".into(),
+                source_version: None,
+                source_path: format!("profiles/{profile}/skills/apple"),
+                promote_as: "apple".into(),
+            })
+            .unwrap();
+        ids.push(id);
+    }
+
+    // ONE invocation promotes all three.
+    let dest = dir.path().join("skills");
+    let promoted = store
+        .promote(&ids, &dest)
+        .expect("a set that reuses one name must promote in a single invocation");
+    assert_eq!(
+        promoted.len(),
+        3,
+        "every item must be promoted: {promoted:?}"
+    );
+
+    // Every item landed under its own directory — none overwritten, none lost.
+    let names: std::collections::BTreeSet<String> =
+        promoted.iter().map(|p| p.promoted_as.clone()).collect();
+    assert_eq!(
+        names.len(),
+        3,
+        "two items collapsed onto one name: {names:?}"
+    );
+    for p in &promoted {
+        assert!(
+            dest.join(&p.promoted_as).join("SKILL.md").is_file(),
+            "{p:?} did not land on disk"
+        );
+    }
+    // Exactly one keeps the plain name; the other two are disambiguated and say so.
+    assert_eq!(promoted.iter().filter(|p| !p.renamed).count(), 1);
+    assert_eq!(promoted.iter().filter(|p| p.renamed).count(), 2);
+    // The bodies are distinct, so the three directories are three ITEMS and not
+    // one item copied three times.
+    let bodies: std::collections::BTreeSet<String> = promoted
+        .iter()
+        .map(|p| std::fs::read_to_string(dest.join(&p.promoted_as).join("SKILL.md")).unwrap())
+        .collect();
+    assert_eq!(
+        bodies.len(),
+        3,
+        "the promoted bodies are not distinct: {bodies:?}"
+    );
+    // And the store is now empty — promotion removed what it promoted.
+    assert!(store.entries().unwrap().is_empty());
+}
 
 #[test]
 fn t21_provenance_document_is_deterministic_and_key_ordered() {
