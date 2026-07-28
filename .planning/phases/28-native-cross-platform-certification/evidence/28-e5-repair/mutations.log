@@ -1,0 +1,10 @@
+﻿F28E5 MARKER MUTATIONS started=2026-07-29T03:49:17.4611611+07:00
+MUT=control-unmutated RC=0 OUT=VERIFIED platform=windows cells=219
+MUT=M1-absent-sandbox-cell RC=1 OUT=node.exe : CR byte in authority artifact (LF grammar required)
+MUT=M2-unbound-commit RC=1 OUT=node.exe : CR byte in authority artifact (LF grammar required)
+MUT=M3-activeness-downgraded RC=1 OUT=node.exe : CR byte in authority artifact (LF grammar required)
+CONTROL_ACCEPTED=True
+M1_REJECTED=True
+M2_REJECTED=True
+M3_REJECTED=True
+EXIT=0

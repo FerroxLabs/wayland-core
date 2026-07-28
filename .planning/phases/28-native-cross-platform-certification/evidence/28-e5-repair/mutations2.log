@@ -1,0 +1,13 @@
+﻿F28E5 MARKER MUTATIONS v2 (LF-exact) started=2026-07-29T03:50:02.4392716+07:00
+SRC_LINES=220
+SRC_HAS_CR=False
+MUT=A-control-untouched RC=0 CR_REASON=False OUT=VERIFIED platform=windows cells=219
+MUT=B-null-mutation-lf-writer RC=0 CR_REASON=False OUT=VERIFIED platform=windows cells=219
+MUT=C1-absent-sandbox-cell RC=1 CR_REASON=False OUT=node.exe : final acceptance marker before all cells were recorded
+MUT=C2-unbound-commit RC=1 CR_REASON=False OUT=node.exe : cell sandbox-probes-windows-acp commit drift
+MUT=C3-duplicate-marker RC=1 CR_REASON=False OUT=node.exe : duplicate cell marker: sandbox-probes-windows-acp
+A_CONTROL_ACCEPTED=True
+B_NULL_MUTATION_ACCEPTED=True
+C_ALL_MUTANTS_REJECTED=True
+C_REJECTED_FOR_THE_RIGHT_REASON=True
+EXIT=0
