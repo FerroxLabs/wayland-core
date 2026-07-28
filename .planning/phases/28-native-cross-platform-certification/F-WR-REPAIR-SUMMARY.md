@@ -82,12 +82,22 @@ neither mode's outcome.
 `cargo test --test live_fs_acl` exits 0 printing `test result: ok` on 0 of 12. Surveying the
 class found **two flavours**:
 
-- **Flavour A — every test `#[ignore]`d: 15 integration-test binaries.** Full inventory in the
-  evidence directory. `cargo test --test X` runs zero and exits 0.
+- **Flavour A — every test `#[ignore]`d: 15 integration-test binaries.** `cargo test --test X`
+  runs zero and exits 0. Distinguished from the **12** suites that have only *some* ignored
+  tests, which are normal and excluded — the runner still executes the rest, so they cannot
+  report `ok` on zero work.
 - **Flavour B — env-gated early `return`: 1 binary, `live_integrity.rs`, 5 tests.** This is
   **strictly worse**: it printed `5 passed` for zero work. Flavour A at least prints
   `0 passed; 12 ignored`, which a reader might notice; an affirmative `5 passed` reads as
   certification. This is the suite `KR-01` lives in.
+
+**The detector for this class had this class's disease.** The first version of the inventory
+generator reported `live_integrity.rs` as 6/6 ignored when its guard is deliberately not
+ignored: it matched `#[ignore` against a block including **doc-comment prose**, and that doc
+comment *describes* the defect using the literal text `` `#[ignore]`d ``. The instrument built
+to detect coverage-from-nothing was itself reporting coverage **from prose rather than code**.
+Fixed by anchoring on `^\s*#\[` and never collecting comment lines. Recorded because it is the
+sharpest available argument for the rule being enforced.
 
 **Fixed in `live_integrity.rs`** (Flavour B converted to Flavour A plus a guard): the five cases
 are now honestly `#[ignore]`d with an asserting gate, and a non-`#[ignore]`d guard fails when
