@@ -23,6 +23,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use wcore_swarm::worktree::CandidateSeal;
+use wcore_types::goal::HostGateObservation;
 use wcore_types::spawner::ChildId;
 
 use super::TerminalState;
@@ -270,6 +271,21 @@ pub struct ClimbOutcome {
     /// [`Self::winner`] for logs/receipts; it is NOT the source of identity and
     /// is never used to reconstruct a candidate.
     pub best_worktree: Option<PathBuf>,
+    /// The host-observed gate evidence for the selected winner, when one was
+    /// kept (F22C, Success Criterion 3).
+    ///
+    /// This exists so the canonical Goal terminal transition can consume the
+    /// evidence the PARENT measured rather than an adapter's paraphrase of it.
+    /// Before F22C the observed stability pass count was computed by
+    /// [`stability_passes`] and then discarded, so nothing downstream could tell
+    /// a 3-of-3 pass from a 1-of-3 one; anything constructing a
+    /// [`HostGateObservation`] outside the engine would have been inventing the
+    /// number. It is `Some` ONLY on the keepable path, where a real gate report
+    /// and a real rerun count exist, and `None` at every other exit.
+    ///
+    /// `HostGateObservation` is deliberately not `Deserialize`, so this field
+    /// cannot be minted by a model-authored tool result.
+    pub gate_observation: Option<HostGateObservation>,
     /// The parent-owned landing outcome for the selected winner, when a winner
     /// existed and the landing wiring ran. Report-only: it carries display
     /// strings extracted from the landing authorization, never an authority
@@ -372,8 +388,8 @@ pub async fn run_climb(
     // Keep-best: if the probe is green (and stable), it is the winner. Ownership
     // of `best` moves into the outcome so ONLY the winner's transaction survives;
     // every other candidate has already terminalized by RAII.
-    if let Some(kind) = check_keepable(gate, &best, params).await {
-        return finish_keepable(best, kind, iterations, valve_fires);
+    if let Some((kind, observation)) = check_keepable(gate, &best, params).await {
+        return finish_keepable(best, kind, observation, iterations, valve_fires);
     }
 
     // ── Surgical climb: fix the failing checks, accept only non-regressions. ──
@@ -443,8 +459,8 @@ pub async fn run_climb(
                 // never collapse: the winner keeps its own distinct checkout.
                 best = (candidate, candidate_report.clone());
                 report = candidate_report;
-                if let Some(kind) = check_keepable(gate, &best, params).await {
-                    return finish_keepable(best, kind, iterations, valve_fires);
+                if let Some((kind, observation)) = check_keepable(gate, &best, params).await {
+                    return finish_keepable(best, kind, observation, iterations, valve_fires);
                 }
             }
             // A rejected candidate is never stored in `best`, so it is dropped at
@@ -546,19 +562,42 @@ enum KeepableKind {
 /// `self_checked` (green but flaky); `None` means not green, keep climbing.
 /// Borrows `best` (its identity is re-resolved for every stability rerun), so
 /// ownership of the winner is only moved into the outcome by [`finish_keepable`].
+///
+/// Also returns the host-observed gate evidence measured on the way to that
+/// decision (F22C): the pinned closure digest the parent ran, the final
+/// candidate's passing/total checks, and the OBSERVED stability pass count.
+/// The evidence is returned for both kinds — a flaky green is evidence too, and
+/// it is evidence that does not clear the bar.
 async fn check_keepable(
     gate: &dyn EvaluationGateExecutor,
     best: &(BuiltCandidate, GateReport),
     params: &ClimbParams,
-) -> Option<KeepableKind> {
+) -> Option<(KeepableKind, HostGateObservation)> {
     if !best.1.all_green() {
         return None;
     }
-    if stability_holds(gate, best.0.checkout.as_ref(), params.stability).await {
-        Some(KeepableKind::Verified)
+    let stability = stability_passes(gate, best.0.checkout.as_ref(), params.stability).await;
+    let observation = HostGateObservation::from_parent_executed_gate(
+        params.gate_closure_digest.clone(),
+        best.1.score(),
+        u32::try_from(best.1.total()).unwrap_or(u32::MAX),
+        // A flipped rerun reports ZERO stability repeats, not the partial count.
+        // The count is evidence, and evidence that a check flipped on identical
+        // code is not evidence of N stable passes. This also means the value
+        // handed to `VerifiedTerminal::from_host_observed_gate` can never clear
+        // a `required >= 1` bar on a flaky candidate.
+        if stability.flipped {
+            0
+        } else {
+            stability.passes
+        },
+    );
+    let kind = if stability.earns_verification(params.stability) {
+        KeepableKind::Verified
     } else {
-        Some(KeepableKind::SelfChecked)
-    }
+        KeepableKind::SelfChecked
+    };
+    Some((kind, observation))
 }
 
 /// Build the keepable outcome, MOVING the winning candidate's checkout identity
@@ -569,6 +608,7 @@ async fn check_keepable(
 fn finish_keepable(
     best: (BuiltCandidate, GateReport),
     kind: KeepableKind,
+    gate_observation: HostGateObservation,
     iterations: u32,
     valve_fires: u32,
 ) -> ClimbOutcome {
@@ -590,6 +630,8 @@ fn finish_keepable(
         valve_fires,
         winner: Some(candidate.checkout),
         best_worktree,
+        // Real, parent-measured evidence — the only place it is ever attached.
+        gate_observation: Some(gate_observation),
         // The landing wiring in the forge fills this after the climb, when a
         // winner exists; the engine itself never lands.
         landing: None,
@@ -600,21 +642,59 @@ fn finish_keepable(
 /// the stamp requires `stability.required` of `stability.of` identical-code
 /// passes (spec §5). The subject is the candidate's own checkout, re-resolved on
 /// every rerun — never a bare path.
-async fn stability_holds(
+///
+/// Returns the OBSERVED evidence rather than a bare predicate (F22C), because
+/// the count is what the canonical Goal terminal transition must consume: a
+/// `bool` return threw it away, so nothing downstream could distinguish 3-of-3
+/// from 1-of-3, and any `stability_repeats` supplied further out would have been
+/// invented.
+///
+/// [`StabilityObservation::flipped`] is carried separately from the count and is
+/// load-bearing. The pre-F22C code returned `false` the instant a rerun flipped,
+/// WITHOUT consulting `stability.met`. Reporting only the count would let a
+/// `required: 1, of: 3` policy read a flip at rerun 2 as `met(1) == true` and
+/// promote a flaky candidate to `verified`. A flip is fatal to verification
+/// regardless of the count, exactly as before.
+#[derive(Debug, Clone, Copy)]
+struct StabilityObservation {
+    /// Identical-code passes observed, including the run that was already green.
+    passes: u32,
+    /// Whether a rerun went non-green (or errored) on identical code.
+    flipped: bool,
+}
+
+impl StabilityObservation {
+    /// Verification is earned only when nothing flipped AND the policy is met.
+    /// Both clauses are required; dropping either widens the reserved stamp.
+    fn earns_verification(self, stability: StabilityPolicy) -> bool {
+        !self.flipped && stability.met(self.passes)
+    }
+}
+
+async fn stability_passes(
     gate: &dyn EvaluationGateExecutor,
     candidate: &dyn CandidateCheckout,
     stability: StabilityPolicy,
-) -> bool {
+) -> StabilityObservation {
     let mut passes = 1; // the run that already went green
     for _ in 1..stability.of {
         match gate.run(candidate).await {
             Ok(r) if r.all_green() => passes += 1,
             // A single non-green (or errored) rerun means the check flipped on
-            // identical code — flaky, so verification is not earned.
-            _ => return false,
+            // identical code — flaky, so verification is not earned. Report the
+            // passes observed BEFORE the flip, and that it flipped.
+            _ => {
+                return StabilityObservation {
+                    passes,
+                    flipped: true,
+                };
+            }
         }
     }
-    stability.met(passes)
+    StabilityObservation {
+        passes,
+        flipped: false,
+    }
 }
 
 /// Build surgical feedback from the current report (valve guidance is folded
@@ -673,6 +753,10 @@ fn timed_out_from_best(report: &GateReport, iterations: u32, valve_fires: u32) -
         // terminalizes it on scope exit — no winner is retained.
         winner: None,
         best_worktree: None,
+        // No candidate was kept, so no host-observed gate evidence exists. This
+        // is `None` rather than a zeroed observation: an empty observation is a
+        // claim that a gate ran and measured nothing, which is false here.
+        gate_observation: None,
         // No winner, so no landing was attempted.
         landing: None,
     }
@@ -695,6 +779,10 @@ fn terminal_from_best(report: &GateReport, iterations: u32, valve_fires: u32) ->
         // No keepable candidate: the last `best` terminalizes on scope exit.
         winner: None,
         best_worktree: None,
+        // No candidate was kept, so no host-observed gate evidence exists. This
+        // is `None` rather than a zeroed observation: an empty observation is a
+        // claim that a gate ran and measured nothing, which is false here.
+        gate_observation: None,
         // No winner, so no landing was attempted.
         landing: None,
     }
@@ -711,6 +799,10 @@ fn blocked(reason: String) -> ClimbOutcome {
         valve_fires: 0,
         winner: None,
         best_worktree: None,
+        // No candidate was kept, so no host-observed gate evidence exists. This
+        // is `None` rather than a zeroed observation: an empty observation is a
+        // claim that a gate ran and measured nothing, which is false here.
+        gate_observation: None,
         // No winner, so no landing was attempted.
         landing: None,
     }

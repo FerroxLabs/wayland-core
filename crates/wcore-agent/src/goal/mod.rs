@@ -26,6 +26,7 @@ mod fleet;
 mod kernel;
 mod ledger;
 mod record;
+pub mod strategy;
 
 pub use fleet::{
     FleetRecovery, FleetRun, GoalFleetDriver, TaskAssignment, TaskExecution, TaskExecutor,
@@ -34,6 +35,10 @@ pub use fleet::{
 pub use kernel::{GoalKernel, GoalRecovery};
 pub use ledger::{ClaimOutcome, GoalLedger, TaskAuthority};
 pub use record::{AuthorityUnreconstructable, GoalAuthorityRecord};
+pub use strategy::{
+    AnvilTag, CouncilTag, DirectOutcome, DirectTag, FleetOutcome, FleetTag, ForgeFlowsTag,
+    GoalLoop, GoalLoopError, LoopOwner, StrategyTag, StrategyTermination,
+};
 
 // Re-exported so callers work in one vocabulary: the durable projection and the
 // kernel that writes it are named from the same module.
