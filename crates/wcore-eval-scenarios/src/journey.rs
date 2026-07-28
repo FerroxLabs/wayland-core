@@ -730,7 +730,10 @@ mod tests {
 
     #[test]
     fn an_empty_receipt_is_refused_by_name() {
-        assert_eq!(parse_receipt("   "), Err(JourneyError::EmptyReceipt));
+        assert_eq!(
+            parse_receipt("   ").unwrap_err(),
+            JourneyError::EmptyReceipt
+        );
     }
 
     #[test]
