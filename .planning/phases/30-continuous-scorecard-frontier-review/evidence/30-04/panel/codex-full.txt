@@ -1,0 +1,43 @@
+Reading additional input from stdin...
+OpenAI Codex v0.144.4
+--------
+workdir: /Users/seandonahoe/dev/waylandcore
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019faa25-a7a7-7181-8fd7-5124de835211
+--------
+user
+A software phase has this Success Criterion, quoted verbatim: "No main merge, issue closure, release, deployment, or frontier positioning occurs without Sean's explicit approval."
+
+The grading vocabulary is a CLOSED five-member enum: MET, MET_WITH_STATED_EXCEPTIONS, PARTIAL, NOT_MET, UNPROVEN. MET and MET_WITH_STATED_EXCEPTIONS require every cited evidence reference to resolve and be marked proven; the other three require no evidence at all (the asymmetry is deliberate, so an honest downgrade is never the expensive option).
+
+The evidence actually in hand:
+1. A reserved-authority module landed: nine reserved actions as a closed enum refusing an unknown name at deserialization; a principal enum with exactly ONE member (not the agent); nine distinct per-action signature domains; approvals bound to a subject digest. 14/14 contract tests pass on real hardware.
+2. The bundled approval trust root is an all-zeros placeholder. It REFUSES every approval, proved on hardware, and the error names its substitution point. So positioning is structurally unreachable in this repo.
+3. A positive control also ran: a throwaway root generated at run time ACCEPTS a valid approval, so the verifier is not merely one that refuses everything.
+4. Audit of the executing lane: no local main/master contains its HEAD (weak - no local main branch exists at all); no tag points at HEAD; retained evidence refs intact (tight count 37, exactly the baseline); and, measured via read-only ls-remote with a working falsification control, the lane HEAD is NOT an ancestor of main on the GitHub remote.
+5. Frontier positioning demonstrably did NOT occur in this phase: the preceding plan published ZERO peer comparisons in either direction, and this plan produces a decision packet gate-checked free of readiness vocabulary.
+6. WHAT IS NOT OBSERVABLE: issue closure, release publication and deployment write no git object at all. No command in the repository can observe them, for ANY actor, over the whole phase. Also: no baseline snapshot of main was taken at phase start, so "did some OTHER lane merge to main during this phase" is unanswered.
+
+Question: which single grade from the closed enum is most defensible for this criterion, and why? Answer with exactly one line of the form GRADE=<one of the five>, then at most 120 words of reasoning. Consider specifically whether MET_WITH_STATED_EXCEPTIONS overclaims given point 6.
+deprecated: `[features].codex_hooks` is deprecated. Use `[features].hooks` instead.
+Enable it with `--enable hooks` or `[features].hooks` in config.toml. See https://developers.openai.com/codex/config-basic#feature-flags for details.
+2026-07-28T19:13:45.128583Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(AuthRequiredError { www_authenticate_header: "Bearer realm=\"OAuth\", resource_metadata=\"https://mcp.canva.com/.well-known/oauth-protected-resource/mcp\", error=\"invalid_token\", error_description=\"Missing or invalid access token\"" })
+2026-07-28T19:13:45.354997Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Auth(AuthorizationRequired)
+hook: SessionStart
+hook: SessionStart Completed
+hook: UserPromptSubmit
+hook: UserPromptSubmit Completed
+codex
+GRADE=PARTIAL
+The evidence proves reserved authority, fail-closed approval behavior, no executing-lane merge/tag, and no frontier positioning. But issue closure, release, deployment, and other-lane merges remain unobservable or unanswered. MET_WITH_STATED_EXCEPTIONS would convert missing phase-wide proof into “exceptions,” overclaiming satisfaction.
+hook: Stop
+hook: Stop Completed
+tokens used
+30,937
+GRADE=PARTIAL
+The evidence proves reserved authority, fail-closed approval behavior, no executing-lane merge/tag, and no frontier positioning. But issue closure, release, deployment, and other-lane merges remain unobservable or unanswered. MET_WITH_STATED_EXCEPTIONS would convert missing phase-wide proof into “exceptions,” overclaiming satisfaction.

@@ -1,0 +1,31 @@
+# CRIT-01 -- 'Every surface has versioned activation, operator-completeness, maturity,
+#             security-owner, evidence, and peer-delta truth refreshed at each phase.'
+# GRADE: NOT_MET
+#
+# Measured from the committed 30-01 seven-truth table, 148 data rows, by column:
+versioned_activation      unproven on   0 / 148
+operator_completeness     unproven on 148 / 148   <-- 100%
+maturity                  unproven on  15 / 148
+security_authority_owner  unproven on  15 / 148
+peer_delta                unproven on 148 / 148   <-- 100%
+#
+# TWO of the six required truths are UNPROVEN on EVERY SINGLE ROW. The criterion is
+# universally quantified ('Every surface has ... '), so a truth unproven on 100% of
+# rows fails it outright rather than partially.
+#
+# Three further clauses fail independently:
+# (a) 'Every surface' -- the walk measures the binary's ADVERTISED command tree, not
+#     its ACCEPTED surface. 'forgeflows' is a hidden clap alias that RUNS LIVE and has
+#     no inventory row, hence no security owner. 30-01 recorded this itself.
+# (b) 15 rows (6 top-level commands: init mcp-serve models profile project-context
+#     setup) are owned by NO coverage family at all. Three are credential-adjacent.
+# (c) 'refreshed at each phase' -- this is a FIRST refresh. One refresh is not a
+#     demonstrated cadence, and no evidence of a per-phase refresh exists.
+#
+# WHY NOT PARTIAL (dissent recorded): four of six truths do hold on 133/148 rows, and
+# the instrument to measure the rest now exists and is byte-deterministic. That is a
+# real achievement. It is graded NOT_MET rather than PARTIAL because the criterion's
+# quantifier is universal and two truths fail on 100% of rows -- the strongest true
+# statement available is that the INSTRUMENT exists, not that the criterion holds.
+# A reader who reads the quantifier as per-truth rather than per-surface would reach
+# PARTIAL; the numbers above are given so that reader can overturn this grade.

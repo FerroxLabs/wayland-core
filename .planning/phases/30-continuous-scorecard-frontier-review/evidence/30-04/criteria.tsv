@@ -1,0 +1,4 @@
+CRIT-01::NOT_MET::evidence=criteria/crit-01.txt
+CRIT-02::NOT_MET::evidence=criteria/crit-02.txt
+CRIT-03::MET_WITH_STATED_EXCEPTIONS::evidence=criteria/crit-03.txt
+CRIT-04::PARTIAL::evidence=criteria/crit-04.txt
