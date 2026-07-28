@@ -8,12 +8,33 @@ Tracks the **six release-blocking items** `CRITERIA-GAP-LEDGER.md` §3 identifie
 |---|---|---|
 | 1 | `24-C2` — three advertised trigger kinds can never fire | **BLOCKING ELEMENT CLOSED** |
 | 2 | `27-C2(a)` — browser remediation string sends users into an impossible loop | **CLOSED** |
-| 3 | `24-C5` + `24-C1` — macOS/Windows setup-to-recovery journeys | **IN FLIGHT** |
+| 3 | `24-C5` + `24-C1` — macOS/Windows setup-to-recovery journeys | **NOT MET**, Linux passes receipted, Windows red on one open HIGH, macOS unrun — finish lane running |
 | 4 | `23A-C1` — `--skills-promote` advertised and always fails | **BLOCKING ELEMENT CLOSED** |
 | 5 | `27-C2(b)` — capability flags lie to Desktop | **BLOCKING ELEMENT CLOSED**, Desktop train owed |
-| 6 | `24-C3` — inbound channel matrix never driven end to end | **NOT STARTED** |
+| 6 | `24-C3` — inbound channel matrix never driven end to end | **IN FLIGHT** — unblocked, the shared fixture now exists |
 
-**Four of six addressed in one day. Two remain: item 3 in flight, item 6 not started.**
+**Four of six addressed. Both remaining items are now in flight.**
+
+### Item 3, measured 2026-07-28 evening — the honest state
+
+`24-04` really had never been started, so the harness did not exist. It does now: a 17-step
+ordered journey identical on every platform, an **independent sink as its own OS process**, and
+a verifier that hashes the binary itself and **derives** duplicates/losses rather than trusting
+a reported figure.
+
+- **Linux — PASS, receipted, twice.** 17 steps, 12 submitted, 12 arrived, 0 duplicates, 0
+  losses. **Recovery observed, not asserted:** `kill -9`, no manual start, `NRestarts=1`, new
+  live pid. Upgrade and rollback both performed and observed — the first time either `24-C1`
+  clause has been exercised anywhere.
+- **Windows — RED at step 12 of 17.** Two HIGHs found and fixed live; **`F24-J-H3` remains
+  open and is a genuine product defect**: `schtasks /sc onlogon` sets **no restart-on-failure
+  policy**, so after a crash the platform does **not** bring the runtime back — task `Ready`,
+  `Last Result: 1`, 120s, nothing. systemd carries `Restart=` and launchd `KeepAlive`; the
+  Windows path carries neither. This was `24-01`'s own carried-forward risk, now measured.
+- **macOS — NOT RUN**, and *not* the false "unobtainable binary" premise: CI publishes the
+  artifact on every push, but concurrency cancelled the run on each of four re-pins.
+
+**Graded NOT MET on one of three platforms, deliberately not narrowed to the one that worked.**
 
 ## Read the "blocking element closed" rows precisely
 
