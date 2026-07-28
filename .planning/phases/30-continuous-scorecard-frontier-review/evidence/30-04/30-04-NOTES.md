@@ -108,3 +108,16 @@ exactly the counts the plan declares.
 - [ ] F-30-03-001 (LOW) fix at source in `30-02-SUMMARY.md` Gates prose
 - [ ] Task 2: both authority runs on hetzner + no-reserved-action audit
 - [ ] Task 3: verdict, positioning packet, residuals
+
+## t+FINAL — all three tasks complete
+
+- Task 1: module + suite. RED af8e12b9 (rc=101) -> GREEN 5602ee11 (14/14) -> oracle fix db9c69d0.
+- Task 2: both authority runs on hardware. Positive control ACCEPTED (rc=0); placeholder
+  REFUSED (remote-decides, rc=0). 10 audit determinations, 2 NOT-OBSERVABLE-HERE.
+- Task 3: verdict graded verbatim + machine-verified; forced-MET refused; packet built;
+  4 seam requests; 6 BACKLOG entries; F-30-03-001 fixed at source.
+
+FINAL GRADES: CRIT-01 NOT_MET, CRIT-02 NOT_MET, CRIT-03 MET_WITH_STATED_EXCEPTIONS,
+CRIT-04 PARTIAL. PHASE GOAL: NOT ACHIEVED.
+
+Termination state 2 (complete with criteria NOT MET).
