@@ -1015,12 +1015,21 @@ fn drive_skill_turn(home: &Path, skill_name: &str, sentinel: &Path) -> Vec<Strin
     ] {
         cmd.env_remove(key);
     }
-    let mut child = cmd
+    // The engine refuses to start a turn without confidential recovery storage
+    // ("no OS keyring was usable and no encrypted credentials vault is
+    // unlocked"), and a hetzner test box has no keyring. The shared support
+    // helper hands the child an ephemeral encrypted vault over an inherited
+    // descriptor — the same thing every other packaged-binary test in this
+    // crate does. Without it the turn dies before reaching the Skill tool, and
+    // BOTH legs would then be measuring a dead engine rather than containment.
+    let vault = support::vault::configure_process(&mut cmd);
+    let child = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn wayland-core --json-stream");
+        .spawn();
+    drop(vault);
+    let mut child = child.expect("spawn wayland-core --json-stream");
 
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
