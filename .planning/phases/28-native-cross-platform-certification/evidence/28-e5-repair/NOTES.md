@@ -145,9 +145,20 @@ being discarded.
 reordered / foreign / misordered / unbound), so the instrument is demonstrably able to reject
 before it is pointed at anything.
 
-## 4. Still to establish
+## 4. Closed
 
-- [ ] CI windows-msvc artifact downloaded; digest recorded.
-- [ ] Matrix run on `seandesktop`; executed cell count read back (never exit status alone).
-- [ ] Real exit codes via `WLRC=`/`WLDONE` status file (ssh+PowerShell collapses every non-zero to 1).
-- [ ] Box left as found.
+- [x] CI windows-msvc artifact downloaded (run `30393960770`), sha256 `4c48d665…`, digest
+      asserted on the host.
+- [x] Matrix run on `seandesktop` as a scheduled task: **219 cells, 219 pass, 0 red, 0 skip;
+      26/26 sandbox**. Counts read back from `win-matrix.json`, not from exit status.
+- [x] Real codes via `WLRC=`/`WLDONE`: `WLRC=0 WLACTRC=0 WLRUNRC=0 WLVERRC=0`.
+- [x] **Wedge differential** (not asked for, and the part that makes the green mean something):
+      same planted artifact, pre-repair binary `baf9bd69…` → **26 RED**, post-repair
+      `4c48d665…` → **26 PASS**; wedge survived the pre leg and was quarantined by the post leg.
+- [x] Marker mutations: control + null-mutation accepted, three mutants rejected each for its
+      own reason. The **first** mutation suite was itself defective (CRLF writer → every mutant
+      rejected for the wrong reason) and was repaired in-lane per §6b-ii; both logs kept.
+- [x] Box left as found — tasks unregistered, `C:\f28e5` removed, lease dir back to 0 files,
+      no quarantine dir, archive byte-intact, zero compiles by this lane.
+
+Full write-up: `../../28-E5-REPAIR-RUN.md`.
