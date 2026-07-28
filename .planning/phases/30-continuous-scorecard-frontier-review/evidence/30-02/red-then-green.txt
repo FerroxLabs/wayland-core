@@ -1,0 +1,61 @@
+# 30-02 Task 2 - RED before GREEN, captured on hetzner-dsm.
+# Lane commit 914d7946 (test only, module absent). REMOTE_RC=101.
+
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling libc v0.2.186
+   Compiling version_check v0.9.5
+   Compiling memchr v2.8.1
+   Compiling typenum v1.20.1
+   Compiling serde_core v1.0.228
+   Compiling bitflags v2.11.1
+   Compiling itoa v1.0.18
+   Compiling once_cell v1.21.4
+   Compiling log v0.4.30
+   Compiling smallvec v1.15.1
+   Compiling subtle v2.6.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v2.0.1
+   Compiling pin-project-lite v0.2.17
+   Compiling serde v1.0.228
+   Compiling bytes v1.11.1
+   Compiling futures-core v0.3.32
+   Compiling generic-array v0.14.7
+   Compiling parking_lot_core v0.9.12
+   Compiling cc v1.2.63
+   Compiling stable_deref_trait v1.2.1
+   Compiling zerocopy v0.8.50
+   Compiling scopeguard v1.2.0
+   Compiling pkg-config v0.3.33
+   Compiling cpufeatures v0.2.17
+   Compiling libm v0.2.16
+
+# ---------------- GREEN, lane commit cee109f6 ----------------
+
+      1 error: could not compile `wcore-eval-scenarios` (lib test) due to 4 previous errors
+      4 error: this call to `clone` can be replaced with `std::slice::from_ref`
+--- error file attribution:
+      1    --> crates/wcore-eval-scenarios/src/journey.rs:683:13
+      1    --> crates/wcore-eval-scenarios/src/journey.rs:695:13
+      1    --> crates/wcore-eval-scenarios/src/journey.rs:707:34
+      1    --> crates/wcore-eval-scenarios/src/journey.rs:717:13
+--- CONTRACT SUITE:
+   Compiling wcore-eval-scenarios v0.12.25 (/root/wayland-30-02/crates/wcore-eval-scenarios)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.71s
+     Running tests/frontier_trials_contract.rs (target/debug/deps/frontier_trials_contract-be233bdd0cf60798)
+
+running 9 tests
+test a_comparative_result_with_a_missing_peer_measurement_cannot_be_constructed ... ok
+test a_directional_verdict_is_refused_when_the_delta_interval_contains_zero ... ok
+test a_proportion_over_zero_trials_is_refused ... ok
+test an_invented_scope_tag_fails_to_deserialize ... ok
+test a_measurement_without_an_interval_does_not_deserialize ... ok
+test an_unknown_field_is_refused_at_every_boundary_struct ... ok
+test indistinguishable_verifies_when_the_delta_interval_contains_zero ... ok
+test a_result_set_does_not_verify_against_a_protocol_whose_digest_differs ... ok
+test two_bootstrap_runs_under_the_same_seed_produce_identical_bounds ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
