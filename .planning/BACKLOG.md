@@ -852,3 +852,34 @@ for nothing. Full note: SR-29-15.
 (`self-update` installs nothing until a real trust root and a published manifest asset exist —
 SR-29-9 / SR-29-11). Their effect on the grades is stated in `29-PHASE-VERDICT.md` rather than
 absorbed.
+
+---
+
+## CLASS-ENV-01 — process-wide env mutation in parallel tests, three independent sightings (MEDIUM, non-blocking)
+
+Three lanes found this from three different directions on 2026-07-28 without knowing about
+each other. It is one root cause, not three flakes, and it manufactures **false reds** — which
+costs more than it looks like, because a false red under contention is indistinguishable from
+a regression until someone spends a session proving it isn't.
+
+| Sighting | Where | What was measured |
+|---|---|---|
+| lane/25-cloud | `crates/wcore-agent/src/.../registry.rs` | `a_recorded_task_is_readable…` flakes under bare `cargo test`. Attributed by measurement, not assumption: same worktree, same commit, only `cloud.rs` swapped — **merge-base 6/12 failed**, lane 8/12, `--test-threads=1` **84/84 clean**. Pre-existing, untouched by the lane. |
+| lane/core-254 | `crates/wcore-config/src/website_policy.rs:683` | The comment claims `#[serial_test::serial]` "serializes every env-mutating test in this binary". **It does not** — the three readers are plain `#[test]`. Base full suite green 932/0, head full suite red 932/3, same 3 green in isolation at both. The PR **exposes** it, does not cause it. Filed there as CR-6. |
+| orchestrator | `wcore-skills` watcher tests | Different mechanism, same lesson: `fs.inotify.max_user_instances` at 128 with ~109 held by six lanes → ~20 EMFILE failures at 0.007s. Raised to 512 at runtime (**resets on reboot**). Same suite passed **669/669 in isolation at the identical commit.** |
+
+**The standing rule this justifies, which is already costing sessions when ignored:** a
+full-workspace run taken while other lanes are building **is not a measurement**. Re-run the
+crate alone at the same commit before reporting any regression, and state which run each figure
+came from.
+
+**Why it stays MEDIUM.** It is test-infrastructure, not product behaviour; `cargo nextest run
+--profile ci` is unaffected (3418 passed / 13 skipped). It does not block a release. But it
+should be fixed once rather than re-diagnosed per lane — the fix is to stop mutating
+process-wide env in tests (per-test config injection), not to add more `#[serial]` attributes,
+which is what the `website_policy.rs` comment shows people reaching for and what demonstrably
+did not hold.
+
+**Do not "fix" this by raising a timeout, adding `#[ignore]`, or serializing the whole suite to
+green.** A reported red is worth more than an engineered green; the goal is tests that do not
+share hidden global state.
