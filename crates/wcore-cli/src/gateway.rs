@@ -105,6 +105,26 @@ pub enum GatewayCmd {
         #[arg(long)]
         json: bool,
     },
+    /// List the deliveries this gateway GAVE UP on, and why.
+    ///
+    /// The gateway abandons a delivery in two situations: a shutdown drain ran
+    /// out of budget, or an attempt's outcome became unknown against a
+    /// destination that cannot recognise a replay (re-sending it would be a
+    /// duplicate). Both are deliberate — but before this command existed
+    /// neither left anything an operator could query. `Abandoned` is excluded
+    /// from the pending list and from the pending count, and its only trace was
+    /// a log line written by a process that had usually already exited.
+    ///
+    /// Reads the ledger journal on disk, so it answers whether or not a gateway
+    /// is currently running — which matters, because the abandonment is most
+    /// often recorded by a process that is now gone.
+    Abandoned {
+        #[command(flatten)]
+        scope: ScopeArgs,
+        /// Emit JSON instead of the operator view.
+        #[arg(long)]
+        json: bool,
+    },
     /// Close admission, finish in-flight work within a budget, and exit.
     Drain {
         #[command(flatten)]
@@ -238,6 +258,7 @@ pub async fn run(args: GatewayArgs) -> Result<()> {
             start(&scope).await
         }
         GatewayCmd::Status { scope, json } => status(&scope, json).await,
+        GatewayCmd::Abandoned { scope, json } => abandoned(&scope, json),
         GatewayCmd::Drain { scope, budget_ms } => drain(&scope, budget_ms),
         GatewayCmd::Run { scope, detach } => run_gateway(&scope, detach).await,
     }
@@ -563,6 +584,90 @@ fn drain(scope: &ScopeArgs, budget_ms: u64) -> Result<()> {
     bail!(
         "drain did not reach a terminal state within {budget_ms}ms + slack; last observed state was {last_seen}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// abandoned — "what did you give up on?"
+// ---------------------------------------------------------------------------
+
+/// List every abandonment still recorded in this home's delivery ledger.
+///
+/// Deliberately reads the JOURNAL rather than asking a running gateway. An
+/// abandonment is usually written by a process that has since exited — the
+/// forced-drain path runs during shutdown, and the unknown-outcome path runs
+/// right after a crash — so a surface that required a live gateway would be
+/// unavailable in exactly the cases it exists for.
+fn abandoned(scope: &ScopeArgs, json: bool) -> Result<()> {
+    let home = scope.home()?;
+    let ledger = wcore_gateway::ledger::DeliveryLedger::open(&home)
+        .with_context(|| format!("cannot read the delivery ledger in {}", home.display()))?;
+
+    let found = ledger.abandoned();
+    let dropped = ledger.dropped_abandonments();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "home": home.display().to_string(),
+                "abandoned": found,
+                "dropped_past_retention": dropped,
+                "quarantined": ledger.quarantined(),
+            }))?
+        );
+        return Ok(());
+    }
+
+    if found.is_empty() {
+        println!("No abandoned deliveries recorded in {}.", home.display());
+    } else {
+        println!(
+            "{} abandoned {} in {}:",
+            found.len(),
+            if found.len() == 1 {
+                "delivery"
+            } else {
+                "deliveries"
+            },
+            home.display()
+        );
+        for a in &found {
+            println!();
+            println!("  {}", a.id);
+            println!(
+                "    to:     {}",
+                a.destination.as_deref().unwrap_or("(not recorded)")
+            );
+            println!("    when:   {}", a.at);
+            match a.reason {
+                Some(r) => println!("    why:    {}", r.describe()),
+                // A record written before the reason was persisted. Named as
+                // unknown rather than guessed — the two reasons call for
+                // opposite operator actions, so inventing one would be worse
+                // than admitting the gap.
+                None => println!("    why:    (not recorded — pre-dates reason tracking)"),
+            }
+        }
+    }
+
+    // Never silent about its own incompleteness.
+    if dropped > 0 {
+        println!();
+        println!(
+            "WARNING: {dropped} further abandonment(s) were dropped by compaction past the \
+             retention cap of {}. Those deliveries can no longer be named.",
+            wcore_gateway::ledger::ABANDON_RETENTION
+        );
+    }
+    if ledger.quarantined() > 0 {
+        println!();
+        println!(
+            "WARNING: {} unparsable journal record(s) were quarantined on load; this list \
+             may be incomplete.",
+            ledger.quarantined()
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1061,6 +1166,16 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
     );
     for id in &report.abandoned {
         eprintln!("[gateway] ABANDONED delivery {id}");
+    }
+    if !report.abandoned.is_empty() {
+        // This stderr listing is ephemeral — it exists only in the terminal of
+        // the invocation that caused it, and a service-managed drain has no
+        // such terminal. Point at the durable surface so the operator can find
+        // these again afterwards.
+        eprintln!(
+            "[gateway] these are recorded durably; list them later with \
+             `wayland-core gateway abandoned`"
+        );
     }
 
     // Channels stop with the runtime. The published health is then REMOVED

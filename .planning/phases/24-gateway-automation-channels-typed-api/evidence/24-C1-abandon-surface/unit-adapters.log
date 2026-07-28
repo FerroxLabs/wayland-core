@@ -1,0 +1,123 @@
+   Compiling futures-util v0.3.32
+   Compiling tokio-util v0.7.18
+   Compiling assert-json-diff v2.0.2
+   Compiling sha1 v0.10.6
+   Compiling similar v2.7.0
+   Compiling rand_chacha v0.9.0
+   Compiling colored v3.1.1
+   Compiling tungstenite v0.24.0
+   Compiling rand v0.9.4
+   Compiling h2 v0.4.14
+   Compiling tower v0.5.3
+   Compiling tokio-tungstenite v0.24.0
+   Compiling tower-http v0.6.11
+   Compiling hyper v1.10.1
+   Compiling hyper-util v0.1.20
+   Compiling hyper-rustls v0.27.9
+   Compiling mockito v1.7.2
+   Compiling reqwest v0.12.28
+   Compiling wcore-config v0.12.25 (/root/wayland-24-abandon-surface/crates/wcore-config)
+   Compiling wcore-egress v0.12.25 (/root/wayland-24-abandon-surface/crates/wcore-egress)
+   Compiling wcore-channels v0.12.25 (/root/wayland-24-abandon-surface/crates/wcore-channels)
+   Compiling wcore-channel-matrix v0.12.25 (/root/wayland-24-abandon-surface/crates/wcore-channel-matrix)
+   Compiling wcore-channel-discord v0.12.25 (/root/wayland-24-abandon-surface/crates/wcore-channel-discord)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.82s
+     Running unittests src/lib.rs (target/debug/deps/wcore_channel_discord-c6f9c90929fdd773)
+
+running 51 tests
+test config::tests::default_intents_cover_guild_dm_and_content ... ok
+test gateway::tests::decide_handshake_fatal_invalid_session_forces_identify ... ok
+test config::tests::missing_required_credential_handle_errors ... ok
+test config::tests::minimal_config_uses_defaults ... ok
+test config::tests::full_config_round_trips ... ok
+test config::tests::unknown_field_rejected ... ok
+test gateway::tests::decide_handshake_identifies_without_session ... ok
+test gateway::tests::heartbeat_frame_carries_seq ... ok
+test gateway::tests::heartbeat_tracker_flags_dead_after_grace ... ok
+test gateway::tests::decide_handshake_resumes_when_session_and_reason_allow ... ok
+test gateway::tests::heartbeat_tracker_two_sends_without_ack_is_dead ... ok
+test gateway::tests::invalid_session_backoff_in_discord_window ... ok
+test gateway::tests::hello_parsing_extracts_heartbeat_interval ... ok
+test gateway::tests::identify_frame_includes_token_and_intents ... ok
+test gateway::tests::invalid_session_resumability_reads_d_boolean ... ok
+test gateway::tests::message_create_drops_bot_messages ... ok
+test gateway::tests::message_create_respects_allow_list ... ok
+test gateway::tests::parse_ready_rejects_non_ready_dispatch ... ok
+test gateway::tests::ready_tolerates_missing_resume_url ... ok
+test gateway::tests::ready_parses_session_id_and_resume_url ... ok
+test gateway::tests::message_create_maps_to_incoming_message ... ok
+test gateway::tests::resume_frame_carries_op6_token_session_and_seq ... ok
+test gateway::tests::resumed_dispatch_detected ... ok
+test gateway::tests::seq_tracking_advances_carried_resume_state ... ok
+test gateway::tests::with_gateway_query_is_idempotent ... ok
+test rest::reaction_tests::next_nonce_is_unique_and_within_cap ... ok
+test rest::reaction_tests::percent_encode_emoji_encodes_utf8_bytes ... ok
+test rest::reaction_tests::the_keyed_nonce_is_stable_across_processes_and_the_unkeyed_one_is_not ... ok
+test rest::reaction_tests::download_bytes_rejects_non_cdn_host_without_request ... ok
+test tests::max_message_len_is_discord_cap ... ok
+test tests::config_round_trip_via_channel_config_options ... ok
+test tests::start_with_missing_credential_errors_auth ... ok
+test tests::probe_reports_incomplete_when_the_credential_is_absent ... ok
+test tests::send_before_start_errors_not_started ... ok
+test tests::probe_reports_incomplete_when_no_credential_handle_is_configured ... ok
+test rest::reaction_tests::download_bytes_errors_on_404 ... ok
+test rest::reaction_tests::reaction_forbidden_maps_to_auth ... ok
+test rest::reaction_tests::get_current_user_id_parses_id_from_users_me ... ok
+test rest::reaction_tests::trigger_typing_succeeds_on_204 ... ok
+test rest::reaction_tests::add_reaction_puts_encoded_emoji_and_succeeds_on_204 ... ok
+test tests::probe_output_never_carries_the_bot_token ... ok
+test tests::stop_ends_gateway_task_cleanly ... ok
+test rest::reaction_tests::download_bytes_fetches_cdn_media ... ok
+test tests::probe_reports_ok_with_the_bot_identity_without_opening_the_gateway ... ok
+test tests::send_message_4xx_is_permanent ... ok
+test tests::probe_separates_a_rejected_token_from_an_unreachable_api ... ok
+test tests::discord_declares_idempotency_only_because_the_nonce_is_derived_from_the_key ... ok
+test tests::send_message_succeeds_on_200 ... ok
+test rest::reaction_tests::send_reuses_one_nonce_across_a_retry ... ok
+test tests::send_message_retries_on_503_then_succeeds ... ok
+test tests::send_message_honours_429_retry_after ... ok
+
+test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+     Running unittests src/lib.rs (target/debug/deps/wcore_channel_matrix-e60b111192b6fc6d)
+
+running 24 tests
+test rest::ack_tests::parse_mxc_splits_server_and_id ... ok
+test config::tests::full_round_trip ... ok
+test config::tests::missing_required_field_errors ... ok
+test sync::tests::empty_sync_yields_nothing ... ok
+test rest::urlencoding::tests::encodes_exclamation_and_colon ... ok
+test sync::tests::detects_native_mention ... ok
+test sync::tests::parses_single_room_message ... ok
+test sync::tests::text_has_no_attachment_and_non_mxc_is_skipped ... ok
+test sync::tests::maps_image_attachment_from_mxc ... ok
+test sync::tests::skips_bot_own_message ... ok
+test sync::tests::ignores_non_message_events ... ok
+test sync::tests::two_member_room_is_direct ... ok
+test tests::config_round_trip_via_channel_config_options ... ok
+test tests::platform_tag_is_matrix ... ok
+test tests::the_txn_id_is_stable_for_one_delivery_and_distinct_across_deliveries ... ok
+test rest::ack_tests::download_media_uses_authenticated_endpoint ... ok
+test rest::ack_tests::download_media_http_error_surfaces ... ok
+test rest::ack_tests::send_typing_puts_to_typing_endpoint ... ok
+test tests::send_before_start_errors_not_started ... ok
+test tests::start_with_missing_token_errors_auth ... ok
+test rest::ack_tests::reaction_http_error_surfaces ... ok
+test rest::ack_tests::send_reaction_puts_annotation_event ... ok
+test tests::send_message_succeeds_on_200 ... ok
+test tests::matrix_declares_idempotency_only_because_the_txn_id_is_derived_from_the_key ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+   Doc-tests wcore_channel_discord
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests wcore_channel_matrix
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

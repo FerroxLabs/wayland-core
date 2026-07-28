@@ -1,7 +1,33 @@
 //! Matrix CS API REST helpers.
 //!
 //! Implements the send path: `PUT /_matrix/client/v3/rooms/{roomId}/send/m.room.message/{txnId}`.
-//! Transaction IDs use a process-local counter (monotonic u64) to make retries idempotent.
+//!
+//! # The transaction id, and why a counter was the wrong source
+//!
+//! Matrix deduplicates a `PUT ... /send/{eventType}/{txnId}` by
+//! `(access token, txnId)`: re-sending the same pair returns the ORIGINAL
+//! `event_id` and posts nothing. That is a genuine idempotency primitive —
+//! most platforms have none — and this adapter was throwing it away.
+//!
+//! The transaction id came from a process-local `AtomicU64` seeded at 1, so it
+//! RESET on every restart. That breaks the primitive in both directions:
+//!
+//! - **No dedup where it matters.** The replay a restart has to worry about is
+//!   the delivery whose outcome is unknown because the process died
+//!   mid-attempt. A counter that restarts cannot recognise that delivery,
+//!   which is precisely the case it existed to cover.
+//! - **False dedup, i.e. LOSS.** Worse, and measured — see
+//!   `24-C1-ABANDON-SURFACE.md`. After a restart the counter re-issues
+//!   `1, 2, 3...` against the same access token. A homeserver that still holds
+//!   those transaction ids treats a genuinely NEW message as a replay and
+//!   silently drops it, returning the OLD event's id. Nothing errors; the
+//!   message simply never appears.
+//!
+//! So the id is now derived from the caller's delivery key, which is stable
+//! across restarts for one logical delivery and distinct across different ones
+//! — the two properties the field actually requires. Unkeyed sends keep a
+//! process-local unique id, because an ordinary send has no logical identity to
+//! collapse against and must never present a stable one.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -10,7 +36,61 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::MatrixError;
 
+/// Fallback source of transaction ids for sends with no delivery key.
+///
+/// Seeded from the wall clock rather than from 1 so an unkeyed send after a
+/// restart cannot collide with a transaction id the homeserver still holds and
+/// be silently dropped as a replay. This is the loss path above; unkeyed sends
+/// are subject to it too, and a fresh process must not re-walk ids it already
+/// used.
 static TXN_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Longest transaction id this adapter will put in a URL path segment.
+const MAX_TXN_LEN: usize = 64;
+
+/// Derive a Matrix transaction id from an outbound delivery key.
+///
+/// Requirements, in order: **stable** across restarts for the same logical
+/// delivery (or the homeserver cannot recognise the replay), **distinct**
+/// across different deliveries (or the homeserver drops a new message as a
+/// replay), and safe in a URL path segment.
+///
+/// The key is used directly when it is already short and path-safe, so the
+/// wire stays legible during an incident — `cron:job-a:1785121776528` is
+/// something an operator can match against the ledger by eye. Anything longer
+/// or containing a character that would need escaping is hashed instead, which
+/// preserves both properties without the escaping question.
+pub(crate) fn txn_id_for_key(key: &str) -> String {
+    let path_safe = !key.is_empty()
+        && key.len() <= MAX_TXN_LEN
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'));
+    if path_safe {
+        return key.to_string();
+    }
+    // FNV-1a, 64-bit. A non-cryptographic hash is right here: this is a
+    // collision-avoidance identifier, not a security boundary, and two
+    // different deliveries colliding would merely re-raise the duplicate
+    // question the ledger already arbitrates.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in key.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("wl-{h:016x}")
+}
+
+/// A transaction id for a send that carries no delivery key.
+fn next_unkeyed_txn_id() -> String {
+    let n = TXN_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    // Millis FIRST so a restart cannot re-walk ids a previous process used.
+    format!("wl-u{ms:x}-{n:x}")
+}
 
 /// Hard cap on a single media download. The `mxc://` URI is attacker-controlled
 /// (it arrives on an inbound message), so the body is streamed with a byte cap
@@ -34,14 +114,22 @@ struct SendEventResponse {
 }
 
 /// Send a plain-text `m.room.message` to `room_id` and return the server-assigned `event_id`.
+///
+/// `delivery_key` is the gateway's outbound idempotency key. `Some` makes the
+/// transaction id stable across restarts for that logical delivery, which is
+/// what lets the homeserver collapse a replay; `None` gets a process-unique id.
 pub async fn send_text_message(
     http: &wcore_egress::EgressClient,
     api_base: &str,
     access_token: &str,
     room_id: &str,
     body: &str,
+    delivery_key: Option<&str>,
 ) -> Result<String, MatrixError> {
-    let txn_id = TXN_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let txn_id = match delivery_key {
+        Some(k) => txn_id_for_key(k),
+        None => next_unkeyed_txn_id(),
+    };
     let encoded_room = urlencoding::encode(room_id);
     let url =
         format!("{api_base}/_matrix/client/v3/rooms/{encoded_room}/send/m.room.message/{txn_id}");

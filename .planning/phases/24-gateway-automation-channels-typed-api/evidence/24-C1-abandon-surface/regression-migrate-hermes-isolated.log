@@ -1,0 +1,16 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.40s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/migrate_hermes.rs (target/debug/deps/migrate_hermes-c85e9e2c833709a8)
+
+running 7 tests
+test apply_contains_an_executable_mcp_definition_instead_of_writing_it_live ... ok
+test build_plan_maps_hermes_profiles ... ok
+test apply_writes_profiles_and_mcp_without_secrets_by_default ... ok
+test import_is_idempotent_without_overwrite ... ok
+test include_credentials_writes_key_and_overwrite_replaces ... ok
+test overwrite_without_credentials_preserves_secret_and_manual_fields ... ok
+test missing_hermes_home_errors ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+

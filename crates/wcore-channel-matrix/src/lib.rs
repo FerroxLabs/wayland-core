@@ -91,6 +91,40 @@ impl MatrixChannel {
     pub fn state(&self) -> ConnectionState {
         self.state
     }
+
+    /// The one send path, keyed or not.
+    ///
+    /// Both trait methods route through here so there is exactly one place
+    /// where a transaction id reaches the wire. Two send paths would let the
+    /// keyed one drift away from the unkeyed one and quietly stop transmitting
+    /// the key while `supports_outbound_idempotency` still claimed it did.
+    async fn put_message(
+        &mut self,
+        msg: OutgoingMessage,
+        delivery_key: Option<&str>,
+    ) -> Result<MessageReceipt, ChannelError> {
+        let token = self
+            .access_token
+            .as_deref()
+            .ok_or(ChannelError::NotStarted)?;
+
+        let event_id = rest::send_text_message(
+            &self.http,
+            &self.api_base,
+            token,
+            &msg.conversation_id,
+            &msg.text,
+            delivery_key,
+        )
+        .await
+        .map_err(|e| ChannelError::Transport(e.to_string()))?;
+
+        Ok(MessageReceipt {
+            id: event_id,
+            conversation_id: msg.conversation_id.clone(),
+            ts_secs: chrono::Utc::now().timestamp(),
+        })
+    }
 }
 
 #[async_trait]
@@ -208,26 +242,36 @@ impl Channel for MatrixChannel {
     }
 
     async fn send_message(&mut self, msg: OutgoingMessage) -> Result<MessageReceipt, ChannelError> {
-        let token = self
-            .access_token
-            .as_deref()
-            .ok_or(ChannelError::NotStarted)?;
+        self.put_message(msg, None).await
+    }
 
-        let event_id = rest::send_text_message(
-            &self.http,
-            &self.api_base,
-            token,
-            &msg.conversation_id,
-            &msg.text,
-        )
-        .await
-        .map_err(|e| ChannelError::Transport(e.to_string()))?;
+    /// Matrix's transaction id IS an idempotency key, so the delivery key is
+    /// carried on the wire rather than ignored: the id is derived from it and
+    /// is therefore identical when the same logical delivery is replayed after
+    /// a restart. The homeserver returns the original `event_id` and posts
+    /// nothing.
+    async fn send_message_idempotent(
+        &mut self,
+        msg: OutgoingMessage,
+        key: &str,
+    ) -> Result<MessageReceipt, ChannelError> {
+        self.put_message(msg, Some(key)).await
+    }
 
-        Ok(MessageReceipt {
-            id: event_id,
-            conversation_id: msg.conversation_id.clone(),
-            ts_secs: chrono::Utc::now().timestamp(),
-        })
+    /// This adapter DOES transmit the key — as the `{txnId}` path segment of
+    /// the send PUT (see [`rest::send_text_message`]) — so the delivery spine
+    /// may retry an outcome-unknown delivery through it.
+    ///
+    /// This returned `false` until the transaction id stopped coming from a
+    /// counter that reset to 1 on every process start. That default was HONEST
+    /// then: the adapter was putting an id on the wire that could not survive
+    /// the restart it was supposed to cover. Flipping it without fixing the id
+    /// would have converted a visible duplicate into an invisible one.
+    ///
+    /// `matrix_declares_idempotency_only_because_the_txn_id_is_derived_from_the_key`
+    /// binds this claim to the wire.
+    fn supports_outbound_idempotency(&self) -> bool {
+        true
     }
 
     fn config_schema(&self) -> &str {
@@ -402,12 +446,16 @@ user_id = "@bot:matrix.example.org"
     #[tokio::test]
     async fn send_message_succeeds_on_200() {
         let mut server = mockito::Server::new_async().await;
-        // The transaction ID is a counter; first call = 1.
+        // An UNKEYED send carries a process-unique `wl-u{ms:x}-{n:x}` id. It
+        // used to be a bare counter starting at 1; that is the defect, because
+        // a fresh process re-walked ids the homeserver still held and its new
+        // messages were dropped as replays.
         let mock = server
             .mock(
                 "PUT",
                 mockito::Matcher::Regex(
-                    r"/_matrix/client/v3/rooms/[^/]+/send/m\.room\.message/\d+".to_string(),
+                    r"/_matrix/client/v3/rooms/[^/]+/send/m\.room\.message/wl-u[0-9a-f]+-[0-9a-f]+"
+                        .to_string(),
                 ),
             )
             .match_header("authorization", format!("Bearer {TEST_TOKEN}").as_str())
@@ -432,5 +480,81 @@ user_id = "@bot:matrix.example.org"
         assert_eq!(receipt.id, "$abc123");
         mock.assert_async().await;
         ch.stop().await.unwrap();
+    }
+
+    /// The capability declaration and the wire must agree.
+    ///
+    /// `supports_outbound_idempotency()` returning `true` is what permits the
+    /// gateway's delivery spine to retry an outcome-unknown delivery through
+    /// this adapter. If the transaction id stopped being derived from the
+    /// delivery key while that claim stood, every such retry would become a
+    /// second message in the room. The mock matches the EXACT path segment, so
+    /// reverting the derivation reddens here rather than only in a live run.
+    #[tokio::test]
+    async fn matrix_declares_idempotency_only_because_the_txn_id_is_derived_from_the_key() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock(
+                "PUT",
+                "/_matrix/client/v3/rooms/%21room123%3Amatrix.example.org/send/\
+                 m.room.message/cron:job-a:1785121776528",
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"event_id":"$abc123"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let creds = MemCreds::with_token("matrix.test.token", TEST_TOKEN);
+        let mut ch = MatrixChannel::with_base("test", cfg(), creds, server.url());
+        assert!(
+            ch.supports_outbound_idempotency(),
+            "matrix claims it can deduplicate a replay"
+        );
+        ch.start().await.unwrap();
+
+        ch.send_message_idempotent(
+            OutgoingMessage::text("!room123:matrix.example.org", "hello"),
+            "cron:job-a:1785121776528",
+        )
+        .await
+        .unwrap();
+
+        mock.assert_async().await;
+        ch.stop().await.unwrap();
+    }
+
+    /// The property that makes the token worth anything: the SAME logical
+    /// delivery produces the SAME transaction id from a DIFFERENT process.
+    ///
+    /// A process-local counter cannot do this, and that is the whole defect.
+    /// The test is a pure function check because it is asserting a property of
+    /// the derivation, not of one process's state — no counter, no clock, no
+    /// prior call can influence it.
+    #[test]
+    fn the_txn_id_is_stable_for_one_delivery_and_distinct_across_deliveries() {
+        use crate::rest::txn_id_for_key;
+        let a = txn_id_for_key("cron:job-a:1785121776528");
+        let again = txn_id_for_key("cron:job-a:1785121776528");
+        assert_eq!(a, again, "the same delivery must map to the same txn id");
+
+        // A different occurrence of the SAME job must NOT collapse — that
+        // would make the homeserver drop the second as a replay, which is a
+        // message loss rather than a duplicate.
+        let next_occurrence = txn_id_for_key("cron:job-a:1785121776529");
+        assert_ne!(a, next_occurrence);
+        let other_job = txn_id_for_key("cron:job-b:1785121776528");
+        assert_ne!(a, other_job);
+
+        // A key needing escaping is hashed, and still stable + distinct.
+        let odd = txn_id_for_key("cron:job a/b?:1");
+        let odd_again = txn_id_for_key("cron:job a/b?:1");
+        assert_eq!(odd, odd_again);
+        assert!(
+            odd.starts_with("wl-") && !odd.contains(['/', '?', ' ']),
+            "an unsafe key must be hashed into a path-safe id, got {odd}"
+        );
+        assert_ne!(odd, txn_id_for_key("cron:job a/b?:2"));
     }
 }

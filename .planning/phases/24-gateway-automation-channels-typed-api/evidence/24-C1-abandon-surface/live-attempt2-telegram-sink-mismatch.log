@@ -1,0 +1,67 @@
+=== binary under test ===
+e39dbcc8
+
+=== 1. independent sink first ===
+SINK_READY url=http://127.0.0.1:18473 journal=/tmp/f24c1b-run/arrivals.jsonl
+
+=== 2. seed 6 deliveries through the shipped binary ===
+on  02831e42-7cd2-420c-983b-35fa5c1d6ef4  [interval  ] @every 30s                    channel  f24c1tg :: f24c1b-delivery-1  last_fired=never
+on  1f734ef1-bb78-4149-aad4-b02f79f091e7  [interval  ] @every 30s                    channel  f24c1tg :: f24c1b-delivery-2  last_fired=never
+on  93f7fded-28d3-491d-a46e-f76815702e45  [interval  ] @every 30s                    channel  f24c1tg :: f24c1b-delivery-3  last_fired=never
+on  51a07fc0-8883-40b3-b7ca-b70fa3ad3624  [interval  ] @every 30s                    channel  f24c1tg :: f24c1b-delivery-4  last_fired=never
+on  8eba0591-f1ce-406d-bc2b-2cab92336aa8  [interval  ] @every 30s                    channel  f24c1tg :: f24c1b-delivery-5  last_fired=never
+on  90497e77-f4eb-4aef-8116-85bd6e756b0a  [interval  ] @every 30s                    channel  f24c1tg :: f24c1b-delivery-6  last_fired=never
+
+=== 3. install + start the REAL service ===
+  home:    /tmp/f24c1b-run/home
+  binary:  /root/wayland-24-abandon-surface/target/release/wayland-core
+gateway start requested (systemd)
+
+=== 4. COUNT POSITIVE DELIVERY at the independent sink ===
+  t=1s arrivals_at_sink=0
+  t=2s arrivals_at_sink=0
+  t=3s arrivals_at_sink=0
+  t=4s arrivals_at_sink=0
+  t=5s arrivals_at_sink=0
+  t=6s arrivals_at_sink=0
+  t=7s arrivals_at_sink=0
+  t=8s arrivals_at_sink=0
+  t=9s arrivals_at_sink=0
+  t=10s arrivals_at_sink=0
+  t=11s arrivals_at_sink=0
+  t=12s arrivals_at_sink=0
+  t=13s arrivals_at_sink=0
+  t=14s arrivals_at_sink=0
+  t=15s arrivals_at_sink=0
+  t=16s arrivals_at_sink=0
+  t=17s arrivals_at_sink=0
+  t=18s arrivals_at_sink=0
+  t=19s arrivals_at_sink=0
+  t=20s arrivals_at_sink=0
+  t=21s arrivals_at_sink=0
+  t=22s arrivals_at_sink=0
+  t=23s arrivals_at_sink=0
+  t=24s arrivals_at_sink=0
+  t=25s arrivals_at_sink=0
+  t=26s arrivals_at_sink=0
+  t=27s arrivals_at_sink=0
+  t=28s arrivals_at_sink=0
+  t=29s arrivals_at_sink=0
+  t=30s arrivals_at_sink=0
+  t=31s arrivals_at_sink=0
+  t=32s arrivals_at_sink=0
+  t=33s arrivals_at_sink=0
+  t=34s arrivals_at_sink=0
+  t=35s arrivals_at_sink=0
+  t=36s arrivals_at_sink=0
+  t=37s arrivals_at_sink=0
+  t=38s arrivals_at_sink=0
+  t=39s arrivals_at_sink=0
+  t=40s arrivals_at_sink=0
+  t=41s arrivals_at_sink=0
+  t=42s arrivals_at_sink=0
+  t=43s arrivals_at_sink=0
+  t=44s arrivals_at_sink=0
+  t=45s arrivals_at_sink=0
+ARRIVALS_AT_INDEPENDENT_SINK=0
+ABORT: nothing was delivered, so nothing below would mean anything
