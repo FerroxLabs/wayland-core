@@ -1,0 +1,49 @@
+# Parent traces, read out of cargo tree. Host: hetzner-dsm. Date: 2026-07-29.
+# Cargo.lock resolves EXACTLY ONE version of each (checked first, so no
+# multi-version blind spot): bincode 1.3.3, ttf-parser 0.25.1.
+
+===== cargo tree -i bincode@1.3.3 --all-features --target all --edges normal,build,dev =====
+bincode v1.3.3
+└── syntect v5.3.0
+    └── wcore-cli v0.12.25 (/root/wayland-29-deny/crates/wcore-cli)
+
+===== cargo tree -i ttf-parser@0.25.1 --all-features --target all --edges normal,build,dev =====
+ttf-parser v0.25.1
+└── lopdf v0.42.0
+    └── pdf-extract v0.12.0
+        └── wcore-tools v0.12.25 (/root/wayland-29-deny/crates/wcore-tools)
+            ├── wcore-agent v0.12.25 (/root/wayland-29-deny/crates/wcore-agent)
+            │   └── wcore-cli v0.12.25 (/root/wayland-29-deny/crates/wcore-cli)
+            │   [dev-dependencies]
+            │   ├── wcore-agent v0.12.25 (/root/wayland-29-deny/crates/wcore-agent) (*)
+            │   └── wcore-cli v0.12.25 (/root/wayland-29-deny/crates/wcore-cli)
+            ├── wcore-browser v0.12.25 (/root/wayland-29-deny/crates/wcore-browser)
+            │   └── wcore-agent v0.12.25 (/root/wayland-29-deny/crates/wcore-agent) (*)
+            ├── wcore-cli v0.12.25 (/root/wayland-29-deny/crates/wcore-cli)
+            ├── wcore-cua v0.12.25 (/root/wayland-29-deny/crates/wcore-cua)
+            │   └── wcore-agent v0.12.25 (/root/wayland-29-deny/crates/wcore-agent) (*)
+            └── wcore-mcp v0.12.25 (/root/wayland-29-deny/crates/wcore-mcp)
+                ├── wcore-agent v0.12.25 (/root/wayland-29-deny/crates/wcore-agent) (*)
+                ├── wcore-cli v0.12.25 (/root/wayland-29-deny/crates/wcore-cli)
+                ├── wcore-plugin-subprocess v0.12.25 (/root/wayland-29-deny/crates/wcore-plugin-subprocess)
+                │   └── wcore-agent v0.12.25 (/root/wayland-29-deny/crates/wcore-agent) (*)
+                └── wcore-skills v0.12.25 (/root/wayland-29-deny/crates/wcore-skills)
+                    ├── wcore-agent v0.12.25 (/root/wayland-29-deny/crates/wcore-agent) (*)
+                    ├── wcore-cli v0.12.25 (/root/wayland-29-deny/crates/wcore-cli)
+                    ├── wcore-eval v0.12.25 (/root/wayland-29-deny/crates/wcore-eval)
+                    │   └── wcore-evolve v0.12.25 (/root/wayland-29-deny/crates/wcore-evolve)
+                    │       └── wcore-agent v0.12.25 (/root/wayland-29-deny/crates/wcore-agent) (*)
+                    │   [dev-dependencies]
+                    │   └── wcore-evolve v0.12.25 (/root/wayland-29-deny/crates/wcore-evolve) (*)
+                    └── wcore-evolve v0.12.25 (/root/wayland-29-deny/crates/wcore-evolve) (*)
+                [dev-dependencies]
+                ├── wcore-agent v0.12.25 (/root/wayland-29-deny/crates/wcore-agent) (*)
+                ├── wcore-cli v0.12.25 (/root/wayland-29-deny/crates/wcore-cli)
+                ├── wcore-eval-scenarios v0.12.25 (/root/wayland-29-deny/crates/wcore-eval-scenarios)
+                │   [dev-dependencies]
+                │   └── wcore-cli v0.12.25 (/root/wayland-29-deny/crates/wcore-cli)
+                ├── wcore-mcp v0.12.25 (/root/wayland-29-deny/crates/wcore-mcp) (*)
+                └── wcore-skills v0.12.25 (/root/wayland-29-deny/crates/wcore-skills) (*)
+
+===== proc-macro-error@1.0.4 AFTER the utoipa 5 bump (must be absent) =====
+error: package ID specification `proc-macro-error@1.0.4` did not match any packages

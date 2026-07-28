@@ -116,11 +116,18 @@ audit:
 # in zero files under .github/ and zero times in this justfile, leaving 1,017
 # crates unevaluated against the licence allowlist.
 #
-# NOT chained into `check-all`, deliberately. The first execution of this
-# policy exits 5 — see 29-02-CLEANROOM-RESULTS.md for the verdict and the
-# per-finding severities. Chaining a red gate into the aggregate check would
-# break every concurrent lane on a policy failure unrelated to their work.
-# Chain it only once the verdict is clean.
+# CHAINED into `check-all` since 2026-07-29 (lane 29-deny). It was deliberately
+# left unchained while its first execution exited 5 — a red gate in the
+# aggregate check would have broken every concurrent lane on a policy failure
+# unrelated to their work (29-02-CLEANROOM-RESULTS.md). The verdict is now
+# `advisories ok, bans ok, licenses ok, sources ok`, exit 0, so the condition
+# that recipe's own comment set for chaining it — "chain it only once the
+# verdict is clean" — is met.
+#
+# Local chaining is not merely a convenience duplicate of CI: the CI job in
+# `.github/workflows/supply-chain.yml` sits behind a path-relevance guard and
+# SKIPS on PRs that do not touch the policy paths, so on those branches this
+# recipe is the only place the policy runs at all.
 deny:
     vx cargo deny --manifest-path Cargo.toml check
 
@@ -150,7 +157,9 @@ _auto-commit-fixes:
     fi
 
 # ── All checks (mirrors CI exactly) ───────────────────────────────────────
-check-all: fmt-check lint test-ci hakari-verify audit
+# `deny` added 2026-07-29 (lane 29-deny) — see the `deny` recipe above for why
+# it was held out until the verdict went green.
+check-all: fmt-check lint test-ci hakari-verify audit deny
 
 # ── User-flow harness (CLI + TUI + failure injection) ────────────────────
 # Drives the COMPILED wayland-core binary the way a user does:

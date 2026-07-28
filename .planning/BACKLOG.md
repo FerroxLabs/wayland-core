@@ -1302,3 +1302,71 @@ and lands on disk; outside is denied and never reaches the filesystem). Both are
 the bound is **one-sided in the safe direction** — runner load can only produce a false FAIL.
 The residual: neither forms a containment *differential*, so macOS evidence for Criterion 1
 rests on two different instruments rather than one.
+
+---
+
+## From lane 29-deny (dependency policy — `cargo deny`)
+
+### `BL-F29-DENY-UNMAINTAINED` — five unmaintained transitives held by exception · MEDIUM · NON-BLOCKING
+
+**Found by:** lane 29-deny, taking `cargo deny check` from exit 5 to exit 0.
+
+**What.** `deny.toml` now carries five `[advisories] ignore` entries. Every one is an
+`informational = "unmaintained"` advisory with `patched = []` in its RustSec source — meaning
+**no version of the flagged crate clears it**, so a bump is not a fix and only removal is. All
+five were checked for reducibility against crates.io metadata, and none is reducible from here:
+
+| advisory | crate | root chain | why it stays |
+|---|---|---|---|
+| RUSTSEC-2025-0141 | bincode 1.3.3 | `<- syntect 5.3.0 <- wcore-cli` | syntect 5.3.0 is the LATEST published syntect. Dropping its `dump-load` feature would remove bincode and also delete TUI syntax highlighting. |
+| RUSTSEC-2026-0192 | ttf-parser 0.25.1 | `<- lopdf 0.42.0 <- pdf-extract 0.12.0 <- wcore-tools` | lopdf 0.44 makes ttf-parser optional, but pdf-extract 0.12.0 (latest) pins `lopdf ^0.42` = `>=0.42.0,<0.43.0`. Reaching 0.44 needs a forked `[patch]`. |
+| RUSTSEC-2024-0436 | paste 1.0.15 | two roots, both `<- wcore-memory` (candle SIMD; tokenizers) | build-time proc-macro, no runtime surface; optional default-OFF `bge-local`. |
+| RUSTSEC-2025-0119 | number_prefix 0.4.0 | `<- indicatif <- hf-hub <- wcore-memory` | indicatif pulls it at every published version; optional default-OFF `bge-local`. |
+| RUSTSEC-2025-0134 | rustls-pemfile 2.2.0 | two edges, one root: `<- bollard <- wcore-sandbox` | needs bollard 0.17 -> 0.21 (four breaking majors) on a non-shipping optional backend. |
+
+**Why non-blocking.** All five are informational-unmaintained with no known vulnerability and
+no patch in existence. Three of the five (`paste`, `number_prefix`, `rustls-pemfile`) are not
+in the shipped binary at all — they are absent from the default-feature graph.
+
+**The one with real reach, stated plainly:** `ttf-parser` parses embedded font tables out of
+**user-supplied PDFs** via the Read tool. That is untrusted input. It is accepted only because
+there is nothing to apply. **If a concrete `ttf-parser` CVE is ever published, the exception
+must be DELETED and the PDF path re-examined — not re-justified.**
+
+**Action on each dependency bump.** Re-run `cargo deny --manifest-path Cargo.toml check` and
+delete any entry that has cleared. Re-derive every trace from `cargo tree -i <crate>@<ver>`;
+never carry a trace forward on trust. Two of the pre-existing dispositions in
+`.github/osv-scanner.toml` were found WRONG by exactly this re-derivation (see below).
+
+### `BL-F29-OSV-TRACES-WERE-STALE` — two dispositions carried untrue parent traces · MEDIUM · NON-BLOCKING
+
+Found and **fixed in the same lane** (per the standing rule that a written-up instrument defect
+is a defect you have agreed to keep). Recorded here because it is a recurrence, not a one-off:
+
+- **paste (RUSTSEC-2024-0436)** claimed pullers "the candle SIMD stack ... **AND ratatui**".
+  `cargo tree -p ratatui --all-features -e normal | grep -c paste` -> **0**. It named a parent
+  that does not exist, and omitted the `tokenizers` root that does.
+- **rustls-pemfile (RUSTSEC-2025-0134)** claimed "transitive **ONLY** via bollard". There are
+  **two** direct parents (`bollard` and `rustls-native-certs 0.7.3`). The conclusion survives
+  only because rustls-native-certs' own sole parent is also bollard — which the entry had not
+  checked.
+- **proc-macro-error (RUSTSEC-2024-0370)** carried a cost estimate ("a breaking major ... not
+  worth the REST-surface regression risk") that was a claim about the dependency graph, never
+  read out of it. The bump turned out to need **zero** source changes. That entry is now
+  deleted because the advisory was eliminated at source.
+
+**The pattern.** All three are the same defect the quick-xml entry had: a justification written
+once and carried forward across files without being re-derived. **Any exception review must
+re-run `cargo tree -i` and state the edge count**, and any "it would be a breaking change" cost
+claim must be measured before it is believed.
+
+### `BL-F29-DENY-GRAPH-SCOPE` — resolved, recorded so the reasoning is not lost · LOW · NON-BLOCKING
+
+`deny.toml` had `[graph] all-features = false`, so the gate evaluated only the default-feature
+graph. Measured: three unmaintained transitives (`paste`, `number_prefix`, `rustls-pemfile`)
+were invisible to it, and — more importantly — **no gate in this repo checked the LICENSE of a
+dependency behind an optional feature.** `cargo audit` and `osv-scanner` read the whole
+lockfile but neither checks licenses, so a GPL/AGPL crate arriving via `hf-hub` or `bollard`
+would have passed everything. Flipped to `all-features = true` after measuring the cost
+(`cargo deny --all-features check licenses bans sources` -> exit 0; advisories -> exactly the
+3 named errors). Cross-audit was 2-1 in favour; the dissent is recorded in `deny.toml`.
