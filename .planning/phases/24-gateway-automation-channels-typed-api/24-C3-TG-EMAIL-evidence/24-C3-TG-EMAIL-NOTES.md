@@ -176,3 +176,91 @@ flagged, and it applies to the leg that captures the REPLY.
 Consequence for the five legs on email: `route` (and the reply half of `admit`) cannot be
 captured through SMTP by any environment-variable mechanism. To be proven executably, not
 asserted, before it is reported.
+
+---
+
+## T+~100min — Task 1 CLOSED. Run 2, hetzner, driver `6a6e8c4e`
+
+```
+INBOUND MATRIX GREEN platform=linux runtime=json-stream legs=20/20 failed=0
+arrivals_total=9 telegram_arrivals=3 turns_total=12 instrument_fault=false
+telegram fixture: submitted=5 still_pending=[] polls=176 max_concurrent_getupdates=1
+```
+
+`PASS telegram/route: reply_text="F24C3\-REPLY f24c3\-telegram\-admit\-3e7f85e6" carries_correlation=true`
+— the same escaped text that read `false` one commit earlier now reads `true`. The repair is
+proven against the product's real transformation, not against a mock of it.
+
+Binary `wayland-core 0.12.25 (source ddc7cfe0…)`, sha256
+`0e5468a23ea23a447178a23b9cba937e2b4f634588feed973343c8f2f26c724b`.
+Journal bytes: arrivals=2424, turns=3387, telegram=46900, core_log=13227.
+
+Telegram fixture per-update accounting `[update_id, message_id, serve_count, deleted_by]`:
+
+```
+[[1,1,1,131],[2,1,1,133],[3,2,1,153],[4,3,1,155],[5,4,1,175]]
+```
+
+Read it: update 2 carries **message_id 1**, i.e. the dedupe replay genuinely re-used the platform
+message id under a fresh transport cursor. **`serve_count == 1` on every update** — nothing was
+served twice, so there was no double-poll. `max_concurrent_getupdates=1` says the same thing from
+the other side, counted out-of-process.
+
+Update 4 (the denied sender) was **served and consumed** — the refusal happens at the dispatch
+access gate, not by failing to read. That is what makes the `access` PASS a positive result
+rather than the universal-denial green the brief warns about.
+
+## T+~120min — Task 2 run 3: the SMTP blocker, proven executably, and a trap I nearly fell into
+
+### The blocker is real, and it is NOT the macOS one
+
+One run, one process, one certificate, one `SSL_CERT_FILE` — and the two protocols disagree:
+
+```
+19:48:14.388  imap.uid_fetch  uid=1000 bytes=298 set_seen=true      <- IMAP accepted the cert
+19:48:15.030  smtp.session.open  session=86
+19:48:15.031  smtp.command  verb=EHLO   secure=false
+19:48:15.072  smtp.command  verb=STARTTLS  secure=false
+19:48:15.077  smtp.starttls.rejected
+   error: "SSL routines:ssl3_read_bytes:tls alert certificate unknown ... SSL alert number 46"
+```
+
+Alert 46 is `certificate_unknown`, sent **by the client** — the binary's rustls refusing my
+fixture. Fifteen SMTP sessions, all refused identically; four IMAP fetches, all accepted.
+
+That isolates the difference to the TLS backend and nothing else, and it confirms the lockfile
+read: IMAP is `native-tls`/OpenSSL (honours `SSL_CERT_FILE`), SMTP is `lettre` +
+`tokio1-rustls-tls` resolving to **`webpki-roots`**, a compiled-in root set that reads no file
+and no environment variable. **This blocks the reply half on every platform, not just macOS.**
+
+Independent instrument check first: Python `imaplib.IMAP4_SSL` with the fixture cert as CA drove
+`LOGIN OK / SELECT OK / SEARCH [b'1000'] / FETCH OK / BODY_HAS_TOKEN True / LOGOUT BYE`. So the
+fixture was proven correct against a client that is not mine before any product claim was made.
+
+### The trap: run 3 reported `email/dedupe FAIL`, and the product was right
+
+Run 3's turns journal showed `f24c3-email-admit-…` **twice**, 90 seconds apart, each tied to its
+own `imap.uid_fetch` of a distinct UID carrying the **same RFC Message-ID**. Read naively that is
+a dedupe defect on a polling adapter — the exact class this lane went looking for.
+
+It is not. The dedupe cache is keyed `(platform, account_id, message_id)`
+(`dispatch/mod.rs:79-85`) with a TTL measured from `first_seen` (`dispatch/dedupe.rs:107`), and
+both construction sites pass **60_000 ms** (`bootstrap.rs:3234`, `channel_inbound_host.rs`). The
+delivery timestamps are `19:48:12.520` and `19:49:42.660` — **90.14 s apart**. The entry had
+expired 30 seconds before the replay arrived. A second turn is the cache working as designed.
+
+The 90 s came from **the driver**: email's `admit` leg burned its full `ARRIVAL_BUDGET_MS` of
+90 s waiting for a reply that the SMTP blocker guarantees can never arrive.
+
+So the driver was manufacturing a product defect out of its own latency. Repairs, in this lane:
+
+1. `DEDUPE_TTL_MS` is read from the product and a replay landing outside it is graded
+   **INCOMPLETE**, never FAIL — with the measured delay printed.
+2. per-adapter arrival budgets, so a blocked reply path cannot inflate the delay.
+3. the dedupe leg now additionally requires the **turns** count to be unchanged, which detects a
+   duplicate turn even when the reply cannot leave — a strictly stronger check than the
+   arrivals-only one it replaces.
+
+**Had this been reported, it would have been a fabricated HIGH against working code.** It is the
+mirror image of the telegram/route defect four hours earlier: there the instrument under-counted
+a real arrival, here it over-counted a real duplicate. Same class, opposite sign.
