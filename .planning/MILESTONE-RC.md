@@ -100,3 +100,35 @@ is what turned Phase 20 into a 74-plan loop lasting two weeks.
 stated** — nine trial legs are confounded because the script spoke one competitor's dialect. The
 cheapest route to a statable position needs no credential and is in Wave 4. Full parity against two
 mature products is a multi-month goal; a defensible release is not the same target.
+
+---
+
+## 7. Decision taken 2026-07-29 — outbound delivery semantics
+
+**Question:** on 7 of 10 platforms there is no idempotency primitive at all (Telegram, Twilio,
+Meta, SMTP, signal-cli, AppleScript, Teams). After a crash during send, should the product abandon
+the delivery (at-most-once, current behaviour) or retry it (at-least-once, risking a duplicate)?
+
+**Measured, not assumed:** replaying one delivery key through real Telegram / Twilio SMS / WhatsApp
+adapters over real HTTP put **two messages at the destination**. The `false` those adapters report
+is truthful, and the abandon is preventing a genuine duplicate — not covering for a stub.
+
+**DECIDED: keep at-most-once as the default.** Reasons, in order:
+
+1. A duplicate on a **metered** channel (Twilio SMS) costs the operator money and cannot be undone.
+2. The alternative was measured to produce real duplicates, not hypothetical ones.
+3. 7 of 10 platforms cannot support the alternative safely at all, so at-least-once would be a
+   per-channel patchwork with no uniform guarantee.
+
+**Conditional on one thing, already dispatched:** at-most-once is only defensible if an abandoned
+delivery is **visible**. Today it has no consumer outside `ledger.rs` and only a `tracing::warn!` —
+a silent loss carrying a comment that claims it is "nameable by an operator". That is graded HIGH
+and is being fixed. **If that surface does not land, this decision is wrong and must be revisited.**
+
+**Also taken:** Matrix and Discord already put a dedup token on the wire and then defeat it (a
+counter reseeded at 1 on restart; a nonce deliberately made distinct across restarts). Both get
+restart-stable tokens and may then report `supports_outbound_idempotency` truthfully. That is 2 of
+10 moved by fixing our own code, with no platform feature required.
+
+**Not decided here, and not urgent:** whether to offer opt-in at-least-once per channel. It is
+cheap once the two adapters above are honest, and pointless before then.
