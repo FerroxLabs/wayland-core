@@ -104,6 +104,47 @@ run") rather than substituting a hand-built binary, and it keeps the certificati
 
 Pushed `lane/28-e5-repair` → CI run **30393960770**.
 
+## 3a. Host as-found state, and a hazard nobody has written down
+
+`asfound.ps1` → `asfound.log`, run before anything else:
+
+```
+WHOAMI=seand   HOSTNAME=SEANDESKTOP
+LEASE_DIR=C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1
+LEASE_DIR_EXISTS=True   LEASE_ENTRY_COUNT=0
+QUIET_CHECK build_processes=6          <-- NOT quiet
+FREE_BYTES_C=215299235840   NODE=v24.16.0   SCHEDULED_TASKS_F28=0
+```
+
+**The lease directory is empty.** So this run measures whether the repair *regresses* the
+matrix, not whether it clears a wedge in flight — 28-h2 already proved the clearing leg on this
+same hardware. Stated up front so the result is not over-read.
+
+**The hazard: `seandesktop` IS the self-hosted Windows CI runner.** The six busy processes are
+`cargo`/`rustc` under `C:\WINDOWS\ServiceProfiles\NetworkService\.rustup\…` — the GitHub Actions
+runner service, compiling the CI run **my own push just triggered**. So the act of pushing a lane
+branch to obtain a CI-built Windows candidate makes the certification host fail its own
+`QUIET_CHECK`. 28-02 asserted "0 compile" on this box and would have tripped on this too.
+
+Mitigation taken: the artifact-producing `Build (x86_64-pc-windows-msvc)` job runs on a
+**GitHub-hosted** `windows-latest` runner (`ci.yml` `build:` matrix), not the self-hosted one, so
+cancelling the workflow after the artifact uploads frees the box without costing me the binary.
+Duplicate run `30394092408` cancelled immediately; `30393960770` will be cancelled once its
+Windows build artifact is up. My lane changes only `.planning/` documents, so no CI signal is
+being discarded.
+
+## 3b. Instrument, staged and self-tested on the host
+
+| file | sha256 on Mac | sha256 on `seandesktop` |
+|---|---|---|
+| `scripts/f28-native-matrix.mjs` | `01e84b22fe33…` | `01e84b22fe33…` **identical** |
+| `evidence/28-01/matrix.tsv` | `510a10431e00…` | `510a10431e00…` **identical** |
+
+`node f28-native-matrix.mjs --self-test` on the box: **`25 assertions passed, 0 failed`**,
+`SELFTEST_RC=0`. That is the marker verifier's own rejection suite (absent / duplicate /
+reordered / foreign / misordered / unbound), so the instrument is demonstrably able to reject
+before it is pointed at anything.
+
 ## 4. Still to establish
 
 - [ ] CI windows-msvc artifact downloaded; digest recorded.
