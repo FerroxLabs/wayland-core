@@ -643,6 +643,125 @@ mod production_landing {
         (spawner, registry, state)
     }
 
+    /// Env var that turns a non-qualifying sandbox from a loud skip into a hard
+    /// failure. Mirrors the established `WCORE_SMOKE_REQUIRE_PREBUILT` idiom
+    /// (#190: "a missing artifact is a hard failure here, never a silent skip").
+    ///
+    /// Set it in any CI job whose whole purpose is to prove the containment
+    /// guarantee. Without it a developer on a laptop with no bubblewrap gets a
+    /// visible skip instead of a red suite; with it, the gate cannot self-pass.
+    const REQUIRE_ENFORCING_SANDBOX: &str = "WCORE_REQUIRE_ENFORCING_SANDBOX";
+
+    /// Can an ENFORCING sandbox actually run here — proven by RUNNING one?
+    ///
+    /// `BubblewrapBackend::is_available()` is `which::which("bwrap").is_some()`:
+    /// a PRESENCE check. Presence is not capability, and the difference is not
+    /// hypothetical. Measured 2026-07-29 on Ubuntu 24.04 + Docker 29.2.1, in a
+    /// container with bubblewrap installed and started the way CI starts it
+    /// (`docker run --rm --network=host`, no `--privileged`, no `--cap-add`,
+    /// default seccomp):
+    ///
+    /// ```text
+    /// bwrap: Creating new namespace failed: Operation not permitted   (rc=1)
+    /// ```
+    ///
+    /// So a qualifier written as `which bwrap` would report READY on exactly the
+    /// host where the sandbox cannot work — a gate that passes because it checks
+    /// nothing. This one spawns the same minimal namespace bwrap needs and reads
+    /// the real exit status.
+    ///
+    /// Returns `Ok(())` when an enforcing sandbox is genuinely usable, or
+    /// `Err(reason)` naming what failed.
+    fn enforcing_sandbox_qualifies() -> Result<(), String> {
+        // The minimum bwrap must do for the 06C gate re-run: a mount namespace
+        // over a read-only root. Runs `true`, touches nothing. Letting `Command`
+        // resolve the program keeps this free of a new dev-dependency and still
+        // distinguishes "not installed" from "installed but not permitted" —
+        // which is the whole point of probing by execution.
+        let out = std::process::Command::new("bwrap")
+            .args(["--ro-bind", "/", "/", "--dev", "/dev", "true"])
+            .output();
+        match out {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err("bubblewrap is not installed (bwrap not on PATH)".to_string())
+            }
+            Err(e) => Err(format!("could not execute bwrap: {e}")),
+            Ok(o) if o.status.success() => Ok(()),
+            Ok(o) => Err(format!(
+                "bwrap is installed but exited {:?} and could not create a namespace: {}",
+                o.status.code(),
+                String::from_utf8_lossy(&o.stderr).trim()
+            )),
+        }
+    }
+
+    /// The workspace `target/` directory, resolved so the skip record lands
+    /// somewhere a CI step can actually find it.
+    ///
+    /// A relative `"target"` is WRONG here: the test's working directory is the
+    /// crate root (`crates/wcore-agent`), not the workspace root, so the first
+    /// version of this helper wrote to a `crates/wcore-agent/target/` that does
+    /// not exist — the open failed, the failure was swallowed by `if let Ok`,
+    /// and the "counted" skip counted nothing. Measured 2026-07-29: CASE A
+    /// produced `5 tests run, 5 passed` with no record written anywhere.
+    fn target_dir() -> std::path::PathBuf {
+        if let Ok(d) = std::env::var("CARGO_TARGET_DIR") {
+            return std::path::PathBuf::from(d);
+        }
+        // CARGO_TARGET_TMPDIR is an absolute path INSIDE the real target dir,
+        // so the nearest ancestor named `target` is the target dir itself.
+        let mut p: &std::path::Path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+        loop {
+            if p.file_name().is_some_and(|n| n == "target") {
+                return p.to_path_buf();
+            }
+            match p.parent() {
+                Some(parent) => p = parent,
+                None => return std::path::PathBuf::from("target"),
+            }
+        }
+    }
+
+    /// Emit the skip so it cannot pass unnoticed, and COUNT it somewhere a CI
+    /// step can aggregate.
+    ///
+    /// Two things this has to survive, both measured rather than assumed:
+    ///
+    /// 1. **nextest captures the output of a PASSING test.** A skip that only
+    ///    prints is therefore invisible in the very run that matters, so the
+    ///    file — not the print — is the load-bearing channel. The prints remain
+    ///    for `--no-capture` and for plain `cargo test`.
+    /// 2. **A recording failure must not be swallowed.** If the count cannot be
+    ///    written, nothing downstream can tell a compensated skip from an
+    ///    uncompensated one, and "counted" becomes a claim rather than a fact.
+    ///    So this panics rather than silently degrading — which is also the only
+    ///    way the failure becomes visible, since a panic un-captures the output.
+    fn record_loud_skip(test: &str, reason: &str) {
+        let line = format!("WCORE_SANDBOX_SKIP test={test} reason={reason}");
+        println!("!!!! {line}");
+        eprintln!("!!!! {line}");
+        eprintln!(
+            "!!!! this test proves the 06C hard-containment gate re-runs under a REAL \
+             enforcing sandbox. It did NOT run. Set {REQUIRE_ENFORCING_SANDBOX}=1 to make \
+             this a hard failure."
+        );
+
+        let dir = target_dir();
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|e| panic!("cannot create {} to record the skip: {e}", dir.display()));
+        let path = dir.join("sandbox-skips.txt");
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap_or_else(|e| {
+                panic!("cannot record the sandbox skip at {}: {e}", path.display())
+            });
+        use std::io::Write as _;
+        writeln!(f, "{line}")
+            .unwrap_or_else(|e| panic!("cannot write the sandbox skip to {}: {e}", path.display()));
+    }
+
     /// The production forge lands the selected winner into a Wayland-owned clone
     /// (surface-for-accept) while the user's workspace stays byte-for-byte
     /// untouched.
@@ -652,6 +771,25 @@ mod production_landing {
         ignore = "live isolated checkout + coherent landing + real sandbox gate run on the Linux harness"
     )]
     fn drive_climb_full_lands_the_winner_surface_for_accept() {
+        // Qualify on a REAL sandbox execution before claiming anything. The
+        // alternative that was explicitly rejected: setting
+        // WAYLAND_ALLOW_NO_SANDBOX=1, which converts this into a test that
+        // exercises the landing path with NO isolation and therefore proves
+        // none of what it exists to prove.
+        if let Err(reason) = enforcing_sandbox_qualifies() {
+            if std::env::var(REQUIRE_ENFORCING_SANDBOX).is_ok_and(|v| v == "1") {
+                panic!(
+                    "{REQUIRE_ENFORCING_SANDBOX}=1 but no enforcing sandbox is usable: \
+                     {reason}. This job exists to prove the containment guarantee; \
+                     skipping it here would make the gate unfalsifiable."
+                );
+            }
+            record_loud_skip(
+                "drive_climb_full_lands_the_winner_surface_for_accept",
+                &reason,
+            );
+            return;
+        }
         // The landing future (climb → 06C hard-containment gate re-run → parent
         // CAS) is a very large async state machine that exceeds the default test
         // thread's stack in DEBUG builds; release optimizes the state machine down
