@@ -882,26 +882,81 @@ fn the_produced_phase_28_receipt_parses_and_verifies_under_the_rust_verifier() {
 // has to take it on trust.
 // ---------------------------------------------------------------------------------------
 
-fn superseding_receipt_path() -> Option<std::path::PathBuf> {
+/// Every superseding receipt on disk, in issue order.
+///
+/// This used to name `SUPERSEDING-001` as a constant, which meant `SUPERSEDING-002` was
+/// covered by nothing the moment it was issued — a supersession chain that grows past the
+/// length its test hardcoded is untested from its second link onward. Discovering the chain
+/// makes the test cover whatever exists, including links not yet written.
+fn superseding_receipt_paths() -> Vec<std::path::PathBuf> {
     let dir = phase_dir();
     if !dir.is_dir() {
-        return None;
+        return Vec::new();
     }
-    let path = dir.join("28-04-CERTIFICATION-RECEIPT-SUPERSEDING-001.json");
-    // Deliberately NOT an assert. Unlike the original receipt, a supersession exists only
-    // once something has been superseded; a checkout that legitimately has none must not fail
-    // here. The test below FAILS rather than skips once the file is present, which is the
-    // half that matters.
-    path.is_file().then_some(path)
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<std::path::PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                n.starts_with("28-04-CERTIFICATION-RECEIPT-SUPERSEDING-") && n.ends_with(".json")
+            })
+        })
+        .collect();
+    // Deliberately NOT an assert on non-emptiness. Unlike the original receipt, a supersession
+    // exists only once something has been superseded; a checkout that legitimately has none
+    // must not fail here. The tests below FAIL rather than skip once a file is present, which
+    // is the half that matters.
+    out.sort();
+    out
+}
+
+/// The receipt a given superseding receipt claims to supersede, resolved FROM THE RECEIPT
+/// rather than assumed to be the original. `-002` supersedes `-001`, not the original, and a
+/// test that assumed otherwise would compare the wrong pair and still look green.
+fn superseded_path_for(
+    receipt: &CertificationReceiptV2,
+    own: &std::path::Path,
+) -> std::path::PathBuf {
+    let own_name = own.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let bound = receipt
+        .body
+        .bindings
+        .artifacts
+        .iter()
+        .find(|a| {
+            let name = a.path.rsplit('/').next().unwrap_or(&a.path);
+            name.starts_with("28-04-CERTIFICATION-RECEIPT") && name != own_name
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "{own_name} must bind, as an artifact, the receipt it supersedes; \
+                 without that the supersession is prose"
+            )
+        });
+    phase_dir().join(&bound.path)
 }
 
 #[test]
 fn the_superseding_receipt_verifies_and_names_what_it_supersedes() {
-    let (Some(new_path), Some(old_path)) = (superseding_receipt_path(), real_receipt_path()) else {
+    let paths = superseding_receipt_paths();
+    if paths.is_empty() || real_receipt_path().is_none() {
         eprintln!("no superseding receipt in this checkout; nothing to check");
         return;
-    };
-    let new_bytes = std::fs::read(&new_path).expect("read the superseding receipt");
+    }
+    eprintln!("supersession chain: {} link(s)", paths.len());
+    for p in &paths {
+        check_one_supersession(p);
+    }
+}
+
+fn check_one_supersession(new_path: &std::path::Path) {
+    let new_bytes = std::fs::read(new_path).expect("read the superseding receipt");
+    let probe: CertificationReceiptV2 =
+        serde_json::from_slice(&new_bytes).expect("the superseding receipt must parse under v2");
+    let old_path = superseded_path_for(&probe, new_path);
     let old_bytes = std::fs::read(&old_path).expect("read the superseded receipt");
 
     let new_receipt: CertificationReceiptV2 =
@@ -991,12 +1046,16 @@ fn the_superseding_receipt_verifies_and_names_what_it_supersedes() {
     );
 
     // And it must bind the superseded receipt's BYTES, so editing that file is detectable.
+    let old_name = old_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("superseded receipt has a name");
     let bound = parsed
         .body
         .bindings
         .artifacts
         .iter()
-        .find(|a| a.path.ends_with("28-04-CERTIFICATION-RECEIPT.json"))
+        .find(|a| a.path.ends_with(old_name))
         .expect("the superseding receipt must bind the superseded receipt as an artifact");
     let actual = format!("{:x}", Sha256::digest(&old_bytes));
     assert_eq!(
@@ -1022,9 +1081,11 @@ fn the_superseding_receipt_verifies_and_names_what_it_supersedes() {
     }
 
     eprintln!(
-        "superseding receipt verified: {} findings, gate_passed={}, supersedes {} under {}",
+        "superseding receipt verified: {} ({} findings, gate_passed={}) supersedes {} ({}) under {}",
+        new_path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
         parsed.body.findings.len(),
         verified.acceptance_gate_passed,
+        old_name,
         old_receipt.body_sha256,
         old_key_id
     );
@@ -1032,40 +1093,63 @@ fn the_superseding_receipt_verifies_and_names_what_it_supersedes() {
 
 #[test]
 fn the_superseding_receipt_rejects_a_single_flipped_byte() {
-    let Some(path) = superseding_receipt_path() else {
+    let paths = superseding_receipt_paths();
+    if paths.is_empty() {
         return;
-    };
-    let text = std::fs::read_to_string(&path).expect("read the superseding receipt");
-    let receipt: CertificationReceiptV2 = serde_json::from_str(&text).unwrap();
-    let CertAuthorityClaimV2::PhaseScoped {
-        ref key_id,
-        ref public_key_base64,
-        ..
-    } = receipt.authority
-    else {
-        panic!("expected a phase-scoped claim");
-    };
-    let raw = BASE64.decode(public_key_base64).unwrap();
-    let verifying =
-        ed25519_dalek::VerifyingKey::from_bytes(&<[u8; 32]>::try_from(raw.as_slice()).unwrap())
-            .unwrap();
-    let mut v = CertificationVerifier::new();
-    v.trust_phase_key(key_id.clone(), verifying);
+    }
+    for path in &paths {
+        let text = std::fs::read_to_string(path).expect("read the superseding receipt");
+        let receipt: CertificationReceiptV2 = serde_json::from_str(&text).unwrap();
+        let CertAuthorityClaimV2::PhaseScoped {
+            ref key_id,
+            ref public_key_base64,
+            ..
+        } = receipt.authority
+        else {
+            panic!("expected a phase-scoped claim");
+        };
+        let raw = BASE64.decode(public_key_base64).unwrap();
+        let verifying =
+            ed25519_dalek::VerifyingKey::from_bytes(&<[u8; 32]>::try_from(raw.as_slice()).unwrap())
+                .unwrap();
+        let mut v = CertificationVerifier::new();
+        v.trust_phase_key(key_id.clone(), verifying);
 
-    // Flip one byte INSIDE the supersession statement — the field this artifact exists to
-    // carry. A digest that covered the receipt but not its supersession clause would let the
-    // superseded identity be rewritten under a valid signature.
-    let tampered = text.replacen(
-        "phase-28-certification-2026-07-28",
-        "phase-28-certification-2026-07-27",
-        1,
-    );
-    assert_ne!(tampered, text, "the mutation must actually mutate");
-    assert_eq!(
-        v.parse_and_verify(tampered.as_bytes()).unwrap_err().code(),
-        "F28R-DIGEST",
-        "rewriting the superseded key id must break verification"
-    );
+        // Flip one byte INSIDE the supersession statement — the field this artifact exists to
+        // carry. A digest that covered the receipt but not its supersession clause would let
+        // the superseded identity be rewritten under a valid signature.
+        //
+        // The target key id is READ OUT OF THE SUPERSEDED RECEIPT rather than hardcoded. The
+        // hardcoded form (`phase-28-certification-2026-07-28`) is the ORIGINAL's key id, and
+        // it appears nowhere in `-002`, whose posture names `-001`'s key. `replacen` would
+        // have found nothing, `tampered == text`, and the assertion would fire on the
+        // "must actually mutate" line — a confusing failure standing in for no coverage.
+        let old_path = superseded_path_for(&receipt, path);
+        let old_bytes = std::fs::read(&old_path).expect("read the superseded receipt");
+        let old: CertificationReceiptV2 = serde_json::from_slice(&old_bytes).unwrap();
+        let CertAuthorityClaimV2::PhaseScoped {
+            key_id: ref old_key_id,
+            ..
+        } = old.authority
+        else {
+            panic!("the superseded receipt must carry a phase-scoped claim");
+        };
+        let mutated_key_id = format!("{old_key_id}-TAMPERED");
+        let tampered = text.replacen(old_key_id.as_str(), &mutated_key_id, 1);
+        assert_ne!(
+            tampered,
+            text,
+            "the mutation must actually mutate {}: the superseded key id {old_key_id} was not \
+             found in its body, so the supersession clause is not what this test thinks it is",
+            path.display()
+        );
+        assert_eq!(
+            v.parse_and_verify(tampered.as_bytes()).unwrap_err().code(),
+            "F28R-DIGEST",
+            "rewriting the superseded key id in {} must break verification",
+            path.display()
+        );
+    }
 }
 
 #[test]

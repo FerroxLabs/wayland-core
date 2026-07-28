@@ -1,0 +1,13 @@
+A software project has a signed cross-platform certification receipt that binds two specific candidate commits (the exact source trees the certified binaries were built from).
+
+VERIFIED FACTS, all independently re-measured:
+1. The receipt's acceptance gate PASSES: 65 findings, every one terminally dispositioned, and an independent verifier that recomputes every binding from raw evidence returns rc=0.
+2. The two candidate commits are 194 and 147 commits behind the current integration branch under the source tree (crates/).
+3. That window includes the three commits that repaired the single finding whose FIXED disposition is exactly what flips the acceptance gate from false to true. So the certified binaries do NOT contain the fix that the passing gate depends on.
+4. The integration branch moves hourly: five parallel lanes merge into it.
+5. Re-running the certification requires three platforms (Linux, macOS arm64, Windows), a 216-cell probe matrix per platform, and a multi-session soak. Prior full runs took multiple sessions across three physical hosts, one of which (the Windows box) is only reachable from one operator's machine.
+
+QUESTION 1: Is the passing gate meaningful today? Answer plainly.
+QUESTION 2: Should the project re-run the full certification against the current integration branch HEAD now, or wait and certify a designated release candidate, keeping the record explicitly marked stale until then?
+
+Begin your reply with the literal token PANEL_POSITION= followed by exactly one of: RECERTIFY_NOW, CERTIFY_AT_RC, OTHER. Then justify in under 200 words.

@@ -1,0 +1,10 @@
+host=Ubuntu-2404-noble-amd64-base commit=708ad83dbb7fe2d9a84fa3ab1e387aa10eacee49 dirty=0
+WLRC=0
+WLDONE
+--- executed count read back, never inferred from exit status ---
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+--- non-vacuity: --nocapture proves the bodies ran ---
+test an_empty_contradicted_criterion_is_rejected_so_an_omission_cannot_read_as_a_none ... supersession chain: ok2
+verified 63 findings, gate_passed=false, unresolved CRITICAL/HIGH = ["F-28-02-002"]
+superseding receipt verified: 28-04-CERTIFICATION-RECEIPT-SUPERSEDING-001.json (63 findings, gate_passed=true) supersedes 28-04-CERTIFICATION-RECEIPT.json (2037352cff1c2f2c8f8b35e59289ba73b514cd56977c8e22d599ed45e49e0fbb) under phase-28-certification-2026-07-28
+superseding receipt verified: 28-04-CERTIFICATION-RECEIPT-SUPERSEDING-002.json (65 findings, gate_passed=true) supersedes 28-04-CERTIFICATION-RECEIPT-SUPERSEDING-001.json (8db1ef07600f644166b422956b13b4f9b5d75af5dc7d0822aa7a4a16746116fb) under phase-28-certification-supersession-001-2026-07-29
