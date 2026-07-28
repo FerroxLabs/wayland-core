@@ -1,0 +1,75 @@
+=== 29-04 re-measurement: are the four release states separate IN THE SHIPPED PIPELINE? ===
+commit: 882191d4737c7552bef33214f4aadc31dbf828a3
+captured: 2026-07-28T04:03:58Z
+
+### 1. Does ANY workflow job declare a GitHub Environment (the only native approval gate)?
+ZERO MATCHES: no job in any workflow declares an environment, so no manual approval gate exists anywhere in the release pipeline.
+
+### 2. Does ANY workflow step rehearse a rollback?
+ZERO MATCHES: no workflow mentions rollback in any form.
+
+### 3. Does release.yml -- the RELEASE pipeline -- append or verify a release-state ledger?
+ZERO MATCHES in release.yml: the release pipeline never invokes wayland-release, never appends a state record, and never publishes or verifies a release manifest.
+
+### 3b. Where DOES wayland-release appear in .github/workflows/ at all?
+.github/workflows/supply-chain.yml:133:      - name: Build wayland-release
+.github/workflows/supply-chain.yml:134:        run: cargo build --locked -p wcore-eval-scenarios --bin wayland-release
+.github/workflows/supply-chain.yml:147:          ./target/debug/wayland-release sbom --metadata metadata.json --output sbom-1.json
+.github/workflows/supply-chain.yml:148:          ./target/debug/wayland-release sbom --metadata metadata.json --output sbom-2.json
+    (supply-chain.yml is 29-02's SBOM job. It builds the binary to generate an SBOM.
+     It appends no state record and signs no manifest.)
+
+### 4. What triggers the release pipeline?
+name: Release
+
+on:
+  push:
+    tags:
+      # Superset of the wayland release tag convention: vX.Y.Z-wayland-<suffix>
+      # (e.g. -base, -safety, -spawner-wired, -multi-agent-nav, -tui-*). The
+      # v0.9.x series used new suffixes that the old two explicit patterns
+      # never matched, so the pipeline silently never fired for any v0.9.x tag
+      # (release run history: nothing between v0.8.1 and v0.9.4.2). This single
+      # glob catches the whole family so future tags auto-publish on push.
+      - 'v*-wayland-*'
+  workflow_call:
+    inputs:
+      tag_name:
+        description: "Release tag to build and publish (e.g., v0.2.0)"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag to build and publish (e.g., v0.2.0)"
+        required: true
+        type: string
+
+
+### 5. The release jobs in order, with their needs: edges
+4:  push:
+36:  prepare-release:
+37:    name: Prepare Release Metadata
+55:  build:
+56:    name: Build ${{ matrix.target }}
+58:    needs: prepare-release
+176:  github-release:
+177:    name: Upload GitHub Release assets
+179:    needs:
+180:      - prepare-release
+181:      - build
+255:  post-tag-smoke:
+256:    name: Smoke ${{ matrix.target }}
+258:    needs:
+259:      - prepare-release
+260:      - github-release
+430:  publish-npm:
+431:    name: Publish to npm
+433:    needs:
+434:      - prepare-release
+435:      - post-tag-smoke
+
+=> CONCLUSION, MEASURED NOT ARGUED: one tag push drives packaging (build), deployment
+   preparation (github-release) and release acceptance (publish-npm) with no approval
+   between them, no rollback rehearsal at all, and the four-state ledger Phase 29 built
+   is not wired into the release pipeline in any form.

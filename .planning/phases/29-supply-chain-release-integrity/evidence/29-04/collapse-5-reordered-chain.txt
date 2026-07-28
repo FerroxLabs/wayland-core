@@ -1,0 +1,6 @@
+--- COLLAPSE-5: verify a chain with rollback rehearsal and deployment preparation SWAPPED ---
+    positions 1 and 2 swapped; no record's contents were altered
+[COLLAPSE-5 state-verify] rc=1
+    wayland-release: record at position 1 is RollbackRehearsal but canonical order requires DeploymentPreparation
+C5_RC=1
+

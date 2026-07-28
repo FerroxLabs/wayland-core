@@ -1,0 +1,27 @@
+=== STANDALONE VERIFICATION — each record against ONLY its own role key ===
+A chain that verifies only as a chain is sequential, not separable. Each
+record's signature is checked here by OpenSSL — an implementation with no
+stake in the outcome — using ONLY that record's own role public key, and
+then AGAINST every other role's key, which must all fail.
+    packaging: body_sha256=a2d3975079cad122cc6a238ee45569f794cf91919588aefe29ba469502bc7454 key_id=packaging-key
+    deployment_preparation: body_sha256=b9ff08e25a8cd9df52d710f783468e7c6d21c73689a6375aa14d0051fa3c6b14 key_id=deployment-preparation-key
+    rollback_rehearsal: body_sha256=5b559f05118bc1d179b35e3b90e7934a1e5a59a4aa8595c7b225f3fea68a9b2a key_id=rollback-rehearsal-key
+    release_acceptance: body_sha256=21b76eeb3f0a4e4c0c325f9e3b811a060240018418a51aef2c9460a623e534cd key_id=release-acceptance-key
+[STANDALONE packaging with role=packaging key] rc=0 out=Signature Verified Successfully
+[STANDALONE deployment_preparation with role=deployment_preparation key] rc=0 out=Signature Verified Successfully
+[STANDALONE rollback_rehearsal with role=rollback_rehearsal key] rc=0 out=Signature Verified Successfully
+[STANDALONE release_acceptance with role=release_acceptance key] rc=0 out=Signature Verified Successfully
+--- cross-role controls: every other role's key MUST fail ---
+[CROSS record=packaging key=deployment_preparation] rc=1 out=Signature Verification Failure
+[CROSS record=packaging key=rollback_rehearsal] rc=1 out=Signature Verification Failure
+[CROSS record=packaging key=release_acceptance] rc=1 out=Signature Verification Failure
+[CROSS record=deployment_preparation key=packaging] rc=1 out=Signature Verification Failure
+[CROSS record=deployment_preparation key=rollback_rehearsal] rc=1 out=Signature Verification Failure
+[CROSS record=deployment_preparation key=release_acceptance] rc=1 out=Signature Verification Failure
+[CROSS record=rollback_rehearsal key=packaging] rc=1 out=Signature Verification Failure
+[CROSS record=rollback_rehearsal key=deployment_preparation] rc=1 out=Signature Verification Failure
+[CROSS record=rollback_rehearsal key=release_acceptance] rc=1 out=Signature Verification Failure
+[CROSS record=release_acceptance key=packaging] rc=1 out=Signature Verification Failure
+[CROSS record=release_acceptance key=deployment_preparation] rc=1 out=Signature Verification Failure
+[CROSS record=release_acceptance key=rollback_rehearsal] rc=1 out=Signature Verification Failure
+

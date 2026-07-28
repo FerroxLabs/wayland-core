@@ -1,0 +1,6 @@
+--- COLLAPSE-4: verify a chain with deployment preparation REMOVED ---
+    deployment_preparation deleted; the other three records are untouched
+[COLLAPSE-4 state-verify] rc=1
+    wayland-release: record at position 1 is RollbackRehearsal but canonical order requires DeploymentPreparation
+C4_RC=1
+

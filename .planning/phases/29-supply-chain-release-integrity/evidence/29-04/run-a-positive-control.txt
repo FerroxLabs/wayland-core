@@ -1,0 +1,19 @@
+=== RUN A — THE POSITIVE CONTROL: four role keys, four states, chain accepted ===
+[A append packaging] rc=0
+    STATE APPENDED state=packaging body_sha256=a2d3975079cad122cc6a238ee45569f794cf91919588aefe29ba469502bc7454
+[A verify prefix[1]] rc=0
+    CHAIN VERIFIED highest_state=packaging records=1 accepted=false
+[A append deployment_preparation] rc=0
+    STATE APPENDED state=deployment_preparation body_sha256=b9ff08e25a8cd9df52d710f783468e7c6d21c73689a6375aa14d0051fa3c6b14
+[A verify prefix[2]] rc=0
+    CHAIN VERIFIED highest_state=deployment_preparation records=2 accepted=false
+[A append rollback_rehearsal] rc=0
+    STATE APPENDED state=rollback_rehearsal body_sha256=5b559f05118bc1d179b35e3b90e7934a1e5a59a4aa8595c7b225f3fea68a9b2a
+[A verify prefix[3]] rc=0
+    CHAIN VERIFIED highest_state=rollback_rehearsal records=3 accepted=false
+[A append release_acceptance] rc=0
+    STATE APPENDED state=release_acceptance body_sha256=21b76eeb3f0a4e4c0c325f9e3b811a060240018418a51aef2c9460a623e534cd
+[A verify prefix[4]] rc=0
+    CHAIN VERIFIED highest_state=release_acceptance records=4 accepted=true
+A_FINAL_VERIFY_RC=0
+

@@ -1,0 +1,21 @@
+# Each of run A's four state records verified STANDALONE against ONLY its own
+# role key. A chain that verifies only as a chain is sequential, not separable,
+# and separability is what Success Criterion 4 asks for.
+#
+# Shape: F29-04-STANDALONE-<ordinal>::VERIFIED::role=<role>::evidence=<path>
+#
+# The verifier here is OpenSSL 3.0.13, not the product. That is deliberate: an
+# implementation with no stake in the outcome confirming the same signatures is
+# stronger evidence than the product confirming itself. The public key is the
+# raw Ed25519 key from the clean-room trust root wrapped in an SPKI header; the
+# message is the state's own domain separator followed by the record's body
+# digest.
+#
+# The four positive results are paired with TWELVE cross-role controls -- every
+# record checked against every OTHER role's key -- and all twelve failed. Without
+# those controls, four "Signature Verified Successfully" lines would be equally
+# consistent with a verifier that accepts anything.
+F29-04-STANDALONE-0::VERIFIED::role=packaging::evidence=standalone-verify.txt
+F29-04-STANDALONE-1::VERIFIED::role=deployment_preparation::evidence=standalone-verify.txt
+F29-04-STANDALONE-2::VERIFIED::role=rollback_rehearsal::evidence=standalone-verify.txt
+F29-04-STANDALONE-3::VERIFIED::role=release_acceptance::evidence=standalone-verify.txt

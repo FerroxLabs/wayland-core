@@ -1,0 +1,30 @@
+# The paired tamper corpus, machine-readable. One row per case.
+#
+# Shape: F29-03-<CLASS>-<n>::control=<ACCEPTED|REFUSED>::mutated=<ACCEPTED|REFUSED>::evidence=<path relative to evidence/29-04>
+#
+# EVERY row records BOTH halves. control=ACCEPTED is what makes the corpus
+# non-trivial: a table of refusals alone is passed by a verifier that refuses
+# everything. A row with control=REFUSED is a corpus defect, not a pass, and the
+# plan's PAIRED-RESULT gate fails on any such row.
+#
+# Source of every result: tamper-corpus-run.txt, the live
+# `cargo test -p wcore-eval-scenarios --test supply_chain_tamper_corpus -- --nocapture`
+# run on hetzner-dsm at commit f6196a3275d41eaf769d4271b38d145e18739f26. Each
+# case has its own TAMPER-CASE line in that transcript.
+#
+# The corpus's own ability to go red is proved separately in
+# tamper-negative-controls.txt: four deliberate defects (a no-op mutation, all
+# controls refused, a dropped object class, an inert mutation) each turned the
+# suite red, and the tree restored byte-clean afterwards.
+F29-03-BINARY-1::control=ACCEPTED::mutated=REFUSED::evidence=tamper-corpus-run.txt
+F29-03-SBOM-1::control=ACCEPTED::mutated=REFUSED::evidence=tamper-corpus-run.txt
+F29-03-UPDATE-1::control=ACCEPTED::mutated=REFUSED::evidence=tamper-corpus-run.txt
+F29-03-UPDATE-2::control=ACCEPTED::mutated=REFUSED::evidence=tamper-corpus-run.txt
+F29-03-PLUGIN-1::control=ACCEPTED::mutated=REFUSED::evidence=tamper-corpus-run.txt
+F29-03-BACKEND-RECEIPT-1::control=ACCEPTED::mutated=REFUSED::evidence=tamper-corpus-run.txt
+F29-03-BACKEND-RECEIPT-2::control=ACCEPTED::mutated=REFUSED::evidence=tamper-corpus-run.txt
+F29-03-MANIFEST-1::control=ACCEPTED::mutated=REFUSED::evidence=tamper-corpus-run.txt
+F29-03-MANIFEST-2::control=ACCEPTED::mutated=REFUSED::evidence=tamper-corpus-run.txt
+F29-03-KEY-1::control=ACCEPTED::mutated=REFUSED::evidence=tamper-corpus-run.txt
+F29-03-KEY-2::control=ACCEPTED::mutated=REFUSED::evidence=tamper-corpus-run.txt
+F29-03-KEY-3::control=ACCEPTED::mutated=REFUSED::evidence=tamper-corpus-run.txt

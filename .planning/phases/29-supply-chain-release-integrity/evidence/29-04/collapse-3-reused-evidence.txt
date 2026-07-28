@@ -1,0 +1,8 @@
+--- COLLAPSE-3: an acceptance record whose evidence REUSES the packaging digest ---
+    starting from run A's first three records
+[COLLAPSE-3 append] rc=0
+    STATE APPENDED state=release_acceptance body_sha256=5adb2e9c31ade76fe76d33bde1afb3c21dcd1e3dc6914a9834b93db4f6c87d2f
+[COLLAPSE-3 state-verify] rc=1
+    wayland-release: state ReleaseAcceptance reuses evidence digest 0ee286808098d9bdb47a5d629c78d03e04603e6f6a009b83d780ac6ee1be3c69 from an earlier state
+C3_RC=1
+
