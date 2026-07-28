@@ -108,7 +108,9 @@ fn main() {
                 // is a container with no audio in it, which must NOT be
                 // reported as "audio flowed".
                 if bytes <= 44 {
-                    eprintln!("F27_VOICE=EMPTY_CAPTURE only {bytes} bytes — header only, no samples");
+                    eprintln!(
+                        "F27_VOICE=EMPTY_CAPTURE only {bytes} bytes — header only, no samples"
+                    );
                     return 4;
                 }
             }
