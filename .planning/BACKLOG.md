@@ -1053,3 +1053,222 @@ observation it is, with its code reference, rather than as a finding this lane p
 
 See `26-GAPS-SUMMARY.md`. The disposition is recorded so the clause cannot reach another
 phase unnoticed the way it reached this one.
+
+---
+
+## From 28-04 — every ACCEPTED and DEFERRED Phase 28 finding (2026-07-28)
+
+Written **before** the finding ledger cited these ids, so each id is real rather than
+aspirational, and gate-checked by
+`python3 .planning/scripts/f28-ledger.py --check-backlog-ids <findings.tsv> .planning/BACKLOG.md`.
+
+Every entry below is also enumerated **inside** the signed certification receipt
+(`28-04-CERTIFICATION-RECEIPT.json`, `body.findings`). That enumeration is the entire
+consideration the program receives in exchange for not fixing these, and it is machine-readable
+on purpose: **if Phase 29 does not read it, this accounting control has no consumer and the
+Phase 28 acceptance rule is worth less than it looks.** That dependency is stated rather than
+assumed — it is the open risk the acceptance decision itself carried forward.
+
+Nothing here is CRITICAL or HIGH. The one Phase 28 finding at HIGH that could be neither fixed
+nor disproved (`F-28-02-002`) is **not** in this file: it is OPEN, it blocks the acceptance
+gate, and it lives in `28-04-FINDING-LEDGER.md` and the receipt.
+
+| Backlog id | Findings | Severity | Owner |
+|---|---|---|---|
+| `BL-F28-KR02` | KR-02 | MEDIUM | Phase 30 (hardening) |
+| `BL-F28-KR03` | KR-03 | MEDIUM | Phase 30 (hardening) |
+| `BL-F28-KR04` | KR-04 | LOW | Phase 29 (release acceptance) |
+| `BL-F28-C4` | F-28-01-001, F-28-01-003 | MEDIUM | Phase 29 / Sean |
+| `BL-F28-POLICY-DOC` | F-28-01-002 | LOW | Phase 29 (release acceptance) |
+| `BL-F28-SURFACE-UNCLAIMED` | F-28-01-R001/R002/R004/R007/R008/R010/R012/R014/R017 | MEDIUM ×9 | Phase 29 (release acceptance) |
+| `BL-F28-SURFACE-WEAK` | F-28-01-R003/R005/R006/R009/R011/R013/R015/R016/R018 | LOW ×9 | Phase 29 (release acceptance) |
+| `BL-F28-SWARM-ADMIT` | F-28-02-003 | MEDIUM | Phase 30 (hardening) |
+| `BL-F28-BELIEF` | F-28-02-004 | MEDIUM | orchestrator |
+| `BL-F28-LOCAL-BACKEND` | F-28-02-005, F-MA-002 | MEDIUM, LOW | Phase 30 (hardening) |
+| `BL-F28-BWRAP-ETC` | F-28-02-006 | MEDIUM | Phase 30 (hardening) |
+| `BL-F28-SYSTEM-DACL` | F-WR-05 | LOW | Phase 30 (hardening) |
+| `BL-F28-WIN-PARALLEL` | F-KR-08 | MEDIUM | Phase 30 (hardening) |
+| `BL-F28-ACL-COST` | F-KR-09 | MEDIUM | Phase 30 (hardening) |
+| `BL-F28-BENCH-SANDBOX` | F-28C-01 | MEDIUM | Phase 30 (hardening) |
+| `BL-F28-ACP-HERMETIC` | F-28C-02 | MEDIUM | Phase 30 (hardening) |
+| `BL-F28-HEADLESS-KEYRING` | F-28C-03 | MEDIUM | Phase 30 (hardening) |
+| `BL-F28-TEMP-SCRATCH` | F-MA-001 | MEDIUM | Phase 30 (hardening) |
+| `BL-F28-WEDGE-BASHPATH` | F-28-04-002 | MEDIUM | Phase 30 (hardening) |
+| `BL-F28-FLAVOUR-D` | F-28-04-003 | MEDIUM | Phase 30 (hardening) |
+| `BL-F28-TWO-CANDIDATES` | F-28-04-004 | MEDIUM | Phase 29 (release acceptance) |
+| `BL-F28-MACOS-CENSUS` | F-28-04-005 | MEDIUM | Phase 30 (hardening) |
+| `BL-F28-SOAK-WORKLOAD` | F-28-04-006 | MEDIUM | Phase 30 (hardening) |
+| `BL-F28-RUNLEVEL-ACTIVENESS` | F-28-04-007 | MEDIUM | Phase 30 (hardening) |
+| `BL-F28-CONTRACT-CORPUS` | F-28-04-008 | MEDIUM | Sean / Desktop release coordination |
+
+### `BL-F28-KR02` — Windows snapshot private DACL enforcement is unproven (MEDIUM)
+
+`snapshot.rs::windows_private_dacl_accepts_restrictive_deny_ace` and `..._rejects_null_empty_and_broad_allow`
+fail at their `WRITE_DAC` reopen step with error 5, **identically at parent**, so this is not a
+candidate regression. The 28-01 contract's §3.4 "unproven-control corollary" would have moved
+this across the A2 line and was deliberately not applied.
+
+### `BL-F28-KR03` — worker output-exhaustion buffer-retention bound is unproven (MEDIUM)
+
+`worker_runtime_limits::multi_worker_output_exhaustion_fails_without_retaining_buffers` takes
+~35 s against a 20 s budget. **The timeout was deliberately NOT raised.** The red is a budget
+overrun in the test, not an observed retention of buffers.
+
+### `BL-F28-KR04` — bash cannot run under Windows AppContainer, by construction (LOW)
+
+msys needs `\BaseNamedObjects`; AppContainer confines to `AppContainerNamedObjects` (`0xC0000022`).
+No budget fixes this. The product contract is fail-closed and the test asserts it. This is the
+canonical `architectural-impossibility` instance and its impossibility check **is** that
+fail-closed assertion.
+
+### `BL-F28-C4` — the acceptance rule's own counter-evidence (MEDIUM)
+
+Two rows. **`F-28-01-001`:** the unproven-control corollary of A2 was considered and deliberately
+not applied, so `KR-02` and `KR-03` stayed below the A2 line — recorded so a later reader applies
+it deliberately rather than rediscovers it. **`F-28-01-003`:** the severity-amendment commit
+`d0837aa7`, whose being the "later instrument" is the whole load-bearing structure of the
+`c4-disposition` decision, ends its own message with *"Phase 28's criteria are untouched
+(different phase)."* That is the strongest available evidence for the losing `c4-literal`
+position and it appears in no captured panel response. **Anyone reopening the Phase 28
+acceptance rule should start here.**
+
+### `BL-F28-POLICY-DOC` — the standing severity policy is not in `AGENTS.md` (LOW)
+
+Plans cite it as living there; it does not. Either add it to `AGENTS.md` §11 or correct the plans.
+
+### `BL-F28-SURFACE-UNCLAIMED` — 9 shipped surfaces claimed by no phase artifact (MEDIUM ×9)
+
+`agent`, `crucible`, `forge`, `init`, `mcp-serve`, `models`, `project-context`, `self-update`,
+`swarm`. All were exercised by the matrix and the soak, so coverage is unaffected — what is
+recorded is that **attribution** is incomplete. They may predate phases 24–27, which is itself
+worth knowing at certification time. **The `F-28-01-R0nn` ids are POSITIONAL and shifted between
+the 28-02 and 28-03 resolutions; do not diff them by id.**
+
+### `BL-F28-SURFACE-WEAK` — 9 surfaces the resolver cannot attribute confidently (LOW ×9)
+
+`fetch`, `goal`, `image`, `migrate`, `profile`, `sandbox`, `session`, `setup`, `workflow`. A limit
+of the **instrument**, deliberately never rendered as a fact about the product.
+
+### `BL-F28-SWARM-ADMIT` — swarm dispatch admission intermittently refuses with the sandbox available (MEDIUM)
+
+Measured by the 28-02 control, not inferred: `obs-scheduled-task-cleared` shows
+`probe_report=available` with `product_behaviour=refused-fail-closed`. Fails **closed**, so it
+costs availability rather than containment.
+
+### `BL-F28-BELIEF` — an unmeasured belief suppressed real security evidence for weeks (MEDIUM)
+
+The standing rule *"never conclude a red from an SSH run"* had no discriminating control behind
+it and discounted Windows sandbox reds. **CONFIRMED-FALSE and retracted** at 28-02; corrected in
+`LANE-BRIEF` §2 and `AGENTS.md` §11. Not marked FIXED because remaining plan-brief copies still
+carry it and need a serialized cross-lane edit by the orchestrator.
+
+### `BL-F28-LOCAL-BACKEND` — `backend run --backend local` names containment it never applies (MEDIUM + LOW)
+
+The module's own doc says it *"CONSULTS `wcore_sandbox::default_for_platform()` … but does NOT
+currently route the child through `SandboxBackend::execute`."* Its receipt honestly reports
+containment *"selected but NOT applied to this child"*, which is why `F-MA-002` is LOW rather
+than an instance of the `KR-05` pattern. This is the path that produced `F-28-02-005` (a task
+created a file outside its workspace), so that measurement evidences nothing about `sandbox-exec`.
+
+### `BL-F28-BWRAP-ETC` — the Linux bwrap backend read-binds all of `/etc` (MEDIUM)
+
+A sandboxed worker reads `/etc/shadow` (`F28_SHADOW=READ`, reproduced twice independently).
+Source read before scoring: `SYSTEM_RO_DIRS` includes `/etc` and the bind is a deliberate
+`--ro-bind /etc /etc`, so `enforces_read_deny() == true` is **not** lying — it means the backend
+honours `fs_read_deny` masks, not that it denies everything ungranted. A hardening gap, **not** a
+control that reports itself active while inactive.
+
+### `BL-F28-SYSTEM-DACL` — running the sandbox as SYSTEM trips `validate_mutex_security` (LOW)
+
+`acquire()` always builds a 2-entry DACL while the validator expects 1 when the caller's SID *is*
+the SYSTEM SID. Fails closed with a message that reads like a platform limitation — the `KR-05`
+pattern again — but SYSTEM is not the shipping configuration.
+
+### `BL-F28-WIN-PARALLEL` — concurrent live AppContainer executions interfere (MEDIUM)
+
+3/2, 2/3, 1/4 in parallel versus a flat 4/1 across 12 serial runs. The observed failure is the
+product's fail-closed guard **declining to measure an ambiguous scope**, which is correct
+behaviour. **Operating consequence: `--test-threads=1` is a CORRECTNESS REQUIREMENT for live
+sandbox suites, not a preference, and any live-Windows figure this program recorded from a
+parallel run is untrustworthy.** This is the cause of `CLASS-WIN-LIVE-01`.
+
+### `BL-F28-ACL-COST` — AppContainer ACL grant+revoke is O(objects), paid every execution (MEDIUM)
+
+133 ms at 200 objects, ~10 s at `%TEMP%`'s 57,636, 19,487 ms at 200,000. The field allowlist the
+repaired test itself documents (`~/.cache`, `~/.cargo`, `~/.npm`, `~/.rustup`) is exactly the
+large-tree case, so a real user can pay tens of seconds of setup **on every sandboxed command**.
+A cost defect, not a containment defect.
+
+### `BL-F28-BENCH-SANDBOX` — `tool_token_bench` cannot measure `BashTool` on any host (MEDIUM)
+
+It dispatches through a context with no sandbox backend, so every Bash row fails closed and the
+sanity gate refuses to write the markdown. **The bench's Bash column has never been produced.**
+
+### `BL-F28-ACP-HERMETIC` — `acp_engine_turn` is non-hermetic while documenting itself as hermetic (MEDIUM)
+
+It calls `Config::resolve()`, which reads the operator's real `~/.config/wayland-core/config.toml`,
+so its result depends on the developer's machine. Attributed decisively by removing the host
+config and watching the panic **move line**.
+
+### `BL-F28-HEADLESS-KEYRING` — no ACP/A2A session on a headless Linux host with no keyring (MEDIUM)
+
+Unless the operator sets `credentials.backend = "encrypted-file"` and supplies a passphrase.
+Fail-closed and actionable with two documented remediations, so not a security defect — but
+headless Linux is the canonical deployment for an agent CLI and this is a first-run wall.
+
+### `BL-F28-TEMP-SCRATCH` — `WorkspacePolicy::contained` grants the whole host temp dir (MEDIUM)
+
+`scratch_dirs()` grants all of `std::env::temp_dir()`, so a contained shell may write anywhere
+under `/tmp`. Deliberate and documented in code. **Measured rather than argued:** it is what
+produced the first red of the new e2e containment gate, whose escape target sat in a
+`tempfile::tempdir()` the policy legitimately grants.
+
+### `BL-F28-WEDGE-BASHPATH` — the KR-05 residual (MEDIUM)
+
+Whether the **bash-tool** path (`default_for_platform()`) executes unsandboxed under a wedged
+AppContainer lease is unmeasured; the 28-02 control exercised `SandboxRegistry::required_for_session`.
+Named explicitly rather than absorbed into `KR-05`'s DISPROVED row, because 28-02 said in terms
+that KR-05 must not be closed on the delegated surface alone. **What would close it:** drive
+`wayland-core sandbox exec` on `seandesktop` with a lease deliberately wedged and observe
+whether the child carries a containment signature or an uncontained High-integrity label.
+
+### `BL-F28-FLAVOUR-D` — zero-execution flavour (d) survives for plain `cargo test` (MEDIUM)
+
+19 feature-gated and 25 platform-gated test binaries print `running 0 tests` / `ok` and exit 0;
+the largest blanks 16 tests. The invocation-site fix (`no-tests = "fail"`) closes it for
+**nextest only**, and that limit is stated rather than glossed.
+
+### `BL-F28-TWO-CANDIDATES` — the certification spans two candidates (MEDIUM)
+
+Linux and Windows matrix legs at `32e2f57d`; macOS matrix re-run and all three soak legs at
+`e4a3f5fc`. **No single-candidate full matrix exists for Phase 28.** Eleven merges landed between
+them, adding 15 surfaces including the `sandbox` verb that makes the macOS re-run possible at all.
+The receipt binds each candidate exactly and per-scope rather than picking one and calling it
+"the" candidate, so the binding is honest and the coverage is what is split. **Phase 29 should
+decide whether a single-candidate full matrix is a release prerequisite.**
+
+### `BL-F28-MACOS-CENSUS` — the macOS orphan census is non-authoritative (MEDIUM)
+
+It observes a process group, and a hostile descendant can leave one, so its zero is a zero
+**observation** rather than a containment guarantee. The instrument is weaker, not absent: a
+deliberately orphaned **product** process was planted and **found**. Linux (cgroup-v2) and
+Windows (job object) are authoritative.
+
+### `BL-F28-SOAK-WORKLOAD` — the soak workload is read-only, so `state_dir_bytes` is flat (MEDIUM)
+
+301 bytes at the first sample and 301 at the last, on every family. A true measurement and a weak
+one: a green means *"a thousand read-only sessions wrote nothing"*, **not** *"the product does not
+accumulate state under use"*. A state-accumulating workload is a deliberate future choice.
+
+### `BL-F28-RUNLEVEL-ACTIVENESS` — the macOS activeness observation is run-level (MEDIUM)
+
+One containment differential applied to all 24 macOS `sandbox-probes` cells rather than one
+observation per cell. Raised by 28-02, carried by 28-03, still true. Not resolved here because
+resolving it means re-running a measurement (forbidden by 28-04's scope fence) and narrowing the
+cell set would be a silent reduction of coverage.
+
+### `BL-F28-CONTRACT-CORPUS` — `desktop_contract_corpus` red, run by no Phase 28 lane (MEDIUM)
+
+`CLASS-CONTRACT-01`, structural. Closing it would require `wcore-contract generate`, a
+release-coordination action explicitly reserved and **not** performed by this phase. Recorded for
+completeness because three separate lanes named it and declined it.
