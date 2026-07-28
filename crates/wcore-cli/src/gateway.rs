@@ -835,7 +835,33 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
         }
     };
 
+    // F24-CL. The single-owner INBOUND POLLING lease.
+    //
+    // F24-C3-H4 stopped THIS process building two managers. It could not stop a
+    // second PROCESS building one — and both an ordinary session and the
+    // `cron daemon` do exactly that, against the same `<home>/channels`. Polling
+    // is a destructive read (Telegram's `offset=` confirm deletes; IMAP sets
+    // `\Seen`), so the loser of that race does not see a duplicate, it sees
+    // nothing at all. Measured 8 of 8 lost at startup on the shipped binary.
+    //
+    // Bound to the gateway's own lifetime deliberately: it is released by the
+    // OS when this process dies, however it dies, so a killed gateway hands
+    // inbound polling straight to the next process instead of wedging it.
+    let poll_lease = wcore_agent::channel_lease::attempt(&home, "gateway");
+    if !poll_lease.is_owner() {
+        eprintln!(
+            "[gateway] inbound polling is owned by another process (pid {:?}); \
+             this gateway will send but not poll",
+            poll_lease.owner_pid()
+        );
+        registration_error = Some(match registration_error.take() {
+            Some(prev) => format!("{prev}; inbound polling owned by another process"),
+            None => "inbound polling owned by another process".to_string(),
+        });
+    }
+
     if registered_n > 0
+        && poll_lease.is_owner()
         && let Err(e) = channels.write().await.start_all().await
     {
         eprintln!("[gateway] channel start_all: {e}");
