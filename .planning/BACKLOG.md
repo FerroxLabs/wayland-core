@@ -883,3 +883,34 @@ did not hold.
 **Do not "fix" this by raising a timeout, adding `#[ignore]`, or serializing the whole suite to
 green.** A reported red is worth more than an engineered green; the goal is tests that do not
 share hidden global state.
+
+---
+
+## CLASS-CONTRACT-01 — the contract corpus reddens every lane by construction (MEDIUM, friction not defect)
+
+`crates/wcore-protocol/src/contract/spec.rs:833` — `SOURCE_INPUTS` digests **40 engine source
+files**, among them `crates/wcore-cli/src/main.rs`. That is precisely the file `LANE-BRIEF` §6
+instructs **every** lane to edit (the shared fence). The consequence, measured by
+`lane/false-advertising` and verified green-at-base then red-at-first-commit before being
+attributed:
+
+> **Every lane goes red on `desktop_contract_corpus` without changing any wire shape.**
+
+`schema_digest` stays **UNCHANGED** in this situation; only `fixture_digest` and
+`source_inputs_digest` move — the same benign shape Sean authorized regenerating at `c743f398`.
+
+**Handling, which is orchestrator-level and must not be devolved to lanes:** ONE regeneration
+over the *merged* tree clears all lanes at once. Per-lane regeneration is actively harmful —
+the artifact is byte-exact, so concurrent regenerations conflict, and each goes stale the
+moment another lane merges. Lanes are correctly told **not** to run `wcore-contract generate`.
+
+**Desktop must re-pin in the same release train.** `observation.rs:329` makes a digest mismatch
+a HARD ERROR at `ready` negotiation, so an un-re-pinned Desktop will not connect.
+
+**Why this is friction rather than a defect:** the digest is doing its job — it is a tripwire
+over engine inputs, and it fires. The design question worth revisiting later is whether
+`main.rs` belongs in `SOURCE_INPUTS` at all, given it is a CLI registration surface rather than
+a wire-shape input. Narrowing that set would remove the recurring cost without weakening the
+tripwire over the files that actually determine the contract. **Do not narrow it reactively to
+make a red go away** — that is the tripwire-weakening move, and it must be a deliberate,
+evidenced decision about what determines the wire shape.
