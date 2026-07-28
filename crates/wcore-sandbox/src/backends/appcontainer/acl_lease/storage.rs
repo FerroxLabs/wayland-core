@@ -136,9 +136,27 @@ fn lease_directory_from(local: PathBuf) -> Result<PathBuf> {
 }
 
 pub(super) fn write_new_synced_lease(path: &Path, lease: &LeaseFile) -> Result<()> {
+    write_new_synced_lease_with_probe(path, lease, |_| ())
+}
+
+/// The create-then-write sequence, with a test probe between the two steps.
+///
+/// The probe exists so `F-28-ADJ-002` can be evidenced at its CAUSE rather than
+/// asserted from reading the source: the file is created here and its content
+/// is written on the next line, so anything that stops the process in between —
+/// a crash, a power loss — leaves a 0-byte `.toml`. In production the probe is
+/// a closure that does nothing and compiles away. This mirrors the crash-phase
+/// hook `rewrite_with_hook` already uses for the rewrite path, so it is the
+/// file's existing pattern rather than a new one.
+pub(super) fn write_new_synced_lease_with_probe(
+    path: &Path,
+    lease: &LeaseFile,
+    probe: impl FnOnce(&Path),
+) -> Result<()> {
     let root = trusted_root_for(path)?;
     let serialized = serialize(lease)?;
     let mut file = create_new_nofollow(&root, path)?;
+    probe(path);
     write_and_sync(&mut file, path, serialized.as_bytes())?;
     validate_open_file(&root, path, &file)?;
     sync_root(&root)?;
@@ -279,6 +297,28 @@ pub(super) fn read_validated_lease(path: &Path) -> Result<LeaseFile> {
     })?;
     lease.validate(path)?;
     Ok(lease)
+}
+
+/// True when the lease file is exactly zero bytes.
+///
+/// [`write_new_synced_lease`] creates the file and only then writes its
+/// content, so an interrupted create leaves a 0-byte `.toml` behind
+/// (`F-28-ADJ-002`). `read_validated_lease` rejects that file, and before this
+/// existed the rejection propagated out of `recover_dead_leases_locked` and
+/// wedged the sandbox permanently — the same denial of service `F-28-02-002`
+/// closed, arriving through a different door.
+///
+/// Deliberately answers ONLY the zero-length question, and is not a general
+/// "is this lease readable" probe. A non-empty lease that fails to parse is
+/// indistinguishable from a tampered one and must keep failing closed.
+pub(super) fn lease_is_zero_length(path: &Path) -> Result<bool> {
+    let root = trusted_root_for(path)?;
+    let file = open_existing_nofollow(&root, path, GENERIC_READ)?;
+    validate_open_file(&root, path, &file)?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| exec_error(format!("stat ACL lease {}: {error}", path.display())))?;
+    Ok(metadata.len() == 0)
 }
 
 pub(super) fn remove_validated_lease(path: &Path) -> Result<()> {

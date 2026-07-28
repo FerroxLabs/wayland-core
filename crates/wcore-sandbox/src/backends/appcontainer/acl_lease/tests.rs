@@ -432,6 +432,138 @@ fn reclamation_reports_grants_it_could_not_revoke() {
     );
 }
 
+/// Write a lease file with exactly the given bytes, bypassing the writer.
+///
+/// Reproduces an on-disk STATE, and does not claim to simulate the crash that
+/// produces it. That the state is reachable is established by
+/// `write_new_synced_lease` creating the file before writing its content, and
+/// by `zero_length_lease_is_reachable_through_the_writer` below.
+fn write_raw_lease(tag: &str, bytes: &[u8]) -> PathBuf {
+    let sequence = SYNTHETIC_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = lease_directory().unwrap().join(format!(
+        "{PROFILE_PREFIX}-h2{tag}-{:08x}-{sequence:04x}.toml",
+        std::process::id()
+    ));
+    fs::write(&path, bytes).unwrap();
+    path
+}
+
+#[test]
+fn zero_length_lease_is_reclaimed_not_refused_forever() {
+    // F-28-ADJ-002. Reproduced on hardware at 1b9f148f before this fix: a
+    // 0-byte .toml refused all sandboxed execution, twice running, with
+    // `invalid AppContainer ACL lease size 0`.
+    let _lock = wedge_test_lock();
+    let directory = lease_directory().unwrap();
+    let _ = take_emitted_reclamations();
+    let path = write_raw_lease("zerolen", b"");
+    assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+
+    unsafe { recover_dead_leases_locked(&directory) }
+        .expect("a 0-byte lease must not refuse acquisition forever");
+
+    assert!(
+        !path.exists(),
+        "the 0-byte lease must be gone from the ACTIVE lease directory"
+    );
+    let quarantined = quarantined_for(&path);
+    assert_eq!(
+        quarantined.len(),
+        1,
+        "it must be MOVED to quarantine, not deleted: {quarantined:?}"
+    );
+    let reports = take_emitted_reclamations();
+    assert_eq!(reports.len(), 1, "the reclamation must be reported: {reports:?}");
+    assert!(
+        reports[0].contains("0-byte"),
+        "the report must name the actual cause: {}",
+        reports[0]
+    );
+    assert!(
+        reports[0].contains("nothing was left behind"),
+        "an empty lease recorded no grant and must say so: {}",
+        reports[0]
+    );
+
+    // Permanence was the finding, so prove the SECOND pass is clean too.
+    unsafe { recover_dead_leases_locked(&directory) }
+        .expect("recovery must stay clean after reclaiming a 0-byte lease");
+    fs::remove_file(&quarantined[0]).unwrap();
+}
+
+#[test]
+fn a_non_empty_unreadable_lease_still_fails_closed() {
+    // The guard rail on the fix above. Reclamation is keyed on zero LENGTH
+    // only. A non-empty lease that will not parse is indistinguishable from a
+    // tampered one -- it may carry real ACL grants -- so it must keep refusing.
+    // Widening the 0-byte reclamation to "anything unreadable" would silently
+    // convert this deliberate fail-closed into a reclaim, which is why this
+    // test sits next to it rather than in the existing ignore-gated suite.
+    let _lock = wedge_test_lock();
+    let directory = lease_directory().unwrap();
+    let path = write_raw_lease("malformed", b"version = 1\nstate = \"nonsense\"\n");
+    assert!(fs::metadata(&path).unwrap().len() > 0);
+
+    let result = unsafe { recover_dead_leases_locked(&directory) };
+
+    assert!(
+        result.is_err(),
+        "a non-empty unparseable lease must still fail closed, not be reclaimed"
+    );
+    assert!(
+        path.exists(),
+        "a non-empty unparseable lease must NOT be quarantined: it may hold real grants"
+    );
+    fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn zero_length_lease_is_reachable_through_the_writer() {
+    // The half of F-28-ADJ-002 that is about CAUSE rather than effect: the
+    // 0-byte state is not hypothetical, it is what the product's own writer
+    // leaves on disk between creating the file and writing its content. Proved
+    // by observing the file at that exact instant rather than by reading the
+    // source, and without killing anything.
+    let _lock = wedge_test_lock();
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(None::<u64>));
+    let probe = std::sync::Arc::clone(&observed);
+    let path = write_new_synced_lease_observed("window", move |path| {
+        *probe.lock().unwrap() = Some(fs::metadata(path).unwrap().len());
+    });
+    assert_eq!(
+        observed.lock().unwrap().take(),
+        Some(0),
+        "the writer must be observable with the lease created and still empty"
+    );
+    fs::remove_file(&path).unwrap();
+}
+
+/// Drive the real writer, calling `probe` after the file exists and before its
+/// content is written.
+fn write_new_synced_lease_observed(tag: &str, probe: impl FnOnce(&Path)) -> PathBuf {
+    let sequence = SYNTHETIC_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let profile_name = format!(
+        "{PROFILE_PREFIX}-h2{tag}-{:08x}-{sequence:04x}",
+        std::process::id()
+    );
+    let mut lease = LeaseFile {
+        version: LEASE_VERSION,
+        state: LeaseState::Prepared,
+        profile_name: profile_name.clone(),
+        sid_sha256: sha256_hex(TEST_SID_SENTINEL),
+        owner_pid: std::process::id(),
+        owner_creation_time: current_process_creation_time().unwrap(),
+        intents: Vec::new(),
+        lease_sha256: String::new(),
+    };
+    lease.refresh_digest();
+    let path = lease_directory()
+        .unwrap()
+        .join(format!("{profile_name}.toml"));
+    storage::write_new_synced_lease_with_probe(&path, &lease, probe).unwrap();
+    path
+}
+
 fn require_live_acceptance() {
     assert_eq!(
         std::env::var_os("WAYLAND_SANDBOX_LIVE_WINDOWS").as_deref(),
