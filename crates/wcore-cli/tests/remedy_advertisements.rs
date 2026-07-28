@@ -483,6 +483,41 @@ fn schema_leaf_names(v: &serde_json::Value, out: &mut BTreeSet<String>) {
     }
 }
 
+/// Every full dotted path the real schema contains.
+fn schema_paths(v: &serde_json::Value, prefix: &str, out: &mut BTreeSet<String>) {
+    if let Some(obj) = v.as_object() {
+        for (k, child) in obj {
+            let path = if prefix.is_empty() {
+                k.clone()
+            } else {
+                format!("{prefix}.{k}")
+            };
+            out.insert(path.clone());
+            schema_paths(child, &path, out);
+        }
+    }
+}
+
+/// Is `path` a real schema path that has LOST its leading section(s)?
+///
+/// This is the defect shape itself, stated as a predicate. The headless-keyring
+/// HIGH advertised `credentials.backend`; the schema has
+/// `storage.credentials.backend`. The advertised path is a genuine suffix of a
+/// genuine path, missing only its root — which is precisely why it looked right
+/// to whoever wrote the message and why the loader ignored it.
+///
+/// Without this clause that case is admitted only if the surrounding sentence
+/// happens to contain the word "config". Measured: it was passing for exactly
+/// that reason under an earlier revision, and a paraphrase of the same message
+/// would have slipped straight through.
+fn is_truncated_schema_path(path: &str, paths: &BTreeSet<String>) -> bool {
+    if !path.contains('.') {
+        return false;
+    }
+    let tail = format!(".{path}");
+    paths.iter().any(|p| p.ends_with(&tail))
+}
+
 /// Resolve a dotted path, descending into arrays.
 ///
 /// Arrays matter: `[[hooks.pre_tool_use]]` is an array-of-tables, so the path
@@ -528,6 +563,8 @@ fn advertised_config_assignments_survive_the_real_loader() {
     let roots = schema_roots(&schema);
     let mut leaves = BTreeSet::new();
     schema_leaf_names(&schema, &mut leaves);
+    let mut paths = BTreeSet::new();
+    schema_paths(&schema, "", &mut paths);
 
     let mut checked = 0usize;
     let mut illustrative = 0usize;
@@ -548,21 +585,35 @@ fn advertised_config_assignments_survive_the_real_loader() {
     }
 
     for (carrier, advs) in groups {
-        // Rule A: the root is a real `ConfigFile` field, so the path is about
-        // THIS product's config and any depth or value error inside it is real.
-        // Rule B: the root is NOT a field -- which is the case 1 / case 5(a)
-        // defect shape itself -- so admit on the LEAF name being one the schema
-        // knows, but only from a string that is talking about configuration.
-        // Without rule B's second half, `[server] port = 8080` (a mock server in
-        // an eval scenario) and a cron tool's `skills=[]` parameter doc get
-        // admitted and red the gate on text that is perfectly correct.
+        // Three admission rules, in descending order of confidence. All three
+        // exist because a rule that admits too much reds the gate on correct
+        // text and gets deleted, and a rule that admits too little is a gate
+        // that fires on nothing.
+        //
+        //   A. the ROOT is a real `ConfigFile` field. The path is about this
+        //      product's config, so any depth or value error inside it is real.
+        //      Admits case 1 (`browser.allowed_origins`) and case 6 is not this.
+        //   B. the path is a real schema path with its leading section(s) LOST
+        //      (`credentials.backend` vs `storage.credentials.backend`). That is
+        //      the headless-keyring defect stated as a predicate, and it does not
+        //      depend on how the sentence around it is worded.
+        //   C. the LEAF name is one the schema knows AND the carrying string is
+        //      talking about configuration. The weakest rule, and the only one
+        //      that reaches a bare key: it is what admits case 6's root-level
+        //      `model` from the `init` template.
+        //
+        // Without C's second half, `[server] port = 8080` (a mock server in an
+        // eval scenario) and a cron tool's `skills=[]` parameter doc get admitted
+        // and red the gate on text that is perfectly correct.
         let carrier_is_config_flavoured = carrier.to_lowercase().contains("config");
         let admitted: Vec<&Advertised> = advs
             .iter()
             .filter(|a| {
                 let root = a.path.split('.').next().unwrap_or_default();
                 let leaf = a.path.rsplit('.').next().unwrap_or_default();
-                roots.contains(root) || (carrier_is_config_flavoured && leaves.contains(leaf))
+                roots.contains(root)
+                    || is_truncated_schema_path(&a.path, &paths)
+                    || (carrier_is_config_flavoured && leaves.contains(leaf))
             })
             .collect();
         if admitted.is_empty() {
@@ -705,7 +756,29 @@ fn checker_reds_on_the_historical_defect_shapes() {
         "the fixed form must be RETAINED, or the gate reds on correct text"
     );
 
-    // case 5(a): `credentials` is not a section at all.
+    // case 5(a): `credentials` is not a section at all. Admission rule B has to
+    // recognise it as a real schema path that lost its root, because rule A
+    // cannot (there is no `credentials` root) and rule C only fires if the
+    // surrounding sentence happens to contain the word "config". Measured: for
+    // one revision this case was admitted purely by the accident of a nearby
+    // `[session]` clause, which is not a property anyone should rely on.
+    let mut paths = BTreeSet::new();
+    schema_paths(&schema(), "", &mut paths);
+    assert!(
+        paths.contains("storage.credentials.backend"),
+        "the schema path this case is a truncation OF must exist, or the \
+         predicate below is vacuous"
+    );
+    assert!(
+        is_truncated_schema_path("credentials.backend", &paths),
+        "case 5(a) must be admitted on its own shape -- a real schema path \
+         missing its leading section -- not on the wording around it"
+    );
+    assert!(
+        !is_truncated_schema_path("core.bare", &paths),
+        "git config must NOT be admitted; that reds the gate on correct text"
+    );
+
     let pre_fix_creds = "credentials.backend = \"encrypted-file\"";
     assert!(
         toml::from_str::<toml::Value>(pre_fix_creds).is_ok(),
