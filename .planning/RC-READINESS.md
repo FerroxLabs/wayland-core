@@ -57,6 +57,38 @@ a reported figure.
 
 **Graded NOT MET on one of three platforms, deliberately not narrowed to the one that worked.**
 
+## Item 7, added 2026-07-29 — the headless remedy, found by Phase 30's peer trial
+
+**`HEADLESS-KEYRING` — BLOCKING ELEMENT CLOSED. HIGH, unanimous three-way panel.**
+
+Found sideways: 30-02 could not run `wayland-core` against the peer harnesses because it refuses to
+start without an OS keyring, where **neither competitor needs an equivalent**.
+
+The error text names a remedy. **The remedy is wrong in three independent ways at once**, each
+measured live on a keyring-free host. `credentials` is not a section — it is `[storage.credentials]`
+— so writing it literally makes the product log *"ignoring unknown or mis-sectioned config key"*
+and re-emit the **identical** error. **That is the closed loop verbatim**, the same shape as
+`27-C2(a)`. At the correct section the advertised value is rejected outright, so the config no
+longer loads **at all** and following the advice is **strictly worse than ignoring it**. The
+underscored spelling fails too — the variant is a struct and can never be a bare string. The
+passphrase half names no mechanism: **0** hits under `docs/`, **0** in 13,921 bytes of `--help`,
+**0** in any error message, and the one string that names it is `WAYLAND_HOME`-gated so it does not
+print on a default install — suppressed exactly where it is needed.
+
+**Why this was missed twice.** The symptom was graded LOW on two prior occasions, and `24-C3`
+scoped it to "an isolated profile". The lane **tested that scoping rather than arguing with it**: a
+plain default install with `WAYLAND_HOME` unset reproduces identically, and `session.enabled`
+defaults `true` — so **the default config of a default install is the failing one on any container,
+CI runner or minimal VM**. The earlier gradings were scoped too narrowly. Not CRITICAL: fails
+closed, no data loss.
+
+Every other lane was unaffected because hetzner runs a live secrets daemon. **The gate is
+conditional and they were never in the condition** — which is exactly how it survived this long.
+
+**Closed as a blocker** because both refusal strings now name what was measured to work, gated by
+tests that re-parse the advertised values through the real parser. **Still open:** the `docs/` and
+`--help` gap, and the fact that the default still needs one line two peers do not.
+
 ## Read the "blocking element closed" rows precisely
 
 Three rows above are closed **as release blockers** while their criteria stay **open**. That
