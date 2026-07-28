@@ -172,6 +172,12 @@ impl TaskExecutor for DelayedExecutor {
 
 struct Fixture {
     _dir: tempfile::TempDir,
+    /// Read only by `a_second_opener_is_refused_the_writer_lease_on_unix`,
+    /// which is `cfg(unix)` because the journal's writer lease is a Unix-only
+    /// construction (threat T-22-06). The field is gated to match, so it
+    /// exists exactly where something reads it rather than being carried as
+    /// dead weight on Windows.
+    #[cfg(unix)]
     journal_path: std::path::PathBuf,
     journal: SessionJournal,
     goal: GoalId,
@@ -184,6 +190,7 @@ impl Fixture {
         let journal = SessionJournal::open(&journal_path, "wire-test").expect("journal opens");
         Self {
             _dir: dir,
+            #[cfg(unix)]
             journal_path,
             journal,
             goal: GoalId::new(format!("g-{name}")),

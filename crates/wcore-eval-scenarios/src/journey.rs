@@ -680,7 +680,7 @@ mod tests {
         let canary = "WLJ-CANARY-0123456789abcdef".to_string();
         let err = scan_canaries(
             "a published document",
-            &[canary.clone()],
+            std::slice::from_ref(&canary),
             &[("raw".into(), "nothing relevant here".into())],
         )
         .unwrap_err();
@@ -692,7 +692,7 @@ mod tests {
         let canary = "WLJ-CANARY-0123456789abcdef".to_string();
         let err = scan_canaries(
             &format!("leaked {canary} here"),
-            &[canary.clone()],
+            std::slice::from_ref(&canary),
             &[("raw".into(), format!("planted {canary}"))],
         )
         .unwrap_err();
@@ -704,7 +704,11 @@ mod tests {
         let canary = "fifteen-bytes!!".to_string();
         assert_eq!(canary.len(), 15);
         assert_eq!(
-            scan_canaries("doc", &[canary.clone()], &[("raw".into(), canary.clone())]),
+            scan_canaries(
+                "doc",
+                std::slice::from_ref(&canary),
+                &[("raw".into(), canary.clone())]
+            ),
             Err(ScanError::CanaryTooShort(canary))
         );
     }
@@ -714,7 +718,7 @@ mod tests {
         let canary = "WLJ-CANARY-0123456789abcdef".to_string();
         let verdicts = scan_canaries(
             "a published document with nothing sensitive",
-            &[canary.clone()],
+            std::slice::from_ref(&canary),
             &[("raw".into(), format!("planted {canary}"))],
         )
         .expect("clean");
