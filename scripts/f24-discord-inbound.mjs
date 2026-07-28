@@ -110,6 +110,30 @@ export function naiveMatch(text, token) {
   return String(text ?? '').includes(token);
 }
 
+/**
+ * Replies whose planted token is findable only AFTER normalization — i.e. the
+ * text really was escaped, wrapped or split in transit. Judged against the
+ * tokens the driver actually planted.
+ */
+export function detectMangled(replies, planted) {
+  return replies.filter((s) =>
+    planted.some((t) => matchesToken(s.content, t) && !naiveMatch(s.content, t)),
+  );
+}
+
+/**
+ * The pre-repair mangling detector. Kept ONLY so the self-test can prove the
+ * repair does something: it re-derived the token by regex from the NORMALIZED
+ * text, which had already had its whitespace stripped, so it swallowed the
+ * reply marker along with the token and flagged every healthy reply.
+ */
+export function legacyDetectMangled(replies) {
+  return replies.filter((s) => {
+    const m = /f24c3-[a-z0-9-]+/i.exec(normalizeForMatch(s.content));
+    return m && !naiveMatch(s.content, m[0]);
+  });
+}
+
 // ── driver ───────────────────────────────────────────────────────────────────
 
 class Driver {
@@ -133,6 +157,8 @@ class Driver {
     // still reports zero replies. `f24-c3-h4-polling-race.mjs` and
     // `f24-inbound.mjs` both set this for the same reason.
     this.vaultPassphrase = crypto.randomBytes(24).toString('hex');
+    /** Every correlation token this driver planted — ground truth for the mangling detector. */
+    this.planted = [];
   }
 
   note(m) {
@@ -307,6 +333,11 @@ class Driver {
   }
 
   msg({ token, channelId, authorId, id }) {
+    // Ground truth for the mangling detector below: the tokens we actually
+    // planted. Deriving them by regex from normalized reply text does not work
+    // — normalization strips whitespace, so "F24C3-REPLY f24c3-disc-admit-x"
+    // collapses to one unbroken run and the regex swallows the marker too.
+    if (token && !this.planted.includes(token)) this.planted.push(token);
     return control(`${this.fxApi}/__control/dispatch`, 'POST', {
       id: id ?? `${Date.now()}${crypto.randomBytes(2).toString('hex')}`,
       channelId: channelId ?? this.chanA,
@@ -457,10 +488,16 @@ class Driver {
     // The specific defect class that has bitten twice: raw match fails where
     // the normalized one succeeds. If that is happening, the naive matcher is
     // actively lying and any run graded with it is void.
-    const mangled = this.fxReplies().filter((s) => {
-      const m = /f24c3-[a-z0-9-]+/i.exec(normalizeForMatch(s.content));
-      return m && !naiveMatch(s.content, m[0]);
-    });
+    //
+    // FALSE-POSITIVE FIXED HERE (run 5). The first version extracted the token
+    // with /f24c3-[a-z0-9-]+/ from the NORMALIZED text. Normalization strips
+    // whitespace, so "F24C3-REPLY f24c3-disc-admit-bf89" becomes
+    // "f24c3-replyf24c3-disc-admit-bf89" — one unbroken run the regex matched
+    // whole, including the marker. `naiveMatch` then failed on that blob and
+    // all 12 healthy replies were flagged mangled, forcing INCOMPLETE on a run
+    // whose six legs had all passed. Compare against the tokens actually
+    // planted instead of re-deriving them from the text being judged.
+    const mangled = detectMangled(this.fxReplies(), this.planted);
     if (mangled.length > 0) {
       faults.push(
         `${mangled.length} reply/replies are mangled (escaped, wrapped or split): the pre-repair matcher would have reported these as LOST`,

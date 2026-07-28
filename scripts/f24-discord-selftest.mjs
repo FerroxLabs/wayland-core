@@ -24,7 +24,13 @@ import crypto from 'node:crypto';
 import net from 'node:net';
 
 import { DiscordFixture } from './f24-discord-fixture.mjs';
-import { matchesToken, naiveMatch, normalizeForMatch } from './f24-discord-inbound.mjs';
+import {
+  detectMangled,
+  legacyDetectMangled,
+  matchesToken,
+  naiveMatch,
+  normalizeForMatch,
+} from './f24-discord-inbound.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -232,6 +238,44 @@ check('instrument D: normalization does not collapse distinct tokens into each o
   // A normalizer that stripped too much would make every leg pass.
   assert.notStrictEqual(normalizeForMatch('f24c3-a-1'), normalizeForMatch('f24c3-a-2'));
   assert.strictEqual(matchesToken('reply f24c3-steady1-aa', 'f24c3-steady2-aa'), false);
+});
+
+// ── 1a. the MANGLING DETECTOR (three assertions) ─────────────────────────────
+//
+// This is the state that decides INCOMPLETE-vs-LOSS, so a false positive here
+// voids an otherwise good run and a false negative republishes the escaping bug
+// as inbound loss. Run 5 of the live driver hit the false positive: six legs
+// passed, twelve replies arrived, and the run still graded INCOMPLETE.
+
+const HEALTHY = [{ content: `F24C3-REPLY ${TOKEN}` }];
+const MANGLED = [
+  { content: `F24C3-REPLY f24c3\\-disc\\-admit\\-ab12` }, // escaped
+  { content: `F24C3-REPLY f24c3-disc-adm\nit-ab12` }, // line-wrapped
+];
+
+check('mangled A: known-POSITIVE — genuinely escaped/wrapped replies ARE detected', () => {
+  assert.strictEqual(detectMangled(MANGLED, [TOKEN]).length, 2);
+});
+
+check('mangled B: known-NEGATIVE — a healthy reply is NOT flagged', () => {
+  assert.strictEqual(
+    detectMangled(HEALTHY, [TOKEN]).length,
+    0,
+    'a clean reply must never be reported as mangled — that forces INCOMPLETE on a good run',
+  );
+});
+
+check('mangled C: THE OLD DETECTOR WOULD HAVE MISSED IT (flagged the healthy reply)', () => {
+  // The pre-repair detector re-derived the token from the NORMALIZED text,
+  // whose whitespace had already been stripped, so it matched
+  // "f24c3-replyf24c3-disc-admit-ab12" — marker included — and then failed to
+  // find that blob in the raw text. Every healthy reply came back "mangled".
+  assert.strictEqual(
+    legacyDetectMangled(HEALTHY).length,
+    1,
+    'PRECONDITION: the old detector must produce the false positive, else this proves nothing',
+  );
+  assert.strictEqual(detectMangled(HEALTHY, [TOKEN]).length, 0, 'the repair removes it');
 });
 
 // ── 1b. the HARNESS itself: prove `check` cannot report an async pass ─────────
