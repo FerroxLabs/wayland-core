@@ -253,6 +253,20 @@ function gradeInstrument(facts) {
   if (facts.expect_polling && facts.polls_total === 0) {
     reasons.push('zero getUpdates in the whole run — nothing polled at all');
   }
+  // A takeover verdict is meaningless unless a process was actually there to
+  // take over. The first leg-4 run graded WEDGED — the most alarming verdict
+  // this driver can return — on a run where the successor never started at all:
+  // `wcore-gateway`'s pre-existing PID lock refused a second gateway for the
+  // same home ("gateway already running for this home"), so "no polls after the
+  // kill" measured nothing about the channel lease. Without this check the
+  // instrument manufactures a false CRITICAL, which is just as damaging as
+  // manufacturing a false green.
+  if (facts.expect_successor && !facts.successor_alive) {
+    reasons.push(
+      `the successor process was not alive (${facts.successor_note ?? 'no detail'}) — ` +
+        'nothing could have taken over, so this run says nothing about lease release',
+    );
+  }
   return { fault: reasons.length > 0, reasons };
 }
 
@@ -948,9 +962,9 @@ async function leg3(run, n = 8) {
 // ───────────────────────────────────────────────────────────────────────────
 
 async function leg4(run) {
-  run.note('=== LEG 4: ungraceful kill of the holder, takeover by the loser ===');
+  run.note('=== LEG 4: SIGKILL the holder, a fresh process must take over ===');
 
-  const { child: gw, logPath: gwLog } = run.startGateway('l4-holder');
+  const { child: holder, logPath: holderLog } = run.startGateway('l4-holder');
   if (!(await run.waitForPolls(3, 90_000, 'holder warmup'))) {
     return {
       leg: 4,
@@ -958,40 +972,53 @@ async function leg4(run) {
       instrument: { fault: true, reasons: ['holder never polled'] },
     };
   }
-
-  // The loser comes up while the holder is alive and must STAY alive.
-  const { child: gw2, logPath: gw2Log } = run.startGateway('l4-loser');
-  sleep(8000);
+  const holderOwned = containsToken(
+    fs.readFileSync(holderLog, 'utf8'),
+    'F24_CHANNEL_LEASE=owner',
+  );
 
   const beforeKill = await run.report();
-  const kStart = new Date().toISOString();
-  run.note(`SIGKILL the holder pid=${gw.pid} — no drain, no release, no cleanup`);
-  gw.kill('SIGKILL');
+  run.note(`SIGKILL holder pid=${holder.pid} — no drain, no release, no cleanup`);
+  holder.kill('SIGKILL');
+  run.waitExit(holder, 20_000, 'holder');
 
-  // Takeover is observable purely from the fixture: polls must continue after
-  // the holder's death. A lease that never releases converts message loss into
-  // permanent unavailability — the exact failure the sandbox lane hit last
-  // night with a stale lease. This leg is what stops that being reintroduced.
-  const took = await run.waitForPolls(beforeKill.poll_total + 5, 90_000, 'takeover');
-  const kEnd = new Date().toISOString();
-  const after = await run.report();
+  // Polling must STOP. This proves the holder really was the only poller, and
+  // it is what makes takeover matter: until someone else acquires, nothing is
+  // being received at all.
+  sleep(8000);
+  const afterKill = await run.report();
+  const pollsWhileDead = afterKill.poll_total - beforeKill.poll_total;
+  run.note(`polls in the 8s after the holder died: ${pollsWhileDead}`);
 
-  // The positive path, so takeover cannot be claimed by a process that polls
-  // but delivers nothing.
+  // The successor. A FRESH process, started after the holder is gone — which is
+  // the real recovery path (a service manager restarting the unit), and which
+  // also sidesteps the gateway PID lock that refuses two live gateways per home.
+  const { child: successor, logPath: succLog } = run.startGateway('l4-successor');
+  const took = await run.waitForPolls(afterKill.poll_total + 5, 90_000, 'successor takeover');
+
+  const succText = fs.readFileSync(succLog, 'utf8');
+  const successorAlive = successor.exitCode === null && successor.signalCode === null;
+  const successorOwned = containsToken(succText, 'F24_CHANNEL_LEASE=owner');
+  const successorRefused = containsToken(succText, 'cannotclaimthisgatewayhome');
+
+  // THE POSITIVE PATH. Takeover cannot be claimed by a process that polls but
+  // delivers nothing.
   const probe = await run.submit(`F24CL-L4-TAKEOVER-${run.runId}`);
-  const delivered = await (async () => {
-    for (let i = 0; i < 20; i += 1) {
-      const r = await run.report();
-      const u = r.updates.find((x) => x.update_id === probe.update_id);
-      if (u && u.serve_count > 0) return true;
-      run.note(`takeover probe: waiting, ${new Date().toISOString()}`);
-      sleep(2000);
+  let delivered = false;
+  for (let i = 0; i < 15; i += 1) {
+    const r = await run.report();
+    const u = r.updates.find((x) => x.update_id === probe.update_id);
+    if (u && u.serve_count > 0) {
+      delivered = true;
+      break;
     }
-    return false;
-  })();
+    run.note(`takeover probe: waiting, ${new Date().toISOString()}`);
+    sleep(2000);
+  }
 
+  const final = await run.report();
   try {
-    gw2.kill('SIGKILL');
+    successor.kill('SIGKILL');
   } catch {
     /* ignore */
   }
@@ -999,32 +1026,41 @@ async function leg4(run) {
   const facts = {
     fixture_reachable: true,
     tg_journal_bytes: byteLen(run.tgJournal),
-    core_log_bytes: byteLen(gw2Log),
+    core_log_bytes: byteLen(holderLog),
     expect_boot: false,
     llm_hit: true,
     expect_polling: true,
-    polls_total: after.poll_total,
+    polls_total: final.poll_total,
+    expect_successor: true,
+    successor_alive: successorAlive,
+    successor_note: successorRefused
+      ? 'refused by the gateway PID lock'
+      : `exitCode=${successor.exitCode} signal=${successor.signalCode} log=${byteLen(succLog)}B`,
   };
   const grade = gradeInstrument(facts);
 
+  let verdict;
+  if (grade.fault) verdict = 'INCOMPLETE';
+  else if (!took)
+    verdict = 'WEDGED — a live successor never polled; the lease did not release on SIGKILL';
+  else if (!delivered) verdict = 'PARTIAL — the successor polled but delivered no message';
+  else verdict = 'TAKEOVER OK — lease released on SIGKILL and the successor serves traffic';
+
   return {
     leg: 4,
-    name: 'ungraceful kill of the holder',
+    name: 'SIGKILL the holder, a fresh process takes over',
+    holder_emitted_owner_token: holderOwned,
     polls_before_kill: beforeKill.poll_total,
-    polls_after_kill: after.poll_total,
-    kill_window: [kStart, kEnd],
+    polls_in_8s_after_kill: pollsWhileDead,
+    successor_alive: successorAlive,
+    successor_emitted_owner_token: successorOwned,
+    successor_refused_by_pid_lock: successorRefused,
     takeover_polls_observed: took,
     post_takeover_message_delivered: delivered,
-    holder_log_bytes: byteLen(gwLog),
-    loser_log_bytes: byteLen(gw2Log),
+    holder_log_bytes: byteLen(holderLog),
+    successor_log_bytes: byteLen(succLog),
     instrument: grade,
-    verdict: grade.fault
-      ? 'INCOMPLETE'
-      : took && delivered
-        ? 'TAKEOVER OK — lease released on SIGKILL and the survivor serves traffic'
-        : took
-          ? 'PARTIAL — polls resumed but no message was delivered after takeover'
-          : 'WEDGED — no polls after the holder died; the lease did not release',
+    verdict,
   };
 }
 
@@ -1372,6 +1408,57 @@ async function selfTestRetry(assert) {
   await new Promise((r) => srv2.close(r));
 }
 
+/**
+ * Self-test for the successor-liveness repair.
+ *
+ * The first leg-4 run returned WEDGED — this driver's most alarming verdict —
+ * for a run in which the successor process never started. A false CRITICAL is
+ * as damaging as a false green, and this is the assertion set that stops it.
+ */
+function selfTestSuccessor(assert) {
+  // The OLD grader: no successor-liveness check at all.
+  const oldGrade = (f) => {
+    const reasons = [];
+    if (f.tg_journal_bytes <= 0) reasons.push('journal');
+    if (f.expect_polling && f.polls_total === 0) reasons.push('no polls');
+    return { fault: reasons.length > 0, reasons };
+  };
+
+  const deadSuccessor = {
+    fixture_reachable: true,
+    tg_journal_bytes: 4096,
+    expect_boot: false,
+    llm_hit: true,
+    expect_polling: true,
+    polls_total: 73,
+    expect_successor: true,
+    successor_alive: false,
+    successor_note: 'refused by the gateway PID lock',
+  };
+  const liveSuccessor = { ...deadSuccessor, successor_alive: true };
+
+  // 1. KNOWN-POSITIVE: a LIVE successor that did not poll is a real WEDGE, and
+  //    the grader must NOT mask it.
+  assert(
+    'successor known-positive: a live successor is not an instrument fault (a real wedge stays visible)',
+    gradeInstrument(liveSuccessor).fault === false,
+  );
+
+  // 2. KNOWN-NEGATIVE: a successor that never started grades INCOMPLETE.
+  assert(
+    'successor known-negative: a successor that never started grades INCOMPLETE, not WEDGED',
+    gradeInstrument(deadSuccessor).fault === true,
+    gradeInstrument(deadSuccessor).reasons.join('; '),
+  );
+
+  // 3. THE OLD GRADER WOULD HAVE MISSED IT — and did, returning WEDGED.
+  assert(
+    'the OLD grader would have MISSED it — it reported a clean run and let WEDGED stand',
+    oldGrade(deadSuccessor).fault === false && gradeInstrument(deadSuccessor).fault === true,
+    `old=${oldGrade(deadSuccessor).fault} new=${gradeInstrument(deadSuccessor).fault}`,
+  );
+}
+
 async function runSelfTests() {
   const results = [];
   const assert = (name, cond, detail) => {
@@ -1380,6 +1467,7 @@ async function runSelfTests() {
   };
   selfTest(assert);
   selfTestMatcher(assert);
+  selfTestSuccessor(assert);
   await selfTestStub(results, assert);
   await selfTestPooling(assert);
   await selfTestRetry(assert);
