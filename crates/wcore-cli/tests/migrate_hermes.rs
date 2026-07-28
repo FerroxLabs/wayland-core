@@ -148,8 +148,6 @@ fn build_plan_maps_hermes_profiles() {
     assert!(!beta.has_credential);
 }
 
-#[test]
-#[serial]
 /// F26-02 changed ONE assertion in this test, deliberately, and STRENGTHENED
 /// it rather than weakening it.
 ///

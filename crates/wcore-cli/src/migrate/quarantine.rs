@@ -321,10 +321,6 @@ impl QuarantineStore {
         self.root.join(QUARANTINE_INDEX)
     }
 
-    fn payloads_root(&self) -> PathBuf {
-        self.root.join(QUARANTINE_PAYLOADS)
-    }
-
     fn load_index(&self) -> Result<QuarantineIndexFile, QuarantineError> {
         let path = self.index_path();
         if !path.exists() {

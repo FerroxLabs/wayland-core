@@ -668,6 +668,8 @@ mod tests {
             name: "work".to_string(),
             out: Some(dst.clone()),
             include_secrets: false,
+            select: Vec::new(),
+            exclude: Vec::new(),
         })
         .unwrap();
         assert!(dst.join("config.toml").exists());
@@ -680,6 +682,8 @@ mod tests {
             name: "work".to_string(),
             out: Some(dst2.clone()),
             include_secrets: true,
+            select: Vec::new(),
+            exclude: Vec::new(),
         })
         .unwrap();
         assert!(dst2.join("credentials.toml").exists());

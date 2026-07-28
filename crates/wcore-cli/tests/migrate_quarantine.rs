@@ -340,8 +340,7 @@ async fn t5_quarantined_content_is_absent_from_what_the_agent_would_load() {
     }
 
     // Behavioural half: the REAL loader, run over this home, does not list it.
-    let refs =
-        wcore_skills::loader::load_catalog(home.path().to_str().unwrap(), &[], false, None).await;
+    let refs = wcore_skills::loader::load_catalog(home.path(), &[], false, None).await;
     let names: Vec<String> = refs.iter().map(|r| r.name.clone()).collect();
     assert!(
         !names.iter().any(|n| n == "repo-status"),
@@ -357,8 +356,7 @@ async fn t5_quarantined_content_is_absent_from_what_the_agent_would_load() {
             &wcore_config::config::wayland_config_dir().join("skills"),
         )
         .unwrap();
-    let refs2 =
-        wcore_skills::loader::load_catalog(home.path().to_str().unwrap(), &[], false, None).await;
+    let refs2 = wcore_skills::loader::load_catalog(home.path(), &[], false, None).await;
     let names2: Vec<String> = refs2.iter().map(|r| r.name.clone()).collect();
     assert!(
         names2.iter().any(|n| n == "repo-status"),
