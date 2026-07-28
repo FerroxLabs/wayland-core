@@ -1,0 +1,149 @@
+command_path	arity	synopsis
+acp	2	v0.7.0 1.A.10: ACP server + client surface. `acp serve` binds the HTTP/SSE transport; `acp request` drives a one-shot session/message round-trip
+acp request	5	One-shot ACP request against a running server. Mostly a smoke-test handle for `serve`
+acp request create-session	0	`session/create`. Prints the new session_id
+acp request delete-session	0	`session/delete :id`
+acp request get-session	0	`session/get :id`. Prints session metadata
+acp request list-sessions	0	`session/list`. Prints one session_id per line
+acp request send	0	`message/send :id <text>`. Streams events to stdout, one per line, JSON-encoded. Exits when the stream ends
+acp serve	0	Bind the HTTP/SSE transport to a TCP port and serve sessions
+agent	5	v0.7.0 3.B.2: manage user-defined agents (create, list, show, edit, delete). Built-ins from the bundled pack are read-only
+agent create	0	Create a new user agent (persists to ~/.wayland/agents/<name>.toml)
+agent delete	0	Delete a user agent. Built-ins cannot be deleted
+agent edit	0	Open the user agent's TOML file in $EDITOR for hand-editing
+agent list	0	List user agents (and optionally the built-ins)
+agent show	0	Print the resolved manifest for an agent (user or built-in)
+auth	6	CLI surface: manage provider API keys (list / add / remove) directly in the global `config.toml` — the lightweight alternative to the full onboarding flow
+auth add	0	Add (or replace) a provider API key. The key is validated against the provider's endpoint before it is written
+auth list	0	List every configured provider with a masked API key
+auth login	0	Sign in to a subscription provider via OAuth in the browser
+auth logout	0	Sign out (delete stored OAuth tokens) for a subscription provider
+auth remove	0	Remove a provider's API key from the config
+auth status	0	Show OAuth login status (provider, plan, token expiry)
+backend	8	F25-01: execution backends — list / probe / run / cancel / orphans / receipt verify / diff across local, container, ssh and cloud
+backend cancel	0	Cancel a live task by id, from any process, and report what cleanup was observed
+backend diff	0	Diff two or more receipts of the SAME task and report equivalence
+backend list	0	List every reference backend with its availability, the probe that established it, and its declared capabilities
+backend orphans	0	Enumerate surfaces still carrying a task nonce, per backend
+backend probe	0	Probe one backend and print the result plus its lifecycle health
+backend receipt	1	Receipt operations
+backend receipt verify	0	Verify a receipt file's integrity and internal consistency
+backend run	0	Run a task definition on one backend and write its receipt
+backend scan	0	F25-05: scan every backend for orphaned execution left behind by a task, printing the RAW enumeration alongside the count and naming the reaping mechanism each backend actually relies on
+backup	5	Archive, verify, restore and recover a Wayland home (F26-03)
+backup create	0	Create a verifiable archive of a Wayland home
+backup digest	0	Print the tree digest of a home, and the algorithm used
+backup recover	0	Roll back any operation whose owning process died mid-flight
+backup restore	0	Restore an archive into a home directory
+backup verify	0	Verify an archive's manifest, payload digests and entry paths
+channel	4	F24-03: channel adapters — list / probe / health / reload. `probe` asks the platform and needs no gateway; `health` reports only what a RUNNING gateway has observed and refuses otherwise
+channel health	0	Show the per-adapter health a RUNNING gateway has observed
+channel list	0	List configured channels from the on-disk config directory
+channel probe	0	Ask each configured channel's platform whether its setup is complete, whether its credential authenticates, and what identity it authenticated as. Sends no message
+channel reload	0	Ask the running gateway to re-read the channel config directory
+cron	10	v0.8.1 U7: manage scheduled cron jobs (add / list / remove / enable / disable). Persists to `$WAYLAND_HOME/cron/jobs.json`; the background runner spawned at session boot picks up changes on its next tick
+cron add	0	Add a new job. Exactly one of `--slash`, `--channel`, or `--skill` must be provided (with matching companion flags)
+cron daemon	0	Spawn the cron runner as a detached background daemon
+cron disable	0	Disable a job by id (kept on disk, skipped by the runner)
+cron enable	0	Enable a job by id
+cron history	0	Print the last N fire records for a job (timestamp, outcome, duration, error message if any). Records come from the JSONL ring-buffer written by the runner alongside jobs.json
+cron list	0	List every persisted cron job
+cron logs	0	Tail recent log lines associated with a job's fires. Currently surfaces fire records from the history file (same data as `cron history`) formatted as structured log lines compatible with the engine's tracing output
+cron publish	0	Publish an event topic, firing every job with a matching `--trigger event:TOPIC`
+cron remove	0	Remove a job by id
+cron status	0	Print full details for one job: id, expression, target, state, created_at, last_fired, and the outcome of the most recent fire attempt (success + duration, or error message)
+crucible	0	Crucible (Mixture-of-Providers): run the cross-provider council over a task. N proposers (each pinned to its own provider from `[providers]`) answer in parallel; a fenced, read-only aggregator fuses them. Requires `[crucible] enabled = true` with a `proposers` roster in your config
+fetch	0	FluxRouter web_fetch (`POST /v1/fetch`): fetch a URL and print it as markdown. `--render` selects the JS-rendered premium arm. A free / paid-but-uncleared Flux key returns an `upgrade_required` message — web_fetch is a paid-only capability
+forge	0	Anvil (gated forge) — forge a candidate that passes a REAL executable gate (tests / build / lint), then stamp a verified receipt. Requires ON by default; `[anvil] enabled = false` is the kill-switch. Empty gate config auto-detects the workspace suite
+gateway	8	F24-B: the persistent gateway runtime — install / uninstall / start / stop / restart / status / drain, plus the `run` verb every generated launchd, systemd and scheduled-task unit invokes
+gateway drain	0	Close admission, finish in-flight work within a budget, and exit
+gateway install	0	Register the gateway as a per-user native service for this platform
+gateway restart	0	Stop then start. A stop refusal because nothing was running is not an error here — restarting a stopped gateway is a start
+gateway run	0	The long-lived runtime itself. This is what every generated service unit invokes; it is not normally typed by an operator
+gateway start	0	Start the registered gateway through the platform's service manager
+gateway status	0	Report what the gateway is doing
+gateway stop	0	Stop it through the platform's service manager
+gateway uninstall	0	Remove the native service registration
+goal	6	F22-04: durable Goals and their Fleet task ledger — open / task / run / status / exec-task. `run` recovers a killed Goal, revokes expired claim leases, drains completions the dead parent never observed, and drives the remaining tasks through the Fleet dispatcher
+goal effects	0	Count the effects on disk: total, and how many carry distinct labels
+goal exec-task	0	The effect boundary: idempotency gate, then the operator's command
+goal open	0	Authorize a durable Goal
+goal run	0	Recover, reclaim and drive the Goal's tasks through the Fleet dispatcher
+goal status	0	The canonical JSON projection of a Goal and its task ledger
+goal task	0	Declare a task in the Goal's durable ledger
+image	0	FluxRouter image generation (`POST /v1/images/generations`). Writes the decoded image to `--out` (or stdout when piped). A free / paid-but-uncleared Flux key returns a `premium_locked` message — image generation is a paid-only capability
+index	4	F23-06 (Phase 23B): the persistent repository index — `build`, `status`, `search` and `verify`. Every verb prints greppable `F23_INDEX=` lines to STDOUT; `verify` exits 6 when the store disagrees with the working tree
+index build	0	Build or incrementally refresh the index
+index search	0	Bounded hybrid retrieval: BM25 plus symbol lookup, reciprocal-rank fused, with an exact-search fallback
+index status	0	Report record count, on-disk size, scope identity and staleness
+index verify	0	Compare the store against the working tree without modifying it
+init	0	v0.7.0 1.B.2: scaffold .wayland/config.toml + WAYLAND.md in cwd
+mcp-serve	0	v0.6.4 Task 2.4: serve the engine's tool registry as an MCP server (stdio or SSE transport). Used by external MCP clients like Claude Desktop, mcp-cli, etc. to call wayland-core's tools
+migrate	4	Import an existing agent setup (Hermes) into wayland-core profiles
+migrate hermes	0	Import Hermes profiles (`~/.hermes/profiles/*`) into wayland-core
+migrate openclaw	0	Import an OpenClaw setup (`~/.openclaw`) into wayland-core
+migrate promote	0	Promote quarantined content out of containment — the EXPLICIT OPERATOR ACTION, and the only thing that can
+migrate quarantined	0	List imported content held in quarantine
+models	1	F-089: model catalog commands
+models list	0	List known models from the bundled pricing catalog. Prints `provider/model_id` one per line. When `--provider` is omitted the full catalog across every built-in provider is shown
+node	9	F25-03: nodes — pair / list / show / probe / revoke / submit / attribution across paired machines that host execution backends
+node advertise	0	Print THIS host's FRESH capability advertisement, from a real probe. The far-end half of `node probe`
+node attribution	0	Re-verify a receipt's attribution chain against a paired node
+node identity	0	Print THIS host's node identity. With `--challenge`, also sign it — this is the far-end half of pairing and is what the controller runs over ssh
+node list	0	List every paired node with identity, capabilities, version and liveness
+node pair	0	Pair a remote host as a node, proving its identity before recording it
+node probe	0	Probe a node's liveness and refresh its capability advertisement
+node revoke	0	Withdraw a node's authority. Subsequent work to it is REFUSED and in-flight work on it is terminated; nothing reroutes
+node show	0	Everything known about one node
+node submit	0	Ask whether work may be submitted to a node, and exit non-zero when the answer is no. This is the scriptable form of the refusal
+plugin	15	Manage installed plugins (install / list / available / remove)
+plugin approve	0	Approve an installed plugin's CURRENT bytes so the loader will run it
+plugin available	0	List plugins available in the local default registry (or the directory pointed at by `--registry-dir`)
+plugin inspect	0	Report everything known about one installed plugin, including whether the loader will admit it. Non-zero exit when it is not installed
+plugin install	0	Install a plugin. `name@marketplace` installs from a registered Claude Code marketplace (see `plugin marketplace add`); a bare `name` uses the legacy registry / GitHub-Releases path
+plugin list	0	List installed plugins
+plugin marketplace	3	Manage Claude Code plugin marketplaces
+plugin marketplace add	0	Register a marketplace: `owner/repo`, a git URL, or a local path to a dir containing `.claude-plugin/marketplace.json`
+plugin marketplace list	0	List registered marketplaces
+plugin marketplace remove	0	Remove a registered marketplace by its name
+plugin new	0	Scaffold a new plugin from a shipped template
+plugin publish	0	Produce a digest-addressed, signed bundle into a local marketplace directory. Never pushes, merges, releases or deploys
+plugin recover	0	Repair a half-written plugin store (interrupted update, missing live generation, drifted install directory)
+plugin remove	0	Remove an installed plugin
+plugin rollback	0	Restore the exact bytes of the retained prior generation
+plugin sign	0	Sign a plugin's entry artifact with the engine's Ed25519 trust root
+plugin test	0	Run a plugin's own test suite and return its verdict faithfully
+plugin update	0	Re-resolve a plugin from its marketplace, retaining the prior generation so the update can be rolled back
+plugin verify	0	Report manifest validity, declared permissions and API compatibility. Non-zero exit on an incompatible declared API version
+profile	8	Manage isolated profiles — each is an independent `WAYLAND_HOME`-rooted home with its own config, credentials, memory, and skills
+profile create	0	Create a new isolated profile
+profile delete	0	Delete a profile and its entire home directory
+profile export	0	Export a profile's home tree to a directory
+profile import	0	Import a directory tree as a new profile
+profile list	0	List all profiles (the active one is marked with `*`)
+profile rename	0	Rename a profile. Re-points the active selection if it named `old`
+profile show	0	Show a profile's home path and which stores it contains
+profile use	0	Set the active profile for future launches
+project-context	0	v0.7.0 Task 1.C.1: print resolved project context from WAYLAND.md / AGENTS.md / .wayland/context.md / CLAUDE.md walking up from cwd
+sandbox	2	F28: platform containment operator surface — `status` reports the selected backend and its properties; `exec` runs a command through the agent's own shell tool so an operator can observe, from the child's own output, that the sandbox was ACTIVE rather than merely available
+sandbox exec	0	Run a command inside this host's platform sandbox and print the child's own output
+sandbox status	0	Report the platform containment backend selected for this host, and the containment properties it does and does not provide
+self-update	0	v0.8.1 U9: update wayland-core to the latest signed release from `FerroxLabs/wayland-core`. Verifies the `.sig` artifact against the pinned marketplace pubkey (ed25519) before atomic swap. Use `--check-only` to print versions without installing
+session	11	F23-02 (Phase 23B): operator verbs over saved sessions — list, search, show, checkpoint, rewind, retry, fork, export, retain, reconcile and cancel. Every operation prints a machine-observable `F23_SESSION=` token to STDOUT and uses the exit-code map documented in `session_cmd`
+session cancel	0	Cancel every interrupted turn so the session becomes resumable
+session checkpoint	0	Capture a workspace checkpoint over the named files
+session export	0	Write the redacted export envelope
+session fork	0	Fork a session, leaving the parent byte-identical
+session list	0	List saved sessions (STDOUT, unlike the root `--list-sessions` flag)
+session reconcile	0	List or resolve outstanding unknown-effect items
+session retain	0	Set a retain-until bound and report the resulting retention state
+session retry	0	Re-run one turn. Approval is re-derived; an expired one is refused
+session rewind	0	Restore a previously captured checkpoint
+session search	0	Full-text search across saved sessions
+session show	0	Show one session's metadata, lineage, retention and reconcile state
+setup	0	CLI surface: launch the TUI on the Onboarding (connect/configure) surface regardless of whether a config already exists. Onboarding handles an existing config gracefully via an Overwrite/Keep choice. The plain `wayland-core` launch only opens Onboarding on a true first run; `setup` is the explicit re-entry point
+swarm	0	v0.6.4 Task 2.6: dispatch a worktree-isolated worker swarm
+workflow	3	ForgeFlows: validate / list / run saved `.ron` workflows from `.wayland/workflows/` [aliases: forgeflows]
+workflow list	0	List the saved workflows discovered under `.wayland/workflows/*.ron`. Each line is `name  ~N agents  — description`. Unparseable files are skipped with a warning to stderr
+workflow run	0	Execute a saved workflow by name. Resolves `<NAME>` to `.wayland/workflows/<NAME>.ron`, parses it, and runs it through the workflow engine over a real provider
+workflow validate	0	Parse and validate a single workflow `.ron` file without executing it. Prints an OK summary on success or the typed parse error (with its field pointer) on failure

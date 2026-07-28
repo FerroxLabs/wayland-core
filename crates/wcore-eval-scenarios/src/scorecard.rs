@@ -280,6 +280,23 @@ pub enum TruthV1 {
     Unproven { would_be_measured_by: String },
 }
 
+/// Maturity as a TRUTH rather than as a bare value.
+///
+/// Taking the surface inventory exposed the reason this wrapper has to exist:
+/// six shipped top-level commands are claimed by no CTRL-01 coverage family, so
+/// there is no recorded maturity for them at all. `MaturityV1` has no member
+/// meaning "nobody has graded this", and it must not grow one — `ABSENT` would
+/// assert the capability does not exist, which is false and worse than silence.
+/// So the unmeasured case is lifted OUT of the enum instead of into it: the
+/// closed eight-state enum keeps refusing any token the ledger never declared,
+/// and "not yet graded" stays sayable without a plausible guess.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MaturityTruthV1 {
+    Measured { value: MaturityV1 },
+    Unproven { would_be_measured_by: String },
+}
+
 /// The seven truths F30-01 and F30-02 require of every surface, all REQUIRED.
 ///
 /// A row missing any one of them is not a partially good row, it is an
@@ -297,8 +314,9 @@ pub struct SurfaceRowV1 {
     pub versioned_activation: TruthV1,
     /// Truth 2 — operator-completeness state.
     pub operator_completeness: TruthV1,
-    /// Truth 3 — maturity, drawn from the ledger's own closed enum.
-    pub maturity: MaturityV1,
+    /// Truth 3 — maturity. A measured value is drawn from the ledger's own
+    /// closed enum; an ungraded surface says so rather than guessing.
+    pub maturity: MaturityTruthV1,
     /// Truth 4 — the security authority accountable for this surface.
     pub security_authority_owner: String,
     /// Truth 5 — evidence references.

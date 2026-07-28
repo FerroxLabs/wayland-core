@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use wcore_eval_scenarios::scorecard::{
     ALL_MATURITY_STATES, CriterionV1, CriterionVerdictV1, EvidenceLocatorV1, EvidenceRefV1,
-    MaturityV1, MeasurementStateV1, ScorecardDocumentV1, SurfaceRowV1, TruthV1, parse_subcommands,
-    render_surfaces_tsv, walk_command_tree,
+    MaturityTruthV1, MaturityV1, MeasurementStateV1, ScorecardDocumentV1, SurfaceRowV1, TruthV1,
+    parse_subcommands, render_surfaces_tsv, walk_command_tree,
 };
 
 /// The repository root, derived from the crate manifest rather than from the
@@ -52,7 +52,7 @@ fn pristine_surface_row_json() -> serde_json::Value {
         "versioned_activation": { "state": "measured", "value": "0.12.25" },
         "operator_completeness": { "state": "unproven",
                                    "would_be_measured_by": "a three-platform operator journey" },
-        "maturity": "REACHED",
+        "maturity": { "state": "measured", "value": "REACHED" },
         "security_authority_owner": "core",
         "evidence": [],
         "peer_delta": { "state": "unproven",
@@ -110,6 +110,24 @@ fn a_maturity_state_the_ledger_never_declared_fails_to_deserialize() {
             "maturity `{invented}` is not in the ledger's enum and must be refused"
         );
     }
+
+    // Lifting the unmeasured case OUT of the enum must not open a hole back
+    // into it: `MaturityTruthV1::Measured` still carries the closed enum, so an
+    // undeclared token is refused just as hard one level down.
+    let ungraded: MaturityTruthV1 = serde_json::from_value(serde_json::json!({
+        "state": "unproven",
+        "would_be_measured_by": "a CTRL-01 coverage family claiming this surface"
+    }))
+    .expect("an ungraded surface must be able to say so");
+    assert!(matches!(ungraded, MaturityTruthV1::Unproven { .. }));
+
+    assert!(
+        serde_json::from_value::<MaturityTruthV1>(serde_json::json!({
+            "state": "measured", "value": "UNPROVEN"
+        }))
+        .is_err(),
+        "UNPROVEN is not a maturity STATE and must not smuggle in as one"
+    );
 }
 
 #[test]
@@ -467,14 +485,22 @@ fn every_surface_row_in_the_committed_inventory_deserializes_and_verifies() {
             command_path: f[1].to_string(),
             versioned_activation: truth(f[2], "a live activation observation"),
             operator_completeness: truth(f[3], "a three-platform operator journey"),
-            maturity: serde_json::from_str::<MaturityV1>(&format!("\"{}\"", f[4])).unwrap_or_else(
-                |e| {
-                    panic!(
-                        "row {} carries an undeclared maturity `{}`: {e}",
-                        f[0], f[4]
-                    )
-                },
-            ),
+            maturity: if f[4] == "UNPROVEN" {
+                MaturityTruthV1::Unproven {
+                    would_be_measured_by: "a CTRL-01 coverage family claiming this surface"
+                        .to_string(),
+                }
+            } else {
+                MaturityTruthV1::Measured {
+                    value: serde_json::from_str::<MaturityV1>(&format!("\"{}\"", f[4]))
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "row {} carries an undeclared maturity `{}`: {e}",
+                                f[0], f[4]
+                            )
+                        }),
+                }
+            },
             security_authority_owner: f[5].to_string(),
             evidence: vec![],
             peer_delta: truth(f[7], "the 30-02 comparative trial"),
