@@ -344,3 +344,32 @@ not delete the inconvenient assertion; I replaced it with a deterministic one th
 what the repair actually does (default agent reuses ONE socket for two requests,
 `agent:false` opens TWO, so the reuse the race needs is gone by construction). **The race
 is not reproduced on demand and is not claimed to be.**
+
+---
+
+## T+205 — regression control, and the report
+
+Parallel `cargo test -p wcore-agent --lib` showed a ~19-test cluster failing
+(`engine::audit_2026_05_22_tests`, `session::`, `session_journal::`, `orchestration::`)
+INCLUDING my own `dropping_the_owner_lets_the_next_process_poll`. Per brief §6 I re-ran
+before reporting a regression:
+
+| run, same commit `e41dbd0e` | result |
+|---|---|
+| `channel_lease::` alone | **4 passed, 0 failed** |
+| the failing cluster isolated, `--test-threads=1` | **119 passed, 0 failed** |
+| full `wcore-agent --lib`, `--test-threads=1` | **2135 passed, 0 failed, 3 ignored** |
+| `wcore-agent --test bootstrap_test` | **27 passed, 0 failed** |
+| `wcore-cron` whole crate | **73+11+3+8+13 passed, 0 failed** |
+
+Box load average 4.44 with other lanes building. Consistent with the contention artifact the
+brief documents for this box. **I did NOT run a base-commit control**, so I am not claiming
+the cluster pre-exists my change — only that it does not reproduce single-threaded at my
+commit and that every crate I touched is green. That limitation is stated in the report.
+
+Likely mechanism, stated as a hypothesis and not as a result: under fd pressure my
+`attempt()` fails CLOSED (returns Observer when the lock file cannot be opened), which would
+turn my own reclaim assertion red — the same pressure the brief documents as EMFILE on this
+box. Not proven.
+
+Report written to `24-CHANNEL-LEASE.md`. Lane complete.
