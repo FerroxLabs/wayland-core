@@ -394,7 +394,7 @@ impl CloudBackend {
         timeout_secs: u64,
     ) -> String {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-        let mut last = String::new();
+        let mut last;
         loop {
             last = read_state(credential, machine_id).await;
             if last == want || std::time::Instant::now() >= deadline {
