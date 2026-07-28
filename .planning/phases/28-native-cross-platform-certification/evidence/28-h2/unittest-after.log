@@ -1,0 +1,326 @@
+﻿F28H2 UNITTEST tag=after started=2026-07-29T00:26:55.9478462+07:00
+SRC_SHA=15821c035f14d0ec571dbefb5b436d549b3913f3
+SRC_DIRTY=0
+===== FULL --lib RUN =====
+cargo.exe :    Compiling proc-macro2 v1.0.106
+At C:\f28h2\unittest.ps1:23 char:9
++ $out = (& cargo test -p wcore-sandbox --lib -- --test-threads=1 2>&1  ...
++         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling proc-macro2 v1.0.106:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling windows-link v0.2.1
+   Compiling cfg-if v1.0.4
+   Compiling serde_core v1.0.228
+   Compiling windows_x86_64_msvc v0.52.6
+   Compiling version_check v0.9.5
+   Compiling io-lifetimes v2.0.4
+   Compiling typenum v1.20.1
+   Compiling parking_lot_core v0.9.12
+   Compiling autocfg v1.5.1
+   Compiling zmij v1.0.21
+   Compiling serde v1.0.228
+   Compiling getrandom v0.4.2
+   Compiling smallvec v1.15.1
+   Compiling io-extras v0.18.4
+   Compiling pin-project-lite v0.2.17
+   Compiling scopeguard v1.2.0
+   Compiling once_cell v1.21.4
+   Compiling thiserror v2.0.18
+   Compiling serde_json v1.0.150
+   Compiling bitflags v2.11.1
+   Compiling cap-primitives v3.4.5
+   Compiling itoa v1.0.18
+   Compiling ambient-authority v0.0.2
+   Compiling memchr v2.8.1
+   Compiling cap-std v3.4.5
+   Compiling slab v0.4.12
+   Compiling bytes v1.11.1
+   Compiling futures-core v0.3.32
+   Compiling winnow v1.0.3
+   Compiling windows-sys v0.61.2
+   Compiling lock_api v0.4.14
+   Compiling cpufeatures v0.2.17
+   Compiling ipnet v2.12.0
+   Compiling maybe-owned v0.3.4
+   Compiling futures-task v0.3.32
+   Compiling tracing-core v0.1.36
+   Compiling filetime v0.2.29
+   Compiling futures-sink v0.3.32
+   Compiling fastrand v2.4.1
+   Compiling sha1_smol v1.0.1
+   Compiling toml_writer v1.1.1+spec-1.1.0
+   Compiling either v1.16.0
+   Compiling winsafe v0.0.19
+   Compiling tar v0.4.46
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling generic-array v0.14.7
+   Compiling num-traits v0.2.19
+   Compiling windows-targets v0.52.6
+   Compiling windows-sys v0.59.0
+   Compiling parking_lot v0.12.5
+   Compiling mio v1.2.1
+   Compiling socket2 v0.6.4
+   Compiling home v0.5.12
+   Compiling tempfile v3.27.0
+   Compiling which v6.0.3
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling digest v0.10.7
+   Compiling syn v2.0.117
+   Compiling sha2 v0.10.9
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling uuid v1.23.2
+   Compiling toml v1.1.2+spec-1.1.0
+   Compiling fs-set-times v0.20.3
+   Compiling winx v0.36.4
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling tokio-macros v2.7.0
+   Compiling futures-macro v0.3.32
+   Compiling tracing-attributes v0.1.31
+   Compiling async-trait v0.1.89
+   Compiling tokio v1.52.3
+   Compiling futures-util v0.3.32
+   Compiling tracing v0.1.44
+   Compiling chrono v0.4.44
+   Compiling wcore-types v0.12.25 (C:\f28h2-repo\crates\wcore-types)
+   Compiling tokio-util v0.7.18
+   Compiling wcore-sandbox v0.12.25 (C:\f28h2-repo\crates\wcore-sandbox)
+error[E0425]: cannot find function `unreconcilable_lease_message` in this scope
+    --> crates\wcore-sandbox\src\backends\appcontainer\acl_lease\storage.rs:1054:23
+     |
+1054 |         let message = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &lease);
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: crates\wcore-sandbox\src\backends\appcontainer\acl_lease.rs:706:1
+     |
+ 706 | fn unreconcilable_lease_reason(lease: &LeaseFile) -> String {
+     | ----------------------------------------------------------- similarly named function 
+`unreconcilable_lease_reason` defined here
+     |
+help: a function with a similar name exists
+     |
+1054 -         let message = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &lease);
+1054 +         let message = unreconcilable_lease_reason(Path::new(r"C:\leases\x.toml"), &lease);
+     |
+
+error[E0425]: cannot find function `unreconcilable_lease_message` in this scope
+    --> crates\wcore-sandbox\src\backends\appcontainer\acl_lease\storage.rs:1067:21
+     |
+1067 |         let other = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &genuine);
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: crates\wcore-sandbox\src\backends\appcontainer\acl_lease.rs:706:1
+     |
+ 706 | fn unreconcilable_lease_reason(lease: &LeaseFile) -> String {
+     | ----------------------------------------------------------- similarly named function 
+`unreconcilable_lease_reason` defined here
+     |
+help: a function with a similar name exists
+     |
+1067 -         let other = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &genuine);
+1067 +         let other = unreconcilable_lease_reason(Path::new(r"C:\leases\x.toml"), &genuine);
+     |
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `wcore-sandbox` (lib test) due to 2 previous errors
+
+LIB_RESULT=UNPARSEABLE
+NAMED=dead_owner_unreconcilable_lease_is_reclaimed_not_refused_forever;result=UNPARSEABLE
+cargo.exe :    Compiling wcore-sandbox v0.12.25 (C:\f28h2-repo\crates\wcore-sandbox)
+At C:\f28h2\unittest.ps1:42 char:9
++   $o = (& cargo test -p wcore-sandbox --lib -- --exact $n --test-thre ...
++         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling wc...\wcore-sandbox):String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error[E0425]: cannot find function `unreconcilable_lease_message` in this scope
+    --> crates\wcore-sandbox\src\backends\appcontainer\acl_lease\storage.rs:1054:23
+     |
+1054 |         let message = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &lease);
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: crates\wcore-sandbox\src\backends\appcontainer\acl_lease.rs:706:1
+     |
+ 706 | fn unreconcilable_lease_reason(lease: &LeaseFile) -> String {
+     | ----------------------------------------------------------- similarly named function 
+`unreconcilable_lease_reason` defined here
+     |
+help: a function with a similar name exists
+     |
+1054 -         let message = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &lease);
+1054 +         let message = unreconcilable_lease_reason(Path::new(r"C:\leases\x.toml"), &lease);
+     |
+
+error[E0425]: cannot find function `unreconcilable_lease_message` in this scope
+    --> crates\wcore-sandbox\src\backends\appcontainer\acl_lease\storage.rs:1067:21
+     |
+1067 |         let other = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &genuine);
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: crates\wcore-sandbox\src\backends\appcontainer\acl_lease.rs:706:1
+     |
+ 706 | fn unreconcilable_lease_reason(lease: &LeaseFile) -> String {
+     | ----------------------------------------------------------- similarly named function 
+`unreconcilable_lease_reason` defined here
+     |
+help: a function with a similar name exists
+     |
+1067 -         let other = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &genuine);
+1067 +         let other = unreconcilable_lease_reason(Path::new(r"C:\leases\x.toml"), &genuine);
+     |
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `wcore-sandbox` (lib test) due to 2 previous errors
+
+NAMED=live_owner_unreconcilable_lease_is_honoured_not_reclaimed;result=UNPARSEABLE
+cargo.exe :    Compiling wcore-sandbox v0.12.25 (C:\f28h2-repo\crates\wcore-sandbox)
+At C:\f28h2\unittest.ps1:42 char:9
++   $o = (& cargo test -p wcore-sandbox --lib -- --exact $n --test-thre ...
++         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling wc...\wcore-sandbox):String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error[E0425]: cannot find function `unreconcilable_lease_message` in this scope
+    --> crates\wcore-sandbox\src\backends\appcontainer\acl_lease\storage.rs:1054:23
+     |
+1054 |         let message = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &lease);
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: crates\wcore-sandbox\src\backends\appcontainer\acl_lease.rs:706:1
+     |
+ 706 | fn unreconcilable_lease_reason(lease: &LeaseFile) -> String {
+     | ----------------------------------------------------------- similarly named function 
+`unreconcilable_lease_reason` defined here
+     |
+help: a function with a similar name exists
+     |
+1054 -         let message = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &lease);
+1054 +         let message = unreconcilable_lease_reason(Path::new(r"C:\leases\x.toml"), &lease);
+     |
+
+error[E0425]: cannot find function `unreconcilable_lease_message` in this scope
+    --> crates\wcore-sandbox\src\backends\appcontainer\acl_lease\storage.rs:1067:21
+     |
+1067 |         let other = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &genuine);
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: crates\wcore-sandbox\src\backends\appcontainer\acl_lease.rs:706:1
+     |
+ 706 | fn unreconcilable_lease_reason(lease: &LeaseFile) -> String {
+     | ----------------------------------------------------------- similarly named function 
+`unreconcilable_lease_reason` defined here
+     |
+help: a function with a similar name exists
+     |
+1067 -         let other = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &genuine);
+1067 +         let other = unreconcilable_lease_reason(Path::new(r"C:\leases\x.toml"), &genuine);
+     |
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `wcore-sandbox` (lib test) due to 2 previous errors
+
+NAMED=quarantine_directory_does_not_become_a_second_wedge;result=UNPARSEABLE
+cargo.exe :    Compiling wcore-sandbox v0.12.25 (C:\f28h2-repo\crates\wcore-sandbox)
+At C:\f28h2\unittest.ps1:42 char:9
++   $o = (& cargo test -p wcore-sandbox --lib -- --exact $n --test-thre ...
++         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling wc...\wcore-sandbox):String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error[E0425]: cannot find function `unreconcilable_lease_message` in this scope
+    --> crates\wcore-sandbox\src\backends\appcontainer\acl_lease\storage.rs:1054:23
+     |
+1054 |         let message = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &lease);
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: crates\wcore-sandbox\src\backends\appcontainer\acl_lease.rs:706:1
+     |
+ 706 | fn unreconcilable_lease_reason(lease: &LeaseFile) -> String {
+     | ----------------------------------------------------------- similarly named function 
+`unreconcilable_lease_reason` defined here
+     |
+help: a function with a similar name exists
+     |
+1054 -         let message = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &lease);
+1054 +         let message = unreconcilable_lease_reason(Path::new(r"C:\leases\x.toml"), &lease);
+     |
+
+error[E0425]: cannot find function `unreconcilable_lease_message` in this scope
+    --> crates\wcore-sandbox\src\backends\appcontainer\acl_lease\storage.rs:1067:21
+     |
+1067 |         let other = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &genuine);
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: crates\wcore-sandbox\src\backends\appcontainer\acl_lease.rs:706:1
+     |
+ 706 | fn unreconcilable_lease_reason(lease: &LeaseFile) -> String {
+     | ----------------------------------------------------------- similarly named function 
+`unreconcilable_lease_reason` defined here
+     |
+help: a function with a similar name exists
+     |
+1067 -         let other = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &genuine);
+1067 +         let other = unreconcilable_lease_reason(Path::new(r"C:\leases\x.toml"), &genuine);
+     |
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `wcore-sandbox` (lib test) due to 2 previous errors
+
+NAMED=reclamation_reports_grants_it_could_not_revoke;result=UNPARSEABLE
+cargo.exe :    Compiling wcore-sandbox v0.12.25 (C:\f28h2-repo\crates\wcore-sandbox)
+At C:\f28h2\unittest.ps1:42 char:9
++   $o = (& cargo test -p wcore-sandbox --lib -- --exact $n --test-thre ...
++         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling wc...\wcore-sandbox):String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error[E0425]: cannot find function `unreconcilable_lease_message` in this scope
+    --> crates\wcore-sandbox\src\backends\appcontainer\acl_lease\storage.rs:1054:23
+     |
+1054 |         let message = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &lease);
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: crates\wcore-sandbox\src\backends\appcontainer\acl_lease.rs:706:1
+     |
+ 706 | fn unreconcilable_lease_reason(lease: &LeaseFile) -> String {
+     | ----------------------------------------------------------- similarly named function 
+`unreconcilable_lease_reason` defined here
+     |
+help: a function with a similar name exists
+     |
+1054 -         let message = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &lease);
+1054 +         let message = unreconcilable_lease_reason(Path::new(r"C:\leases\x.toml"), &lease);
+     |
+
+error[E0425]: cannot find function `unreconcilable_lease_message` in this scope
+    --> crates\wcore-sandbox\src\backends\appcontainer\acl_lease\storage.rs:1067:21
+     |
+1067 |         let other = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &genuine);
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: crates\wcore-sandbox\src\backends\appcontainer\acl_lease.rs:706:1
+     |
+ 706 | fn unreconcilable_lease_reason(lease: &LeaseFile) -> String {
+     | ----------------------------------------------------------- similarly named function 
+`unreconcilable_lease_reason` defined here
+     |
+help: a function with a similar name exists
+     |
+1067 -         let other = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &genuine);
+1067 +         let other = unreconcilable_lease_reason(Path::new(r"C:\leases\x.toml"), &genuine);
+     |
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `wcore-sandbox` (lib test) due to 2 previous errors
+
+finished=2026-07-29T00:27:19.7832460+07:00

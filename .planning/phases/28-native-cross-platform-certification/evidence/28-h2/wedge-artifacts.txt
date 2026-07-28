@@ -1,0 +1,24 @@
+===== WCore-storage-00002d20-00000000000000f2.toml =====
+  version = 1
+  state = "prepared"
+  profile_name = "WCore-storage-00002d20-00000000000000f2"
+  sid_sha256 = "5b22ee051799cf8aa6783a40faf32ce5bc9a7f7817bae7ab4076db3279005155"
+  owner_pid = 11552
+  owner_creation_time = 134295030246075290
+  intents = []
+  lease_sha256 = "f4c88d6086fb6ecd9ef5c34d5d0ad8205ebac58386d3e637f29fbfe7bdcd9265"
+===== WCore-storage-00006314-00000000000000f2.toml =====
+  version = 1
+  state = "prepared"
+  profile_name = "WCore-storage-00006314-00000000000000f2"
+  sid_sha256 = "5b22ee051799cf8aa6783a40faf32ce5bc9a7f7817bae7ab4076db3279005155"
+  owner_pid = 25364
+  owner_creation_time = 134295030246928367
+  intents = []
+  lease_sha256 = "585dad8a01df443ff687964c3ee3cc569e026a831e360d43e9d36e44f3ff06f4"
+REPO C:\ferrox-win-p28 SHA=9529c46a9412547a3d59aca394c23b91860ba1aa BRANCH=HEAD
+REPO C:\ferrox-win-p28 DIRTY_LINES=0
+REPO C:\ferrox-win SHA=978f49d778ce74cd5777d153866d734b16bbf705 BRANCH=HEAD
+REPO C:\ferrox-win DIRTY_LINES=11
+RUSTC=rustc 1.95.0 (59807616e 2026-04-14)
+INV2DONE

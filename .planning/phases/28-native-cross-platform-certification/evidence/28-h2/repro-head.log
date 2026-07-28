@@ -1,0 +1,91 @@
+﻿F28H2 REPRO tag=head started=2026-07-29T00:47:55.6285040+07:00
+EXE=C:\f28h2-target\release\wayland-core.exe
+EXE_SHA256=2114d41c2db1d0c20296126785a08b36c4fb75dca9d255bcf38c8240d7e7aded
+SRC_SHA=3f3f93dc8dc64c847ad5ab0955837d3e91d44d1a
+SRC_DIRTY=0
+LEASEDIR=C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1
+QUIET_BUILD_PROCS=3
+AS_FOUND_LEASES=0
+===== OBSERVATION state=clean active_leases=0 quarantined=0 =====
+----- RAW sandbox status -----
+backend                   appcontainer
+available                 true
+bypasses containment      false
+enforces read deny        true
+owns descendants hard     true
+binds cwd authority       true
+binds workspace authority true
+
+----- END -----
+----- RAW sandbox exec -----
+Exit code: 0
+STDOUT:
+F28H2RAN
+
+STDERR:
+
+----- END -----
+F28H2=state=clean;active_leases=0;quarantined=0;available=True;ran=True;disabled=False;mismatch=False;reclaimed=False;transient_claim=False;names_lease_file=False
+WEDGE_INSTALLED=True
+===== OBSERVATION state=wedged active_leases=1 quarantined=0 =====
+----- RAW sandbox status -----
+wayland-core.exe : [2m2026-07-28T17:48:23.770382Z[0m [31mERROR[0m RECLAIMED a stale 
+AppContainer ACL lease: it was written by wcore-sandbox's OWN TEST SUITE (it carries the test SID 
+sentinel) and can never match a real AppContainer profile, and its owning process 11552 is gone. 
+This was persistent on-disk state ΓÇö NOT a platform limitation, NOT an SSH or session-0 effect, 
+and NOT transient. Until this reclamation landed, a file in this state disabled ALL sandboxed 
+execution on this machine until a human DELETED it. The file has been MOVED (not deleted) to \\?\C
+:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\quarantine\WCore-storage-00002d20-0
+0000000000000f2.toml.quarantined-000053e4-0000000000000000 so the cause stays inspectable. It 
+recorded NO filesystem ACL grant, so nothing was left behind on this machine. [3mlease[0m[2m=[
+0m\\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\WCore-storage-00002d20-00000
+000000000f2.toml [3mquarantined_to[0m[2m=[0m\\?\C:\Users\seand\AppData\Local\Wayland\Core\AppC
+ontainerLeases\v1\quarantine\WCore-storage-00002d20-00000000000000f2.toml.quarantined-000053e4-000
+0000000000000 [3mowner_pid[0m[2m=[0m11552
+At C:\f28h2\repro.ps1:55 char:10
++   $so = (& $Exe sandbox status 2>&1 | Out-String)
++          ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([2m2026-07-28T...m[2m=[0m11552:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+backend                   appcontainer
+available                 true
+bypasses containment      false
+enforces read deny        true
+owns descendants hard     true
+binds cwd authority       true
+binds workspace authority true
+
+----- END -----
+----- RAW sandbox exec -----
+Exit code: 0
+STDOUT:
+F28H2RAN
+
+STDERR:
+
+----- END -----
+F28H2=state=wedged;active_leases=1;quarantined=0;available=True;ran=True;disabled=False;mismatch=True;reclaimed=False;transient_claim=False;names_lease_file=True
+===== OBSERVATION state=wedged-second-run active_leases=0 quarantined=1 =====
+----- RAW sandbox status -----
+backend                   appcontainer
+available                 true
+bypasses containment      false
+enforces read deny        true
+owns descendants hard     true
+binds cwd authority       true
+binds workspace authority true
+
+----- END -----
+----- RAW sandbox exec -----
+Exit code: 0
+STDOUT:
+F28H2RAN
+
+STDERR:
+
+----- END -----
+F28H2=state=wedged-second-run;active_leases=0;quarantined=1;available=True;ran=True;disabled=False;mismatch=False;reclaimed=False;transient_claim=False;names_lease_file=False
+LEASE_RESTORED count=0 expected=0
+finished=2026-07-29T00:49:20.4401702+07:00
