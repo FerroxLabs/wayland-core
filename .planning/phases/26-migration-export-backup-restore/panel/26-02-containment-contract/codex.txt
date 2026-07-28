@@ -1,0 +1,7 @@
+PANEL-MEMBER: codex
+PANEL-QUESTION-SHA256: b95bb3bf1e4adddc87d69c3e3e56bf99e117c6840865c99584f2cf99e769fce7
+---
+PANEL-VERDICT: contract-accept
+PANEL-BASIS: All six gates pass: arithmetic balances, batch promotion is bounded, classification is exact, the positive control fired, and existing trust ceilings remain unchanged.
+
+The 29 capacity refusals are explicit, individually reported, and remain inert; they are a visible operational limit, not a containment failure. Raising the shared ceiling would be the wrong repair. Promotion now handles realistic multi-profile name collisions without overwriting or forcing one invocation per item, while its authorization decision remains independent of payload-controlled metadata. The paired real-binary proof establishes actual behavioral asymmetry between quarantine and explicit promotion, including a live-turn assertion that rules out the earlier dead-engine false green. Classification matches execution semantics: passive data imports normally, while every identified child-process surface is quarantined.

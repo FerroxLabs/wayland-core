@@ -1,0 +1,11 @@
+PANEL-MEMBER: gemini
+PANEL-QUESTION-SHA256: b95bb3bf1e4adddc87d69c3e3e56bf99e117c6840865c99584f2cf99e769fce7
+---
+PANEL-VERDICT: contract-accept
+PANEL-BASIS: The containment contract successfully meets all six criteria without compromise: counts balance, classification is strictly bounded, the positive control fired, promotion cost is bounded, and the workspace-trust ceilings were correctly enforced rather than dangerously widened.
+
+The measurements prove the containment contract is fundamentally sound. The arithmetic balances flawlessly across 554 discovered items, and classification correctly boundaries the executable surface (`CLASSIFY-DATA-QUARANTINED: 0`, `CLASSIFY-EXEC-UNCONTAINED: 0`). Crucially, the positive control fired during the inertness proof, confirming that imported executable payloads are genuinely contained until explicitly promoted by the operator. 
+
+The promotion path is usable at scale because it correctly resolves naming collisions and processes in bounded time (`PROMOTE-SCALING: bounded`), preventing the ergonomic friction that would otherwise push operators to bypass the contract. 
+
+While the quarantine store capacity limit refused 29 items (512 admitted out of 541 quarantined), this is a correct enforcement of the system's invariants. As explicitly constrained, widening `MAX_EXECUTABLE_FILES` to mask this friction is forbidden because it would permanently degrade the security posture of all workspace-trust consumers just to ease a one-time migration. The contract held its ground: it safely contained the payload up to its hard limit and safely refused the overflow without silently dropping data or violating global security ceilings. The containment contract as built is acceptable and ready to ship.

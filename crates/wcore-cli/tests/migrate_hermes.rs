@@ -97,6 +97,9 @@ fn hermes_args(home: &Path, include_credentials: bool, overwrite: bool) -> Herme
         overwrite,
         // These tests exercise the prose/apply path, which `--json` bypasses.
         json: false,
+        // F26-02: un-narrowed — these tests exercise the whole-home import.
+        select: Vec::new(),
+        exclude: Vec::new(),
     }
 }
 
@@ -145,6 +148,44 @@ fn build_plan_maps_hermes_profiles() {
     assert!(!beta.has_credential);
 }
 
+/// F26-02 changed ONE assertion in this test, deliberately, and STRENGTHENED
+/// it rather than weakening it.
+///
+/// Before: this asserted `[mcp.servers.ijfw-memory]` was written into
+/// `config.toml`. That entry carries `command: /usr/bin/ijfw-memory` with
+/// `TransportType::Stdio`, so writing it into the live config makes it
+/// LAUNCHABLE — a child-process surface fed by peer-controlled strings, which
+/// F26-02's threat register names T-26-02-03 (critical) and which this plan
+/// exists to close. The old assertion therefore pinned the defect in place.
+///
+/// After: the same import must NOT write that entry live, and must instead
+/// report it contained. Both halves are asserted, so the change cannot pass by
+/// the import simply doing nothing.
+#[test]
+#[serial]
+fn apply_contains_an_executable_mcp_definition_instead_of_writing_it_live() {
+    let (_g, home) = rooted();
+    let hermes = fixture_hermes();
+
+    migrate::run(MigrateCmd::Hermes(hermes_args(hermes.path(), false, false))).unwrap();
+
+    let toml = config_toml(home.path());
+    assert!(
+        !toml.contains("[mcp.servers.ijfw-memory]"),
+        "a peer MCP definition carrying a launch command must not land in \
+         config.toml, where it is spawnable (T-26-02-03); got:\n{toml}"
+    );
+    assert!(
+        wcore_cli::migrate::quarantine::QuarantineStore::for_current_home()
+            .contains("mcp_server:ijfw-memory")
+            .unwrap(),
+        "…and it must be CONTAINED rather than silently dropped"
+    );
+    // Positive half: the profiles still imported, so the absence above is a
+    // containment decision and not an import that did nothing.
+    assert!(toml.contains("[profiles.alpha]"), "{toml}");
+}
+
 #[test]
 #[serial]
 fn apply_writes_profiles_and_mcp_without_secrets_by_default() {
@@ -163,7 +204,9 @@ fn apply_writes_profiles_and_mcp_without_secrets_by_default() {
     let toml = config_toml(home.path());
     assert!(toml.contains("[profiles.alpha]"));
     assert!(toml.contains("deepseek-v4-pro"));
-    assert!(toml.contains("[mcp.servers.ijfw-memory]"));
+    // The MCP half of this test moved to
+    // `apply_contains_an_executable_mcp_definition_instead_of_writing_it_live`
+    // when F26-02 brought peer launch commands under quarantine (T-26-02-03).
     // No credentials imported by default.
     assert!(
         !toml.contains("sk-secret-alpha"),

@@ -1,0 +1,16 @@
+PANEL-MEMBER: kimi
+PANEL-QUESTION-SHA256: b95bb3bf1e4adddc87d69c3e3e56bf99e117c6840865c99584f2cf99e769fce7
+---
+• PANEL-VERDICT: contract-accept
+  PANEL-BASIS: Every load-bearing check the six criteria name measured green at real scale — the counts balance, classification is bounded in both directions, promotion is constant-cost, the positive control fired against the live binary, and the ceiling refused rather than moved.
+
+  The arithmetic closes (13 + 541 + 0 = 554) with zero excluded, so nothing vanished between discovery and disposition. Classification is bounded on both sides: `CLASSIFY-DATA-QUARANTINED: 0` shows personas/memory/settings/assets pass without ceremony, and `CLASSIFY-EXEC-UNCONTAINED: 0` shows every child-process surface — MCP launch commands, hook commands, shell-carrying skill bodies — landed in quarantine. The MCP classifier keying on `command` rather than the peer-controlled transport field is the right call.
+
+  The criterion that could have sunk this was #2, and the record shows it nearly did: the first measurement was `invocations=256`, linear, because a real install reuses skill names across profiles and the collision aborted the set. That is exactly the "operator routes around containment" failure mode. It was reproduced, fixed inside the plan's own files, and re-measured at `invocations=1` for both 1 and 256 items — collision resolved by digest-disambiguated naming with the mapping returned, nothing silently overwritten or dropped. That is a contract an operator lives with.
+
+  The no-self-trust half is proven, not asserted: the fixture carries `trusted: true`, `auto_promote: true`, a `PROMOTE` marker, and a `manifest.json` claiming promotion, and stays contained because `promote` reads only the caller's ids and the store's own index.
+
+  The 29 ceiling refusals are containment working, not failing: each is named, counted, and inert; the constants stand at 512/4MiB/32MiB. Per the constraint, that is a finding to report, not a limit to widen.
+
+  The positive control re-fired at this commit against the real binary with a live turn-ran assertion, so the negative leg means something.
+

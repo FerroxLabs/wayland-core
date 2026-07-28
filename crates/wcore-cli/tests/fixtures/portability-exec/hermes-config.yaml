@@ -1,0 +1,11 @@
+model:
+  default: anthropic/claude-sonnet-4-20250514
+  provider: anthropic
+mcp_servers:
+  peer-launcher:
+    command: /usr/bin/peer-mcp-server
+    args: ["--stdio"]
+    env:
+      PATH: /usr/bin
+  peer-remote:
+    url: https://mcp.example.test/sse
