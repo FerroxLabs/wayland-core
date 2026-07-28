@@ -1,0 +1,5 @@
+{
+ "observed": true,
+ "probe": "containment-differential",
+ "detail": "DNS resolves outside and does not inside (network namespace); /etc is readable outside and denied inside (filesystem read confined) [inside reading via sandbox-exec-surface]"
+}

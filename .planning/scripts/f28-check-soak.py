@@ -491,6 +491,19 @@ def do_session_count(soak: dict) -> list[str]:
             "F28S-050",
             "session shortfall -- Criterion 2 is NOT MET for: " + "; ".join(shortfalls),
         )
+    # A family that could not be run at all is a shortfall of 1,000, not an omission. It is
+    # recorded separately because it has no measured record to carry it, and it must still
+    # turn this gate RED -- otherwise "the families we ran all passed" reads as "the soak
+    # passed", which is the exact narrowing this phase exists to prevent.
+    not_run = soak.get("families_not_run") or []
+    if not_run:
+        named = "; ".join(
+            f"{f.get('family')}: 0/{SESSION_TARGET} ({f.get('reason', 'no reason recorded')})"
+            for f in not_run
+        )
+        for f in not_run:
+            lines.append(f"{f.get('family')}\tsessions_run=0\ttarget={SESSION_TARGET}\tNOT RUN")
+        reject("F28S-054", "family NOT RUN -- Criterion 2 is NOT MET for: " + named)
     return lines
 
 
@@ -806,6 +819,14 @@ def self_test() -> int:
 
     results.append(_expect_reject("RED: claimed count exceeds the retained ledger",
                                   "F28S-053", red_claimed_not_run))
+
+    def red_family_not_run():
+        s = _soak_fixture()
+        s["families_not_run"] = [{"family": "windows", "reason": "host unreachable"}]
+        do_session_count(s)
+
+    results.append(_expect_reject("RED: a family could not be run at all", "F28S-054",
+                                  red_family_not_run))
 
     def red_slope():
         s = _soak_fixture()
