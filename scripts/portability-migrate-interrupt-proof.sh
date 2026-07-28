@@ -193,7 +193,9 @@ blocks = re.split(r"(?m)^(?=\[)", text)
 kept = []
 dropped = False
 for b in blocks:
-    if not dropped and b.startswith("[profiles.prof"):
+    # Any profile section: the Hermes corpus names them `prof<NN>`, the
+    # OpenClaw one names them after providers and `openclaw/root`.
+    if not dropped and b.startswith("[profiles."):
         dropped = True
         continue
     kept.append(b)
