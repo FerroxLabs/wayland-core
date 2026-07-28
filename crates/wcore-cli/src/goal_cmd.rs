@@ -144,8 +144,9 @@ pub enum GoalCommand {
         /// genuinely shards rather than degenerating to one shard.
         #[arg(long, default_value_t = 4)]
         shard_size: usize,
-        /// Claim lease. A claim whose lease has expired is revoked and
-        /// reassigned by the next process to start.
+        /// Claim lease, for BOTH a task claim and the Goal's loop-owner claim.
+        /// A claim whose lease has expired is revoked and reassigned by the next
+        /// process to start.
         #[arg(long, default_value = "60s")]
         lease: String,
         /// Per-shard wall-clock timeout.
@@ -400,7 +401,13 @@ async fn run_goal(options: RunOptions) -> anyhow::Result<()> {
     // closed, so the Goal loop must clone this handle rather than reopen the
     // path. Found by the live run, not by the suite: every unit test builds a
     // single driver, so nothing in-process ever opened the journal twice.
-    let loop_driver = GoalLoop::new(GoalKernel::new(handle.clone()));
+    // The loop-owner claim honours the SAME `--lease` as a task claim, because
+    // it answers the same question — how long a claim stays evidence that its
+    // owner is alive. A loop-owner claim with a different, invisible lease would
+    // be a second liveness vocabulary, and a `kill -9` would strand the Goal for
+    // however long that hidden default happened to be.
+    let loop_driver = GoalLoop::new(GoalKernel::new(handle.clone()))
+        .with_lease_ms(u64::try_from(options.lease.as_millis()).unwrap_or(u64::MAX));
     let driver = GoalFleetDriver::new(
         handle,
         GoalId::new(&options.goal),
