@@ -601,11 +601,50 @@ pub(crate) struct GatewayArgs {
 /// Append `?v=10&encoding=json` to a bare gateway host if it lacks a
 /// query string. Idempotent — a URL that already carries query params is
 /// returned untouched.
+/// Append the gateway query string, ensuring the URL carries a PATH.
+///
+/// F24-C3-DISCORD. This used to be `format!("{base}?v=10&encoding=json")`,
+/// which for the default base produced
+/// `wss://gateway.discord.gg?v=10&encoding=json` — no path at all. The module
+/// docs above have always said the connect URL is
+/// `wss://gateway.discord.gg/?v=10&encoding=json`, WITH the slash; the code
+/// disagreed with its own documentation.
+///
+/// It matters because `tokio_tungstenite::connect_async` turns the string into
+/// an `http::Uri`, and unlike the `url` crate, `http::Uri` does NOT normalise an
+/// empty path to `/`. The handshake request-target therefore came out as
+/// `GET ?v=10&encoding=json HTTP/1.1`, which is not a valid request-target: a
+/// strict HTTP server rejects it outright. Measured against the Phase 24
+/// fixture, every single connect attempt failed with `400 Bad Request` and the
+/// server-side parser reported `HPE_INVALID_URL`.
+///
+/// This was invisible for the whole of Phase 24 because Discord inbound had
+/// never once been driven end to end.
 fn with_gateway_query(base: &str) -> String {
+    let base = ensure_path(base);
     if base.contains('?') {
-        base.to_string()
+        base
     } else {
         format!("{base}?v=10&encoding=json")
+    }
+}
+
+/// Ensure a `ws://host[:port]` style URL has at least a `/` path, so the
+/// resulting request-target is valid. Leaves an existing path untouched.
+fn ensure_path(url: &str) -> String {
+    // Only the authority section matters: find the end of `scheme://`.
+    let Some(after_scheme) = url.find("://").map(|i| i + 3) else {
+        return url.to_string();
+    };
+    let rest = &url[after_scheme..];
+    // The authority ends at the first '/', '?' or '#'.
+    match rest.find(['/', '?', '#']) {
+        // Already has a path.
+        Some(i) if rest.as_bytes()[i] == b'/' => url.to_string(),
+        // Has a query/fragment but NO path — insert the missing '/'.
+        Some(i) => format!("{}/{}", &url[..after_scheme + i], &rest[i..]),
+        // Bare authority — append the path.
+        None => format!("{url}/"),
     }
 }
 
@@ -1279,14 +1318,53 @@ mod tests {
 
     #[test]
     fn with_gateway_query_is_idempotent() {
+        // The path is REQUIRED. `http::Uri` does not normalise an empty path,
+        // so a pathless URL yields the invalid request-target
+        // `GET ?v=10&encoding=json HTTP/1.1` and the handshake 400s.
         assert_eq!(
             with_gateway_query("wss://gateway.discord.gg"),
-            "wss://gateway.discord.gg?v=10&encoding=json"
+            "wss://gateway.discord.gg/?v=10&encoding=json"
         );
-        // Already carries query params → untouched.
+        // Already carries query params → query untouched, path still ensured.
         assert_eq!(
-            with_gateway_query("wss://resume.gg?v=10&encoding=json"),
-            "wss://resume.gg?v=10&encoding=json"
+            with_gateway_query("wss://resume.gg/?v=10&encoding=json"),
+            "wss://resume.gg/?v=10&encoding=json"
         );
+    }
+
+    /// F24-C3-DISCORD regression. Measured against the Phase 24 fixture: every
+    /// connect attempt failed `400 Bad Request` / `HPE_INVALID_URL` because the
+    /// generated URL had a query but no path.
+    #[test]
+    fn gateway_url_always_carries_a_path() {
+        for base in [
+            "wss://gateway.discord.gg",
+            "ws://127.0.0.1:41533",
+            "wss://resume.example.gg",
+        ] {
+            let got = with_gateway_query(base);
+            let after_scheme = got.find("://").unwrap() + 3;
+            let rest = &got[after_scheme..];
+            let idx = rest.find(['/', '?']).expect("must have a path or query");
+            assert_eq!(
+                rest.as_bytes()[idx],
+                b'/',
+                "the authority must be followed by a PATH, not a bare query: {got}"
+            );
+            assert!(got.contains("/?v=10&encoding=json"), "got {got}");
+        }
+    }
+
+    #[test]
+    fn ensure_path_leaves_an_existing_path_alone() {
+        assert_eq!(ensure_path("wss://a.gg/socket"), "wss://a.gg/socket");
+        assert_eq!(
+            ensure_path("wss://a.gg/socket?x=1"),
+            "wss://a.gg/socket?x=1"
+        );
+        assert_eq!(ensure_path("ws://127.0.0.1:9/"), "ws://127.0.0.1:9/");
+        // The two shapes that were broken.
+        assert_eq!(ensure_path("wss://a.gg"), "wss://a.gg/");
+        assert_eq!(ensure_path("wss://a.gg?x=1"), "wss://a.gg/?x=1");
     }
 }
