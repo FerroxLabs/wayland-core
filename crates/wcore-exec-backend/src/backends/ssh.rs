@@ -431,6 +431,20 @@ impl ExecutionBackend for SshBackend {
     }
 }
 
+/// Emitted by [`REMOTE_SCAN`] when no process-table reader on the far end
+/// worked. The Rust side turns it into `enumerated: false`, so the surface
+/// reports NOT MEASURED instead of a clean zero.
+///
+/// THIRD defect found live, on 2026-07-28, against a real Windows far end:
+/// `ps -eo pid,ppid,args` is procps-specific and Git-for-Windows' msys `ps`
+/// rejects it (`ps: unknown option -- o`). Its stderr went to `/dev/null` and
+/// the pipeline ended in `|| true`, so a sweep that could not run produced an
+/// empty result indistinguishable from a clean one. The surface reported
+/// `0 (MEASURED)` while two independent instruments — msys `ps -ef` and
+/// `Win32_Process` — both showed the orphan. Same class as the `tasklist`
+/// false zero plan 25-04 found, on a different surface.
+const SWEEP_UNAVAILABLE: &str = "__WAYLAND_SWEEP_UNAVAILABLE__";
+
 /// Constant remote scanner. The nonce arrives as `$1`, never as script text.
 ///
 /// TWO defects found by the live cancellation run on 2026-07-26 are fixed
@@ -448,20 +462,6 @@ impl ExecutionBackend for SshBackend {
 ///    leader in `$root/.pid`, so the scan now checks that pid for liveness as
 ///    its primary signal and keeps the `ps` sweep as a secondary one for a
 ///    stray that escaped the session.
-/// Emitted by [`REMOTE_SCAN`] when no process-table reader on the far end
-/// worked. The Rust side turns it into `enumerated: false`, so the surface
-/// reports NOT MEASURED instead of a clean zero.
-///
-/// THIRD defect found live, on 2026-07-28, against a real Windows far end:
-/// `ps -eo pid,ppid,args` is procps-specific and Git-for-Windows' msys `ps`
-/// rejects it (`ps: unknown option -- o`). Its stderr went to `/dev/null` and
-/// the pipeline ended in `|| true`, so a sweep that could not run produced an
-/// empty result indistinguishable from a clean one. The surface reported
-/// `0 (MEASURED)` while two independent instruments — msys `ps -ef` and
-/// `Win32_Process` — both showed the orphan. Same class as the `tasklist`
-/// false zero plan 25-04 found, on a different surface.
-const SWEEP_UNAVAILABLE: &str = "__WAYLAND_SWEEP_UNAVAILABLE__";
-
 const REMOTE_SCAN: &str = r#"
 set -u
 nonce="$1"
