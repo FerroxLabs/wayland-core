@@ -1,0 +1,74 @@
+LIVE PRODUCT PROOF — `wayland-scorecard verify` against the real release binary
+host        : hetzner-dsm (Linux)
+worktree    : /root/wayland-30-01
+source_sha  : 4f749251060a0b22546dd6341c82a5e049083237
+binary      : target/release/wayland-scorecard (built --release --locked, rc=0)
+date        : 2026-07-28
+
+The document is hand-built and grades one criterion NOT_MET with NO evidence at
+all and one MET with evidence that really resolves. Run 1 must pass; runs 2 and
+3 are mutations of that SAME document and must each fail with a NAMING error.
+No credential of any kind is involved.
+
+--- the document (/tmp/f30-doc.json) ---
+{
+  "schema": "wayland.scorecard",
+  "schema_version": 1,
+  "source_sha": "4f749251060a0b22546dd6341c82a5e049083237",
+  "criteria": [
+    { "id": "SC-A", "statement": "graded NOT_MET with no evidence at all",
+      "grade": "NOT_MET", "evidence": [] },
+    { "id": "SC-B", "statement": "graded MET with evidence that really resolves",
+      "grade": "MET",
+      "evidence": [ { "id": "EV-REAL",
+        "locator": { "kind": "path", "path": "crates/wcore-eval-scenarios/Cargo.toml" },
+        "measurement": "proven" } ] }
+  ],
+  "surfaces": []
+}
+
+=== RUN 1: pristine document — the CONTROL, accepted first
+$ ./target/release/wayland-scorecard verify --document /tmp/f30-doc.json --repo-root .
+SCORECARD_VERIFY=OK criteria=2 surfaces=0 source_sha=4f749251060a0b22546dd6341c82a5e049083237
+EXIT=0
+
+  NOTE: SC-A is graded NOT_MET carrying an EMPTY evidence set and is accepted.
+  That is the asymmetry working: the honest grade cost nothing.
+
+=== RUN 2: the MET criterion's evidence repointed at a path that does not exist
+$ sed 's#.../Cargo.toml#.../NO-SUCH-FILE.toml#' -> /tmp/f30-doc-broken.json
+$ ./target/release/wayland-scorecard verify --document /tmp/f30-doc-broken.json --repo-root .
+wayland-scorecard: criterion `SC-B` is graded MET but evidence reference `EV-REAL` \
+does not resolve (no such path: ./crates/wcore-eval-scenarios/NO-SUCH-FILE.toml)
+EXIT=1
+
+  The refusal NAMES the criterion, the grade, the reference and the path. Only
+  the MET criterion moved; SC-A was untouched and is still free.
+
+=== RUN 3: the invented grade
+$ sed 's#"NOT_MET"#"ready_for_frontier_positioning"#' -> /tmp/f30-doc-invented.json
+$ ./target/release/wayland-scorecard verify --document /tmp/f30-doc-invented.json --repo-root .
+wayland-scorecard: unknown variant `ready_for_frontier_positioning`, expected one of \
+`MET`, `MET_WITH_STATED_EXCEPTIONS`, `PARTIAL`, `NOT_MET`, `UNPROVEN` at line 7 column 47
+EXIT=1
+
+  Refused at DESERIALIZATION, before any verification logic ran, and the error
+  enumerates the five legal grades. A sixth grade meaning "ready" without
+  meaning "proved" cannot be filed.
+
+=== SEPARATION RESULT
+  known-good  -> EXIT=0
+  known-bad   -> EXIT=1 (broken reference), EXIT=1 (invented grade)
+  The instrument accepts a real document and rejects mutations of that same
+  real document. It has been watched failing.
+
+=== REGENERATION GATE (the inventory is a measurement, not an assertion)
+$ ./target/release/wayland-scorecard surfaces --binary ./target/release/wayland-core > /tmp/f30-regen.tsv
+$ diff -u <committed evidence/30-01/surfaces.tsv> /tmp/f30-regen.tsv
+REGENERATION_DIFF=IDENTICAL
+  committed rows : 149 (148 surfaces + header)
+  regen rows     : 149
+  wayland-core sha256 : e73453a5ba0cdb23ace670106de036d24e28fc6ed6f38202a842c87a86c5aaae
+
+A hand-edited inventory fails this diff. The committed bytes are what the
+shipped binary itself emitted.
