@@ -238,6 +238,28 @@ export class DiscordFixture {
         res.end(JSON.stringify(obj));
       };
 
+      // ── control plane (driver -> fixture), deliberately unauthenticated ────
+      //
+      // THIS FIXTURE MUST RUN AS ITS OWN OS PROCESS. Every driver in this
+      // program sleeps with `Atomics.wait`, which blocks the whole Node event
+      // loop; an in-process fixture therefore cannot accept a single TCP
+      // connection while the driver waits, and the run reports "the binary
+      // never connected" — a PRODUCT defect — when the truth is that the
+      // instrument was not listening. That is exactly how this driver's first
+      // two runs failed. Every other fixture here (`f24-tg-fixture.mjs`,
+      // `f24-llm-fixture.mjs`) is spawned separately for the same reason.
+      if (p === '/__control/dispatch' && req.method === 'POST') {
+        const spec = JSON.parse(body || '{}');
+        const sockets = this.dispatchMessage(spec);
+        return json(200, { sockets });
+      }
+      if (p === '/__control/report' && req.method === 'GET') {
+        return json(200, this.report());
+      }
+      if (p === '/__control/replies' && req.method === 'GET') {
+        return json(200, { sent: this.sent });
+      }
+
       // The fixture still ENFORCES its own minted token. A fixture that
       // accepted anything would pass an adapter that sent no credential at
       // all, which is a green by universal acceptance — the mirror image of
@@ -495,3 +517,28 @@ export class DiscordFixture {
 }
 
 export default DiscordFixture;
+
+// ── standalone mode ──────────────────────────────────────────────────────────
+//
+// usage: node f24-discord-fixture.mjs [--token <t>] [--heartbeat-ms N]
+// Prints a single ready banner the driver greps for, then serves until killed.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const argv = process.argv.slice(2);
+  const opts = {};
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === '--token') opts.botToken = argv[++i];
+    else if (argv[i] === '--heartbeat-ms') opts.heartbeatIntervalMs = Number(argv[++i]);
+    else if (argv[i] === '--bot-id') opts.botId = argv[++i];
+  }
+  const fx = new DiscordFixture(opts);
+  await fx.start();
+  process.stdout.write(
+    `DISCFIX_READY url=${fx.apiBase} gateway=${fx.gatewayUrl} bot_id=${fx.botId}\n`,
+  );
+  const bye = async () => {
+    await fx.stop();
+    process.exit(0);
+  };
+  process.on('SIGTERM', bye);
+  process.on('SIGINT', bye);
+}

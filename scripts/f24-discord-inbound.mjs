@@ -43,16 +43,31 @@
 //
 // usage: f24-discord-inbound.mjs --binary <path> --run-dir <dir> [--budget-ms N]
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { DiscordFixture } from './f24-discord-fixture.mjs';
-
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+// The fixture runs as its OWN OS PROCESS and is reached over HTTP. It is not
+// imported here, and that is load-bearing rather than stylistic: `sleep()`
+// below is `Atomics.wait`, which blocks the entire Node event loop, so an
+// in-process fixture cannot accept a TCP connection while this driver waits.
+// The first two runs of this driver did exactly that and reported "the binary
+// never opened a TCP connection" — an instrument failure wearing the costume of
+// a product defect. A trace run proved the adapter had been dialling correctly
+// the whole time.
+function control(url, method, body) {
+  const args = ['-s', '-X', method, url];
+  if (body !== undefined) {
+    args.push('-H', 'content-type: application/json', '-d', JSON.stringify(body));
+  }
+  const out = execFileSync('curl', args, { encoding: 'utf8', timeout: 15_000 });
+  return JSON.parse(out);
+}
 
 export const LEGS = ['admit', 'dedupe', 'access', 'bind', 'route', 'steady'];
 export const RESULT_SCHEMA = 'wayland.discord.inbound/1';
@@ -110,6 +125,7 @@ class Driver {
     this.chanB = '900000002';
     this.child = null;
     this.llm = null;
+    this.children = [];
   }
 
   note(m) {
@@ -123,6 +139,33 @@ class Driver {
   }
 
   // ── setup ──────────────────────────────────────────────────────────────────
+
+  // Spawn a fixture as its own process and read its ready banner from its log.
+  startFixture(script, extraArgs, readyRe, logName) {
+    const logPath = path.join(this.args.runDir, logName);
+    fs.writeFileSync(logPath, '');
+    const fd = fs.openSync(logPath, 'a');
+    const child = spawn(process.execPath, [path.join(HERE, script), ...extraArgs], {
+      stdio: ['ignore', fd, fd],
+      windowsHide: true,
+    });
+    this.children.push(child);
+    for (let i = 0; i < 100; i += 1) {
+      const banner = fs.readFileSync(logPath, 'utf8');
+      const m = readyRe.exec(banner);
+      if (m) return m;
+      sleep(100);
+    }
+    throw new Error(`${script} never printed its ready banner`);
+  }
+
+  fxReport() {
+    return control(`${this.fxApi}/__control/report`, 'GET');
+  }
+
+  fxReplies() {
+    return control(`${this.fxApi}/__control/replies`, 'GET').sent;
+  }
 
   startLlm() {
     this.llmJournal = path.join(this.args.runDir, 'llm-journal.jsonl');
@@ -150,7 +193,7 @@ class Driver {
 
     fs.writeFileSync(
       path.join(this.home, 'credentials.toml'),
-      ['[secrets]', `"discord.f24c3.bot_token" = "${this.fx.botToken}"`, ''].join('\n'),
+      ['[secrets]', `"discord.f24c3.bot_token" = "${this.botToken}"`, ''].join('\n'),
       { mode: 0o600 },
     );
 
@@ -186,8 +229,8 @@ class Driver {
         // a `deny_unknown_fields` parse error and the adapter can only ever
         // reach discord.com / gateway.discord.gg — which is exactly why the
         // Discord inbound path had never been driven.
-        `api_base_url = "${this.fx.apiBase}"`,
-        `gateway_url = "${this.fx.gatewayUrl}"`,
+        `api_base_url = "${this.fxApi}"`,
+        `gateway_url = "${this.fxGateway}"`,
         'heartbeat_grace_ms = 30000',
         '',
         '[inbound]',
@@ -222,8 +265,12 @@ class Driver {
     let i = 0;
     while (Date.now() < deadline) {
       i += 1;
-      if (this.fx.identifyCount > 0 && [...this.fx.conns].some((c) => c.identified)) {
-        this.note(`gateway IDENTIFYed after ~${i * 250}ms (conns=${this.fx.conns.size})`);
+      const rep = this.fxReport();
+      if (rep.identify_count > 0 && rep.live_gateway_connections > 0) {
+        this.note(
+          `gateway IDENTIFYed after ~${i * 250}ms ` +
+            `(tcp=${rep.tcp_connections} upgrades=${rep.total_gateway_connections} live=${rep.live_gateway_connections})`,
+        );
         return true;
       }
       if (this.child && this.child.exitCode !== null) {
@@ -239,21 +286,25 @@ class Driver {
   /** Wait for a reply carrying `token` to be POSTed back through the fixture. */
   waitForReply(token, budgetMs) {
     const deadline = Date.now() + budgetMs;
-    while (Date.now() < deadline) {
-      const hit = this.fx.sent.filter((s) => matchesToken(s.content, token));
+    for (;;) {
+      const hit = this.fxReplies().filter((s) => matchesToken(s.content, token));
       if (hit.length > 0) return hit;
-      sleep(200);
+      if (Date.now() >= deadline) return hit;
+      sleep(400);
     }
-    return this.fx.sent.filter((s) => matchesToken(s.content, token));
+  }
+
+  repliesFor(token) {
+    return this.fxReplies().filter((s) => matchesToken(s.content, token));
   }
 
   msg({ token, channelId, authorId, id }) {
-    return this.fx.dispatchMessage({
+    return control(`${this.fxApi}/__control/dispatch`, 'POST', {
       id: id ?? `${Date.now()}${crypto.randomBytes(2).toString('hex')}`,
       channelId: channelId ?? this.chanA,
       content: `hello ${token}`,
       authorId: authorId ?? this.senderId,
-    });
+    }).sockets;
   }
 
   // ── legs ───────────────────────────────────────────────────────────────────
@@ -276,10 +327,10 @@ class Driver {
     const dupId = `dup${Date.now()}`;
     this.msg({ token: tDup, id: dupId });
     this.waitForReply(tDup, budget);
-    const before = this.fx.sent.filter((s) => matchesToken(s.content, tDup)).length;
+    const before = this.repliesFor(tDup).length;
     this.msg({ token: tDup, id: dupId }); // identical id — must not produce a 2nd
     sleep(Math.min(8000, budget));
-    const after = this.fx.sent.filter((s) => matchesToken(s.content, tDup)).length;
+    const after = this.repliesFor(tDup).length;
     // POSITIVE CONTROL: a DIFFERENT id from the same sender still gets through,
     // so "no second reply" cannot be satisfied by an adapter that simply died.
     const tCtl = `f24c3-disc-dedupectl-${this.tag}`;
@@ -295,7 +346,7 @@ class Driver {
     const tDeny = `f24c3-disc-access-${this.tag}`;
     this.msg({ token: tDeny, authorId: this.strangerId });
     sleep(Math.min(8000, budget));
-    const denied = this.fx.sent.filter((s) => matchesToken(s.content, tDeny));
+    const denied = this.repliesFor(tDeny);
     const tAllow = `f24c3-disc-accessctl-${this.tag}`;
     this.msg({ token: tAllow });
     const allowed = this.waitForReply(tAllow, budget);
@@ -350,15 +401,17 @@ class Driver {
     }
     const deadline = Date.now() + budget;
     while (Date.now() < deadline) {
+      const sentNow = this.fxReplies();
       const got = steadyTokens.filter(
-        (t) => this.fx.sent.filter((s) => matchesToken(s.content, t)).length > 0,
+        (t) => sentNow.filter((s) => matchesToken(s.content, t)).length > 0,
       ).length;
       if (got === steadyTokens.length) break;
       sleep(500);
     }
+    const finalSent = this.fxReplies();
     const perSteady = steadyTokens.map((t) => ({
       token: t,
-      replies: this.fx.sent.filter((s) => matchesToken(s.content, t)).length,
+      replies: finalSent.filter((s) => matchesToken(s.content, t)).length,
     }));
     const lost = perSteady.filter((p) => p.replies === 0);
     const duped = perSteady.filter((p) => p.replies > 1);
@@ -375,7 +428,7 @@ class Driver {
   // ── grading ────────────────────────────────────────────────────────────────
 
   grade(steady) {
-    const rep = this.fx.report();
+    const rep = this.fxReport();
     const llmTurns = fs.existsSync(this.llmJournal)
       ? fs.readFileSync(this.llmJournal, 'utf8').trim().split('\n').filter(Boolean).length
       : 0;
@@ -396,7 +449,7 @@ class Driver {
     // The specific defect class that has bitten twice: raw match fails where
     // the normalized one succeeds. If that is happening, the naive matcher is
     // actively lying and any run graded with it is void.
-    const mangled = this.fx.sent.filter((s) => {
+    const mangled = this.fxReplies().filter((s) => {
       const m = /f24c3-[a-z0-9-]+/i.exec(normalizeForMatch(s.content));
       return m && !naiveMatch(s.content, m[0]);
     });
@@ -465,7 +518,7 @@ class Driver {
   }
 
   cleanup() {
-    for (const p of [this.child, this.llm]) {
+    for (const p of [this.child, this.llm, ...this.children]) {
       try {
         p?.kill('SIGKILL');
       } catch {
@@ -510,9 +563,16 @@ async function main() {
   fs.mkdirSync(args.runDir, { recursive: true });
 
   const d = new Driver(args);
-  d.fx = new DiscordFixture();
-  await d.fx.start();
-  d.note(`discord fixture on ${d.fx.apiBase} (gateway ${d.fx.gatewayUrl})`);
+  d.botToken = `MTIz.f24c3.${crypto.randomBytes(16).toString('hex')}`;
+  const banner = d.startFixture(
+    'f24-discord-fixture.mjs',
+    ['--token', d.botToken, '--heartbeat-ms', '5000'],
+    /DISCFIX_READY url=(\S+) gateway=(\S+)/,
+    'discord-fixture.log',
+  );
+  d.fxApi = banner[1];
+  d.fxGateway = banner[2];
+  d.note(`discord fixture on ${d.fxApi} (gateway ${d.fxGateway})`);
   d.llmUrl = d.startLlm();
   d.note(`llm fixture ${d.llmUrl}`);
   d.writeConfig();
