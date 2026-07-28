@@ -1,0 +1,2 @@
+--self-test: 3 assertions, 0 failure(s) (known-negative / known-positive / old-instrument-missed-it)
+selftest rc=0
