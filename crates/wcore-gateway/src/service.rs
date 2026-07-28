@@ -390,10 +390,27 @@ impl ServiceManager for ScheduledTaskManager {
             "/tn".into(),
             spec.service_name(),
             "/tr".into(),
+            // F24-J-H1. `--home` is here because Task Scheduler has NO
+            // mechanism for setting an environment variable on a registered
+            // task, while the other two families do: the launchd plist carries
+            // `EnvironmentVariables/WAYLAND_HOME` and the systemd unit carries
+            // `Environment=WAYLAND_HOME=`. Without it the Windows task started
+            // the runtime against the DEFAULT home rather than the home it was
+            // installed for, so `gateway status --profile <p>` reported
+            // `stopped` with a null pid for a gateway that was running — the
+            // same misreport shape as F24-B-H1, one field over. Measured live
+            // on the real box: task Last Run Time recorded, `wayland-core.exe`
+            // in the process table, status `stopped`.
+            //
+            // The home is passed as an ARGUMENT, not by wrapping the command in
+            // a shell that sets a variable. A `cmd /c "set WAYLAND_HOME=..."`
+            // wrapper would interpolate an operator-supplied path into a
+            // shell string, which is the injection shape AGENTS.md forbids.
             format!(
-                "\"{}\" gateway run --profile {}",
+                "\"{}\" gateway run --profile {} --home \"{}\"",
                 spec.binary.display(),
-                spec.sanitised_profile()
+                spec.sanitised_profile(),
+                spec.home.display()
             ),
             "/sc".into(),
             "onlogon".into(),
@@ -596,6 +613,46 @@ mod tests {
         assert_eq!(argv[0], "schtasks");
         assert!(argv.iter().any(|a| a == "onlogon"));
         assert!(argv.iter().any(|a| a == "/f"));
+    }
+
+    #[test]
+    fn every_family_carries_the_home_into_the_registration_it_writes() {
+        // F24-J-H1, and it is a THREE-family assertion on purpose. Windows was
+        // the only family that carried no home, and it was the only family
+        // without a test that said it had to. Measured live on the real box:
+        // the task launched the runtime, the runtime resolved the DEFAULT home,
+        // and `gateway status --profile f24j` answered `stopped` with a null
+        // pid about a process that was in the task list.
+        let s = spec();
+        let home = s.home.display().to_string();
+
+        let systemd = SystemdManager
+            .unit_text(&s)
+            .expect("systemd always writes a unit");
+        assert!(
+            systemd.contains(&home),
+            "systemd unit lost the home:\n{systemd}"
+        );
+
+        let launchd = LaunchdManager
+            .unit_text(&s)
+            .expect("launchd always writes a unit");
+        assert!(
+            launchd.contains(&home),
+            "launchd plist lost the home:\n{launchd}"
+        );
+
+        // Windows registers through a command line and has no unit, so the
+        // home has to appear in the argv or it appears nowhere.
+        let argv = ScheduledTaskManager.install_argv(&s);
+        assert!(
+            argv.iter().any(|a| a.contains(&home)),
+            "the schtasks registration lost the home: {argv:?}"
+        );
+        assert!(
+            argv.iter().any(|a| a.contains("--home")),
+            "the schtasks registration must pass --home explicitly: {argv:?}"
+        );
     }
 
     #[test]
