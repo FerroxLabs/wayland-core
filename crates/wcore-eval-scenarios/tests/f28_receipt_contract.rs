@@ -218,9 +218,13 @@ fn an_unsigned_receipt_is_structurally_valid_but_carries_no_authority() {
 // The eight F28-03 bindings, each with its OWN failure code.
 // ---------------------------------------------------------------------------------------
 
+/// One binding removed from an otherwise-valid fixture. Named rather than `#[allow]`ed —
+/// suppressing a lint to reach a gate is exactly what this phase is not permitted to do.
+type BindingMutation = Box<dyn Fn(&mut CertBindingsV2)>;
+
 #[test]
 fn each_missing_binding_is_rejected_with_its_own_code() {
-    let cases: Vec<(&str, Box<dyn Fn(&mut CertBindingsV2)>)> = vec![
+    let cases: Vec<(&str, BindingMutation)> = vec![
         (
             "F28R-B01",
             Box::new(|b: &mut CertBindingsV2| b.candidate.clear()),
