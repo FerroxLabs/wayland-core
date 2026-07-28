@@ -1,0 +1,4 @@
+ASSERT_1_KNOWN_POSITIVE=PASS (repaired matcher reports FOUND)
+ASSERT_2_KNOWN_NEGATIVE=PASS (repaired matcher reports ABSENT)
+ASSERT_3_OLD_MATCHER_MISSED_IT=PASS (old rc=0 found-shaped on a clean file; repaired rc=1)
+SELFTEST_RESULT=PASS
