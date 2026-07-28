@@ -199,15 +199,19 @@ pub enum JourneyError {
     DirtyReconciliation { duplicates: u64, losses: u64 },
     #[error("binary digest mismatch: receipt records {recorded}, verifier computed {computed}")]
     DigestMismatch { recorded: String, computed: String },
-    #[error("binary is missing or unreadable at {path}: {source}")]
-    BinaryUnreadable { path: String, source: String },
+    // NOT named `source`: thiserror treats a field of that name as the error
+    // source and demands it implement `std::error::Error`, which `String` does
+    // not. The io error is carried as text so this enum can stay `PartialEq`
+    // and a test can name the variant it expects.
+    #[error("binary is missing or unreadable at {path}: {reason}")]
+    BinaryUnreadable { path: String, reason: String },
 }
 
 /// sha256 a file and return the lowercase hex digest.
 pub fn sha256_file(path: &Path) -> Result<String, JourneyError> {
-    let bytes = std::fs::read(path).map_err(|source| JourneyError::BinaryUnreadable {
+    let bytes = std::fs::read(path).map_err(|error| JourneyError::BinaryUnreadable {
         path: path.display().to_string(),
-        source: source.to_string(),
+        reason: error.to_string(),
     })?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
