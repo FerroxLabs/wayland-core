@@ -27,16 +27,45 @@
 //! it. At ~0.20 ms per object that budget is exhausted somewhere near 125 000
 //! objects.
 //!
-//! So the model makes a falsifiable prediction: grant over a subtree of ~200 000
+//! So the model made a falsifiable prediction: grant over a subtree of ~200 000
 //! objects and the SAME command that passes today must fail with exactly
 //! `SandboxError::Timeout` — the reported symptom — with nothing else changed.
-//! Rung 11 demands that failure and FAILS if it does not arrive; rung 12 is its
-//! matched pair, identical in every respect except size.
 //!
-//! If both rungs land, F-KR-07's red is attributed to the SIZE of the directory
-//! the test chose to grant over (`std::env::temp_dir()`, unbounded and shared
-//! with every other process on the host) and not to the non-existent allowlist
-//! entry the test is named for — which part 1, rung 3 already cleared in 107 ms.
+//! # THE PREDICTION WAS REFUTED, AND THE REFUTATION IS THE RESULT
+//!
+//! Measured on `SeanDesktop`, run 3:
+//!
+//! ```text
+//! rung 11   200 000 objects   19 487 ms   Ok(0)     <- predicted >25 000 ms and a Timeout
+//! rung 12       200 objects      133 ms   Ok(0)
+//! ```
+//!
+//! Rung 11 FAILED, on its own assertion, exactly as it was written to. Two
+//! things follow, and they point in opposite directions:
+//!
+//! * **The size relationship is confirmed and large.** Same command, same 10s
+//!   manifest, same two-entry allowlist; one variable changed, and the cost
+//!   moved 133 ms -> 19 487 ms, a **146x spread**. Subtree size is unambiguously
+//!   the dominant cost term.
+//! * **The linear extrapolation was wrong.** Cost is SUBLINEAR at scale:
+//!   ~0.20 ms/object at 8 000 objects but ~0.097 ms/object at 200 000. The
+//!   25s budget is therefore reached nearer ~250 000 objects than the ~125 000
+//!   predicted, and `%TEMP%`'s measured ~10 s at 57 636 entries is roughly twice
+//!   what the synthetic curve predicts for that count — real temp trees are not
+//!   shaped like synthetic ones, and other processes write to `%TEMP%` during
+//!   the measurement.
+//!
+//! So this ladder does NOT reproduce `SandboxError::Timeout` on demand, and the
+//! mechanism of the originally reported 12/12 red remains UNPROVEN. What it does
+//! establish, executably, is what the red is NOT: not the non-existent allowlist
+//! entry (part 1 rung 3, green in 107 ms), not the two-entry allowlist shape
+//! (rung 12, green in 133 ms), not the sandbox and not the command (part 1 rung
+//! 1, green in 112 ms) — and that the test's cost is dominated by the size of
+//! `std::env::temp_dir()`, a directory that is unbounded, shared with every
+//! other process on the host, and outside the test's control.
+//!
+//! The refuted prediction is left in place rather than retuned to fit. A rung
+//! edited until it passes measures nothing.
 
 #![cfg(windows)]
 
