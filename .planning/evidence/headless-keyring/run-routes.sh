@@ -30,9 +30,14 @@ for i in $(seq 1 20); do
   sleep 0.3
 done
 
+# The config file name is `config.toml` inside WAYLAND_HOME, confirmed against the
+# product itself: `wayland-core --config-path` prints `$WAYLAND_HOME/config.toml`.
+# An earlier revision of this harness wrote `wcore.toml`; route R0 then failed with
+# "No API key found" instead of the keyring error, i.e. the CONTROL DID NOT
+# REPRODUCE, which is what caught the mistake. Keep R0 as the harness's own gate.
 write_config() {           # $1 = home dir, $2 = extra toml
   mkdir -p "$1"
-  cat > "$1/wcore.toml" <<EOF
+  cat > "$1/config.toml" <<EOF
 [default]
 provider = "mock"
 

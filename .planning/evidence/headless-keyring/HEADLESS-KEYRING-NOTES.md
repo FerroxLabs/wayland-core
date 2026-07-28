@@ -102,17 +102,99 @@ so the journaled path is the DEFAULT path.
 This also identifies what remedy route 2 ("disable session persistence") must mean in
 practice: `[session] enabled = false`. Note that key is not named anywhere in the error text.
 
-## Still to establish (live, no OS keyring reachable)
+## LIVE RESULTS — binary built at this lane's own SHA
 
-- [ ] R0: reproduce the bare failure headless (control — the gate must be able to fail)
-- [ ] R1: remedy route 1 — `credentials.backend = "encrypted-file"` + passphrase. Does it
-      START and COMPLETE A REAL TURN, or land in a second error?
-- [ ] R2: remedy route 2 — "disable session persistence". **Does a flag/config for this even
-      exist?** If not, that string is advertised-but-dead on its face.
-- [ ] R3: anything `--help` points a headless operator toward.
-- [ ] R4: why did other lanes run headless on hetzner fine tonight? Conditional gate, or did
-      they configure around it? (cheap check against their evidence)
+`/root/wayland-hlkr/target/release/wayland-core`, `wayland-core 0.12.25`, built from
+`09686599` (this branch), `BUILDRC=0`. Condition created by stripping the session bus
+(`env -u DBUS_SESSION_BUS_ADDRESS -u XDG_RUNTIME_DIR -u DISPLAY`) — i.e. a container / CI
+runner / minimal VM. A loopback OpenAI-compatible mock stands in for the provider so that
+"started" can be told apart from "completed a turn"; contact is measured from the **mock's
+own log**, never the product's stdout.
 
-## Verdict so far
+**Harness self-check fired once, as designed.** The first revision wrote `wcore.toml`; R0
+then failed with "No API key found" rather than the keyring error — the control did not
+reproduce, which is what caught it. Corrected to `config.toml` (confirmed against
+`wayland-core --config-path`). Kept R0 as the harness's own gate.
 
-NOT YET REACHED. E3 is solid and already reportable. Severity depends entirely on R1/R2.
+| route | config written | passphrase | rc | provider contact | outcome |
+|---|---|---|---|---|---|
+| R0 control | none | no | 1 | no | **keyring error reproduced** — condition established |
+| R1a | `[credentials] backend="encrypted-file"` (literal text) | no | 1 | no | key **ignored**, identical error re-emitted |
+| R1b | same literal | yes | 0 | yes | turn completed — *but the config clause was ignored; the passphrase did it* |
+| R1c | `[storage.credentials] backend="encrypted-file"` | no | 1 | no | **hard TOML parse error, config unloadable** |
+| R1d | same | yes | 1 | no | **hard TOML parse error** |
+| R1e | `[storage.credentials] backend="encrypted_file"` | yes | 1 | no | **hard TOML parse error** (unit vs struct variant) |
+| R1f | same | no | 1 | no | **hard TOML parse error** |
+| R1g | **none at all** | yes | 0 | yes | **turn completed** |
+| R1h | `[storage.credentials.backend.encrypted_file]` + 2 paths | yes | 0 | yes | turn completed |
+| R1i | same | no | 1 | no | error blames a "wrong unlock passphrase" never supplied |
+| R2 | `[session] enabled = false` | no | 0 | yes | **turn completed** |
+
+Verbatim, R0 (and R1a, identically):
+
+```
+error: Session persistence authority unavailable: secure recovery storage is unavailable:
+no OS keyring was usable and no encrypted credentials vault is unlocked. Configure an OS
+keyring, or set credentials.backend to "encrypted-file" and supply its unlock passphrase
+```
+
+R1a, having been told to set `credentials.backend`, and having set exactly that:
+
+```
+WARN ignoring unknown or mis-sectioned config key `credentials` in .../config.toml
+     — it has no effect; check for a typo or wrong [section] key=credentials
+```
+…followed by the **identical** error again. That is the closed loop, measured.
+
+R1c/R1d — the same value at the section the schema actually defines:
+
+```
+Error: failed to parse .../config.toml: TOML parse error at line 14, column 11
+14 | backend = "encrypted-file"
+   |           ^^^^^^^^^^^^^^^^
+unknown variant `encrypted-file`, expected one of `auto`, `plaintext`, `keyring`, `encrypted_file`
+```
+
+R1e — spelling corrected to the underscore the parser just asked for:
+
+```
+14 | backend = "encrypted_file"
+   |           ^^^^^^^^^^^^^^^^
+invalid type: unit variant, expected struct variant
+```
+
+because `CredentialsBackend::EncryptedFile { cipher_path, key_params_path }`
+(`credentials.rs:56-61`) is a **struct** variant: it can never be a bare string in any
+spelling. R1h is the only config form that loads, and it requires inventing two paths.
+
+R1i — right backend, no passphrase:
+
+```
+error: Session persistence authority unavailable: secure recovery storage could not be
+read: the configured store rejected this profile's recovery key. An encrypted vault opened
+with the wrong unlock passphrase reads this way — re-check the passphrase for this profile
+```
+
+i.e. it tells the operator to re-check a passphrase they never set, and still never names
+`WAYLAND_VAULT_PASSPHRASE`.
+
+### R3 — `--help` (13,921 bytes) offers a headless operator nothing
+
+`keyring` 0 hits, `vault` 0, `passphrase` 0, `WAYLAND_VAULT` 0, `credential` 1.
+`--doctor` probes `wlrctl`/`grim`/`chromium`/`ollama` and `WAYLAND_DISPLAY`/`DISPLAY` —
+it does not probe the credential/keyring authority that actually blocks startup.
+
+## Verdict
+
+**Route 1 (`credentials.backend = "encrypted-file"`) is ADVERTISED-BUT-DEAD.** Every literal
+reading of it either has no effect (and re-emits the identical error) or hard-fails config
+parsing. It is wrong in three independent ways at once — section, spelling, and shape — and
+no operator can recover from it using only product-supplied text, because `WAYLAND_VAULT_PASSPHRASE`
+appears in **no** doc, **no** `--help`, and **no** error message. The one string that does
+name it is the *plaintext-fallback warning*, which is only printed when `WAYLAND_HOME` is set.
+
+**Route 2 (`[session] enabled = false`) WORKS** — but that key is not named in the error text
+either, and it works by turning off durable sessions, i.e. by giving up a feature.
+
+**The actual one-line fix is `WAYLAND_VAULT_PASSPHRASE=<anything>` (R1g), which the product
+never tells anyone.** Adding the advertised config line on top of it *breaks* it (R1d).
