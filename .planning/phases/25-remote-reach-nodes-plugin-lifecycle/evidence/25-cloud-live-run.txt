@@ -1,0 +1,135 @@
+=== HOST ===
+Ubuntu-2404-noble-amd64-base
+2026-07-28T08:11:07Z
+commit: 5e620ef06487dc9477a2b10f2fe0045dd642c29d
+app scoped to: wayland-f25-test (token variable name: WAYLAND_F25_CLOUD_TOKEN, value never printed)
+BINARY FRESHNESS: FRESH (bin 1785211823 > src 1785211496)
+
+=== BACKEND LIST (shipped binary) ===
+BACKEND    KIND       AVAILABLE    PROBE BASIS            DETAIL
+local      local      yes          sandbox_backend_probe  platform containment backend 'bubblewrap' probed available
+container  container  yes          daemon_ping            container daemon answered a version ping: server 29.2.1
+ssh        ssh        NO           credential_absent      WAYLAND_EXEC_SSH_TARGET is not set
+cloud      cloud      yes          vendor_api_call        vendor API answered 200 for app wayland-f25-test machine listing
+
+Availability is answered from a real probe in every row — the container backend from a daemon ping rather than socket presence, the ssh backend from a real handshake, the cloud backend from an authenticated API call. A backend with no credential reports NO and names what is missing; it never falls back to another backend.
+LIST_EXIT=0
+
+=== PROBE cloud ===
+backend:       cloud
+available:     true
+probe basis:   VendorApiCall
+probe detail:  vendor API answered 200 for app wayland-f25-test machine listing
+healthy:       true
+live tasks:    0
+health detail: vendor API answered 200 for app wayland-f25-test machine listing
+PROBE_EXIT=0
+
+=== PRE-RUN: the app must be empty before we start ===
+200
+[]
+
+=== RUN local (same task, same commit) ===
+task:        f25-reference
+backend:     local
+transport:   Local via localhost
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: NotApplicable
+wall ms:     1
+receipt:     /root/f25-cloud-evidence/receipt-local.json
+RUN_local_EXIT=0
+
+=== RUN container (same task, same commit) ===
+task:        f25-reference
+backend:     container
+transport:   Container via wayland-f25-f25-reference
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: NotApplicable
+wall ms:     227
+receipt:     /root/f25-cloud-evidence/receipt-container.json
+RUN_container_EXIT=0
+
+=== RUN cloud — THE FOURTH SURFACE ===
+task:        f25-reference
+backend:     cloud
+transport:   Cloud via 8ed9d7dc3e5618
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: Observed { transitions: ["created:created", "started:started", "suspended:suspended", "resumed:started previous_state=suspended", "ram-witness before=f25-ram-witness-f25-reference-nonce boot_id=d9b32269-d2e2-46cd-a840-6327465d7b04 uptime=1s / after=f25-ram-witness-f25-reference-nonce boot_id=d9b32269-d2e2-46cd-a840-6327465d7b04 uptime=3s"] }
+wall ms:     9745
+receipt:     /root/f25-cloud-evidence/receipt-cloud.json
+RUN_cloud_EXIT=0
+
+=== RECEIPT INTEGRITY (cloud) ===
+receipt:   /root/f25-cloud-evidence/receipt-cloud.json
+schema:    wayland.execution-backend-receipt v1
+backend:   cloud
+key id:    8fd3f091a3e8c133937ecb1b9466fb0e87f8e542e77d861ae90403ab635d7fd4
+terminal:  Success
+INTEGRITY: OK — body digest, event ordering, single terminal event and internal consistency all hold.
+IDENTITY:  NOT ESTABLISHED by this command. A receipt cannot authenticate itself: verifying identity requires a verifying key the caller already pinned, which a receipt file does not carry. Use the conformance harness or a caller holding the pinned key.
+RECEIPT_VERIFY_EXIT=0
+
+=== HIBERNATION FIELD, VERBATIM FROM THE CLOUD RECEIPT ===
+{
+  "kind": "observed",
+  "transitions": [
+    "created:created",
+    "started:started",
+    "suspended:suspended",
+    "resumed:started previous_state=suspended",
+    "ram-witness before=f25-ram-witness-f25-reference-nonce boot_id=d9b32269-d2e2-46cd-a840-6327465d7b04 uptime=1s / after=f25-ram-witness-f25-reference-nonce boot_id=d9b32269-d2e2-46cd-a840-6327465d7b04 uptime=3s"
+  ]
+}
+HIBERNATION_READ_EXIT=0
+
+=== NORMALIZED EQUIVALENCE DIFF (local vs container vs cloud) ===
+receipts compared: 3
+  local      transport=local      endpoint=localhost wall_ms=1
+  container  transport=container  endpoint=wayland-f25-f25-reference wall_ms=227
+  cloud      transport=cloud      endpoint=8ed9d7dc3e5618 wall_ms=9745
+
+EXPECTED-DIVERGENT fields (excluded from the normalized body by design):
+  local      backend.backend_id     local
+  local      backend.instance_id    89485cccb5044869a604b6e9d6afcbf8
+  local      backend.version        0.12.25
+  local      backend.key_id         734fdfe33de0727253404f3f63b3041733a90a1ed085af2d64a16a9d0a454322
+  local      transport.kind         local
+  local      transport.endpoint     localhost
+  local      timing.wall_ms         1
+  local      hibernation            {"kind":"not_applicable"}
+  container  backend.backend_id     container
+  container  backend.instance_id    89485cccb5044869a604b6e9d6afcbf8
+  container  backend.version        0.12.25
+  container  backend.key_id         9c4b6df51086f641776dce68a3c7e39d550c09f77dd08db99102d53c05829777
+  container  transport.kind         container
+  container  transport.endpoint     wayland-f25-f25-reference
+  container  timing.wall_ms         227
+  container  hibernation            {"kind":"not_applicable"}
+  cloud      backend.backend_id     cloud
+  cloud      backend.instance_id    89485cccb5044869a604b6e9d6afcbf8
+  cloud      backend.version        0.12.25
+  cloud      backend.key_id         8fd3f091a3e8c133937ecb1b9466fb0e87f8e542e77d861ae90403ab635d7fd4
+  cloud      transport.kind         cloud
+  cloud      transport.endpoint     8ed9d7dc3e5618
+  cloud      timing.wall_ms         9745
+  cloud      hibernation            {"kind":"observed","transitions":["created:created","started:started","suspended:suspended","resumed:started previous_state=suspended","ram-witness before=f25-ram-witness-f25-reference-nonce boot_id=d9b32269-d2e2-46cd-a840-6327465d7b04 uptime=1s / after=f25-ram-witness-f25-reference-nonce boot_id=d9b32269-d2e2-46cd-a840-6327465d7b04 uptime=3s"]}
+
+NORMALIZED DIFF: EQUIVALENT
+The four normalized bodies agree on task digests, resource budget, backend ceiling, event ordering and content digests, artifact digest, terminal status, exposed-secret names and egress decision.
+DIFF_EXIT=0
+
+=== POST-RUN: the app must be empty again ===
+200
+[]
+
+=== EXIT LEDGER (each captured before any pipe) ===
+LIST_EXIT=0 PROBE_EXIT=0 LOCAL_EXIT=0 CONTAINER_EXIT=0 CLOUD_EXIT=0 VERIFY_EXIT=0 DIFF_EXIT=0

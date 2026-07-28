@@ -1,0 +1,107 @@
+=== HOST / COMMIT ===
+Ubuntu-2404-noble-amd64-base
+2026-07-28T08:12:42Z
+commit: 5e620ef06487dc9477a2b10f2fe0045dd642c29d
+
+=== the controller does NOT have the guest's file ===
+controller /etc/alpine-release: ABSENT (cat exits nonzero here)
+cat: /etc/alpine-release: No such file or directory
+controller_cat_exit=1
+
+=== build the provenance task ===
+sha256 OF THE SUBMITTED INPUT (the echo-defect digest): 0f7545d631dd44c993749b9ba2f66684427ca7eb761223e1adeccde7713c2370
+
+=== NEGATIVE CONTROL: the same task on the LOCAL backend must not succeed ===
+task:        f25-provenance
+backend:     local
+transport:   Local via localhost
+terminal:    Failure { code: "exit-1" }
+input sha:   0f7545d631dd44c993749b9ba2f66684427ca7eb761223e1adeccde7713c2370
+workspace:   e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+hibernation: NotApplicable
+wall ms:     2
+receipt:     /root/f25-cloud-evidence/receipt-prov-local.json
+PROV_local_EXIT=0
+
+=== the task on the CLOUD backend ===
+task:        f25-provenance
+backend:     cloud
+transport:   Cloud via 873264c0070738
+terminal:    Success
+input sha:   0f7545d631dd44c993749b9ba2f66684427ca7eb761223e1adeccde7713c2370
+workspace:   e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+artifact:    stdout.bin bf4e4df148b791a0915b623982122ab212b50e0a4b363a8b75fe60e12293ac17 (8 bytes)
+hibernation: Observed { transitions: ["created:created", "started:started", "suspended:suspended", "resumed:started previous_state=suspended", "ram-witness before=f25-ram-witness-f25-provenance-nonce boot_id=3fd423f5-edf8-4a48-bcc1-85f8f321bb61 uptime=1s / after=f25-ram-witness-f25-provenance-nonce boot_id=3fd423f5-edf8-4a48-bcc1-85f8f321bb61 uptime=2s"] }
+wall ms:     10879
+receipt:     /root/f25-cloud-evidence/receipt-prov-cloud.json
+PROV_cloud_EXIT=0
+
+=== INDEPENDENT OBSERVATION: ask the vendor directly what the guest's file says ===
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/usr/lib/python3.12/json/__init__.py", line 293, in load
+    return loads(fp.read(),
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/json/__init__.py", line 346, in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/json/decoder.py", line 337, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/json/decoder.py", line 355, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+oracle machine: 
+oracle raw: 
+oracle machine destroyed
+
+=== VERDICT ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "/usr/lib/python3.12/json/__init__.py", line 346, in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/json/decoder.py", line 337, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/json/decoder.py", line 355, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+PROVENANCE_EXIT=1
+
+=== app must be empty ===
+200
+[{"id":"82d1d97b062338","name":"aged-paper-9847","state":"created","region":"iad","instance_id":"01KYKWHB3YHRJWJYZ7FYMXV4EG","private_ip":"fdaa:a3:8ac:a7b:ef:5e91:9bfe:2","config":{"init":{"exec":["/bin/sleep","inf"]},"guest":{"cpu_kind":"shared","cpus":1,"memory_mb":256},"metadata":{"wayland_task_nonce":"f25-provenance-oracle"},"image":"alpine:3.20","restart":{"policy":"no"}},"incomplete_config":null,"image_ref":{"registry":"docker-hub-mirror.fly.io","repository":"library/alpine","tag":"3.20","digest":"sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e","labels":null},"created_at":"2026-07-28T08:12:54Z","updated_at":"2026-07-28T08:12:54Z","events":[{"id":"01KYKWHB6BT158DX995C7MGVCD","type":"launch","status":"created","source":"user","timestamp":1785226374347},{"id":"01KYKWHB3YHRJWJYZ7G160YQVY","type":"launch","status":"pending","source":"flyd","timestamp":1785226374270}],"host_status":"ok","cordoned":false}]
+
+
+=== EXIT LEDGER ===
+PROV_local_EXIT=0 PROV_cloud_EXIT=0 PROVENANCE_EXIT=1
+=== HOST / COMMIT ===
+Ubuntu-2404-noble-amd64-base
+2026-07-28T08:14:49Z
+commit: 5e620ef06487dc9477a2b10f2fe0045dd642c29d
+oracle machine: 48ed957da55298
+oracle response: {"stdout":"3.20.10\n","stderr":"","exit_code":0,"exit_signal":0}
+
+=== DESTROY the oracle machine, then VERIFY by re-reading ===
+200
+{"ok":true}
+machines remaining in wayland-f25-test: 0 []
+ORACLE_CLEANUP_VERIFIED_EXIT=0
+
+=== PROVENANCE VERDICT ===
+guest /etc/alpine-release, read by an INDEPENDENT instrument: '3.20.10\n'
+  sha256(guest file)              = bf4e4df148b791a0915b623982122ab212b50e0a4b363a8b75fe60e12293ac17 (8 bytes)
+  sha256(submitted input)         = 0f7545d631dd44c993749b9ba2f66684427ca7eb761223e1adeccde7713c2370   <- the echo-defect digest
+  cloud receipt artifact sha256   = bf4e4df148b791a0915b623982122ab212b50e0a4b363a8b75fe60e12293ac17 (8 bytes)
+  cloud receipt terminal          = {"kind": "success"}
+  LOCAL receipt terminal          = {"kind": "failure", "code": "exit-1"}  <- negative control
+  local produced an artifact?     = False
+PROVENANCE: PASS
+  The cloud artifact is the GUEST's file, which the controller does not have.
+  The same task on the local backend FAILED with exit-1 and published no artifact.
+  The task therefore ran ON the cloud machine and was not echoed by the controller.
+PROVENANCE_EXIT=0
+
+=== EXIT LEDGER ===
+ORACLE_CLEANUP_VERIFIED_EXIT=0 PROVENANCE_EXIT=0
