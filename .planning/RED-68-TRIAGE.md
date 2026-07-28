@@ -63,7 +63,8 @@ would have cleared a test the re-run never executed. The first pass reported
 been folded into "all environment". After the second and third batches:
 
 ```
-PASS_SERIAL=65   FAIL_SERIAL=1   ABSENT=2
+batch 2  PASS_SERIAL=65   FAIL_SERIAL=1   ABSENT=2
+batch 3  PASS_SERIAL=67   FAIL_SERIAL=1   ABSENT=0      <- final, nothing unmeasured
 ```
 
 ### 1c. Two more, both of which would have produced a wrong headline
