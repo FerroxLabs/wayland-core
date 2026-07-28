@@ -1,0 +1,32 @@
+# CRIT-03 -- 'Published claims and limitations match raw redacted evidence and contain
+#             no unsupported superiority language.'
+# GRADE: MET_WITH_STATED_EXCEPTIONS
+#
+# Published set: 9 allowed claims, 0 comparatives, 20 limitations, 10 attempted and
+# refused, 12 refusal rules, 24 corpus rows, 12 DISTINCT rules actually fired.
+#
+# 'match raw redacted evidence' -- publication is a CODE PATH, proved both ways:
+#   re-render all three documents from the committed register and diff -> BYTE IDENTICAL
+#   tamper test: append one flattering sentence, re-diff          -> DETECTED
+#   publish against a register with one broken reference          -> REFUSED, wrote
+#                                                                    NOTHING, named the
+#                                                                    offending claim
+# The tamper test is what stops the clean diff passing vacuously.
+#
+# 'no unsupported superiority language' -- rule unbounded_superiority, plus scope
+# containment and a mandatory resolving evidence pointer on EVERY claim. ATK-11 fires
+# the superiority rule on a VERBATIM ledger quotation severed from its qualifier.
+#
+# THE STATED EXCEPTIONS, all named by 30-03 itself and none discovered later:
+#  E1 The checker proves a claim points at something that exists, is bounded, is
+#     scoped correctly and is classified consistently. It CANNOT prove the sentence
+#     means what the evidence shows. That residual is a reading task.
+#  E2 The comparative lexicon is a finite list; a sufficiently creative sentence can
+#     compare without matching it. Scope containment and the evidence-pointer
+#     requirement do more work than the lexicon does.
+#  E3 The evidence-bundle secret scan holds ZERO secrets, so in production it cannot
+#     fail and proves only that the mechanism ran. Stated in MANIFEST.tsv itself.
+#
+# This is the one criterion whose evidence resolves and is proven end to end, which is
+# why it is the only one graded above PARTIAL -- and the asymmetric verifier had to be
+# paid for it.

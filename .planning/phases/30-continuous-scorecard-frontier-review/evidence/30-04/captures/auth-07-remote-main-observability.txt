@@ -1,0 +1,29 @@
+# AUTH-07 -- is this lane's HEAD contained in main, on the GitHub remote?
+#
+# TWO INSTRUMENT DEFECTS WERE FOUND WHILE TAKING THIS MEASUREMENT, both recorded
+# rather than quietly corrected:
+#  (1) rtk silently FILTERED an interactive grep of this ref list -- it printed nothing
+#      while grep -c on the same pipeline counted 2. Everything below is file-captured.
+#  (2) MY OWN regex broke when I added %(objectname) to the for-each-ref format: the
+#      anchor /(main|master)$ then had a trailing SHA after it and matched ZERO lines,
+#      while the unanchored count said 2. Same defect class the brief names. Fixed by
+#      matching on the refname-only format, below.
+
+HEAD=5d48ec270f642498cc095bd21ad4a256e628c4c3
+REMOTE_MAIN_SHA(ls-remote gh refs/heads/main)=61b79c4f90f71fe2cf243affa7620b3c9b607f14
+
+--- remote-tracking refs named main or master (refname-only format) ---
+refs/remotes/gh/main
+refs/remotes/origin/main
+COUNT=2
+
+--- their SHAs ---
+refs/remotes/gh/main = 61b79c4f90f71fe2cf243affa7620b3c9b607f14
+refs/remotes/origin/main = ea3bb1c584b157e7e83d34db25d96e1136e9f584
+
+--- is this lane's HEAD an ancestor of remote main? ---
+HEAD_IS_IN_REMOTE_MAIN=NO
+
+--- FALSIFICATION CONTROL: the identical check against main's own tip must answer YES,
+--- or the NO above is vacuous ---
+CONTROL=YES -- the check CAN answer YES, so the NO above is a real measurement

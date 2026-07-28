@@ -1,0 +1,13 @@
+# AUTH-06 -- retained-ref inventory, measured two ways
+# The plan's expression is: git for-each-ref | grep -cv '^refs/heads/'   floor 37
+PLAN_EXPRESSION_COUNT=275
+# ...but that INCLUDES refs/remotes, which the planning measurement did not:
+REMOTE_TRACKING=238
+# The TIGHT count -- the refs whose deletion is actually the reserved action --
+# is tags plus refs/f20a/*, and it reproduces the planning baseline of 37 EXACTLY:
+TAGS=36
+F20A=1
+TIGHT_TOTAL=37
+BASELINE=37
+# FINDING: against an actual 275, a floor of 37 could not detect the deletion of 238
+# refs. The tight count is the meaningful one and it is exact, not merely above a floor.

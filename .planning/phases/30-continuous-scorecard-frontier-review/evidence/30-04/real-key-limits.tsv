@@ -1,0 +1,14 @@
+# Every point in Phase 30 at which a real key, a real account or a Sean-reserved action
+# was the ONLY missing input. NONE of these is graded as met. Each names the exact
+# substitution that changes it, so a reader knows precisely what is different on the
+# day a real key exists.
+#
+# shape: KEY-NN::<what is missing>::substitution=<exact point>
+KEY-01::Sean's Ed25519 approval public key -- without it the bundled approval trust root is the all-zeros placeholder, so ALL NINE reserved actions including frontier positioning are structurally unreachable from this repository::substitution=crates/wcore-eval-scenarios/src/reserved_authority.rs:APPROVAL_ROOT_PUBKEY_HEX
+KEY-02::A live provider credential -- the security dimension could not be measured for any of the three tools because the shared loopback meter records body digests and per-leaf hashes, never bodies, so the frozen canary byte-search was never performable (LIM-01/02/03)::substitution=crates/wcore-eval-scenarios/src/fixtures/openai.rs
+KEY-03::Real provider billing -- cost was metered in synthetic fixture units against a scripted script; those units do not convert to money, so no dollar-cost claim exists (LIM-17)::substitution=a-live-provider-tier-run-with-real-billing-records
+KEY-04::A GitHub API credential -- pull requests, issue closures, release publications and deployments write NO git object, so no command in this repository can observe whether any occurred, for any actor, over the whole phase (AUTH-08/AUTH-09)::substitution=Sean's-own-view-of-the-GitHub-remote
+KEY-05::Phase 28's inherited real-key limits -- 28-04 graded its own Criterion 4 NOT MET and its acceptance gate did NOT pass, with zero_undispositioned_findings=false and zero_unresolved_critical_or_high=false::substitution=.planning/phases/28-native-cross-platform-certification/28-04-PHASE-VERDICT.md
+KEY-06::Phase 29's inherited real-key and real-release limits -- 29 graded its own goal NOT ACHIEVED with all four criteria PARTIAL, the runtime plugin and backend trust roots are still all-zeros placeholders, and cargo deny's real verdict is FAIL exit 5::substitution=.planning/phases/29-supply-chain-release-integrity/29-PHASE-VERDICT.md
+KEY-07::A second physical host authorisation -- hetzner-dsm cannot reach seandesktop (Permission denied publickey) and minting the key is a Sean authorization; this bounds Phase 25 Criterion 2 and is inherited unchanged::substitution=an-SSH-trust-relationship-only-Sean-can-mint
+KEY-08::Per-tool dialect compilation of the canonical script -- without it the correctness, recovery and cost comparatives CANNOT BE RE-TAKEN, so Criterion 2 cannot be re-graded at all (LIM-20). This one needs no credential, only a re-pre-registered protocol::substitution=a-protocol-v2-pre-registration-with-committed-translation-digests

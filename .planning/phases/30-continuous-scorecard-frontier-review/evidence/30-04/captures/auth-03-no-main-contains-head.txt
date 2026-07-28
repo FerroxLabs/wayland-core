@@ -1,0 +1,9 @@
+# AUTH-03 -- does any LOCAL branch named main or master contain this lane's HEAD?
+# command: git branch --contains HEAD --format='%(refname:short)'
+HEAD=5d48ec270f642498cc095bd21ad4a256e628c4c3
+--- branches containing HEAD ---
+lane/30-04
+--- count matching ^(main|master)$ ---
+MATCHES=0
+--- do main/master exist locally at all? ---
+LOCAL_MAIN_EXISTS=0

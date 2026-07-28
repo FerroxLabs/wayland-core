@@ -1,0 +1,24 @@
+# Machine-readable index of 30-04-POSITIONING-PACKET.md.
+# The packet is EVIDENCE Sean decides from. It contains no recommendation, no readiness
+# statement and no market comparison, and that omission is the requirement rather than
+# an oversight. This index is gate-checked free of readiness vocabulary.
+#
+# shape: PKT-NN::<section>::<count or state>::<source artifact>
+PKT-01::allowed claims as published::9::30-03-CLAIMS-ALLOWED.md
+PKT-02::peer comparatives published, in either direction::0::30-03-CLAIMS-ALLOWED.md
+PKT-03::claims attempted and refused, each with the rule that refused it::10::30-03-CLAIMS-PROHIBITED.md
+PKT-04::refusal rules in the checker::12::crates/wcore-eval-scenarios/src/claims.rs
+PKT-05::distinct rules actually fired by the paired attack corpus::12::evidence/30-03/attack-corpus.tsv
+PKT-06::published limitations, each with a substitution point::20::30-03-LIMITATIONS.md
+PKT-07::trial legs UNPROVEN, of 15::6::evidence/30-02/legs.tsv
+PKT-08::trial legs RUN but CONFOUNDED, of 15::9::30-02-TRIAL-RESULTS.md
+PKT-09::dimensions of five yielding a usable comparative::0::30-02-TRIAL-RESULTS.md
+PKT-10::surface rows with peer_delta UNPROVEN, of 148::148::evidence/30-01/surface-truths.tsv
+PKT-11::surface rows with operator_completeness UNPROVEN, of 148::148::evidence/30-01/surface-truths.tsv
+PKT-12::shipped surfaces owned by no coverage family::15::30-01-SURFACE-INVENTORY.md
+PKT-13::real-key and real-account limits enumerated::8::evidence/30-04/real-key-limits.tsv
+PKT-14::reserved actions, all structurally unreachable under the committed root::9::30-04-AUTHORITY-PROOF.md
+PKT-15::Success Criteria graded MET::0::evidence/30-04/criteria.tsv
+PKT-16::Success Criteria graded NOT_MET::2::evidence/30-04/criteria.tsv
+PKT-17::HIGH findings open across the phase, named with owners::7::30-PHASE-VERDICT.md
+PKT-18::positioning statements contained in this packet::0::30-04-POSITIONING-PACKET.md

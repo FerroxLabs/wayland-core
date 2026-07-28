@@ -1,0 +1,17 @@
+[ijfw] Smart mode
+[ijfw] Memory loaded (993 things remembered)
+[ijfw] Welcome back -- picking up where you left off.
+[ijfw] Ready.
+Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY.
+Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY.
+MCP issues detected. Run /mcp list for status.
+Hook system message: [ijfw] Smart mode
+[ijfw] Memory loaded (993 things remembered)
+[ijfw] Welcome back -- picking up where you left off.
+[ijfw] Ready.
+Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY.
+Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY.
+GRADE=PARTIAL
+
+Reasoning: The criterion asserts a multi-domain negative invariant. We can definitively prove the negative for frontier positioning and this specific lane's merge (Points 4-5), and we successfully proved the structural enforcement mechanisms (Points 1-3). However, `MET_WITH_STATED_EXCEPTIONS` fatally overclaims because issue closures, releases, deployments, and parallel merges (Point 6) are fundamentally unobservable from this local repository context. These are not minor "exceptions" to a proven rule; they are complete telemetry blind spots that cover the majority of the criterion's surface area. Because we can only generate resolving evidence for a fraction of the specified domains, the overall invariant is only PARTIAL, as the universal negative cannot be proven without comprehensive out-of-band telemetry.
+Hook system message: [ijfw] Session 1050 complete (993 memory entries).

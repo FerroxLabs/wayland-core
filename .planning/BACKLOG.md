@@ -1370,3 +1370,63 @@ lockfile but neither checks licenses, so a GPL/AGPL crate arriving via `hf-hub` 
 would have passed everything. Flipped to `all-features = true` after measuring the cost
 (`cargo deny --all-features check licenses bans sources` -> exit 0; advisories -> exactly the
 3 named errors). Cross-audit was 2-1 in favour; the dissent is recorded in `deny.toml`.
+### `BL-F30-REFCOUNT-GATE` — the retained-ref gate counts remote-tracking refs, so its floor is meaningless (MEDIUM)
+
+30-04's `RETAINED-EVIDENCE-REFS` gate asserts `git for-each-ref | grep -cv '^refs/heads/'` is at
+least **37**, the count measured at planning. In the lane worktree that expression reads **275**,
+because it includes **238 remote-tracking refs** the planning measurement did not. So the gate
+passes with 238 refs of headroom and **could not detect the deletion of any of them**. The *tight*
+count — `refs/tags` (36) plus `refs/f20a/*` (1) — is **37 exactly**, reproducing the baseline. The
+tight count is the meaningful one and it is what the gate should assert, as an equality-or-floor
+over `refs/tags` and `refs/f20a` rather than over everything that is not a branch. Both figures
+are recorded in `evidence/30-04/captures/auth-06-ref-count-two-ways.txt`. Not blocking: the tight
+count was taken and is exact.
+
+### `BL-F30-FORCED-MET-SED` — 30-04's MET-forcing gate seds a field that does not exist (MEDIUM)
+
+The `MET-IS-STILL-EXPENSIVE` gate forces a grade upward with
+`sed 's#"verdict": *"NOT_MET"#"verdict": "MET"#'`. The field `CriterionV1` actually carries is
+**`grade`**, not `verdict`. Run literally the sed is a **no-op** (measured:
+`PLAN_SED_IS_A_NO_OP=YES`), producing an unchanged document that verifies successfully, whereupon
+the gate reports `UNEXPECTED_MET_ACCEPTED` and exits 9 — failing, but for entirely the wrong
+reason, and telling a reader the asymmetry is broken when it is not. 30-04 ran the corrected form
+(`"grade"`), forced 2 grades, and captured the real refusal. Any future plan reusing this gate
+shape must sed `grade`.
+
+### `BL-F30-VERDICT-VERIFY-ARG` — 30-04's verdict-verify gate passes `--root`, the CLI takes `--repo-root` (LOW)
+
+`wayland-scorecard verify` declares `--document` and `--repo-root`. The plan's gate passes
+`--root .`, which clap rejects. Run as written the gate fails at argument parsing, which is safe
+but uninformative. 30-04 ran the corrected form.
+
+### `BL-F30-VACUOUS-MAIN-GATE` — "no local main contains HEAD" passes vacuously (MEDIUM)
+
+30-04's `NO-MAIN-MERGE` gate asserts no local branch named `main` or `master` contains the lane's
+HEAD. **There is no local `main` branch in this repository at all** (`LOCAL_MAIN_EXISTS=0`), so
+the gate passes at base, passes after any amount of work, and would still pass if the lane had
+merged to main on the remote. The plan conjoins it with a completion anchor, which proves the task
+ran but does not make the check mean anything. The determination that actually carries is the
+remote one: `ls-remote gh refs/heads/main` plus an ancestry test with a falsification control
+(`evidence/30-04/captures/auth-07-remote-main-observability.txt`). Future plans should assert
+against the **remote** ref, not a local branch that does not exist.
+
+### `BL-F30-AUDIT-CEILING-PREMISE` — the audit ceiling was stated on a false premise (MEDIUM)
+
+30-04's `read_first` states that *"this repository has NO remote-tracking refs at all, which is
+what bounds the audit."* There are **238**, and `refs/remotes/gh/main` is among them, its cached
+SHA matching a live `ls-remote` exactly. The conclusion (a residual ceiling exists) survives, but
+the reason is different and the ceiling is **narrower** than the plan assumed: the main-merge half
+is measurable and was measured. What genuinely cannot be observed is everything writing no git
+object — pull requests, issue closures, release publications and deployments. A plan asserting a
+limitation should measure the limitation before asserting it.
+
+### `BL-F30-ROADMAP-STALE-STATUS` — the ROADMAP progress table contradicts the tree for Phases 28 and 29 (MEDIUM)
+
+`.planning/ROADMAP.md`'s Status column states for Phase 28 *"IN PROGRESS — no phase verdict exists
+yet"* and *"28-04 not started"*, and for Phase 29 *"29-03 and 29-04 not started"*. All four
+artifacts exist on disk: `28-04-PHASE-VERDICT.md` (22.1K), `28-04-SUMMARY.md`,
+`29-PHASE-VERDICT.md` (20.4K), `29-04-SUMMARY.md`. This is 30-01's STALE-06/07/08 still
+unrepaired. It matters beyond tidiness because Phase 30's own verdict quotes its Success Criteria
+from this file — the **criteria text is current**; only the progress table is stale. 30-04 graded
+against the artifacts on disk, not against the table, and did not edit ROADMAP.md from inside the
+phase being graded.

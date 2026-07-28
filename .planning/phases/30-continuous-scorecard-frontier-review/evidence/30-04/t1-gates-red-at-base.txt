@@ -1,0 +1,10 @@
+AT-BASE MODULE-LANDED: rc=1 RED (can fail)
+AT-BASE CLOSED-ACTION: rc=1 RED (can fail)
+AT-BASE SINGLE-PRINCIPAL: rc=1 RED (can fail)
+AT-BASE NINE-DOMAIN: rc=1 RED (can fail)
+AT-BASE FAIL-CLOSED-PLACEHOLDER: rc=1 RED (can fail)
+AT-BASE ANTI-COLLAPSE: rc=1 RED (can fail)
+AT-BASE NO-SECRET-ON-ARGV: rc=1 RED (can fail)
+-- regression-guard legs, which SHOULD be green at base by design --
+F-021 count at base: 6
+INDEX_PUBKEY_HEX count at base: 6

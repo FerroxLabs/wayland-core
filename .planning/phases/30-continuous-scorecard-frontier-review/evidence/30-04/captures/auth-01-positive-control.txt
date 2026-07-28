@@ -1,0 +1,15 @@
+RUN_SHA=5d48ec270f642498cc095bd21ad4a256e628c4c3
+   Compiling wcore-config v0.12.25 (/root/wayland-30-04/crates/wcore-config)
+   Compiling wcore-eval-scenarios v0.12.25 (/root/wayland-30-04/crates/wcore-eval-scenarios)
+    Finished `release` profile [optimized] target(s) in 54.91s
+--- init-root ---
+AUTHORITY_INIT_ROOT=OK root_kind=throwaway_generated_at_run_time
+key_id=throwaway-not-seans-key-31007056bb20fee7 public_key_hex=31007056bb20fee7d394117aca261ac81b592a8fe4551b1921dc26f3c421ebed
+root=/tmp/tmp.cxaic9AVXN/root.json approval=/tmp/tmp.cxaic9AVXN/frontier-positioning.approval.json subject_sha256=d89c9063e7f33bdd657b6bc1306bdcc0c1d2a9ac84eb54a05cdf018a88d995b3
+NOTE: this root was generated at run time and is NOT Sean's approval key. It exists to prove the mechanism can ACCEPT a valid approval; an acceptance under it authorises nothing.
+--- seed file mode (must be 600) ---
+600 /tmp/tmp.cxaic9AVXN/throwaway-not-seans-key-31007056bb20fee7.seed
+--- verify under the THROWAWAY root ---
+AUTHORITY_VERIFY=ACCEPTED action=frontier_positioning principal=sean subject_sha256=d89c9063e7f33bdd657b6bc1306bdcc0c1d2a9ac84eb54a05cdf018a88d995b3 key_id=throwaway-not-seans-key-31007056bb20fee7 root_kind=throwaway_generated_at_run_time
+NOTE: root_kind is not operator_supplied. This acceptance proves the MECHANISM works; it is not an approval and authorises nothing.
+POSITIVE_CONTROL_RC=0
