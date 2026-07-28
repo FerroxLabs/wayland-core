@@ -280,3 +280,79 @@ Internal adversarial pass, arguing AGAINST the YES majority, and how it resolved
 and specifically on the licenses/sources argument rather than the advisories one; codex's
 dissent is recorded because its exception-hygiene point is correct and is the reason each
 of the three new entries carries a full derived trace rather than a cross-reference.
+
+---
+
+## T+150 — decisions APPLIED, and two pre-existing dispositions found WRONG
+
+Flipping `all-features = true` required deriving traces for the three newly-visible
+advisories. Deriving them (rather than copying the existing justifications) caught two
+errors in `.github/osv-scanner.toml` — the same defect class as the quick-xml entry, and
+the reason the brief insists traces come out of the tool:
+
+- **paste / RUSTSEC-2024-0436** claimed pullers "the candle SIMD stack ... **AND ratatui**".
+  Measured: `cargo tree -p ratatui --all-features -e normal | grep -c paste` -> **0**.
+  It named a parent that does not exist. It also omitted a root that does:
+  `macro_rules_attribute <- tokenizers <- wcore-memory`. Ten direct parents, two roots.
+- **rustls-pemfile / RUSTSEC-2025-0134** claimed "Transitive **ONLY** via bollard".
+  Measured: **two** direct parents — `bollard 0.17.1` AND `rustls-native-certs 0.7.3`.
+  The conclusion survives (rustls-native-certs' own sole parent is bollard) but only
+  because of a fact the entry had never checked.
+- **proc-macro-error / RUSTSEC-2024-0370** carried a *cost* claim — "a breaking major ...
+  not worth the REST-surface regression risk" — which is a claim about the dependency
+  graph that was never read out of the graph. The bump needed **zero** source changes.
+
+All three corrected/deleted in the same commit, per the standing rule that a written-up
+instrument defect is one you have agreed to keep.
+
+## T+160 — final gate state
+
+`cargo deny --manifest-path Cargo.toml check` (all-features = true, 5 exceptions):
+**WLRC=0**, 0 errors, 76 duplicate warnings, `advisories ok, bans ok, licenses ok, sources ok`.
+
+Falsification run #2 — 12 cases, all four sections flip independently, and **each of the
+five ignore ids is dropped individually** (a battery that drops the whole list at once
+cannot distinguish a load-bearing exception from a passenger). F10 narrows the graph back
+and is the one case expected to stay green; it is reported as a control, not a pass.
+
+`just --dry-run check-all` now expands to six commands ending
+`vx cargo deny --manifest-path Cargo.toml check`; with `deny` removed from the recipe it
+expands to five. The chaining is real and its absence is detectable.
+
+`cargo fmt --all -- --check` -> exit 0. Shared-file fence: `git diff $BASE --
+crates/wcore-cli/src/{lib,main}.rs` -> EMPTY (neither touched).
+
+## T+170 — LIVE evidence (brief 3.1): the real binary on the real wire
+
+`target/debug/wayland-core 0.12.25`, `acp serve --bind 127.0.0.1:18929`, real HTTP:
+
+```
+http_status=200   bytes=18286
+openapi_version=3.1.0        <- the utoipa 5 bump, on the wire
+path_count=8   schema_count=21
+/v1/sessions, /v1/sessions/{id}, /v1/sessions/{id}/prompt : all PRESENT
+count_3_0_form_nullable_true = 0
+count_3_1_form_type_null     = 9     SHAPE_DIFFERENTIAL=PASS
+doc_status=200
+sessions_no_key_status=401           <- negative control
+```
+
+Two things this establishes beyond the unit tests: (1) the served document changed
+**shape**, not only its version string — nine fields moved from 3.0's `"nullable": true`
+to 3.1's `"type": [..., "null"]`; (2) the 200s mean something, because a non-carve-out
+endpoint on the same listener returns 401.
+
+**Instrument repaired mid-run (6b-ii).** The first version of the shape check was written
+inline in the shell as ``echo "... replaces `nullable: true` with ..."``. Backticks inside a
+double-quoted string are command substitution, so the shell tried to EXECUTE the phrase
+(`nullable:: command not found`) and the label was destroyed. It still printed `0` — the
+right answer for the wrong reason, and indistinguishable from "the check never ran". Rather
+than note it, it was rewritten as `shapecheck.py`, a real 3.0-vs-3.1 differential with a
+**three-assertion** self-test: known-positive passes, known-negative fails, and — the only
+assertion that proves the repair does anything — **the old matcher scores a correct 3.1
+document and an EMPTY document identically (both 0)**, so it could never have detected the
+failure mode it was there to guard.
+
+Side note, not a finding of this lane: `acp serve` cannot mint its server key on a headless
+box (`no keychain backend available: Secret Service`). Bypassed with
+`WAYLAND_ACP_SERVER_KEY`. A separate lane owns headless keyring.

@@ -1,0 +1,53 @@
+    Fetching advisory database from `https://github.com/RustSec/advisory-db.git`
+      Loaded 1172 security advisories (from /root/.cargo/advisory-db)
+    Updating crates.io index
+    Scanning Cargo.lock for vulnerabilities (1019 crate dependencies)
+Crate:     bincode
+Version:   1.3.3
+Warning:   unmaintained
+Title:     Bincode is unmaintained
+Date:      2025-12-16
+ID:        RUSTSEC-2025-0141
+URL:       https://rustsec.org/advisories/RUSTSEC-2025-0141
+
+Crate:     number_prefix
+Version:   0.4.0
+Warning:   unmaintained
+Title:     number_prefix crate is unmaintained
+Date:      2025-11-17
+ID:        RUSTSEC-2025-0119
+URL:       https://rustsec.org/advisories/RUSTSEC-2025-0119
+
+Crate:     paste
+Version:   1.0.15
+Warning:   unmaintained
+Title:     paste - no longer maintained
+Date:      2024-10-07
+ID:        RUSTSEC-2024-0436
+URL:       https://rustsec.org/advisories/RUSTSEC-2024-0436
+
+Crate:     rustls-pemfile
+Version:   2.2.0
+Warning:   unmaintained
+Title:     rustls-pemfile is unmaintained
+Date:      2025-11-28
+ID:        RUSTSEC-2025-0134
+URL:       https://rustsec.org/advisories/RUSTSEC-2025-0134
+
+Crate:     ttf-parser
+Version:   0.25.1
+Warning:   unmaintained
+Title:     `ttf-parser` is unmaintained
+Date:      2026-06-28
+ID:        RUSTSEC-2026-0192
+URL:       https://rustsec.org/advisories/RUSTSEC-2026-0192
+
+Crate:     lexical-core
+Version:   0.7.6
+Warning:   unsound
+Title:     Multiple soundness issues
+Date:      2023-09-03
+ID:        RUSTSEC-2023-0086
+URL:       https://rustsec.org/advisories/RUSTSEC-2023-0086
+
+warning: 6 allowed warnings found

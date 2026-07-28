@@ -1,0 +1,14 @@
+### DISTILLED CAPTURE — deny-final.txt (all-features = true)
+# Source: /root/deny-final.txt on hetzner-dsm.
+# Full capture: 26018 lines / 1674327 bytes; ~95% is warning[duplicate] trees.
+###
+
+--- counts (from the FULL capture) ---
+error[] blocks  : 0
+warning[] blocks: 76
+     76 warning[duplicate]
+
+--- every error block, verbatim ---
+
+--- final verdict line ---
+advisories ok, bans ok, licenses ok, sources ok

@@ -12,7 +12,42 @@
 #     windows-sys, hashbrown), not `deny`.
 
 [graph]
-all-features = false
+# 2026-07-29 (lane 29-deny): flipped false -> true, DELIBERATELY, after measuring
+# both settings. With `all-features = false` this gate evaluated only the
+# DEFAULT-feature graph, which meant `paste`, `number_prefix` and
+# `rustls-pemfile` — reachable only through optional, default-OFF features
+# (`wcore-memory/bge-local`, `wcore-sandbox/live-docker`) — were not evaluated
+# at all. `cargo tree -i paste@1.0.15` etc. WITHOUT `--all-features` reports
+# "did not match any packages"; WITH it, all three appear.
+#
+# Why that mattered, and it is NOT the advisories: `cargo audit` and
+# `.github/osv-scanner.toml` already read the whole `Cargo.lock`, so advisory
+# coverage was duplicated. **Licenses and sources were not.** Nothing else in
+# this repository checks the LICENSE of a dependency, so under the old setting a
+# GPL/AGPL crate arriving through the `hf-hub` or `bollard` path would have
+# passed every gate the repo has. That was an uncovered hole, not defence in
+# depth.
+#
+# Measured cost of closing it, before committing to it:
+#   cargo deny --all-features check licenses bans sources  -> exit 0, 0 errors
+#   cargo deny --all-features check advisories             -> exit 1, exactly 3
+#     additional error[unmaintained] (paste / number_prefix / rustls-pemfile)
+# i.e. the price is exactly three more traced advisory exceptions and nothing
+# else. All three are dispositioned below.
+#
+# Cross-audit was 2-1 in favour (gemini + kimi YES, codex NO). codex's dissent —
+# that growing the exception list from 2 to 5 is the wrong trade in a repo whose
+# documented failure mode is a bad exception — is recorded rather than dismissed,
+# and is the reason every entry below carries a trace DERIVED here rather than a
+# cross-reference to an existing one. (Deriving them is what caught two errors in
+# the pre-existing dispositions; see `.github/osv-scanner.toml`.)
+#
+# One objection was raised and DISPROVED rather than argued: that
+# `--all-features` would make the gate flaky on a workspace this size by
+# enabling combinations that do not build. cargo-deny builds a *metadata* graph
+# and never compiles anything, so non-building feature combinations cannot
+# perturb it; the run completed and returned a verdict for all four sections.
+all-features = true
 no-default-features = false
 
 [output]
@@ -171,6 +206,85 @@ yanked = "deny"
 # Tracking: `.planning/BACKLOG.md` -> `BL-F29-DENY-UNMAINTAINED`, and
 # `.github/osv-scanner.toml` (RUSTSEC-2026-0192, ignoreUntil 2026-09-02).
 #
+# ── The three admitted by `all-features = true` ────────────────────────────
+# These do NOT exist in the default-feature graph at all (`cargo tree -i
+# <crate>@<ver>` without `--all-features` -> "did not match any packages" for
+# each). They are evaluated only because this gate now covers optional features
+# — which is the point: their LICENSES are now checked, and that check has no
+# other home in this repo.
+#
+# All three are `informational = "unmaintained"`. Their traces below were
+# re-derived from `cargo tree -i ... --all-features --target all --edges
+# normal,build,dev --depth 1` (direct parents) and `--depth 2/3` (roots), NOT
+# copied from `.github/osv-scanner.toml`. That re-derivation is what caught two
+# errors in the pre-existing dispositions there, both now corrected in that file.
+#
+# ── RUSTSEC-2024-0436 — paste 1.0.15, "unmaintained" ───────────────────────
+# Accepted 2026-07-29. Build-time proc-macro: it expands during compilation and
+# has NO runtime surface and no runtime input.
+#
+# DIRECT PARENTS: 10 (counted off `--depth 1`) — gemm, gemm-c32, gemm-c64,
+# gemm-common, gemm-f16, gemm-f32, gemm-f64, pulp, macro_rules_attribute,
+# tokenizers. They collapse to TWO third-party roots, and BOTH terminate at the
+# same first-party crate:
+#
+#   (a) paste <- {gemm*, pulp, gemm-common} <- candle-core 0.9.2
+#                <- candle-nn / candle-transformers <- wcore-memory
+#   (b) paste <- macro_rules_attribute 0.2.2 <- tokenizers 0.21.4 <- wcore-memory
+#       (and paste <- tokenizers directly)
+#
+# Both roots are behind `wcore-memory`'s OPTIONAL, default-OFF `bge-local`
+# feature (`dep:candle-core`, `dep:candle-nn`, `dep:candle-transformers`,
+# `dep:tokenizers`, `dep:hf-hub`, `dep:safetensors`). Not in the shipped binary.
+#
+# CORRECTION TO THE PRIOR DISPOSITION: `.github/osv-scanner.toml` said paste was
+# pulled by "the candle ML SIMD stack ... AND by ratatui". Measured here,
+# **ratatui does not pull paste at all** (`cargo tree -p ratatui --all-features
+# -e normal | grep -c paste` -> 0), and root (b), tokenizers, was omitted. That
+# file is corrected in the same commit as this one.
+#
+# What would remove it: candle and tokenizers dropping paste upstream. No
+# maintained drop-in replacement for the macro exists.
+# Tracking: `.planning/BACKLOG.md` -> `BL-F29-DENY-UNMAINTAINED`.
+#
+# ── RUSTSEC-2025-0119 — number_prefix 0.4.0, "unmaintained" ────────────────
+# Accepted 2026-07-29.
+# DIRECT PARENTS: 1. Root chain:
+#
+#   number_prefix v0.4.0 <- indicatif 0.17.11 <- hf-hub 0.4.3 <- wcore-memory
+#
+# indicatif depends on number_prefix at every published version, so this is not
+# reconfigurable from here; it would require hf-hub dropping indicatif upstream.
+# hf-hub is behind the same OPTIONAL, default-OFF `bge-local` feature, so this
+# is a progress-bar helper in a code path that is not in the shipped binary.
+# Tracking: `.planning/BACKLOG.md` -> `BL-F29-DENY-UNMAINTAINED`.
+#
+# ── RUSTSEC-2025-0134 — rustls-pemfile 2.2.0, "unmaintained" ───────────────
+# Accepted 2026-07-29. Deprecated because it was folded into rustls itself.
+#
+# DIRECT PARENTS: **2** — `bollard 0.17.1` AND `rustls-native-certs 0.7.3`.
+# Both terminate at the same root, because rustls-native-certs 0.7.3 itself has
+# exactly one parent, which is bollard:
+#
+#   rustls-pemfile v2.2.0
+#   ├── bollard v0.17.1              <- wcore-sandbox
+#   └── rustls-native-certs v0.7.3
+#       └── bollard v0.17.1          <- wcore-sandbox
+#
+# bollard is OPTIONAL and default-OFF behind `wcore-sandbox`'s `live-docker`
+# feature (`live-docker = ["dep:bollard", "dep:futures"]`), so it does not
+# compile into the shipped binary.
+#
+# CORRECTION TO THE PRIOR DISPOSITION: `.github/osv-scanner.toml` said
+# "Transitive ONLY via bollard". The *conclusion* survives — both edges converge
+# on bollard — but the trace named one of two direct edges, and "only via X" was
+# asserted where "two edges, one root" is the fact. Stated correctly here and
+# corrected there.
+#
+# What would remove it: a bollard 0.17 -> 0.21 bump (four breaking majors) to
+# clear a warning on a non-shipping optional backend. Not taken.
+# Tracking: `.planning/BACKLOG.md` -> `BL-F29-DENY-UNMAINTAINED`.
+#
 # ── Eliminated at source rather than ignored (do NOT add these back) ───────
 # RUSTSEC-2024-0370 (proc-macro-error 1.0.4) was the third unmaintained
 # finding at this gate's baseline. It is GONE from `Cargo.lock`, not muted:
@@ -185,6 +299,9 @@ yanked = "deny"
 # review; never carry a trace forward on trust. An empty list is the goal.
 ignore = [
     { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3 unmaintained (patched=[], no version clears it). ONE parent path, read from `cargo tree -i bincode@1.3.3 --all-features --target all`: bincode <- syntect 5.3.0 <- wcore-cli. Reachability: syntect's compile-time-embedded syntax/theme dumps only (SyntaxSet::load_defaults_newlines in tui/widgets/diff.rs); no user- or network-supplied bytes reach bincode on this path (syntect `yaml-load` already off). syntect 5.3.0 is the latest published release, so there is nothing to bump to; dropping `dump-load` would delete TUI syntax highlighting. Accepted 2026-07-29. Tracked: .planning/BACKLOG.md BL-F29-DENY-UNMAINTAINED + .github/osv-scanner.toml (ignoreUntil 2026-09-02)." },
+    { id = "RUSTSEC-2024-0436", reason = "paste 1.0.15 unmaintained. Build-time proc-macro, expands at compile time, NO runtime surface and no runtime input. TEN direct parents (`cargo tree -i paste@1.0.15 --all-features --target all --depth 1`: gemm, gemm-c32, gemm-c64, gemm-common, gemm-f16, gemm-f32, gemm-f64, pulp, macro_rules_attribute, tokenizers) collapsing to TWO roots, both terminating at wcore-memory: (a) candle SIMD stack <- candle-core <- candle-nn/candle-transformers <- wcore-memory; (b) macro_rules_attribute <- tokenizers <- wcore-memory. Both sit behind wcore-memory's OPTIONAL default-OFF `bge-local` feature and are absent from the default-feature graph entirely. NOTE: the prior disposition in .github/osv-scanner.toml named ratatui as a second puller — measured FALSE (ratatui pulls no paste) — and omitted the tokenizers root; corrected there in the same commit. Accepted 2026-07-29. Tracked: .planning/BACKLOG.md BL-F29-DENY-UNMAINTAINED." },
+    { id = "RUSTSEC-2025-0119", reason = "number_prefix 0.4.0 unmaintained. ONE direct parent. Root chain: number_prefix <- indicatif 0.17.11 <- hf-hub 0.4.3 <- wcore-memory, behind the OPTIONAL default-OFF `bge-local` feature; absent from the default-feature graph. indicatif depends on number_prefix at every published version, so it is not reconfigurable from here — removal requires hf-hub dropping indicatif upstream. Progress-bar helper on a path that is not in the shipped binary. Accepted 2026-07-29. Tracked: .planning/BACKLOG.md BL-F29-DENY-UNMAINTAINED." },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile 2.2.0 unmaintained (deprecated, folded into rustls). TWO direct parents, not one: bollard 0.17.1 AND rustls-native-certs 0.7.3 — and rustls-native-certs 0.7.3's own sole parent is bollard, so both edges converge on ONE root: bollard <- wcore-sandbox, behind the OPTIONAL default-OFF `live-docker` feature; absent from the default-feature graph. NOTE: the prior disposition in .github/osv-scanner.toml asserted `transitive ONLY via bollard` — the conclusion holds but the trace named one of two direct edges; corrected there in the same commit. Removal would need bollard 0.17 -> 0.21 (four breaking majors) to clear a warning on a non-shipping optional backend. Accepted 2026-07-29. Tracked: .planning/BACKLOG.md BL-F29-DENY-UNMAINTAINED." },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser 0.25.1 unmaintained (patched=[], author declared EOL, no version clears it). ONE parent path, read from `cargo tree -i ttf-parser@0.25.1 --all-features --target all`: ttf-parser <- lopdf 0.42.0 <- pdf-extract 0.12.0 <- wcore-tools <- {wcore-agent, wcore-browser, wcore-cli, wcore-cua, wcore-mcp}. Reachability NOT minimised: this path DOES parse untrusted input (embedded font tables in user-supplied PDFs via the Read tool). Accepted only because the advisory is informational-unmaintained with no known vulnerability and NO patch in existence. lopdf made ttf-parser optional in 0.44.0, but pdf-extract 0.12.0 (latest) pins lopdf ^0.42 = >=0.42.0,<0.43.0, so reaching it needs a forked [patch] override — worse supply chain, not better. If a concrete ttf-parser CVE is ever published, DELETE this entry and re-examine the PDF path. Accepted 2026-07-29. Tracked: .planning/BACKLOG.md BL-F29-DENY-UNMAINTAINED + .github/osv-scanner.toml (ignoreUntil 2026-09-02)." },
 ]
 
