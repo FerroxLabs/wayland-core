@@ -23,14 +23,14 @@
 ///
 /// Returns the far-end argv, one element per line, so a dropped, split or
 /// executed value is directly visible.
-fn far_end_argv(quoted_values: &[String]) -> (Vec<String>, String) {
+async fn far_end_argv(quoted_values: &[String]) -> (Vec<String>, String) {
     // `printf '%s\n'` on each positional is the smallest faithful reader of
     // argv: it prints exactly what the shell bound, with no re-interpretation.
     let script = r#"for a in "$@"; do printf '%s\n' "$a"; done"#;
     let command_string = format!("set -- {}; {}", quoted_values.join(" "), script);
 
     let output = wcore_config::shell::shell_command(&command_string)
-        .output()
+        .await
         .expect("a POSIX shell must be runnable on a unix test host");
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let argv = stdout.lines().map(str::to_string).collect();
@@ -39,8 +39,8 @@ fn far_end_argv(quoted_values: &[String]) -> (Vec<String>, String) {
 
 /// The three shapes measured breaking against a live far end on 2026-07-28,
 /// each round-tripped through a real shell.
-#[test]
-fn quoted_values_reach_the_far_end_shell_byte_for_byte() {
+#[tokio::test]
+async fn quoted_values_reach_the_far_end_shell_byte_for_byte() {
     let originals = vec![
         // Measured: vanished entirely, shifting every later argument left.
         String::new(),
@@ -67,7 +67,7 @@ fn quoted_values_reach_the_far_end_shell_byte_for_byte() {
         .map(|v| wcore_exec_backend::backends::ssh::posix_quote(v))
         .collect();
 
-    let (argv, raw) = far_end_argv(&quoted);
+    let (argv, raw) = far_end_argv(&quoted).await;
 
     // Nothing was dropped and nothing was split.
     assert_eq!(
@@ -95,8 +95,8 @@ fn quoted_values_reach_the_far_end_shell_byte_for_byte() {
 ///
 /// This reproduces the original defect deliberately, so the test file itself
 /// demonstrates that the round-trip can go red.
-#[test]
-fn without_quoting_the_same_round_trip_is_corrupted_and_executes() {
+#[tokio::test]
+async fn without_quoting_the_same_round_trip_is_corrupted_and_executes() {
     let originals = vec![
         String::new(),
         "hello world".to_string(),
@@ -105,7 +105,7 @@ fn without_quoting_the_same_round_trip_is_corrupted_and_executes() {
     // The pre-fix behaviour: values pushed onto ssh's remote command with no
     // quoting at all.
     let unquoted: Vec<String> = originals.clone();
-    let (argv, raw) = far_end_argv(&unquoted);
+    let (argv, raw) = far_end_argv(&unquoted).await;
 
     // The empty value vanished and the spaced value split, so the count cannot
     // match. That is the corruption that shifted task argv left in the field.
