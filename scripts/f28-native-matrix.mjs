@@ -608,6 +608,16 @@ const ACTIVENESS_PROBE = [
   'echo F28_NSPID=$(grep -E "^NSpid" /proc/self/status 2>/dev/null | tr -s " \\t" ":" || echo none)',
   'echo F28_ROOTLS=$(ls / 2>/dev/null | tr "\\n" ",")',
   '(getent hosts github.com >/dev/null 2>&1 || nslookup github.com >/dev/null 2>&1) && echo F28_DNS=RESOLVES || echo F28_DNS=NO_DNS',
+  // F-28-02-001. A filesystem-read signal, because the three signals above are
+  // all namespace-derived and macOS's sandbox-exec has no PID or mount
+  // namespace: NSpid and the root listing are identical inside and out there,
+  // leaving DNS as the only differential. `/etc` is granted by neither the
+  // `contained` workspace policy nor the macOS profile's read allowlist
+  // (/usr, /System, /Library, /bin, /sbin), so it is denied inside and
+  // readable outside. Inert on the other two families — Linux bwrap
+  // read-binds /etc (readable both sides) and Windows has no /etc (denied
+  // both sides) — so it can only ever ADD a difference, never remove one.
+  '(head -c 1 /etc/hosts >/dev/null 2>&1 && echo F28_ETC=READ) || echo F28_ETC=DENIED',
   '(whoami /groups 2>&1 | head -3) 2>/dev/null || true',
 ].join('\n') + '\n';
 
@@ -634,6 +644,7 @@ function summarise(raw) {
     nspid: g(/F28_NSPID=(\S*)/),
     rootls: g(/F28_ROOTLS=(\S*)/),
     dns: g(/F28_DNS=(\S*)/),
+    etc: g(/F28_ETC=(\S*)/),
     appcontainer: /0xC0000022|BaseNamedObjects/.test(text),
     accessDenied: /Access is denied/.test(text),
     highIntegrity: /S-1-16-12288/.test(text),
@@ -655,7 +666,36 @@ export function captureActiveness(bin) {
      '--repo', repo, '--base-branch', 'main', '--timeout', '90s'],
     { env: { HOME: root, USERPROFILE: root }, timeout: 180_000 },
   );
-  const inside = summarise(swarm.text);
+  let inside = summarise(swarm.text);
+  let via = 'swarm';
+  let fallbackText = '';
+
+  // F-28-02-001. The delegated path is not the only containment path the
+  // product has. When it cannot spawn a worker AT ALL — as on macOS, where
+  // sandbox-exec does not meet the delegated admission contract and the
+  // Docker fallback is compiled out — take the inside reading through
+  // `sandbox exec`, which runs the probe through the SAME backend selection
+  // and the SAME shell tool the agent uses for every command.
+  //
+  // This does NOT relax the activeness rule. The differential and every
+  // signal in it are unchanged; only the surface that produces the inside
+  // reading differs, and it is recorded. A run that still shows no difference
+  // is still `observed: false`, and a family with no obtainable difference is
+  // still RED.
+  if (!inside.ran) {
+    const direct = runBin(
+      bin,
+      ['sandbox', 'exec', '--workspace', repo,
+       IS_WINDOWS ? 'echo F28RAN & whoami /groups' : 'sh probe.sh'],
+      { env: { HOME: root, USERPROFILE: root }, timeout: 180_000 },
+    );
+    fallbackText = direct.text;
+    const alternate = summarise(direct.text);
+    if (alternate.ran) {
+      inside = alternate;
+      via = 'sandbox-exec-surface';
+    }
+  }
   rmSync(root, { recursive: true, force: true });
 
   if (!inside.ran) {
@@ -663,8 +703,9 @@ export function captureActiveness(bin) {
       observed: false,
       reason:
         'no worker could be spawned through the product\'s own sandbox path, so no ' +
-        'containment differential is obtainable: ' + firstLine(swarm.text),
-      raw: swarm.text.slice(0, 1200),
+        'containment differential is obtainable: ' + firstLine(swarm.text) +
+        (fallbackText ? '; nor through `sandbox exec`: ' + firstLine(fallbackText) : ''),
+      raw: (swarm.text + '\n' + fallbackText).slice(0, 1200),
     };
   }
 
@@ -679,6 +720,9 @@ export function captureActiveness(bin) {
   }
   if (outside.dns === 'RESOLVES' && inside.dns === 'NO_DNS') {
     differences.push('DNS resolves outside and does not inside (network namespace)');
+  }
+  if (outside.etc === 'READ' && inside.etc === 'DENIED') {
+    differences.push('/etc is readable outside and denied inside (filesystem read confined)');
   }
   if (inside.appcontainer && !outside.appcontainer) {
     differences.push('the child was refused \\BaseNamedObjects with 0xC0000022, which AppContainer confines by construction');
@@ -699,7 +743,9 @@ export function captureActiveness(bin) {
   return {
     observed: true,
     probe: 'containment-differential',
-    detail: differences.join('; '),
+    // The surface that produced the inside reading is part of the evidence:
+    // a reader must be able to tell which containment path was exercised.
+    detail: differences.join('; ') + ` [inside reading via ${via}]`,
   };
 }
 
