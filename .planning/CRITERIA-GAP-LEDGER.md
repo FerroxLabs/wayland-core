@@ -115,6 +115,10 @@ capability whose only shipped entry point is the CLI, and the CLI path works.
 > **"Direct, ForgeFlows, Fleet, Council, and Anvil terminate through one canonical Goal transition
 > with no nested verification/retry owner."** (`ROADMAP.md:92`)
 
+> **CORRECTED 2026-07-29 by lane/record-truth — this row said FAILED and said no lane had
+> attempted it. Both are stale. See "Correction" below; the original text is kept intact
+> above it, and its falsifier is itself defective.**
+
 **Grade measured: FAILED, unchanged.** Confirmed at `873cc389`: `GoalTerminalState` has consumers
 only in `goal/{ledger,kernel}.rs` and `session_journal/model.rs`. **Grep for `GoalTerminalState`
 under `crates/wcore-agent/src/orchestration/` returns zero hits.** Anvil still returns
@@ -131,6 +135,45 @@ Single crate, no protocol change, no credential, no second machine.
 
 **Cost: 2–3 lane-sessions.** **Not release-blocking** — architecture consistency; no customer
 symptom.
+
+#### 22-C3 — CORRECTION (2026-07-29, lane/record-truth): **PARTIAL, not FAILED — and the row's own falsifier is broken**
+
+**Three separate things are wrong with the row above, and they need separating.**
+
+**(a) The adapter surface WAS built.** `26be00cd` — *"feat(22-c3): the adapter surface — one
+canonical Goal terminal transition over all five loop owners"* — adds
+`crates/wcore-agent/src/goal/strategy.rs` (**+667 lines**) plus changes to
+`goal/kernel.rs`, `session_journal/model.rs` and `session_journal/reducer.rs`. Merged at
+`f68f3ddd` — *"merge(22-c3): one loop owner, enforced over the Goal lifecycle and graded
+PARTIAL"*. Measured at `f68f3ddd`: `strategy.rs` carries **45** `GoalTerminalState` references
+and adapts all five owners —
+`ClimbOutcome | CouncilRunResult | WorkflowRunError | &[ShardSummary] | DirectOutcome`.
+So *"no lane has attempted it"* is false, and **PARTIAL is the correct grade** — which is
+what the implementing lane graded itself in `aa60fc4b`.
+
+**(b) It is NOT in the integration branch, and that must not be glossed.**
+`git branch --contains f68f3ddd` lists `inv/*` and `lane/*` refs only.
+`gh/plan/f20-unified-audit-repair` is at `ef1d97be`, where the adapter is genuinely absent.
+**Both facts are true at once**: the work exists and is graded PARTIAL by its own lane; the
+integration branch does not yet have it. A reader taking either half alone gets the wrong
+picture.
+
+**(c) The row's falsifier is a BROKEN INSTRUMENT and would never have noticed.**
+The row's evidence is *"Grep for `GoalTerminalState` under
+`crates/wcore-agent/src/orchestration/` returns zero hits."* The adapter was built under
+`crates/wcore-agent/src/goal/`. **Measured: that grep returns zero even at `f68f3ddd`, where
+the adapter exists and is merged.** The instrument therefore reports FAILED forever, including
+after the criterion closes — a self-*failing* gate, the mirror of the self-passing class in
+LANE-BRIEF §3.2. Per §6b-ii it is repaired here rather than merely noted:
+
+> **Corrected falsifier for 22-C3.** Grep for `GoalTerminalState` across
+> `crates/wcore-agent/src/` — **not** `orchestration/` alone — and require a consumer that
+> adapts each of the five owner result types. RED when `goal/strategy.rs` is absent or stops
+> naming all five. Verify against `f68f3ddd`, where the corrected form finds 45 references and
+> the original finds none.
+
+**Grade: PARTIAL** (built, merged to lane refs, self-graded PARTIAL, not yet integrated).
+**Not release-blocking**, unchanged.
 
 #### 22-C4 — PARTIAL
 
@@ -208,6 +251,27 @@ is declared at `main.rs:463-464` with a plain `#[arg(long, value_name = "PROCEDU
 hidden**. It appears in `--help` on the shipped binary, with a docstring describing exactly what it
 will do. It always fails. A customer can draft a skill and can never activate it. That is a shipped,
 advertised, permanently dead flag.
+
+> **CORRECTED 2026-07-29 by lane/record-truth — the paragraph above is stale. The flag is
+> hidden.** At HEAD (`ef1d97be`), `crates/wcore-cli/src/main.rs:473` reads
+> `#[arg(long, value_name = "PROCEDURE_ID", hide = true)]`, above a nine-line comment that
+> cites this ledger row by name: *"HIDDEN (ledger row `23A-C1`) … the flag stops being
+> advertised while still parsing and still failing loudly for anyone who already scripted it.
+> This does NOT close `23A-C1`."* Both halves are guarded by
+> `crates/wcore-cli/tests/skills_promote_not_advertised.rs`.
+>
+> **What this changes:** the *advertisement* complaint is closed, so the
+> "RELEASE-BLOCKING at the advertisement level" verdict below no longer holds, and the
+> 0.25-lane-session interim has already been spent.
+>
+> **What this does NOT change: `23A-C1` stays NOT MET.** Governed promotion, *revoked* and
+> *rolled back* are still unimplemented; `run_skills_promote` is still a `bail!`. The product
+> merely stopped promising something it cannot do. The 3–4 lane-sessions to close the criterion
+> stand.
+>
+> Also stale in the paragraph below: **`F23A-01-H2` is FIXED** (`32a5fc90`, 2026-07-27, five
+> wired regression tests) — see `.planning/phases/23A-governed-skills/23A-STATUS-CORRECTION.md`.
+> The *observe* clause is no longer degraded by it.
 
 **Closing it requires**: governed promotion (state machine + policy review + provenance),
 revocation, rollback, and append-only history — `wcore-cli` + `wcore-memory` + `wcore-skills`.
