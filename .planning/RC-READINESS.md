@@ -8,12 +8,33 @@ Tracks the **six release-blocking items** `CRITERIA-GAP-LEDGER.md` §3 identifie
 |---|---|---|
 | 1 | `24-C2` — three advertised trigger kinds can never fire | **BLOCKING ELEMENT CLOSED** |
 | 2 | `27-C2(a)` — browser remediation string sends users into an impossible loop | **CLOSED** |
-| 3 | `24-C5` + `24-C1` — macOS/Windows setup-to-recovery journeys | **NOT MET**, Linux passes receipted, Windows red on one open HIGH, macOS unrun — finish lane running |
+| 3 | `24-C5` + `24-C1` — macOS/Windows setup-to-recovery journeys | ✅ **MET on all three platforms** (`5ed01866`) |
 | 4 | `23A-C1` — `--skills-promote` advertised and always fails | **BLOCKING ELEMENT CLOSED** |
 | 5 | `27-C2(b)` — capability flags lie to Desktop | **BLOCKING ELEMENT CLOSED**, Desktop train owed |
 | 6 | `24-C3` — inbound channel matrix never driven end to end | **IN FLIGHT** — unblocked, the shared fixture now exists |
 
-**Four of six addressed. Both remaining items are now in flight.**
+**Five of six closed. One remains: `24-C3`, in flight.**
+
+### Item 3 CLOSED 2026-07-28 — and the Windows fix is a cautionary tale
+
+`24-C5` is **MET on all three platforms**. Linux 17/17, Windows 17/17, macOS 17/17, each with a
+verifier-accepted receipt and recovery **observed** rather than asserted.
+
+**The obvious Windows fix does not work, and a gate would have certified it.** `<RestartOnFailure>`
+registers, reads back correctly through Task Scheduler's own `/query /xml`, and leaves the runtime
+**still down 3m20s after `taskkill /F`** against a `PT1M` interval. Any gate asserting the element
+is present would have signed off a service that stays dead. What actually recovers it is a
+`<TimeTrigger>` with a one-minute `<Repetition>` and `MultipleInstancesPolicy=IgnoreNew` — measured
+end to end: killed pid 46164, no manual start, platform-started pid 9376 thirty-six seconds later.
+
+Two further measurements each of which would have broken real installs: `encoding="UTF-8"` is
+**rejected** while UTF-16-declared UTF-8 bytes are accepted; and `%USERDOMAIN%\%USERNAME%` is
+**rejected on a workgroup machine**, so emitting a `<Principals>` block would have broken install on
+**every non-domain-joined desktop**.
+
+Open and reported rather than smoothed: `bind` refuses the three-platform trio because macOS ran at
+an ancestor differing only in `.planning`, and its CI artifact sat queued 45 minutes. **A provenance
+gap, not a coverage gap** — the lane declined to describe an unbound trio as bound.
 
 ### Item 3, measured 2026-07-28 evening — the honest state
 
