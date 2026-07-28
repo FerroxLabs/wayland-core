@@ -57,7 +57,7 @@ real hardware, none visible from source review, two actively masked by gates tha
 
 ---
 
-## 2. Running right now — four lanes
+## 2. Running right now — six lanes
 
 | Lane | Doing |
 |---|---|
@@ -65,8 +65,22 @@ real hardware, none visible from source review, two actively masked by gates tha
 | `lane/24-c3-h2` | The installed gateway **cannot receive inbound at all** — build it or refuse loudly |
 | `lane/27-gaps` | Phase 27, the weakest phase and the largest genuine parity gap |
 | `lane/22-c3` | Phase 22 Criterion 3 — "one loop owner", **never attempted in three passes** |
+| `lane/29-h1` | `F29-02-H1` — **quick-xml 0.41.0 exists**, so this has a source fix, not just a re-justification |
+| `lane/28-h2` | `F-28-02-002` — the stale-lease DoS, **the one finding blocking Phase 28's acceptance gate** |
 
 Merge each as it reports, then continue Phase 30 serially: **30-02 → 30-03 → 30-04.**
+
+**Both HIGH lanes added 2026-07-28 late**, after grounding the findings rather than trusting their
+write-ups:
+
+- `F29-02-H1` — `wcore-tools` depends on quick-xml **directly** (`Cargo.toml:109`), `doc-extract`
+  is **default-on** (`:135`), and `doc_tool.rs:644,775` parses **user-supplied** docx/pptx. So the
+  audit.toml "sole path" is false and `0194` is reachable with attacker-controlled input. The
+  calamine leg stays withdrawn — it resolves to quick-xml 0.31.0, which neither advisory names.
+- `F-28-02-002` — the word **`stale` appears nowhere** in the `acl_lease` module. The wedge is not
+  faulty staleness handling, it is the **absence of any staleness concept**. The named mutex
+  already handles `WAIT_ABANDONED`, so the mutex is not the wedge; the persisted lease record is.
+  SeanDesktop re-verified reachable before dispatch.
 
 ---
 
