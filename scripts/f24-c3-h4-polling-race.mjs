@@ -362,8 +362,18 @@ class Race {
     this.startBinary();
 
     // ── live: messages arriving while the gateway is up ────────────────────
-    // Submitted after a short settle so both poll loops are established.
-    sleep(4000);
+    // `--settle-ms` decides WHICH question this leg answers, and they are
+    // different questions. A short settle keeps the live messages inside the
+    // gateway's startup window, where the two managers start seconds apart and
+    // the first one sweeps the queue. A long settle puts them in STEADY STATE,
+    // where both loops are established and long-polling, and loss (if any) is
+    // then an ongoing property rather than a startup artifact. Claiming the
+    // first as evidence for the second would overstate the finding.
+    this.note(`settling ${this.args.settleMs}ms before the live submissions`);
+    for (let s = 0; s < this.args.settleMs; s += 10_000) {
+      sleep(Math.min(10_000, this.args.settleMs - s));
+      this.note(`settle ${Math.min(s + 10_000, this.args.settleMs)}/${this.args.settleMs}ms`);
+    }
     for (let i = 0; i < this.args.live; i += 1) {
       const t = `f24c3-h4-live-${i}-${this.runId}`;
       const r = await this.submit(t);
@@ -446,6 +456,7 @@ class Race {
       submitted_total: tokens.length,
       preload: this.args.preload,
       live: this.args.live,
+      settle_ms: this.args.settleMs,
       replied_total: perToken.filter((t) => t.replies >= 1).length,
       turns_total: turns,
       raw_replies_total: rep.replies.length,
@@ -489,6 +500,7 @@ function parseArgs(argv) {
     preload: 4,
     live: 4,
     budgetMs: 120_000,
+    settleMs: 4_000,
     cron: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -498,6 +510,7 @@ function parseArgs(argv) {
     else if (a === '--preload') out.preload = Number(argv[++i]);
     else if (a === '--live') out.live = Number(argv[++i]);
     else if (a === '--budget-ms') out.budgetMs = Number(argv[++i]);
+    else if (a === '--settle-ms') out.settleMs = Number(argv[++i]);
     else if (a === '--cron') out.cron = true;
     else {
       process.stderr.write(`f24-c3-h4-polling-race: unknown argument ${a}\n`);
