@@ -351,7 +351,11 @@ class InboundMatrix {
         '',
         '[inbound]',
         'dm = "allowlist"',
-        'dm_allowlist = ["15552220000"]',
+        // TWO allowed peers. On a peer-keyed platform the "second
+        // conversation" of the bind leg is a second person, not a second room,
+        // so the allowlist has to admit both or the leg would be measuring the
+        // access gate again.
+        'dm_allowlist = ["15552220000", "15552221111"]',
         'group = "disabled"',
         'require_mention = true',
         'tools = "conversational"',
@@ -376,7 +380,7 @@ class InboundMatrix {
         '',
         '[inbound]',
         'dm = "allowlist"',
-        'dm_allowlist = ["+15553330000"]',
+        'dm_allowlist = ["+15553330000", "+15553331111"]',
         'group = "disabled"',
         'require_mention = true',
         'tools = "conversational"',
@@ -593,7 +597,15 @@ class InboundMatrix {
     // A second conversation from the same allowed sender. Two arrivals, two
     // distinct conversation ids: a single shared session would collapse them.
     const c4 = `f24c3-${adapter}-bind-${tag}`;
-    post(cfg.build({ url, sender: cfg.allowed, conversation: cfg.conv2, text: `hello ${c4}`, messageId: `${tag}.0004` }));
+    post(
+      cfg.build({
+        url,
+        sender: cfg.secondSender ?? cfg.allowed,
+        conversation: cfg.conv2,
+        text: `hello ${c4}`,
+        messageId: `${tag}.0004`,
+      }),
+    );
     const seen4 = this.awaitArrivals(c4, 1);
     const distinct =
       seen1.length === 1 &&
@@ -670,14 +682,15 @@ class InboundMatrix {
       channelName: 'f24c3whatsapp',
       allowed: '15552220000',
       denied: '15559990000',
+      // WhatsApp DMs are keyed by the PEER, so a second conversation is a
+      // second person. `sender` and `conversation` are therefore the same
+      // string on this platform, and the bind leg's second identity is a
+      // second allowlisted number rather than a second room.
       conv1: '15552220000',
-      conv2: '15552220000',
-      // WhatsApp DMs are keyed by the peer's number, so a "second
-      // conversation" from the same sender does not exist on this platform.
-      // Recorded honestly rather than faked with a second identity that would
-      // also change the ACCESS answer.
+      conv2: '15552221111',
+      secondSender: '15552221111',
       expectConversation: '15552220000',
-      expectConversation2: '15552220000',
+      expectConversation2: '15552221111',
       build: ({ url, sender, text, messageId }) =>
         whatsappRequest({
           url,
@@ -693,10 +706,14 @@ class InboundMatrix {
       channelName: 'f24c3sms',
       allowed: '+15553330000',
       denied: '+15559990000',
+      // Same peer-keyed shape as WhatsApp. Before F24-C3-H3 the outbound
+      // `To` here was the BOT's number for every sender, which is what this
+      // leg caught.
       conv1: '+15553330000',
-      conv2: '+15553330000',
+      conv2: '+15553331111',
+      secondSender: '+15553331111',
       expectConversation: '+15553330000',
-      expectConversation2: '+15553330000',
+      expectConversation2: '+15553331111',
       build: ({ url, sender, text, messageId }) =>
         twilioRequest({
           url,

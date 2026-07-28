@@ -111,9 +111,31 @@ pub fn parse_form(raw_body: &str) -> Vec<(String, String)> {
 /// Twilio webhook fields used:
 /// * `MessageSid` — platform-assigned id.
 /// * `From` — author (E.164 phone number).
-/// * `To` — receiving Twilio number — used as the conversation_id so
-///   downstream routing treats every (From, To) pair under the same
-///   "conversation".
+/// * `To` — receiving Twilio number — carried as `account_id` (which bot
+///   number this arrived on), NOT as the conversation id.
+///
+/// # F24-C3-H3 — why `To` is not the conversation id
+///
+/// It was, on the stated reasoning that this "treats every (From, To) pair
+/// under the same conversation". A deployment has ONE Twilio number, so `To`
+/// is a constant: every distinct human texting the bot collapsed into a single
+/// conversation id. Two consequences, both measured live at an independent
+/// sink on Linux at 27d24bef:
+///
+/// 1. **The reply went to the bot's own number.** `channel_inbound` builds the
+///    reply with `conversation_id: msg.conversation_id`, and the Twilio send
+///    path uses that as `To`. An inbound SMS from `+15553330000` produced an
+///    outbound addressed to `+15550009999` — the bot's own number. The human
+///    who texted received nothing; the bot texted itself.
+/// 2. **Every sender shared one agent session.** `build_session_key` for
+///    `ChatType::Direct` is `agent:main:{channel}:dm:{conversation_id}` with
+///    no sender component — that is deliberate, because on every other
+///    platform a DM conversation id already identifies the peer. With a
+///    constant conversation id it means one shared session, one shared
+///    history, across unrelated people.
+///
+/// The peer is `From`, so `From` is the conversation. `account_id` keeps
+/// `To`, so which bot number the message arrived on is not lost.
 /// * `Body` — message text.
 /// * `NumMedia` / `MediaUrl{N}` — attachments. We collect all
 ///   `MediaUrl{N}` entries, in order.
@@ -164,7 +186,13 @@ pub fn pairs_to_incoming(pairs: &[(String, String)]) -> Result<IncomingMessage, 
         account_id: Some(to.clone()),
         platform: Some("sms".into()),
         attachments,
-        ..IncomingMessage::new(sid, to, from, body, chrono::Utc::now().timestamp())
+        ..IncomingMessage::new(
+            sid,
+            from.clone(),
+            from,
+            body,
+            chrono::Utc::now().timestamp(),
+        )
     })
 }
 
@@ -266,7 +294,12 @@ mod tests {
         assert_eq!(msg.id, "SM123");
         assert_eq!(msg.author, "+15551234567");
         assert_eq!(msg.sender_id, "+15551234567");
-        assert_eq!(msg.conversation_id, "+15559876543");
+        // F24-C3-H3: the conversation is the PEER, not the bot's own number.
+        // This assertion previously read "+15559876543" (the `To`), which is
+        // the constant every deployment has exactly one of — see the
+        // `pairs_to_incoming` docs for what that broke. The bot number is not
+        // lost; it is `account_id` on the next line.
+        assert_eq!(msg.conversation_id, "+15551234567");
         assert_eq!(msg.account_id.as_deref(), Some("+15559876543"));
         assert_eq!(msg.platform.as_deref(), Some("sms"));
         assert_eq!(msg.chat_type, ChatType::Direct);
