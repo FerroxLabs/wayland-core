@@ -11,7 +11,7 @@ with four requirements explicitly open and each unmet clause named, and that was
 the right call. Two of these nine judgements are OPEN, and naming them precisely
 now is cheap; inheriting them unnamed into Phase 28 is not.
 
-F26-CERT-SHA: 0a75efd98b461a72fd099542b8e0650026491173
+F26-CERT-SHA: 9b2ed8290264593d9b5105ea8985766b2db4914d
 
 ---
 
@@ -42,11 +42,11 @@ prose is what a human reads; the line is what makes the claim checkable, and
 Task 4 RE-EXECUTES the evidence every `CLOSED` line names.
 
 F26-SC1: CLOSED — typed, deterministic, structurally secret-redacted and non-mutating discovery for BOTH peer sources, proven on Linux canary corpora and on Sean's REAL macOS installs with live credentials, 0 secret hits and both homes unmutated. platform=linux+macos evidence=.planning/phases/26-migration-export-backup-restore/26-01-BASELINE.md
-F26-SC2: CLOSED — selective import preserves per-item provenance and contains executable content by PLACEMENT outside every skill load root, proven live against the real binary with a paired positive control, and re-proven under hostile input on Linux and real Windows. platform=linux+windows evidence=crates/wcore-cli/tests/migrate_quarantine.rs
+F26-SC2: CLOSED — selective import preserves per-item provenance and contains executable content by PLACEMENT outside every skill load root, proven live against the real binary with a paired positive control that fired in 2.4s while the negative leg exhausted its full 45s window. platform=linux evidence=crates/wcore-cli/tests/migrate_quarantine.rs
 F26-SC3: OPEN — `backup restore` survives interruption and rolls back exactly on Linux AND real Windows (26-03, lane 26c). But the criterion also names "profile migration, and reciprocal portability", and NEITHER was ever interrupted: no plan in this phase killed a `migrate hermes` or `migrate openclaw` mid-apply, so the exact-rollback contract for the migration path rests on a partial-failure argument rather than on a measured interruption. That specific clause is the unmet one.
 F26-SC4: CLOSED — hostile corpora with DECLARED outcomes prove conflict semantics for exact, case-folded and normal-form names; secret-source behaviour for secrets hidden in memory notes, persona bodies, skill bodies and dotenvs; isolation by an external sentinel tree digested before and after on BOTH platforms; and recovery semantics under refusal and manifest/payload mismatch. platform=linux+windows evidence=scripts/portability-native-matrix.sh
 F26-01: CLOSED — `migrate --json` emits the typed plan in which a credential VALUE is unrepresentable by type; byte-identical across independent walks; tree digest unchanged on both corpora and both REAL peer homes; the mandatory macOS leg RAN and its provenance re-derives from GitHub. platform=linux+macos evidence=.planning/phases/26-migration-export-backup-restore/26-01-BASELINE.md
-F26-02: CLOSED — profiles, skills, personas, memory, settings, MCP definitions and credentials migrate selectively by published identity with conflicts reported rather than silently applied, executable content quarantined, and provenance recorded per item. platform=linux+windows evidence=crates/wcore-cli/tests/migrate_quarantine.rs
+F26-02: CLOSED — profiles, skills, personas, memory, settings, MCP definitions and credentials migrate selectively by published identity with conflicts reported rather than silently applied, executable content quarantined, and provenance recorded per item. platform=linux evidence=crates/wcore-cli/tests/migrate_quarantine.rs
 F26-03: OPEN — authenticated backup, restore and reciprocal migration are built and proven, and imported content is never executed. But the requirement's FIRST clause — "consume the F23 redacted session/evidence envelope to export a portable profile/session corpus" — is entirely unaddressed: no plan in this phase reads an F23 envelope, `crates/wcore-cli/src/backup/` contains no reference to a session or evidence envelope, and 26-03's SUMMARY never mentions one. The session-corpus half of this requirement was never started.
 F26-04: CLOSED — secret sources are explicitly remapped across all four credential backends with the operator told the backend, the count and the action, and no refusal wrote its target (measured by digest, not read off the message); exact rollback from an uncatchable mid-flight kill holds on Linux and on real Windows. platform=linux+windows evidence=scripts/portability-remap-capture.sh
 F26-05: CLOSED — hostile corpora are generated on the target platform at run time, every case declares its expected outcome as data and the suite asserts that outcome against the REAL binary, isolation is proven by an external sentinel on both platforms, and the normalised report is byte-identical between Linux and real Windows. platform=linux+windows evidence=crates/wcore-cli/tests/portability_hostile_corpus.rs
@@ -90,10 +90,19 @@ the Skill tool RAN and reported the skill unavailable with the sentinel ABSENT;
 the positive control, identical but for `migrate promote`, produces the sentinel
 in 2.4s while the negative leg exhausts its full 45s window.
 
-26-02 had **no Windows leg** (`seandesktop` was believed unreachable at the
-time). This plan supplies it: the Windows matrix run exercises the same
-quarantine and classification path on NTFS at the certified SHA, and its
-platform report records the outcome for every case.
+**The platform claim is deliberately `linux`, and the reason is worth stating
+plainly because it is exactly where this certification could have rounded up.**
+26-02 had no Windows leg (`seandesktop` was believed unreachable at the time).
+This plan supplies a Windows leg for the migrate/quarantine path — the same
+classification, containment and accounting exercised on NTFS at the certified
+SHA, with its per-case outcomes in the Windows platform report. But the
+load-bearing evidence for THIS criterion is the paired LIVE inertness proof: a
+real agent turn, driven through the real binary against a scripted provider,
+asserting that the Skill tool RAN and reported the skill unavailable while the
+sentinel stayed absent. **That turn has only ever run on Linux.** Claiming
+`platform=linux+windows` here would present a corroborating run as if it were
+the proof, so the platform is recorded as `linux` and the Windows corroboration
+is described rather than counted.
 
 ### Success Criterion 3 — OPEN
 
@@ -131,6 +140,44 @@ four load-bearing measurements depends on that probe.
 
 Full per-case results, including what each case deforms and which field it
 attacks, are in `26-04-SUMMARY.md`.
+
+**The determinism half, measured rather than argued.** The normalised portable
+report is **3514 bytes on Linux and 3514 bytes on Windows and `diff` exits 0** —
+byte-identical, both files proven non-empty before the comparison so a missing
+report cannot pass as a match. That comparison also proves something the plan
+did not ask for and which is worth having: the two materialisers are
+INDEPENDENT (Python on Linux, a native PowerShell materialiser on Windows,
+because that box has no Python), and each portable case's `corpus_digest` is
+inside the compared report — so byte equality proves the two independently
+written materialisers built identical corpora rather than merely both having
+run.
+
+**The platform-variant cases are recorded per platform and never cross-compared,
+and that is a design decision this certification should be judged on.** A
+case-only name collision is TWO items on Linux and ONE on Windows; comparing
+them would guarantee a diff that says nothing about determinism, and the natural
+response to that diff would be to loosen the comparison — which this phase
+forbids. So the seven platform-variant cases assert their declared outcome
+SEPARATELY on each platform, in `<report>.platform` and in the hostile suite.
+What that measured, on real hardware, on 2026-07-28:
+
+| Case | Linux | Windows (NTFS) | macOS (APFS) |
+|---|---|---|---|
+| case-only name collision | distinct, `discovered=3` | **collapsed**, `discovered=2` | **collapsed** |
+| Unicode normal-form collision | distinct, `discovered=3` | **distinct**, `discovered=3` | **collapsed** |
+| trailing dot / trailing space | both written, `discovered=3` | one **unwritable**, `discovered=2` | both written |
+
+The middle row is the non-obvious one and it is the reason the generator carries
+`require_distinct_on` as data rather than a single rule: **NTFS is
+case-insensitive but NOT normalisation-insensitive**, so two peer items differing
+only by NFC/NFD stay distinct there and merge on APFS. A single "Windows and
+macOS both collapse" assumption would have been wrong in one of the two
+directions, and the generator's post-creation verification is what measured it
+instead of assuming it.
+
+Isolation is re-proven on Windows by the same external sentinel method:
+`SENTINEL-UNCHANGED: yes` appears in the byte-identical portable report, so it
+holds on both platforms by construction of the comparison.
 
 ---
 
