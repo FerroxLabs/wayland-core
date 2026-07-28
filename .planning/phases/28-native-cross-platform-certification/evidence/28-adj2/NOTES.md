@@ -41,3 +41,26 @@ Windows: `SeanD@seandesktop`, worktree `C:\f28h2-repo`, target `C:\f28h2-target`
 - `[t0]` Branch + worktree created off `1b9f148f`. Confirmed `166ce7fe` (lane/28-h2) is an
   ancestor of integration HEAD, so the F-28-02-002 fix is present in this tree.
 - `[t0]` NOTES committed before any analysis.
+- `[t1]` **ADJ-001 fixed** (`8a870b9a`). Root cause confirmed exactly as filed: the test read the
+  quarantined TOML, which the MOVE preserves regardless of the report. Rewrote it to assert the
+  EMITTED report, both directions. Added a `cfg(test)` recorder rather than testing the pure
+  function alone — the pure function alone would still pass an implementation that logged a
+  constant. M3 re-run pending a Windows build.
+- `[t2]` **ADJ-002 REPRODUCED** on real hardware, base `1b9f148f`, binary `c732584c…`,
+  `SRC_DIRTY=0` (`adj2repro-base.log`). Clean → `ran=True`. 0-byte `.toml` → `ran=False`,
+  backend degrades to `fail_closed`, and the predicted diagnostic appears verbatim:
+  `invalid AppContainer ACL lease size 0 in \\?\C:\…\WCore-adj2-….toml`. Second run identical →
+  **permanent**. Effect and mechanism both match the static reading. Proceeding to fix.
+
+### FIFTH self-passing gate — mine, again, and the same shape I already recorded once
+
+`adj2-repro.ps1` reported `size_error=False` while the raw log contains the string. Cause: the
+console wraps long lines, splitting `invalid \n AppContainer ACL lease size` across a newline, so
+a literal `-match` of the phrase fails. **This is the same defect I noted in lane 28-h2 as an
+under-detecting `reclaimed=False` marker and did NOT fix in the harness — so it recurred.**
+An under-detecting classifier is the dangerous direction: it silently reports the defect ABSENT.
+
+Repair: whitespace-normalise the captured text before matching, and self-test the classifier
+against a known-positive and a known-negative in the same run. Marker lines from
+`adj2repro-base.log` are NOT to be trusted for the `size_error` field; the raw text is the
+authority for that observation.
