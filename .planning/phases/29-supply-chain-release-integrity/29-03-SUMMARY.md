@@ -243,7 +243,13 @@ same key, same body digest, a release-**state** domain separator — refused.
    MEDIUM → BACKLOG). Not split because the plan's SURGICAL-DIFF gate whitelists
    exactly two `wcore-cli/src` files and a third would have turned red a
    scope-control gate that protects five concurrent lanes.
-6. **My own mutation drill was defective on its first run and the defect is kept
+6. **The plan's FENCE and SURGICAL-DIFF gates are vacuous as written** — they
+   use `git status --porcelain`, which is empty once work is committed, and this
+   plan commits per task. Re-run in the merge-base form against the SHA captured
+   once at lane start: **0 fenced files touched between `6df10dab` and HEAD; 6
+   `crates/` paths touched, every one whitelisted; 0 off-whitelist.** F29-03-08,
+   MEDIUM.
+7. **My own mutation drill was defective on its first run and the defect is kept
    in the record.** Its parser matched the wrong nextest line shape and reported
    `failed=0` for all 18 mutations while the exit status said 100 — a measurement
    that could not be taken rendering as zero. The parser now raises instead.

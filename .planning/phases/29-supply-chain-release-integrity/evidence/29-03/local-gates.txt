@@ -39,3 +39,33 @@ The gates and the instruction contradict each other. Both forms are run
 above; the scope-corrected forms over the two-file artifact pair PASS.
 This is reported as a defect in the plan (SR-29-12), not repaired by
 adding a reference to self_update.rs purely to satisfy a grep.
+
+==========================================================================
+THE FENCE AND SURGICAL-DIFF GATES ABOVE ARE VACUOUS AS WRITTEN — RE-RUN
+==========================================================================
+Both use `git status --porcelain`, which reports only UNCOMMITTED changes.
+This plan commits per task, so by the time either gate runs the working tree
+is clean and the gate passes no matter what was changed. That is the
+'already green at base, so it proves nothing' class the lane brief names.
+
+The non-vacuous form, diffing against the MERGE-BASE SHA captured once at
+the start of the lane (never against the branch name, which moves):
+
+  BASE=6df10dab31e346a99f2644539cf9dc5518c8ba67
+  HEAD=92258e5ac76e60fbdab57efd76e840a0040e4b9f
+
+--- fenced paths touched between BASE and HEAD (must be empty) ---
+(0 lines)
+
+--- every crates/ path touched between BASE and HEAD ---
+crates/wcore-cli/src/self_update.rs
+crates/wcore-cli/src/update_trust.rs
+crates/wcore-cli/tests/self_update_trust.rs
+crates/wcore-eval-scenarios/bin/wayland-release.rs
+crates/wcore-eval-scenarios/src/release_integrity.rs
+crates/wcore-eval-scenarios/tests/release_integrity_contract.rs
+
+--- off-whitelist count: 0 ---
+
+This is the check that actually constrains the change. All six touched
+paths are on the plan's own whitelist; zero fenced files were touched.
