@@ -57,6 +57,12 @@ KR01_WITNESS_DESCENDANTS_ALIVE_BEFORE_DROP=[21664]   KR01_WITNESS_SURVIVORS_AFTE
 A real descendant PID, observed alive by host-side CIM before the future is dropped, and gone
 after. **`KR-01` may be marked DISPROVED with executable evidence, which unblocks 28-04.**
 
+**The pass is attributable to the repair, not to serialisation.** The obvious alternative
+explanation — "the old test would also have passed if run serially" — is refuted by ladder
+rung 5, which ran the *original* nested shape as a single test in a serial invocation and still
+returned `exit 1 / Access is denied.` in 2.7s. The original construction fails serially too;
+threading was never what stopped it reaching its assertion.
+
 ### The non-determinism has a cause, and it is not random
 
 `CLASS-WIN-LIVE-01`'s exact signature (3 passed / 2 failed, those two tests) reproduced **3/3**
