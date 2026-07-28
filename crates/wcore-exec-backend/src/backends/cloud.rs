@@ -41,9 +41,70 @@ use super::{
 
 pub const BACKEND_ID: &str = "cloud";
 pub const TOKEN_ENV: &str = "WAYLAND_F25_CLOUD_TOKEN";
+/// The Fly **app** slug this backend is scoped to.
+///
+/// The name says ORG for historical reasons and the value is an APP. That is
+/// deliberate and it is the safer of the two: an app is the narrowest surface
+/// whose machine list can be asserted empty in one call, whereas an org-wide
+/// assertion would go red the moment the owner created an unrelated app. The
+/// credential probe that specified this variable asked for "one throwaway
+/// Fly.io organization (or app)", and the app arm is the one taken.
 pub const ORG_ENV: &str = "WAYLAND_F25_CLOUD_ORG";
+/// Overrides the region a task machine is created in.
+pub const REGION_ENV: &str = "WAYLAND_F25_CLOUD_REGION";
 pub const NONCE_METADATA_KEY: &str = "wayland_task_nonce";
 const API_BASE: &str = "https://api.machines.dev/v1";
+const DEFAULT_REGION: &str = "iad";
+/// The task machine's image. Pinned to a digest-stable tag rather than
+/// `latest` so two runs a week apart are the same machine.
+const MACHINE_IMAGE: &str = "alpine:3.20";
+/// Where the hibernation probe plants its RAM-resident witness. `/dev/shm` is
+/// a tmpfs, so its contents live in the guest's RAM and in nothing else — a
+/// full machine stop loses them and a RAM-snapshot suspend keeps them. That
+/// asymmetry is the whole measurement.
+const RAM_WITNESS_PATH: &str = "/dev/shm/wayland-f25-hibernation.witness";
+
+/// The remote runner, executed by `sh -c` inside the task machine.
+///
+/// A CONSTANT, exactly as the ssh backend's runner is. Nothing task-specific is
+/// interpolated into the script text; every task-specific value arrives as a
+/// positional argument that `sh` binds to `$1`, `$2`, … and never re-parses as
+/// script. The task's own argv is expanded with `"$@"`, so a task argument
+/// containing a shell metacharacter reaches the program as literal bytes.
+const MACHINE_RUNNER: &str = r#"
+set -eu
+nonce="$1"; shift
+b64input="$1"; shift
+root="/tmp/wayland-f25-$nonce"
+mkdir -p "$root"
+printf '%s' "$b64input" | base64 -d > "$root/input.bin"
+cd "$root"
+export WAYLAND_TASK_NONCE="$nonce"
+"$@"
+"#;
+
+/// Plants the RAM witness and reads back the two values that distinguish a
+/// RAM-snapshot resume from a cold boot: the kernel's boot id and uptime.
+const HIBERNATION_PLANT: &str = r#"
+set -eu
+witness_path="$1"; shift
+witness="$1"; shift
+printf '%s' "$witness" > "$witness_path"
+printf 'WITNESS=%s\n' "$(cat "$witness_path")"
+printf 'BOOT_ID=%s\n' "$(cat /proc/sys/kernel/random/boot_id)"
+printf 'UPTIME=%s\n' "$(cut -d. -f1 /proc/uptime)"
+"#;
+
+/// Reads the same three values back after the resume. A missing witness file is
+/// reported as the literal `MISSING` rather than allowed to fail the script,
+/// because "the witness was gone" is the measurement, not an error.
+const HIBERNATION_VERIFY: &str = r#"
+set -eu
+witness_path="$1"; shift
+printf 'WITNESS=%s\n' "$(cat "$witness_path" 2>/dev/null || printf MISSING)"
+printf 'BOOT_ID=%s\n' "$(cat /proc/sys/kernel/random/boot_id)"
+printf 'UPTIME=%s\n' "$(cut -d. -f1 /proc/uptime)"
+"#;
 
 pub struct CloudBackend {
     capabilities: BackendCapabilities,
@@ -97,6 +158,116 @@ struct MachineSummary {
     name: String,
     #[serde(default)]
     state: String,
+}
+
+/// What the vendor's `exec` endpoint returns: the task's real output, produced
+/// on the machine.
+#[derive(Debug, Deserialize)]
+struct ExecResult {
+    #[serde(default)]
+    stdout: String,
+    #[serde(default)]
+    stderr: String,
+    #[serde(default)]
+    exit_code: i32,
+}
+
+/// The vendor's answer to `start`. `previous_state` is the field that says
+/// whether the machine came back from a RAM-snapshot `suspended` or from a
+/// cold `stopped`, straight from the vendor rather than from our own record of
+/// which call we made.
+#[derive(Debug, Deserialize)]
+struct StartResult {
+    #[serde(default)]
+    previous_state: String,
+}
+
+/// The three values the hibernation probe reads on both sides of the transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RamProbe {
+    witness: String,
+    boot_id: String,
+    uptime_secs: u64,
+}
+
+impl RamProbe {
+    /// Parse the runner's `KEY=value` lines. A field the probe did not emit is
+    /// left empty / zero, which fails the comparison rather than passing it —
+    /// an unparseable probe must not be able to certify hibernation.
+    fn parse(stdout: &str) -> Self {
+        let field = |key: &str| -> String {
+            stdout
+                .lines()
+                .find_map(|line| line.trim().strip_prefix(key).map(|v| v.trim().to_string()))
+                .unwrap_or_default()
+        };
+        Self {
+            witness: field("WITNESS="),
+            boot_id: field("BOOT_ID="),
+            uptime_secs: field("UPTIME=").parse().unwrap_or(0),
+        }
+    }
+}
+
+/// Decide whether what was read back on the far side of `suspend`/`start` is a
+/// RAM-snapshot resume or a cold boot wearing one's coat.
+///
+/// Split out as a pure function so it is unit-testable against the SHAPES both
+/// transitions actually produce — measured on the vendor, recorded in this
+/// phase's evidence — rather than only against the one that happened to run.
+///
+/// Every clause is a control that has been observed to fail. Against a real
+/// `stop`/`start` on Fly, measured 2026-07-28: the witness came back `MISSING`,
+/// the boot id changed, and uptime reset from 84s to 4s. All three clauses go
+/// red on a stop, so a stop cannot reach [`HibernationObservation::Observed`].
+fn hibernation_verdict(
+    previous_state: &str,
+    planted: &str,
+    before: &RamProbe,
+    after: &RamProbe,
+    transitions: Vec<String>,
+) -> HibernationObservation {
+    let mut failures: Vec<String> = Vec::new();
+    if previous_state != "suspended" {
+        failures.push(format!(
+            "the vendor reported the machine resumed from state '{previous_state}', not \
+             'suspended' — a stop/start cycle is NOT hibernation (binding condition C1)"
+        ));
+    }
+    if after.witness != planted {
+        failures.push(format!(
+            "the RAM witness planted in {RAM_WITNESS_PATH} did not survive the transition \
+             (read back '{}'); a tmpfs file survives a RAM-snapshot suspend and is lost by a \
+             machine stop, so this is a cold boot",
+            after.witness
+        ));
+    }
+    if before.boot_id.is_empty() || after.boot_id != before.boot_id {
+        failures.push(format!(
+            "the guest kernel boot id changed across the transition ({} -> {}), which means the \
+             kernel rebooted rather than resuming from RAM",
+            before.boot_id, after.boot_id
+        ));
+    }
+    if after.uptime_secs < before.uptime_secs {
+        failures.push(format!(
+            "guest uptime went backwards across the transition ({}s -> {}s), which is a reboot; \
+             a resumed guest continues counting",
+            before.uptime_secs, after.uptime_secs
+        ));
+    }
+
+    if failures.is_empty() {
+        HibernationObservation::Observed { transitions }
+    } else {
+        HibernationObservation::NotObserved {
+            reason: format!(
+                "this run did NOT observe hibernation and does not claim it (binding condition \
+                 C1): {}",
+                failures.join("; ")
+            ),
+        }
+    }
 }
 
 impl CloudBackend {
@@ -158,11 +329,27 @@ impl CloudBackend {
         credential: &CloudCredential,
         path: &str,
     ) -> std::result::Result<(u16, String), String> {
+        Self::api_post_json(credential, path, &serde_json::Value::Null).await
+    }
+
+    /// POST with a JSON body.
+    ///
+    /// The body-less variant above was the ONLY post path this module had, and
+    /// a machine cannot be created without one: the vendor requires a `config`
+    /// object naming an image. That defect is why this backend had never
+    /// created a machine — see the phase evidence.
+    async fn api_post_json(
+        credential: &CloudCredential,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> std::result::Result<(u16, String), String> {
         let client = wcore_egress::EgressClient::new();
         let url = format!("{API_BASE}{path}");
-        let response = client
-            .post(&url)
-            .bearer_auth(&credential.token)
+        let mut request = client.post(&url).bearer_auth(&credential.token);
+        if !body.is_null() {
+            request = request.json(body);
+        }
+        let response = request
             .send()
             .await
             .map_err(|e| redact(&e.to_string(), &credential.token))?;
@@ -172,6 +359,65 @@ impl CloudBackend {
             .await
             .map_err(|e| redact(&e.to_string(), &credential.token))?;
         Ok((status, body))
+    }
+
+    /// Run one argv on the machine and get its real stdout, stderr and exit
+    /// status back.
+    ///
+    /// `command` is a JSON ARRAY, so every element is a separate argv entry on
+    /// the far end and no shell parses any of them. This is argv mode carried
+    /// across the vendor API, and it is the same rule the ssh backend follows.
+    async fn machine_exec(
+        credential: &CloudCredential,
+        machine_id: &str,
+        command: &[String],
+        timeout_secs: u64,
+    ) -> std::result::Result<ExecResult, String> {
+        let path = format!("/apps/{}/machines/{}/exec", credential.app, machine_id);
+        let body = serde_json::json!({ "command": command, "timeout": timeout_secs });
+        let (status, text) = Self::api_post_json(credential, &path, &body).await?;
+        if !(200..300).contains(&status) {
+            return Err(format!("machine exec returned HTTP {status}: {text}"));
+        }
+        serde_json::from_str(&text).map_err(|e| format!("unparseable exec result: {e}"))
+    }
+
+    /// Poll the machine until it reports `want`, reading the state BACK from
+    /// the vendor each time.
+    ///
+    /// Returns the last state seen, so a caller that timed out records what it
+    /// actually saw rather than what it hoped for.
+    async fn await_state(
+        credential: &CloudCredential,
+        machine_id: &str,
+        want: &str,
+        timeout_secs: u64,
+    ) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        let mut last = String::new();
+        loop {
+            last = read_state(credential, machine_id).await;
+            if last == want || std::time::Instant::now() >= deadline {
+                return last;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        }
+    }
+
+    /// Destroy a machine and report whether the vendor confirmed it.
+    ///
+    /// Cleanup has its own function because it must run on EVERY path out of
+    /// `execute`, including the failing ones. A leaked cloud machine bills
+    /// real money, and the failure paths are exactly where one leaks.
+    async fn destroy_machine(credential: &CloudCredential, machine_id: &str) -> bool {
+        let path = format!(
+            "/apps/{}/machines/{}?force=true",
+            credential.app, machine_id
+        );
+        matches!(
+            Self::api_delete(credential, &path).await,
+            Ok((status, _)) if (200..300).contains(&status)
+        )
     }
 
     async fn api_delete(
@@ -192,6 +438,137 @@ impl CloudBackend {
             .await
             .map_err(|e| redact(&e.to_string(), &credential.token))?;
         Ok((status, body))
+    }
+
+    /// Boot the machine, hibernate it, resume it, then run the task ON IT.
+    ///
+    /// The task runs AFTER the resume deliberately. Success Criterion 1 asks
+    /// for the task to run "on one hibernating cloud machine", and a task that
+    /// ran before the machine was ever suspended would satisfy the words while
+    /// proving something weaker: this ordering makes the run itself depend on
+    /// the resume having worked.
+    async fn drive_machine(
+        credential: &CloudCredential,
+        machine_id: &str,
+        task: &ExecutionTask,
+    ) -> Result<(ExecResult, HibernationObservation)> {
+        let mut transitions: Vec<String> = Vec::new();
+        transitions.push(format!(
+            "created:{}",
+            read_state(credential, machine_id).await
+        ));
+
+        // 2. Wait for the machine to actually be running.
+        let state = Self::await_state(credential, machine_id, "started", 90).await;
+        transitions.push(format!("started:{state}"));
+        if state != "started" {
+            return Err(ExecError::Transport(format!(
+                "machine {machine_id} never reached 'started' (last state '{state}')"
+            )));
+        }
+
+        // 3. Plant a witness in the guest's RAM and read the two kernel values
+        //    that a reboot cannot preserve.
+        let witness = format!("f25-ram-witness-{}", task.nonce);
+        let plant = Self::machine_exec(
+            credential,
+            machine_id,
+            &[
+                "/bin/sh".into(),
+                "-c".into(),
+                HIBERNATION_PLANT.into(),
+                "f25".into(),
+                RAM_WITNESS_PATH.into(),
+                witness.clone(),
+            ],
+            30,
+        )
+        .await
+        .map_err(ExecError::Transport)?;
+        let before = RamProbe::parse(&plant.stdout);
+
+        // 4. THE HIBERNATION TRANSITION. Condition C1: `suspend`, not `stop`.
+        let suspend_path = format!("/apps/{}/machines/{}/suspend", credential.app, machine_id);
+        let suspend = Self::api_post(credential, &suspend_path).await;
+        let hibernation = match suspend {
+            Ok((status, _)) if (200..300).contains(&status) => {
+                let observed = Self::await_state(credential, machine_id, "suspended", 60).await;
+                transitions.push(format!("suspended:{observed}"));
+
+                // Resume, and take `previous_state` from the VENDOR rather
+                // than inferring it from the call we chose to make.
+                let start_path = format!("/apps/{}/machines/{}/start", credential.app, machine_id);
+                let previous_state = match Self::api_post(credential, &start_path).await {
+                    Ok((status, body)) if (200..300).contains(&status) => {
+                        serde_json::from_str::<StartResult>(&body)
+                            .map(|r| r.previous_state)
+                            .unwrap_or_default()
+                    }
+                    Ok((status, _)) => format!("start-http-{status}"),
+                    Err(_) => "start-unreachable".into(),
+                };
+                let resumed = Self::await_state(credential, machine_id, "started", 90).await;
+                transitions.push(format!("resumed:{resumed} previous_state={previous_state}"));
+
+                let verify = Self::machine_exec(
+                    credential,
+                    machine_id,
+                    &[
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        HIBERNATION_VERIFY.into(),
+                        "f25".into(),
+                        RAM_WITNESS_PATH.into(),
+                    ],
+                    30,
+                )
+                .await
+                .map_err(ExecError::Transport)?;
+                let after = RamProbe::parse(&verify.stdout);
+                transitions.push(format!(
+                    "ram-witness before={} boot_id={} uptime={}s / after={} boot_id={} uptime={}s",
+                    before.witness,
+                    before.boot_id,
+                    before.uptime_secs,
+                    after.witness,
+                    after.boot_id,
+                    after.uptime_secs
+                ));
+
+                hibernation_verdict(&previous_state, &witness, &before, &after, transitions)
+            }
+            Ok((status, body)) => HibernationObservation::NotObserved {
+                reason: format!(
+                    "suspend returned HTTP {status} ({body}); this run did NOT observe \
+                     hibernation and does not claim it (binding condition C1)"
+                ),
+            },
+            Err(detail) => HibernationObservation::NotObserved {
+                reason: format!(
+                    "suspend could not be issued: {detail}; this run did NOT observe hibernation \
+                     and does not claim it (binding condition C1)"
+                ),
+            },
+        };
+
+        // 5. Run the REAL task on the machine, in argv mode.
+        use base64::Engine as _;
+        let input_b64 = base64::engine::general_purpose::STANDARD.encode(&task.input);
+        let mut command = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            MACHINE_RUNNER.to_string(),
+            "f25".to_string(),
+            task.nonce.clone(),
+            input_b64,
+        ];
+        command.extend(task.argv.iter().cloned());
+        let wall_secs = task.resources.wall_time_ms.div_ceil(1000).clamp(5, 120);
+        let exec = Self::machine_exec(credential, machine_id, &command, wall_secs)
+            .await
+            .map_err(ExecError::Transport)?;
+
+        Ok((exec, hibernation))
     }
 
     async fn machines_with_nonce(
@@ -304,27 +681,40 @@ impl ExecutionBackend for CloudBackend {
             started_unix_ms: started,
         })?;
 
-        let mut transitions: Vec<String> = Vec::new();
-
-        // 1. Create the machine, tagged with the task nonce so an orphan scan
-        //    can find it with one call.
+        // 1. Create the machine, TAGGED WITH THE TASK NONCE.
+        //
+        // The tag is not decoration. `scan_orphans` and `cancel` both find a
+        // machine by filtering on this exact metadata key, so a machine created
+        // without it is invisible to both — an orphan that no scan can ever
+        // return, and a clean scan that means nothing. The create call
+        // previously sent no body at all, which set no metadata and in fact
+        // created no machine.
         let create_path = format!("/apps/{}/machines", credential.app);
-        let (status, body) = Self::api_post(&credential, &create_path)
-            .await
-            .map_err(ExecError::Transport)?;
+        let create_body = machine_create_body(task);
+        let (status, body) =
+            match Self::api_post_json(&credential, &create_path, &create_body).await {
+                Ok(response) => response,
+                Err(detail) => {
+                    registry::forget(&task.task_id)?;
+                    return Err(ExecError::Transport(detail));
+                }
+            };
         if !(200..300).contains(&status) {
             registry::forget(&task.task_id)?;
             return Err(ExecError::Transport(format!(
                 "machine create returned HTTP {status}: {body}"
             )));
         }
-        let created: MachineSummary = serde_json::from_str(&body)
-            .map_err(|e| ExecError::Transport(format!("unparseable machine create: {e}")))?;
+        let created: MachineSummary = match serde_json::from_str(&body) {
+            Ok(created) => created,
+            Err(e) => {
+                registry::forget(&task.task_id)?;
+                return Err(ExecError::Transport(format!(
+                    "unparseable machine create: {e}"
+                )));
+            }
+        };
         let machine_id = created.id.clone();
-        transitions.push(format!(
-            "created:{}",
-            read_state(&credential, &machine_id).await
-        ));
 
         registry::record(&LiveTask {
             task_id: task.task_id.clone(),
@@ -336,65 +726,32 @@ impl ExecutionBackend for CloudBackend {
             started_unix_ms: started,
         })?;
 
-        // 2. Run: wait for the machine to reach `started`.
-        let wait_path = format!(
-            "/apps/{}/machines/{}/wait?state=started&timeout=60",
-            credential.app, machine_id
-        );
-        let _ = Self::api_get(&credential, &wait_path).await;
-        transitions.push(format!(
-            "started:{}",
-            read_state(&credential, &machine_id).await
-        ));
+        // 2-4 run against a live machine and can fail at any point. Whatever
+        // they return, the machine is destroyed below BEFORE the result is
+        // examined — an early `?` here would leak a billable machine, and the
+        // failure paths are precisely where a leak happens.
+        let run = Self::drive_machine(&credential, &machine_id, task).await;
 
-        // 3. The HIBERNATION transition. Condition C1: `suspend`, not `stop`.
-        let suspend_path = format!("/apps/{}/machines/{}/suspend", credential.app, machine_id);
-        let suspend_result = Self::api_post(&credential, &suspend_path).await;
-        let hibernation = match suspend_result {
-            Ok((status, _)) if (200..300).contains(&status) => {
-                let observed = read_state(&credential, &machine_id).await;
-                transitions.push(format!("suspended:{observed}"));
-                // 4. Resume, and read the state back rather than inferring it
-                //    from the request that asked for it.
-                let start_path = format!("/apps/{}/machines/{}/start", credential.app, machine_id);
-                let _ = Self::api_post(&credential, &start_path).await;
-                transitions.push(format!(
-                    "resumed:{}",
-                    read_state(&credential, &machine_id).await
-                ));
-                HibernationObservation::Observed {
-                    transitions: transitions.clone(),
-                }
-            }
-            Ok((status, body)) => HibernationObservation::NotObserved {
-                reason: format!(
-                    "suspend returned HTTP {status} ({body}); this run did NOT observe \
-                     hibernation and does not claim it (binding condition C1)"
-                ),
-            },
-            Err(detail) => HibernationObservation::NotObserved {
-                reason: format!(
-                    "suspend could not be issued: {detail}; this run did NOT observe hibernation \
-                     and does not claim it (binding condition C1)"
-                ),
-            },
-        };
-
-        // 5. Destroy. Cleanup is part of the run, not an afterthought.
-        let destroy_path = format!(
-            "/apps/{}/machines/{}?force=true",
-            credential.app, machine_id
-        );
-        let _ = Self::api_delete(&credential, &destroy_path).await;
+        let destroyed = Self::destroy_machine(&credential, &machine_id).await;
 
         let finished = now_unix_ms();
         let cancelled = cancel_marker_taken(&task.task_id);
         registry::forget(&task.task_id)?;
 
-        // The cloud leg's stdout is the machine's captured output. Until a
-        // credential exists this path has never executed against a real
-        // vendor, and that is recorded in the phase evidence rather than
-        // papered over: an unexercised path must not be reported as proven.
+        let (exec, hibernation) = run?;
+        if !destroyed {
+            return Err(ExecError::Transport(format!(
+                "the task machine {machine_id} could not be destroyed; it may still be running \
+                 and billing. Enumerate with `wayland-core backend orphans --nonce {}`",
+                task.nonce
+            )));
+        }
+
+        // The cloud leg's stdout is the machine's OWN captured output, returned
+        // by the vendor's exec endpoint. It is not the submitted input echoed
+        // back: an echo would produce a receipt digest identical to the other
+        // three backends' while nothing whatsoever ran in the cloud, which is
+        // the precise shape of a false equivalence.
         outcome_receipt(
             task,
             &self.capabilities,
@@ -402,9 +759,9 @@ impl ExecutionBackend for CloudBackend {
             &self.signer,
             &policy,
             RunOutcome {
-                stdout: task.input.clone(),
-                stderr: Vec::new(),
-                exit_code: 0,
+                stdout: exec.stdout.into_bytes(),
+                stderr: exec.stderr.into_bytes(),
+                exit_code: exec.exit_code,
                 endpoint: machine_id,
                 cancelled,
                 hibernation,
@@ -489,6 +846,50 @@ impl ExecutionBackend for CloudBackend {
     }
 }
 
+/// The guest size for a task, in the units the vendor accepts.
+///
+/// Rounded UP to the vendor's 256 MB granularity so a task is never given less
+/// memory than it asked for, and clamped to a ceiling because this backend
+/// creates machines on a real account and an unbounded value here is an
+/// unbounded bill.
+fn guest_memory_mb(memory_bytes: u64) -> u64 {
+    let requested_mb = memory_bytes.div_ceil(1024 * 1024);
+    requested_mb
+        .div_ceil(256)
+        .saturating_mul(256)
+        .clamp(256, 2048)
+}
+
+/// The machine-create body.
+///
+/// `metadata` carries the task nonce under [`NONCE_METADATA_KEY`] — the same
+/// key `scan_orphans` and `cancel` filter on. `init.exec` holds the machine
+/// open with a sleeper rather than letting the image's own entrypoint exit,
+/// because a machine that has already stopped cannot be suspended and cannot
+/// run the task. `restart.policy: no` stops the vendor resurrecting a machine
+/// this backend believes it destroyed.
+fn machine_create_body(task: &ExecutionTask) -> serde_json::Value {
+    let region = std::env::var(REGION_ENV)
+        .ok()
+        .filter(|r| !r.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_REGION.to_string());
+    serde_json::json!({
+        "region": region,
+        "config": {
+            "image": MACHINE_IMAGE,
+            "guest": {
+                "cpu_kind": "shared",
+                "cpus": 1,
+                "memory_mb": guest_memory_mb(task.resources.memory_bytes),
+            },
+            "init": { "exec": ["/bin/sleep", "inf"] },
+            "auto_destroy": false,
+            "restart": { "policy": "no" },
+            "metadata": { (NONCE_METADATA_KEY): task.nonce },
+        }
+    })
+}
+
 /// Read a machine's state BACK from the vendor. Deliberately not inferred from
 /// the request that asked for the transition — an inferred transition is an
 /// assertion, and the criterion asks for an observation.
@@ -562,6 +963,221 @@ mod tests {
             availability.detail.contains(TOKEN_ENV),
             "the unavailable verdict must name the missing credential, got: {}",
             availability.detail
+        );
+    }
+
+    // ---- the hibernation discriminator ----------------------------------
+    //
+    // These are pinned against the two shapes MEASURED on the live vendor from
+    // hetzner-dsm on 2026-07-28, recorded in
+    // `evidence/25-cloud-suspend-vs-stop-control.txt`. Both transitions were
+    // driven on the same machine minutes apart, so the difference between them
+    // is the transition and nothing else.
+
+    /// The suspend shape, verbatim from the live run: witness survived, boot id
+    /// unchanged, uptime continued.
+    fn measured_suspend() -> (RamProbe, RamProbe) {
+        (
+            RamProbe {
+                witness: "f25-ram-witness-n1".into(),
+                boot_id: "c5a791f8-71cf-4f0a-92ae-b29315f08002".into(),
+                uptime_secs: 55,
+            },
+            RamProbe {
+                witness: "f25-ram-witness-n1".into(),
+                boot_id: "c5a791f8-71cf-4f0a-92ae-b29315f08002".into(),
+                uptime_secs: 63,
+            },
+        )
+    }
+
+    /// The stop shape, verbatim from the live control: witness MISSING, boot id
+    /// changed, uptime reset from 84s to 4s.
+    fn measured_stop() -> (RamProbe, RamProbe) {
+        (
+            RamProbe {
+                witness: "f25-ram-witness-n1".into(),
+                boot_id: "c5a791f8-71cf-4f0a-92ae-b29315f08002".into(),
+                uptime_secs: 84,
+            },
+            RamProbe {
+                witness: "MISSING".into(),
+                boot_id: "8e4a0900-5666-4878-8fa2-4e03bf48f1e1".into(),
+                uptime_secs: 4,
+            },
+        )
+    }
+
+    #[test]
+    fn a_real_suspend_resume_is_the_only_shape_that_reaches_observed() {
+        let (before, after) = measured_suspend();
+        let verdict = hibernation_verdict(
+            "suspended",
+            "f25-ram-witness-n1",
+            &before,
+            &after,
+            vec!["suspended:suspended".into()],
+        );
+        assert!(
+            matches!(verdict, HibernationObservation::Observed { .. }),
+            "the measured suspend/resume shape must be accepted: {verdict:?}"
+        );
+    }
+
+    /// The control. A stop/start cycle reported as hibernation would be a false
+    /// green on the ONE property distinguishing this backend from the other
+    /// three, so it must be rejected — and rejected by every clause
+    /// independently, not by one that a vendor change could quietly remove.
+    #[test]
+    fn a_stop_start_cycle_is_refused_by_every_clause_independently() {
+        let (before, after) = measured_stop();
+        let verdict = hibernation_verdict(
+            "stopped",
+            "f25-ram-witness-n1",
+            &before,
+            &after,
+            vec!["stopped:stopped".into()],
+        );
+        let reason = match &verdict {
+            HibernationObservation::NotObserved { reason } => reason.clone(),
+            other => panic!("a stop/start cycle was reported as hibernation: {other:?}"),
+        };
+        assert!(reason.contains("not 'suspended'"), "{reason}");
+        assert!(reason.contains("RAM witness"), "{reason}");
+        assert!(reason.contains("boot id changed"), "{reason}");
+        assert!(reason.contains("uptime went backwards"), "{reason}");
+    }
+
+    /// Each clause must be able to redden ON ITS OWN. A discriminator that only
+    /// fails when all four signals fail together would pass a vendor that
+    /// preserved tmpfs across a reboot, or a `previous_state` string that drifted.
+    #[test]
+    fn each_clause_reddens_alone() {
+        let (before, after) = measured_suspend();
+        let witness = "f25-ram-witness-n1";
+
+        // Only previous_state wrong.
+        assert!(matches!(
+            hibernation_verdict("stopped", witness, &before, &after, vec![]),
+            HibernationObservation::NotObserved { .. }
+        ));
+        // Only the witness lost.
+        let lost = RamProbe {
+            witness: "MISSING".into(),
+            ..after.clone()
+        };
+        assert!(matches!(
+            hibernation_verdict("suspended", witness, &before, &lost, vec![]),
+            HibernationObservation::NotObserved { .. }
+        ));
+        // Only the boot id changed.
+        let rebooted = RamProbe {
+            boot_id: "8e4a0900-5666-4878-8fa2-4e03bf48f1e1".into(),
+            ..after.clone()
+        };
+        assert!(matches!(
+            hibernation_verdict("suspended", witness, &before, &rebooted, vec![]),
+            HibernationObservation::NotObserved { .. }
+        ));
+        // Only uptime went backwards.
+        let reset = RamProbe {
+            uptime_secs: 4,
+            ..after.clone()
+        };
+        assert!(matches!(
+            hibernation_verdict("suspended", witness, &before, &reset, vec![]),
+            HibernationObservation::NotObserved { .. }
+        ));
+    }
+
+    /// A probe whose output could not be parsed must not certify hibernation.
+    /// Empty fields compare equal to each other, so a naive implementation
+    /// would report Observed for a machine it never actually reached.
+    #[test]
+    fn an_unparseable_probe_cannot_certify_hibernation() {
+        let empty = RamProbe::parse("");
+        assert_eq!(empty.witness, "");
+        assert_eq!(empty.boot_id, "");
+        assert!(matches!(
+            hibernation_verdict("suspended", "w", &empty, &empty, vec![]),
+            HibernationObservation::NotObserved { .. }
+        ));
+    }
+
+    #[test]
+    fn the_probe_parses_the_runner_output_shape() {
+        let probe = RamProbe::parse(
+            "WITNESS=f25-ram-witness-n1\nBOOT_ID=c5a791f8-71cf-4f0a-92ae-b29315f08002\nUPTIME=63\n",
+        );
+        assert_eq!(probe.witness, "f25-ram-witness-n1");
+        assert_eq!(probe.boot_id, "c5a791f8-71cf-4f0a-92ae-b29315f08002");
+        assert_eq!(probe.uptime_secs, 63);
+    }
+
+    // ---- the create body -------------------------------------------------
+
+    fn probe_task(nonce: &str) -> ExecutionTask {
+        crate::conformance::reference_task("t-1", nonce, crate::conformance::reference_budget())
+    }
+
+    /// The nonce tag is what makes an orphan findable. Without it
+    /// `scan_orphans` filters on a key no machine carries, so it returns an
+    /// empty list unconditionally — a scan that cannot see anything, reported
+    /// as zero orphans.
+    #[test]
+    fn a_created_machine_is_tagged_with_the_task_nonce() {
+        let body = machine_create_body(&probe_task("f25-nonce-abc"));
+        assert_eq!(
+            body["config"]["metadata"][NONCE_METADATA_KEY]
+                .as_str()
+                .unwrap(),
+            "f25-nonce-abc",
+            "an untagged machine is invisible to the orphan scan that is supposed to find it"
+        );
+    }
+
+    /// The machine must stay up long enough to be suspended and to run the
+    /// task. An image whose entrypoint exits leaves a stopped machine, and a
+    /// stopped machine cannot be suspended.
+    #[test]
+    fn the_machine_is_held_open_and_not_auto_restarted() {
+        let body = machine_create_body(&probe_task("f25-nonce-abc"));
+        assert_eq!(
+            body["config"]["init"]["exec"][0].as_str().unwrap(),
+            "/bin/sleep"
+        );
+        assert_eq!(body["config"]["restart"]["policy"].as_str().unwrap(), "no");
+        assert_eq!(body["config"]["auto_destroy"].as_bool().unwrap(), false);
+        assert!(
+            body["config"]["image"]
+                .as_str()
+                .unwrap()
+                .starts_with("alpine:")
+        );
+    }
+
+    #[test]
+    fn guest_memory_rounds_up_and_is_bounded() {
+        // The reference budget's 256 MB maps to exactly one unit.
+        assert_eq!(guest_memory_mb(256 * 1024 * 1024), 256);
+        // Anything smaller still gets the vendor's minimum.
+        assert_eq!(guest_memory_mb(1), 256);
+        // A request between granularities rounds UP, never down.
+        assert_eq!(guest_memory_mb(300 * 1024 * 1024), 512);
+        // And an absurd request is clamped rather than billed.
+        assert_eq!(guest_memory_mb(u64::MAX), 2048);
+    }
+
+    /// The task's argv crosses as separate argv entries and is never spliced
+    /// into the runner's script text — the same rule the ssh backend follows.
+    #[test]
+    fn the_runner_binds_task_values_positionally_rather_than_interpolating_them() {
+        assert!(MACHINE_RUNNER.contains(r#"nonce="$1""#));
+        assert!(MACHINE_RUNNER.contains(r#"b64input="$1""#));
+        assert!(MACHINE_RUNNER.contains("base64 -d"));
+        assert!(
+            MACHINE_RUNNER.contains(r#""$@""#),
+            "the task argv must be expanded as argv, not re-parsed as script"
         );
     }
 
