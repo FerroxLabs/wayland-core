@@ -1,0 +1,32 @@
+warning: /root/hlkr-out3/home-R1i/config.toml has permissions 0o644; tightening to 0o600 on next write
+2026-07-28T18:09:10.261167Z  INFO egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked allowlisted=37
+2026-07-28T18:09:10.261288Z  INFO egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked allowlisted=37
+2026-07-28T18:09:10.262702Z  WARN not advertising browser_suite: the plugin is loaded but no backend can start capability="browser_suite" reason=no browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health remedy=install @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+2026-07-28T18:09:10.262726Z  WARN not advertising computer_use: the plugin is loaded but no backend can start capability="computer_use" reason=neither DISPLAY nor WAYLAND_DISPLAY is set, so no display server is reachable and the X11 backend cannot connect remedy=run inside a graphical session, or export DISPLAY for an available X server (e.g. an Xvfb instance) before starting
+2026-07-28T18:09:10.262890Z  INFO postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+2026-07-28T18:09:10.262968Z  INFO skipping registration of tool whose backend is not configured tool=spotify_playback
+2026-07-28T18:09:10.262983Z  INFO skipping registration of tool whose backend is not configured tool=spotify_devices
+2026-07-28T18:09:10.262986Z  INFO skipping registration of tool whose backend is not configured tool=spotify_queue
+2026-07-28T18:09:10.262988Z  INFO skipping registration of tool whose backend is not configured tool=spotify_search
+2026-07-28T18:09:10.262996Z  INFO skipping registration of tool whose backend is not configured tool=spotify_playlists
+2026-07-28T18:09:10.262998Z  INFO skipping registration of tool whose backend is not configured tool=spotify_albums
+2026-07-28T18:09:10.263000Z  INFO skipping registration of tool whose backend is not configured tool=spotify_library
+2026-07-28T18:09:10.263009Z  INFO skipping registration of tool whose backend is not configured tool=yuanbao
+2026-07-28T18:09:10.263017Z  INFO image_gen: using gpt-image-1 at http://127.0.0.1:8399 (active OpenAI-wire provider)
+2026-07-28T18:09:10.263032Z  INFO web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+2026-07-28T18:09:10.263054Z  WARN vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+2026-07-28T18:09:10.263057Z  WARN transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden
+2026-07-28T18:09:10.263064Z  INFO tts: using OpenAI TTS at http://127.0.0.1:8399 (active OpenAI-wire provider)
+2026-07-28T18:09:10.263290Z  WARN video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+2026-07-28T18:09:10.263313Z  INFO cronjob: wiring WaylandCronScheduler over default FileCronStore
+2026-07-28T18:09:10.263422Z  WARN plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool plugin=wayland-browser tool=execute fq_name=Browser::execute
+2026-07-28T18:09:10.274936Z  WARN semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+2026-07-28T18:09:10.275062Z  INFO W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+2026-07-28T18:09:10.275071Z  INFO M3.2: memory.enabled ON — decay scheduler spawned interval_secs=3600
+2026-07-28T18:09:10.277162Z  INFO user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+2026-07-28T18:09:21.598925Z  INFO F-014: channels auto-registered from ~/.wayland/channels count=0
+2026-07-28T18:09:21.598963Z  WARN vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+2026-07-28T18:09:21.598968Z  WARN transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden
+2026-07-28T18:09:21.598979Z  INFO Phase 1B-2: inbound channel subscriber spawned
+2026-07-28T18:09:21.598983Z  INFO F-014: channel_manager.start_all() complete — inbound polling active
+error: Session persistence authority unavailable: secure recovery storage could not be read: the configured store rejected this profile's recovery key. An encrypted vault opened with the wrong unlock passphrase reads this way — re-check the passphrase for this profile

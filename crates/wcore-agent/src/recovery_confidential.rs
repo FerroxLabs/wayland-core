@@ -73,15 +73,18 @@ pub(crate) struct PreparedRequestBinding<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub(crate) enum RecoveryConfidentialError {
     #[error(
-        "credentials.backend is set to \"plaintext\", which cannot hold the confidential key that \
-         durable session recovery requires. Set credentials.backend to \"keyring\" or \
-         \"encrypted-file\", or disable session persistence"
+        "storage.credentials.backend is set to \"plaintext\", which cannot hold the confidential \
+         key that durable session recovery requires. Unlock an encrypted vault by setting \
+         WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or \
+         WAYLAND_VAULT_PASSPHRASE, or set [storage.credentials] backend = \"keyring\", or turn \
+         durable sessions off with [session] enabled = false"
     )]
     PlaintextBackendRejected,
     #[error(
         "secure recovery storage is unavailable: no OS keyring was usable and no encrypted \
-         credentials vault is unlocked. Configure an OS keyring, or set credentials.backend to \
-         \"encrypted-file\" and supply its unlock passphrase"
+         credentials vault is unlocked. On a headless host set WAYLAND_VAULT_PASSPHRASE_FD (a \
+         passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE to unlock the \
+         encrypted vault, or turn durable sessions off with [session] enabled = false"
     )]
     NoSecureBackendAvailable,
     #[error(
@@ -477,6 +480,98 @@ mod tests {
         assert!(
             error.contains("session"),
             "the user must be told which capability requires it: {error}"
+        );
+    }
+
+    /// Every `backend = "<value>"` a remediation string tells an operator to
+    /// write must actually be accepted by the config parser it will be written
+    /// into.
+    ///
+    /// This exists because it was NOT true. Both messages advertised
+    /// `credentials.backend = "encrypted-file"`, and all three of its parts were
+    /// wrong at once, measured live on a keyring-less host:
+    ///   * `[credentials]` is not a section — the loader logs "ignoring unknown
+    ///     or mis-sectioned config key `credentials` … it has no effect" and
+    ///     then re-emits this identical error. A closed loop.
+    ///   * at the real section `[storage.credentials]`, `"encrypted-file"` is
+    ///     rejected: `unknown variant, expected one of auto, plaintext,
+    ///     keyring, encrypted_file` — the config no longer loads AT ALL, so
+    ///     following the advice is strictly worse than ignoring it.
+    ///   * even `"encrypted_file"` fails, because the variant is
+    ///     `EncryptedFile { cipher_path, key_params_path }` — a struct variant
+    ///     that can never be a bare string in any spelling.
+    ///
+    /// The gate can fail: it re-parses whatever the messages say through the
+    /// real `CredentialsStorageConfig`, so re-introducing any unrepresentable
+    /// value reds it. Verified red against the pre-fix strings.
+    #[test]
+    fn every_backend_value_the_messages_advertise_actually_parses() {
+        let messages = [
+            RecoveryConfidentialError::PlaintextBackendRejected.to_string(),
+            RecoveryConfidentialError::NoSecureBackendAvailable.to_string(),
+            RecoveryConfidentialError::SecureStoreUnreadable.to_string(),
+            RecoveryConfidentialError::MissingRecoveryKey.to_string(),
+        ];
+
+        let mut checked = 0usize;
+        for message in &messages {
+            // Pull every `backend = "value"` / `backend to "value"` the text
+            // offers, however it is phrased around the quotes.
+            for (index, _) in message.match_indices("backend") {
+                let tail = &message[index..];
+                let Some(open) = tail.find('"') else { continue };
+                let Some(len) = tail[open + 1..].find('"') else {
+                    continue;
+                };
+                let value = &tail[open + 1..open + 1 + len];
+                // Only a bare word can be a backend value; skip prose quotes.
+                if value.is_empty() || value.contains(' ') {
+                    continue;
+                }
+                let toml = format!("backend = \"{value}\"");
+                assert!(
+                    toml::from_str::<CredentialsStorageConfig>(&toml).is_ok(),
+                    "message advertises backend = \"{value}\", which \
+                     [storage.credentials] rejects. An operator who follows this \
+                     text literally ends up with a config that will not load.\n\
+                     message: {message}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 0,
+            "no backend value was extracted from any message — the gate would \
+             pass vacuously; fix the extraction, do not delete the assert"
+        );
+    }
+
+    /// The messages must point at a remedy that a headless operator can reach
+    /// with product-supplied information alone.
+    ///
+    /// Measured: `WAYLAND_VAULT_PASSPHRASE` appears in ZERO files under `docs/`,
+    /// in ZERO bytes of `--help`, and (before this fix) in no error message —
+    /// yet setting it, with no config change whatsoever, is the ONE thing that
+    /// makes a default install complete a turn on a host with no OS keyring.
+    #[test]
+    fn the_unavailable_message_names_a_remedy_an_operator_can_actually_perform() {
+        let message = RecoveryConfidentialError::NoSecureBackendAvailable.to_string();
+
+        assert!(
+            message.contains("WAYLAND_VAULT_PASSPHRASE"),
+            "the vault unlock transport is the only remedy that works without a \
+             config change, and it is documented nowhere else: {message}"
+        );
+
+        // The other advertised escape must be spelled exactly as the config
+        // schema accepts it, not described in prose.
+        assert!(
+            message.contains("[session] enabled = false"),
+            "the persistence-off escape must be given as a writable config key: {message}"
+        );
+        assert!(
+            toml::from_str::<wcore_config::config::SessionConfig>("enabled = false").is_ok(),
+            "the key this message advertises must exist in SessionConfig"
         );
     }
 

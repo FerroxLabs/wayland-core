@@ -1,0 +1,40 @@
+warning: /root/hlkr-out5/home-R6/.config/wayland-core/config.toml has permissions 0o644; tightening to 0o600 on next write
+2026-07-28T18:13:29.351957Z  INFO egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked allowlisted=37
+2026-07-28T18:13:29.352080Z  INFO egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked allowlisted=37
+2026-07-28T18:13:29.353505Z  WARN not advertising browser_suite: the plugin is loaded but no backend can start capability="browser_suite" reason=no browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health remedy=install @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+2026-07-28T18:13:29.353527Z  WARN not advertising computer_use: the plugin is loaded but no backend can start capability="computer_use" reason=neither DISPLAY nor WAYLAND_DISPLAY is set, so no display server is reachable and the X11 backend cannot connect remedy=run inside a graphical session, or export DISPLAY for an available X server (e.g. an Xvfb instance) before starting
+2026-07-28T18:13:29.353710Z  INFO postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+2026-07-28T18:13:29.353796Z  INFO skipping registration of tool whose backend is not configured tool=spotify_playback
+2026-07-28T18:13:29.353811Z  INFO skipping registration of tool whose backend is not configured tool=spotify_devices
+2026-07-28T18:13:29.353813Z  INFO skipping registration of tool whose backend is not configured tool=spotify_queue
+2026-07-28T18:13:29.353815Z  INFO skipping registration of tool whose backend is not configured tool=spotify_search
+2026-07-28T18:13:29.353818Z  INFO skipping registration of tool whose backend is not configured tool=spotify_playlists
+2026-07-28T18:13:29.353820Z  INFO skipping registration of tool whose backend is not configured tool=spotify_albums
+2026-07-28T18:13:29.353822Z  INFO skipping registration of tool whose backend is not configured tool=spotify_library
+2026-07-28T18:13:29.353830Z  INFO skipping registration of tool whose backend is not configured tool=yuanbao
+2026-07-28T18:13:29.353839Z  INFO image_gen: using gpt-image-1 at http://127.0.0.1:8399 (active OpenAI-wire provider)
+2026-07-28T18:13:29.353849Z  INFO web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+2026-07-28T18:13:29.353868Z  WARN vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+2026-07-28T18:13:29.353871Z  WARN transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden
+2026-07-28T18:13:29.353878Z  INFO tts: using OpenAI TTS at http://127.0.0.1:8399 (active OpenAI-wire provider)
+2026-07-28T18:13:29.354191Z  WARN video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+2026-07-28T18:13:29.354216Z  INFO cronjob: wiring WaylandCronScheduler over default FileCronStore
+2026-07-28T18:13:29.354343Z  WARN plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool plugin=wayland-browser tool=execute fq_name=Browser::execute
+2026-07-28T18:13:29.368098Z  WARN semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+2026-07-28T18:13:29.368236Z  INFO W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+2026-07-28T18:13:29.368245Z  INFO M3.2: memory.enabled ON — decay scheduler spawned interval_secs=3600
+2026-07-28T18:13:29.370276Z  INFO user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+2026-07-28T18:13:40.729648Z  INFO F-014: channels auto-registered from ~/.wayland/channels count=0
+2026-07-28T18:13:40.729691Z  WARN vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+2026-07-28T18:13:40.729696Z  WARN transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden
+2026-07-28T18:13:40.729707Z  INFO Phase 1B-2: inbound channel subscriber spawned
+2026-07-28T18:13:40.729712Z  INFO F-014: channel_manager.start_all() complete — inbound polling active
+2026-07-28T18:13:40.783313Z  WARN WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+2026-07-28T18:13:40.897824Z  WARN W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic provider="openai" model="mock-model"
+2026-07-28T18:13:40.897842Z  WARN W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic provider="openai" model="mock-model"
+2026-07-28T18:13:40.897846Z  WARN W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic provider="openai" model="mock-model"
+Pricing unavailable for openai/mock-model; the call remains bounded by the token envelope and cost is unpriced, not $0.
+2026-07-28T18:13:40.901360Z  WARN W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic provider="openai" model="mock-model"
+2026-07-28T18:13:40.901696Z  WARN W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic provider="openai" model="mock-model"
+
+[turns: 1 | tokens: 1 in / 1 out]

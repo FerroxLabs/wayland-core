@@ -1,0 +1,15 @@
+warning: /root/hlkr-out2/home-R1f/config.toml has permissions 0o644; tightening to 0o600 on next write
+Error: failed to parse /root/hlkr-out2/home-R1f/config.toml: TOML parse error at line 14, column 11
+   |
+14 | backend = "encrypted_file"
+   |           ^^^^^^^^^^^^^^^^
+invalid type: unit variant, expected struct variant
+
+
+Caused by:
+    TOML parse error at line 14, column 11
+       |
+    14 | backend = "encrypted_file"
+       |           ^^^^^^^^^^^^^^^^
+    invalid type: unit variant, expected struct variant
+    

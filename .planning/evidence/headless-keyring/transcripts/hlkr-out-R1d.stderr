@@ -1,0 +1,15 @@
+warning: /root/hlkr-out/home-R1d/config.toml has permissions 0o644; tightening to 0o600 on next write
+Error: failed to parse /root/hlkr-out/home-R1d/config.toml: TOML parse error at line 14, column 11
+   |
+14 | backend = "encrypted-file"
+   |           ^^^^^^^^^^^^^^^^
+unknown variant `encrypted-file`, expected one of `auto`, `plaintext`, `keyring`, `encrypted_file`
+
+
+Caused by:
+    TOML parse error at line 14, column 11
+       |
+    14 | backend = "encrypted-file"
+       |           ^^^^^^^^^^^^^^^^
+    unknown variant `encrypted-file`, expected one of `auto`, `plaintext`, `keyring`, `encrypted_file`
+    
