@@ -352,6 +352,7 @@ async fn live_future_drop_reaps_descendant_job_tree() {
         // Capture by fixed ProcessId WHILE the anchor is alive. Panics if it
         // cannot, so the post-drop check can never be vacuous.
         captured = tokio::task::block_in_place(|| capture_alive_descendant_pids(1, 20));
+        println!("KR01_WITNESS_DESCENDANTS_ALIVE_BEFORE_DROP={captured:?}");
 
         // Dropping `execution` here IS the session-cancellation path under test.
     }
@@ -370,5 +371,10 @@ async fn live_future_drop_reaps_descendant_job_tree() {
             "detached descendant reaped after execution future drop",
         )
     });
+    println!(
+        "KR01_WITNESS_SURVIVORS_AFTER_DROP={} of {}",
+        tokio::task::block_in_place(|| surviving_captured_descendant_pids(&captured)),
+        captured.len()
+    );
     reap_stray_descendants();
 }
