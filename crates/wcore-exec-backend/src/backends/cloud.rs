@@ -1147,7 +1147,7 @@ mod tests {
             "/bin/sleep"
         );
         assert_eq!(body["config"]["restart"]["policy"].as_str().unwrap(), "no");
-        assert_eq!(body["config"]["auto_destroy"].as_bool().unwrap(), false);
+        assert!(!body["config"]["auto_destroy"].as_bool().unwrap());
         assert!(
             body["config"]["image"]
                 .as_str()
