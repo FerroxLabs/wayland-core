@@ -3,7 +3,7 @@
 **Lane** `lane/channel-starvation` · **base** `2f5e6479` (`plan/f20-unified-audit-repair`, the
 merge commit that landed `lane/channel-lease`) · **HEAD** see §9.
 
-**Verdict: all four proof legs GREEN on the shipped binary, live, on `hetzner-dsm`.**
+**Verdict: all four proof legs GREEN on the shipped binary, live, on `hetzner-dsm`, plus a fifth (leg E) that closes the one gap this report first declared unproven.**
 `instrument.fault = false`. Across the whole four-leg run — 144 polls, three handovers —
 the endpoint never saw more than **one** concurrent poller, and **4 of 4** submitted messages
 were delivered. What I did **not** prove is in §7 and it is not small.
@@ -135,7 +135,7 @@ why the TTL exists, and why the wedge was worth closing at the price of a bounde
 
 ---
 
-## 4. The four proof legs
+## 4. The proof legs
 
 All on the shipped `wayland-core` binary (debug, `0.12.25`, source `37a99a2c`), on
 `hetzner-dsm`, one run: `.../24-CHANNEL-STARVATION-evidence/run-full/`. Driver exit `0`,
@@ -203,6 +203,47 @@ Gateway owner (pid 3372003) + session observer (pid 3372116), both alive. Gatewa
 This is deliberately **stronger** than the landing lane's leg 4, which started a *new* process
 after the kill. That proves the recovery a service manager performs (restart the unit); it does
 not prove the in-place upgrade, which was the residual.
+
+### Leg E — a DEAD claimant must not wedge the home · `NO WEDGE — RECOVERED UNAIDED`
+
+Added after the first four legs were already green, because §7 named this the most valuable
+missing leg and a measured refusal to close it would have been a worse deliverable than the
+extra run. Separate run: `.../24-CHANNEL-STARVATION-evidence/run-e/`, driver exit `0`,
+`instrument.fault = false`.
+
+This is the failure that would be **strictly worse than the starvation being fixed**: the owner
+yields to a higher-ranked claimant, the claimant dies before taking the lock, and nobody polls —
+for ever. Gemini and codex both named it; it is manufactured denial promoted out of the harness
+and into production.
+
+**The claimant is dead by construction.** The driver plants a well-formed gateway-ranked claim
+naming pid `4242424` and **never refreshes it**. No process is started; nothing touches the file
+again. The only thing that can end the standoff is the claim ageing past its TTL — which is the
+property under test. (Note that `4242424` may well be a *valid* pid on Linux: the design never
+consults pid liveness, so it does not matter, and this leg demonstrates that freshness alone
+suffices.)
+
+| measure | value |
+|---|---|
+| session owned polling first | **true** (W1: `max_open=1`, 10 polls, attributed to pid 3586270) |
+| session yielded to the dead claim | **true**, at `21:12:26.978` |
+| session recovered **without help** | **true**, at `21:12:31.853` |
+| **wedge window** | **4875 ms** (bound asserted at 30 000 ms, not merely reported) |
+| W2 after recovery | `max_open=1`, 10 polls, attributed to **the same session** | 
+| message delivered after recovery | **true** (`deleted_by` poll 22) |
+| whole-run max concurrent `getUpdates` | **1** |
+
+The zero-poller window is confirmed **independently of the binary's own log**, from the fixture
+journal in another process: **4770 ms** with no `getUpdates` open at all, from `21:12:27.084` to
+`21:12:31.854`. The two numbers agree to within one poll interval, and they were measured by two
+different processes from two different sources.
+
+At the harness's 1s tick with `TTL = 3 × tick`, recovery took ~4.9s. At the production 2s
+default expect roughly **10s**. Nothing is lost in that window (§3).
+
+This leg is also the one that proves the anti-denial grader can fire on something **real**: it
+deliberately creates a genuine zero-poller window, and the run is graded a pass only because
+polling *resumed* and a message was *delivered* afterwards.
 
 ### Anti-denial — a green cannot be manufactured by universal denial
 
@@ -356,11 +397,11 @@ without `RUST_LOG`.
    tests are cross-platform, but **no Windows leg was run in this lane.** Claim files are
    ordinary files with temp+rename, which is `MoveFileEx`-backed on Windows, but that is
    reasoning, not a measurement.
-4. **The wedge bound is unit-tested, not live-tested.** `a_dead_claimants_stale_claim_cannot_
-   wedge_polling` proves it deterministically in-process. I never killed a *claimant* mid-
-   handover on the real binary and watched the ex-owner resume after the TTL. That is the single
-   most valuable missing leg, because the wedge is the failure that would be **worse** than the
-   starvation being fixed.
+4. ~~**The wedge bound is unit-tested, not live-tested.**~~ **CLOSED — see leg E (§4).** This was
+   named here first as not proven, then proven: the wedge bound is now measured live on the
+   shipped binary at **4875 ms**, with an independent **4770 ms** zero-poller window read from
+   the fixture in another process. What remains unproven is only the *production-cadence* figure
+   — leg E ran at a 1s tick, and the 2s default is extrapolated, not measured.
 5. **Redelivery across a handover was not exercised.** Kimi raised it: a handover between
    *receive* and *confirm* legitimately redelivers a message to the successor. Leg C measured
    `served_more_than_once = 0`, but no message was in flight during any of my handovers, so the

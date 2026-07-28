@@ -1,0 +1,112 @@
+[cs] tg fixture pid=3586256 at http://127.0.0.1:41127
+[cs] llm stub pid=3586263 at http://127.0.0.1:36167
+[cs] fixture health: {"ok":true,"pending":0,"polls":0}
+[cs] === LEG E: a dead claimant must not wedge polling ===
+[cs] session 'E' pid=3586270 log=session-E.log
+[cs] legE/session-owns: waiting, poll_total=0, 2026-07-28T21:12:10.127Z
+[cs] legE/session-owns: waiting, poll_total=0, 2026-07-28T21:12:11.280Z
+[cs] legE/session-owns: waiting, poll_total=0, 2026-07-28T21:12:12.428Z
+[cs] legE/session-owns: waiting, poll_total=0, 2026-07-28T21:12:13.581Z
+[cs] legE/session-owns: waiting, poll_total=0, 2026-07-28T21:12:14.734Z
+[cs] legE/session-owns: waiting, poll_total=0, 2026-07-28T21:12:15.887Z
+[cs] legE/session-owns: poll_total=2 (>= 2)
+[cs] legE/W1 session polls: window 1/8 at 2026-07-28T21:12:17.185Z
+[cs] legE/W1 session polls: window 4/8 at 2026-07-28T21:12:20.633Z
+[cs] legE/W1 session polls: window 7/8 at 2026-07-28T21:12:24.081Z
+[cs] legE: planted a gateway-ranked claim at /root/f24cs-run-e/home/channels/channel-poll.claim.4242424 and will NEVER refresh it
+[cs] legE/session-yields: waiting for 'F24_CHANNEL_LEASE=yielded', 2026-07-28T21:12:26.385Z
+[cs] legE/session-yields: saw 'F24_CHANNEL_LEASE=yielded' after 1300ms
+[cs] legE/session-recovers: waiting for 'F24_CHANNEL_LEASE=acquired', 2026-07-28T21:12:27.686Z
+[cs] legE/session-recovers: waiting for 'F24_CHANNEL_LEASE=acquired', 2026-07-28T21:12:28.835Z
+[cs] legE/session-recovers: waiting for 'F24_CHANNEL_LEASE=acquired', 2026-07-28T21:12:29.984Z
+[cs] legE/session-recovers: waiting for 'F24_CHANNEL_LEASE=acquired', 2026-07-28T21:12:31.139Z
+[cs] legE/session-recovers: saw 'F24_CHANNEL_LEASE=acquired' after 4751ms
+[cs] legE/W2 after recovery: window 1/8 at 2026-07-28T21:12:32.435Z
+[cs] legE/W2 after recovery: window 4/8 at 2026-07-28T21:12:35.881Z
+[cs] legE/W2 after recovery: window 7/8 at 2026-07-28T21:12:39.331Z
+[cs] legE/deliver-after-recovery: update 1 served 1x, deleted_by=22
+
+=== RESULT (2115 bytes at /root/f24cs-run-e/result.json) ===
+{
+  "run_id": "7f792ed3",
+  "started_at": "2026-07-28T21:12:09.859Z",
+  "legs": [
+    {
+      "leg": "E",
+      "verdict": "NO WEDGE — RECOVERED UNAIDED",
+      "session_pid": 3586270,
+      "session_owned_first": true,
+      "planted_claim_at": "2026-07-28T21:12:26.235Z",
+      "planted_claim": {
+        "pid": 4242424,
+        "rank": 30,
+        "holder": "gateway",
+        "refreshed_ever": false
+      },
+      "window_before": {
+        "label": "legE/W1 session polls",
+        "start": "2026-07-28T21:12:17.037Z",
+        "end": "2026-07-28T21:12:26.229Z",
+        "maxOpen": 1,
+        "polls": 10,
+        "pids": [
+          3586270
+        ],
+        "grade": {
+          "grade": "OK",
+          "why": "exactly one poller, attributed to pid(s) 3586270"
+        }
+      },
+      "session_yielded_to_the_dead_claim": true,
+      "session_recovered_without_help": true,
+      "yield_at": "2026-07-28T21:12:26.978837Z",
+      "acquire_at": "2026-07-28T21:12:31.853701Z",
+      "wedge_window_ms": 4875,
+      "wedge_bound_ms": 30000,
+      "recovery_within_bound": true,
+      "window_after": {
+        "label": "legE/W2 after recovery",
+        "start": "2026-07-28T21:12:32.286Z",
+        "end": "2026-07-28T21:12:41.479Z",
+        "maxOpen": 1,
+        "polls": 10,
+        "pids": [
+          3586270
+        ],
+        "grade": {
+          "grade": "OK",
+          "why": "exactly one poller, attributed to pid(s) 3586270"
+        }
+      },
+      "delivered_after_recovery": {
+        "delivered": true,
+        "serve_count": 1,
+        "deleted_by": 22
+      },
+      "session_still_alive_at_measurement": true,
+      "log_bytes": {
+        "legE session": 16331
+      }
+    },
+    {
+      "leg": "C",
+      "verdict": "NOTHING LOST",
+      "submitted_total": 1,
+      "delivered_total": 1,
+      "never_delivered": [],
+      "served_more_than_once": [],
+      "still_pending_at_end": []
+    }
+  ],
+  "instrument": {
+    "fault": false,
+    "reasons": []
+  },
+  "llm_stub_hits": 1,
+  "poll_total": 22,
+  "conn_samples": 31,
+  "ss_available": true,
+  "finished_at": "2026-07-28T21:12:41.637Z"
+}
+DRIVERRC=0
+DRIVERDONE

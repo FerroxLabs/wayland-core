@@ -315,3 +315,30 @@ re-measured at 1 `WARN` + 1 stderr line.
 - [ ] redelivery across a handover with a message in flight
 - [ ] Windows leg
 - [ ] IMAP / Discord adapters
+
+---
+
+## T+300 — leg E added and green: the wedge bound is now proven LIVE
+
+§7.4 of the report named the live wedge proof as the most valuable missing leg. Rather than ship
+that as a stated gap, I built it: leg E plants a gateway-ranked claim naming pid `4242424` and
+**never refreshes it**, so the claimant is dead by construction and nothing in the run can
+rescue it.
+
+`/root/f24cs-run-e`, driver exit **0**, `instrument.fault=false`:
+
+| measure | value |
+|---|---|
+| session yielded to the dead claim | true, `21:12:26.978` |
+| session recovered unaided | true, `21:12:31.853` |
+| **wedge window (session's own log)** | **4875 ms** (asserted against a 30 000 ms bound) |
+| **zero-poller window (fixture, another process)** | **4770 ms**, `21:12:27.084` → `21:12:31.854` |
+| message delivered after recovery | true |
+| whole-run max concurrent `getUpdates` | 1 |
+
+Two processes, two sources, agreeing to within one poll interval. §7.4 is now closed and the
+report says so explicitly rather than quietly deleting the admission.
+
+Leg E is also the only leg that deliberately CREATES a zero-poller window, so it is the one that
+shows the anti-denial grader firing on something real rather than hypothetical — the run passes
+only because polling RESUMED and a message was DELIVERED afterwards.
