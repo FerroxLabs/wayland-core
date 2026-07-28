@@ -135,6 +135,18 @@ pub struct ScopeArgs {
     /// The profile this gateway hosts. One gateway, one home, one profile.
     #[arg(long)]
     pub profile: Option<String>,
+
+    /// The gateway home, overriding `WAYLAND_HOME`.
+    ///
+    /// F24-J-H1: Windows Task Scheduler cannot set an environment variable on a
+    /// registered task, so a Windows registration has no way to carry
+    /// `WAYLAND_HOME` the way the launchd plist and the systemd unit both do.
+    /// The registration therefore passes the home as an argument, and this is
+    /// the flag it passes. It is on `ScopeArgs` rather than on `run` alone so
+    /// an operator can point `status` and `drain` at the same home without
+    /// exporting anything.
+    #[arg(long)]
+    pub home: Option<PathBuf>,
 }
 
 impl ScopeArgs {
@@ -143,6 +155,17 @@ impl ScopeArgs {
             .clone()
             .or_else(|| std::env::var("WAYLAND_PROFILE").ok())
             .unwrap_or_else(|| "default".to_string())
+    }
+
+    /// The explicit flag wins over the environment, which wins over the
+    /// default. A registration that named a home must not be silently
+    /// redirected by whatever the service manager's environment happens to
+    /// hold — that redirection is the defect this flag exists to close.
+    fn home(&self) -> Result<PathBuf> {
+        match &self.home {
+            Some(path) => Ok(path.clone()),
+            None => home(),
+        }
     }
 }
 
@@ -180,7 +203,7 @@ fn spec(scope: &ScopeArgs) -> Result<ServiceSpec> {
     Ok(ServiceSpec {
         profile: scope.profile(),
         binary,
-        home: home()?,
+        home: scope.home()?,
     })
 }
 
@@ -403,7 +426,7 @@ async fn is_registered(
 }
 
 async fn status(scope: &ScopeArgs, json: bool) -> Result<()> {
-    let home = home()?;
+    let home = scope.home()?;
     let profile = scope.profile();
     let mgr = wcore_gateway::service::for_this_platform();
 
@@ -461,7 +484,7 @@ async fn status(scope: &ScopeArgs, json: bool) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn drain(scope: &ScopeArgs, budget_ms: u64) -> Result<()> {
-    let home = home()?;
+    let home = scope.home()?;
     let Some(proj) = read_live_projection(&home) else {
         // The lifecycle machine refuses Drain from anything that is not
         // Running, by name. Rendering that refusal rather than inventing one
@@ -602,7 +625,33 @@ fn publish(home: &Path, proj: &StatusProjection) -> Result<()> {
 }
 
 async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
-    let home = home()?;
+    let home = scope.home()?;
+
+    // F24-J-H2. `--home` is a NARROWER carrier than the environment variable
+    // the Unix units set, and the difference is not cosmetic. The launchd plist
+    // and the systemd unit both export `WAYLAND_HOME`, which scopes the gateway
+    // home AND everything `wcore_config::wayland_config_dir` resolves under it
+    // — config, and with it the credentials store. Task Scheduler cannot set an
+    // environment variable, so the Windows registration passes `--home`, which
+    // scoped only the gateway's own files.
+    //
+    // Measured live on the real box at d89b81b6: the gateway came up in the
+    // right home and published a correct projection, then every delivery failed
+    // with `no value for credential handle "slack.f24j.bot_token"` because the
+    // credentials store had resolved under `%APPDATA%\wayland-core` while the
+    // credentials file sat in the home the task was registered for. Twelve
+    // submitted, zero arrived.
+    //
+    // So the flag exports what the units export, and the one carrier scopes the
+    // whole process on every platform rather than two thirds of it on one.
+    if scope.home.is_some() && std::env::var_os("WAYLAND_HOME").is_none() {
+        // SAFETY: this runs before any configuration is read and before the
+        // gateway spawns any work, so no other thread is reading the
+        // environment concurrently. It is also a no-op whenever the variable is
+        // already set, so a unit that exports it keeps authority over a flag.
+        unsafe { std::env::set_var("WAYLAND_HOME", &home) };
+    }
+
     std::fs::create_dir_all(&home)
         .with_context(|| format!("cannot create gateway home {}", home.display()))?;
 
