@@ -268,3 +268,50 @@ shape would have missed the case.
 | 1 | rtk `git` proxy hides a merge commit from `log` while `rev-parse` sees it | **REPAIRED** — the reader cross-checks `rev-parse` against `log -1` and refuses to answer when they disagree; 3 assertions incl. old-shape |
 | 2 | `gradeWindow` returned DENIAL for a window that only caught poll-CLOSE samples — a false CRITICAL | **REPAIRED** — poll count is the denial measure; unreadable concurrency is graded `UNREADABLE`; 3 assertions incl. old-shape |
 | 3 | codex silently returned 39 bytes (`Reading additional input from stdin...`), dropping its panel vote | **REPAIRED** — panel invocations pass `< /dev/null`; recorded at T+55 |
+
+---
+
+## T+240 — all four legs green live; report written
+
+`/root/f24cs-run-full`, driver exit **0**, `instrument.fault=false`, `ss_available=true`,
+184 attribution samples, 144 polls, 4/4 messages delivered.
+
+| leg | verdict |
+|---|---|
+| A — service starts SECOND | `SERVICE WINS FROM BEHIND` |
+| B — service starts FIRST | `SERVICE KEEPS IT` |
+| C — accounting | `NOTHING LOST` (4 submitted, 4 delivered, 0 pending, 0 double-served) |
+| D — live observer takes over on SIGKILL, unaided | `LIVE OBSERVER TOOK OVER` (4.74s) |
+
+**Run-wide max concurrent `getUpdates` = 1**, and the handover transient — which I promised to
+measure rather than merely exclude — is also **1** in both leg A and leg D, widened 3s each
+side. The feared instrument artifact (an aborted long-poll still counted OPEN by the fixture,
+reading as a phantom second poller) did NOT occur. Longest no-poller gap in the whole run:
+**4097ms**, and it is the leg A handover.
+
+Regressions, all serial: `wcore-agent --lib` **2145/0/3** (landing lane 2135 + my 10),
+`wcore-cron` **108/0/0**, `wcore-cli --lib` **1831/0/1**, `bootstrap_test` **27/0/0**,
+clippy clean on both crates, workspace `cargo fmt --check` clean.
+
+Fence diff vs `$BASE` = **0 lines**; no `Cargo.toml`/`Cargo.lock` churn.
+
+## Instrument (§6b-ii) — final tally: 4 found, 4 repaired, 27 assertions
+
+| # | defect | status |
+|---|---|---|
+| 1 | rtk `git` proxy hid the merge commit from `log` while `rev-parse` saw it | REPAIRED — cross-checked reader refuses to answer on disagreement |
+| 2 | `gradeWindow` returned DENIAL for a window that only caught poll-CLOSE samples — a false CRITICAL | REPAIRED — poll count is the denial measure; `UNREADABLE` for unreadable concurrency |
+| 3 | codex silently returned 39 bytes, dropping its panel vote | REPAIRED — `< /dev/null` |
+| 4 | window attribution carried as a `Set`, so evidence recorded `"pids": {}` — a successful attribution written down as the strongest negative | REPAIRED — arrays both sides |
+
+Plus one **production** defect the live run found in my own fix: 23 `WARN` lines in 90s from a
+single observer, because the per-tick re-attempt reused the boot attempt's log levels. Fixed;
+re-measured at 1 `WARN` + 1 stderr line.
+
+## Still to establish — carried into the report §7 as NOT proven
+
+- [ ] `cron-daemon` role live-exercised (code + unit tests only)
+- [ ] the wedge bound proven LIVE (unit-tested only) — the most valuable missing leg
+- [ ] redelivery across a handover with a message in flight
+- [ ] Windows leg
+- [ ] IMAP / Discord adapters
