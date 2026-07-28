@@ -778,3 +778,77 @@ downloaded, so `gh attestation verify` is never reached while no release publish
 re-enters the path the moment manifests ship. Refusing earlier is strictly safer than
 downloading an archive you have already declined to install. Recorded so nobody later reads
 the unreached call as a removed one.
+
+## F29-04-01 — `wayland-release manifest build` cannot record a certification binding (MEDIUM)
+
+Filed by 29-04 at `882191d4737c7552bef33214f4aadc31dbf828a3`. Evidence:
+`.planning/phases/29-supply-chain-release-integrity/evidence/29-04/run-a1-shipped-tool-only.txt`.
+
+`manifest_build` hardcodes `certification: Evidence::Unavailable` and offers no flag to record
+one. `verify_state_chain` refuses release acceptance over an unavailable binding, so the
+four-state chain **cannot be completed through the shipped tooling**. Measured with all four
+role keys held: every append returned `rc=0`, the acceptance record was minted, and
+`state-verify` returned `rc=1` — `release acceptance requires an observed certification
+binding`. Holding every key is not sufficient; possession of a signature is not authority,
+which is correct.
+
+**Non-blocking** because it is a *tooling completeness* gap on a fail-closed path, not an
+unsafe one, and because Success Criterion 4 already grades PARTIAL for an independent and
+larger reason (F29-04-03). **Not repaired by 29-04**, which modifies no production source at
+all: a corpus written by the hand that fixed the defect proves only that its author knew what
+they fixed. Remedy and the requested flag: `SEAM-REQUESTS/29.md` SR-29-14.
+
+## F29-04-02 — release acceptance gates on `Observed`, not on a verified join (MEDIUM)
+
+Filed by 29-04. Evidence: the corpus case `F29-03-BACKEND-RECEIPT-2` in
+`evidence/29-04/tamper-corpus-run.txt`.
+
+`verify_state_chain` gates release acceptance on the certification field merely **being**
+`Evidence::Observed`. Nothing verifies the binding actually joins to a real receipt, so an
+`Observed` binding of invented digests would pass. 29-04's corpus proves the join **can** be
+checked — `F29-03-BACKEND-RECEIPT-2` leaves the manifest completely untouched, mutates only
+the bound receipt's `identity.binary_sha256`, and the refusal comes from the join itself while
+`verify_manifest` still passes. No production path performs that check.
+
+**Non-blocking:** defence-in-depth, not an authorization bypass. The manifest must still be
+signed by the release-acceptance key, and that key holder is the authority the binding exists
+to give machine-checkable evidence *alongside*, not to constrain. Related to **R28-A** —
+until the receipt binds the distributed archive to the certified binary, a stronger join has
+less to verify. Remedy: SR-29-14 item 2.
+
+## F29-04-03 — the four-state ledger is not wired into `release.yml` (MEDIUM)
+
+Filed by 29-04. Evidence: `evidence/29-04/release-pipeline-states.txt` (re-measured at this
+commit, not inherited from 29-01's census).
+
+Three greps: zero `environment:` declarations in **any** workflow (the only native
+manual-approval gate); zero mentions of rollback in **any** workflow; zero occurrences of
+`wayland-release`, `state-append`, `state-verify` or `release-manifest` in `release.yml`. One
+tag push matching `v*-wayland-*` drives build → github-release → publish-npm. Packaging,
+deployment preparation and release acceptance are **one authorization act** in the product.
+
+**Non-blocking as a finding, but it is the finding that holds Success Criterion 4 at PARTIAL**
+and the verdict says so explicitly. It is filed here as the tracking entry; the actionable
+request, with what to add and where, is `SEAM-REQUESTS/29.md` SR-29-13, owned by release
+coordination. `.github/workflows/` is fenced out of every Phase 29 plan.
+
+## F29-04-04 — CORRECTION: `seandesktop` is reachable as `SeanD` (MEDIUM)
+
+Filed by 29-04. 29-03's `evidence/29-03/REAL-KEY-LIMITS.tsv` records `F29-LIMIT-06` as a
+REAL-ACCOUNT blocker — "SSH access to the `seandesktop` host, which is refusing authentication
+on every account tried". Falsified from the Mac at this commit:
+`ssh -o BatchMode=yes SeanD@seandesktop 'hostname'` → `SeanDesktop`, `rc=0`. The account is
+**`SeanD`**.
+
+**29-04 did not run the Windows leg** — out of scope, and a concurrent lane holds that host.
+`seandesktop` is one physical machine and contention there corrupts proofs. **Serialize:**
+whoever picks this up waits for the windows-requeue lane and states which quiet run each
+figure came from. Filed so a wrongly-reported blocker does not cost a Sean-reserved round trip
+for nothing. Full note: SR-29-15.
+
+**HIGH findings are NOT here.** Phase 29 closes with **two open HIGHs**, both escalated in
+`.planning/SEAM-REQUESTS/29.md` and neither closable inside the phase: **F29-02-H1** (the
+`.cargo/audit.toml` "sole path" suppression, amended by 29-04 — SR-29-6) and **F29-03-01**
+(`self-update` installs nothing until a real trust root and a published manifest asset exist —
+SR-29-9 / SR-29-11). Their effect on the grades is stated in `29-PHASE-VERDICT.md` rather than
+absorbed.
