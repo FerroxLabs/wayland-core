@@ -1,0 +1,34 @@
+HEAD=272843ef4fc6974c3b3da1919518032d391dd697
+cargo.exe :    Compiling wcore-sandbox v0.12.25 (C:\wl-kr07\crates\wcore-sandbox)
+At C:\Users\SeanD\kr07-run3.ps1:12 char:1
++ & cargo test -p wcore-sandbox --test kr07_ladder3 -- --ignored --test ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling wc...\wcore-sandbox):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.65s
+     Running tests\kr07_ladder3.rs (target\debug\deps\kr07_ladder3-9f8e2880fc6a2c00.exe)
+
+running 2 tests
+test rung11_oversized_subtree_reproduces_the_reported_timeout ... KR07C_BUILT tag=oversized files=200000 build_ms=28682
+KR07C_RUNG_11 files=200000 elapsed_ms=19487 result=Ok(0)
+
+thread 'rung11_oversized_subtree_reproduces_the_reported_timeout' (38560) panicked at 
+crates\wcore-sandbox\tests\kr07_ladder3.rs:145:9:
+PREDICTION REFUTED: granting over 200000 objects completed in 19487ms instead of exhausting the 25s budget. Subtree 
+size does not explain F-KR-07 and the attribution in parts 1-3 must be reconsidered.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test rung12_small_subtree_same_shape_passes ... KR07C_BUILT tag=small files=200 build_ms=23
+KR07C_RUNG_12 files=200 elapsed_ms=133 result=Ok(0)
+ok
+
+failures:
+
+failures:
+    rung11_oversized_subtree_reproduces_the_reported_timeout
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 70.35s
+
+error: test failed, to rerun pass `-p wcore-sandbox --test kr07_ladder3`
+LADDER3_RC=101

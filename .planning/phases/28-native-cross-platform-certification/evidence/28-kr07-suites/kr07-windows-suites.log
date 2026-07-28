@@ -1,0 +1,161 @@
+HEAD=8c6f4c97313584bbefaf6a15a50c904226a52f86
+=== GUARD FALSIFIABILITY: env SET, no --ignored (must FAIL) ===
+cargo.exe :    Compiling wcore-sandbox v0.12.25 (C:\wl-kr07\crates\wcore-sandbox)
+At C:\Users\SeanD\kr07-run4.ps1:14 char:1
++ & cargo test -p wcore-sandbox --test live_fs_acl 2>&1 | Out-File $log ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling wc...\wcore-sandbox):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.93s
+     Running tests\live_fs_acl.rs (target\debug\deps\live_fs_acl-d32a7a29301c9af7.exe)
+
+running 12 tests
+test concurrent_allow_and_deny_identities_do_not_interfere ... ignored, explicit native Windows AppContainer acceptance
+test denied_secret_under_granted_parent_is_unreadable_and_revoked ... ignored, explicit native Windows AppContainer acceptance
+test deny_ace_still_blocks_granted_read ... ignored, explicit native Windows AppContainer acceptance
+test granted_path_is_readable_then_revoked ... ignored, explicit native Windows AppContainer acceptance
+test normal_sid_only_grant_is_denied ... ignored, explicit native Windows AppContainer acceptance
+test one_execution_grant_never_leaks_to_another_identity ... ignored, explicit native Windows AppContainer acceptance
+test one_exit_does_not_remove_another_execution_grant ... ignored, explicit native Windows AppContainer acceptance
+test timeout_and_cancellation_remove_their_leases ... ignored, explicit native Windows AppContainer acceptance
+test twenty_concurrent_executions_have_unique_temp_roots ... ignored, explicit native Windows AppContainer acceptance
+test ungranted_path_is_denied_in_sandbox ... ignored, explicit native Windows AppContainer acceptance
+test unrelated_acl_survives_exact_sid_cleanup ... ignored, explicit native Windows AppContainer acceptance
+test native_acceptance_gate_marker ... FAILED
+
+failures:
+
+---- native_acceptance_gate_marker stdout ----
+
+thread 'native_acceptance_gate_marker' (6368) panicked at crates\wcore-sandbox\tests\live_fs_acl.rs:69:5:
+WAYLAND_SANDBOX_LIVE_WINDOWS=1 declares a live acceptance run, but this invocation cannot execute any of the 11 acceptance cases ??? they are #[ignore]d and neither --ignored nor --include-ignored was passed. Exiting 0 here would certify nothing. Re-run with: cargo test -p wcore-sandbox --test live_fs_acl -- --ignored --test-threads=1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    native_acceptance_gate_marker
+
+test result: FAILED. 0 passed; 1 failed; 11 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p wcore-sandbox --test live_fs_acl`
+GUARD_ENV_SET_RC=101
+=== GUARD: env UNSET, no --ignored (must pass, 1 executed) ===
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+At C:\Users\SeanD\kr07-run4.ps1:19 char:1
++ & cargo test -p wcore-sandbox --test live_fs_acl 2>&1 | Out-File $log ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.24s:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_fs_acl.rs (target\debug\deps\live_fs_acl-d32a7a29301c9af7.exe)
+
+running 12 tests
+test concurrent_allow_and_deny_identities_do_not_interfere ... ignored, explicit native Windows AppContainer acceptance
+test denied_secret_under_granted_parent_is_unreadable_and_revoked ... ignored, explicit native Windows AppContainer acceptance
+test deny_ace_still_blocks_granted_read ... ignored, explicit native Windows AppContainer acceptance
+test granted_path_is_readable_then_revoked ... ignored, explicit native Windows AppContainer acceptance
+test normal_sid_only_grant_is_denied ... ignored, explicit native Windows AppContainer acceptance
+test one_execution_grant_never_leaks_to_another_identity ... ignored, explicit native Windows AppContainer acceptance
+test one_exit_does_not_remove_another_execution_grant ... ignored, explicit native Windows AppContainer acceptance
+test timeout_and_cancellation_remove_their_leases ... ignored, explicit native Windows AppContainer acceptance
+test twenty_concurrent_executions_have_unique_temp_roots ... ignored, explicit native Windows AppContainer acceptance
+test ungranted_path_is_denied_in_sandbox ... ignored, explicit native Windows AppContainer acceptance
+test unrelated_acl_survives_exact_sid_cleanup ... ignored, explicit native Windows AppContainer acceptance
+test native_acceptance_gate_marker ... ok
+
+test result: ok. 1 passed; 0 failed; 11 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+GUARD_ENV_UNSET_RC=0
+=== SUITE live_fs_acl (serial, --ignored) ===
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+At C:\Users\SeanD\kr07-run4.ps1:25 char:3
++   & cargo test -p wcore-sandbox --test $t -- --ignored --test-threads ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.21s:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_fs_acl.rs (target\debug\deps\live_fs_acl-d32a7a29301c9af7.exe)
+
+running 11 tests
+test concurrent_allow_and_deny_identities_do_not_interfere ... ok
+test denied_secret_under_granted_parent_is_unreadable_and_revoked ... ok
+test deny_ace_still_blocks_granted_read ... ok
+test granted_path_is_readable_then_revoked ... ok
+test normal_sid_only_grant_is_denied ... ok
+test one_execution_grant_never_leaks_to_another_identity ... ok
+test one_exit_does_not_remove_another_execution_grant ... ok
+test timeout_and_cancellation_remove_their_leases ... ok
+test twenty_concurrent_executions_have_unique_temp_roots ... ok
+test ungranted_path_is_denied_in_sandbox ... ok
+test unrelated_acl_survives_exact_sid_cleanup ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 13.81s
+
+SUITE_live_fs_acl_RC=0
+=== SUITE hard_process_containment_windows (serial, --ignored) ===
+cargo.exe :    Compiling wcore-sandbox v0.12.25 (C:\wl-kr07\crates\wcore-sandbox)
+At C:\Users\SeanD\kr07-run4.ps1:25 char:3
++   & cargo test -p wcore-sandbox --test $t -- --ignored --test-threads ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling wc...\wcore-sandbox):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: unused import: `std::process::Command`
+  --> crates\wcore-sandbox\tests\hard_process_containment_windows.rs:34:5
+   |
+34 | use std::process::Command;
+   |     ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `SandboxCommand` and `SandboxManifest`
+  --> crates\wcore-sandbox\tests\hard_process_containment_windows.rs:39:21
+   |
+39 | use wcore_sandbox::{SandboxCommand, SandboxManifest};
+   |                     ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+
+warning: unused imports: `hold_iterations`, `live_descendant_pids`, and `resolve_anchor_pid`
+  --> crates\wcore-sandbox\tests\hard_process_containment_windows.rs:43:65
+   |
+43 |     capture_alive_descendant_pids, cmd_script, descendant_hold, hold_iterations, inline_hold,
+   |                                                                 ^^^^^^^^^^^^^^^
+44 |     live_descendant_count, live_descendant_pids, manifest, reap_stray_descendants,
+   |                            ^^^^^^^^^^^^^^^^^^^^
+45 |     require_live_windows, resolve_anchor_pid, surviving_captured_descendant_pids, wait_until,
+   |                           ^^^^^^^^^^^^^^^^^^
+
+warning: `wcore-sandbox` (test "hard_process_containment_windows") generated 3 warnings (run `cargo fix --test 
+"hard_process_containment_windows" -p wcore-sandbox` to apply 3 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.77s
+     Running tests\hard_process_containment_windows.rs 
+(target\debug\deps\hard_process_containment_windows-577f80c7bb508abb.exe)
+
+running 5 tests
+test active_process_cap_is_enforced ... ok
+test breakaway_is_denied ... ok
+test contained_detached_child_exit ... ok
+test job_close_reaps_detached_descendant_with_no_residue ... ok
+test qualified_hard_containment_backend_preflight ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 19.85s
+
+SUITE_hard_process_containment_windows_RC=0
+=== SUITE live_cwd_verbatim (serial, --ignored) ===
+cargo.exe :    Compiling wcore-sandbox v0.12.25 (C:\wl-kr07\crates\wcore-sandbox)
+At C:\Users\SeanD\kr07-run4.ps1:25 char:3
++   & cargo test -p wcore-sandbox --test $t -- --ignored --test-threads ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling wc...\wcore-sandbox):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.60s
+     Running tests\live_cwd_verbatim.rs (target\debug\deps\live_cwd_verbatim-e3310863441af5e5.exe)
+
+running 2 tests
+test plain_cwd_is_unaffected ... ok
+test verbatim_cwd_lands_in_the_requested_directory ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.40s
+
+SUITE_live_cwd_verbatim_RC=0
