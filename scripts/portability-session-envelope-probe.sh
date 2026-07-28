@@ -66,10 +66,14 @@ cat > "$SESSIONS/$SID.json" <<JSON
   ]
 }
 JSON
+# `summary` is the truncated first user message, so the real index ALREADY
+# carries transcript prose. The canary is put there too, deliberately: if the
+# archive carries the index it carries user text regardless of the session file.
 cat > "$SESSIONS/index.json" <<JSON
 { "sessions": [ { "id": "$SID", "created_at": "2026-07-28T00:00:00Z",
-  "updated_at": "2026-07-28T00:05:00Z", "provider": "anthropic",
-  "model": "claude-opus-4", "cwd": "/tmp/probe", "message_count": 2 } ] }
+  "updated_at": "2026-07-28T00:05:00Z",
+  "model": "claude-opus-4", "summary": "my secret plan is $CANARY",
+  "message_count": 2 } ] }
 JSON
 
 # --- the fixture must be one the PRODUCT accepts, not merely one we wrote -----
