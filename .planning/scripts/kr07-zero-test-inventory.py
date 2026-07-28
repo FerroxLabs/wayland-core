@@ -90,6 +90,64 @@ def classify_file(path):
     return total, ignored, names_ignored, names_live, env_gated
 
 
+MOD_DECL = re.compile(r"^\s*(?:pub\s+)?mod\s+([A-Za-z0-9_]+)\s*;")
+MOD_PATH_ATTR = re.compile(r'^\s*#\[\s*path\s*=\s*"([^"]+)"\s*\]')
+
+
+def included_module_files(path, _seen=None):
+    """Every source file compiled INTO this test binary via `mod` declarations.
+
+    A test binary is not one file. `crates/wcore-cli/tests/acp_engine_turn.rs`
+    declares `#[path = "support/mod.rs"] mod support;`, and that module carries
+    8 non-ignored `#[test]`s — so the binary runs 8 tests by default and is NOT
+    an all-ignored binary at all.
+
+    Missing this made the previous revision report acp_engine_turn as flavour
+    (a). That is a FALSE POSITIVE, and a detector that over-reports is as
+    useless as one that under-reports: it trains the reader to skim the list.
+    """
+    if _seen is None:
+        _seen = set()
+    path = path.resolve()
+    if path in _seen or not path.is_file():
+        return []
+    _seen.add(path)
+    out = [path]
+    base = path.parent
+    stem_dir = base / path.stem
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    pending_path = None
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("*"):
+            continue
+        pm = MOD_PATH_ATTR.match(line)
+        if pm:
+            pending_path = pm.group(1)
+            continue
+        m = MOD_DECL.match(line)
+        if m:
+            if pending_path:
+                cands = [base / pending_path]
+            else:
+                name = m.group(1)
+                cands = [
+                    base / f"{name}.rs",
+                    base / name / "mod.rs",
+                    stem_dir / f"{name}.rs",
+                    stem_dir / name / "mod.rs",
+                ]
+            for c in cands:
+                if c.is_file():
+                    out.extend(included_module_files(c, _seen))
+                    break
+            pending_path = None
+            continue
+        if stripped and not stripped.startswith("#["):
+            pending_path = None
+    return out
+
+
 def file_level_cfg(path):
     """Flavour (d) probe: return the file-level ``#![cfg(...)]`` predicate, or None.
 
@@ -147,7 +205,17 @@ def main():
     flavour_a, some_ignored, flavour_b, clean = [], [], [], []
     flavour_d_feature, flavour_d_platform = [], []
     for crate, f in test_binaries():
-        total, ignored, ni, nl, env_gated = classify_file(f)
+        # Classify the WHOLE binary: the entry file plus every module compiled
+        # into it. Flavour (a) is a property of the binary, not of one file.
+        total = ignored = env_gated = 0
+        ni, nl = [], []
+        for unit in included_module_files(f):
+            u_total, u_ignored, u_ni, u_nl, u_env = classify_file(unit)
+            total += u_total
+            ignored += u_ignored
+            ni += u_ni
+            nl += u_nl
+            env_gated += u_env
         rel = str(f.relative_to(ROOT))
 
         # Flavour (d). Checked BEFORE the `total == 0` short-circuit below:
