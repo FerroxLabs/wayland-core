@@ -54,11 +54,59 @@ live repro harness and the unit tests, on real `seandesktop` hardware. It appear
 
 ---
 
-## 2. Still to establish
+## 2. The original invocation, recovered (step 3 of the brief)
 
-- [ ] Reproduce the original E5 Windows invocation (`scripts/f28-native-matrix.mjs` +
-      `evidence/28-02/f28-win-matrix.ps1`), not an approximation.
-- [ ] Build a Windows candidate at a commit containing `15821c03`.
-- [ ] Run the Windows sandbox-dimension cells; read back executed counts and real exit codes
-      via the `WLRC=`/`WLDONE` status-file pattern (ssh+PowerShell collapses every non-zero to 1).
-- [ ] Report honestly in either direction.
+`evidence/28-02/f28-win-matrix.ps1`, run as a scheduled task on `seandesktop`:
+
+```
+node scripts/f28-native-matrix.mjs --capture-activeness --bin $exe --out win-activeness.json
+node scripts/f28-native-matrix.mjs --run --bin $exe --os windows \
+     --commit <c> --tree <t> --nonce <n> --matrix evidence/28-01/matrix.tsv \
+     --activeness win-activeness.json --log win-matrix-markers.log --json win-matrix.json
+node scripts/f28-native-matrix.mjs --verify win-matrix-markers.log --matrix evidence/28-01/matrix.tsv \
+     --os windows --commit <c> --tree <t> --nonce <n>
+```
+
+with a quiet check (`cargo`/`rustc`/`link` process count must be 0) before and after, and a
+binary-digest assertion against the candidate ledger before anything runs.
+
+`--run` filters `matrix.tsv` by `--os`, not by dimension. **I will run the whole 219-cell
+Windows leg**, because that is the invocation that produced the 219 pass / 0 red row, and
+comparability with that row is the point. The 26 `sandbox-probes` cells are reported separately.
+
+### 2a. Why this run can actually fail
+
+`captureActiveness()` obtains the inside half of the containment differential by spawning a
+worker through the product's own sandbox path (`wayland-core swarm --workers 1 …`), which on
+Windows is the AppContainer backend. **That is the exact path `F-28-02-002` wedged.** If the
+lease repair regressed it, no worker spawns, `observed:false`, and all 26 sandbox cells go RED
+under the activeness rule. The gate is not self-passing.
+
+### 2b. Instrument delta since the 28-02 run — stated, not hidden
+
+`scripts/f28-native-matrix.mjs` changed by +50/-4 between the 28-02 harness (`9529c46a`) and
+lane HEAD. `git diff` shows the change is confined to `captureActiveness()` and is the
+`F-28-02-001` macOS repair: an added `/etc` read signal, and a `sandbox exec` fallback that
+fires **only** when the swarm worker did not run. On Windows the swarm worker did run at 28-02,
+so the fallback is unreached, and the comment claims `/etc` is denied on both sides on Windows
+(adds no difference). `evidence/28-01/matrix.tsv` is **byte-identical** (no diff). The cell probe
+logic (`runMatrix`, the nine dimension probes, the marker grammar) is untouched.
+
+I use lane HEAD's harness, not `9529c46a`'s, because it is the instrument the project now ships.
+
+## 3. Candidate binary provenance
+
+`ci.yml` fires on `push` to `lane/**` (added 2026-07-27 for exactly this reason) and its
+`build (x86_64-pc-windows-msvc)` job uploads `wayland-core-x86_64-pc-windows-msvc`. That
+reproduces 28-02's provenance line ("CI release artifact, digest asserted on the host before the
+run") rather than substituting a hand-built binary, and it keeps the certification Windows box at
+**0 compiles**, which was a 28-02 invariant (`QUIET_CHECK`).
+
+Pushed `lane/28-e5-repair` → CI run **30393960770**.
+
+## 4. Still to establish
+
+- [ ] CI windows-msvc artifact downloaded; digest recorded.
+- [ ] Matrix run on `seandesktop`; executed cell count read back (never exit status alone).
+- [ ] Real exit codes via `WLRC=`/`WLDONE` status file (ssh+PowerShell collapses every non-zero to 1).
+- [ ] Box left as found.
