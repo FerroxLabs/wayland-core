@@ -78,3 +78,74 @@ Anything unmeasurable stays **NOT MEASURED**. Not FAIL, not PASS.
 
 - **T+0** — worktree created at `3cfc336f`, NOTES committed. Nothing measured yet beyond
   the source reads above.
+
+- **T+25 — provider route surface, measured against the live API.**
+  `POST /v1/<path>` with `{}` body, to establish route existence before spending anything:
+
+  | path | HTTP | body |
+  |---|---|---|
+  | `audio/transcriptions` | **400** | `invalid or missing multipart audio upload` (param `file`) |
+  | `audio/speech` | 500 | `Internal server error` |
+  | `audio/translations` | **404** | `Not Found` |
+  | `images/generations` | **400** | `prompt required` |
+  | `responses` | 400 | `model is required` |
+  | `embeddings` | 500 | missing `input` |
+
+  404 vs 400 is the discriminator: `audio/translations` does not exist; the other five do.
+  `/v1/models` returns **77** ids (HTTP 200, 9,958 bytes), including `flux-image`,
+  `flux-voice`, `flux-voice-fast`, `flux-voice-accurate`. Model metadata carries **no**
+  capability field — the route probe above is the only way to know what serves what.
+
+- **T+35 — C4 transcription: the provider round-trip WORKS, verbatim.**
+  Positive input built locally and free: macOS `say -v Samantha` → `afconvert -f WAVE -d
+  LEI16@16000 -c 1` → `speech.wav`, 115,554 bytes, **1 ch / 16000 Hz / 16-bit / 55,735
+  frames / 3.48 s** — the same format `f27_voice_capture` produces.
+
+  ```
+  POST /v1/audio/transcriptions  model=flux-voice-fast   HTTP=200  75 bytes
+  {"text":" The quick brown fox jumps over the lazy dog near the riverbank."}
+  ```
+  `flux-voice` returned byte-identical output. Verbatim match to what `say` was given.
+
+  **Negative control fires** — same duration, same format, all-zero samples
+  (`silence.wav`, 111,514 bytes):
+  ```
+  HTTP=200  22 bytes   {"text":" Thank you."}
+  ```
+  Different text, so the positive is not a driver that always reports the expected string.
+  (`" Thank you."` is the known Whisper silence hallucination.)
+
+  **`response_format=verbose_json` — the exact format the product sends** (see
+  `openai_compat_whisper.rs:61`) — is served correctly: `task`, `language: English`,
+  `duration: 3.483437568`, `segments[]` with `start`/`end`/`text`/`tokens`. 458 bytes.
+  So the wire is compatible with the shipped backend's own request shape, not merely with
+  "OpenAI-ish".
+
+- **T+35 — C4 accounting: TWO separate defects, both structural.**
+  1. **The provider reports cost only in HTTP response headers**, never in the JSON body:
+     `x-flux-cost-usd: 0.016670`, `x-flux-billed-seconds: 10`, `x-flux-routed-model`.
+  2. **`OpenAiCompatWhisperBackend` cannot see it, and could not record it if it did.**
+     `openai_compat_whisper.rs:85-86` takes `resp.status()` then immediately `resp.text()`
+     — **response headers are never read**. And `TranscriptionOutcome::Ok { transcript,
+     language, segments }` has **no cost or usage field at all**, so the type system has
+     nowhere to put one. The transcription path has **no accounting surface**, independent
+     of provider.
+
+  Contrast with chat: `/v1/chat/completions` puts `cost_usd` **in `usage`** —
+  `{"completion_tokens":29,"prompt_tokens":10,"cost_usd":0.000126,...}` — as well as in
+  `x-flux-cost-usd`. So C3's model-turn accounting has a body-visible record; C4's
+  transcription accounting does not.
+
+  **Measured prices** (bound the run budget): trivial chat call `$0.000126`; one 3.48 s
+  transcription `$0.016670` (billed at a **10-second floor** — 3.48 s of audio bills as 10).
+
+- **T+35 — `flux-fast` reasoning-budget trap reproduced and avoided.** At `max_tokens=2000`,
+  `content='PONG'` with `completion_tokens=29` of which `reasoning_tokens=26`. Only 3
+  tokens were visible output. A 16-token budget would have spent everything on reasoning and
+  returned empty — exactly as the brief warned. Also worth recording: `flux-fast` is a
+  **router alias**, `x-flux-original-model: flux-fast` → `x-flux-routed-model:
+  deepseek-v4-flash`. The model that answers is not the model you name.
+
+- **T+40** — hetzner worktree `hz/27-cred` at `/root/wayland-27cred` created at lane HEAD
+  `8ff6a3eb`; `cargo build --release -p wcore-cli` running (`/root/wayland-27cred-build.log`).
+  Host has `node v22.21.1` (the MCP fixture needs it) and 714 G free on `/`.
