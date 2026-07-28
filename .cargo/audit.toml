@@ -1,16 +1,47 @@
 # cargo-audit configuration.
 #
-# Posture (verified 2026-07-29, F29-02-H1): `cargo audit` reports
-# 0 vulnerabilities and 7 warning-class advisories (6 "unmaintained", 1
-# "unsound"). CI runs plain `cargo audit`, which does NOT fail on
-# warning-class advisories — so the gate is green WITHOUT ignoring anything.
+# Posture (re-measured 2026-07-29, lane 29-deny): `cargo audit` reports
+# 0 vulnerabilities and **6** warning-class advisories (5 "unmaintained", 1
+# "unsound"), exit 0, `warning: 6 allowed warnings found`. CI runs plain
+# `cargo audit`, which does NOT fail on warning-class advisories — so the gate
+# is green WITHOUT ignoring anything.
+#
+# (It was 7 earlier the same day. RUSTSEC-2024-0370 / proc-macro-error left the
+# tree when the workspace moved utoipa 4.2 -> 5 — see the history list below.)
 #
 # The ignore list is EMPTY, and that is load-bearing rather than decorative:
 # every advisory this repo has faced has been closed AT SOURCE, never muted.
-# The 7 remaining warning-class advisories are left VISIBLE (not silenced) and
+# The 6 remaining warning-class advisories are left VISIBLE (not silenced) and
 # are dispositioned — publicly, dated, with parent traces — in
-# `.github/osv-scanner.toml`, which is the gating scanner. Duplicating those
-# mutes here would only hide warnings we want to keep seeing on every run.
+# `.github/osv-scanner.toml`, which is the gating scanner, and (for the two
+# that also fail `cargo deny`) in `deny.toml`. Duplicating those mutes here
+# would only hide warnings we want to keep seeing on every run.
+#
+# NOTE on the division of labour, because the three files are NOT
+# interchangeable: `cargo audit` does not fail on warning-class advisories, but
+# **`cargo deny` DOES** — an "unmaintained" advisory is an `error[unmaintained]`
+# there. So the empty list here costs nothing, while `deny.toml` genuinely must
+# carry an exception for anything unmaintained that cannot be removed. As of
+# 2026-07-29 that is exactly two of these six: bincode (RUSTSEC-2025-0141) and
+# ttf-parser (RUSTSEC-2026-0192).
+#
+# The other four do NOT reach `cargo deny` — and the reason is a real scope
+# difference that was MEASURED, not assumed. `cargo audit` reads `Cargo.lock`,
+# i.e. every crate any feature can pull. `deny.toml` sets `[graph]
+# all-features = false`, so `cargo deny` evaluates only the DEFAULT-feature
+# graph, and `paste`, `number_prefix` and `rustls-pemfile` arrive through
+# optional / default-OFF features (candle SIMD stack, hf-hub, bollard). Proof:
+# `cargo deny --all-features check advisories` -> exit 1, three additional
+# `error[unmaintained]` for exactly those three crates; the default-graph run
+# -> exit 0. (`lexical-core`'s "unsound" advisory does not surface in cargo-deny
+# at either setting.)
+#
+# So: a green `cargo deny` certifies the DEFAULT-feature graph, not the whole
+# lockfile. That gap is covered by this file's scanner and by
+# `.github/osv-scanner.toml`, both of which read the full lockfile — it is
+# defence in depth, not an unwatched hole — but do not read a green `cargo
+# deny` as broader than it is. See `deny.toml` for the standing decision on
+# whether to widen it.
 #
 # History of source-level eliminations (each one previously an ignore entry):
 #
@@ -23,6 +54,16 @@
 #     rustls, so this added no build surface.
 #   * lru "unsound" — eliminated by the ratatui 0.29 -> 0.30 upgrade.
 #   * RUSTSEC-2026-0194 + RUSTSEC-2026-0195 (quick-xml DoS pair) — see below.
+#   * RUSTSEC-2024-0370 (proc-macro-error, unmaintained) — eliminated
+#     2026-07-29 by moving the workspace `utoipa` pin from "4.2" to "5".
+#     `utoipa-gen` 4.x declares `proc-macro-error ^1.0` as a REQUIRED
+#     dependency; `utoipa-gen` 5.x dropped it. `cargo tree -i
+#     proc-macro-error@1.0.4` showed exactly one path (via utoipa <- wcore-acp)
+#     and now reports "did not match any packages". Note this one could NOT
+#     have been fixed by bumping the flagged crate: the advisory is
+#     `patched = []`, so only removal works. Side effect: the `syn` 1.x/2.x
+#     duplicate went away too (cargo-deny duplicate warnings 60 -> 59).
+#     Do NOT float `utoipa` back below 5 — it reintroduces this advisory.
 #
 # ── quick-xml DoS pair: RUSTSEC-2026-0194 / RUSTSEC-2026-0195 ─────────────
 # CLOSED AT SOURCE 2026-07-29 (F29-02-H1). Both were previously ignored here

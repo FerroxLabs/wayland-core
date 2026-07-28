@@ -200,3 +200,83 @@ and state the path count explicitly. Consequences for this lane:
 
 ## Next
 Derive traces with `cargo tree -i` per resolved version; then apply fixes in order.
+
+---
+
+## T+95 — GREEN, and proven able to fail
+
+`cargo deny --manifest-path Cargo.toml check` at the fixed tree:
+`WLRC=0` / `WLDONE`, **0 error blocks**, final line `advisories ok, bans ok, licenses ok, sources ok`.
+Duplicate warnings 60 -> 59: the vanished pair is `syn` (proc-macro-error carried syn 1.x).
+
+8-case falsification battery (`evidence/29-deny/falsify.sh`, verbatim log in
+`falsification.txt`). cargo-deny's exit code is a **bitmask** — advisories=1, bans=2,
+licenses=4, sources=8 — which cross-checks the baseline: exit **5 = 1|4** = advisories +
+licenses, exactly the two sections that read FAILED. Every section flips independently:
+
+| case | mutation | rc | verdict |
+|---|---|---|---|
+| F0 | none (control) | 0 | all ok |
+| F1 | revert the license one-liner | 4 | licenses FAILED |
+| F2 | drop RUSTSEC-2025-0141 from ignore | 1 | advisories FAILED |
+| F3 | drop RUSTSEC-2026-0192 from ignore | 1 | advisories FAILED |
+| F4 | ban `serde` | 2 | bans FAILED |
+| F5 | empty `allow-registry` | 8 | sources FAILED |
+| F6 | drop MIT from the allowlist | 4 | licenses FAILED |
+| F7 | restore (control) | 0 | all ok |
+
+F2/F3 matter most: each ignore id is load-bearing on its own, so neither is a
+blanket suppression riding on the other.
+
+## T+105 — `cargo audit` re-measured: 7 -> 6
+
+`cargo audit` exit 0, `warning: 6 allowed warnings found` (5 unmaintained + 1 unsound),
+`proc-macro-error` absent. `.cargo/audit.toml`'s header claimed 7; corrected.
+
+## T+115 — SCOPE GAP FOUND IN THE GREEN (this is the important one)
+
+`deny.toml` sets `[graph] all-features = false`, so a green `cargo deny` certifies only the
+**default-feature graph**, not the lockfile. Measured, not assumed:
+
+- `cargo deny --all-features check advisories` -> **exit 1, 3 extra `error[unmaintained]`**:
+  `paste`, `number_prefix`, `rustls-pemfile` (via candle SIMD / hf-hub / bollard, all
+  optional and default-OFF).
+- `cargo deny --all-features check licenses bans sources` -> **exit 0, 0 errors.**
+
+So widening the graph costs exactly three advisory exceptions and nothing else.
+
+## T+125 — cross-audit panel (§4) on the two judgement calls
+
+Q1 "chain `cargo deny` into `check-all` now that it is green?" — **codex YES, gemini YES,
+kimi YES. Unanimous.** kimi added the argument none of the others made and that I had not
+weighted: the CI job sits behind a *path-relevance guard*, so on PRs that do not touch the
+policy paths cargo-deny does not run at all — which makes `check-all` a genuine backstop,
+not a duplicate.
+
+Q2 "flip `all-features` to true, buying optional-feature coverage for 3 more exceptions?" —
+**codex NO, gemini YES, kimi YES (2-1).**
+
+Internal adversarial pass, arguing AGAINST the YES majority, and how it resolved:
+1. *"`--all-features` is flaky on a workspace this size — mutually exclusive / platform
+   features will make the gate fail for reasons unrelated to supply chain."* **Disproved by
+   the measurement itself:** cargo-deny builds a *metadata* graph and never compiles, so
+   feature combinations that would not build do not perturb it. The `--all-features` run
+   completed and produced a verdict for all four sections.
+2. *"Exception count 2 -> 5 in the one repo whose documented failure mode is a bad
+   exception."* Real, and it is the reason codex says NO. But the response to a bad
+   exception is a better exception, not a narrower gate — and all three are already dated,
+   traced and public in `.github/osv-scanner.toml`; moving them here consolidates an
+   existing decision rather than manufacturing a new one.
+3. *"cargo audit already covers the whole lockfile, so the coverage is duplicated."* True
+   **for advisories** — and that is codex's strongest point. But it is **false for
+   licenses and sources**, and that is decisive: nothing else in this repo checks the
+   license of an optional dependency. `cargo audit` does not check licenses; `osv-scanner`
+   does not check licenses. Today a GPL/AGPL crate arriving through the `hf-hub` or
+   `bollard` path would pass every gate the repo has. That hole is not defence-in-depth,
+   it is uncovered — and I measured that closing it costs nothing on the licenses axis
+   (exit 0 under `--all-features`).
+
+**DECIDED: Q1 = YES (chain it). Q2 = YES (flip `all-features`).** Q2 follows the majority,
+and specifically on the licenses/sources argument rather than the advisories one; codex's
+dissent is recorded because its exception-hygiene point is correct and is the reason each
+of the three new entries carries a full derived trace rather than a cross-reference.
