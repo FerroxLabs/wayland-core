@@ -98,7 +98,7 @@ right answer by treating my instructions as falsifiable. Write briefs that make 
 | ID | What |
 |---|---|
 | ~~`F24-C3-H2`~~ | **CLOSED, merged.** The gateway hosts inbound, and refuses at startup naming the cause when it cannot. Live-proven on Linux; **Criterion 3 still NOT MET** and the lane declined to record it as closed. |
-| `F24-C3-H4` | **NEW, measured but not fixed.** The gateway registers and starts **two** `ChannelManager`s — 6 registration events for 3 channels — because `build_headless_cron_handler` builds and `start_all`s its own. Harmless for webhooks (9 arrivals, dedupe green). **For polling adapters that consume as they poll — IMAP seen-flag, Telegram `getUpdates` offset — a second manager could take delivery of messages the subscriber never sees.** Double registration proven; the consumption race **unmeasured**, because the affected adapters are precisely the ones with no fixture seam. |
+| ~~`F24-C3-H4`~~ | **REPRODUCED, RAISED TO HIGH, FIXED, merged.** The race was real and worse than filed — the subscriber-less manager swept and confirmed the queue **3 ms before the second manager had registered**. Startup: 8 of 8 lost → 0. **Severity came from the steady-state legs**: after a 45 s settle, 5 of 6 lost, with a control ruling out "the adapter just stops" — so the loss is **ongoing, silent, and produces no error**. Email IMAP and Discord share the mechanism and are **unmeasured**. |
 | `F-28-02-002` | Stale AppContainer lease = DoS. **OPEN at HIGH by choice** — 28-04 declined a MEDIUM re-score that a literal reading permitted, because the downgrade opens the accept path and passes the gate. |
 | ~~`F29-02-H1`~~ | **CLOSED AT SOURCE, merged.** Suppression removed entirely (`ignore = []`), both vulnerable quick-xml versions gone from the lock. |
 | `F29-03-01` | `self-update` installs nothing until a trust root + manifest asset exist. Fail-closed by design. |
@@ -124,8 +124,13 @@ right answer by treating my instructions as falsifiable. Write briefs that make 
   serial a flat 4/1 over 12.
 - **A silent poll loop is indistinguishable from a hung agent** and the watchdog kills it. Emit
   every iteration, bound the loop, commit before any long wait. It killed six lanes today.
-- **The instrument that hunts a defect class tends to carry it — now eight times.** Run every
-  checker against a known-positive *and* a known-negative before trusting it.
+- **The instrument that hunts a defect class tends to carry it — now TEN times.** Run every
+  checker against a known-positive *and* a known-negative before trusting it. Two more overnight:
+  a `--list` regex anchoring `$` against trailing CRs reported zero resolved tests, and **MarkdownV2
+  escaping mangled a correlation token so a run with eight successful replies printed `replied=0`**
+  — one step from writing up a working path as total loss. The fix there is the transferable part:
+  an explicit `instrument_fault` state that grades such a run **INCOMPLETE rather than LOSS**.
+  Build that state into any instrument whose failure mode looks like the defect it hunts.
 - **A WITHDRAWN finding leg is not a settled one.** `F29-02-H1`'s calamine leg was withdrawn as
   "wrong" because quick-xml 0.31.0 is "not named by either advisory". Nobody checked the advisory
   metadata: both declare `patched = [">= 0.41.0"]` with **no `unaffected` range**, so every
