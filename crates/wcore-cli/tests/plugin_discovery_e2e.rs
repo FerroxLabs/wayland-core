@@ -149,7 +149,18 @@ fn first_startup_events(backends: Backends) -> [serde_json::Value; 2] {
     ])
     .current_dir(tmp.path())
     // Defensive: empty HOME so per-user config doesn't sneak in.
+    //
+    // `HOME` alone does NOT isolate on Windows: `dirs::home_dir()` reads
+    // `USERPROFILE` there, so the child loads the developer's real
+    // `%APPDATA%\wayland-core` config. Measured on `SeanD@seandesktop`
+    // 2026-07-29: with `HOME` only, this exact invocation produced 0 bytes of
+    // stdout and exited before `ready`, because the host config carried
+    // `storage.credentials.backend = "plaintext"` and durable session recovery
+    // refuses to start on it. With `WAYLAND_HOME` — the crate's canonical
+    // hermetic override, see `wcore_config::config::wayland_config_dir` — the
+    // same invocation emitted `ready` in under a second.
     .env("HOME", tmp.path())
+    .env("WAYLAND_HOME", tmp.path())
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());

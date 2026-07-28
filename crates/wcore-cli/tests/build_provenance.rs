@@ -23,8 +23,26 @@
 #[test]
 fn binary_matches_repo_head() {
     // ── 1. Resolve git HEAD ───────────────────────────────────────────────
+    // Resolve the FULL 40-hex HEAD, not `--short`.
+    //
+    // Step 2 below asserts the embedded SHA is exactly 40 hex characters, and
+    // step 4 asserts `embedded_sha == head`. With `--short` those two
+    // assertions contradict each other: a 40-character string can never equal
+    // a 7-character one, so the strict branch — which arms itself whenever
+    // `CI` is set — could not pass under any circumstances. Measured on the
+    // self-hosted Windows leg of run 30403867920:
+    //
+    //   STRICT: binary source 189599ca5af5b84661ce7f93d4318758155d26b9
+    //           != HEAD 189599c (stale build — rebuild required)
+    //
+    // The second string is a prefix of the first, i.e. the build was NOT
+    // stale; the comparison was. On the Linux leg the same test "passed" in
+    // 0.009s — too fast to have spawned `--build-info` at all — because
+    // `git rev-parse` fails inside the CI container and the early return below
+    // exits having asserted nothing. One test, both failure modes: vacuous on
+    // one platform, unfailable-in-the-wrong-direction on the other.
     let Ok(head_out) = std::process::Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
+        .args(["rev-parse", "HEAD"])
         .output()
     else {
         // git not available — skip; provenance check is only meaningful where git exists
