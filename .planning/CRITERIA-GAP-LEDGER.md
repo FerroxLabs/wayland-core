@@ -253,6 +253,26 @@ these are distinguishable), and outbound idempotency for the nine adapters.
 
 #### 24-C2 — PARTIAL
 
+> **CORRECTED 2026-07-28 by `lane/24-triggers` (merged `5d93a407`), which probed the real tick
+> loop at base rather than reading the source. Two claims below are wrong:**
+>
+> 1. **`poll` did NOT fail silently — it fired.** Measured at base: `event` 0 fires,
+>    `webhook` 0 fires, **`poll` 6 fires**. `poll:URL:300` was `every:300` with the URL string
+>    ignored, so it ran the action on the clock **having never contacted the URL**. That is a
+>    stronger lie than silence: not a feature that does nothing, but one that does the wrong
+>    thing while reporting success.
+> 2. **The suspected mechanism is refuted.** `wcore-agent/src/cron.rs`'s "a missing surface logs
+>    the fire and returns Ok" comment is **stale** — the arms return `NoDispatcher`, and the
+>    comment describes `Target`, not `Trigger`. The real cause was `next_after` plus a total
+>    absence of producers.
+>
+> **Current state:** `event` is implemented on a durable cross-process queue; `webhook` and
+> `poll` are refused at add and removed from `--help`, with persisted jobs listed as
+> `WILL NEVER FIRE`. **Criterion 2 remains PARTIAL** — the false promise was retired, the plane
+> was not built. Open: webhook needs an inbound route and credential scheme (~1.5 sessions,
+> should reuse the new event bus); poll needs an egress-routed client and, first, a *defined*
+> response contract (~1 session). Full record: `24-C2-REPAIR-SUMMARY.md`.
+
 > **"Scheduled, event-driven, webhook, polling, and commitment work has bounded history, retry,
 > continuation, and delivery."** (`ROADMAP.md:118`)
 
