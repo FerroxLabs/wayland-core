@@ -21,6 +21,10 @@ pub mod cancel;
 // drives an agent turn through the TurnDispatcher seam, then sends the
 // reply back. Completes the inbound path that was structurally missing.
 pub mod channel_inbound;
+/// F24-CL: the single-owner INBOUND POLLING lease. Three production sites each
+/// call `ChannelManager::start_all()` in a separate process, and polling is a
+/// destructive read — see the module docs for the measured loss.
+pub mod channel_lease;
 // F24-C3-H2 — the inbound stack (subscriber + dispatcher + webhook host)
 // assembled once, for any runtime that hosts channels. It was previously only
 // ever built inside `AgentBootstrap`, so the persistent `gateway run` runtime —

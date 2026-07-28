@@ -221,6 +221,10 @@ impl LeaseHandle {
 #[derive(Debug)]
 pub struct ScheduleLease {
     dir: PathBuf,
+    /// Basename of this lease's owner record. Carried rather than assumed
+    /// because `Drop` must remove the record it actually wrote — see
+    /// [`ScheduleLease::attempt_named`].
+    record_file: String,
     handle: LeaseHandle,
     _sentinel: File,
 }
@@ -253,10 +257,41 @@ impl ScheduleLease {
     /// failure. Genuine failures (an unusable directory, a lock call that
     /// itself errored) are still errors.
     pub fn attempt(dir: impl AsRef<Path>, holder: &str) -> Result<LeaseAttempt, LeaseError> {
+        Self::attempt_named(dir, holder, LEASE_LOCK_FILE, LEASE_RECORD_FILE)
+    }
+
+    /// [`attempt`](Self::attempt) with caller-chosen sentinel and record
+    /// basenames.
+    ///
+    /// # Why this exists
+    ///
+    /// Phase 24 shipped this lease for the cron SCHEDULE, and the schedule was
+    /// not the only thing in this workspace with exactly one legitimate owner
+    /// per home. Inbound channel polling has the same shape and a sharper
+    /// failure: polling is a DESTRUCTIVE read — Telegram's `getUpdates?offset=`
+    /// permanently deletes, IMAP sets `\Seen`, Discord allows one gateway
+    /// session per token — so a second poller does not duplicate a message, it
+    /// DESTROYS it for the first, silently.
+    ///
+    /// The channel guard therefore reuses this primitive rather than declaring
+    /// a second exclusion concept. Two mechanisms for one invariant is how the
+    /// double-`ChannelManager` defect arose in the first place, and a lease
+    /// whose release story differed from this one would be a second chance to
+    /// reintroduce the stale-lock wedge this module's OS-owned lock exists to
+    /// prevent.
+    ///
+    /// Only the FILE NAMES vary. The exclusion, the liveness story and the
+    /// release-on-death guarantee are shared verbatim, which is the point.
+    pub fn attempt_named(
+        dir: impl AsRef<Path>,
+        holder: &str,
+        lock_file: &str,
+        record_file: &str,
+    ) -> Result<LeaseAttempt, LeaseError> {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir).map_err(LeaseError::Directory)?;
 
-        let lock_path = dir.join(LEASE_LOCK_FILE);
+        let lock_path = dir.join(lock_file);
         let mut sentinel = File::options()
             .read(true)
             .write(true)
@@ -275,7 +310,7 @@ impl ScheduleLease {
 
         if !try_lock_exclusive(&sentinel).map_err(LeaseError::Lock)? {
             // Held, which by OS construction means the holder is alive.
-            let holder_pid = Self::read_record(&dir).map(|r| r.pid);
+            let holder_pid = Self::read_record_named(&dir, record_file).map(|r| r.pid);
             return Ok(LeaseAttempt::Observer { holder_pid });
         }
 
@@ -284,10 +319,11 @@ impl ScheduleLease {
             acquired_at: chrono::Utc::now().to_rfc3339(),
             holder: holder.to_string(),
         };
-        write_record(&dir, &record).map_err(LeaseError::Record)?;
+        write_record(&dir, &record, record_file).map_err(LeaseError::Record)?;
 
         Ok(LeaseAttempt::Owner(Self {
             dir,
+            record_file: record_file.to_string(),
             handle: LeaseHandle {
                 owned: Arc::new(AtomicBool::new(true)),
                 owner_pid: std::process::id(),
@@ -310,7 +346,12 @@ impl ScheduleLease {
     /// Read the owner record without taking the lock and without being
     /// blocked by it.
     pub fn read_record(dir: impl AsRef<Path>) -> Option<LeaseRecord> {
-        let path = dir.as_ref().join(LEASE_RECORD_FILE);
+        Self::read_record_named(dir, LEASE_RECORD_FILE)
+    }
+
+    /// [`read_record`](Self::read_record) for a caller-chosen record basename.
+    pub fn read_record_named(dir: impl AsRef<Path>, record_file: &str) -> Option<LeaseRecord> {
+        let path = dir.as_ref().join(record_file);
         let mut buf = String::new();
         File::open(path).ok()?.read_to_string(&mut buf).ok()?;
         serde_json::from_str(&buf).ok()
@@ -331,8 +372,10 @@ impl Drop for ScheduleLease {
         self.handle.revoke();
         // A clean release removes the record so a later read reports no owner
         // rather than naming a process that has exited. The OS releases the
-        // lock itself when `_sentinel` closes.
-        let _ = std::fs::remove_file(self.dir.join(LEASE_RECORD_FILE));
+        // lock itself when `_sentinel` closes — which is also why an UNCLEAN
+        // death (SIGKILL, panic, power loss) still frees the lease: nothing
+        // here has to run for the next process to acquire it.
+        let _ = std::fs::remove_file(self.dir.join(&self.record_file));
     }
 }
 
@@ -341,14 +384,14 @@ impl Drop for ScheduleLease {
 /// `std::fs::rename` maps to `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING` on
 /// Windows, which replaces an existing destination, and no handle is held on
 /// the destination while the rename runs.
-fn write_record(dir: &Path, record: &LeaseRecord) -> std::io::Result<()> {
-    let tmp = dir.join(format!("{LEASE_RECORD_FILE}.{}.tmp", std::process::id()));
+fn write_record(dir: &Path, record: &LeaseRecord, record_file: &str) -> std::io::Result<()> {
+    let tmp = dir.join(format!("{record_file}.{}.tmp", std::process::id()));
     {
         let mut f = File::create(&tmp)?;
         f.write_all(serde_json::to_string_pretty(record)?.as_bytes())?;
         f.sync_all()?;
     }
-    std::fs::rename(&tmp, dir.join(LEASE_RECORD_FILE))
+    std::fs::rename(&tmp, dir.join(record_file))
 }
 
 // ---------------------------------------------------------------------------

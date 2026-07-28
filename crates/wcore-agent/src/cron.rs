@@ -59,6 +59,15 @@ pub struct EngineJobHandler {
     channels: Option<Arc<RwLock<ChannelManager>>>,
     slash: Option<SlashSink>,
     skill: Option<SkillSink>,
+    /// F24-CL — the inbound-polling lease this handler's process holds, in
+    /// EITHER role.
+    ///
+    /// Carried purely so the claim outlives `build_headless_cron_handler_*`.
+    /// The lease releases on drop, so without an owner living as long as the
+    /// pollers do, the `cron daemon` would surrender inbound polling the
+    /// instant its handler was built and a third process could immediately
+    /// start polling alongside it — reinstating the race in a subtler form.
+    channel_poll_lease: Option<crate::channel_lease::ChannelPollLease>,
 }
 
 impl EngineJobHandler {
@@ -71,7 +80,18 @@ impl EngineJobHandler {
             channels,
             slash,
             skill,
+            channel_poll_lease: None,
         }
+    }
+
+    /// Attach the inbound-polling lease this process holds, so it lives as
+    /// long as the handler does. See the field docs for why that matters.
+    pub fn with_channel_poll_lease(
+        mut self,
+        lease: crate::channel_lease::ChannelPollLease,
+    ) -> Self {
+        self.channel_poll_lease = Some(lease);
+        self
     }
 
     /// A handler with every surface absent — fires are logged only.
@@ -429,15 +449,36 @@ pub async fn build_headless_cron_handler_with_channels(
         ),
     }
     let channels = Arc::new(tokio::sync::RwLock::new(channel_manager_inner));
-    if let Err(e) = channels.write().await.start_all().await {
-        warn!(
+
+    // F24-CL. This is the `cron daemon` path — a SEPARATE PROCESS from both the
+    // session and the gateway, and one that ships launchd and systemd
+    // templates, so it is routinely running unattended beside them. Polling is
+    // a destructive read, so arming a poller here while another process polls
+    // the same account destroys messages for whichever one loses the race.
+    //
+    // Losing costs this handler nothing that matters: the channel sink is used
+    // to SEND (Channel cron jobs dispatch outbound), and sending is unaffected
+    // by the lease. Only the inbound poll loops are withheld.
+    let poll_lease =
+        crate::channel_lease::attempt(&wcore_config::config::wayland_config_dir(), "cron-daemon");
+    if poll_lease.is_owner() {
+        if let Err(e) = channels.write().await.start_all().await {
+            warn!(
+                target: "wcore_agent::cron",
+                error = %e,
+                "headless cron handler: channel start_all failed; inbound polling may be partial"
+            );
+        }
+    } else {
+        info!(
             target: "wcore_agent::cron",
-            error = %e,
-            "headless cron handler: channel start_all failed; inbound polling may be partial"
+            owner_pid = ?poll_lease.owner_pid(),
+            "F24-CL: another process owns inbound polling; cron handler will send but not poll"
         );
     }
 
     EngineJobHandler::new(Some(channels), None, Some(skill_sink))
+        .with_channel_poll_lease(poll_lease)
 }
 
 #[cfg(test)]

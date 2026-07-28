@@ -139,6 +139,19 @@ pub struct BootstrapResult {
         tokio::task::JoinHandle<()>,
         tokio::sync::watch::Sender<bool>,
     )>,
+    /// F24-CL — the single-owner INBOUND POLLING lease.
+    ///
+    /// **Hold this for the session lifetime.** Dropping it releases the OS
+    /// lock and hands inbound polling to whatever process asks next, so an
+    /// early drop would silently re-open the two-poller race this lease
+    /// exists to close.
+    ///
+    /// `Some` whenever channels were not skipped, in BOTH roles — an observer
+    /// carries a lease too, it simply is not the owner. Ask
+    /// [`channel_lease::ChannelPollLease::is_owner`] rather than testing for
+    /// `Some`. `None` only on the per-session / sub-agent path, which never
+    /// touches channels at all.
+    pub channel_poll_lease: Option<crate::channel_lease::ChannelPollLease>,
     /// Servers dropped by a pre-connect gate (e.g. an unreachable stdio
     /// command). They never reached connect_all/health(), so they are
     /// carried here so the boot snapshot can render a skipped (⊘) row.
@@ -3074,6 +3087,8 @@ impl AgentBootstrap {
             tokio::task::JoinHandle<()>,
             tokio::sync::watch::Sender<bool>,
         )>;
+        // F24-CL. Held for the session lifetime via `BootstrapResult`.
+        let channel_poll_lease: Option<crate::channel_lease::ChannelPollLease>;
 
         if !self.without_channels {
             // Register adapters on the inner manager.
@@ -3247,22 +3262,51 @@ impl AgentBootstrap {
                 None
             };
 
-            // Call start_all to arm inbound poll tasks (now that the subscriber
-            // is listening). Best-effort: if start_all returns an error we warn
-            // and continue (session still works, channels just won't deliver
-            // inbound messages).
-            if let Err(e) = lifted.write().await.start_all().await {
-                tracing::warn!(
-                    target: "wcore_agent::bootstrap",
-                    error = %e,
-                    "F-014: channel_manager.start_all() failed; inbound polling may be partial"
-                );
+            // F24-CL. Take the single-owner INBOUND POLLING lease before arming
+            // any poller.
+            //
+            // F24-C3-H4 stopped ONE process starting two managers. It could not
+            // stop TWO processes each starting one, and every ordinary session
+            // reaches this line — `without_channels` is set only in tests and in
+            // the per-session recursion guard. Polling is a destructive read, so
+            // a session that polls beside the installed service does not
+            // duplicate its messages, it DELETES them: measured at 8 of 8 at
+            // startup on the shipped binary, silently.
+            //
+            // An observer still gets a fully working session and can still SEND;
+            // it just does not poll. It says so loudly — see `channel_lease`.
+            let poll_lease = crate::channel_lease::attempt(
+                &wcore_config::config::wayland_config_dir(),
+                "session",
+            );
+
+            if poll_lease.is_owner() {
+                // Call start_all to arm inbound poll tasks (now that the
+                // subscriber is listening). Best-effort: if start_all returns an
+                // error we warn and continue (session still works, channels just
+                // won't deliver inbound messages).
+                if let Err(e) = lifted.write().await.start_all().await {
+                    tracing::warn!(
+                        target: "wcore_agent::bootstrap",
+                        error = %e,
+                        "F-014: channel_manager.start_all() failed; inbound polling may be partial"
+                    );
+                } else {
+                    tracing::info!(
+                        target: "wcore_agent::bootstrap",
+                        "F-014: channel_manager.start_all() complete — inbound polling active"
+                    );
+                }
             } else {
                 tracing::info!(
                     target: "wcore_agent::bootstrap",
-                    "F-014: channel_manager.start_all() complete — inbound polling active"
+                    owner_pid = ?poll_lease.owner_pid(),
+                    "F24-CL: another process owns inbound polling; start_all NOT called"
                 );
             }
+            // Held for the session's lifetime. Dropping it releases the OS lock
+            // and hands inbound polling to the next process that asks.
+            channel_poll_lease = Some(poll_lease);
 
             // Inbound webhook host — when enabled, bind an HTTP listener that
             // routes platform webhook POSTs (Slack / WhatsApp / Twilio SMS) to
@@ -3332,6 +3376,10 @@ impl AgentBootstrap {
             channels_auto_registered = 0;
             inbound_subscriber = None;
             inbound_webhook = None;
+            // No channels on this path, so no polling and nothing to exclude.
+            // Taking a lease here would let a per-session engine deny the real
+            // session its own polling — the recursion guard must stay inert.
+            channel_poll_lease = None;
         }
 
         // v0.8.1 U7 — spawn the cron runner. Errors resolving the
@@ -3548,6 +3596,7 @@ impl AgentBootstrap {
             cron_runner,
             inbound_subscriber,
             inbound_webhook,
+            channel_poll_lease,
             skipped_mcp_servers,
         })
     }
