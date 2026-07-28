@@ -207,16 +207,54 @@ decision was taken by `first_exceeded_reason()` — directly, or via
 is not taken. **No admission or budgeting decision anywhere reads `limit_for`.** Recorded
 so it is not rediscovered as a new finding.
 
-### OOP-1 — `delegate_isolation` F05 identity has not been re-gated · MEDIUM · OUT-OF-PHASE
+### OOP-1 — `delegate_isolation` F05 identity: ANSWERED, and the answer is a NEGATIVE · MEDIUM · OUT-OF-PHASE
 
-`.planning/intel/COMPETITIVE-LEDGER.md` assigns Phase 21 the carried limitation "re-run
-the F05 capability activation gate against the `delegate_isolation` identity at
-`9821ef76` and record the result", because AUTH-* carries an `Unavailable: isolation not
-enforced` negative that Phase 20 may already have cleared.
+**Updated 2026-07-28. The question this item tracked now has an answer. Phase 20 did NOT
+clear the negative — the negative survived it and is emitted by the shipped product.**
 
-**Why out-of-phase.** That is an F05 capability-gate re-run, not an authority-inheritance
-proof. None of the four Phase 21 plans has a task for it and the four-plan cap forbids
-adding one. Owner to be reassigned by Sean.
+**Original item.** `.planning/intel/COMPETITIVE-LEDGER.md` assigned Phase 21 the carried
+limitation "re-run the F05 capability activation gate against the `delegate_isolation`
+identity at `9821ef76` and record the result", because AUTH-\* carries an
+`Unavailable: isolation not enforced` negative that Phase 20 **may** already have cleared.
+The 2026-07-26 ledger recorded that Phase 20 "plausibly supersedes" the finding but that
+no Phase 20 artifact had re-run the gate, so there was **no evidence either way**.
+
+**There is now evidence, and it runs against the product.** The shipped binary's own
+capability-activation stream emits
+
+```
+{"type":"capability_activation","capability":"delegate_isolation","stage":"unavailable","reason":"isolation_not_enforced"}
+```
+
+**18 times at SHA `2ecdfdf5`** — a commit that is a **descendant of the Phase 20A seal
+`9821ef76`** — on host `Ubuntu-2404-noble-amd64-base`, `wayland-core 0.12.25`. Raw
+capture: `phases/27-multimodal-browser-generation-voice/evidence/27-01/OBS-RAW.log`.
+Corroborated on **Windows** in Phase 25's lifecycle lab:
+`phases/25-remote-reach-nodes-plugin-lifecycle/evidence/25-02-win-pos-approved.txt:107`
+and `25-02-win-neg-unapproved.txt:98` (2026-07-27; that artifact does not assert its own
+SHA). Evidence ID `F05-NEG-PERSISTS@2ecdfdf5`, recorded in
+`.planning/intel/COMPETITIVE-LEDGER.md`. **AUTH-\* therefore keeps the negative and stays
+at `CONSTRUCTED`, now on measured grounds rather than on the absence of a measurement.**
+
+**Three qualifications, carried verbatim from the ledger so this is not over-read.**
+
+1. This is the **product's own activation stream**, not a fresh execution of the F05
+   capability-activation gate harness. It is stronger than absence of evidence and weaker
+   than a re-run gate.
+2. The observations are at `2ecdfdf5`, which is **earlier than** the Phase 21 authority
+   repair at `ac94b1d5`. **Nothing has re-read the identity at or after `ac94b1d5`.**
+3. The identity is `delegate_isolation` specifically. It is **not** a statement about
+   macOS or Windows sandbox containment generally, both of which `F28-CONTROL-WEDGE` and
+   `F-28-02-001-FIXED` measure separately and more favourably.
+
+**What remains open.** Not the original question — that is answered — but its successor:
+**re-read the `delegate_isolation` identity at or after `ac94b1d5`**, ideally by executing
+the F05 capability-activation gate itself rather than reading the activation stream. Named
+as a next-refresh action on the AUTH-\* row of the competitive ledger. Owner unassigned.
+
+**Why still out-of-phase.** It is an F05 capability-gate re-run, not an
+authority-inheritance proof. None of the four Phase 21 plans had a task for it and the
+four-plan cap forbade adding one. Owner to be reassigned by Sean.
 
 ### OOP-2 — `wcore-permissions` has no inheritance model by design · MEDIUM · OUT-OF-PHASE
 
