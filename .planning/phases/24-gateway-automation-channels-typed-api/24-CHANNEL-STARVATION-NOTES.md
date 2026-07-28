@@ -202,3 +202,69 @@ defect #5, in a new costume. So:
 - [ ] leg D: handover on holder exit, no operator action
 - [ ] anti-denial: positive baseline in the same run; `max_open == 0` graded DENIAL
 - [ ] `wcore-agent --lib` serial run (parallel cluster is NOT mine — brief §6)
+
+---
+
+## T+150 — the fix is in, 14/14 unit tests green, and mutation testing found a second instrument defect
+
+### Landed (commit `bce987fa`)
+
+`crates/wcore-agent/src/channel_lease.rs` gains role ranks, advisory claims and
+`ChannelPollSupervisor`; the three call sites (`bootstrap.rs`, `cron.rs`,
+`wcore-cli/gateway.rs`) hold a supervisor where they held a one-shot lease. **No
+`Cargo.toml` / `Cargo.lock` churn** and **neither fenced file touched** (`git diff $BASE --
+crates/wcore-cli/src/{lib,main}.rs` = 0 lines).
+
+`cargo test -p wcore-agent --lib channel_lease:: -- --test-threads=1` on `hetzner-dsm`:
+
+```
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 2134 filtered out
+```
+
+**14 is the number expected** — 4 pre-existing plus 10 new — and `0 ignored` is read back,
+not inferred from exit status (brief §3.2).
+
+The state machine is tested by driving two simulated processes with **injected pids** inside
+one test process, so `the_service_takes_polling_from_a_session_that_got_there_first`,
+`a_dead_claimants_stale_claim_cannot_wedge_polling` and
+`an_observer_defers_to_a_fresh_better_claim_rather_than_racing_it` are exact orderings rather
+than races against a timer. `flock` is owned by the open file description, so two attempts in
+one process genuinely conflict — the same property the landing lane relied on.
+
+### Instrument defect #2, found by mutation-testing my own grader BEFORE it ran
+
+I mutated `gradeWindow` to stop treating zero pollers as `DENIAL`. **The suite stayed green
+at 21/21.** Chasing why exposed a real defect, not just a coverage hole:
+
+The fixture pushes a concurrency sample on poll OPEN (after increment, so `>= 1`) **and again
+on poll CLOSE (after decrement, so possibly `0`)**. A window that happens to contain only
+close-side samples reads `max_open = 0` while `polls > 0` — polling was demonstrably
+happening. My grader tested `maxOpen === 0` FIRST and would have returned **DENIAL**.
+
+That is a **false CRITICAL** — the landing lane's `WEDGED`-on-a-run-with-no-successor in a new
+costume, and the twelfth instance of an instrument carrying the defect class it hunts.
+
+**Repaired, not documented:** poll COUNT is now the anti-denial measure (it is the direct one);
+`max_open` is read only once an open-side sample landed, and a window without one is graded
+`UNREADABLE`, which is neither a pass nor a denial.
+
+### Mutation results — the suite can fail
+
+| mutant | killed by |
+|---|---|
+| ss parser loses peer anchoring | `ss/known-negative` |
+| token matcher stops stripping whitespace | `token/known-positive` |
+| git reader stops cross-checking | `git/known-negative` |
+| grader stops treating zero polls as DENIAL | 3 assertions |
+| grader reverts to maxOpen-first (defect #2) | `falsedenial/known-positive` + its old-shape assertion |
+
+**24 assertions, 24 passing**, each instrument repair carrying a third assertion that the old
+shape would have missed the case.
+
+## Instrument (§6b-ii) — running tally
+
+| # | defect | status |
+|---|---|---|
+| 1 | rtk `git` proxy hides a merge commit from `log` while `rev-parse` sees it | **REPAIRED** — the reader cross-checks `rev-parse` against `log -1` and refuses to answer when they disagree; 3 assertions incl. old-shape |
+| 2 | `gradeWindow` returned DENIAL for a window that only caught poll-CLOSE samples — a false CRITICAL | **REPAIRED** — poll count is the denial measure; unreadable concurrency is graded `UNREADABLE`; 3 assertions incl. old-shape |
+| 3 | codex silently returned 39 bytes (`Reading additional input from stdin...`), dropping its panel vote | **REPAIRED** — panel invocations pass `< /dev/null`; recorded at T+55 |
