@@ -214,6 +214,120 @@ guard does anything, since the pre-repair harness incremented `passed` and exite
 The two `FAIL harness B/C (expected FAIL)` lines in the output are deliberate, and each is
 verified by its `-verify` partner; the intentional failures are un-counted afterwards.
 
+---
+
+## M6 — HIGH PRODUCT DEFECT FOUND AND FIXED: the gateway URL had no path
+
+Once the fixture could listen, every connect attempt failed `400 Bad Request`, and the
+fixture's parser reported `HPE_INVALID_URL`.
+
+Root cause: `with_gateway_query` was `format!("{base}?v=10&encoding=json")`, and
+`DISCORD_GATEWAY_BASE` is `wss://gateway.discord.gg` with no trailing slash — so the connect URL
+was `wss://gateway.discord.gg?v=10&encoding=json`, **a query with no path**. The module docs at
+`lib.rs:11` have always documented the connect URL as
+`wss://gateway.discord.gg/?v=10&encoding=json`, WITH the slash: the code disagreed with its own
+documentation.
+
+Why it matters: `tokio_tungstenite::connect_async` converts the string to an `http::Uri`, and
+unlike the `url` crate, `http::Uri` does **not** normalise an empty path to `/`. The handshake
+request-target came out as `GET ?v=10&encoding=json HTTP/1.1`, which is not a valid
+request-target. A strict server rejects it outright.
+
+Fixed by `ensure_path()` + two regression tests. **This is exactly the class of defect the lane
+existed to find, and it was invisible for the whole of Phase 24 because Discord inbound had
+never once been driven end to end.**
+
+Honest limit: I cannot test against real Discord (no credential, and that is the point), so I
+cannot say whether Discord's production edge tolerated the malformed target. Against a strict
+server it is fatal, and the fix makes the code agree with its own documentation either way.
+
+## M7 — LIVE RESULT: all six legs PASS, twice, no vendor credential
+
+Binary `wayland-core 0.12.25` built on hetzner from lane HEAD; `gateway run` driven end to end.
+
+| run | config | verdict | legs | arrivals | llm turns | conns_max | steady |
+|-----|--------|---------|------|----------|-----------|-----------|--------|
+| 6 | default (6 steady, 15s settle) | **PASS** rc=0 | 6/6 | 12 | 12 | 1 | 6 submitted, 0 lost, 0 dup |
+| 7 | `--steady 12 --settle-ms 30000` | **PASS** rc=0 | 6/6 | 18 | 18 | 1 | 12 submitted, 0 lost, 0 dup |
+
+Two INDEPENDENT journals agree exactly: `arrivals_total` (the fixture's REST journal, written by
+a different OS process the binary cannot write to except by completing a real TCP round trip)
+equals `llm_turns` (the model fixture's separate journal) — 12/12 and 18/18.
+
+Internal consistency: `dispatched_total − 2 = arrivals` in BOTH runs (14−2=12, 20−2=18). The two
+non-arriving dispatches are exactly the ones that MUST not produce a reply: the dedupe replay and
+the access-denied stranger. A run where those two had leaked would break this identity.
+
+### M7a. Does Discord share the destructive-read loss mode? NO — and here is the evidence
+
+- **`max_concurrent_gateway_connections = 1`** in both runs, and `total_gateway_connections = 1`.
+  The double-`ChannelManager` defect does **not** reach Discord: only one authenticated socket
+  ever existed on the bot token.
+- **`dispatch_socket_deliveries == dispatched_total`** (14/14, 20/20) — 1:1. No message was ever
+  delivered to two sockets, so there is no duplication, which is the shape the defect WOULD take
+  on a push transport.
+- **Steady state: 0 lost of 6, and 0 lost of 12 after a 30s settle.** This is the leg that lifted
+  the Telegram finding from MEDIUM to HIGH, run harder here than there.
+
+So Discord shows **no loss mode of its own** and is not affected by the Telegram one. That is a
+negative result, and it is only worth anything because the instrument was proven able to report
+the positive — see M8.
+
+## M8 — THE GATE CAN FAIL (mutation-proven, not asserted)
+
+Mutated the fixture so `dispatchMessage` delivers to **zero** sockets — total inbound loss with
+the connection still healthy — and re-ran:
+
+```
+MUT_RUNRC=1   verdict=FAIL   legs=0/6   steady lost=4/4   conns_max=1   instrument_fault=no
+```
+
+The two things that make this a real falsification rather than a formality:
+
+1. **The universal-denial trap fired and was caught.** The access leg's primary condition
+   (`stranger_replies=0`) was *satisfied* under total loss — that is what a green by universal
+   denial looks like. Its in-run POSITIVE CONTROL (`allowed_control=0`, want 1) is what failed
+   it. Without that control this run would have scored access as a PASS.
+2. **`conns_max` stayed 1**, so the instrument correctly attributed the failure to DELIVERY and
+   not to the connection — the two are separately observable, as designed.
+
+Fixture restored afterwards; `git status --porcelain | wc -l` = 0.
+
+Five further independent failing runs (2, 3, 4, 5 and the mutation) each produced a DIFFERENT and
+correct diagnosis, which is stronger evidence of discrimination than a single red:
+
+| run | what was wrong | what the instrument said |
+|-----|----------------|--------------------------|
+| 2 | fixture in-process, event loop blocked | "never opened a TCP connection — NOT MEASURED" |
+| 3 | gateway URL had no path | "DIALLED (241 TCP) but no WS handshake completed — protocol/URL fault, NOT inbound loss", `HPE_INVALID_URL` |
+| 4 | no unlocked vault on headless host | "admitted and ROUTED but the turn failed downstream … NOT inbound loss" |
+| 5 | mangling detector false-positived | INCOMPLETE (not a false PASS, and not a false LOSS) |
+| mut | total inbound loss | FAIL, lost=4/4 |
+
+## M9 — three further instrument defects, all found and FIXED in-lane (§6b-ii)
+
+1. **In-process fixture + `Atomics.wait`.** Every driver here sleeps with `Atomics.wait`, which
+   blocks the whole Node event loop, so an in-process fixture cannot accept a TCP connection
+   while the driver waits. Runs 2 and 3 reported "the binary never connected" — a PRODUCT defect
+   — when the instrument simply was not listening. A `RUST_LOG=…=trace` run proved the adapter
+   had been dialling correctly all along. Fixed by running the fixture as its own OS process with
+   a `/__control/` API, which is why every sibling fixture is spawned separately.
+2. **`tcp_connections` could not distinguish "nothing dialled" from "handshake refused".** Both
+   read as 0 because only completed upgrades were counted. Fixed; this is the counter that then
+   diagnosed M6 in one run.
+3. **The mangling detector flagged all 12 healthy replies** (run 5 → INCOMPLETE despite 6/6 legs
+   green). It re-derived the token by regex from the NORMALIZED text, whose whitespace had
+   already been stripped, so `F24C3-REPLY f24c3-disc-admit-bf89` collapsed into one unbroken run
+   and the regex swallowed the marker too. Fixed by judging against the tokens actually planted,
+   with the three-assertion self-test including the proof that the old detector produced the
+   false positive.
+
+Self-test now **16 passed / 0 failed** on both macOS and Linux.
+
+Also worth recording: my own `pkill -f "wayland-core gateway"` killed the ssh shell running it,
+because the command line *contains* the pattern — the identical trap `f24-inbound-run.sh` was
+written to avoid. Cost one run.
+
 ## Risk register (live)
 
 - The instrument tends to carry the defect class it hunts (11 recorded instances). My fixture
