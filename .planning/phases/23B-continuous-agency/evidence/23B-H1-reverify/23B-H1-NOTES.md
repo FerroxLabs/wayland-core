@@ -327,7 +327,22 @@ Assertion 3 is the one that proves the repair does anything: the old matcher lab
 - [x] Q3 — mutation reddens the write-path gate (1 failed), but recovery masks 4 of 5
 - [x] Q2b — recovery's exhaustiveness claim false; ~32 fields share the shape, 2 repaired
 - [x] instrument defect found in my own harness and REPAIRED with a 3-assertion self-test
-- [ ] Q4 — original symptom at HEAD (binary building)
+- [x] Q4 — 0/12 at HEAD, harness cannot reach a tool event; weak evidence, not a disproof
+- [x] live: recovery proved both directions + 2 falsification legs
+- [x] cross-audit panel 2-1 HIGH; SUMMARY written
+
+## T+120 — second instrument defect, also repaired
+
+`git diff --name-only <BASE> -- <fence> | wc -l` returned **1** on an EMPTY diff: this
+environment's `rtk` filter splices a `--- Changes ---` decoration line into git output, and
+`wc -l` counted it. It nearly made me report a shared-file fence violation I had not committed.
+Repaired by counting with `grep -c .` over a written file instead of `wc -l` over the filtered
+stream. True values: **0 fence files, 0 Rust files** changed by this lane.
+
+## FINAL
+
+Severity at HEAD: **HIGH, OPEN.** The fixed mechanism is engine-unreachable (Q1), so the
+original cause is still unidentified. Full reasoning and the panel in `23B-H1-SUMMARY.md`.
 - [ ] Q2 tests hold at HEAD
 - [ ] Q3 mutation proves the gates can fail
 - [ ] Q4 original symptom at HEAD
