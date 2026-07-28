@@ -15,10 +15,13 @@
 //! evidence.
 //!
 //! The whole file is `#![cfg(feature = "doc-extract")]`-free ON PURPOSE: a
-//! file-level `cfg` is one of the ways a suite silently runs zero tests. The
-//! feature is default-on, and `no_default_features_reports_honestly` below
-//! asserts the honest-error path instead, so a `--no-default-features` build
-//! still executes real assertions rather than vanishing.
+//! file-level `cfg` is one of the ways a suite silently runs ZERO tests while
+//! still exiting 0. The extraction cases carry a per-function
+//! `#[cfg(feature = "doc-extract")]` instead, and `feature_gate_reports_honestly`
+//! is deliberately UNGATED and asserts a real outcome in BOTH configurations.
+//! So the executed count is 5 with default features and 1 with
+//! `--no-default-features` — never 0. Read the count back; do not trust the
+//! exit status alone.
 
 use std::io::Write;
 
@@ -101,6 +104,7 @@ fn docx_fixture() -> Vec<u8> {
     ])
 }
 
+#[cfg(feature = "doc-extract")]
 #[tokio::test]
 async fn docx_paragraphs_and_table_extract() {
     let dir = TempDir::new().unwrap();
@@ -146,6 +150,7 @@ async fn docx_paragraphs_and_table_extract() {
 
 // ── pptx: two slides, ordered ────────────────────────────────────────────────
 
+#[cfg(feature = "doc-extract")]
 fn pptx_fixture() -> Vec<u8> {
     let slide = |title: &str, bullet_a: &str, bullet_b: &str| {
         format!(
@@ -186,6 +191,7 @@ fn pptx_fixture() -> Vec<u8> {
     ])
 }
 
+#[cfg(feature = "doc-extract")]
 #[tokio::test]
 async fn pptx_slides_extract_in_numeric_order() {
     let dir = TempDir::new().unwrap();
@@ -234,6 +240,7 @@ async fn pptx_slides_extract_in_numeric_order() {
 /// A minimal but genuinely valid .xlsx: content types, package + workbook
 /// relationships, a workbook naming one sheet, and a worksheet with inline
 /// strings and a numeric cell.
+#[cfg(feature = "doc-extract")]
 fn xlsx_fixture() -> Vec<u8> {
     let cells = [
         ("A1", "Advisory"),
@@ -286,6 +293,7 @@ fn xlsx_fixture() -> Vec<u8> {
     ])
 }
 
+#[cfg(feature = "doc-extract")]
 #[tokio::test]
 async fn xlsx_sheet_extracts_as_markdown_table() {
     let dir = TempDir::new().unwrap();
@@ -320,6 +328,7 @@ async fn xlsx_sheet_extracts_as_markdown_table() {
 /// csv goes through the `csv` crate, not quick-xml or calamine. It is included
 /// as a CONTROL: it must be byte-identical before and after the upgrade, so a
 /// diff that shows csv changing means the harness itself moved, not the parsers.
+#[cfg(feature = "doc-extract")]
 #[tokio::test]
 async fn csv_control_is_unaffected_by_xml_stack() {
     let dir = TempDir::new().unwrap();
