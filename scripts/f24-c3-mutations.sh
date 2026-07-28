@@ -87,8 +87,18 @@ cp "$SMS" /tmp/sms.orig
 python3 - <<'PY'
 p='crates/wcore-channel-sms/src/inbound.rs'
 s=open(p).read()
-old='..IncomingMessage::new(sid, from.clone(), from, body, chrono::Utc::now().timestamp())'
-new='..IncomingMessage::new(sid, to, from, body, chrono::Utc::now().timestamp())'
+# rustfmt splits this call across lines, so the mutation targets the
+# multi-line form. The count assertion below is what catches a drift in
+# either direction: a mutation that matched nothing would leave the tree
+# unchanged and the test would 'pass', reading as a proof it is not.
+old='''..IncomingMessage::new(
+            sid,
+            from.clone(),
+            from,'''
+new='''..IncomingMessage::new(
+            sid,
+            to,
+            from,'''
 assert s.count(old)==1, f"expected exactly 1 site, found {s.count(old)}"
 open(p,'w').write(s.replace(old,new))
 print("M2 applied")
