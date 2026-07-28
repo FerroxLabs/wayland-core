@@ -33,6 +33,18 @@ use futures_util::StreamExt;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 
+/// The release-lifecycle half of this subcommand: the ordered update decision,
+/// the bundled release trust root, persisted freeze protection and revocation
+/// enforcement.
+///
+/// `#[path]` places it at `src/update_trust.rs` rather than
+/// `src/self_update/update_trust.rs`, and declaring it HERE rather than in
+/// `lib.rs` keeps this change off the two files every concurrent lane shares.
+/// `self_update.rs` is 631 lines at base and AGENTS.md caps a module at 1000,
+/// so the new logic is a sibling module rather than growth in place.
+#[path = "update_trust.rs"]
+pub mod update_trust;
+
 /// GitHub repo that hosts wayland-core releases. Pinned to the production
 /// org so a misconfigured workspace cannot redirect updates elsewhere.
 pub const RELEASES_REPO: &str = "FerroxLabs/wayland-core";
@@ -55,10 +67,55 @@ pub async fn run(check_only: bool) -> Result<()> {
     println!("current: v{current_version}");
     println!("latest:  v{latest_version}");
 
-    if latest_version == current_version {
-        println!("already up to date.");
-        return Ok(());
+    let tmp = tempfile::tempdir()?;
+    let now_unix = unix_now();
+
+    // Release trust root and signed manifest, resolved BEFORE the version
+    // decision so a placeholder trust root is reported to the user here rather
+    // than discovered at swap time. This is additive: it neither replaces nor
+    // weakens the keyless attestation check further down, which still runs over
+    // the downloaded archive and still fails closed.
+    let manifest_path = tmp.path().join("release-manifest.json");
+    let (manifest, manifest_status) =
+        load_release_manifest(&release, &manifest_path, now_unix).await;
+    println!("manifest: {manifest_status}");
+
+    // A revocation the user never learns about protects nobody, so a revoked
+    // RUNNING version is reported whatever the decision turns out to be.
+    for line in update_trust::check_only_report(manifest.as_ref(), current_version) {
+        println!("{line}");
     }
+
+    // The install-or-not choice: a pure function of the running version, the
+    // offered release, the verified manifest and the persisted state. It reads
+    // no network, no environment and no clock beyond the injected instant.
+    let freeze_state = update_trust::FreezeState::load();
+    let decision = update_trust::decide_update(&update_trust::UpdateOffer {
+        running_version: current_version,
+        offered_version: latest_version,
+        manifest: manifest.as_ref(),
+        state: &freeze_state,
+        now_unix,
+        max_manifest_age_secs: update_trust::DEFAULT_MAX_MANIFEST_AGE_SECS,
+    });
+
+    let accepted_sequence = match &decision {
+        update_trust::UpdateDecision::AlreadyUpToDate { .. } => {
+            println!("already up to date.");
+            return Ok(());
+        }
+        update_trust::UpdateDecision::Proceed { sequence, .. } => *sequence,
+        refusal => {
+            // A check-only run REPORTS a refusal and exits cleanly; an install
+            // run fails, because refusing to install is the outcome.
+            if check_only {
+                println!("{}", refusal.message());
+                return Ok(());
+            }
+            bail!("{}", refusal.message());
+        }
+    };
+
     if check_only {
         println!("(check-only: not installing)");
         return Ok(());
@@ -74,7 +131,6 @@ pub async fn run(check_only: bool) -> Result<()> {
         .find(|a| a.name == archive_name)
         .with_context(|| format!("no {archive_name} in release v{latest_version}"))?;
 
-    let tmp = tempfile::tempdir()?;
     let archive_path = tmp.path().join(&archive_name);
     download_to(&asset.browser_download_url, &archive_path).await?;
 
@@ -89,8 +145,87 @@ pub async fn run(check_only: bool) -> Result<()> {
         .context("extract binary from verified release archive")?;
 
     atomic_swap(&bin_path)?;
+
+    // The high-water mark advances ONLY here, after a successful install —
+    // never on a decision, and never on a refusal. A failure to persist it is
+    // reported but does not un-install a binary that is already swapped in.
+    if let Err(error) = update_trust::FreezeState::record_install(accepted_sequence, now_unix) {
+        eprintln!("warning: could not persist the release freeze high-water mark: {error}");
+    }
+
     println!("upgraded to v{latest_version}");
     Ok(())
+}
+
+/// Seconds since the Unix epoch. A clock that predates the epoch yields 0,
+/// which the age rule then treats as maximally stale — fail closed.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+/// Fetch and verify the release's signed manifest, returning it alongside a
+/// user-facing status line.
+///
+/// Never returns an error: every failure mode degrades to `None` plus a status
+/// the caller prints, and it is [`update_trust::decide_update`] that decides
+/// what a missing manifest means. That keeps the policy in one pure place
+/// instead of scattering fail-open judgements through the fetch path.
+async fn load_release_manifest(
+    release: &Release,
+    dest: &Path,
+    now_unix: u64,
+) -> (Option<update_trust::VerifiedManifest>, String) {
+    let verifier = match update_trust::ReleaseVerifier::bundled() {
+        Ok(verifier) => verifier,
+        Err(error) => return (None, format!("UNAVAILABLE — {error}")),
+    };
+
+    let Some(asset) = release.assets.iter().find(|asset| {
+        asset
+            .name
+            .ends_with(update_trust::RELEASE_MANIFEST_ASSET_SUFFIX)
+    }) else {
+        return (
+            None,
+            format!(
+                "UNAVAILABLE — release {} publishes no *{} asset",
+                release.tag,
+                update_trust::RELEASE_MANIFEST_ASSET_SUFFIX
+            ),
+        );
+    };
+
+    if let Err(error) = download_to(&asset.browser_download_url, dest).await {
+        return (
+            None,
+            format!("UNAVAILABLE — could not download {}: {error:#}", asset.name),
+        );
+    }
+    let bytes = match std::fs::read(dest) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return (
+                None,
+                format!("UNAVAILABLE — could not read {}: {error}", dest.display()),
+            );
+        }
+    };
+
+    match verifier.verify_manifest_json(&bytes, now_unix) {
+        Ok(manifest) => {
+            let status = format!(
+                "VERIFIED {} sequence={} key_id={}",
+                asset.name,
+                manifest.sequence(),
+                manifest.signing_key_id()
+            );
+            (Some(manifest), status)
+        }
+        Err(error) => (None, format!("REFUSED — {error}")),
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -109,10 +244,12 @@ impl Release {
     /// Strip the leading `v` and the trailing `-wayland-base` from the
     /// release tag so consumers see a SemVer string that matches
     /// `CARGO_PKG_VERSION`.
+    ///
+    /// Delegates to [`update_trust::normalize_version_tag`] so this rule has
+    /// exactly one implementation: the ordering comparison and the printed
+    /// version can never disagree about what a release tag means.
     pub fn version(&self) -> &str {
-        self.tag
-            .trim_start_matches('v')
-            .trim_end_matches("-wayland-base")
+        update_trust::normalize_version_tag(&self.tag)
     }
 }
 
