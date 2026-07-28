@@ -99,7 +99,7 @@ fn build_tree(tag: &str, files: usize) -> PathBuf {
 
 /// Run the reported command shape verbatim — same argv, same 10s manifest, same
 /// two-entry allowlist of one real path plus the absent one — over `real`.
-async fn reported_shape(real: PathBuf) -> (Result<u32, String>, u128) {
+async fn reported_shape(real: PathBuf) -> (Result<i32, String>, u128) {
     let b = AppContainerBackend::new();
     let m = SandboxManifest {
         fs_read_allow: vec![real, PathBuf::from(ABSENT)],
