@@ -1,0 +1,9 @@
+REPLAY-CERT-SHA: 9b2ed8290264593d9b5105ea8985766b2db4914d
+REPLAY: F26-SC1 evidence=.planning/phases/26-migration-export-backup-restore/26-01-BASELINE.md host=github result=reproduced reason=run-30229917833-headSha-and-build-job-and-live-artifact-all-re-derived
+REPLAY: F26-SC2 evidence=crates/wcore-cli/tests/migrate_quarantine.rs host=hetzner-dsm result=reproduced reason=re-ran-30-tests-at-certified-sha-all-passed
+REPLAY: F26-SC4 evidence=scripts/portability-native-matrix.ps1 host=SeanD@seandesktop result=reproduced reason=re-ran-on-real-windows-at-certified-sha-exit-0
+REPLAY: F26-01 evidence=.planning/phases/26-migration-export-backup-restore/26-01-BASELINE.md host=github result=reproduced reason=run-30229917833-headSha-and-build-job-and-live-artifact-all-re-derived
+REPLAY: F26-02 evidence=crates/wcore-cli/tests/migrate_quarantine.rs host=hetzner-dsm result=reproduced reason=re-ran-30-tests-at-certified-sha-all-passed
+REPLAY: F26-04 evidence=scripts/portability-remap-capture.sh host=hetzner-dsm result=reproduced reason=re-ran-at-certified-sha-exit-0
+REPLAY: F26-05 evidence=crates/wcore-cli/tests/portability_hostile_corpus.rs host=hetzner-dsm result=reproduced reason=re-ran-23-tests-at-certified-sha-all-passed
+REPLAY-SUMMARY: closed_keys=7 failed=0 not_replayable=0

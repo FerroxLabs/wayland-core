@@ -914,3 +914,55 @@ a wire-shape input. Narrowing that set would remove the recurring cost without w
 tripwire over the files that actually determine the contract. **Do not narrow it reactively to
 make a red go away** — that is the tripwire-weakening move, and it must be a deliberate,
 evidenced decision about what determines the wire shape.
+
+## F26-04-B — a case-only or normal-form-only peer name collapses BEFORE the product sees it (MEDIUM)
+
+Filed by 26-04, and measured on Sean's own hardware on 2026-07-28 rather than assumed.
+The hostile corpus generator verifies AFTER creation that a declared name distinction
+actually survived on the filesystem it just wrote to:
+
+| distinction | Linux (hetzner-dsm) | Windows (SeanDesktop, NTFS) | macOS (Sean's Mac, APFS) |
+|---|---|---|---|
+| two peer profiles differing only by CASE | distinct | **collapsed** | **collapsed** |
+| two peer profiles differing only by Unicode NORMAL FORM | distinct | distinct | **collapsed** |
+
+The middle column is the non-obvious result: **NTFS is case-insensitive but NOT
+normalisation-insensitive**, so a single "Windows and macOS both collapse" assumption is
+wrong in one of the two directions. The consequence for the product is that on macOS an
+operator migrating two case-distinct peer profiles loses one AT THE SOURCE, before
+`migrate` is ever invoked — and the product cannot report what it was never shown. Nothing
+in Core can fix this; the most it can do is DETECT and warn, which it does not today.
+
+macOS is not a gate host in this phase, so this is recorded rather than closed here.
+**Phase 28's native certification owns it.**
+
+## F26-04-C — the directory-level symlink escape produces no NAMED refusal (LOW)
+
+Filed by 26-04. The hostile case `escape-symlink-dir` replaces an entire skill directory
+with a symlink out of the source root. The walk simply does not descend it, so the product
+emits no refusal naming that item — unlike the file-level escapes, which produce
+`refused: imported executable content contains a symlink: <path>`. The case's evidence is
+therefore the external sentinel digest (unchanged, both platforms) and the item's absence
+from the quarantine store, which is weaker than a named refusal. Recorded so nobody later
+mistakes that case for stronger evidence than it is. Not a defect: nothing escaped.
+
+## F26-02-C — RE-CONFIRMED by 26-04, still open (MEDIUM)
+
+`scripts/panel-decision-check.sh` REJECTS a capture carrying a repeated IDENTICAL
+`PANEL-VERDICT` line, which is a shape codex measurably emits. 26-02 escalated this to
+26-01 rather than editing a file outside its declared set; 26-04 is under the same
+direction and does the same. Measured again at 26-04's own panel record, each shape in
+isolation under POSIX `sh`:
+
+| capture shape | required | measured |
+|---|---|---|
+| kimi bullet-prefixed and indented verdict | ACCEPT | **rc=0, accepted** |
+| codex repeating its final block (identical verdict twice) | ACCEPT | **rc=1, REJECTED** |
+| two DIFFERENT verdict values in one capture | REJECT | rc=1, rejected |
+
+**No vote was lost in 26-04's run** — measured: the real codex capture carries exactly
+**1** `PANEL-VERDICT` line, and the panel record passes the checker (`PANEL RECORD OK`).
+The gap is that the harness would drop a vote IF codex emitted its duplicate shape. The
+fix belongs in `panel-decision-check.sh`'s `verdict_count`, which should tolerate N
+identical verdict values and reject only N distinct ones — the extraction is already
+correctly unanchored, so only the count is wrong.

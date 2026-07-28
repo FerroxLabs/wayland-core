@@ -1,0 +1,11 @@
+### Phase 26: Migration, Export, Backup, and Restore
+**Goal**: Users can move, preserve, and restore Wayland state without executing imported content or leaking secrets.
+**Depends on**: Phase 23
+**Requirements**: F26-01, F26-02, F26-03, F26-04, F26-05
+**Success Criteria** (what must be TRUE):
+  1. Hermes/OpenClaw discovery and dry-run are typed, deterministic, secret-redacted, and non-mutating.
+  2. Selective import/export preserves provenance and quarantines executable content.
+  3. Backup, restore, profile migration, and reciprocal portability survive interruption and restore exact pre-operation state on rollback.
+  4. Hostile fixture corpora prove conflict, secret-source remapping, isolation, and recovery semantics.
+**Plans**: TBD
+
