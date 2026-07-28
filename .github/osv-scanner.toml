@@ -10,13 +10,26 @@
 #     genuinely irreducible without a regression or a pre-release dep. (A 6th,
 #     lru, was eliminated at source via the ratatui 0.30 upgrade — see below.)
 #
+# Update 2026-07-29 (F29-02-H1): the two quick-xml entries that lived at the
+# bottom of this file are DELETED — RUSTSEC-2026-0194 / RUSTSEC-2026-0195 were
+# eliminated at source by bumping quick-xml to 0.41 and calamine to 0.36 (see
+# the block at the end for the full account, including the three errors in the
+# justification those entries carried). Measured with `cargo audit` against
+# the post-bump lockfile and NO ignore list: 4 vulnerabilities before, 0 after.
+# That run is cargo-audit's; `osv-scanner scan source -r ./` has NOT been
+# re-run since, so the warning-class counts quoted above are as of 2026-06-02
+# and may understate newer ambient advisories (cargo audit currently sees 7).
+#
 # Every entry below is a PUBLIC, DATED, REASONED disposition — not a silent
 # mute. `ignoreUntil` forces a re-evaluation; on each dependency bump, re-run
 # `osv-scanner scan source -r ./` and delete any entry whose advisory has
 # cleared. An empty IgnoredVulns list is the goal whenever the ecosystem
 # allows it.
 #
-# Parent trace recipe: `cargo tree -i <crate>@<ver> --all-features --target all`.
+# Parent trace recipe: run `cargo tree -i <crate>@<ver> --all-features --target
+# all` ONCE PER RESOLVED VERSION of the crate — a crate can appear in the tree
+# at several semver-incompatible versions at once, and an ignore entry that
+# traces only one of them is a blind spot, not a disposition.
 
 # ── paste 1.0.15 (unmaintained) ──────────────────────────────────────────
 # Multi-parent and irreducible: pulled by the candle ML SIMD stack
@@ -134,24 +147,35 @@ id = "RUSTSEC-2026-0192"
 ignoreUntil = "2026-09-02T00:00:00Z"
 reason = "ttf-parser unmaintained (patched=[]); transitive only via lopdf <- pdf-extract <- wcore-tools PDF text extraction. Informational, no patch exists; successor skrifa is an upstream pdf-extract/lopdf decision. Tracked; revisit on pdf-extract/lopdf bump."
 
-# ── quick-xml 0.39.4 DoS pair ────────────────────────────────────────────
+# ── quick-xml DoS pair — REMOVED 2026-07-29, ELIMINATED AT SOURCE ────────
 # RUSTSEC-2026-0194 (quadratic duplicate-attribute check) and
 # RUSTSEC-2026-0195 (unbounded NsReader namespace-declaration allocation),
-# both published 2026-06-29, fixed only in quick-xml >= 0.41.0. Sole parent
-# trace: plist 1.9.0 <- syntect 5.3.0 <- wcore-cli. syntect is used solely by
-# the TUI diff widget with load_defaults() EMBEDDED binary theme/syntax dumps
-# (crates/wcore-cli/src/tui/widgets/diff.rs:332-333); no from_folder(), no
-# user-supplied .tmTheme/plist XML is ever parsed, so the vulnerable XML
-# reader never receives input. No patched 0.39.x exists and plist 1.9.0 (the
-# latest) still pins ^0.39.2 — nothing to bump. Ambient advisory (not a code
-# change in this PR). Tracked: FerroxLabs/wayland-core#142; lift on a plist
-# release carrying quick-xml >= 0.41.
-[[IgnoredVulns]]
-id = "RUSTSEC-2026-0194"
-ignoreUntil = "2026-09-02T00:00:00Z"
-reason = "quick-xml quadratic dup-attribute DoS: unreachable — sole path plist<-syntect<-wcore-cli TUI diff widget using embedded load_defaults() dumps; no XML parsing of any input. No patched 0.39.x; plist latest pins ^0.39.2. Tracked #142."
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2026-0195"
-ignoreUntil = "2026-09-02T00:00:00Z"
-reason = "quick-xml NsReader namespace-allocation DoS: unreachable — same sole embedded-dump path, no XML input reaches NsReader. No patched 0.39.x; plist latest pins ^0.39.2. Tracked #142."
+# both published 2026-06-29, both fixed only in quick-xml >= 0.41.0.
+#
+# These two carried `[[IgnoredVulns]]` entries here until F29-02-H1. Those
+# entries are DELETED rather than re-justified, because the advisories are now
+# absent from the tree — and because the justification they carried was wrong:
+#
+#   * It named a "sole parent trace" of plist <- syntect <- wcore-cli. There
+#     were THREE paths. `cargo tree -i` at the base commit also showed
+#     quick-xml 0.39.4 as a DIRECT dependency of wcore-tools (default-on
+#     `doc-extract` feature) and quick-xml 0.31.0 via calamine 0.26.1.
+#   * Its "unreachable / embedded dumps only" argument was true of the syntect
+#     path but said nothing about the two it omitted — `DocExtractTool`, which
+#     parses docx/pptx and xlsx/ods from USER-SUPPLIED files, i.e. exactly the
+#     untrusted input both advisories are about.
+#   * It claimed nothing patched existed to bump to. Both advisories declare
+#     `patched = [">= 0.41.0"]` with no `unaffected` range (so 0.31.0 counted
+#     too, and the true finding count was FOUR, not two), and quick-xml
+#     0.41.0 / plist 1.10.0 / calamine 0.36.1 were all published already.
+#
+# Fix: workspace pins moved to quick-xml "0.41" and calamine "0.36"; plist
+# resolved 1.9.0 -> 1.10.0. quick-xml 0.31.0 and 0.39.4 are gone from
+# Cargo.lock (`cargo tree -i quick-xml@0.39.4` -> "did not match any
+# packages"). Verified by `cargo audit` with NO ignore list: 4 vulnerabilities
+# before, 0 after. Do NOT float quick-xml below 0.41 or calamine below 0.36.
+#
+# Lesson for future entries in this file: a parent trace must be READ OUT of
+# `cargo tree -i <crate>@<ver>` for EVERY resolved version of the crate, and
+# the count of paths stated explicitly. A reachability argument that covers
+# one path of three is not a disposition, it is a blind spot.

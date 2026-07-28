@@ -1,54 +1,71 @@
 # cargo-audit configuration.
 #
-# Posture (verified 2026-06-02): `cargo audit` reports 0 vulnerabilities and
-# 5 warning-class advisories (4 "unmaintained", 1 "unsound"). CI runs plain
-# `cargo audit`, which does NOT fail on warning-class advisories — so the gate
-# is green WITHOUT ignoring anything. (A 6th, the lru "unsound" advisory, was
-# eliminated at source by the ratatui 0.29 -> 0.30 upgrade.)
+# Posture (verified 2026-07-29, F29-02-H1): `cargo audit` reports
+# 0 vulnerabilities and 7 warning-class advisories (6 "unmaintained", 1
+# "unsound"). CI runs plain `cargo audit`, which does NOT fail on
+# warning-class advisories — so the gate is green WITHOUT ignoring anything.
 #
-# The ignore list is intentionally EMPTY. The 6 remaining advisories are left
-# VISIBLE as warnings (not silenced) and are dispositioned — publicly, dated,
-# with parent traces — in `.github/osv-scanner.toml`, which is the gating
-# scanner. Duplicating those mutes here would only hide warnings we want to
-# keep seeing on every run.
+# The ignore list is EMPTY, and that is load-bearing rather than decorative:
+# every advisory this repo has faced has been closed AT SOURCE, never muted.
+# The 7 remaining warning-class advisories are left VISIBLE (not silenced) and
+# are dispositioned — publicly, dated, with parent traces — in
+# `.github/osv-scanner.toml`, which is the gating scanner. Duplicating those
+# mutes here would only hide warnings we want to keep seeing on every run.
 #
-# History: a prior 18-entry wasmtime / wasmtime-wasi ignore block lived here
-# while the runtime was pinned at 30.x (it masked CVSS 9.2 / 9.0 advisories).
-# Those are now FIXED at the source — wasmtime + wasmtime-wasi were upgraded
-# 30 -> 36.0.10 (the bindgen async-syntax migration that had blocked the bump
-# is done) — so every entry in that block is satisfied and has been removed.
-# Confirmed: `cargo audit` with this file's ignore list bypassed reports the
-# same 6 warnings and zero wasmtime advisories.
+# History of source-level eliminations (each one previously an ignore entry):
 #
-# Rotation policy: on every dependency bump, re-run `cargo audit`. If a real
-# vulnerability ever needs a temporary documented exception, add it to
-# `ignore` below WITH a parent trace, a threat-model note, and a tracking
-# item — never as a bare id.
+#   * wasmtime / wasmtime-wasi (18 entries, masking CVSS 9.2 / 9.0) — fixed by
+#     upgrading 30.x -> 36.0.10 once the bindgen async-syntax migration landed.
+#   * RUSTSEC-2023-0071 (rsa, Marvin Attack) — jsonwebtoken migrated
+#     `rust_crypto` -> `aws_lc_rs` in wcore-channel-msteams + wcore-providers,
+#     dropping the pure-Rust `rsa` crate from the tree entirely
+#     (`cargo tree -i rsa` -> not found). aws-lc-rs was already present via
+#     rustls, so this added no build surface.
+#   * lru "unsound" — eliminated by the ratatui 0.29 -> 0.30 upgrade.
+#   * RUSTSEC-2026-0194 + RUSTSEC-2026-0195 (quick-xml DoS pair) — see below.
+#
+# ── quick-xml DoS pair: RUSTSEC-2026-0194 / RUSTSEC-2026-0195 ─────────────
+# CLOSED AT SOURCE 2026-07-29 (F29-02-H1). Both were previously ignored here
+# with a justification that was FACTUALLY WRONG in three ways, all corrected:
+#
+#   1. It claimed a "sole path" of quick-xml <- plist <- syntect <- wcore-cli.
+#      There were in fact THREE paths. `cargo tree -i` at the base commit
+#      showed, in addition to that one:
+#        - quick-xml 0.39.4 <- wcore-tools  (a DIRECT dependency, declared in
+#          crates/wcore-tools/Cargo.toml under the default-on `doc-extract`
+#          feature), and
+#        - quick-xml 0.31.0 <- calamine 0.26.1 <- wcore-tools.
+#   2. Its UNREACHABLE threat model covered only the path it named. The two
+#      omitted paths are `DocExtractTool`, which parses docx/pptx (quick-xml
+#      directly) and xlsx/ods (through calamine) from USER-SUPPLIED FILES —
+#      precisely the untrusted-input condition both advisories describe.
+#   3. It asserted "no fix to take at source". Both advisories carry
+#      `patched = [">= 0.41.0"]` with NO `unaffected` range, so 0.31.0 was in
+#      scope too, and `cargo audit` reported FOUR findings (two advisories x
+#      two versions), not two. quick-xml 0.41.0, plist 1.10.0 (requires
+#      quick-xml ^0.41.0) and calamine 0.36.1 (requires quick-xml ^0.41) were
+#      all published and un-yanked at the time the entry claimed otherwise.
+#
+# Fix applied: the workspace pins moved to `quick-xml = "0.41"` and
+# `calamine = "0.36"`, and plist resolved 1.9.0 -> 1.10.0. quick-xml 0.31.0
+# and 0.39.4 are now ABSENT from Cargo.lock — `cargo tree -i quick-xml@0.39.4`
+# and `@0.31.0` both report "did not match any packages". Only 0.41.0 remains.
+# No source changes were required in `crates/wcore-tools/src/doc_tool.rs`; the
+# `Reader` / `Event` / `BytesText::decode` / calamine streaming-cell-reader
+# surface it uses is unchanged across both upgrades, and extraction output is
+# byte-identical before and after (proof:
+# crates/wcore-tools/tests/doc_extract_quickxml_migration.rs).
+#
+# Rotation policy: on every dependency bump, re-run `cargo audit`. Do NOT float
+# `quick-xml` below 0.41 or `calamine` below 0.36 — either would reintroduce
+# this pair. If a real vulnerability ever needs a temporary documented
+# exception, add it to `ignore` below WITH a parent trace covering EVERY path
+# (verify with `cargo tree -i <crate>@<ver>` and count them — this entry's
+# predecessor named one path of three), a threat-model note for each path, and
+# a tracking item — never as a bare id, and never a trace asserted from memory
+# rather than read out of the tool's output.
 #
 # Format reference: https://docs.rs/cargo-audit/latest/cargo_audit/
 
 [advisories]
-# (prior state) RUSTSEC-2023-0071 (rsa Marvin Attack) was ELIMINATED AT THE
-# SOURCE, not ignored: jsonwebtoken migrated `rust_crypto` -> `aws_lc_rs` in
-# wcore-channel-msteams + wcore-providers, dropping the pure-Rust `rsa` crate
-# from the tree (`cargo tree -i rsa` -> not found). aws-lc-rs was already
-# present via rustls, so this added no build surface.
-#
-# ── quick-xml 0.39.4 DoS pair (RUSTSEC-2026-0194 / RUSTSEC-2026-0195) ──────
-# Published 2026-06-29; started failing plain `cargo audit` on every PR from
-# 2026-07-02 (ambient advisory-DB event, not a code change). Both fixed only
-# in quick-xml >= 0.41.0.
-# Parent trace (sole path): quick-xml 0.39.4 <- plist 1.9.0 <- syntect 5.3.0
-#   <- wcore-cli (`cargo tree -i quick-xml`).
-# Threat model — UNREACHABLE: syntect is used only by the TUI diff widget
-# (crates/wcore-cli/src/tui/widgets/diff.rs:332-333) via
-# SyntaxSet::load_defaults_newlines() + ThemeSet::load_defaults(), which read
-# syntect's EMBEDDED binary dumps. No from_folder(), no user-supplied
-# .tmTheme/plist XML parsing anywhere in the workspace — the vulnerable
-# NsReader/attribute-check code paths never receive input of any provenance.
-# No fix to take at source: plist's latest release (1.9.0) still requires
-# quick-xml ^0.39.2; nothing patched exists on the 0.39 line.
-# Tracking: FerroxLabs/wayland-core#142 — lift when plist releases with
-# quick-xml >= 0.41 (`cargo update -p plist`, remove both entries here and in
-# .github/osv-scanner.toml).
-ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]
+ignore = []

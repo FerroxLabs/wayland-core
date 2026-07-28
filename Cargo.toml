@@ -269,10 +269,19 @@ tar    = "0.4"
 flate2 = "1"
 
 # #650 doc_extract — office-doc text extraction (pure-Rust, no native libs).
-# calamine: xlsx/xls/ods; quick-xml: docx/pptx OOXML part parsing (0.39 already
-# in the tree); csv: robust quoted-CSV parsing.
-calamine = "0.26"
-quick-xml = "0.39"
+# calamine: xlsx/xls/ods; quick-xml: docx/pptx OOXML part parsing; csv: robust
+# quoted-CSV parsing.
+#
+# F29-02-H1: both XML-stack pins are held at or above quick-xml 0.41 to keep
+# RUSTSEC-2026-0194 (quadratic attribute duplicate-check) and RUSTSEC-2026-0195
+# (unbounded NsReader namespace allocation) out of the tree AT SOURCE. Both are
+# fixed only in quick-xml >= 0.41.0 and both are reachable here from
+# user-supplied files: DocExtractTool parses docx/pptx with quick-xml directly
+# and xlsx/ods through calamine. calamine < 0.36 pins quick-xml ^0.31/^0.38/
+# ^0.39, so it must not be floated back below 0.36.
+# DO NOT downgrade either pin without re-running `cargo audit`.
+calamine = "0.36"
+quick-xml = "0.41"
 csv = "1.3"
 
 # v0.9.0 W1 B8 postgres_schema_tool backend — real tokio-postgres client
