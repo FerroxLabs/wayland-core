@@ -8,7 +8,7 @@ grade-24-C5: "MET. All three platforms drive the 17-step journey to a verified r
 grade-24-C1: "upgrade and rollback now PERFORMED and observed on all three platforms; the 12-of-12 clean tally holds on all three."
 merge-base: c61cf8087faa803d880f8df28dabc828c74f4277
 candidate-proved: 978f49d778ce74cd5777d153866d734b16bbf705
-head: HEAD_SHA_PLACEHOLDER
+head: 4b904d01+1 (this commit)
 ---
 
 # 24-C5 — finishing the setup-to-recovery journey
@@ -235,7 +235,7 @@ Linux and Windows are both at `978f49d7`. macOS is at `eba6e9d7` — an ancestor
 it, differing only in `.planning` documentation. I pinned `978f49d7` on its own
 branch (`lane/24-c5-candidate`) specifically so a later push could not cancel its
 CI, and the `aarch64-apple-darwin` job was still **queued** behind the macOS runner
-pool when this lane closed. The job sat `queued` for the whole ~20 minutes it was watched, while other branches' darwin builds completed around it — the same runner-pool wait the previous lane hit, and the reason the previous lane produced no macOS receipt at all.
+pool when this lane closed. The job sat `queued` for **45 minutes** of bounded polling while other branches' darwin builds completed around it — the same runner-pool wait the previous lane hit, and the reason that lane produced no macOS receipt at all. I stopped waiting rather than let the lane hang on it; the leg it would close is provenance, and the macOS journey itself is already driven, receipted and verified.
 
 This is a **provenance** gap, not a coverage gap: three platforms each drove the
 full 17 steps to an independently verified receipt. But `bind` exists precisely to

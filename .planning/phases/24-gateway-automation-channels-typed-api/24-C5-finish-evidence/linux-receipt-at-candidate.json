@@ -1,0 +1,123 @@
+{
+  "schema": "wayland.journey.receipt/1",
+  "platform": "linux",
+  "service_family": "systemd",
+  "candidate_commit": "978f49d778ce74cd5777d153866d734b16bbf705",
+  "binary_version": "wayland-core 0.12.25",
+  "binary_sha256": "d7785b83ed8c9d85b6340f1f8967573139130ba4e52ab56372a744253d828316",
+  "driver_commit": "978f49d778ce74cd5777d153866d734b16bbf705",
+  "started_at": "2026-07-28T14:55:03.106Z",
+  "finished_at": "2026-07-28T14:56:16.496Z",
+  "arrival_source": "independent-sink",
+  "counts": {
+    "submitted": 12,
+    "arrived": 12,
+    "unique": 12,
+    "duplicates": 0,
+    "losses": 0
+  },
+  "steps": [
+    {
+      "name": "preflight-clean",
+      "command": "systemctl --user list-unit-files wayland-core-gateway-f24j.service",
+      "output": "residual_query_status=1\nUNIT FILE STATE PRESET\n\n0 unit files listed.\n\ngateway_state=\"uninstalled\"",
+      "ok": true
+    },
+    {
+      "name": "binary-identity",
+      "command": "/root/wayland-24c5/target/release/wayland-core --build-info",
+      "output": "wayland-core 0.12.25 (source 978f49d778ce74cd5777d153866d734b16bbf705)\nsha256=d7785b83ed8c9d85b6340f1f8967573139130ba4e52ab56372a744253d828316\npath=/root/wayland-24c5/target/release/wayland-core",
+      "ok": true
+    },
+    {
+      "name": "profile-setup",
+      "command": "write /tmp/f24c5-run/linux-home/credentials.toml + channels/f24jsink.toml (synthetic credentials)",
+      "output": "home=/tmp/f24c5-run/linux-home\nprofile=f24j\ncredentials_mode=0600\ncanary_bytes=49\nseeded_bot_token=xoxb-f24j-WLJ-CANARY-linux-4ce4d6ddf536ac422a317c19f6b90cdb",
+      "ok": true
+    },
+    {
+      "name": "sink-start",
+      "command": "/usr/local/bin/node scripts/f24-sink.mjs --journal /tmp/f24c5-run/linux-arrivals.jsonl",
+      "output": "SINK_READY url=http://127.0.0.1:33499 journal=/tmp/f24c5-run/linux-arrivals.jsonl\nsink_pid=1132409\nhealth={\"ok\":true,\"arrivals\":0}",
+      "ok": true
+    },
+    {
+      "name": "gateway-install",
+      "command": "/root/wayland-24c5/target/release/wayland-core gateway install --profile f24j",
+      "output": "wrote unit: /root/.config/systemd/user/wayland-core-gateway-f24j.service\ngateway installed (systemd): wayland-core-gateway-f24j\n  home:    /tmp/f24c5-run/linux-home\n  binary:  /root/wayland-24c5/target/release/wayland-core\n$ systemctl --user daemon-reload\nstatus=0\n\n$ systemctl --user list-unit-files wayland-core-gateway-f24j.service\nregistration_status=0\nUNIT FILE                         STATE   PRESET\nwayland-core-gateway-f24j.service enabled enabled\n\n1 unit files listed.",
+      "ok": true
+    },
+    {
+      "name": "gateway-start",
+      "command": "/root/wayland-24c5/target/release/wayland-core gateway start --profile f24j",
+      "output": "gateway start requested (systemd)",
+      "ok": true
+    },
+    {
+      "name": "status-running",
+      "command": "/root/wayland-24c5/target/release/wayland-core gateway status --profile f24j --json",
+      "output": "{\n  \"state\": \"running\",\n  \"pid\": 1133056,\n  \"uptime_secs\": 0,\n  \"profile\": \"f24j\",\n  \"turns_in_flight\": 0,\n  \"deliveries_pending\": 0,\n  \"binary_path\": \"/root/wayland-24c5/target/release/wayland-core\",\n  \"binary_version\": \"0.12.25\"\n}\nliveness_probe=kill -0 1133056 -> alive",
+      "ok": true
+    },
+    {
+      "name": "automation-add",
+      "command": "/root/wayland-24c5/target/release/wayland-core cron add --trigger every:15 --channel f24jsink --text f24j-heartbeat ; /root/wayland-24c5/target/release/wayland-core cron add --trigger \"cron:0 9 * * *\" --channel f24jsink --text f24j-daily",
+      "output": "next[0]: 2026-07-28T14:56:04.291049764+00:00\nnext[1]: 2026-07-28T14:57:04.291049764+00:00\nnext[2]: 2026-07-28T14:58:04.291049764+00:00\nadded 5dbbfe65-5cfa-4024-9bb3-c69360b7e60f\nnext[0]: 2026-07-29T09:00:00+00:00\nnext[1]: 2026-07-30T09:00:00+00:00\nnext[2]: 2026-07-31T09:00:00+00:00\nadded f79f0f2b-91a0-4e50-b44c-50b4d0aa69b1\n$ /root/wayland-24c5/target/release/wayland-core cron list\non  5dbbfe65-5cfa-4024-9bb3-c69360b7e60f  [interval  ] @every 15s                    channel  f24jsink :: f24j-heartbeat  last_fired=never\non  f79f0f2b-91a0-4e50-b44c-50b4d0aa69b1  [cron      ] 0 9 * * *                     channel  f24jsink :: f24j-daily  last_fired=never",
+      "ok": true
+    },
+    {
+      "name": "deliveries-submit",
+      "command": "/root/wayland-24c5/target/release/wayland-core cron add --trigger every:15 --channel f24jsink --text f24j-delivery-NN x12",
+      "output": "submitted=12\nf24j-delivery-01: added c19c71a1-c0c8-44b5-a920-31fb82e2a98e\nf24j-delivery-02: added d24825b2-b92a-43f2-bdf3-56ceb2a8c029\nf24j-delivery-03: added d23b923e-db9e-4502-aa59-8a67c9262561\nf24j-delivery-04: added 723c880e-99b5-4f4e-903a-49a0a3901616\nf24j-delivery-05: added f0859e4c-d39f-4b70-a7e5-8e17f413762a\nf24j-delivery-06: added 412ca84b-475a-46c2-9890-5b3754e58117\nf24j-delivery-07: added d2375bed-7074-4c3b-b06d-65340835215a\nf24j-delivery-08: added e0729469-11d5-4fcb-9468-f9163ed30933\nf24j-delivery-09: added 596fce3d-f232-4cb3-af96-9e8b130971ba\nf24j-delivery-10: added fa38f5ae-e060-4c43-9d41-80fcf800954a\nf24j-delivery-11: added 02615c87-593e-4206-b41d-397ba072696c\nf24j-delivery-12: added cc608ec3-1afa-42b6-bc13-71c3a93573c1",
+      "ok": true
+    },
+    {
+      "name": "arrival-before-kill",
+      "command": "read arrivals journal /tmp/f24c5-run/linux-arrivals.jsonl (owned by the independent sink)",
+      "output": "arrivals_total=9\nunique_expected_bodies=8\nfirst_arrival={\"seq\":1,\"ts\":\"1.000000\",\"endpoint\":\"chat.postMessage\",\"conversation_id\":\"f24jsink\",\"text\":\"f24j-heartbeat\",\"auth_fingerprint\":\"sha256:653bad6e00fa\",\"answered\":true,\"idempotency_key\":\"cron:5dbbfe65-5cfa-4024-9bb3-c69360b7e60f:1785250564291\",\"suppressed\":false,\"at\":\"2026-07-28T14:56:05.208Z\"}",
+      "ok": true
+    },
+    {
+      "name": "hard-kill",
+      "command": "kill -9 1133056",
+      "output": "killed_pid=1133056\nkill_status=0\n\nliveness_after_kill=kill -0 1133056 -> gone",
+      "ok": true
+    },
+    {
+      "name": "platform-recover",
+      "command": "/root/wayland-24c5/target/release/wayland-core gateway status --profile f24j --json (polled; NO manual start)",
+      "output": "killed_pid=1133056\nrecovered_pid=1150080\n{\n  \"state\": \"running\",\n  \"pid\": 1150080,\n  \"uptime_secs\": 1,\n  \"profile\": \"f24j\",\n  \"turns_in_flight\": 0,\n  \"deliveries_pending\": 0,\n  \"binary_path\": \"/root/wayland-24c5/target/release/wayland-core\",\n  \"binary_version\": \"0.12.25\"\n}\n$ systemctl --user show -p NRestarts --value wayland-core-gateway-f24j\nstatus=0\n1",
+      "ok": true
+    },
+    {
+      "name": "delivery-reconcile",
+      "command": "tally the independent sink's journal /tmp/f24c5-run/linux-arrivals.jsonl",
+      "output": "arrival_source=independent-sink\nsubmitted=12\narrived=12\nunique=12\nduplicates=0\nlosses=0\njournal_lines_total=13",
+      "ok": true
+    },
+    {
+      "name": "upgrade-in-place",
+      "command": "/root/wayland-24c5/target/release/wayland-core gateway uninstall --profile f24j ; /tmp/f24c5-run/linux-upgraded-core gateway install --profile f24j ; /root/wayland-24c5/target/release/wayland-core gateway start --profile f24j",
+      "output": "upgrade_target=/tmp/f24c5-run/linux-upgraded-core\nstop_status=0\ngateway stop requested (systemd)\nremoved unit: /root/.config/systemd/user/wayland-core-gateway-f24j.service\ngateway uninstalled (systemd): wayland-core-gateway-f24j\nwrote unit: /root/.config/systemd/user/wayland-core-gateway-f24j.service\ngateway installed (systemd): wayland-core-gateway-f24j\n  home:    /tmp/f24c5-run/linux-home\n  binary:  /tmp/f24c5-run/linux-upgraded-core\ngateway start requested (systemd)\nobserved_binary_path=/tmp/f24c5-run/linux-upgraded-core\nobserved_pid=1151584\n{\n  \"state\": \"running\",\n  \"pid\": 1151584,\n  \"uptime_secs\": 0,\n  \"profile\": \"f24j\",\n  \"turns_in_flight\": 0,\n  \"deliveries_pending\": 0,\n  \"binary_path\": \"/tmp/f24c5-run/linux-upgraded-core\",\n  \"binary_version\": \"0.12.25\"\n}",
+      "ok": true
+    },
+    {
+      "name": "rollback",
+      "command": "/root/wayland-24c5/target/release/wayland-core gateway uninstall --profile f24j ; /root/wayland-24c5/target/release/wayland-core gateway install --profile f24j ; /root/wayland-24c5/target/release/wayland-core gateway start --profile f24j",
+      "output": "rollback_target=/root/wayland-24c5/target/release/wayland-core\nstop_status=0\ngateway stop requested (systemd)\nremoved unit: /root/.config/systemd/user/wayland-core-gateway-f24j.service\ngateway uninstalled (systemd): wayland-core-gateway-f24j\nwrote unit: /root/.config/systemd/user/wayland-core-gateway-f24j.service\ngateway installed (systemd): wayland-core-gateway-f24j\n  home:    /tmp/f24c5-run/linux-home\n  binary:  /root/wayland-24c5/target/release/wayland-core\ngateway start requested (systemd)\nobserved_binary_path=/root/wayland-24c5/target/release/wayland-core\nobserved_pid=1152265\n{\n  \"state\": \"running\",\n  \"pid\": 1152265,\n  \"uptime_secs\": 0,\n  \"profile\": \"f24j\",\n  \"turns_in_flight\": 0,\n  \"deliveries_pending\": 0,\n  \"binary_path\": \"/root/wayland-24c5/target/release/wayland-core\",\n  \"binary_version\": \"0.12.25\"\n}",
+      "ok": true
+    },
+    {
+      "name": "redaction-canary",
+      "command": "redact /tmp/f24c5-run/linux-raw.txt -> /tmp/f24c5-run/linux-redacted.md over 3 seeded secrets",
+      "output": "control=present published=absent secrets=3\nraw_bytes=7253\nredacted_bytes=7204\nredaction_markers=1",
+      "ok": true
+    },
+    {
+      "name": "drain-uninstall-clean",
+      "command": "/root/wayland-24c5/target/release/wayland-core gateway drain --profile f24j --budget-ms 15000 ; /root/wayland-24c5/target/release/wayland-core gateway uninstall --profile f24j",
+      "output": "drain requested (budget 15000ms); gateway pid 1152265\ndrain complete: Drained (deliveries pending 0)\nremoved unit: /root/.config/systemd/user/wayland-core-gateway-f24j.service\ngateway uninstalled (systemd): wayland-core-gateway-f24j\n$ systemctl --user list-unit-files wayland-core-gateway-f24j.service\nresidual_status=1\nUNIT FILE STATE PRESET\n\n0 unit files listed.\n\nresidual_pids_alive=0\nfinal_status={\n  \"state\": \"uninstalled\",\n  \"pid\": null,\n  \"uptime_secs\": null,\n  \"profile\": \"f24j\",\n  \"turns_in_flight\": 0,\n  \"deliveries_pending\": 0,\n  \"binary_path\": null,\n  \"binary_version\": null\n}",
+      "ok": true
+    }
+  ]
+}
