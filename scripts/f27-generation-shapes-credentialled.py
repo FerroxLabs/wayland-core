@@ -86,6 +86,14 @@ def child_env(home: Path) -> dict:
     env = dict(os.environ)
     env["WAYLAND_HOME"] = str(home)
     env["NO_COLOR"] = "1"
+    # Measured 2026-07-29 on headless `hetzner-dsm`: without this the FIRST
+    # turn dies with `engine_error: Session persistence authority unavailable:
+    # ... no OS keyring was usable and no encrypted credentials vault is
+    # unlocked`, and `stream_end` reports `finish_reason: error` with zero
+    # tokens. The engine boots, MCP servers connect and `mcp_ready` fires, so
+    # every discovery observable looks healthy while no turn can ever run.
+    # This is a throwaway passphrase for a throwaway home, not a credential.
+    env["WAYLAND_VAULT_PASSPHRASE"] = "f27-credentialled-throwaway"
     return env
 
 
