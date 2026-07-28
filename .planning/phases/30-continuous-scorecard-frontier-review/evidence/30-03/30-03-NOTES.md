@@ -162,8 +162,38 @@ unsupported claim**, and it is worth having a rule fire on it.
 - The exact `frontier_trials` directional-rule function to CALL (not copy).
 - The verbatim ledger sentences to use as accepted pristine controls.
 
+## 4b. RESOLVED — everything §4 listed as outstanding
+
+- **`peer_delta`**: measured UNPROVEN on 148/148 rows (see §3b). Carried as `LIM-16`.
+- **Citable evidence IDs**: 39 CONFIRMED, 1 PARTIAL, 2 UNRESOLVED. The two UNRESOLVED became
+  rule `evidence_id_unresolved` rather than a note, so 30-01's HIGH is now mechanical.
+- **The directional rule to CALL**: `frontier_trials::direction_for(&IntervalV1, f64)` at
+  line 518, with `DirectionV1::is_directional()`. Called exactly once; `grep -c 'direction_for('`
+  on claims.rs = **1**. Not copied.
+- **Verbatim ledger controls**: four candidates carry an explicit qualifier and pass. Two are
+  used as the mandated pristine controls (AUTH-\* and SUPPLY-\* delta sentences). Both verify.
+
+## 4c. FINAL measured results (all read back from captured runs)
+
+| leg | result |
+|---|---|
+| RED (`a88e8451`) | `RED_RC=101`, `error[E0432]: unresolved import ...::claims` |
+| GREEN (`6e2f292f`) | 10 run, 10 passed, 0 skipped |
+| corpus complete (`ba665f24`) | 11 run, 11 passed, 0 skipped |
+| `claims verify` | `allowed=9 limitations=20 attempted_and_refused=10 rules_fired=9` |
+| corpus TSV | 24 rows, 24 well-formed, 12 ACCEPTED, 12 REFUSED, **12 distinct rules** |
+| re-render diff | byte identical; **tamper test DETECTED an appended sentence** |
+| publish vs broken register | REFUSED, wrote nothing, named the offender |
+| targeted suite | **485 run, 485 passed, 0 failed, 5 skipped** (470 baseline + 15 new) |
+| clippy | 4 errors, ALL in Phase 24 `journey.rs`; **0 in my four files**, proven by a second run |
+| fence vs BASE `b79f141e` | 0 fenced files changed; exactly 4 source files touched |
+
 ## 5. Termination state
 
-Not yet determined. States available: 1 Complete, 2 Sparse, 3 Escalated. Expectation on the
-evidence so far is **2 (Sparse)** — a small allowed set, a long prohibited list and a longer
-limitations document. Per the plan, that is a correct outcome and padding it is the failure.
+**DETERMINED: state 2 — Sparse.** 9 allowed claims, **zero of them comparatives**, 20
+limitations, 10 refusals. Every clause of state 1 is also satisfied (module green, all named
+tests pass, corpus refuses every unsupported claim and accepts every hedged control, all four
+artifacts survive the on-hardware re-render diff), but state 2 is the more informative and more
+honest label because the substantive outcome is the SIZE of the allowed set. The sparseness is
+a property of the evidence, not a shortfall of execution. Padding it would have been the
+failure the plan exists to prevent.
