@@ -139,19 +139,21 @@ pub struct BootstrapResult {
         tokio::task::JoinHandle<()>,
         tokio::sync::watch::Sender<bool>,
     )>,
-    /// F24-CL — the single-owner INBOUND POLLING lease.
+    /// F24-CL/F24-CS — this session's INBOUND POLLING participation.
     ///
     /// **Hold this for the session lifetime.** Dropping it releases the OS
     /// lock and hands inbound polling to whatever process asks next, so an
-    /// early drop would silently re-open the two-poller race this lease
-    /// exists to close.
+    /// early drop would silently re-open the two-poller race the lease exists
+    /// to close.
     ///
     /// `Some` whenever channels were not skipped, in BOTH roles — an observer
-    /// carries a lease too, it simply is not the owner. Ask
-    /// [`channel_lease::ChannelPollLease::is_owner`] rather than testing for
-    /// `Some`. `None` only on the per-session / sub-agent path, which never
-    /// touches channels at all.
-    pub channel_poll_lease: Option<crate::channel_lease::ChannelPollLease>,
+    /// is supervised too, it simply is not the owner. Ask
+    /// [`channel_lease::ChannelPollSupervisor::is_owner`] rather than testing
+    /// for `Some`, and note that the answer CHANGES over the session's life:
+    /// a session that started before the installed service yields to it, and a
+    /// session that outlives the service takes over from it. `None` only on
+    /// the per-session / sub-agent path, which never touches channels at all.
+    pub channel_poll_lease: Option<crate::channel_lease::ChannelPollSupervisor>,
     /// Servers dropped by a pre-connect gate (e.g. an unreachable stdio
     /// command). They never reached connect_all/health(), so they are
     /// carried here so the boot snapshot can render a skipped (⊘) row.
@@ -3087,8 +3089,8 @@ impl AgentBootstrap {
             tokio::task::JoinHandle<()>,
             tokio::sync::watch::Sender<bool>,
         )>;
-        // F24-CL. Held for the session lifetime via `BootstrapResult`.
-        let channel_poll_lease: Option<crate::channel_lease::ChannelPollLease>;
+        // F24-CL/F24-CS. Held for the session lifetime via `BootstrapResult`.
+        let channel_poll_lease: Option<crate::channel_lease::ChannelPollSupervisor>;
 
         if !self.without_channels {
             // Register adapters on the inner manager.
@@ -3304,9 +3306,24 @@ impl AgentBootstrap {
                     "F24-CL: another process owns inbound polling; start_all NOT called"
                 );
             }
-            // Held for the session's lifetime. Dropping it releases the OS lock
-            // and hands inbound polling to the next process that asks.
-            channel_poll_lease = Some(poll_lease);
+            // F24-CS. Supervise the role for the session's lifetime rather than
+            // deciding it once here.
+            //
+            // Deciding once was first-come, and first-come made the INSTALLED
+            // SERVICE the observer whenever a session happened to start first —
+            // for as long as that session lived. A session is transient and the
+            // service is the always-on role the user installed, so the session
+            // stands down when the service claims, and takes over again if the
+            // service goes away. `session` is the lowest rank, so this process
+            // preempts nobody.
+            channel_poll_lease = Some(crate::channel_lease::ChannelPollSupervisor::spawn(
+                &wcore_config::config::wayland_config_dir(),
+                "session",
+                poll_lease,
+                crate::channel_lease::ChannelManagerPollControl::new(std::sync::Arc::clone(
+                    &lifted,
+                )),
+            ));
 
             // Inbound webhook host — when enabled, bind an HTTP listener that
             // routes platform webhook POSTs (Slack / WhatsApp / Twilio SMS) to

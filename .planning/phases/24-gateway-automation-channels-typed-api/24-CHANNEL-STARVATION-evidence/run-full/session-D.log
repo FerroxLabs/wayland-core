@@ -1,0 +1,91 @@
+wayland-core: warning: previous run did not shut down cleanly (crash sentinel found at /root/f24cs-run-full/home/.dirty-death.3356349)
+[2m2026-07-28T20:58:05.412359Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37
+[2m2026-07-28T20:58:05.412612Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37
+[2m2026-07-28T20:58:05.415457Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+[2m2026-07-28T20:58:05.415485Z[0m [33m WARN[0m not advertising computer_use: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"computer_use" [3mreason[0m[2m=[0mneither DISPLAY nor WAYLAND_DISPLAY is set, so no display server is reachable and the X11 backend cannot connect [3mremedy[0m[2m=[0mrun inside a graphical session, or export DISPLAY for an available X server (e.g. an Xvfb instance) before starting
+[2m2026-07-28T20:58:05.415963Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+[2m2026-07-28T20:58:05.416197Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback
+[2m2026-07-28T20:58:05.416209Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices
+[2m2026-07-28T20:58:05.416215Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue
+[2m2026-07-28T20:58:05.416221Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search
+[2m2026-07-28T20:58:05.416226Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists
+[2m2026-07-28T20:58:05.416232Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums
+[2m2026-07-28T20:58:05.416238Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library
+[2m2026-07-28T20:58:05.416248Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao
+[2m2026-07-28T20:58:05.416294Z[0m [32m INFO[0m image_gen: using gpt-image-1 at http://127.0.0.1:39393 (active OpenAI-wire provider)
+[2m2026-07-28T20:58:05.416306Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+[2m2026-07-28T20:58:05.416367Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-28T20:58:05.416374Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden
+[2m2026-07-28T20:58:05.416411Z[0m [32m INFO[0m tts: using OpenAI TTS at http://127.0.0.1:39393 (active OpenAI-wire provider)
+[2m2026-07-28T20:58:05.416798Z[0m [33m WARN[0m video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+[2m2026-07-28T20:58:05.416850Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-28T20:58:05.417114Z[0m [33m WARN[0m plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool [3mplugin[0m[2m=[0mwayland-cua [3mtool[0m[2m=[0mexecute [3mfq_name[0m[2m=[0mCua::execute
+[2m2026-07-28T20:58:05.419787Z[0m [33m WARN[0m semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+[2m2026-07-28T20:58:05.419894Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-28T20:58:05.419932Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-28T20:58:05.420126Z[0m [34mDEBUG[0m bundled skill catalog initialised for session
+[2m2026-07-28T20:58:05.422348Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-28T20:58:05.422467Z[0m [34mDEBUG[0m skill_router: hydrated from GEPA `evolved_prompts` (bench scorer) [3mseeded[0m[2m=[0m0
+[2m2026-07-28T20:58:05.422477Z[0m [34mDEBUG[0m skill_router: hydrated auto-drafted skills (auto_drafter scorer) [3mseeded[0m[2m=[0m0
+[2m2026-07-28T20:58:05.423878Z[0m [34mDEBUG[0m child tool authority bound to the parent session registry
+[2m2026-07-28T20:58:42.499885Z[0m [34mDEBUG[0m F-024: TemplateRouter installed (Thompson-sampled orchestration active)
+[2m2026-07-28T20:58:42.499933Z[0m [34mDEBUG[0m v0.8.1 U6: SkillDrafter installed; auto-skill loop active
+[2m2026-07-28T20:58:42.500238Z[0m [34mDEBUG[0m F-039: SkillWatcher armed (skill hot-reload active)
+[2m2026-07-28T20:58:42.500718Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24cstg [3mplatform[0m[2m=[0mtelegram
+[2m2026-07-28T20:58:42.500741Z[0m [32m INFO[0m F-014: channels auto-registered from ~/.wayland/channels [3mcount[0m[2m=[0m1
+[2m2026-07-28T20:58:42.500872Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-28T20:58:42.500884Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden
+[2m2026-07-28T20:58:42.500922Z[0m [32m INFO[0m Phase 1B-2: inbound channel subscriber spawned
+[2m2026-07-28T20:58:42.501015Z[0m [33m WARN[0m F24_CHANNEL_LEASE=observer — another process owns inbound polling; this process will NOT poll (sending is unaffected) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3372003" [3mdir[0m[2m=[0m/root/f24cs-run-full/home/channels
+F24_CHANNEL_LEASE=observer owner_pid=3372003 holder=session: another wayland-core process is already receiving messages for this home; this one will not poll for inbound messages. Sending still works.
+[2m2026-07-28T20:58:42.501043Z[0m [32m INFO[0m F24-CL: another process owns inbound polling; start_all NOT called [3mowner_pid[0m[2m=[0mSome(3372003)
+[2m2026-07-28T20:58:42.501261Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24cs-run-full/home/cron
+[2m2026-07-28T20:58:42.546229Z[0m [33m WARN[0m WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+[2m2026-07-28T20:58:43.503615Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=owner (supervisor re-attempt) [3mholder[0m[2m=[0m"session"
+[2m2026-07-28T20:58:43.503722Z[0m [33m WARN[0m WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+[2m2026-07-28T20:58:46.410929Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24cs-stub"
+[2m2026-07-28T20:58:46.410976Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24cs-stub"
+[2m2026-07-28T20:58:46.410987Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24cs-stub"
+Pricing unavailable for openai/f24cs-stub; the call remains bounded by the token envelope and cost is unpriced, not $0.
+[2m2026-07-28T20:58:47.289435Z[0m [32m INFO[0m F24_CHANNEL_LEASE=acquired — this process has taken over inbound polling [3mholder[0m[2m=[0m"session" [3mpid[0m[2m=[0m3372116
+F24_CHANNEL_LEASE=acquired holder=session pid=3372116: this process has taken over inbound message polling for this home.
+[2m2026-07-28T20:58:47.289480Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mAcquired
+[2m2026-07-28T20:58:47.289545Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:58:48.291010Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:58:49.290941Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:58:50.290952Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:58:51.290520Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:58:52.290565Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:58:53.290914Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:58:54.290484Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:58:55.291001Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:58:56.290766Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:58:57.290964Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:58:57.292652Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37
+[2m2026-07-28T20:58:57.296111Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+[2m2026-07-28T20:58:57.296164Z[0m [33m WARN[0m not advertising computer_use: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"computer_use" [3mreason[0m[2m=[0mneither DISPLAY nor WAYLAND_DISPLAY is set, so no display server is reachable and the X11 backend cannot connect [3mremedy[0m[2m=[0mrun inside a graphical session, or export DISPLAY for an available X server (e.g. an Xvfb instance) before starting
+[2m2026-07-28T20:58:57.296395Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+[2m2026-07-28T20:58:57.296948Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback
+[2m2026-07-28T20:58:57.296983Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices
+[2m2026-07-28T20:58:57.297001Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue
+[2m2026-07-28T20:58:57.297017Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search
+[2m2026-07-28T20:58:57.297034Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists
+[2m2026-07-28T20:58:57.297050Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums
+[2m2026-07-28T20:58:57.297067Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library
+[2m2026-07-28T20:58:57.297099Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao
+[2m2026-07-28T20:58:57.297218Z[0m [32m INFO[0m image_gen: using gpt-image-1 at http://127.0.0.1:39393 (active OpenAI-wire provider)
+[2m2026-07-28T20:58:57.297423Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-28T20:58:57.297440Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden
+[2m2026-07-28T20:58:57.297522Z[0m [32m INFO[0m tts: using OpenAI TTS at http://127.0.0.1:39393 (active OpenAI-wire provider)
+[2m2026-07-28T20:58:57.297558Z[0m [33m WARN[0m video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+[2m2026-07-28T20:58:57.297605Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-28T20:58:57.298707Z[0m [33m WARN[0m plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool [3mplugin[0m[2m=[0mwayland-cua [3mtool[0m[2m=[0mexecute [3mfq_name[0m[2m=[0mCua::execute
+[2m2026-07-28T20:58:57.303878Z[0m [33m WARN[0m semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+[2m2026-07-28T20:58:57.304086Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-28T20:58:57.304124Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-28T20:58:57.304292Z[0m [34mDEBUG[0m bundled skill catalog initialised for session
+[2m2026-07-28T20:58:57.306367Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-28T20:58:57.306483Z[0m [34mDEBUG[0m skill_router: hydrated from GEPA `evolved_prompts` (bench scorer) [3mseeded[0m[2m=[0m0
+[2m2026-07-28T20:58:57.306503Z[0m [34mDEBUG[0m skill_router: hydrated auto-drafted skills (auto_drafter scorer) [3mseeded[0m[2m=[0m0
+[2m2026-07-28T20:58:57.309470Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-28T20:58:57.309554Z[0m [34mDEBUG[0m child tool authority bound to the parent session registry

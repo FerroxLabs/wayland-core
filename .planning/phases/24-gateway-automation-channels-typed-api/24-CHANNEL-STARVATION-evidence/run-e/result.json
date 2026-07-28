@@ -1,0 +1,81 @@
+{
+  "run_id": "7f792ed3",
+  "started_at": "2026-07-28T21:12:09.859Z",
+  "legs": [
+    {
+      "leg": "E",
+      "verdict": "NO WEDGE — RECOVERED UNAIDED",
+      "session_pid": 3586270,
+      "session_owned_first": true,
+      "planted_claim_at": "2026-07-28T21:12:26.235Z",
+      "planted_claim": {
+        "pid": 4242424,
+        "rank": 30,
+        "holder": "gateway",
+        "refreshed_ever": false
+      },
+      "window_before": {
+        "label": "legE/W1 session polls",
+        "start": "2026-07-28T21:12:17.037Z",
+        "end": "2026-07-28T21:12:26.229Z",
+        "maxOpen": 1,
+        "polls": 10,
+        "pids": [
+          3586270
+        ],
+        "grade": {
+          "grade": "OK",
+          "why": "exactly one poller, attributed to pid(s) 3586270"
+        }
+      },
+      "session_yielded_to_the_dead_claim": true,
+      "session_recovered_without_help": true,
+      "yield_at": "2026-07-28T21:12:26.978837Z",
+      "acquire_at": "2026-07-28T21:12:31.853701Z",
+      "wedge_window_ms": 4875,
+      "wedge_bound_ms": 30000,
+      "recovery_within_bound": true,
+      "window_after": {
+        "label": "legE/W2 after recovery",
+        "start": "2026-07-28T21:12:32.286Z",
+        "end": "2026-07-28T21:12:41.479Z",
+        "maxOpen": 1,
+        "polls": 10,
+        "pids": [
+          3586270
+        ],
+        "grade": {
+          "grade": "OK",
+          "why": "exactly one poller, attributed to pid(s) 3586270"
+        }
+      },
+      "delivered_after_recovery": {
+        "delivered": true,
+        "serve_count": 1,
+        "deleted_by": 22
+      },
+      "session_still_alive_at_measurement": true,
+      "log_bytes": {
+        "legE session": 16331
+      }
+    },
+    {
+      "leg": "C",
+      "verdict": "NOTHING LOST",
+      "submitted_total": 1,
+      "delivered_total": 1,
+      "never_delivered": [],
+      "served_more_than_once": [],
+      "still_pending_at_end": []
+    }
+  ],
+  "instrument": {
+    "fault": false,
+    "reasons": []
+  },
+  "llm_stub_hits": 1,
+  "poll_total": 22,
+  "conn_samples": 31,
+  "ss_available": true,
+  "finished_at": "2026-07-28T21:12:41.637Z"
+}

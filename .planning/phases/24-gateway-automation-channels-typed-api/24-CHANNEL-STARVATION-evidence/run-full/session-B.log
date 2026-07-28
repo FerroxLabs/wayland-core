@@ -1,0 +1,88 @@
+wayland-core: warning: previous run did not shut down cleanly (crash sentinel found at /root/f24cs-run-full/home/.dirty-death.3350595)
+wayland-core: warning: previous run did not shut down cleanly (crash sentinel found at /root/f24cs-run-full/home/.dirty-death.3337956)
+[2m2026-07-28T20:57:07.483079Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37
+[2m2026-07-28T20:57:07.483331Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37
+[2m2026-07-28T20:57:07.486149Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+[2m2026-07-28T20:57:07.486182Z[0m [33m WARN[0m not advertising computer_use: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"computer_use" [3mreason[0m[2m=[0mneither DISPLAY nor WAYLAND_DISPLAY is set, so no display server is reachable and the X11 backend cannot connect [3mremedy[0m[2m=[0mrun inside a graphical session, or export DISPLAY for an available X server (e.g. an Xvfb instance) before starting
+[2m2026-07-28T20:57:07.486541Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+[2m2026-07-28T20:57:07.486762Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback
+[2m2026-07-28T20:57:07.486780Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices
+[2m2026-07-28T20:57:07.486786Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue
+[2m2026-07-28T20:57:07.486792Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search
+[2m2026-07-28T20:57:07.486797Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists
+[2m2026-07-28T20:57:07.486803Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums
+[2m2026-07-28T20:57:07.486808Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library
+[2m2026-07-28T20:57:07.486819Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao
+[2m2026-07-28T20:57:07.486866Z[0m [32m INFO[0m image_gen: using gpt-image-1 at http://127.0.0.1:39393 (active OpenAI-wire provider)
+[2m2026-07-28T20:57:07.486882Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+[2m2026-07-28T20:57:07.486943Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-28T20:57:07.486950Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden
+[2m2026-07-28T20:57:07.486982Z[0m [32m INFO[0m tts: using OpenAI TTS at http://127.0.0.1:39393 (active OpenAI-wire provider)
+[2m2026-07-28T20:57:07.487308Z[0m [33m WARN[0m video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+[2m2026-07-28T20:57:07.487355Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-28T20:57:07.487709Z[0m [33m WARN[0m plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool [3mplugin[0m[2m=[0mwayland-cua [3mtool[0m[2m=[0mexecute [3mfq_name[0m[2m=[0mCua::execute
+[2m2026-07-28T20:57:07.490371Z[0m [33m WARN[0m semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+[2m2026-07-28T20:57:07.490472Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-28T20:57:07.490508Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-28T20:57:07.490710Z[0m [34mDEBUG[0m bundled skill catalog initialised for session
+[2m2026-07-28T20:57:07.492595Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-28T20:57:07.492715Z[0m [34mDEBUG[0m skill_router: hydrated from GEPA `evolved_prompts` (bench scorer) [3mseeded[0m[2m=[0m0
+[2m2026-07-28T20:57:07.492725Z[0m [34mDEBUG[0m skill_router: hydrated auto-drafted skills (auto_drafter scorer) [3mseeded[0m[2m=[0m0
+[2m2026-07-28T20:57:07.494057Z[0m [34mDEBUG[0m child tool authority bound to the parent session registry
+[2m2026-07-28T20:57:44.557157Z[0m [34mDEBUG[0m F-024: TemplateRouter installed (Thompson-sampled orchestration active)
+[2m2026-07-28T20:57:44.557208Z[0m [34mDEBUG[0m v0.8.1 U6: SkillDrafter installed; auto-skill loop active
+[2m2026-07-28T20:57:44.557509Z[0m [34mDEBUG[0m F-039: SkillWatcher armed (skill hot-reload active)
+[2m2026-07-28T20:57:44.557981Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24cstg [3mplatform[0m[2m=[0mtelegram
+[2m2026-07-28T20:57:44.558003Z[0m [32m INFO[0m F-014: channels auto-registered from ~/.wayland/channels [3mcount[0m[2m=[0m1
+[2m2026-07-28T20:57:44.558131Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-28T20:57:44.558142Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden
+[2m2026-07-28T20:57:44.558195Z[0m [32m INFO[0m Phase 1B-2: inbound channel subscriber spawned
+[2m2026-07-28T20:57:44.558290Z[0m [33m WARN[0m F24_CHANNEL_LEASE=observer — another process owns inbound polling; this process will NOT poll (sending is unaffected) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349" [3mdir[0m[2m=[0m/root/f24cs-run-full/home/channels
+F24_CHANNEL_LEASE=observer owner_pid=3356349 holder=session: another wayland-core process is already receiving messages for this home; this one will not poll for inbound messages. Sending still works.
+[2m2026-07-28T20:57:44.558320Z[0m [32m INFO[0m F24-CL: another process owns inbound polling; start_all NOT called [3mowner_pid[0m[2m=[0mSome(3356349)
+[2m2026-07-28T20:57:44.558535Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24cs-run-full/home/cron
+[2m2026-07-28T20:57:44.617121Z[0m [33m WARN[0m WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+[2m2026-07-28T20:57:45.559729Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=observer (supervisor re-attempt) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349"
+[2m2026-07-28T20:57:45.559794Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mStillObserver
+[2m2026-07-28T20:57:46.560341Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=observer (supervisor re-attempt) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349"
+[2m2026-07-28T20:57:46.560404Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mStillObserver
+[2m2026-07-28T20:57:47.560325Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=observer (supervisor re-attempt) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349"
+[2m2026-07-28T20:57:47.560389Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mStillObserver
+[2m2026-07-28T20:57:48.353560Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24cs-stub"
+[2m2026-07-28T20:57:48.353608Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24cs-stub"
+[2m2026-07-28T20:57:48.353617Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24cs-stub"
+Pricing unavailable for openai/f24cs-stub; the call remains bounded by the token envelope and cost is unpriced, not $0.
+[2m2026-07-28T20:57:48.560060Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=observer (supervisor re-attempt) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349"
+[2m2026-07-28T20:57:48.560119Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mStillObserver
+[2m2026-07-28T20:57:49.560064Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=observer (supervisor re-attempt) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349"
+[2m2026-07-28T20:57:49.560119Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mStillObserver
+[2m2026-07-28T20:57:50.559631Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=observer (supervisor re-attempt) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349"
+[2m2026-07-28T20:57:50.559680Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mStillObserver
+[2m2026-07-28T20:57:51.560078Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=observer (supervisor re-attempt) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349"
+[2m2026-07-28T20:57:51.560133Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mStillObserver
+[2m2026-07-28T20:57:52.560132Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=observer (supervisor re-attempt) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349"
+[2m2026-07-28T20:57:52.560167Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mStillObserver
+[2m2026-07-28T20:57:53.560134Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=observer (supervisor re-attempt) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349"
+[2m2026-07-28T20:57:53.560192Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mStillObserver
+[2m2026-07-28T20:57:54.559389Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=observer (supervisor re-attempt) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349"
+[2m2026-07-28T20:57:54.559425Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mStillObserver
+[2m2026-07-28T20:57:55.559569Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=observer (supervisor re-attempt) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349"
+[2m2026-07-28T20:57:55.559659Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mStillObserver
+[2m2026-07-28T20:57:56.559692Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=observer (supervisor re-attempt) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349"
+[2m2026-07-28T20:57:56.559727Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mStillObserver
+[2m2026-07-28T20:57:57.560178Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=observer (supervisor re-attempt) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349"
+[2m2026-07-28T20:57:57.560235Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mStillObserver
+[2m2026-07-28T20:57:58.559316Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=observer (supervisor re-attempt) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349"
+[2m2026-07-28T20:57:58.559350Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mStillObserver
+[2m2026-07-28T20:57:59.559447Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=observer (supervisor re-attempt) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349"
+[2m2026-07-28T20:57:59.559486Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mStillObserver
+[2m2026-07-28T20:58:00.560093Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=observer (supervisor re-attempt) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349"
+[2m2026-07-28T20:58:00.560137Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mStillObserver
+[2m2026-07-28T20:58:01.559954Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=observer (supervisor re-attempt) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349"
+[2m2026-07-28T20:58:01.560015Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mStillObserver
+[2m2026-07-28T20:58:02.560318Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=observer (supervisor re-attempt) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349"
+[2m2026-07-28T20:58:02.560376Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mStillObserver
+[2m2026-07-28T20:58:03.559963Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=observer (supervisor re-attempt) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349"
+[2m2026-07-28T20:58:03.560025Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mStillObserver
+[2m2026-07-28T20:58:04.560193Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=observer (supervisor re-attempt) [3mholder[0m[2m=[0m"session" [3mowner_pid[0m[2m=[0m"3356349"
+[2m2026-07-28T20:58:04.560255Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mStillObserver

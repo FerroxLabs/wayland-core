@@ -976,6 +976,25 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
         });
     }
 
+    // F24-CS. The gateway is the INSTALLED, always-on role, so it outranks both
+    // an ordinary session and the cron daemon. Ownership is no longer decided
+    // once at boot: if a session got to the lease first, this supervisor claims
+    // it and the session stands down; if this gateway is ever the loser it
+    // keeps claiming until it wins.
+    //
+    // Bound to the gateway's own lifetime deliberately, exactly as the bare
+    // lease was: dropping it releases the OS lock, and the OS releases it
+    // anyway however this process dies.
+    //
+    // Held rather than named `_`: `_` would drop it immediately, releasing the
+    // lease at the top of `gateway run` and reopening the race.
+    let _poll_supervisor = wcore_agent::channel_lease::ChannelPollSupervisor::spawn(
+        &home,
+        "gateway",
+        poll_lease,
+        wcore_agent::channel_lease::ChannelManagerPollControl::new(Arc::clone(&channels)),
+    );
+
     // The REAL headless handler, not a recorder. A gateway whose dispatch is
     // a log line proves its own loop and nothing about delivery.
     //
