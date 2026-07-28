@@ -93,3 +93,50 @@ was the thing lying. All captures in this lane use `/usr/bin/wc`.
 
 Count for the program ledger: this is instance **twelve, thirteen and fourteen** of an
 instrument carrying the defect class it hunts — all three found inside one instrument.
+
+## Minute 35-70 — the sandbox measurement that killed option (i)
+
+Cross-audit panel, 3/3 both questions (codex 5.6-sol, gemini 3.1-pro, kimi K3):
+**Q1 -> (c)** implemented as a two-run differential; **Q2 -> (ii)** qualify-or-skip.
+Codex dropped its first vote to the stdin trap the brief warns about (backgrounded, no
+tty -> "Failed to read prompt from stdin"); re-run with `< /dev/null` recovered it.
+Codex's amendment is adopted: **a bare "the flag changed" differential is weaker than (c),
+because inverted behaviour also changes** — assert POLARITY in each leg, not change.
+
+**The decisive measurement.** Brief offered "install bubblewrap in the CI image" as an
+acceptable fix. It is not, on its own. Ubuntu 24.04 sets
+`kernel.apparmor_restrict_unprivileged_userns=1`; hetzner is Ubuntu 24.04 + Docker 29.2.1,
+a near-exact match for GitHub's ubuntu-latest. In an image WITH bubblewrap installed:
+
+| docker run flags (all with --rm --network=host)                    | result |
+|--------------------------------------------------------------------|--------|
+| (none — exactly what CI uses today)                                  | `Creating new namespace failed: Operation not permitted` rc=1 |
+| `--security-opt seccomp=unconfined`                                  | same, rc=1 |
+| `--security-opt apparmor=unconfined`                                 | same, rc=1 |
+| `--security-opt seccomp=unconfined --security-opt apparmor=unconfined` | same, rc=1 |
+| `--cap-add SYS_ADMIN`                                                | `Failed to make / slave: Permission denied` rc=1 |
+| `--cap-add SYS_ADMIN --security-opt apparmor=unconfined`             | `pivot_root: Operation not permitted` rc=1 |
+| `--cap-add SYS_ADMIN` + seccomp=unconfined + apparmor=unconfined     | **rc=0** |
+| `--privileged`                                                       | rc=0 |
+
+So installing the package changes the failure mode, not the outcome. The relaxation is
+mandatory, and is scoped to a NEW dedicated job rather than the 12,775-test suite —
+running that whole suite with seccomp disabled could let other sandbox tests pass for
+the wrong reason. `--privileged` rejected: the narrower measured grant suffices.
+
+**Second finding, unprompted.** `BubblewrapBackend::is_available()` is
+`which::which("bwrap").is_some()` — a PRESENCE check. In a container with bubblewrap
+installed but namespaces blocked it reports available and the sandbox then dies at
+execution. A qualifier written as `which bwrap` would therefore report READY on exactly
+the host where the sandbox cannot work. The qualifier I added **executes** a real
+`bwrap --ro-bind / / --dev /dev true` and reads the exit status. Logged to BACKLOG-worthy:
+the production `is_available()` has the same shallow-probe shape.
+
+**Structural fact that closes off the obvious alternative:** Linux runs ONLY
+containerized. The native matrix is macOS + self-hosted Windows (direct-shell Linux was
+removed because the GHA runner agent crashes). There is no non-container Linux job to
+move the sandbox test to. And the native matrix invokes `just test-ci`, which is why only
+the containerized leg fail-fasted.
+
+`WAYLAND_ALLOW_NO_SANDBOX=1` was never used anywhere. It is forbidden and would make the
+test prove nothing.
