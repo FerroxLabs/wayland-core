@@ -49,16 +49,22 @@ PEER=hermes
 TRIALS=9
 ITEMS=440
 DO_KILL=yes
+EVIDENCE=""
 
 while [ $# -gt 1 ]; do
     case "$1" in
-        --peer)    PEER="$2"; shift 2 ;;
-        --trials)  TRIALS="$2"; shift 2 ;;
-        --items)   ITEMS="$2"; shift 2 ;;
-        --no-kill) DO_KILL=no; shift ;;
+        --peer)     PEER="$2"; shift 2 ;;
+        --trials)   TRIALS="$2"; shift 2 ;;
+        --items)    ITEMS="$2"; shift 2 ;;
+        --evidence) EVIDENCE="$2"; shift 2 ;;
+        --no-kill)  DO_KILL=no; shift ;;
         *) break ;;
     esac
 done
+if [ -n "$EVIDENCE" ]; then
+    mkdir -p "$EVIDENCE" || FAIL "could not create the evidence directory $EVIDENCE"
+    EVIDENCE=$(CDPATH= cd -- "$EVIDENCE" && pwd)
+fi
 
 BIN="${1:-}"
 [ -n "$BIN" ] || FAIL "usage: $0 [--peer hermes|openclaw] [--trials N] <path-to-wayland-core>"
@@ -250,6 +256,11 @@ while [ "$k" -le "$TRIALS" ]; do
         KILL_RC=$?
     fi
 
+    # Snapshot the index EXACTLY as the kill left it, before the re-drive gets
+    # a chance to rewrite it. Without this the evidence would only ever show the
+    # post-recovery file, which is not the artefact under examination.
+    cp "$TH/migrate-quarantine/index.json" "$WORK/trial-$k.index.postkill" 2>/dev/null
+
     fingerprint "$TH" > "$WORK/trial-$k.fp"
     T_INDEX=$(field "$WORK/trial-$k.fp" INDEX)
     T_ENTRIES=$(field "$WORK/trial-$k.fp" ENTRIES)
@@ -285,8 +296,34 @@ while [ "$k" -le "$TRIALS" ]; do
         REC=yes; RECOVERED=$((RECOVERED + 1))
     else
         REC=no; NOT_RECOVERED=$((NOT_RECOVERED + 1))
-        cp "$WORK/trial-$k.fp" "$WORK/UNRECOVERED-$k-postkill.fp" 2>/dev/null
-        fingerprint "$TH" > "$WORK/UNRECOVERED-$k-final.fp" 2>/dev/null
+        # Preserve the whole failing case OUTSIDE the work directory the EXIT
+        # trap deletes, so an unrecovered trial can be inspected rather than
+        # merely counted.
+        if [ -n "$EVIDENCE" ]; then
+            D="$EVIDENCE/unrecovered-$PEER-trial-$k"
+            mkdir -p "$D"
+            cp "$WORK/trial-$k.fp" "$D/postkill.fingerprint" 2>/dev/null
+            fingerprint "$TH" > "$D/final.fingerprint" 2>/dev/null
+            printf '%s\n' "$REF_FP" > "$D/reference.fingerprint"
+            cp "$WORK/trial-$k.log" "$D/kill-run.log" 2>/dev/null
+            cp "$WORK/trial-$k.redrive.log" "$D/redrive.log" 2>/dev/null
+            printf 'delay_ms=%s class=%s index=%s entries=%s payloads=%s orphans=%s cfg_profiles=%s redrive_rc=%s\n' \
+                "$DELAY_MS" "$CLASS" "$T_INDEX" "${T_ENTRIES:-0}" "${T_PAYLOADS:-0}" \
+                "${T_ORPHANS:-0}" "${T_CFG:-0}" "$REDRIVE_RC" > "$D/facts.txt"
+            # The index EXACTLY as the kill left it, plus its size and the tail
+            # bytes -- a truncated JSON document is the thing under examination.
+            cp "$WORK/trial-$k.index.postkill" "$D/postkill-index.json" 2>/dev/null
+            IDX="$TH/migrate-quarantine/index.json"
+            if [ -f "$IDX" ]; then
+                wc -c < "$IDX" > "$D/final-index.bytes"
+                tail -c 200 "$IDX" > "$D/final-index.tail" 2>/dev/null
+            fi
+            # What the OPERATOR sees when they ask what is contained. Run
+            # against the trial home, so it reports that home and not the
+            # measuring user's real one.
+            WAYLAND_HOME="$TH" "$BIN" migrate quarantined > "$D/quarantined-listing.log" 2>&1
+            echo "rc=$?" >> "$D/quarantined-listing.log"
+        fi
     fi
 
     printf 'TRIAL: %d %d %s %s %s %s %s %s %s %s\n' \
