@@ -222,3 +222,57 @@ Both runs graded **INCOMPLETE**, never LOSS — reasons `llm stub never bound` a
 two attempts: neither degraded run was allowed to be reported as a result, in either
 direction. The evidence above was recovered from the fixture's own journal, which is written
 by a different process and fsync'd before each answer.
+
+---
+
+## T+110 — BOTH LEGS REPRODUCE CLEANLY. `instrument.fault = false` on both.
+
+Binary `wayland-core 0.12.25 (source 3d7d4a01…)` — base, unfixed. Run `/root/f24cl-run-base`.
+
+### LEG 1 — backlog theft — **LOSS REPRODUCED**
+
+```
+submitted                    = 8
+stolen_by_session            = 8      <- an ordinary session destroyed all of them
+gateway_received             = 0      <- the installed service got NOTHING
+still_pending_after_session  = 0
+poll_total                   = 27
+instrument                   = {"fault": false, "reasons": []}
+```
+
+Eight in, eight destroyed by a process that was not the service, zero delivered to the
+service. Silent: no error, no warning, no retry.
+
+### LEG 2 — steady state — **RACE REPRODUCED**
+
+```
+window A (service ALONE)              max_open = 1   polls = 19
+window B (service + ordinary session) max_open = 2   polls = 41
+poll_rate_ratio = 2.16     two_pollers_detected = true
+instrument = {"fault": false, "reasons": []}
+```
+
+**Both independent signals agree**, which is the point of carrying two: the window-scoped
+concurrency reader goes 1 → 2, and the poll rate goes 2.16x over equal 20s windows. An
+alternating pair that never overlapped would have shown max_open 1 and still been caught by
+the rate; a rate confounded by load would still have been caught by max_open. Neither is a
+log line the binary printed about itself — both come from the fixture, in another process.
+
+`max_open = 1` in window A also establishes the **positive baseline**: with one process the
+service does poll. So a later `max_open = 1` after the fix means "exactly one poller", not
+"nothing polls" — and `max_open = 0` is a distinct FAILING answer the grader reports as
+DENIAL. Universal denial cannot manufacture a green here.
+
+### Verdict on the finding
+
+**The brief's finding is CONFIRMED on both legs, on the real shipped binary, against a
+destructive-read endpoint.** This is not a code-reading argument. Startup loss is 8/8;
+steady state puts two pollers on one account continuously.
+
+Severity: **HIGH**, and I would argue it is the correct top "what breaks if we ship
+tomorrow" item — see the report for the reasoning. It requires no unusual configuration:
+an installed service plus a user opening a normal session is the intended product usage.
+
+### Next
+
+Apply `ScheduleLease` to channel polling. Open question still open: the dependency edge.
