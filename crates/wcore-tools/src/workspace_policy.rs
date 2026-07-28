@@ -170,7 +170,7 @@ impl WorkspacePolicy {
     /// honors the network opt-in. Does NOT jail the in-process file tools.
     pub fn trusted_local(workspace: impl Into<PathBuf>) -> Self {
         let root = canon(workspace.into());
-        let mut writable_extra = scratch_dirs();
+        let mut writable_extra = scratch_dirs(WorkspaceTrust::Trusted);
         if let Some(home) = dirs::home_dir() {
             for sub in [".cache", ".cargo/registry", ".cargo/git", ".npm/_cacache"] {
                 let path = home.join(sub);
@@ -239,7 +239,7 @@ impl WorkspacePolicy {
             .collect();
         let readable_extra = minimal_toolchain_read_dirs();
         // Hoist writable_extra so we can borrow it for readable_canon.
-        let writable_extra = scratch_dirs();
+        let writable_extra = scratch_dirs(WorkspaceTrust::Contained);
 
         // Compute readable_canon from the same locals readable_roots() uses.
         let readable_canon = readable_canon_roots(&root, &writable_extra, &readable_extra);
@@ -932,9 +932,80 @@ fn canon(p: PathBuf) -> PathBuf {
     std::fs::canonicalize(&p).unwrap_or(p)
 }
 
-fn scratch_dirs() -> Vec<PathBuf> {
-    let tmp = std::env::temp_dir();
-    vec![canon(tmp)]
+/// Leaf name of the bounded scratch tree, replacing a grant over the whole host
+/// temp directory.
+const SCRATCH_ROOT: &str = "wayland-scratch";
+
+/// The writable scratch grant handed to a sandboxed session.
+///
+/// Previously this was the entire host temp tree (`vec![canon(temp_dir())]`).
+/// On Windows every writable root is materialized as an inheritable ACE via
+/// `SetNamedSecurityInfoW` per spawn and revoked afterwards, so granting
+/// `%TEMP%` is both O(subtree) in cost and enormous in blast radius: a crash
+/// between grant and revoke strands an ACE on a directory shared with every
+/// other application on the machine. It is also far more authority than a
+/// sandboxed child needs — it could read and rewrite any other process's temp
+/// state, including files a more privileged program is mid-way through writing.
+///
+/// **The scratch dir is keyed by trust.** One fixed name shared by
+/// [`WorkspacePolicy::trusted_local`] and [`WorkspacePolicy::contained`] would
+/// hand an untrusted/remote `Contained` session a writable host directory that
+/// a `Trusted` local session also writes to and reads back — a trust-crossing
+/// channel created by the narrowing itself.
+///
+/// Returns an EMPTY grant, never a fallback to `%TEMP%`, when the directory
+/// cannot be established: failing closed costs a session its scratch space,
+/// whereas failing open silently restores the defect this function exists to
+/// remove.
+fn scratch_dirs(trust: WorkspaceTrust) -> Vec<PathBuf> {
+    match scratch_dir(trust) {
+        Some(dir) => vec![dir],
+        None => Vec::new(),
+    }
+}
+
+/// SAFETY: `getuid` is a POSIX call that cannot fail, takes no arguments and
+/// touches no caller-owned memory. It is `unsafe` only because it is `extern`.
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    unsafe { libc::getuid() }
+}
+
+fn scratch_dir(trust: WorkspaceTrust) -> Option<PathBuf> {
+    let mut dir = std::env::temp_dir();
+    // The uid goes in the TOP component on unix, not a subdirectory: there
+    // `temp_dir()` is the shared, world-writable `/tmp`, and a shared parent
+    // would mean whichever user created it first owns the permissions for
+    // everyone else.
+    #[cfg(unix)]
+    dir.push(format!("{SCRATCH_ROOT}-u{}", current_uid()));
+    // `%TEMP%` is already per-user on Windows.
+    #[cfg(not(unix))]
+    dir.push(SCRATCH_ROOT);
+    dir.push(match trust {
+        WorkspaceTrust::Trusted => "trusted",
+        WorkspaceTrust::Contained => "contained",
+    });
+
+    std::fs::create_dir_all(&dir).ok()?;
+
+    // `/tmp` is world-writable, so another user can pre-create this name — as a
+    // symlink to somewhere valuable, or as a directory they retain write access
+    // to. `create_dir_all` follows symlinks and succeeds in both cases. Verify
+    // we got a real directory that we own before granting a write ACE to it.
+    let meta = std::fs::symlink_metadata(&dir).ok()?;
+    if !meta.is_dir() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.uid() != current_uid() {
+            return None;
+        }
+    }
+
+    Some(canon(dir))
 }
 
 /// #657 (Overwatch ruling, Sean-confirmed): the Bash network posture for a

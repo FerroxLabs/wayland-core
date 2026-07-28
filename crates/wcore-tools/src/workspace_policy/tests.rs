@@ -703,3 +703,85 @@ fn is_project_secret_resolves_symlink_to_secret() {
         "a benign-named symlink to a project secret must be denied (canon-first)"
     );
 }
+
+// ---------- scratch grant: bounded, and not shared across trust ----------
+//
+// Re-authored from the narrowing frankforges proposed in wayland-core #254.
+// Before this, `scratch_dirs()` returned `vec![canon(temp_dir())]` -- the
+// ENTIRE host temp tree, handed to trusted and untrusted sessions alike.
+
+#[test]
+fn scratch_grant_is_bounded_not_the_whole_temp_tree() {
+    let host_temp = canon(std::env::temp_dir());
+    let dir = tempfile::tempdir().unwrap();
+    let policy = WorkspacePolicy::trusted_local(dir.path());
+
+    // THE REGRESSION: granting the host temp root gives a sandboxed child
+    // write access to every other process's temp state.
+    assert!(
+        !policy.writable_roots().contains(&host_temp),
+        "the whole host temp tree {host_temp:?} is granted writable"
+    );
+
+    let scratch =
+        scratch_dir(WorkspaceTrust::Trusted).expect("a scratch dir must be establishable");
+    assert_ne!(
+        scratch, host_temp,
+        "scratch collapsed back to the temp root"
+    );
+    assert!(
+        scratch.starts_with(&host_temp),
+        "scratch {scratch:?} escaped the temp tree {host_temp:?}"
+    );
+    // Bounded is only useful if it is also actually granted -- otherwise this
+    // would pass equally against a version that granted no scratch at all.
+    assert!(
+        policy.writable_roots().contains(&scratch),
+        "the bounded scratch dir {scratch:?} is not in {:?}",
+        policy.writable_roots()
+    );
+}
+
+#[test]
+fn trusted_and_contained_do_not_share_a_scratch_directory() {
+    let trusted = scratch_dir(WorkspaceTrust::Trusted).expect("trusted scratch");
+    let contained = scratch_dir(WorkspaceTrust::Contained).expect("contained scratch");
+    assert_ne!(
+        trusted, contained,
+        "one shared scratch dir lets an untrusted session write where a \
+         trusted session reads"
+    );
+    assert!(
+        !trusted.starts_with(&contained) && !contained.starts_with(&trusted),
+        "scratch dirs must be siblings, not nested: {trusted:?} vs {contained:?}"
+    );
+
+    // Same property at the public surface, which is what actually reaches the
+    // sandbox backend as a write ACE.
+    let t = tempfile::tempdir().unwrap();
+    let c = tempfile::tempdir().unwrap();
+    let trusted_roots = WorkspacePolicy::trusted_local(t.path()).writable_roots();
+    for root in WorkspacePolicy::contained(c.path()).writable_roots() {
+        assert!(
+            !trusted_roots.contains(&root),
+            "a Contained session shares writable root {root:?} with a Trusted session"
+        );
+    }
+}
+
+#[test]
+fn scratch_dir_is_a_real_directory_we_own() {
+    let scratch = scratch_dir(WorkspaceTrust::Trusted).expect("trusted scratch");
+    let meta = std::fs::symlink_metadata(&scratch).expect("scratch must exist once granted");
+    assert!(
+        meta.is_dir(),
+        "scratch {scratch:?} is not a directory -- a squatted symlink would be \
+         granted a write ACE"
+    );
+    assert!(
+        scratch
+            .components()
+            .any(|c| c.as_os_str().to_string_lossy().starts_with(SCRATCH_ROOT)),
+        "scratch {scratch:?} is not under the {SCRATCH_ROOT} tree"
+    );
+}

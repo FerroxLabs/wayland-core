@@ -63,6 +63,65 @@ fn is_verbatim_disk_path_classifies_prefixes() {
     assert!(!is_verbatim_disk_path(std::path::Path::new(r"C:\plain")));
 }
 
+// ---------- resolve_cwd: the lpCurrentDirectory contract ----------
+//
+// These assert the OBSERVABLE VALUE production hands to
+// `CreateProcessAsUserW`'s `lpCurrentDirectory`, decoded back from the actual
+// UTF-16 buffer -- not that some string helper was called. `live_cwd_verbatim
+// .rs` proves the same fix end-to-end against a real child process.
+
+/// Decode the buffer `resolve_cwd` produces, minus its NUL terminator.
+fn lp_current_directory(path: &str) -> String {
+    let wide = resolve_cwd(Some(std::path::Path::new(path)))
+        .expect("an absolute cwd must resolve")
+        .expect("Some(cwd) in must yield Some(buffer) out, never a NULL lpCurrentDirectory");
+    assert_eq!(
+        wide.last().copied(),
+        Some(0),
+        "lpCurrentDirectory must be NUL-terminated"
+    );
+    String::from_utf16(&wide[..wide.len() - 1]).expect("test paths are valid UTF-16")
+}
+
+#[test]
+fn resolve_cwd_strips_verbatim_disk_prefix() {
+    // THE REGRESSION. `std::fs::canonicalize` returns this spelling for every
+    // local path on Windows, so a canonicalized cwd arrives here verbatim.
+    // Passed through unmodified, the command processor reads the leading `\\`
+    // as UNC, refuses it as a current directory, and silently substitutes
+    // `C:\Windows` -- the child then runs in the wrong directory with no error
+    // raised anywhere. Found by frankforges (wayland-core #254).
+    assert_eq!(lp_current_directory(r"\\?\C:\work\repo"), r"C:\work\repo");
+    assert_eq!(lp_current_directory(r"\\?\D:\"), r"D:\");
+}
+
+#[test]
+fn resolve_cwd_leaves_every_other_shape_byte_identical() {
+    // Already the spelling Win32 wants.
+    assert_eq!(lp_current_directory(r"C:\work\repo"), r"C:\work\repo");
+    // Verbatim-UNC and plain UNC name REMOTE objects. Stripping their prefix
+    // would change WHICH object is named, so the strip must not touch them --
+    // this is the negative that keeps the fix from becoming a path-mangler.
+    assert_eq!(
+        lp_current_directory(r"\\?\UNC\server\share"),
+        r"\\?\UNC\server\share"
+    );
+    assert_eq!(lp_current_directory(r"\\server\share"), r"\\server\share");
+}
+
+#[test]
+fn resolve_cwd_keeps_the_absolute_and_null_contract() {
+    // No cwd requested => NULL lpCurrentDirectory (inherit the parent's).
+    assert!(
+        resolve_cwd(None).expect("None is not an error").is_none(),
+        "absent cwd must stay absent, not become an empty buffer"
+    );
+    // A relative cwd would resolve against the PARENT's directory; rejected.
+    let err = resolve_cwd(Some(std::path::Path::new(r"relative\dir")))
+        .expect_err("a relative cwd must be rejected");
+    assert!(matches!(err, SandboxError::ExecFailed(_)), "got {err:?}");
+}
+
 #[test]
 fn quote_arg_empty_string_is_double_quoted() {
     assert_eq!(quote_arg(""), "\"\"");

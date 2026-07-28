@@ -374,6 +374,30 @@ pub(super) fn probe_appcontainer_available() -> bool {
     }
 }
 
+/// Build the exact UTF-16 buffer handed to `CreateProcessAsUserW`'s
+/// `lpCurrentDirectory` (or `None` for a NULL, meaning "inherit the parent's").
+///
+/// Extracted from [`execute_blocking`] so the value that actually reaches Win32
+/// is directly assertable. It is the whole of the cwd contract:
+///
+/// 1. a relative cwd is rejected — the child must never silently land somewhere
+///    resolved against the PARENT's current directory;
+/// 2. a verbatim-disk cwd is de-prefixed, because `cmd.exe` treats a leading
+///    `\\` as UNC, refuses it as a current directory, and silently substitutes
+///    `C:\Windows` — see [`strip_verbatim_disk_prefix`] for why this does not
+///    widen the sandbox.
+pub(super) fn resolve_cwd(cwd: Option<&std::path::Path>) -> Result<Option<Vec<u16>>> {
+    let Some(p) = cwd else {
+        return Ok(None);
+    };
+    if !p.is_absolute() {
+        return Err(SandboxError::ExecFailed(format!(
+            "cwd {p:?} must be absolute"
+        )));
+    }
+    Ok(Some(widen_os(&strip_verbatim_disk_prefix(p))))
+}
+
 pub(super) fn execute_blocking(
     manifest: &SandboxManifest,
     cmd: &SandboxCommand,
@@ -384,17 +408,7 @@ pub(super) fn execute_blocking(
         return Err(SandboxError::ExecFailed("empty argv".into()));
     }
 
-    let cwd_w: Option<Vec<u16>> = match cmd.cwd.as_ref() {
-        Some(p) => {
-            if !p.is_absolute() {
-                return Err(SandboxError::ExecFailed(format!(
-                    "cwd {p:?} must be absolute"
-                )));
-            }
-            Some(widen_os(p.as_os_str()))
-        }
-        None => None,
-    };
+    let cwd_w: Option<Vec<u16>> = resolve_cwd(cmd.cwd.as_deref())?;
 
     let app_name_w = resolve_program(&cmd.argv[0])?;
     let mut identity = ExecutionIdentity::start(manifest)?;
