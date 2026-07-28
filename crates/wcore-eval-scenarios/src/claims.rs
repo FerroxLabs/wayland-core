@@ -1125,6 +1125,7 @@ pub fn publish(
     register_bytes: &[u8],
     repo_root: &Path,
     out_dir: &Path,
+    secret_set: Vec<String>,
 ) -> Result<PublishedSet, anyhow::Error> {
     let register: ClaimRegisterV1 = serde_json::from_slice(register_bytes)?;
     if register.schema != CLAIMS_SCHEMA || register.schema_version != CLAIMS_SCHEMA_VERSION {
@@ -1151,7 +1152,113 @@ pub fn publish(
     std::fs::write(out_dir.join("30-03-CLAIMS-PROHIBITED.md"), &set.prohibited)?;
     std::fs::write(out_dir.join("30-03-LIMITATIONS.md"), &set.limitations)?;
     std::fs::write(out_dir.join("limitations.tsv"), &set.limitations_tsv)?;
+
+    // The raw evidence bundle: render every projection, scan every projection, and refuse
+    // the WHOLE bundle rather than publishing a partially clean one.
+    //
+    // No real credential exists anywhere in this phase, so the redactor is built over an
+    // EMPTY secret set and necessarily finds nothing. That is stated rather than presented
+    // as a clean result: with zero secrets held the scan cannot fail, so it proves the
+    // mechanism RAN, not that the bundle is secret-free. What proves the mechanism can
+    // fail is `the_bundle_scan_is_able_to_fail_and_refuses_the_whole_bundle`, which seeds
+    // a synthetic canary and asserts one leaking projection refuses all of them.
+    let projections = vec![
+        Projection {
+            name: "30-03-CLAIMS-ALLOWED.md".into(),
+            body: set.allowed.clone(),
+        },
+        Projection {
+            name: "30-03-CLAIMS-PROHIBITED.md".into(),
+            body: set.prohibited.clone(),
+        },
+        Projection {
+            name: "30-03-LIMITATIONS.md".into(),
+            body: set.limitations.clone(),
+        },
+        Projection {
+            name: "limitations.tsv".into(),
+            body: set.limitations_tsv.clone(),
+        },
+        Projection {
+            name: "claims-register.json".into(),
+            body: String::from_utf8_lossy(register_bytes).into_owned(),
+        },
+    ];
+    let redactor = crate::redaction::SecretRedactor::from_secret_set(secret_set)
+        .map_err(|e| anyhow::anyhow!("redactor refused a too-short secret: {e:?}"))?;
+    scan_bundle(&projections, &redactor)?;
+
+    let bundle_dir = out_dir.join("published-evidence");
+    std::fs::create_dir_all(&bundle_dir)?;
+    let mut manifest = String::new();
+    let _ = writeln!(
+        manifest,
+        "# published-evidence bundle. secrets_held={} projections={}",
+        redactor.secret_count(),
+        projections.len()
+    );
+    for p in &projections {
+        std::fs::write(bundle_dir.join(&p.name), &p.body)?;
+        let _ = writeln!(
+            manifest,
+            "{}::sha256={}::bytes={}",
+            p.name,
+            protocol_sha256(p.body.as_bytes()),
+            p.body.len()
+        );
+    }
+    std::fs::write(bundle_dir.join("MANIFEST.tsv"), manifest)?;
     Ok(set)
+}
+
+/// A projection of the evidence bundle: one named rendering of one artifact.
+pub struct Projection {
+    pub name: String,
+    pub body: String,
+}
+
+/// Render EVERY projection, scan EVERY projection, and refuse the WHOLE bundle if any one
+/// of them carries a secret.
+///
+/// This follows `receipt.rs`'s existing render-all-then-scan discipline rather than
+/// inventing a second one, and it reuses `redaction::SecretRedactor` rather than writing a
+/// second redactor — two redactors is two chances for one of them to miss a channel.
+///
+/// The refusal is deliberately WHOLE-BUNDLE. A bundle clean in five projections and leaking
+/// in the sixth is not a clean bundle, and publishing the clean five would be a partial
+/// disclosure dressed as a complete one.
+pub fn scan_bundle(
+    projections: &[Projection],
+    redactor: &crate::redaction::SecretRedactor,
+) -> Result<(), BundleRefusal> {
+    let mut leaking: Vec<String> = projections
+        .iter()
+        .filter(|p| redactor.any_present(&p.body))
+        .map(|p| p.name.clone())
+        .collect();
+    leaking.sort();
+    if leaking.is_empty() {
+        Ok(())
+    } else {
+        Err(BundleRefusal {
+            leaking,
+            scanned: projections.len(),
+            secrets: redactor.secret_count(),
+        })
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "evidence bundle REFUSED WHOLE: {} of {scanned} projections carry a held secret ({secrets} \
+     secrets scanned for): {}",
+    leaking.len(),
+    leaking.join(", ")
+)]
+pub struct BundleRefusal {
+    pub leaking: Vec<String>,
+    pub scanned: usize,
+    pub secrets: usize,
 }
 
 pub struct PublishedSet {
@@ -1184,6 +1291,41 @@ mod tests {
         assert!(carries_unproven_qualifier(
             "Sandbox/egress: Core architectural lead, operationally unproven"
         ));
+    }
+
+    #[test]
+    fn the_bundle_scan_is_able_to_fail_and_refuses_the_whole_bundle() {
+        // A scan run over an EMPTY secret set can never fail, so on its own it proves
+        // nothing — the same defect class as a gate that was already green at base. This
+        // seeds a synthetic canary and asserts the scan finds it, then asserts that ONE
+        // leaking projection refuses ALL of them.
+        let canary = "wl-canary-secret-0123456789";
+        let redactor =
+            crate::redaction::SecretRedactor::from_secret_set([canary.to_string()]).unwrap();
+
+        let clean = vec![
+            Projection {
+                name: "allowed".into(),
+                body: "nothing sensitive here".into(),
+            },
+            Projection {
+                name: "limitations".into(),
+                body: "nor here".into(),
+            },
+        ];
+        scan_bundle(&clean, &redactor).expect("a clean bundle passes");
+
+        let mut leaky = clean;
+        leaky.push(Projection {
+            name: "prohibited".into(),
+            body: format!("a refusal quoted the value {canary} verbatim"),
+        });
+        let err = scan_bundle(&leaky, &redactor).expect_err("a leaking projection must refuse");
+        assert_eq!(err.leaking, vec!["prohibited".to_string()]);
+        // THE WHOLE bundle is refused: three projections were scanned, not just the
+        // offending one, and none of the three is publishable.
+        assert_eq!(err.scanned, 3);
+        assert_eq!(err.secrets, 1);
     }
 
     #[test]

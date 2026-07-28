@@ -222,7 +222,9 @@ fn run_claims(command: ClaimsCommand) -> anyhow::Result<String> {
             out,
         } => {
             let raw = std::fs::read(&register)?;
-            let set = publish(&raw, &repo_root, &out)?;
+            // No secret is read, accepted on argv, or required. The bundle scan runs over
+            // an empty secret set because this phase holds no credential at all.
+            let set = publish(&raw, &repo_root, &out, Vec::new())?;
             Ok(format!(
                 "CLAIMS_PUBLISH=OK register_sha256={} out={}\n",
                 set.digest,
