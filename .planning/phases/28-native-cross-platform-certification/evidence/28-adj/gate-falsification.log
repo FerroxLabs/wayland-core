@@ -1,0 +1,40 @@
+=== 28-adj gate falsification, run 2026-07-28T18:11:29Z ===
+Purpose: prove F28L-002 and F28L-008 still BITE after F-28-02-002 moved to FIXED.
+NOTE: a first version of this log printed 'rc=' empty. ${PIPESTATUS[0]} after a
+      pipeline returns empty in this shell - the trap the lane brief names first.
+      Every rc below is captured with NO pipeline in between.
+
+--- falsification: nodisp ---
+rc=1
+--validate: 63 finding(s), allow_open=False
+--validate: REJECTED (1)
+  F28L-002  F-28-02-002 (line 39): no disposition recorded
+
+--- falsification: open ---
+rc=1
+--validate: 63 finding(s), allow_open=False
+--validate: REJECTED (1)
+  F28L-002  F-28-02-002 (line 39): disposition is OPEN; acceptance requires a terminal disposition
+
+--- falsification: noevidence ---
+rc=1
+--validate: 63 finding(s), allow_open=False
+--validate: REJECTED (1)
+  F28L-008  F-28-02-002 (line 39): FIXED with no executable-check reference; a repair is proved by a check, not asserted
+
+--- the real ledger, strict (this is the one that must now pass) ---
+rc=0
+--validate: 63 finding(s), allow_open=False
+--validate: OK
+
+--- --self-test: F28L-002 still provable against synthetic fixtures ---
+rc=0
+self-test: 0 failure(s)
+self-test: every rejection code was tripped by a bad fixture and NOT tripped
+acceptance self-test: 0 failure(s)
+
+--- the other documented checks ---
+--check-a2 rc=0  --check-a2: OK
+--check-downgrades rc=0  --check-downgrades: OK
+--check-backlog-ids rc=0  --check-backlog-ids: OK
+--check-completeness rc=0  --check-completeness: OK

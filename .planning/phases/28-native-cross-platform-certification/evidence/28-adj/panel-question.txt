@@ -1,0 +1,54 @@
+You are adjudicating a security-finding disposition. Answer with a line
+PANEL_POSITION=FIXED or PANEL_POSITION=OPEN, then <=8 lines of reasoning.
+
+FINDING F-28-02-002 (severity HIGH): "the stale AppContainer lease wedge is a
+PERSISTENT DENIAL OF SERVICE: a file nobody knows to look for permanently refuses
+all sandboxed execution, with a message that reads like a platform limitation."
+Only two dispositions are available: FIXED or DISPROVED. ACCEPTED/DEFERRED are
+closed at HIGH by contract, and downgrading the severity to reopen them is a
+named forgery. OPEN means not yet disposed.
+
+THE REPAIR (merged, Rust, Windows AppContainer ACL leases):
+- Root cause: in recover_dead_leases_locked, a lease whose owning process is
+  provably dead and whose recorded SID cannot reconcile against the SID derived
+  from its own recorded profile name hit `return Err(...)`. That aborted the
+  WHOLE recovery pass, which runs on every ExecutionIdentity::start. The negative
+  probe cache is in-process only, so every new process re-read the file and failed
+  again. Permanent denial of all sandboxed execution until a human deleted a file.
+- Repair: such a lease is now MOVED to a `quarantine` subdirectory and the pass
+  continues. Gated on owner_is_live()==false. The quarantine directory is
+  allow-listed in the directory scan (which otherwise hard-errors on any
+  unrecognised entry).
+
+WHAT I INDEPENDENTLY VERIFIED (I did not author the repair):
+1. The repair source is genuinely merged into the integration branch (verified by
+   git merge-base --is-ancestor), byte-identical to what was tested.
+2. `if owner_is_live(&lease)? { continue; }` is the FIRST statement in the per-lease
+   loop, dominating all three mutating branches. A mutant replacing it with
+   `if false` kills the honour-when-alive test and nothing else.
+3. A mutant removing the quarantine allow-list kills the re-entrancy test.
+4. Reproduced on real Windows hardware before/after: before, sandboxed execution
+   was refused permanently; after, it runs, and the lease is reclaimed in flight.
+5. The allow-list is narrow (only a real directory named `quarantine`; a symlink or
+   a file of that name still hard-errors, i.e. fails closed) and nothing in product
+   code ever reads back out of that directory. No new writable surface.
+
+THE DEFECT I FOUND, AND MEASURED ON THE HARDWARE:
+The repair also added an operator disclosure: when the reclaimed lease recorded
+filesystem ACL grants that cannot be revoked (the SID is stored only as a digest),
+the log names those paths. There is a test literally named
+`reclamation_reports_grants_it_could_not_revoke`. It does NOT test that. It never
+calls the reporting function; it only checks the quarantined FILE still contains
+the grant path, which is satisfied by the move preserving file contents.
+I built a mutant deleting the entire disclosure branch, so the operator is told
+"nothing was left behind on this machine" while un-revokable grants remain.
+The full suite stayed green: 133 passed, 0 failed, 23 ignored -- byte-identical to
+the pristine result, with the mutant provably compiled.
+
+RELEVANT COUNTER-ARGUMENT: even with NO disclosure at all, quarantining still
+dominates the old behaviour, because refusing forever never revoked those grants
+either, and the old documented remedy was "delete the file by hand", which
+disclosed nothing.
+
+QUESTION: does F-28-02-002 warrant FIXED, or must it stay OPEN because of the
+unguarded disclosure branch?
