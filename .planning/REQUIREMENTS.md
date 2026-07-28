@@ -122,40 +122,115 @@ merged at `9c3e3687`, F21-04-03 fixed at `1eb9b5ca`, F21-04-02 disproved at
 - [ ] **F23-05**: A multi-day resume/wait/complete scenario proves cumulative authority, resource, memory, evidence, and delivery state survives restart without a second loop owner.
 - [ ] **F23-06**: `wcore-repomap` becomes a persistent incremental hybrid repository index with content-hash add/change/delete/rename/worktree invalidation, Git-respecting scope, BM25/FTS plus symbols and optional semantic/RRF retrieval, exact-search fallback, provenance/staleness, secret/authority isolation, and warm-start/size/latency/retrieval-quality gates.
 
-**Phase 23B disposition (2026-07-26).** No F23 requirement is marked complete. Full
-grading in `.planning/phases/23B-continuous-agency/23B-PHASE-DISPOSITION.md`.
+**Phase 23B disposition — REVISED 2026-07-28.** All four 23B plans have now executed.
+**No F23 requirement is marked complete and the phase is not closed.** The whole-phase
+grade is `23B-PHASE-DISPOSITION-v2.md` (2026-07-27), superseded on F23-05 and F23-06 by
+the two lanes that landed 2026-07-28; the per-requirement dispositions below are taken
+from each plan's own SUMMARY.
 
-- **F23-02 — INCOMPLETE, substantial delivery.** `wayland-core session` ships every
-  listed verb plus `cancel`, driven against the shipped binary on Linux with captured
-  per-verb evidence; the `reconcile`/`cancel` pair closes live Windows UAT defect D2 end
-  to end. Unmet clauses: macOS not driven, Windows not driven, TUI verbs not added or
-  driven, `retry` live-proved only on its refusal path, binary provenance is base-sha
-  only. Evidence: `23B-01-LIVE-EVIDENCE.md`.
-- **F23-03 — INCOMPLETE, not started.** Plan 23B-02 was not executed.
-- **F23-04 — INCOMPLETE, not started.** Plan 23B-02 was not executed.
-- **F23-05 — INCOMPLETE, not started.** Plan 23B-04 was not executed.
-- **F23-06 — INCOMPLETE, not started.** Plan 23B-03 was not executed; `wcore-repomap`
-  is unchanged.
+- **F23-02 — INCOMPLETE, substantial delivery.** `23B-01-SUMMARY.md`,
+  `status: complete-with-named-open-verbs`. `wayland-core session` ships every listed
+  verb plus `cancel`, driven against the shipped binary on Linux with captured per-verb
+  evidence, and re-proved on current code at lane HEAD with a caller-generated nonce
+  (`F23_01_DRIVE=PASS platform=linux nonce=c3ebab28a4160e31`, driver exit 0) against a
+  binary whose `--build-info` reports the commit under test. The `reconcile`/`cancel`
+  pair closes live Windows UAT defect D2 end to end, including
+  `F23_01_D2_RESOLVED_PERSISTS_ACROSS_RESTART=true`. Unmet clauses: macOS not driven,
+  Windows not driven, TUI verbs not added or driven, `retry` live-proved only on its
+  refusal path. Evidence: `23B-01-LIVE-EVIDENCE.md`.
+- **F23-03 — INCOMPLETE, executed.** Plan 23B-02 ran (`23B-02-SUMMARY.md`,
+  `status: complete-with-named-open-controls`, `requirements_disposition: F23-03:
+  incomplete`). Recall provenance exists and is emitted by the fusion that produced the
+  ranking; correction, forgetting, privacy scoping and retention bounding run through the
+  unmodified access gate, are audited, and are reachable from `/memory` on the shipped
+  surface; a forget reaches the CDC changelog; exclusions are reported rather than silent.
+  **Not met, on the plan's own acceptance mechanism:** F23-03 demands that forgetting be
+  proved by absence from the ACTUAL OUTBOUND PROVIDER REQUEST BODY, and what exists is a
+  proof that the row is deleted and gone from retrieval — the exact shape the plan named
+  as the engineered green to avoid. Nothing was driven live; no TUI leg on any platform;
+  user-model correction precedence not implemented.
+- **F23-04 — INCOMPLETE, not started.** 23B-02 Task 2 was never begun
+  (`23B-02-SUMMARY.md`, `requirements_disposition: F23-04: not-started`).
+  `cache_diagnostics.rs` still emits telemetry only.
+- **F23-05 — INCOMPLETE, IN PROGRESS on a real calendar clock.**
+  Plan 23B-04 executed (`23B-04-SUMMARY.md`,
+  `status: partial-clock-started-two-platforms`, `requirements_disposition: F23-05:
+  in-progress`). Task 1 (the clock policy) is COMPLETE — measured first on
+  `hetzner-dsm` against the release binary at the SHA under test, nonce-bound, exit 0,
+  with a discriminating control pair (identical durable state, 45s real gap →
+  `exceeded=true reason=max_wall_time`; no gap → `exceeded=false`) — then cross-audited.
+  Task 2 is STARTED and running: **Linux day one `2026-07-27T14:21:19Z` (`hetzner-dsm`),
+  Windows day one `2026-07-27T23:54:26Z` (`SEANDESKTOP`), macOS NOT ACHIEVED — nothing
+  run, nothing claimed.** Journey SHA pinned `0ed05322`, asserted through each binary's
+  own `--build-info` on every invocation. Task 3 deliberately unstarted.
+  **The journey cannot be closed before `2026-07-30T23:54:26Z`.** The plan reports
+  none of its four termination states rather than inventing a fifth.
+- **F23-06 — COMPLETE ON ITS MANDATORY CLAUSES, optional semantic layer deferred; still
+  not marked complete here.** Plan 23B-03 executed (`23B-03-SUMMARY.md`,
+  `status: complete-semantic-layer-deferred`, `requirements_disposition: F23-06:
+  complete-with-semantic-layer-deferred`, termination state 2). `wcore-repomap` now holds
+  a persistent, incrementally-maintained SQLite index — content-hash invalidation across
+  add, change, delete, rename and branch switch; Git-respecting scope and worktree
+  identity; bounded BM25-plus-symbol retrieval fused by reciprocal rank with an exact
+  search fallback; provenance and a staleness verdict on every hit; secret isolation
+  proved against the store's own bytes — reachable as
+  `wayland-core index build|status|search|verify`. **All three mandatory platform legs
+  PASS on real hardware**, each with a caller-generated run-time nonce and each against a
+  binary whose `--build-info` source SHA was asserted equal to the commit under test
+  before any measurement. **Every mandatory clause of F23-06 is closed.** The only
+  deferral is the layer F23-06 itself marks OPTIONAL, with the non-claim recorded.
+  Evidence: `23B-03-LIVE-EVIDENCE.md`. Marking the requirement box complete is left to
+  the phase-closing plan, consistent with the rest of this file.
+
+**Phase HIGH 23B-H1 — CLOSED, both halves.** The write-path fix is recorded in
+`23B-H1-DISPOSITION.md`; the residual it explicitly declined to close — journals ALREADY
+on disk carrying an explicit `"effect_receipt":null` failing their checksum on read, i.e.
+silent permanent user data loss — is now recovered with content intact **on Linux, macOS
+and Windows against real binaries, without loosening the integrity check**
+(`23B-H1-RECOVERY-SUMMARY.md`, `status: complete`). Registered as a field regression:
+`intel/FIELD-REGRESSIONS.md` FIELD-JOURNAL-002.
+
+**Escalation still open (unchanged).** All four 23B plans specify that the macOS leg
+builds its own binary on the Mac via `scripts/f23-macos-binary.sh`; the controlling
+execution instruction forbids running Cargo on the Mac. Every macOS row in this phase
+remains OPEN and that script still does not exist. Note that
+`.planning/intel/MACOS-BINARY-IS-OBTAINABLE.md` records a method that does not require
+it, and Phase 28-02 refuted "no macOS binary is obtainable" by executing a downloaded CI
+`aarch64-apple-darwin` artifact.
 
 ### Phase 24 — Gateway, Automation, Channels, and Typed API
 
-**Execution disposition, 2026-07-26.** Phase 24 was dispatched as four plans
-(24-01 wave 1; 24-02 and 24-03 wave 2; 24-04 wave 3). **Only 24-01 was
-executed, and it did not reach its own Complete state.** 24-02, 24-03 and
-24-04 were not started. Every requirement below is therefore recorded with
-an explicit INCOMPLETE disposition naming the unmet clauses, rather than
-left as an unannotated open box — the evidence does not support completing
-any of them, and 24-04 (the only plan that may mark Phase-24 requirements
-complete) never ran. Branch carrying the work:
-`worktree-wf_b7d743bd-954-4`. Evidence:
-`phases/24-gateway-automation-channels-typed-api/24-01-SUMMARY.md` and
-`24-01-GATEWAY-CONTRACT.md`.
+**Execution disposition — REVISED 2026-07-28.** The 2026-07-26 disposition recorded
+that only 24-01 had executed and that 24-02, 24-03 and 24-04 were not started.
+**That is out of date. All four plans have now executed, plus two unplanned
+remediation lanes 24-B and 24-C, and all six SUMMARY files declare
+`status: partial`.** The 2026-07-26 phase report
+(`24-PHASE-REPORT.md`) is superseded for plan status and for the Criterion 1, 3
+and 4 grades; it remains the record of the Windows `cron.rs` creation-flags HIGH
+and of the panel-methodology findings.
 
-- [ ] **F24-01**: One persistent gateway runtime provides install/start/stop/restart/status/doctor/logs/drain, profile isolation, active-turn visibility, graceful recovery, and native service management. — **INCOMPLETE. Partial evidence recorded.** MET: a persistent runtime exists as the mid-layer `wcore-gateway` crate with a lifecycle state machine whose every illegal transition is refused by name; a Windows-safe single-instance lock answering all four documented Windows defect classes; active-turn and pending-delivery counts in a machine-readable status projection; ordered drain distinguishing clean from forced; a native service abstraction with one implementation per OS family and a single platform-selection point; and one HIGH defect found by hardware measurement and fixed (the Windows detach branch set no creation flags, so the scheduler daemon died with its session — 1 of 600 heartbeats). UNMET CLAUSES, each named: (a) **install/start/stop/restart/status/doctor/logs/drain do not exist on the shipped binary** — `crates/wcore-cli/src/gateway.rs` was not written and the registration sites `wcore-cli/src/{lib,main}.rs` were fenced for this wave (SEAM-24-01); (b) **graceful recovery is unproven** — no service was installed, killed and recovered on any platform; (c) **native service management is generated but never executed** — no `launchctl`/`systemctl`/`schtasks` invocation from this crate has reached a real registry; (d) **profile isolation is asserted structurally, not exercised** — no per-profile child was supervised through the gateway.
-- [ ] **F24-02**: The automation plane supports one-shot, interval, cron, natural-language authoring, commitments/heartbeat, hooks/webhooks/polling, history, retry, continuation, and bounded delivery. — **INCOMPLETE. No evidence.** Plan 24-02 was not executed. Every clause is unmet: no scheduling lease, no trigger vocabulary beyond the pre-existing cron expression, no retry, no bounded history beyond the pre-existing ring buffer, no continuation, no natural-language authoring. The persistent scheduling that Phase 22 Success Criterion 4 explicitly deferred to Phase 24 **remains deferred and is now overdue**.
-- [ ] **F24-03**: The channel framework proves setup/auth probes, pairing/access, thread/group binding, profile/agent routing, media normalization, edit/delete/reaction, idempotent outbound delivery, reconnect/reload, and health. — **INCOMPLETE. One clause has partial upstream support.** Plan 24-03 was not executed. All clauses unmet. The single exception worth recording: **idempotent outbound delivery** now has a durable substrate — 24-01's exactly-once ledger, with the compatibility decision recorded (the key lives in the ledger, not on the serialized outbound message, because that struct rejects unknown fields) — but nothing in `wcore-channels` is routed through it.
-- [ ] **F24-04**: A typed API/App SDK provides authenticated roles, idempotent commands, ordered/gap-aware events, compatibility negotiation, remote clients, logs, health, and a redacted support bundle. — **INCOMPLETE. No evidence.** Plan 24-03 (which owns this requirement) was not executed. `crates/wcore-acp` gained no `roles.rs`, `idempotency.rs`, `cursor.rs` or `negotiate.rs`, and no support bundle exists, redacted or otherwise.
-- [ ] **F24-05**: Setup-to-recovery and kill/reconnect/delivery journeys pass on native macOS, Linux, and Windows without lost or duplicate work. — **INCOMPLETE. No evidence.** Plan 24-04 was not executed. No journey driver, no receipt schema, no receipt on any platform. The "without lost or duplicate work" property is proved only at unit level inside `wcore-gateway` against an in-process independent sink — that is not a journey and must not be read as one.
+**The phase is NOT closed and no requirement below is marked complete**
+(`24-04-SUMMARY.md` §8). One thing must not be misread: **`24-04-SUMMARY.md`
+exists to record that 24-04's own four tasks — journey driver, Windows
+interface-evidence decision, three platform journeys, acceptance panel — were
+NEVER STARTED.** That lane was directed at Criterion 4's wiring gap instead. A
+summary is not a completion.
+
+**No macOS and no Windows evidence exists anywhere in this phase** (24-C
+§5.3 records this as a budget outcome, not an impossibility, and names the
+method at `.planning/intel/MACOS-BINARY-IS-OBTAINABLE.md`).
+
+Evidence: `24-01-SUMMARY.md`, `24-02-SUMMARY.md`, `24-03-SUMMARY.md`,
+`24-04-SUMMARY.md`, `24-B-SUMMARY.md`, `24-C-SUMMARY.md`, and the contracts
+`24-01-GATEWAY-CONTRACT.md`, `24-02-AUTOMATION-CONTRACT.md`,
+`24-03-SURFACE-CONTRACT.md`, `24-B-GATEWAY-SURFACE.md`,
+`24-C-ARRIVAL-CONTRACT.md`.
+
+- [ ] **F24-01**: One persistent gateway runtime provides install/start/stop/restart/status/doctor/logs/drain, profile isolation, active-turn visibility, graceful recovery, and native service management. — **INCOMPLETE, and substantially further on than the 2026-07-26 entry recorded.** From 24-01: a persistent runtime as the mid-layer `wcore-gateway` crate with a lifecycle state machine whose every illegal transition is refused by name; a Windows-safe single-instance lock answering all four documented Windows defect classes; active-turn and pending-delivery counts in a machine-readable status projection; ordered drain distinguishing clean from forced; a native service abstraction with one implementation per OS family; and one HIGH found by hardware measurement and fixed (`crates/wcore-cli/src/cron.rs`'s non-Unix spawn branch set no creation flags — 1 of 600 heartbeats before, 600 of 600 after). **Three of the four clauses the 2026-07-26 entry named unmet are now closed by lane 24-B** (`24-B-SUMMARY.md`): (a) **the shipped binary now has the verbs** — `crates/wcore-cli/src/gateway.rs` exists and provides `gateway install|uninstall|start|stop|restart|status|drain|run`; (b) **graceful recovery is proven live on Linux** — install, start, status, hard kill, **platform-driven** recovery, drain, uninstall, against a real `systemctl --user` service; (c) **native service management has reached a real registry** on Linux. **Four HIGH were found by running it and all four fixed.** STILL UNMET: `doctor` and `logs` are a recorded gap asserted by test (the 4/4 panel chose journey-minimal); **profile isolation is still asserted structurally, not exercised** — no per-profile child has been supervised through the gateway; and **no macOS or Windows lifecycle run exists**. Windows residual from 24-01: the `cron.rs` `creation_flags` call site is still unbuilt on Windows.
+- [ ] **F24-02**: The automation plane supports one-shot, interval, cron, natural-language authoring, commitments/heartbeat, hooks/webhooks/polling, history, retry, continuation, and bounded delivery. — **INCOMPLETE, executed. Plan 24-02 ran** (`24-02-SUMMARY.md`, `status: partial`, **termination state 2 of 3 — "Complete with a named gap"**; state 1 explicitly not claimable). Delivered: schedule ownership is a **held lease** rather than an assumption (`crates/wcore-cron/src/lease.rs`, an `flock`/`LockFileEx` exclusive lock on a one-byte sentinel, taken at all three call sites — the gateway automation plane, the session-boot runner in `bootstrap.rs`, and `cron daemon`; leasing only the session side would have left the race exactly where it was). **`flock` and not `fcntl` is load-bearing** — fcntl record locks are process-owned, so the single-owner test could never have gone red. Trigger vocabulary grew from one type to seven with a bound on each; retry and history became enforced rather than documented; all of it is reachable from the shipped binary. **UNMET: the plan's own live criterion is closed on Linux only, and not at all on macOS** — the plan requires live kill-and-continue evidence on both. The persistent scheduling Phase 22 Criterion 4 deferred to Phase 24 is addressed here but not proved on the required platform set.
+- [ ] **F24-03**: The channel framework proves setup/auth probes, pairing/access, thread/group binding, profile/agent routing, media normalization, edit/delete/reaction, idempotent outbound delivery, reconnect/reload, and health. — **INCOMPLETE, executed. Plan 24-03 ran** (`24-03-SUMMARY.md`, `status: partial`). Delivered as tested, mutation-proved modules: `wcore_channels::{probe,binding,media,health}`, `manager::{reload,probe_all,health,edit_on,delete_on,take_registered}`, and `ChannelError::Unsupported` distinct from `Rejected`; the operator surface `wayland-core channel list|probe|health|reload` is on the shipped binary and was live-exercised. Design decisions worth keeping: `Channel::probe` defaults to a **named `Unsupported`, never `Ok`** (a default of Ok is an adapter attesting to a configuration it never read); `channel health` REFUSES when no gateway is running rather than printing an empty list; `reload` treats an unfingerprintable adapter as CHANGED, because the other direction keeps a rotated credential in service. Idempotent outbound delivery was closed by lane 24-C. **Phase verdict: PARTIALLY MET on Linux, NOT MET on macOS or Windows.** Not met: the end-to-end inbound matrix from the binary against a fixture (admit → dedupe → access → bind → route), and any evidence at all on the other two platforms. Two HIGH found live and fixed (F24-D-H1 the channel subsystem silently disabled on any host with no LLM provider key; F24-D-H2 `channel health` reporting a failed registration as an empty installation).
+- [ ] **F24-04**: A typed API/App SDK provides authenticated roles, idempotent commands, ordered/gap-aware events, compatibility negotiation, remote clients, logs, health, and a redacted support bundle. — **INCOMPLETE, but its Success Criterion is MET on Linux.** 24-03 built `wcore_acp::{roles,idempotency,cursor,negotiate}` and `wcore_gateway::support_bundle` (structural elision first, exact-secret scrubbing as backstop, canary-proved live) and then graded itself honestly: *"a criterion that says clients recover event gaps is not met by a module that could let them"* — the cursor was not on the server's request path. **Lane 24e overturned that** (`24-04-SUMMARY.md`): `RolePolicy` and `HttpHandler::authorize_method` put the server in the decision path before dispatch, `GET /sessions/:id/events` is the resume transport with three refusals carrying distinct statuses, `message/send` tees events into a per-session log from a drain task, and stream ids carry a per-process-run uuid so a pre-restart cursor is refused **by name** rather than served another stream's positions. **A typed client that severed its connection having received ZERO bytes recovered, twelve seconds later, an event the server produced entirely after it had gone — over a real socket, against the real server, and against the shipped binary (`wayland-core acp serve --role viewer|operator|admin`), duplicates and losses both zero.** 13 tests, 10 mutations each reddening its named test, plus a live transcript. **LIMITS, named:** recovery and idempotency are proved on the **HTTP/SSE transport only** — REST `/v1` is role-gated but has no resume route and no idempotency handling, and stdio/WebSocket have none of the three — and **everything is Linux only**. The requirement is not marked complete because those limits are real and because closure is 24-04's to claim, and 24-04 never ran.
+- [ ] **F24-05**: Setup-to-recovery and kill/reconnect/delivery journeys pass on native macOS, Linux, and Windows without lost or duplicate work. — **INCOMPLETE. NOT ADDRESSED.** **Plan 24-04's own four tasks were never started** — no journey driver, no receipt schema, no receipt on any platform, no Windows interface-evidence decision, no acceptance panel (`24-04-SUMMARY.md` §8: *"Criterion 5 (live journeys on three platforms): NOT ADDRESSED"*). The `24-04-SUMMARY.md` file records that non-execution; it does not represent it. What DOES exist and must not be mistaken for this requirement: lane 24-C built the **independent delivery sink** the phase could not close Criterion 1's arrival half without, and found a HIGH within one run — **a delivery landed at the destination TWICE across a `kill -9` and a platform-driven restart**. Fixed, re-measured and mutation-proved: of ten deliveries attempted, ten distinct messages exist at an independent destination and none arrived twice; the one delivery whose outcome was UNKNOWN across the kill produced **exactly one** message where before it produced two. That is **Linux only**, is **10 of 12** (the permanently-stalling sink blocks the tick loop — instrument artefact F24-C-M1, not losses), and leaves open the nine adapters inheriting `supports_outbound_idempotency() == false`, for which an outcome-unknown delivery is now correctly **abandoned** rather than duplicated — safe and honest, and not the same thing as delivered.
 
 ### Phase 25 — Remote Reach, Nodes, and Plugin Lifecycle
 
@@ -277,8 +352,8 @@ below; full grading in
 | REQ-native-r12, r13 | Phase 20A | **Open** — unexercised acceptance clauses, not failing tests; see per-requirement notes above. Phase 20A closed COMPLETE on its three Success Criteria without them. |
 | F21-01, F21-02, F21-03, F21-04 | Phase 21 | **F21-01 complete; F21-03 fenced on F21-04-01; F21-02 and F21-04 open** — re-graded 2026-07-27 at `ac94b1d5` in `21-REVERIFICATION.md`. SC1 upgraded NOT-MET → MET WITH STATED EXCEPTIONS (the tool guard is present and live-proven); SC2 MET WITH STATED EXCEPTIONS (F21-04-02 discharged, F21-04-01 fenced); SC3 still NOT MET. Superseded prior text: **All four Open** — adjudicated at `21-04-PHASE-VERDICT.md` §3, base `f2d186f6`. Criterion 1 NOT MET (tool authority confirmed absent and DECLINED); Criteria 2 and 3 MET WITH STATED EXCEPTIONS. Six HIGH findings open: F21-02-01, F21-02-03, F21-02-02's live closure, F21-04-01, F21-04-02, F21-04-03. No seal claimed. |
 | F22-01, F22-02, F22-03, F22-04, F22-05, F22-06, F22-07 | Phase 22 | Pending |
-| F23-01, F23-02, F23-03, F23-04, F23-05, F23-06 | Phase 23 | Pending |
-| F24-01, F24-02, F24-03, F24-04, F24-05 | Phase 24 | **All five Open, with explicit incomplete dispositions** — only plan 24-01 of four executed, and it did not reach its own Complete state. F24-01 has partial evidence (runtime, lock, ledger, drain, service abstraction, one HIGH Windows defect fixed on hardware measurement) with four named unmet clauses. F24-02/03/04/05 have no evidence: plans 24-02, 24-03 and 24-04 were not started. Branch `worktree-wf_b7d743bd-954-4`; evidence `phases/24-.../24-01-SUMMARY.md`. |
+| F23-01, F23-02, F23-03, F23-04, F23-05, F23-06 | Phase 23 (23A + 23B) | **All six Open. Both sub-phases executed; neither is closed.** 23A: 1 of 4 plans executed, Success Criterion 1 **NOT MET** (`23A-04-SUMMARY.md`) — F23-01 explicitly not marked complete, with `revoke` and `rollback` unimplemented and clause 1 satisfied only vacuously; open HIGH F23A-01-H2. 23B: 4 of 4 plans executed. **F23-06's mandatory clauses are COMPLETE on all three platforms** with only the OPTIONAL semantic layer deferred (`23B-03-SUMMARY.md`). **F23-05 is IN PROGRESS on a real calendar clock** — day one taken on Linux and Windows, macOS NOT ACHIEVED, and it **cannot close before `2026-07-30T23:54:26Z`** (`23B-04-SUMMARY.md`). F23-02 and F23-03 incomplete with named open legs; **F23-04 not started**. Phase HIGH 23B-H1 closed on both halves across three platforms. |
+| F24-01, F24-02, F24-03, F24-04, F24-05 | Phase 24 | **All five Open. Revised 2026-07-28 — the prior entry ("only plan 24-01 of four executed") is out of date.** All four plans plus two unplanned lanes (24-B, 24-C) have executed; all six SUMMARY files declare `status: partial`; **the phase is NOT closed and no requirement is marked complete** (`24-04-SUMMARY.md` §8). Criterion 1's delivery-arrival half is **closed on Linux within a stated scope** by 24-C, which found and fixed a HIGH (a delivery landed twice at an independent destination across a `kill -9` and a restart); lane 24-B put the gateway verbs on the shipped binary and proved install→kill→platform recovery→drain→uninstall live on Linux, finding and fixing four more HIGH. **Criterion 4 is MET on Linux, HTTP/SSE only** — a real typed client recovered a real event gap over a real socket against the shipped binary. Criterion 3 PARTIALLY MET on Linux, NOT MET on macOS/Windows. **Criterion 5 NOT ADDRESSED — 24-04's own four tasks were never started, and `24-04-SUMMARY.md` exists to record exactly that.** **No macOS and no Windows evidence exists anywhere in this phase.** Evidence: `phases/24-.../24-{01,02,03,04,B,C}-SUMMARY.md`. |
 | F25-01, F25-02 | Phase 25 | **Both Open** — plan 25-01 executed and terminated in state 2 (complete with a bounded cloud gap), base `frontier/p25-remote-reach`. The provider-neutral contract exists, is oracle-conformant and is proven live across THREE reference backends on `hetzner-dsm` with a normalized diff of EQUIVALENT. **Unmet clause, F25-01:** "lifecycle health" and "attestation" are covered, but the contract is proven on three of the four surfaces it must abstract, so provider-neutrality across the cloud transport is asserted rather than demonstrated. **Unmet clause, F25-02:** "and on one hibernating cloud reference backend" — the cloud leg is UNEXERCISED, no Fly credential exists on any proof host, and the backend fails closed rather than falling back. Second unmet clause, F25-02: "identical authority and cleanup semantics" is proven local↔container↔ssh only. See `phases/25-.../25-01-SUMMARY.md`. |
 | F25-03 | Phase 25 | **Open — NOT STARTED.** Plan 25-02 was not executed. Unmet clauses: all of them — pairing, capability advertisement, revocation, mixed-version behavior, offline recovery, artifact/receipt attribution. Nothing was built and nothing is claimed. |
 | F25-04 | Phase 25 | **Open — NOT STARTED.** Plan 25-02 (the twelve-verb plugin lifecycle) was not executed. Unmet clauses: scaffold, test, sign, inspect, approve, update, rollback, recover, publish and verify-compatibility are all absent from `wayland-core plugin`, which today offers install, list, available, remove and three marketplace verbs. Install and remove alone exist. |
