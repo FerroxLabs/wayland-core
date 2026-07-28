@@ -44,6 +44,12 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
+import {
+  partition as correlate,
+  instrumentFault,
+  matches as correlationMatches,
+} from './f24-correlate.mjs';
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 export const RESULT_SCHEMA = 'wayland.inbound.matrix/1';
@@ -51,11 +57,60 @@ export const RESULT_SCHEMA = 'wayland.inbound.matrix/1';
 // The adapters this driver can point at a fixture, and the inbound transport
 // each one uses. Kept as data so the report can name what it did NOT measure
 // with the same authority as what it did.
-export const ADAPTERS = ['slack', 'whatsapp', 'sms'];
+//
+// `telegram` is the FIRST polling adapter in this matrix, and adding it is the
+// point of the 24-C3-TG-EMAIL lane. Everything measured before it received by
+// WEBHOOK — the platform POSTs, the binary's inbound webhook host answers. A
+// polling adapter inverts that: the binary reaches OUT and, critically,
+// CONSUMES WHAT IT READS. `getUpdates?offset=N` permanently destroys every
+// update below N. That destructive read is the mechanism behind F24-C3-H4's
+// steady-state loss of 5 of 6 messages, and no webhook leg can exercise it.
+// `email` is the SECOND polling adapter and the one that had never been driven
+// at all. It carries the same destructive-read hazard in two forms: a real IMAP
+// server sets `\Seen` on a non-PEEK `FETCH ... RFC822`, and `imap.rs` advances a
+// UID watermark persisted OUTSIDE the session and keyed by
+// (host, user, mailbox), after which it only ever searches above it.
+export const ADAPTERS = ['slack', 'whatsapp', 'sms', 'telegram', 'email'];
+
+// How each adapter's inbound messages reach the binary. A `webhook` adapter
+// needs the inbound webhook host to be bound; a `poll` adapter does not, and
+// conflating the two is what made the old `failEveryLeg` over-report.
+export const TRANSPORT = {
+  slack: 'webhook',
+  whatsapp: 'webhook',
+  sms: 'webhook',
+  telegram: 'poll',
+  email: 'poll',
+};
+
 export const LEGS = ['admit', 'dedupe', 'access', 'bind', 'route'];
 
 const WEBHOOK_PORT = 18787;
 const ARRIVAL_BUDGET_MS = 90_000;
+
+// How long the shipped binary's inbound dedupe cache remembers a message id.
+//
+// Read from the product, not guessed: `bootstrap.rs:3234` and
+// `channel_inbound_host.rs` both construct `InboundSubscriber::new(..., 60_000,
+// 1024)`, and `DedupeCache` measures expiry from `first_seen`
+// (`dispatch/dedupe.rs:107`), so a replay later than this is EXPECTED to produce
+// a second turn — that is the cache working as designed, not a duplicate
+// leaking through.
+//
+// This constant exists because the driver got it wrong first. Email's `admit`
+// leg burns its full arrival budget (its reply can never arrive — see
+// `mailFixtureSupported`), which pushed the dedupe replay to **90.1s** after the
+// original. The leg dutifully reported FAIL, and the product was correct: the
+// entry had expired 30 seconds earlier. A driver that cannot see its own
+// timing writes product defects out of its own latency.
+const DEDUPE_TTL_MS = 60_000;
+
+// Per-adapter arrival budget. An adapter whose reply path is known-blocked must
+// not spend 90s per leg waiting for an arrival that provably cannot come — the
+// waiting is what pushed the dedupe replay outside the TTL above.
+const ARRIVAL_BUDGET_BY_ADAPTER = {
+  email: 20_000,
+};
 
 // ── small process helpers ────────────────────────────────────────────────────
 
@@ -209,9 +264,27 @@ class InboundMatrix {
     this.home = path.join(this.runDir, 'home');
     this.journalPath = path.join(this.runDir, 'arrivals.jsonl');
     this.llmJournalPath = path.join(this.runDir, 'turns.jsonl');
+    // The polling adapter's arrivals land in the TELEGRAM FIXTURE's own
+    // journal, not the shared sink: a Telegram reply leaves through
+    // `sendMessage` on the Bot API base, which is the fixture. That preserves
+    // the load-bearing property unchanged — the journal belongs to a process
+    // the binary does not own and can only write to by completing a real TCP
+    // round trip.
+    this.tgJournalPath = path.join(this.runDir, 'telegram.jsonl');
+    this.mailJournalPath = path.join(this.runDir, 'mail.jsonl');
     this.children = [];
+    // Legs that could not be attempted, with the reason. Distinct from a FAIL
+    // and distinct from a zero: this driver's header rule is that an adapter
+    // whose inbound path cannot be pointed at a fixture is reported NOT
+    // MEASURED with the reason, never as a zero and never as a pass.
+    this.notMeasured = [];
     this.results = [];
     this.notes = [];
+    // Records that carry a correlation token in a form this driver cannot
+    // decode. Never counted as arrivals, never counted as losses — see
+    // `f24-correlate.mjs`.
+    this.faults = [];
+    this.faultKeys = new Set();
 
     // Every secret below is minted here and exists only for this run.
     this.slackBotToken = `xoxb-f24c3-${crypto.randomBytes(12).toString('hex')}`;
@@ -220,6 +293,13 @@ class InboundMatrix {
     this.waAppSecret = crypto.randomBytes(24).toString('hex');
     this.twilioSid = `ACf24c3${crypto.randomBytes(12).toString('hex')}`;
     this.twilioToken = crypto.randomBytes(24).toString('hex');
+    // Minted here exactly like the other four. A Telegram bot token's real
+    // shape is `<bot_id>:<secret>`; the colon is reproduced because it is part
+    // of the URL path the adapter builds (`/bot<token>/getUpdates`) and a
+    // token without one would exercise a path shape no real token takes.
+    this.tgBotToken = `70${crypto.randomInt(100000, 999999)}:AA${crypto.randomBytes(17).toString('base64url')}`;
+    this.mailUser = 'f24c3';
+    this.mailPass = crypto.randomBytes(18).toString('hex');
     this.vaultPassphrase = crypto.randomBytes(24).toString('hex');
   }
 
@@ -261,6 +341,59 @@ class InboundMatrix {
     return m[1];
   }
 
+  /// Mint a throwaway CA-less self-signed certificate for the mail fixture.
+  ///
+  /// Returns the cert path, or `null` with the reason recorded. `null` is NOT a
+  /// failure of the product — it means this host cannot host the fixture, and
+  /// the email legs are reported NOT MEASURED rather than FAILED.
+  mintMailCert() {
+    const dir = path.join(this.runDir, 'tls');
+    fs.mkdirSync(dir, { recursive: true });
+    const cert = path.join(dir, 'fixture-cert.pem');
+    const key = path.join(dir, 'fixture-key.pem');
+    const r = run([
+      'openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+      '-keyout', key, '-out', cert,
+      '-days', '1', '-subj', '/CN=localhost',
+      '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1',
+    ]);
+    if (r.status !== 0 || !fs.existsSync(cert)) {
+      this.note(`openssl could not mint a fixture certificate (rc=${r.status}): ${r.output.slice(0, 400)}`);
+      return null;
+    }
+    this.note(`mail fixture cert ${cert} (${fs.statSync(cert).size} bytes)`);
+    return { cert, key };
+  }
+
+  /// Whether the shipped binary can be pointed at a self-signed IMAP fixture on
+  /// THIS host, and why not when it cannot.
+  ///
+  /// `crates/wcore-channel-email/Cargo.toml:13` pulls `native-tls`, and
+  /// `imap.rs:194` calls `native_tls::TlsConnector::new()`. That resolves to a
+  /// different trust store per platform:
+  ///
+  ///   Linux    OpenSSL, which reads `SSL_CERT_FILE` at runtime  -> reachable
+  ///   macOS    Security.framework / the system keychain, which ignores
+  ///            `SSL_CERT_FILE` entirely                          -> NOT reachable
+  ///   Windows  SChannel / the system cert store, same problem    -> NOT reachable
+  ///
+  /// Reported rather than silently skipped, because "email produced no
+  /// arrivals" on a Mac would otherwise read as a product defect when it is a
+  /// property of the platform's TLS trust store.
+  mailFixtureSupported() {
+    if (process.platform === 'linux') return { ok: true };
+    return {
+      ok: false,
+      reason:
+        `SSL_CERT_FILE cannot redirect native-tls trust on ${process.platform}: ` +
+        `imap.rs:194 uses native_tls::TlsConnector::new(), which is ` +
+        `${process.platform === 'darwin' ? 'Security.framework (system keychain)' : 'SChannel (system cert store)'} ` +
+        `here and ignores the variable. Only the Linux/OpenSSL backend honours it. ` +
+        `A ${process.platform} email leg needs a different mechanism (a trusted-root install, ` +
+        `or a cert-source knob in the adapter) — it is NOT achievable from configuration alone.`,
+    };
+  }
+
   // ── configuration ─────────────────────────────────────────────────────────
 
   writeConfig() {
@@ -276,6 +409,11 @@ class InboundMatrix {
         `"whatsapp.f24c3.app_secret" = "${this.waAppSecret}"`,
         `"sms.f24c3.account_sid" = "${this.twilioSid}"`,
         `"sms.f24c3.auth_token" = "${this.twilioToken}"`,
+        `"telegram.f24c3.bot_token" = "${this.tgBotToken}"`,
+        `"email.f24c3.imap_user" = "${this.mailUser}"`,
+        `"email.f24c3.imap_pass" = "${this.mailPass}"`,
+        `"email.f24c3.smtp_user" = "${this.mailUser}"`,
+        `"email.f24c3.smtp_pass" = "${this.mailPass}"`,
         '',
       ].join('\n'),
       { mode: 0o600 },
@@ -387,6 +525,108 @@ class InboundMatrix {
         '',
       ].join('\n'),
     );
+
+    // ── telegram (POLLING) ────────────────────────────────────────────────
+    //
+    // `api_base_url` is the whole reason this adapter can be measured without a
+    // vendor credential: `TelegramChannel::new`
+    // (crates/wcore-channel-telegram/src/lib.rs:68-75) reads it into `api_base`,
+    // so the SHIPPED constructor the registry calls — not a `#[doc(hidden)]`
+    // test-only one — points at the fixture.
+    //
+    // `allowed_chat_ids` is left EMPTY on purpose. Telegram carries a second,
+    // adapter-local gate at the long-poll layer
+    // (longpoll.rs:267) that the other three adapters do not have. Leaving it
+    // empty means the `access` leg measures the SAME mechanism the other three
+    // are measured on — `[inbound] dm_allowlist`, compared against
+    // `msg.sender_id` in dispatch/access.rs:223 — so a green here means the
+    // shared access path admits and refuses correctly on a polling transport,
+    // not merely that a Telegram-only pre-filter worked. The adapter-local gate
+    // is a separate question and is NOT claimed by this run.
+    //
+    // `long_poll_timeout_secs = 1` keeps the fixture's long-poll short so the
+    // matrix's own settle windows stay meaningful; the fixture additionally
+    // caps its wait via `--max-wait-ms`.
+    fs.writeFileSync(
+      path.join(this.home, 'channels', 'f24c3telegram.toml'),
+      [
+        'name = "f24c3telegram"',
+        'platform = "telegram"',
+        'enabled = true',
+        '',
+        '[options]',
+        'credential_handle = "telegram.f24c3.bot_token"',
+        `api_base_url = "${this.tgUrl}"`,
+        'long_poll_timeout_secs = 1',
+        'allowed_chat_ids = []',
+        '',
+        '[inbound]',
+        'dm = "allowlist"',
+        // Telegram private chats are keyed by the peer: `chat.id` equals the
+        // sender's user id for a DM. The bind leg's second conversation is
+        // therefore a second person, exactly as on WhatsApp and SMS.
+        'dm_allowlist = ["24030001", "24030002"]',
+        'group = "disabled"',
+        'require_mention = true',
+        'tools = "conversational"',
+        '',
+      ].join('\n'),
+    );
+
+    // ── email (POLLING, IMAP inbound + SMTP outbound) ─────────────────────
+    //
+    // `[inbound]` is written BEFORE `[options]` because once `[options.smtp]`
+    // is opened, every following table is nested under it in TOML unless a new
+    // top-level table is declared — and a silently-nested `[inbound]` would
+    // deserialise as an unknown field on `SmtpConfig`, which is
+    // `deny_unknown_fields`. The channel would then be skipped at load and the
+    // whole adapter would read as "no arrivals" for a reason that has nothing
+    // to do with the inbound path.
+    //
+    // `poll_interval_secs = 2` because the matrix's settle windows are 20s: a
+    // default 60s poll would make every negative leg trivially "pass" by never
+    // having polled at all.
+    if (this.mailPorts) {
+      fs.writeFileSync(
+        path.join(this.home, 'channels', 'f24c3email.toml'),
+        [
+          'name = "f24c3email"',
+          'platform = "email"',
+          'enabled = true',
+          '',
+          '[inbound]',
+          'dm = "allowlist"',
+          // Email is peer-keyed: imap.rs:465-471 sets BOTH `sender_id` and
+          // `conversation_id` to the normalised bare addr-spec of `From:`.
+          'dm_allowlist = ["allowed@fixture.invalid", "second@fixture.invalid"]',
+          'group = "disabled"',
+          'require_mention = true',
+          'tools = "conversational"',
+          '',
+          '[options]',
+          'from_address = "bot@fixture.invalid"',
+          '',
+          '[options.smtp]',
+          // `localhost`, not `127.0.0.1`: the fixture certificate carries
+          // `DNS:localhost` and an IP literal would be verified against an IP
+          // SAN instead.
+          'host = "localhost"',
+          `port = ${this.mailPorts.smtp}`,
+          'user_credential_handle = "email.f24c3.smtp_user"',
+          'password_credential_handle = "email.f24c3.smtp_pass"',
+          '',
+          '[options.imap]',
+          'host = "localhost"',
+          `port = ${this.mailPorts.imap}`,
+          'user_credential_handle = "email.f24c3.imap_user"',
+          'password_credential_handle = "email.f24c3.imap_pass"',
+          'mailbox = "INBOX"',
+          'poll_interval_secs = 2',
+          'allowed_senders = []',
+          '',
+        ].join('\n'),
+      );
+    }
   }
 
   // ── the binary ────────────────────────────────────────────────────────────
@@ -427,7 +667,23 @@ class InboundMatrix {
         // credentials-posture refusal to the inbound path. The passphrase is
         // minted for this run and is not a vendor credential.
         WAYLAND_VAULT_PASSPHRASE: this.vaultPassphrase,
-        RUST_LOG: 'wcore_agent::bootstrap=info,wcore_agent::channel_inbound=debug,wcore_channels=debug',
+        // CHILD-SCOPED. This is the whole email seam on Linux: `imap.rs:194`
+        // builds a `native_tls::TlsConnector`, which on Linux is OpenSSL, and
+        // OpenSSL reads `SSL_CERT_FILE` at runtime for its default verify
+        // paths. Setting it here — and only here, on this child — makes the
+        // SHIPPED binary trust the run's throwaway fixture certificate without
+        // touching Rust, without touching the host trust store, and without
+        // outliving the process.
+        //
+        // It has NO effect on the SMTP path. `Cargo.toml:11` selects
+        // `lettre/tokio1-rustls-tls`, whose resolved dependency set contains
+        // `webpki-roots` and not `rustls-native-certs`; `webpki-roots` is a
+        // compiled-in Mozilla root set that reads no file and no environment
+        // variable, on any platform.
+        ...(this.mailCert ? { SSL_CERT_FILE: this.mailCert } : {}),
+        RUST_LOG:
+          'wcore_agent::bootstrap=info,wcore_agent::channel_inbound=debug,' +
+          'wcore_channels=debug,wcore_channel_email=debug',
       },
       windowsHide: true,
     });
@@ -466,12 +722,22 @@ class InboundMatrix {
     return null;
   }
 
-  /// Every leg, failed, with the one reason that caused all of them. Used when
-  /// the runtime bound no inbound listener at all: each leg is reported
+  /// Every WEBHOOK leg, failed, with the one reason that caused all of them.
+  /// Used when the runtime bound no inbound listener: each leg is reported
   /// individually so the count in the banner is the real leg count and not a
   /// zero that a reader could mistake for "nothing ran".
-  failEveryLeg(reason) {
+  ///
+  /// Scoped to the webhook adapters on purpose. Before telegram joined the
+  /// matrix every adapter was a webhook adapter, so failing "every leg" was the
+  /// same set. It is not any more, and failing the polling legs for a missing
+  /// webhook host would destroy the single most interesting measurement this
+  /// driver can now make: whether a runtime that binds NO inbound listener
+  /// (`gateway run`, per F24-C3-H2) nonetheless receives on a POLLING adapter.
+  /// Those are independent paths, and collapsing them would answer a question
+  /// nobody asked while burying the one that matters.
+  failWebhookLegs(reason) {
     for (const adapter of ADAPTERS) {
+      if (TRANSPORT[adapter] !== 'webhook') continue;
       for (const leg of LEGS) {
         this.record(adapter, leg, false, reason);
       }
@@ -498,24 +764,324 @@ class InboundMatrix {
       .map((l) => JSON.parse(l));
   }
 
+  // The telegram fixture's OWN journal, projected into the same
+  // `{text, conversation_id}` shape the sink emits, so one set of leg logic
+  // serves both transports. A Telegram reply is a `sendMessage` call; its
+  // `chat_id` is the conversation.
+  tgArrivals() {
+    if (!fs.existsSync(this.tgJournalPath)) return [];
+    return fs
+      .readFileSync(this.tgJournalPath, 'utf8')
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch {
+          return null;
+        }
+      })
+      .filter((r) => r && r.kind === 'sendMessage')
+      .map((r) => ({ text: r.text, conversation_id: String(r.chat_id) }));
+  }
+
+  /// Every record in the mail fixture's journal.
+  mailJournal() {
+    if (!fs.existsSync(this.mailJournalPath)) return [];
+    return fs
+      .readFileSync(this.mailJournalPath, 'utf8')
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  }
+
+  /// Email replies, projected into the shared arrival shape. An email reply is
+  /// an SMTP delivery; its single envelope recipient is the conversation, which
+  /// matches `imap.rs:465-471` binding `conversation_id` to the peer address.
+  mailArrivals() {
+    return this.mailJournal()
+      .filter((r) => r.kind === 'smtp.delivered')
+      .map((r) => ({ text: r.data, conversation_id: (r.rcpt_to ?? [])[0] ?? null }));
+  }
+
+  /// Which journal an adapter's replies land in.
+  readerFor(adapter) {
+    if (adapter === 'telegram') return () => this.tgArrivals();
+    if (adapter === 'email') return () => this.mailArrivals();
+    return () => this.arrivals();
+  }
+
+  /// Record every leg of an adapter as NOT MEASURED, with the reason.
+  ///
+  /// Deliberately NOT a FAIL. A FAIL asserts the product did the wrong thing;
+  /// this asserts the driver could not ask the question on this host. Conflating
+  /// them is how a harness limitation gets filed as a product regression.
+  recordNotMeasured(adapter, reason) {
+    this.note(`NOT MEASURED ${adapter}: ${reason}`);
+    for (const leg of LEGS) {
+      this.notMeasured.push({ adapter, leg, reason });
+    }
+  }
+
+  /// One leg that ran but cannot be graded, with the reason. Distinct from both
+  /// PASS/FAIL and from NOT MEASURED: the question was asked, and the answer is
+  /// not interpretable.
+  recordIncomplete(adapter, leg, reason) {
+    this.note(`INCOMPLETE ${adapter}/${leg}: ${reason}`);
+    this.notMeasured.push({ adapter, leg, reason, ran: true });
+  }
+
+  /// A separately-named probe of the email INBOUND path, graded on the turns
+  /// journal rather than on arrivals.
+  ///
+  /// THIS IS NOT THE FIVE LEGS AND IS NOT COUNTED AS THEM. 24-C3's legs are
+  /// defined on ARRIVALS — a reply that leaves the binary and lands in a journal
+  /// it does not own. Email's replies leave by SMTP, and SMTP cannot reach a
+  /// fixture (see `mailFixtureSupported` and the webpki-roots note on
+  /// `SSL_CERT_FILE`), so those five legs are recorded NOT MEASURED with the
+  /// measured TLS error. Redefining them onto a weaker observable to reach a
+  /// green would be exactly the "redefine success downward" move this program
+  /// has already paid for once.
+  ///
+  /// What this probe establishes instead is narrower and stated as such: that a
+  /// message delivered to a real IMAP mailbox is fetched by the shipped binary
+  /// over TLS, admitted or refused by the shared access gate, deduplicated, and
+  /// turned into a real model turn against the fixture endpoint. The turns
+  /// journal is written by a DIFFERENT out-of-process fixture than the mailbox,
+  /// so a claim here still cannot be satisfied by the binary talking to itself.
+  runEmailAdmissionProbe() {
+    const tag = crypto.randomBytes(4).toString('hex');
+    const probe = [];
+    const rec = (leg, ok, detail) => {
+      probe.push({ leg, ok, detail });
+      process.stdout.write(`[inbound] ${ok ? 'PASS' : 'FAIL'} email-admission/${leg} — ${detail}\n`);
+    };
+    const fetchCount = () => this.mailJournal().filter((r) => r.kind === 'imap.uid_fetch').length;
+    const send = (sender, text, messageId) =>
+      this.mailControl(
+        JSON.stringify({
+          op: 'deliver',
+          from: sender,
+          to: 'bot@fixture.invalid',
+          subject: 'f24c3 inbound',
+          body: text,
+          messageId: `<${messageId}@fixture.invalid>`,
+        }),
+      );
+    const awaitTurns = (corr, want, budgetSecs) => {
+      for (let i = 0; i < budgetSecs; i += 1) {
+        if (this.turnsFor(corr).length >= want) break;
+        process.stdout.write(
+          `[inbound] awaiting email turn ${corr}: ${this.turnsFor(corr).length}/${want} ` +
+            `after ${i}s ${new Date().toISOString()}\n`,
+        );
+        sleep(1000);
+      }
+      return this.turnsFor(corr);
+    };
+
+    // ── fetch: the binary reads the mailbox over TLS at all ────────────────
+    const fetchesBefore = fetchCount();
+    const c1 = `f24c3-email-admit-${tag}`;
+    const startedAt = Date.now();
+    const s1 = send('allowed@fixture.invalid', `hello ${c1}`, `${tag}.0001`);
+    const t1 = awaitTurns(c1, 1, 30);
+    const fetchesAfter = fetchCount();
+    rec(
+      'fetch',
+      fetchesAfter > fetchesBefore,
+      `deliver=${s1.output.slice(0, 60)} | imap.uid_fetch before=${fetchesBefore} after=${fetchesAfter} ` +
+        `(the shipped binary completed a TLS IMAP session against the fixture cert via SSL_CERT_FILE)`,
+    );
+
+    // ── admit ──────────────────────────────────────────────────────────────
+    rec(
+      'admit',
+      t1.length === 1,
+      `turns(fixture-journal)=${t1.length} want=1 for an allowlisted From:`,
+    );
+
+    // ── dedupe: SAME RFC Message-ID, new UID, inside the TTL ───────────────
+    const before2 = this.turnsFor(c1).length;
+    send('allowed@fixture.invalid', `hello ${c1}`, `${tag}.0001`);
+    const replayDelayMs = Date.now() - startedAt;
+    this.settle(15_000);
+    const after2 = this.turnsFor(c1).length;
+    const c1b = `f24c3-email-dedupe-control-${tag}`;
+    send('allowed@fixture.invalid', `hello ${c1b}`, `${tag}.0002`);
+    const control = awaitTurns(c1b, 1, 30);
+    if (replayDelayMs >= DEDUPE_TTL_MS) {
+      rec(
+        'dedupe',
+        false,
+        `NOT GRADEABLE: replay landed +${replayDelayMs}ms, outside the ${DEDUPE_TTL_MS}ms TTL`,
+      );
+    } else {
+      rec(
+        'dedupe',
+        after2 === before2 && control.length === 1,
+        `replay of the SAME Message-ID at +${replayDelayMs}ms (inside the ${DEDUPE_TTL_MS}ms TTL) | ` +
+          `turns before=${before2} after=${after2} (want equal) | ` +
+          `positive-control fresh Message-ID turns=${control.length} want=1`,
+      );
+    }
+
+    // ── access ─────────────────────────────────────────────────────────────
+    const c3 = `f24c3-email-access-${tag}`;
+    const fetchesBeforeDenied = fetchCount();
+    send('denied@fixture.invalid', `hello ${c3}`, `${tag}.0003`);
+    this.settle(20_000);
+    const t3 = this.turnsFor(c3);
+    const fetchesAfterDenied = fetchCount();
+    rec(
+      'access',
+      t3.length === 0 && t1.length === 1 && fetchesAfterDenied > fetchesBeforeDenied,
+      `denied From: turns=${t3.length} want=0 | CONTROL admit-turn=${t1.length} want=1 | ` +
+        `CONTROL the denied message WAS fetched (uid_fetch ${fetchesBeforeDenied}->${fetchesAfterDenied}), ` +
+        `so the zero is a refusal at the access gate and not an unread mailbox`,
+    );
+
+    // ── bind: explicitly NOT claimed ───────────────────────────────────────
+    const c4 = `f24c3-email-bind-${tag}`;
+    send('second@fixture.invalid', `hello ${c4}`, `${tag}.0004`);
+    const t4 = awaitTurns(c4, 1, 30);
+    rec(
+      'second-sender-admitted',
+      t4.length === 1,
+      `turns=${t4.length} want=1 for the second allowlisted sender. NOTE this is NOT the ` +
+        `24-C3 bind leg: the turns journal carries no conversation id, so it cannot show the two ` +
+        `senders bound to DISTINCT sessions. That remains unproven for email.`,
+    );
+
+    // ── steady state ───────────────────────────────────────────────────────
+    //
+    // THE LEG THIS LANE EXISTS FOR. F24-C3-H4 lost 5 of 6 messages in steady
+    // state on Telegram because two managers competed for one destructive read.
+    // Email carries the same hazard in two forms — `\Seen` on a non-PEEK fetch,
+    // and a UID watermark persisted OUTSIDE the session and keyed by
+    // (host, user, mailbox), so two pollers race on a shared file. That root
+    // cause is reported fixed, but email had never been driven at all, so
+    // nothing had confirmed the fix reaches it or that email has no second loss
+    // mode of its own.
+    //
+    // Six messages, delivered back-to-back rather than one at a time, because a
+    // race needs concurrency to show. Graded on three independent counts:
+    // deliveries the fixture accepted, fetches the fixture served, and turns a
+    // DIFFERENT fixture journalled.
+    const steadyN = 6;
+    const steadyTokens = [];
+    const fetchesBeforeSteady = fetchCount();
+    for (let i = 0; i < steadyN; i += 1) {
+      const c = `f24c3-email-steady${i}-${tag}`;
+      steadyTokens.push(c);
+      send('allowed@fixture.invalid', `hello ${c}`, `${tag}.10${i}`);
+    }
+    for (let i = 0; i < 60; i += 1) {
+      const got = steadyTokens.filter((c) => this.turnsFor(c).length >= 1).length;
+      if (got >= steadyN) break;
+      process.stdout.write(
+        `[inbound] steady state: ${got}/${steadyN} turns after ${i}s ${new Date().toISOString()}\n`,
+      );
+      sleep(1000);
+    }
+    const perToken = steadyTokens.map((c) => this.turnsFor(c).length);
+    const turnsSeen = perToken.filter((n) => n >= 1).length;
+    const duplicated = perToken.filter((n) => n > 1).length;
+    const fetchesAfterSteady = fetchCount();
+    const report = this.mailReport();
+    const steadyMsgs =
+      report && report.ok ? report.messages.filter((m) => m.uid >= 1000 + 5) : [];
+    const multiFetched = steadyMsgs.filter((m) => m.fetch_count > 1).length;
+    const unfetched = steadyMsgs.filter((m) => m.fetch_count === 0).length;
+    rec(
+      'steady-state',
+      turnsSeen === steadyN && duplicated === 0 && unfetched === 0 && multiFetched === 0,
+      `${steadyN} messages delivered back-to-back | turns per message=${JSON.stringify(perToken)} ` +
+        `(want all 1) | delivered-and-never-fetched=${unfetched} want=0 | ` +
+        `fetched-more-than-once=${multiFetched} want=0 | ` +
+        `imap.uid_fetch ${fetchesBeforeSteady}->${fetchesAfterSteady} | ` +
+        `max_concurrent_imap_sessions=${report && report.ok ? report.max_concurrent_imap_sessions : 'unread'} ` +
+        `(2 would mean two pollers competing on one mailbox; 0 would mean nothing polled at all)`,
+    );
+
+    this.emailProbe = probe;
+    return probe;
+  }
+
   // Every count in the report comes through here: the ARRIVALS JOURNAL of a
   // process the binary does not own, filtered to the correlation token this
   // leg planted. Never a status line, never a log line the product wrote.
-  arrivalsFor(correlation) {
-    return this.arrivals().filter((a) => (a.text ?? '').includes(correlation));
+  //
+  // The filter is `f24-correlate.mjs`, NOT `String.includes`. The exact
+  // substring test this replaced is wrong for any adapter that transforms
+  // outbound text, and Telegram does: `parse_mode` defaults to MarkdownV2 and
+  // the adapter escapes the full body, so `f24c3-telegram-admit-9f3a1c02`
+  // reaches the journal as `f24c3\-telegram\-admit\-9f3a1c02`. An exact matcher
+  // scores a perfectly delivered reply ZERO — which is how a lane on this
+  // program came to report `replied=0` for eight replies that had all arrived.
+  //
+  // Anything carrying the token in a form the matcher cannot decode is recorded
+  // as an INSTRUMENT FAULT and is counted as neither an arrival nor a loss.
+  arrivalsFor(correlation, reader) {
+    const records = (reader ?? (() => this.arrivals()))();
+    const { arrivals, faults } = correlate(records, correlation);
+    for (const f of faults) {
+      const key = `${correlation} ${f.text}`;
+      if (this.faultKeys.has(key)) continue;
+      this.faultKeys.add(key);
+      this.faults.push({
+        correlation,
+        conversation_id: f.conversation_id ?? null,
+        text: f.text,
+        why: 'token present in an encoding this driver does not model',
+      });
+      process.stdout.write(
+        `[inbound] INSTRUMENT FAULT ${correlation}: journal record carries the token in an ` +
+          `undecodable form — run is INCOMPLETE, not a loss. text=${JSON.stringify(f.text)}\n`,
+      );
+    }
+    return arrivals;
   }
 
   turnsFor(correlation) {
-    return this.turns().filter((t) => t.correlation === correlation);
+    // The turns journal records the correlation the fixture extracted from the
+    // INBOUND text, which no adapter escapes, so an exact compare is correct
+    // here. The fault detector still runs so an unexpected transform on the
+    // inbound side cannot pass silently either.
+    const all = this.turns();
+    const exact = all.filter((t) => t.correlation === correlation);
+    if (exact.length === 0) {
+      for (const t of all) {
+        if (t.correlation && instrumentFault(t.correlation, correlation)) {
+          const key = `turn ${correlation} ${t.correlation}`;
+          if (this.faultKeys.has(key)) continue;
+          this.faultKeys.add(key);
+          this.faults.push({
+            correlation,
+            conversation_id: null,
+            text: t.correlation,
+            why: 'turn journal correlation is a mangled form of the planted token',
+          });
+        }
+      }
+    }
+    return exact;
   }
 
   // Wait until `want` arrivals carry `correlation`, or the budget expires.
   // Returns whatever it saw — the caller decides whether that is a pass. A
   // waiter that threw on timeout would turn "zero arrived" into a crash and
   // lose the very number the access leg needs.
-  awaitArrivals(correlation, want, budgetMs = ARRIVAL_BUDGET_MS) {
+  awaitArrivals(correlation, want, reader, budgetMs = ARRIVAL_BUDGET_MS) {
     const deadline = Date.now() + budgetMs;
-    let seen = this.arrivalsFor(correlation);
+    let seen = this.arrivalsFor(correlation, reader);
     let i = 0;
     while (seen.length < want && Date.now() < deadline) {
       i += 1;
@@ -523,7 +1089,7 @@ class InboundMatrix {
         `[inbound] awaiting ${correlation}: ${seen.length}/${want} after ${i}s ${new Date().toISOString()}\n`,
       );
       sleep(1000);
-      seen = this.arrivalsFor(correlation);
+      seen = this.arrivalsFor(correlation, reader);
     }
     return seen;
   }
@@ -548,25 +1114,56 @@ class InboundMatrix {
 
   // ── per-adapter matrix ────────────────────────────────────────────────────
 
-  // `send` maps (sender, conversation, text, messageId) to a signed platform
-  // request. `expectConversation` maps a conversation id to the id the sink
-  // should see on the way out — for Slack they are the same string; for
-  // Twilio the outbound `To` is the inbound `From`.
+  // `build` maps (sender, conversation, text, messageId) to a signed platform
+  // request for a WEBHOOK adapter. `expectConversation` maps a conversation id
+  // to the id the sink should see on the way out — for Slack they are the same
+  // string; for Twilio the outbound `To` is the inbound `From`.
+  //
+  // A POLLING adapter has no request to sign and no endpoint to POST to: the
+  // platform does not push, the binary pulls. Such an adapter supplies `inject`
+  // instead of `build`, which hands the message to the fixture's own control
+  // plane and lets the binary come and get it. Everything downstream of
+  // injection — the five legs, the falsifiers, the controls — is identical, and
+  // that is deliberate: a polling adapter measured by a different yardstick
+  // could not be compared against the webhook three.
   runMatrix(adapter, cfg) {
     const tag = crypto.randomBytes(4).toString('hex');
     const url = `http://127.0.0.1:${WEBHOOK_PORT}/webhooks/${cfg.channelName}`;
+    const reader = this.readerFor(adapter);
+    const budget = ARRIVAL_BUDGET_BY_ADAPTER[adapter] ?? ARRIVAL_BUDGET_MS;
+    const deliver = ({ sender, conversation, text, messageId }) =>
+      cfg.inject
+        ? cfg.inject({ sender, conversation, text, messageId })
+        : post(cfg.build({ url, sender, conversation, text, messageId }));
+
+    this.note(`matrix ${adapter} transport=${TRANSPORT[adapter]} tag=${tag}`);
 
     // ── admit + route ─────────────────────────────────────────────────────
     const c1 = `f24c3-${adapter}-admit-${tag}`;
-    const r1 = post(cfg.build({ url, sender: cfg.allowed, conversation: cfg.conv1, text: `hello ${c1}`, messageId: `${tag}.0001` }));
-    const seen1 = this.awaitArrivals(c1, 1);
+    const r1 = deliver({ sender: cfg.allowed, conversation: cfg.conv1, text: `hello ${c1}`, messageId: `${tag}.0001` });
+    const originalAt = Date.now();
+    const seen1 = this.awaitArrivals(c1, 1, reader, budget);
     this.record(
       adapter,
       'admit',
       seen1.length === 1,
       `POST rc=${r1.status} ${r1.output.split('\n')[0]} | arrivals(journal)=${seen1.length} want=1 | turns(fixture-journal)=${this.turnsFor(c1).length}`,
     );
-    const routed = seen1.length === 1 && (seen1[0].text ?? '').includes(c1);
+    // MUST go through the correlate module, not `String.includes`.
+    //
+    // This exact line survived the first pass of the matcher repair and the
+    // live run caught it: `arrivalsFor` was fixed, so telegram/admit counted
+    // its arrival correctly, while telegram/route re-tested the SAME arrival
+    // with the OLD exact matcher and reported
+    // `carries_correlation=false` against
+    // `"F24C3\-REPLY f24c3\-telegram\-admit\-67ac190c"` — a reply that had
+    // plainly arrived, in the right conversation, carrying the right token.
+    //
+    // Recorded because it is the sharpest available demonstration of
+    // LANE-BRIEF §6b-ii: a PARTIAL instrument repair leaves the defect live at
+    // whichever call site was missed, and the missed site fails in exactly the
+    // direction that blames the product.
+    const routed = seen1.length === 1 && correlationMatches(seen1[0].text, c1);
     const convOk = seen1.length === 1 && seen1[0].conversation_id === cfg.expectConversation;
     this.record(
       adapter,
@@ -580,31 +1177,58 @@ class InboundMatrix {
     // ── dedupe ────────────────────────────────────────────────────────────
     // Replay the IDENTICAL platform message id. A second arrival means the
     // inbound dedupe cache did not absorb the platform's own retry.
-    const beforeDedupe = this.arrivalsFor(c1).length;
-    const r2 = post(cfg.build({ url, sender: cfg.allowed, conversation: cfg.conv1, text: `hello ${c1}`, messageId: `${tag}.0001` }));
+    const beforeDedupe = this.arrivalsFor(c1, reader).length;
+    const beforeTurns = this.turnsFor(c1).length;
+    const r2 = deliver({ sender: cfg.allowed, conversation: cfg.conv1, text: `hello ${c1}`, messageId: `${tag}.0001` });
+    // How far into the product's dedupe window this replay landed. Recorded
+    // BEFORE the settle, because the settle is not part of the window that
+    // matters — the entry's TTL runs from when the ORIGINAL was first seen.
+    const replayDelayMs = Date.now() - originalAt;
     this.settle(20_000);
-    const afterDedupe = this.arrivalsFor(c1).length;
+    const afterDedupe = this.arrivalsFor(c1, reader).length;
     // Positive control: a DIFFERENT id from the same sender in the same
     // conversation must still get through, or "no second arrival" would be
     // satisfied by an adapter that had simply stopped working.
     const c1b = `f24c3-${adapter}-dedupe-control-${tag}`;
-    post(cfg.build({ url, sender: cfg.allowed, conversation: cfg.conv1, text: `hello ${c1b}`, messageId: `${tag}.0002` }));
-    const control = this.awaitArrivals(c1b, 1);
-    this.record(
-      adapter,
-      'dedupe',
-      afterDedupe === beforeDedupe && control.length === 1,
-      `replay POST rc=${r2.status} | arrivals before=${beforeDedupe} after=${afterDedupe} (want equal) | positive-control fresh-id arrivals=${control.length} want=1`,
-    );
+    deliver({ sender: cfg.allowed, conversation: cfg.conv1, text: `hello ${c1b}`, messageId: `${tag}.0002` });
+    const control = this.awaitArrivals(c1b, 1, reader, budget);
+    const afterTurns = this.turnsFor(c1).length;
+
+    // TIMING GUARD. The product's dedupe entry expires `DEDUPE_TTL_MS` after the
+    // original was first seen. A replay that lands after that is SUPPOSED to
+    // produce a second turn, so grading it FAIL would write a product defect out
+    // of the driver's own latency — which is exactly what happened on the first
+    // email run (replay at 90.1s against a 60s TTL, reported FAIL, product
+    // correct). Not measurable is not the same as broken.
+    if (replayDelayMs >= DEDUPE_TTL_MS) {
+      this.recordIncomplete(
+        adapter,
+        'dedupe',
+        `replay landed ${replayDelayMs}ms after the original, which is OUTSIDE the product's ` +
+          `${DEDUPE_TTL_MS}ms dedupe TTL (bootstrap.rs:3234). A second delivery here is correct ` +
+          `behaviour, so this leg cannot distinguish a dedupe defect from an expired entry. ` +
+          `arrivals before=${beforeDedupe} after=${afterDedupe} | turns before=${beforeTurns} after=${afterTurns}`,
+      );
+    } else {
+      this.record(
+        adapter,
+        'dedupe',
+        afterDedupe === beforeDedupe && afterTurns === beforeTurns && control.length === 1,
+        `replay rc=${r2.status} at +${replayDelayMs}ms (inside the ${DEDUPE_TTL_MS}ms TTL) | ` +
+          `arrivals before=${beforeDedupe} after=${afterDedupe} (want equal) | ` +
+          `turns before=${beforeTurns} after=${afterTurns} (want equal) | ` +
+          `positive-control fresh-id arrivals=${control.length} want=1`,
+      );
+    }
 
     // ── access ────────────────────────────────────────────────────────────
     // A sender outside the allowlist. The control is the admit leg above,
     // which used the same transport, the same signature scheme and the same
     // settle window and DID arrive.
     const c3 = `f24c3-${adapter}-access-${tag}`;
-    const r3 = post(cfg.build({ url, sender: cfg.denied, conversation: cfg.conv1, text: `hello ${c3}`, messageId: `${tag}.0003` }));
+    const r3 = deliver({ sender: cfg.denied, conversation: cfg.convDenied ?? cfg.conv1, text: `hello ${c3}`, messageId: `${tag}.0003` });
     this.settle(20_000);
-    const seen3 = this.arrivalsFor(c3);
+    const seen3 = this.arrivalsFor(c3, reader);
     const turns3 = this.turnsFor(c3);
     // The control is LOAD-BEARING, not decoration. Measured at the pre-fix
     // binary, this leg passed on all three adapters purely because the whole
@@ -625,16 +1249,13 @@ class InboundMatrix {
     // A second conversation from the same allowed sender. Two arrivals, two
     // distinct conversation ids: a single shared session would collapse them.
     const c4 = `f24c3-${adapter}-bind-${tag}`;
-    post(
-      cfg.build({
-        url,
-        sender: cfg.secondSender ?? cfg.allowed,
-        conversation: cfg.conv2,
-        text: `hello ${c4}`,
-        messageId: `${tag}.0004`,
-      }),
-    );
-    const seen4 = this.awaitArrivals(c4, 1);
+    deliver({
+      sender: cfg.secondSender ?? cfg.allowed,
+      conversation: cfg.conv2,
+      text: `hello ${c4}`,
+      messageId: `${tag}.0004`,
+    });
+    const seen4 = this.awaitArrivals(c4, 1, reader, budget);
     const distinct =
       seen1.length === 1 &&
       seen4.length === 1 &&
@@ -656,6 +1277,7 @@ class InboundMatrix {
     fs.mkdirSync(this.runDir, { recursive: true });
     fs.rmSync(this.journalPath, { force: true });
     fs.rmSync(this.llmJournalPath, { force: true });
+    fs.rmSync(this.tgJournalPath, { force: true });
     fs.rmSync(this.home, { recursive: true, force: true });
 
     this.sinkUrl = this.startFixture(
@@ -674,6 +1296,55 @@ class InboundMatrix {
     );
     this.note(`llm fixture ${this.llmUrl} journal=${this.llmJournalPath}`);
 
+    // The Telegram Bot API fixture. Started BEFORE the config is written
+    // because the config has to name its bound port, and before the binary
+    // because `TelegramChannel::start()` calls `deleteWebhook` immediately.
+    this.tgUrl = this.startFixture(
+      'f24-tg-fixture.mjs',
+      ['--journal', this.tgJournalPath, '--token', this.tgBotToken, '--max-wait-ms', '1500'],
+      /TGFIX_READY url=(\S+)/,
+      'telegram.log',
+    );
+    this.note(`telegram fixture ${this.tgUrl} journal=${this.tgJournalPath}`);
+
+    // ── mail fixture ──────────────────────────────────────────────────────
+    const supported = this.mailFixtureSupported();
+    if (!supported.ok) {
+      this.recordNotMeasured('email', supported.reason);
+    } else {
+      const pem = this.mintMailCert();
+      if (!pem) {
+        this.recordNotMeasured(
+          'email',
+          'openssl is not available on this host, so no fixture certificate could be minted',
+        );
+      } else {
+        this.mailCert = pem.cert;
+        const banner = this.startFixture(
+          'f24-mail-fixture.mjs',
+          [
+            '--journal', this.mailJournalPath,
+            '--cert', pem.cert,
+            '--key', pem.key,
+            '--user', this.mailUser,
+            '--pass', this.mailPass,
+          ],
+          /MAILFIX_READY (imap=\S+ smtp=\S+ control=\S+)/,
+          'mail.log',
+        );
+        const kv = Object.fromEntries(banner.split(' ').map((p) => p.split('=')));
+        this.mailPorts = {
+          imap: Number(kv.imap),
+          smtp: Number(kv.smtp),
+          control: Number(kv.control),
+        };
+        this.note(
+          `mail fixture imap=${this.mailPorts.imap} smtp=${this.mailPorts.smtp} ` +
+            `control=${this.mailPorts.control} journal=${this.mailJournalPath}`,
+        );
+      }
+    }
+
     this.writeConfig();
 
     const info = this.buildInfo();
@@ -685,15 +1356,22 @@ class InboundMatrix {
     this.startBinary();
     const healthz = this.waitForWebhookHost();
 
-    // The runtime bound no inbound listener. Do NOT proceed into the matrix:
-    // every POST would go to a closed port and every leg would fail after its
-    // full 90s arrival budget, reporting fifteen separate mysteries instead of
-    // the one fact that explains all of them.
+    // The runtime bound no inbound listener. Do NOT run the WEBHOOK legs: every
+    // POST would go to a closed port and every leg would fail after its full
+    // 90s arrival budget, reporting separate mysteries instead of the one fact
+    // that explains all of them.
+    //
+    // The POLLING legs still run. They reach the binary by a path that never
+    // touches the webhook host, so a missing host says nothing about them —
+    // and "does a runtime with no webhook host still receive by polling?" is
+    // exactly the question F24-C3-H2 left open.
     if (healthz === null) {
-      this.failEveryLeg(
+      this.failWebhookLegs(
         `no inbound listener on 127.0.0.1:${WEBHOOK_PORT} — runtime=${this.args.runtime} ` +
           `hosts no inbound webhook host`,
       );
+      this.runTelegramMatrix();
+      this.runEmailMatrix();
       return this.finish(info, digest, null);
     }
 
@@ -766,7 +1444,210 @@ class InboundMatrix {
         }),
     });
 
+    this.runTelegramMatrix();
+    this.runEmailMatrix();
+
     return this.finish(info, digest, healthz);
+  }
+
+  /// Talk to the mail fixture's control plane over a raw line-delimited TCP
+  /// socket. A child process again, for the same reason `post()` is one: this
+  /// driver's waits are blocking, so its own event loop is parked.
+  mailControl(line) {
+    if (!this.mailPorts) return { status: 1, output: 'no mail fixture' };
+    const script = `
+      const net = require('node:net');
+      const s = net.connect(${this.mailPorts.control}, '127.0.0.1', () => s.write(${JSON.stringify(`${line}\n`)}));
+      let buf = '';
+      s.setEncoding('utf8');
+      s.on('data', (c) => {
+        buf += c;
+        if (buf.includes('\\n')) { process.stdout.write(buf.trim()); s.end(); }
+      });
+      s.on('error', (e) => { process.stdout.write('MAILCTL FAILED ' + e.message); process.exit(1); });
+    `;
+    return run([process.execPath, '-e', script], { timeout: 30_000 });
+  }
+
+  mailReport() {
+    if (!this.mailPorts) return null;
+    const r = this.mailControl('report');
+    try {
+      return JSON.parse(r.output);
+    } catch {
+      return { ok: false, raw: r.output, rc: r.status };
+    }
+  }
+
+  /// Wait until the binary's IMAP poller has SELECTed the mailbox at least once.
+  ///
+  /// This is not politeness, it is correctness. `imap.rs` seeds its watermark to
+  /// `UIDNEXT - 1` on the first connect with no persisted watermark, precisely so
+  /// that pre-existing mail is not replayed as new inbound. A message delivered
+  /// to the fixture BEFORE that first SELECT would therefore be seeded past and
+  /// never fetched — and every email leg would read as zero arrivals for a
+  /// reason that has nothing to do with the inbound path.
+  waitForImapSeed(budgetSecs = 60) {
+    for (let i = 0; i < budgetSecs; i += 1) {
+      const selects = this.mailJournal().filter((r) => r.kind === 'imap.select');
+      if (selects.length > 0) {
+        this.note(
+          `imap poller seeded after ${i}s: select#1 exists=${selects[0].exists} ` +
+            `uid_next=${selects[0].uid_next} (watermark seeds to uid_next-1)`,
+        );
+        return selects[0];
+      }
+      const logins = this.mailJournal().filter((r) => r.kind === 'imap.login');
+      process.stdout.write(
+        `[inbound] waiting for imap seed: ${i}s logins=${logins.length} ${new Date().toISOString()}\n`,
+      );
+      sleep(1000);
+    }
+    this.note('imap poller never SELECTed the mailbox within 60s');
+    return null;
+  }
+
+  /// The email matrix. Runs only when the mail fixture is up on this host.
+  runEmailMatrix() {
+    if (!this.mailPorts) {
+      // `recordNotMeasured` already fired at fixture-start time with the real
+      // reason; do not add a second, vaguer one.
+      return;
+    }
+
+    const seeded = this.waitForImapSeed();
+    if (!seeded) {
+      this.recordNotMeasured(
+        'email',
+        'the binary never completed an IMAP SELECT against the fixture within 60s — see ' +
+          'mail.jsonl for whether TLS, LOGIN or SELECT is where it stopped',
+      );
+      return;
+    }
+
+    this.runEmailAdmissionProbe();
+
+    // Only NOW decide how to record the five arrival legs, from what the fixture
+    // actually observed rather than from what the lockfile predicts.
+    const report = this.mailReport();
+    const smtpDelivered = report && report.ok ? report.smtp_delivered_total : null;
+    const smtpFailures = report && report.ok ? report.smtp_failures : [];
+    if (smtpDelivered === 0 && smtpFailures.length > 0) {
+      const err = String(smtpFailures[0].detail ?? '').split('\n')[0];
+      this.recordNotMeasured(
+        'email',
+        `the reply could not leave: ${smtpFailures.length} SMTP session(s) reached the fixture, ` +
+          `completed EHLO and STARTTLS, and were refused at certificate verification — "${err}". ` +
+          `SMTP is lettre/rustls (Cargo.toml:11, tokio1-rustls-tls) whose resolved deps include ` +
+          `webpki-roots and NOT rustls-native-certs; webpki-roots is a compiled-in root set that ` +
+          `reads no file and no environment variable, so SSL_CERT_FILE cannot redirect it on ANY ` +
+          `platform. The five legs of 24-C3 are defined on arrivals, so they are NOT MEASURED for ` +
+          `email — see email_admission_probe for what WAS established about the inbound half.`,
+      );
+    } else if (smtpDelivered > 0) {
+      // The prediction was wrong and the reply DID leave. Say so loudly rather
+      // than keeping the NOT MEASURED path that was written for it.
+      this.note(
+        `UNEXPECTED: ${smtpDelivered} SMTP deliveries succeeded. The webpki-roots analysis is ` +
+          `wrong and the email arrival legs should be run for real.`,
+      );
+      this.recordNotMeasured(
+        'email',
+        `SMTP unexpectedly delivered ${smtpDelivered} message(s); the arrival legs were not ` +
+          `wired for this case and must be re-run rather than inferred`,
+      );
+    } else {
+      this.recordNotMeasured(
+        'email',
+        `no SMTP delivery and no SMTP failure was observed at the fixture — the reply path was ` +
+          `never even attempted, which is a different fact from being refused`,
+      );
+    }
+  }
+
+  /// The polling adapter's matrix. Split out of `execute` so it can be reached
+  /// from BOTH the healthy path and the no-webhook-host path without
+  /// duplicating the descriptor.
+  runTelegramMatrix() {
+    this.runMatrix('telegram', {
+      channelName: 'f24c3telegram',
+      // Telegram private chats are peer-keyed: `chat.id == from.id` for a DM,
+      // and `longpoll.rs:364` binds `conversation_id` to `chat.id`. So sender
+      // and conversation are the same number, exactly as on WhatsApp and SMS.
+      allowed: '24030001',
+      denied: '24039999',
+      conv1: '24030001',
+      conv2: '24030002',
+      convDenied: '24039999',
+      secondSender: '24030002',
+      expectConversation: '24030001',
+      expectConversation2: '24030002',
+      inject: ({ sender, conversation, text, messageId }) =>
+        this.tgSubmit({ sender, conversation, text, messageId }),
+    });
+  }
+
+  /// Hand a message to the Telegram fixture's queue. The binary then has to
+  /// come and get it with `getUpdates`, destroying it as it confirms — which is
+  /// the mechanism a webhook leg cannot exercise at all.
+  ///
+  /// `messageId` is passed through as the Telegram `message_id` so the dedupe
+  /// leg can replay the SAME platform message under a fresh `update_id`. That
+  /// is the real shape of a Telegram redelivery: `update_id` is the transport's
+  /// cursor and always advances, while `message_id` identifies the message —
+  /// and `message_id` is what the dedupe cache keys on.
+  tgSubmit({ sender, conversation, text, messageId }) {
+    // The matrix's ids are `<tag>.NNNN`; Telegram message ids are integers.
+    // Map deterministically so a replay of `${tag}.0001` produces the SAME
+    // integer and therefore genuinely tests dedupe rather than sending a new
+    // message that happens to carry the same text.
+    const numericId = Number.parseInt(String(messageId).split('.').pop(), 10);
+    const payload = JSON.stringify({
+      token: this.tgBotToken,
+      chatId: String(conversation),
+      senderId: String(sender),
+      username: `u${sender}`,
+      text,
+      messageId: numericId,
+    });
+    const script = `
+      fetch(${JSON.stringify(`${this.tgUrl}/__control/submit`)}, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: ${JSON.stringify(payload)},
+      })
+        .then(async (res) => {
+          const t = await res.text();
+          process.stdout.write('SUBMIT ' + res.status + ' ' + t);
+        })
+        .catch((e) => { process.stdout.write('SUBMIT FAILED ' + e.message); process.exit(1); });
+    `;
+    return run([process.execPath, '-e', script], { timeout: 30_000 });
+  }
+
+  /// The Telegram fixture's independent report: how many updates it was given,
+  /// which poll consumed each one, and the maximum number of `getUpdates`
+  /// requests it ever had open at once.
+  ///
+  /// `max_concurrent_getupdates` is the F24-C3-H4 observable and it is counted
+  /// in ANOTHER PROCESS from overlapping open requests — it is not a log line
+  /// the binary prints about itself. 2 means two managers are competing for one
+  /// token (and whatever the unsubscribed one wins is destroyed on read); 1 is
+  /// correct; 0 means the runtime polled NOTHING, which is a distinct failing
+  /// answer, so a "fix" that works by starting nothing cannot pass here.
+  tgReport() {
+    if (!this.tgUrl) return null;
+    const script = `
+      fetch(${JSON.stringify(`${this.tgUrl}/__control/report`)})
+        .then(async (r) => process.stdout.write(await r.text()))
+        .catch((e) => { process.stdout.write(JSON.stringify({ ok: false, error: e.message })); });
+    `;
+    const r = run([process.execPath, '-e', script], { timeout: 30_000 });
+    try {
+      return JSON.parse(r.output);
+    } catch {
+      return { ok: false, raw: r.output, rc: r.status };
+    }
   }
 
   /// Assemble, persist and return the result document. Split out of `execute`
@@ -774,6 +1655,11 @@ class InboundMatrix {
   /// as a full run — a result a reader has to interpret differently depending
   /// on how the run ended is a result that gets misread.
   finish(info, digest, healthz) {
+    // Read the fixture's report BEFORE the result document is assembled, so a
+    // fixture that has already been reaped shows up as an explicit failure to
+    // read rather than as a silently absent field.
+    const tgReport = this.tgReport();
+    const mailReport = this.mailReport();
     const result = {
       schema: RESULT_SCHEMA,
       platform: this.args.platform,
@@ -801,6 +1687,35 @@ class InboundMatrix {
       core_log_tail: this.coreLogTail ?? null,
       arrivals_total: this.arrivals().length,
       turns_total: this.turns().length,
+      // Byte counts, because a journal that exists and is EMPTY is a different
+      // fact from a journal that was never created, and both read as "0
+      // arrivals" if you only count parsed records.
+      journal_bytes: {
+        arrivals: fs.existsSync(this.journalPath) ? fs.statSync(this.journalPath).size : null,
+        turns: fs.existsSync(this.llmJournalPath) ? fs.statSync(this.llmJournalPath).size : null,
+        telegram: fs.existsSync(this.tgJournalPath) ? fs.statSync(this.tgJournalPath).size : null,
+        mail: fs.existsSync(this.mailJournalPath) ? fs.statSync(this.mailJournalPath).size : null,
+        core_log: this.coreLog && fs.existsSync(this.coreLog) ? fs.statSync(this.coreLog).size : null,
+      },
+      telegram_journal: this.tgJournalPath,
+      telegram_arrivals_total: this.tgArrivals().length,
+      // The independent, out-of-process observable for F24-C3-H4.
+      telegram_fixture_report: tgReport,
+      mail_journal: this.mailJournalPath,
+      mail_arrivals_total: this.mailArrivals().length,
+      mail_fixture_report: mailReport,
+      mail_ssl_cert_file: this.mailCert ?? null,
+      // Deliberately a SEPARATE key from `results`. This is not the five legs.
+      email_admission_probe: this.emailProbe ?? null,
+      // Legs the driver could not ask about on this host, with the reason.
+      // NOT failures — see `recordNotMeasured`.
+      not_measured: this.notMeasured,
+      // INCOMPLETE, not LOSS. See `f24-correlate.mjs`: a non-empty list here
+      // means at least one journal record carried a planted token in a form
+      // this driver cannot decode, so its numbers are not trustworthy in either
+      // direction and the run must not be read as a clean result.
+      instrument_fault: this.faults.length > 0,
+      instrument_faults: this.faults,
       results: this.results,
       notes: this.notes,
       finished_at: new Date().toISOString(),
@@ -873,19 +1788,67 @@ if (isMain) {
     m.cleanup();
   }
   const failed = result.results.filter((r) => !r.ok);
+  const expectedLegs = ADAPTERS.length * LEGS.length;
+  // A NOT-MEASURED leg is accounted for, but it is not a leg that ran. The
+  // total must reconcile or the driver is losing legs silently.
+  const accounted = result.results.length + (result.not_measured ?? []).length;
+  const ranEverything = accounted === expectedLegs && (result.not_measured ?? []).length === 0;
+  // Three outcomes, not two. INCOMPLETE is what an instrument fault produces:
+  // a token reached the journal in a form this driver cannot decode, so the
+  // numbers are untrustworthy in BOTH directions and the run must not be read
+  // as either a clean green or an honest red.
+  const verdict = result.instrument_fault
+    ? 'INCOMPLETE'
+    : failed.length === 0 && ranEverything
+      ? 'GREEN'
+      : 'RED';
   process.stdout.write(
-    `\nINBOUND MATRIX ${failed.length === 0 ? 'GREEN' : 'RED'} platform=${result.platform} ` +
+    `\nINBOUND MATRIX ${verdict} platform=${result.platform} ` +
       `runtime=${result.runtime} ` +
-      `legs=${result.results.length} failed=${failed.length} ` +
-      `arrivals_total=${result.arrivals_total} turns_total=${result.turns_total}\n`,
+      `legs=${result.results.length}/${expectedLegs} failed=${failed.length} ` +
+      `not_measured=${(result.not_measured ?? []).length} accounted=${accounted}/${expectedLegs} ` +
+      `arrivals_total=${result.arrivals_total} telegram_arrivals=${result.telegram_arrivals_total} ` +
+      `mail_arrivals=${result.mail_arrivals_total} ` +
+      `turns_total=${result.turns_total} instrument_fault=${result.instrument_fault}\n`,
   );
+  if (result.mail_fixture_report && result.mail_fixture_report.ok) {
+    const m = result.mail_fixture_report;
+    process.stdout.write(
+      `  mail fixture: mailbox=${m.mailbox_total} imap_sessions=${m.imap_session_total} ` +
+        `max_concurrent_imap=${m.max_concurrent_imap_sessions} ` +
+        `smtp_delivered=${m.smtp_delivered_total} smtp_failures=${m.smtp_failures.length}\n`,
+    );
+    for (const msg of m.messages) {
+      process.stdout.write(
+        `    uid=${msg.uid} from=${msg.from} fetches=${msg.fetch_count} seen_by=${msg.seen_by}\n`,
+      );
+    }
+  }
+  for (const p of result.email_admission_probe ?? []) {
+    process.stdout.write(`  ${p.ok ? 'PASS' : 'FAIL'} email-admission/${p.leg}: ${p.detail}\n`);
+  }
+  for (const n of result.not_measured ?? []) {
+    process.stdout.write(`  NOT-MEASURED ${n.adapter}/${n.leg}: ${n.reason}\n`);
+  }
+  if (result.telegram_fixture_report && result.telegram_fixture_report.ok) {
+    const t = result.telegram_fixture_report;
+    process.stdout.write(
+      `  telegram fixture: submitted=${t.submitted_total} still_pending=${JSON.stringify(t.still_pending)} ` +
+        `polls=${t.poll_total} max_concurrent_getupdates=${t.max_concurrent_getupdates}\n`,
+    );
+  }
   for (const r of result.results) {
     process.stdout.write(`  ${r.ok ? 'PASS' : 'FAIL'} ${r.adapter}/${r.leg}: ${r.detail}\n`);
   }
-  // Non-zero on any failed leg, so this is usable as a gate. It also exits
-  // non-zero when it ran no legs at all — a driver that measured nothing must
-  // not be readable as a pass.
-  process.exit(failed.length === 0 && result.results.length === ADAPTERS.length * LEGS.length ? 0 : 1);
+  for (const f of result.instrument_faults ?? []) {
+    process.stdout.write(`  INSTRUMENT-FAULT ${f.correlation}: ${f.why} — ${JSON.stringify(f.text)}\n`);
+  }
+  // Distinct exit codes so a caller can tell the three apart. Exit status alone
+  // was never enough here anyway (see LANE-BRIEF §3.2), but collapsing
+  // INCOMPLETE into RED would let a harness defect be filed as a product
+  // regression — which is precisely the failure this state exists to prevent.
+  //   0 = GREEN, 1 = RED, 3 = INCOMPLETE (instrument fault)
+  process.exit(verdict === 'GREEN' ? 0 : verdict === 'INCOMPLETE' ? 3 : 1);
 }
 
 export { InboundMatrix, slackRequest, whatsappRequest, twilioRequest };

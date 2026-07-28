@@ -1,0 +1,295 @@
+[inbound] sink http://127.0.0.1:42297 journal=/root/f24tg-run4/arrivals.jsonl
+[inbound] llm fixture http://127.0.0.1:46589 journal=/root/f24tg-run4/turns.jsonl
+[inbound] telegram fixture http://127.0.0.1:38187 journal=/root/f24tg-run4/telegram.jsonl
+[inbound] mail fixture cert /root/f24tg-run4/tls/fixture-cert.pem (1151 bytes)
+[inbound] mail fixture imap=36287 smtp=43489 control=37531 journal=/root/f24tg-run4/mail.jsonl
+[inbound] binary /root/wayland-24-c3-tg-email/target/release/wayland-core
+[inbound] build-info wayland-core 0.12.25 (source ddc7cfe069e333946665eae9568e5e82a67d9a92)
+[inbound] sha256 0e5468a23ea23a447178a23b9cba937e2b4f634588feed973343c8f2f26c724b
+[inbound] runtime=json-stream argv=["--json-stream"]
+[inbound] waiting for webhook host: 0s 2026-07-28T19:58:12.201Z
+[inbound] waiting for webhook host: 1s 2026-07-28T19:58:13.245Z
+[inbound] waiting for webhook host: 2s 2026-07-28T19:58:14.290Z
+[inbound] webhook host up after 3s: HEALTHZ 200 ok
+[inbound] matrix slack transport=webhook tag=7c78b687
+[inbound] awaiting f24c3-slack-admit-7c78b687: 0/1 after 1s 2026-07-28T19:58:15.397Z
+[inbound] PASS slack/admit — POST rc=0 HTTP 200 | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+[inbound] PASS slack/route — reply_text="F24C3-REPLY f24c3-slack-admit-7c78b687" carries_correlation=true conversation_id="D24C3ONE" want="D24C3ONE"
+[inbound] settling: 1s 2026-07-28T19:58:16.453Z
+[inbound] settling: 2s 2026-07-28T19:58:17.453Z
+[inbound] settling: 3s 2026-07-28T19:58:18.453Z
+[inbound] settling: 4s 2026-07-28T19:58:19.453Z
+[inbound] settling: 5s 2026-07-28T19:58:20.453Z
+[inbound] settling: 6s 2026-07-28T19:58:21.454Z
+[inbound] settling: 7s 2026-07-28T19:58:22.454Z
+[inbound] settling: 8s 2026-07-28T19:58:23.454Z
+[inbound] settling: 9s 2026-07-28T19:58:24.454Z
+[inbound] settling: 10s 2026-07-28T19:58:25.455Z
+[inbound] settling: 11s 2026-07-28T19:58:26.455Z
+[inbound] settling: 12s 2026-07-28T19:58:27.455Z
+[inbound] settling: 13s 2026-07-28T19:58:28.455Z
+[inbound] settling: 14s 2026-07-28T19:58:29.456Z
+[inbound] settling: 15s 2026-07-28T19:58:30.456Z
+[inbound] settling: 16s 2026-07-28T19:58:31.456Z
+[inbound] settling: 17s 2026-07-28T19:58:32.456Z
+[inbound] settling: 18s 2026-07-28T19:58:33.456Z
+[inbound] settling: 19s 2026-07-28T19:58:34.457Z
+[inbound] settling: 20s 2026-07-28T19:58:35.457Z
+[inbound] awaiting f24c3-slack-dedupe-control-7c78b687: 0/1 after 1s 2026-07-28T19:58:36.512Z
+[inbound] PASS slack/dedupe — replay rc=0 at +1056ms (inside the 60000ms TTL) | arrivals before=1 after=1 (want equal) | turns before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+[inbound] settling: 1s 2026-07-28T19:58:37.566Z
+[inbound] settling: 2s 2026-07-28T19:58:38.567Z
+[inbound] settling: 3s 2026-07-28T19:58:39.567Z
+[inbound] settling: 4s 2026-07-28T19:58:40.567Z
+[inbound] settling: 5s 2026-07-28T19:58:41.567Z
+[inbound] settling: 6s 2026-07-28T19:58:42.568Z
+[inbound] settling: 7s 2026-07-28T19:58:43.568Z
+[inbound] settling: 8s 2026-07-28T19:58:44.568Z
+[inbound] settling: 9s 2026-07-28T19:58:45.568Z
+[inbound] settling: 10s 2026-07-28T19:58:46.568Z
+[inbound] settling: 11s 2026-07-28T19:58:47.569Z
+[inbound] settling: 12s 2026-07-28T19:58:48.569Z
+[inbound] settling: 13s 2026-07-28T19:58:49.569Z
+[inbound] settling: 14s 2026-07-28T19:58:50.569Z
+[inbound] settling: 15s 2026-07-28T19:58:51.569Z
+[inbound] settling: 16s 2026-07-28T19:58:52.570Z
+[inbound] settling: 17s 2026-07-28T19:58:53.570Z
+[inbound] settling: 18s 2026-07-28T19:58:54.570Z
+[inbound] settling: 19s 2026-07-28T19:58:55.570Z
+[inbound] settling: 20s 2026-07-28T19:58:56.570Z
+[inbound] PASS slack/access — denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+[inbound] awaiting f24c3-slack-bind-7c78b687: 0/1 after 1s 2026-07-28T19:58:57.626Z
+[inbound] PASS slack/bind — conv1="D24C3ONE" conv2="D24C3TWO" want2="D24C3TWO" distinct=true
+[inbound] matrix whatsapp transport=webhook tag=e996d632
+[inbound] awaiting f24c3-whatsapp-admit-e996d632: 0/1 after 1s 2026-07-28T19:58:58.680Z
+[inbound] PASS whatsapp/admit — POST rc=0 HTTP 200 | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+[inbound] PASS whatsapp/route — reply_text="F24C3-REPLY f24c3-whatsapp-admit-e996d632" carries_correlation=true conversation_id="15552220000" want="15552220000"
+[inbound] settling: 1s 2026-07-28T19:58:59.732Z
+[inbound] settling: 2s 2026-07-28T19:59:00.732Z
+[inbound] settling: 3s 2026-07-28T19:59:01.732Z
+[inbound] settling: 4s 2026-07-28T19:59:02.733Z
+[inbound] settling: 5s 2026-07-28T19:59:03.733Z
+[inbound] settling: 6s 2026-07-28T19:59:04.733Z
+[inbound] settling: 7s 2026-07-28T19:59:05.733Z
+[inbound] settling: 8s 2026-07-28T19:59:06.733Z
+[inbound] settling: 9s 2026-07-28T19:59:07.734Z
+[inbound] settling: 10s 2026-07-28T19:59:08.734Z
+[inbound] settling: 11s 2026-07-28T19:59:09.734Z
+[inbound] settling: 12s 2026-07-28T19:59:10.734Z
+[inbound] settling: 13s 2026-07-28T19:59:11.734Z
+[inbound] settling: 14s 2026-07-28T19:59:12.735Z
+[inbound] settling: 15s 2026-07-28T19:59:13.735Z
+[inbound] settling: 16s 2026-07-28T19:59:14.735Z
+[inbound] settling: 17s 2026-07-28T19:59:15.735Z
+[inbound] settling: 18s 2026-07-28T19:59:16.736Z
+[inbound] settling: 19s 2026-07-28T19:59:17.736Z
+[inbound] settling: 20s 2026-07-28T19:59:18.736Z
+[inbound] awaiting f24c3-whatsapp-dedupe-control-e996d632: 0/1 after 1s 2026-07-28T19:59:19.790Z
+[inbound] PASS whatsapp/dedupe — replay rc=0 at +1053ms (inside the 60000ms TTL) | arrivals before=1 after=1 (want equal) | turns before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+[inbound] settling: 1s 2026-07-28T19:59:20.844Z
+[inbound] settling: 2s 2026-07-28T19:59:21.844Z
+[inbound] settling: 3s 2026-07-28T19:59:22.845Z
+[inbound] settling: 4s 2026-07-28T19:59:23.845Z
+[inbound] settling: 5s 2026-07-28T19:59:24.845Z
+[inbound] settling: 6s 2026-07-28T19:59:25.845Z
+[inbound] settling: 7s 2026-07-28T19:59:26.846Z
+[inbound] settling: 8s 2026-07-28T19:59:27.846Z
+[inbound] settling: 9s 2026-07-28T19:59:28.846Z
+[inbound] settling: 10s 2026-07-28T19:59:29.846Z
+[inbound] settling: 11s 2026-07-28T19:59:30.846Z
+[inbound] settling: 12s 2026-07-28T19:59:31.847Z
+[inbound] settling: 13s 2026-07-28T19:59:32.847Z
+[inbound] settling: 14s 2026-07-28T19:59:33.847Z
+[inbound] settling: 15s 2026-07-28T19:59:34.847Z
+[inbound] settling: 16s 2026-07-28T19:59:35.847Z
+[inbound] settling: 17s 2026-07-28T19:59:36.848Z
+[inbound] settling: 18s 2026-07-28T19:59:37.848Z
+[inbound] settling: 19s 2026-07-28T19:59:38.848Z
+[inbound] settling: 20s 2026-07-28T19:59:39.848Z
+[inbound] PASS whatsapp/access — denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+[inbound] awaiting f24c3-whatsapp-bind-e996d632: 0/1 after 1s 2026-07-28T19:59:40.902Z
+[inbound] PASS whatsapp/bind — conv1="15552220000" conv2="15552221111" want2="15552221111" distinct=true
+[inbound] matrix sms transport=webhook tag=79b3f95a
+[inbound] awaiting f24c3-sms-admit-79b3f95a: 0/1 after 1s 2026-07-28T19:59:41.959Z
+[inbound] PASS sms/admit — POST rc=0 HTTP 200 | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+[inbound] PASS sms/route — reply_text="F24C3-REPLY f24c3-sms-admit-79b3f95a" carries_correlation=true conversation_id="+15553330000" want="+15553330000"
+[inbound] settling: 1s 2026-07-28T19:59:43.013Z
+[inbound] settling: 2s 2026-07-28T19:59:44.014Z
+[inbound] settling: 3s 2026-07-28T19:59:45.014Z
+[inbound] settling: 4s 2026-07-28T19:59:46.014Z
+[inbound] settling: 5s 2026-07-28T19:59:47.014Z
+[inbound] settling: 6s 2026-07-28T19:59:48.015Z
+[inbound] settling: 7s 2026-07-28T19:59:49.015Z
+[inbound] settling: 8s 2026-07-28T19:59:50.015Z
+[inbound] settling: 9s 2026-07-28T19:59:51.015Z
+[inbound] settling: 10s 2026-07-28T19:59:52.015Z
+[inbound] settling: 11s 2026-07-28T19:59:53.016Z
+[inbound] settling: 12s 2026-07-28T19:59:54.016Z
+[inbound] settling: 13s 2026-07-28T19:59:55.016Z
+[inbound] settling: 14s 2026-07-28T19:59:56.016Z
+[inbound] settling: 15s 2026-07-28T19:59:57.017Z
+[inbound] settling: 16s 2026-07-28T19:59:58.017Z
+[inbound] settling: 17s 2026-07-28T19:59:59.017Z
+[inbound] settling: 18s 2026-07-28T20:00:00.017Z
+[inbound] settling: 19s 2026-07-28T20:00:01.017Z
+[inbound] settling: 20s 2026-07-28T20:00:02.018Z
+[inbound] awaiting f24c3-sms-dedupe-control-79b3f95a: 0/1 after 1s 2026-07-28T20:00:03.070Z
+[inbound] PASS sms/dedupe — replay rc=0 at +1054ms (inside the 60000ms TTL) | arrivals before=1 after=1 (want equal) | turns before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+[inbound] settling: 1s 2026-07-28T20:00:04.125Z
+[inbound] settling: 2s 2026-07-28T20:00:05.126Z
+[inbound] settling: 3s 2026-07-28T20:00:06.126Z
+[inbound] settling: 4s 2026-07-28T20:00:07.126Z
+[inbound] settling: 5s 2026-07-28T20:00:08.126Z
+[inbound] settling: 6s 2026-07-28T20:00:09.126Z
+[inbound] settling: 7s 2026-07-28T20:00:10.127Z
+[inbound] settling: 8s 2026-07-28T20:00:11.127Z
+[inbound] settling: 9s 2026-07-28T20:00:12.127Z
+[inbound] settling: 10s 2026-07-28T20:00:13.127Z
+[inbound] settling: 11s 2026-07-28T20:00:14.127Z
+[inbound] settling: 12s 2026-07-28T20:00:15.128Z
+[inbound] settling: 13s 2026-07-28T20:00:16.128Z
+[inbound] settling: 14s 2026-07-28T20:00:17.128Z
+[inbound] settling: 15s 2026-07-28T20:00:18.128Z
+[inbound] settling: 16s 2026-07-28T20:00:19.128Z
+[inbound] settling: 17s 2026-07-28T20:00:20.129Z
+[inbound] settling: 18s 2026-07-28T20:00:21.129Z
+[inbound] settling: 19s 2026-07-28T20:00:22.129Z
+[inbound] settling: 20s 2026-07-28T20:00:23.129Z
+[inbound] PASS sms/access — denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+[inbound] awaiting f24c3-sms-bind-79b3f95a: 0/1 after 1s 2026-07-28T20:00:24.182Z
+[inbound] PASS sms/bind — conv1="+15553330000" conv2="+15553331111" want2="+15553331111" distinct=true
+[inbound] matrix telegram transport=poll tag=c417518b
+[inbound] awaiting f24c3-telegram-admit-c417518b: 0/1 after 1s 2026-07-28T20:00:25.238Z
+[inbound] PASS telegram/admit — POST rc=0 SUBMIT 200 {"ok":true,"update_id":1} | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+[inbound] PASS telegram/route — reply_text="F24C3\\-REPLY f24c3\\-telegram\\-admit\\-c417518b" carries_correlation=true conversation_id="24030001" want="24030001"
+[inbound] settling: 1s 2026-07-28T20:00:26.293Z
+[inbound] settling: 2s 2026-07-28T20:00:27.293Z
+[inbound] settling: 3s 2026-07-28T20:00:28.294Z
+[inbound] settling: 4s 2026-07-28T20:00:29.294Z
+[inbound] settling: 5s 2026-07-28T20:00:30.294Z
+[inbound] settling: 6s 2026-07-28T20:00:31.294Z
+[inbound] settling: 7s 2026-07-28T20:00:32.295Z
+[inbound] settling: 8s 2026-07-28T20:00:33.295Z
+[inbound] settling: 9s 2026-07-28T20:00:34.295Z
+[inbound] settling: 10s 2026-07-28T20:00:35.295Z
+[inbound] settling: 11s 2026-07-28T20:00:36.295Z
+[inbound] settling: 12s 2026-07-28T20:00:37.296Z
+[inbound] settling: 13s 2026-07-28T20:00:38.296Z
+[inbound] settling: 14s 2026-07-28T20:00:39.296Z
+[inbound] settling: 15s 2026-07-28T20:00:40.296Z
+[inbound] settling: 16s 2026-07-28T20:00:41.296Z
+[inbound] settling: 17s 2026-07-28T20:00:42.296Z
+[inbound] settling: 18s 2026-07-28T20:00:43.297Z
+[inbound] settling: 19s 2026-07-28T20:00:44.297Z
+[inbound] settling: 20s 2026-07-28T20:00:45.297Z
+[inbound] awaiting f24c3-telegram-dedupe-control-c417518b: 0/1 after 1s 2026-07-28T20:00:46.353Z
+[inbound] PASS telegram/dedupe — replay rc=0 at +1056ms (inside the 60000ms TTL) | arrivals before=1 after=1 (want equal) | turns before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+[inbound] settling: 1s 2026-07-28T20:00:47.407Z
+[inbound] settling: 2s 2026-07-28T20:00:48.408Z
+[inbound] settling: 3s 2026-07-28T20:00:49.408Z
+[inbound] settling: 4s 2026-07-28T20:00:50.408Z
+[inbound] settling: 5s 2026-07-28T20:00:51.408Z
+[inbound] settling: 6s 2026-07-28T20:00:52.409Z
+[inbound] settling: 7s 2026-07-28T20:00:53.409Z
+[inbound] settling: 8s 2026-07-28T20:00:54.409Z
+[inbound] settling: 9s 2026-07-28T20:00:55.409Z
+[inbound] settling: 10s 2026-07-28T20:00:56.409Z
+[inbound] settling: 11s 2026-07-28T20:00:57.410Z
+[inbound] settling: 12s 2026-07-28T20:00:58.410Z
+[inbound] settling: 13s 2026-07-28T20:00:59.410Z
+[inbound] settling: 14s 2026-07-28T20:01:00.410Z
+[inbound] settling: 15s 2026-07-28T20:01:01.410Z
+[inbound] settling: 16s 2026-07-28T20:01:02.411Z
+[inbound] settling: 17s 2026-07-28T20:01:03.411Z
+[inbound] settling: 18s 2026-07-28T20:01:04.411Z
+[inbound] settling: 19s 2026-07-28T20:01:05.411Z
+[inbound] settling: 20s 2026-07-28T20:01:06.411Z
+[inbound] PASS telegram/access — denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+[inbound] awaiting f24c3-telegram-bind-c417518b: 0/1 after 1s 2026-07-28T20:01:07.467Z
+[inbound] PASS telegram/bind — conv1="24030001" conv2="24030002" want2="24030002" distinct=true
+[inbound] imap poller seeded after 0s: select#1 exists=0 uid_next=1000 (watermark seeds to uid_next-1)
+[inbound] awaiting email turn f24c3-email-admit-c9a8474d: 0/1 after 0s 2026-07-28T20:01:08.497Z
+[inbound] awaiting email turn f24c3-email-admit-c9a8474d: 0/1 after 1s 2026-07-28T20:01:09.497Z
+[inbound] awaiting email turn f24c3-email-admit-c9a8474d: 0/1 after 2s 2026-07-28T20:01:10.498Z
+[inbound] PASS email-admission/fetch — deliver={"ok":true,"uid":1000} | imap.uid_fetch before=0 after=1 (the shipped binary completed a TLS IMAP session against the fixture cert via SSL_CERT_FILE)
+[inbound] PASS email-admission/admit — turns(fixture-journal)=1 want=1 for an allowlisted From:
+[inbound] settling: 1s 2026-07-28T20:01:11.525Z
+[inbound] settling: 2s 2026-07-28T20:01:12.525Z
+[inbound] settling: 3s 2026-07-28T20:01:13.526Z
+[inbound] settling: 4s 2026-07-28T20:01:14.526Z
+[inbound] settling: 5s 2026-07-28T20:01:15.526Z
+[inbound] settling: 6s 2026-07-28T20:01:16.526Z
+[inbound] settling: 7s 2026-07-28T20:01:17.526Z
+[inbound] settling: 8s 2026-07-28T20:01:18.527Z
+[inbound] settling: 9s 2026-07-28T20:01:19.527Z
+[inbound] settling: 10s 2026-07-28T20:01:20.527Z
+[inbound] settling: 11s 2026-07-28T20:01:21.527Z
+[inbound] settling: 12s 2026-07-28T20:01:22.527Z
+[inbound] settling: 13s 2026-07-28T20:01:23.528Z
+[inbound] settling: 14s 2026-07-28T20:01:24.528Z
+[inbound] settling: 15s 2026-07-28T20:01:25.528Z
+[inbound] awaiting email turn f24c3-email-dedupe-control-c9a8474d: 0/1 after 0s 2026-07-28T20:01:26.554Z
+[inbound] PASS email-admission/dedupe — replay of the SAME Message-ID at +3054ms (inside the 60000ms TTL) | turns before=1 after=1 (want equal) | positive-control fresh Message-ID turns=1 want=1
+[inbound] settling: 1s 2026-07-28T20:01:27.582Z
+[inbound] settling: 2s 2026-07-28T20:01:28.582Z
+[inbound] settling: 3s 2026-07-28T20:01:29.582Z
+[inbound] settling: 4s 2026-07-28T20:01:30.582Z
+[inbound] settling: 5s 2026-07-28T20:01:31.582Z
+[inbound] settling: 6s 2026-07-28T20:01:32.583Z
+[inbound] settling: 7s 2026-07-28T20:01:33.583Z
+[inbound] settling: 8s 2026-07-28T20:01:34.583Z
+[inbound] settling: 9s 2026-07-28T20:01:35.583Z
+[inbound] settling: 10s 2026-07-28T20:01:36.583Z
+[inbound] settling: 11s 2026-07-28T20:01:37.584Z
+[inbound] settling: 12s 2026-07-28T20:01:38.584Z
+[inbound] settling: 13s 2026-07-28T20:01:39.584Z
+[inbound] settling: 14s 2026-07-28T20:01:40.584Z
+[inbound] settling: 15s 2026-07-28T20:01:41.585Z
+[inbound] settling: 16s 2026-07-28T20:01:42.585Z
+[inbound] settling: 17s 2026-07-28T20:01:43.585Z
+[inbound] settling: 18s 2026-07-28T20:01:44.585Z
+[inbound] settling: 19s 2026-07-28T20:01:45.585Z
+[inbound] settling: 20s 2026-07-28T20:01:46.586Z
+[inbound] PASS email-admission/access — denied From: turns=0 want=0 | CONTROL admit-turn=1 want=1 | CONTROL the denied message WAS fetched (uid_fetch 3->4), so the zero is a refusal at the access gate and not an unread mailbox
+[inbound] awaiting email turn f24c3-email-bind-c9a8474d: 0/1 after 0s 2026-07-28T20:01:47.612Z
+[inbound] PASS email-admission/second-sender-admitted — turns=1 want=1 for the second allowlisted sender. NOTE this is NOT the 24-C3 bind leg: the turns journal carries no conversation id, so it cannot show the two senders bound to DISTINCT sessions. That remains unproven for email.
+[inbound] NOT MEASURED email: the reply could not leave: 22 SMTP session(s) reached the fixture, completed EHLO and STARTTLS, and were refused at certificate verification — "C00C4836E4760000:error:0A000416:SSL routines:ssl3_read_bytes:ssl/tls alert certificate unknown:../deps/openssl/openssl/ssl/record/rec_layer_s3.c:916:SSL alert number 46". SMTP is lettre/rustls (Cargo.toml:11, tokio1-rustls-tls) whose resolved deps include webpki-roots and NOT rustls-native-certs; webpki-roots is a compiled-in root set that reads no file and no environment variable, so SSL_CERT_FILE cannot redirect it on ANY platform. The five legs of 24-C3 are defined on arrivals, so they are NOT MEASURED for email — see email_admission_probe for what WAS established about the inbound half.
+
+INBOUND MATRIX RED platform=linux runtime=json-stream legs=20/25 failed=0 not_measured=5 accounted=25/25 arrivals_total=9 telegram_arrivals=3 mail_arrivals=0 turns_total=15 instrument_fault=false
+  mail fixture: mailbox=5 imap_sessions=114 max_concurrent_imap=1 smtp_delivered=0 smtp_failures=22
+    uid=1000 from=allowed@fixture.invalid fetches=1 seen_by=85
+    uid=1001 from=allowed@fixture.invalid fetches=1 seen_by=90
+    uid=1002 from=allowed@fixture.invalid fetches=1 seen_by=98
+    uid=1003 from=denied@fixture.invalid fetches=1 seen_by=103
+    uid=1004 from=second@fixture.invalid fetches=1 seen_by=113
+  PASS email-admission/fetch: deliver={"ok":true,"uid":1000} | imap.uid_fetch before=0 after=1 (the shipped binary completed a TLS IMAP session against the fixture cert via SSL_CERT_FILE)
+  PASS email-admission/admit: turns(fixture-journal)=1 want=1 for an allowlisted From:
+  PASS email-admission/dedupe: replay of the SAME Message-ID at +3054ms (inside the 60000ms TTL) | turns before=1 after=1 (want equal) | positive-control fresh Message-ID turns=1 want=1
+  PASS email-admission/access: denied From: turns=0 want=0 | CONTROL admit-turn=1 want=1 | CONTROL the denied message WAS fetched (uid_fetch 3->4), so the zero is a refusal at the access gate and not an unread mailbox
+  PASS email-admission/second-sender-admitted: turns=1 want=1 for the second allowlisted sender. NOTE this is NOT the 24-C3 bind leg: the turns journal carries no conversation id, so it cannot show the two senders bound to DISTINCT sessions. That remains unproven for email.
+  NOT-MEASURED email/admit: the reply could not leave: 22 SMTP session(s) reached the fixture, completed EHLO and STARTTLS, and were refused at certificate verification — "C00C4836E4760000:error:0A000416:SSL routines:ssl3_read_bytes:ssl/tls alert certificate unknown:../deps/openssl/openssl/ssl/record/rec_layer_s3.c:916:SSL alert number 46". SMTP is lettre/rustls (Cargo.toml:11, tokio1-rustls-tls) whose resolved deps include webpki-roots and NOT rustls-native-certs; webpki-roots is a compiled-in root set that reads no file and no environment variable, so SSL_CERT_FILE cannot redirect it on ANY platform. The five legs of 24-C3 are defined on arrivals, so they are NOT MEASURED for email — see email_admission_probe for what WAS established about the inbound half.
+  NOT-MEASURED email/dedupe: the reply could not leave: 22 SMTP session(s) reached the fixture, completed EHLO and STARTTLS, and were refused at certificate verification — "C00C4836E4760000:error:0A000416:SSL routines:ssl3_read_bytes:ssl/tls alert certificate unknown:../deps/openssl/openssl/ssl/record/rec_layer_s3.c:916:SSL alert number 46". SMTP is lettre/rustls (Cargo.toml:11, tokio1-rustls-tls) whose resolved deps include webpki-roots and NOT rustls-native-certs; webpki-roots is a compiled-in root set that reads no file and no environment variable, so SSL_CERT_FILE cannot redirect it on ANY platform. The five legs of 24-C3 are defined on arrivals, so they are NOT MEASURED for email — see email_admission_probe for what WAS established about the inbound half.
+  NOT-MEASURED email/access: the reply could not leave: 22 SMTP session(s) reached the fixture, completed EHLO and STARTTLS, and were refused at certificate verification — "C00C4836E4760000:error:0A000416:SSL routines:ssl3_read_bytes:ssl/tls alert certificate unknown:../deps/openssl/openssl/ssl/record/rec_layer_s3.c:916:SSL alert number 46". SMTP is lettre/rustls (Cargo.toml:11, tokio1-rustls-tls) whose resolved deps include webpki-roots and NOT rustls-native-certs; webpki-roots is a compiled-in root set that reads no file and no environment variable, so SSL_CERT_FILE cannot redirect it on ANY platform. The five legs of 24-C3 are defined on arrivals, so they are NOT MEASURED for email — see email_admission_probe for what WAS established about the inbound half.
+  NOT-MEASURED email/bind: the reply could not leave: 22 SMTP session(s) reached the fixture, completed EHLO and STARTTLS, and were refused at certificate verification — "C00C4836E4760000:error:0A000416:SSL routines:ssl3_read_bytes:ssl/tls alert certificate unknown:../deps/openssl/openssl/ssl/record/rec_layer_s3.c:916:SSL alert number 46". SMTP is lettre/rustls (Cargo.toml:11, tokio1-rustls-tls) whose resolved deps include webpki-roots and NOT rustls-native-certs; webpki-roots is a compiled-in root set that reads no file and no environment variable, so SSL_CERT_FILE cannot redirect it on ANY platform. The five legs of 24-C3 are defined on arrivals, so they are NOT MEASURED for email — see email_admission_probe for what WAS established about the inbound half.
+  NOT-MEASURED email/route: the reply could not leave: 22 SMTP session(s) reached the fixture, completed EHLO and STARTTLS, and were refused at certificate verification — "C00C4836E4760000:error:0A000416:SSL routines:ssl3_read_bytes:ssl/tls alert certificate unknown:../deps/openssl/openssl/ssl/record/rec_layer_s3.c:916:SSL alert number 46". SMTP is lettre/rustls (Cargo.toml:11, tokio1-rustls-tls) whose resolved deps include webpki-roots and NOT rustls-native-certs; webpki-roots is a compiled-in root set that reads no file and no environment variable, so SSL_CERT_FILE cannot redirect it on ANY platform. The five legs of 24-C3 are defined on arrivals, so they are NOT MEASURED for email — see email_admission_probe for what WAS established about the inbound half.
+  telegram fixture: submitted=5 still_pending=[] polls=215 max_concurrent_getupdates=1
+  PASS slack/admit: POST rc=0 HTTP 200 | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+  PASS slack/route: reply_text="F24C3-REPLY f24c3-slack-admit-7c78b687" carries_correlation=true conversation_id="D24C3ONE" want="D24C3ONE"
+  PASS slack/dedupe: replay rc=0 at +1056ms (inside the 60000ms TTL) | arrivals before=1 after=1 (want equal) | turns before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+  PASS slack/access: denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+  PASS slack/bind: conv1="D24C3ONE" conv2="D24C3TWO" want2="D24C3TWO" distinct=true
+  PASS whatsapp/admit: POST rc=0 HTTP 200 | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+  PASS whatsapp/route: reply_text="F24C3-REPLY f24c3-whatsapp-admit-e996d632" carries_correlation=true conversation_id="15552220000" want="15552220000"
+  PASS whatsapp/dedupe: replay rc=0 at +1053ms (inside the 60000ms TTL) | arrivals before=1 after=1 (want equal) | turns before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+  PASS whatsapp/access: denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+  PASS whatsapp/bind: conv1="15552220000" conv2="15552221111" want2="15552221111" distinct=true
+  PASS sms/admit: POST rc=0 HTTP 200 | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+  PASS sms/route: reply_text="F24C3-REPLY f24c3-sms-admit-79b3f95a" carries_correlation=true conversation_id="+15553330000" want="+15553330000"
+  PASS sms/dedupe: replay rc=0 at +1054ms (inside the 60000ms TTL) | arrivals before=1 after=1 (want equal) | turns before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+  PASS sms/access: denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+  PASS sms/bind: conv1="+15553330000" conv2="+15553331111" want2="+15553331111" distinct=true
+  PASS telegram/admit: POST rc=0 SUBMIT 200 {"ok":true,"update_id":1} | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+  PASS telegram/route: reply_text="F24C3\\-REPLY f24c3\\-telegram\\-admit\\-c417518b" carries_correlation=true conversation_id="24030001" want="24030001"
+  PASS telegram/dedupe: replay rc=0 at +1056ms (inside the 60000ms TTL) | arrivals before=1 after=1 (want equal) | turns before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+  PASS telegram/access: denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+  PASS telegram/bind: conv1="24030001" conv2="24030002" want2="24030002" distinct=true

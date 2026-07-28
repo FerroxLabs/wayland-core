@@ -118,13 +118,25 @@ let maxConcurrentPolls = 0;
 // single maximum.
 const concurrencyTrace = [];
 
-function submitUpdate({ token, chatId, senderId, username, text }) {
+// `messageId` is OPTIONAL and defaults to the update id, which is what every
+// prior caller relied on. Passing it explicitly is what makes a dedupe leg
+// possible on this transport: Telegram's `update_id` is the TRANSPORT CURSOR
+// and always advances, while `message_id` identifies the message itself. A
+// redelivery — a bot restarted against a stale offset, or a platform retry —
+// arrives as a NEW update_id carrying the SAME message_id, and `message_id` is
+// what the inbound dedupe cache keys on. Reusing the update id for both would
+// make a replay indistinguishable from a fresh message and the leg would be
+// measuring nothing.
+function submitUpdate({ token, chatId, senderId, username, text, messageId }) {
   const update_id = nextUpdateId;
   nextUpdateId += 1;
+  const message_id = Number.isFinite(Number(messageId)) && messageId !== null && messageId !== undefined
+    ? Number(messageId)
+    : update_id;
   const body = {
     update_id,
     message: {
-      message_id: update_id,
+      message_id,
       date: Math.floor(Date.now() / 1000),
       chat: { id: Number(chatId), type: 'private' },
       from: { id: Number(senderId), is_bot: false, first_name: username, username },
@@ -132,8 +144,8 @@ function submitUpdate({ token, chatId, senderId, username, text }) {
     },
   };
   pending.push({ update_id, token, body });
-  history.set(update_id, { token, deleted_by: null, served_to: [] });
-  record('submit', { update_id, token, chat_id: chatId, sender_id: senderId, text });
+  history.set(update_id, { token, message_id, deleted_by: null, served_to: [] });
+  record('submit', { update_id, message_id, token, chat_id: chatId, sender_id: senderId, text });
   return update_id;
 }
 
@@ -197,6 +209,7 @@ const server = http.createServer((req, res) => {
       for (const [id, h] of history.entries()) {
         served.push({
           update_id: id,
+          message_id: h.message_id ?? id,
           token: h.token,
           served_to: h.served_to,
           serve_count: h.served_to.length,
