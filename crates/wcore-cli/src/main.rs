@@ -460,7 +460,17 @@ struct Cli {
     /// emitted in `skill_drafted` TraceEvents (or as listed by
     /// internal tooling). Reads + writes the project's
     /// `.wayland-core/memory/memory.db`.
-    #[arg(long, value_name = "PROCEDURE_ID")]
+    ///
+    /// HIDDEN (ledger row `23A-C1`). `run_skills_promote` is a `bail!` —
+    /// governed promotion is unimplemented, and so are the criterion's
+    /// `revoke` and `rollback` clauses. A flag that appears in `--help`
+    /// and can never succeed is an advertised dead surface, so the flag
+    /// stops being advertised while still parsing and still failing
+    /// loudly for anyone who already scripted it. This does NOT close
+    /// `23A-C1`; it only stops the product promising something it
+    /// cannot do. `tests/skills_promote_not_advertised.rs` guards both
+    /// halves. Un-hide only together with a real governed promotion.
+    #[arg(long, value_name = "PROCEDURE_ID", hide = true)]
     skills_promote: Option<String>,
 
     /// W9.1 T4 (T11): archive a P4 procedure. Accepts either a

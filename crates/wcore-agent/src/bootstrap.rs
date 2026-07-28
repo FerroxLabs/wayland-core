@@ -1351,12 +1351,10 @@ impl AgentBootstrap {
         // `[browser.policy]` in their config.toml. v0.8.4's fix wired the
         // schema; this completes the loop by feeding it through to the
         // reify step.
-        let policy = &self.config.browser.policy;
-        for spec in &mut plugin_runner.browser.specs {
-            spec.policy.default_action = policy.default_action.clone();
-            spec.policy.allowed_origins = policy.allowed_origins.clone();
-            spec.policy.denied_origins = policy.denied_origins.clone();
-        }
+        crate::plugins::adapters::browser_adapter::apply_config_policy(
+            &self.config.browser.policy,
+            &mut plugin_runner.browser.specs,
+        );
 
         // v0.6.5 Task 1.4 — browser/cua plugin tools now reify INSIDE
         // `apply_initialize_outcome` (see `apply.rs::deliver_browser_tools`

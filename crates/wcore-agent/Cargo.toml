@@ -256,6 +256,10 @@ rstest.workspace      = true
 serial_test.workspace = true
 inventory.workspace   = true
 criterion.workspace   = true
+# 27-C2(a): `tests/browser_config_hint_roundtrip.rs` parses the exact TOML the
+# browser tool's remediation hint prints through the real `ConfigFile` serde
+# types, so the hint cannot drift from the loader again. Dev-only.
+toml.workspace        = true
 
 # ── Integration test binaries ──────────────────────────────────────────────
 [[test]]
