@@ -1,0 +1,99 @@
+=== binary under test ===
+e39dbcc8
+
+=== 1. independent sink first ===
+SINK_READY url=http://127.0.0.1:18474 journal=/tmp/f24c1c-run/arrivals.jsonl
+
+=== 2. seed 6 deliveries ===
+seeded=24
+
+=== 3. install + start the REAL service ===
+  binary:  /root/wayland-24-abandon-surface/target/release/wayland-core
+gateway start requested (systemd)
+
+=== 4. COUNT POSITIVE DELIVERY at the independent sink ===
+  t=1s arrivals_at_sink=0
+  t=2s arrivals_at_sink=0
+  t=3s arrivals_at_sink=0
+  t=4s arrivals_at_sink=0
+  t=5s arrivals_at_sink=0
+  t=6s arrivals_at_sink=0
+  t=7s arrivals_at_sink=0
+  t=8s arrivals_at_sink=0
+  t=9s arrivals_at_sink=0
+  t=10s arrivals_at_sink=0
+  t=11s arrivals_at_sink=0
+  t=12s arrivals_at_sink=0
+  t=13s arrivals_at_sink=0
+  t=14s arrivals_at_sink=0
+  t=15s arrivals_at_sink=0
+  t=16s arrivals_at_sink=0
+  t=17s arrivals_at_sink=0
+  t=18s arrivals_at_sink=0
+  t=19s arrivals_at_sink=0
+  t=20s arrivals_at_sink=0
+  t=21s arrivals_at_sink=0
+  t=22s arrivals_at_sink=0
+  t=23s arrivals_at_sink=0
+  t=24s arrivals_at_sink=0
+  t=25s arrivals_at_sink=0
+  t=26s arrivals_at_sink=0
+  t=27s arrivals_at_sink=0
+  t=28s arrivals_at_sink=0
+  t=29s arrivals_at_sink=0
+  t=30s arrivals_at_sink=4
+ARRIVALS_AT_INDEPENDENT_SINK=4
+
+=== 5. surface BEFORE (must be EMPTY) ===
+No abandoned deliveries recorded in /tmp/f24c1c-run/home.
+
+=== 6. kill -9 while a delivery is stalled at the sink ===
+gateway_pid=3008492 at 20:37:56
+killed gateway and sink
+STATE_COUNTS_AFTER_KILL = {'settled': 3, 'attempted': 1}
+  CARRIED: cron:4c974ae2-91ca-4e4a-8897-89c8d74d3bbb:1785271074538 state= attempted dest= f24c1csink
+
+=== 7. platform restarts it; resume CARRIES the unsettled delivery ===
+  t=2s active=activating NRestarts=0
+  t=4s active=activating NRestarts=0
+  t=6s active=activating NRestarts=0
+  t=8s active=active NRestarts=1
+Jul 28 20:36:55 Ubuntu-2404-noble-amd64-base wayland-core[3008492]: [gateway] started pid=3008492 role=Owner profile=f24c1c carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+Jul 28 20:38:01 Ubuntu-2404-noble-amd64-base wayland-core[3023952]: [gateway] started pid=3023952 role=Owner profile=f24c1c carried=1 (unattempted 0 / unknown-outcome 1) quarantined=0
+
+=== 8. ask the shipped binary to drain with a budget it cannot meet ===
+drain requested (budget 2000ms); gateway pid 3023952
+  Draining (deliveries pending 1)
+drain complete: Drained (deliveries pending 0)
+Jul 28 20:38:02 Ubuntu-2404-noble-amd64-base wayland-core[3023952]: [gateway] drain requested (budget Some(2000)ms)
+Jul 28 20:38:04 Ubuntu-2404-noble-amd64-base wayland-core[3023952]: [gateway] drain Forced: observations=21 abandoned=1 flushed=true
+Jul 28 20:38:04 Ubuntu-2404-noble-amd64-base wayland-core[3023952]: [gateway] ABANDONED delivery cron:4c974ae2-91ca-4e4a-8897-89c8d74d3bbb:1785271074538
+Jul 28 20:38:04 Ubuntu-2404-noble-amd64-base wayland-core[3023952]: [gateway] these are recorded durably; list them later with `wayland-core gateway abandoned`
+
+=== 9. THE SURFACE: what did you give up on? ===
+--- operator view ---
+1 abandoned delivery in /tmp/f24c1c-run/home:
+
+  cron:4c974ae2-91ca-4e4a-8897-89c8d74d3bbb:1785271074538
+    to:     f24c1csink
+    when:   2026-07-28T20:38:04.783500018+00:00
+    why:    shutdown drain ran out of budget before this delivery finished
+--- json ---
+{
+  "abandoned": [
+    {
+      "at": "2026-07-28T20:38:04.783500018+00:00",
+      "destination": "f24c1csink",
+      "id": "cron:4c974ae2-91ca-4e4a-8897-89c8d74d3bbb:1785271074538",
+      "reason": "drain_budget_expired"
+    }
+  ],
+  "dropped_past_retention": 0,
+  "home": "/tmp/f24c1c-run/home",
+  "quarantined": 0
+}
+
+=== 10. cross-check surface vs raw ledger ===
+raw_abandoned_records=1
+{"id":"cron:4c974ae2-91ca-4e4a-8897-89c8d74d3bbb:1785271074538","state":"abandoned","at":"2026-07-28T20:38:04.783500018+00:00","destination":"f24c1csink","reason":"drain_budget_expired"}
+F24C1_LIVE3_DONE
