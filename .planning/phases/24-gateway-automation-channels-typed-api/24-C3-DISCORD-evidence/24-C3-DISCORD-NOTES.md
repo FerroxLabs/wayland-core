@@ -69,6 +69,62 @@ directions: old config still parses AND defaults are unchanged (control test).
       lib.rs:238-240 is `inbox.lock().await.drain(..)` — a DESTRUCTIVE READ, same mechanism.
       Whoever drains first wins; a second reader gets nothing. Needs a steady-state leg.
 
+---
+
+## M3 — the config seam LANDED and PROVEN (commit `1770f0d9`)
+
+Added `api_base_url` + `gateway_url` to `DiscordConfig`, both `#[serde(default)]`, and made
+`DiscordChannel::new` consume them (it previously hardcoded the two constants). Updated
+`src/schemas/discord.json` (it carries `additionalProperties: false`, so the schema had to
+learn the fields too).
+
+### Gate results (hetzner `hz/24-c3-discord` @ `1770f0d9`, isolated targeted runs)
+
+| run | command | result |
+|-----|---------|--------|
+| fmt | `cargo fmt --all -- --check` (Mac) | rc=0, **0 bytes** output |
+| unit | `cargo test -p wcore-channel-discord` | **54 passed / 0 failed / 0 ignored** |
+| registry | `cargo test -p wcore-channels-registry` | **11 passed / 0 failed / 0 ignored** |
+
+All 5 new tests confirmed EXECUTED BY NAME (not merely "suite green"):
+`control_absent_keys_still_reach_production_discord`,
+`backcompat_a_preexisting_full_config_still_parses`,
+`both_bases_are_independently_overridable`,
+`new_honours_the_config_bases_so_the_shipped_path_is_redirectable`,
+`control_new_with_a_default_config_still_points_at_production`.
+
+### M3a. The gate CAN fail — mutation-proven, not assumed
+
+Reverted `new()` to the hardcoded constants and re-ran:
+
+```
+MUTATED_RC=101
+tests::new_honours_the_config_bases_so_the_shipped_path_is_redirectable ... FAILED
+tests::control_new_with_a_default_config_still_points_at_production ... ok
+test result: FAILED. 53 passed; 1 failed
+```
+
+This is the discriminating result I wanted: the seam test went red, and the production-default
+control stayed GREEN (correctly — the mutation preserves the production default). A mutation
+that reddened both would have meant my control was not actually a control. File restored;
+`git status --porcelain | wc -l` = 0.
+
+### M3b. Trap encountered and confirmed, first hand
+
+`echo "FMT_EXIT=${PIPESTATUS[0]}"` after a pipeline printed **`FMT_EXIT=`** (empty), exactly as
+the brief warns. Cause: this shell is **zsh**, where the array is `$pipestatus` and is
+1-indexed; `PIPESTATUS` is a bash-ism and expands to nothing. Every exit status in this lane is
+therefore taken from an unpiped command via `$?` written to a variable on the same line, or from
+a file. I did not use `${PIPESTATUS[0]}` again.
+
+### M3c. LOW finding (BACKLOG, not fixed — out of scope per AGENTS.md §3)
+
+`src/schemas/discord.json` declares `"intents": {"default": 33792}`, but the code's
+`DEFAULT_INTENTS` is **37376** (config.rs:23-24, after DIRECT_MESSAGES bit 12 was added). The
+shipped schema's advertised default has drifted from the real one. Descriptive-only (serde
+supplies the real default, and `default_intents()` is what actually runs), so LOW → BACKLOG.
+I did not fix it: it predates this change and is not required by it.
+
 ## Risk register (live)
 
 - The instrument tends to carry the defect class it hunts (11 recorded instances). My fixture
