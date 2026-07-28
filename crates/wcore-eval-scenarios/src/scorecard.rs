@@ -337,13 +337,14 @@ impl SurfaceRowV1 {
         }
         // A row's own evidence must resolve when it claims a measured truth.
         for ev in &self.evidence {
-            if ev.measurement == MeasurementStateV1::Proven {
-                if let Err(detail) = ev.resolve(repo_root) {
-                    return Err(ScorecardError::InvalidSurfaceRow {
-                        surface: self.id.clone(),
-                        detail: format!("evidence `{}` does not resolve: {detail}", ev.id),
-                    });
-                }
+            if ev.measurement != MeasurementStateV1::Proven {
+                continue;
+            }
+            if let Err(detail) = ev.resolve(repo_root) {
+                return Err(ScorecardError::InvalidSurfaceRow {
+                    surface: self.id.clone(),
+                    detail: format!("evidence `{}` does not resolve: {detail}", ev.id),
+                });
             }
         }
         Ok(())
