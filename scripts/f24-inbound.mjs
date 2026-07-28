@@ -574,11 +574,19 @@ class InboundMatrix {
     this.settle(20_000);
     const seen3 = this.arrivalsFor(c3);
     const turns3 = this.turnsFor(c3);
+    // The control is LOAD-BEARING, not decoration. Measured at the pre-fix
+    // binary, this leg passed on all three adapters purely because the whole
+    // inbound path was denying everything — "the denied sender did not get
+    // through" is trivially true of a path nothing gets through. A leg that
+    // cannot fail proves nothing, so the admit control is part of the
+    // condition and not merely printed beside it.
+    const accessControlHeld = seen1.length === 1;
     this.record(
       adapter,
       'access',
-      seen3.length === 0 && turns3.length === 0,
-      `denied-sender POST rc=${r3.status} | arrivals=${seen3.length} want=0 | turns=${turns3.length} want=0 | control: admit leg arrived=${seen1.length}`,
+      seen3.length === 0 && turns3.length === 0 && accessControlHeld,
+      `denied-sender POST rc=${r3.status} | arrivals=${seen3.length} want=0 | turns=${turns3.length} want=0 | ` +
+        `CONTROL admit-leg-arrived=${seen1.length} want=1 ${accessControlHeld ? '(control held)' : '(CONTROL FAILED — a zero here is not a refusal, it is a dead path)'}`,
     );
 
     // ── bind ──────────────────────────────────────────────────────────────
