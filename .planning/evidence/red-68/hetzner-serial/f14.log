@@ -1,0 +1,21 @@
+warning: in config file .config/nextest.toml, ignoring unknown configuration key: profile.default.no-tests
+   Compiling wcore-cli v0.12.25 (/root/wayland-red68/crates/wcore-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.51s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 42279270-5fab-4e7e-8efc-ac696d9117a7 with nextest profile: default
+    Starting 11 tests across 1 binary (1 test skipped)
+        PASS [   0.153s] ( 1/11) wcore-cli::f14_sigkill_recovery isolated_profile_without_secure_store_fails_before_turn_or_provider_intent
+        PASS [   9.933s] ( 2/11) wcore-cli::f14_sigkill_recovery packaged_fresh_process_reopens_sealed_request_and_dispatches_once
+        PASS [  14.140s] ( 3/11) wcore-cli::f14_sigkill_recovery packaged_host_continue_and_non_genesis_reconnect_are_exactly_once
+        PASS [   0.015s] ( 4/11) wcore-cli::f14_sigkill_recovery packaged_local_surfaces_pin_distinct_policy_provenance
+        PASS [  10.262s] ( 5/11) wcore-cli::f14_sigkill_recovery packaged_tui_restart_projection_matches_json_host
+        PASS [  10.284s] ( 6/11) wcore-cli::f14_sigkill_recovery recovered_approval_approve_executes_effect_once_and_continues_once
+        PASS [   6.068s] ( 7/11) wcore-cli::f14_sigkill_recovery sigkill_during_model_stream_resumes_as_provider_reconciliation_without_redispatch
+        PASS [   6.163s] ( 8/11) wcore-cli::f14_sigkill_recovery sigkill_during_tool_execution_requires_reconciliation_without_reexecution
+        PASS [   5.863s] ( 9/11) wcore-cli::f14_sigkill_recovery sigkill_mid_dispatch_charges_the_surviving_reservation_instead_of_refunding_it
+        PASS [   6.052s] (10/11) wcore-cli::f14_sigkill_recovery sigkill_while_awaiting_approval_restores_gate_without_provider_or_tool_replay
+        PASS [   9.807s] (11/11) wcore-cli::f14_sigkill_recovery stop_during_active_host_continue_preserves_unknown_provider_authority
+────────────
+     Summary [  78.742s] 11 tests run: 11 passed, 1 skipped
