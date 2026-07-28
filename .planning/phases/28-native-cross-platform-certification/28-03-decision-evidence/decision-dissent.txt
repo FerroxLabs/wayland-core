@@ -1,0 +1,105 @@
+DECISION, RATIONALE AND DISSENT — 28-03 task 1, "what is an unacceptable quality/performance
+delta?"
+
+DECISION: OPTION C — drift within the run as the primary gate, plus deliberately loose
+absolute sanity floors. UNANIMOUS, 4 of 4.
+
+  codex  (gpt-5.6-sol)      C, high
+  gemini (3.1-pro-preview)  C, high
+  kimi   (K3)               C, medium
+  internal adversarial      C, medium
+
+RATIONALE (the panel's shared reasoning, not a restatement of the option text)
+
+A alone is blind to the failure mode this candidate is most plausibly in: a run that is
+uniformly slow or uniformly wrong from session 1 produces a drift of ZERO and passes. Three
+members reached that independently and it is the decisive fact. B alone invents per-platform
+ceilings with no per-platform baseline and dresses guesses as empiricism; codex added the
+sharpest form of it — "using the same limits on every platform is more honest than fabricating
+platform-specific baselines" — which is why the floors below are identical on all three
+families rather than tuned per box. D is circular by construction: a threshold derived from the
+run it judges cannot fail that run, so it would make Criterion 2 unfalsifiable for exactly the
+candidate it is meant to certify.
+
+C is therefore not a compromise between A and B. It is the only construction in which BOTH
+failure modes — degradation over the run, and a run that was bad throughout — have a mechanism
+that can fire.
+
+DISSENT AND MINORITY POSITIONS — recorded because they are the useful part
+
+1. THE STRONGEST OBJECTION, raised by the internal pass and independently confirmed by codex
+   when probed separately: IN THIS SOAK THE LATENCY-DRIFT GATE IS STRUCTURALLY NARROW. Every
+   session is a fresh short-lived process. A per-process leak cannot accumulate across 1,000
+   separate processes — it dies with each one. Latency drift can therefore only fire through
+   state that OUTLIVES a process: accumulated on-disk state that later sessions re-read,
+   orphaned children competing for CPU, or host contention that is not the product's at all.
+   Codex, asked the question in isolation and with no knowledge of the panel: "It cannot detect
+   process-local leaks — those die with each CLI process — or uniformly bad latency present
+   from session 1."
+   CONSEQUENCE, adopted into the design rather than noted and ignored: the detection weight for
+   "no unbounded resource use" sits on the SLOPE bands (state-dir bytes, live product
+   processes, harness handles), NOT on the drift bands. The results document may not present a
+   green latency drift as though it were the finding of a leak. It is the absence of one narrow
+   symptom.
+
+2. GEMINI'S EARLY WINDOW — sessions 101-300, discarding 1-100 as cold start — WAS OVERRULED by
+   the internal pass. The direction is safe (a faster baseline makes the ratio stricter) but it
+   deletes cold-start pathology, which is a real product property, from the measurement.
+   ADOPTED INSTEAD: blocks 1-3 including block 1, with the per-block series published so a
+   reader sees the cold start rather than having it removed for them.
+
+3. GEMINI AND CODEX BOTH CHOSE A SINGLE-WINDOW p95. OVERRULED in favour of kimi's block
+   aggregation: compute the statistic per 100-session block, then compare the MEDIAN OF THE
+   THREE EARLY BLOCKS against the MEDIAN OF THE THREE LATE BLOCKS. A p95 over one 200-session
+   window has about ten samples above it on a host whose load average is 3-5 and not ours; one
+   foreign cron job in the late window manufactures a breach, and gemini's own key objection
+   concedes exactly that. Block aggregation is not a loosening — it is the same threshold on a
+   less noisy estimator, and a spike must now move the median of three separate blocks.
+
+4. KIMI'S "LOAD-ADJUSTED INCONCLUSIVE" VERDICT WAS REJECTED, and this is the one place the
+   panel's own instincts were overruled on program grounds rather than technical ones. A third
+   verdict that is neither pass nor fail is precisely the shape an agent on this program abused
+   when it invented a termination state to escape an artifact it did not want to produce. A
+   regression adjustment on a covariate the certifier also chooses is a dismissal lever with a
+   statistician's vocabulary. ADOPTED INSTEAD, and strictly weaker for the certifier: record
+   the load covariate as evidence; it may justify exactly one re-run on a quiet host; a breach
+   is RED until a re-run is green ON ITS OWN NUMBERS; there is no verdict in between. Gemini
+   and codex independently proposed the same shape, so the minority here is kimi alone.
+
+5. CODEX'S WARM-UP OBJECTION IS THE ONE THAT CHANGED THE DESIGN MOST. "Warm-up may bind
+   variable values, but it may not define 'whatever happened' as correct. Otherwise a uniformly
+   broken response could teach the validator that broken output is normal." This is the same
+   defect class as the whole phase's positive-control rule, one level up: an invariant learned
+   from a broken baseline is an invariant that cannot fail. ADOPTED: warm-up must satisfy a
+   COMMITTED sanity schema (exit 0, non-empty output, no panic sentinel) before it establishes
+   any invariant; a surface failing it is BROKEN INVENTORY and establishes nothing; and if
+   broken inventory exceeds 5% of the workload the run is VOID rather than passed.
+
+6. KIMI'S STRUCTURAL DIGEST was adopted in its affordable half — the warm-up captures a
+   structural signature (top-level JSON key set, or line count plus sentinel absence) as well
+   as exit class, because "exits 0 but silently malformed" is the most plausible quality-rot
+   mode under resource pressure and it is free to catch.
+
+7. KIMI'S SUPERSEDES CLAUSE was adopted verbatim in intent. Every number in bands.json is
+   invented; none has a measurement behind it. The bands file says so in a machine-readable
+   field (`numbers_are_measured: false`) which the validator ENFORCES, and it carries the
+   requirement that a later phase re-derive the bands from this soak's archived distributions
+   for the NEXT candidate. Doing that for THIS candidate would be option D.
+
+WHAT REMAINS UNRESOLVED, stated rather than smoothed over
+
+The proxy being banded is a DETERMINISM-AND-STABILITY measurement, not a semantic quality
+measurement. Kimi said it plainest — "exited 0 and produced non-empty output would pass a
+surface emitting garbage" — and gemini agreed in different words. A soak can still pass while
+the product is semantically wrong on all 1,000 sessions, provided it is wrong CONSISTENTLY and
+was already wrong at warm-up. The warm-up sanity schema and the broken-inventory VOID reduce
+this; they do not cure it. Semantic correctness belongs to the per-surface probe matrix
+(plan 28-02), not to the soak, and the soak's results document must say so in those words
+rather than let "quality" carry an unearned meaning.
+
+The four thresholds — 1.5x on the p50 block median, 2.0x on the p90 block median, 0.02 absolute
+on the correctness rate, and the floors at 0.99 / 10s p95 / 60s max — are PRE-REGISTERED
+GUESSES. Their defensibility comes from three things and no others: they were committed before
+any number existed, they are labelled as unmeasured in the artifact itself, and widening one
+after a measurement is named as a finding against the certifier rather than a correction to the
+band.

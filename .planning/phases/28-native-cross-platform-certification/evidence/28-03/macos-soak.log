@@ -1,0 +1,11 @@
+F28_SOAK block=1 sessions=100 correct=100 completed=100
+F28_SOAK block=2 sessions=100 correct=100 completed=200
+F28_SOAK block=3 sessions=100 correct=100 completed=300
+F28_SOAK block=4 sessions=100 correct=100 completed=400
+F28_SOAK block=5 sessions=100 correct=100 completed=500
+F28_SOAK block=6 sessions=100 correct=100 completed=600
+F28_SOAK block=7 sessions=100 correct=100 completed=700
+F28_SOAK block=8 sessions=100 correct=100 completed=800
+F28_SOAK block=9 sessions=100 correct=100 completed=900
+F28_SOAK block=10 sessions=100 correct=100 completed=1000
+F28_SOAK_DONE family=macos sessions=1000 out=.planning/phases/28-native-cross-platform-certification/evidence/28-03/macos-soak.json

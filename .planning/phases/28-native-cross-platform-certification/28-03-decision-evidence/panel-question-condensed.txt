@@ -1,0 +1,20 @@
+You are one member of a four-way adversarial review panel. Answer from your own reasoning; use no tools. Disagree if the recommendation is wrong.
+
+DECISION: A certification requires a 1,000-session soak of a Rust CLI agent binary (`wayland-core`) to complete with "no unacceptable quality/performance delta". Nothing in the program defines "unacceptable". You must decide the definition, mechanically enough that a Python validator computes PASS/FAIL from a JSON file with no human judgement. The decision is committed to git BEFORE the soak runs; a threshold chosen after seeing the numbers cannot fail the run it judges.
+
+ENVIRONMENT: three OS families, no per-platform baseline exists. linux = shared Hetzner box, load average 3-5, not ours to control. macos = arm64 laptop. windows = one physical box, slowest, long runs via scheduled task. A "session" is ONE INVOCATION of the shipped binary against one of ~116 command surfaces read off its own command tree — a fresh short-lived process each time. Concurrent children run throughout.
+
+QUALITY IS SAMPLED WITHOUT AN LLM PROVIDER (1,000 real model sessions would cost more than the certification and add third-party nondeterminism): each session records exit status and whether output matches a per-surface invariant established in a warm-up window at the start of the same run. Performance = per-session wall-clock latency. Resource use (disk, handles, threads, live children) is a SEPARATE observable evaluated by slope.
+
+OPTIONS:
+A) drift-within-run: late window vs early window, same host, same run; band on the ratio. Blind to a run that is uniformly bad from session 1.
+B) absolute per-platform ceilings fixed in advance. Catches uniformly-bad, but every number is invented today and encodes the hardware it was written on.
+C) drift primary PLUS deliberately loose absolute sanity floors. Covers both failure modes; two mechanisms to explain; a loose floor invites the charge of being decorative.
+D) run the soak first, then set bands from the observed distribution. A threshold derived from the run it judges cannot fail that run.
+
+ANSWER: (1) which option and why; (2) exact window definition and exact statistic (p50/p95/mean/trimmed?) and why; (3) the specific numbers you would set, and what makes an invented number defensible; (4) whether quality is banded separately from performance; (5) whether a soak failing identically from session 1 should pass a drift-only gate and what you do about it; (6) how you stop a noisy shared host manufacturing drift WITHOUT giving the certifier a lever to dismiss a real red as noise.
+
+Last three lines of your answer, exactly:
+PANEL_POSITION=<A|B|C|D>
+PANEL_CONFIDENCE=<low|medium|high>
+PANEL_KEY_OBJECTION=<one sentence naming the strongest argument AGAINST your own position>

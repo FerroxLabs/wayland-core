@@ -1,0 +1,543 @@
+### SURFACE-CAPTURE v1
+### BINARY sha256=ab8cf3d34457b5897b94f8313a96f6dce04a95eb8f0d3bc3343fcba9bdb2991d path=/root/wayland-p28-03-candidate host=Ubuntu-2404-noble-amd64-base profile=release
+### SOURCE commit=e4a3f5fc0f92a7b0126f594146c4b71182e9e378 tree=6a494c995358d76f0bb296abf3ea8a086b24c28b
+### COMMAND --help
+A multi-provider AI agent CLI with tool orchestration support
+
+Usage: wayland-p28-03-candidate [OPTIONS] [PROMPT]... [COMMAND]
+
+Commands:
+  models           F-089: model catalog commands
+  plugin           Manage installed plugins (install / list / available / remove)
+  mcp-serve        v0.6.4 Task 2.4: serve the engine's tool registry as an MCP server (stdio or SSE transport). Used by external MCP clients like Claude Desktop, mcp-cli, etc. to call wayland-core's tools
+  swarm            v0.6.4 Task 2.6: dispatch a worktree-isolated worker swarm
+  session          F23-02 (Phase 23B): operator verbs over saved sessions — list, search, show, checkpoint, rewind, retry, fork, export, retain, reconcile and cancel. Every operation prints a machine-observable `F23_SESSION=` token to STDOUT and uses the exit-code map documented in `session_cmd`
+  workflow         ForgeFlows: validate / list / run saved `.ron` workflows from `.wayland/workflows/` [aliases: forgeflows]
+  crucible         Crucible (Mixture-of-Providers): run the cross-provider council over a task. N proposers (each pinned to its own provider from `[providers]`) answer in parallel; a fenced, read-only aggregator fuses them. Requires `[crucible] enabled = true` with a `proposers` roster in your config
+  forge            Anvil (gated forge) — forge a candidate that passes a REAL executable gate (tests / build / lint), then stamp a verified receipt. Requires ON by default; `[anvil] enabled = false` is the kill-switch. Empty gate config auto-detects the workspace suite
+  project-context  v0.7.0 Task 1.C.1: print resolved project context from WAYLAND.md / AGENTS.md / .wayland/context.md / CLAUDE.md walking up from cwd
+  init             v0.7.0 1.B.2: scaffold .wayland/config.toml + WAYLAND.md in cwd
+  acp              v0.7.0 1.A.10: ACP server + client surface. `acp serve` binds the HTTP/SSE transport; `acp request` drives a one-shot session/message round-trip
+  agent            v0.7.0 3.B.2: manage user-defined agents (create, list, show, edit, delete). Built-ins from the bundled pack are read-only
+  cron             v0.8.1 U7: manage scheduled cron jobs (add / list / remove / enable / disable). Persists to `$WAYLAND_HOME/cron/jobs.json`; the background runner spawned at session boot picks up changes on its next tick
+  self-update      v0.8.1 U9: update wayland-core to the latest signed release from `FerroxLabs/wayland-core`. Verifies the `.sig` artifact against the pinned marketplace pubkey (ed25519) before atomic swap. Use `--check-only` to print versions without installing
+  setup            CLI surface: launch the TUI on the Onboarding (connect/configure) surface regardless of whether a config already exists. Onboarding handles an existing config gracefully via an Overwrite/Keep choice. The plain `wayland-core` launch only opens Onboarding on a true first run; `setup` is the explicit re-entry point
+  auth             CLI surface: manage provider API keys (list / add / remove) directly in the global `config.toml` — the lightweight alternative to the full onboarding flow
+  image            FluxRouter image generation (`POST /v1/images/generations`). Writes the decoded image to `--out` (or stdout when piped). A free / paid-but-uncleared Flux key returns a `premium_locked` message — image generation is a paid-only capability
+  fetch            FluxRouter web_fetch (`POST /v1/fetch`): fetch a URL and print it as markdown. `--render` selects the JS-rendered premium arm. A free / paid-but-uncleared Flux key returns an `upgrade_required` message — web_fetch is a paid-only capability
+  backend          F25-01: execution backends — list / probe / run / cancel / orphans / receipt verify / diff across local, container, ssh and cloud
+  gateway          F24-B: the persistent gateway runtime — install / uninstall / start / stop / restart / status / drain, plus the `run` verb every generated launchd, systemd and scheduled-task unit invokes
+  node             F25-03: nodes — pair / list / show / probe / revoke / submit / attribution across paired machines that host execution backends
+  goal             F22-04: durable Goals and their Fleet task ledger — open / task / run / status / exec-task. `run` recovers a killed Goal, revokes expired claim leases, drains completions the dead parent never observed, and drives the remaining tasks through the Fleet dispatcher
+  channel          F24-03: channel adapters — list / probe / health / reload. `probe` asks the platform and needs no gateway; `health` reports only what a RUNNING gateway has observed and refuses otherwise
+  profile          Manage isolated profiles — each is an independent `WAYLAND_HOME`-rooted home with its own config, credentials, memory, and skills
+  migrate          Import an existing agent setup (Hermes) into wayland-core profiles
+  backup           Archive, verify, restore and recover a Wayland home (F26-03)
+  sandbox          F28: platform containment operator surface — `status` reports the selected backend and its properties; `exec` runs a command through the agent's own shell tool so an operator can observe, from the child's own output, that the sandbox was ACTIVE rather than merely available
+  help             Print this message or the help of the given subcommand(s)
+
+Arguments:
+  [PROMPT]...  Initial prompt (if omitted, enters interactive REPL mode)
+
+Options:
+  -p, --provider <PROVIDER>
+          Provider: "anthropic" or "openai" [env: PROVIDER=]
+  -k, --api-key <API_KEY>
+          API key [env: API_KEY=]
+  -b, --base-url <BASE_URL>
+          Base URL for the API [env: BASE_URL=]
+  -m, --model <MODEL>
+          Model name [env: MODEL=]
+      --agent <NAME>
+          Built-in agent persona to inherit (e.g. `architect`, `debugger`). Loads system_prompt + max_turns from the bundled agent pack unless an explicit `--system-prompt` / `--max-turns` is also set. Run `wayland-core --list-agents` to see all built-ins
+      --assistant <NAME>
+          #111 — the host's active assistant identity, for per-assistant MCP scoping. A config MCP server marked `only_for_assistant` is injected only when this matches its allow-list (fail-closed otherwise). Distinct from `--agent` (persona/system-prompt); the desktop host sets this when spawning the json-stream engine [env: WAYLAND_ASSISTANT=]
+      --list-agents
+          List built-in agent personas and exit
+      --max-tokens <MAX_TOKENS>
+          Max output tokens per response
+      --max-turns <MAX_TURNS>
+          Max agent loop turns
+      --system-prompt <SYSTEM_PROMPT>
+          Custom system prompt
+      --profile <PROFILE>
+          Named profile from config file
+      --auto-approve
+          Auto-approve all tool executions (skip confirmation)
+      --force
+          Force mode: approve every tool call without prompting. Only use for trusted, scripted runs — there is NO interactive permission gate once this is set. Equivalent to flipping the engine's session approval mode to `Force` for the entire run. The TUI surfaces a `· FORCE` badge in the bottom status bar so the mode is impossible to forget. Alias: `--yolo`
+      --dangerously-skip-permissions
+          Compatibility spelling for approval bypass. This does NOT disable the OS sandbox. Use `--dangerous` for an explicit, time-bounded local sandbox bypass
+      --dangerous
+          Explicit local Dangerous session: bypass approvals and the OS sandbox until the lease expires. Cannot be activated by config, environment, protocol, ACP, TUI commands, resumed state, or child agents
+      --dangerous-ttl-secs <SECONDS>
+          Dangerous-session lifetime in seconds (maximum one hour)
+      --project-dir <PROJECT_DIR>
+          Project directory to load .wayland-core.toml from (defaults to CWD)
+      --trust-workspace
+          Trust the current repository's executable configuration fingerprint in Core's external trust store, then start the session. Material changes to hooks, MCP config or project skills automatically revoke eligibility
+      --untrust-workspace
+          Remove the current repository from Core's external trust store, then start with the strict untrusted-workspace profile
+      --allow-host-workspace-grants
+          Permit this JSON-stream host to approve read-only, process-lifetime developer capabilities. This launch opt-in does not permit writes, untrusted/remote grants, or sandbox bypass
+      --allow-host-budget-grants
+          Permit this local JSON-stream host to grant additional provider spend after Core has emitted a budget-exceeded receipt. Default-deny; managed sessions still refuse grants
+      --resume <RESUME>
+          Resume a previous session
+  -c, --continue
+          Resume the most-recent session (the latest by creation time). A convenience shortcut for `--resume <latest-id>` — mutually exclusive with `--resume` and `--session-id`
+      --session-id <SESSION_ID>
+          Use a specific session ID (instead of auto-generating one)
+      --list-sessions
+          List saved sessions
+      --no-color
+          Disable colored output
+      --json-stream
+          Enable JSON streaming mode for host client integration
+      --no-tui
+          Disable the ratatui TUI — fall back to the line-based REPL even on an interactive terminal. The TUI is the default for `wayland-core` on a TTY with no prompt; this is the escape hatch for users who prefer the bare REPL (or for terminals it cannot drive). `--json-stream` and `-p`/headless modes are unaffected
+      --init-config
+          Generate a default config file
+      --config-path
+          Print config file path and exit
+      --build-info
+          Print build provenance (version + embedded source git SHA) and exit. Catches the stale-build class: the SHA must match the HEAD the binary was compiled from. Used by the build-provenance integration test
+      --skills-path
+          Print skill directory paths and exit
+      --doctor
+          W5 (A.5): run the system-dependency doctor. Probes external binaries (`wlrctl`, `grim`, `chromium`, `ollama`), environment signals (`WAYLAND_DISPLAY`, `DISPLAY`, `BROWSERBASE_API_KEY`, `OLLAMA_BASE_URL`), and surfaces missing dependencies with per-distro install hints. Exit code `1` if any required check fails on the current platform, otherwise `0`
+      --probe-mcp
+          A4b: when running --doctor, actually CONNECT-TEST each declared MCP server (spawns stdio commands / dials URLs) instead of only listing them. Off by default so bare --doctor stays side-effect-free
+      --skills-audit
+          W4 F19: run the skills audit. Writes JSON to .wayland-core/skills-audit.json and renders Markdown to stdout
+      --skills-audit-stale-days <SKILLS_AUDIT_STALE_DAYS>
+          Override the staleness threshold (days) used by --skills-audit [default: 180]
+      --skills-promote <PROCEDURE_ID>
+          W9.1 T4 (T11): promote a P4 procedure (drafted skill) from `Staged` → `Active`. The argument is the procedure's UUID as emitted in `skill_drafted` TraceEvents (or as listed by internal tooling). Reads + writes the project's `.wayland-core/memory/memory.db`
+      --skills-archive <PROCEDURE_ID>
+          W9.1 T4 (T11): archive a P4 procedure. Accepts either a `Staged` or `Active` row (W9 T0.5 amendment to the state-machine allows `Staged → Archived` directly so curators can dismiss losing drafts without a detour through Active). Pinned rows are NOT archivable from the CLI — promote → archive or unpin them through the curator UI first
+      --memory-show <SESSION_ID>
+          M3.4: dump the memory state for a given session id. Prints all episodes scoped to that session at the session+project tiers, plus all project-tier facts and procedures. Intended for human inspection; the format is a plain text table (not JSON) and may change between releases. Exits 0 even if the session has no recorded data so scripts can probe state without try/catch
+      --replay <TRACE_PATH>
+          M5.2: replay a session trace JSON file. Validates schema + the version-skew guard (refuses traces recorded by a different wcore-core build unless --replay-force-version-skew is set). Prints the event count for the session. Combine with --replay-diff to surface the first divergence against another trace
+      --replay-diff <OTHER_TRACE_PATH>
+          M5.2: compare the trace passed to --replay against this second trace and print the changed/added/removed entries
+      --replay-force-version-skew
+          M5.2: skip the wcore-version guard in --replay (use only when inspecting traces from another release on purpose)
+      --compaction <COMPACTION>
+          Output compaction level: off, safe (default), full
+      --toon
+          Enable TOON encoding for JSON arrays (session-level, cannot change mid-conversation)
+      --online-evolution
+          F-092 (W7-N): enable live online evolution. At session-end the engine emits one `evolution_event` and applies the Paraphrase mutator to successful trajectories (≥50% of turns had tool calls). Evolved system-prompt variants are persisted to `$WAYLAND_HOME/evolved/`. Equivalent to `[observability] online_evolution = true` in config
+      --no-memory
+          Run a stateless session: disable long-term memory for this run. Sets `memory.enabled = false` before the engine boots, so no MemoryManager is created — GEPA, SkillRouter seeds, SkillDrafter, and user-model write-back are all inert. Equivalent to `[memory] enabled = false` in wcore.toml, but scoped to this invocation only. Merge is one-directional: the flag can only turn memory off, never on
+      --search
+          FluxRouter web_search grounding (contract §5): attach a server-side `web_search` tool to every turn so Flux grounds the answer via Perplexity Sonar and renders citations. Only fires when the active model is a Flux tier alias (`flux-auto` / `flux-fast` / `flux-standard` / `flux-reasoning`) — a no-op on other models. Paid-only on Flux
+  -h, --help
+          Print help
+  -V, --version
+          Print version
+### COMMAND help models
+F-089: model catalog commands
+
+Usage: wayland-p28-03-candidate models <COMMAND>
+
+Commands:
+  list  List known models from the bundled pricing catalog. Prints `provider/model_id` one per line. When `--provider` is omitted the full catalog across every built-in provider is shown
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+### COMMAND help plugin
+Manage installed plugins (install / list / available / remove)
+
+Usage: wayland-p28-03-candidate plugin [OPTIONS] <COMMAND>
+
+Commands:
+  install      Install a plugin. `name@marketplace` installs from a registered Claude Code marketplace (see `plugin marketplace add`); a bare `name` uses the legacy registry / GitHub-Releases path
+  marketplace  Manage Claude Code plugin marketplaces
+  list         List installed plugins
+  available    List plugins available in the local default registry (or the directory pointed at by `--registry-dir`)
+  remove       Remove an installed plugin
+  new          Scaffold a new plugin from a shipped template
+  test         Run a plugin's own test suite and return its verdict faithfully
+  verify       Report manifest validity, declared permissions and API compatibility. Non-zero exit on an incompatible declared API version
+  sign         Sign a plugin's entry artifact with the engine's Ed25519 trust root
+  publish      Produce a digest-addressed, signed bundle into a local marketplace directory. Never pushes, merges, releases or deploys
+  inspect      Report everything known about one installed plugin, including whether the loader will admit it. Non-zero exit when it is not installed
+  approve      Approve an installed plugin's CURRENT bytes so the loader will run it
+  update       Re-resolve a plugin from its marketplace, retaining the prior generation so the update can be rolled back
+  rollback     Restore the exact bytes of the retained prior generation
+  recover      Repair a half-written plugin store (interrupted update, missing live generation, drifted install directory)
+  help         Print this message or the help of the given subcommand(s)
+
+Options:
+      --install-root <INSTALL_ROOT>  Override the install root. Defaults to `dirs::data_dir()/wayland-core/plugins`. Mostly useful for tests and sandboxed setups; users normally don't touch this
+  -h, --help                         Print help
+### COMMAND help mcp-serve
+v0.6.4 Task 2.4: serve the engine's tool registry as an MCP server (stdio or SSE transport). Used by external MCP clients like Claude Desktop, mcp-cli, etc. to call wayland-core's tools
+
+Usage: wayland-p28-03-candidate mcp-serve [OPTIONS]
+
+Options:
+      --transport <TRANSPORT>  Transport: `stdio` (default — Claude Desktop / MCP CLIs spawn the process and speak newline-delimited JSON-RPC over stdin/stdout) or `sse` (HTTP server with text/event-stream responses on `--bind`) [default: stdio] [possible values: stdio, sse]
+      --bind <BIND>            Bind address for `--transport sse`. Ignored for stdio. Defaults to `127.0.0.1:9876` (loopback only — matches `SseConfig::default`) [default: 127.0.0.1:9876]
+  -h, --help                   Print help
+### COMMAND help swarm
+v0.6.4 Task 2.6: dispatch a worktree-isolated worker swarm
+
+Usage: wayland-p28-03-candidate swarm [OPTIONS] --workers <WORKERS>
+
+Options:
+      --workers <WORKERS>
+          Number of parallel workers to dispatch (1 through the safe Swarm cap)
+      --worker-command <WORKER_COMMAND>
+          argv-style worker command. Split on ASCII whitespace; the first token is the program (resolved against PATH), the rest are arguments. No shell interpretation. Ignored when `--brief` is set
+      --repo <REPO>
+          Repository root the swarm operates on. Defaults to CWD
+      --brief <BRIEF>
+          Optional TOML brief overriding ALL individual flags. Shape matches `SwarmBrief` (task, base_branch, worker_branch_prefix, worker_command, timeout, env)
+      --task <TASK>
+          Free-form telemetry label. Default: "cli-swarm" [default: cli-swarm]
+      --base-branch <BASE_BRANCH>
+          Branch each worker worktree is created from. Default: "main" [default: main]
+      --branch-prefix <BRANCH_PREFIX>
+          Branch prefix for each worker. Default: "swarm/cli" [default: swarm/cli]
+      --timeout <TIMEOUT>
+          Per-worker wall-clock timeout (humantime, e.g. "30s", "5m"). Default: 1h [default: 1h]
+      --reduce <REDUCE>
+          How to reduce the collected worker results. One of: mesh      — print every result verbatim (default). fleet     — print a success/failure roll-up summary. consensus — strict-majority vote over worker stdout. debate    — multi-round debate (single round at the CLI). Consensus/debate bucket workers by normalized (trimmed+lowercased) stdout [default: mesh]
+  -h, --help
+          Print help
+### COMMAND help session
+F23-02 (Phase 23B): operator verbs over saved sessions — list, search, show, checkpoint, rewind, retry, fork, export, retain, reconcile and cancel. Every operation prints a machine-observable `F23_SESSION=` token to STDOUT and uses the exit-code map documented in `session_cmd`
+
+Usage: wayland-p28-03-candidate session [OPTIONS] <COMMAND>
+
+Commands:
+  list        List saved sessions (STDOUT, unlike the root `--list-sessions` flag)
+  search      Full-text search across saved sessions
+  show        Show one session's metadata, lineage, retention and reconcile state
+  checkpoint  Capture a workspace checkpoint over the named files
+  rewind      Restore a previously captured checkpoint
+  retry       Re-run one turn. Approval is re-derived; an expired one is refused
+  fork        Fork a session, leaving the parent byte-identical
+  export      Write the redacted export envelope
+  retain      Set a retain-until bound and report the resulting retention state
+  reconcile   List or resolve outstanding unknown-effect items
+  cancel      Cancel every interrupted turn so the session becomes resumable
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+      --dir <DIR>              Directory holding saved sessions. Defaults to the resolved config's session directory, or `$WAYLAND_HOME/sessions` when no config resolves
+      --workspace <WORKSPACE>  Workspace root that checkpoint capture and restore are confined to. Defaults to the current directory
+  -h, --help                   Print help
+### COMMAND help workflow
+ForgeFlows: validate / list / run saved `.ron` workflows from `.wayland/workflows/`
+
+Usage: wayland-p28-03-candidate workflow <COMMAND>
+
+Commands:
+  validate  Parse and validate a single workflow `.ron` file without executing it. Prints an OK summary on success or the typed parse error (with its field pointer) on failure
+  list      List the saved workflows discovered under `.wayland/workflows/*.ron`. Each line is `name  ~N agents  — description`. Unparseable files are skipped with a warning to stderr
+  run       Execute a saved workflow by name. Resolves `<NAME>` to `.wayland/workflows/<NAME>.ron`, parses it, and runs it through the workflow engine over a real provider
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+### COMMAND help crucible
+Crucible (Mixture-of-Providers): run the cross-provider council over a task. N proposers (each pinned to its own provider from `[providers]`) answer in parallel; a fenced, read-only aggregator fuses them. Requires `[crucible] enabled = true` with a `proposers` roster in your config
+
+Usage: wayland-p28-03-candidate crucible [OPTIONS] <TASK>
+
+Arguments:
+  <TASK>  The task for the council to work
+
+Options:
+      --auto               Gate the council: a cheap classifier decides whether the task warrants convening (high-stakes / complex) or can be answered with a single direct call (trivial). Without this flag the council always convenes
+      --council <COUNCIL>  Auto mode: pin the candidate pool to these specs (comma-separated)
+      --judge <JUDGE>      Auto mode: pin the aggregator to this spec
+      --direct             Auto mode: force a single direct answer
+      --force-council      Auto mode: force convening a council regardless of the gate
+      --deep               Auto mode: treat the task as High stakes (widest roster, top judge)
+      --deny <DENY>        Auto mode: exclude these provider families (comma-separated)
+      --advisor            Inject the council synthesis into the normal trusted agent loop as private guidance (the agent then reasons/acts/uses tools on it), instead of printing the fused answer and stopping. Overrides config
+      --terminal           Force terminal (print-and-stop) mode, overriding `[crucible].mode`
+  -h, --help               Print help
+### COMMAND help forge
+Anvil (gated forge) — forge a candidate that passes a REAL executable gate (tests / build / lint), then stamp a verified receipt. Requires ON by default; `[anvil] enabled = false` is the kill-switch. Empty gate config auto-detects the workspace suite
+
+Usage: wayland-p28-03-candidate forge <TASK>
+
+Arguments:
+  <TASK>  The task to forge. Anvil is for work with a REAL, checkable gate (tests / build / lint) — it forges a candidate that passes it
+
+Options:
+  -h, --help  Print help
+### COMMAND help project-context
+v0.7.0 Task 1.C.1: print resolved project context from WAYLAND.md / AGENTS.md / .wayland/context.md / CLAUDE.md walking up from cwd
+
+Usage: wayland-p28-03-candidate project-context
+
+Options:
+  -h, --help  Print help
+### COMMAND help init
+v0.7.0 1.B.2: scaffold .wayland/config.toml + WAYLAND.md in cwd
+
+Usage: wayland-p28-03-candidate init [OPTIONS]
+
+Options:
+      --force          Overwrite any files that already exist. Without `--force` the init is idempotent: each file is written only when missing, and a one-line "skipped (exists)" notice goes to stderr
+      --model <MODEL>  Default model to write into the starter `config.toml`. When omitted, falls back to `$WAYLAND_MODEL` and then to [`PLACEHOLDER_MODEL`]
+      --skip-context   Skip the `WAYLAND.md` template at the project root. The `.wayland/config.toml` is still written
+      --root <ROOT>    Project root to scaffold. Defaults to the current working directory. Mostly useful for tests; users almost never set it
+  -h, --help           Print help
+### COMMAND help acp
+v0.7.0 1.A.10: ACP server + client surface. `acp serve` binds the HTTP/SSE transport; `acp request` drives a one-shot session/message round-trip
+
+Usage: wayland-p28-03-candidate acp <COMMAND>
+
+Commands:
+  serve    Bind the HTTP/SSE transport to a TCP port and serve sessions
+  request  One-shot ACP request against a running server. Mostly a smoke-test handle for `serve`
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+### COMMAND help agent
+v0.7.0 3.B.2: manage user-defined agents (create, list, show, edit, delete). Built-ins from the bundled pack are read-only
+
+Usage: wayland-p28-03-candidate agent <COMMAND>
+
+Commands:
+  create  Create a new user agent (persists to ~/.wayland/agents/<name>.toml)
+  list    List user agents (and optionally the built-ins)
+  show    Print the resolved manifest for an agent (user or built-in)
+  edit    Open the user agent's TOML file in $EDITOR for hand-editing
+  delete  Delete a user agent. Built-ins cannot be deleted
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+### COMMAND help cron
+v0.8.1 U7: manage scheduled cron jobs (add / list / remove / enable / disable). Persists to `$WAYLAND_HOME/cron/jobs.json`; the background runner spawned at session boot picks up changes on its next tick
+
+Usage: wayland-p28-03-candidate cron <COMMAND>
+
+Commands:
+  list     List every persisted cron job
+  add      Add a new job. Exactly one of `--slash`, `--channel`, or `--skill` must be provided (with matching companion flags)
+  remove   Remove a job by id
+  enable   Enable a job by id
+  disable  Disable a job by id (kept on disk, skipped by the runner)
+  status   Print full details for one job: id, expression, target, state, created_at, last_fired, and the outcome of the most recent fire attempt (success + duration, or error message)
+  history  Print the last N fire records for a job (timestamp, outcome, duration, error message if any). Records come from the JSONL ring-buffer written by the runner alongside jobs.json
+  logs     Tail recent log lines associated with a job's fires. Currently surfaces fire records from the history file (same data as `cron history`) formatted as structured log lines compatible with the engine's tracing output
+  daemon   Spawn the cron runner as a detached background daemon
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+### COMMAND help self-update
+v0.8.1 U9: update wayland-core to the latest signed release from `FerroxLabs/wayland-core`. Verifies the `.sig` artifact against the pinned marketplace pubkey (ed25519) before atomic swap. Use `--check-only` to print versions without installing
+
+Usage: wayland-p28-03-candidate self-update [OPTIONS]
+
+Options:
+      --check-only  Print current vs. latest version and exit without installing
+  -h, --help        Print help
+### COMMAND help setup
+CLI surface: launch the TUI on the Onboarding (connect/configure) surface regardless of whether a config already exists. Onboarding handles an existing config gracefully via an Overwrite/Keep choice. The plain `wayland-core` launch only opens Onboarding on a true first run; `setup` is the explicit re-entry point
+
+Usage: wayland-p28-03-candidate setup
+
+Options:
+  -h, --help  Print help
+### COMMAND help auth
+CLI surface: manage provider API keys (list / add / remove) directly in the global `config.toml` — the lightweight alternative to the full onboarding flow
+
+Usage: wayland-p28-03-candidate auth <COMMAND>
+
+Commands:
+  list    List every configured provider with a masked API key
+  add     Add (or replace) a provider API key. The key is validated against the provider's endpoint before it is written
+  remove  Remove a provider's API key from the config
+  login   Sign in to a subscription provider via OAuth in the browser
+  logout  Sign out (delete stored OAuth tokens) for a subscription provider
+  status  Show OAuth login status (provider, plan, token expiry)
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+### COMMAND help image
+FluxRouter image generation (`POST /v1/images/generations`). Writes the decoded image to `--out` (or stdout when piped). A free / paid-but-uncleared Flux key returns a `premium_locked` message — image generation is a paid-only capability
+
+Usage: wayland-p28-03-candidate image [OPTIONS] --prompt <PROMPT>
+
+Options:
+      --prompt <PROMPT>        The image prompt (required, non-empty)
+      --model <MODEL>          Image arm / provider (e.g. `flux-image-together-flux`, `nano-banana`, `gpt-image-high`). Omit for the cheapest default (together-flux)
+      --n <N>                  Number of images to generate. Defaults to 1; keep at 1 for premium arms (they can exceed the ~60s sync timeout otherwise) [default: 1]
+      --size <SIZE>            Image size (honored only by together-flux; other arms use a fixed size)
+      --out <OUT>              Output file path. With `--n > 1` an index is inserted before the extension (`out.png` → `out-1.png`, `out-2.png`, …). When omitted, the single image is written to stdout (only valid for `--n 1`)
+      --max-price <MAX_PRICE>  USD price ceiling. If the final (post-PAYG) price exceeds this, Flux returns 402 and does NOT charge
+      --api-key <API_KEY>      Override the Flux Bearer key (else `$FLUX_API_KEY` / config)
+      --base-url <BASE_URL>    Override the Flux base URL ending in `/v1` (else config / default)
+  -h, --help                   Print help
+### COMMAND help fetch
+FluxRouter web_fetch (`POST /v1/fetch`): fetch a URL and print it as markdown. `--render` selects the JS-rendered premium arm. A free / paid-but-uncleared Flux key returns an `upgrade_required` message — web_fetch is a paid-only capability
+
+Usage: wayland-p28-03-candidate fetch [OPTIONS] <URL>
+
+Arguments:
+  <URL>  The URL to fetch (required, non-empty, http(s) only). One URL per call
+
+Options:
+      --render               Use the JS-rendered premium arm (scrape.do, ~$0.02 vs ~$0.005). Needed for JS-heavy pages the default reader can't render
+      --api-key <API_KEY>    Override the Flux Bearer key (else `$FLUX_API_KEY` / config)
+      --base-url <BASE_URL>  Override the Flux base URL ending in `/v1` (else config / default)
+  -h, --help                 Print help
+### COMMAND help backend
+F25-01: execution backends — list / probe / run / cancel / orphans / receipt verify / diff across local, container, ssh and cloud
+
+Usage: wayland-p28-03-candidate backend <COMMAND>
+
+Commands:
+  list     List every reference backend with its availability, the probe that established it, and its declared capabilities
+  probe    Probe one backend and print the result plus its lifecycle health
+  run      Run a task definition on one backend and write its receipt
+  cancel   Cancel a live task by id, from any process, and report what cleanup was observed
+  orphans  Enumerate surfaces still carrying a task nonce, per backend
+  scan     F25-05: scan every backend for orphaned execution left behind by a task, printing the RAW enumeration alongside the count and naming the reaping mechanism each backend actually relies on
+  receipt  Receipt operations
+  diff     Diff two or more receipts of the SAME task and report equivalence
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+### COMMAND help gateway
+F24-B: the persistent gateway runtime — install / uninstall / start / stop / restart / status / drain, plus the `run` verb every generated launchd, systemd and scheduled-task unit invokes
+
+Usage: wayland-p28-03-candidate gateway <COMMAND>
+
+Commands:
+  install    Register the gateway as a per-user native service for this platform
+  uninstall  Remove the native service registration
+  start      Start the registered gateway through the platform's service manager
+  stop       Stop it through the platform's service manager
+  restart    Stop then start. A stop refusal because nothing was running is not an error here — restarting a stopped gateway is a start
+  status     Report what the gateway is doing
+  drain      Close admission, finish in-flight work within a budget, and exit
+  run        The long-lived runtime itself. This is what every generated service unit invokes; it is not normally typed by an operator
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+### COMMAND help node
+F25-03: nodes — pair / list / show / probe / revoke / submit / attribution across paired machines that host execution backends
+
+Usage: wayland-p28-03-candidate node <COMMAND>
+
+Commands:
+  identity     Print THIS host's node identity. With `--challenge`, also sign it — this is the far-end half of pairing and is what the controller runs over ssh
+  advertise    Print THIS host's FRESH capability advertisement, from a real probe. The far-end half of `node probe`
+  pair         Pair a remote host as a node, proving its identity before recording it
+  list         List every paired node with identity, capabilities, version and liveness
+  show         Everything known about one node
+  probe        Probe a node's liveness and refresh its capability advertisement
+  revoke       Withdraw a node's authority. Subsequent work to it is REFUSED and in-flight work on it is terminated; nothing reroutes
+  submit       Ask whether work may be submitted to a node, and exit non-zero when the answer is no. This is the scriptable form of the refusal
+  attribution  Re-verify a receipt's attribution chain against a paired node
+  help         Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+### COMMAND help goal
+F22-04: durable Goals and their Fleet task ledger — open / task / run / status / exec-task. `run` recovers a killed Goal, revokes expired claim leases, drains completions the dead parent never observed, and drives the remaining tasks through the Fleet dispatcher
+
+Usage: wayland-p28-03-candidate goal <COMMAND>
+
+Commands:
+  open       Authorize a durable Goal
+  task       Declare a task in the Goal's durable ledger
+  run        Recover, reclaim and drive the Goal's tasks through the Fleet dispatcher
+  status     The canonical JSON projection of a Goal and its task ledger
+  exec-task  The effect boundary: idempotency gate, then the operator's command
+  effects    Count the effects on disk: total, and how many carry distinct labels
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+### COMMAND help channel
+F24-03: channel adapters — list / probe / health / reload. `probe` asks the platform and needs no gateway; `health` reports only what a RUNNING gateway has observed and refuses otherwise
+
+Usage: wayland-p28-03-candidate channel <COMMAND>
+
+Commands:
+  list    List configured channels from the on-disk config directory
+  probe   Ask each configured channel's platform whether its setup is complete, whether its credential authenticates, and what identity it authenticated as. Sends no message
+  health  Show the per-adapter health a RUNNING gateway has observed
+  reload  Ask the running gateway to re-read the channel config directory
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+### COMMAND help profile
+Manage isolated profiles — each is an independent `WAYLAND_HOME`-rooted home with its own config, credentials, memory, and skills
+
+Usage: wayland-p28-03-candidate profile <COMMAND>
+
+Commands:
+  create  Create a new isolated profile
+  use     Set the active profile for future launches
+  list    List all profiles (the active one is marked with `*`)
+  show    Show a profile's home path and which stores it contains
+  rename  Rename a profile. Re-points the active selection if it named `old`
+  delete  Delete a profile and its entire home directory
+  export  Export a profile's home tree to a directory
+  import  Import a directory tree as a new profile
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+### COMMAND help migrate
+Import an existing agent setup (Hermes) into wayland-core profiles
+
+Usage: wayland-p28-03-candidate migrate <COMMAND>
+
+Commands:
+  hermes    Import Hermes profiles (`~/.hermes/profiles/*`) into wayland-core
+  openclaw  Import an OpenClaw setup (`~/.openclaw`) into wayland-core
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+### COMMAND help backup
+Archive, verify, restore and recover a Wayland home (F26-03)
+
+Usage: wayland-p28-03-candidate backup <COMMAND>
+
+Commands:
+  create   Create a verifiable archive of a Wayland home
+  verify   Verify an archive's manifest, payload digests and entry paths
+  restore  Restore an archive into a home directory
+  recover  Roll back any operation whose owning process died mid-flight
+  digest   Print the tree digest of a home, and the algorithm used
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+### COMMAND help sandbox
+F28: platform containment operator surface — `status` reports the selected backend and its properties; `exec` runs a command through the agent's own shell tool so an operator can observe, from the child's own output, that the sandbox was ACTIVE rather than merely available
+
+Usage: wayland-p28-03-candidate sandbox <COMMAND>
+
+Commands:
+  status  Report the platform containment backend selected for this host, and the containment properties it does and does not provide
+  exec    Run a command inside this host's platform sandbox and print the child's own output
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+### END-CAPTURE

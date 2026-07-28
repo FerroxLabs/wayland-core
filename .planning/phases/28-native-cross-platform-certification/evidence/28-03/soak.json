@@ -1,0 +1,3681 @@
+{
+ "schema": "f28-soak/v1",
+ "requirement": "F28-02",
+ "candidate": {
+  "commit": "e4a3f5fc0f92a7b0126f594146c4b71182e9e378",
+  "tree": "6a494c995358d76f0bb296abf3ea8a086b24c28b",
+  "ledger": "evidence/28-03/candidate.json"
+ },
+ "bands_ref": "evidence/28-03/bands.json",
+ "bands_committed_at": "1dea6437 \u2014 before any soak session existed",
+ "families": [
+  {
+   "family": "linux",
+   "host": "hetzner-dsm",
+   "target": "x86_64-unknown-linux-gnu",
+   "binary_sha256": "ab8cf3d34457b5897b94f8313a96f6dce04a95eb8f0d3bc3343fcba9bdb2991d",
+   "ledger_sha256": "ab8cf3d34457b5897b94f8313a96f6dce04a95eb8f0d3bc3343fcba9bdb2991d",
+   "sessions_completed": 1000,
+   "session_target": 1000,
+   "concurrency": 4,
+   "workload": {
+    "candidate_surfaces": 131,
+    "tier1_candidates": 41,
+    "tier3_candidates": 90,
+    "established": 106,
+    "precondition_unavailable": 22,
+    "broken_inventory": 3,
+    "broken_inventory_ids": [
+     "backend receipt",
+     "channel probe",
+     "plugin marketplace"
+    ],
+    "precondition_ids": [
+     "agent show",
+     "backend diff",
+     "backend orphans",
+     "backend probe",
+     "backend scan",
+     "backup digest",
+     "backup verify",
+     "cron history",
+     "cron logs",
+     "cron status",
+     "goal status",
+     "node attribution",
+     "node probe",
+     "node show",
+     "plugin inspect",
+     "plugin verify",
+     "profile export",
+     "profile show",
+     "session export",
+     "session search",
+     "session show",
+     "workflow validate"
+    ],
+    "established_ids": [
+     "agent list",
+     "auth list",
+     "auth status",
+     "backend list",
+     "channel list",
+     "cron list",
+     "gateway status",
+     "models list",
+     "node identity",
+     "node list",
+     "plugin available",
+     "plugin list",
+     "profile list",
+     "sandbox status",
+     "session list",
+     "workflow list",
+     "acp --help",
+     "acp request --help",
+     "acp serve --help",
+     "agent --help",
+     "agent create --help",
+     "agent delete --help",
+     "agent edit --help",
+     "auth --help",
+     "auth add --help",
+     "auth login --help",
+     "auth logout --help",
+     "auth remove --help",
+     "backend --help",
+     "backend cancel --help",
+     "backend run --help",
+     "backup --help",
+     "backup create --help",
+     "backup recover --help",
+     "backup restore --help",
+     "channel --help",
+     "channel health --help",
+     "channel reload --help",
+     "cron --help",
+     "cron add --help",
+     "cron daemon --help",
+     "cron disable --help",
+     "cron enable --help",
+     "cron remove --help",
+     "crucible --help",
+     "fetch --help",
+     "forge --help",
+     "gateway --help",
+     "gateway drain --help",
+     "gateway install --help",
+     "gateway restart --help",
+     "gateway run --help",
+     "gateway start --help",
+     "gateway stop --help",
+     "gateway uninstall --help",
+     "goal --help",
+     "goal effects --help",
+     "goal exec-task --help",
+     "goal open --help",
+     "goal run --help",
+     "goal task --help",
+     "image --help",
+     "init --help",
+     "mcp-serve --help",
+     "migrate --help",
+     "migrate hermes --help",
+     "migrate openclaw --help",
+     "models --help",
+     "node --help",
+     "node advertise --help",
+     "node pair --help",
+     "node revoke --help",
+     "node submit --help",
+     "plugin --help",
+     "plugin approve --help",
+     "plugin install --help",
+     "plugin new --help",
+     "plugin publish --help",
+     "plugin recover --help",
+     "plugin remove --help",
+     "plugin rollback --help",
+     "plugin sign --help",
+     "plugin test --help",
+     "plugin update --help",
+     "profile --help",
+     "profile create --help",
+     "profile delete --help",
+     "profile import --help",
+     "profile rename --help",
+     "profile use --help",
+     "project-context --help",
+     "sandbox --help",
+     "sandbox exec --help",
+     "self-update --help",
+     "session --help",
+     "session cancel --help",
+     "session checkpoint --help",
+     "session fork --help",
+     "session reconcile --help",
+     "session retain --help",
+     "session retry --help",
+     "session rewind --help",
+     "setup --help",
+     "swarm --help",
+     "workflow --help",
+     "workflow run --help"
+    ]
+   },
+   "blocks": [
+    {
+     "block": 1,
+     "sessions": 100,
+     "correct": 100,
+     "p50_ms": 52.328325,
+     "p90_ms": 55.313338,
+     "p95_ms": 56.333166
+    },
+    {
+     "block": 2,
+     "sessions": 100,
+     "correct": 100,
+     "p50_ms": 52.741378,
+     "p90_ms": 55.740342,
+     "p95_ms": 63.680927
+    },
+    {
+     "block": 3,
+     "sessions": 100,
+     "correct": 100,
+     "p50_ms": 52.646635,
+     "p90_ms": 56.425054,
+     "p95_ms": 59.568545
+    },
+    {
+     "block": 4,
+     "sessions": 100,
+     "correct": 100,
+     "p50_ms": 52.419192,
+     "p90_ms": 54.912934,
+     "p95_ms": 56.205412
+    },
+    {
+     "block": 5,
+     "sessions": 100,
+     "correct": 100,
+     "p50_ms": 52.272171,
+     "p90_ms": 55.992281,
+     "p95_ms": 74.869473
+    },
+    {
+     "block": 6,
+     "sessions": 100,
+     "correct": 100,
+     "p50_ms": 52.229406,
+     "p90_ms": 54.192336,
+     "p95_ms": 56.494388
+    },
+    {
+     "block": 7,
+     "sessions": 100,
+     "correct": 100,
+     "p50_ms": 52.175885,
+     "p90_ms": 55.96518,
+     "p95_ms": 57.270098
+    },
+    {
+     "block": 8,
+     "sessions": 100,
+     "correct": 100,
+     "p50_ms": 52.193702,
+     "p90_ms": 55.703286,
+     "p95_ms": 56.765027
+    },
+    {
+     "block": 9,
+     "sessions": 100,
+     "correct": 100,
+     "p50_ms": 52.835179,
+     "p90_ms": 55.44816,
+     "p95_ms": 56.927672
+    },
+    {
+     "block": 10,
+     "sessions": 100,
+     "correct": 100,
+     "p50_ms": 52.342807,
+     "p90_ms": 55.270653,
+     "p95_ms": 58.156475
+    }
+   ],
+   "canary": {
+    "channels": {
+     "protocol": 0,
+     "stdout": 0,
+     "stderr": 0,
+     "files": 0,
+     "logs": 0,
+     "telemetry": 0
+    },
+    "channels_scanned": [
+     "protocol",
+     "stdout",
+     "stderr",
+     "files",
+     "logs",
+     "telemetry"
+    ],
+    "control_detected": true,
+    "control_per_channel": {
+     "protocol": 1,
+     "stdout": 1,
+     "stderr": 1,
+     "files": 1,
+     "logs": 1,
+     "telemetry": 1
+    },
+    "control_channel": "all-six"
+   },
+   "census": {
+    "backend": "cgroup-v2",
+    "authoritative": true,
+    "orphans_found": 0,
+    "orphan_pids": [],
+    "control_orphan_found": true,
+    "scope": "processes whose executable path resolves to /root/wayland-p28-03-candidate",
+    "caveat": null
+   },
+   "resources": {
+    "samples": [
+     {
+      "session_index": 0,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 55648256,
+       "control_growth_bytes": 8192
+      }
+     },
+     {
+      "session_index": 10,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 55648256,
+       "control_growth_bytes": 12288
+      }
+     },
+     {
+      "session_index": 20,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 0,
+       "harness_rss_bytes": 55648256,
+       "control_growth_bytes": 16384
+      }
+     },
+     {
+      "session_index": 30,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 55648256,
+       "control_growth_bytes": 20480
+      }
+     },
+     {
+      "session_index": 40,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 56434688,
+       "control_growth_bytes": 24576
+      }
+     },
+     {
+      "session_index": 50,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 0,
+       "harness_rss_bytes": 56434688,
+       "control_growth_bytes": 28672
+      }
+     },
+     {
+      "session_index": 60,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 56434688,
+       "control_growth_bytes": 32768
+      }
+     },
+     {
+      "session_index": 70,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 0,
+       "harness_rss_bytes": 56434688,
+       "control_growth_bytes": 36864
+      }
+     },
+     {
+      "session_index": 80,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 56434688,
+       "control_growth_bytes": 40960
+      }
+     },
+     {
+      "session_index": 90,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 0,
+       "harness_rss_bytes": 57221120,
+       "control_growth_bytes": 45056
+      }
+     },
+     {
+      "session_index": 100,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 58007552,
+       "control_growth_bytes": 49152
+      }
+     },
+     {
+      "session_index": 110,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 58007552,
+       "control_growth_bytes": 53248
+      }
+     },
+     {
+      "session_index": 120,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 58007552,
+       "control_growth_bytes": 57344
+      }
+     },
+     {
+      "session_index": 130,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 57798656,
+       "control_growth_bytes": 61440
+      }
+     },
+     {
+      "session_index": 140,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 57798656,
+       "control_growth_bytes": 65536
+      }
+     },
+     {
+      "session_index": 150,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 57798656,
+       "control_growth_bytes": 69632
+      }
+     },
+     {
+      "session_index": 160,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 0,
+       "harness_rss_bytes": 57798656,
+       "control_growth_bytes": 73728
+      }
+     },
+     {
+      "session_index": 170,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 57798656,
+       "control_growth_bytes": 77824
+      }
+     },
+     {
+      "session_index": 180,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 57798656,
+       "control_growth_bytes": 81920
+      }
+     },
+     {
+      "session_index": 190,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 57798656,
+       "control_growth_bytes": 86016
+      }
+     },
+     {
+      "session_index": 200,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 0,
+       "harness_rss_bytes": 57798656,
+       "control_growth_bytes": 90112
+      }
+     },
+     {
+      "session_index": 210,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 57798656,
+       "control_growth_bytes": 94208
+      }
+     },
+     {
+      "session_index": 220,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 57798656,
+       "control_growth_bytes": 98304
+      }
+     },
+     {
+      "session_index": 230,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 57798656,
+       "control_growth_bytes": 102400
+      }
+     },
+     {
+      "session_index": 240,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 0,
+       "harness_rss_bytes": 57798656,
+       "control_growth_bytes": 106496
+      }
+     },
+     {
+      "session_index": 250,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 57798656,
+       "control_growth_bytes": 110592
+      }
+     },
+     {
+      "session_index": 260,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 57798656,
+       "control_growth_bytes": 114688
+      }
+     },
+     {
+      "session_index": 270,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 57798656,
+       "control_growth_bytes": 118784
+      }
+     },
+     {
+      "session_index": 280,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 57798656,
+       "control_growth_bytes": 122880
+      }
+     },
+     {
+      "session_index": 290,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 57798656,
+       "control_growth_bytes": 126976
+      }
+     },
+     {
+      "session_index": 300,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 57798656,
+       "control_growth_bytes": 131072
+      }
+     },
+     {
+      "session_index": 310,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 57798656,
+       "control_growth_bytes": 135168
+      }
+     },
+     {
+      "session_index": 320,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 57798656,
+       "control_growth_bytes": 139264
+      }
+     },
+     {
+      "session_index": 330,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 58585088,
+       "control_growth_bytes": 143360
+      }
+     },
+     {
+      "session_index": 340,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 58585088,
+       "control_growth_bytes": 147456
+      }
+     },
+     {
+      "session_index": 350,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 58585088,
+       "control_growth_bytes": 151552
+      }
+     },
+     {
+      "session_index": 360,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 58585088,
+       "control_growth_bytes": 155648
+      }
+     },
+     {
+      "session_index": 370,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 59371520,
+       "control_growth_bytes": 159744
+      }
+     },
+     {
+      "session_index": 380,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 59371520,
+       "control_growth_bytes": 163840
+      }
+     },
+     {
+      "session_index": 390,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 59371520,
+       "control_growth_bytes": 167936
+      }
+     },
+     {
+      "session_index": 400,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 59371520,
+       "control_growth_bytes": 172032
+      }
+     },
+     {
+      "session_index": 410,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 59371520,
+       "control_growth_bytes": 176128
+      }
+     },
+     {
+      "session_index": 420,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 59371520,
+       "control_growth_bytes": 180224
+      }
+     },
+     {
+      "session_index": 430,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 60157952,
+       "control_growth_bytes": 184320
+      }
+     },
+     {
+      "session_index": 440,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 0,
+       "harness_rss_bytes": 61730816,
+       "control_growth_bytes": 188416
+      }
+     },
+     {
+      "session_index": 450,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 61730816,
+       "control_growth_bytes": 192512
+      }
+     },
+     {
+      "session_index": 460,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 61730816,
+       "control_growth_bytes": 196608
+      }
+     },
+     {
+      "session_index": 470,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 63303680,
+       "control_growth_bytes": 200704
+      }
+     },
+     {
+      "session_index": 480,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 64876544,
+       "control_growth_bytes": 204800
+      }
+     },
+     {
+      "session_index": 490,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 64876544,
+       "control_growth_bytes": 208896
+      }
+     },
+     {
+      "session_index": 500,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 64876544,
+       "control_growth_bytes": 212992
+      }
+     },
+     {
+      "session_index": 510,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 64876544,
+       "control_growth_bytes": 217088
+      }
+     },
+     {
+      "session_index": 520,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 65662976,
+       "control_growth_bytes": 221184
+      }
+     },
+     {
+      "session_index": 530,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 65662976,
+       "control_growth_bytes": 225280
+      }
+     },
+     {
+      "session_index": 540,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 65662976,
+       "control_growth_bytes": 229376
+      }
+     },
+     {
+      "session_index": 550,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 65662976,
+       "control_growth_bytes": 233472
+      }
+     },
+     {
+      "session_index": 560,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 65662976,
+       "control_growth_bytes": 237568
+      }
+     },
+     {
+      "session_index": 570,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 0,
+       "harness_rss_bytes": 65662976,
+       "control_growth_bytes": 241664
+      }
+     },
+     {
+      "session_index": 580,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 65662976,
+       "control_growth_bytes": 245760
+      }
+     },
+     {
+      "session_index": 590,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 65662976,
+       "control_growth_bytes": 249856
+      }
+     },
+     {
+      "session_index": 600,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 65662976,
+       "control_growth_bytes": 253952
+      }
+     },
+     {
+      "session_index": 610,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 65662976,
+       "control_growth_bytes": 258048
+      }
+     },
+     {
+      "session_index": 620,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 65662976,
+       "control_growth_bytes": 262144
+      }
+     },
+     {
+      "session_index": 630,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 65662976,
+       "control_growth_bytes": 266240
+      }
+     },
+     {
+      "session_index": 640,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 65662976,
+       "control_growth_bytes": 270336
+      }
+     },
+     {
+      "session_index": 650,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 0,
+       "harness_rss_bytes": 65662976,
+       "control_growth_bytes": 274432
+      }
+     },
+     {
+      "session_index": 660,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 65662976,
+       "control_growth_bytes": 278528
+      }
+     },
+     {
+      "session_index": 670,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 66048000,
+       "control_growth_bytes": 282624
+      }
+     },
+     {
+      "session_index": 680,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 66048000,
+       "control_growth_bytes": 286720
+      }
+     },
+     {
+      "session_index": 690,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 0,
+       "harness_rss_bytes": 66048000,
+       "control_growth_bytes": 290816
+      }
+     },
+     {
+      "session_index": 700,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 66048000,
+       "control_growth_bytes": 294912
+      }
+     },
+     {
+      "session_index": 710,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 66048000,
+       "control_growth_bytes": 299008
+      }
+     },
+     {
+      "session_index": 720,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 66048000,
+       "control_growth_bytes": 303104
+      }
+     },
+     {
+      "session_index": 730,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 66048000,
+       "control_growth_bytes": 307200
+      }
+     },
+     {
+      "session_index": 740,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 0,
+       "harness_rss_bytes": 66048000,
+       "control_growth_bytes": 311296
+      }
+     },
+     {
+      "session_index": 750,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 66048000,
+       "control_growth_bytes": 315392
+      }
+     },
+     {
+      "session_index": 760,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 66048000,
+       "control_growth_bytes": 319488
+      }
+     },
+     {
+      "session_index": 770,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 66048000,
+       "control_growth_bytes": 323584
+      }
+     },
+     {
+      "session_index": 780,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 66048000,
+       "control_growth_bytes": 327680
+      }
+     },
+     {
+      "session_index": 790,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 66048000,
+       "control_growth_bytes": 331776
+      }
+     },
+     {
+      "session_index": 800,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 66048000,
+       "control_growth_bytes": 335872
+      }
+     },
+     {
+      "session_index": 810,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 66834432,
+       "control_growth_bytes": 339968
+      }
+     },
+     {
+      "session_index": 820,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 66834432,
+       "control_growth_bytes": 344064
+      }
+     },
+     {
+      "session_index": 830,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 66834432,
+       "control_growth_bytes": 348160
+      }
+     },
+     {
+      "session_index": 840,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 66834432,
+       "control_growth_bytes": 352256
+      }
+     },
+     {
+      "session_index": 850,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 66834432,
+       "control_growth_bytes": 356352
+      }
+     },
+     {
+      "session_index": 860,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 67608576,
+       "control_growth_bytes": 360448
+      }
+     },
+     {
+      "session_index": 870,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 67608576,
+       "control_growth_bytes": 364544
+      }
+     },
+     {
+      "session_index": 880,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 67411968,
+       "control_growth_bytes": 368640
+      }
+     },
+     {
+      "session_index": 890,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 67411968,
+       "control_growth_bytes": 372736
+      }
+     },
+     {
+      "session_index": 900,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 67411968,
+       "control_growth_bytes": 376832
+      }
+     },
+     {
+      "session_index": 910,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 67411968,
+       "control_growth_bytes": 380928
+      }
+     },
+     {
+      "session_index": 920,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 0,
+       "harness_rss_bytes": 67411968,
+       "control_growth_bytes": 385024
+      }
+     },
+     {
+      "session_index": 930,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 67411968,
+       "control_growth_bytes": 389120
+      }
+     },
+     {
+      "session_index": 940,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 67411968,
+       "control_growth_bytes": 393216
+      }
+     },
+     {
+      "session_index": 950,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 67411968,
+       "control_growth_bytes": 397312
+      }
+     },
+     {
+      "session_index": 960,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 67411968,
+       "control_growth_bytes": 401408
+      }
+     },
+     {
+      "session_index": 970,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 67411968,
+       "control_growth_bytes": 405504
+      }
+     },
+     {
+      "session_index": 980,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 68198400,
+       "control_growth_bytes": 409600
+      }
+     },
+     {
+      "session_index": 990,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 68198400,
+       "control_growth_bytes": 413696
+      }
+     },
+     {
+      "session_index": 1000,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 68198400,
+       "control_growth_bytes": 417792
+      }
+     }
+    ],
+    "control_growth_flagged": true
+   },
+   "covariates": [
+    {
+     "session_index": 0,
+     "host_load_1m": 0.57,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 10,
+     "host_load_1m": 0.57,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 20,
+     "host_load_1m": 0.57,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 30,
+     "host_load_1m": 0.57,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 40,
+     "host_load_1m": 0.57,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 50,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 60,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 70,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 80,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 90,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 100,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 110,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 120,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 130,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 140,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 150,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 160,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 170,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 180,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 190,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 200,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 210,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 220,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 230,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 240,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 250,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 260,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 270,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 280,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 290,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 300,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 310,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 320,
+     "host_load_1m": 1.33,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 330,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 340,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 350,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 360,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 370,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 380,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 390,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 400,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 410,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 420,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 430,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 440,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 450,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 460,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 470,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 480,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 490,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 500,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 510,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 520,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 530,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 540,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 550,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 560,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 570,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 580,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 590,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 600,
+     "host_load_1m": 1.46,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 610,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 620,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 630,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 640,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 650,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 660,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 670,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 680,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 690,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 700,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 710,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 720,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 730,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 740,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 750,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 760,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 770,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 780,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 790,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 800,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 810,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 820,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 830,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 840,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 850,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 860,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 870,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 880,
+     "host_load_1m": 1.59,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 890,
+     "host_load_1m": 1.78,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 900,
+     "host_load_1m": 1.78,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 910,
+     "host_load_1m": 1.78,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 920,
+     "host_load_1m": 1.78,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 930,
+     "host_load_1m": 1.78,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 940,
+     "host_load_1m": 1.78,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 950,
+     "host_load_1m": 1.78,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 960,
+     "host_load_1m": 1.78,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 970,
+     "host_load_1m": 1.78,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 980,
+     "host_load_1m": 1.78,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 990,
+     "host_load_1m": 1.78,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 1000,
+     "host_load_1m": 1.78,
+     "live_soak_children": 0
+    }
+   ],
+   "drift": [
+    {
+     "metric": "latency_p50_block_median_ms",
+     "early": 52.646635,
+     "late": 52.342807
+    },
+    {
+     "metric": "latency_p90_block_median_ms",
+     "early": 55.740342,
+     "late": 55.44816
+    },
+    {
+     "metric": "quality_correct_rate_block_mean",
+     "early": 1,
+     "late": 1
+    },
+    {
+     "metric": "quality_correct_rate_run",
+     "early": 1,
+     "late": 1
+    },
+    {
+     "metric": "session_wall_ms_max",
+     "early": 94.376555,
+     "late": 94.376555
+    },
+    {
+     "metric": "session_wall_ms_p95",
+     "early": 57.948211,
+     "late": 57.948211
+    }
+   ],
+   "reds": []
+  },
+  {
+   "family": "macos",
+   "host": "certification-mac (macOS 26.3, arm64)",
+   "target": "aarch64-apple-darwin",
+   "binary_sha256": "59f57fb3fa6a554645ace02ba2044439235cc9460c660a8392ac4df1e6fa7ce8",
+   "ledger_sha256": "59f57fb3fa6a554645ace02ba2044439235cc9460c660a8392ac4df1e6fa7ce8",
+   "sessions_completed": 1000,
+   "session_target": 1000,
+   "concurrency": 4,
+   "workload": {
+    "candidate_surfaces": 131,
+    "tier1_candidates": 41,
+    "tier3_candidates": 90,
+    "established": 106,
+    "precondition_unavailable": 22,
+    "broken_inventory": 3,
+    "broken_inventory_ids": [
+     "backend receipt",
+     "channel probe",
+     "plugin marketplace"
+    ],
+    "precondition_ids": [
+     "agent show",
+     "backend diff",
+     "backend orphans",
+     "backend probe",
+     "backend scan",
+     "backup digest",
+     "backup verify",
+     "cron history",
+     "cron logs",
+     "cron status",
+     "goal status",
+     "node attribution",
+     "node probe",
+     "node show",
+     "plugin inspect",
+     "plugin verify",
+     "profile export",
+     "profile show",
+     "session export",
+     "session search",
+     "session show",
+     "workflow validate"
+    ],
+    "established_ids": [
+     "agent list",
+     "auth list",
+     "auth status",
+     "backend list",
+     "channel list",
+     "cron list",
+     "gateway status",
+     "models list",
+     "node identity",
+     "node list",
+     "plugin available",
+     "plugin list",
+     "profile list",
+     "sandbox status",
+     "session list",
+     "workflow list",
+     "acp --help",
+     "acp request --help",
+     "acp serve --help",
+     "agent --help",
+     "agent create --help",
+     "agent delete --help",
+     "agent edit --help",
+     "auth --help",
+     "auth add --help",
+     "auth login --help",
+     "auth logout --help",
+     "auth remove --help",
+     "backend --help",
+     "backend cancel --help",
+     "backend run --help",
+     "backup --help",
+     "backup create --help",
+     "backup recover --help",
+     "backup restore --help",
+     "channel --help",
+     "channel health --help",
+     "channel reload --help",
+     "cron --help",
+     "cron add --help",
+     "cron daemon --help",
+     "cron disable --help",
+     "cron enable --help",
+     "cron remove --help",
+     "crucible --help",
+     "fetch --help",
+     "forge --help",
+     "gateway --help",
+     "gateway drain --help",
+     "gateway install --help",
+     "gateway restart --help",
+     "gateway run --help",
+     "gateway start --help",
+     "gateway stop --help",
+     "gateway uninstall --help",
+     "goal --help",
+     "goal effects --help",
+     "goal exec-task --help",
+     "goal open --help",
+     "goal run --help",
+     "goal task --help",
+     "image --help",
+     "init --help",
+     "mcp-serve --help",
+     "migrate --help",
+     "migrate hermes --help",
+     "migrate openclaw --help",
+     "models --help",
+     "node --help",
+     "node advertise --help",
+     "node pair --help",
+     "node revoke --help",
+     "node submit --help",
+     "plugin --help",
+     "plugin approve --help",
+     "plugin install --help",
+     "plugin new --help",
+     "plugin publish --help",
+     "plugin recover --help",
+     "plugin remove --help",
+     "plugin rollback --help",
+     "plugin sign --help",
+     "plugin test --help",
+     "plugin update --help",
+     "profile --help",
+     "profile create --help",
+     "profile delete --help",
+     "profile import --help",
+     "profile rename --help",
+     "profile use --help",
+     "project-context --help",
+     "sandbox --help",
+     "sandbox exec --help",
+     "self-update --help",
+     "session --help",
+     "session cancel --help",
+     "session checkpoint --help",
+     "session fork --help",
+     "session reconcile --help",
+     "session retain --help",
+     "session retry --help",
+     "session rewind --help",
+     "setup --help",
+     "swarm --help",
+     "workflow --help",
+     "workflow run --help"
+    ]
+   },
+   "blocks": [
+    {
+     "block": 1,
+     "sessions": 100,
+     "correct": 100,
+     "p50_ms": 9.559667,
+     "p90_ms": 18.751584,
+     "p95_ms": 25.517833
+    },
+    {
+     "block": 2,
+     "sessions": 100,
+     "correct": 100,
+     "p50_ms": 11.126208,
+     "p90_ms": 21.905375,
+     "p95_ms": 28.337417
+    },
+    {
+     "block": 3,
+     "sessions": 100,
+     "correct": 100,
+     "p50_ms": 11.455791,
+     "p90_ms": 21.030834,
+     "p95_ms": 29.739875
+    },
+    {
+     "block": 4,
+     "sessions": 100,
+     "correct": 100,
+     "p50_ms": 10.613542,
+     "p90_ms": 24.373958,
+     "p95_ms": 26.948667
+    },
+    {
+     "block": 5,
+     "sessions": 100,
+     "correct": 100,
+     "p50_ms": 9.857958,
+     "p90_ms": 15.814416,
+     "p95_ms": 22.344083
+    },
+    {
+     "block": 6,
+     "sessions": 100,
+     "correct": 100,
+     "p50_ms": 9.687958,
+     "p90_ms": 18.355583,
+     "p95_ms": 20.904166
+    },
+    {
+     "block": 7,
+     "sessions": 100,
+     "correct": 100,
+     "p50_ms": 9.410291,
+     "p90_ms": 18.786458,
+     "p95_ms": 23.149458
+    },
+    {
+     "block": 8,
+     "sessions": 100,
+     "correct": 100,
+     "p50_ms": 9.728792,
+     "p90_ms": 16.609875,
+     "p95_ms": 25.272541
+    },
+    {
+     "block": 9,
+     "sessions": 100,
+     "correct": 100,
+     "p50_ms": 10.589833,
+     "p90_ms": 16.430791,
+     "p95_ms": 19.868791
+    },
+    {
+     "block": 10,
+     "sessions": 100,
+     "correct": 100,
+     "p50_ms": 9.354041,
+     "p90_ms": 16.480542,
+     "p95_ms": 23.323166
+    }
+   ],
+   "canary": {
+    "channels": {
+     "protocol": 0,
+     "stdout": 0,
+     "stderr": 0,
+     "files": 0,
+     "logs": 0,
+     "telemetry": 0
+    },
+    "channels_scanned": [
+     "protocol",
+     "stdout",
+     "stderr",
+     "files",
+     "logs",
+     "telemetry"
+    ],
+    "control_detected": true,
+    "control_per_channel": {
+     "protocol": 1,
+     "stdout": 1,
+     "stderr": 1,
+     "files": 1,
+     "logs": 1,
+     "telemetry": 1
+    },
+    "control_channel": "all-six"
+   },
+   "census": {
+    "backend": "process-group-observed-nonauthoritative",
+    "authoritative": false,
+    "orphans_found": 0,
+    "orphan_pids": [],
+    "control_orphan_found": true,
+    "scope": "processes whose executable path resolves to /private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/cand/aarch64-apple-darwin/wayland-core",
+    "caveat": "the fallback observes a process group and a hostile descendant can leave one, so a zero census here is a zero OBSERVATION rather than a containment guarantee"
+   },
+   "resources": {
+    "samples": [
+     {
+      "session_index": 0,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 132333568,
+       "control_growth_bytes": 8192
+      }
+     },
+     {
+      "session_index": 10,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 132710400,
+       "control_growth_bytes": 12288
+      }
+     },
+     {
+      "session_index": 20,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 133038080,
+       "control_growth_bytes": 16384
+      }
+     },
+     {
+      "session_index": 30,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 133185536,
+       "control_growth_bytes": 20480
+      }
+     },
+     {
+      "session_index": 40,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 133365760,
+       "control_growth_bytes": 24576
+      }
+     },
+     {
+      "session_index": 50,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 133627904,
+       "control_growth_bytes": 28672
+      }
+     },
+     {
+      "session_index": 60,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 134021120,
+       "control_growth_bytes": 32768
+      }
+     },
+     {
+      "session_index": 70,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 135004160,
+       "control_growth_bytes": 36864
+      }
+     },
+     {
+      "session_index": 80,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 136331264,
+       "control_growth_bytes": 40960
+      }
+     },
+     {
+      "session_index": 90,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 136347648,
+       "control_growth_bytes": 45056
+      }
+     },
+     {
+      "session_index": 100,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 137576448,
+       "control_growth_bytes": 49152
+      }
+     },
+     {
+      "session_index": 110,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 138002432,
+       "control_growth_bytes": 53248
+      }
+     },
+     {
+      "session_index": 120,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 138067968,
+       "control_growth_bytes": 57344
+      }
+     },
+     {
+      "session_index": 130,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 2,
+       "harness_rss_bytes": 138231808,
+       "control_growth_bytes": 61440
+      }
+     },
+     {
+      "session_index": 140,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 138231808,
+       "control_growth_bytes": 65536
+      }
+     },
+     {
+      "session_index": 150,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 138985472,
+       "control_growth_bytes": 69632
+      }
+     },
+     {
+      "session_index": 160,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 139001856,
+       "control_growth_bytes": 73728
+      }
+     },
+     {
+      "session_index": 170,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 139034624,
+       "control_growth_bytes": 77824
+      }
+     },
+     {
+      "session_index": 180,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 139149312,
+       "control_growth_bytes": 81920
+      }
+     },
+     {
+      "session_index": 190,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 139149312,
+       "control_growth_bytes": 86016
+      }
+     },
+     {
+      "session_index": 200,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 139345920,
+       "control_growth_bytes": 90112
+      }
+     },
+     {
+      "session_index": 210,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 140771328,
+       "control_growth_bytes": 94208
+      }
+     },
+     {
+      "session_index": 220,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 140771328,
+       "control_growth_bytes": 98304
+      }
+     },
+     {
+      "session_index": 230,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 140886016,
+       "control_growth_bytes": 102400
+      }
+     },
+     {
+      "session_index": 240,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 0,
+       "harness_rss_bytes": 140902400,
+       "control_growth_bytes": 106496
+      }
+     },
+     {
+      "session_index": 250,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 141017088,
+       "control_growth_bytes": 110592
+      }
+     },
+     {
+      "session_index": 260,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 141049856,
+       "control_growth_bytes": 114688
+      }
+     },
+     {
+      "session_index": 270,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 141213696,
+       "control_growth_bytes": 118784
+      }
+     },
+     {
+      "session_index": 280,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 2,
+       "harness_rss_bytes": 141213696,
+       "control_growth_bytes": 122880
+      }
+     },
+     {
+      "session_index": 290,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 141230080,
+       "control_growth_bytes": 126976
+      }
+     },
+     {
+      "session_index": 300,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 141361152,
+       "control_growth_bytes": 131072
+      }
+     },
+     {
+      "session_index": 310,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 141361152,
+       "control_growth_bytes": 135168
+      }
+     },
+     {
+      "session_index": 320,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 141590528,
+       "control_growth_bytes": 139264
+      }
+     },
+     {
+      "session_index": 330,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 141639680,
+       "control_growth_bytes": 143360
+      }
+     },
+     {
+      "session_index": 340,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 141639680,
+       "control_growth_bytes": 147456
+      }
+     },
+     {
+      "session_index": 350,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 141754368,
+       "control_growth_bytes": 151552
+      }
+     },
+     {
+      "session_index": 360,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 141770752,
+       "control_growth_bytes": 155648
+      }
+     },
+     {
+      "session_index": 370,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 2,
+       "harness_rss_bytes": 141967360,
+       "control_growth_bytes": 159744
+      }
+     },
+     {
+      "session_index": 380,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 141967360,
+       "control_growth_bytes": 163840
+      }
+     },
+     {
+      "session_index": 390,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 141983744,
+       "control_growth_bytes": 167936
+      }
+     },
+     {
+      "session_index": 400,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 142639104,
+       "control_growth_bytes": 172032
+      }
+     },
+     {
+      "session_index": 410,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 142639104,
+       "control_growth_bytes": 176128
+      }
+     },
+     {
+      "session_index": 420,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 142655488,
+       "control_growth_bytes": 180224
+      }
+     },
+     {
+      "session_index": 430,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 143982592,
+       "control_growth_bytes": 184320
+      }
+     },
+     {
+      "session_index": 440,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 145342464,
+       "control_growth_bytes": 188416
+      }
+     },
+     {
+      "session_index": 450,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 145620992,
+       "control_growth_bytes": 192512
+      }
+     },
+     {
+      "session_index": 460,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 145620992,
+       "control_growth_bytes": 196608
+      }
+     },
+     {
+      "session_index": 470,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 145965056,
+       "control_growth_bytes": 200704
+      }
+     },
+     {
+      "session_index": 480,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 0,
+       "harness_rss_bytes": 147226624,
+       "control_growth_bytes": 204800
+      }
+     },
+     {
+      "session_index": 490,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 2,
+       "harness_rss_bytes": 148701184,
+       "control_growth_bytes": 208896
+      }
+     },
+     {
+      "session_index": 500,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 149061632,
+       "control_growth_bytes": 212992
+      }
+     },
+     {
+      "session_index": 510,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 149061632,
+       "control_growth_bytes": 217088
+      }
+     },
+     {
+      "session_index": 520,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 149110784,
+       "control_growth_bytes": 221184
+      }
+     },
+     {
+      "session_index": 530,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 149176320,
+       "control_growth_bytes": 225280
+      }
+     },
+     {
+      "session_index": 540,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 149291008,
+       "control_growth_bytes": 229376
+      }
+     },
+     {
+      "session_index": 550,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 149684224,
+       "control_growth_bytes": 233472
+      }
+     },
+     {
+      "session_index": 560,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 149700608,
+       "control_growth_bytes": 237568
+      }
+     },
+     {
+      "session_index": 570,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 149700608,
+       "control_growth_bytes": 241664
+      }
+     },
+     {
+      "session_index": 580,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 149733376,
+       "control_growth_bytes": 245760
+      }
+     },
+     {
+      "session_index": 590,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 149749760,
+       "control_growth_bytes": 249856
+      }
+     },
+     {
+      "session_index": 600,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 150044672,
+       "control_growth_bytes": 253952
+      }
+     },
+     {
+      "session_index": 610,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 150044672,
+       "control_growth_bytes": 258048
+      }
+     },
+     {
+      "session_index": 620,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 150061056,
+       "control_growth_bytes": 262144
+      }
+     },
+     {
+      "session_index": 630,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 150093824,
+       "control_growth_bytes": 266240
+      }
+     },
+     {
+      "session_index": 640,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 150110208,
+       "control_growth_bytes": 270336
+      }
+     },
+     {
+      "session_index": 650,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 150388736,
+       "control_growth_bytes": 274432
+      }
+     },
+     {
+      "session_index": 660,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 150388736,
+       "control_growth_bytes": 278528
+      }
+     },
+     {
+      "session_index": 670,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 150388736,
+       "control_growth_bytes": 282624
+      }
+     },
+     {
+      "session_index": 680,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 150405120,
+       "control_growth_bytes": 286720
+      }
+     },
+     {
+      "session_index": 690,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 150405120,
+       "control_growth_bytes": 290816
+      }
+     },
+     {
+      "session_index": 700,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 150667264,
+       "control_growth_bytes": 294912
+      }
+     },
+     {
+      "session_index": 710,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 150683648,
+       "control_growth_bytes": 299008
+      }
+     },
+     {
+      "session_index": 720,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 150683648,
+       "control_growth_bytes": 303104
+      }
+     },
+     {
+      "session_index": 730,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 2,
+       "harness_rss_bytes": 150683648,
+       "control_growth_bytes": 307200
+      }
+     },
+     {
+      "session_index": 740,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 150700032,
+       "control_growth_bytes": 311296
+      }
+     },
+     {
+      "session_index": 750,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 150994944,
+       "control_growth_bytes": 315392
+      }
+     },
+     {
+      "session_index": 760,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 150994944,
+       "control_growth_bytes": 319488
+      }
+     },
+     {
+      "session_index": 770,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 151011328,
+       "control_growth_bytes": 323584
+      }
+     },
+     {
+      "session_index": 780,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 151027712,
+       "control_growth_bytes": 327680
+      }
+     },
+     {
+      "session_index": 790,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 151044096,
+       "control_growth_bytes": 331776
+      }
+     },
+     {
+      "session_index": 800,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 151289856,
+       "control_growth_bytes": 335872
+      }
+     },
+     {
+      "session_index": 810,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 151339008,
+       "control_growth_bytes": 339968
+      }
+     },
+     {
+      "session_index": 820,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 151355392,
+       "control_growth_bytes": 344064
+      }
+     },
+     {
+      "session_index": 830,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 151355392,
+       "control_growth_bytes": 348160
+      }
+     },
+     {
+      "session_index": 840,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 151486464,
+       "control_growth_bytes": 352256
+      }
+     },
+     {
+      "session_index": 850,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 151486464,
+       "control_growth_bytes": 356352
+      }
+     },
+     {
+      "session_index": 860,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 151519232,
+       "control_growth_bytes": 360448
+      }
+     },
+     {
+      "session_index": 870,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 151535616,
+       "control_growth_bytes": 364544
+      }
+     },
+     {
+      "session_index": 880,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 152043520,
+       "control_growth_bytes": 368640
+      }
+     },
+     {
+      "session_index": 890,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 152059904,
+       "control_growth_bytes": 372736
+      }
+     },
+     {
+      "session_index": 900,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 152059904,
+       "control_growth_bytes": 376832
+      }
+     },
+     {
+      "session_index": 910,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 0,
+       "harness_rss_bytes": 152076288,
+       "control_growth_bytes": 380928
+      }
+     },
+     {
+      "session_index": 920,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 152092672,
+       "control_growth_bytes": 385024
+      }
+     },
+     {
+      "session_index": 930,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 152141824,
+       "control_growth_bytes": 389120
+      }
+     },
+     {
+      "session_index": 940,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 152272896,
+       "control_growth_bytes": 393216
+      }
+     },
+     {
+      "session_index": 950,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 152289280,
+       "control_growth_bytes": 397312
+      }
+     },
+     {
+      "session_index": 960,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 152305664,
+       "control_growth_bytes": 401408
+      }
+     },
+     {
+      "session_index": 970,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 152305664,
+       "control_growth_bytes": 405504
+      }
+     },
+     {
+      "session_index": 980,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 152322048,
+       "control_growth_bytes": 409600
+      }
+     },
+     {
+      "session_index": 990,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 152322048,
+       "control_growth_bytes": 413696
+      }
+     },
+     {
+      "session_index": 1000,
+      "metrics": {
+       "state_dir_bytes": 301,
+       "live_product_processes": 0,
+       "harness_active_handles": 1,
+       "harness_rss_bytes": 152322048,
+       "control_growth_bytes": 417792
+      }
+     }
+    ],
+    "control_growth_flagged": true
+   },
+   "covariates": [
+    {
+     "session_index": 0,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 10,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 20,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 30,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 40,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 50,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 60,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 70,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 80,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 90,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 100,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 110,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 120,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 130,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 140,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 150,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 160,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 170,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 180,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 190,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 200,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 210,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 220,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 230,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 240,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 250,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 260,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 270,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 280,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 290,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 300,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 310,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 320,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 330,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 340,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 350,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 360,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 370,
+     "host_load_1m": 16.8369140625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 380,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 390,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 400,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 410,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 420,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 430,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 440,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 450,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 460,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 470,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 480,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 490,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 500,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 510,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 520,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 530,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 540,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 550,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 560,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 570,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 580,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 590,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 600,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 610,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 620,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 630,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 640,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 650,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 660,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 670,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 680,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 690,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 700,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 710,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 720,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 730,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 740,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 750,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 760,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 770,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 780,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 790,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 800,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 810,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 820,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 830,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 840,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 850,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 860,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 870,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 880,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 890,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 900,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 910,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 920,
+     "host_load_1m": 16.2890625,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 930,
+     "host_load_1m": 15.865234375,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 940,
+     "host_load_1m": 15.865234375,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 950,
+     "host_load_1m": 15.865234375,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 960,
+     "host_load_1m": 15.865234375,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 970,
+     "host_load_1m": 15.865234375,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 980,
+     "host_load_1m": 15.865234375,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 990,
+     "host_load_1m": 15.865234375,
+     "live_soak_children": 0
+    },
+    {
+     "session_index": 1000,
+     "host_load_1m": 15.865234375,
+     "live_soak_children": 0
+    }
+   ],
+   "drift": [
+    {
+     "metric": "latency_p50_block_median_ms",
+     "early": 11.126208,
+     "late": 9.728792
+    },
+    {
+     "metric": "latency_p90_block_median_ms",
+     "early": 21.030834,
+     "late": 16.480542
+    },
+    {
+     "metric": "quality_correct_rate_block_mean",
+     "early": 1,
+     "late": 1
+    },
+    {
+     "metric": "quality_correct_rate_run",
+     "early": 1,
+     "late": 1
+    },
+    {
+     "metric": "session_wall_ms_max",
+     "early": 81.538375,
+     "late": 81.538375
+    },
+    {
+     "metric": "session_wall_ms_p95",
+     "early": 26.664791,
+     "late": 26.664791
+    }
+   ],
+   "reds": []
+  }
+ ],
+ "families_not_run": [
+  {
+   "family": "windows",
+   "target": "x86_64-pc-windows-msvc",
+   "host": "seandesktop",
+   "reason": "host access refused: sshd on seandesktop rejected every available key and user combination (publickey,password,keyboard-interactive denied for sean/seandonahoe/sdonahoe/wayland with both the default id_ed25519 and the wayland_win identity; Administrator is reset after kex). Supplying a credential is reserved to Sean and this lane did not attempt to obtain one.",
+   "what_would_close_it": "one quiet scheduled-task run of scripts/f28-native-soak.mjs on seandesktop against the digest-bound x86_64-pc-windows-msvc artifact 54b12e8e5576ee54e88a93975c360e6c624202059f449d80574b71adf00c631e, logged with an exit marker and polled.",
+   "criterion2": "NOT MET (unmeasured)"
+  }
+ ]
+}

@@ -1,0 +1,18 @@
+# Per-target binary manifest for the resolved candidate -- RE-RESOLVED by plan 28-03.
+# Every one of the six CI release targets appears. A target may be UNBINDABLE but it may
+# never be absent: an omission would let an OS family look certified on evidence that
+# never existed.
+# Consumed by: f28-resolve-candidate.py --resolve --target-manifest <this file>
+# Columns: target	status	digest	provenance	reason
+#
+# MEASURED, not inherited. Plan 28-02 certified 32e2f57d and said in its own words that
+# it covered 32e2f57d and NOT the tip. Eleven merges have landed since, including the
+# F-28-02-001 macOS activeness repair. Every digest below was DOWNLOADED from CI run
+# 30316603150 (head e4a3f5fc) and hashed on the planning Mac by this plan; none is copied
+# from a document.
+x86_64-unknown-linux-gnu	bound	ab8cf3d34457b5897b94f8313a96f6dce04a95eb8f0d3bc3343fcba9bdb2991d	CI run 30316603150 artifact wayland-core-x86_64-unknown-linux-gnu, downloaded and hashed 2026-07-28 by plan 28-03	
+aarch64-unknown-linux-gnu	bound	b4a9a3d096e35067854b6c2ba181368b407075c09ba14930b276826304d6a272	CI run 30316603150 artifact wayland-core-aarch64-unknown-linux-gnu, downloaded and hashed 2026-07-28 by plan 28-03	
+x86_64-apple-darwin	bound	cb09067e9d35a2a9236cc6eb8702841c8c81e0c90298a8f43281fcbc03ad30e3	CI run 30316603150 artifact wayland-core-x86_64-apple-darwin, downloaded and hashed 2026-07-28 by plan 28-03	
+aarch64-apple-darwin	bound	59f57fb3fa6a554645ace02ba2044439235cc9460c660a8392ac4df1e6fa7ce8	CI run 30316603150 artifact wayland-core-aarch64-apple-darwin, downloaded and hashed 2026-07-28 by plan 28-03	
+x86_64-pc-windows-msvc	bound	54b12e8e5576ee54e88a93975c360e6c624202059f449d80574b71adf00c631e	CI run 30316603150 artifact wayland-core-x86_64-pc-windows-msvc, downloaded and hashed 2026-07-28 by plan 28-03	
+aarch64-pc-windows-msvc	bound	e716ee1127c67e6edca5d4d489f0ad2cef0a50b03a55c54e4b2767ce9915f78a	CI run 30316603150 artifact wayland-core-aarch64-pc-windows-msvc, downloaded and hashed 2026-07-28 by plan 28-03	

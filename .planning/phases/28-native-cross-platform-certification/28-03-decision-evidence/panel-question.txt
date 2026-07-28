@@ -1,0 +1,115 @@
+You are one member of a four-way adversarial review panel on a software certification
+program. Answer with reasoning, then a machine-readable verdict block. Do not be agreeable;
+if the recommendation is wrong, say so and say why.
+
+## THE DECISION
+
+A certification phase (Phase 28, "native cross-platform certification") has a Success
+Criterion 2 that reads, in part: a 1,000-session and concurrent-child soak must complete
+"with no secret leak, no orphan process, no unbounded resource use, and no unacceptable
+quality/performance delta".
+
+Three of those four are defined. The fourth is not. Nothing anywhere in the program defines
+what an "unacceptable quality/performance delta" is — not the roadmap, not the requirements
+document, not any of the 27 prior phases. There is no prior decision to inherit.
+
+The question you are deciding: WHAT DEFINITION DOES THE CERTIFICATION ENFORCE, AND HOW IS IT
+MEASURED? The answer must be mechanical enough that a Python validator can compute a
+PASS/FAIL from a JSON results file with no human judgement at evaluation time.
+
+## HARD CONSTRAINT ON TIMING
+
+The decision is being taken BEFORE the soak runs. A threshold chosen after seeing the numbers
+is a threshold fitted to the result it needs to permit, and would make the criterion
+unfalsifiable. The bands will be committed to git before the first soak session executes and
+that ordering will be provable from commit history.
+
+## THE MEASUREMENT ENVIRONMENT (real, not hypothetical)
+
+Three OS families, wildly different hardware, no per-platform performance baseline exists
+anywhere in the program:
+
+- linux: a Hetzner dedicated server, x86_64, many cores, load average typically 3-5 because
+  other work runs on it. 1.8T disk.
+- macos: an arm64 Apple Silicon laptop (macOS 26.3). Interactive machine.
+- windows: one physical box registered as two runners. Slowest of the three. Long runs must
+  go through a scheduled task because OpenSSH kills session children on disconnect.
+
+The product under test is `wayland-core`, a Rust CLI agent binary. A "session" in this soak is
+one invocation of the shipped release binary against one of the ~116 command surfaces read off
+the binary's own command tree (e.g. `wayland-core session list`, `wayland-core plugin list`,
+`wayland-core backend probe`). Concurrent children are part of the workload throughout.
+
+## HOW "QUALITY" IS SAMPLED — you must answer about this, not about performance alone
+
+Driving 1,000 real LLM sessions would cost more than the certification and would make the
+measurement depend on a third-party model's nondeterminism. So quality is sampled WITHOUT a
+provider: each session invokes a resolved surface and the harness records
+  - the exit status,
+  - whether the invocation's output satisfies a per-surface invariant established during a
+    short warm-up window at the start of the same run (e.g. the surface exited 0 and produced
+    non-empty output; or the surface exited with the same status class it exited with in
+    warm-up),
+so "quality" for this soak = the per-session correctness rate of the resolved surfaces against
+their own warm-up behaviour on that same host. Performance = per-session wall-clock latency.
+Resource use (memory, handles/fds, threads, live children, disk) is sampled as a series
+throughout, and is a SEPARATE observable with its own criterion ("no unbounded resource use"),
+evaluated by slope — it is not part of this bands decision except insofar as you think it
+should be.
+
+If you think that quality proxy is not a quality measurement at all, say so plainly, and say
+what you would replace it with that is affordable and deterministic.
+
+## THE FOUR OPTIONS
+
+A) drift-within-run (THE RECOMMENDED STARTING POSITION — confirm it or overturn it on
+   evidence). Compare a LATE window of sessions against an EARLY window of sessions, on the
+   same host, in the same run. The band is on the RATIO or DELTA between windows, e.g. late-
+   window p95 latency may not exceed early-window p95 latency by more than X%.
+   PRO: measures the thing the criterion asks — whether a thousand sessions DEGRADE the
+   product. Self-normalising, so it does not encode the hardware it was authored on, and one
+   set of numbers is meaningful on all three families. Needs no historical baseline, which the
+   program does not have. Detects a leak or a slow degradation, which is the failure mode a
+   soak exists to find.
+   CON: blind to a product that is uniformly slow or wrong from session 1 — a flat-but-bad run
+   shows no drift and passes. Sensitive to window size and placement, which must be fixed in
+   advance. A noisy host can manufacture drift that is not the product's.
+
+B) absolute per-metric ceilings, fixed in advance per platform.
+   PRO: catches a uniformly bad run, which drift cannot. Simple to state and to check.
+   Independent of window choice.
+   CON: encodes the hardware it was written on; every ceiling would be invented today with no
+   measurement behind it, which is exactly the kind of number that later gets widened.
+
+C) drift-within-run as the primary gate PLUS a small set of deliberately loose absolute sanity
+   floors whose job is to catch catastrophe rather than to grade performance.
+   PRO: covers both failure modes. Loose floors remove the pressure to widen them.
+   CON: two mechanisms to specify and explain; a loose floor invites the charge that it is
+   decorative; more surface for a later reader to misread which gate fired.
+
+D) run the soak first, characterise the distribution, then set the bands from what was
+   observed.
+   PRO: bands grounded in real measurement rather than invented.
+   CON: a threshold derived from the run it judges cannot fail that run. Makes the criterion
+   unfalsifiable for this candidate.
+
+## WHAT YOUR ANSWER MUST CONTAIN
+
+1. Which option, and why, in evidence terms.
+2. If drift is involved: the EXACT window definition (which sessions are "early", which are
+   "late", why that split, and what protects it from a noisy host), and the EXACT statistic
+   (p50? p95? mean? trimmed mean?) and why.
+3. The specific numeric band(s) you would set, and the reasoning for each number. You are
+   being asked for numbers you cannot justify from measurement — say so if that is your
+   position, and say what makes a number defensible in its absence.
+4. Whether the quality dimension should be banded separately from performance, and how.
+5. Whether a soak whose sessions all fail identically from session 1 should pass a
+   drift-only gate, and what you do about it.
+6. What you would do about the fact that a noisy shared host can manufacture drift the product
+   did not cause — WITHOUT giving the certifier a lever to dismiss a real red as noise.
+
+## OUTPUT FORMAT (required, last line of your answer)
+
+PANEL_POSITION=<A|B|C|D>
+PANEL_CONFIDENCE=<low|medium|high>
+PANEL_KEY_OBJECTION=<one sentence naming the strongest argument AGAINST your own position>
