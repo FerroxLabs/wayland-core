@@ -1,0 +1,36 @@
+PEER BASELINE RE-VERIFICATION — read-only
+date: 2026-07-28T14:50:25Z
+
+== hermes-agent
+   repo   : /Users/seandonahoe/dev/resources/hermes-agent
+   pin    : dbe734beff0caf5e8ee2acbe4277db7f6cf84a21
+-- cmd: git -C <repo> cat-file -t dbe734beff0caf5e8ee2acbe4277db7f6cf84a21
+   out: commit
+-- cmd: git -C <repo> merge-base --is-ancestor dbe734beff0caf5e8ee2acbe4277db7f6cf84a21 HEAD
+   rc: 0  (0 = pinned commit IS an ancestor of local HEAD)
+-- cmd: git -C <repo> show dbe734beff0caf5e8ee2acbe4277db7f6cf84a21:pyproject.toml   (line 10)
+   out: version = "0.17.0"
+   ledger records: 0.17.0
+   VERDICT: version string AGREES with the ledger
+-- cmd: git -C <repo> status --short   (write-check: this run must leave it as found)
+   dirty paths: 0
+-- cmd: git -C <repo> rev-parse HEAD
+   out: d59b79fadd1e9edd7afc5c679cc3b143838e7c01
+
+== openclaw
+   repo   : /Users/seandonahoe/dev/resources/openclaw
+   pin    : 11a0ad10e91a50d5a0e636494eea4d7ad3eaf9fc
+-- cmd: git -C <repo> cat-file -t 11a0ad10e91a50d5a0e636494eea4d7ad3eaf9fc
+   out: commit
+-- cmd: git -C <repo> merge-base --is-ancestor 11a0ad10e91a50d5a0e636494eea4d7ad3eaf9fc HEAD
+   rc: 0  (0 = pinned commit IS an ancestor of local HEAD)
+-- cmd: git -C <repo> show 11a0ad10e91a50d5a0e636494eea4d7ad3eaf9fc:package.json   (line 3)
+   out:   "version": "2026.6.2",
+   ledger records: 2026.6.2
+   VERDICT: version string AGREES with the ledger
+-- cmd: git -C <repo> status --short   (write-check: this run must leave it as found)
+   dirty paths: 0
+-- cmd: git -C <repo> rev-parse HEAD
+   out: 3659c85e534fdb8b8ce6b7505a83d92cc2e4df8e
+
+PEER_BASELINE_RESULT=PASS
