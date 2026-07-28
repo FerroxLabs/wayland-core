@@ -30,10 +30,31 @@ pub struct TelegramConfig {
     /// Default `parse_mode` for outbound messages.
     #[serde(default = "default_parse_mode")]
     pub parse_mode: ParseMode,
+
+    /// Override the Bot API base URL. Defaults to
+    /// [`crate::TELEGRAM_API_BASE`] (`https://api.telegram.org`).
+    ///
+    /// F24-C3-H4. This exists for the same reason `SlackConfig::api_base_url`,
+    /// `WhatsAppConfig::api_base_url` and `SmsConfig::api_base_url` already do:
+    /// without it the SHIPPED binary can only ever reach `api.telegram.org`, so
+    /// the one adapter in the reference pair that receives by POLLING has no
+    /// fixture seam and cannot be measured end to end at all. Telegram was the
+    /// only remaining HTTP adapter missing the field, which is precisely why
+    /// its inbound path stayed unmeasured across the whole of Phase 24.
+    ///
+    /// This is operator-owned configuration at the same trust level as
+    /// `credential_handle`: whoever can write this file can already name the
+    /// credential the adapter sends. It is NOT reachable from a message.
+    #[serde(default = "default_api_base")]
+    pub api_base_url: String,
 }
 
 fn default_long_poll_timeout_secs() -> u32 {
     30
+}
+
+fn default_api_base() -> String {
+    crate::TELEGRAM_API_BASE.to_string()
 }
 
 fn default_parse_mode() -> ParseMode {
@@ -127,6 +148,11 @@ credential_handle = "telegram.acme.bot_token"
         assert!(cfg.allowed_chat_ids.is_empty());
         assert_eq!(cfg.long_poll_timeout_secs, 30);
         assert_eq!(cfg.parse_mode, ParseMode::MarkdownV2);
+        assert_eq!(
+            cfg.api_base_url,
+            crate::TELEGRAM_API_BASE,
+            "a config that does not name a base must reach production Telegram"
+        );
     }
 
     #[test]
@@ -136,11 +162,13 @@ credential_handle = "telegram.acme.bot_token"
 allowed_chat_ids = ["123", "-100456"]
 long_poll_timeout_secs = 60
 parse_mode = "HTML"
+api_base_url = "http://127.0.0.1:18099"
 "#;
         let cfg: TelegramConfig = toml::from_str(src).unwrap();
         assert_eq!(cfg.allowed_chat_ids, vec!["123", "-100456"]);
         assert_eq!(cfg.long_poll_timeout_secs, 60);
         assert_eq!(cfg.parse_mode, ParseMode::Html);
+        assert_eq!(cfg.api_base_url, "http://127.0.0.1:18099");
     }
 
     #[test]

@@ -56,13 +56,22 @@ pub struct TelegramChannel {
 }
 
 impl TelegramChannel {
-    /// Construct a Telegram channel pointed at the production API.
+    /// Construct a Telegram channel pointed at the base URL its config names.
+    ///
+    /// F24-C3-H4: that is `config.api_base_url`, which defaults to
+    /// [`TELEGRAM_API_BASE`] when the TOML omits the key — so an untouched
+    /// production config reaches production Telegram exactly as before, and an
+    /// operator (or a fixture harness) can point the adapter somewhere else
+    /// without a `#[doc(hidden)]` constructor the registry never calls. Slack,
+    /// WhatsApp and SMS already worked this way; Telegram was the outlier, and
+    /// being the outlier is why the polling inbound path had no fixture seam.
     pub fn new(
         name: impl Into<String>,
         config: TelegramConfig,
         creds: Arc<dyn CredentialsStore>,
     ) -> Self {
-        Self::with_api_base(name, config, creds, TELEGRAM_API_BASE.to_string())
+        let api_base = config.api_base_url.clone();
+        Self::with_api_base(name, config, creds, api_base)
     }
 
     /// Test-only constructor that overrides the API base URL so
@@ -463,6 +472,11 @@ mod tests {
             // 0 makes mockito getUpdates return immediately without long-polling.
             long_poll_timeout_secs: 0,
             parse_mode: ParseMode::MarkdownV2,
+            // These tests construct via `with_api_base`, which overrides this
+            // field with the mockito URL. Left at the production default so a
+            // test that forgets to override cannot silently reach the real API
+            // with a fake token — it would 404/401 loudly instead.
+            api_base_url: TELEGRAM_API_BASE.to_string(),
         }
     }
 
@@ -486,6 +500,56 @@ mod tests {
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
         let ch = TelegramChannel::new("test", cfg(), creds);
         assert_eq!(ch.max_message_len(), Some(4096));
+    }
+
+    // -----------------------------------------------------------------
+    // F24-C3-H4. The config-level base-URL seam, exercised through the SAME
+    // constructor the registry calls (`new`), not through the `#[doc(hidden)]`
+    // test constructor. Before this, `new` hardcoded TELEGRAM_API_BASE, so no
+    // config a shipped binary could load was capable of pointing the polling
+    // adapter at a fixture — which is why the polling inbound path had never
+    // been driven end to end.
+    //
+    // This test can fail: revert `new` to `TELEGRAM_API_BASE.to_string()` and
+    // `sendMessage` goes to api.telegram.org, the mock is never hit, and the
+    // send errors out.
+    // -----------------------------------------------------------------
+    #[tokio::test]
+    async fn new_honours_the_configs_api_base_url() {
+        let mut server = mockito::Server::new_async().await;
+        mock_delete_webhook(&mut server).await;
+        let mock = server
+            .mock("POST", format!("/bot{TEST_TOKEN}/sendMessage").as_str())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true,"result":{"message_id":9,"date":1,"chat":{"id":9}}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let cfg = TelegramConfig {
+            api_base_url: server.url(),
+            ..cfg()
+        };
+        let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
+        // `new`, exactly as `wcore_channels_registry::make_telegram` calls it.
+        let mut ch = TelegramChannel::new("seam", cfg, creds);
+        ch.start().await.unwrap();
+        ch.send_message(OutgoingMessage::text("9", "seam"))
+            .await
+            .expect("send must reach the fixture the config named");
+        mock.assert_async().await;
+        ch.stop().await.unwrap();
+    }
+
+    // The control for the test above: a config that names NO base must still
+    // reach production. Asserted on the resolved field rather than by making a
+    // network call, so the suite stays hermetic.
+    #[test]
+    fn new_without_an_override_still_points_at_production_telegram() {
+        let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
+        let ch = TelegramChannel::new("default", cfg(), creds);
+        assert_eq!(ch.api_base, TELEGRAM_API_BASE);
     }
 
     // -----------------------------------------------------------------

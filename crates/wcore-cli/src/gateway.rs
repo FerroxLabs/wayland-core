@@ -680,31 +680,33 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
-    // The REAL headless handler, not a recorder. A gateway whose dispatch is
-    // a log line proves its own loop and nothing about delivery.
-    let handler: Arc<dyn wcore_cron::JobHandler> =
-        Arc::new(wcore_agent::cron::build_headless_cron_handler(&cwd).await);
     let history =
         wcore_gateway::automation::AutomationPlane::schedule_dir(&home).join("history.jsonl");
 
-    let mut plane =
-        wcore_gateway::automation::AutomationPlane::start(&home, store, handler, Some(history))
-            .context("cannot start the automation plane")?;
-
-    // Everything the previous process left unfinished is picked up BEFORE the
-    // first tick. A gateway that starts ticking before it resumes has a window
-    // in which a carried delivery is invisible to its own status.
-    let resumed = plane.resume().context("cannot resume carried deliveries")?;
-    eprintln!(
-        "[gateway] started pid={} role={:?} profile={profile} carried={} (unattempted {} / unknown-outcome {}) quarantined={}",
-        std::process::id(),
-        plane.role(),
-        resumed.carried(),
-        resumed.unattempted.len(),
-        resumed.unknown_outcome.len(),
-        resumed.quarantined,
-    );
-
+    // F24-C3-H4. THE CHANNEL STACK IS BUILT BEFORE THE AUTOMATION PLANE, and
+    // that ordering is the fix, not a tidy-up.
+    //
+    // This function used to build the cron handler here via
+    // `build_headless_cron_handler(&cwd)`, which constructs its OWN
+    // `ChannelManager`, auto-registers every adapter into it and calls
+    // `start_all()` on it — and then, sixty lines below, registered the same
+    // adapters a second time into the manager the gateway keeps. One process,
+    // two managers, two poll loops per account, six registration events for
+    // three channels, and a subscriber on only one of the two.
+    //
+    // For the three webhook adapters that was merely wasteful. For POLLING
+    // adapters it is a consumption race with no error path: `getUpdates`
+    // confirming an offset deletes the update server-side and IMAP's `\Seen`
+    // is likewise destructive, so the manager WITHOUT a subscriber can take
+    // delivery of a message that then reaches nobody. Nothing logs, nothing
+    // fails, the message is simply gone.
+    //
+    // So the manager is now built, registered, subscribed and started FIRST,
+    // and the cron handler is handed that same `Arc` instead of making one.
+    // The plane follows, because `plane.resume()` dispatches carried
+    // deliveries through the channel sink and adapters that resolve their
+    // credential in `start()` cannot send before `start_all` has run.
+    //
     // F24-03. The gateway hosts the channel adapters and REPUBLISHES their
     // observed health every tick, because `wayland-core channel health` runs
     // in a different process and would otherwise have to fabricate an answer
@@ -842,6 +844,43 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
             None => format!("start_all: {e}"),
         });
     }
+
+    // The REAL headless handler, not a recorder. A gateway whose dispatch is
+    // a log line proves its own loop and nothing about delivery.
+    //
+    // F24-C3-H4: it ADOPTS the manager built above rather than constructing a
+    // second one. `..._with_channels(cwd, Some(arc))` registers nothing and
+    // starts nothing — this call site owns the manager's whole lifecycle
+    // (registration, `start_all`, the reload below, shutdown) and the cron
+    // handler only borrows it as a send path. Channel cron jobs therefore
+    // dispatch through the SAME adapters the subscriber is listening on, which
+    // is also what makes a cron fire and an inbound reply observable as one
+    // conversation instead of two.
+    let handler: Arc<dyn wcore_cron::JobHandler> = Arc::new(
+        wcore_agent::cron::build_headless_cron_handler_with_channels(
+            &cwd,
+            Some(Arc::clone(&channels)),
+        )
+        .await,
+    );
+
+    let mut plane =
+        wcore_gateway::automation::AutomationPlane::start(&home, store, handler, Some(history))
+            .context("cannot start the automation plane")?;
+
+    // Everything the previous process left unfinished is picked up BEFORE the
+    // first tick. A gateway that starts ticking before it resumes has a window
+    // in which a carried delivery is invisible to its own status.
+    let resumed = plane.resume().context("cannot resume carried deliveries")?;
+    eprintln!(
+        "[gateway] started pid={} role={:?} profile={profile} carried={} (unattempted {} / unknown-outcome {}) quarantined={}",
+        std::process::id(),
+        plane.role(),
+        resumed.carried(),
+        resumed.unattempted.len(),
+        resumed.unknown_outcome.len(),
+        resumed.quarantined,
+    );
 
     let _ = crate::channel::publish_health(
         &home,
