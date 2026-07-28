@@ -68,6 +68,61 @@ is the one of the four that could fail to borrow-check. **To be confirmed by a
 real compile — not assumed.** The second clone on that line is a genuine clone
 into a tuple and is untouched.
 
+## T+1 — clippy is GREEN, and the instrument is proven able to fail
+
+Build host: `hetzner-dsm`, worktree `/root/wayland-ci-unblock` @ `1e1770d4`.
+
+**Toolchain checked before trusting anything.** The lint is 1.95.0-specific, so
+an older rustc would have produced a green that proved nothing (brief §3.2,
+"the gate was already green at base"). `rust-toolchain.toml` pins `1.95.0` and
+`vx.toml` pins `rust = "1.95.0"`; hetzner's *default* is 1.96.0, but inside the
+worktree rustup honours the pin:
+
+```
+rustc 1.95.0 (59807616e 2026-04-14)
+clippy 0.1.95 (59807616e1 2026-04-14)
+```
+
+**Gate self-test — three assertions, per brief §6b-ii.** Script restores the
+pre-fix `journey.rs` from base `ef1d97be`, runs clippy, restores the fixed file,
+runs clippy again:
+
+```
+WLNEG=101      <- known-negative: pre-fix file FAILS
+WLPOS=0        <- known-positive: fixed file PASSES
+WLDIFF=0       <- worktree restored clean, no residue
+```
+
+And it failed for the *right* reason, not an unrelated error — the negative log
+holds exactly the four CI errors at exactly the four CI lines:
+
+```
+cloned_ref_errors=4
+crates/wcore-eval-scenarios/src/journey.rs:683:13
+crates/wcore-eval-scenarios/src/journey.rs:695:13
+crates/wcore-eval-scenarios/src/journey.rs:707:34
+crates/wcore-eval-scenarios/src/journey.rs:717:13
+```
+
+The 707 borrow-check risk flagged above **did not materialise** — it compiles.
+
+**Full workspace, CI's exact invocation** `cargo clippy --workspace
+--all-targets -- -D warnings`:
+
+```
+WLRC=0
+Finished `dev` profile in 1m 45s
+wcore_crates_checked=49   wayland_plugins_checked=5   (= the 54-crate workspace)
+error_lines=0
+```
+
+Coverage counted rather than assumed, because rc=0 on a run that checked
+nothing is the exact failure class this program keeps hitting. The single
+`warning:` line is cargo's future-incompat notice for third-party
+`imap-proto v0.10.2` — not a clippy diagnostic and not gated by `-D warnings`.
+
+**CI run `30392102087` queued on `lane/ci-unblock` at 19:28:37Z.** Pushed once.
+
 ## What is still to establish
 
 1. Clippy green across the workspace with CI's exact invocation. (hetzner)
