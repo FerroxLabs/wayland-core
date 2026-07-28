@@ -173,4 +173,115 @@ test result: FAILED. 128 passed; 1 failed; 23 ignored
 The two negative-control cases stayed **green** through the revert, which is the point:
 the guard fails on the defect specifically, not on any change to the function.
 
-<!-- ferrox:write-continue -->
+### T2 — cwd strip · LIVE, end-to-end against a real child process
+
+The unit guard above proves the buffer. This proves the **behaviour**: a real AppContainer
+child is asked to print its own working directory.
+
+**RED** (fix reverted) — the child reports the Windows directory, in its own words:
+
+```
+test native_cwd_gate_marker ... ok
+test plain_cwd_is_unaffected ... ok
+test verbatim_cwd_lands_in_the_requested_directory ... FAILED
+
+panicked at tests\live_cwd_verbatim.rs:124:
+  child fell back to the Windows directory (C:\WINDOWS) -- the verbatim prefix
+  reached lpCurrentDirectory and cmd.exe rejected it as UNC
+test result: FAILED. 2 passed; 1 failed
+```
+
+**GREEN** (fix restored, same worktree, same commit):
+
+```
+test native_cwd_gate_marker ... ok
+test plain_cwd_is_unaffected ... ok
+test verbatim_cwd_lands_in_the_requested_directory ... ok
+test result: ok. 3 passed; 0 failed
+```
+
+`plain_cwd_is_unaffected` stayed green across both legs, so the harness itself was working
+in the red run — the failure is the defect, not a broken test.
+
+---
+
+## Per-platform test numbers, and which run each came from
+
+Every figure is from a run I executed and read. Crate-isolated runs are labelled as such,
+per `CLASS-ENV-01`.
+
+| Platform | Command | Scope | Result |
+|---|---|---|---|
+| Linux `hetzner-dsm` @ `db391a0a` | `cargo test -p wcore-tools --lib` | crate alone | **992 passed; 0 failed; 3 ignored** |
+| Linux `hetzner-dsm` @ `db391a0a` | `cargo test -p wcore-sandbox` | crate alone, all targets | **80 + 6 + 1 + 4 + 4 + 5 passed; 0 failed** |
+| Linux `hetzner-dsm` @ `db391a0a` | `cargo clippy -p wcore-tools -p wcore-sandbox --all-targets` | — | **exit 0, no warnings** |
+| Windows `seandesktop` @ `db391a0a` | `cargo test -p wcore-tools --lib` | crate alone | **966 passed; 0 failed; 2 ignored** |
+| Windows `seandesktop` @ `db391a0a` | `cargo test -p wcore-sandbox --lib` | crate alone | **129 passed; 0 failed; 23 ignored** |
+| Windows `seandesktop` @ `db391a0a` | `--test live_cwd_verbatim -- --ignored` | live AppContainer | **3 passed; 0 failed** |
+| Mac | `cargo fmt --all -- --check` | workspace | **exit 0** |
+
+The `CLASS-ENV-01` false-red cluster did **not** appear in either isolated `wcore-tools` run
+(Linux 992/0, Windows 966/0). I ran the crate alone specifically so it could not, and I am
+not claiming a full-workspace figure I did not take.
+
+### One red, and it is not this lane's
+
+`cargo test -p wcore-sandbox --test live_integrity` on Windows fails two wall-clock cases.
+Settled by measurement rather than argument:
+
+| Commit | Worktree | Result |
+|---|---|---|
+| `14905684` (merge-base, **no** lane changes) | `C:\ferrox-254-base` | 3 passed; **2 failed** |
+| `db391a0a` (lane head) | `C:\ferrox-254-take` | 3 passed; **2 failed** |
+
+Identical cases both times (`live_future_drop_reaps_descendant_job_tree`,
+`live_runaway_command_is_bounded_by_timeout`), and the set is non-deterministic — one head
+run gave 0 passed / 5 failed in 25.72s, a later run at the same commit gave 3 passed /
+2 failed in 16.12s. Filed as `CLASS-WIN-LIVE-01` in `.planning/BACKLOG.md`.
+
+Independently, neither change can reach those tests:
+`live_runaway_command_is_bounded_by_timeout` passes `cwd: None`, and `resolve_cwd(None)`
+returns `Ok(None)` byte-identically to the old code; `live_future_drop_reaps_descendant_job_tree`
+passes a **non-canonicalized** `C:\Users\Public\…` cwd, which is `Prefix::Disk`, not
+VerbatimDisk, so it takes the untouched borrow path. And `wcore-sandbox` has no
+`wcore-tools` dependency, so the scratch narrowing cannot reach it at all.
+
+---
+
+## Still open
+
+- **`CLASS-WIN-LIVE-01`** — the base-red above. Pre-existing, filed, not fixed here.
+- **`CLASS-WIN-LONGPATH-01`** — the `atomic_write` long-path item the brief raised. **I did
+  not investigate it.** Filed with that stated plainly. It is adjacent in theme to this fix
+  but the opposite direction (long-path support *adds* a verbatim prefix; the cwd fix
+  *removes* one), so it is not the same defect and fixing one does not affect the other.
+- **CR-5** (`BashTool::description()` Windows quoting warning) — not in this lane's scope,
+  not rejected on merit. Worth noting the underlying problem is real and I hit it: driving
+  this lane over SSH, a `cmd`-style nested-quote invocation mangled, and I had to switch to
+  `powershell -EncodedCommand` to patch a file remotely. That is the exact failure the
+  contributor wanted surfaced to the agent.
+- **C4's problem statement** — the package (§4.5) is emphatic that rejecting Relaxed Mode
+  must not discard the finding underneath it (that a normal Windows dev toolchain may not
+  run under the sandbox at all). This lane did not reproduce or address that; it needs the
+  tracked issue §4.5 calls for, which is a Sean-side action.
+
+## What this lane did NOT do
+
+No GitHub action on #254 of any kind — no merge, comment, review, close, or push to the
+contributor's branch. No `wcore-contract generate`. No edit to `wcore-cli/src/{lib,main}.rs`
+(fence verified empty against the captured merge-base `14905684`). No test weakened: nothing
+was `#[ignore]`d, `#[allow]`ed, re-gated, deleted, or given a longer timeout to reach green.
+
+## Provenance
+
+| | |
+|---|---|
+| Lane branch | `lane/254-take` |
+| Merge-base | `plan/f20-unified-audit-repair` @ `14905684` |
+| Linux worktree | `hetzner-dsm:/root/wayland-254-take` (branch `hz/254-take`) |
+| Windows worktree | `seandesktop:C:\ferrox-254-take` (branch `win/254-take`) |
+| Windows baseline | `seandesktop:C:\ferrox-254-base` (branch `win/254-base`, @ `14905684`) |
+
+**Shared-host courtesy:** all Windows scheduled tasks (`wlCore254*`, `WLApp9340`, `WlLiveUatBuild`,
+`WLdev`, …) were `Ready`/idle throughout and were only ever *queried* — none started, stopped
+or modified. No other lane's worktree was touched.
