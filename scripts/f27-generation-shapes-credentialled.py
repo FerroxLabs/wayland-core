@@ -284,31 +284,39 @@ def drive_shape(
     # Two turns: one that must SUCCEED, one that must FAIL the way a
     # paid-but-uncleared arm fails. The second is this shape's OWN failure
     # observation -- it does not borrow the negative control's.
-    commands.append(
-        {
-            "type": "message",
-            "msg_id": "m1",
-            "content": (
-                "Call the media_generate_image tool exactly once with the prompt "
-                "'a plain red square'. Do not explain, just make the tool call."
-            ),
-            "files": [],
-        }
-    )
-    commands.append(
-        {
-            "type": "message",
-            "msg_id": "m2",
-            "content": (
-                "Now call the media_generate_locked tool exactly once with the prompt "
-                "'a plain blue square'. Do not explain, just make the tool call."
-            ),
-            "files": [],
-        }
-    )
+    #
+    # They run in SEPARATE sessions on purpose. Measured 2026-07-29: queueing
+    # both messages on one stdin got the first turn executed and the second
+    # silently dropped -- `media_generate_locked called=False` in all three
+    # shapes, which would have rendered `failures` NOT MEASURED for a reason
+    # that was an artefact of the driver, not of the product.
+    msg_image = {
+        "type": "message",
+        "msg_id": "m1",
+        "content": (
+            "Call the media_generate_image tool exactly once with the prompt "
+            "'a plain red square'. Do not explain, just make the tool call."
+        ),
+        "files": [],
+    }
+    msg_locked = {
+        "type": "message",
+        "msg_id": "m1",
+        "content": (
+            "Call the media_generate_locked tool exactly once with the prompt "
+            "'a plain blue square'. Do not explain, just make the tool call."
+        ),
+        "files": [],
+    }
 
     s = Session(binary, home, timeout=240)
-    events = s.run(commands, settle=settle)
+    events = s.run(commands + [msg_image], settle=settle)
+
+    s2 = Session(binary, home, timeout=240)
+    events2 = s2.run(commands + [msg_locked], settle=settle)
+    r.note(f"session-2 (locked) event types: {sorted({e.get('type','?') for e in events2})}")
+    events = events + events2
+    s.raw_lines = s.raw_lines + s2.raw_lines
 
     types_seen = sorted({e.get("type", "?") for e in events})
     r.note(f"event types seen ({len(events)} events): {types_seen}")
@@ -357,13 +365,34 @@ def drive_shape(
                 f"{json.dumps(media_attributed[:5])}",
             )
         elif turn_costs:
+            # Distinguish "reported $0" from "explicitly unpriced". The engine
+            # emits `session_cost.per_turn[].priced` and an `info` line reading
+            # "cost is unpriced, not $0" -- grading those the same would be the
+            # under-detection this program keeps hitting, in the other
+            # direction: it would report an honesty defect that is not there.
+            unpriced_flags = [
+                e
+                for e in events
+                if e.get("type") == "session_cost"
+                for t in e.get("per_turn", [])
+                if t.get("priced") is False
+            ]
+            unpriced_msg = [
+                e.get("message", "")
+                for e in events
+                if e.get("type") == "info" and "unpriced" in (e.get("message") or "").lower()
+            ]
             r.grade(
                 "accounting",
                 FAIL,
                 f"the media tool WAS invoked and the session emitted "
                 f"{len(turn_costs)} cost-shaped field(s), but every one is "
-                f"token/turn-shaped with no attribution to the media call: "
-                f"{json.dumps(turn_costs[:5])}",
+                f"token/turn-shaped with NO attribution to the media call: "
+                f"{json.dumps(turn_costs[:5])}. "
+                f"Note in mitigation, and it matters: the turn-level channel is "
+                f"HONEST about being unpriced rather than reporting a false zero "
+                f"({len(unpriced_flags)} per-turn entries carry priced=false; "
+                f"engine says: {unpriced_msg[:1]}).",
             )
         else:
             r.grade(
