@@ -61,9 +61,50 @@ All four inherited artifacts read. Key facts pinned:
   fixed (`eabb6ec0`) and re-proven. **LIM-18's substitution point is now DISCHARGED** —
   its "result not in" evidence tag is superseded. Record, do not edit 30-03's published doc.
 
+## t+90 — TASK 1 COMPLETE
+
+RED→GREEN, both read back from the executed count, never from exit status.
+
+| | |
+|---|---|
+| RED commit (contract suite alone) | `af8e12b9` |
+| RED result | `RED_RC=101`, `error[E0432]: unresolved import wcore_eval_scenarios::reserved_authority` |
+| GREEN commit | `5602ee11` |
+| GREEN result | **14 tests run: 14 passed, 0 failed, 0 ignored** |
+| oracle fix | `db9c69d0` |
+| targeted suite | **505 run: 505 passed, 0 failed, 5 skipped** |
+
+Suite delta accounted exactly: 30-03's baseline 485 + 14 contract + 6 inline = **505**. No residual.
+
+**Clippy is RED and it is not mine.** 4 errors, all four Phase 24 `journey.rs` (683/695/707/717).
+Re-run WITHOUT `-D warnings`: rc=0, **0 hits across all four of my files**, 4 in `journey.rs`.
+Not fixed, not silenced, not attributed here.
+
+### My own inline test failed, and the CODE was right
+
+`civil_from_days_matches_known_dates` asserted day 11016 = 2000-03-01. The implementation
+answered **2000-02-29** and the implementation was correct — 2000 divides by 400 and IS a leap
+year. **The oracle was wrong, not the code.** Corrected the oracle (not the code, not by
+deleting the assertion) and pinned the boundary from both sides plus 1900-non-leap plus two
+negative days that exercise the Euclidean-remainder path. `db9c69d0`.
+
+### All nine Task-1 local gates GREEN, and all seven falsifiable ones RED at base
+
+Falsified against `git archive fced9f61` — a real base tree.
+
+**Instrument defect found in my own falsification harness, tenth instance of the standing
+pattern.** My first falsification used `git show BASE:path > file`, which **creates the file
+even when `git show` fails**. So an absent-at-base file materialised as present-and-empty, and
+`test -f` passed. Six of seven gates still went red (their grep legs failed on the empty file),
+which is exactly what hid it — `NO-SECRET-ON-ARGV` alone reported GREEN AT BASE and looked like
+a self-passing gate in the plan. It is not: re-run with `git archive | tar -x`, it is RED like
+the rest. **The gate was sound; my falsifier carried the defect it was hunting.**
+
+Precedent regression-guard legs measured at base: `F-021` = **6**, `INDEX_PUBKEY_HEX` = **6** —
+exactly the counts the plan declares.
+
 ## Still to establish
 
 - [ ] F-30-03-001 (LOW) fix at source in `30-02-SUMMARY.md` Gates prose
-- [ ] Task 1: `reserved_authority.rs` + contract suite (TDD, RED recorded)
 - [ ] Task 2: both authority runs on hetzner + no-reserved-action audit
 - [ ] Task 3: verdict, positioning packet, residuals
