@@ -3,13 +3,13 @@ phase: 30-continuous-scorecard-frontier-review
 plan: "02"
 subsystem: eval-harness
 status: complete
-termination_state: 2 (partially blocked)
+termination_state: 1 (complete)
 tags: [frontier-review, comparative-trials, pre-registration, confidence-bounds, F30-03]
 requires: ["30-01"]
 provides:
   - "pre-registered, content-addressed comparative trial protocol (F30-03)"
   - "trial harness in which an unbounded point estimate and a one-sided comparison are unconstructible"
-  - "fifteen-leg accounting: 6 RUN, 9 UNPROVEN, each naming a real capture"
+  - "fifteen-leg accounting: 9 RUN, 6 UNPROVEN, each naming a real capture"
 affects: ["30-03", "30-04"]
 tech-stack:
   added: []
@@ -31,8 +31,8 @@ decisions:
   - "cognitive_tax declared NOT MEASURABLE in this tier rather than proxied - unanimous"
   - "SplitMix64 rather than rand::StdRng, whose stream is not guaranteed stable across releases"
 metrics:
-  legs_run: 6
-  legs_unproven: 9
+  legs_run: 9
+  legs_unproven: 6
   contract_tests: 9
   targeted_suite: "470 passed, 0 failed, 5 skipped"
 ---
@@ -44,8 +44,10 @@ number existed, built a harness in which a point estimate without bounds and a c
 missing a peer are both unconstructible, and ran the trials — producing a result that goes
 **against** the product whose vendor ran the benchmark, published unaltered.
 
-**Termination state: 2 — partially blocked.** 6 of 15 legs RUN, 9 UNPROVEN with named blockers
-and substitution points.
+**Termination state: 1 — complete.** All three tools were provisioned at their pinned commits and
+passed the unscored conformance gate. 9 of 15 legs RUN; the 6 UNPROVEN are blocked by the
+**instrument**, not by any peer — three by the shared meter, three by a dimension the panel
+unanimously ruled unmeasurable in this tier.
 
 ## The panel, and the vote-extraction defects measured on the way
 
@@ -97,15 +99,25 @@ trivially.
 
 ## The results — and they go against us
 
-| Dimension | Wayland | Hermes 0.17.0 | Verdict |
-|---|---|---|---|
-| correctness | 0/30, [0.0000, 0.1135] | 30/30, [0.8865, 1.0000] | **PEER_AHEAD** |
-| recovery | 0/30, [0.0000, 0.1135] | 30/30, [0.8865, 1.0000] | **PEER_AHEAD** |
-| cost | 20.00 units, zero variance | 20.00 units, zero variance | PRACTICALLY_INDISTINGUISHABLE |
+| Dimension | Wayland | Hermes 0.17.0 | OpenClaw 2026.6.2 | vs Hermes | vs OpenClaw |
+|---|---|---|---|---|---|
+| correctness | 0/30 [0.0000, 0.1135] | 30/30 [0.8865, 1.0000] | 0/30 [0.0000, 0.1135] | **PEER_AHEAD** | INCONCLUSIVE |
+| recovery | 0/30 [0.0000, 0.1135] | 30/30 [0.8865, 1.0000] | 0/30 [0.0000, 0.1135] | **PEER_AHEAD** | INCONCLUSIVE |
+| cost | 20.00 units | 20.00 units | 20.00 units | INDISTINGUISHABLE | INDISTINGUISHABLE |
+
+**Wayland loses two comparatives outright, to Hermes.** Published unaltered.
+
+**The fourth verdict state earned its keep on real data.** Wayland vs OpenClaw is
+[−0.1135, 0.1135] — contains zero but more than twice the tie band. Under the plan's original
+three-state enum that would have been published as *practically indistinguishable*, an affirmative
+equivalence claim. It is `INCONCLUSIVE`. Kimi's amendment described an actual row, not a hypothetical.
 
 **The dominant cause is a defect in my own frozen protocol**, found by running it: the single
 canonical script emits a tool call named `write_file`, which Hermes accepts and whose Wayland
-equivalent is named `Write`. Panel member codex prescribed per-tool dialect compilation and this
+equivalent is named `Write`. **OpenClaw also scored 0/30** — two of three harnesses fail the
+identical script, which is what turns "Wayland is broken" into the better-supported "the script
+speaks Hermes' dialect". That correction exists only because the peer that first failed to
+transfer was retried until it landed. Panel member codex prescribed per-tool dialect compilation and this
 protocol failed to adopt it. Amending a protocol after a measurement exists is the one forbidden
 act, so the legs were neither re-scripted nor re-run — **and the result was not suppressed**,
 because hiding an unfavourable number is exactly the forgery this plan exists to prevent. The
@@ -120,18 +132,26 @@ credentials vault is unlocked"* — and reached a provider only after an `encryp
 credentials config plus a vault passphrase. Neither peer needed an equivalent. Carried as
 `workspace_seed_files` **data** so the extra setup our own tool required stays visible.
 
-## The nine UNPROVEN legs
+## The six UNPROVEN legs
 
 - **security ×3** — the protocol's extraction is a byte search of request bodies; the meter
   records body *digests* and per-leaf hashes, not bodies. An exact-leaf comparison would be a
   strictly **narrower** extraction, so it was **not** silently substituted. Meter gate-checked untouched.
 - **cognitive_tax ×3** — unanimous panel finding, frozen before any trial. F30-03 is incomplete
   on one of its five dimensions and this plan says so.
-- **openclaw ×5** — the 392,186,966-byte read-only bundle transfer **dropped at 164,766,720 bytes
-  (42%)** with `lost connection`; `git clone` refused it (`error: index-pack died`). A resumable
-  rsync retry was still running at plan close. **No HEAD snapshot was substituted, no registry
-  copy fetched, no other version measured.** OpenClaw contributes zero comparatives; its absence
-  makes Wayland's position *less* evidenced, not better.
+
+## OpenClaw, obtained the hard way
+
+Its first bundle transfer **dropped at 42%** (164,766,720 of 392,186,966 bytes, `lost connection`)
+and `git clone` refused the truncated file. A resumable `rsync --partial --append` retry resumed
+from that byte and completed 33 minutes later. It was then provisioned from its **own** committed
+`pnpm-lock.yaml` at its **own** pinned commit (pnpm 11.2.2 per its `packageManager` field, 1168
+packages) and built from source (243 s); `openclaw --help` reports `OpenClaw 2026.6.2 (11a0ad1)`.
+Nothing was substituted — no HEAD snapshot, no registry build, no other version.
+
+Persisting with the inconvenient peer produced the single finding that most constrains how the
+numbers may be read.
+**No leg is UNPROVEN because of a peer.** All three tools ran.
 
 ## Peers, read-only
 

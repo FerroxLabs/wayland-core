@@ -9,7 +9,7 @@ model quality, about real-world task success, and about dollar cost.** Every mea
 the scope tag `SCRIPTED_HARNESS`. This is a scripted agent-harness benchmark, never an
 agent-quality benchmark.
 
-**An UNPROVEN leg is not a win for anybody.** Nine of the fifteen legs did not run. No comparative
+**An UNPROVEN leg is not a win for anybody.** Six of the fifteen legs did not run. No comparative
 result exists for any dimension in which a tool did not run — `ComparativeResultV1` cannot be
 constructed without every compared tool's measurement, so "we could not run the competitor, so we
 win" is not expressible in this harness at all.
@@ -22,7 +22,7 @@ question, and 30-04 grades the phase.
 | Protocol | `evidence/30-02/protocol.json`, sha256 `d18407e0b96bf753f66adc1eab7d21cbaeca1b9e627cecf0159095938b83ef25` |
 | Pre-registered at | commit `a7bd5d87`, which contains no measurement of any kind |
 | Results | `evidence/30-02/results.json`, verified by the shipped `wayland-scorecard trials verify` |
-| Legs | 15 accounted for exactly once: **6 RUN, 9 UNPROVEN** |
+| Legs | 15 accounted for exactly once: **9 RUN, 6 UNPROVEN** |
 | Host | `hetzner-dsm`, Linux. `df -h /root` before provisioning: 750G available; after: 744G |
 
 ---
@@ -41,11 +41,16 @@ question, and 30-04 grades the phase.
 | LEG-08 | hermes | security | UNPROVEN | same meter limitation |
 | LEG-09 | hermes | cost | **RUN** | |
 | LEG-10 | hermes | cognitive_tax | UNPROVEN | not measurable in this tier |
-| LEG-11 | openclaw | correctness | UNPROVEN | peer never delivered to the build host |
-| LEG-12 | openclaw | recovery | UNPROVEN | peer never delivered |
-| LEG-13 | openclaw | security | UNPROVEN | peer never delivered + meter limitation |
-| LEG-14 | openclaw | cost | UNPROVEN | peer never delivered |
-| LEG-15 | openclaw | cognitive_tax | UNPROVEN | not measurable + peer never delivered |
+| LEG-11 | openclaw | correctness | **RUN** | |
+| LEG-12 | openclaw | recovery | **RUN** | |
+| LEG-13 | openclaw | security | UNPROVEN | same meter limitation |
+| LEG-14 | openclaw | cost | **RUN** | |
+| LEG-15 | openclaw | cognitive_tax | UNPROVEN | not measurable in this tier |
+
+**All six UNPROVEN legs are blocked by the INSTRUMENT, not by a peer.** Three by the shared
+meter's inability to support the frozen security extraction, three by a dimension the panel
+unanimously ruled unmeasurable in this tier. Every one of the three tools was provisioned at its
+pinned commit and passed the unscored conformance gate.
 
 Index: `evidence/30-02/legs.tsv`. Every leg names a capture that exists and holds real content —
 per-trial JSON Lines for a RUN leg, a named blocker with its substitution point for an UNPROVEN one.
@@ -65,26 +70,39 @@ stdout, transcript, exit status or self-report.**
 | hermes | correctness | 30 | 1.0000 | [0.8865, 1.0000] | Wilson score |
 | hermes | recovery | 30 | 1.0000 | [0.8865, 1.0000] | Wilson score |
 | hermes | cost | 15 | 20.00 units | [20.00, 20.00] | ZERO_EMPIRICAL_VARIANCE |
+| openclaw | correctness | 30 | 0.0000 | [0.0000, 0.1135] | Wilson score |
+| openclaw | recovery | 30 | 0.0000 | [0.0000, 0.1135] | Wilson score |
+| openclaw | cost | 15 | 20.00 units | [20.00, 20.00] | ZERO_EMPIRICAL_VARIANCE |
 
 Note the Wilson bound on Hermes' perfect score: **30/30 gives a lower bound of 0.8865, not 1.0.**
 A clean sweep of 30 trials does not license a claim of better-than-95% reliability, and the
 interval says so without anyone having to remember it.
 
-Both cost legs were perfectly deterministic — 2 fixture requests and 20 synthetic token units on
-every single trial for both tools. That is reported as `ZERO_EMPIRICAL_VARIANCE` rather than as a
+All three cost legs were perfectly deterministic — 2 fixture requests and 20 synthetic token units
+on every single trial for every tool. That is reported as `ZERO_EMPIRICAL_VARIANCE` rather than as a
 zero-width interval dressed up as precision.
 
 ### The comparatives
 
-| Dimension | Delta interval (Wayland − Hermes) | Tie band | Verdict |
-|---|---|---|---|
-| correctness | [−1.0000, −0.8395] | 0.05 | **PEER_AHEAD** |
-| recovery | [−1.0000, −0.8395] | 0.05 | **PEER_AHEAD** |
-| cost | [0.0000, 0.0000] | 0.05 | PRACTICALLY_INDISTINGUISHABLE |
+| Dimension | Peer | Delta interval (Wayland − peer) | Band | Verdict |
+|---|---|---|---|---|
+| correctness | hermes | [−1.0000, −0.8395] | 0.05 | **PEER_AHEAD** |
+| correctness | openclaw | [−0.1135, 0.1135] | 0.05 | INCONCLUSIVE |
+| recovery | hermes | [−1.0000, −0.8395] | 0.05 | **PEER_AHEAD** |
+| recovery | openclaw | [−0.1135, 0.1135] | 0.05 | INCONCLUSIVE |
+| cost | hermes | [0.0000, 0.0000] | 0.05 | PRACTICALLY_INDISTINGUISHABLE |
+| cost | openclaw | [0.0000, 0.0000] | 0.05 | PRACTICALLY_INDISTINGUISHABLE |
 
-**Two of the three comparable dimensions go against Wayland**, by an interval that clears the tie
-band with room to spare. That is what the frozen rules entail and it is published unaltered.
-No comparative exists against OpenClaw on any dimension.
+**Wayland loses two comparatives outright, to Hermes, on correctness and recovery.** That is
+published unaltered.
+
+**And the fourth verdict state earned its keep on real data.** Wayland vs OpenClaw sits at
+[−0.1135, 0.1135] — an interval that contains zero but is more than twice the tie band. Under the
+plan's original three-state enum that would have been reported as *practically indistinguishable*,
+i.e. as an affirmative claim of equivalence. It is not: it is **INCONCLUSIVE**, two tools that
+both scored 0/30 with too little resolution to say more. Kimi's amendment — "'CI contains zero,
+therefore tie' silently converts low power into declared equivalence" — turned out to describe an
+actual row in this table, not a hypothetical.
 
 ---
 
@@ -102,8 +120,15 @@ The frozen protocol specifies **one canonical fixture script** whose tool call i
   steps and exited 0 on every trial — but produced no artifact, because the scripted tool call
   named a tool it does not expose.
 
-So the dominant cause of the 0/30 is that **the frozen script happens to speak Hermes' tool
-dialect and not Wayland's.** Panel member codex predicted exactly this and prescribed the fix —
+- **OpenClaw 2026.6.2 also scored 0/30**, on both dimensions, at its pinned commit, after being
+  provisioned from its own pnpm lockfile and built from source.
+
+**Two of the three tools failed the identical script, and only Hermes passed it.** That is the
+decisive detail, and it arrived only because the peer everyone expected to be unobtainable was
+eventually obtained. Had OpenClaw stayed UNPROVEN, this document would have shown Wayland alone
+against Hermes and the natural reading would have been "Wayland is broken". The third tool
+converts that reading into a much better-supported one: **the frozen script speaks Hermes' tool
+dialect, and neither of the other two harnesses exposes a tool named `write_file`.** Panel member codex predicted exactly this and prescribed the fix —
 "if tool schemas differ, compile one canonical semantic script into tool-native response dialects
 and hash all translations; do not falsely claim byte identity" — and **my protocol failed to adopt
 it.** That is a defect in the instrument, found by running it.
@@ -156,28 +181,34 @@ it while calling the result protocol-conformant would be the forbidden act by an
 legs are UNPROVEN. `src/fixtures/openai.rs` is a hard scope fence in this plan and was
 gate-checked untouched.
 
-## 6. Why OpenClaw is entirely UNPROVEN, and what was NOT done instead
+## 6. OpenClaw: obtained the hard way, and why that mattered
 
-The pinned commit `11a0ad10e91a50d5a0e636494eea4d7ad3eaf9fc` was bundled **read-only** from Sean's
-reference checkout — 392,186,966 bytes. The transfer to the build host **dropped at 164,766,720
-bytes (42%)** with `Read from remote host: Operation timed out / lost connection`, and
-`git clone` correctly refused the truncated bundle:
+The first delivery **failed**. The pinned commit was bundled read-only from Sean's reference
+checkout — 392,186,966 bytes — and the transfer **dropped at 164,766,720 bytes (42%)** with
+`Read from remote host: Operation timed out / lost connection`. `git clone` correctly refused the
+truncated bundle (`error: index-pack died`). A resumable `rsync --partial --append` retry resumed
+from byte 164,766,720 and completed 33 minutes later.
 
-```
-error: index-pack died
-fatal: remote transport reported error
-```
+The peer was then provisioned **from its own committed `pnpm-lock.yaml` at its own pinned commit**
+(`corepack pnpm install --frozen-lockfile`, pnpm 11.2.2 as declared in its `packageManager` field,
+1168 packages, 21.4 s) and built from source (`pnpm build`, 243.4 s, slowest phase tsdown 176.8 s),
+because the shipped `openclaw.mjs` refuses to run from an unbuilt tree. `openclaw --help` then
+reports **`OpenClaw 2026.6.2 (11a0ad1)`** — the banner names the pinned commit.
 
-A resumable `rsync --partial --append` retry was started, resumed from 164,766,720 bytes, and had
-not completed within this plan's window.
+Conformance took three attempts and is itself an observation: `--local` requires a session
+selector (`--session-key`), and its model catalog rejected both `fixture-chat-v1` and
+`openai/gpt-4o-mini` with `FailoverError: Unknown model` until a `~/.openclaw/openclaw.json`
+declared the provider and model. Wayland and Hermes both needed a seeded config too; all three
+are carried as `workspace_seed_files` data.
 
-**What was NOT done, and this is the load-bearing part:** the `HEAD-2026-07-26` snapshot was not
-substituted, no npm-registry copy was fetched, no other version was measured, and no leg was
-scored from a peer that did not run. OpenClaw contributes **zero** comparatives. Its absence
-makes Wayland's position *less* evidenced, not better.
+**This is the leg that most changed the report.** Had the transfer not been retried, OpenClaw
+would have been five UNPROVEN legs and §2 would have shown Wayland alone against Hermes. The
+third tool is what turns "Wayland failed" into the far better-supported "two of three harnesses
+do not expose a tool named `write_file`". Persisting with an inconvenient peer produced the
+finding that most constrains how §2 may be read.
 
-Substitution point: complete the transfer (it resumes from byte 164,766,720), clone at the pin,
-install from the repository's own committed lockfile, re-run the legs unchanged.
+**Nothing was substituted at any point:** the `HEAD-2026-07-26` snapshot was never used, no
+npm-registry build was fetched, and no version other than the pin was measured.
 
 ## 7. Cognitive tax: unmeasured on purpose, decided before any trial ran
 

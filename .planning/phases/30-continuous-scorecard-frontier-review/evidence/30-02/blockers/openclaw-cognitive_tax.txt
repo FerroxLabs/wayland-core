@@ -2,9 +2,15 @@ LEG LEG-15 - openclaw / cognitive_tax - UNPROVEN
 ==============================================================================
 BLOCKER AND SUBSTITUTION POINT:
 
-NOT MEASURABLE IN THIS TIER -- same unanimous panel finding, frozen before any trial ran;
-and openclaw was additionally never provisioned. SUBSTITUTION POINT: as above, plus a
-completed openclaw delivery.
+NOT MEASURABLE IN THIS TIER -- the same unanimous cross-audit panel finding as the other two
+cognitive_tax legs, frozen in the protocol BEFORE any trial ran. Cognitive tax is a property
+of the human-operator loop; a loopback fixture does not exercise it, and configuration-line
+counts, command counts, intervention counts and elapsed time are not cognitive tax. F30-03
+is INCOMPLETE on this dimension for every tool. NOTE: openclaw WAS provisioned from its own
+pnpm lockfile at the pinned commit, built from source, and PASSED the unscored conformance
+gate; this leg is blocked by the dimension being unmeasurable in this tier, not by the peer.
+SUBSTITUTION POINT: a live-tier protocol with a scripted human operator and a pre-registered
+intervention taxonomy, run by a human evaluator.
 
 An UNPROVEN leg is NOT a win for any tool. No comparative result exists for
 any dimension in which a tool did not run: ComparativeResultV1 cannot be
