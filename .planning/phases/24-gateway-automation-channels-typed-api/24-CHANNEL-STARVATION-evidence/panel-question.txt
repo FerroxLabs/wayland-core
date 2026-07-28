@@ -1,0 +1,27 @@
+Rust CLI agent ("wayland-core"). Inbound message polling (Telegram getUpdates, IMAP FETCH, Discord gateway) is a DESTRUCTIVE read: whichever process polls first permanently takes delivery away from the others, silently. Three kinds of process can poll the same home directory:
+
+  A) "gateway"      - the installed always-on background service (launchd/systemd unit)
+  B) "cron-daemon"  - a long-lived scheduled-job daemon
+  C) "session"      - an ordinary interactive/one-shot CLI session the user runs by hand
+
+A fix just landed: a single-owner lease using flock() (Unix) / LockFileEx (Windows) on <home>/channels/channel-poll.lock. Exactly one process holds it and polls; everyone else runs normally, does not poll, can still SEND, and prints a loud warning naming the owner's pid. Release is by OS descriptor close, so SIGKILL/panic/power-loss all free it, and a successor acquires with no timeout heuristic. That is proven working.
+
+The residual defect: ownership is FIRST-COME. If a user's interactive session starts first, the installed always-on SERVICE becomes the non-polling observer and stays one for the entire lifetime of that session. Nothing is lost (the session receives), but the thing the user installed to be always-on is silently idle, and mail simply stops arriving at the service. Three reviewers graded this must-fix.
+
+flock offers NO preemption: a claimant cannot seize a held lock, and the holder cannot be forced to drop it. So "the service wins" can only be implemented as a VOLUNTARY YIELD by the current holder.
+
+Answer these three, each on its own line, with the exact token, and then justify:
+
+1. PANEL_PRECEDENCE=service   (the installed service should always end up owning polling, preempting a session that got there first)
+   or PANEL_PRECEDENCE=firstcome  (leave first-come; only add background reacquisition so the loser takes over after the holder exits)
+
+2. PANEL_MECHANISM=yield  (owner periodically reads an ADVISORY per-process "claim" file carrying a role rank; if a live claim strictly outranks it, the owner stops polling and drops the lease; every non-owner periodically re-attempts the lease and starts polling when it wins. The claim file can never grant or deny ownership - only flock does - so if claims are missing, stale or corrupt the behaviour degrades to today's first-come, never to two simultaneous pollers.)
+   or PANEL_MECHANISM=reacquireonly  (no preemption; non-owners just retry in the background and take over when the holder exits)
+   or PANEL_MECHANISM=other  (say what)
+
+3. PANEL_RANK=gateway>cron>session  or give a different total order over the three roles, using that syntax.
+
+Also state, briefly:
+ - the strongest argument AGAINST your own answer to (1);
+ - whether "equal ranks never preempt each other" (strict inequality only) is sufficient to make oscillation/ping-pong impossible;
+ - whether a stale advisory claim from a DEAD claimant can wedge or flap the system, and what bounds that.
