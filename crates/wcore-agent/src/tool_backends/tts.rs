@@ -138,9 +138,33 @@ pub fn build_tts_backend(config: &Config) -> Option<Arc<dyn TtsBackend>> {
             return Some(b);
         }
     }
+    // The Piper parenthetical that used to live here is GONE, not reworded.
+    //
+    // It read "(or download Piper voices via piper_download)" and was dead four
+    // independent ways at once:
+    //   1. `piper_download` is not a tool. It is a module name
+    //      (`wcore_tools::piper_download`); nothing by that name is registered,
+    //      so an operator who went looking for it found nothing to run.
+    //   2. `build_piper_download_backend` has no production caller at all.
+    //   3. `build_piper_tts_backend` returns `None` unconditionally, even when
+    //      it has just detected a cached voice on disk.
+    //   4. `PiperTtsBackend::synthesize` is a stub returning `DependencyMissing`,
+    //      and `piper_tts` is not a default feature, so on the shipped binary
+    //      the branch above is not even compiled.
+    //
+    // This is the `23A-C1` repair, not the `27-C2(a)` one: the route cannot be
+    // corrected because it does not exist, so it stops being advertised. Piper
+    // is NOT implemented by this change and nothing about (2)-(4) is fixed —
+    // only the promise is withdrawn. Restore the mention in the same commit that
+    // makes a real local voice work, and not before.
+    //
+    // It also cost more than a bad line of text: two planning documents
+    // recommended Piper as "the only route that does not go through Sean", a
+    // conclusion drawn from reading this string rather than the implementation.
+    // The class does not only mislead users.
     tracing::warn!(
-        "tts: no TTS backend configured — set OPENAI_API_KEY or ELEVENLABS_API_KEY \
-         (or download Piper voices via piper_download). Tool hidden."
+        "tts: no TTS backend configured — set OPENAI_API_KEY or ELEVENLABS_API_KEY. \
+         Tool hidden."
     );
     None
 }
