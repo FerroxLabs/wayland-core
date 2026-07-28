@@ -77,7 +77,11 @@ fn the_reserved_action_enum_is_closed_at_exactly_nine_with_nine_distinct_domains
     let mut tokens: Vec<&str> = ALL_RESERVED_ACTIONS.iter().map(|a| a.token()).collect();
     tokens.sort_unstable();
     tokens.dedup();
-    assert_eq!(tokens.len(), 9, "nine actions must carry nine distinct tokens");
+    assert_eq!(
+        tokens.len(),
+        9,
+        "nine actions must carry nine distinct tokens"
+    );
 
     let mut domains: Vec<&[u8]> = ALL_RESERVED_ACTIONS
         .iter()
@@ -350,10 +354,12 @@ fn frontier_positioning_verifies_under_a_throwaway_root_generated_at_run_time() 
     for action in ALL_RESERVED_ACTIONS {
         let a = mint_approval(action, SUBJECT, &throwaway.key_id, throwaway.seed())
             .expect("mint for each action");
-        throwaway
-            .root
-            .verify(&a)
-            .unwrap_or_else(|e| panic!("action {} must verify under a real root: {e}", action.token()));
+        throwaway.root.verify(&a).unwrap_or_else(|e| {
+            panic!(
+                "action {} must verify under a real root: {e}",
+                action.token()
+            )
+        });
     }
 }
 

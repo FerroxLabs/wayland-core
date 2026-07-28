@@ -13,11 +13,15 @@
 //!
 //! No secret is read, printed, logged or accepted on argv.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::{Parser, Subcommand};
+use sha2::{Digest, Sha256};
 use wcore_eval_scenarios::claims::{ClaimRegisterV1, publish, register_digest};
 use wcore_eval_scenarios::fixtures::openai::{OpenAiFixtureScript, OpenAiStep};
 use wcore_eval_scenarios::frontier_trials::{
@@ -25,6 +29,9 @@ use wcore_eval_scenarios::frontier_trials::{
     MeasurementV1, ResultSetV1, ScopeV1, ToolInvocationV1, ToolV1, TrialOutcomeV1, TrialRecordV1,
     bootstrap_difference, continuous_measurement, newcombe_wilson_difference,
     proportion_measurement, protocol_sha256,
+};
+use wcore_eval_scenarios::reserved_authority::{
+    ApprovalRecordV1, ApprovalTrustRootV1, ReservedActionV1, RootKindV1, mint_approval,
 };
 use wcore_eval_scenarios::scorecard::{
     ScorecardDocumentV1, render_surfaces_tsv, walk_command_tree,
@@ -68,6 +75,55 @@ enum Command {
     Claims {
         #[command(subcommand)]
         command: ClaimsCommand,
+    },
+    /// Phase 30 (F30-05) reserved authority. ADDITIVE alongside `surfaces`, `verify`,
+    /// `trials` and `claims`; none of them is reordered or restructured.
+    Authority {
+        #[command(subcommand)]
+        command: AuthorityCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuthorityCommand {
+    /// Generate a THROWAWAY approval root into a directory, and mint one frontier-positioning
+    /// approval under it.
+    ///
+    /// This is the POSITIVE CONTROL: without it the whole reserved-authority mechanism would
+    /// be satisfied by a verifier that refuses unconditionally, which would prove nothing
+    /// about whether an approval can ever be honoured. The root declares itself throwaway and
+    /// every acceptance reports that kind, so this can never be quoted as Sean's approval.
+    ///
+    /// The signing seed is written to an owner-only file inside `--dir` and is never printed.
+    InitRoot {
+        #[arg(long)]
+        dir: PathBuf,
+    },
+    /// Record an approval. The base64 32-byte Ed25519 signing seed is read from STDIN,
+    /// exactly as `wayland-receipt sign` reads it, and never from an argument.
+    Record {
+        /// One of the nine reserved action tokens.
+        #[arg(long)]
+        action: String,
+        /// The 64-character lowercase sha256 digest of the subject being approved.
+        #[arg(long)]
+        subject_sha256: String,
+        #[arg(long)]
+        key_id: String,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Verify an approval against a trust root supplied INDEPENDENTLY of the approval.
+    ///
+    /// `--bundled-root` checks against the committed all-zeros placeholder, which refuses
+    /// every approval and names its own substitution point.
+    Verify {
+        #[arg(long, conflicts_with = "bundled_root")]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        bundled_root: bool,
+        #[arg(long)]
+        approval: PathBuf,
     },
 }
 
@@ -185,7 +241,188 @@ fn run(cli: Cli) -> anyhow::Result<String> {
         }
         Command::Trials { command } => run_trials(command),
         Command::Claims { command } => run_claims(command),
+        Command::Authority { command } => run_authority(command),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 30 F30-05 reserved authority — one contiguous additive block.
+// ---------------------------------------------------------------------------
+
+fn run_authority(command: AuthorityCommand) -> anyhow::Result<String> {
+    match command {
+        AuthorityCommand::InitRoot { dir } => {
+            std::fs::create_dir_all(&dir)?;
+            let throwaway = ApprovalTrustRootV1::generate_throwaway();
+
+            let root_path = dir.join("root.json");
+            let root_bytes = serde_json::to_vec_pretty(&throwaway.root)?;
+            std::fs::write(&root_path, &root_bytes)?;
+
+            // The seed goes to an owner-only file and is NEVER printed. There is no
+            // subcommand in this binary that prints a seed and none that accepts one on argv.
+            let seed_path = dir.join(format!("{}.seed", throwaway.key_id));
+            std::fs::write(&seed_path, BASE64.encode(throwaway.seed()))?;
+            restrict_to_owner(&seed_path)?;
+
+            // A real subject digest: the digest of the root document that was just written.
+            let subject = format!("{:x}", Sha256::digest(&root_bytes));
+            let approval = mint_approval(
+                ReservedActionV1::FrontierPositioning,
+                &subject,
+                &throwaway.key_id,
+                throwaway.seed(),
+            )?;
+            let approval_path = dir.join("frontier-positioning.approval.json");
+            std::fs::write(&approval_path, serde_json::to_vec_pretty(&approval)?)?;
+
+            let mut out = String::new();
+            out.push_str("AUTHORITY_INIT_ROOT=OK root_kind=");
+            out.push_str(throwaway.root.root_kind.token());
+            out.push('\n');
+            for (key_id, public_hex) in &throwaway.root.keys {
+                out.push_str(&format!("key_id={key_id} public_key_hex={public_hex}\n"));
+            }
+            out.push_str(&format!(
+                "root={} approval={} subject_sha256={}\n",
+                root_path.display(),
+                approval_path.display(),
+                subject
+            ));
+            out.push_str(
+                "NOTE: this root was generated at run time and is NOT Sean's approval key. \
+                 It exists to prove the mechanism can ACCEPT a valid approval; an acceptance \
+                 under it authorises nothing.\n",
+            );
+            Ok(out)
+        }
+        AuthorityCommand::Record {
+            action,
+            subject_sha256,
+            key_id,
+            out,
+        } => {
+            let action: ReservedActionV1 = serde_json::from_value(serde_json::Value::String(
+                action.clone(),
+            ))
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "`{action}` is not one of the nine reserved actions. The action set \
+                             is CLOSED: an unrecognised name is refused here rather than mapped \
+                             to anything."
+                )
+            })?;
+            let mut secret = SecretBytes(Vec::new());
+            std::io::stdin()
+                .take(4097)
+                .read_to_end(&mut secret.0)
+                .map_err(|e| anyhow::anyhow!("could not read signing seed from stdin: {e}"))?;
+            if secret.0.len() > 4096 {
+                anyhow::bail!("signing seed input exceeds 4096 bytes");
+            }
+            let decoded = BASE64
+                .decode(trim_ascii(&secret.0))
+                .map_err(|_| anyhow::anyhow!("signing seed is not valid base64"))?;
+            let mut seed = SecretBytes(decoded);
+            let seed_array: [u8; 32] = seed
+                .0
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("signing seed must decode to exactly 32 bytes"))?;
+            let approval = mint_approval(action, &subject_sha256, &key_id, &seed_array)?;
+            wipe(&mut seed.0);
+            std::fs::write(&out, serde_json::to_vec_pretty(&approval)?)?;
+            Ok(format!(
+                "AUTHORITY_RECORD=OK action={} principal={} subject_sha256={} out={}\n",
+                approval.action.token(),
+                approval.principal.token(),
+                approval.subject_sha256,
+                out.display()
+            ))
+        }
+        AuthorityCommand::Verify {
+            root,
+            bundled_root,
+            approval,
+        } => {
+            let approval_bytes = std::fs::read(&approval)?;
+            // Unknown fields are refused HERE, before any verification logic runs, so an
+            // invented action or a stray `approved_by_agent` key cannot reach the rules.
+            let approval: ApprovalRecordV1 = serde_json::from_slice(&approval_bytes)?;
+            let root = match (root, bundled_root) {
+                (Some(path), false) => {
+                    let raw = std::fs::read(&path)?;
+                    serde_json::from_slice::<ApprovalTrustRootV1>(&raw)?
+                }
+                (None, true) => ApprovalTrustRootV1::bundled(),
+                _ => anyhow::bail!(
+                    "supply exactly one of --root <file> or --bundled-root; the trust root \
+                     must arrive independently of the approval"
+                ),
+            };
+            let verified = root.verify(&approval)?;
+            let mut out = format!(
+                "AUTHORITY_VERIFY=ACCEPTED action={} principal={} subject_sha256={} \
+                 key_id={} root_kind={}\n",
+                verified.action.token(),
+                verified.principal.token(),
+                verified.subject_sha256,
+                verified.key_id,
+                verified.root_kind.token()
+            );
+            if verified.root_kind != RootKindV1::OperatorSupplied {
+                out.push_str(
+                    "NOTE: root_kind is not operator_supplied. This acceptance proves the \
+                     MECHANISM works; it is not an approval and authorises nothing.\n",
+                );
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// Restrict a file to its owner. Unix only — on other platforms the seed still never leaves
+/// the caller-named directory, and no gate in this phase depends on the mode.
+fn restrict_to_owner(path: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
+struct SecretBytes(Vec<u8>);
+
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        wipe(&mut self.0);
+    }
+}
+
+fn wipe(bytes: &mut [u8]) {
+    for byte in bytes {
+        // SAFETY: `byte` is a valid unique reference for this write. Volatile prevents the
+        // compiler from eliding this security-sensitive wipe.
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+}
+
+fn trim_ascii(bytes: &[u8]) -> &[u8] {
+    let mut start = 0;
+    let mut end = bytes.len();
+    while start < end && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while end > start && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    &bytes[start..end]
 }
 
 // ---------------------------------------------------------------------------

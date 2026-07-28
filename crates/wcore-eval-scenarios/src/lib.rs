@@ -87,6 +87,11 @@ pub mod release_integrity;
 /// Phase 29 closed four-state release ledger (F29-04).
 pub mod release_states;
 pub mod report;
+/// Phase 30 reserved authority (F30-05): the nine actions reserved to Sean as a CLOSED enum,
+/// a principal enum with exactly one member that is not the agent, per-action signature
+/// domains, and a bundled all-zeros trust root that fails closed exactly as
+/// `IndexVerifier::bundled()` does — so frontier positioning is structurally unreachable here.
+pub mod reserved_authority;
 pub mod runner;
 /// Phase 29 deterministic CycloneDX SBOM transform (F29-01, closes F29-CEN-05).
 pub mod sbom;
