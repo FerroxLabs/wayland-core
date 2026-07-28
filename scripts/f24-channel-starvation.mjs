@@ -952,6 +952,93 @@ async function legD(run) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// LEG E — a DEAD claimant must not wedge the home into having no poller.
+//
+// This is the failure that would be strictly WORSE than the starvation being
+// fixed: an owner yields to a higher-ranked claimant, the claimant dies before
+// taking the lock, and NOBODY polls — for ever. Two of the three cross-audit
+// reviewers named it, and it is the shape the brief calls manufactured denial,
+// promoted out of the harness and into production.
+//
+// The claimant is dead BY CONSTRUCTION: this driver plants a well-formed
+// gateway-ranked claim naming a pid that is not the gateway, and then never
+// refreshes it. Nothing in the run can rescue it. The only thing that can end
+// the standoff is the claim ageing past its TTL — which is exactly the property
+// under test.
+//
+// It is also the one leg that deliberately CREATES a zero-poller window, so it
+// is the leg that proves the anti-denial grader can fire on something real
+// rather than only on a hypothetical.
+// ───────────────────────────────────────────────────────────────────────────
+
+async function legE(run) {
+  run.note('=== LEG E: a dead claimant must not wedge polling ===');
+  const session = run.startSession('E');
+  const gotFirst = await run.waitForPolls(2, BOOT_BUDGET_MS, 'legE/session-owns');
+  const w1 = await run.window('legE/W1 session polls', WINDOW_MS);
+
+  // Plant the dead claimant. `publish_claim`'s on-disk shape, a rank the
+  // session must respect, and a pid that will never be refreshed.
+  const claimPath = path.join(run.home, 'channels', 'channel-poll.claim.4242424');
+  const plantedAt = new Date().toISOString();
+  fs.writeFileSync(claimPath, JSON.stringify({ pid: 4242424, rank: 30, holder: 'gateway' }));
+  run.note(`legE: planted a gateway-ranked claim at ${claimPath} and will NEVER refresh it`);
+
+  const yielded = run.waitForToken(session.logPath, 'F24_CHANNEL_LEASE=yielded', 60_000, 'legE/session-yields');
+  // NOTHING happens here. No process is started, no file is touched.
+  const recovered = run.waitForToken(session.logPath, 'F24_CHANNEL_LEASE=acquired', 60_000, 'legE/session-recovers');
+
+  const w2 = await run.window('legE/W2 after recovery', WINDOW_MS);
+  const m1 = await run.submit(`F24CS-E1-${run.runId}`);
+  const d1 = await run.waitForDelivery(m1.update_id, 30_000, 'legE/deliver-after-recovery');
+
+  // The measured wedge bound, from the process's own transition timestamps.
+  const clean = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, '');
+  const log = clean(readOr(session.logPath));
+  const stampOf = (tok) => {
+    const line = log.split('\n').find((l) => l.includes(tok) && /^\d{4}-/.test(l));
+    return line ? line.split(/\s+/)[0] : null;
+  };
+  const yieldAt = stampOf('F24_CHANNEL_LEASE=yielded');
+  const acquireAt = stampOf('F24_CHANNEL_LEASE=acquired');
+  const wedgeMs = yieldAt && acquireAt ? Date.parse(acquireAt) - Date.parse(yieldAt) : null;
+
+  const sessionAlive = run.alive(session);
+  const g1 = gradeWindow({ maxOpen: w1.maxOpen, polls: w1.polls, expectPids: [session.child.pid], sawPids: w1.pids });
+  const g2 = gradeWindow({ maxOpen: w2.maxOpen, polls: w2.polls, expectPids: [session.child.pid], sawPids: w2.pids });
+
+  // The bound is asserted, not merely reported. A recovery that took a minute
+  // would be a wedge with a long fuse, and grading it a pass would be exactly
+  // the "redefine success downward" failure the brief forbids.
+  const WEDGE_BOUND_MS = 30_000;
+  const boundedRecovery = wedgeMs !== null && wedgeMs > 0 && wedgeMs <= WEDGE_BOUND_MS;
+
+  const pass = gotFirst && yielded && recovered && boundedRecovery && d1.delivered &&
+    g1.grade === 'OK' && g2.grade === 'OK' && sessionAlive;
+
+  try { session.child.kill('SIGKILL'); } catch { /* gone */ }
+
+  return {
+    leg: 'E', verdict: pass ? 'NO WEDGE — RECOVERED UNAIDED' : 'FAILED',
+    session_pid: session.child.pid,
+    session_owned_first: gotFirst,
+    planted_claim_at: plantedAt,
+    planted_claim: { pid: 4242424, rank: 30, holder: 'gateway', refreshed_ever: false },
+    window_before: { ...w1, report: undefined, grade: g1 },
+    session_yielded_to_the_dead_claim: yielded,
+    session_recovered_without_help: recovered,
+    yield_at: yieldAt, acquire_at: acquireAt,
+    wedge_window_ms: wedgeMs,
+    wedge_bound_ms: WEDGE_BOUND_MS,
+    recovery_within_bound: boundedRecovery,
+    window_after: { ...w2, report: undefined, grade: g2 },
+    delivered_after_recovery: d1,
+    session_still_alive_at_measurement: sessionAlive,
+    log_bytes: { 'legE session': byteLen(session.logPath) },
+  };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // LEG C — the accounting. Nothing may be lost across the whole run.
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -1119,7 +1206,7 @@ function runSelfTests() {
 // ───────────────────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
-  const out = { binary: null, runDir: null, legs: 'a,b,c,d', selfTest: false, llmStub: false, holdMs: 90_000, journal: null };
+  const out = { binary: null, runDir: null, legs: 'a,b,d,e,c', selfTest: false, llmStub: false, holdMs: 90_000, journal: null };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--binary') out.binary = argv[++i];
@@ -1161,6 +1248,7 @@ async function main() {
     if (want.has('a')) { const r = await legA(run); results.legs.push(r); Object.assign(logBytes, r.log_bytes); expectAlive['legA session'] = r.session_still_alive_at_measurement; expectAlive['legA gateway'] = r.gateway_still_alive_at_measurement; }
     if (want.has('b')) { const r = await legB(run); results.legs.push(r); Object.assign(logBytes, r.log_bytes); expectAlive['legB session'] = r.session_still_alive_at_measurement; expectAlive['legB gateway'] = r.gateway_still_alive_at_measurement; }
     if (want.has('d')) { const r = await legD(run); results.legs.push(r); Object.assign(logBytes, r.log_bytes); expectAlive['legD session (before kill)'] = r.session_was_a_live_observer_before_the_kill; expectAlive['legD session (after kill)'] = r.session_alive_after_the_kill; }
+    if (want.has('e')) { const r = await legE(run); results.legs.push(r); Object.assign(logBytes, r.log_bytes); expectAlive['legE session'] = r.session_still_alive_at_measurement; }
     if (want.has('c')) { const r = await legC(run); results.legs.push(r); }
 
     const finalReport = await run.report().catch(() => ({ poll_total: 0 }));
