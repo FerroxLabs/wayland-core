@@ -128,3 +128,26 @@ against a real CreateAppContainerProfile identity.
                 terminal disposition
 Exactly the one rejection the ledger documents at :1173/:1182. The gate CAN fail and
 is failing now, for this row and no other.
+
+### A9. Adjacent door still open — F-28-ADJ-002 (static reading, NOT reproduced)
+write_new_synced_lease (storage.rs:138) = create_new_nofollow THEN write_and_sync. A crash
+between them leaves a 0-byte *.toml; read_validated_lease rejects on metadata.len()==0
+(storage.rs:257); recover_dead_leases_locked:651 propagates with `?` -> whole pass aborts
+forever. Same shape as F-28-02-002, different door. The rewrite path IS crash-safe (temp +
+recover_rewrite_temps); the initial-create path is not, and recover_rewrite_temps cannot help
+because .toml is not a .tmp name. Distinct from malformed_or_unknown_lease_fails_closed
+(tests.rs:99), which pins fail-closed for a malformed lease DELIBERATELY and is principled.
+MEDIUM -> BACKLOG, non-blocking.
+
+### A10. Signed receipt NOT touched
+28-04-CERTIFICATION-RECEIPT.json body.findings[28] = {F-28-02-002, OPEN}, under Ed25519
+authority over body_sha256, which I verified is sha256 of json.dumps(body, separators=(',',':'),
+sort_keys=False). Editing breaks hash + signature. Re-issue is a release action -> Sean.
+
+### A11. FINAL VERDICT: FIXED.
+Panel 3/3 FIXED; internal adversarial pass for OPEN rejected because the finding's own message
+clause IS pinned by a_leaked_test_lease_is_diagnosed_by_name, and the unguarded branch is
+additional disclosure the repair invented, outside the finding's text.
+Gate post-update: strict --validate rc=0 OK, and proven still able to fail 3 ways (blank
+disposition -> F28L-002; OPEN -> F28L-002; FIXED without executable_check -> F28L-008).
+--check-downgrades rc=0 independently confirms no severity downgrade was taken.
