@@ -700,7 +700,7 @@ mod tests {
 
     #[test]
     fn a_shortfall_is_never_a_pass() {
-        assert!(session_count_verdict(999, 1000).is_green() == false);
+        assert!(!session_count_verdict(999, 1000).is_green());
         assert!(session_count_verdict(1000, 1000).is_green());
     }
 }

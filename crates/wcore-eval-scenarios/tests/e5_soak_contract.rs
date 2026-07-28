@@ -334,8 +334,8 @@ fn a_shortfall_against_the_thousand_session_target_is_never_a_pass() {
 
 #[test]
 fn a_zero_concurrency_soak_fails_the_contract_and_cannot_be_configured_away() {
-    assert!(concurrency_verdict(0).is_green() == false);
-    assert!(concurrency_verdict(1).is_green() == false);
+    assert!(!concurrency_verdict(0).is_green());
+    assert!(!concurrency_verdict(1).is_green());
     assert!(concurrency_verdict(MIN_CONCURRENCY).is_green());
     let mut f = family();
     f.concurrency = 0;
