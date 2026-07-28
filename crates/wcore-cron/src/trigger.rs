@@ -328,10 +328,18 @@ impl Trigger {
             // caller or a remote will next make it due. Reporting a
             // predicted instant for these would be a fabricated number in an
             // operator-facing field.
-            Self::Event { .. } | Self::Webhook { .. } => None,
-            Self::Poll { every_secs, .. } => {
-                Some(after + Duration::seconds(*every_secs.max(&1) as i64))
-            }
+            //
+            // 24-C2: `Poll` joined this arm on measured evidence. It used to
+            // return `after + every_secs`, so the tick fired it on the clock —
+            // and NOTHING has ever performed the HTTP fetch. The measured
+            // consequence: `--trigger poll:https://x/health:300` ran its target
+            // six times in six ticks having never contacted the URL, i.e. it
+            // was `--trigger every:300` wearing a remote's name. A trigger whose
+            // documented contract is "fires when the response says work is due"
+            // must not fire when no response was ever obtained; firing anyway is
+            // a stronger lie than not firing, because the action has an effect.
+            // It is now externally driven, has no producer, and says so.
+            Self::Event { .. } | Self::Webhook { .. } | Self::Poll { .. } => None,
             Self::Commitment { heartbeat_secs, .. } => {
                 Some(after + Duration::seconds(*heartbeat_secs.max(&1) as i64))
             }
@@ -352,7 +360,45 @@ impl Trigger {
     /// Whether the runtime's clock alone can say when this fires. `false` for
     /// the externally driven variants, whose next fire is genuinely unknown.
     pub fn is_clock_driven(&self) -> bool {
-        !matches!(self, Self::Event { .. } | Self::Webhook { .. })
+        !matches!(
+            self,
+            Self::Event { .. } | Self::Webhook { .. } | Self::Poll { .. }
+        )
+    }
+
+    /// Whether a producer exists in THIS build that can make the trigger fire.
+    ///
+    /// An externally driven trigger is only real if something drives it. The
+    /// clock drives the clock-driven variants and [`crate::events`] drives
+    /// `Event`; nothing drives `Webhook` or `Poll`, so a job carrying one can
+    /// never fire however valid its parameters are.
+    ///
+    /// This is deliberately a capability question and not a validity question.
+    /// A `Webhook` job is not malformed — it is unreachable, which is a
+    /// different thing and has to be reported differently: refused at the point
+    /// an operator tries to create one, and marked on any that is already
+    /// persisted. Reporting it as invalid would tell an operator to fix their
+    /// parameters, which would not help them.
+    pub fn has_producer(&self) -> bool {
+        !matches!(self, Self::Webhook { .. } | Self::Poll { .. })
+    }
+
+    /// Why this trigger can never fire, in one operator-facing sentence.
+    /// `None` when it can.
+    pub fn no_producer_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Webhook { .. } => Some(
+                "webhook triggers have no producer in this build: nothing routes an inbound \
+                 HTTP request to a job, and no authentication scheme exists for one. \
+                 This job will never fire. Use `cron publish` with an `event:` trigger instead.",
+            ),
+            Self::Poll { .. } => Some(
+                "poll triggers have no producer in this build: nothing performs the HTTP \
+                 request, so no response can say work is due. This job will never fire. \
+                 Use `every:SECONDS` if you wanted a plain timer.",
+            ),
+            _ => None,
+        }
     }
 }
 

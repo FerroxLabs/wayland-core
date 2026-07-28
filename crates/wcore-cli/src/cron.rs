@@ -46,11 +46,13 @@ pub enum CronCmd {
         ///   --trigger once:2026-08-01T09:00:00Z
         ///   --trigger every:900
         ///   --trigger cron:"0 9 * * *"
-        ///   --trigger event:build.finished
-        ///   --trigger webhook:/hooks/build          (authenticated)
-        ///   --trigger webhook:/hooks/build:open     (UNAUTHENTICATED)
-        ///   --trigger poll:https://x.test/health:300
+        ///   --trigger event:build.finished     (fire it with `cron publish`)
         ///   --trigger commit:2026-08-01T17:00:00Z:900
+        ///
+        /// `webhook:` and `poll:` are NOT accepted: nothing in this build can
+        /// fire them. They are refused at this verb rather than persisted as a
+        /// job that never runs. Use `event:` plus `cron publish` for a webhook,
+        /// and `every:SECONDS` for a plain timer.
         #[arg(long, value_name = "KIND:PARAMS")]
         trigger: Option<String>,
 
@@ -89,6 +91,27 @@ pub enum CronCmd {
         /// JSON args for `--skill` (default `{}`).
         #[arg(long, requires = "skill", value_name = "JSON")]
         args: Option<String>,
+    },
+
+    /// Publish an event topic, firing every job with a matching
+    /// `--trigger event:TOPIC`.
+    ///
+    /// This is the producer for event triggers. Anything that can run a
+    /// command can drive the schedule with it — a CI step, a git hook, a
+    /// skill, an operator at a shell:
+    ///
+    ///   wayland-core cron add --trigger event:build.finished --skill notify
+    ///   wayland-core cron publish build.finished
+    ///
+    /// The topic is matched EXACTLY — no prefix, no glob. Delivery is at least
+    /// once: a process killed between firing a job and clearing the event
+    /// re-fires it on the next tick, so the job's action must tolerate a
+    /// repeat. The event is queued on disk beside `jobs.json` and is consumed
+    /// by whichever process owns the schedule (the gateway, or `cron daemon`),
+    /// so publishing works whether or not one is running right now.
+    Publish {
+        /// Topic to publish, matching an `event:` trigger exactly.
+        topic: String,
     },
 
     /// Remove a job by id.
@@ -209,6 +232,7 @@ async fn run_inner(
             )
             .await
         }
+        CronCmd::Publish { topic } => publish_cmd(&topic, store).await,
         CronCmd::Remove { id } => {
             store.remove(&id).await.context("cron remove failed")?;
             println!("removed {id}");
@@ -235,6 +259,46 @@ async fn run_inner(
         CronCmd::Logs { id, limit } => logs_cmd(&id, limit, history_path).await,
         CronCmd::Daemon => daemon_cmd(store).await,
     }
+}
+
+/// Publish a topic into the schedule's event queue.
+///
+/// Reports how many jobs are currently subscribed, because "published" alone
+/// does not tell an operator whether anything will happen — and a publish that
+/// matches nothing is the most likely way to mistype a topic. It is NOT an
+/// error: the subscriber may be created later, and refusing here would make
+/// the ordering of two independent operations load-bearing.
+async fn publish_cmd(topic: &str, store: &FileCronStore) -> Result<()> {
+    let cron_dir = store
+        .path()
+        .parent()
+        .map(PathBuf::from)
+        .context("cron store has no parent directory to queue events in")?;
+    let event = wcore_cron::publish_event(&cron_dir, topic, chrono::Utc::now())
+        .with_context(|| format!("could not publish {topic:?}"))?;
+
+    let subscribers = store
+        .list()
+        .await
+        .map(|jobs| {
+            jobs.iter()
+                .filter(|j| j.enabled)
+                .filter(|j| {
+                    matches!(j.effective_trigger(), wcore_cron::Trigger::Event { topic: t } if t == event.topic)
+                })
+                .count()
+        })
+        .unwrap_or(0);
+
+    println!("published {topic:?} ({})", event.id);
+    if subscribers == 0 {
+        println!(
+            "warning: no enabled job is subscribed to {topic:?}; it will be queued until one is"
+        );
+    } else {
+        println!("{subscribers} subscribed job(s) will fire on the schedule owner's next tick");
+    }
+    Ok(())
 }
 
 async fn list_cmd(store: &FileCronStore) -> Result<()> {
@@ -276,6 +340,15 @@ async fn list_cmd(store: &FileCronStore) -> Result<()> {
             target = target,
             last_fired = last_fired
         );
+        // 24-C2: a job whose trigger has no producer can never fire. Creating
+        // one is now refused, but jobs written before that — or by the Desktop
+        // app, or by hand — are still on disk, and listing them beside working
+        // jobs with no distinction is the silent acceptance this repair exists
+        // to remove. It is printed under the job, not as a footnote, because a
+        // footnote is a thing nobody reads.
+        if let Some(reason) = job.effective_trigger().no_producer_reason() {
+            println!("      ^ WILL NEVER FIRE — {reason}");
+        }
     }
     Ok(())
 }
@@ -358,6 +431,7 @@ async fn add_cmd(
             // Quoted back verbatim, and nothing written.
             bail!("could not interpret {phrase:?} as a schedule; nothing was written");
         };
+        refuse_without_producer(&t)?;
         let candidate = CronJob::with_trigger(t.clone(), target.clone())
             .context("the interpreted trigger is not valid")?;
         println!("phrase:  {phrase:?}");
@@ -372,6 +446,7 @@ async fn add_cmd(
     } else if let Some(spec) = trigger {
         let t = parse_trigger_spec(&spec)
             .with_context(|| format!("could not parse --trigger {spec:?}"))?;
+        refuse_without_producer(&t)?;
         let job = CronJob::with_trigger(t, target).context("could not create cron job")?;
         print_next_fires(&job, 3);
         job
@@ -383,6 +458,31 @@ async fn add_cmd(
     let id = job.id.clone();
     store.insert(job).await.context("cron add failed")?;
     println!("added {id}");
+    Ok(())
+}
+
+/// Refuse to create a job whose trigger nothing in this build can fire.
+///
+/// 24-C2, and this is the whole point of the repair. `webhook:` and `poll:`
+/// validated, persisted and appeared in `cron list` with no error and no
+/// warning; the operator got a job that looked healthy and never ran. Accepting
+/// a trigger with no producer is the one outcome that is not acceptable, so the
+/// refusal happens BEFORE anything is written, names exactly what is
+/// unsupported, and points at what to use instead.
+///
+/// Deliberately NOT folded into [`parse_trigger_spec`]: parsing must keep
+/// working, because a persisted `webhook` job still has to load and still has
+/// to report its `require_auth` posture honestly in `cron list`. What is
+/// refused is CREATING one, and the error says so in those terms.
+fn refuse_without_producer(t: &wcore_cron::Trigger) -> Result<()> {
+    if let Some(reason) = t.no_producer_reason() {
+        bail!(
+            "refusing to create a {kind} job: {reason}\n\
+             Nothing was written.",
+            kind = t.kind(),
+            reason = reason
+        );
+    }
     Ok(())
 }
 
@@ -427,7 +527,7 @@ fn print_next_fires(job: &CronJob, n: usize) {
 /// Deliberately strict: an unrecognised kind is an error rather than a
 /// fallback to cron, because silently reinterpreting `webhook:/x` as a cron
 /// expression would produce a job that never fires and never says why.
-fn parse_trigger_spec(spec: &str) -> Result<wcore_cron::Trigger> {
+pub fn parse_trigger_spec(spec: &str) -> Result<wcore_cron::Trigger> {
     use wcore_cron::Trigger;
     let (kind, rest) = spec
         .split_once(':')
@@ -667,6 +767,11 @@ async fn status_cmd(id: &str, store: &FileCronStore) -> Result<()> {
 
     println!("id:          {}", job.id);
     println!("trigger:     {} — {}", trigger.kind(), job.expression);
+    // 24-C2: stated FIRST among the diagnostics, because every field under it
+    // describes a job that is never going to run.
+    if let Some(reason) = trigger.no_producer_reason() {
+        println!("reachable:   NO — {reason}");
+    }
     println!(
         "bound:       min_interval={}s max_in_flight={} deadline={}",
         bound.min_interval_secs,
