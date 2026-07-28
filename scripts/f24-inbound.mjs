@@ -220,6 +220,17 @@ class InboundMatrix {
     this.waAppSecret = crypto.randomBytes(24).toString('hex');
     this.twilioSid = `ACf24c3${crypto.randomBytes(12).toString('hex')}`;
     this.twilioToken = crypto.randomBytes(24).toString('hex');
+    this.vaultPassphrase = crypto.randomBytes(24).toString('hex');
+  }
+
+  // The host's OWN channel directory, which is NOT the isolated profile's.
+  // Recorded in the result because it changes the answer: the inbound access
+  // policy is resolved from this path rather than from `WAYLAND_HOME`
+  // (F24-C3-H1), so a matrix run on a host that happens to have configs here
+  // measures something different from one that does not.
+  hostChannelsDir() {
+    const home = process.env.HOME ?? process.env.USERPROFILE;
+    return home ? path.join(home, '.wayland', 'channels') : null;
   }
 
   note(text) {
@@ -396,6 +407,15 @@ class InboundMatrix {
       env: {
         ...process.env,
         WAYLAND_HOME: this.home,
+        // Measured on hetzner at 15ad7b0e: an isolated profile with NO vault
+        // passphrase stores credentials plaintext-0600 and then refuses EVERY
+        // turn with "Session persistence authority unavailable". That refusal
+        // is host-wide, not channel-specific — a plain one-shot
+        // `wayland-core "say hi"` on the same home fails identically — so
+        // running the matrix without a passphrase would attribute a
+        // credentials-posture refusal to the inbound path. The passphrase is
+        // minted for this run and is not a vendor credential.
+        WAYLAND_VAULT_PASSPHRASE: this.vaultPassphrase,
         RUST_LOG: 'wcore_agent::bootstrap=info,wcore_agent::channel_inbound=debug,wcore_channels=debug',
       },
       windowsHide: true,
@@ -688,6 +708,12 @@ class InboundMatrix {
       build_info: info,
       binary_sha256: digest,
       arrival_source: 'independent-sink',
+      host_channels_dir: this.hostChannelsDir(),
+      host_channels_dir_entries: (() => {
+        const d = this.hostChannelsDir();
+        if (!d || !fs.existsSync(d)) return null;
+        return fs.readdirSync(d);
+      })(),
       arrivals_journal: this.journalPath,
       turns_journal: this.llmJournalPath,
       healthz,

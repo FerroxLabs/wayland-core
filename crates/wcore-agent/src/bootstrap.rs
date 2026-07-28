@@ -293,6 +293,21 @@ pub fn govern_standalone_spawner(
 /// - Tool usage guidance is always injected
 /// - AGENTS.md is loaded from the workspace hierarchy
 /// - Skills, MCP, plan mode, spawn are enabled based on `Config` fields
+/// Load the channel configs the inbound subscriber derives its ACCESS POLICY
+/// and TOOL POSTURE from.
+///
+/// Named and public so the invariant it carries is testable: this must resolve
+/// the SAME directory the adapters are registered from
+/// ([`wcore_channels_registry::channels_dir`], which honors `WAYLAND_HOME`).
+/// It previously used `ChannelConfigLoader::default_root()`, which joins
+/// `$HOME/.wayland/channels` unconditionally — see F24-C3-H1 at the call site
+/// for what that broke, in both directions.
+pub fn load_channel_policy_configs() -> Vec<wcore_channels::config::ChannelConfig> {
+    wcore_channels::config::ChannelConfigLoader::new(wcore_channels_registry::channels_dir())
+        .load_all()
+        .unwrap_or_default()
+}
+
 pub struct AgentBootstrap {
     config: Config,
     workspace: String,
@@ -3089,11 +3104,34 @@ impl AgentBootstrap {
                 // per-session engines). A channel absent from these maps uses
                 // the fail-closed access default and the safe Conversational
                 // tool posture respectively.
-                let channel_configs = wcore_channels::config::ChannelConfigLoader::new(
-                    wcore_channels::config::ChannelConfigLoader::default_root(),
-                )
-                .load_all()
-                .unwrap_or_default();
+                //
+                // F24-C3-H1. This resolves through
+                // `wcore_channels_registry::channels_dir()` — the SAME
+                // directory the adapters were registered from a few lines
+                // above — and not through
+                // `ChannelConfigLoader::default_root()`, which joins
+                // `$HOME/.wayland/channels` and ignores `WAYLAND_HOME`.
+                //
+                // The divergence was not cosmetic and it broke in both
+                // directions. Under an isolated profile (every gateway unit,
+                // every `--profile`, the desktop host) the registration read
+                // `$WAYLAND_HOME/channels` while the policy read the host
+                // user's home, found nothing, and every channel silently took
+                // the fail-closed default: the adapter registered, started,
+                // polled and reported healthy while DENYING every inbound
+                // message the operator had allowlisted. Measured live at
+                // 15ad7b0e — `inbound denied … reason=sender not in dm
+                // allowlist` for a sender named in that profile's own
+                // `dm_allowlist`.
+                //
+                // In the other direction, on a host whose `$HOME/.wayland/
+                // channels` DOES hold configs, an isolated profile applied the
+                // host user's allowlists and tool posture — including
+                // `tools = "full"` — to a different profile's channels. That
+                // is the same cross-profile leak F-019 closed for
+                // registration; `channels_dir`'s own doc comment already
+                // asserts the two loaders "never diverge", and they did.
+                let channel_configs = load_channel_policy_configs();
 
                 // Resolve each channel's tool posture into a concrete scope.
                 // `Workspace` jails to the channel's `tool_workspace_root`
