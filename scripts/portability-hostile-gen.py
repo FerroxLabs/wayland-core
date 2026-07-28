@@ -195,6 +195,7 @@ SPEC = [
         expect="refused",
         files=[["skills/absolute/SKILL.md", _skill_body("absolute")]],
         symlinks=[["skills/absolute/escape", "/etc"]],
+        scope="platform",
         note=(
             "Following it would let a hostile source read arbitrary machine files "
             "into an import report. It must be refused or reported, never followed."
@@ -208,6 +209,7 @@ SPEC = [
         expect="refused",
         files=[["skills/traverse/SKILL.md", _skill_body("traverse")]],
         symlinks=[["skills/traverse/escape", "../../../.."]],
+        scope="platform",
         note=(
             "The relative form is the one a path-prefix check misses: the string "
             "starts inside the root and only leaves it after resolution."
@@ -221,6 +223,7 @@ SPEC = [
         expect="refused",
         files=[["skills/keep/SKILL.md", _skill_body("keep")]],
         symlinks=[["skills/hijack", "/tmp"]],
+        scope="platform",
         note=(
             "A symlinked directory is the escape a per-file check misses, because "
             "the walk descends before any file is inspected."
