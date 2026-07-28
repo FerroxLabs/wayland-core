@@ -9149,6 +9149,7 @@ dependencies = [
  "tokio-postgres-rustls",
  "tokio-test",
  "tokio-util",
+ "toml",
  "tracing",
  "url",
  "urlencoding",
@@ -9234,6 +9235,7 @@ dependencies = [
  "wcore-sandbox",
  "wcore-tools",
  "wcore-types",
+ "which 6.0.3",
  "wiremock",
  "workspace-hack",
 ]

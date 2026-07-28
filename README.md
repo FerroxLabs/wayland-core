@@ -297,7 +297,7 @@ The agent doesn't stop at the filesystem. Wayland Core ships two real desktop-au
 Both families register through a thin plugin shell. Per audit F2 the `wayland-browser` and `wayland-cua` crates carry no dependency on the real `wcore-browser`/`wcore-cua` engine crates — they register a spec mirror through the plugin API and the host reifies the actual tool, so the isolation boundary is structural, not a convention. The host has to advertise `capabilities.browser_suite` / `capabilities.computer_use` or neither family registers at all. On Linux Wayland the adapter goes further and refuses registration outright on a restricted compositor (GNOME mutter default, focus-steal-off Hyprland), probed live and re-checked mid-session.
 
 ```toml
-[browser]
+[browser.policy]
 # Disabled by default (fail-closed). Allow specific domains to turn it on:
 allowed_origins = ["example.com", "*.mysite.com"]
 # Or, not recommended (SSRF risk):

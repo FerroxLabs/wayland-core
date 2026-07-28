@@ -153,6 +153,70 @@ impl PluginCapabilitySet {
             computer_use: verified("wayland-cua"),
         }
     }
+
+    /// 27-C2(b) — advertise on liveness, not on linkage.
+    ///
+    /// [`Self::from_verified`] answers "is the plugin present and genuine?".
+    /// That is a necessary condition for the capability, not a sufficient one:
+    /// on a headless host `browser_suite` read `true`, the desktop app rendered
+    /// the capability, and the first operation died with
+    /// `spawn camoufox: No such file or directory`. The host was shown a
+    /// capability that could not work.
+    ///
+    /// This runs the backend crates' own probes on top and **can only clear a
+    /// flag, never set one** — the identity guarantee `from_verified` provides
+    /// is preserved intact, because a `false` can never become `true` here.
+    ///
+    /// The probes narrow only on positive proof that every compiled-in backend
+    /// is unable to start; anything undecidable without launching a backend
+    /// keeps the capability (`*Liveness::Indeterminate`). Under-advertising a
+    /// working capability is the same defect as over-advertising a broken one.
+    ///
+    /// **Wire compatibility.** Nothing in `wcore-protocol` changes: same field,
+    /// same type, same value domain, and `false` is already the value a host
+    /// sees when the plugin is absent. The `schema_digest` cannot observe this,
+    /// so no `CONTRACT_MINOR` bump and no manifest regeneration is implied.
+    /// Confirmed 3-of-3 by cross-audit panel; see
+    /// `.planning/FALSE-ADVERTISING-SUMMARY.md`.
+    ///
+    /// Each narrowing is logged at WARN with the probe's reason and remedy. A
+    /// recorded panel dissent held that silently dropping a capability replaces
+    /// an actionable runtime error with an un-debuggable missing feature; the
+    /// log is how that objection is honoured without keeping the false claim.
+    pub async fn narrowed_to_live(self) -> Self {
+        let mut out = self;
+
+        if out.browser_suite {
+            let probe = wcore_browser::liveness::probe(
+                wcore_browser::backends::CamoufoxBackend::default_url(),
+            )
+            .await;
+            if let Some(u) = probe.unavailable() {
+                tracing::warn!(
+                    capability = "browser_suite",
+                    reason = %u.reason,
+                    remedy = %u.remedy,
+                    "not advertising browser_suite: the plugin is loaded but no backend can start"
+                );
+                out.browser_suite = false;
+            }
+        }
+
+        if out.computer_use {
+            let probe = wcore_cua::liveness::probe();
+            if let Some(u) = probe.unavailable() {
+                tracing::warn!(
+                    capability = "computer_use",
+                    reason = %u.reason,
+                    remedy = %u.remedy,
+                    "not advertising computer_use: the plugin is loaded but no backend can start"
+                );
+                out.computer_use = false;
+            }
+        }
+
+        out
+    }
 }
 
 /// JSON stream protocol output sink

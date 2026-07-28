@@ -496,14 +496,15 @@ impl Tool for BrowserTool {
                     && self.policy.allowed_origins.is_empty()
                     && self.policy.default_action == crate::policy::PolicyAction::Deny
                 {
-                    "Browser tool is disabled by default. \
-                     Add allowed domains to your config.toml to enable it:\n\n\
-                     [browser]\n\
-                     # Allow specific domains (glob patterns supported)\n\
-                     allowed_origins = [\"example.com\", \"*.mysite.com\"]\n\n\
-                     Alternatively, set default_action = \"allow\" to permit all origins \
-                     (not recommended — exposes SSRF risk)."
-                        .to_string()
+                    // 27-C2(a): the section header here MUST be the one the
+                    // config loader reads (`[browser.policy]`). It named
+                    // `[browser]`, which `#[serde(default)]` silently drops,
+                    // so following this hint verbatim left the tool disabled
+                    // with no diagnostic. The text now comes from
+                    // `config_hint`, whose snippets are round-tripped through
+                    // the real loader by
+                    // `wcore-agent/tests/browser_config_hint_roundtrip.rs`.
+                    crate::config_hint::disabled_by_default_hint()
                 } else {
                     format!("policy: {e}")
                 }

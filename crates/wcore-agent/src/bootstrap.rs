@@ -872,8 +872,16 @@ impl AgentBootstrap {
                 )
             })
             .collect();
+        // 27-C2(b): `from_verified` answers "is the plugin present and
+        // genuine?" — necessary for the capability, not sufficient. Narrow the
+        // result to what can actually START on this host, so the desktop app
+        // stops rendering a capability whose first operation dies with
+        // `spawn camoufox: No such file or directory`. Clears flags only; the
+        // identity guarantee above is untouched.
         let plugin_capabilities =
-            crate::output::protocol_sink::PluginCapabilitySet::from_verified(&verified_plugins);
+            crate::output::protocol_sink::PluginCapabilitySet::from_verified(&verified_plugins)
+                .narrowed_to_live()
+                .await;
         // Backwards-compat alias for any consumer that still expects
         // the raw name list (handler-side log lines etc.).
         let loaded_plugin_names: Vec<String> =
@@ -1351,12 +1359,10 @@ impl AgentBootstrap {
         // `[browser.policy]` in their config.toml. v0.8.4's fix wired the
         // schema; this completes the loop by feeding it through to the
         // reify step.
-        let policy = &self.config.browser.policy;
-        for spec in &mut plugin_runner.browser.specs {
-            spec.policy.default_action = policy.default_action.clone();
-            spec.policy.allowed_origins = policy.allowed_origins.clone();
-            spec.policy.denied_origins = policy.denied_origins.clone();
-        }
+        crate::plugins::adapters::browser_adapter::apply_config_policy(
+            &self.config.browser.policy,
+            &mut plugin_runner.browser.specs,
+        );
 
         // v0.6.5 Task 1.4 — browser/cua plugin tools now reify INSIDE
         // `apply_initialize_outcome` (see `apply.rs::deliver_browser_tools`
