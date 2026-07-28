@@ -1,0 +1,43 @@
+warning: /root/hlkr-out/home-R1b/config.toml has permissions 0o644; tightening to 0o600 on next write
+2026-07-28T18:06:38.190360Z  WARN ignoring unknown or mis-sectioned config key `credentials` in /root/hlkr-out/home-R1b/config.toml — it has no effect; check for a typo or wrong [section] key=credentials path=/root/hlkr-out/home-R1b/config.toml
+2026-07-28T18:06:38.190673Z  INFO egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked allowlisted=37
+2026-07-28T18:06:38.190781Z  INFO egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked allowlisted=37
+2026-07-28T18:06:38.191886Z  WARN not advertising browser_suite: the plugin is loaded but no backend can start capability="browser_suite" reason=no browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health remedy=install @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+2026-07-28T18:06:38.191912Z  WARN not advertising computer_use: the plugin is loaded but no backend can start capability="computer_use" reason=neither DISPLAY nor WAYLAND_DISPLAY is set, so no display server is reachable and the X11 backend cannot connect remedy=run inside a graphical session, or export DISPLAY for an available X server (e.g. an Xvfb instance) before starting
+2026-07-28T18:06:38.192078Z  INFO postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+2026-07-28T18:06:38.192160Z  INFO skipping registration of tool whose backend is not configured tool=spotify_playback
+2026-07-28T18:06:38.192174Z  INFO skipping registration of tool whose backend is not configured tool=spotify_devices
+2026-07-28T18:06:38.192177Z  INFO skipping registration of tool whose backend is not configured tool=spotify_queue
+2026-07-28T18:06:38.192179Z  INFO skipping registration of tool whose backend is not configured tool=spotify_search
+2026-07-28T18:06:38.192182Z  INFO skipping registration of tool whose backend is not configured tool=spotify_playlists
+2026-07-28T18:06:38.192184Z  INFO skipping registration of tool whose backend is not configured tool=spotify_albums
+2026-07-28T18:06:38.192186Z  INFO skipping registration of tool whose backend is not configured tool=spotify_library
+2026-07-28T18:06:38.192194Z  INFO skipping registration of tool whose backend is not configured tool=yuanbao
+2026-07-28T18:06:38.192203Z  INFO image_gen: using gpt-image-1 at http://127.0.0.1:8399 (active OpenAI-wire provider)
+2026-07-28T18:06:38.192213Z  INFO web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+2026-07-28T18:06:38.192231Z  WARN vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+2026-07-28T18:06:38.192234Z  WARN transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden
+2026-07-28T18:06:38.192241Z  INFO tts: using OpenAI TTS at http://127.0.0.1:8399 (active OpenAI-wire provider)
+2026-07-28T18:06:38.192465Z  WARN video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+2026-07-28T18:06:38.192488Z  INFO cronjob: wiring WaylandCronScheduler over default FileCronStore
+2026-07-28T18:06:38.192620Z  WARN plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool plugin=wayland-browser tool=execute fq_name=Browser::execute
+2026-07-28T18:06:38.204103Z  WARN semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+2026-07-28T18:06:38.204230Z  INFO W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+2026-07-28T18:06:38.204239Z  INFO M3.2: memory.enabled ON — decay scheduler spawned interval_secs=3600
+2026-07-28T18:06:38.206100Z  INFO user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+2026-07-28T18:06:38.206278Z  WARN ignoring unknown or mis-sectioned config key `credentials` in /root/hlkr-out/home-R1b/config.toml — it has no effect; check for a typo or wrong [section] key=credentials path=/root/hlkr-out/home-R1b/config.toml
+2026-07-28T18:06:39.206553Z  INFO F-014: channels auto-registered from ~/.wayland/channels count=0
+2026-07-28T18:06:39.206594Z  WARN vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+2026-07-28T18:06:39.206599Z  WARN transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden
+2026-07-28T18:06:39.206609Z  INFO Phase 1B-2: inbound channel subscriber spawned
+2026-07-28T18:06:39.206612Z  INFO F-014: channel_manager.start_all() complete — inbound polling active
+2026-07-28T18:06:39.253142Z  WARN WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+2026-07-28T18:06:39.383286Z  WARN W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic provider="openai" model="mock-model"
+2026-07-28T18:06:39.383305Z  WARN W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic provider="openai" model="mock-model"
+2026-07-28T18:06:39.383308Z  WARN W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic provider="openai" model="mock-model"
+Pricing unavailable for openai/mock-model; the call remains bounded by the token envelope and cost is unpriced, not $0.
+2026-07-28T18:06:39.388097Z  WARN W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic provider="openai" model="mock-model"
+2026-07-28T18:06:39.388493Z  WARN W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic provider="openai" model="mock-model"
+2026-07-28T18:06:39.394727Z  INFO auto-memorize skipped this session; no facts saved skip_reason=Some(BelowFactThreshold) candidates=0
+
+[turns: 1 | tokens: 1 in / 1 out]

@@ -1,0 +1,2 @@
+1785262136.620 listening on 8399
+1785262150.162 POST /v1/chat/completions stream=True model=mock-model msgs=3

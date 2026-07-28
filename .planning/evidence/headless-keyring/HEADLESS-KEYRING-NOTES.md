@@ -198,3 +198,40 @@ either, and it works by turning off durable sessions, i.e. by giving up a featur
 
 **The actual one-line fix is `WAYLAND_VAULT_PASSPHRASE=<anything>` (R1g), which the product
 never tells anyone.** Adding the advertised config line on top of it *breaks* it (R1d).
+
+## Cross-audit panel (§4) + the internal adversarial pass
+
+| voter | position |
+|---|---|
+| codex `gpt-5.6-sol` | `PANEL_POSITION=HIGH` — "every remediation the error explicitly recommends is invalid or incomplete… not CRITICAL because there is a reliable workaround" |
+| gemini `3.1-pro-preview` | `PANEL_POSITION=HIGH` — "actively gaslights users into a dead-end configuration loop with factually incorrect schema advice" |
+| kimi K3 | `PANEL_POSITION=HIGH` — "not CRITICAL… no data loss, no corruption, no security exposure — the process fails closed and safe" |
+
+**Internal adversarial pass, arguing AGAINST HIGH.** The strongest available objection was
+that this program has already graded this symptom **LOW twice** (BACKLOG F21-02-08;
+24-C3-SUMMARY:398), and that 24-C3 scoped it explicitly to *"an isolated profile"* — i.e.
+only when `WAYLAND_HOME` is set. Every route R0–R2 above set `WAYLAND_HOME`, so on the
+evidence I had, the objection was live and would have cut severity to MEDIUM at most.
+
+**Measured, and the objection fails.** R5 — a plain default install, `WAYLAND_HOME`
+deliberately unset, config at the real default `$HOME/.config/wayland-core/config.toml`:
+
+```
+ROUTE=R5 rc=1 contact=no
+error: Session persistence authority unavailable: secure recovery storage is unavailable:
+no OS keyring was usable and no encrypted credentials vault is unlocked. …
+```
+
+R6, identical but with the env var: `rc=0 contact=yes stdout=[* HEADLESS_TURN_OK]`.
+
+So the blast radius is **every default install on a keyring-less host**, not isolated
+profiles. The prior LOW gradings were scoped too narrowly.
+
+The adversarial pass also surfaced an **aggravating** fact rather than a mitigating one: the
+plaintext-fallback warning is the ONLY string in the entire product that names
+`WAYLAND_VAULT_PASSPHRASE`, and it is `WAYLAND_HOME`-gated — so it does **not** print in the
+default case (absent from R5's stderr, present in R0's). The one hint that exists is
+suppressed in exactly the situation that needs it.
+
+**Verdict: HIGH.** Unanimous panel, and the one serious counter-argument was tested and
+refuted by measurement rather than by argument.
