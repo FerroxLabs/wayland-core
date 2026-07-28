@@ -196,3 +196,12 @@ pub mod goal_cmd;
 // fabricated by the reporting process) is testable under
 // `cargo test -p wcore-cli --lib`.
 pub mod channel;
+
+// F28 (F-28-02-001): CLI surface `wayland-core sandbox` — the platform
+// containment operator surface (status / exec). `exec` dispatches through
+// `BashTool::execute_with_ctx`, the agent's OWN shell tool, so the containment
+// an operator observes is the containment the agent applies — the evidence is
+// transitive rather than parallel. Lives in the lib so the selector's
+// bypass refusal and the contained-profile context are testable under
+// `cargo test -p wcore-cli --lib`.
+pub mod sandbox_cmd;
