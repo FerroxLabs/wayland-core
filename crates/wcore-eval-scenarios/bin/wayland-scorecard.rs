@@ -303,7 +303,7 @@ async fn drive_leg(
 
         let script = OpenAiFixtureScript::new(steps.clone());
         let fixture = script.start_for_workspace(&workspace).await?;
-        let base_url = format!("{}/v1", fixture.base_url());
+        let base_url = format!("{}{}", fixture.base_url(), invocation.base_url_suffix);
 
         let started = Instant::now();
         let mut child = {

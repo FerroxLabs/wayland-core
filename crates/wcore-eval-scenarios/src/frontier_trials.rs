@@ -697,6 +697,15 @@ pub struct ToolInvocationV1 {
     /// The environment variable through which this tool accepts an OpenAI-compatible base
     /// URL. Measured at the pinned commit, never assumed from HEAD.
     pub base_url_env: String,
+    /// Appended to the fixture's loopback root before it is handed to the tool.
+    ///
+    /// This exists because the three tools genuinely disagree about where `/v1` lives:
+    /// Wayland appends `/v1/chat/completions` to whatever base URL it is given, while both
+    /// peers follow the OpenAI SDK convention in which the base URL already ends in `/v1`.
+    /// Carrying that as a VALUE keeps the adapter tool-neutral; hard-coding it per tool in
+    /// the driver would be exactly the per-tool special-casing this type exists to prevent,
+    /// and it would be invisible to a reader of the results.
+    pub base_url_suffix: String,
     /// Additional non-secret environment entries this tool needs to start at all.
     pub extra_env: BTreeMap<String, String>,
 }
