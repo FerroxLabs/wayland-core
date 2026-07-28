@@ -1,0 +1,90 @@
+﻿F28ADJ2 REPRO2 tag=fix started=2026-07-29T01:56:40.4408421+07:00
+CLASSIFIER_SELFTEST=known_positive=True;known_negative=True;old_matcher_missed_it=True
+EXE_SHA256=b3b235fcd40394030b0e8b42fac767ff7970c4186c061d54680c1c2fc3e910e9
+SRC_SHA=9c4d2612157851abc6d810fc75d153410372dafa
+SRC_DIRTY=0
+QUIET_BUILD_PROCS=5
+AS_FOUND_LEASES=0
+===== OBSERVATION state=clean active=0 quarantined=0 zerofile_bytes=-1 =====
+----- RAW sandbox status -----
+backend                   appcontainer
+available                 true
+bypasses containment      false
+enforces read deny        true
+owns descendants hard     true
+binds cwd authority       true
+binds workspace authority true
+
+----- END -----
+----- RAW sandbox exec -----
+Exit code: 0
+STDOUT:
+ADJ2RAN
+
+STDERR:
+
+----- END -----
+F28ADJ2B=state=clean;active=0;quarantined=0;zerofile_bytes=-1;ran=True;disabled=False;size_error=False;reclaimed=False;fail_closed_backend=False;appcontainer=True
+ZERO_INSTALLED=True;bytes=0
+===== OBSERVATION state=zero-byte-lease active=1 quarantined=0 zerofile_bytes=0 =====
+----- RAW sandbox status -----
+wayland-core.exe : [2m2026-07-28T18:57:08.138500Z[0m [31mERROR[0m RECLAIMED a 0-byte 
+AppContainer ACL lease \\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\WCore-a
+dj2-0000c0de-00000000000000f2.toml. A lease file is created before its content is written, so an 
+execution interrupted in that window leaves an empty file. This is persistent on-disk state ΓÇö 
+NOT a platform limitation and NOT transient ΓÇö and until this reclamation landed it disabled ALL 
+sandboxed execution on this machine until a human deleted it. It was empty, so it recorded no 
+filesystem ACL grant and nothing was left behind. The file has been MOVED (not deleted) to \\?\C:\
+Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\quarantine\WCore-adj2-0000c0de-000000
+00000000f2.toml.quarantined-00009704-0000000000000000 so the interruption stays visible. [3mlease
+[0m[2m=[0m\\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\WCore-adj2-0000c0
+de-00000000000000f2.toml [3mquarantined_to[0m[2m=[0m\\?\C:\Users\seand\AppData\Local\Wayland\C
+ore\AppContainerLeases\v1\quarantine\WCore-adj2-0000c0de-00000000000000f2.toml.quarantined-0000970
+4-0000000000000000
+At C:\f28h2\adj2-repro2.ps1:70 char:10
++   $so = (& $Exe sandbox status 2>&1 | Out-String)
++          ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([2m2026-07-28T...000000000000000:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+backend                   appcontainer
+available                 true
+bypasses containment      false
+enforces read deny        true
+owns descendants hard     true
+binds cwd authority       true
+binds workspace authority true
+
+----- END -----
+----- RAW sandbox exec -----
+Exit code: 0
+STDOUT:
+ADJ2RAN
+
+STDERR:
+
+----- END -----
+F28ADJ2B=state=zero-byte-lease;active=1;quarantined=0;zerofile_bytes=0;ran=True;disabled=False;size_error=False;reclaimed=True;fail_closed_backend=False;appcontainer=True
+===== OBSERVATION state=zero-byte-lease-second-run active=0 quarantined=1 zerofile_bytes=-1 =====
+----- RAW sandbox status -----
+backend                   appcontainer
+available                 true
+bypasses containment      false
+enforces read deny        true
+owns descendants hard     true
+binds cwd authority       true
+binds workspace authority true
+
+----- END -----
+----- RAW sandbox exec -----
+Exit code: 0
+STDOUT:
+ADJ2RAN
+
+STDERR:
+
+----- END -----
+F28ADJ2B=state=zero-byte-lease-second-run;active=0;quarantined=1;zerofile_bytes=-1;ran=True;disabled=False;size_error=False;reclaimed=False;fail_closed_backend=False;appcontainer=True
+LEASE_RESTORED count=0 expected=0
+finished=2026-07-29T01:58:17.9509239+07:00

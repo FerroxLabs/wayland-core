@@ -1,0 +1,127 @@
+﻿F28ADJ2 REPRO tag=base started=2026-07-29T01:34:57.7202811+07:00
+EXE_SHA256=c732584c4945b7a29651329950f0120fe0d2deb388550d567cd68cb863037092
+SRC_SHA=1b9f148f046967ba019db6bd648157dba98f82d7
+SRC_DIRTY=0
+QUIET_BUILD_PROCS=32
+AS_FOUND_LEASES=0
+===== OBSERVATION state=clean active=0 quarantined=0 zerofile_bytes=-1 =====
+----- RAW sandbox status -----
+backend                   appcontainer
+available                 true
+bypasses containment      false
+enforces read deny        true
+owns descendants hard     true
+binds cwd authority       true
+binds workspace authority true
+
+----- END -----
+----- RAW sandbox exec -----
+Exit code: 0
+STDOUT:
+ADJ2RAN
+
+STDERR:
+
+----- END -----
+F28ADJ2=state=clean;active=0;quarantined=0;zerofile_bytes=-1;ran=True;disabled=False;size_error=False;fail_closed_backend=False
+ZERO_INSTALLED=True;bytes=0
+===== OBSERVATION state=zero-byte-lease active=1 quarantined=0 zerofile_bytes=0 =====
+----- RAW sandbox status -----
+wayland-core.exe : [2m2026-07-28T18:35:47.216221Z[0m [31mERROR[0m AppContainer real-spawn 
+probe failed; sandbox disabled. This is NOT a statement that Windows cannot sandbox: the cause is 
+the `error` field on this line, verbatim, and it names the call or file that failed. Read it 
+first. A stale ACL lease is no longer a cause ΓÇö an unreconcilable lease whose owner is gone is 
+now reclaimed to the quarantine directory and reported by name. Treat this as transient (AV, disk 
+contention), and wait for the probe to re-run after the negative-cache TTL, ONLY when the error 
+names no persistent on-disk state. [3merror[0m[2m=[0msandbox child execution failed: invalid 
+AppContainer ACL lease size 0 in \\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\
+v1\WCore-adj2-0000c0de-00000000000000f2.toml
+At C:\f28h2\adj2-repro.ps1:51 char:10
++   $so = (& $Exe sandbox status 2>&1 | Out-String)
++          ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([2m2026-07-28T...00000000f2.toml:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+backend                   fail_closed
+available                 true
+bypasses containment      false
+enforces read deny        false
+owns descendants hard     false
+binds cwd authority       false
+binds workspace authority false
+
+----- END -----
+----- RAW sandbox exec -----
+wayland-core.exe : [2m2026-07-28T18:35:47.391752Z[0m [31mERROR[0m AppContainer real-spawn 
+probe failed; sandbox disabled. This is NOT a statement that Windows cannot sandbox: the cause is 
+the `error` field on this line, verbatim, and it names the call or file that failed. Read it 
+first. A stale ACL lease is no longer a cause ΓÇö an unreconcilable lease whose owner is gone is 
+now reclaimed to the quarantine directory and reported by name. Treat this as transient (AV, disk 
+contention), and wait for the probe to re-run after the negative-cache TTL, ONLY when the error 
+names no persistent on-disk state. [3merror[0m[2m=[0msandbox child execution failed: invalid 
+AppContainer ACL lease size 0 in \\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\
+v1\WCore-adj2-0000c0de-00000000000000f2.toml
+At C:\f28h2\adj2-repro.ps1:53 char:10
++   $eo = (& $Exe sandbox exec --workspace $ws --timeout-ms 90000 "cmd. ...
++          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([2m2026-07-28T...00000000f2.toml:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Refused: shell is unavailable because the active sandbox backend cannot enforce secret-read-deny for this workspace.
+wayland-core sandbox: sandboxed command reported an error
+
+----- END -----
+F28ADJ2=state=zero-byte-lease;active=1;quarantined=0;zerofile_bytes=0;ran=False;disabled=True;size_error=False;fail_closed_backend=True
+===== OBSERVATION state=zero-byte-lease-second-run active=1 quarantined=0 zerofile_bytes=0 =====
+----- RAW sandbox status -----
+wayland-core.exe : [2m2026-07-28T18:35:47.428843Z[0m [31mERROR[0m AppContainer real-spawn 
+probe failed; sandbox disabled. This is NOT a statement that Windows cannot sandbox: the cause is 
+the `error` field on this line, verbatim, and it names the call or file that failed. Read it 
+first. A stale ACL lease is no longer a cause ΓÇö an unreconcilable lease whose owner is gone is 
+now reclaimed to the quarantine directory and reported by name. Treat this as transient (AV, disk 
+contention), and wait for the probe to re-run after the negative-cache TTL, ONLY when the error 
+names no persistent on-disk state. [3merror[0m[2m=[0msandbox child execution failed: invalid 
+AppContainer ACL lease size 0 in \\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\
+v1\WCore-adj2-0000c0de-00000000000000f2.toml
+At C:\f28h2\adj2-repro.ps1:51 char:10
++   $so = (& $Exe sandbox status 2>&1 | Out-String)
++          ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([2m2026-07-28T...00000000f2.toml:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+backend                   fail_closed
+available                 true
+bypasses containment      false
+enforces read deny        false
+owns descendants hard     false
+binds cwd authority       false
+binds workspace authority false
+
+----- END -----
+----- RAW sandbox exec -----
+wayland-core.exe : [2m2026-07-28T18:35:47.461244Z[0m [31mERROR[0m AppContainer real-spawn 
+probe failed; sandbox disabled. This is NOT a statement that Windows cannot sandbox: the cause is 
+the `error` field on this line, verbatim, and it names the call or file that failed. Read it 
+first. A stale ACL lease is no longer a cause ΓÇö an unreconcilable lease whose owner is gone is 
+now reclaimed to the quarantine directory and reported by name. Treat this as transient (AV, disk 
+contention), and wait for the probe to re-run after the negative-cache TTL, ONLY when the error 
+names no persistent on-disk state. [3merror[0m[2m=[0msandbox child execution failed: invalid 
+AppContainer ACL lease size 0 in \\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\
+v1\WCore-adj2-0000c0de-00000000000000f2.toml
+At C:\f28h2\adj2-repro.ps1:53 char:10
++   $eo = (& $Exe sandbox exec --workspace $ws --timeout-ms 90000 "cmd. ...
++          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([2m2026-07-28T...00000000f2.toml:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Refused: shell is unavailable because the active sandbox backend cannot enforce secret-read-deny for this workspace.
+wayland-core sandbox: sandboxed command reported an error
+
+----- END -----
+F28ADJ2=state=zero-byte-lease-second-run;active=1;quarantined=0;zerofile_bytes=0;ran=False;disabled=True;size_error=False;fail_closed_backend=True
+LEASE_RESTORED count=0 expected=0
+finished=2026-07-29T01:35:47.4713470+07:00

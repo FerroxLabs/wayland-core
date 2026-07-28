@@ -20,8 +20,8 @@ use self::sha256::sha256_hex;
 #[cfg(test)]
 use self::storage::{TEST_LEASE_ROOT_ENV, test_lease_root};
 use self::storage::{
-    lease_directory, quarantine_lease, read_validated_lease, recover_rewrite_temps,
-    remove_validated_lease, rewrite_synced_lease, write_new_synced_lease,
+    lease_directory, lease_is_zero_length, quarantine_lease, read_validated_lease,
+    recover_rewrite_temps, remove_validated_lease, rewrite_synced_lease, write_new_synced_lease,
 };
 
 use crate::error::{Result, SandboxError};
@@ -648,6 +648,26 @@ unsafe fn recover_dead_leases_locked(lease_dir: &Path) -> Result<()> {
     paths.sort();
 
     for path in paths {
+        // An interrupted create leaves a 0-byte lease, which
+        // `read_validated_lease` rejects — and that rejection used to propagate
+        // straight out of this loop, wedging the sandbox permanently on every
+        // later acquisition (`F-28-ADJ-002`). Reproduced on `seandesktop` at
+        // `1b9f148f`: `ran=False` on two consecutive runs, backend degraded to
+        // `fail_closed`, diagnostic `invalid AppContainer ACL lease size 0`.
+        //
+        // Reclaiming it is safe for a reason worth stating, because it is the
+        // only thing separating this from destroying a live writer's file: the
+        // sole production caller of `write_new_synced_lease`
+        // (`start_with_apply`) holds the SAME `MutationLock` this recovery pass
+        // runs under, across the whole create-then-write sequence. A 0-byte
+        // lease visible here therefore cannot belong to a writer that is still
+        // running; it is a crash or power-loss remnant. This is the exact
+        // argument `recover_rewrite_temps` already relies on to delete orphaned
+        // `.rewrite-*.tmp` files unconditionally.
+        if lease_is_zero_length(&path)? {
+            reclaim_zero_length_lease(&path)?;
+            continue;
+        }
         let lease = read_validated_lease(&path)?;
         if owner_is_live(&lease)? {
             continue;
@@ -743,15 +763,94 @@ fn unreconcilable_lease_reason(lease: &LeaseFile) -> String {
 /// permanent, behind a message that read like a platform limitation.
 fn reclaim_unreconcilable_lease(path: &Path, lease: &LeaseFile, reason: &str) -> Result<()> {
     let destination = quarantine_lease(path)?;
+    let report = reclamation_report(lease, &destination, reason);
+    #[cfg(test)]
+    record_emitted_reclamation(&report);
     tracing::error!(
         target: "wcore_sandbox",
         lease = %path.display(),
         quarantined_to = %destination.display(),
         owner_pid = lease.owner_pid,
-        "{}",
-        reclamation_report(lease, &destination, reason)
+        "{report}"
     );
     Ok(())
+}
+
+/// Reclaim a 0-byte lease left behind by an interrupted create.
+///
+/// Reuses the quarantine path rather than introducing a second recovery
+/// concept: the file is MOVED, not deleted, so an operator investigating an
+/// interrupted run can still see that it happened and when.
+///
+/// The file carries no owner identity to check — it has no content at all — so
+/// unlike [`reclaim_unreconcilable_lease`] the liveness gate cannot apply here.
+/// The mutation lock supplies the equivalent guarantee; see the call site.
+fn reclaim_zero_length_lease(path: &Path) -> Result<()> {
+    let destination = quarantine_lease(path)?;
+    let report = zero_length_report(path, &destination);
+    #[cfg(test)]
+    record_emitted_reclamation(&report);
+    tracing::error!(
+        target: "wcore_sandbox",
+        lease = %path.display(),
+        quarantined_to = %destination.display(),
+        "{report}"
+    );
+    Ok(())
+}
+
+/// Operator-facing text for a 0-byte lease reclamation, as a pure function.
+///
+/// Separate from [`reclamation_report`] because the two say different things: a
+/// zero-length lease never recorded an ACL grant, so there is nothing that
+/// could have been left behind, and claiming otherwise would be noise.
+fn zero_length_report(path: &Path, destination: &Path) -> String {
+    format!(
+        "RECLAIMED a 0-byte AppContainer ACL lease {}. A lease file is created before its \
+         content is written, so an execution interrupted in that window leaves an empty \
+         file. This is persistent on-disk state — NOT a platform limitation and NOT \
+         transient — and until this reclamation landed it disabled ALL sandboxed execution \
+         on this machine until a human deleted it. It was empty, so it recorded no \
+         filesystem ACL grant and nothing was left behind. The file has been MOVED (not \
+         deleted) to {} so the interruption stays visible.",
+        path.display(),
+        destination.display()
+    )
+}
+
+/// Every reclamation report actually emitted, recorded for tests only.
+///
+/// This seam exists because of `F-28-ADJ-001`. The test named for the
+/// residual-grant disclosure asserted only that the QUARANTINED FILE still
+/// contained the grant path — which the move guarantees whatever the report
+/// says — so deleting the disclosure branch outright left the suite at a
+/// byte-identical 133 passed / 0 failed. It was a test that never called the
+/// function it was named for.
+///
+/// Asserting on [`reclamation_report`] alone would close only half of that: it
+/// would not prove a REAL reclamation passes the real lease to it, so an
+/// implementation that logged a constant would still pass. Recording the exact
+/// string handed to `tracing` is what makes the test observe what an operator
+/// would actually read.
+#[cfg(test)]
+static EMITTED_RECLAMATIONS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn record_emitted_reclamation(report: &str) {
+    EMITTED_RECLAMATIONS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(report.to_string());
+}
+
+/// Drain and return every reclamation reported since the last call.
+#[cfg(test)]
+pub(super) fn take_emitted_reclamations() -> Vec<String> {
+    std::mem::take(
+        &mut *EMITTED_RECLAMATIONS
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()),
+    )
 }
 
 /// The operator-facing text of a reclamation, as a pure function.

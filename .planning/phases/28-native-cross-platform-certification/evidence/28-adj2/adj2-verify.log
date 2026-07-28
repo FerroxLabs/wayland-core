@@ -1,0 +1,23 @@
+﻿F28ADJ2 VERIFY started=2026-07-29T01:39:41.2357233+07:00
+SRC_SHA=9c4d2612157851abc6d810fc75d153410372dafa
+SRC_DIRTY=0
+RESOLVED=backends::appcontainer::appcontainer_acl_lease::tests::dead_owner_unreconcilable_lease_is_reclaimed_not_refused_forever
+RESOLVED=backends::appcontainer::appcontainer_acl_lease::tests::live_owner_unreconcilable_lease_is_honoured_not_reclaimed
+RESOLVED=backends::appcontainer::appcontainer_acl_lease::tests::quarantine_directory_does_not_become_a_second_wedge
+RESOLVED=backends::appcontainer::appcontainer_acl_lease::tests::reclamation_reports_grants_it_could_not_revoke
+RESOLVED=backends::appcontainer::appcontainer_acl_lease::tests::zero_length_lease_is_reclaimed_not_refused_forever
+RESOLVED=backends::appcontainer::appcontainer_acl_lease::tests::a_non_empty_unreadable_lease_still_fails_closed
+RESOLVED=backends::appcontainer::appcontainer_acl_lease::tests::zero_length_lease_is_reachable_through_the_writer
+RESOLVED=backends::appcontainer::appcontainer_acl_lease::storage::tests::a_leaked_test_lease_is_diagnosed_by_name
+RESOLVED_COUNT=8;EXPECTED=8
+PRISTINE_FULL=result=ok;passed=136;failed=0;ignored=23
+PRISTINE=dead_owner_unreconcilable_lease_is_reclaimed_not_refused_forever;result=ok;passed=1;failed=0
+PRISTINE=live_owner_unreconcilable_lease_is_honoured_not_reclaimed;result=ok;passed=1;failed=0
+PRISTINE=quarantine_directory_does_not_become_a_second_wedge;result=ok;passed=1;failed=0
+PRISTINE=reclamation_reports_grants_it_could_not_revoke;result=ok;passed=1;failed=0
+PRISTINE=zero_length_lease_is_reclaimed_not_refused_forever;result=ok;passed=1;failed=0
+PRISTINE=a_non_empty_unreadable_lease_still_fails_closed;result=ok;passed=1;failed=0
+PRISTINE=zero_length_lease_is_reachable_through_the_writer;result=ok;passed=1;failed=0
+PRISTINE=a_leaked_test_lease_is_diagnosed_by_name;result=ok;passed=1;failed=0
+PRISTINE_SHA256=542541c93f3e54654acd81b9b0222bbeb7b5d13a16edee7155bf63e5a9623d59
+finished=2026-07-29T01:39:53.1472941+07:00
