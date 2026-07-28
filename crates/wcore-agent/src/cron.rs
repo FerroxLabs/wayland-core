@@ -258,6 +258,36 @@ impl JobHandler for EngineJobHandler {
 /// panics. The caller should treat any construction problem as non-fatal and
 /// fall back to [`EngineJobHandler::log_only`].
 pub async fn build_headless_cron_handler(cwd: &str) -> EngineJobHandler {
+    build_headless_cron_handler_with_channels(cwd, None).await
+}
+
+/// As [`build_headless_cron_handler`], but the caller may supply a
+/// [`ChannelManager`] it already owns.
+///
+/// F24-C3-H4. `gateway run` used to call [`build_headless_cron_handler`] AND
+/// build its own manager from the same directory, so one process registered
+/// every adapter twice and called `start_all()` on both — six registration
+/// events for three channels, two poll loops per account, and only ONE of the
+/// two managers carrying a subscriber. For webhook adapters that is merely
+/// wasteful; for polling adapters it is a consumption race, because Telegram's
+/// `getUpdates` offset confirm and IMAP's `\Seen` flag DESTROY the pending item
+/// server-side, so whichever manager polls first can take delivery of a message
+/// the subscriber then never sees.
+///
+/// When `channels` is `Some`, this function registers nothing and starts
+/// nothing: the caller owns the manager's whole lifecycle (registration,
+/// `start_all`, reload, shutdown) and the cron handler merely borrows it as a
+/// send path. That is the invariant — **one manager, one owner** — and it is
+/// what makes the double start unrepresentable from the gateway rather than
+/// merely absent.
+///
+/// When `channels` is `None` (the `cron daemon` path, which has no manager of
+/// its own) the previous behaviour is unchanged: build one, auto-register from
+/// `~/.wayland/channels/*.toml`, `start_all` it.
+pub async fn build_headless_cron_handler_with_channels(
+    cwd: &str,
+    channels: Option<Arc<RwLock<ChannelManager>>>,
+) -> EngineJobHandler {
     use std::sync::Arc;
 
     // Resolved config — default on any load failure so the daemon never
@@ -352,6 +382,21 @@ pub async fn build_headless_cron_handler(cwd: &str) -> EngineJobHandler {
     };
 
     // --- Channel sink ----------------------------------------------------
+    // F24-C3-H4. If the caller already owns a manager, ADOPT it and return.
+    // Registering into it here would double-register every adapter, and
+    // `start_all`ing it here would arm the poll loops before the caller's
+    // subscriber holds a broadcast receiver — tokio's broadcast drops events
+    // published before a receiver exists, so that ordering silently loses
+    // everything that arrives in the gap.
+    if let Some(existing) = channels {
+        info!(
+            target: "wcore_agent::cron",
+            "headless cron handler: using the caller's ChannelManager; \
+             not registering or starting a second one"
+        );
+        return EngineJobHandler::new(Some(existing), None, Some(skill_sink));
+    }
+
     // Auto-register channels from ~/.wayland/channels and start their poll
     // loops so Channel cron jobs dispatch. Every failure is non-fatal — the
     // handler still has a working skill sink.
