@@ -2139,6 +2139,26 @@ impl Config {
             // env var before surfacing MissingApiKey.
             Err(e) => match catalog_env_key.clone() {
                 Some(key) => key,
+                // 27-C2: a LOCAL model has no remote credential, so demanding
+                // one here is wrong. This is not a new affordance -- it is the
+                // one the engine already advertises. On `MissingApiKey` the CLI
+                // prints, verbatim: "To use a LOCAL model with Ollama, select a
+                // model id prefixed with `ollama:` ... no API key is needed."
+                // That route is built, wired and enabled by default
+                // (`make_plugin_provider_router` in `wcore-cli` claims any
+                // `ollama:`-prefixed model), but it was unreachable, because
+                // this function returned `MissingApiKey` before the model
+                // string was consulted at all. Measured on the shipped v0.12.25
+                // artifact natively on macOS, Linux and Windows: following the
+                // printed instruction verbatim reproduced the identical
+                // `MissingApiKey` the instruction claims to resolve.
+                //
+                // The key resolves to the empty string, exactly as it already
+                // may for a catalog provider. Nothing downstream is loosened:
+                // if no plugin claims the local route, `AgentBootstrap` refuses
+                // to fall through to a remote provider with an empty
+                // credential and fails loudly instead.
+                None if wcore_types::model_aliases::is_local_model(&model) => String::new(),
                 None => return Err(e),
             },
         };

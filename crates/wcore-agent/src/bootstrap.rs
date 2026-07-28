@@ -935,6 +935,37 @@ impl AgentBootstrap {
         // The wrap carries no fallback chain — a single configured provider
         // has no alternate — but fail-fast circuit-breaking is live for all.
         let injected_or_routed = self.provider.take().or(routed_provider);
+
+        // 27-C2: the paired half of the config-layer local-model exemption.
+        //
+        // `Config::resolve` no longer demands a remote credential when the
+        // model carries the `ollama:` prefix, because a local model has none.
+        // That exemption is only safe if the local route is guaranteed to be
+        // taken. If nothing claimed it -- the plugin is disabled, the router
+        // was never installed (a non-CLI embedder), or the downcast failed --
+        // then falling through to `build_native_or_chatgpt_provider` would
+        // construct a REMOTE provider holding an empty API key, and the user
+        // would learn about it as an opaque 401 from api.anthropic.com several
+        // seconds later.
+        //
+        // Refuse here instead, naming the cause and the remedy. This is the
+        // "deliver it or refuse loudly" rule: the credential-free local path is
+        // either genuinely available or explicitly unavailable, never silently
+        // redirected to a remote provider that cannot work.
+        if injected_or_routed.is_none()
+            && wcore_types::model_aliases::is_local_model(&self.config.model)
+        {
+            anyhow::bail!(
+                "model `{}` requests the local inference route, but no provider \
+                 claimed it. The `wayland-ollama` plugin supplies that route and \
+                 is enabled by default -- check that it is not disabled in \
+                 `plugins.toml`. Refusing to fall back to a remote provider: \
+                 no remote credential was required for a local model, so there \
+                 is none to use.",
+                self.config.model
+            );
+        }
+
         let primary_provider: Arc<dyn LlmProvider> = match injected_or_routed {
             Some(p) => p,
             None => build_native_or_chatgpt_provider(&self.config)?,
