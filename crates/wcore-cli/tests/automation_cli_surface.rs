@@ -59,22 +59,27 @@ async fn every_trigger_kind_is_addable_through_the_existing_add_verb() {
     // One surface, seven types. A second command surface for the new types
     // would leave the old verbs stranded and the operator guessing which one
     // a given job lives under.
-    let cases: Vec<(&str, &str)> = vec![
+    // 24-C2: every kind is now either ADDABLE or REFUSED WITH A REASON. The
+    // third state — accepted, persisted, listed, and unable to ever fire — is
+    // what this criterion was failing on, and it is no longer reachable.
+    let addable: Vec<(&str, &str)> = vec![
         ("once:2026-08-01T09:00:00Z", "once"),
         ("every:900", "interval"),
         ("cron:0 9 * * *", "cron"),
         ("event:build.finished", "event"),
-        ("webhook:/hooks/build", "webhook"),
-        ("poll:https://status.test/health:300", "poll"),
         ("commit:2026-08-01T17:00:00Z:900", "commitment"),
     ];
+    let refused: Vec<(&str, &str)> = vec![
+        ("webhook:/hooks/build", "webhook"),
+        ("poll:https://status.test/health:300", "poll"),
+    ];
     assert_eq!(
-        cases.len(),
+        addable.len() + refused.len(),
         Trigger::KINDS.len(),
         "a trigger kind exists with no CLI case"
     );
 
-    for (spec, kind) in cases {
+    for (spec, kind) in addable {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         run_with_store(add(spec), &s)
@@ -91,6 +96,27 @@ async fn every_trigger_kind_is_addable_through_the_existing_add_verb() {
         run_with_store(CronCmd::Status { id: job.id.clone() }, &s)
             .await
             .unwrap();
+    }
+
+    for (spec, kind) in refused {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let err = run_with_store(add(spec), &s)
+            .await
+            .expect_err("a trigger nothing can fire must be refused, not persisted");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(kind),
+            "the refusal must name the kind it refused, got {msg}"
+        );
+        assert!(
+            msg.contains("never fire"),
+            "the refusal must say plainly that such a job would never fire, got {msg}"
+        );
+        assert!(
+            s.list().await.unwrap().is_empty(),
+            "a refused trigger must write nothing"
+        );
     }
 }
 
@@ -110,12 +136,18 @@ async fn an_unknown_trigger_kind_is_refused_rather_than_reinterpreted() {
     assert!(s.list().await.unwrap().is_empty(), "nothing may be written");
 }
 
+/// 24-C2: driven through the PARSER rather than through `cron add`, because
+/// creating a webhook job is now refused outright — nothing can fire one.
+///
+/// The property still matters and is still load-bearing: a webhook job written
+/// by the Desktop app or by hand still loads, still lists, and `cron list` must
+/// report its authentication posture honestly. Threat T-24-02-02 says an
+/// unauthenticated caller must not be able to cause work; that guarantee held
+/// only vacuously while nothing could fire a webhook at all, so the default
+/// must be right before a producer ever lands.
 #[tokio::test]
 async fn a_webhook_is_authenticated_unless_open_is_typed_out() {
-    let dir = tempfile::tempdir().unwrap();
-    let s = store(dir.path());
-    run_with_store(add("webhook:/hooks/x"), &s).await.unwrap();
-    match only_job(&s).await.effective_trigger() {
+    match wcore_cli::cron::parse_trigger_spec("webhook:/hooks/x").unwrap() {
         Trigger::Webhook { require_auth, .. } => assert!(
             require_auth,
             "an unqualified webhook must be authenticated by default"
@@ -123,18 +155,48 @@ async fn a_webhook_is_authenticated_unless_open_is_typed_out() {
         other => panic!("expected a webhook, got {other:?}"),
     }
 
-    let dir2 = tempfile::tempdir().unwrap();
-    let s2 = store(dir2.path());
-    run_with_store(add("webhook:/hooks/x:open"), &s2)
-        .await
-        .unwrap();
-    match only_job(&s2).await.effective_trigger() {
+    match wcore_cli::cron::parse_trigger_spec("webhook:/hooks/x:open").unwrap() {
         Trigger::Webhook { require_auth, .. } => assert!(
             !require_auth,
             "an explicitly opened endpoint must be recorded as open"
         ),
         other => panic!("expected a webhook, got {other:?}"),
     }
+}
+
+/// The refusal is not a parse failure. A persisted `webhook`/`poll` job must
+/// still load and still be inspectable — an operator has to be able to SEE the
+/// job they can no longer create, and be told why it will never run.
+#[tokio::test]
+async fn a_persisted_unreachable_job_still_lists_and_is_marked_unreachable() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(dir.path());
+    // Written directly, the way the Desktop app or a pre-existing install did.
+    let job = wcore_cron::CronJob::with_trigger(
+        Trigger::Poll {
+            url: "https://status.test/health".into(),
+            every_secs: 300,
+        },
+        wcore_cron::Target::Slash {
+            command: "/brief".into(),
+        },
+    )
+    .unwrap();
+    let id = job.id.clone();
+    s.insert(job).await.unwrap();
+
+    // Both diagnostic verbs must succeed against it rather than hiding it.
+    run_with_store(CronCmd::List, &s).await.unwrap();
+    run_with_store(CronCmd::Status { id: id.clone() }, &s)
+        .await
+        .unwrap();
+
+    let listed = only_job(&s).await;
+    let reason = listed
+        .effective_trigger()
+        .no_producer_reason()
+        .expect("a poll job must carry an operator-facing reason it cannot fire");
+    assert!(reason.contains("never fire"));
 }
 
 #[tokio::test]

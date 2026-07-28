@@ -525,10 +525,7 @@ mod tests {
             ledger: Arc::clone(&ledger),
         };
         let (job, at) = fire_at(1_785_121_776_528);
-        let fire = FireContext {
-            job_id: &job,
-            scheduled_for: at,
-        };
+        let fire = FireContext::scheduled(&job, at);
         let id = fire.delivery_id();
 
         // Reproduce the state a hard kill leaves behind: accepted, attempted,
@@ -571,10 +568,7 @@ mod tests {
             ledger: Arc::clone(&ledger),
         };
         let (job, at) = fire_at(1_785_121_776_528);
-        let fire = FireContext {
-            job_id: &job,
-            scheduled_for: at,
-        };
+        let fire = FireContext::scheduled(&job, at);
         let id = fire.delivery_id();
         {
             let mut l = lock(&ledger);
@@ -603,10 +597,7 @@ mod tests {
             ledger: Arc::clone(&ledger),
         };
         let (job, at) = fire_at(1_785_121_776_528);
-        let fire = FireContext {
-            job_id: &job,
-            scheduled_for: at,
-        };
+        let fire = FireContext::scheduled(&job, at);
         let id = fire.delivery_id();
         {
             let mut l = lock(&ledger);

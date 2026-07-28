@@ -209,6 +209,14 @@ async fn externally_driven_triggers_never_fire_from_the_clock_alone() {
             path: "/hooks/build".into(),
             require_auth: true,
         },
+        // 24-C2: `poll` joined this set on measured evidence. It used to be
+        // clock-driven and fired its target on a timer having never contacted
+        // the URL — six fires in six ticks against a remote that was never
+        // asked.
+        Trigger::Poll {
+            url: "https://status.test/health".into(),
+            every_secs: 300,
+        },
     ] {
         let kind = trigger.kind();
         let dir = tempfile::tempdir().unwrap();
@@ -265,21 +273,28 @@ async fn a_webhook_records_whether_it_is_open() {
     );
 }
 
+/// 24-C2 re-targeted from `poll` to `interval`.
+///
+/// This test proved that a variant's rate FLOOR is applied to the computed
+/// next-fire and not only to the stored parameter. It used to drive that
+/// through `Trigger::Poll` — but `poll` has no producer, nothing has ever
+/// performed its HTTP request, and it is no longer fired by the clock at all
+/// (see `a_poll_job_never_fires_because_nothing_performs_the_poll`). Left on
+/// `poll`, both halves of this test would now read zero and it would pass
+/// whatever the flooring code did: a self-passing gate.
+///
+/// `interval` is genuinely clock-driven, so the property is still proven and
+/// the test can still fail. Reddens on: removing the `.max(60)` from
+/// `Interval`'s `default_bound`, or the `earliest` floor in `next_after`.
 #[tokio::test]
-async fn a_poll_is_floored_at_five_minutes_however_fast_it_asks() {
+async fn an_interval_is_floored_at_a_minute_however_fast_it_asks() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_in(dir.path());
     let handler = Counting::default();
     let arc: Arc<dyn JobHandler> = Arc::new(handler.clone());
 
-    let mut job = CronJob::with_trigger(
-        Trigger::Poll {
-            url: "https://status.test/health".into(),
-            every_secs: 1,
-        },
-        slash("/poll"),
-    )
-    .unwrap();
+    let mut job =
+        CronJob::with_trigger(Trigger::Interval { every_secs: 1 }, slash("/fast")).unwrap();
     job.created_at = t0();
     store.insert(job).await.unwrap();
 
@@ -288,14 +303,14 @@ async fn a_poll_is_floored_at_five_minutes_however_fast_it_asks() {
         &arc,
         None,
         &LeaseHandle::unleased(),
-        t0() + Duration::seconds(299),
+        t0() + Duration::seconds(59),
     )
     .await
     .unwrap();
     assert_eq!(
         handler.count().await,
         0,
-        "a remote-driven poll must not run faster than its floor"
+        "a job must not run faster than its variant's floor"
     );
 
     tick_once_at(
@@ -303,11 +318,16 @@ async fn a_poll_is_floored_at_five_minutes_however_fast_it_asks() {
         &arc,
         None,
         &LeaseHandle::unleased(),
-        t0() + Duration::seconds(301),
+        t0() + Duration::seconds(61),
     )
     .await
     .unwrap();
-    assert_eq!(handler.count().await, 1);
+    assert_eq!(
+        handler.count().await,
+        1,
+        "and it must still fire once the floor has passed — without this half \
+         the test passes against a runner that fires nothing at all"
+    );
 }
 
 #[tokio::test]
@@ -389,14 +409,12 @@ async fn a_hand_edited_bound_cannot_make_a_job_fire_faster() {
     let handler = Counting::default();
     let arc: Arc<dyn JobHandler> = Arc::new(handler.clone());
 
-    let mut job = CronJob::with_trigger(
-        Trigger::Poll {
-            url: "https://x.test".into(),
-            every_secs: 300,
-        },
-        slash("/poll"),
-    )
-    .unwrap();
+    // 24-C2: re-targeted from `poll` to `interval` for the same reason as
+    // `an_interval_is_floored_at_a_minute_however_fast_it_asks` — a `poll` job
+    // no longer fires from the clock under any bound, so this test would read
+    // zero regardless of whether the clamp worked, and would prove nothing.
+    let mut job =
+        CronJob::with_trigger(Trigger::Interval { every_secs: 3600 }, slash("/hourly")).unwrap();
     job.created_at = t0();
     // The shape a hand-edited jobs.json takes: a one-second rate and a large
     // in-flight allowance.
@@ -416,6 +434,23 @@ async fn a_hand_edited_bound_cannot_make_a_job_fire_faster() {
         handler.count().await,
         0,
         "a stored bound must not be able to widen the variant's default"
+    );
+
+    // The other half, which is what keeps this from passing against a runner
+    // that has simply stopped firing: past its OWN period it must still fire.
+    tick_once_at(
+        &store,
+        &arc,
+        None,
+        &LeaseHandle::unleased(),
+        t0() + Duration::seconds(3601),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        handler.count().await,
+        1,
+        "the clamp narrows the rate, it does not disable the job"
     );
 }
 

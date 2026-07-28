@@ -67,6 +67,17 @@ pub trait CronStore: Send + Sync {
     async fn list_for_run(&self) -> Result<Vec<CronJob>> {
         self.list().await
     }
+
+    /// The directory this schedule lives in, when it lives in one.
+    ///
+    /// 24-C2. The event producer's queue is a sibling of `jobs.json` — the same
+    /// directory the schedule lease already governs, so one owner governs one
+    /// schedule and one queue. `None` for a store with no filesystem home; such
+    /// a store has no queue and cannot be published to either, so there is
+    /// nothing for the drain to miss.
+    fn cron_dir(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// JSON-file backed store. Read-then-write under one async mutex so
@@ -393,6 +404,10 @@ impl CronStore for FileCronStore {
         // trust is enforced separately in `list_for_run`.
         let (file, _trust) = self.read_validated()?;
         Ok(file.jobs)
+    }
+
+    fn cron_dir(&self) -> Option<PathBuf> {
+        self.path.parent().map(PathBuf::from)
     }
 
     async fn list_for_run(&self) -> Result<Vec<CronJob>> {

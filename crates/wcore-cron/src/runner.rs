@@ -20,7 +20,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::job::{CronFireOutcome, CronFireRecord, Target};
+use crate::job::{CronFireOutcome, CronFireRecord, CronJob, Target};
 use crate::lease::LeaseHandle;
 use crate::store::CronStore;
 use crate::{CronError, Result};
@@ -285,16 +285,56 @@ pub trait JobHandler: Send + Sync {
 pub struct FireContext<'a> {
     pub job_id: &'a str,
     pub scheduled_for: DateTime<Utc>,
+    /// The external occurrence that caused this fire, when one did.
+    ///
+    /// 24-C2. A clock fire is identified by its scheduled instant and that is
+    /// enough, because the clock produces at most one occurrence per instant.
+    /// An EVENT fire is not: two publishes of one topic inside the same
+    /// millisecond are two distinct occurrences, and identifying both by the
+    /// instant alone would give them one delivery identity — so the ledger
+    /// would recognise the second as a duplicate of the first and drop it.
+    /// Losing a published event silently is the failure this trigger exists to
+    /// stop, so the event's own opaque id joins the key.
+    ///
+    /// `None` for every clock-driven fire, which keeps their keys byte-identical
+    /// to the ones already written in persisted ledgers.
+    pub occurrence: Option<&'a str>,
 }
 
-impl FireContext<'_> {
+impl<'a> FireContext<'a> {
+    /// A clock-driven occurrence: identified by the instant the schedule said.
+    pub fn scheduled(job_id: &'a str, scheduled_for: DateTime<Utc>) -> Self {
+        Self {
+            job_id,
+            scheduled_for,
+            occurrence: None,
+        }
+    }
+
+    /// An externally driven occurrence, carrying the producer's own identity.
+    pub fn external(job_id: &'a str, at: DateTime<Utc>, occurrence: &'a str) -> Self {
+        Self {
+            job_id,
+            scheduled_for: at,
+            occurrence: Some(occurrence),
+        }
+    }
+
     /// The stable delivery identity for this occurrence.
     pub fn delivery_id(&self) -> String {
-        format!(
-            "cron:{}:{}",
-            self.job_id,
-            self.scheduled_for.timestamp_millis()
-        )
+        match self.occurrence {
+            None => format!(
+                "cron:{}:{}",
+                self.job_id,
+                self.scheduled_for.timestamp_millis()
+            ),
+            Some(o) => format!(
+                "cron:{}:{}:{}",
+                self.job_id,
+                self.scheduled_for.timestamp_millis(),
+                o
+            ),
+        }
     }
 }
 
@@ -548,7 +588,7 @@ pub async fn tick_once_at(
     // unattended execution (engine-stamped integrity tag, owner-only perms).
     // `list_for_run` withholds tampered/untagged/foreign-owned jobs.
     let jobs = store.list_for_run().await?;
-    for mut job in jobs {
+    for job in jobs {
         if !job.enabled {
             continue;
         }
@@ -618,6 +658,42 @@ pub async fn tick_once_at(
             continue;
         }
 
+        dispatch_and_record(store, handler, history_path, lease, job, next, None, now).await;
+    }
+
+    // 24-C2: the EVENT producer, drained after the clock pass, under the same
+    // lease and inside the same tick. Deliberately routed through the same
+    // `dispatch_and_record` the clock path uses, so an event fire inherits
+    // every property that path already has — the M-18 target scan, the bounded
+    // retry, the pre-dispatch lease re-check, the history record and the
+    // gateway's delivery ledger — instead of becoming a second, weaker
+    // dispatch path standing beside the first.
+    drain_published_events(store, handler, history_path, lease, now).await;
+    Ok(())
+}
+
+/// One job, one occurrence: scan, re-check ownership, dispatch, record.
+///
+/// Extracted from the tick loop so the clock and the event producer share it.
+/// A second copy of this would be a second set of security and bookkeeping
+/// properties to keep in step, and the one that drifted would be the one an
+/// operator never looked at.
+///
+/// `scheduled_for` is the instant the occurrence is identified BY (a schedule
+/// instant, or an event's publish instant); `occurrence` is the producer's own
+/// id when there is one. `now` is when the tick noticed.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_and_record(
+    store: &Arc<dyn CronStore>,
+    handler: &Arc<dyn JobHandler>,
+    history_path: Option<&PathBuf>,
+    lease: &LeaseHandle,
+    mut job: CronJob,
+    scheduled_for: DateTime<Utc>,
+    occurrence: Option<&str>,
+    now: DateTime<Utc>,
+) {
+    {
         // M-18: scan the target at the execution boundary BEFORE dispatch.
         // A blocked target never fires; record the block as an error outcome
         // (so operators see it in `cron status`/history) and do NOT advance
@@ -647,7 +723,7 @@ pub async fn tick_once_at(
                 );
             }
             append_history(history_path, &record);
-            continue;
+            return;
         }
 
         // Ownership is re-checked HERE, between selection and dispatch, and
@@ -680,12 +756,13 @@ pub async fn tick_once_at(
                 id = %job.id,
                 "abandoned a selected fire: schedule lease lost mid-tick"
             );
-            continue;
+            return;
         }
 
         let fire = FireContext {
             job_id: &job.id,
-            scheduled_for: next,
+            scheduled_for,
+            occurrence,
         };
         let t0 = Instant::now();
         match handler.dispatch_fire(&fire, &job.target).await {
@@ -818,7 +895,166 @@ pub async fn tick_once_at(
             }
         }
     }
-    Ok(())
+}
+
+/// Drain the published-event queue and fire every job subscribed to a drained
+/// topic.
+///
+/// 24-C2. This is the producer that makes `--trigger event:TOPIC` a feature
+/// rather than a promise. Before it, an event-triggered job validated,
+/// persisted and listed, and nothing in the runtime could ever fire it — with
+/// no error at any point.
+///
+/// Four properties live here:
+///
+/// - **Fan-out.** One event fires EVERY subscribed job. Consuming the event on
+///   the first match would leave a second subscriber silently dead, which is
+///   the same defect in miniature.
+/// - **At least once.** The event file is removed only after its matching jobs
+///   have been dispatched, so a process killed mid-drain re-fires rather than
+///   losing the event. The gateway's delivery ledger is what collapses that
+///   repeat at a delivery-bearing sink, which is why the event's own id is part
+///   of the fire identity.
+/// - **A job does not consume an event published before it existed.** Otherwise
+///   creating a subscriber would immediately fire it against a backlog it was
+///   never meant to see.
+/// - **The trigger's rate bound is enforced here**, because a bound that is
+///   only stored is decoration. `Event`'s default floor is one second, and a
+///   runaway publisher is exactly the case it was written for.
+async fn drain_published_events(
+    store: &Arc<dyn CronStore>,
+    handler: &Arc<dyn JobHandler>,
+    history_path: Option<&PathBuf>,
+    lease: &LeaseHandle,
+    now: DateTime<Utc>,
+) {
+    let Some(cron_dir) = store.cron_dir() else {
+        // A store with no directory (in-memory) has no queue to drain. It is
+        // not an error and it is not silent: such a store cannot be published
+        // to either, so there is nothing to lose.
+        return;
+    };
+    let events = crate::events::pending(&cron_dir);
+    if events.is_empty() {
+        return;
+    }
+    // Same trust gate as the clock path — an untagged or tampered jobs.json
+    // must not become fireable just because the fire came from an event.
+    let Ok(jobs) = store.list_for_run().await else {
+        warn!(
+            target: "wcore_cron::runner",
+            "cannot read the run list; leaving published events queued"
+        );
+        return;
+    };
+
+    // The most recent ATTEMPT per job within this drain.
+    //
+    // Measured red, caught by `a_burst_of_publishes_is_held_to_the_triggers_
+    // minimum_interval`: `jobs` is a snapshot read once, so five events for one
+    // job each read the same stale `last_fired` and all five fired inside a 60s
+    // floor. Reading `last_fired` back from the store per event would also fix
+    // it, at one store read per event; this carries the in-tick history instead.
+    let mut attempted_at: std::collections::HashMap<String, DateTime<Utc>> =
+        std::collections::HashMap::new();
+
+    for (path, event) in events {
+        let mut fired = 0_usize;
+        // Whether some subscriber was held back for a reason that will CLEAR on
+        // its own. Such an event is left queued rather than consumed: dropping
+        // it would be a published event silently never delivered, which is the
+        // exact failure this module exists to remove. Backpressure is applied
+        // at the publisher instead, where `MAX_PENDING` gives a hard, visible
+        // refusal.
+        let mut defer = false;
+
+        for job in &jobs {
+            if !job.enabled {
+                continue;
+            }
+            let crate::trigger::Trigger::Event { topic } = job.effective_trigger() else {
+                continue;
+            };
+            // Exact match only. A prefix or glob rule becomes a compatibility
+            // constraint the moment it ships.
+            if topic != event.topic {
+                continue;
+            }
+            if job.created_at > event.published_at {
+                debug!(
+                    target: "wcore_cron::runner",
+                    id = %job.id,
+                    topic = %event.topic,
+                    "not consuming an event published before this job existed"
+                );
+                continue;
+            }
+            let bound = job.effective_bound();
+            if bound.is_spent(now) {
+                // Terminal. Waiting would wait forever.
+                continue;
+            }
+            // The rate bound, enforced rather than merely stored. A runaway
+            // publisher is the exact case it was written for.
+            let last = attempted_at.get(&job.id).copied().or(job.last_fired);
+            if let Some(last) = last
+                && now - last < chrono::Duration::seconds(bound.min_interval_secs.max(1) as i64)
+            {
+                debug!(
+                    target: "wcore_cron::runner",
+                    id = %job.id,
+                    topic = %event.topic,
+                    "event held: inside the trigger's minimum interval; staying queued"
+                );
+                defer = true;
+                continue;
+            }
+            if !job.retry_state.may_attempt(now) {
+                // A job inside its backoff will attempt again; one that has
+                // given up will not until it is edited, so only the first is
+                // worth waiting for.
+                if !job.retry_state.gave_up {
+                    defer = true;
+                }
+                continue;
+            }
+            attempted_at.insert(job.id.clone(), now);
+            dispatch_and_record(
+                store,
+                handler,
+                history_path,
+                lease,
+                job.clone(),
+                event.published_at,
+                Some(&event.id),
+                now,
+            )
+            .await;
+            fired += 1;
+        }
+
+        if defer {
+            debug!(
+                target: "wcore_cron::runner",
+                topic = %event.topic,
+                event = %event.id,
+                fired,
+                "a subscriber was rate-held; leaving this event queued for a later tick"
+            );
+            continue;
+        }
+        debug!(
+            target: "wcore_cron::runner",
+            topic = %event.topic,
+            event = %event.id,
+            fired,
+            "drained a published event"
+        );
+        // Removed AFTER dispatch. The other order loses the event outright on a
+        // crash, and a lost automation trigger is worse than a repeated one for
+        // every target this runtime has.
+        crate::events::consume(&path);
+    }
 }
 
 /// Append a [`CronFireRecord`] as a single JSONL line to `path`.
