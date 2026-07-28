@@ -119,3 +119,62 @@ inform. I will not grade it before measuring.
 - byte-count every capture; no `echo "EXIT=${PIPESTATUS[0]}"` after a pipeline.
 - self-test the matcher three ways incl. "the old broken matcher would have missed it".
 - run test targets by file, never by filter (a filter matching no test exits 0 on 0 tests).
+
+---
+
+## Step 3 — harness siting decided (no manifest change, no Cargo.lock churn)
+
+Composition seam found: **`crates/wcore-cli`** already depends on `wcore-agent` (test-utils),
+`wcore-channels-registry` (which depends on all 10 adapter crates), `wcore-cron`,
+`wcore-gateway`, and already has `mockito = "1"` as a dev-dependency. So a NEW integration
+test file under `crates/wcore-cli/tests/` reaches the entire spine with **zero Cargo.toml and
+zero Cargo.lock edits** — which matters because Cargo.lock is a Phase-24 shared seam that
+concurrent lanes conflict on deterministically.
+
+`crates/wcore-cli/src/lib.rs` and `src/main.rs` are the fenced files; `tests/` is not fenced,
+and a new file there is additive and belongs to this lane alone.
+
+Public entry points confirmed:
+- `wcore_gateway::automation::AutomationPlane::start(home, store, handler, history_path)` —
+  public, and it is what wraps the injected handler in the (private) `LedgeredHandler` at
+  `automation.rs:281`. So the real spine is reachable without touching gateway internals.
+- `wcore_channels::ChannelManager::supports_outbound_idempotency(name)` (manager.rs:665) and
+  `send_to_keyed(name, msg, key)` (manager.rs:674).
+- `wcore_channels_registry::auto_register_from_dir(mgr, dir, creds)` — builds adapters from
+  real on-disk TOML through the PRODUCTION factory (`channel_factory_for`), so the measurement
+  runs the same construction path a real deploy does, not a hand-rolled one.
+
+Adapters with a real fixture seam (`api_base_url` in the TOML `[options]` table, all
+`#[serde(deny_unknown_fields)]`, so a typo fails loudly rather than silently reaching
+production):
+
+| adapter  | config field   | transport / shape                                  |
+|----------|----------------|----------------------------------------------------|
+| slack    | `api_base_url` | Slack Web API, JSON + Bearer      — declares `true` |
+| telegram | `api_base_url` | Bot API, token-in-path            — declares false  |
+| sms      | `api_base_url` | Twilio REST, form-encoded + Basic — declares false  |
+| whatsapp | `api_base_url` | Meta Graph, JSON + versioned path — declares false  |
+
+Four genuinely different transports, one of which is the known-positive. `email` (SMTP),
+`imessage` (AppleScript) and `signal` (subprocess) have no HTTP seam and are out of scope for
+an HTTP fixture; that limit will be stated in the report rather than papered over.
+
+## Step 3b — the measurement that actually decides this (design, not yet run)
+
+The question "abandon vs duplicate" has TWO halves and the finding only names one:
+
+- **Half 1 — is the `false` TRUTHFUL?** If an adapter declaring `false` were in fact able to
+  dedupe at its destination, the spine would be abandoning deliveries it did not need to
+  abandon, and the defect would be over-conservatism, not loss. Test: send the SAME key twice
+  through the real adapter at a fixture sink and count arrivals + inspect the wire for any
+  dedupe token. Two arrivals with no token = the `false` is truthful and the abandon is
+  protecting a genuine duplicate.
+- **Half 2 — what does the SPINE do?** Drive `AutomationPlane` with a real adapter, prove the
+  positive path (message arrives, counted) FIRST, then take the outcome-unknown path and count
+  arrivals again.
+
+Half 1 is the novel half — nothing in the phase has measured it on any adapter — and it is the
+one that decides whether the 9-of-10 gap is "missing capability" or "wrong default".
+
+Positive-control discipline: no no-duplicate/no-arrival number is trusted until the sink has
+been shown to record a real arrival in the same run. A universal denial manufactures a green.
