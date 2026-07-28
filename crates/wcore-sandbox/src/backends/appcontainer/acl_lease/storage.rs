@@ -56,15 +56,22 @@ fn lease_root() -> Result<PathBuf> {
 /// The stakes are not test hygiene. A lease written by a test carries a
 /// synthetic `WCore-storage-…` profile name for which no AppContainer profile
 /// is ever created, so `recover_dead_leases_locked` can never derive a matching
-/// SID, returns `Err`, and fails closed FOREVER — there is no quarantine path,
-/// and the negative probe cache is in-process only, so every later process
-/// re-reads the same file and fails again. That error reaches the caller
-/// through `probe_appcontainer_available()`, which maps it to `false` and logs
-/// "sandbox disabled"; the product then carries on running UNSANDBOXED. Running
-/// the native acceptance suite could therefore silently disable the sandbox on
-/// that machine until a human deleted a file nobody knew to look for — which is
-/// exactly what was found on a real developer box. See
-/// `.planning/intel/APPCONTAINER-SSH-LEASE-WEDGE.md`.
+/// SID. Two such files were found disabling the Windows sandbox on a real
+/// developer box. See `.planning/intel/APPCONTAINER-SSH-LEASE-WEDGE.md`.
+///
+/// That used to be PERMANENT: the mismatch returned `Err`, there was no
+/// quarantine path, and the negative probe cache is in-process only, so every
+/// later process re-read the same file and failed again until a human deleted
+/// it (`F-28-02-002`). [`quarantine_lease`] now reclaims such a lease once its
+/// owning process is provably gone, so the wedge self-clears — but this test
+/// root remains the primary defence, because reclamation is a repair and not a
+/// licence for tests to write into a developer's real lease directory.
+///
+/// One correction to the record this comment previously carried: the product
+/// does NOT "carry on running UNSANDBOXED" when the probe reports false. That
+/// was measured on `seandesktop` 2026-07-27 and disproved — the delegated
+/// dispatcher fails CLOSED (`ran=False` in both wedged observations). The
+/// defect was denial of service, not silent loss of containment.
 ///
 /// Integration tests under `tests/` compile the library WITHOUT `cfg(test)` and
 /// so still use the real directory. That is correct and intended: they drive
@@ -282,6 +289,61 @@ pub(super) fn remove_validated_lease(path: &Path) -> Result<()> {
     drop(file);
     confirm_path_absent(path)?;
     sync_root(&root)
+}
+
+/// Move a lease that can never reconcile out of the ACTIVE lease directory,
+/// into the quarantine sub-directory, and prove it is gone from the active set.
+///
+/// The file is moved, never deleted. A lease in this state is the only record
+/// of how the wedge was produced — two such files were found disabling the
+/// Windows sandbox on a real developer box — and deleting them would trade a
+/// silent permanent failure for a silent permanent loss of the evidence.
+///
+/// An already-quarantined artifact is NEVER overwritten: `MoveFileExW` is
+/// called without `MOVEFILE_REPLACE_EXISTING`, and a name collision advances to
+/// a fresh suffix instead of clobbering.
+pub(super) fn quarantine_lease(path: &Path) -> Result<PathBuf> {
+    let root = trusted_root_for(path)?;
+    let quarantine = create_or_open_child_directory(&root, QUARANTINE_DIRECTORY)?;
+    let name = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| exec_error(format!("invalid ACL lease filename: {}", path.display())))?;
+    let start = TEMP_COUNTER.fetch_add(TEMP_ATTEMPTS, Ordering::Relaxed);
+    for offset in 0..TEMP_ATTEMPTS {
+        let destination = quarantine.final_path.join(format!(
+            "{name}.quarantined-{:08x}-{:016x}",
+            std::process::id(),
+            start + offset
+        ));
+        let source_wide = widen_path(path);
+        let destination_wide = widen_path(&destination);
+        if unsafe {
+            MoveFileExW(
+                source_wide.as_ptr(),
+                destination_wide.as_ptr(),
+                MOVEFILE_WRITE_THROUGH,
+            )
+        } != 0
+        {
+            confirm_path_absent(path)?;
+            sync_root(&root)?;
+            sync_root(&quarantine)?;
+            return Ok(destination);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(exec_error(format!(
+                "quarantine AppContainer ACL lease {} -> {}: {error}",
+                path.display(),
+                destination.display()
+            )));
+        }
+    }
+    Err(exec_error(format!(
+        "could not allocate a unique quarantine name for AppContainer ACL lease {}",
+        path.display()
+    )))
 }
 
 pub(super) fn recover_rewrite_temps(root_path: &Path) -> Result<()> {
@@ -986,23 +1048,46 @@ mod tests {
 
     /// A leaked test lease must be named as such, not reported as a generic
     /// mismatch. The generic text is what operators read as a platform limit.
+    ///
+    /// Retargeted from `unreconcilable_lease_message` onto the pair that
+    /// replaced it when `F-28-02-002` was repaired
+    /// (`unreconcilable_lease_reason` + `reclamation_report`). Every assertion
+    /// it made is still made here; the remedy assertion additionally now pins
+    /// that the message denies the three false explanations that let the wedge
+    /// survive for weeks.
     #[test]
     fn a_leaked_test_lease_is_diagnosed_by_name() {
         let lease = test_lease(0xbeef, LeaseState::Prepared);
-        let message = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &lease);
+        let reason = unreconcilable_lease_reason(&lease);
         assert!(
-            message.contains("OWN TEST SUITE"),
-            "test-origin lease must be named as test-origin, got: {message}"
+            reason.contains("OWN TEST SUITE"),
+            "test-origin lease must be named as test-origin, got: {reason}"
+        );
+
+        let message = reclamation_report(
+            &lease,
+            Path::new(r"C:\leases\quarantine\x.toml.quarantined-0-0"),
+            &reason,
         );
         assert!(
             message.contains("DELETED") || message.contains("Delete it"),
             "the diagnosis must state the remedy, got: {message}"
         );
+        assert!(
+            message.contains("NOT a platform limitation")
+                && message.contains("NOT an SSH or session-0 effect")
+                && message.contains("NOT transient"),
+            "the diagnosis must deny the explanations that hid this defect, got: {message}"
+        );
+        assert!(
+            message.contains(r"C:\leases\quarantine\x.toml.quarantined-0-0"),
+            "the diagnosis must name where the evidence went, got: {message}"
+        );
 
         let mut genuine = lease.clone();
         genuine.sid_sha256 = sha256_hex(b"a-real-appcontainer-package-sid");
         genuine.refresh_digest();
-        let other = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &genuine);
+        let other = unreconcilable_lease_reason(&genuine);
         assert!(
             !other.contains("OWN TEST SUITE"),
             "a genuine mismatch must NOT be blamed on the test suite, got: {other}"

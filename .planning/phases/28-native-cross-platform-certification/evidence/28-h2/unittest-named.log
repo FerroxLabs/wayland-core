@@ -1,0 +1,181 @@
+﻿F28H2 UNITTEST tag=named started=2026-07-29T00:30:38.6008342+07:00
+SRC_SHA=3f3f93dc8dc64c847ad5ab0955837d3e91d44d1a
+SRC_DIRTY=0
+===== FULL --lib RUN =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+At C:\f28h2\unittest.ps1:23 char:9
++ $out = (& cargo test -p wcore-sandbox --lib -- --test-threads=1 2>&1  ...
++         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.23s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running unittests src\lib.rs (C:\f28h2-target\debug\deps\wcore_sandbox-d9612696e1348a08.exe)
+
+running 156 tests
+test authority_boundary_tests::buffered_authority_rejects_same_path_replacement_before_backend ... ok
+test authority_boundary_tests::streaming_authority_rejects_same_path_replacement_before_backend ... ok
+test backends::appcontainer::appcontainer_acl_lease::mutation_lock::tests::global_user_keyed_mutex_serializes_processes ... ignored, explicit native Windows AppContainer acceptance
+test backends::appcontainer::appcontainer_acl_lease::mutation_lock::tests::mutation_lock_helper_entry ... ok
+test backends::appcontainer::appcontainer_acl_lease::storage::tests::a_leaked_test_lease_is_diagnosed_by_name ... ok
+test backends::appcontainer::appcontainer_acl_lease::storage::tests::a_lease_written_by_a_test_never_lands_in_the_production_directory ... ok
+test backends::appcontainer::appcontainer_acl_lease::storage::tests::atomic_rewrite_is_old_or_new_across_injected_crash_phases ... ignored, explicit native Windows AppContainer acceptance
+test backends::appcontainer::appcontainer_acl_lease::storage::tests::equivalent_windows_spellings_resolve_to_one_file_identity ... ignored, explicit native Windows AppContainer acceptance
+test backends::appcontainer::appcontainer_acl_lease::storage::tests::hostile_windows_path_forms_fail_closed_before_open ... ok
+test backends::appcontainer::appcontainer_acl_lease::storage::tests::lease_root_junction_is_rejected_before_external_mutation ... ignored, explicit native Windows AppContainer acceptance
+test backends::appcontainer::appcontainer_acl_lease::storage::tests::lease_symlink_is_rejected_without_following_it ... ignored, explicit native Windows AppContainer acceptance
+test backends::appcontainer::appcontainer_acl_lease::storage::tests::opened_lease_cannot_be_swapped_under_validation ... ignored, explicit native Windows AppContainer acceptance
+test backends::appcontainer::appcontainer_acl_lease::storage::tests::test_sid_sentinel_digest_is_frozen ... ok
+test backends::appcontainer::appcontainer_acl_lease::storage::tests::unit_tests_never_resolve_the_production_lease_directory ... ok
+test backends::appcontainer::appcontainer_acl_lease::tests::crash_helper_entry ... ok
+test backends::appcontainer::appcontainer_acl_lease::tests::dead_owner_unreconcilable_lease_is_reclaimed_not_refused_forever ... ok
+test backends::appcontainer::appcontainer_acl_lease::tests::generated_profile_names_are_safe_and_bounded ... ok
+test backends::appcontainer::appcontainer_acl_lease::tests::killed_owner_is_recovered_before_next_execution ... ignored, requires explicit native Windows AppContainer acceptance
+test backends::appcontainer::appcontainer_acl_lease::tests::live_owner_is_never_reclaimed ... ignored, requires explicit native Windows AppContainer acceptance
+test backends::appcontainer::appcontainer_acl_lease::tests::live_owner_unreconcilable_lease_is_honoured_not_reclaimed ... ok
+test backends::appcontainer::appcontainer_acl_lease::tests::malformed_or_unknown_lease_fails_closed ... ignored, requires explicit native Windows AppContainer acceptance
+test backends::appcontainer::appcontainer_acl_lease::tests::quarantine_directory_does_not_become_a_second_wedge ... ok
+test backends::appcontainer::appcontainer_acl_lease::tests::real_profile_collision_allocates_a_new_identity ... ignored, requires explicit native Windows AppContainer acceptance
+test backends::appcontainer::appcontainer_acl_lease::tests::reclamation_reports_grants_it_could_not_revoke ... ok
+test backends::appcontainer::appcontainer_acl_lease::tests::setup_failure_after_durable_lease_cleans_up ... ignored, requires explicit native Windows AppContainer acceptance
+test backends::appcontainer::appcontainer_acl_lease::tests::sha256_matches_known_vector ... ok
+test backends::appcontainer::hard_containment_identity_tests::appcontainer_identity_names_job_object_mechanism ... ok
+test backends::appcontainer::probe_cache_tests::late_negative_never_downgrades_a_sticky_positive ... ok
+test backends::appcontainer::probe_cache_tests::negative_is_cached_then_self_heals ... ok
+test backends::appcontainer::probe_cache_tests::negative_then_positive_recovers_and_sticks ... ok
+test backends::appcontainer::probe_cache_tests::positive_is_sticky ... ok
+test backends::appcontainer::probe_cache_tests::single_flight_fails_closed_once_under_concurrency ... ok
+test backends::appcontainer::probe_cache_tests::single_flight_runs_probe_once_under_concurrency ... ok
+test backends::appcontainer::probe_cache_tests::unknown_forces_a_probe ... ok
+test backends::appcontainer::windows_impl::tests::allow_hosts_rejected ... ok
+test backends::appcontainer::windows_impl::tests::build_env_block_allows_lf_in_non_security_value ... ok
+test backends::appcontainer::windows_impl::tests::build_env_block_case_insensitive_dedup_last_wins ... ok
+test backends::appcontainer::windows_impl::tests::build_env_block_empty_is_just_double_null ... ok
+test backends::appcontainer::windows_impl::tests::build_env_block_rejects_empty_key ... ok
+test backends::appcontainer::windows_impl::tests::build_env_block_rejects_eq_in_key ... ok
+test backends::appcontainer::windows_impl::tests::build_env_block_rejects_lf_in_key ... ok
+test backends::appcontainer::windows_impl::tests::build_env_block_rejects_lf_in_path_value ... ok
+test backends::appcontainer::windows_impl::tests::build_env_block_rejects_nul_in_value ... ok
+test backends::appcontainer::windows_impl::tests::build_env_block_rejects_tab_in_key ... ok
+test backends::appcontainer::windows_impl::tests::build_env_block_single_pair_has_double_null_terminator ... ok
+test backends::appcontainer::windows_impl::tests::build_env_block_sorts_alphabetically ... ok
+test backends::appcontainer::windows_impl::tests::cancellation_guard_is_sticky_unless_disarmed ... ok
+test backends::appcontainer::windows_impl::tests::classify_bare_shell_buckets ... ok
+test backends::appcontainer::windows_impl::tests::echo_runs_live ... ignored, explicit native Windows AppContainer acceptance
+test backends::appcontainer::windows_impl::tests::is_trace_safe_recognizes_windows_essentials_and_rejects_others ... ok
+test backends::appcontainer::windows_impl::tests::is_verbatim_disk_path_classifies_prefixes ... ok
+test backends::appcontainer::windows_impl::tests::large_output_survives_live ... ignored, explicit native Windows AppContainer acceptance
+test backends::appcontainer::windows_impl::tests::quote_arg_backslash_before_quote_doubled ... ok
+test backends::appcontainer::windows_impl::tests::quote_arg_backslashes_before_internal_quote ... ok
+test backends::appcontainer::windows_impl::tests::quote_arg_embedded_quote_is_escaped ... ok
+test backends::appcontainer::windows_impl::tests::quote_arg_empty_string_is_double_quoted ... ok
+test backends::appcontainer::windows_impl::tests::quote_arg_multiple_trailing_backslashes_doubled ... ok
+test backends::appcontainer::windows_impl::tests::quote_arg_no_special_chars_passes_through ... ok
+test backends::appcontainer::windows_impl::tests::quote_arg_only_quote_char ... ok
+test backends::appcontainer::windows_impl::tests::quote_arg_space_is_quoted ... ok
+test backends::appcontainer::windows_impl::tests::quote_arg_trailing_backslash_with_quoting_is_doubled ... ok
+test backends::appcontainer::windows_impl::tests::quote_arg_trailing_backslash_without_special_chars_passes_through ... ok
+test backends::appcontainer::windows_impl::tests::required_live_job_teardown_precedes_workspace_cleanup ... ok
+test backends::appcontainer::windows_impl::tests::resolve_cwd_keeps_the_absolute_and_null_contract ... ok
+test backends::appcontainer::windows_impl::tests::resolve_cwd_leaves_every_other_shape_byte_identical ... ok
+test backends::appcontainer::windows_impl::tests::resolve_cwd_strips_verbatim_disk_prefix ... ok
+test backends::appcontainer::windows_impl::tests::resolve_program_absolute_path_existing_returns_widened ... ok
+test backends::appcontainer::windows_impl::tests::resolve_program_absolute_path_missing_rejected ... ok
+test backends::appcontainer::windows_impl::tests::resolve_program_allowlisted_shell_resolves_to_system32 ... ok
+test backends::appcontainer::windows_impl::tests::resolve_program_allowlisted_shell_without_exe_extension_resolves ... ok
+test backends::appcontainer::windows_impl::tests::resolve_program_bare_bash_rejected_with_actionable_message ... ok
+test backends::appcontainer::windows_impl::tests::resolve_program_bare_name_outside_allowlist_rejected ... ok
+test backends::appcontainer::windows_impl::tests::resolve_program_bare_powershell_rejected_with_actionable_message ... ok
+test backends::appcontainer::windows_impl::tests::resolve_program_device_path_rejected ... ok
+test backends::appcontainer::windows_impl::tests::resolve_program_directory_rejected ... ok
+test backends::appcontainer::windows_impl::tests::resolve_program_dos_device_path_rejected ... ok
+test backends::appcontainer::windows_impl::tests::resolve_program_empty_rejected ... ok
+test backends::appcontainer::windows_impl::tests::resolve_program_unc_path_rejected ... ok
+test backends::appcontainer::windows_impl::tests::windows_retained_cwd_bind_survives_a_pathname_substitution ... ok
+test backends::bwrap::tests::allow_hosts_unsupported ... ignored, bwrap is Linux-only
+test backends::bwrap::tests::bwrap_denied_directory_is_not_writable ... ignored, bwrap is Linux-only
+test backends::bwrap::tests::bwrap_denies_read_of_secret_under_allowed_root ... ignored, bwrap is Linux-only
+test backends::bwrap::tests::bwrap_enforces_read_deny_returns_true ... ignored, bwrap is Linux-only
+test backends::bwrap::tests::echo_runs_under_bwrap ... ignored, bwrap is Linux-only
+test backends::bwrap::tests::is_available_reflects_path ... ok
+test backends::bwrap::tests::missing_bind_source_is_skipped_not_fatal ... ignored, bwrap is Linux-only
+test backends::bwrap::tests::relative_path_rejected ... ignored, bwrap is Linux-only
+test backends::bwrap::tests::required_live_bwrap_admission ... ignored, bwrap is Linux-only
+test backends::bwrap::tests::required_live_bwrap_hard_containment_mint_and_drift ... ignored, bwrap is Linux-only
+test backends::bwrap::tests::required_live_bwrap_retained_cwd_enforcement ... ignored, bwrap is Linux-only
+test backends::docker::tests::backend_name_is_stable ... ok
+test backends::docker::tests::docker_disabled_is_unavailable_and_refuses ... ok
+test backends::docker::tests::enforces_read_deny_is_false_without_live_docker ... ok
+test backends::no_sandbox::tests::dropping_stream_reaps_windows_job_descendant ... ok
+test backends::no_sandbox::tests::echo_runs ... ok
+test backends::no_sandbox::tests::empty_argv_is_error ... ok
+test backends::no_sandbox::tests::env_is_scrubbed_then_repopulated ... ok
+test backends::no_sandbox::tests::execute_streaming_yields_chunks_then_exit ... ok
+test backends::no_sandbox::tests::warn_once_is_idempotent ... ok
+test backends::tests::dropping_stream_receiver_drops_backend_execution ... ok
+test directory_authority::archive::tests::crash_after_descendant_removal_recovers_original_before_reads ... ok
+test directory_authority::archive::tests::mid_import_failure_rolls_back_to_original_tree ... ok
+test directory_authority::tests::case_sensitive_parent_preserves_distinct_foo_and_uppercase_foo ... ok
+test directory_authority::tests::cleanup_refuses_outstanding_handle_loan_then_retries_same_authority ... ok
+test directory_authority::tests::concurrent_atomic_write_exposes_only_whole_old_or_new_payloads ... ok
+test directory_authority::tests::created_directory_rolls_back_every_post_create_validation_failure ... ok
+test directory_authority::tests::created_file_rolls_back_every_post_create_validation_failure ... ok
+test directory_authority::tests::directory_information_larger_than_supplied_buffer_fails_closed ... ok
+test directory_authority::tests::directory_name_cannot_cross_its_current_entry_boundary ... ok
+test directory_authority::tests::file_symlink_is_rejected_without_following_it ... ok
+test directory_authority::tests::misaligned_next_directory_entry_offset_fails_closed ... ok
+test directory_authority::tests::read_only_child_open_does_not_require_or_receive_delete_authority ... ok
+test directory_authority::tests::rename_buffer_includes_full_structure_and_rejects_overflow ... ok
+test directory_authority::tests::retained_parent_routes_children_after_path_replacement ... ok
+test directory_authority::tests::root_mutation_authority_supports_directory_durability ... ok
+test directory_authority::tests::unaligned_directory_entry_is_copied_before_utf16_decoding ... ok
+test directory_authority::tests::windows_command_cwd_stays_bound_to_renamed_directory_object ... ok
+test directory_authority::tests::windows_destructive_removal_succeeds_through_a_directory_child ... ok
+test directory_authority::tests::windows_destructive_removal_succeeds_through_a_read_only_file_child ... ok
+test directory_authority::tests::windows_handle_relative_delete_rejects_same_path_replacement ... ok
+test directory_authority::tests::windows_handle_relative_enumeration_rejects_reparse_children ... ok
+test directory_authority::tests::windows_handle_relative_file_publish_stays_bound_to_target_parent ... ok
+test directory_authority::tests::windows_handle_relative_rename_stays_bound_to_target_parent ... ok
+test directory_authority::tests::windows_namespace_and_ads_names_fail_before_operations ... ok
+test fail_closed_tests::environment_passthrough_is_owned_by_each_session_runtime ... ok
+test fail_closed_tests::fail_closed_backend_does_not_enforce_read_deny ... ok
+test fail_closed_tests::fail_closed_backend_refuses_execution ... ok
+test fail_closed_tests::opt_in_parsing_accepts_1_and_true ... ok
+test fail_closed_tests::required_session_rejects_environment_bypass_pair ... ok
+test fail_closed_tests::required_session_rejects_persisted_none ... ok
+test fail_closed_tests::sandbox_none_fails_closed_without_opt_in ... ok
+test fail_closed_tests::sandbox_none_honored_with_opt_in ... ok
+test fail_closed_tests::session_runtimes_do_not_follow_later_global_changes ... ok
+test fail_closed_tests::unsandboxed_fallback_fails_closed_without_opt_in ... ok
+test fail_closed_tests::unsandboxed_fallback_runs_no_sandbox_with_opt_in ... ok
+test hard_containment_tests::authority_debug_is_redacted ... ok
+test hard_containment_tests::backend_drift_refuses ... ok
+test hard_containment_tests::bypass_registry_cannot_mint ... ok
+test hard_containment_tests::executable_and_runtime_drift_refuses ... ok
+test hard_containment_tests::non_qualifying_backend_at_spawn_refuses ... ok
+test hard_containment_tests::non_qualifying_backends_cannot_mint ... ok
+test hard_containment_tests::policy_drift_refuses ... ok
+test hard_containment_tests::probe_failure_at_every_stage_fails_closed ... ok
+test hard_containment_tests::probe_identity_disagreement_fails_closed ... ok
+test hard_containment_tests::qualifying_backend_mints_and_verifies_with_no_drift ... ok
+test hard_containment_tests::spawn_parameter_drift_refuses ... ok
+test manifest::tests::denied_location_flags_temp_and_credentials ... ok
+test manifest::tests::fs_read_deny_defaults_empty ... ok
+test manifest::tests::fs_read_deny_missing_from_toml_defaults_empty ... ok
+test manifest::tests::fs_read_deny_roundtrips_toml ... ok
+test manifest::tests::hard_containment_denies_candidate_under_global_temp ... ok
+test manifest::tests::hard_containment_filesystem_is_read_only_candidate_plus_private_writes ... ok
+test manifest::tests::hard_containment_rejects_relative_candidate ... ok
+test manifest::tests::hard_containment_rejects_traversal_components ... ok
+test manifest::tests::hard_containment_rejects_writable_root_overlapping_candidate ... ok
+test manifest::tests::policy_identity_is_order_independent ... ok
+
+test result: ok. 133 passed; 0 failed; 23 ignored; 0 measured; 0 filtered out; finished in 4.71s
+
+
+LIB_RESULT=ok;passed=133;failed=0;ignored=23
+NAMED=dead_owner_unreconcilable_lease_is_reclaimed_not_refused_forever;result=ok;passed=1;failed=0
+NAMED=live_owner_unreconcilable_lease_is_honoured_not_reclaimed;result=ok;passed=1;failed=0
+NAMED=quarantine_directory_does_not_become_a_second_wedge;result=ok;passed=1;failed=0
+NAMED=reclamation_reports_grants_it_could_not_revoke;result=ok;passed=1;failed=0
+finished=2026-07-29T00:30:44.9013142+07:00
