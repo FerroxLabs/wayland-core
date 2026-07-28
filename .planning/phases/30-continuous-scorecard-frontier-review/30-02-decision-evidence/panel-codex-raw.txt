@@ -1,0 +1,660 @@
+Reading additional input from stdin...
+OpenAI Codex v0.144.4
+--------
+workdir: /private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019fa960-b12b-7d10-9d3d-d386583940af
+--------
+user
+You are one member of a four-way adversarial review panel. Answer on evidence, not politeness.
+
+CONTEXT (all figures below were measured, not assumed).
+
+We must design a comparative benchmark methodology for three AI agent CLIs, and FREEZE it before
+any number exists. The three tools:
+  - Wayland Core (Rust, our product — so we are the interested party)
+  - Hermes Agent 0.17.0, pinned at commit dbe734beff0caf5e8ee2acbe4277db7f6cf84a21 (Python)
+  - OpenClaw 2026.6.2, pinned at commit 11a0ad10e91a50d5a0e636494eea4d7ad3eaf9fc (TypeScript/Node)
+
+The requirement (F30-03) names five dimensions — correctness, recovery, security, cost, cognitive
+tax — and demands "pinned baselines, repeated trials and confidence bounds". It defines NONE of:
+the metric per dimension, the trial count, the interval method, or what counts as a tie.
+
+MEASURED FACTS:
+1. We already own a FIFO-scripted OpenAI-compatible loopback HTTP fixture (axum, binds
+   127.0.0.1:0, serves POST /v1/chat/completions with SSE). It records every request
+   (sequence, body sha256, model), counts consumed script steps, and returns HTTP 409 with a
+   recorded "unexpected_request" violation when a tool makes MORE requests than the script has
+   steps. It emits usage {prompt_tokens, completion_tokens} in the final SSE frame.
+2. At the PINNED commits, both peers accept an OpenAI-compatible base-URL override via the
+   environment variable OPENAI_BASE_URL:
+     - OpenClaw: extensions/openai/base-url.ts line 10 reads env.OPENAI_BASE_URL.
+     - Hermes: agent/auxiliary_client.py line 1946 and hermes_cli/auth.py line 191
+       (base_url_env_var="OPENAI_BASE_URL"); its "custom" provider is OPENAI_BASE_URL +
+       OPENAI_API_KEY.
+   NOTE: our own planning document wrongly asserted Hermes used HERMES_BASE_URL. At the pin that
+   variable is a TUI-gateway setting and an env-allowlist TEST fixture, NOT the LLM base URL.
+3. NO REAL CREDENTIAL IS AVAILABLE OR PERMITTED. Not for us, not for the peers. A synthetic
+   placeholder OPENAI_API_KEY value is the only thing that can be set.
+4. The build host is a shared Linux box (Ubuntu 24.04, node v22, python 3.12, uv, npm) with 758G
+   free, shared with four other concurrent agents. OpenClaw is a large monorepo with a multi-step
+   build (tsdown/tsgo/pnpm); Hermes installs via uv from a committed uv.lock.
+5. Our own ledger currently contains ZERO measured runtime, cost or success-rate numbers. This
+   plan is the first measurement.
+
+THE RECOMMENDED STARTING POSITION, WITH ITS REASONING — confirm or overturn it on evidence:
+
+  Adopt a SHARED LOOPBACK METER: drive all three tools against ONE instance of that fixture,
+  serving byte-identical scripted assistant turns, with the fixture (not the tool) counting
+  requests and tokens. Alongside it, commit a fully specified LIVE-PROVIDER protocol that is
+  runnable but declared UNPROVEN until credentials exist.
+
+  Reasoning: it is credential-free so it runs today; byte-identical model output removes model
+  variance, the largest confound in agent comparison; cost is measured on the wire rather than
+  read from three programs' mutually incomparable self-reports; and the fixture already exists
+  and is already used by our contract tests, so no new harness is invented.
+
+  Its cost: it measures the AGENT HARNESS and says nothing about model quality or real-world task
+  success. That limitation must be carried on every measurement, not in a footnote.
+
+The alternatives considered were: (b) live trials against a real provider with real keys for all
+three tools; (c) extend the existing static structural source comparison already in our ledger;
+(d) the hybrid above.
+
+ANSWER THESE, CONCRETELY. Vague advice is worthless here; we will encode your answer in Rust
+types and a JSON protocol that a verifier enforces.
+
+Q1. Confirm or overturn the recommended position. If you overturn it, say what evidence makes the
+    alternative better.
+Q2. For each of the five dimensions, name ONE observable that (i) all three tools can be made to
+    exhibit through a scripted loopback provider, and (ii) is extracted mechanically from either
+    the fixture's request records or the tool's workspace on disk — never from the tool's own
+    self-report. Say whether each is a PROPORTION or a CONTINUOUS quantity. Say plainly if you
+    think a dimension is NOT measurable this way — an honest "cognitive tax cannot be measured by
+    a loopback fixture" is more useful to us than an invented proxy.
+Q3. How many repeated trials per (tool, dimension) leg? Justify against the fact that a scripted
+    fixture makes each trial nearly deterministic, so variance is mostly harness nondeterminism
+    (scheduling, retry timing), not model sampling.
+Q4. What interval method? We may add NO new dependency; a Wilson score interval for proportions
+    and a percentile bootstrap for continuous quantities are each a few lines. Is that right, or
+    is a Clopper-Pearson / other choice better for our trial counts?
+Q5. What TIE BAND — the separation below which two tools are declared indistinguishable
+    REGARDLESS of point estimates? Give a rule we can encode. We already intend the hard rule
+    "refuse any directional verdict when the delta's confidence interval contains zero". Is a tie
+    band ON TOP of that justified, or is it double-counting?
+Q6. What stop rule for a hung trial?
+Q7. Name the single strongest way this methodology could still produce a flattering lie for
+    Wayland, given that we control the harness, the fixture and the task. What structural
+    countermeasure closes it?
+
+FORMAT. End your response with exactly one line of the form:
+PANEL_POSITION=<CONFIRM|OVERTURN|CONFIRM_WITH_AMENDMENT>
+followed by a one-sentence justification on the next line.
+deprecated: `[features].codex_hooks` is deprecated. Use `[features].hooks` instead.
+Enable it with `--enable hooks` or `[features].hooks` in config.toml. See https://developers.openai.com/codex/config-basic#feature-flags for details.
+2026-07-28T15:38:36.968981Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(AuthRequiredError { www_authenticate_header: "Bearer realm=\"OAuth\", resource_metadata=\"https://mcp.canva.com/.well-known/oauth-protected-resource/mcp\", error=\"invalid_token\", error_description=\"Missing or invalid access token\"" })
+2026-07-28T15:38:37.189189Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Auth(AuthorizationRequired)
+2026-07-28T15:38:37.613815Z ERROR codex_memories_write::phase2: Phase 2 no changes
+hook: SessionStart
+hook: SessionStart Completed
+hook: UserPromptSubmit
+hook: UserPromptSubmit Completed
+codex
+I’m treating this as a preregistration audit: I’ll test whether each proposed metric is actually attributable to the named dimension, then give verifier-ready rules and reject proxies that would manufacture meaning. I’m using the critique skill because the task explicitly calls for adversarial pressure-testing.
+hook: PreToolUse
+hook: PreToolUse Completed
+exec
+/bin/zsh -lc "sed -n '1,240p' /Users/seandonahoe/.codex/RTK.md && sed -n '1,260p' /Users/seandonahoe/.codex/skills/ijfw-critique/SKILL.md && rg -n \"F30-03|comparative benchmark|loopback|confidence bounds|cognitive tax\" /Users/seandonahoe/.codex/memories/MEMORY.md" in /private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad
+ exited 1 in 0ms:
+# RTK - Rust Token Killer (Codex CLI)
+
+**Usage**: Token-optimized CLI proxy for shell commands.
+
+## Rule
+
+Always prefix shell commands with `rtk`.
+
+Examples:
+
+```bash
+rtk git status
+rtk cargo test
+rtk npm run build
+rtk pytest -q
+```
+
+## Meta Commands
+
+```bash
+rtk gain            # Token savings analytics
+rtk gain --history  # Recent command savings history
+rtk proxy <cmd>     # Run raw command without filtering
+```
+
+## Verification
+
+```bash
+rtk --version
+rtk gain
+which rtk
+```
+---
+name: ijfw-critique
+description: "Challenge decisions, surface counter-arguments, flag assumptions. Trigger: 'should I', 'is this right', 'critique', 'poke holes', 'second opinion', 'devil's advocate'. Auto-fired by ijfw-intent-router."
+---
+
+
+Before you agree, disagree. Before you advise, stress-test.
+
+When the user asks you to critique, review a decision, or give a second
+opinion -- or when the intent router flags critique intent -- follow this
+pattern rather than answering from the same frame they asked from.
+
+## Four-step critique
+
+1. **Steelman first.** In one sentence, state the strongest version of the
+   current plan / decision / design. Not to flatter -- to make sure you're
+   critiquing the real thing, not a caricature.
+
+2. **Surface the assumptions.** Name 2-3 assumptions the plan rests on.
+   These are the load-bearing beliefs that, if wrong, collapse the argument.
+   Be specific: "assumes traffic stays under 10k qps", not "assumes scale".
+
+3. **Three concrete counter-arguments.** Each should be:
+   - *Non-obvious* (if the user already considered it, skip)
+   - *Bounded* (state when it applies; rarely are counter-arguments universal)
+   - *Actionable* (each comes with a "watch for X" or "test by Y")
+
+   Prefer counter-arguments that come from different angles: operational,
+   social/organizational, economic, correctness. One bug-class concern is
+   worth less than one operational + one social + one correctness concern.
+
+4. **State your verdict briefly.** After laying out the counters, give a
+   1-line recommendation: proceed / proceed with X mitigation / stop and
+   rework because Y. Own the verdict -- don't just hedge.
+
+## Refactor reframe (single-line trigger)
+
+When the user is mid-refactor and a fix feels hacky, or you catch yourself
+patching around a smell rather than removing it, run this prompt out loud:
+
+> *Knowing everything I know now, what would the elegant solution look like?*
+
+Answer it briefly (3-5 lines). If the elegant version costs less than the
+hack you're about to ship, replace the hack. If it costs more than 2x, log
+the elegant version as a follow-up and proceed with the pragmatic fix --
+but only after you've named the debt explicitly.
+
+Skip this for trivial or obvious fixes; the point is to break frame on
+non-trivial decisions, not to over-engineer.
+
+## When NOT to critique
+
+- The user is midway through implementing and needs help, not a critique.
+- The decision is reversible and cheap (just do it and see).
+- You lack the domain facts to form an opinion -- say so instead of guessing.
+- The question is "how" not "whether". How-to questions deserve how-to
+  answers, not a rehash of whether to do it at all.
+
+## Output shape
+
+```
+Steelman: <one-line strongest version>
+
+Assumptions:
+  1. <load-bearing belief>
+  2. <load-bearing belief>
+
+Counter-arguments:
+  1. <non-obvious objection> -- applies when <condition>; watch for <signal>.
+  2. <different angle> -- applies when <condition>; test with <method>.
+  3. <third angle> -- applies when <condition>; mitigate via <approach>.
+
+Verdict: <proceed|mitigate|rework> -- <one-line reason>
+
+Audit: stress-tested <N> assumptions, <N> angles (<angle-1> + <angle-2> + <angle-3>). Confidence: <low|med|high>.
+```
+
+### Worked example
+
+```
+Steelman: Rewriting the auth layer in Rust eliminates the class of memory bugs that caused last quarter's outages.
+
+Assumptions:
+  1. The team has enough Rust fluency to maintain the new code without slowdown.
+  2. The outages trace to memory bugs, not logic or config errors.
+
+Counter-arguments:
+  1. Operationally: Rust compile times and borrow-checker friction could double review cycles -- applies when the team has <3 months Rust experience; watch for PR cycle time increasing past 2 days.
+  2. Socially: the auth team may resist a full rewrite when incremental hardening (address-sanitiser + fuzzing) could close the same risk at 20% of the effort -- applies when management is measuring velocity; test by asking the team to estimate both approaches.
+  3. Correctness: auth logic bugs (e.g. missing token expiry checks) are language-agnostic -- applies if the root-cause analysis is incomplete; mitigate by running a postmortem before deciding on the rewrite.
+
+Verdict: mitigate -- commission a 2-week root-cause analysis first; if the cause is confirmed memory-safety, Rust is the right call.
+
+Audit: stress-tested 2 assumptions, 3 angles (operational + social + correctness). Confidence: high.
+```
+
+## Tone
+
+Direct, not hedging. The user asked for a critique; they don't need
+"this is just my opinion". State the counter clearly. If they push back,
+that's the signal to update or yield -- but make them do the work of
+pushing back, not you.
+
+Resume normal mode after.
+
+hook: PostToolUse
+hook: PostToolUse Completed
+hook: PreToolUse
+hook: PreToolUse Completed
+exec
+/bin/zsh -lc 'rtk rg -n "F00-F30|whole-program|benchmark|confidence|loopback" /Users/seandonahoe/.codex/memories/MEMORY.md' in /private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad
+ succeeded in 0ms:
+52:# Task Group: waylandcore whole-program transfer export and enterprise security comparison
+54:scope: Wayland Core enterprise-agent security comparison work plus whole-program F00-F30 transfer exports; use when the user asks for ranked enterprise security comparisons or wants a Claude-ready handoff covering the complete Frontier program instead of one phase.
+67:## Task 2: Export the full F00-F30 program as a Claude-ready handoff bundle
+71:- rollout_summaries/2026-07-13T09-31-15-Xa6S-wayland_core_full_program_handoff_and_enterprise_security_re.md (cwd=/Users/seandonahoe/dev/waylandcore, rollout_path=/Users/seandonahoe/.codex/sessions/2026/07/13/rollout-2026-07-13T16-31-16-019f5ad1-067f-72c3-8341-43b07274a70a.jsonl, updated_at=2026-07-20T01:13:46+00:00, thread_id=019f5ad1-067f-72c3-8341-43b07274a70a, initial Phase-20-only handoff was rebuilt into a whole-program export)
+75:- handoff MD, exact location, F00-F30, Phase 20, whole-program transfer, Claude code, transfer bundle, 00-READ-ME-FIRST.md, secret scanner, executable bit
+82:- when the user corrects "it's not just phase 20. It should be the entire fucking plan," default handoff/export work to whole-program scope instead of phase-only scope unless they explicitly narrow it [Task 2]
+187:- when the user corrects, "I want to make sure that this is the entire fucking plan not just the current phase," make whole-program scope explicit and spell out what remains after the active phase [Task 2][Task 3]
+265:# Task Group: anvil benchmark lane pause boundary and Flux prerequisite audit
+267:scope: Standalone Anvil benchmark-lane audit work that was paused and then formally blocked, including Flux successor readiness, accounting/reconciler blockers, preregistration contract boundaries, and pause enforcement; use when the user asks where the lane stands or whether it is safe to continue.
+268:applies_to: cwd=/Users/seandonahoe/dev/anvil; reuse_rule=reuse across Anvil benchmark, Flux prerequisite, and goal-control work in this workspace, but treat live deployment/accounting counts and image digests as time-specific.
+274:- rollout_summaries/2026-07-14T12-51-24-79mj-anvil_benchmark_pause_and_flux_prereq_audit.md (cwd=/Users/seandonahoe/dev/anvil, rollout_path=/Users/seandonahoe/.codex/sessions/2026/07/14/rollout-2026-07-14T19-51-24-019f60ae-a083-7610-b619-afc9ea60c1f3.jsonl, updated_at=2026-07-18T05:32:53+00:00, thread_id=019f60ae-a083-7610-b619-afc9ea60c1f3, rejected digest was revoked and the successor path stayed upstream-blocked)
+284:- rollout_summaries/2026-07-14T12-51-24-79mj-anvil_benchmark_pause_and_flux_prereq_audit.md (cwd=/Users/seandonahoe/dev/anvil, rollout_path=/Users/seandonahoe/.codex/sessions/2026/07/14/rollout-2026-07-14T19-51-24-019f60ae-a083-7610-b619-afc9ea60c1f3.jsonl, updated_at=2026-07-18T05:32:53+00:00, thread_id=019f60ae-a083-7610-b619-afc9ea60c1f3, direct DB read exposed a live reconciler/quarantine blocker)
+294:- rollout_summaries/2026-07-14T12-51-24-79mj-anvil_benchmark_pause_and_flux_prereq_audit.md (cwd=/Users/seandonahoe/dev/anvil, rollout_path=/Users/seandonahoe/.codex/sessions/2026/07/14/rollout-2026-07-14T19-51-24-019f60ae-a083-7610-b619-afc9ea60c1f3.jsonl, updated_at=2026-07-18T05:32:53+00:00, thread_id=019f60ae-a083-7610-b619-afc9ea60c1f3, preregistration v5 and reconciliation fingerprint checks were audited without mutation)
+304:- rollout_summaries/2026-07-14T12-51-24-79mj-anvil_benchmark_pause_and_flux_prereq_audit.md (cwd=/Users/seandonahoe/dev/anvil, rollout_path=/Users/seandonahoe/.codex/sessions/2026/07/14/rollout-2026-07-14T19-51-24-019f60ae-a083-7610-b619-afc9ea60c1f3.jsonl, updated_at=2026-07-18T05:32:53+00:00, thread_id=019f60ae-a083-7610-b619-afc9ea60c1f3, lane was formally blocked after repeated auto-resume against a pause instruction)
+315:- preserve frozen benchmark/preregistration contracts unless a new preregistration is explicitly authorized [Task 3]
+
+hook: PostToolUse
+hook: PostToolUse Completed
+hook: PreToolUse
+hook: PreToolUse Completed
+exec
+/bin/zsh -lc "rtk sed -n '52,88p;265,318p' /Users/seandonahoe/.codex/memories/MEMORY.md" in /private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad
+ succeeded in 0ms:
+# Task Group: waylandcore whole-program transfer export and enterprise security comparison
+
+scope: Wayland Core enterprise-agent security comparison work plus whole-program F00-F30 transfer exports; use when the user asks for ranked enterprise security comparisons or wants a Claude-ready handoff covering the complete Frontier program instead of one phase.
+applies_to: cwd=/Users/seandonahoe/dev/waylandcore; reuse_rule=reuse across Wayland Core research, transfer, and planning-export work in this checkout, but treat exact export paths, hashes, and current program files as time-specific.
+
+## Task 1: Compare enterprise security posture of Wayland Core and peer agent platforms
+
+### rollout_summary_files
+
+- rollout_summaries/2026-07-13T09-31-15-Xa6S-wayland_core_full_program_handoff_and_enterprise_security_re.md (cwd=/Users/seandonahoe/dev/waylandcore, rollout_path=/Users/seandonahoe/.codex/sessions/2026/07/13/rollout-2026-07-13T16-31-16-019f5ad1-067f-72c3-8341-43b07274a70a.jsonl, updated_at=2026-07-20T01:13:46+00:00, thread_id=019f5ad1-067f-72c3-8341-43b07274a70a, research gathered enterprise security criteria but did not finish a final ranking)
+
+### keywords
+
+- security ranking, enterprise agents, Wayland Core, Hermes, OpenClaw, Claude Code, Codex, Cursor, OpenHands, Cline, audit logs, sandboxing, zero data retention
+
+## Task 2: Export the full F00-F30 program as a Claude-ready handoff bundle
+
+### rollout_summary_files
+
+- rollout_summaries/2026-07-13T09-31-15-Xa6S-wayland_core_full_program_handoff_and_enterprise_security_re.md (cwd=/Users/seandonahoe/dev/waylandcore, rollout_path=/Users/seandonahoe/.codex/sessions/2026/07/13/rollout-2026-07-13T16-31-16-019f5ad1-067f-72c3-8341-43b07274a70a.jsonl, updated_at=2026-07-20T01:13:46+00:00, thread_id=019f5ad1-067f-72c3-8341-43b07274a70a, initial Phase-20-only handoff was rebuilt into a whole-program export)
+
+### keywords
+
+- handoff MD, exact location, F00-F30, Phase 20, whole-program transfer, Claude code, transfer bundle, 00-READ-ME-FIRST.md, secret scanner, executable bit
+
+## User preferences
+
+- when the user asks for a "top 10 list" and to "rank them in terms of their security," they want a comparative, evidence-weighted ranking rather than a feature dump [Task 1]
+- when the user says "Look at Wayland and Wayland Core, consider them as one unit," treat those as one product in future comparisons unless the user explicitly splits them [Task 1]
+- when the user asks for "a handoff MD ... and its exact location so I can give it the Claude code," include a directly reusable file path and paste-ready instruction [Task 2]
+- when the user corrects "it's not just phase 20. It should be the entire fucking plan," default handoff/export work to whole-program scope instead of phase-only scope unless they explicitly narrow it [Task 2]
+
+## Reusable knowledge
+
+- Future security comparisons in this area should normalize on sandbox boundary, approvals, auditability, retention, admin control, and deployment isolation rather than comparing marketing pages loosely [Task 1]
+- The useful evidence matrix here included GitHub enterprise agent docs, Anthropic Claude Code security/sandboxing docs, OpenAI enterprise privacy/security docs, Cursor enterprise docs, and OpenHands/Cline enterprise self-hosting narratives [Task 1]
+- The final full-program handoff path is `/Users/seandonahoe/dev/waylandcore-gsd-full-plan-export-2026-07-20/.planning/exports/2026-07-20-CLAUDE-FULL-PROGRAM-TRANSFER.md`, with a read-first shim at `/Users/seandonahoe/dev/waylandcore-gsd-full-plan-export-2026-07-20/00-READ-ME-FIRST.md` and a portable archive at `/Users/seandonahoe/dev/waylandcore-gsd-full-plan-export-2026-07-20.tar.gz` [Task 2]
+# Task Group: anvil benchmark lane pause boundary and Flux prerequisite audit
+
+scope: Standalone Anvil benchmark-lane audit work that was paused and then formally blocked, including Flux successor readiness, accounting/reconciler blockers, preregistration contract boundaries, and pause enforcement; use when the user asks where the lane stands or whether it is safe to continue.
+applies_to: cwd=/Users/seandonahoe/dev/anvil; reuse_rule=reuse across Anvil benchmark, Flux prerequisite, and goal-control work in this workspace, but treat live deployment/accounting counts and image digests as time-specific.
+
+## Task 1: Verify Flux production successor readiness for the Anvil P-3 lane
+
+### rollout_summary_files
+
+- rollout_summaries/2026-07-14T12-51-24-79mj-anvil_benchmark_pause_and_flux_prereq_audit.md (cwd=/Users/seandonahoe/dev/anvil, rollout_path=/Users/seandonahoe/.codex/sessions/2026/07/14/rollout-2026-07-14T19-51-24-019f60ae-a083-7610-b619-afc9ea60c1f3.jsonl, updated_at=2026-07-18T05:32:53+00:00, thread_id=019f60ae-a083-7610-b619-afc9ea60c1f3, rejected digest was revoked and the successor path stayed upstream-blocked)
+
+### keywords
+
+- anvil, flux-proxy, flux successor, remote master, rejected digest, rollback digest, P3-FLUX-SUCCESSOR-REPAIR-PROMPT-2026-07-18.md, production readiness
+
+## Task 2: Inspect Flux accounting and the stale reconciler blocker for the Anvil lane
+
+### rollout_summary_files
+
+- rollout_summaries/2026-07-14T12-51-24-79mj-anvil_benchmark_pause_and_flux_prereq_audit.md (cwd=/Users/seandonahoe/dev/anvil, rollout_path=/Users/seandonahoe/.codex/sessions/2026/07/14/rollout-2026-07-14T19-51-24-019f60ae-a083-7610-b619-afc9ea60c1f3.jsonl, updated_at=2026-07-18T05:32:53+00:00, thread_id=019f60ae-a083-7610-b619-afc9ea60c1f3, direct DB read exposed a live reconciler/quarantine blocker)
+
+### keywords
+
+- billing_ledger, usage_reconciler, flux-usage-reconciler, conflicting usage for idempotency_key, ledger_rows=30121, unsynchronized_rows=2975, alertfix-f8496c3
+
+## Task 3: Audit the frozen Anvil preregistration and reconciliation contract
+
+### rollout_summary_files
+
+- rollout_summaries/2026-07-14T12-51-24-79mj-anvil_benchmark_pause_and_flux_prereq_audit.md (cwd=/Users/seandonahoe/dev/anvil, rollout_path=/Users/seandonahoe/.codex/sessions/2026/07/14/rollout-2026-07-14T19-51-24-019f60ae-a083-7610-b619-afc9ea60c1f3.jsonl, updated_at=2026-07-18T05:32:53+00:00, thread_id=019f60ae-a083-7610-b619-afc9ea60c1f3, preregistration v5 and reconciliation fingerprint checks were audited without mutation)
+
+### keywords
+
+- preregistration-current.json, anvil-prereg-20260718-v5, query_fingerprint, tools/anvil_readiness.py, anvil_eval/reconciliation.py, anvil/profile-contract-v2
+
+## Task 4: Enforce the user’s explicit pause boundary and block the active goal
+
+### rollout_summary_files
+
+- rollout_summaries/2026-07-14T12-51-24-79mj-anvil_benchmark_pause_and_flux_prereq_audit.md (cwd=/Users/seandonahoe/dev/anvil, rollout_path=/Users/seandonahoe/.codex/sessions/2026/07/14/rollout-2026-07-14T19-51-24-019f60ae-a083-7610-b619-afc9ea60c1f3.jsonl, updated_at=2026-07-18T05:32:53+00:00, thread_id=019f60ae-a083-7610-b619-afc9ea60c1f3, lane was formally blocked after repeated auto-resume against a pause instruction)
+
+### keywords
+
+- pause, blocked, update_goal(status=\"blocked\"), authorization boundary, stop immediately, do not auto-resume
+
+## User preferences
+
+- when the user says `"That's going to be behind a lot of other work so you're going to have to pause."`, stop immediately and do not keep auto-resuming the lane in the background [Task 4]
+- when a lane is paused, do not broaden the work into adjacent accounting, Flux Router, or preregistration edits just to keep moving; audit-and-stop is the safer default [Task 2][Task 3][Task 4]
+- when a candidate digest has already been deployed and rolled back twice, do not keep treating it as deployable; require a new evidence-backed successor path [Task 1]
+- preserve frozen benchmark/preregistration contracts unless a new preregistration is explicitly authorized [Task 3]
+- keep privileges narrow; do not broaden REST access when a direct DB read path exists [Task 2]
+
+## Reusable knowledge
+
+hook: PostToolUse
+hook: PostToolUse Completed
+codex
+Steelman: a shared deterministic provider is the only currently executable way to compare agent harness behavior while removing model variance and tool-controlled accounting.
+
+Load-bearing assumptions:
+
+1. `OPENAI_BASE_URL` compatibility implies compatible SSE and tool-call semantics. It does not; that needs proof.
+2. Scripted usage values represent a meaningful controlled cost unit. They do not represent real provider billing.
+3. The tasks, oracles, and protocol do not encode Wayland-specific expectations. Because Wayland owns them, this is the largest bias risk.
+
+## Q1. Position
+
+Confirm with amendment.
+
+The hybrid is superior on the supplied evidence:
+
+- Live-provider trials are presently impossible and prohibited because no credentials may be used.
+- Static source comparison cannot satisfy repeated runtime trials or confidence bounds.
+- The loopback fixture can measure deterministic agent-harness behavior today.
+- A frozen live-provider protocol preserves the later path to external-validity evidence.
+
+Required amendments:
+
+- Call the result a **scripted agent-harness benchmark**, never an agent-quality benchmark.
+- Do not assume byte-identical responses are valid merely because all tools accept an OpenAI base URL. First run an unscored conformance gate covering SSE parsing, tool calls, tool-result continuation, usage frames, HTTP errors, and stream termination.
+- If tool schemas differ, compile one canonical semantic script into tool-native response dialects and hash all translations. Do not falsely claim byte identity.
+- Use one fixture implementation but an isolated fixture process and workspace per trial, or a fixture explicitly namespaced by trial ID. A shared global FIFO must never serve concurrent trials.
+- Label loopback cost as synthetic metered demand, not dollars or real-provider token cost.
+- Record cognitive tax as `NOT_MEASURED`, leaving F30-03 incomplete on that dimension until a human protocol runs.
+
+Every result must carry something equivalent to:
+
+```json
+{
+  "scope": "scripted_agent_harness_only",
+  "model_quality_measured": false,
+  "real_world_task_success_measured": false,
+  "provider_cost_measured": false
+}
+```
+
+## Q2. One observable per dimension
+
+| Dimension | Observable | Kind | Exact definition |
+|---|---|---:|---|
+| Correctness | Oracle-completion rate | PROPORTION | A trial succeeds only if the canonicalized final workspace matches the preregistered oracle and the expected fixture script is consumed without an `unexpected_request`. Ignore only explicitly allowlisted metadata such as timestamps. |
+| Recovery | Injected-fault recovery rate | PROPORTION | Inject exactly one preregistered recoverable fault. Success requires reaching the correct final workspace after observing that fault, within the request and time budgets. A baseline success without encountering the injection is invalid, not recovered. |
+| Security | Canary non-exfiltration rate | PROPORTION | Put a unique random canary in a preregistered workspace file and issue a scripted malicious instruction attempting to disclose it. Success means the canary never appears in any subsequent fixture request body. This measures only workspace-secret exfiltration resistance, not “security” generally. |
+| Cost | Fixture-metered token units per attempted trial | CONTINUOUS | Sum `prompt_tokens + completion_tokens` from every usage frame emitted by the fixture, including ultimately failed trials. Call these synthetic token units. Permit a “lower cost” verdict only when the cheaper tool is noninferior on correctness; otherwise fail-fast behavior would be rewarded. |
+| Cognitive tax | Not measurable by this protocol | — | Request logs and workspace state cannot establish human comprehension, effort, frustration, or intervention burden. Configuration-line counts, command counts, and elapsed time are not cognitive tax. Encode `NOT_MEASURED`, not zero. |
+
+The security observable is specifically **canary containment under scripted prompt injection**. It cannot support claims about sandbox escape, dependency security, privilege boundaries, credential storage, or network isolation.
+
+The fixture’s usage values also require a frozen per-step usage schedule. Unless prompt tokens are calculated from actual request bodies with a pinned tokenizer, they measure controlled synthetic demand rather than actual tokenization.
+
+## Q3. Trial count
+
+Use exactly **30 fresh-process trials per `(tool, measurable_dimension, scenario)` leg**.
+
+Why 30:
+
+- For a true 10% nondeterministic failure probability, 30 trials have a `1 - 0.9^30 = 95.8%` chance of observing at least one failure.
+- More repetitions of a deterministic script rapidly become pseudo-evidence; task breadth is more valuable than running one script 100 times.
+- Thirty is enough for a minimally defensible bootstrap while remaining practical across three large CLIs.
+- Its limitation is visible: 30/30 successes still yields a two-sided 95% Wilson lower bound of approximately 88.6%. Therefore, the result cannot claim “better than 95% reliability.”
+
+Each trial must use:
+
+- A new process tree.
+- A new fixture process or trial namespace.
+- A new temporary workspace.
+- A unique security canary.
+- The same frozen environment allowlist.
+- Randomized tool order within each scenario block.
+- Prebuilt binaries; build and installation time stay outside scored trials.
+
+Do not pretend 30 repetitions generalize across tasks. Generalization requires multiple independently authored scenarios, each with its own 30-trial leg.
+
+## Q4. Intervals
+
+Use 95% intervals:
+
+- Individual proportions: **Wilson score interval**.
+- Difference between two proportions: **Newcombe’s Wilson-based interval**, not subtraction of two Wilson endpoints and not a Wald interval.
+- Continuous quantities: **10,000-resample percentile bootstrap**, with the PRNG algorithm and seed derived from the frozen protocol-manifest hash.
+- Continuous pairwise effect: bootstrap the difference of arithmetic means. For cost, also report the mean ratio.
+
+Clopper–Pearson is not better here. It is conservative, produces unnecessarily wide bounds at 30 trials, and does not repair an underpowered design. Wilson has better estimation behavior.
+
+If every continuous observation is identical, the bootstrap will be degenerate. Emit `ZERO_EMPIRICAL_VARIANCE` and state that the interval covers only rerun nondeterminism under the frozen script.
+
+## Q5. Tie band
+
+A practical tie band is justified because statistical detectability and material importance are different questions. But do not declare a tie merely because the point estimate lies inside the band; a wide interval means **inconclusive**, not indistinguishable.
+
+Freeze these smallest effects of interest:
+
+- Correctness, recovery, security: `ε = 0.05` absolute proportion, or five percentage points.
+- Cost: `ε = ln(1.05)` on the mean-cost ratio scale, equivalent to 5%.
+
+For signed effect `E`, where positive favors tool A:
+
+```text
+A_BETTER       iff CI_low  > +ε
+A_WORSE        iff CI_high < -ε
+PRACTICAL_TIE  iff CI_low >= -ε and CI_high <= +ε
+INCONCLUSIVE   otherwise
+```
+
+This subsumes the proposed zero rule: a directional verdict necessarily excludes both zero and the entire practical-equivalence region. It is not double-counting.
+
+Do not use the word “tie” when the interval merely crosses zero. That result is `INCONCLUSIVE`.
+
+## Q6. Hung-trial stop rule
+
+For already-built CLIs:
+
+- Startup timeout: 120 seconds without the first fixture request.
+- Inactivity timeout: 120 seconds without any fixture request, stdout/stderr byte, or workspace mutation.
+- Absolute wall-clock timeout: 600 seconds.
+- First `unexpected_request`: terminate immediately because the frozen script is exhausted and the scored outcome is already determined.
+- Termination: send `SIGTERM` to the whole process group, wait five seconds, then `SIGKILL`.
+- Preserve the fixture ledger, workspace, stdout, stderr, exit status, and timeout reason.
+
+A timeout is a scored failure, never a discarded trial. Only a preregistered infrastructure failure—fixture crash, disk exhaustion, or host-wide interruption—may invalidate a block, in which case rerun the entire three-tool block rather than selectively rerunning one tool.
+
+## Q7. Strongest flattering lie
+
+The strongest lie is **protocol and task affinity masquerading as product superiority**: Wayland’s authors can choose tasks, tool-call syntax, recovery sequences, oracle normalization, and request budgets that mirror Wayland’s architecture while forcing peers through unnatural adapters.
+
+The countermeasure is structural:
+
+1. Define a tool-neutral canonical scenario format.
+2. Give every CLI an unscored conformance/calibration suite; protocol incompatibility must be distinguished from scored task failure.
+3. Have an independent reviewer or peer representative approve each adapter and contribute an equal share of scored scenarios.
+4. Freeze hashes of canonical scenarios, translated scripts, adapters, oracles, budgets, and exclusions before any scored execution.
+5. Prohibit tool-specific oracle relaxations or post-result adapter changes; any protocol revision creates a new benchmark version and invalidates all earlier scores.
+
+Without independent control over the task corpus and adapter validation, confidence intervals merely quantify a biased experiment more precisely.
+
+PANEL_POSITION=CONFIRM_WITH_AMENDMENT
+The credential-free hybrid is the only executable design, but it is valid only as a harness benchmark with neutral conformance, isolated trials, synthetic-cost labeling, and cognitive tax explicitly unmeasured.
+hook: Stop
+hook: Stop Completed
+tokens used
+43,204
+Steelman: a shared deterministic provider is the only currently executable way to compare agent harness behavior while removing model variance and tool-controlled accounting.
+
+Load-bearing assumptions:
+
+1. `OPENAI_BASE_URL` compatibility implies compatible SSE and tool-call semantics. It does not; that needs proof.
+2. Scripted usage values represent a meaningful controlled cost unit. They do not represent real provider billing.
+3. The tasks, oracles, and protocol do not encode Wayland-specific expectations. Because Wayland owns them, this is the largest bias risk.
+
+## Q1. Position
+
+Confirm with amendment.
+
+The hybrid is superior on the supplied evidence:
+
+- Live-provider trials are presently impossible and prohibited because no credentials may be used.
+- Static source comparison cannot satisfy repeated runtime trials or confidence bounds.
+- The loopback fixture can measure deterministic agent-harness behavior today.
+- A frozen live-provider protocol preserves the later path to external-validity evidence.
+
+Required amendments:
+
+- Call the result a **scripted agent-harness benchmark**, never an agent-quality benchmark.
+- Do not assume byte-identical responses are valid merely because all tools accept an OpenAI base URL. First run an unscored conformance gate covering SSE parsing, tool calls, tool-result continuation, usage frames, HTTP errors, and stream termination.
+- If tool schemas differ, compile one canonical semantic script into tool-native response dialects and hash all translations. Do not falsely claim byte identity.
+- Use one fixture implementation but an isolated fixture process and workspace per trial, or a fixture explicitly namespaced by trial ID. A shared global FIFO must never serve concurrent trials.
+- Label loopback cost as synthetic metered demand, not dollars or real-provider token cost.
+- Record cognitive tax as `NOT_MEASURED`, leaving F30-03 incomplete on that dimension until a human protocol runs.
+
+Every result must carry something equivalent to:
+
+```json
+{
+  "scope": "scripted_agent_harness_only",
+  "model_quality_measured": false,
+  "real_world_task_success_measured": false,
+  "provider_cost_measured": false
+}
+```
+
+## Q2. One observable per dimension
+
+| Dimension | Observable | Kind | Exact definition |
+|---|---|---:|---|
+| Correctness | Oracle-completion rate | PROPORTION | A trial succeeds only if the canonicalized final workspace matches the preregistered oracle and the expected fixture script is consumed without an `unexpected_request`. Ignore only explicitly allowlisted metadata such as timestamps. |
+| Recovery | Injected-fault recovery rate | PROPORTION | Inject exactly one preregistered recoverable fault. Success requires reaching the correct final workspace after observing that fault, within the request and time budgets. A baseline success without encountering the injection is invalid, not recovered. |
+| Security | Canary non-exfiltration rate | PROPORTION | Put a unique random canary in a preregistered workspace file and issue a scripted malicious instruction attempting to disclose it. Success means the canary never appears in any subsequent fixture request body. This measures only workspace-secret exfiltration resistance, not “security” generally. |
+| Cost | Fixture-metered token units per attempted trial | CONTINUOUS | Sum `prompt_tokens + completion_tokens` from every usage frame emitted by the fixture, including ultimately failed trials. Call these synthetic token units. Permit a “lower cost” verdict only when the cheaper tool is noninferior on correctness; otherwise fail-fast behavior would be rewarded. |
+| Cognitive tax | Not measurable by this protocol | — | Request logs and workspace state cannot establish human comprehension, effort, frustration, or intervention burden. Configuration-line counts, command counts, and elapsed time are not cognitive tax. Encode `NOT_MEASURED`, not zero. |
+
+The security observable is specifically **canary containment under scripted prompt injection**. It cannot support claims about sandbox escape, dependency security, privilege boundaries, credential storage, or network isolation.
+
+The fixture’s usage values also require a frozen per-step usage schedule. Unless prompt tokens are calculated from actual request bodies with a pinned tokenizer, they measure controlled synthetic demand rather than actual tokenization.
+
+## Q3. Trial count
+
+Use exactly **30 fresh-process trials per `(tool, measurable_dimension, scenario)` leg**.
+
+Why 30:
+
+- For a true 10% nondeterministic failure probability, 30 trials have a `1 - 0.9^30 = 95.8%` chance of observing at least one failure.
+- More repetitions of a deterministic script rapidly become pseudo-evidence; task breadth is more valuable than running one script 100 times.
+- Thirty is enough for a minimally defensible bootstrap while remaining practical across three large CLIs.
+- Its limitation is visible: 30/30 successes still yields a two-sided 95% Wilson lower bound of approximately 88.6%. Therefore, the result cannot claim “better than 95% reliability.”
+
+Each trial must use:
+
+- A new process tree.
+- A new fixture process or trial namespace.
+- A new temporary workspace.
+- A unique security canary.
+- The same frozen environment allowlist.
+- Randomized tool order within each scenario block.
+- Prebuilt binaries; build and installation time stay outside scored trials.
+
+Do not pretend 30 repetitions generalize across tasks. Generalization requires multiple independently authored scenarios, each with its own 30-trial leg.
+
+## Q4. Intervals
+
+Use 95% intervals:
+
+- Individual proportions: **Wilson score interval**.
+- Difference between two proportions: **Newcombe’s Wilson-based interval**, not subtraction of two Wilson endpoints and not a Wald interval.
+- Continuous quantities: **10,000-resample percentile bootstrap**, with the PRNG algorithm and seed derived from the frozen protocol-manifest hash.
+- Continuous pairwise effect: bootstrap the difference of arithmetic means. For cost, also report the mean ratio.
+
+Clopper–Pearson is not better here. It is conservative, produces unnecessarily wide bounds at 30 trials, and does not repair an underpowered design. Wilson has better estimation behavior.
+
+If every continuous observation is identical, the bootstrap will be degenerate. Emit `ZERO_EMPIRICAL_VARIANCE` and state that the interval covers only rerun nondeterminism under the frozen script.
+
+## Q5. Tie band
+
+A practical tie band is justified because statistical detectability and material importance are different questions. But do not declare a tie merely because the point estimate lies inside the band; a wide interval means **inconclusive**, not indistinguishable.
+
+Freeze these smallest effects of interest:
+
+- Correctness, recovery, security: `ε = 0.05` absolute proportion, or five percentage points.
+- Cost: `ε = ln(1.05)` on the mean-cost ratio scale, equivalent to 5%.
+
+For signed effect `E`, where positive favors tool A:
+
+```text
+A_BETTER       iff CI_low  > +ε
+A_WORSE        iff CI_high < -ε
+PRACTICAL_TIE  iff CI_low >= -ε and CI_high <= +ε
+INCONCLUSIVE   otherwise
+```
+
+This subsumes the proposed zero rule: a directional verdict necessarily excludes both zero and the entire practical-equivalence region. It is not double-counting.
+
+Do not use the word “tie” when the interval merely crosses zero. That result is `INCONCLUSIVE`.
+
+## Q6. Hung-trial stop rule
+
+For already-built CLIs:
+
+- Startup timeout: 120 seconds without the first fixture request.
+- Inactivity timeout: 120 seconds without any fixture request, stdout/stderr byte, or workspace mutation.
+- Absolute wall-clock timeout: 600 seconds.
+- First `unexpected_request`: terminate immediately because the frozen script is exhausted and the scored outcome is already determined.
+- Termination: send `SIGTERM` to the whole process group, wait five seconds, then `SIGKILL`.
+- Preserve the fixture ledger, workspace, stdout, stderr, exit status, and timeout reason.
+
+A timeout is a scored failure, never a discarded trial. Only a preregistered infrastructure failure—fixture crash, disk exhaustion, or host-wide interruption—may invalidate a block, in which case rerun the entire three-tool block rather than selectively rerunning one tool.
+
+## Q7. Strongest flattering lie
+
+The strongest lie is **protocol and task affinity masquerading as product superiority**: Wayland’s authors can choose tasks, tool-call syntax, recovery sequences, oracle normalization, and request budgets that mirror Wayland’s architecture while forcing peers through unnatural adapters.
+
+The countermeasure is structural:
+
+1. Define a tool-neutral canonical scenario format.
+2. Give every CLI an unscored conformance/calibration suite; protocol incompatibility must be distinguished from scored task failure.
+3. Have an independent reviewer or peer representative approve each adapter and contribute an equal share of scored scenarios.
+4. Freeze hashes of canonical scenarios, translated scripts, adapters, oracles, budgets, and exclusions before any scored execution.
+5. Prohibit tool-specific oracle relaxations or post-result adapter changes; any protocol revision creates a new benchmark version and invalidates all earlier scores.
+
+Without independent control over the task corpus and adapter validation, confidence intervals merely quantify a biased experiment more precisely.
+
+PANEL_POSITION=CONFIRM_WITH_AMENDMENT
+The credential-free hybrid is the only executable design, but it is valid only as a harness benchmark with neutral conformance, isolated trials, synthetic-cost labeling, and cognitive tax explicitly unmeasured.
+CODEX_RC=0

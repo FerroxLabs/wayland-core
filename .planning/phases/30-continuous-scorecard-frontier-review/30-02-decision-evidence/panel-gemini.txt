@@ -1,0 +1,34 @@
+# Panel member: gemini-3.1-pro-preview, invoked 2026-07-28 22:38 via
+#   gemini -p "$(cat panel-question.txt)" -m gemini-3.1-pro-preview -o text --skip-trust
+# GEMINI_RC=0. MCP tool-name truncation warnings stripped; answer verbatim.
+
+Q1. **CONFIRM_WITH_AMENDMENT.**
+A shared loopback meter is the only scientifically valid method without credentials, and it isolates the harness from model variance. The amendment: a strictly FIFO-scripted fixture inherently biases the test toward the agent whose internal state machine perfectly matches the script's expected sequence. 
+
+Q2. 
+- **Correctness:** Final workspace file state matches an expected cryptographic hash. (PROPORTION: 1=pass, 0=fail).
+- **Recovery:** Task completion success after the fixture is configured to inject a simulated HTTP 503 on the first tool-call attempt. (PROPORTION: 1=recovered and passed, 0=failed).
+- **Security:** The fixture scans all incoming POST bodies and headers for the synthetic `OPENAI_API_KEY`. (PROPORTION: 1=leaked, 0=secure).
+- **Cost:** Sum of `prompt_tokens` + `completion_tokens` recorded by the fixture per completed run. (CONTINUOUS).
+- **Cognitive Tax:** UNMEASURABLE via loopback. This requires human-in-the-loop metrics (interventions, prompt engineering time). Drop this dimension from the automated benchmark; attempting to proxy it via wall-clock time measures performance, not cognitive load.
+
+Q3. **10 trials per leg.**
+Because the fixture removes model sampling variance (temperature/top_p), the remaining variance is purely OS thread scheduling, filesystem I/O jitter, and network stack latency on the shared host. N=10 is sufficient to establish bounds for mechanical jitter without wasting CI compute time.
+
+Q4. **Wilson score (proportions) and Percentile bootstrap (continuous).**
+These are correct. Wilson score handles extreme distributions (e.g., 10/10 successes) gracefully where normal approximations fail, and bootstrap requires zero dependencies. Clopper-Pearson is overly conservative and will artificially widen your bounds for N=10.
+
+Q5. **Do not double-count variance, but enforce a practical equivalence margin.**
+If the 95% CI of the delta includes zero, it is a statistical tie. If it excludes zero, but the entire CI falls within a predefined trivial band (e.g., < 2% difference in tokens), it is a practical tie. Encode: `if ci_lower < 0 && ci_upper > 0 { Tie } else if abs(ci_upper) < (baseline * 0.02) { Tie } else { Winner }`.
+
+Q6. **Wall-clock timeout threshold.**
+Kill the process and record Correctness=0 if the agent exceeds 300% of the median baseline execution time, OR if it triggers the fixture's 409 `unexpected_request` violation.
+
+Q7. **The strongest lie:** A rigid FIFO script.
+If the fixture strictly expects `[Request A -> Response A, Request B -> Response B]`, and Wayland requests A then B, Wayland wins. If OpenClaw naturally requests B then A, OpenClaw gets a 409 `unexpected_request` and fails. 
+**Countermeasure:** The fixture must act as a stateless or state-machine router matching on request payload invariants (e.g., "if body contains 'read_file(main.rs)', return payload X"), not a rigid FIFO queue. 
+
+PANEL_POSITION=CONFIRM_WITH_AMENDMENT
+A shared loopback isolates the agent harness and circumvents credential requirements, but the fixture must map responses to request content rather than a hardcoded FIFO sequence to avoid rigging the benchmark in favor of our own agent's execution graph.
+Hook system message: [ijfw] Session 9 complete (0 memory entries).
+GEMINI_RC=0
