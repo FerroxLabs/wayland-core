@@ -141,9 +141,24 @@ function Get-CorpusDigest([string]$root) {
     $stack.Push($root)
     while ($stack.Count -gt 0) {
         $dir = $stack.Pop()
-        foreach ($item in [IO.Directory]::GetFileSystemEntries($dir)) {
+        $children = @()
+        try { $children = [IO.Directory]::GetFileSystemEntries($dir) }
+        catch { $children = @() }
+        foreach ($item in $children) {
             $rel = $item.Substring($root.Length).TrimStart('\', '/').Replace('\', '/')
-            $info = Get-Item -LiteralPath $item -Force
+            # A reserved DOS device name ENUMERATES but cannot be stat-ed: the
+            # directory listing returns 'skills\aux' and Get-Item on it throws
+            # PathNotFound. That is the platform behaviour this corpus exists to
+            # surface, so it is RECORDED rather than allowed to kill the walk -
+            # a crash here would take the whole Windows leg down and leave the
+            # cross-platform claim with no measurement at all.
+            $info = $null
+            try { $info = Get-Item -LiteralPath $item -Force -ErrorAction Stop }
+            catch { $info = $null }
+            if ($null -eq $info) {
+                $entries[$rel] = "U`0unstatable-on-this-platform"
+                continue
+            }
             $isLink = ($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq [IO.FileAttributes]::ReparsePoint
             if ($isLink) {
                 $target = ''
@@ -156,7 +171,8 @@ function Get-CorpusDigest([string]$root) {
                 $stack.Push($item)
             }
             else {
-                $entries[$rel] = "F`0" + (Get-Sha256OfFile $item)
+                try { $entries[$rel] = "F`0" + (Get-Sha256OfFile $item) }
+                catch { $entries[$rel] = "U`0unreadable-on-this-platform" }
             }
         }
     }
@@ -233,9 +249,12 @@ foreach ($case in $spec.cases) {
         $bothExist = (Test-Path -LiteralPath $a) -and (Test-Path -LiteralPath $b)
         $same = $false
         if ($bothExist) {
-            $fa = (Get-Item -LiteralPath $a -Force).FullName
-            $fb = (Get-Item -LiteralPath $b -Force).FullName
-            if ([string]::Equals($fa, $fb, [StringComparison]::OrdinalIgnoreCase)) { $same = $true }
+            try {
+                $fa = (Get-Item -LiteralPath $a -Force -ErrorAction Stop).FullName
+                $fb = (Get-Item -LiteralPath $b -Force -ErrorAction Stop).FullName
+                if ([string]::Equals($fa, $fb, [StringComparison]::OrdinalIgnoreCase)) { $same = $true }
+            }
+            catch { $same = $true }
         }
         if ((-not $bothExist) -or $same) { $collapsed = $true }
     }
