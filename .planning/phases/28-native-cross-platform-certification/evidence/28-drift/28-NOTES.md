@@ -175,3 +175,22 @@ Both are the same shape this program keeps measuring, now in the instrument buil
       `-002` is covered by the Rust half too; run it on `hetzner-dsm` and read the count back.
 - [ ] Cost out re-certification at HEAD; decide whether it should happen at all on a moving branch.
 - [ ] Write `28-DRIFT.md`.
+
+---
+
+## FINAL — all measurements landed
+
+- **M13** — 28-02-SUMMARY.md:40-41 already said, in bold, "This certification therefore covers
+  `32e2f57d` and NOT the current tip, and plan 28-04 must not read it as covering the tip."
+  Searched every downstream artifact: `28-04-PHASE-VERDICT.md`, `28-04-SUMMARY.md`,
+  `28-04-FINDING-LEDGER.md`/`F-28-04-004`, `28-ADJUDICATION.md`, `28-RECEIPT-SUPERSESSION.md`,
+  both receipts. All name WHICH candidate; **none names how far behind.** The caveat was written
+  once, at the source, and dropped at every hop.
+- **M14** — no matrix run has ever exercised the `F-28-02-002` repair. Every candidate.json /
+  results.json / soak.json names only `32e2f57d` or `e4a3f5fc`, both pre-repair.
+- **M15** — Rust on hetzner: RED (27/1, the A3 disclosure-name contract) → receipt rebuilt →
+  GREEN (28/0). Pre-change test file on the identical tree: 28/0 — it was blind to it.
+- **M16** — panel 3/3 `CERTIFY_AT_RC`; internal adversarial argued `RECERTIFY_NOW`, lost on
+  direction, won the §2d precondition. Codex dropped its first vote (backgrounded, stdin
+  detached, 131 bytes); re-invoked in the foreground.
+- Report written: `28-DRIFT.md`.

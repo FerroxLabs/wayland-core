@@ -1,0 +1,10 @@
+• This is a reasoning question, not a coding task. Answer plainly.
+
+• PANEL_POSITION=CERTIFY_AT_RC
+
+  **Q1: Is the passing gate meaningful today?** No. The gate answers "was this artifact dispositioned?" — and it did so correctly *for those two candidate trees*. But fact 3 severs the claim the receipt implies: the passing gate depends on a FIXED disposition whose fix commits sit 194/147 commits *ahead* of the certified trees. So the receipt certifies binaries that provably lack the fix that makes the gate pass. rc=0 verifies internal consistency, not current safety. As evidence about shippable code today, the pass is vacuous; as a historical record of a past audit, it's accurate but stale.
+
+  **Q2: Wait, and mark stale.** Re-running against integration HEAD now is certifying a moving target — with hourly merges from five lanes, HEAD is obsolete before the multi-session, three-platform soak finishes, and you'd burn scarce resources (including the single-operator Windows path) on a receipt that expires on arrival. Instead: mark the existing receipt explicitly stale/superseded in the record, and schedule the full certification against a *frozen, designated release candidate* — a commit that doesn't move while the 216-cell × 3-platform matrix and soak run. Certification only binds meaningfully to an immutable target.
+
+To resume this session: kimi -r session_222d20d1-6a05-4680-9d7c-37e8036c1131
+kimi rc=0
