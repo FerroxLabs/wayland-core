@@ -182,6 +182,25 @@ function pollsInWindow(trace, startIso, endIso) {
   return ids.size;
 }
 
+
+// ───────────────────────────────────────────────────────────────────────────
+// The token matcher.
+//
+// THE DEFECT THIS SHAPE AVOIDS, measured twice on this program. A console line
+// wrap puts a newline INSIDE the phrase a matcher searches for, so the matcher
+// reports absence while the raw log contains the string several times. One lane
+// wrote that defect up and moved on; the NEXT lane hit the identical defect
+// again. So: strip all whitespace from both sides before comparing. The tokens
+// this checks (`F24_CHANNEL_LEASE=observer`) contain no internal spaces, so
+// stripping cannot create a false positive by joining two unrelated words that
+// were separated only by a space.
+// ───────────────────────────────────────────────────────────────────────────
+
+function containsToken(haystack, token) {
+  const strip = (x) => String(x).replace(/\s+/g, '');
+  return strip(haystack).includes(strip(token));
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // The instrument grader. INCOMPLETE, never LOSS, when the run is not vouchable.
 // ───────────────────────────────────────────────────────────────────────────
@@ -786,6 +805,118 @@ async function leg2(run, windowMs = 20_000) {
   };
 }
 
+
+// ───────────────────────────────────────────────────────────────────────────
+// LEG 3 — THE LEASE TEST. The service is already the owner; a session arrives.
+//
+// This is the leg leg 1 CANNOT be. Leg 1 runs the session on its own, so there
+// is no contention and no lease decision to make — a session alone is the
+// legitimate owner and will poll both before and after the fix. Leg 1 therefore
+// characterises the destructive read; it does not test the exclusion. This does.
+//
+// Three claims, deliberately separated by SOURCE:
+//   * "the loser does not poll"      — from the FIXTURE (another process)
+//   * "the loser is not silent"      — from the LOSER'S OWN stderr, which is
+//                                      the thing under test: whether it TELLS
+//                                      the operator. Using the fixture for this
+//                                      would be impossible; using the binary's
+//                                      log for the polling claim would be the
+//                                      tautology this program keeps measuring.
+//   * "the holder gets EVERYTHING"   — from the FIXTURE, counted per message.
+//     Without this last one a fix that stopped BOTH processes polling would
+//     pass every "no duplicate consumption" check. `max_open == 0` is graded
+//     DENIAL, which is a FAILURE, not a pass.
+// ───────────────────────────────────────────────────────────────────────────
+
+async function leg3(run, n = 8) {
+  run.note('=== LEG 3: service owns the lease, an ordinary session arrives ===');
+
+  const { child: gw, logPath: gwLog } = run.startGateway('l3');
+  if (!(await run.waitForPolls(3, 90_000, 'service l3 warmup'))) {
+    return {
+      leg: 3,
+      verdict: 'INCOMPLETE',
+      instrument: { fault: true, reasons: ['service never polled during warmup'] },
+    };
+  }
+
+  // The session arrives SECOND, which is the scenario: an installed service is
+  // already receiving, and the user opens a normal session for unrelated work.
+  const { child: sess, logPath: sessLog } = run.startSession('l3');
+  sleep(6000); // let it boot and make its lease decision
+
+  const wStart = new Date().toISOString();
+  const submitted = [];
+  for (let i = 0; i < n; i += 1) {
+    const r = await run.submit(`F24CL-L3-${run.runId}-${i}`);
+    submitted.push(r.update_id);
+    run.note(`leg3: submitted ${i + 1}/${n}, ${new Date().toISOString()}`);
+    sleep(2000);
+  }
+  sleep(4000); // let the owner drain the tail
+  const wEnd = new Date().toISOString();
+
+  const report = await run.report();
+  const maxOpen = maxOpenInWindow(report.concurrency_trace, wStart, wEnd);
+  const polls = pollsInWindow(report.concurrency_trace, wStart, wEnd);
+
+  // THE POSITIVE PATH, counted per message.
+  const delivered = report.updates.filter(
+    (u) => submitted.includes(u.update_id) && u.serve_count > 0,
+  );
+
+  const sessText = fs.readFileSync(sessLog, 'utf8');
+  const gwText = fs.readFileSync(gwLog, 'utf8');
+  const loserWasLoud = containsToken(sessText, 'F24_CHANNEL_LEASE=observer');
+  const holderClaimedOwner = containsToken(gwText, 'F24_CHANNEL_LEASE=owner');
+
+  for (const c of [gw, sess]) {
+    try {
+      c.kill('SIGKILL');
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const facts = {
+    fixture_reachable: true,
+    tg_journal_bytes: byteLen(run.tgJournal),
+    core_log_bytes: byteLen(gwLog),
+    expect_boot: true,
+    llm_hit: run.llm.hits > 0,
+    expect_polling: true,
+    polls_total: report.poll_total,
+  };
+  const grade = gradeInstrument(facts);
+
+  let verdict;
+  if (grade.fault) verdict = 'INCOMPLETE';
+  else if (maxOpen === 0) verdict = 'DENIAL — nothing polled; a green here would be manufactured';
+  else if (maxOpen > 1) verdict = 'STILL RACING — two processes polled with the lease in place';
+  else if (delivered.length !== n)
+    verdict = `HOLDER STARVED — only ${delivered.length}/${n} reached the owner`;
+  else if (!loserWasLoud)
+    verdict = 'SILENT LOSER — exactly one poller, but the other said nothing (a NEW silent failure)';
+  else verdict = 'LEASE HOLDS — one poller, holder got everything, loser was loud';
+
+  return {
+    leg: 3,
+    name: 'service owns the lease, an ordinary session arrives',
+    submitted: submitted.length,
+    delivered_to_holder: delivered.length,
+    max_open_in_window: maxOpen,
+    polls_in_window: polls,
+    loser_emitted_observer_token: loserWasLoud,
+    holder_emitted_owner_token: holderClaimedOwner,
+    session_log_bytes: byteLen(sessLog),
+    gateway_log_bytes: byteLen(gwLog),
+    window: [wStart, wEnd],
+    llm_hits: run.llm.hits,
+    instrument: grade,
+    verdict,
+  };
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // LEG 4 — ungraceful release. Only meaningful once a lease exists.
 // ───────────────────────────────────────────────────────────────────────────
@@ -1041,6 +1172,37 @@ async function selfTestStub(results, assert) {
   return results;
 }
 
+/**
+ * Self-test for the token matcher. Third assertion again: the NAIVE matcher
+ * (plain `String.includes`) must be shown to MISS the wrapped case, or this
+ * self-test would pass just as happily on the broken matcher.
+ */
+function selfTestMatcher(assert) {
+  const naive = (h, t) => String(h).includes(t);
+  const TOKEN = 'F24_CHANNEL_LEASE=observer';
+
+  const plain = `prefix F24_CHANNEL_LEASE=observer owner_pid=42 suffix`;
+  // A console line wrap puts a newline INSIDE the token. Measured twice on this
+  // program; the second time because the first sighting was documented instead
+  // of repaired.
+  const wrapped = `prefix F24_CHANNEL_LE\nASE=observer owner_pid=42 suffix`;
+  const absent = `prefix F24_CHANNEL_LEASE=owner owner_pid=42 suffix`;
+
+  assert(
+    'matcher known-positive: an unwrapped token is found',
+    containsToken(plain, TOKEN),
+  );
+  assert(
+    'matcher known-negative: a DIFFERENT token (=owner) is not mistaken for =observer',
+    !containsToken(absent, TOKEN),
+  );
+  assert(
+    'the NAIVE matcher would have MISSED it — a wrap inside the token reads as absence',
+    naive(wrapped, TOKEN) === false && containsToken(wrapped, TOKEN) === true,
+    `naive=${naive(wrapped, TOKEN)} robust=${containsToken(wrapped, TOKEN)}`,
+  );
+}
+
 async function runSelfTests() {
   const results = [];
   const assert = (name, cond, detail) => {
@@ -1048,6 +1210,7 @@ async function runSelfTests() {
     process.stdout.write(`${cond ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}\n`);
   };
   selfTest(assert);
+  selfTestMatcher(assert);
   await selfTestStub(results, assert);
   const failed = results.filter((r) => !r.pass);
   process.stdout.write(
@@ -1117,10 +1280,11 @@ async function main() {
     out.build_info = `${bi.stdout}${bi.stderr}`.trim().split('\n').slice(0, 3).join(' | ');
     run.note(`binary: ${out.build_info}`);
 
-    const legs = args.leg === 'all' ? ['1', '2'] : [args.leg];
+    const legs = args.leg === 'all' ? ['1', '2', '3', '4'] : args.leg.split(',');
     for (const l of legs) {
       if (l === '1') out.legs.push(await leg1(run));
       else if (l === '2') out.legs.push(await leg2(run));
+      else if (l === '3') out.legs.push(await leg3(run));
       else if (l === '4') out.legs.push(await leg4(run));
     }
   } catch (e) {
