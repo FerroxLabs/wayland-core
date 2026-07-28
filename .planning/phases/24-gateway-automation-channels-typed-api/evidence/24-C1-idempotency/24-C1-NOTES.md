@@ -178,3 +178,68 @@ one that decides whether the 9-of-10 gap is "missing capability" or "wrong defau
 
 Positive-control discipline: no no-duplicate/no-arrival number is trusted until the sink has
 been shown to record a real arrival in the same run. A universal denial manufactures a green.
+
+---
+
+## Step 4 — MEASURED (hetzner `hz/24-idempotency` @ 5d71b7e3, isolated run)
+
+`cargo test -p wcore-cli --test f24_c1_outbound_idempotency`
+→ `test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`
+Executed count read back = 6, not zero. Status file `WLRC=0` + `WLDONE`.
+
+**The replay really does duplicate.** Mutation M1 (`.expect(2)` → `.expect(1)` at all 4 sites)
+turned all four arrival tests RED and mockito printed the true hit counts:
+
+```
+POST /bot111:AAAA-f24c1-bot-token/sendMessage      idempotency-key: (missing)   ...but received 2
+POST /2010-04-01/Accounts/AC…/Messages.json        idempotency-key: (missing)   ...but received 2
+POST /v18.0/10987654321/messages                   idempotency-key: (missing)   ...but received 2
+POST /api/chat.postMessage   idempotency-key: cron:f24c1-job:1785121776528      ...but received 2
+```
+
+So on Telegram, Twilio SMS and WhatsApp a replayed delivery key produces **two messages at the
+destination and carries no dedupe token**. The `false` is TRUTHFUL. Slack carries the key on
+both attempts — the known-positive holds, which is what makes the other three interpretable.
+
+Mutation M2 (trait default `false` → `true` in `wcore-channels/src/lib.rs:139`) reddened
+exactly the two capability tests and nothing else, proving they read the real adapter → real
+`ChannelManager` → real `EngineJobHandler` chain rather than restating source. Reverted; clean
+re-run back to 6 passed / 0 failed.
+
+## Step 5 — the finding that outranks the one I was sent for
+
+The abandon path's own comment justifies itself as: *"recorded, terminal, and nameable by an
+operator"*. **The code does not implement that.**
+
+- `ledger.rs:214 pending()` filters to `Accepted | Attempted` — `Abandoned` is EXCLUDED.
+- `ledger.rs:223 pending_count()` — same filter, and its doc says *"the number drain publishes"*.
+- `ledger.rs:253 compact()` classes `Abandoned` as terminal history, subject to the
+  `retain_settled` bound — so an abandoned delivery can be **compacted out of the journal**.
+- `DeliveryState::Abandoned` has **no consumer anywhere outside `ledger.rs`** (workspace grep;
+  the other `Abandoned` hits are unrelated types — `CronFireOutcome`, `HookPhaseState`).
+
+Net: the only signal that a delivery was abandoned is one `tracing::warn!`. No gateway verb
+lists it, nothing re-sends it, and the record is eligible for deletion. That is what turns a
+defensible "recorded non-delivery" into an effectively unrecoverable one — and unlike the
+platform limits, it is **entirely inside our code**.
+
+## Step 6 — fix cost is NOT uniform across the nine (this reframes the whole finding)
+
+- **7 of 10 platforms have no idempotency primitive at all** (Telegram Bot API, Twilio
+  Messages, Meta Graph, SMTP, signal-cli, AppleScript iMessage, MS Teams). For these `false`
+  is a permanent, truthful statement about the platform. Not fixable by writing code.
+- **2 of the 9 already put a token on the wire** and are cheap:
+  - **Matrix** — `rest.rs:47` PUTs `…/send/m.room.message/{txn_id}`, which is the Matrix
+    protocol's NATIVE idempotency slot, but `txn_id` comes from
+    `static TXN_COUNTER: AtomicU64 = AtomicU64::new(1)` (`rest.rs:13`) — a process-local
+    counter that **resets to 1 on every restart**, i.e. it does not survive the exact event
+    the ledger exists for.
+  - **Discord** — already sends a dedup `nonce` and reuses it across the in-adapter retry
+    loop (closing HIGH-7), but `next_nonce()` is `{wall-clock-ms:x}-{counter:x}`, documented
+    as deliberately *"distinct across restarts"* — so a post-restart replay gets a new nonce
+    and Discord will not dedupe it.
+- **UNMEASURED HYPOTHESIS, do not grade as a finding:** because Matrix's counter restarts at
+  1, a fresh process reuses txnIds 1,2,3… for DIFFERENT messages. If a homeserver still holds
+  the old txn in its per-access-token cache it would return the original event and silently
+  drop the new message. That is a distinct potential loss path. I did not measure it and it
+  must not be reported as fact.
