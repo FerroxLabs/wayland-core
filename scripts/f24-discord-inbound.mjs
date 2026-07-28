@@ -126,6 +126,13 @@ class Driver {
     this.child = null;
     this.llm = null;
     this.children = [];
+    // Minted per run for this throwaway isolated profile. Without it the
+    // headless host has no keyring and no unlocked vault, so EVERY inbound turn
+    // dies with "Session persistence authority unavailable" AFTER the message
+    // has been admitted and routed — i.e. the inbound path works and the run
+    // still reports zero replies. `f24-c3-h4-polling-race.mjs` and
+    // `f24-inbound.mjs` both set this for the same reason.
+    this.vaultPassphrase = crypto.randomBytes(24).toString('hex');
   }
 
   note(m) {
@@ -253,6 +260,7 @@ class Driver {
       env: {
         ...process.env,
         WAYLAND_HOME: this.home,
+        WAYLAND_VAULT_PASSPHRASE: this.vaultPassphrase,
         RUST_LOG: 'info,wcore_channel_discord=debug',
       },
       detached: false,
@@ -463,6 +471,25 @@ class Driver {
         `${rep.bad_token_identifies} IDENTIFY(s) presented a token the fixture did not mint — auth failure, not inbound loss`,
       );
     }
+    // A turn that was ADMITTED and then died downstream is not inbound loss.
+    // Run 4 of this driver hit exactly this: every message arrived, was
+    // admitted and was routed, and each turn then failed on
+    // "Session persistence authority unavailable" because the headless host had
+    // no unlocked vault. Counted as loss, that would have been published as
+    // "Discord loses 100% of inbound messages" — a false HIGH against a working
+    // inbound path. It is graded INCOMPLETE and the cause is named.
+    const gwLog = fs.existsSync(this.gwLog) ? fs.readFileSync(this.gwLog, 'utf8') : '';
+    const dispatchFailures = (gwLog.match(/inbound turn dispatch failed/g) ?? []).length;
+    if (dispatchFailures > 0) {
+      const cause = /Session persistence authority unavailable/.test(gwLog)
+        ? 'session persistence authority unavailable (no unlocked vault on this host)'
+        : 'see gateway.log';
+      faults.push(
+        `${dispatchFailures} inbound turn(s) were ADMITTED and ROUTED but the turn failed downstream: ${cause}. ` +
+          `The inbound path delivered; this is NOT inbound loss.`,
+      );
+    }
+
     if (rep.max_concurrent_gateway_connections === 0) {
       // Distinguish the two very different zero-states.
       if ((rep.tcp_connections ?? 0) > 0) {
