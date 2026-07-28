@@ -728,17 +728,40 @@ fn escape_case(id: &str) {
         apply.combined()
     );
 
-    // And the escape reached NOTHING: no entry containing it was admitted to
-    // the store. A refusal reported to the operator over a store that took the
-    // content anyway is not a refusal.
+    // And the ESCAPING item reached nothing: it is absent from the store. A
+    // refusal reported to the operator over a store that took the content
+    // anyway is not a refusal.
+    //
+    // Scoped to the escaping item deliberately. These corpora also carry an
+    // innocent, directive-carrying sibling skill, and that one BELONGS in
+    // quarantine — asserting an empty store would demand the product refuse
+    // correct content to pass, which is a test dictating the wrong behaviour.
     let listed = t.run(&["migrate", "quarantined"]);
     listed.assert_no_panic(&case.id);
-    assert_eq!(
-        listed.stdout.matches("reason:").count(),
-        0,
-        "case {id}: an item carrying a root escape was ADMITTED to the \
-         quarantine store:\n{}",
-        listed.stdout
+    let mut checked = 0usize;
+    for link in &case.symlinks {
+        assert!(
+            !link.starts_with('<'),
+            "case {id}: {link} — the link was never created"
+        );
+        // `skills/absolute/escape` -> `skills/absolute`; `skills/hijack` stays.
+        let parts: Vec<&str> = link.split('/').collect();
+        let item = if parts.len() >= 3 {
+            format!("{}/{}", parts[0], parts[1])
+        } else {
+            link.clone()
+        };
+        checked += 1;
+        assert!(
+            !listed.stdout.contains(&format!("from:   {item} ")),
+            "case {id}: the item carrying the root escape ({item}) was ADMITTED \
+             to the quarantine store:\n{}",
+            listed.stdout
+        );
+    }
+    assert!(
+        checked >= 1,
+        "case {id}: no escape link was checked, so this asserted nothing"
     );
 
     // Never followed: the escape targets are real system paths, so their
