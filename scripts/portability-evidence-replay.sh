@@ -137,6 +137,17 @@ replay_windows_script() {
         emit "$KEY" "$EV" "$WIN_HOST" failed "windows-checkout-is-at-$WH-not-the-certified-sha"
         FAILED=$((FAILED + 1)); return
     fi
+    # `powershell -NoProfile -File <missing.ps1>; exit $LASTEXITCODE` exits ZERO.
+    # A replay written without this guard reports `reproduced` for a script that
+    # is not there — the highest-leverage self-passing shape in this program, and
+    # F26-03-C is the measurement that it is live on this very box. So the script
+    # is PROVEN present before it is run, and its absence is a hard failure.
+    ssh -n -o BatchMode=yes "$WIN_HOST" \
+        "powershell -NoProfile -Command \"if (Test-Path -LiteralPath '$WIN_WT\\$WINEV' -PathType Leaf) { exit 0 } else { exit 66 }\"" >> "$LOG" 2>&1
+    if [ $? -ne 0 ]; then
+        emit "$KEY" "$EV" "$WIN_HOST" failed "named-evidence-script-is-absent-on-the-windows-checkout"
+        FAILED=$((FAILED + 1)); return
+    fi
     ssh -n -o BatchMode=yes -o ServerAliveInterval=30 "$WIN_HOST" \
         "powershell -NoProfile -File $WIN_WT\\$WINEV $ARGS; exit \$LASTEXITCODE" >> "$LOG" 2>&1
     RC=$?
