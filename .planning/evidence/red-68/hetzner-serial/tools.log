@@ -1,0 +1,91 @@
+warning: in config file .config/nextest.toml, ignoring unknown configuration key: profile.default.no-tests
+   Compiling serde v1.0.228
+   Compiling serde_json v1.0.150
+   Compiling cipher v0.4.4
+   Compiling getrandom v0.4.2
+   Compiling crossbeam-utils v0.8.21
+   Compiling either v1.16.0
+   Compiling rand_chacha v0.3.1
+   Compiling rand_chacha v0.9.0
+   Compiling rayon-core v1.13.0
+   Compiling md-5 v0.10.6
+   Compiling plotters-backend v0.3.7
+   Compiling ciborium-io v0.2.2
+   Compiling tempfile v3.27.0
+   Compiling uuid v1.23.2
+   Compiling rand v0.10.1
+   Compiling chacha20 v0.9.1
+   Compiling ecb v0.1.2
+   Compiling aes v0.8.4
+   Compiling rand v0.8.6
+   Compiling rand v0.9.4
+   Compiling chacha20poly1305 v0.10.1
+   Compiling cbc v0.1.2
+   Compiling clap_builder v4.6.0
+   Compiling plotters-svg v0.3.7
+   Compiling itertools v0.10.5
+   Compiling which v6.0.3
+   Compiling crossbeam-epoch v0.9.20
+   Compiling ciborium-ll v0.2.2
+   Compiling libseccomp v0.4.0
+   Compiling chrono v0.4.44
+   Compiling serde_urlencoded v0.7.1
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling wcore-compact v0.12.25 (/root/wayland-red68/crates/wcore-compact)
+   Compiling crossbeam-deque v0.8.6
+   Compiling wcore-safety v0.12.25 (/root/wayland-red68/crates/wcore-safety)
+   Compiling rand_distr v0.5.1
+   Compiling reqwest v0.12.28
+   Compiling lopdf v0.42.0
+   Compiling ignore v0.4.25
+   Compiling humantime-serde v1.1.1
+   Compiling cast v0.3.0
+   Compiling calamine v0.36.1
+   Compiling tinytemplate v1.2.1
+   Compiling criterion-plot v0.5.0
+   Compiling rayon v1.12.0
+   Compiling ciborium v0.2.2
+   Compiling wcore-types v0.12.25 (/root/wayland-red68/crates/wcore-types)
+   Compiling wcore-budget v0.12.25 (/root/wayland-red68/crates/wcore-budget)
+   Compiling rusqlite v0.32.1
+   Compiling clap v4.6.1
+   Compiling plotters v0.3.7
+   Compiling serial_test_derive v3.5.0
+   Compiling wcore-egress v0.12.25 (/root/wayland-red68/crates/wcore-egress)
+   Compiling is-terminal v0.4.17
+   Compiling oorandom v11.1.5
+   Compiling anes v0.1.6
+   Compiling serial_test v3.5.0
+   Compiling wcore-repomap v0.12.25 (/root/wayland-red68/crates/wcore-repomap)
+   Compiling criterion v0.5.1
+   Compiling wcore-config v0.12.25 (/root/wayland-red68/crates/wcore-config)
+   Compiling wcore-protocol v0.12.25 (/root/wayland-red68/crates/wcore-protocol)
+   Compiling wcore-sandbox v0.12.25 (/root/wayland-red68/crates/wcore-sandbox)
+   Compiling pdf-extract v0.12.0
+   Compiling wcore-observability v0.12.25 (/root/wayland-red68/crates/wcore-observability)
+   Compiling wcore-memory v0.12.25 (/root/wayland-red68/crates/wcore-memory)
+   Compiling wcore-tools v0.12.25 (/root/wayland-red68/crates/wcore-tools)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.44s
+────────────
+ Nextest run ID 8209c385-6a69-4439-82bd-a4badebb4b06 with nextest profile: default
+    Starting 18 tests across 1 binary
+        PASS [   0.030s] ( 1/18) wcore-tools::bash_sandbox_routing_test ctx_paths_execute_through_injected_session_runtime
+        PASS [   0.322s] ( 2/18) wcore-tools::bash_sandbox_routing_test delegated_mutation_live_sandbox_confines_parent_global_tmp_and_symlink_writes
+        PASS [   0.031s] ( 3/18) wcore-tools::bash_sandbox_routing_test delegated_mutation_refuses_scratch_identity_substitution_before_spawn
+        PASS [   0.474s] ( 4/18) wcore-tools::bash_sandbox_routing_test delegated_mutation_required_live_sandbox_confines_parent_and_descendants
+        PASS [   0.031s] ( 5/18) wcore-tools::bash_sandbox_routing_test delegated_mutation_uses_only_owner_checkout_and_private_scratch
+        PASS [   0.030s] ( 6/18) wcore-tools::bash_sandbox_routing_test denylist_still_refuses_before_sandbox_dispatch
+        PASS [   0.041s] ( 7/18) wcore-tools::bash_sandbox_routing_test env_and_cwd_are_honored_through_sandbox
+        PASS [   0.030s] ( 8/18) wcore-tools::bash_sandbox_routing_test exec_time_gate_contained_policy_no_enforcing_backend_refuses
+        PASS [   0.030s] ( 9/18) wcore-tools::bash_sandbox_routing_test exec_time_gate_streaming_contained_policy_no_enforcing_backend_refuses
+        PASS [   0.033s] (10/18) wcore-tools::bash_sandbox_routing_test exec_time_gate_trusted_policy_passes_through
+        PASS [   0.033s] (11/18) wcore-tools::bash_sandbox_routing_test execute_failing_command_reports_error
+        PASS [   0.032s] (12/18) wcore-tools::bash_sandbox_routing_test execute_routes_through_sandbox_and_returns_stdout
+        PASS [   0.033s] (13/18) wcore-tools::bash_sandbox_routing_test execute_streaming_failing_command_reports_exit
+        PASS [   0.034s] (14/18) wcore-tools::bash_sandbox_routing_test execute_streaming_routes_through_sandbox_and_yields_chunks
+        PASS [   0.032s] (15/18) wcore-tools::bash_sandbox_routing_test execute_streaming_with_ctx_routes_through_sandbox
+        PASS [   0.063s] (16/18) wcore-tools::bash_sandbox_routing_test execute_with_ctx_honors_cancellation
+        PASS [   0.033s] (17/18) wcore-tools::bash_sandbox_routing_test execute_with_ctx_routes_through_sandbox
+        PASS [   1.025s] (18/18) wcore-tools::bash_sandbox_routing_test full_remote_bash_git_object_store_secret_is_denied
+────────────
+     Summary [   2.341s] 18 tests run: 18 passed, 0 skipped

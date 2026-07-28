@@ -1,0 +1,347 @@
+### wcore-agent::typed_execution_policy_e2e_test typed_bypass_executes_bash_inside_required_sandbox
+    thread 'typed_bypass_executes_bash_inside_required_sandbox' (10925) panicked at crates/wcore-agent/tests/typed_execution_policy_e2e_test.rs:181:5:
+    Bash must execute through the required sandbox runtime
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli sandbox_cmd::tests::sandbox_context_carries_the_contained_profile_and_the_selected_registry
+    thread 'sandbox_cmd::tests::sandbox_context_carries_the_contained_profile_and_the_selected_registry' (13677) panicked at crates/wcore-cli/src/sandbox_cmd.rs:300:9:
+    assertion `left != right` failed: the placeholder registry must have been replaced by the selected one
+    left: "fail_closed"
+    right: "fail_closed"
+
+### wcore-cli::deterministic_openai_loop packaged_core_cancels_an_active_stream
+    thread 'packaged_core_cancels_an_active_stream' (18206) panicked at crates/wcore-cli/tests/deterministic_openai_loop.rs:377:5:
+    expected exactly [CostMissing] after a mid-turn cancellation, got [OverTime { observed_secs: 3.001422813, budget_secs: 3.0 }]. wall_time 3.180200471s, cancellation_requested true, final_text ""
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::deterministic_openai_loop packaged_f04_run_is_repeatable_and_content_addressed
+    thread 'packaged_f04_run_is_repeatable_and_content_addressed' (18333) panicked at crates/wcore-cli/tests/deterministic_openai_loop.rs:603:6:
+    seal exact F04 Core artifact: Probe("expected source identity is not 40 lowercase hexadecimal characters")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::f14_sigkill_recovery recovered_approval_approve_executes_effect_once_and_continues_once
+    thread 'recovered_approval_approve_executes_effect_once_and_continues_once' (18972) panicked at crates/wcore-cli/tests/f14_sigkill_recovery.rs:1712:47:
+    read recovered approval marker: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::f14_sigkill_recovery sigkill_during_tool_execution_requires_reconciliation_without_reexecution
+    thread 'sigkill_during_tool_execution_requires_reconciliation_without_reexecution' (19427) panicked at crates/wcore-cli/tests/f14_sigkill_recovery.rs:1749:9:
+    timed out waiting for tool marker /tmp/.tmpiB4hUk/f14-tool-started.log
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_absolute_symlink_escape_is_refused_and_nothing_outside_changed
+    thread 'hostile_absolute_symlink_escape_is_refused_and_nothing_outside_changed' (20548) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_casefold_collision_keeps_both_peer_items_accounted
+    thread 'hostile_casefold_collision_keeps_both_peer_items_accounted' (20551) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_conservation_invariant_balances_across_every_corpus
+    thread 'hostile_conservation_invariant_balances_across_every_corpus' (20565) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:1115:10:
+    python3: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_data_that_merely_looks_executable_is_not_contained
+    thread 'hostile_data_that_merely_looks_executable_is_not_contained' (20569) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_deeply_nested_configuration_is_named_not_panicked
+    thread 'hostile_deeply_nested_configuration_is_named_not_panicked' (20581) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_directory_symlink_escape_is_refused_and_nothing_outside_changed
+    thread 'hostile_directory_symlink_escape_is_refused_and_nothing_outside_changed' (20590) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_env_credential_reports_its_name_and_never_its_value
+    thread 'hostile_env_credential_reports_its_name_and_never_its_value' (20599) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_every_case_declares_a_legitimate_outcome_and_what_it_attacks
+    thread 'hostile_every_case_declares_a_legitimate_outcome_and_what_it_attacks' (20607) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:438:10:
+    python3: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_exact_name_collision_is_reported_and_never_silently_overwrites
+    thread 'hostile_exact_name_collision_is_reported_and_never_silently_overwrites' (20617) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_excessive_item_count_hits_the_declared_refusal
+    thread 'hostile_excessive_item_count_hits_the_declared_refusal' (20626) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_executable_claiming_to_be_data_is_still_contained
+    thread 'hostile_executable_claiming_to_be_data_is_still_contained' (20635) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_generator_can_go_red
+    thread 'hostile_generator_can_go_red' (20644) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:527:10:
+    python3: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_manifest_payload_mismatch_is_refused_by_verification
+    thread 'hostile_manifest_payload_mismatch_is_refused_by_verification' (20653) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_name_distinctions_survive_on_this_platform_or_the_generator_says_so
+    thread 'hostile_name_distinctions_survive_on_this_platform_or_the_generator_says_so' (20662) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_normalform_collision_keeps_both_peer_items_accounted
+    thread 'hostile_normalform_collision_keeps_both_peer_items_accounted' (20671) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_oversized_member_hits_the_declared_refusal
+    thread 'hostile_oversized_member_hits_the_declared_refusal' (20679) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_refused_restore_leaves_an_occupied_target_byte_identical
+    thread 'hostile_refused_restore_leaves_an_occupied_target_byte_identical' (20689) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_secret_in_a_memory_note_never_reaches_a_plan_or_report
+    thread 'hostile_secret_in_a_memory_note_never_reaches_a_plan_or_report' (20697) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_secret_in_a_persona_body_never_reaches_a_plan_or_report
+    thread 'hostile_secret_in_a_persona_body_never_reaches_a_plan_or_report' (20709) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_secret_in_a_skill_body_is_contained_and_never_reported
+    thread 'hostile_secret_in_a_skill_body_is_contained_and_never_reported' (20715) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_traversal_symlink_escape_is_refused_and_nothing_outside_changed
+    thread 'hostile_traversal_symlink_escape_is_refused_and_nothing_outside_changed' (20728) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_truncated_configuration_is_named_not_panicked
+    thread 'hostile_truncated_configuration_is_named_not_panicked' (20731) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::portability_hostile_corpus hostile_wrong_typed_configuration_is_named_not_panicked
+    thread 'hostile_wrong_typed_configuration_is_named_not_panicked' (20744) panicked at crates/wcore-cli/tests/portability_hostile_corpus.rs:126:10:
+    python3 must be available to materialise a hostile corpus: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-cli::sandbox_activeness sandbox_exec_confines_a_write_that_escapes_the_workspace
+    thread 'sandbox_exec_confines_a_write_that_escapes_the_workspace' (21074) panicked at crates/wcore-cli/tests/sandbox_activeness.rs:145:5:
+    backend `fail_closed` reported available, but the child never ran, so containment cannot be evidenced from this execution. stdout=Refused: shell is unavailable because the active sandbox backend cannot enforce secret-read-deny for this workspace.
+    stderr=wayland-core sandbox: sandboxed command reported an error
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-eval-scenarios pty_capture::tests::direct_child_exit_reaps_pty_descendant_group
+    thread 'pty_capture::tests::direct_child_exit_reaps_pty_descendant_group' (24386) panicked at crates/wcore-eval-scenarios/src/pty_capture.rs:796:9:
+    PTY descendant pid=24390 or listener on 127.0.0.1:42017 survived cleanup
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-eval-scenarios pty_capture::tests::drop_reaps_live_pty_process_group
+    thread 'pty_capture::tests::drop_reaps_live_pty_process_group' (24393) panicked at crates/wcore-eval-scenarios/src/pty_capture.rs:796:9:
+    PTY descendant pid=24397 or listener on 127.0.0.1:39083 survived cleanup
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-eval-scenarios::runner_contracts assertion_failure_still_reaps_owned_descendant_listener
+    thread 'assertion_failure_still_reaps_owned_descendant_listener' (24940) panicked at crates/wcore-eval-scenarios/tests/runner_contracts.rs:235:5:
+    owned descendant pid=24943 still listens on 127.0.0.1:42799 (last published heartbeat 0)
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-eval-scenarios::runner_contracts cancellation_reaps_owned_descendant_listener
+    thread 'cancellation_reaps_owned_descendant_listener' (24945) panicked at crates/wcore-eval-scenarios/tests/runner_contracts.rs:235:5:
+    owned descendant pid=24948 still listens on 127.0.0.1:43171 (last published heartbeat 0)
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-eval-scenarios::runner_contracts direct_child_early_exit_reaps_owned_descendant_listener
+    thread 'direct_child_early_exit_reaps_owned_descendant_listener' (24950) panicked at crates/wcore-eval-scenarios/tests/runner_contracts.rs:235:5:
+    owned descendant pid=24953 still listens on 127.0.0.1:40071 (last published heartbeat 0)
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-eval-scenarios::runner_contracts dropping_runner_future_reaps_owned_descendant_listener
+    thread 'dropping_runner_future_reaps_owned_descendant_listener' (24998) panicked at crates/wcore-eval-scenarios/tests/runner_contracts.rs:746:5:
+    dropping the runner future left descendant pid=25001 listening on 127.0.0.1:42999
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-eval-scenarios::runner_contracts normal_exit_reaps_owned_descendant_listener
+    thread 'normal_exit_reaps_owned_descendant_listener' (25112) panicked at crates/wcore-eval-scenarios/tests/runner_contracts.rs:235:5:
+    owned descendant pid=25115 still listens on 127.0.0.1:38691 (last published heartbeat 0)
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-eval-scenarios::runner_contracts timeout_reaps_owned_descendant_listener
+    thread 'timeout_reaps_owned_descendant_listener' (25122) panicked at crates/wcore-eval-scenarios/tests/runner_contracts.rs:235:5:
+    owned descendant pid=25125 still listens on 127.0.0.1:40321 (last published heartbeat 12)
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-eval-scenarios::runner_contracts outer_deadline_reaps_owned_descendant_listener
+    thread 'outer_deadline_reaps_owned_descendant_listener' (25127) panicked at crates/wcore-eval-scenarios/tests/runner_contracts.rs:235:5:
+    owned descendant pid=25130 still listens on 127.0.0.1:42723 (last published heartbeat 49)
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-exec-backend orphan::tests::the_real_process_table_passes_its_own_self_test_on_this_host
+    thread 'orphan::tests::the_real_process_table_passes_its_own_self_test_on_this_host' (25498) panicked at crates/wcore-exec-backend/src/orphan.rs:581:9:
+    the process table could not be enumerated on this host: CannotDetermine { reason: "could not run `ps` to enumerate processes: No such file or directory (os error 2)" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-exec-backend orphan::tests::the_scanner_does_not_count_its_own_process
+    thread 'orphan::tests::the_scanner_does_not_count_its_own_process' (25499) panicked at crates/wcore-exec-backend/src/orphan.rs:678:62:
+    called `Result::unwrap()` on an `Err` value: Exec("could not run `ps` to enumerate processes: No such file or directory (os error 2)")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-exec-backend::conformance_matrix the_local_backend_is_always_exercised_because_it_needs_nothing_external
+    thread 'the_local_backend_is_always_exercised_because_it_needs_nothing_external' (25572) panicked at crates/wcore-exec-backend/tests/conformance_matrix.rs:98:5:
+    local conformance failures: [
+    CheckResult {
+    name: "an orphan scan enumerates rather than assuming, and finds nothing for an unused nonce",
+
+### wcore-exec-backend::conformance_matrix every_reference_backend_passes_the_same_harness_or_reports_why_it_did_not
+    thread 'every_reference_backend_passes_the_same_harness_or_reports_why_it_did_not' (25576) panicked at crates/wcore-exec-backend/tests/conformance_matrix.rs:71:5:
+    exercised backends failed the shared harness: [
+    "local: an orphan scan enumerates rather than assuming, and finds nothing for an unused nonce (enumerated=false found=0 via live-task registry only; the process table could not be enumerated (execution failed: could not run `ps` to enumerate processes: No such file or directory (os error 2)))",
+    ]
+
+### wcore-exec-backend orphan::tests::the_local_scanner_finds_a_descendant_that_was_deliberately_left_behind
+    thread 'orphan::tests::the_local_scanner_finds_a_descendant_that_was_deliberately_left_behind' (25656) panicked at crates/wcore-exec-backend/src/orphan.rs:649:53:
+    called `Result::unwrap()` on an `Err` value: Exec("could not run `ps` to enumerate processes: No such file or directory (os error 2)")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-exec-backend::fail_closed_matrix the_local_scan_finds_an_orphan_that_no_registry_remembers
+    thread 'the_local_scan_finds_an_orphan_that_no_registry_remembers' (25886) panicked at crates/wcore-exec-backend/tests/fail_closed_matrix.rs:588:5:
+    the local surface must be enumerable on this host
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+    thread 'checked_corpus_matches_real_serializers_byte_for_byte' (28396) panicked at crates/wcore-protocol/tests/desktop_contract_corpus.rs:203:22:
+    checked-in Desktop contract corpus must match the generator: Custom { kind: Other, error: "Desktop contract corpus drift: missing=[], extra=[], drifted=[\"adversarial/events/fixture-mismatch.jsonl\", \"adversarial/events/schema-mismatch.jsonl\", \"adversarial/events/version-mismatch.jsonl\", \"events/ready.json\", \"manifest.json\"]; run `wcore-contract generate`" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-sandbox backends::bwrap::tests::required_live_bwrap_retained_cwd_enforcement
+    thread 'backends::bwrap::tests::required_live_bwrap_retained_cwd_enforcement' (31161) panicked at crates/wcore-sandbox/src/backends/bwrap.rs:904:9:
+    required live bwrap must be installed and usable
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-sandbox backends::bwrap::tests::required_live_bwrap_admission
+    thread 'backends::bwrap::tests::required_live_bwrap_admission' (31159) panicked at crates/wcore-sandbox/src/backends/bwrap.rs:813:9:
+    required live bwrap must be installed and usable
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-sandbox backends::bwrap::tests::required_live_bwrap_hard_containment_mint_and_drift
+    thread 'backends::bwrap::tests::required_live_bwrap_hard_containment_mint_and_drift' (31164) panicked at crates/wcore-sandbox/src/backends/bwrap.rs:851:9:
+    required live bwrap must be installed and usable
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-sandbox::hard_process_containment qualified_hard_containment_backend_preflight
+    thread 'qualified_hard_containment_backend_preflight' (31324) panicked at crates/wcore-sandbox/tests/hard_process_containment.rs:96:5:
+    required live hard-containment backend (bubblewrap) must be installed and usable
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-sandbox::process_capture linux::cancellation_kills_the_owned_process_tree
+    thread 'linux::cancellation_kills_the_owned_process_tree' (32640) panicked at crates/wcore-sandbox/tests/process_capture.rs:17:9:
+    captured process descendant 32643 survived tree cleanup
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-sandbox::process_capture linux::stdout_flood_is_bounded_and_kills_descendant
+    thread 'linux::stdout_flood_is_bounded_and_kills_descendant' (32738) panicked at crates/wcore-sandbox/tests/process_capture.rs:17:9:
+    captured process descendant 32741 survived tree cleanup
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-swarm::dispatch_smoke dispatches_4_noop_workers_in_parallel
+    thread 'dispatches_4_noop_workers_in_parallel' (35858) panicked at crates/wcore-swarm/tests/dispatch_smoke.rs:33:9:
+    worker 46fffb997c774d0ea6c396a3de80adeb-0 failed: Failed("sandbox backend fail_closed cannot enforce delegated read denial") (stderr: )
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-swarm::dispatch_smoke heartbeat_symlink_cannot_make_parent_disclose_host_data_or_hang
+    thread 'heartbeat_symlink_cannot_make_parent_disclose_host_data_or_hang' (36209) panicked at crates/wcore-swarm/tests/dispatch_smoke.rs:405:5:
+    sandbox backend fail_closed cannot enforce delegated read denial
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-swarm::dispatch_smoke malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic
+    thread 'malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic' (36419) panicked at crates/wcore-swarm/tests/dispatch_smoke.rs:369:5:
+    sandbox backend fail_closed cannot enforce delegated read denial
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-swarm::dispatch_smoke public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state
+    thread 'public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state' (36639) panicked at crates/wcore-swarm/tests/dispatch_smoke.rs:94:5:
+    assertion `left == right` failed: WorkerHandle { worker_id: "58acb2c342a34acbafdba7d71b3b0c3c-0", branch: "swarm/authority/58acb2c342a34acbafdba7d71b3b0c3c-0", status: Failed("sandbox backend fail_closed cannot enforce delegated read denial"), stdout: "", stderr: "", duration: 105.167215ms }
+    left: Failed("sandbox backend fail_closed cannot enforce delegated read denial")
+    right: Succeeded
+
+### wcore-swarm::heartbeat_test worker_writes_heartbeat_during_long_running_task
+    thread 'worker_writes_heartbeat_during_long_running_task' (36857) panicked at crates/wcore-swarm/tests/heartbeat_test.rs:91:10:
+    worker wrote a heartbeat
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-swarm::swarm_worker_failure_reporting_e2e swarm_reports_failed_worker_status_and_succeeding_workers_complete
+    thread 'swarm_reports_failed_worker_status_and_succeeding_workers_complete' (37385) panicked at crates/wcore-swarm/tests/swarm_worker_failure_reporting_e2e.rs:31:9:
+    expected Succeeded, got Failed("sandbox backend fail_closed cannot enforce delegated read denial") (worker: 46ca85c5a4d54200b1f82feff3eb9d8c-0, stderr: )
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-swarm worktree::tests::linux::status_output_cap_kills_git_descendant
+    thread 'worktree::tests::linux::status_output_cap_kills_git_descendant' (37453) panicked at crates/wcore-swarm/src/worktree_tests/linux.rs:634:5:
+    process 37462 survived cleanup
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-swarm worktree::tests::linux::worktree_add_timeout_kills_tree_and_reports_preserved_residual
+    thread 'worktree::tests::linux::worktree_add_timeout_kills_tree_and_reports_preserved_residual' (37652) panicked at crates/wcore-swarm/src/worktree_tests/linux.rs:634:5:
+    process 37660 survived cleanup
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-swarm::worker_runtime_limits aborting_dispatch_future_kills_tree_and_releases_workspace
+    thread 'aborting_dispatch_future_kills_tree_and_releases_workspace' (38012) panicked at crates/wcore-swarm/tests/worker_runtime_limits.rs:271:9:
+    worker never started
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-swarm::worker_runtime_limits cancellation_kills_worker_descendant_and_releases_owned_workspace
+    thread 'cancellation_kills_worker_descendant_and_releases_owned_workspace' (38082) panicked at crates/wcore-swarm/tests/worker_runtime_limits.rs:271:9:
+    worker never started
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-swarm::worker_runtime_limits timeout_releases_workspace_and_capacity_before_return
+    thread 'timeout_releases_workspace_and_capacity_before_return' (38869) panicked at crates/wcore-swarm/tests/worker_runtime_limits.rs:81:5:
+    assertion `left == right` failed
+    left: Failed("sandbox backend fail_closed cannot enforce delegated read denial")
+    right: TimedOut
+
+### wcore-swarm::worker_runtime_limits workspace_growth_observer_kills_worker_releases_reservation_and_admits_successor
+    thread 'workspace_growth_observer_kills_worker_releases_reservation_and_admits_successor' (39292) panicked at crates/wcore-swarm/tests/worker_runtime_limits.rs:129:5:
+    sandbox backend fail_closed cannot enforce delegated read denial
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-swarm::worker_runtime_limits multi_worker_output_exhaustion_fails_without_retaining_buffers
+    thread 'multi_worker_output_exhaustion_fails_without_retaining_buffers' (38994) panicked at crates/wcore-swarm/tests/worker_runtime_limits.rs:46:13:
+    sandbox backend fail_closed cannot enforce delegated read denial
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-swarm::worker_runtime_limits cleanup_preserves_live_worker_until_owner_releases_it
+    thread 'cleanup_preserves_live_worker_until_owner_releases_it' (38152) panicked at crates/wcore-swarm/tests/worker_runtime_limits.rs:271:9:
+    worker never started
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-tools::bash_sandbox_routing_test delegated_mutation_required_live_sandbox_confines_parent_and_descendants
+    thread 'delegated_mutation_required_live_sandbox_confines_parent_and_descendants' (41621) panicked at crates/wcore-tools/tests/bash_sandbox_routing_test.rs:393:5:
+    required live delegated-mutation sandbox is unavailable on this host
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+### wcore-swarm::worker_runtime_limits many_entry_accounting_does_not_block_cancellation
+    thread 'many_entry_accounting_does_not_block_cancellation' (42162) panicked at crates/wcore-swarm/tests/worker_runtime_limits.rs:515:9:
+    worker never became ready
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    ────────────
+

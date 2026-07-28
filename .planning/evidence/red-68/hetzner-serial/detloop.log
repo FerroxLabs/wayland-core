@@ -1,0 +1,24 @@
+warning: in config file .config/nextest.toml, ignoring unknown configuration key: profile.default.no-tests
+   Compiling wcore-cli v0.12.25 (/root/wayland-red68/crates/wcore-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.93s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 4930dded-a94a-4681-a9cb-3393d25f8404 with nextest profile: default
+    Starting 13 tests across 1 binary
+        PASS [   2.302s] ( 1/13) wcore-cli::deterministic_openai_loop packaged_core_blocks_a_denied_write
+        PASS [   2.280s] ( 2/13) wcore-cli::deterministic_openai_loop packaged_core_calls_a_streamable_http_mcp_tool
+        PASS [   2.059s] ( 3/13) wcore-cli::deterministic_openai_loop packaged_core_cancels_an_active_stream
+        PASS [   2.225s] ( 4/13) wcore-cli::deterministic_openai_loop packaged_core_completes_a_scripted_openai_turn
+        PASS [   2.345s] ( 5/13) wcore-cli::deterministic_openai_loop packaged_core_executes_an_approved_write
+        PASS [   3.918s] ( 6/13) wcore-cli::deterministic_openai_loop packaged_core_exhausts_a_real_read_timeout
+        PASS [   2.175s] ( 7/13) wcore-cli::deterministic_openai_loop packaged_core_preserves_declared_duplicate_deltas
+        PASS [   2.747s] ( 8/13) wcore-cli::deterministic_openai_loop packaged_core_recovers_after_a_bounded_429
+        PASS [   2.877s] ( 9/13) wcore-cli::deterministic_openai_loop packaged_core_recovers_after_a_real_read_timeout
+        PASS [   2.731s] (10/13) wcore-cli::deterministic_openai_loop packaged_core_recovers_after_a_truncated_stream
+        PASS [   3.815s] (11/13) wcore-cli::deterministic_openai_loop packaged_core_recovers_after_two_503_responses
+        PASS [   2.456s] (12/13) wcore-cli::deterministic_openai_loop packaged_core_satisfies_a_hidden_repository_outcome
+        SLOW [> 30.000s] (─────) wcore-cli::deterministic_openai_loop packaged_f04_run_is_repeatable_and_content_addressed
+        PASS [  57.523s] (13/13) wcore-cli::deterministic_openai_loop packaged_f04_run_is_repeatable_and_content_addressed
+────────────
+     Summary [  89.456s] 13 tests run: 13 passed (1 slow), 0 skipped

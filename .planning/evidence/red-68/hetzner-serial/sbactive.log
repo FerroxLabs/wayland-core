@@ -1,0 +1,12 @@
+warning: in config file .config/nextest.toml, ignoring unknown configuration key: profile.default.no-tests
+   Compiling wcore-cli v0.12.25 (/root/wayland-red68/crates/wcore-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.58s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 7cf96bb5-8130-4ad4-a681-ad2970330d19 with nextest profile: default
+    Starting 2 tests across 1 binary
+        PASS [   0.225s] (1/2) wcore-cli::sandbox_activeness sandbox_exec_confines_a_write_that_escapes_the_workspace
+        PASS [   0.072s] (2/2) wcore-cli::sandbox_activeness sandbox_status_never_reports_a_containment_bypass
+────────────
+     Summary [   0.297s] 2 tests run: 2 passed, 0 skipped
