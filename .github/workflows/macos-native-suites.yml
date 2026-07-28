@@ -41,10 +41,22 @@
 name: macOS native suites (Phase 28)
 
 on:
-  # Dispatch-only. `workflow_dispatch` already selects the branch to run on, so
-  # there is deliberately no `ref` input: feeding a dispatch input into
+  # `workflow_dispatch` already selects the branch to run on, so there is
+  # deliberately no `ref` input: feeding a dispatch input into
   # `actions/checkout`'s `ref:` is a ref-injection surface for no added ability.
+  #
+  # NOTE: the REST API resolves a dispatchable workflow by name off the DEFAULT
+  # branch, so `gh workflow run` returns 404 for a workflow that exists only on
+  # a topic branch. The scoped `push` trigger below is what lets this run before
+  # it has ever reached the default branch. Paths are narrowed to the sandbox
+  # surface it certifies so it does not fire on unrelated lane pushes.
   workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/macos-native-suites.yml'
+      - 'crates/wcore-sandbox/src/**'
+      - 'crates/wcore-sandbox/tests/hard_process_containment_macos.rs'
+      - 'crates/wcore-sandbox/tests/live_integrity_macos.rs'
 
 permissions:
   contents: read
