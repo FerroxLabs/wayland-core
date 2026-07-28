@@ -1,0 +1,58 @@
+=== f25h SSH orphan control pair ===
+controller : Ubuntu-2404-noble-amd64-base (eded23e3526d4d74a642b0904ed8fc71)
+far end    : 43108d373d1b (container, full POSIX: setsid + procps ps -eo)
+binary     : wayland-core 0.12.25  sha256=98acb016681a315ccd62fa6e7c48858e490fd3648b37ad9b6af2c934c2362a2e
+commit     : 2da46485ca008284863ec1de2ec3df72a4205b05
+date       : 2026-07-28T11:44:26Z
+
+--- LEG 1: NEGATIVE CONTROL — a nonce nothing carries ---
+nonce: f25h-unused-1785239066
+INDEPENDENT-ENUM[negative]: rows-matching-nonce=0
+SCAN[negative] ssh count=0 (MEASURED) exit=0
+SCAN[negative] ssh method=remote `ps -eo pid,args` filtered on the task nonce
+SCAN[negative] ssh mechanism={"mechanism": "best_effort", "detail": "a remote process group killed over the same ssh transport. ProcessTreeMechanism has NO variant that crosses an ssh conne
+F25H-SSH-NEGATIVE-EXIT: 0 (0 required — nothing to find)
+
+--- LEG 2: POSITIVE CONTROL — a REAL orphan the product itself leaves ---
+How it is produced: the remote runner starts work with setsid, in its own
+remote session. The module doc says a remote child that calls setsid
+survives a dead controller. So the controller is killed -9 mid-task and the
+remote work is left genuinely orphaned. Nothing is planted.
+nonce: f25h-orphan-1785239067
+PRE-STATE independent enum: 0
+controller pid=2443917 launched; letting the remote session establish
+remote session established? yes
+controller KILLED -9 (pid 2443917) — the connection is gone, the work is not
+
+INDEPENDENT-ENUM[positive] rows:
+     1166    1160 sh -s -- f25h-orphan-1785239067  sleep 600
+INDEPENDENT-ENUM[positive]: rows-matching-nonce=1
+far-end .pid record: 1170
+SCAN[positive] ssh count=2 (MEASURED) exit=1
+SCAN[positive] ssh method=remote `ps -eo pid,args` filtered on the task nonce
+SCAN[positive] ssh mechanism={"mechanism": "best_effort", "detail": "a remote process group killed over the same ssh transport. ProcessTreeMechanism has NO variant that crosses an ssh conne
+SCAN[positive] ssh row=session-leader 1170 still alive for nonce f25h-orphan-1785239067
+SCAN[positive] ssh row=1166    1160 sh -s -- f25h-orphan-1785239067  sleep 600
+F25H-SSH-POSITIVE-EXIT: 1 (NON-ZERO required — a found orphan must be a gate)
+
+F25H-SSH-SCANNER-AGREEMENT-PLANTED: AGREE scanner=2 manual=1
+
+--- LEG 3: after cleanup, the SAME nonce must measure zero ---
+(a scan that says 1 forever is as blind as one that says 0 forever)
+recorded session leader on the far end: pid=1170
+independent liveness of that pid BEFORE the reap: alive
+INDEPENDENT-ENUM[after-reap]: rows-matching-nonce=0; session-leader pid 1170 is dead
+NOTE: the nonce grep read 0 even while pid 1170 was ALIVE, because the
+      orphan is the task's own argv (`sleep 600`) and carries no nonce.
+      The scanner's .pid signal saw it and the grep did not — so the grep
+      alone is the WEAKER instrument here, and is not sufficient on its own.
+SCAN[after-reap] ssh count=0 (MEASURED) exit=0
+SCAN[after-reap] ssh method=remote `ps -eo pid,args` filtered on the task nonce
+SCAN[after-reap] ssh mechanism={"mechanism": "best_effort", "detail": "a remote process group killed over the same ssh transport. ProcessTreeMechanism has NO variant that crosses an ssh conne
+F25H-SSH-AFTER-REAP-EXIT: 0 (0 required)
+
+--- LEG 4: NOT MEASURED is still reachable and is never rendered as zero ---
+(with no target configured the surface must refuse to report a number)
+SCAN[no-target] ssh count=NOT MEASURED reason=the surface could not be enumerated (WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned), so no count exists — this is NOT zero orphans
+
+=== ledger written to /root/f25h-evidence/25h-ssh-orphan-ledger.txt ===

@@ -1,0 +1,49 @@
+=== negative control isolating the NODE key ===
+date: 2026-07-28T11:43:11Z   node: SeanDesktop
+
+Build an alternate state dir that is a byte copy of the node's real one,
+then remove ONLY keys/node.key so a new node identity is minted while the
+backend signing key stays the same.
+  local.key identical: True
+  node.key present in alt: False
+
+Mint a receipt there. Same machine, same backend key, DIFFERENT node key.
+  task:        f25-reference
+  backend:     local
+  transport:   Local via localhost
+  terminal:    Success
+  input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+  workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+  artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+  hibernation: NotApplicable
+  wall ms:     52
+  receipt:     C:\ferrox-25h\rec-altnode.json
+
+good receipt: backend d01d8180bbac  node fa808c4de95c
+alt  receipt: backend d01d8180bbac  node 8462f515c20e
+SETUP OK — the backend key is IDENTICAL and only the node key differs,
+  so any refusal below can only be about the node identity.
+
+--- POSITIVE: the paired identity's receipt, verified in the alt state dir ---
+(same backend key, and the pinned record says fa808c4de95c...)
+  receipt     C:\ferrox-25h\rec-good.json
+  backend     local
+  node        windesk
+  attribution HOLDS — work attributed to node 'windesk' (key fa808c4de95c)
+  EXIT=0
+
+--- NEGATIVE: the alt-node receipt against the SAME pinned record ---
+  receipt     C:\ferrox-25h\rec-altnode.json
+  backend     local
+  node        windesk
+  attribution BROKEN — receipt attributes work to node 'windesk' (key 8462f515c20e) but the pinned record for 'windesk' carries key fa808c4de95c
+  wayland-core node: attribution BROKEN: receipt attributes work to node 'windesk' (key 8462f515c20e) but the pinned record for 'windesk' carries key fa808c4de95c
+  EXIT=1
+
+F25H-C2-ATTRIBUTION-NODE-DISCRIMINATION: PASS
+  positive exit=0, negative exit=1, and the refusal names the NODE
+  key mismatch rather than a missing backend key. Attribution therefore
+  discriminates on node identity, which is what the criterion asks.
+
+alt state dir removed: yes
+=== ledger: /root/f25h-evidence/25h-attribution-negative.txt ===

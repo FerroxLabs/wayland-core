@@ -1,0 +1,31 @@
+=== f25h cleanup, 2026-07-28T11:45:33Z ===
+
+--- controller (hetzner-dsm) ---
+containers named f25h-*: 0  (0 required)
+images named f25h-*    : 0  (0 required)
+25-03 leftover container f25-03-farnode: 0 (0 = removed; it was left running from 2026-07-27)
+iptables partition rule present? no
+OUTPUT rules mentioning the node IP: 0  (0 required)
+lane key material and scratch state removed: yes
+  (the lane's dedicated ssh key /root/f25h/id_f25h is gone with it)
+evidence retained at /root/f25h-evidence: 37 files
+
+--- node (SeanDesktop) ---
+task roots under /tmp/wayland-f25-*: 6  (0 required)
+processes carrying f25hwin- (Win32): 0  (0 required)
+  SUCCESS: The scheduled task "ferrox25hBuild" was successfully deleted.
+  SUCCESS: The scheduled task "ferrox25hPlant" was successfully deleted.
+scheduled tasks named ferrox25h*: 0  (0 required)
+OTHER lanes' tasks left alone: ferroxP21A
+
+node registry file the lane wrote (must be absent, it did not exist before):
+  absent
+backup file left behind? no
+
+--- what is DELIBERATELY retained, and why ---
+C:\ferrox-25h on the node: the two binaries and the build clone. Retained so
+  this evidence is re-runnable; it is a directory this lane created and it
+  belongs to no other lane. Size: 2.9 GB
+C:\ferrox-win (lane 26's tree) was never written to — only read by git clone.
+
+=== cleanup ledger: /root/f25h-evidence/25h-cleanup.txt ===

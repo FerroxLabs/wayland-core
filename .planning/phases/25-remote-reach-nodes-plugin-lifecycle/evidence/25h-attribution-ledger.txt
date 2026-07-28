@@ -1,0 +1,82 @@
+=== f25h — authority attribution across two physical hosts ===
+controller : Ubuntu-2404-noble-amd64-base   node: SeanDesktop
+node state dir (the one PAIRING used): C:\Users\seand\AppData\Roaming\wayland-core\exec-backend
+date: 2026-07-28T11:40:12Z
+
+--- state hygiene: the node's registry file before this run ---
+ABSENT - this run creates it and removes it again
+
+############ the two receipts ############
+POSITIVE: minted on the node under its DEFAULT state dir, i.e. the very
+          identity the controller paired.
+  task:        f25-reference
+  backend:     local
+  transport:   Local via localhost
+  terminal:    Success
+  input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+  workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+  artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+  hibernation: NotApplicable
+  wall ms:     15
+  receipt:     C:\ferrox-25h\rec-good.json
+
+NEGATIVE: minted on the SAME machine but under a scratch state dir, so it
+          carries a DIFFERENT node key. Nothing else about it differs.
+  task:        f25-reference
+  backend:     local
+  transport:   Local via localhost
+  terminal:    Success
+  input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+  workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+  artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+  hibernation: NotApplicable
+  wall ms:     12
+  receipt:     C:\ferrox-25h\rec-bad.json
+
+node stamp, GOOD receipt: {'node_id': 'windesk', 'machine_id': 'seandesktop', 'key_id': 'fa808c4de95cdfbc01ec11f2a51496de7df5f7ed345ac05838f64ae49e877311', 'contract_version': {'major': 1, 'minor': 0}}
+node stamp, BAD  receipt: {'node_id': 'windesk', 'machine_id': 'seandesktop', 'key_id': 'dbc2fbd722c204f01bf51aff7a4661cc4bf69fe30fe840283c210eab8fe90848', 'contract_version': {'major': 1, 'minor': 0}}
+pinned key on the controller for 'windesk': fa808c4de95cdfbc01ec11f2a51496de7df5f7ed345ac05838f64ae49e877311
+
+############ A. the CONTROLLER tries to verify the NODE's receipt ############
+This is what an auditor would actually do: take the node's receipt to the
+controller that pinned the node, and ask whether it holds.
+  wayland-core node: this host does not hold the signing key for backend 'local' (receipt key d01d8180bbac vs local cd83b86781cd), so the receipt's IDENTITY cannot be verified here — only its integrity, which is not the same claim
+  [exit=1]
+F25H-C2-ATTRIBUTION-ON-CONTROLLER: CANNOT VERIFY (exit 1) — see the
+  reason above. This is a property of the shipped CLI, not of this harness.
+
+############ B. the control pair, asked ON THE NODE ############
+The node holds its own backend signing key, so the identity leg can run
+there. The pinned record is the controller's, copied over.
+
+POSITIVE — the paired identity's own receipt:
+  receipt     C:\ferrox-25h\rec-good.json
+  backend     local
+  node        windesk
+  attribution HOLDS — work attributed to node 'windesk' (key fa808c4de95c)
+  EXIT=0
+
+NEGATIVE — a receipt from a DIFFERENT node key on the same machine:
+  wayland-core node: this host does not hold the signing key for backend 'local' (receipt key 740f62aa1cd2 vs local d01d8180bbac), so the receipt's IDENTITY cannot be verified here — only its integrity, which is not the same claim
+  EXIT=1
+
+F25H-C2-ATTRIBUTION-CONTROL-PAIR: PASS — holds for the pinned identity
+  (exit 0) and BREAKS for a different key (exit 1). The
+  verdict is capable of both answers, so a HOLDS is worth something.
+
+############ C. re-asked after every disruption ############
+  after REVOKE: HOLDS   (attribution HOLDS — work attributed to node 'windesk' (key fa808c4de95c))
+  after REPAIR: HOLDS   (attribution HOLDS — work attributed to node 'windesk' (key fa808c4de95c))
+  after DISCONNECT (recorded offline across a real partition): HOLDS   (attribution HOLDS — work attributed to node 'windesk' (key fa808c4de95c))
+  after RETURN: HOLDS   (attribution HOLDS — work attributed to node 'windesk' (key fa808c4de95c))
+  after VERSION-MISMATCH in the registry: HOLDS   (attribution HOLDS — work attributed to node 'windesk' (key fa808c4de95c))
+
+--- and the negative control must STILL be able to go red at the end ---
+  wrong-key receipt at the end: exit=1 (non-zero required)
+
+############ cleanup ############
+node registry file restored/removed: absent (as found)
+scratch state dir removed: yes
+iptables rule still present? no
+
+=== ledger: /root/f25h-evidence/25h-attribution-ledger.txt ===

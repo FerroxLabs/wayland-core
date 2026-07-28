@@ -1,0 +1,105 @@
+{
+  "schema": "wayland.execution-backend-receipt",
+  "schema_version": 1,
+  "body_sha256": "2e1f96c678c702d9d5689cceaea538e0fea4d3b77283c8b9cfadf7fe54a17f3b",
+  "body": {
+    "protocol_version": 1,
+    "backend": {
+      "backend_id": "local",
+      "instance_id": "dba1e24289c94e60acf722d5521d00e3",
+      "version": "0.12.25",
+      "key_id": "d01d8180bbac3036ebdd3b9824fc05b30bfec96ac8e49114ea83d24eeb0eb5e3"
+    },
+    "node": {
+      "node_id": "windesk",
+      "machine_id": "seandesktop",
+      "key_id": "fa808c4de95cdfbc01ec11f2a51496de7df5f7ed345ac05838f64ae49e877311",
+      "contract_version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    "transport": {
+      "kind": "local",
+      "endpoint": "localhost"
+    },
+    "task": {
+      "task_id": "f25-reference",
+      "workspace_sha256": "9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4",
+      "input_sha256": "55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6",
+      "resources": {
+        "cpu_millis": 30000,
+        "memory_bytes": 268435456,
+        "wall_time_ms": 60000,
+        "output_bytes": 1048576
+      }
+    },
+    "limits": {
+      "cpu_millis": 30000,
+      "memory_bytes": 268435456,
+      "wall_time_ms": 60000,
+      "output_bytes": 1048576
+    },
+    "events_sha256": "134a84b14b29fc9a0a31b86cc9f424fcf6db43ad9a9b5816b991bc37fb8e5a8e",
+    "events": [
+      {
+        "sequence": 1,
+        "event": {
+          "kind": "task_accepted",
+          "task_id": "f25-reference",
+          "backend_id": "local",
+          "workspace_sha256": "9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4",
+          "input_sha256": "55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6"
+        }
+      },
+      {
+        "sequence": 2,
+        "event": {
+          "kind": "output",
+          "channel": "stdout",
+          "text_sha256": "55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6",
+          "bytes": 32
+        }
+      },
+      {
+        "sequence": 3,
+        "event": {
+          "kind": "artifact_published",
+          "name": "stdout.bin",
+          "sha256": "55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6",
+          "bytes": 32
+        }
+      },
+      {
+        "sequence": 4,
+        "event": {
+          "kind": "succeeded",
+          "artifact_sha256": "55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6"
+        }
+      }
+    ],
+    "artifact": {
+      "name": "stdout.bin",
+      "sha256": "55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6",
+      "bytes": 32
+    },
+    "terminal": {
+      "kind": "success"
+    },
+    "timing": {
+      "started_unix_ms": 1785238820603,
+      "finished_unix_ms": 1785238820618,
+      "wall_ms": 15
+    },
+    "hibernation": {
+      "kind": "not_applicable"
+    },
+    "secrets_exposed": [],
+    "egress_decision": "allow-all-default-no-policy-installed"
+  },
+  "attestation": {
+    "algorithm": "ed25519",
+    "key_id": "d01d8180bbac3036ebdd3b9824fc05b30bfec96ac8e49114ea83d24eeb0eb5e3",
+    "signature_base64": "sQaUTz8l71+YyAHVW75n9wH5vxqo6D6UiMiX7NG+RXmM+jQgPhHwJXuRHK6KwrolKGMZfrS4yDtJx4WpwwwCAA=="
+  }
+}

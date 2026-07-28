@@ -1,4 +1,55 @@
-# Phase 25 — status at hand-back (2026-07-27, lane/25)
+# Phase 25 — status
+
+## CURRENT STANDING (read this first)
+
+| Criterion | Grade | Closed by |
+|---|---|---|
+| 1 — one task across local / container / ssh / cloud | **MET** | `lane/25-cloud`, 2026-07-28 |
+| 2 — nodes pair, advertise, revoke, recover, mixed versions, attribution | **MET on every named property**, one limitation recorded | `lane/25-hosts`, 2026-07-28 |
+| 3 — twelve-verb plugin lifecycle | **MET on Linux**, PARTIAL on Windows | `lane/25`, 2026-07-27 |
+| 4 — fail closed, no orphaned execution | **MET** | `lane/25-hosts`, 2026-07-28 |
+
+**Nothing in Phase 25 is now waiting on Sean.**
+
+### Two corrections to what this file used to say
+
+1. **This header used to claim "two of four MET" while the verbatim gradings below
+   showed only Criterion 3.** The table above is the governing statement; the verbatim
+   section is kept as a dated record of how each criterion was graded when it was
+   graded, and its Criterion 2 and 4 entries are SUPERSEDED by
+   `25-HOSTS-SUMMARY.md`.
+
+2. **Criteria 2 and 4 were recorded as blocked on Sean establishing SSH trust between
+   `hetzner-dsm` and `SeanD@seandesktop` (item 2 and 3 under "What is genuinely broken",
+   below). That blocker did not exist.** The trust was already live and was measured on
+   2026-07-28:
+
+   ```
+   $ ssh hetzner-dsm 'ssh -o BatchMode=yes -o ConnectTimeout=15 SeanD@seandesktop hostname; echo RC=$?'
+   SeanDesktop
+   RC=0
+   ```
+
+   Both criteria were then closed with no credential, no new machine and no Sean action.
+   A wrongly-reported blocker costs a reserved round trip for nothing, which is why the
+   correction sits at the head of this file rather than at the foot.
+
+### What closing them actually found
+
+Running the real thing on a second real host produced **three HIGH defects that a green
+suite could not see**, all in the ssh backend, all fixed on `lane/25-hosts`:
+
+| # | Defect | Would it have failed loudly? |
+|---|---|---|
+| 1 | `backend scan --task-id 'x;id>/tmp/w;echo y'` executed `id` **as root on the far end** — ssh does not carry an argv, and the far end's login shell re-parsed every value | No — it "worked" |
+| 2 | An empty task input **vanished from the wire**, shifting task argv left, so the ssh backend could not run a task with empty input at all | Yes — exit 1 |
+| 3 | The orphan sweep reported **`0 (MEASURED)` while an orphan ran** on a Windows far end, because msys `ps` rejects `-eo`, its stderr went to `/dev/null`, and the pipeline ended in `\|\| true` | **No — silent false zero** |
+
+Detail, live transcripts and both control directions: **`25-HOSTS-SUMMARY.md`**.
+
+---
+
+## Original hand-back (2026-07-27, lane/25)
 
 All four plans executed. Graded verbatim below.
 
@@ -98,10 +149,16 @@ reference backend".
    **RESOLVED 2026-07-28** — Sean minted the credential; `lane/25-cloud` ran the leg and found
    the backend was **broken, not merely unexercised** (three HIGH defects, two of which would
    have produced a false green). All fixed. (`25-CLOUD-SUMMARY.md`)
-2. **No SSH trust between the two physical hosts** blocks the cross-machine half of
-   Criterion 2. Reserved to Sean. (`25-03-NODE-EVIDENCE.md` §7)
-3. **The SSH orphan surface is unmeasurable on the proof hosts**, which blocks Criterion 4.
-   It reports `NOT MEASURED`, never zero.
+2. ~~**No SSH trust between the two physical hosts** blocks the cross-machine half of
+   Criterion 2. Reserved to Sean. (`25-03-NODE-EVIDENCE.md` §7)~~
+   **WITHDRAWN 2026-07-28 — this blocker did not exist.** The trust was already live;
+   `lane/25-hosts` measured it and ran the full node corpus with `hetzner-dsm` as
+   controller and `SeanD@seandesktop` as the node. See the head of this file.
+3. ~~**The SSH orphan surface is unmeasurable on the proof hosts**, which blocks Criterion 4.
+   It reports `NOT MEASURED`, never zero.~~
+   **RESOLVED 2026-07-28 by `lane/25-hosts`.** The surface is now MEASURED on two far
+   ends — a containerised sshd and the real Windows host — each checked in both
+   directions. Closing it found the sweep was a **structural false zero** on Windows.
    The **cloud** orphan surface was closed on 2026-07-28 by `lane/25-cloud`: it is now
    MEASURED, checked by a real leaked machine the scan found and by an unused nonce it
    correctly measured as zero. (`evidence/25-cloud-orphan-control.txt`)

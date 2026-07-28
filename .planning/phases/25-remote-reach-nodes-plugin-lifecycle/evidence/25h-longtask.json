@@ -1,0 +1,9 @@
+{
+  "task_id": "f25h-longtask",
+  "nonce": "f25h-orphan-1785239067",
+  "workspace": [],
+  "input": "",
+  "argv": ["sleep", "600"],
+  "artifact_name": "out.bin",
+  "resources": { "cpu_millis": 30000, "memory_bytes": 268435456, "wall_time_ms": 60000, "output_bytes": 65536 }
+}
