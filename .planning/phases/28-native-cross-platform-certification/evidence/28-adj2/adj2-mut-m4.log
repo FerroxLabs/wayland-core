@@ -1,0 +1,17 @@
+﻿F28ADJ2 MUT m4 started=2026-07-29T01:41:17.1841993+07:00
+APPLIED=m4
+TARGET_SHA256=25b81b0b1af300eb652f6d9808b8c7fbd6572ddf7a40563a69a3d30c27820bca
+MUT_COMPILED=True
+RESOLVED_COUNT=8;EXPECTED=8
+MUT=dead_owner_unreconcilable_lease_is_reclaimed_not_refused_forever;result=ok;passed=1;failed=0
+MUT=live_owner_unreconcilable_lease_is_honoured_not_reclaimed;result=ok;passed=1;failed=0
+MUT=quarantine_directory_does_not_become_a_second_wedge;result=ok;passed=1;failed=0
+MUT=reclamation_reports_grants_it_could_not_revoke;result=FAILED;passed=0;failed=1
+MUT=zero_length_lease_is_reclaimed_not_refused_forever;result=ok;passed=1;failed=0
+MUT=a_non_empty_unreadable_lease_still_fails_closed;result=ok;passed=1;failed=0
+MUT=zero_length_lease_is_reachable_through_the_writer;result=ok;passed=1;failed=0
+MUT=a_leaked_test_lease_is_diagnosed_by_name;result=ok;passed=1;failed=0
+MUT_FULL=result=FAILED;passed=135;failed=1;ignored=23
+RESTORED_SHA256=542541c93f3e54654acd81b9b0222bbeb7b5d13a16edee7155bf63e5a9623d59
+RESTORED_DIRTY=0
+finished=2026-07-29T01:41:29.4858046+07:00

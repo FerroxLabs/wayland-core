@@ -1,0 +1,47 @@
+# lane/28-adj2 mutants (diff vs the committed acl_lease.rs at 9c4d2612)
+
+## m3
+@@ -865,7 +865,7 @@
+     // automatically. Refusing forever did not revoke them either — it only
+     // also disabled the sandbox — so quarantining strictly dominates, but the
+     // operator is told exactly what may remain.
+-    let residual = if lease.intents.is_empty() {
++    let residual = if true {
+         "It recorded NO filesystem ACL grant, so nothing was left behind on this machine."
+             .to_string()
+     } else {
+
+## m4
+@@ -763,7 +763,7 @@
+ /// permanent, behind a message that read like a platform limitation.
+ fn reclaim_unreconcilable_lease(path: &Path, lease: &LeaseFile, reason: &str) -> Result<()> {
+     let destination = quarantine_lease(path)?;
+-    let report = reclamation_report(lease, &destination, reason);
++    let report = "RECLAIMED a stale AppContainer ACL lease.".to_string();
+     #[cfg(test)]
+     record_emitted_reclamation(&report);
+     tracing::error!(
+
+## m5
+@@ -664,10 +664,6 @@
+         // running; it is a crash or power-loss remnant. This is the exact
+         // argument `recover_rewrite_temps` already relies on to delete orphaned
+         // `.rewrite-*.tmp` files unconditionally.
+-        if lease_is_zero_length(&path)? {
+-            reclaim_zero_length_lease(&path)?;
+-            continue;
+-        }
+         let lease = read_validated_lease(&path)?;
+         if owner_is_live(&lease)? {
+             continue;
+
+## m6
+@@ -664,7 +664,7 @@
+         // running; it is a crash or power-loss remnant. This is the exact
+         // argument `recover_rewrite_temps` already relies on to delete orphaned
+         // `.rewrite-*.tmp` files unconditionally.
+-        if lease_is_zero_length(&path)? {
++        if read_validated_lease(&path).is_err() {
+             reclaim_zero_length_lease(&path)?;
+             continue;
+         }
