@@ -1,0 +1,39 @@
+=== wait ready ===
+  wait i=1 http=200 20:12:13
+=== register ===
+reg bytes=140
+token_len=39
+=== create room ===
+room=!QzGyEsVKqodScqjEPc:f24c1.local
+
+############ MEASUREMENT A: the RESETTING counter ############
+--- process life 1 (counter seeded at 1, as AtomicU64::new(1)) ---
+PUT txn=1 body=MSG-A -> {"event_id":"$A0jD_zARYyEZ2s9hOveta3q6YgyUiblnYqGV-RsgfaY"}
+PUT txn=2 body=MSG-B -> {"event_id":"$inhJrHmCdSgHuhzBUEoUZPqK-YwEoIT1LrIBFDWDyss"}
+--- process life 2: SAME access token, counter RESET to 1 ---
+PUT txn=1 body=MSG-C -> {"event_id":"$A0jD_zARYyEZ2s9hOveta3q6YgyUiblnYqGV-RsgfaY"}
+
+E1 (txn=1, MSG-A) = $A0jD_zARYyEZ2s9hOveta3q6YgyUiblnYqGV-RsgfaY
+E3 (txn=1, MSG-C) = $A0jD_zARYyEZ2s9hOveta3q6YgyUiblnYqGV-RsgfaY
+VERDICT_A=REPLAY_SUPPRESSED
+
+=== ground truth: room contents (not the response, the ROOM) ===
+BODIES_IN_ROOM = ['MSG-B-before-restart', 'MSG-A-before-restart']
+  present(MSG-A-before-restart) = True
+  present(MSG-B-before-restart) = True
+  present(MSG-C-after-restart-GENUINELY-NEW) = False
+MSG_C_LOST = True
+
+############ MEASUREMENT B: the key-derived txn id (the fix) ############
+PUT txn=cron:job-a:1785121776528 -> {"event_id":"$PvBnVig5yNaPAdm-qXs7R34JVMJnHzlzRvaJ8x5WGXI"}
+PUT txn=cron:job-a:1785121776528 (REPLAY of same delivery) -> {"event_id":"$PvBnVig5yNaPAdm-qXs7R34JVMJnHzlzRvaJ8x5WGXI"}
+PUT txn=cron:job-a:1785121776529 (DIFFERENT delivery) -> {"event_id":"$rB3Eai_4wXUYm4_OPC4dP8RUHeWyTUdUu2QzofzI_Xk"}
+E4=$PvBnVig5yNaPAdm-qXs7R34JVMJnHzlzRvaJ8x5WGXI
+E5=$PvBnVig5yNaPAdm-qXs7R34JVMJnHzlzRvaJ8x5WGXI
+E6=$rB3Eai_4wXUYm4_OPC4dP8RUHeWyTUdUu2QzofzI_Xk
+DEDUP_WORKS=yes
+DISTINCT_WORKS=yes
+FINAL_BODIES = ['MSG-E-next-occurrence', 'MSG-D-derived', 'MSG-B-before-restart', 'MSG-A-before-restart']
+MSG_D_count = 1  (1 = replay suppressed, 2 = duplicate)
+MSG_E_present = True  (True = a genuinely new delivery survived)
+F24C1_SYNAPSE_DONE

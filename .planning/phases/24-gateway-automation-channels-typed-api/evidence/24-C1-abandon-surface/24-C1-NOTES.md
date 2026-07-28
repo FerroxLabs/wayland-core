@@ -141,10 +141,79 @@ QUARANTINES anything it cannot parse (`ledger.rs:141`), so a non-defaulted field
 an upgrade read every pre-existing record as a torn tail — converting an upgrade into a
 mass phantom loss.
 
+## M8 — TASK 3 MEASURED: the Matrix restart loss path is REAL (HIGH)
+
+Against a **real Synapse** (`matrixdotorg/synapse:latest`, Docker on hetzner, port 18008),
+one real access token, one real room. Raw log: `synapse-txn-reuse.log` (1869 bytes),
+harness: `synapse-measure.sh`.
+
+```
+--- process life 1 (counter seeded at 1, as AtomicU64::new(1)) ---
+PUT txn=1 body=MSG-A -> {"event_id":"$A0jD_zARYyEZ2s9hOveta3q6YgyUiblnYqGV-RsgfaY"}
+PUT txn=2 body=MSG-B -> {"event_id":"$inhJrHmCdSgHuhzBUEoUZPqK-YwEoIT1LrIBFDWDyss"}
+--- process life 2: SAME access token, counter RESET to 1 ---
+PUT txn=1 body=MSG-C -> {"event_id":"$A0jD_zARYyEZ2s9hOveta3q6YgyUiblnYqGV-RsgfaY"}
+VERDICT_A=REPLAY_SUPPRESSED
+BODIES_IN_ROOM = ['MSG-B-before-restart', 'MSG-A-before-restart']
+MSG_C_LOST = True
+```
+
+**The homeserver returned HTTP 200 and MSG-A's event id for a PUT carrying MSG-C's body,
+and MSG-C never entered the room.** The ground truth is read from
+`/rooms/{id}/messages` — the room's own contents — not from the response the sender got,
+because the response is precisely what lies here.
+
+This is a **different failure from the duplicate the previous lanes were chasing**, and it is
+worse in one specific way: a duplicate is visible at the destination, whereas this is a
+disappearance that reports success. The sender records a `Settled` delivery with
+`delivered=true`, holding a plausible `event_id` for an event that is somebody else's
+message. Nothing anywhere is red.
+
+Graded **HIGH**: silent outbound message loss on a supported channel, triggered by the
+ordinary event of a process restart, with no error surfaced at any layer.
+
+Scope, stated honestly: the collision needs the reused `(access_token, txn_id)` pair to
+still be within the homeserver's transaction retention. It is therefore most likely on the
+FIRST sends after a restart — which is exactly when a gateway replays its carried ledger
+work.
+
+## M9 — the fix eliminates it, proven rather than assumed
+
+Same homeserver, same room, in the same run:
+
+```
+PUT txn=cron:job-a:1785121776528                    -> $PvBnVig5...
+PUT txn=cron:job-a:1785121776528 (REPLAY, same id)  -> $PvBnVig5...   DEDUP_WORKS=yes
+PUT txn=cron:job-a:1785121776529 (DIFFERENT id)     -> $rB3Eai_4...   DISTINCT_WORKS=yes
+MSG_D_count = 1   (replay suppressed, not duplicated)
+MSG_E_present = True  (a genuinely new delivery survived)
+```
+
+Both required properties hold on a real homeserver: a replay of one delivery collapses, and
+a different delivery does not. The key-derived id has no counter to reset, so the M8 loss
+cannot recur through it. Unkeyed sends are additionally reseeded from the wall clock rather
+than from 1, which closes the same hole for traffic that carries no delivery key.
+
+## Instrument defect found and REPAIRED in-lane (§6b-ii)
+
+My first Synapse harness reported `Registration has been disabled` and I nearly recorded it
+as an environment limitation. Cause: the generated `homeserver.yaml` has **no trailing
+newline**, so `cat >>` glued `enable_registration: true` onto the final line
+`# vim:ft=yaml` — the flag became part of a COMMENT. The file looked correct in a `grep`.
+
+Repaired rather than worked around, and the repair is verified by PARSING rather than by
+grepping:
+
+```
+python3 -c "import yaml;d=yaml.safe_load(open(Y));print(d.get('enable_registration'))"
+  -> True
+```
+
+That check would have caught the original defect (a commented-out key parses as absent,
+returning `None`), which a `grep enable_registration` — matching happily inside the comment
+— would not. That is the third assertion §6b-ii asks for: the naive matcher misses it.
+
 ## Still to establish
 
-- [ ] Task 3: whether a restarted Matrix counter makes a homeserver DROP a genuinely new
-      message. Plan: real Synapse in Docker on hetzner (`docker 29.2.1` present, 657G free
-      on `/root`), same access token, txn_id reuse. Not a mock — the whole question is what
-      a real homeserver does.
 - [ ] Live proof of the operator surface against a REAL abandonment, not a synthetic row.
+- [ ] Adapter test suites green on hetzner.
