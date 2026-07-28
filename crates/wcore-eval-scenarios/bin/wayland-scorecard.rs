@@ -203,10 +203,14 @@ fn run_claims(command: ClaimsCommand) -> anyhow::Result<String> {
             let reg: ClaimRegisterV1 = serde_json::from_slice(&raw)?;
             reg.verify(&repo_root)?;
             let rules = reg.rules_fired(&repo_root);
+            // `allowed` counts ONLY the claims that reach CLAIMS-ALLOWED.md. Limitations
+            // are counted separately: reporting one total would overstate the allowed set
+            // by the size of the limitations list, which is the larger of the two here.
             Ok(format!(
-                "CLAIMS_VERIFY=OK allowed={} attempted_and_refused={} rules_fired={} \
-                 register_sha256={}\n",
-                reg.claims.len(),
+                "CLAIMS_VERIFY=OK allowed={} limitations={} attempted_and_refused={} \
+                 rules_fired={} register_sha256={}\n",
+                reg.allowed_count(),
+                reg.limitation_count(),
                 reg.refusals(&repo_root).len(),
                 rules.len(),
                 register_digest(&raw)

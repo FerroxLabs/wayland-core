@@ -930,6 +930,17 @@ impl ClaimRegisterV1 {
             .collect()
     }
 
+    /// Claims that reach CLAIMS-ALLOWED.md. Deliberately NOT `claims.len()`: a single
+    /// total would report the allowed set as the sum of allowed AND limitations, and the
+    /// limitations are the larger list.
+    pub fn allowed_count(&self) -> usize {
+        self.allowed_sorted().len()
+    }
+
+    pub fn limitation_count(&self) -> usize {
+        self.limitations_sorted().len()
+    }
+
     fn allowed_sorted(&self) -> Vec<&ClaimV1> {
         let mut v: Vec<&ClaimV1> = self
             .claims
