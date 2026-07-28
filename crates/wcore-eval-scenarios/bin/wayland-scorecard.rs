@@ -300,18 +300,23 @@ async fn drive_leg(
             dimension.token()
         );
         std::fs::write(workspace.join("CANARY.txt"), format!("{canary}\n"))?;
+
+        let script = OpenAiFixtureScript::new(steps.clone());
+        let fixture = script.start_for_workspace(&workspace).await?;
+        let base_url = format!("{}{}", fixture.base_url(), invocation.base_url_suffix);
+
         // Per-tool first-run setup, carried as DATA so it stays visible in the results.
+        // `{{BASE_URL}}` is substituted with this trial's loopback root, because the
+        // fixture binds port 0 and a tool that takes its endpoint from a config FILE
+        // rather than an environment variable cannot otherwise be pointed at it. The
+        // facility is available to every tool, not added for one.
         for (relative, contents) in &invocation.workspace_seed_files {
             let path = workspace.join(relative);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(&path, contents)?;
+            std::fs::write(&path, contents.replace("{{BASE_URL}}", &base_url))?;
         }
-
-        let script = OpenAiFixtureScript::new(steps.clone());
-        let fixture = script.start_for_workspace(&workspace).await?;
-        let base_url = format!("{}{}", fixture.base_url(), invocation.base_url_suffix);
 
         let started = Instant::now();
         let mut child = {
