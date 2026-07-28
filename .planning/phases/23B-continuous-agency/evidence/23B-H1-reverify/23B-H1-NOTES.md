@@ -101,11 +101,96 @@ $ grep -c "23B-H1" .planning/BACKLOG.md
 0
 ```
 
+---
+
+## T+35 — Q1 ANSWERED: the engine CANNOT emit `Some(Value::Null)`. The fix does not explain 23B-01.
+
+This is the load-bearing result of the lane, so the whole chain is written out.
+
+**Production call chain to a journalled effect receipt** (`crates/wcore-agent/`):
+
+```
+orchestration/mod.rs:1744   prepared_runtime = tool.prepare_effect(..)  -> Option<PreparedToolEffect>
+orchestration/mod.rs:1821   durable_receipt  = prepared.durable_receipt()      -> Option<Value>
+orchestration/mod.rs:1917   prepare_tool_effect(.., durable_receipt, ..)
+orchestration/mod.rs: 966   (Some(receipt), None) => scope.prepare_tool_with_effect_receipt(.., receipt)
+journal_effects.rs   : 249  prepare_tool_recorded(.., Some(effect_receipt), ..)
+journal_effects.rs   : 397  journal.append(SessionEvent::ToolIntentRecordedV2 { effect_receipt, .. })
+```
+
+`durable_receipt` is the **only** production source of a `Some(..)` on that path. The other
+three `prepare_tool_effect` call sites (`mod.rs:1047` `record_tool_not_started`, `mod.rs:2376`
+unknown-tool, and the not-started paths) all pass a literal `None`.
+
+And `durable_receipt` cannot be null:
+
+```rust
+// crates/wcore-tools/src/effects.rs:247
+pub fn durable_receipt(&self) -> Result<Value, serde_json::Error> {
+    serde_json::to_value(&self.receipt)          // self.receipt: FilesystemEffectReceiptV1
+}
+```
+
+```rust
+// crates/wcore-tools/src/effects.rs:64
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FilesystemEffectReceiptV1 { .. }
+```
+
+A derived `Serialize` on a named-field struct produces `Value::Object`, always. `effects.rs`
+contains **no** hand-written `Serialize` impl (`grep -c 'impl Serialize\|impl serde::Serialize'`
+= 0), so there is no escape hatch. `serde_json::to_value` of that type is `Object(..)` or `Err`,
+never `Null`. The `Err` arm is handled separately at `mod.rs:1824` and journals a
+`DispatchFailed` not-started instead.
+
+The one other `ProviderIdempotent` receipt construction, `journal_effects.rs:1441`, is inside
+that file's `mod tests` (`#[test] fn secured_input_envelope_and_contract_are_durable_…`), not
+production. `engine.rs:25976` is likewise inside a test module (`SessionManager::new(dir.path()…,
+"test", "test-model")` at `engine.rs:25940`).
+
+### What follows, stated carefully
+
+The write-path fix `a7beafe5` closes a **real** defect: the API
+`prepare_tool_with_effect_receipt` takes a bare `Value` and does not reject a null one, and the
+wire contract blesses explicit nulls, so a **third-party producer** — the Desktop host writing
+through the documented protocol — can still drive it. The disposition says exactly this and I
+am not disputing it. Keeping that fix is right.
+
+But **23B-01's reproduction was a headless `wayland-core` run with no Desktop host and no
+third-party producer.** For that reproduction the fixed mechanism is unreachable. So:
+
+> **The fix that claims to have root-caused 23B-01 cannot have caused 23B-01.**
+
+The disposition's own §5 is consistent with this without drawing the conclusion: it reports
+**0 reproductions in 34 runs**, including 12 against the pristine base binary at load 130 —
+higher than the load 28 under which 23B-01 saw the failure 17 times in 18. It reads that as
+"same defect, different reach". Under Q1 that reading does not survive: the reach it needed was
+not merely un-taken by the harness, it does not exist on the engine path at all.
+
+**The load-sensitivity argument also collapses.** A serde encoding asymmetry is deterministic in
+the journal's *content*: a run that records a null receipt fails every time, a run that does not
+never fails. The disposition bridges that to 23B-01's load-sensitivity by arguing load makes a
+run get further and reach the tool boundary. But per Q1, reaching the tool boundary produces an
+`Object` receipt, not a null one — so getting further cannot produce the null shape, and the
+bridge does not hold. 23B-01's burst 2 (9/10 — one run readable under the *same* load that
+failed the other nine) is a within-run race, which is what a lease/concurrency fault looks like
+and is not what an encoding asymmetry looks like.
+
+**Therefore the HIGH is NOT closed.** What is closed is a latent third-party-reachable variant
+plus a genuinely good recovery path. What is open is the original: a cleanly-exited headless run
+producing `journal checksum mismatch at sequence 16`, cause unknown.
+
+The coordinator's lead — 16 red journal-durability tests at HEAD, and a measured
+`session journal writer lease is already held` failure under parallelism — is a far better
+candidate for a load-sensitive within-run race than the encoding asymmetry is. Q4 now has a
+specific hypothesis to test rather than a blind re-run.
+
 ## STATUS
 
 - [x] worktree created, HEAD confirmed
 - [x] brief premise checked against tree — premise is stale
-- [ ] Q1 engine reachability of `Some(Value::Null)`
+- [x] **Q1 — engine CANNOT emit `Some(Value::Null)`; fix does not explain 23B-01**
 - [ ] Q2 tests hold at HEAD
 - [ ] Q3 mutation proves the gates can fail
 - [ ] Q4 original symptom at HEAD
