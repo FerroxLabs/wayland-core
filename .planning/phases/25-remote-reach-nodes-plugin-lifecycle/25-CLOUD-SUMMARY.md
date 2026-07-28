@@ -182,6 +182,31 @@ every committed artifact for the literal token on the host that holds it: **0 fi
 | 4 | MEDIUM | FIXED | This lane's own `tail -1` parse leaked a billable machine; became the Criterion 4 positive control |
 | 5 | LOW | BACKLOG | `WAYLAND_F25_CLOUD_ORG` holds an **app** slug, not an org slug. Renaming is a cross-lane operator-surface change, out of scope here; documented on the constant |
 | 6 | LOW | observation | Guest uptime is the weakest hibernation clause and failed to discriminate on the measured stop control. Retained, but must never be the only signal |
+| 7 | MEDIUM | BACKLOG, **pre-existing** | `registry::tests::a_recorded_task_is_readable_by_another_caller_and_removable` flakes under bare `cargo test`: `with_temp_state` sets a **process-wide** env var while `cargo test` runs tests as threads in one process. Not a regression — see below |
+
+### Suite numbers, and the one red I had to attribute
+
+Under the repo's actual runner at `88020432`:
+
+```
+cargo nextest run -p wcore-exec-backend   ->  117 tests run: 117 passed (1 leaky), 1 skipped
+cargo clippy -p wcore-exec-backend --all-targets  ->  0 warnings, 0 errors
+```
+
+Bare `cargo test` intermittently reddens one registry test. I did **not** assume that was
+pre-existing — I measured it, in the same worktree at the same commit with only `cloud.rs`
+swapped (`evidence/25-cloud-registry-flake-attribution.txt`):
+
+| cloud.rs | failed runs |
+|---|---|
+| **merge-base** (my change reverted) | **6/12** |
+| this lane's | 8/12 |
+| this lane's, `--test-threads=1` | **0** (84 passed) |
+
+The flake occurs **without my change**, so it is not a regression. `registry.rs` is untouched by
+this lane (empty diff vs merge-base) and none of my tests touch that env var. The higher rate with
+my file is scheduling pressure from six added tests, not a new defect. The source comment at
+`registry.rs:121` already states the design assumes nextest's per-process isolation.
 
 ## What this lane did NOT do
 
