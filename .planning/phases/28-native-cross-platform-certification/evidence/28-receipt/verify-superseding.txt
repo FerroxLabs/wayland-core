@@ -1,0 +1,3 @@
+  note: 1 bound file(s) are zero bytes and none is cited as finding evidence: evidence/28-03/macos-activeness.err
+--verify: recomputed bindings for 28-04-CERTIFICATION-RECEIPT-SUPERSEDING-001.json against the raw evidence under /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-28-receipt/.planning/phases/28-native-cross-platform-certification
+--verify: OK
