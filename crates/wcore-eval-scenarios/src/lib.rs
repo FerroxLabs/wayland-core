@@ -56,6 +56,10 @@ pub mod e5_soak;
 mod egress_evidence;
 mod filesystem_evidence;
 pub mod fixtures;
+/// Phase 30 frontier comparative trial harness (F30-03): bounded measurements with no
+/// unbounded representation, comparative results that cannot be built without every peer,
+/// and a verdict rule that refuses a direction on an interval containing zero.
+pub mod frontier_trials;
 pub mod hook_scenarios;
 pub mod journey;
 pub mod judge;
