@@ -1,0 +1,10 @@
+case: ATK-07
+what: a measured comparative's interval is replaced by a point estimate
+half: MUTATION
+class: comparative
+scope: SCRIPTED_HARNESS
+text: Hermes completed the scripted task more reliably than wayland-core.
+outcome: REFUSED
+rule: comparative_without_interval
+refusal: comparative claim `P` rests on a SCRIPTED_HARNESS measurement but carries no interval (point_estimate_only); a point estimate is not an interval
+missing: a real confidence interval

@@ -1,0 +1,10 @@
+case: ATK-11
+what: a real ledger sentence is quoted with its unproven-qualifier truncated away
+half: MUTATION
+class: comparative
+scope: STATIC_SOURCE
+text: This is Core's clearest unique capability
+outcome: REFUSED
+rule: unbounded_superiority
+refusal: comparative claim `P` asserts superiority (`clearest`) from a STATIC_SOURCE census with neither an interval nor an explicit unproven-qualifier
+missing: either an interval or an explicit unproven-qualifier

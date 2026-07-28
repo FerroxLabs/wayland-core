@@ -1,0 +1,8 @@
+case: ATK-03
+what: a claim is moved onto a leg recorded UNPROVEN
+half: PRISTINE
+class: factual
+scope: SCRIPTED_HARNESS
+text: The wayland correctness leg produced a recorded run of thirty trials.
+outcome: ACCEPTED
+rule: NONE

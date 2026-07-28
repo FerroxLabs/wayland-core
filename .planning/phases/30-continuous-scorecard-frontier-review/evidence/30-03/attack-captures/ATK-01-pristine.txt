@@ -1,0 +1,8 @@
+case: ATK-01
+what: an evidence pointer is removed
+half: PRISTINE
+class: factual
+scope: STATIC_SOURCE
+text: 30-02's trial accounting records fifteen legs, each naming a capture file.
+outcome: ACCEPTED
+rule: NONE

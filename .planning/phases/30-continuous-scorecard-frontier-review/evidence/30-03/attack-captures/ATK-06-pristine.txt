@@ -1,0 +1,8 @@
+case: ATK-06
+what: the pinned peer baseline is dropped from a comparative
+half: PRISTINE
+class: comparative
+scope: STATIC_SOURCE
+text: Sandbox/egress: Core architectural lead, operationally unproven
+outcome: ACCEPTED
+rule: NONE

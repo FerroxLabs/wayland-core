@@ -1,0 +1,8 @@
+case: ATK-11
+what: a real ledger sentence is quoted with its unproven-qualifier truncated away
+half: PRISTINE
+class: comparative
+scope: STATIC_SOURCE
+text: Sandbox/egress: Core architectural lead, operationally unproven
+outcome: ACCEPTED
+rule: NONE
