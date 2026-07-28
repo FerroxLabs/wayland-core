@@ -626,6 +626,32 @@ fn publish(home: &Path, proj: &StatusProjection) -> Result<()> {
 
 async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
     let home = scope.home()?;
+
+    // F24-J-H2. `--home` is a NARROWER carrier than the environment variable
+    // the Unix units set, and the difference is not cosmetic. The launchd plist
+    // and the systemd unit both export `WAYLAND_HOME`, which scopes the gateway
+    // home AND everything `wcore_config::wayland_config_dir` resolves under it
+    // — config, and with it the credentials store. Task Scheduler cannot set an
+    // environment variable, so the Windows registration passes `--home`, which
+    // scoped only the gateway's own files.
+    //
+    // Measured live on the real box at d89b81b6: the gateway came up in the
+    // right home and published a correct projection, then every delivery failed
+    // with `no value for credential handle "slack.f24j.bot_token"` because the
+    // credentials store had resolved under `%APPDATA%\wayland-core` while the
+    // credentials file sat in the home the task was registered for. Twelve
+    // submitted, zero arrived.
+    //
+    // So the flag exports what the units export, and the one carrier scopes the
+    // whole process on every platform rather than two thirds of it on one.
+    if scope.home.is_some() && std::env::var_os("WAYLAND_HOME").is_none() {
+        // SAFETY: this runs before any configuration is read and before the
+        // gateway spawns any work, so no other thread is reading the
+        // environment concurrently. It is also a no-op whenever the variable is
+        // already set, so a unit that exports it keeps authority over a flag.
+        unsafe { std::env::set_var("WAYLAND_HOME", &home) };
+    }
+
     std::fs::create_dir_all(&home)
         .with_context(|| format!("cannot create gateway home {}", home.display()))?;
 
