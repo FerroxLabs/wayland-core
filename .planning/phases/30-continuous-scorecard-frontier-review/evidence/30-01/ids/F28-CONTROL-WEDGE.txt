@@ -1,0 +1,19 @@
+EVIDENCE ID : F28-CONTROL-WEDGE
+LEDGER ROW  : 35
+ARTIFACT    : `phases/28-native-cross-platform-certification/28-02-OBSERVABILITY-CONTROL.md` — verdict **`wedge-clearable`**: session type made no difference, lease state made all the difference; session-0 non-interactive SSH reported the sandbox **available** and ran a contained worker. `observation-blocked` therefore NOT AUTHORISED for any cell. In both wedged observations the product **REFUSED TO EXECUTE** — `KR-05`'s "continues UNSANDBOXED" half DISPROVED for the delegated-execution surface, its "reads like a platform limitation" half CONFIRMED. **Does not generalise: `seandesktop` is one physical box**
+
+== PATH RESOLUTION ==
+[OK]   stat phases/28-native-cross-platform-certification/28-02-OBSERVABILITY-CONTROL.md
+       -> .planning/phases/28-native-cross-platform-certification/28-02-OBSERVABILITY-CONTROL.md  size=16167
+       head:
+# 28-02 — The Windows sandbox observability control
+
+**Measured 2026-07-27 on `seandesktop`, run `f28ctl-20260727222551`.**
+Machine form: `evidence/28-02/controls.json`. Raw log: `evidence/28-02/win-control.log`.
+Enforcement: `f28-check-matrix-results.py --check-controls` and `--check-control-directions`.
+
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

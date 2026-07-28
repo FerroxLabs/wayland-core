@@ -1,0 +1,19 @@
+EVIDENCE ID : F27-VERDICT
+LEDGER ROW  : 32
+ARTIFACT    : `phases/27-multimodal-browser-generation-voice/27-PHASE-VERDICT.md` — **GOAL NOT ACHIEVED.** C1 PARTIAL, C2/C3/C4/C5 NOT MET, 0/5 requirements complete. `browser_suite` and `computer_use` still report `true` on a box with no browser binary and no display, measured invariant across five single-variable observations with the next operation failing `spawn camoufox: No such file or directory`. Zero packaged smokes on zero platforms
+
+== PATH RESOLUTION ==
+[OK]   stat phases/27-multimodal-browser-generation-voice/27-PHASE-VERDICT.md
+       -> .planning/phases/27-multimodal-browser-generation-voice/27-PHASE-VERDICT.md  size=9825
+       head:
+# Phase 27 — verdict against the ROADMAP Success Criteria
+
+**Phase goal, verbatim from `.planning/ROADMAP.md`:** "Attachments, documents,
+browser/CUA/web, generation, and voice work consistently across providers and
+hosts with honest readiness and bounded authority."
+
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

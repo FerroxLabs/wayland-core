@@ -1,0 +1,20 @@
+EVIDENCE ID : F05-RECEIPT@0825c92d
+LEDGER ROW  : 2
+ARTIFACT    : `docs/design/2026-07-13-wayland-core-f05-capability-activation-receipt.md`; implementation source `0825c92d42fe1777822e2c3463f9eb581ba5cd5d` on `frontier/m0`
+
+== PATH RESOLUTION ==
+[OK]   stat docs/design/2026-07-13-wayland-core-f05-capability-activation-receipt.md
+       -> docs/design/2026-07-13-wayland-core-f05-capability-activation-receipt.md  size=6152
+       head:
+# Wayland Core F05 Capability Activation Receipt
+
+**Status:** implementation and local Linux E3 seal passed; authoritative CI,
+native-platform and Desktop-host seals pending
+
+**Implementation source:** `0825c92d42fe1777822e2c3463f9eb581ba5cd5d` on
+
+== GIT OBJECT RESOLUTION ==
+[OK]   COMMIT git cat-file -t 0825c92d42fe1777822e2c3463f9eb581ba5cd5d -> commit
+       git log -1 0825c92d42fe1777822e2c3463f9eb581ba5cd5d -> 0825c92d42fe1777822e2c3463f9eb581ba5cd5d 2026-07-14 fix(agent): gate smart handoff readiness
+
+== VERDICT == CONFIRMED

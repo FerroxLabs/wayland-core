@@ -1,0 +1,11 @@
+EVIDENCE ID : F05-TRUTH-{n}
+LEDGER ROW  : 3
+ARTIFACT    : Row `{n}` of the F05 startup truth table, `…-f05-capability-activation-receipt.md` §2
+
+== PATH RESOLUTION ==
+(no path token in the artifact cell)
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == UNRESOLVED

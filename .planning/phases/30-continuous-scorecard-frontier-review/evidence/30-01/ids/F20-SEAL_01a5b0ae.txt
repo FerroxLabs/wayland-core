@@ -1,0 +1,15 @@
+EVIDENCE ID : F20-SEAL@01a5b0ae
+LEDGER ROW  : 4
+ARTIFACT    : Phase 20 close, SHA `01a5b0ae459c9d5088cfd7e41271a5d4ece1b9bb` (tree `4a5247ca`); `cargo nextest` 11519/11519 passed, 48 skipped. Logs: `phases/20-transactional-delegated-mutation/20-56-evidence/{build,test}-01a5b0ae-GREEN.log.gz`
+
+== PATH RESOLUTION ==
+(no path token in the artifact cell)
+
+== GIT OBJECT RESOLUTION ==
+[OK]   COMMIT git cat-file -t 01a5b0ae459c9d5088cfd7e41271a5d4ece1b9bb -> commit
+       git log -1 01a5b0ae459c9d5088cfd7e41271a5d4ece1b9bb -> 01a5b0ae459c9d5088cfd7e41271a5d4ece1b9bb 2026-07-25 test(cli): give the F04 repeatability run its measured time budget
+[OK]   COMMIT git cat-file -t 4a5247ca -> tree
+[OK]   COMMIT git cat-file -t 01a5b0ae -> commit
+       git log -1 01a5b0ae -> 01a5b0ae459c9d5088cfd7e41271a5d4ece1b9bb 2026-07-25 test(cli): give the F04 repeatability run its measured time budget
+
+== VERDICT == CONFIRMED

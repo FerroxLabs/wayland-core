@@ -1,0 +1,23 @@
+EVIDENCE ID : F23B-04-CLOCK
+LEDGER ROW  : 19
+ARTIFACT    : `phases/23B-continuous-agency/23B-04-SUMMARY.md` + `23B-04-LIVE-EVIDENCE.md` — multi-day journey **day one only**: Linux `2026-07-27T14:21:19Z`, Windows `2026-07-27T23:54:26Z`, **macOS NOT ACHIEVED, nothing run**. Journey SHA `0ed05322`. **The journey cannot close before `2026-07-30T23:54:26Z`**
+
+== PATH RESOLUTION ==
+[OK]   stat phases/23B-continuous-agency/23B-04-SUMMARY.md
+       -> .planning/phases/23B-continuous-agency/23B-04-SUMMARY.md  size=15086
+       head:
+---
+phase: 23B-continuous-agency
+plan: "04"
+subsystem: multi-day-journey-and-clock-policy
+status: partial-clock-started-two-platforms
+requirements:
+
+== SIBLING (bare-filename) RESOLUTION ==
+[OK]   sibling 23B-04-LIVE-EVIDENCE.md -> .planning/phases/23B-continuous-agency/23B-04-LIVE-EVIDENCE.md
+
+== GIT OBJECT RESOLUTION ==
+[OK]   COMMIT git cat-file -t 0ed05322 -> commit
+       git log -1 0ed05322 -> 0ed05322462e64cb44e2b80aa15b7357263b8187 2026-07-27 fix(23B-04): normalize the libtest prefix that was eating every day record
+
+== VERDICT == CONFIRMED

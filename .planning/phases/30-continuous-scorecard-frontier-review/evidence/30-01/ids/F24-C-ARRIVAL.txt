@@ -1,0 +1,19 @@
+EVIDENCE ID : F24-C-ARRIVAL
+LEDGER ROW  : 24
+ARTIFACT    : `phases/24-gateway-automation-channels-typed-api/24-C-SUMMARY.md` §8 + `24-C-arrival-evidence/` — delivery ARRIVAL at an **independent sink**: 10 deliveries, 10 distinct messages at the destination, none twice; the one delivery whose outcome was UNKNOWN across a `kill -9` and a platform restart produced **exactly one** message. **Before the fix that same delivery produced two.** Linux only; a full 12-of-12 clean tally is still open (F24-C-M1)
+
+== PATH RESOLUTION ==
+[OK]   stat phases/24-gateway-automation-channels-typed-api/24-C-SUMMARY.md
+       -> .planning/phases/24-gateway-automation-channels-typed-api/24-C-SUMMARY.md  size=14003
+       head:
+---
+phase: 24-gateway-automation-channels-typed-api
+plan: "C"
+subsystem: delivery
+tags: [independent-sink, delivery-arrival, outbound-idempotency, exactly-once, criterion-1]
+status: partial
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

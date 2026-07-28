@@ -1,0 +1,19 @@
+EVIDENCE ID : F26-03-BACKUP
+LEDGER ROW  : 31
+ARTIFACT    : `phases/26-migration-export-backup-restore/26-03-SUMMARY.md` (completed in lane 26c) — backup, restore and exact rollback; **F26-03-D fixed at the product**: `wcore_config::atomic_io`'s tempfile round trip reached Win32 without long-path handling and failed with os error 3 at a 320-character non-verbatim absolute path on Windows 11 26200. Windows interruption legs run. F26-03 and F26-04 claimed. **Plans 26-02 (import/apply + quarantine) and 26-04 (hostile corpora) NOT STARTED**
+
+== PATH RESOLUTION ==
+[OK]   stat phases/26-migration-export-backup-restore/26-03-SUMMARY.md
+       -> .planning/phases/26-migration-export-backup-restore/26-03-SUMMARY.md  size=32870
+       head:
+---
+phase: 26-migration-export-backup-restore
+plan: "03"
+status: complete
+termination_state: 1 (Complete)
+requirements: [F26-03, F26-04]
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

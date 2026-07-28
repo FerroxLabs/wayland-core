@@ -1,0 +1,22 @@
+EVIDENCE ID : F-28-02-001-FIXED
+LEDGER ROW  : 36
+ARTIFACT    : `phases/28-native-cross-platform-certification/F-28-02-001-DISPOSITION.md` + `F-28-02-001-MACOS-PROOF.md` — the 24 macOS reds were an **observability** gap, not a containment gap; macOS containment is real (`SandboxExecBackend`, a `(deny default)` SBPL profile) and was simply unobservable through any black-box surface. Disposition FIXED, with `swarm`'s macOS refusal deliberately untouched
+
+== PATH RESOLUTION ==
+[OK]   stat phases/28-native-cross-platform-certification/F-28-02-001-DISPOSITION.md
+       -> .planning/phases/28-native-cross-platform-certification/F-28-02-001-DISPOSITION.md  size=14114
+       head:
+# F-28-02-001 — DISPOSITION
+
+**Finding.** *macOS sandbox activeness is not obtainable through any black-box surface of the
+shipped candidate.* 24 `sandbox-probes` cells on `macos` are RED; Criterion 1 is not satisfied
+on that family. HIGH by construction under amendment **A2** — the accept and defer paths are
+closed, leaving **FIXED** or **DISPROVED** only.
+
+== SIBLING (bare-filename) RESOLUTION ==
+[OK]   sibling F-28-02-001-MACOS-PROOF.md -> .planning/phases/28-native-cross-platform-certification/F-28-02-001-MACOS-PROOF.md
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

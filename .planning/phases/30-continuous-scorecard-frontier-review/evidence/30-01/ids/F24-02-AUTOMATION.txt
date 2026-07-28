@@ -1,0 +1,22 @@
+EVIDENCE ID : F24-02-AUTOMATION
+LEDGER ROW  : 22
+ARTIFACT    : `phases/24-gateway-automation-channels-typed-api/24-02-SUMMARY.md` + `24-02-AUTOMATION-CONTRACT.md` — single-owner schedule lease over `flock`/`LockFileEx`, seven trigger types, bounded retry and history, all seven types authored from the shipped binary. This is the persistent scheduling Phase 22 C4 deferred to Phase 24
+
+== PATH RESOLUTION ==
+[OK]   stat phases/24-gateway-automation-channels-typed-api/24-02-SUMMARY.md
+       -> .planning/phases/24-gateway-automation-channels-typed-api/24-02-SUMMARY.md  size=20452
+       head:
+---
+phase: 24-gateway-automation-channels-typed-api
+plan: "02"
+subsystem: automation
+tags: [scheduling, lease, single-owner, triggers, retry, history-bound, natural-language]
+status: partial
+
+== SIBLING (bare-filename) RESOLUTION ==
+[OK]   sibling 24-02-AUTOMATION-CONTRACT.md -> .planning/phases/24-gateway-automation-channels-typed-api/24-02-AUTOMATION-CONTRACT.md
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED
