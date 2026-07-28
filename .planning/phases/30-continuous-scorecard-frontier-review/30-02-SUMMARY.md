@@ -186,9 +186,19 @@ five dimensions mechanical, both peer pins present and one re-resolved, module l
 results carry the current protocol digest, scope stated, peer checkouts clean.
 
 `cargo fmt --all -- --check` clean. **Authoritative gate:** `wayland-scorecard trials verify`
-against the committed protocol and committed results on hetzner → `TRIALS_VERIFY=OK legs=15 run=6
-unproven=9 comparatives=3`, rc=0. **`cargo nextest run -p wcore-eval-scenarios --no-fail-fast`:
-470 passed, 0 failed, 5 skipped.**
+against the committed protocol and committed results on hetzner → `TRIALS_VERIFY=OK legs=15 run=9
+unproven=6 comparatives=6 scope=SCRIPTED_HARNESS`, rc=0.
+**`cargo nextest run -p wcore-eval-scenarios --no-fail-fast`: 470 passed, 0 failed, 5 skipped.**
+
+> **Correction applied by 30-04 (finding `F-30-03-001`, LOW, documentation only).** This line
+> previously transcribed the gate as `run=6 unproven=9 comparatives=3` — the three figures
+> inverted and halved. **The data was always sound; only this sentence was wrong.** Its own
+> committed capture `evidence/30-02/authoritative-gates.txt` line 4 reads
+> `run=9 unproven=6 comparatives=6`, `evidence/30-02/legs.tsv` counts 9 `::RUN::` and
+> 6 `::UNPROVEN::`, and this summary's own frontmatter carries `legs_run: 9` /
+> `legs_unproven: 6`. All four now agree. 30-03 found the inversion and correctly declined to
+> edit another plan's summary; the correction is made here, at the source, and changes no
+> measurement. Only the prose was touched — `evidence/30-02/` is gate-checked unmodified.
 
 **Clippy is RED, and it is not mine.** 4 errors, all four in Phase 24's `journey.rs`
 (683/695/707/717), zero in this lane's four files. Pre-existing; another lane owns that file. Not
