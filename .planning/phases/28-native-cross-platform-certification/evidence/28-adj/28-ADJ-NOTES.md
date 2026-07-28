@@ -74,3 +74,57 @@ and nothing else -> the honour test is not satisfiable by reclaim-everything.
 - Adjacent unrepaired wedge: read_validated_lease Err / owner_is_live Err still abort the
   whole pass. Pre-existing, but is it inside F-28-02-002's stated scope?
 - The gate self-test at 28-04-FINDING-LEDGER.md:1182.
+
+### A6. THE FOURTH SELF-PASSING GATE — FOUND, AND MEASURED ON HARDWARE.
+`F-28-ADJ-001`. The test named `reclamation_reports_grants_it_could_not_revoke`
+(tests.rs:359) does NOT test that reclamation reports grants it could not revoke.
+It never calls `reclamation_report`; the only occurrence of that identifier in
+tests.rs is the test's own NAME. Its assertion reads the QUARANTINED FILE and checks
+it still contains the grant path — which is satisfied by the file MOVE preserving
+contents, and is already asserted by `dead_owner_..._is_reclaimed_not_refused_forever`.
+The `else` branch of `residual` in `reclamation_report` (acl_lease.rs:772-785) is
+therefore asserted by NOTHING: the only test that calls `reclamation_report`
+(storage.rs:1067 `a_leaked_test_lease_is_diagnosed_by_name`) passes `test_lease(...)`,
+whose intents are `Vec::new()` (storage.rs:776), so only the `if` branch is covered.
+
+MEASURED, not read. M3 mutant deletes the disclosure branch so the operator is told
+"nothing was left behind on this machine" while un-revokable ACL grants remain.
+On SeanDesktop at 3f3f93dc (byte-identical to integration HEAD, sha256 bc6bdac1…):
+  MUT_COMPILED=True, APPLIED_SHA256=8dc05b5c… (the mutant)
+  all 5 named tests passed=1 failed=0, INCLUDING reclamation_reports_grants_it_could_not_revoke
+  FULL LIB SUITE: 133 passed; 0 failed; 23 ignored  <- identical to the pristine headline
+  RESTORED_SHA256=bc6bdac1… RESTORE_MATCHES_PRISTINE=True REPO_DIRTY_AFTER=0
+Evidence: evidence/28-adj/{m3.log,m3.diff,adj-m3.ps1}.
+
+The first attempt of this same instrument ABORTED on its own guard (WLRC=7,
+RESOLVED_COUNT=0): the `--list` regex anchored `$` against lines carrying a trailing
+CR, so all five --exact filters resolved to nothing. Without the enumerate-and-count
+guard I would have read five `ok; 0 passed` runs as five greens. Kept as the first
+half of m3.log's story; the brief's trap #2, hit live.
+
+SEVERITY: WARNING, not BLOCKER. The disclosure is a secondary property of the repair,
+not the finding's subject. Even with NO disclosure, quarantining still strictly
+dominates refusing-forever: refusing never revoked the grants either, and its
+documented remedy ("DELETE it and re-run") disclosed nothing at all.
+
+### A7. Containment direction — the fix does NOT trade DoS for a hole.
+Before: unreconcilable dead-owner lease -> sandbox permanently unavailable -> product
+refuses all execution -> stale ACEs remain on disk, undisclosed.
+After:  lease quarantined -> sandbox available -> product executes SANDBOXED -> the
+same stale ACEs remain, now disclosed.
+The residual ACE is granted to a SID stored only as a digest. AppContainer SIDs derive
+deterministically from the profile NAME, but "unreconcilable" is by definition the case
+where the recorded SID does NOT match the SID derived from the recorded profile name —
+so the grant's SID cannot be reached from anything the lease discloses. Not practically
+exploitable from the lease's contents. No live container can be affected: owner_is_live
+dominates all three mutating branches (A4), M2-proven plus live_owner_is_never_reclaimed
+against a real CreateAppContainerProfile identity.
+
+### A8. Baseline gate state, measured BEFORE any edit (so a later green means something)
+  --self-test                        rc=0  (synthetic fixtures; 0 failures)
+  --validate --allow-open            rc=0  63 findings, OK
+  --validate  (strict)               rc=1  REJECTED (1)
+      F28L-002  F-28-02-002 (line 39): disposition is OPEN; acceptance requires a
+                terminal disposition
+Exactly the one rejection the ledger documents at :1173/:1182. The gate CAN fail and
+is failing now, for this row and no other.

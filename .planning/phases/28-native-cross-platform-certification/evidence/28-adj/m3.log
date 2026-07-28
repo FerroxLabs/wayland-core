@@ -1,0 +1,23 @@
+F28ADJ M3 started=2026-07-29T01:03:31.4932288+07:00
+REPO_HEAD=3f3f93dc8dc64c847ad5ab0955837d3e91d44d1a
+REPO_DIRTY_BEFORE=0
+PRISTINE_SHA256=bc6bdac1ff3f59459f05aaa81883f53b68480bacb73bae7696af6e493dc50de9
+RESOLVED=backends::appcontainer::appcontainer_acl_lease::tests::dead_owner_unreconcilable_lease_is_reclaimed_not_refused_forever
+RESOLVED=backends::appcontainer::appcontainer_acl_lease::tests::live_owner_unreconcilable_lease_is_honoured_not_reclaimed
+RESOLVED=backends::appcontainer::appcontainer_acl_lease::tests::quarantine_directory_does_not_become_a_second_wedge
+RESOLVED=backends::appcontainer::appcontainer_acl_lease::tests::reclamation_reports_grants_it_could_not_revoke
+RESOLVED=backends::appcontainer::appcontainer_acl_lease::storage::tests::a_leaked_test_lease_is_diagnosed_by_name
+RESOLVED_COUNT=5;EXPECTED=5
+APPLIED_SHA256=8dc05b5cb8916f1fc9fd527a2e37dac293d5fa8f50132df0d83b1b80cf5547e5
+MUT_COMPILED=True
+M3=dead_owner_unreconcilable_lease_is_reclaimed_not_refused_forever;result=ok;passed=1;failed=0;summaries=1
+M3=live_owner_unreconcilable_lease_is_honoured_not_reclaimed;result=ok;passed=1;failed=0;summaries=1
+M3=quarantine_directory_does_not_become_a_second_wedge;result=ok;passed=1;failed=0;summaries=1
+M3=reclamation_reports_grants_it_could_not_revoke;result=ok;passed=1;failed=0;summaries=1
+M3=a_leaked_test_lease_is_diagnosed_by_name;result=ok;passed=1;failed=0;summaries=1
+M3_FULLSUITE=result=ok;passed=133;failed=0;ignored=23;summaries=1
+M3_FULLSUITE_LINE=test result: ok. 133 passed; 0 failed; 23 ignored; 0 measured; 0 filtered out; finished in 4.70s
+RESTORED_SHA256=bc6bdac1ff3f59459f05aaa81883f53b68480bacb73bae7696af6e493dc50de9
+RESTORE_MATCHES_PRISTINE=True
+REPO_DIRTY_AFTER=0
+finished=2026-07-29T01:03:42.2162606+07:00
