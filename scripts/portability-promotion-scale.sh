@@ -44,6 +44,35 @@ if [ ! -s "$WT" ]; then
     exit 6
 fi
 
+# --- the scale corpus ------------------------------------------------------
+#
+# 26-01's canary corpus reproduces the real install's STRUCTURE exactly — 540
+# skill directories — but its generator is bounded: everything that was not
+# importer-relevant became a directory MARKER, so those 540 directories carry
+# no `SKILL.md`. Imported as-is they classify as nothing at all, and a promotion
+# cost measured over them would be a cost over one item, which is not a slope.
+#
+# So the script materialises a realistic body into the directories that are
+# already there, from the committed fixture, into a SCRATCH copy. The structure
+# is the real install's; the payload is the same one the paired inertness legs
+# prove executes. Nothing in the committed corpus is modified.
+FIXTURE="$REPO/crates/wcore-cli/tests/fixtures/portability-exec/skills/repo-status/SKILL.md"
+SCALE_CORPUS="$CORPUS"
+MATERIALISED=0
+if [ -s "$FIXTURE" ]; then
+    EMPTY_DIRS=$(/usr/bin/find "$CORPUS" -mindepth 1 -type d -path '*/skills/*' 2>/dev/null | /usr/bin/wc -l | tr -d ' ')
+    HAVE_BODIES=$(/usr/bin/find "$CORPUS" -name 'SKILL.md' 2>/dev/null | /usr/bin/wc -l | tr -d ' ')
+    if [ "$EMPTY_DIRS" -gt 0 ] && [ "$HAVE_BODIES" -eq 0 ]; then
+        SCALE_CORPUS=$(mktemp -d)/hermes
+        /bin/cp -R "$CORPUS" "$SCALE_CORPUS"
+        for d in $(/usr/bin/find "$SCALE_CORPUS" -mindepth 1 -type d -path '*/skills/*'); do
+            /usr/bin/sed 's|__SENTINEL__|/tmp/scale-sentinel-never-run|' "$FIXTURE" >"$d/SKILL.md"
+            MATERIALISED=$((MATERIALISED + 1))
+        done
+    fi
+fi
+CORPUS="$SCALE_CORPUS"
+
 # --- a throwaway home per measurement -------------------------------------
 # Each measurement starts from the SAME state. Reusing one home would let an
 # earlier promotion change what a later one costs, and the slope would then be
@@ -97,19 +126,17 @@ NIDS=$(printf '%s\n' "$IDS" | /usr/bin/grep -c . || true)
 DATA_Q=$(printf '%s\n' "$IDS" | /usr/bin/grep -cE '^(persona|memory|memory_note|settings|asset|profile|root_profile):' || true)
 [ -z "$DATA_Q" ] && DATA_Q=0
 
-# (a) an item the plan published as executable that never reached the store.
+# Under-broad is measured DIRECTLY off the home the import actually wrote —
+# what executable content ended up somewhere it can RUN — rather than by
+# subtracting one report from another. An earlier version of this script
+# subtracted a published count from a contained count and got 1, purely because
+# the same item appears in both the `published` and `would_quarantine` arrays of
+# the emitted plan. A subtraction between two reports is not a measurement of
+# the surface; reading the surface is.
 WAYLAND_HOME="$H1" XDG_DATA_HOME= "$BIN" migrate hermes --home "$CORPUS" --json \
     >"$OUT/plan.json" 2>/dev/null
-PUB_EXEC=$(/usr/bin/grep -c '"class": "executable"' "$OUT/plan.json" || true)
-[ -z "$PUB_EXEC" ] && PUB_EXEC=0
-MISSING=0
-if [ "$PUB_EXEC" -gt "$NIDS" ]; then
-    MISSING=$((PUB_EXEC - NIDS))
-fi
 
-# (b) a live MCP server definition in the written config that carries a launch
-#     command — the child-process surface, read off the artifact the import
-#     actually wrote rather than off a report about it.
+# (a) a live MCP server definition carrying a launch command — a child process.
 LIVE_CMD=0
 if [ -s "$H1/config.toml" ]; then
     LIVE_CMD=$(/usr/bin/awk '
@@ -119,7 +146,15 @@ if [ -s "$H1/config.toml" ]; then
         END { print n+0 }
     ' "$H1/config.toml")
 fi
-EXEC_UNCONTAINED=$((MISSING + LIVE_CMD))
+
+# (b) a skill body carrying a shell directive sitting on the agent's own load
+#     path (<home>/skills), which is where a promoted skill lands and the only
+#     place an imported skill could run from.
+LIVE_SKILL=0
+if [ -d "$H1/skills" ]; then
+    LIVE_SKILL=$(/usr/bin/grep -rlF '```!' "$H1/skills" 2>/dev/null | /usr/bin/wc -l | tr -d ' ')
+fi
+EXEC_UNCONTAINED=$((LIVE_CMD + LIVE_SKILL))
 
 # --- promotion cost at TWO subset sizes ------------------------------------
 #
@@ -228,3 +263,5 @@ echo "CLASSIFY-EXEC-UNCONTAINED: $EXEC_UNCONTAINED"
 echo "CEILING-REFUSES-REALISTIC: $REFUSES"
 echo "CEILING-CONSTANTS: files=$CF file_bytes=$CFB total_bytes=$CTB"
 echo "POSITIVE-CONTROL: $PC"
+echo "SCALE-CORPUS-MATERIALISED-SKILLS: $MATERIALISED"
+echo "SCALE-STORE-ADMITTED: $NIDS"
