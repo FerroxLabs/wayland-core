@@ -221,3 +221,100 @@ says the taxonomy is consumed, not extended):
    clean Fleet/ForgeFlows/Council run, but the variant NAME reads as a partial
    failure. The payload is exact; the name is not. Worth a rename or a
    `Completed{unchecked}` variant in a later phase.
+
+---
+
+## M5 — built, and what the gates actually showed
+
+Commits so far: `0e33c08d` notes → `4ff65de4` anvil evidence → `26be00cd` adapter surface
+→ `09d5acf8` import fix → `74a6a6c0` test suite → `f7f72dc7` warning → `9db73178` CLI wiring
+→ `60c919b0` writer-lease fix.
+
+| Gate | Command | Result (read back, not assumed) |
+|---|---|---|
+| fmt | `cargo fmt --all -- --check` (Mac) | rc=0, 0 bytes of diff |
+| compile | `cargo check -p wcore-agent --all-targets` | rc=0, 0 errors |
+| strategy suite | `cargo nextest run -p wcore-agent --test goal_strategy_test` | **17 tests run: 17 passed, 0 skipped** |
+| whole crate | `cargo nextest run -p wcore-agent --no-fail-fast` | **3021 run: 3021 passed, 11 skipped**, rc=0 — no regression |
+| clippy | `cargo clippy -p wcore-agent --all-targets --all-features -- -D warnings` | rc=0, **ERRCOUNT=0**. `journey.rs` is in `wcore-eval-scenarios`, a different crate — the 4 pre-existing errors were neither inherited nor touched |
+| compile-fail proofs | `cargo test --doc -p wcore-agent -- goal::strategy` | **2 passed**, 0 failed |
+
+### The compile-fail gate was FALSIFIED, not merely run
+
+Removing the retry loop from the `from_anvil` doctest (so the token is used once and
+the snippet compiles) made the gate go **RED**: `FAILED_RC=101`,
+`test result: FAILED. 1 passed; 1 failed`. Restored in the same run; `git diff --stat`
+clean afterwards. So the doctest genuinely detects the move-once property rather than
+passing because rustdoc ignored it.
+
+Two runtime falsification tests are permanent, not one-off: the tag-collision detector
+is run against a deliberately-collided list, and `canonical_transitions` is shown
+returning **0** for a Goal that never ran a strategy — without which every "exactly
+one" assertion would be a tautology.
+
+## M6 — LIVE, against `wayland-core 0.12.25` release on hetzner
+
+### The live run found a defect the whole green suite could not
+
+First live invocation died at `session journal writer lease is already held`.
+`SessionJournal::open` takes an exclusive cross-process lease and a second open fails
+closed by design; `goal run --terminate` opened one handle for `GoalFleetDriver` and a
+second for `GoalLoop`. **Every real invocation would have died after recovery and
+before the first wave**, while 3021 tests stayed green — because every test builds a
+single driver, so nothing in-process ever opened the journal twice. Fixed in
+`60c919b0` by cloning the one handle.
+
+### Transcript — the shipped binary driving the canonical transition
+
+```
+GOAL: run pid=3683975 goal=g-live
+GOAL: recovery=resumed iterations=0 resume_count=1 resumable=true revoked=0 drained=0
+GOAL-EXEC: task=t3 key=idem-t3 produced=yes
+GOAL-EXEC: task=t2 key=idem-t2 produced=yes
+GOAL-EXEC: task=t1 key=idem-t1 produced=yes
+GOAL: wave=0 shards=2 claimed=3 lost=0 completed=3 failed=0 indeterminate=0 abandoned=0 delivered=3
+GOAL: run_complete waves=1 iterations=1 completed=3 delivered=3
+GOAL: canonical_transition strategy=fleet
+      terminal=Terminated { terminal: PartiallyCompleted { completed: 3, failed: 0 } }
+      cursor_seq=Some(22)
+```
+`goal status` then replays `{"state":"terminated","terminal":{"state":"partially_completed","completed":3,"failed":0}}`,
+and a second `goal run` reports `recovery=already-terminal ... resumable=false`.
+
+### Byte-identity (22-01 M1) survives — proven live, not argued
+
+A Goal that never claimed an owner serialises with **neither** new field:
+`loop_owner present: False`, `loop_owner_epochs present: False`.
+
+### The claim is DURABLE, proven by killing the thing that held it
+
+`kill -9` on the process group mid-wave: **9 descendants → 0**. A FRESH process then
+replays the chain and finds the claim still there:
+
+```
+lifecycle: {"state": "running"}
+loop_owner: {"strategy": "fleet", "epoch": 1}
+loop_owner_epochs: 1
+```
+
+That is "recorded on the Goal, not held in a call stack" demonstrated against the one
+event a call stack cannot survive. The restart's second claim was refused —
+`loop owner Fleet (epoch 1) is already live; a nested loop owner is refused`, exit 1 —
+and the Goal stayed `resumable=true` and non-terminal.
+
+## M7 — HIGH, found in my own construction by the live kill
+
+**The loop-owner claim has no lease, so an owner that dies deadlocks its Goal forever.**
+
+The refusal above is correct in-process and wrong across a crash: after `kill -9` the
+epoch-1 claim is live with nobody holding it, and no restart can ever claim or
+terminate. Task claims in the 22-03 ledger already solve exactly this with a lease
+(`--lease 60s`, "a claim whose lease has expired is revoked and reassigned by the next
+process to start"); I introduced the loop-owner claim without one. That asymmetry is
+mine, it is HIGH, and it is not a reason to weaken the nesting refusal.
+
+The epoch fence already makes reclaim SAFE: `GoalLoopOwnerFinished` requires the exact
+live epoch, so once a successor claims epoch 2, a resurrected epoch-1 owner's
+termination is refused. The missing half is only the liveness evidence that says the
+old owner is gone — which is what a lease is. Fixing next, mirroring the ledger's
+proven design rather than inventing a second one.
