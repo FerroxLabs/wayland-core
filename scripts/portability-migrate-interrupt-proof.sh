@@ -153,6 +153,61 @@ if [ "$DET_FP" != "$REF_FP" ]; then
 fi
 echo "DETERMINISM-CONTROL: pass"
 
+# SENSITIVITY CONTROL. The fingerprint normalises `config.toml` section ORDER
+# (the profile map is a HashMap, so two correct runs shuffle it) and the
+# embedded home path. A normalisation that went one step further would also
+# stop noticing a profile that never landed -- which is exactly the data loss
+# this proof exists to catch -- so the comparand is required to FAIL here.
+#
+# Three independent deformations, one per thing the fingerprint must see:
+# a missing profile, a missing quarantine entry, and a mutated payload byte.
+SENS_HOME="$WORK/sens-home"
+cp -a "$DET_HOME" "$SENS_HOME" || FAIL "could not copy a home for the sensitivity control"
+SENS_BASE=$(fingerprint "$SENS_HOME" | sed -n 's/^FINGERPRINT: //p')
+[ "$SENS_BASE" = "$REF_FP" ] || FAIL "a plain copy of a clean home did not fingerprint equal; the comparand is path-sensitive"
+
+python3 - "$SENS_HOME" <<'PY' || FAIL "could not deform the sensitivity copy"
+import json, os, re, sys
+home = sys.argv[1]
+cfg = os.path.join(home, "config.toml")
+text = open(cfg, encoding="utf-8").read()
+# Drop exactly one profile section.
+blocks = re.split(r"(?m)^(?=\[)", text)
+kept = []
+dropped = False
+for b in blocks:
+    if not dropped and b.startswith("[profiles.prof"):
+        dropped = True
+        continue
+    kept.append(b)
+assert dropped, "no profile section to drop"
+open(cfg, "w", encoding="utf-8").write("".join(kept))
+PY
+SENS_CFG=$(fingerprint "$SENS_HOME" | sed -n 's/^FINGERPRINT: //p')
+[ "$SENS_CFG" != "$SENS_BASE" ] || FAIL "the fingerprint did NOT change when a profile was removed from config.toml"
+
+SENS2="$WORK/sens-home-2"
+cp -a "$DET_HOME" "$SENS2" || FAIL "could not copy a home for the payload sensitivity control"
+PAY=$(find "$SENS2/migrate-quarantine/payloads" -type f | head -1)
+[ -n "$PAY" ] || FAIL "no payload file to deform"
+printf 'DEFORMED\n' >> "$PAY"
+SENS_PAY=$(fingerprint "$SENS2" | sed -n 's/^FINGERPRINT: //p')
+[ "$SENS_PAY" != "$SENS_BASE" ] || FAIL "the fingerprint did NOT change when a quarantined payload byte changed"
+
+SENS3="$WORK/sens-home-3"
+cp -a "$DET_HOME" "$SENS3" || FAIL "could not copy a home for the index sensitivity control"
+python3 - "$SENS3" <<'PY' || FAIL "could not deform the index copy"
+import json, os, sys
+p = os.path.join(sys.argv[1], "migrate-quarantine", "index.json")
+doc = json.load(open(p, encoding="utf-8"))
+k = sorted(doc["entries"])[0]
+del doc["entries"][k]
+json.dump(doc, open(p, "w", encoding="utf-8"))
+PY
+SENS_IDX=$(fingerprint "$SENS3" | sed -n 's/^FINGERPRINT: //p')
+[ "$SENS_IDX" != "$SENS_BASE" ] || FAIL "the fingerprint did NOT change when a quarantine index entry was removed"
+echo "SENSITIVITY-CONTROL: pass (profile-drop, payload-byte, index-entry all detected)"
+
 # --- trials -------------------------------------------------------------------
 MID=0; PRE=0; POST=0
 RECOVERED=0; NOT_RECOVERED=0

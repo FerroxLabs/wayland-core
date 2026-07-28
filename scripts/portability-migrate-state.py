@@ -111,15 +111,51 @@ def payload_map(root):
     return out
 
 
+def canonical_config(raw_text, root):
+    """Canonicalise `config.toml` for comparison across two homes.
+
+    TWO variances here are legitimate and must be normalised, and NOTHING else
+    is. Both were MEASURED on real runs rather than assumed:
+
+      1. SECTION ORDER. `Config::profiles` is a `HashMap`, and Rust's default
+         hasher is randomly seeded per process, so two identical clean
+         migrations emit the same profile sections in different orders. Without
+         this, every comparison fails and the natural response is to weaken the
+         comparison until it passes. Recorded as a finding in its own right.
+      2. THE HOME PATH. Derived keys such as `sessions.directory` embed the
+         absolute home, which differs by construction between a reference home
+         and a trial home.
+
+    What is deliberately NOT normalised: the SET of sections, the set of keys in
+    each section, and every value that does not contain the home path. So a
+    profile that failed to land, a key that was dropped, or a provider that
+    changed all still change the result.
+    """
+    text = raw_text.replace(os.path.abspath(root), "<HOME>").replace(root, "<HOME>")
+    sections = {}
+    current = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            current = stripped
+            sections.setdefault(current, [])
+        elif stripped:
+            sections.setdefault(current, []).append(stripped)
+    return "\n".join(
+        name + "\n" + "\n".join(sorted(sections[name])) for name in sorted(sections)
+    )
+
+
 def config_state(root):
     path = os.path.join(root, "config.toml")
     if not os.path.exists(path):
         return None, 0
-    raw = open(path, "rb").read()
+    raw = open(path, "rb").read().decode("utf-8", "replace")
     # Profile count read structurally enough to be a non-vacuity check without
     # depending on a TOML parser being installed on the measuring host.
-    profiles = raw.decode("utf-8", "replace").count("[profiles.")
-    return hashlib.sha256(raw).hexdigest(), profiles
+    profiles = raw.count("[profiles.")
+    canon = canonical_config(raw, root)
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest(), profiles
 
 
 def main():
@@ -145,7 +181,7 @@ def main():
     orphans = sorted(on_disk - claimed)
 
     doc = {
-        "config_sha256": cfg_digest,
+        "config_canonical_sha256": cfg_digest,
         "quarantine_index_verdict": verdict,
         "quarantine_entries": normalised,
         "payloads": {k: payloads[k] for k in sorted(payloads)},
