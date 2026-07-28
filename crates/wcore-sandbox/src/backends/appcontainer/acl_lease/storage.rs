@@ -1048,23 +1048,46 @@ mod tests {
 
     /// A leaked test lease must be named as such, not reported as a generic
     /// mismatch. The generic text is what operators read as a platform limit.
+    ///
+    /// Retargeted from `unreconcilable_lease_message` onto the pair that
+    /// replaced it when `F-28-02-002` was repaired
+    /// (`unreconcilable_lease_reason` + `reclamation_report`). Every assertion
+    /// it made is still made here; the remedy assertion additionally now pins
+    /// that the message denies the three false explanations that let the wedge
+    /// survive for weeks.
     #[test]
     fn a_leaked_test_lease_is_diagnosed_by_name() {
         let lease = test_lease(0xbeef, LeaseState::Prepared);
-        let message = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &lease);
+        let reason = unreconcilable_lease_reason(&lease);
         assert!(
-            message.contains("OWN TEST SUITE"),
-            "test-origin lease must be named as test-origin, got: {message}"
+            reason.contains("OWN TEST SUITE"),
+            "test-origin lease must be named as test-origin, got: {reason}"
+        );
+
+        let message = reclamation_report(
+            &lease,
+            Path::new(r"C:\leases\quarantine\x.toml.quarantined-0-0"),
+            &reason,
         );
         assert!(
             message.contains("DELETED") || message.contains("Delete it"),
             "the diagnosis must state the remedy, got: {message}"
         );
+        assert!(
+            message.contains("NOT a platform limitation")
+                && message.contains("NOT an SSH or session-0 effect")
+                && message.contains("NOT transient"),
+            "the diagnosis must deny the explanations that hid this defect, got: {message}"
+        );
+        assert!(
+            message.contains(r"C:\leases\quarantine\x.toml.quarantined-0-0"),
+            "the diagnosis must name where the evidence went, got: {message}"
+        );
 
         let mut genuine = lease.clone();
         genuine.sid_sha256 = sha256_hex(b"a-real-appcontainer-package-sid");
         genuine.refresh_digest();
-        let other = unreconcilable_lease_message(Path::new(r"C:\leases\x.toml"), &genuine);
+        let other = unreconcilable_lease_reason(&genuine);
         assert!(
             !other.contains("OWN TEST SUITE"),
             "a genuine mismatch must NOT be blamed on the test suite, got: {other}"

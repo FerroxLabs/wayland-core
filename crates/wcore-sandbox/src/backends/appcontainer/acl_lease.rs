@@ -743,6 +743,24 @@ fn unreconcilable_lease_reason(lease: &LeaseFile) -> String {
 /// permanent, behind a message that read like a platform limitation.
 fn reclaim_unreconcilable_lease(path: &Path, lease: &LeaseFile, reason: &str) -> Result<()> {
     let destination = quarantine_lease(path)?;
+    tracing::error!(
+        target: "wcore_sandbox",
+        lease = %path.display(),
+        quarantined_to = %destination.display(),
+        owner_pid = lease.owner_pid,
+        "{}",
+        reclamation_report(lease, &destination, reason)
+    );
+    Ok(())
+}
+
+/// The operator-facing text of a reclamation, as a pure function.
+///
+/// Deliberately NOT inlined into the `tracing` call. What an operator reads is
+/// the whole remedy for a defect that survived for weeks precisely because its
+/// message pointed away from its cause, so the wording is a behaviour worth
+/// pinning in a test rather than a formatting detail.
+fn reclamation_report(lease: &LeaseFile, destination: &Path, reason: &str) -> String {
     // Stated rather than glossed: a mismatching SID cannot be reconstructed
     // from its digest, so any ACL grant the lease recorded cannot be revoked
     // automatically. Refusing forever did not revoke them either — it only
@@ -765,21 +783,16 @@ fn reclaim_unreconcilable_lease(path: &Path, lease: &LeaseFile, reason: &str) ->
                 .join(", ")
         )
     };
-    tracing::error!(
-        target: "wcore_sandbox",
-        lease = %path.display(),
-        quarantined_to = %destination.display(),
-        owner_pid = lease.owner_pid,
-        "RECLAIMED a stale AppContainer ACL lease: {reason}, and its owning process \
-         {} is gone. This was persistent on-disk state — NOT a platform limitation, \
-         NOT an SSH or session-0 effect, and NOT transient. Until this reclamation \
-         landed, a file in this state disabled ALL sandboxed execution on this machine \
-         until a human deleted it. The file has been MOVED (not deleted) to {} so the \
-         cause stays inspectable. {residual}",
+    format!(
+        "RECLAIMED a stale AppContainer ACL lease: {reason}, and its owning process {} is \
+         gone. This was persistent on-disk state — NOT a platform limitation, NOT an SSH \
+         or session-0 effect, and NOT transient. Until this reclamation landed, a file in \
+         this state disabled ALL sandboxed execution on this machine until a human DELETED \
+         it. The file has been MOVED (not deleted) to {} so the cause stays inspectable. \
+         {residual}",
         lease.owner_pid,
         destination.display()
-    );
-    Ok(())
+    )
 }
 
 fn owner_is_live(lease: &LeaseFile) -> Result<bool> {
