@@ -1,0 +1,172 @@
+# Phase 28 — the two native macOS sandbox acceptance suites, on a real macOS host.
+#
+# Why this workflow exists
+# ------------------------
+# `wcore-sandbox/tests/hard_process_containment_macos.rs` and
+# `wcore-sandbox/tests/live_integrity_macos.rs` carry the two
+# `required_live_macos_*` cases in the Phase 28 hostile platform matrix. Both are
+# `#![cfg(target_os = "macos")]` and `#[ignore]`d, so they had never executed
+# anywhere: the development Macs are forbidden from running cargo, the Linux
+# build host is not macOS, and the Windows box is not macOS either. A previous
+# lane concluded "no macOS build host in reach" and filed the legs unrun.
+#
+# That conclusion was wrong about the available hardware. `ci.yml` has used
+# GitHub-hosted `macos-latest` runners since long before Phase 28, and
+# `release.yml` builds both Darwin targets on them. A hosted macOS runner IS a
+# macOS build host. This workflow uses one.
+#
+# Why the gate can fail
+# ---------------------
+# Both suites contain the exact self-passing shape this program has measured
+# repeatedly. Each test opens with:
+#
+#     if std::env::var("WAYLAND_SANDBOX_LIVE_MACOS").is_err() { eprintln!("skip: ..."); return; }
+#     if !backend.is_available() { eprintln!("skip: ..."); return; }
+#
+# so an un-opted-in host prints `1 passed` having asserted nothing (flavour B),
+# and without `--ignored` the binary prints `test result: ok` having run zero
+# tests (flavour A). Asserting the exit status, or even `1 passed`, would
+# therefore certify nothing. This job asserts all three properties separately:
+#
+#   1. `running 1 test`            — the case was collected, not filtered away.
+#   2. `1 passed; 0 failed`        — it reached the end without an assertion firing.
+#   3. NO `skip:` line in stdout   — neither early return was taken, so the
+#                                    assertions actually ran against a live
+#                                    sandbox-exec backend.
+#
+# Property 3 is the load-bearing one. Drop it and an unset env var reads as a
+# clean pass. The exit status is captured out of PIPESTATUS, never off the tail
+# of a pipe, because `cmd | tee` reports tee's status and not cmd's.
+
+name: macOS native suites (Phase 28)
+
+on:
+  # `workflow_dispatch` already selects the branch to run on, so there is
+  # deliberately no `ref` input: feeding a dispatch input into
+  # `actions/checkout`'s `ref:` is a ref-injection surface for no added ability.
+  #
+  # NOTE: the REST API resolves a dispatchable workflow by name off the DEFAULT
+  # branch, so `gh workflow run` returns 404 for a workflow that exists only on
+  # a topic branch. The scoped `push` trigger below is what lets this run before
+  # it has ever reached the default branch. Paths are narrowed to the sandbox
+  # surface it certifies so it does not fire on unrelated lane pushes.
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/macos-native-suites.yml'
+      - 'crates/wcore-sandbox/src/**'
+      - 'crates/wcore-sandbox/tests/hard_process_containment_macos.rs'
+      - 'crates/wcore-sandbox/tests/live_integrity_macos.rs'
+
+permissions:
+  contents: read
+
+jobs:
+  macos-native-suites:
+    name: wcore-sandbox live macOS acceptance
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      # Opt this host into the live macOS execution both suites gate on.
+      WAYLAND_SANDBOX_LIVE_MACOS: "1"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup vx (installs Rust from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      # Record what the host actually offers before trusting any result below.
+      # If sandbox-exec is missing or non-functional the suites would take their
+      # second early return and report a green; we want that visible as data.
+      - name: Probe the host sandbox facility
+        run: |
+          set -euo pipefail
+          echo "sw_vers:"; sw_vers
+          echo "uname: $(uname -a)"
+          echo "sandbox-exec: $(command -v sandbox-exec || echo MISSING)"
+          # A trivial deny-default profile that permits only process-exec.
+          printf '(version 1)(allow default)' > /tmp/probe.sb
+          if sandbox-exec -f /tmp/probe.sb /bin/echo "sandbox-exec probe ok"; then
+            echo "PROBE_RESULT=usable"
+          else
+            echo "PROBE_RESULT=unusable (rc=$?)"
+          fi
+
+      - name: Run hard_process_containment_macos
+        id: containment
+        run: |
+          set -uo pipefail
+          vx cargo test -p wcore-sandbox --test hard_process_containment_macos \
+            -- --ignored --test-threads=1 2>&1 | tee /tmp/containment.log
+          echo "rc=${PIPESTATUS[0]}" | tee -a /tmp/containment.rc
+
+      - name: Run live_integrity_macos
+        id: integrity
+        if: always()
+        run: |
+          set -uo pipefail
+          vx cargo test -p wcore-sandbox --test live_integrity_macos \
+            -- --ignored --test-threads=1 2>&1 | tee /tmp/integrity.log
+          echo "rc=${PIPESTATUS[0]}" | tee -a /tmp/integrity.rc
+
+      # The gate proper. Deliberately separate from the run steps so a
+      # non-zero cargo exit cannot short-circuit the executed-count checks,
+      # and so each asserted property fails with its own message.
+      - name: Assert both suites executed their case and did not skip
+        if: always()
+        run: |
+          set -uo pipefail
+          fail=0
+          check_suite() {
+            local name="$1" log="$2" want_tests="$3"
+            echo "=== ${name} ==="
+            if [ ! -s "${log}" ]; then
+              echo "FAIL(${name}): no log produced — the suite never ran"
+              fail=1
+              return
+            fi
+            if ! grep -q "running ${want_tests} test" "${log}"; then
+              echo "FAIL(${name}): expected 'running ${want_tests} test' — suite collected the wrong number of cases (flavour A/C: zero executed)"
+              grep -E "running [0-9]+ test|test result" "${log}" || true
+              fail=1
+            fi
+            if ! grep -qE "test result: ok\. ${want_tests} passed; 0 failed" "${log}"; then
+              echo "FAIL(${name}): expected '${want_tests} passed; 0 failed'"
+              grep -E "test result" "${log}" || true
+              fail=1
+            fi
+            if grep -q "^skip:" "${log}"; then
+              echo "FAIL(${name}): the test took an early return and asserted NOTHING (flavour B):"
+              grep "^skip:" "${log}"
+              fail=1
+            fi
+            echo "--- ${name} verdict lines ---"
+            grep -E "running [0-9]+ test|test result|^skip:" "${log}" || true
+          }
+          check_suite hard_process_containment_macos /tmp/containment.log 1
+          check_suite live_integrity_macos /tmp/integrity.log 1
+          echo "=== recorded cargo exit codes ==="
+          cat /tmp/containment.rc /tmp/integrity.rc 2>/dev/null || echo "(none recorded)"
+          if [ "${fail}" -ne 0 ]; then
+            echo "GATE: FAILED"
+            exit 1
+          fi
+          echo "GATE: PASSED — both required_live_macos_* cases executed on a real macOS host"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-native-suites-logs
+          path: |
+            /tmp/containment.log
+            /tmp/integrity.log
+            /tmp/containment.rc
+            /tmp/integrity.rc
+          if-no-files-found: warn

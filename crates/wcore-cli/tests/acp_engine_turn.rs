@@ -158,3 +158,45 @@ async fn a2a_on_message_routes_task_to_engine() {
     assert_eq!(reply.to, "peer", "reply addressed back to the sender");
     assert_eq!(reply.correlation_id, Some("corr-1".to_string()));
 }
+
+/// Zero-execution guard — and it has to RUN to be one.
+///
+/// This binary is a subtler case than the all-`#[ignore]`d suites, and the
+/// difference is worth stating because a scan of THIS FILE alone gets it wrong.
+/// Both ACP cases above are `#[ignore]`d, but `#[path = "support/mod.rs"] mod
+/// support;` compiles 8 further non-ignored `#[test]`s into the same binary.
+/// So `cargo test --test acp_engine_turn` prints `8 passed` and exits 0 while
+/// executing NEITHER of the two cases the binary is named for — measured:
+/// under `-- --ignored` the run reports `8 filtered out`.
+///
+/// That is worse than a plain zero-execution suite, not better: a reader
+/// checking the executed count sees a healthy `8 passed` and has no signal
+/// that the ACP bridge was never exercised. The count assertion this program
+/// relies on ("read the `N passed` back") does not catch it.
+///
+/// This guard is deliberately NOT `#[ignore]`d: three suites in this repo
+/// carried a guard that was itself ignored, which made each inert against
+/// precisely the scenario it existed for.
+///
+/// It FAILS when a caller sets `WAYLAND_REQUIRE_IGNORED=1` to declare a run of
+/// the two ACP cases while passing an invocation that cannot execute either.
+/// Skipped under nextest, whose `no-tests = "fail"` policy covers the
+/// zero-match case at the invocation site.
+#[test]
+fn zero_execution_guard() {
+    if std::env::var_os("NEXTEST").is_some() {
+        return;
+    }
+    if std::env::var("WAYLAND_REQUIRE_IGNORED").as_deref() != Ok("1") {
+        return;
+    }
+    let asked_for_ignored = std::env::args().any(|a| a == "--ignored" || a == "--include-ignored");
+    assert!(
+        asked_for_ignored,
+        "declared intent to run this binary's 2 #[ignore]d ACP cases, but neither \
+         --ignored nor --include-ignored was passed, so zero of them can execute. \
+         The 8 support-module tests in this binary WILL pass and prove nothing \
+         about the ACP bridge. Re-run with: \
+         cargo test -p wcore-cli --test acp_engine_turn -- --ignored --test-threads=1"
+    );
+}
