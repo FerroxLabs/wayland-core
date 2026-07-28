@@ -88,6 +88,30 @@ export const LEGS = ['admit', 'dedupe', 'access', 'bind', 'route'];
 const WEBHOOK_PORT = 18787;
 const ARRIVAL_BUDGET_MS = 90_000;
 
+// How long the shipped binary's inbound dedupe cache remembers a message id.
+//
+// Read from the product, not guessed: `bootstrap.rs:3234` and
+// `channel_inbound_host.rs` both construct `InboundSubscriber::new(..., 60_000,
+// 1024)`, and `DedupeCache` measures expiry from `first_seen`
+// (`dispatch/dedupe.rs:107`), so a replay later than this is EXPECTED to produce
+// a second turn — that is the cache working as designed, not a duplicate
+// leaking through.
+//
+// This constant exists because the driver got it wrong first. Email's `admit`
+// leg burns its full arrival budget (its reply can never arrive — see
+// `mailFixtureSupported`), which pushed the dedupe replay to **90.1s** after the
+// original. The leg dutifully reported FAIL, and the product was correct: the
+// entry had expired 30 seconds earlier. A driver that cannot see its own
+// timing writes product defects out of its own latency.
+const DEDUPE_TTL_MS = 60_000;
+
+// Per-adapter arrival budget. An adapter whose reply path is known-blocked must
+// not spend 90s per leg waiting for an arrival that provably cannot come — the
+// waiting is what pushed the dedupe replay outside the TTL above.
+const ARRIVAL_BUDGET_BY_ADAPTER = {
+  email: 20_000,
+};
+
 // ── small process helpers ────────────────────────────────────────────────────
 
 function run(argv, opts = {}) {
@@ -806,6 +830,140 @@ class InboundMatrix {
     }
   }
 
+  /// One leg that ran but cannot be graded, with the reason. Distinct from both
+  /// PASS/FAIL and from NOT MEASURED: the question was asked, and the answer is
+  /// not interpretable.
+  recordIncomplete(adapter, leg, reason) {
+    this.note(`INCOMPLETE ${adapter}/${leg}: ${reason}`);
+    this.notMeasured.push({ adapter, leg, reason, ran: true });
+  }
+
+  /// A separately-named probe of the email INBOUND path, graded on the turns
+  /// journal rather than on arrivals.
+  ///
+  /// THIS IS NOT THE FIVE LEGS AND IS NOT COUNTED AS THEM. 24-C3's legs are
+  /// defined on ARRIVALS — a reply that leaves the binary and lands in a journal
+  /// it does not own. Email's replies leave by SMTP, and SMTP cannot reach a
+  /// fixture (see `mailFixtureSupported` and the webpki-roots note on
+  /// `SSL_CERT_FILE`), so those five legs are recorded NOT MEASURED with the
+  /// measured TLS error. Redefining them onto a weaker observable to reach a
+  /// green would be exactly the "redefine success downward" move this program
+  /// has already paid for once.
+  ///
+  /// What this probe establishes instead is narrower and stated as such: that a
+  /// message delivered to a real IMAP mailbox is fetched by the shipped binary
+  /// over TLS, admitted or refused by the shared access gate, deduplicated, and
+  /// turned into a real model turn against the fixture endpoint. The turns
+  /// journal is written by a DIFFERENT out-of-process fixture than the mailbox,
+  /// so a claim here still cannot be satisfied by the binary talking to itself.
+  runEmailAdmissionProbe() {
+    const tag = crypto.randomBytes(4).toString('hex');
+    const probe = [];
+    const rec = (leg, ok, detail) => {
+      probe.push({ leg, ok, detail });
+      process.stdout.write(`[inbound] ${ok ? 'PASS' : 'FAIL'} email-admission/${leg} — ${detail}\n`);
+    };
+    const fetchCount = () => this.mailJournal().filter((r) => r.kind === 'imap.uid_fetch').length;
+    const send = (sender, text, messageId) =>
+      this.mailControl(
+        JSON.stringify({
+          op: 'deliver',
+          from: sender,
+          to: 'bot@fixture.invalid',
+          subject: 'f24c3 inbound',
+          body: text,
+          messageId: `<${messageId}@fixture.invalid>`,
+        }),
+      );
+    const awaitTurns = (corr, want, budgetSecs) => {
+      for (let i = 0; i < budgetSecs; i += 1) {
+        if (this.turnsFor(corr).length >= want) break;
+        process.stdout.write(
+          `[inbound] awaiting email turn ${corr}: ${this.turnsFor(corr).length}/${want} ` +
+            `after ${i}s ${new Date().toISOString()}\n`,
+        );
+        sleep(1000);
+      }
+      return this.turnsFor(corr);
+    };
+
+    // ── fetch: the binary reads the mailbox over TLS at all ────────────────
+    const fetchesBefore = fetchCount();
+    const c1 = `f24c3-email-admit-${tag}`;
+    const startedAt = Date.now();
+    const s1 = send('allowed@fixture.invalid', `hello ${c1}`, `${tag}.0001`);
+    const t1 = awaitTurns(c1, 1, 30);
+    const fetchesAfter = fetchCount();
+    rec(
+      'fetch',
+      fetchesAfter > fetchesBefore,
+      `deliver=${s1.output.slice(0, 60)} | imap.uid_fetch before=${fetchesBefore} after=${fetchesAfter} ` +
+        `(the shipped binary completed a TLS IMAP session against the fixture cert via SSL_CERT_FILE)`,
+    );
+
+    // ── admit ──────────────────────────────────────────────────────────────
+    rec(
+      'admit',
+      t1.length === 1,
+      `turns(fixture-journal)=${t1.length} want=1 for an allowlisted From:`,
+    );
+
+    // ── dedupe: SAME RFC Message-ID, new UID, inside the TTL ───────────────
+    const before2 = this.turnsFor(c1).length;
+    send('allowed@fixture.invalid', `hello ${c1}`, `${tag}.0001`);
+    const replayDelayMs = Date.now() - startedAt;
+    this.settle(15_000);
+    const after2 = this.turnsFor(c1).length;
+    const c1b = `f24c3-email-dedupe-control-${tag}`;
+    send('allowed@fixture.invalid', `hello ${c1b}`, `${tag}.0002`);
+    const control = awaitTurns(c1b, 1, 30);
+    if (replayDelayMs >= DEDUPE_TTL_MS) {
+      rec(
+        'dedupe',
+        false,
+        `NOT GRADEABLE: replay landed +${replayDelayMs}ms, outside the ${DEDUPE_TTL_MS}ms TTL`,
+      );
+    } else {
+      rec(
+        'dedupe',
+        after2 === before2 && control.length === 1,
+        `replay of the SAME Message-ID at +${replayDelayMs}ms (inside the ${DEDUPE_TTL_MS}ms TTL) | ` +
+          `turns before=${before2} after=${after2} (want equal) | ` +
+          `positive-control fresh Message-ID turns=${control.length} want=1`,
+      );
+    }
+
+    // ── access ─────────────────────────────────────────────────────────────
+    const c3 = `f24c3-email-access-${tag}`;
+    const fetchesBeforeDenied = fetchCount();
+    send('denied@fixture.invalid', `hello ${c3}`, `${tag}.0003`);
+    this.settle(20_000);
+    const t3 = this.turnsFor(c3);
+    const fetchesAfterDenied = fetchCount();
+    rec(
+      'access',
+      t3.length === 0 && t1.length === 1 && fetchesAfterDenied > fetchesBeforeDenied,
+      `denied From: turns=${t3.length} want=0 | CONTROL admit-turn=${t1.length} want=1 | ` +
+        `CONTROL the denied message WAS fetched (uid_fetch ${fetchesBeforeDenied}->${fetchesAfterDenied}), ` +
+        `so the zero is a refusal at the access gate and not an unread mailbox`,
+    );
+
+    // ── bind: explicitly NOT claimed ───────────────────────────────────────
+    const c4 = `f24c3-email-bind-${tag}`;
+    send('second@fixture.invalid', `hello ${c4}`, `${tag}.0004`);
+    const t4 = awaitTurns(c4, 1, 30);
+    rec(
+      'second-sender-admitted',
+      t4.length === 1,
+      `turns=${t4.length} want=1 for the second allowlisted sender. NOTE this is NOT the ` +
+        `24-C3 bind leg: the turns journal carries no conversation id, so it cannot show the two ` +
+        `senders bound to DISTINCT sessions. That remains unproven for email.`,
+    );
+
+    this.emailProbe = probe;
+    return probe;
+  }
+
   // Every count in the report comes through here: the ARRIVALS JOURNAL of a
   // process the binary does not own, filtered to the correlation token this
   // leg planted. Never a status line, never a log line the product wrote.
@@ -921,6 +1079,7 @@ class InboundMatrix {
     const tag = crypto.randomBytes(4).toString('hex');
     const url = `http://127.0.0.1:${WEBHOOK_PORT}/webhooks/${cfg.channelName}`;
     const reader = this.readerFor(adapter);
+    const budget = ARRIVAL_BUDGET_BY_ADAPTER[adapter] ?? ARRIVAL_BUDGET_MS;
     const deliver = ({ sender, conversation, text, messageId }) =>
       cfg.inject
         ? cfg.inject({ sender, conversation, text, messageId })
@@ -931,7 +1090,8 @@ class InboundMatrix {
     // ── admit + route ─────────────────────────────────────────────────────
     const c1 = `f24c3-${adapter}-admit-${tag}`;
     const r1 = deliver({ sender: cfg.allowed, conversation: cfg.conv1, text: `hello ${c1}`, messageId: `${tag}.0001` });
-    const seen1 = this.awaitArrivals(c1, 1, reader);
+    const originalAt = Date.now();
+    const seen1 = this.awaitArrivals(c1, 1, reader, budget);
     this.record(
       adapter,
       'admit',
@@ -967,7 +1127,12 @@ class InboundMatrix {
     // Replay the IDENTICAL platform message id. A second arrival means the
     // inbound dedupe cache did not absorb the platform's own retry.
     const beforeDedupe = this.arrivalsFor(c1, reader).length;
+    const beforeTurns = this.turnsFor(c1).length;
     const r2 = deliver({ sender: cfg.allowed, conversation: cfg.conv1, text: `hello ${c1}`, messageId: `${tag}.0001` });
+    // How far into the product's dedupe window this replay landed. Recorded
+    // BEFORE the settle, because the settle is not part of the window that
+    // matters — the entry's TTL runs from when the ORIGINAL was first seen.
+    const replayDelayMs = Date.now() - originalAt;
     this.settle(20_000);
     const afterDedupe = this.arrivalsFor(c1, reader).length;
     // Positive control: a DIFFERENT id from the same sender in the same
@@ -975,13 +1140,35 @@ class InboundMatrix {
     // satisfied by an adapter that had simply stopped working.
     const c1b = `f24c3-${adapter}-dedupe-control-${tag}`;
     deliver({ sender: cfg.allowed, conversation: cfg.conv1, text: `hello ${c1b}`, messageId: `${tag}.0002` });
-    const control = this.awaitArrivals(c1b, 1, reader);
-    this.record(
-      adapter,
-      'dedupe',
-      afterDedupe === beforeDedupe && control.length === 1,
-      `replay POST rc=${r2.status} | arrivals before=${beforeDedupe} after=${afterDedupe} (want equal) | positive-control fresh-id arrivals=${control.length} want=1`,
-    );
+    const control = this.awaitArrivals(c1b, 1, reader, budget);
+    const afterTurns = this.turnsFor(c1).length;
+
+    // TIMING GUARD. The product's dedupe entry expires `DEDUPE_TTL_MS` after the
+    // original was first seen. A replay that lands after that is SUPPOSED to
+    // produce a second turn, so grading it FAIL would write a product defect out
+    // of the driver's own latency — which is exactly what happened on the first
+    // email run (replay at 90.1s against a 60s TTL, reported FAIL, product
+    // correct). Not measurable is not the same as broken.
+    if (replayDelayMs >= DEDUPE_TTL_MS) {
+      this.recordIncomplete(
+        adapter,
+        'dedupe',
+        `replay landed ${replayDelayMs}ms after the original, which is OUTSIDE the product's ` +
+          `${DEDUPE_TTL_MS}ms dedupe TTL (bootstrap.rs:3234). A second delivery here is correct ` +
+          `behaviour, so this leg cannot distinguish a dedupe defect from an expired entry. ` +
+          `arrivals before=${beforeDedupe} after=${afterDedupe} | turns before=${beforeTurns} after=${afterTurns}`,
+      );
+    } else {
+      this.record(
+        adapter,
+        'dedupe',
+        afterDedupe === beforeDedupe && afterTurns === beforeTurns && control.length === 1,
+        `replay rc=${r2.status} at +${replayDelayMs}ms (inside the ${DEDUPE_TTL_MS}ms TTL) | ` +
+          `arrivals before=${beforeDedupe} after=${afterDedupe} (want equal) | ` +
+          `turns before=${beforeTurns} after=${afterTurns} (want equal) | ` +
+          `positive-control fresh-id arrivals=${control.length} want=1`,
+      );
+    }
 
     // ── access ────────────────────────────────────────────────────────────
     // A sender outside the allowlist. The control is the admit leg above,
@@ -1017,7 +1204,7 @@ class InboundMatrix {
       text: `hello ${c4}`,
       messageId: `${tag}.0004`,
     });
-    const seen4 = this.awaitArrivals(c4, 1, reader);
+    const seen4 = this.awaitArrivals(c4, 1, reader, budget);
     const distinct =
       seen1.length === 1 &&
       seen4.length === 1 &&
@@ -1287,32 +1474,44 @@ class InboundMatrix {
       return;
     }
 
-    this.runMatrix('email', {
-      channelName: 'f24c3email',
-      allowed: 'allowed@fixture.invalid',
-      denied: 'denied@fixture.invalid',
-      conv1: 'allowed@fixture.invalid',
-      conv2: 'second@fixture.invalid',
-      convDenied: 'denied@fixture.invalid',
-      secondSender: 'second@fixture.invalid',
-      expectConversation: 'allowed@fixture.invalid',
-      expectConversation2: 'second@fixture.invalid',
-      inject: ({ sender, text, messageId }) =>
-        this.mailControl(
-          JSON.stringify({
-            op: 'deliver',
-            from: sender,
-            to: 'bot@fixture.invalid',
-            subject: 'f24c3 inbound',
-            body: text,
-            // The RFC Message-ID is what the inbound dedupe cache keys on, so a
-            // replay must reuse it while the UID (the transport cursor) advances
-            // — the same distinction the telegram leg draws between message_id
-            // and update_id.
-            messageId: `<${messageId}@fixture.invalid>`,
-          }),
-        ),
-    });
+    this.runEmailAdmissionProbe();
+
+    // Only NOW decide how to record the five arrival legs, from what the fixture
+    // actually observed rather than from what the lockfile predicts.
+    const report = this.mailReport();
+    const smtpDelivered = report && report.ok ? report.smtp_delivered_total : null;
+    const smtpFailures = report && report.ok ? report.smtp_failures : [];
+    if (smtpDelivered === 0 && smtpFailures.length > 0) {
+      const err = String(smtpFailures[0].detail ?? '').split('\n')[0];
+      this.recordNotMeasured(
+        'email',
+        `the reply could not leave: ${smtpFailures.length} SMTP session(s) reached the fixture, ` +
+          `completed EHLO and STARTTLS, and were refused at certificate verification — "${err}". ` +
+          `SMTP is lettre/rustls (Cargo.toml:11, tokio1-rustls-tls) whose resolved deps include ` +
+          `webpki-roots and NOT rustls-native-certs; webpki-roots is a compiled-in root set that ` +
+          `reads no file and no environment variable, so SSL_CERT_FILE cannot redirect it on ANY ` +
+          `platform. The five legs of 24-C3 are defined on arrivals, so they are NOT MEASURED for ` +
+          `email — see email_admission_probe for what WAS established about the inbound half.`,
+      );
+    } else if (smtpDelivered > 0) {
+      // The prediction was wrong and the reply DID leave. Say so loudly rather
+      // than keeping the NOT MEASURED path that was written for it.
+      this.note(
+        `UNEXPECTED: ${smtpDelivered} SMTP deliveries succeeded. The webpki-roots analysis is ` +
+          `wrong and the email arrival legs should be run for real.`,
+      );
+      this.recordNotMeasured(
+        'email',
+        `SMTP unexpectedly delivered ${smtpDelivered} message(s); the arrival legs were not ` +
+          `wired for this case and must be re-run rather than inferred`,
+      );
+    } else {
+      this.recordNotMeasured(
+        'email',
+        `no SMTP delivery and no SMTP failure was observed at the fixture — the reply path was ` +
+          `never even attempted, which is a different fact from being refused`,
+      );
+    }
   }
 
   /// The polling adapter's matrix. Split out of `execute` so it can be reached
@@ -1455,6 +1654,8 @@ class InboundMatrix {
       mail_arrivals_total: this.mailArrivals().length,
       mail_fixture_report: mailReport,
       mail_ssl_cert_file: this.mailCert ?? null,
+      // Deliberately a SEPARATE key from `results`. This is not the five legs.
+      email_admission_probe: this.emailProbe ?? null,
       // Legs the driver could not ask about on this host, with the reason.
       // NOT failures — see `recordNotMeasured`.
       not_measured: this.notMeasured,
@@ -1571,6 +1772,9 @@ if (isMain) {
         `    uid=${msg.uid} from=${msg.from} fetches=${msg.fetch_count} seen_by=${msg.seen_by}\n`,
       );
     }
+  }
+  for (const p of result.email_admission_probe ?? []) {
+    process.stdout.write(`  ${p.ok ? 'PASS' : 'FAIL'} email-admission/${p.leg}: ${p.detail}\n`);
   }
   for (const n of result.not_measured ?? []) {
     process.stdout.write(`  NOT-MEASURED ${n.adapter}/${n.leg}: ${n.reason}\n`);
