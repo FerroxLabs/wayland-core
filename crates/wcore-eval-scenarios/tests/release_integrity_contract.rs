@@ -118,6 +118,13 @@ fn manifest_body(certification: Evidence<CertificationBindingV1>) -> ReleaseMani
             evidence_sha256: digest_of(b"variance-report"),
         },
         certification,
+        // The lifecycle facts a keyless build attestation structurally cannot
+        // carry: where this manifest sits in the sequence, when it was issued,
+        // and what has been revoked. Consumed by the shipped updater's freeze
+        // and revocation checks.
+        sequence: 1,
+        issued_at: 1_800_000_000,
+        revocations: Vec::new(),
     }
 }
 

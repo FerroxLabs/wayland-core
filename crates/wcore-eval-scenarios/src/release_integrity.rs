@@ -199,6 +199,39 @@ impl ReleaseTrustRootV1 {
         }
         decode_public_key(&entry.public_key_base64)
     }
+
+    /// Rotation, half one: add a key. Returns a NEW root rather than mutating,
+    /// so a caller always holds both the pre- and post-rotation roots and can
+    /// re-verify an existing manifest against each.
+    ///
+    /// A duplicate key id is refused: two keys answering to one id makes
+    /// "which key signed this" unanswerable.
+    pub fn with_key_added(&self, key: TrustedKeyV1) -> Result<Self, ReleaseIntegrityError> {
+        if self.keys.iter().any(|entry| entry.key_id == key.key_id) {
+            return Err(ReleaseIntegrityError::DuplicateKeyId { key_id: key.key_id });
+        }
+        let mut keys = self.keys.clone();
+        keys.push(key);
+        Ok(Self::new(keys))
+    }
+
+    /// Rotation, half two: retire a key at `retired_at`. The key stays in the
+    /// root — retirement is a recorded fact, not a deletion — and
+    /// [`ReleaseTrustRootV1::resolve`] refuses it from that instant on even
+    /// though its signatures remain cryptographically valid.
+    pub fn with_key_retired(
+        &self,
+        key_id: &str,
+        retired_at: u64,
+    ) -> Result<Self, ReleaseIntegrityError> {
+        let mut keys = self.keys.clone();
+        let entry = keys
+            .iter_mut()
+            .find(|candidate| candidate.key_id == key_id)
+            .ok_or_else(|| ReleaseIntegrityError::UnknownKeyId(key_id.to_string()))?;
+        entry.retired_at = Some(retired_at);
+        Ok(Self::new(keys))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +264,48 @@ pub struct ReleaseManifestBodyV1 {
     /// The Phase 28 seam. Representable as unavailable so this manifest is
     /// buildable and verifiable before Phase 28's receipt extensions land.
     pub certification: Evidence<CertificationBindingV1>,
+    /// Monotonic manifest sequence, starting at 1. A client refuses a manifest
+    /// whose sequence is at or below the highest it has already accepted, so a
+    /// mirror that keeps serving a correctly signed but STALE view is caught
+    /// even though every field in that view is internally consistent.
+    ///
+    /// Zero is not a valid sequence. A measurement that cannot be taken must
+    /// never render as `0`.
+    pub sequence: u64,
+    /// Unix seconds at which this manifest was issued. Non-zero. This is the
+    /// only freeze protection available on a first run, before any high-water
+    /// mark exists.
+    pub issued_at: u64,
+    /// Versions and artifact digests this release line has revoked, each with
+    /// the reason a client surfaces to the user. Keyless build provenance
+    /// cannot express revocation — an attestation says an archive was built by
+    /// this workflow and goes on saying it forever.
+    pub revocations: Vec<ReleaseRevocationV1>,
+}
+
+/// One revoked release version or one revoked artifact digest.
+///
+/// Two fields rather than an untagged union, because an unrecognised `kind`
+/// must fail at deserialization rather than silently matching nothing — a
+/// revocation that quietly fails to apply is worse than no revocation at all.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseRevocationV1 {
+    pub kind: RevocationKind,
+    /// The revoked version string (for [`RevocationKind::Version`]) or the
+    /// lowercase hex SHA-256 of the revoked artifact (for
+    /// [`RevocationKind::ArtifactSha256`]).
+    pub value: String,
+    /// Why. Surfaced verbatim to the user; a revocation nobody learns about
+    /// protects nobody.
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevocationKind {
+    Version,
+    ArtifactSha256,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -516,6 +591,25 @@ fn validate_manifest_body(body: &ReleaseManifestBodyV1) -> Result<(), ReleaseInt
             )));
         }
     }
+    if body.sequence == 0 {
+        return Err(ReleaseIntegrityError::InvalidBody(
+            "sequence must be at least 1; zero is unset, not a sequence".to_string(),
+        ));
+    }
+    if body.issued_at == 0 {
+        return Err(ReleaseIntegrityError::InvalidBody(
+            "issued_at must be a non-zero unix timestamp".to_string(),
+        ));
+    }
+    for revocation in &body.revocations {
+        require_nonempty("revocation.reason", &revocation.reason)?;
+        match revocation.kind {
+            RevocationKind::Version => require_nonempty("revocation.value", &revocation.value)?,
+            RevocationKind::ArtifactSha256 => {
+                require_hex("revocation.value", &revocation.value, 64)?
+            }
+        }
+    }
     if let Evidence::Observed { value } = &body.sbom {
         require_nonempty("sbom.name", &value.name)?;
         require_hex("sbom.sha256", &value.sha256, 64)?;
@@ -685,12 +779,11 @@ mod tests {
         assert!(serde_json::from_str::<TrustedKeyV1>(ok).is_ok());
     }
 
-    #[test]
-    fn body_validation_rejects_an_empty_artifact_list() {
-        let body = ReleaseManifestBodyV1 {
+    fn body(artifacts: Vec<PackagedArtifactV1>) -> ReleaseManifestBodyV1 {
+        ReleaseManifestBodyV1 {
             release_id: "r".to_string(),
             source_commit: h('a', 40),
-            artifacts: Vec::new(),
+            artifacts,
             sbom: Evidence::Unavailable {
                 code: "absent".to_string(),
             },
@@ -701,10 +794,139 @@ mod tests {
             certification: Evidence::Unavailable {
                 code: "absent".to_string(),
             },
-        };
+            sequence: 1,
+            issued_at: 1_800_000_000,
+            revocations: Vec::new(),
+        }
+    }
+
+    fn one_artifact() -> Vec<PackagedArtifactV1> {
+        vec![PackagedArtifactV1 {
+            name: "wayland-core.tar.gz".to_string(),
+            sha256: h('b', 64),
+            byte_length: 1,
+            kind: ArtifactKind::Archive,
+        }]
+    }
+
+    #[test]
+    fn body_validation_rejects_an_empty_artifact_list() {
         assert!(matches!(
-            ReleaseManifestV1::unsigned(body),
+            ReleaseManifestV1::unsigned(body(Vec::new())),
             Err(ReleaseIntegrityError::InvalidBody(_))
+        ));
+        // Pristine control: the same body with one artifact is accepted, so
+        // this cannot pass against a validator that refuses everything.
+        assert!(ReleaseManifestV1::unsigned(body(one_artifact())).is_ok());
+    }
+
+    #[test]
+    fn a_zero_sequence_or_a_zero_issue_time_is_refused() {
+        // A measurement that could not be taken must never render as 0.
+        let mut unset = body(one_artifact());
+        unset.sequence = 0;
+        assert!(matches!(
+            ReleaseManifestV1::unsigned(unset),
+            Err(ReleaseIntegrityError::InvalidBody(_))
+        ));
+
+        let mut undated = body(one_artifact());
+        undated.issued_at = 0;
+        assert!(matches!(
+            ReleaseManifestV1::unsigned(undated),
+            Err(ReleaseIntegrityError::InvalidBody(_))
+        ));
+    }
+
+    #[test]
+    fn a_revocation_must_carry_a_reason_and_a_well_formed_target() {
+        let mut reasonless = body(one_artifact());
+        reasonless.revocations = vec![ReleaseRevocationV1 {
+            kind: RevocationKind::Version,
+            value: "0.1.0".to_string(),
+            reason: "   ".to_string(),
+        }];
+        assert!(matches!(
+            ReleaseManifestV1::unsigned(reasonless),
+            Err(ReleaseIntegrityError::InvalidBody(_))
+        ));
+
+        let mut malformed = body(one_artifact());
+        malformed.revocations = vec![ReleaseRevocationV1 {
+            kind: RevocationKind::ArtifactSha256,
+            value: "not-a-digest".to_string(),
+            reason: "why".to_string(),
+        }];
+        assert!(matches!(
+            ReleaseManifestV1::unsigned(malformed),
+            Err(ReleaseIntegrityError::InvalidBody(_))
+        ));
+
+        // Control: a well-formed revocation of each kind is accepted.
+        let mut good = body(one_artifact());
+        good.revocations = vec![
+            ReleaseRevocationV1 {
+                kind: RevocationKind::Version,
+                value: "0.1.0".to_string(),
+                reason: "known sandbox escape".to_string(),
+            },
+            ReleaseRevocationV1 {
+                kind: RevocationKind::ArtifactSha256,
+                value: h('c', 64),
+                reason: "repackaged from an uncertified binary".to_string(),
+            },
+        ];
+        assert!(ReleaseManifestV1::unsigned(good).is_ok());
+    }
+
+    #[test]
+    fn an_unrecognised_revocation_kind_fails_to_deserialize() {
+        let bad = r#"{"kind":"maybe","value":"0.1.0","reason":"x"}"#;
+        assert!(serde_json::from_str::<ReleaseRevocationV1>(bad).is_err());
+        // Control: a real kind parses.
+        let ok = r#"{"kind":"artifact_sha256","value":"0.1.0","reason":"x"}"#;
+        assert!(serde_json::from_str::<ReleaseRevocationV1>(ok).is_ok());
+    }
+
+    #[test]
+    fn rotation_adds_a_key_and_retires_another_without_mutating_the_original() {
+        let key = TrustedKeyV1 {
+            key_id: "a".to_string(),
+            public_key_base64: BASE64.encode([1u8; 32]),
+            role: ReleaseState::ReleaseAcceptance,
+            valid_from: 0,
+            retired_at: None,
+        };
+        let root = ReleaseTrustRootV1::new(vec![key.clone()]);
+
+        let added = root
+            .with_key_added(TrustedKeyV1 {
+                key_id: "b".to_string(),
+                ..key.clone()
+            })
+            .expect("adding a distinct key id must succeed");
+        assert_eq!(added.keys.len(), 2);
+        assert_eq!(root.keys.len(), 1, "the original root must not be mutated");
+
+        // A duplicate key id makes "which key signed this" unanswerable.
+        assert!(matches!(
+            added.with_key_added(key.clone()),
+            Err(ReleaseIntegrityError::DuplicateKeyId { .. })
+        ));
+
+        let retired = added
+            .with_key_retired("a", 100)
+            .expect("retire a known key");
+        assert_eq!(retired.keys[0].retired_at, Some(100));
+        assert_eq!(retired.keys[1].retired_at, None);
+        assert_eq!(
+            added.keys[0].retired_at, None,
+            "the pre-rotation root must still be usable for comparison"
+        );
+
+        assert!(matches!(
+            retired.with_key_retired("nobody", 100),
+            Err(ReleaseIntegrityError::UnknownKeyId(_))
         ));
     }
 }
