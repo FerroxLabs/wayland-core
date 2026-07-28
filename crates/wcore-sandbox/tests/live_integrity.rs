@@ -181,7 +181,44 @@ async fn live_cmd_builtin_runs_under_hardened_sandbox() {
 async fn live_cmd_runs_when_allowlist_has_missing_path() {
     require_live_windows();
 
-    let real = std::env::temp_dir();
+    // The real allowlist entry is a directory this test OWNS, not
+    // `std::env::temp_dir()`, which is what it used to be. That is a
+    // determinism repair, not a relaxation: the property under test is that a
+    // NON-EXISTENT allowlist entry is skipped rather than aborting the spawn,
+    // and the size of the entry beside it was never part of it. The assertions
+    // below are unchanged — still exit 0, still the stdout marker, still one
+    // real path and one absent path.
+    //
+    // Why it had to change (F-KR-07 ladder, measured on SeanDesktop): the cost
+    // of a grant is dominated by the number of objects under the granted path,
+    // and `%TEMP%` is unbounded, shared with every other process on the host,
+    // and outside this test's control. Same command, same manifest, same
+    // two-entry allowlist shape, varying only that one directory:
+    //
+    //     200 objects        133 ms
+    //     %TEMP%, 57 636   ~10 000 ms   (5 consecutive runs: 9 848 … 10 629 ms)
+    //     200 000 objects  19 487 ms
+    //
+    // The effective budget is 25s (`manifest.timeout` 10s plus the 15s setup
+    // grace in `windows_impl::process`, which exists because the inner
+    // `WaitForSingleObject` bounds only the child's RUN). Against `%TEMP%` this
+    // test therefore ran at ~42% of its ceiling with an unbounded dependency
+    // deciding the margin — a pass whose survival depended on how much litter
+    // the host happened to be holding. `F-KR-07` recorded it failing 12/12 with
+    // `SandboxError::Timeout`; it passes today, and the only thing known to
+    // have changed on the host between the two is `%TEMP%` getting smaller.
+    //
+    // NO TIMEOUT IS RAISED. The manifest below is the original 10s.
+    let real = std::env::temp_dir().join(format!(
+        "wcore-allowlist-skip-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&real).expect("create the real allowlist directory");
+    std::fs::write(real.join("cache-entry.bin"), b"kr07").expect("seed the real allowlist entry");
     let missing = std::path::PathBuf::from(r"C:\__wcore_absent_cache__\.npm");
     assert!(
         !missing.exists(),
@@ -190,11 +227,11 @@ async fn live_cmd_runs_when_allowlist_has_missing_path() {
 
     let b = AppContainerBackend::new();
     let m = SandboxManifest {
-        fs_read_allow: vec![real, missing],
+        fs_read_allow: vec![real.clone(), missing],
         timeout: Some(Duration::from_secs(10)),
         ..Default::default()
     };
-    let out = b
+    let spawned = b
         .execute(
             &m,
             SandboxCommand {
@@ -206,8 +243,10 @@ async fn live_cmd_runs_when_allowlist_has_missing_path() {
                 cwd: None,
             },
         )
-        .await
-        .expect("AppContainer spawn must succeed despite a non-existent allowlist path");
+        .await;
+    let _ = std::fs::remove_dir_all(&real);
+    let out =
+        spawned.expect("AppContainer spawn must succeed despite a non-existent allowlist path");
     assert_eq!(
         out.exit_code,
         0,

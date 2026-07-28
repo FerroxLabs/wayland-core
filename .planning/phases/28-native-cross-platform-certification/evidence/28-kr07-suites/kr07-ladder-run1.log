@@ -1,0 +1,32 @@
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s
+At C:\Users\SeanD\kr07-ladder.ps1:7 char:1
++ & cargo test -p wcore-sandbox --test kr07_ladder -- --ignored --test- ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.26s:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\kr07_ladder.rs (target\debug\deps\kr07_ladder-bb5333ceec01e8a6.exe)
+
+running 7 tests
+test rung1_control_no_allowlist_at_all ... KR07_RUNG_1_CONTROL ok=true elapsed_ms=112 outcome=OK_EXIT0_WITH_STDOUT
+ok
+test rung2_exact_failing_shape_tempdir_plus_absent ... KR07_RUNG_2_EXACT_SHAPE ok=true elapsed_ms=21499 outcome=OK_EXIT0_WITH_STDOUT
+KR07_RUNG_2_MECHANISM=SETUP_BOUND_outer_ceiling_fired_ACL_apply_is_the_only_added_setup
+ok
+test rung3_absent_path_only ... KR07_RUNG_3_ABSENT_ONLY ok=true elapsed_ms=107 outcome=OK_EXIT0_WITH_STDOUT
+ok
+test rung4_real_tempdir_only ... KR07_RUNG_4_TEMPDIR_ONLY ok=true elapsed_ms=10164 outcome=OK_EXIT0_WITH_STDOUT
+KR07_RUNG_4_MECHANISM=CHILD_RUN_BOUND_inner_WaitForSingleObject_fired
+ok
+test rung5_small_fresh_dir_plus_absent ... KR07_RUNG_5_SMALL_PLUS_ABSENT ok=true elapsed_ms=99 outcome=OK_EXIT0_WITH_STDOUT
+ok
+test rung6_exact_shape_with_diagnostic_ceiling ... KR07_RUNG_6_DIAGNOSTIC_CEILING ok=true elapsed_ms=9285 outcome=OK_EXIT0_WITH_STDOUT
+KR07_RUNG_6_VERDICT=SLOW_NOT_STUCK
+KR07_RUNG_6_TRUE_COST_MS=9285 label=OK_EXIT0_WITH_STDOUT
+ok
+test rung7_repeat_cost_is_paid_once_or_every_run ... KR07_RUNG_7_REPEAT ok=true elapsed_ms=9084 outcome=OK_EXIT0_WITH_STDOUT
+KR07_RUNG_7_SECOND_RUN_MS=9084
+ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 50.47s
+

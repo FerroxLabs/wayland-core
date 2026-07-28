@@ -51,11 +51,36 @@ fn require_live_acceptance() {
     );
 }
 
+/// Zero-execution guard — and it has to RUN to be one.
+///
+/// This test used to carry `#[ignore]`, which made it inert against the exact
+/// scenario it exists for: with every test in the binary ignored,
+/// `cargo test -p wcore-sandbox --test live_cwd_verbatim` executed 0 of 3 and
+/// still exited 0 printing `test result: ok`. The guard could only fire under
+/// `--ignored`, by which point the real cases were running anyway.
+///
+/// It now always runs, so this binary can never report success on zero executed
+/// tests, and it FAILS when a caller declares live intent by setting
+/// `WAYLAND_SANDBOX_LIVE_WINDOWS=1` while asking for a run that cannot execute
+/// any cwd case. Skipped under nextest, which covers the same ground.
 #[test]
-#[ignore = "zero-execution guard for explicit native Windows acceptance"]
 fn native_cwd_gate_marker() {
-    require_live_acceptance();
     assert_eq!(NATIVE_CWD_CASES, 2);
+    if std::env::var_os("NEXTEST").is_some() {
+        return;
+    }
+    if std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").as_deref() != Ok("1") {
+        return;
+    }
+    let asked_for_ignored = std::env::args().any(|a| a == "--ignored" || a == "--include-ignored");
+    assert!(
+        asked_for_ignored,
+        "WAYLAND_SANDBOX_LIVE_WINDOWS=1 declares a live cwd acceptance run, but this \
+         invocation cannot execute any of the {NATIVE_CWD_CASES} cwd cases — they are \
+         #[ignore]d and neither --ignored nor --include-ignored was passed. Exiting 0 \
+         here would certify nothing. Re-run with: cargo test -p wcore-sandbox \
+         --test live_cwd_verbatim -- --ignored --test-threads=1"
+    );
 }
 
 /// A unique directory under `%PUBLIC%` — the same seeding `live_fs_acl.rs` uses,
