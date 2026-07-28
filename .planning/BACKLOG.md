@@ -883,3 +883,42 @@ did not hold.
 **Do not "fix" this by raising a timeout, adding `#[ignore]`, or serializing the whole suite to
 green.** A reported red is worth more than an engineered green; the goal is tests that do not
 share hidden global state.
+
+---
+
+## CLASS-WIN-LIVE-01 — `live_integrity` job-reaping/timeout cases are red at base on Windows (MEDIUM, pre-existing)
+
+**Found by:** `lane/254-take` while measuring the #254 cwd fix. **Not caused by that lane** —
+established by a base-vs-head comparison, not by argument.
+
+With `WAYLAND_SANDBOX_LIVE_WINDOWS=1` set, `cargo test -p wcore-sandbox --test live_integrity`
+on `SeanD@seandesktop` fails the same two cases at the merge-base as at the lane head:
+
+| Commit | Worktree | Result |
+|---|---|---|
+| `14905684` (merge-base, no lane changes) | `C:\ferrox-254-base` | **3 passed; 2 failed** |
+| `db391a0a` (lane head) | `C:\ferrox-254-take` | **3 passed; 2 failed** |
+
+Same two cases both times: `live_future_drop_reaps_descendant_job_tree` (line 287) and
+`live_runaway_command_is_bounded_by_timeout` (line 210). An earlier head run reported
+**0 passed / 5 failed in 25.72s** where a later run at the identical commit reported
+**3 passed / 2 failed in 16.12s**, so the case set is also non-deterministic — consistent with
+the known wall-clock-budget-under-load class rather than a logic defect.
+
+Both are wall-clock-budgeted (a 10s `tokio::time::timeout` around a heartbeat poll, and a
+timeout-bound runaway). They are NOT `#[ignore]`d, so they run in a default
+`cargo test -p wcore-sandbox` — but only do real work when `WAYLAND_SANDBOX_LIVE_WINDOWS=1`.
+
+**Do not fix by raising the timeout or adding `#[ignore]`.** The budgets are the assertion.
+
+## CLASS-WIN-LONGPATH-01 — `atomic_write` and Win32 long-path handling (MEDIUM, NOT investigated)
+
+Recorded per the `lane/254-take` brief, which flagged that `atomic_write` reaches Win32 without
+`std::fs`'s long-path handling and that ~41 modules call it.
+
+**Stated honestly: this lane did NOT investigate or reproduce it.** It is adjacent in theme to
+the cwd fix (both concern the `\\?\` verbatim prefix at the Win32 boundary) but it is a
+different mechanism and the opposite direction: the cwd fix *strips* a verbatim prefix so
+`cmd.exe` will accept a current directory, whereas long-path support requires *adding* one so
+a >MAX_PATH path can be opened. Fixing one neither causes nor cures the other. Needs its own
+investigation before anyone acts on it — do not treat this entry as a confirmed defect.
