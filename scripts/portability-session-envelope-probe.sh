@@ -49,7 +49,8 @@ mkdir -p "$SESSIONS" || FAIL "could not build the home"
 # A canary shaped like the thing a transcript actually carries: prose a user
 # typed. Unique enough that a hit cannot be coincidence.
 CANARY="WLC-F26GAPS-TRANSCRIPT-CANARY-8f2b41d9-DO-NOT-USE"
-SID="probe-session-0001"
+# Session ids are validated: 6-40 hex characters, hyphens allowed.
+SID="a1b2c3-d4e5f6-0789ab"
 
 cat > "$SESSIONS/$SID.json" <<JSON
 {
