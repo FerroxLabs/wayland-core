@@ -27,6 +27,7 @@ import {
   StepFailure,
   hostPlatform,
   parseArgs,
+  parseStatusJson,
   run,
   shellish,
 } from './f24-journey.mjs';
@@ -176,6 +177,31 @@ test('the driver exits non-zero and names the failing step when a step fails', (
   assert.ok(CANONICAL_STEPS.includes(failure.failed_at), failure.failed_at);
   assert.ok(!fs.existsSync(path.join(dir, `${hostPlatform()}-receipt.json`)),
     'a failed journey must NOT write a receipt');
+});
+
+test('the status parser reads a PRETTY-PRINTED projection', () => {
+  // The real `gateway status --json` output. Reading only the last line yields
+  // `}`, the parse fails, and a running gateway reads as "no live pid" — which
+  // is exactly how the first live Linux run failed while the product was
+  // behaving correctly.
+  const pretty = [
+    '{',
+    '  "state": "running",',
+    '  "pid": 2601545,',
+    '  "uptime_secs": 59,',
+    '  "profile": "f24j",',
+    '  "turns_in_flight": 0,',
+    '  "deliveries_pending": 0,',
+    '  "binary_path": "/root/wayland-24journey/target/release/wayland-core",',
+    '  "binary_version": "0.12.25"',
+    '}',
+    '',
+  ].join('\n');
+  assert.equal(parseStatusJson(pretty)?.pid, 2601545);
+  assert.equal(parseStatusJson(pretty)?.state, 'running');
+  assert.equal(parseStatusJson(`warning: something\n${pretty}`)?.pid, 2601545);
+  assert.equal(parseStatusJson(''), null);
+  assert.equal(parseStatusJson('not json at all'), null);
 });
 
 test('shellish quotes an argument containing whitespace', () => {

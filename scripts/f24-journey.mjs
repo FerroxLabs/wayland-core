@@ -161,6 +161,24 @@ export function run(argv, opts = {}) {
   };
 }
 
+// `gateway status --json` PRETTY-PRINTS, so the projection spans many lines and
+// may be preceded by unrelated output. Taking the last line yields `}` and the
+// parse fails silently — which reads as "no live pid" for a gateway that was
+// reporting `state: running` with a live pid the whole time. Measured on the
+// Linux host: the first journey run failed its status step for exactly this
+// reason while the projection it printed was correct.
+export function parseStatusJson(output) {
+  const text = String(output ?? '');
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start === -1 || end <= start) return null;
+  try {
+    return JSON.parse(text.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+}
+
 function shellish(argv) {
   return argv.map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(' ');
 }
@@ -242,13 +260,7 @@ class Journey {
     const r = run(this.core('gateway', 'status', '--profile', PROFILE, '--json'), {
       env: this.env(),
     });
-    let parsed = null;
-    try {
-      parsed = JSON.parse(r.output.trim().split('\n').pop());
-    } catch {
-      parsed = null;
-    }
-    return { raw: r, parsed };
+    return { raw: r, parsed: parseStatusJson(r.output) };
   }
 
   // ── step 1 ───────────────────────────────────────────────────────────────
