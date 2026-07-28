@@ -161,17 +161,43 @@ defect below. `WCORE_REQUIRE_ENFORCING_SANDBOX=1` (mirroring the existing
 `WCORE_SMOKE_REQUIRE_PREBUILT` idiom, #190) converts a non-qualifying sandbox into a
 **hard failure**.
 
-**CI side — a dedicated `sandbox-containment-linux` job** with bubblewrap installed
-and the measured minimal grant, running with `WCORE_REQUIRE_ENFORCING_SANDBOX=1` so it
-cannot self-pass. Scoped to its own job rather than added to the 12,775-test suite:
-running that whole suite with seccomp disabled could let other sandbox tests pass for
-the wrong reason. `--privileged` deliberately not used — the narrower measured grant
-suffices. The job asserts the executed-test count and fails on a skip token.
+**CI side — a dedicated `sandbox-containment-linux` job was built, RUN, and then
+REMOVED, because it does not pass and I will not ship a red I introduced.** What it
+established is worth more than the job would have been:
+
+- The measured docker grant **transfers to GitHub's runner**. The job's
+  "Prove bubblewrap can actually create a namespace here" step **succeeded** on
+  `ubuntu-latest` with `--cap-add SYS_ADMIN --security-opt seccomp=unconfined
+  --security-opt apparmor=unconfined`. The hetzner measurement was sound.
+- **The test still failed — and NOT with `sandbox UNAVAILABLE`.** It got all the way
+  into the landing case and panicked with `expected LandingReport::Landed, got None`.
+  4 of the 5 tests in the binary passed.
+- **The diagnosis, from comparing the two runs' internals** (`--success-output=final`
+  on the build host): hetzner builds **one** candidate, `cand-0`, which passes the
+  `["true"]` gate and is landed. CI built **three** — `cand-1` and `cand-2` with
+  `tokens=0+0`, i.e. the scripted provider exhausted — which only happens when
+  `cand-0`'s gate did **not** pass. So bwrap can create a namespace in that container,
+  but the **engine's own sandboxed gate execution does not succeed against the
+  bind-mounted `/work` workspace**. That is a different and narrower problem than the
+  one the brief described, and it is now isolated.
+- **My namespace probe was itself too weak** — it proved a proxy (can bwrap unshare?)
+  rather than the capability (can the engine run its gate under bwrap here?). Same
+  defect class as `is_available()`; logged in section 4.
+
+Two hypotheses were tested and **eliminated**: git identity (hetzner has no global
+`user.name`/`user.email` either, and passes without one — measured) and the qualifier
+itself (it passed, so the sandbox was deemed usable and the test genuinely ran).
 
 This matters because **Linux runs ONLY containerized** — the native matrix is macOS +
 self-hosted Windows (direct-shell Linux was removed after runner-agent crashes). There
-is no non-container Linux job to relocate the test to, so without the dedicated job a
-skip would leave the containment guarantee ungated forever.
+is no non-container Linux job to relocate the test to. So today the containment
+guarantee is proven **on the Linux build host only**, the main leg skips loudly and
+counted, and the CI step says so in a `::warning::` rather than pretending otherwise.
+
+**Follow-up needed (not done here):** determine why the engine's bwrap gate fails
+against a bind-mounted `/work`, most plausibly mount propagation on the docker bind
+mount. The recipe is otherwise ready — the removed job is recoverable from
+`git show 189599ca -- .github/workflows/ci.yml`.
 
 ### Proof the gate can fail (build host, bwrap hidden via a symlink farm)
 
@@ -232,6 +258,16 @@ Four, all repaired here rather than written up and carried:
    that only prints is invisible in the run that matters; the file is the load-bearing
    channel.
 
+5. **My CI namespace probe proved a proxy, not the capability.** The step
+   "Prove bubblewrap can actually create a namespace here" ran
+   `bwrap --ro-bind / / --dev /dev true` and **passed**, then the thing it was
+   qualifying (the engine running its gate under bwrap in that same container)
+   **failed**. A probe that answers an easier question than the one you need is the
+   same defect as `is_available()`'s presence check — which is the defect I had just
+   written this lane's qualifier to avoid. Repaired by deletion: the job is removed
+   rather than left green-probing-and-red-testing, and the real requirement is now
+   stated in section 2 for whoever closes it.
+
 Also hit and worth recording: `wc -c < file` reads **0** through the proxy
 (`/usr/bin/wc` reads 123) — the byte-counter the brief tells you to trust was itself
 lying; `${PIPESTATUS[0]}` is empty in zsh **and** `Bad substitution` in dash, which
@@ -239,13 +275,34 @@ silently killed one remote harness run at line 2.
 
 ---
 
-## 5. CI run
+## 5. CI runs
 
-- Branch `lane/ci-triage`, pushed **once**.
-- Run id / conclusion: see `## 6. CI result` appended below after polling.
+**Run 1 — `30403867920`** (HEAD `189599ca`). The one that produced the finding above.
+
+| job | conclusion |
+|---|---|
+| Browser live e2e (chromium) | success |
+| Eval acceptance gate (Linux, containerized) | success |
+| **Hard-containment gate (Linux, bubblewrap)** | **failure** — `expected LandingReport::Landed, got None`; 4/5 passed; the bubblewrap namespace probe step SUCCEEDED |
+
+That job is removed in run 2. Its log is the evidence for section 2 and is worth
+keeping: job id `90424728437`.
+
+**Run 2 — HEAD after removing the job.** Id and per-job conclusions appended below.
 
 ---
 
-## 6. CI result
+## 6. Verdict
 
-_(appended after the push; see below)_
+- **Failure 1 (HIGH, contract): FIXED**, with the decision argued and the choice proven
+  by executable falsification — the adopted assertion fails against the re-broken
+  engine, the rejected one passes.
+- **Failure 2 (sandbox): PARTIALLY CLOSED, HONESTLY.** The test no longer fails in CI:
+  it qualifies on a real execution probe and skips loudly and counted, and the gate is
+  proven able to fail (`WCORE_REQUIRE_ENFORCING_SANDBOX=1` → rc=100). The containment
+  guarantee itself is proven **on the Linux build host, not in CI**. The brief's
+  option (i) is disproved with a measurement table; the residual blocker is isolated
+  to the engine's sandboxed gate against a bind-mounted workspace. **This is not a
+  complete fix and is not claimed as one.**
+- **Failure 3 (`--no-fail-fast`): FIXED**, with the "every historical count is a lower
+  bound" consequence recorded in the workflow itself.

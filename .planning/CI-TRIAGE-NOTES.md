@@ -155,3 +155,30 @@ test prove nothing.
 - Sandbox gate three-case proof: A skip+recorded / B hard-fail rc=100 / C real-sandbox
   pass. Timing 0.866s (ran) vs 0.275s (skipped) corroborates.
 - Fence: `git diff $BASE -- wcore-cli/src/lib.rs wcore-cli/src/main.rs` is EMPTY.
+
+## Minute 150-200 — CI run 1 result, and a finding that beat my own probe
+
+Run `30403867920`, HEAD `189599ca`. The dedicated `sandbox-containment-linux` job
+FAILED — but not the way the brief predicted, and the failure is informative:
+
+- Its "Prove bubblewrap can actually create a namespace here" step **SUCCEEDED** on
+  GitHub's ubuntu-latest with `--cap-add SYS_ADMIN --security-opt seccomp=unconfined
+  --security-opt apparmor=unconfined`. My hetzner measurement transferred.
+- The test then reached the landing case and panicked:
+  `expected LandingReport::Landed, got None`. 4/5 in the binary passed.
+- Comparing internals: hetzner builds ONE candidate (`cand-0`) which passes the
+  `["true"]` gate and lands. CI built THREE, with `cand-1`/`cand-2` at `tokens=0+0`
+  (scripted provider exhausted) — which only happens if `cand-0`'s gate FAILED.
+  So the engine's sandboxed gate does not succeed against the bind-mounted `/work`,
+  even though bwrap can unshare there.
+
+**My probe proved a proxy, not the capability** — the exact defect class I wrote the
+qualifier to avoid, one layer up. Instance fifteen.
+
+Eliminated by measurement, not assumed: git identity (hetzner has NO global
+user.name/user.email and passes without one — CASE D, 5/5).
+
+Action: removed the job rather than ship a red I introduced. The test-side
+qualify-or-skip stands (panel-unanimous, gate proven able to fail). The residual
+blocker + full recipe recorded in CI-TRIAGE.md §2; job recoverable from
+`git show 189599ca -- .github/workflows/ci.yml`.

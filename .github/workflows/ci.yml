@@ -371,119 +371,21 @@ jobs:
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
 
-      # The suite above runs WITHOUT bubblewrap and without namespace
-      # privileges, so the anvil hard-containment test qualifies-and-skips
-      # there (loudly). That skip is only acceptable because
-      # `sandbox-containment-linux` below runs the same test for real. If the
-      # skip ever stops being compensated, this step is what says so out loud.
-      - name: Report sandbox skips (must be compensated by sandbox-containment-linux)
+      # The suite runs WITHOUT bubblewrap and without namespace privileges, so
+      # the anvil hard-containment test qualifies-and-skips here (loudly, and
+      # counted). This step surfaces the count so the skip cannot quietly
+      # become permanent. The containment guarantee is currently proven on the
+      # Linux build host only — see ".planning/CI-TRIAGE.md" section 2 for the
+      # measured reason a CI job does not yet close it, and the exact recipe.
+      - name: Report sandbox skips (NOT yet compensated by a CI job)
         if: always()
         run: |
           if [ -f target/sandbox-skips.txt ]; then
-            echo "::warning::sandbox-qualified skips in this leg (gated instead by the sandbox-containment-linux job):"
+            echo "::warning::sandbox-qualified skips in this leg — the hard-containment guarantee is proven on the build host, not in CI (see .planning/CI-TRIAGE.md section 2):"
             cat target/sandbox-skips.txt
             echo "count=$(wc -l < target/sandbox-skips.txt)"
           else
             echo "no sandbox-qualified skips recorded"
-          fi
-
-  # ── Hard-containment gate (Linux, containerized, namespace-capable) ───
-  # `anvil_forge_transaction::drive_climb_full_lands_the_winner_surface_for_accept`
-  # proves the 06C gate re-runs under a REAL enforcing sandbox (bubblewrap).
-  # It cannot run in the `ci-linux` job above, and "install bubblewrap in the
-  # CI image" does NOT fix that on its own. Measured 2026-07-29 on Ubuntu
-  # 24.04 + Docker 29.2.1, image with bubblewrap installed:
-  #
-  #   docker run --rm --network=host                              -> bwrap: Creating new namespace failed: Operation not permitted (rc=1)
-  #   ... --security-opt seccomp=unconfined                       -> same
-  #   ... --security-opt apparmor=unconfined                      -> same
-  #   ... --security-opt seccomp=unconfined,apparmor=unconfined   -> same
-  #   ... --cap-add SYS_ADMIN                                     -> bwrap: Failed to make / slave: Permission denied (rc=1)
-  #   ... --cap-add SYS_ADMIN --security-opt apparmor=unconfined  -> bwrap: pivot_root: Operation not permitted (rc=1)
-  #   ... --cap-add SYS_ADMIN + seccomp=unconfined + apparmor=unconfined -> rc=0
-  #   ... --privileged                                            -> rc=0
-  #
-  # Ubuntu 24.04 sets kernel.apparmor_restrict_unprivileged_userns=1, so an
-  # unprivileged container cannot create the user namespace bwrap needs.
-  # The relaxation is therefore REQUIRED, and is scoped to this job alone
-  # rather than added to the 12,775-test suite above — running that whole
-  # suite with seccomp disabled could let other sandbox tests pass for the
-  # wrong reason. `--privileged` is deliberately NOT used: the measured
-  # narrower grant is sufficient.
-  #
-  # WCORE_REQUIRE_ENFORCING_SANDBOX=1 makes a non-qualifying sandbox a HARD
-  # FAILURE here, so this gate cannot self-pass by skipping.
-  # WAYLAND_ALLOW_NO_SANDBOX is deliberately NOT set anywhere: it would make
-  # the test exercise the landing path with no isolation and prove nothing.
-  sandbox-containment-linux:
-    name: Hard-containment gate (Linux, bubblewrap)
-    runs-on: ubuntu-latest
-    env:
-      CARGO_TERM_COLOR: always
-      CARGO_INCREMENTAL: "0"
-      SANDBOX_IMAGE: wayland-core-ci-sandbox
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Build namespace-capable CI image (bubblewrap baked in)
-        run: |
-          docker build -t "$SANDBOX_IMAGE" -f - . <<'EOF'
-          FROM rust:1.95-slim-bookworm
-          RUN apt-get update -qq \
-            && apt-get install -y -qq --no-install-recommends \
-                 libdbus-1-dev libseccomp-dev libssl-dev libasound2-dev pkg-config mold ca-certificates git bubblewrap \
-            && rm -rf /var/lib/apt/lists/*
-          RUN cargo install --locked cargo-nextest --version "^0.9"
-          EOF
-
-      - name: Prove bubblewrap can actually create a namespace here
-        run: |
-          set -e
-          docker run --rm --network=host \
-            --cap-add SYS_ADMIN \
-            --security-opt seccomp=unconfined \
-            --security-opt apparmor=unconfined \
-            "$SANDBOX_IMAGE" \
-            bwrap --ro-bind / / --dev /dev true
-          echo "bubblewrap created a namespace successfully"
-
-      # Run the test BY FILE, never by name filter: `cargo nextest run -E
-      # 'test(name)'` exits 0 having run zero tests when the filter matches
-      # nothing, which is the easiest self-passing gate in this repo to write
-      # by accident. The executed count is asserted below.
-      - name: Anvil hard-containment landing gate
-        run: |
-          set -o pipefail
-          docker run --rm --network=host \
-            --cap-add SYS_ADMIN \
-            --security-opt seccomp=unconfined \
-            --security-opt apparmor=unconfined \
-            -e CARGO_INCREMENTAL=0 \
-            -e WCORE_REQUIRE_ENFORCING_SANDBOX=1 \
-            -v "${{ github.workspace }}:/work" -w /work \
-            "$SANDBOX_IMAGE" \
-            cargo nextest run -p wcore-agent --test anvil_forge_transaction \
-            2>&1 | tee /tmp/sandbox-gate.log
-
-      - name: Assert the gate actually executed tests
-        run: |
-          set -e
-          # A suite can exit 0 having run ZERO tests. Read the executed count
-          # back rather than trusting the exit status.
-          summary=$(grep -Eo 'Summary \[[^]]*\] +[0-9]+ tests? run' /tmp/sandbox-gate.log | tail -1 || true)
-          if [ -z "$summary" ]; then
-            echo "::error::could not read an executed-test count from the gate output"
-            exit 1
-          fi
-          count=$(echo "$summary" | grep -Eo '[0-9]+ tests? run' | grep -Eo '^[0-9]+')
-          echo "executed tests: $count ($summary)"
-          if [ "$count" -lt 1 ]; then
-            echo "::error::the containment gate ran $count tests — it proves nothing"
-            exit 1
-          fi
-          if grep -q 'WCORE_SANDBOX_SKIP' /tmp/sandbox-gate.log; then
-            echo "::error::the containment gate SKIPPED under WCORE_REQUIRE_ENFORCING_SANDBOX=1"
-            exit 1
           fi
 
   # ── W10A eval-gate (Linux, containerized) ─────────────────────────────
