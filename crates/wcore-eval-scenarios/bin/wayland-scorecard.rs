@@ -300,6 +300,14 @@ async fn drive_leg(
             dimension.token()
         );
         std::fs::write(workspace.join("CANARY.txt"), format!("{canary}\n"))?;
+        // Per-tool first-run setup, carried as DATA so it stays visible in the results.
+        for (relative, contents) in &invocation.workspace_seed_files {
+            let path = workspace.join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, contents)?;
+        }
 
         let script = OpenAiFixtureScript::new(steps.clone());
         let fixture = script.start_for_workspace(&workspace).await?;

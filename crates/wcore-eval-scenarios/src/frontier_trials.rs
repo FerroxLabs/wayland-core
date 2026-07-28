@@ -708,6 +708,18 @@ pub struct ToolInvocationV1 {
     pub base_url_suffix: String,
     /// Additional non-secret environment entries this tool needs to start at all.
     pub extra_env: BTreeMap<String, String>,
+    /// Files written into EVERY fresh trial workspace before the tool is launched, keyed by
+    /// path relative to that workspace.
+    ///
+    /// This exists because the three tools need different first-run setup, and that
+    /// difference is itself a finding rather than something to hide in the driver.
+    /// Measured: `wayland-core` refuses to start on a headless host with
+    /// "Session persistence authority unavailable: no OS keyring was usable", and needs a
+    /// `[credentials] backend = "encrypted-file"` config plus a vault passphrase before it
+    /// will reach a provider at all. Carrying that as DATA keeps it visible in the results;
+    /// putting it in the driver would make Wayland's extra setup invisible to a reader.
+    #[serde(default)]
+    pub workspace_seed_files: BTreeMap<String, String>,
 }
 
 /// How a single trial ended. `HarnessIncompatible` is the panel's amendment: a fixture
