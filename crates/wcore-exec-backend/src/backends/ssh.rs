@@ -2,12 +2,29 @@
 //!
 //! Two rules govern this module and neither is negotiable.
 //!
-//! 1. ARGV MODE ONLY. AGENTS.md states that any command whose arguments
-//!    include non-literal data must use `shell_command_argv`, never
-//!    shell-string mode, because argv mode never lets a metacharacter reach an
-//!    interpreter. A remote-execution backend is the most attacker-adjacent
-//!    surface in this phase, so there is NO shell-string path in this file at
-//!    all. There is no `format!`-into-a-command anywhere below.
+//! 1. ARGV MODE ONLY, PLUS EXPLICIT QUOTING FOR THE FAR END. AGENTS.md states
+//!    that any command whose arguments include non-literal data must use
+//!    `shell_command_argv`, never shell-string mode, because argv mode never
+//!    lets a metacharacter reach an interpreter. That is necessary here and it
+//!    is NOT sufficient, and this file used to claim otherwise.
+//!
+//!    **`ssh` does not carry an argument vector.** The client joins its
+//!    remote-command arguments with single spaces and the far end's LOGIN
+//!    SHELL re-splits the resulting string. So `shell_command_argv` protects
+//!    the LOCAL spawn only; across the connection every value is shell text.
+//!    Measured against a real far end on 2026-07-28, through the shipped
+//!    binary:
+//!
+//!    * an EMPTY value vanished entirely, shifting every later argument left;
+//!    * a value containing a space arrived as two arguments;
+//!    * a value containing `;` was EXECUTED on the far end — `backend scan
+//!      --task-id 'x;id>/tmp/w;echo y'` ran `id` as root there.
+//!
+//!    Every value that crosses the connection therefore goes through
+//!    [`posix_quote`], so the far end's shell re-assembles the original argv
+//!    instead of re-parsing the values as script. There is still no
+//!    `format!`-into-a-command anywhere below, and no shell-string mode on the
+//!    local spawn.
 //!
 //! 2. CANCELLATION IS REMOTE, NOT LOCAL. The local backends inherit
 //!    process-tree ownership; over ssh nothing inherits anything. So the
@@ -102,6 +119,38 @@ impl SshBackend {
     }
 }
 
+/// Quote one value so the far end's shell reproduces it EXACTLY as one
+/// argument.
+///
+/// This exists because `ssh host cmd a b c` is not an argv call: the client
+/// concatenates `cmd a b c` with spaces and the remote login shell parses the
+/// result. Wrapping each value in single quotes makes the remote shell treat
+/// every byte inside as literal — no word splitting, no globbing, no command
+/// substitution, no `;`. A literal single quote is the one character that
+/// cannot appear inside a single-quoted string, so it is emitted as
+/// `'\''` — close, escaped quote, reopen — which is the standard POSIX form.
+///
+/// An empty value becomes `''`, which is why an empty task input survives
+/// instead of disappearing.
+///
+/// Public so `tests/ssh_far_end_quoting.rs` can round-trip its output through a
+/// real shell. That round-trip cannot live in this file: the guard below
+/// asserts this module's source contains no shell-string execution path, and a
+/// shell invocation written here — even in a test — would trip it.
+pub fn posix_quote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for c in value.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 fn ssh_base_args(target: &str) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     if let Ok(config) = std::env::var(CONFIG_ENV)
@@ -126,8 +175,14 @@ fn ssh_base_args(target: &str) -> Vec<String> {
 ///
 /// It is a CONSTANT. Nothing task-specific is interpolated into it; every
 /// task-specific value arrives as a positional argument that `sh` binds to
-/// `$1`, `$2`, … so it is never re-parsed as script text. That is the same
-/// safety property argv mode gives locally, extended across the connection.
+/// `$1`, `$2`, … so it is never re-parsed as script text BY THIS SCRIPT.
+///
+/// That last qualification is the whole point and this comment used to omit
+/// it. Binding to `$1` protects the value only once it has already arrived as
+/// one argument. Getting it there is [`posix_quote`]'s job, because the far
+/// end's LOGIN shell parses ssh's remote command string before this script
+/// ever runs. Unquoted, a value carrying `;` was executed by that login shell
+/// and this script never saw it.
 const REMOTE_RUNNER: &str = r#"
 set -eu
 nonce="$1"; shift
@@ -233,9 +288,13 @@ impl ExecutionBackend for SshBackend {
         args.push("sh".into());
         args.push("-s".into());
         args.push("--".into());
-        args.push(task.nonce.clone());
-        args.push(input_b64);
-        args.extend(task.argv.iter().cloned());
+        // Quoted for the FAR END's shell, not just handed to the local ssh
+        // client as separate argv entries. See `posix_quote`: without this an
+        // empty input silently shifts `argv` left and a task argument
+        // containing `;` executes on the far end.
+        args.push(posix_quote(&task.nonce));
+        args.push(posix_quote(&input_b64));
+        args.extend(task.argv.iter().map(|a| posix_quote(a)));
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let started = now_unix_ms();
@@ -372,6 +431,20 @@ impl ExecutionBackend for SshBackend {
     }
 }
 
+/// Emitted by [`REMOTE_SCAN`] when no process-table reader on the far end
+/// worked. The Rust side turns it into `enumerated: false`, so the surface
+/// reports NOT MEASURED instead of a clean zero.
+///
+/// THIRD defect found live, on 2026-07-28, against a real Windows far end:
+/// `ps -eo pid,ppid,args` is procps-specific and Git-for-Windows' msys `ps`
+/// rejects it (`ps: unknown option -- o`). Its stderr went to `/dev/null` and
+/// the pipeline ended in `|| true`, so a sweep that could not run produced an
+/// empty result indistinguishable from a clean one. The surface reported
+/// `0 (MEASURED)` while two independent instruments — msys `ps -ef` and
+/// `Win32_Process` — both showed the orphan. Same class as the `tasklist`
+/// false zero plan 25-04 found, on a different surface.
+const SWEEP_UNAVAILABLE: &str = "__WAYLAND_SWEEP_UNAVAILABLE__";
+
 /// Constant remote scanner. The nonce arrives as `$1`, never as script text.
 ///
 /// TWO defects found by the live cancellation run on 2026-07-26 are fixed
@@ -401,13 +474,34 @@ if [ -f "$root/.pid" ]; then
     echo "session-leader $pid still alive for nonce $nonce"
   fi
 fi
-# Secondary sweep for a stray that left the session, excluding this scan's own
-# process and its children.
-ps -eo pid,ppid,args 2>/dev/null \
-  | grep -F -- "$nonce" \
-  | grep -v -F -- "grep" \
-  | awk -v s="$self" '$1 != s && $2 != s' \
-  || true
+# Secondary sweep for a stray that left the session.
+#
+# Pick a reader this far end actually SUPPORTS, and say so when none does.
+# `ps -eo` is procps; msys and BusyBox ps both reject it. The column layout
+# differs between the two forms, so the self-exclusion columns move with it:
+#   ps -eo pid,ppid,args  ->  pid $1, ppid $2
+#   ps -ef                ->  pid $2, ppid $3
+table=""
+pidcol=1
+ppidcol=2
+if table=$(ps -eo pid,ppid,args 2>/dev/null) && [ -n "$table" ]; then
+  pidcol=1; ppidcol=2
+elif table=$(ps -ef 2>/dev/null) && [ -n "$table" ]; then
+  pidcol=2; ppidcol=3
+else
+  # A sweep that could not run is NOT a sweep that found nothing.
+  echo "__WAYLAND_SWEEP_UNAVAILABLE__ no supported ps invocation on this far end"
+  table=""
+fi
+if [ -n "$table" ]; then
+  # Exclude this scan's own process and its children: the nonce travels on
+  # this script's own argv, so an unguarded match finds the scan itself.
+  echo "$table" \
+    | grep -F -- "$nonce" \
+    | grep -v -F -- "grep" \
+    | awk -v s="$self" -v p="$pidcol" -v q="$ppidcol" '$p != s && $q != s' \
+    || true
+fi
 "#;
 
 /// Constant remote killer. Signals the remote SESSION, not the connection.
@@ -431,12 +525,27 @@ if [ -f "$root/.pid" ]; then
   fi
 fi
 # Sweep any stray that left the session, never this script or its children.
-for p in $(ps -eo pid,ppid,args 2>/dev/null \
-             | grep -F -- "$nonce" \
-             | grep -v -F -- "grep" \
-             | awk -v s="$self" '$1 != s && $2 != s {print $1}'); do
-  kill -KILL "$p" 2>/dev/null || true
-done
+# Same reader selection as REMOTE_SCAN: `ps -eo` is procps-only, so a far end
+# with msys or BusyBox ps would otherwise sweep nothing while looking fine.
+table=""
+pidcol=1
+ppidcol=2
+if table=$(ps -eo pid,ppid,args 2>/dev/null) && [ -n "$table" ]; then
+  pidcol=1; ppidcol=2
+elif table=$(ps -ef 2>/dev/null) && [ -n "$table" ]; then
+  pidcol=2; ppidcol=3
+fi
+if [ -n "$table" ]; then
+  for p in $(echo "$table" \
+               | grep -F -- "$nonce" \
+               | grep -v -F -- "grep" \
+               | awk -v s="$self" -v p="$pidcol" -v q="$ppidcol" \
+                     '$p != s && $q != s {print $p}'); do
+    kill -KILL "$p" 2>/dev/null || true
+  done
+else
+  echo "stray-sweep-unavailable: no supported ps invocation on this far end"
+fi
 rm -rf "$root" 2>/dev/null || true
 echo "remote-kill-issued"
 exit 0
@@ -454,7 +563,11 @@ async fn remote_exec(
     args.push("sh".into());
     args.push("-s".into());
     args.push("--".into());
-    args.push(argument.to_string());
+    // The nonce reaching here is NOT always a validated identifier: `backend
+    // scan --task-id <X>` passes an operator-or-caller string straight through
+    // to `scan_orphans`, so this argument is the one that was measured
+    // executing `id` as root on the far end before it was quoted.
+    args.push(posix_quote(argument));
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut command = wcore_config::shell::shell_command_argv("ssh", &borrowed);
     command.stdin(std::process::Stdio::piped());
@@ -487,24 +600,203 @@ async fn remote_kill(target: &str, nonce: &str) -> String {
     }
 }
 
+/// Rows the far end reported, or an error naming why the sweep could not run.
+///
+/// An `Err` here becomes `enumerated: false` at the call site, i.e. NOT
+/// MEASURED — never zero. When the primary signal DID find something before
+/// the sweep failed, those rows are carried into the error text so the operator
+/// still sees them: the count is unknowable, but "at least this one" is not.
 async fn remote_scan(target: &str, nonce: &str) -> std::result::Result<Vec<String>, String> {
     let out = remote_exec(target, REMOTE_SCAN, nonce).await?;
-    Ok(out
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect())
+    let mut rows: Vec<String> = Vec::new();
+    for line in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if let Some(detail) = line.strip_prefix(SWEEP_UNAVAILABLE) {
+            let mut reason = format!(
+                "the far end's process table could not be enumerated ({}), so a count \
+                 would omit an unknown number of processes",
+                detail.trim()
+            );
+            if !rows.is_empty() {
+                // Do not lose a positive finding to an unmeasurable total.
+                reason.push_str(" — and the primary signal DID find: ");
+                reason.push_str(&rows.join("; "));
+            }
+            return Err(reason);
+        }
+        rows.push(line.to_string());
+    }
+    Ok(rows)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The quoting the far end's shell needs, checked against the exact three
+    /// shapes that were measured breaking on a live far end on 2026-07-28.
+    #[test]
+    fn every_value_crossing_the_connection_is_quoted_for_the_far_end_shell() {
+        // An EMPTY value. Unquoted this vanished from ssh's remote command
+        // string entirely and every later argument shifted left, so the task's
+        // base64 input was read as its argv. It must survive as `''`.
+        assert_eq!(posix_quote(""), "''");
+
+        // A value with a SPACE. Unquoted the far end split it into two
+        // arguments.
+        assert_eq!(posix_quote("hello world"), "'hello world'");
+
+        // A value with shell METACHARACTERS. Unquoted this executed on the far
+        // end as root. Quoted, every byte is literal — and critically the
+        // result contains no unquoted `;`.
+        let payload = "x;id>/tmp/w;echo y";
+        let quoted = posix_quote(payload);
+        assert_eq!(quoted, "'x;id>/tmp/w;echo y'");
+        assert!(quoted.starts_with('\'') && quoted.ends_with('\''));
+
+        // A literal single quote is the one byte that cannot appear inside a
+        // single-quoted string. Close, escaped quote, reopen.
+        assert_eq!(posix_quote("it's"), r#"'it'\''s'"#);
+        // The escape must not be a way back out: a value that TRIES to close
+        // the quoting and append a command stays inert.
+        let escape = posix_quote("a';id>/tmp/w;'b");
+        assert_eq!(escape, r#"'a'\'';id>/tmp/w;'\''b'"#);
+        // NOTE: whether that string is actually inert is a question about a
+        // SHELL, and this file deliberately does not answer it by hand. A
+        // first draft of this test hand-rolled an even/odd quote counter and
+        // called the correct output an escape, because the counter did not
+        // model `\'`. The real round-trip — feed the quoted form to a real
+        // `sh` and compare what comes back — lives in
+        // `tests/ssh_far_end_quoting.rs`, where it can use a shell without
+        // tripping this module's own no-shell-string guard.
+    }
+
+    /// A positive control on the test above: the assertions must be capable of
+    /// failing. An identity "quoting" function has to break every one of them.
+    #[test]
+    fn the_quoting_assertions_would_fail_without_quoting() {
+        fn unquoted(value: &str) -> String {
+            value.to_string()
+        }
+        assert_ne!(unquoted(""), "''", "the empty-value assertion is vacuous");
+        assert_ne!(
+            unquoted("hello world"),
+            "'hello world'",
+            "the space assertion is vacuous"
+        );
+        assert_ne!(
+            unquoted("x;id>/tmp/w;echo y"),
+            "'x;id>/tmp/w;echo y'",
+            "the metacharacter assertion is vacuous"
+        );
+    }
+
+    /// The three places task-supplied bytes reach the wire must all quote.
+    ///
+    /// Every needle is ASSEMBLED at runtime, for the reason the guard below
+    /// already states: a literal needle appears in this file's own source, so
+    /// the scan finds itself. A first draft wrote them as literals and the
+    /// negative assertions failed against the test's own text — a self-match
+    /// that would have been read as a real regression.
+    #[test]
+    fn every_wire_path_quotes_its_arguments() {
+        let source = include_str!("ssh.rs");
+        let q = ["posix", "_quote"].concat();
+
+        // `execute` — nonce, base64 input, and every element of task argv.
+        for tail in ["(&task.nonce)", "(&input_b64)", "(a)"] {
+            let needle = format!("{q}{tail}");
+            assert!(
+                source.contains(&needle),
+                "a value crossing the connection is unquoted: {needle}"
+            );
+        }
+        // `remote_exec` — the argument carrying the nonce for the scan and the
+        // kill. This is the one `backend scan --task-id` reaches, and unlike
+        // `execute`'s nonce it is NOT identifier-validated first.
+        assert!(source.contains(&format!("{q}(argument)")));
+
+        // And no raw task value may sit alongside them.
+        let raw_nonce = ["args.push(task.non", "ce.clone());"].concat();
+        assert!(
+            !source.contains(&raw_nonce),
+            "an unquoted nonce is back on the wire"
+        );
+        let raw_argv = ["args.extend(task.argv.iter().clon", "ed());"].concat();
+        assert!(
+            !source.contains(&raw_argv),
+            "unquoted task argv is back on the wire"
+        );
+
+        // Positive control: the needle-assembly must be capable of finding
+        // something that is genuinely absent, or the negatives prove nothing.
+        let absent = ["args.push(nothing_like_this", "_exists());"].concat();
+        assert!(!source.contains(&absent));
+        assert!(source.contains(&q), "the assembled needle matches nothing");
+    }
+
+    /// A sweep that could not run must be distinguishable from one that found
+    /// nothing. Measured against a real Windows far end on 2026-07-28: msys
+    /// `ps` rejects `-eo`, stderr went to `/dev/null`, the pipeline ended in
+    /// `|| true`, and the surface reported `0 (MEASURED)` while two independent
+    /// instruments saw the orphan.
+    #[test]
+    fn a_far_end_with_no_supported_ps_reports_not_measured_rather_than_zero() {
+        // The scan must offer a fallback reader and a marker when neither works.
+        assert!(REMOTE_SCAN.contains("ps -eo pid,ppid,args"));
+        assert!(
+            REMOTE_SCAN.contains("ps -ef"),
+            "a far end whose ps rejects -eo must still be enumerable"
+        );
+        assert!(
+            REMOTE_SCAN.contains(SWEEP_UNAVAILABLE),
+            "an unrunnable sweep must announce itself, not return empty"
+        );
+        // The column layout differs between the two readers, so the
+        // self-exclusion must move with it or the scan excludes the wrong pid.
+        assert!(REMOTE_SCAN.contains("pidcol=2; ppidcol=3"));
+        assert!(REMOTE_SCAN.contains(r#"'$p != s && $q != s'"#));
+        // The kill's stray sweep has the same blindness and the same fallback.
+        assert!(REMOTE_KILL.contains("ps -ef"));
+
+        // And the parser must turn the marker into an error — which the call
+        // site renders as NOT MEASURED — rather than treating it as a row.
+        let marked = format!("session-leader 42 still alive\n{SWEEP_UNAVAILABLE} msys ps\n");
+        let mut rows: Vec<String> = Vec::new();
+        let mut failed: Option<String> = None;
+        for line in marked.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            if line.starts_with(SWEEP_UNAVAILABLE) {
+                failed = Some(line.to_string());
+                break;
+            }
+            rows.push(line.to_string());
+        }
+        assert!(
+            failed.is_some(),
+            "the marker must stop the scan being read as a clean list"
+        );
+        assert_eq!(
+            rows.len(),
+            1,
+            "a positive primary finding must survive to be reported in the reason"
+        );
+
+        // Positive control: an ordinary two-row answer must NOT trip the marker,
+        // or every scan would report NOT MEASURED and the check proves nothing.
+        let ordinary = "session-leader 42 still alive\n123 456 sh -c work\n";
+        assert!(
+            !ordinary
+                .lines()
+                .any(|l| l.trim().starts_with(SWEEP_UNAVAILABLE)),
+            "an ordinary scan must still be measurable"
+        );
+    }
+
     #[test]
     fn the_module_contains_no_shell_string_execution_path() {
-        // The safety property this whole module rests on, asserted rather than
-        // left in a comment: nothing here builds a `sh -c` string.
+        // Necessary, and — as the module doc now says — NOT sufficient. This
+        // checks the LOCAL spawn only. It passed unchanged while the far end
+        // was executing injected shell, which is exactly why the quoting tests
+        // above exist alongside it rather than instead of it.
         //
         // The needles are ASSEMBLED at runtime rather than written as literals.
         // A literal would appear in this file's own source and the scan would
@@ -560,14 +852,27 @@ mod tests {
         // argv, so an unguarded `ps | grep <nonce>` matches the scan itself.
         // The scan then always reports one orphan that does not exist, and the
         // killer kills itself mid-run and reports a failure that did not happen.
+        //
+        // The exclusion is unchanged in intent; only its spelling moved. The
+        // pid/ppid COLUMNS differ between `ps -eo pid,ppid,args` and the
+        // `ps -ef` fallback added for far ends whose ps rejects `-eo`, so the
+        // comparison is now against the column variables rather than the
+        // literal `$1`/`$2`. Weakening this guard was never an option — a scan
+        // that finds itself reports an orphan that does not exist.
         for script in [REMOTE_SCAN, REMOTE_KILL] {
             assert!(
                 script.contains("self=$$"),
                 "the script must know its own pid to exclude itself"
             );
             assert!(
-                script.contains(r#"'$1 != s && $2 != s"#),
+                script.contains(r#"$p != s && $q != s"#),
                 "the script must exclude its own pid and its children from the match"
+            );
+            // And the columns must actually be set for BOTH readers, or the
+            // exclusion compares the wrong field and silently stops working.
+            assert!(
+                script.contains("pidcol=1; ppidcol=2") && script.contains("pidcol=2; ppidcol=3"),
+                "the self-exclusion columns must track the reader that was chosen"
             );
         }
     }

@@ -1,0 +1,58 @@
+[
+  {
+    "backend_id": "cloud",
+    "kind": "cloud",
+    "nonce": "f25h-nops-1785238049",
+    "method": "backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back",
+    "mechanism": {
+      "mechanism": "none",
+      "detail": "stopping a cloud machine is a vendor API call, not a kernel mechanism. ProcessTreeMechanism has no variant for it, and if the API call does not land the machine keeps running"
+    },
+    "orphan_count": null,
+    "rows": [],
+    "unobserved_reason": "the surface could not be enumerated (backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back), so no count exists — this is NOT zero orphans"
+  },
+  {
+    "backend_id": "container",
+    "kind": "container",
+    "nonce": "f25h-nops-1785238049",
+    "method": "docker ps -a --filter label=wayland.task.nonce=<nonce>",
+    "mechanism": {
+      "mechanism": "kernel_backed",
+      "process_tree_mechanism": "DockerContainerReap",
+      "detail": "the container daemon force-removing the container and its whole tree"
+    },
+    "orphan_count": 0,
+    "rows": [],
+    "unobserved_reason": null
+  },
+  {
+    "backend_id": "local",
+    "kind": "local",
+    "nonce": "f25h-nops-1785238049",
+    "method": "live-task registry UNION a real enumeration of the host process table",
+    "mechanism": {
+      "mechanism": "kernel_backed",
+      "process_tree_mechanism": "LinuxPidNamespaceReap",
+      "detail": "the platform sandbox backend's PID namespace, with /proc descendant discovery"
+    },
+    "orphan_count": 0,
+    "rows": [],
+    "unobserved_reason": null
+  },
+  {
+    "backend_id": "ssh",
+    "kind": "ssh",
+    "nonce": "f25h-nops-1785238049",
+    "method": "remote `ps -eo pid,args` filtered on the task nonce",
+    "mechanism": {
+      "mechanism": "best_effort",
+      "detail": "a remote process group killed over the same ssh transport. ProcessTreeMechanism has NO variant that crosses an ssh connection, so nothing kernel-backed on the controller reaps the far end; a remote child that calls setsid survives"
+    },
+    "orphan_count": 0,
+    "rows": [],
+    "unobserved_reason": null
+  }
+]
+
+TOTAL: 0 orphan(s) measured across 4 backend(s); 1 surface(s) NOT measured

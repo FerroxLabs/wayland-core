@@ -1,0 +1,63 @@
+=== f25h — SSH orphan surface on the REAL second physical host ===
+controller : Ubuntu-2404-noble-amd64-base / machine-id eded23e3526d4d74a642b0904ed8fc71
+far end    : SeanDesktop / 
+binary     : wayland-core 0.12.25 sha256=98acb016681a315ccd62fa6e7c48858e490fd3648b37ad9b6af2c934c2362a2e
+commit     : 2da46485ca008284863ec1de2ec3df72a4205b05
+date       : 2026-07-28T11:25:10Z
+
+--- 0: what the far end actually provides for the remote runner ---
+
+--- 1: NEGATIVE CONTROL — a nonce nothing carries ---
+nonce: f25hwin-unused-1785237913
+  msys PROBE-NONCE=f25hwin-unused-1785237913
+  msys PROBE-ROOT=absent PROBE-PID-ALIVE=no
+  msys PROBE-ARGV-ROWS:
+  msys PROBE-ARGV-COUNT=0
+  cim  CIM-SELFTEST=ok
+  cim  CIM-COUNT=0
+SCAN[negative] ssh count=0 (MEASURED) exit=0
+F25H-WIN-SSH-NEGATIVE-EXIT: 0 (0 required)
+
+--- 2: POSITIVE A — PRIMARY signal (task root + a live .pid) ---
+The shape a real orphan leaves: the runner's task root with a .pid pointing
+at work still running, whose own argv carries no nonce.
+nonce: f25hwin-pid-1785237924
+plant completed
+  msys PROBE-NONCE=f25hwin-pid-1785237924
+  msys PROBE-ROOT=present PROBE-PID=2481
+  msys PROBE-PID-ALIVE=yes
+  msys PROBE-PID-ROW:
+  msys      seand    2481       1 cons0    18:25:31 sleep 900 
+  msys PROBE-ARGV-ROWS:
+  msys PROBE-ARGV-COUNT=0
+  cim  CIM-SELFTEST=ok
+  cim  CIM-COUNT=0
+SCAN[positive-pid] ssh count=1 (MEASURED) exit=1
+SCAN[positive-pid] ssh row=session-leader 2481 still alive for nonce f25hwin-pid-1785237924
+F25H-WIN-SSH-POSITIVE-PID-EXIT: 1
+F25H-WIN-SSH-PRIMARY-AGREEMENT-PLANTED: AGREE scanner=1 independent=alive
+
+--- 3: POSITIVE B — SECONDARY signal (nonce in a process argv only) ---
+No task root at all, so ONLY the ps sweep can find this one.
+nonce: f25hwin-argv-1785237950
+plant completed
+  msys PROBE-NONCE=f25hwin-argv-1785237950
+  msys PROBE-ROOT=absent PROBE-PID-ALIVE=no
+  msys PROBE-ARGV-ROWS:
+  msys      seand    2529       1 cons1    18:25:53 sh -c while :; do sleep 5; done # f25hwin-argv-1785237950 
+  msys PROBE-ARGV-COUNT=1
+  cim  CIM-SELFTEST=ok
+  cim  CIM-COUNT=1
+  cim  CIM-ROW=3144 44896 "C:\Program Files\Git\usr\bin\sh.exe" -c "while :; do sleep 5; done # f25hwin-argv-1785237950"
+SCAN[positive-argv] ssh count=1 (MEASURED) exit=1
+SCAN[positive-argv] ssh row=seand    2529       1 cons1    18:25:53 sh -c while :; do sleep 5; done # f25hwin-argv-1785237950
+F25H-WIN-SSH-POSITIVE-ARGV-EXIT: 1
+independent: msys ps -ef=1  Win32_Process=1   scanner=1
+F25H-WIN-SSH-SWEEP-AGREEMENT-PLANTED: AGREE scanner=1 msys=1 cim=1
+
+--- 4: cleanup, and prove it ---
+residual task roots: 6
+residual argv procs: 2
+residual (Win32)   : 2
+
+=== ledger: /root/f25h-evidence/25h-win-ssh-orphan-ledger.txt ===
