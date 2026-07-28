@@ -355,31 +355,81 @@ fn quarantine_directory_does_not_become_a_second_wedge() {
     }
 }
 
+/// Reclaim one unreconcilable lease and return the report the product emitted.
+///
+/// Reads the report out of the production emit path, NOT out of the quarantined
+/// file. That distinction is the whole of `F-28-ADJ-001`: the quarantined file
+/// contains the grant path because the file was MOVED verbatim, so asserting on
+/// it passes no matter what the operator is told.
+fn reclaim_and_capture_report(tag: &str, intents: Vec<AclIntent>) -> String {
+    let directory = lease_directory().unwrap();
+    let _ = take_emitted_reclamations();
+    let path = write_unreconcilable_lease(tag, false, intents);
+
+    unsafe { recover_dead_leases_locked(&directory) }.unwrap();
+
+    let mut reports = take_emitted_reclamations();
+    assert_eq!(
+        reports.len(),
+        1,
+        "exactly one reclamation must have been reported, got: {reports:?}"
+    );
+    for stale in quarantined_for(&path) {
+        fs::remove_file(stale).unwrap();
+    }
+    reports.pop().unwrap()
+}
+
 #[test]
 fn reclamation_reports_grants_it_could_not_revoke() {
     // A lease with recorded intents cannot have those grants revoked: the SID
     // is stored as a digest and cannot be reconstructed. Refusing forever never
     // revoked them either, so reclaiming is strictly better — but the operator
-    // has to be TOLD, and that is what this pins.
+    // has to be TOLD, and that is the ONLY warning they get.
+    //
+    // Asserted in BOTH directions on purpose. Disclosure alone is satisfied by
+    // an implementation that always discloses; silence alone is satisfied by
+    // one that never does. Mutant M3 (adjudication `28-adj`) deletes the
+    // disclosure branch so every reclamation claims nothing was left behind —
+    // the negative assertion below is what catches it.
     let _lock = wedge_test_lock();
-    let directory = lease_directory().unwrap();
-    let intents = vec![AclIntent {
-        path: "C:\\f28h2-residual".to_string(),
-        kind: IntentKind::Allow,
-        mask: ACL_READ_MASK,
-    }];
-    let path = write_unreconcilable_lease("residual", false, intents.clone());
+    const GRANT: &str = r"C:\f28h2-residual";
 
-    unsafe { recover_dead_leases_locked(&directory) }.unwrap();
-
-    let quarantined = quarantined_for(&path);
-    assert_eq!(quarantined.len(), 1);
-    let preserved = fs::read_to_string(&quarantined[0]).unwrap();
-    assert!(
-        preserved.contains("C:\\\\f28h2-residual") || preserved.contains("C:\\f28h2-residual"),
-        "quarantine must preserve the unrevoked grant paths for the operator: {preserved}"
+    let disclosed = reclaim_and_capture_report(
+        "residual",
+        vec![AclIntent {
+            path: GRANT.to_string(),
+            kind: IntentKind::Allow,
+            mask: ACL_READ_MASK,
+        }],
     );
-    fs::remove_file(&quarantined[0]).unwrap();
+    assert!(
+        disclosed.contains(GRANT),
+        "a grant that could not be revoked must be named to the operator: {disclosed}"
+    );
+    assert!(
+        disclosed.contains("could NOT be revoked automatically"),
+        "the report must say the grants were not revoked, not merely list a path: {disclosed}"
+    );
+    assert!(
+        !disclosed.contains("nothing was left behind"),
+        "a lease WITH un-revokable grants must never be reported as leaving nothing behind: \
+         {disclosed}"
+    );
+
+    let silent = reclaim_and_capture_report("noresidual", Vec::new());
+    assert!(
+        silent.contains("nothing was left behind"),
+        "a lease with no recorded grant must say so plainly: {silent}"
+    );
+    assert!(
+        !silent.contains("could NOT be revoked automatically"),
+        "a lease with no recorded grant must not manufacture a residual warning: {silent}"
+    );
+    assert!(
+        !silent.contains(GRANT),
+        "a lease with no recorded grant must name no path: {silent}"
+    );
 }
 
 fn require_live_acceptance() {

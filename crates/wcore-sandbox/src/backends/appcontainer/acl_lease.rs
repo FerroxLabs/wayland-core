@@ -743,15 +743,52 @@ fn unreconcilable_lease_reason(lease: &LeaseFile) -> String {
 /// permanent, behind a message that read like a platform limitation.
 fn reclaim_unreconcilable_lease(path: &Path, lease: &LeaseFile, reason: &str) -> Result<()> {
     let destination = quarantine_lease(path)?;
+    let report = reclamation_report(lease, &destination, reason);
+    #[cfg(test)]
+    record_emitted_reclamation(&report);
     tracing::error!(
         target: "wcore_sandbox",
         lease = %path.display(),
         quarantined_to = %destination.display(),
         owner_pid = lease.owner_pid,
-        "{}",
-        reclamation_report(lease, &destination, reason)
+        "{report}"
     );
     Ok(())
+}
+
+/// Every reclamation report actually emitted, recorded for tests only.
+///
+/// This seam exists because of `F-28-ADJ-001`. The test named for the
+/// residual-grant disclosure asserted only that the QUARANTINED FILE still
+/// contained the grant path — which the move guarantees whatever the report
+/// says — so deleting the disclosure branch outright left the suite at a
+/// byte-identical 133 passed / 0 failed. It was a test that never called the
+/// function it was named for.
+///
+/// Asserting on [`reclamation_report`] alone would close only half of that: it
+/// would not prove a REAL reclamation passes the real lease to it, so an
+/// implementation that logged a constant would still pass. Recording the exact
+/// string handed to `tracing` is what makes the test observe what an operator
+/// would actually read.
+#[cfg(test)]
+static EMITTED_RECLAMATIONS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn record_emitted_reclamation(report: &str) {
+    EMITTED_RECLAMATIONS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(report.to_string());
+}
+
+/// Drain and return every reclamation reported since the last call.
+#[cfg(test)]
+pub(super) fn take_emitted_reclamations() -> Vec<String> {
+    std::mem::take(
+        &mut *EMITTED_RECLAMATIONS
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()),
+    )
 }
 
 /// The operator-facing text of a reclamation, as a pure function.
