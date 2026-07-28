@@ -179,10 +179,49 @@ to that exact file, so the guard is designed to be re-reddened by the workflow i
 I did NOT run `wcore-contract generate` (brief §0). A fenced seam request goes in the
 report.
 
-## Still to establish
+## T+3 — Windows: the standing HIGH is disproved, and my own probe nearly proved it
 
-- [ ] Second serial batch (`wcore-cli --lib`, `portability_hostile_corpus`,
-      `f14_sigkill_recovery`, `sandbox_activeness`) — the 30 currently ABSENT.
-- [ ] Windows: whether `--json-stream` really emits no `ready`, measured with a
-      probe that isolates config properly and reads stderr.
-- [ ] Rank the real defects by customer impact.
+Three probe generations were needed and the first two were both wrong. Recorded
+because the failure modes are the ones this program keeps hitting.
+
+- **v1 head-truncated the stderr tail.** Took the last 40 lines, joined them, then
+  kept the FIRST 2500 characters — discarding exactly the end, where the fatal error
+  is. The repaired v3 keeps the last 1500; its A3 assertion reports **True**, i.e.
+  the old shape provably missed the line that turned out to be the whole answer.
+- **v2 measured a binary that did not exist.** The runner rebuilt `target/release`
+  mid-session. Every probe reported `OUTBYTES=0 READYFRAMES=0` — which reads exactly
+  like a confirmation of the standing HIGH. **v3 carries a positive control
+  (`--version`, which must produce output) and an explicit
+  `SPAWN=FAILED … UNREADABLE, not evidence` branch. That control is what caught it.**
+
+v3 result (release binary, `plugin_discovery_e2e`'s exact invocation):
+
+| probe | isolation | OUTBYTES | ready frames | last stderr line |
+|---|---|---|---|---|
+| `CTRL_version` | — | 21 | — | control: `wayland-core 0.12.25` |
+| `A_home_only` | `HOME` only | **0** | **0** | `Error: storage.credentials.backend is set to "plaintext", which cannot hold the confidential key that durable session recovery requires…` |
+| `B_wayland_home` | + `WAYLAND_HOME` | 4751 | **1** | normal warnings |
+| `C_wh_long` | same, 150s | 4741 | **1** | normal warnings |
+
+`--json-stream` **does** emit `ready` on that host. Corroborated independently from
+the same CI job: `migrate_quarantine` and `smoke_p0` captured 4 full
+`{"type":"ready","version":"0.12.25",…}` frames on the Windows runner.
+
+## T+4 — C4 resolved: container, not parallelism
+
+`cargo nextest run -p wcore-eval-scenarios -p wcore-sandbox -p wcore-swarm` on 96
+cores, unrestricted: `761 tests run: 761 passed, 18 skipped`, and all 13 reaping
+tests verified **by name** as executed and passing. Parallelism is exonerated.
+
+## T+4 — final grading of the 68
+
+`PASS_SERIAL=67  FAIL_SERIAL=1  ABSENT=0`. The one is the contract corpus.
+
+## T+4 — the provenance-gate falsification self-passed on the first attempt
+
+Advancing HEAD with an empty commit and re-running through `cargo nextest` gave
+`1 passed` — cargo had **rebuilt** the binary, so the embedded SHA moved with HEAD
+and the gate was never shown a stale build. Re-run against the already-built test
+binary directly: leg 1 (fresh) `1 passed`, leg 2 (HEAD advanced, same binary)
+`FAILED`, with 40-hex vs 40-hex and the intended message. Leg 1 was impossible
+before the fix.

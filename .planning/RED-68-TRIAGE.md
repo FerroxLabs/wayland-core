@@ -9,10 +9,13 @@ Every number below is read back from a named run. Running notes:
 
 ## 0. The headline, before the detail
 
-- **All 68 are classified.** 64 are environment — the CI container is missing three
-  binaries the suite needs. 1 is a real defect. 1 is a stale test. 1 is already-known.
-  1 cluster of 13 is environment-or-parallelism with the **mechanism not established**,
-  and is reported that way rather than guessed at.
+- **All 68 are classified, and all 68 were re-measured by name** — not by crate
+  total. 65 are environment: the CI container is missing three binaries the suite
+  needs. 1 is a real defect, 1 a stale test, 1 already-known. Final grading against
+  the serial re-runs: `PASS_SERIAL=67  FAIL_SERIAL=1  ABSENT=0`.
+- **The 13-test descendant-reaping cluster is a container artefact, not a
+  parallelism artefact** — measured both ways, because this program keeps confusing
+  the two. 761/761 pass on 96 cores natively, all 13 verified by name.
 - **The 68 and the 81 overlap by 33.** They are neither the same list nor disjoint.
   **116 distinct tests** fail across the two platforms.
 - **The standing HIGH — `--json-stream` emits no `ready` event on Windows — is
@@ -124,12 +127,15 @@ lane's HEAD, `--test-threads 1 --no-fail-fast`:
 | `-p wcore-cli --test portability_hostile_corpus` | `23 tests run: 23 passed` |
 | `-p wcore-cli --test f14_sigkill_recovery` | `11 tests run: 11 passed, 1 skipped` |
 | `-p wcore-cli --test sandbox_activeness` | `2 tests run: 2 passed` |
+| `-p wcore-cli --test deterministic_openai_loop` | `13 tests run: 13 passed (1 slow)` |
+
+Per-test grading against the CI list: **`PASS_SERIAL=67  FAIL_SERIAL=1  ABSENT=0`.**
 
 | class | n | verdict |
 |---|---|---|
 | **C1** `python3` absent from the CI image | 23 | environment |
 | **C3** `bubblewrap` absent from the CI image | 20 | environment |
-| **C4** descendant reaping | 13 | environment **or** parallelism — mechanism NOT established |
+| **C4** descendant reaping | 13 | environment (container) — parallelism disproved; exact mechanism not named |
 | **C2** `ps` absent from the CI image | 6 | environment |
 | **C5** container timing / provenance | 3 | environment |
 | **K1** already-known | 1 | `BACKLOG.md:516` |
@@ -165,23 +171,34 @@ built for one test, not a package.
 **I did not make this change: `ci.yml` is owned by another lane.** It is one edit to
 the inline Dockerfile plus a decision on the 20.
 
-### C4 — the honest gap
+### C4 — container, and specifically NOT parallelism (measured both ways)
 
 13 tests assert that a descendant process or listener does not survive teardown
 (`wcore-eval-scenarios::runner_contracts` ×7, `pty_capture` ×2,
-`wcore-sandbox::process_capture` ×2, `wcore-swarm worktree::tests::linux` ×2). All
-pass serially on hetzner. **The mechanism is not established**, and two variables
-are confounded: CI ran *containerized* and *parallel*; the hetzner re-run was
-*native* and *serial*.
+`wcore-sandbox::process_capture` ×2, `wcore-swarm worktree::tests::linux` ×2).
 
-**It is specifically NOT the missing `ps`.** `crates/wcore-sandbox/src/backends/process_tree.rs`
+The board's standing warning is that this program keeps confusing container
+artefacts with parallelism artefacts, so the two variables were separated rather
+than assumed. CI ran *containerized* **and** *parallel*; the first hetzner re-run
+was *native* **and** *serial* — which decides nothing on its own. So a second run
+was taken **native and parallel**, on 96 cores, unrestricted:
+
+```
+cargo nextest run -p wcore-eval-scenarios -p wcore-sandbox -p wcore-swarm --no-fail-fast
+Summary [3.584s] 761 tests run: 761 passed, 18 skipped
+```
+
+and each of the 13 was checked **by name**, not by the crate total:
+`PASS_SERIAL=13` (all 13 executed and passed under full parallel load).
+
+**Verdict: container artefact. Parallelism is exonerated for this cluster.**
+
+**It is also specifically NOT the missing `ps`.** `crates/wcore-sandbox/src/backends/process_tree.rs`
 reads `/proc`; only `crates/wcore-exec-backend/src/orphan.rs:321` shells out to `ps`,
-and that crate's 6 failures are separately accounted for above. Attributing the
-reaping cluster to `ps` would be a plausible story, not a measurement.
-
-A parallel re-run of those three crates on hetzner is queued to separate the two
-variables; its result is appended to `RED-68-NOTES.md`. **Until that lands, C4 is
-unresolved and is not counted as "environment" in any claim above.**
+and that crate's 6 failures are separately accounted for above. The remaining
+container-side candidate — PID-namespace reparenting under a non-reaping PID 1, or
+`/proc` visibility inside `docker run` — was **not** narrowed further here, so the
+class is "container", not a named mechanism.
 
 ---
 
@@ -319,6 +336,34 @@ nothing.
 
 One test, both known failure modes at once: **unfailable in the wrong direction on
 one platform, vacuous on the other.** Fixed by comparing full 40-hex to full 40-hex.
+
+**Proof the repaired gate can both pass and fail** — and this took two attempts,
+which is itself the finding:
+
+*Attempt 1 self-passed.* Advance HEAD with an empty commit, re-run via
+`cargo nextest` → `1 test run: 1 passed`. Cargo had **rebuilt** the binary, so the
+embedded SHA moved with HEAD and the gate was never actually presented with a stale
+build. (Incidentally this disproves the test's own doc comment, which asserts
+"Cargo's rerun-if-changed guards don't re-trigger on a plain `git commit`".) A
+falsification that lets the tool under test refresh itself proves nothing.
+
+*Attempt 2, running the already-built test binary directly so cargo cannot
+intervene:*
+
+| leg | condition | result |
+|---|---|---|
+| 1 | embedded == HEAD, `CI=1` (strict armed) | `test result: ok. 1 passed` |
+| 2 | HEAD advanced by an empty commit, **same prebuilt binary**, `CI=1` | `test result: FAILED. 0 passed; 1 failed` |
+
+```
+STRICT: binary source bdf0b829c4706656ed972d1c3d548274109de203
+     != HEAD 6f1f6f1cef49c56ca4cc6d08878fff96161a4ffc (stale build — rebuild required)
+```
+
+40-hex against 40-hex, two genuinely different commits, the message it was written
+to produce. **Leg 1 was impossible before this fix** — the gate could only ever
+produce leg 2's outcome, for the wrong reason.
+
 The remaining vacuity (silent skip when git is unavailable) is **not** fixed here —
 making it a hard failure would introduce a new Linux red that belongs to whoever
 owns the container's git configuration.
@@ -395,9 +440,10 @@ Three test-side fixes. No product code touched. No `ci.yml` touched. No test wea
   the 20 bwrap tests, and `ci.yml` belongs to another lane. That is deliberate: a
   triage that fixes three and describes sixty-five precisely is worth more than a
   lane that half-fixes thirty.
-- **Did not establish the mechanism for the 13 descendant-reaping failures (C4).**
-  A parallel-vs-serial run on hetzner is queued to separate the two confounded
-  variables. Until it reports, C4 is unresolved.
+- **Did not name the mechanism for the 13 descendant-reaping failures (C4).** I
+  established what it is *not* — not parallelism (761/761 pass on 96 cores natively,
+  all 13 checked by name) and not the missing `ps` — but did not narrow the
+  container-side cause to a single mechanism.
 - **Did not run `wcore-contract generate`** (brief §0). R1 is a fenced seam request.
 - **Did not fix R2b** (no protocol frame before a startup refusal) — protocol surface.
 - **Did not verify the two Windows fixes by running the tests on Windows.** The

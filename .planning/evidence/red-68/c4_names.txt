@@ -1,0 +1,13 @@
+wcore-eval-scenarios pty_capture::tests::direct_child_exit_reaps_pty_descendant_group
+wcore-eval-scenarios pty_capture::tests::drop_reaps_live_pty_process_group
+wcore-eval-scenarios::runner_contracts assertion_failure_still_reaps_owned_descendant_listener
+wcore-eval-scenarios::runner_contracts cancellation_reaps_owned_descendant_listener
+wcore-eval-scenarios::runner_contracts direct_child_early_exit_reaps_owned_descendant_listener
+wcore-eval-scenarios::runner_contracts dropping_runner_future_reaps_owned_descendant_listener
+wcore-eval-scenarios::runner_contracts normal_exit_reaps_owned_descendant_listener
+wcore-eval-scenarios::runner_contracts outer_deadline_reaps_owned_descendant_listener
+wcore-eval-scenarios::runner_contracts timeout_reaps_owned_descendant_listener
+wcore-sandbox::process_capture linux::cancellation_kills_the_owned_process_tree
+wcore-sandbox::process_capture linux::stdout_flood_is_bounded_and_kills_descendant
+wcore-swarm worktree::tests::linux::status_output_cap_kills_git_descendant
+wcore-swarm worktree::tests::linux::worktree_add_timeout_kills_tree_and_reports_preserved_residual

@@ -1,0 +1,17 @@
+warning: in config file .config/nextest.toml, ignoring unknown configuration key: profile.default.no-tests
+   Compiling wcore-cli v0.12.25 (/root/wayland-red68/crates/wcore-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.53s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 5f1e2d48-7a12-43d8-93c1-1e1fa83896c5 with nextest profile: default
+    Starting 7 tests across 3 binaries
+        PASS [   0.075s] (1/7) wcore-cli::build_provenance binary_matches_repo_head
+        PASS [   0.181s] (2/7) wcore-cli::plugin_discovery_e2e ready_event_advertises_plugin_capabilities_when_backends_can_start
+        PASS [   0.182s] (3/7) wcore-cli::plugin_discovery_e2e ready_event_withdraws_plugin_capabilities_when_backends_cannot_start
+        PASS [   0.036s] (4/7) wcore-cli::release_binary_smoke release_binary_help_and_version_succeed
+        PASS [   0.161s] (5/7) wcore-cli::release_binary_smoke release_binary_ready_event_advertises_plugin_capabilities
+        PASS [   0.005s] (6/7) wcore-cli::release_binary_smoke release_binary_smoke_fails_fast_when_artifact_missing
+        PASS [   0.161s] (7/7) wcore-cli::release_binary_smoke release_binary_withdraws_plugin_capabilities_when_backends_cannot_start
+────────────
+     Summary [   0.803s] 7 tests run: 7 passed, 0 skipped
