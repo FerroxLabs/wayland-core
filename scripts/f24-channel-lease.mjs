@@ -107,6 +107,37 @@ function httpJson(url, { method = 'GET', body = null, timeoutMs = 15000 } = {}) 
   });
 }
 
+/** Raw-body client. `httpJson` cannot read an SSE stream — it is not JSON. */
+function httpText(url, { method = 'GET', body = null, timeoutMs = 15000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const payload = body === null ? null : JSON.stringify(body);
+    const u = new URL(url);
+    const req = http.request(
+      {
+        hostname: u.hostname,
+        port: u.port,
+        path: `${u.pathname}${u.search}`,
+        method,
+        timeout: timeoutMs,
+        headers: payload
+          ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }
+          : {},
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (c) => {
+          data += c;
+        });
+        res.on('end', () => resolve(data));
+      },
+    );
+    req.on('timeout', () => req.destroy(new Error(`timeout ${url}`)));
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
 /** Byte-count every capture. A zero-byte log is an instrument fault, not a result. */
 function byteLen(p) {
   try {
@@ -215,21 +246,38 @@ function runAsLlmStub(holdMs, journalPath) {
         journalPath,
         `${JSON.stringify({ at: new Date().toISOString(), path: req.url, hit: hits })}\n`,
       );
-      // Hold, so the session (and therefore its channel poller) stays alive for
-      // a duration this driver controls.
+      // SSE, not plain JSON. The first version answered a single JSON body and
+      // the engine logged `OpenAI SSE stream closed before any terminal event
+      // ([DONE] / finish_reason / error) — response truncated`, retried, and
+      // tripped its circuit breaker — so the session hung ~90s instead of
+      // completing a turn and exiting. Answering the real streaming shape is
+      // what makes "an ordinary session" a faithful stand-in for one.
+      res.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive',
+      });
+      const base = {
+        id: 'f24cl',
+        object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000),
+        model: 'f24cl-stub',
+      };
+      res.write(
+        `data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`,
+      );
+      // HOLD with the stream open, so the session — and therefore its channel
+      // poller — stays alive for a duration this driver controls, and then
+      // terminates CLEANLY rather than by timing out.
       setTimeout(() => {
-        const payload = {
-          id: 'f24cl',
-          object: 'chat.completion',
-          created: Math.floor(Date.now() / 1000),
-          model: 'f24cl-stub',
-          choices: [
-            { index: 0, message: { role: 'assistant', content: 'ack' }, finish_reason: 'stop' },
-          ],
-          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-        };
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify(payload));
+        res.write(
+          `data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: { content: 'ack' }, finish_reason: null }] })}\n\n`,
+        );
+        res.write(
+          `data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`,
+        );
+        res.write('data: [DONE]\n\n');
+        res.end();
       }, holdMs);
     });
   });
@@ -285,7 +333,9 @@ class LlmStub {
     }
     const m = re.exec(banner);
     if (!m) throw new Error(`llm stub never bound (log ${byteLen(logPath)} bytes): ${banner}`);
-    this.url = `${m[1]}/v1`;
+    // The engine appends its own `/v1/chat/completions`, so the base must NOT
+    // carry `/v1` or the journal shows `/v1/v1/...`.
+    this.url = m[1];
     this.child = child;
     return this.url;
   }
@@ -441,7 +491,10 @@ class Run {
     fs.writeFileSync(logPath, '');
     const fd = fs.openSync(logPath, 'a');
     const child = spawn(this.args.binary, ['gateway', 'run'], {
-      stdio: ['pipe', fd, fd],
+      // stdin `ignore`, not `pipe`. A pipe this driver never writes to still
+      // produced `write EPIPE` when the child went away mid-leg, aborting the
+      // whole run at the point the measurement was about to be taken.
+      stdio: ['ignore', fd, fd],
       env: this.childEnv(),
     });
     this.children.push(child);
@@ -497,7 +550,17 @@ class Run {
   }
 
   async report() {
-    return httpJson(`${this.tgUrl}/__control/report`);
+    let lastErr = null;
+    for (let i = 0; i < 5; i += 1) {
+      try {
+        return await httpJson(`${this.tgUrl}/__control/report`);
+      } catch (e) {
+        lastErr = e;
+        this.note(`report retry ${i + 1}/5 after ${e.message}`);
+        sleep(1000);
+      }
+    }
+    throw lastErr;
   }
 
   async waitForPolls(minPolls, budgetMs, label) {
@@ -913,24 +976,26 @@ async function selfTestStub(results, assert) {
   //    this driver has blocked its own event loop — the exact condition the
   //    steady-state leg creates for 2s at a time between submissions.
   let url = null;
-  let answered = false;
+  let sse = '';
   try {
     url = stub.start();
     sleep(1200); // block the driver's loop, as the real legs do
-    const r = await httpJson(`${url}/chat/completions`, {
+    sse = await httpText(`${url}/v1/chat/completions`, {
       method: 'POST',
       body: { model: 'x', messages: [] },
       timeoutMs: 8000,
     });
-    answered = Boolean(r.choices);
   } catch (e) {
-    answered = false;
-    url = url ?? `ERR:${e.message}`;
+    sse = `ERR:${e.message}`;
   }
+  // Assert the TERMINAL event, not merely "some bytes came back". A stream that
+  // ends without `[DONE]` is exactly what made the engine retry and trip its
+  // circuit breaker in the first live run, so a weaker assertion here would
+  // have passed on the broken stub.
   assert(
-    'stub known-positive: out-of-process stub answers even after the driver blocks its own loop',
-    answered,
-    `url=${url}`,
+    'stub known-positive: out-of-process stub streams a terminated SSE turn after the driver blocks its own loop',
+    sse.includes('data: [DONE]') && sse.includes('"finish_reason":"stop"'),
+    `url=${url} bytes=${sse.length}`,
   );
 
   // 2. KNOWN-NEGATIVE: hits are read from the stub's own journal, written by
