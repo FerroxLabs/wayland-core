@@ -166,4 +166,74 @@ per-lane discipline failure, not a broken process everywhere.
 F26-04-B, F26-04-C, F-28-02-003/004/005/006, F-28-01-R001, F-28C-01/02/03,
 F-KR-09, F29-03-04, F29-CEN-06 — all found with count ≥1.
 
-## T4 — CRITERIA-GAP-LEDGER rows — not yet started
+## T4 — CRITERIA-GAP-LEDGER
+
+### T4.a `23A-C1` "not hidden" — FALSE at HEAD, correctable
+Ledger (line ~206): *"`--skills-promote <PROCEDURE_ID>` is declared at
+`main.rs:463-464` with a plain `#[arg(long, value_name = "PROCEDURE_ID")]` —
+**not hidden**."* At HEAD `crates/wcore-cli/src/main.rs:473` reads
+`#[arg(long, value_name = "PROCEDURE_ID", hide = true)]`, with a 9-line comment
+citing ledger row `23A-C1` by name, and a guard test
+`tests/skills_promote_not_advertised.rs`. The **advertisement** half is closed;
+the criterion itself (revoke / rollback / governed promotion) is still NOT MET.
+⇒ correct the paragraph and the "RELEASE-BLOCKING at the advertisement level"
+line; do NOT upgrade the criterion grade.
+
+### T4.b `22-C3` FAILED — stale in substance, and its falsifier is a BROKEN INSTRUMENT
+Two separate things are wrong here.
+
+1. **Substance.** The adapter surface WAS built: `26be00cd`
+   *"feat(22-c3): the adapter surface -- one canonical Goal terminal transition
+   over all five loop owners"* (+667 lines `crates/wcore-agent/src/goal/strategy.rs`),
+   merged at `f68f3ddd` *"merge(22-c3): one loop owner, enforced over the Goal
+   lifecycle and graded PARTIAL"*, with `aa60fc4b` *"docs(22-c3): SUMMARY with an
+   honest PARTIAL grade on Criterion 3"*. At `f68f3ddd`, `strategy.rs` carries
+   **45** `GoalTerminalState` references and names all five owners
+   (`ClimbOutcome | CouncilRunResult | WorkflowRunError | &[ShardSummary] |
+   DirectOutcome`). So **PARTIAL, not FAILED** — as the brief said.
+2. **BUT it is NOT in the integration branch.** `git branch --contains f68f3ddd`
+   lists `inv/*` and `lane/*` only; `gh/plan/f20-unified-audit-repair` head is
+   `ef1d97be`, my base, where the adapter is absent. Both facts must be stated.
+3. **The ledger's own falsifier is defective.** It reads: *"Grep for
+   `GoalTerminalState` under `crates/wcore-agent/src/orchestration/` returns zero
+   hits."* The adapter was built under `crates/wcore-agent/src/goal/`, so that
+   grep returns **zero even at `f68f3ddd` where the adapter exists** — measured.
+   The instrument would report FAILED forever, including after closure. This is
+   the same class as the self-passing gates in §3.2 of the brief, inverted
+   (self-FAILING). Per §6b-ii I repair it rather than only noting it.
+
+---
+
+## COORDINATOR ADDITIONS (2026-07-29)
+
+### C.a `.planning/SEAM-REQUESTS/30.md` — swept, nothing dropped
+Added by `c2b57d53` (not in my base; read via `git show`). 4 entries
+(SR-30-1..4), all fenced-FILE requests against
+`crates/wcore-eval-scenarios/src/fixtures/openai.rs` and the trial protocol.
+**It contains no BACKLOG rows and makes no filing claim**, so it drops nothing.
+
+### C.b The 30-04 lane's 6 MEDIUM/LOW — VERIFIED FILED, claim is TRUE
+Same commit `c2b57d53` writes **+61 lines to `.planning/BACKLOG.md`**, adding
+exactly six: `BL-F30-REFCOUNT-GATE` (M), `BL-F30-FORCED-MET-SED` (M),
+`BL-F30-VERDICT-VERIFY-ARG` (L), `BL-F30-VACUOUS-MAIN-GATE` (M),
+`BL-F30-AUDIT-CEILING-PREMISE` (M), `BL-F30-ROADMAP-STALE-STATUS` (M).
+**This lane filed honestly** — a useful negative control for the checker, and it
+is the correct behaviour the other lanes did not follow.
+
+### C.c Third historical case — a DIFFERENT shape, and it is statically detectable
+`BL-F30-FORCED-MET-SED`: 30-04's MET-forcing gate runs
+`sed 's#"verdict": *"NOT_MET"#"verdict": "MET"#'` over
+`evidence/30-04/phase-verdict.json`. Confirmed at HEAD that
+`crates/wcore-eval-scenarios/src/scorecard.rs:229` `struct CriterionV1` carries
+`id, statement, **grade**, evidence` — there is **no `verdict` field**. The sed
+matches nothing, so the "prove MET is refused" gate mutated nothing and proved
+nothing.
+
+**Why a naive matcher misses it:** `grep -r verdict` over the repo returns many
+hits — the TYPE name `CriterionVerdictV1`, the FILE name `phase-verdict.json`,
+prose. Only checking `"verdict":` in JSON-KEY position distinguishes it. That is
+my third self-test assertion.
+
+**Checker design consequence:** rather than infer, the strongest available check
+**measures the effect** — take the sed and its target file, apply it, and assert
+the document actually changed. Shape 1 reads a claim; shape 2 reads an effect.
