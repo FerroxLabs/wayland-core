@@ -280,8 +280,13 @@ fn keyval_re() -> Regex {
     // verbatim in shipped remediation text. Case 5's pre-fix string used the
     // prose form ("set `credentials.backend` to \"encrypted-file\""), so an
     // extractor that only understood `=` would have been blind to it.
+    //
+    // The optional backticks are load-bearing, not cosmetic: shipped remediation
+    // text markdown-quotes the key ("set `credentials.backend` to ..."), and a
+    // pattern without the CLOSING backtick recovered nothing at all from case
+    // 5's own pre-fix string -- measured, this test file's first run.
     Regex::new(
-        r#"(?:^|[^\w.\-])([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)\s*(?:=|\sto\s)\s*`?("[^"]*"|\[[^\]]*\]|true|false|-?\d+)"#,
+        r#"(?:^|[^\w.\-])`?([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)`?\s*(?:=|\sto\s)\s*`?("[^"]*"|\[[^\]]*\]|true|false|-?\d+)"#,
     )
     .unwrap()
 }
@@ -486,6 +491,7 @@ fn advertised_config_assignments_survive_the_real_loader() {
 
     let mut checked = 0usize;
     let mut illustrative = 0usize;
+    let mut illustrative_reasons: Vec<String> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
 
     for adv in sweep_advertised() {
@@ -507,9 +513,18 @@ fn advertised_config_assignments_survive_the_real_loader() {
         // "{model}"`) is not literal TOML. Skip it, but ONLY when generic TOML
         // rejects it -- if generic TOML accepts it and ConfigFile does not, that
         // is exactly the case 5(b)/(c) defect and must red.
-        let Ok(generic) = snippet.parse::<toml::Value>() else {
-            illustrative += 1;
-            continue;
+        // `toml::from_str::<toml::Value>` and NOT `snippet.parse::<toml::Value>()`:
+        // under toml 1.x the `FromStr` impl rejected every one of these, so the
+        // first run of this gate skipped 36 of 36 candidates as "illustrative"
+        // and checked ZERO. The anti-vacuity floor below is the only reason that
+        // was visible instead of shipping as a green.
+        let generic = match toml::from_str::<toml::Value>(&snippet) {
+            Ok(v) => v,
+            Err(e) => {
+                illustrative_reasons.push(format!("{} :: {}", snippet, e));
+                illustrative += 1;
+                continue;
+            }
         };
         checked += 1;
 
@@ -555,11 +570,19 @@ fn advertised_config_assignments_survive_the_real_loader() {
     // is well under the count measured at authoring time (48 header-bound
     // assignments) so ordinary churn cannot trip it, but a broken lexer or a
     // broken extractor drops straight through it.
+    eprintln!(
+        "remedy-gate: {checked} advertised config assignments checked, \
+         {illustrative} skipped as illustrative"
+    );
+    for r in illustrative_reasons.iter().take(20) {
+        eprintln!("  illustrative: {r}");
+    }
     assert!(
         checked >= 15,
         "only {checked} advertised config assignments were checked ({illustrative} \
          skipped as illustrative). The sweep is broken -- fix the extraction, do \
-         NOT lower this floor."
+         NOT lower this floor. skips: {:#?}",
+        illustrative_reasons
     );
 
     assert!(
@@ -604,8 +627,9 @@ fn checker_reds_on_the_historical_defect_shapes() {
     // case 5(a): `credentials` is not a section at all.
     let pre_fix_creds = "credentials.backend = \"encrypted-file\"";
     assert!(
-        pre_fix_creds.parse::<toml::Value>().is_ok(),
-        "must be well-formed TOML, else it would be skipped as illustrative"
+        toml::from_str::<toml::Value>(pre_fix_creds).is_ok(),
+        "must be well-formed TOML, else the main check would skip it as \
+         illustrative rather than red on it"
     );
     let cfg = toml::from_str::<ConfigFile>(pre_fix_creds)
         .expect("unknown roots are ignored, not rejected -- that IS the defect");
