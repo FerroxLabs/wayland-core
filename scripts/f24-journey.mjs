@@ -671,36 +671,48 @@ class Journey {
   // service reports the NEW binary after an upgrade and the OLD one after a
   // rollback.
   upgradeInPlace() {
-    const upgraded = path.join(this.runDir, `${this.args.platform}-upgraded-core${path.extname(this.binary)}`);
-    fs.copyFileSync(this.binary, upgraded);
-    fs.chmodSync(upgraded, 0o755);
-    const install = this.must([upgraded, 'gateway', 'install', '--profile', PROFILE]);
-    if (this.table.postInstall) run(this.table.postInstall(), { env: this.env() });
-    const restart = this.must(this.core('gateway', 'restart', '--profile', PROFILE));
-    const observed = this.awaitBinaryPath(upgraded);
-    this.upgradedPath = upgraded;
-    this.step(
-      'upgrade-in-place',
-      `${shellish([upgraded, 'gateway', 'install', '--profile', PROFILE])} ; ${shellish(this.core('gateway', 'restart', '--profile', PROFILE))}`,
-      `${install.output.trim()}\n${restart.output.trim()}\n` +
-        `observed_binary_path=${observed.binaryPath}\nobserved_pid=${observed.pid}\n` +
-        `${observed.raw}`,
+    const upgraded = path.join(
+      this.runDir,
+      `${this.args.platform}-upgraded-core${path.extname(this.binary)}`,
     );
+    fs.copyFileSync(this.binary, upgraded);
+    if (this.args.platform !== 'windows') fs.chmodSync(upgraded, 0o755);
+    this.upgradedPath = upgraded;
+    this.step('upgrade-in-place', ...this.swapTo(upgraded, 'upgrade'));
   }
 
   // ── step 15 ──────────────────────────────────────────────────────────────
   rollback() {
-    const install = this.must(this.core('gateway', 'install', '--profile', PROFILE));
+    this.step('rollback', ...this.swapTo(this.binary, 'rollback'));
+  }
+
+  // Stop, re-register against `target`, start, and require the RUNNING service
+  // to report that binary. `gateway install` derives the registration from the
+  // binary that ran it, so invoking it from the target is the operator's own
+  // upgrade path rather than a synthetic edit of a unit file.
+  //
+  // The uninstall is not cosmetic: launchd refuses to load a label it already
+  // holds, so an install over a live registration would fail on macOS and pass
+  // on the other two — a platform difference in a STEP, which is precisely what
+  // the one-journey rule forbids.
+  swapTo(target, label) {
+    const stop = run(this.core('gateway', 'stop', '--profile', PROFILE), { env: this.env() });
+    const uninstall = this.must(this.core('gateway', 'uninstall', '--profile', PROFILE));
     if (this.table.postInstall) run(this.table.postInstall(), { env: this.env() });
-    const restart = this.must(this.core('gateway', 'restart', '--profile', PROFILE));
-    const observed = this.awaitBinaryPath(this.binary);
-    this.step(
-      'rollback',
-      `${shellish(this.core('gateway', 'install', '--profile', PROFILE))} ; ${shellish(this.core('gateway', 'restart', '--profile', PROFILE))}`,
-      `${install.output.trim()}\n${restart.output.trim()}\n` +
+    const install = this.must([target, 'gateway', 'install', '--profile', PROFILE]);
+    if (this.table.postInstall) run(this.table.postInstall(), { env: this.env() });
+    const start = this.must(this.core('gateway', 'start', '--profile', PROFILE));
+    const observed = this.awaitBinaryPath(target);
+    return [
+      `${shellish(this.core('gateway', 'uninstall', '--profile', PROFILE))} ; ` +
+        `${shellish([target, 'gateway', 'install', '--profile', PROFILE])} ; ` +
+        `${shellish(this.core('gateway', 'start', '--profile', PROFILE))}`,
+      `${label}_target=${target}\n` +
+        `stop_status=${stop.status}\n${stop.output.trim()}\n` +
+        `${uninstall.output.trim()}\n${install.output.trim()}\n${start.output.trim()}\n` +
         `observed_binary_path=${observed.binaryPath}\nobserved_pid=${observed.pid}\n` +
         `${observed.raw}`,
-    );
+    ];
   }
 
   awaitBinaryPath(expected) {
