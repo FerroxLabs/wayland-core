@@ -62,10 +62,10 @@ real hardware, none visible from source review, two actively masked by gates tha
 | Lane | Doing |
 |---|---|
 | `lane/30-02` | Phase 30 trial protocol. Owns `peer_delta`, **UNPROVEN on all 148 surface rows** |
-| `lane/24-c3-h2` | The installed gateway **cannot receive inbound at all** — build it or refuse loudly |
+| ~~`lane/24-c3-h2`~~ | **MERGED.** Gateway hosts inbound; `F24-C3-H4` spun out |
 | `lane/27-gaps` | Phase 27, the weakest phase and the largest genuine parity gap |
 | `lane/22-c3` | Phase 22 Criterion 3 — "one loop owner", **never attempted in three passes** |
-| `lane/29-h1` | `F29-02-H1` — **quick-xml 0.41.0 exists**, so this has a source fix, not just a re-justification |
+| ~~`lane/29-h1`~~ | **MERGED.** `F29-02-H1` closed at source; `ignore = []`, both vulnerable versions out of the lock |
 | `lane/28-h2` | `F-28-02-002` — the stale-lease DoS, **the one finding blocking Phase 28's acceptance gate** |
 
 Merge each as it reports, then continue Phase 30 serially: **30-02 → 30-03 → 30-04.**
@@ -88,7 +88,8 @@ write-ups:
 
 | ID | What |
 |---|---|
-| `F24-C3-H2` | `run_gateway` builds no `InboundSubscriber` and no webhook host. Config says `enabled = true`; `rc=7`, nothing listening. Being fixed. |
+| ~~`F24-C3-H2`~~ | **CLOSED, merged.** The gateway hosts inbound, and refuses at startup naming the cause when it cannot. Live-proven on Linux; **Criterion 3 still NOT MET** and the lane declined to record it as closed. |
+| `F24-C3-H4` | **NEW, measured but not fixed.** The gateway registers and starts **two** `ChannelManager`s — 6 registration events for 3 channels — because `build_headless_cron_handler` builds and `start_all`s its own. Harmless for webhooks (9 arrivals, dedupe green). **For polling adapters that consume as they poll — IMAP seen-flag, Telegram `getUpdates` offset — a second manager could take delivery of messages the subscriber never sees.** Double registration proven; the consumption race **unmeasured**, because the affected adapters are precisely the ones with no fixture seam. |
 | `F-28-02-002` | Stale AppContainer lease = DoS. **OPEN at HIGH by choice** — 28-04 declined a MEDIUM re-score that a literal reading permitted, because the downgrade opens the accept path and passes the gate. |
 | ~~`F29-02-H1`~~ | **CLOSED AT SOURCE, merged.** Suppression removed entirely (`ignore = []`), both vulnerable quick-xml versions gone from the lock. |
 | `F29-03-01` | `self-update` installs nothing until a trust root + manifest asset exist. Fail-closed by design. |
