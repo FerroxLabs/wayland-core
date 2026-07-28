@@ -1,0 +1,45 @@
+### commit: ef1d97beb61f1b084bdfba745e8f49830924d757
+### status file
+WLRC_BUILD=0
+WLRC_SERIAL=0
+WLRC_PARALLEL=101
+WLDONE
+
+### SERIAL  cargo test -p wcore-agent --lib -- --test-threads=1
+test result: ok. 2131 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 138.28s
+### SERIAL failure count: 0
+
+### PARALLEL  cargo test -p wcore-agent --lib
+test result: FAILED. 2114 passed; 17 failed; 3 ignored; 0 measured; 0 filtered out; finished in 30.37s
+### PARALLEL failing tests
+    child_transaction::tests::rejects_append_reopen_reduce_corruption
+    engine::audit_2026_05_22_tests::actual_dispatch_crash_reopens_engine_and_blocks_opaque_replay
+    engine::audit_2026_05_22_tests::cancelled_terminal_checkpoint_finishes_after_restart_without_provider_dispatch
+    engine::audit_2026_05_22_tests::durable_provider_success_before_terminal_composite_never_redispatches
+    engine::audit_2026_05_22_tests::invalid_live_session_switch_leaves_existing_authority_untouched
+    engine::audit_2026_05_22_tests::live_session_switch_transfers_journal_authority_and_runtime_state
+    engine::audit_2026_05_22_tests::post_charge_budget_cap_recovers_terminal_without_running_tools
+    engine::audit_2026_05_22_tests::recovered_denial_resumes_after_partial_no_start_without_dispatch
+    engine::audit_2026_05_22_tests::recovered_denial_terminalizes_without_provider_or_tool_replay
+    engine::audit_2026_05_22_tests::recovered_multi_tool_round_replays_first_and_retries_second_once
+    engine::audit_2026_05_22_tests::recovery_checkpoint_continues_without_duplicate_prompt_or_provider_call
+    engine::audit_2026_05_22_tests::restart_reconciles_durable_provider_success_without_redispatch
+    engine::audit_2026_05_22_tests::resumed_engine_holds_journal_lease_until_drop
+    engine::retry_wedge_protection_tests::ceiling_abort_does_not_persist_unrecoverable_session
+    orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects
+    session_journal::fault_tests::session_retirement_never_deletes_a_replacement_journal_or_collateral
+    session::tests::cleanup_error_attempts_all_artifacts_but_retains_index_authority
+
+### distinct lease paths (proves per-test tempdirs, not a shared path)
+lease is already held at /tmp/.tmp3WIxQ9/ce1111a60001.journal
+lease is already held at /tmp/.tmpEa2jlG/f14000a.journal
+lease is already held at /tmp/.tmpHmkD5m/f14c007.journal
+lease is already held at /tmp/.tmpIyJ0nJ/f14a00170001.journal
+lease is already held at /tmp/.tmpK2cxRp/f14ca11ce100.journal
+lease is already held at /tmp/.tmpqyPuCv/f14de111a101.journal
+lease is already held at /tmp/.tmpsvPwtY/f14b00d6e7001.journal
+lease is already held at /tmp/.tmpuU6h5C/f14b0001.journal
+lease is already held at /tmp/.tmpV9U4R1/880fb529d4dc.journal
+lease is already held at /tmp/.tmpVnD9cl/f14de111a100.journal
+lease is already held at /tmp/.tmpXgeymx/f1300006.journal
+lease is already held at /tmp/.tmpXmUqPK/f14c005.journal

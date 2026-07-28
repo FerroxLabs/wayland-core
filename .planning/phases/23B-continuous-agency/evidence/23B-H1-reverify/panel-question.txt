@@ -1,0 +1,15 @@
+A Rust CLI writes an append-only session journal; each record carries a SHA-256 checksum. Weeks ago a HIGH defect was filed: a normally-exiting run produced a journal the product could not read back ("checksum mismatch at sequence 16"), observed 8/8 then 9/10 under machine load, 0/3 when idle, and reproduced on a pristine older binary. At the time there was NO repair path, so such sessions were permanently unreadable.
+
+Since then, another engineer:
+(a) found that a field `Option<serde_json::Value>` with `#[serde(default, skip_serializing_if="Option::is_none")]` holding Some(Null) writes explicit `null`, decodes back to None, and re-serializes to nothing -- so re-hashing covers different bytes. Fixed it. This is deterministic and proven red-before-green at unit level.
+(b) added a recovery path that repairs such journals by re-hashing a restored value and accepting ONLY on exact stored-SHA match. I have live-proven this works on the real binary at HEAD (damaged journal read back, exit 0; the falsification leg where I ask the same binary to prove it unreadable correctly fails).
+
+I have now established by code reading that the engine CANNOT produce Some(Value::Null): the only production source is serde_json::to_value() of a derive(Serialize) named-field struct, which is always a JSON Object, never Null. All other call sites pass literal None. So mechanism (a) is reachable only by a third-party producer writing through the documented wire protocol -- NOT by the headless run that produced the original 8/8.
+
+Also: the original was load-sensitive and intermittent; a serde encoding asymmetry is deterministic in journal content, so the "load made the run get further" bridging argument is weak.
+
+Reproduction attempts at HEAD: 12 runs, 0 reproductions (plus 34 by the previous engineer, 0 reproductions). BUT both harnesses drive a turn against a closed port, so dispatch fails and no tool event is ever recorded -- the harness cannot reach the code path in question. So non-reproduction is weak evidence, not a disproof.
+
+Policy in force: CRITICAL/HIGH must be fixed or disproved with executable evidence; MEDIUM and below go to a non-blocking backlog.
+
+QUESTION: What severity should the ORIGINAL finding carry at HEAD today -- HIGH or MEDIUM? Reply with exactly one line of the form SEVERITY=HIGH or SEVERITY=MEDIUM, then at most 120 words of justification.

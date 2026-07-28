@@ -1,0 +1,23 @@
+warning: function `is_absent_json_value` is never used
+  --> crates/wcore-agent/src/session_journal/model.rs:40:4
+   |
+40 | fn is_absent_json_value(value: &Option<serde_json::Value>) -> bool {
+   |    ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `wcore-agent` (lib) generated 1 warning
+   Compiling wcore-agent v0.12.25 (/root/wayland-23b-h1/crates/wcore-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.82s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/journal_legacy_null_receipt_recovery.rs (target/debug/deps/journal_legacy_null_receipt_recovery-74991eb5f70cc986)
+
+running 4 tests
+test a_genuinely_corrupt_journal_is_still_rejected ... ok
+test journal_recovers_a_pre_fix_null_receipt_with_its_content_intact ... ok
+test a_genuinely_corrupt_snapshot_is_still_rejected ... ok
+test snapshot_recovers_a_pre_fix_null_receipt_with_its_content_intact ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
