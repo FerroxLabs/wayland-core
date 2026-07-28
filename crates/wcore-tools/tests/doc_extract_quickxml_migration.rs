@@ -169,6 +169,12 @@ fn pptx_fixture() -> Vec<u8> {
             "[Content_Types].xml",
             r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"#,
         ),
+        // The format sniffer keys pptx off `ppt/presentation.xml`, so a real
+        // deck must carry it (slides alone are rejected as an unrecognized ZIP).
+        (
+            "ppt/presentation.xml",
+            r#"<?xml version="1.0"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldIdLst><p:sldId id="256"/><p:sldId id="257"/></p:sldIdLst></p:presentation>"#,
+        ),
         (
             "ppt/slides/slide2.xml",
             &slide("Second slide", "calamine 0.36.1", "quick-xml 0.41.0"),
