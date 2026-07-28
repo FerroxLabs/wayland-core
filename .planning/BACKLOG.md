@@ -718,3 +718,25 @@ of these**, and `deny` is deliberately NOT chained into `just check-all` while t
 
 **HIGH findings are NOT here** — F29-02-H1 and the re-raised F29-CEN-06 are escalations in
 `.planning/SEAM-REQUESTS/29.md` (SR-29-6, SR-29-7).
+
+## F29-03-04 — `update_trust.rs` is 1142 lines, over the 1000-line cap (MEDIUM)
+
+Filed by 29-03 at `3658c4281fe228af1f700a56a42e662d3d6a9c7c`. AGENTS.md caps a module at
+1000 lines. `crates/wcore-cli/src/update_trust.rs` is 1142 (219 of them doc/comment, 62 the
+inline unit-test module). It was NOT split because 29-03-PLAN.md's SURGICAL-DIFF gate
+whitelists exactly two `crates/wcore-cli/src` files and a third would have turned red a
+scope-control gate protecting five concurrent lanes.
+
+**Remedy:** add `update_trust_wire` to that whitelist and move the wire mirror
+(`WireManifest` … `WireTrustedKey`, roughly 200 lines) into
+`crates/wcore-cli/src/update_trust_wire.rs`. Non-blocking; the module has one clear purpose
+and its inline tests target its own internals, which is where AGENTS.md wants them.
+
+## F29-03-03 — `verify_provenance` is unreachable in production until manifests ship (MEDIUM)
+
+Filed by 29-03. The signed-manifest gate refuses a forward move BEFORE the archive is
+downloaded, so `gh attestation verify` is never reached while no release publishes a
+`*-release-manifest.json`. The check itself is untouched — 6 call sites, baseline 6 — and
+re-enters the path the moment manifests ship. Refusing earlier is strictly safer than
+downloading an archive you have already declined to install. Recorded so nobody later reads
+the unreached call as a removed one.

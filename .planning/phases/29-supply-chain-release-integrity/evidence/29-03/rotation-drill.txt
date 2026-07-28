@@ -1,0 +1,23 @@
+# rotation and compromise drill — 2026-07-28T02:21:07Z
+# binary: ./target/debug/wayland-release @ e5952311eb0b6938d9078f86c2a46c95e779ed86
+
+--- trust-root-init (public material only) ---
+TRUST ROOT READY path=/tmp/tmp.m6jtX4Yktg/keys/trust-root.json
+KEY key_id=packaging-key role=packaging public_key_base64=8JSQMv8ywxZmipvj70tqS441/FMbXh70oEzaBYRgCZE=
+KEY key_id=deployment-preparation-key role=deployment_preparation public_key_base64=8t+7fejBXMMVif8HEyiBF8GyDi4Vf5cuSwnNTuw75tQ=
+KEY key_id=rollback-rehearsal-key role=rollback_rehearsal public_key_base64=l21e5eTKTlYMw7s0sT8SH1ALFpUh0dimBm10VSZMQyM=
+KEY key_id=release-acceptance-key role=release_acceptance public_key_base64=i0N+2C036WKF124NwkRYa3exsWYngPhq8SngXkbOpSc=
+
+F29-ROTATE-01::ACCEPTED::key-a-active
+    tool said: MANIFEST VERIFIED body_sha256=684acc7f7d75e8bc72fe5bff0a8d0a67457e6ca5622206e137efde8b618a795c
+    KEY ADDED key_id=release-acceptance-key-b role=release_acceptance public_key_base64=waYyL1Xz715NPx6nt3STGNynW25k2vJ7ES6Nv8hKdKY=
+    KEY RETIRED key_id=release-acceptance-key retired_at=1799999999
+
+F29-ROTATE-02::REFUSED::key-a-retired
+    tool said: wayland-release: key is retired: release-acceptance-key
+F29-ROTATE-03::ACCEPTED::key-b-active
+    tool said: MANIFEST VERIFIED body_sha256=160f7c70b8c3bc2de1c0b2c97ac8666574f5f8eaa5be5d77666cf3e0c413ed82
+F29-ROTATE-04::REFUSED::placeholder-root
+    shipped binary reported the placeholder refusal on 1 line(s)
+
+# no seed was printed, echoed or passed as an argument at any point.

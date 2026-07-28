@@ -1,0 +1,54 @@
+F29-02-LIVE-PROVENANCE-FAIL-CLOSED — the existing attestation check survives
+============================================================================
+Commit:    3658c4281fe228af1f700a56a42e662d3d6a9c7c
+Platform:  hetzner-dsm, Linux x86_64
+
+STATE THE LIMITATION FIRST, NOT LAST
+------------------------------------
+The end-to-end network path through `gh attestation verify` is NOT reachable
+through the shipped entry point at this commit, and it is not reachable for a
+reason this plan created: the signed-manifest gate now refuses a forward move
+BEFORE the archive is downloaded, so the attestation check is never reached
+while release manifests do not exist. That ordering is correct — you must not
+download and verify an archive you have already decided not to install — but it
+means this leg is proved at the unit level plus by measurement of the source,
+not by a network round trip. Saying otherwise would be an overclaim.
+
+WHAT WAS RUN
+------------
+    $ cargo nextest run -p wcore-cli -E 'test(verify_provenance_fails_closed_without_gh)'
+        Starting 1 test across 49 binaries (2240 tests skipped)
+        PASS [   0.016s] (1/1) wcore-cli self_update::tests::verify_provenance_fails_closed_without_gh
+        Summary [   0.021s] 1 test run: 1 passed, 2240 skipped
+
+That test injects a program name that does not exist
+(`wayland-core-no-such-gh-binary-xyz`) and asserts the resulting error carries
+the actionable guidance rather than a silent skip. Injection is the right
+instrument here because `gh` IS present on this host:
+
+    $ command -v gh
+    /usr/bin/gh
+
+so the NotFound branch cannot be reached by absence on this machine, and
+removing a system `gh` shared by five concurrent lanes would be vandalism.
+
+THE REFUSAL THE USER SEES, quoted from crates/wcore-cli/src/self_update.rs
+--------------------------------------------------------------------------
+    "GitHub CLI (`gh`) not found — it is required to verify release
+     provenance. Install it from https://cli.github.com, or update via
+     npm instead: npm install -g @ferroxlabs/wayland-core@latest"
+
+NOT-REPLACED, MEASURED
+----------------------
+The plan's standing rule is that everything added here is ANDed with the
+existing attestation check and nothing substitutes for it. Measured at this
+commit against the baseline recorded at ac94b1d5:
+
+    grep -cF 'verify_provenance' crates/wcore-cli/src/self_update.rs   =  6   (baseline 6)
+    grep -cF 'RELEASES_REPO'     crates/wcore-cli/src/self_update.rs   =  3   (baseline 3)
+    grep -cE 'env::var\('        crates/wcore-cli/src/self_update.rs   =  0   (baseline 0)
+
+The call sites did not shrink, the pinned repository constant survived, and no
+runtime environment read was introduced. The archive-digest binding added by
+this plan sits IMMEDIATELY BEFORE `verify_provenance` and returns early only on
+mismatch; on the accept path the attestation call runs exactly as it did.

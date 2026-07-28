@@ -1,0 +1,56 @@
+F29-02-LIVE-MACOS: NOT RUN — no macOS wayland-core binary exists for this commit
+================================================================================
+Commit: 3658c4281fe228af1f700a56a42e662d3d6a9c7c
+
+WHAT WAS ATTEMPTED, IN ORDER
+-----------------------------
+1. A release archive for this commit. There is none. The only published release
+   is v0.12.25, whose macOS archives predate every line of this plan:
+
+       $ gh release view -R FerroxLabs/wayland-core --json tagName,assets
+       tag: v0.12.25
+         wayland-core-v0.12.25-aarch64-apple-darwin.tar.gz
+         wayland-core-v0.12.25-x86_64-apple-darwin.tar.gz
+         ... (7 assets; see release-assets-have-no-manifest.txt)
+
+   Running legs one and two against that binary would prove nothing about this
+   change, because that binary does not contain this change. A Linux result
+   must never be presented as a macOS result, and neither must a stale one.
+
+2. A CI artifact for this commit via `gh run download`. The CI workflow does
+   upload one — `.github/workflows/ci.yml` has an "Upload release binary" step
+   producing `wayland-core-${{ matrix.target }}` for the macOS matrix entries —
+   so this leg IS structurally obtainable, unlike a leg that needs a
+   credential. Measured at the time of writing:
+
+       $ gh run list -R FerroxLabs/wayland-core --branch lane/29-03
+       [pending] CI 30323212984  headSha=3658c428  status=pending, no jobs started
+
+   The run for this exact SHA had not begun executing jobs. The two earlier
+   runs on this branch (30321783903 @ e5952311, 30321742266 @ 040f28f4) show
+   conclusion=**cancelled**, not failure — each was superseded by the next
+   push — and neither produced artifacts.
+
+3. Building it locally. Forbidden: this lane may not run Cargo on the Mac. The
+   sole sanctioned exception is `cargo fmt --all -- --check`, which was run and
+   is clean.
+
+WHY THIS IS RECORDED AS NOT RUN RATHER THAN SUBSTITUTED
+--------------------------------------------------------
+Nothing here is impossible; it is unfinished. The honest record is that the
+macOS leg is pending a CI artifact for SHA 3658c428, and the exact command that
+completes it once that run finishes is:
+
+    gh run download 30323212984 -R FerroxLabs/wayland-core \
+      -n wayland-core-aarch64-apple-darwin -D /tmp/macos-29-03
+    chmod +x /tmp/macos-29-03/wayland-core
+    env -u GH_TOKEN -u GITHUB_TOKEN HOME=/tmp/tw WAYLAND_HOME=/tmp/tw \
+      /tmp/macos-29-03/wayland-core self-update --check-only
+
+No Linux result is presented in its place and no synthetic transcript was
+manufactured. The macOS-specific risk this leaves unmeasured is small and
+nameable: `FreezeState::default_path()` resolves through
+`wcore_config::config::wayland_config_dir()`, which on macOS is
+`~/Library/Application Support/wayland-core` rather than `~/.config`. That
+resolver is shared with 21 existing `wcore-cli` test files and is not modified
+here, but this plan has not itself observed it on macOS.

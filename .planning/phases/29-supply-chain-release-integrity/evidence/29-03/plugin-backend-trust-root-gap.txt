@@ -1,0 +1,46 @@
+F29-02-PLUGIN-BACKEND-TRUST-ROOTS — measured, filed, and NOT graded met
+=======================================================================
+Commit: 3658c4281fe228af1f700a56a42e662d3d6a9c7c
+
+F29-02 asks for "trust roots for plugins and backends". That clause has two
+halves on two different lifecycles, and only one of them is Phase 29's.
+
+HALF ONE — the RELEASE-side trust root. Proved here.
+-----------------------------------------------------
+Plugin and backend artifacts distributed as part of a release are covered by
+the release manifest's `artifacts[]` list and by the release trust root this
+plan added to the shipped updater. That root fails closed on a placeholder,
+refuses an unknown key id, refuses a retired key, accepts a rotated key
+immediately, and is bound to the `release_acceptance` role. Evidence:
+rotation-drill.txt, live-trust-root-placeholder.txt, mutation-drill.txt.
+
+HALF TWO — the RUNTIME install-time trust root for third-party plugins.
+NOT closed, and not this plan's to close.
+-----------------------------------------------------------------------
+`crates/wcore-cli/src/plugin/index.rs` is the marketplace allowlist index
+verifier — the thing that decides whether a third-party plugin a user installs
+at runtime is vouched for. Measured at this commit, unchanged by this plan:
+
+    crates/wcore-cli/src/plugin/index.rs:30
+      pub const INDEX_PUBKEY_HEX: &str =
+          "0000000000000000000000000000000000000000000000000000000000000000";
+
+Still the all-zeros placeholder. `IndexVerifier::bundled()` correctly REFUSES
+it (finding F-021), so the runtime plugin trust path is fail-closed rather than
+forgeable — but it is also non-functional, and it becomes functional only when
+Sean's real plugin-index signing key is substituted. That key does not exist in
+this tree, and the lifecycle of that file belongs to Phase 25, which is
+executing concurrently. `crates/wcore-pluginsrc/` and
+`crates/wcore-exec-backend/` are likewise untouched.
+
+This plan MEASURED the gap, did not modify any of those files (gate-checked:
+`git status --porcelain -- crates/wcore-cli/src/plugin crates/wcore-pluginsrc
+crates/wcore-exec-backend` returns zero lines), assigned it a severity, and
+filed it as a cross-phase request in .planning/SEAM-REQUESTS/29.md as SR-29-8.
+
+SEVERITY: HIGH — a non-functional runtime plugin trust root means the plugin
+install path cannot verify anything today. It is fail-closed rather than
+forgeable, which is why it is HIGH and not CRITICAL.
+
+GRADE: NOT-PROVABLE-HERE. Both halves are named. The release half alone is not
+this clause.

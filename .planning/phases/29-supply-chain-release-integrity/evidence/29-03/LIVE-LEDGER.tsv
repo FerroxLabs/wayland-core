@@ -1,0 +1,9 @@
+# Every live leg, its verdict, and the captured artifact. Paths are relative to
+# evidence/29-03. A NOT-RUN row is NAMED here rather than quietly counted done.
+F29-02-LIVE-CHECK-ONLY::PASS::evidence=live-check-only.txt
+F29-02-LIVE-TRUST-ROOT-PLACEHOLDER::PASS::evidence=live-trust-root-placeholder.txt
+F29-02-LIVE-DOWNGRADE::PASS::evidence=live-downgrade.txt
+F29-02-LIVE-PROVENANCE-FAIL-CLOSED::PASS::evidence=live-provenance-fail-closed.txt
+F29-02-LIVE-ROTATION::PASS::evidence=rotation-drill.txt
+F29-02-LIVE-MUTATION-DRILL::PASS::evidence=mutation-drill.txt
+F29-02-LIVE-MACOS::NOT-RUN::evidence=macos-leg.txt
