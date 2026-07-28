@@ -1,0 +1,11 @@
+=== default build (no --features voice) ===
+F27_VOICE=FEATURE_OFF the `voice` feature is not compiled in. This is the DEFAULT for this workspace and for every shipped release artifact: wcore-cli's default features do not include `voice`, and release.yml builds without --features voice. Rebuild with `--features voice` to reach the capture path.
+
+=== --features voice on a headless host ===
+F27_VOICE=NO_INPUT_DEVICE cpal bound no default input device on this host. The voice_mode tool hides itself here (is_available() == false). This is the honest-degradation path, not a crash.
+F27_VOICE_RC=3
+
+=== exit codes ===
+DEFAULT_RC=2
+FEATURE_RC=3
+VOICE_DONE

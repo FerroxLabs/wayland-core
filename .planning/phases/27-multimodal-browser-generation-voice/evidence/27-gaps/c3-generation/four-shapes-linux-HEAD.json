@@ -1,0 +1,134 @@
+{
+  "counts": {
+    "PASS": 10,
+    "FAIL": 0,
+    "NOT MEASURED": 7
+  },
+  "shapes": [
+    {
+      "shape": "A/built-in",
+      "description": "the engine's own `image` generation subcommand",
+      "clauses": {
+        "discovery": {
+          "grade": "PASS",
+          "why": "`image` is a first-class subcommand with a typed surface"
+        },
+        "credentials": {
+          "grade": "PASS",
+          "why": "rc=1, named the missing credential, produced no artifact"
+        },
+        "failures": {
+          "grade": "PASS",
+          "why": "named the violated rule"
+        },
+        "accounting": {
+          "grade": "NOT MEASURED",
+          "why": "no generation completed (no Flux credential), so no cost record could exist to inspect. Needs a cleared FLUX_API_KEY, which is Sean-reserved."
+        }
+      },
+      "transcript": [
+        "$ wayland-core image --help  -> rc=0",
+        "$ wayland-core image --prompt ... -> rc=1: wayland-core image: no Flux API key (set --api-key, $FLUX_API_KEY, or [providers.flux-router] in config): no Flux API key found",
+        "$ wayland-core image --prompt '' -> rc=1: wayland-core image: image: --prompt must be non-empty"
+      ]
+    },
+    {
+      "shape": "B/MCP-only",
+      "description": "media tools from a config-declared MCP server, no built-in credential",
+      "clauses": {
+        "discovery": {
+          "grade": "PASS",
+          "why": "host was told the media tools by name: ['media_generate_image', 'media_generate_locked']"
+        },
+        "credentials": {
+          "grade": "PASS",
+          "why": "the MCP media server was reached and registered with no provider credential present anywhere in the session"
+        },
+        "failures": {
+          "grade": "NOT MEASURED",
+          "why": "no server failed in this run, so the host-visible failure path was not exercised here (it is exercised by the negative-control shape)"
+        },
+        "accounting": {
+          "grade": "NOT MEASURED",
+          "why": "invoking a registered MCP media tool requires a model turn to call it; the local-model route boots the engine but no local inference server is running on this host, so no tool call was issued and no cost record could be inspected."
+        }
+      },
+      "transcript": [
+        "mcp_ready: {\"f27media\": [\"media_generate_image\", \"media_generate_locked\"]}",
+        "mcp_failed: {}",
+        "event types seen: ['capability_activation', 'execution_policy', 'mcp_ready', 'ready', 'workspace_policy']",
+        "fixture contacted: True"
+      ]
+    },
+    {
+      "shape": "C/late-MCP",
+      "description": "media tools introduced AFTER session start via AddMcpServer",
+      "clauses": {
+        "discovery": {
+          "grade": "PASS",
+          "why": "host was told the media tools by name: ['media_generate_image', 'media_generate_locked']"
+        },
+        "credentials": {
+          "grade": "PASS",
+          "why": "the MCP media server was reached and registered with no provider credential present anywhere in the session"
+        },
+        "failures": {
+          "grade": "NOT MEASURED",
+          "why": "no server failed in this run, so the host-visible failure path was not exercised here (it is exercised by the negative-control shape)"
+        },
+        "accounting": {
+          "grade": "NOT MEASURED",
+          "why": "invoking a registered MCP media tool requires a model turn to call it; the local-model route boots the engine but no local inference server is running on this host, so no tool call was issued and no cost record could be inspected."
+        }
+      },
+      "transcript": [
+        "mcp_ready: {\"f27media-late\": [\"media_generate_image\", \"media_generate_locked\"]}",
+        "mcp_failed: {}",
+        "event types seen: ['capability_activation', 'execution_policy', 'mcp_ready', 'ready', 'workspace_policy']",
+        "fixture contacted: True"
+      ]
+    },
+    {
+      "shape": "D/combined",
+      "description": "a config-declared server AND a late-added server in one session",
+      "clauses": {
+        "discovery": {
+          "grade": "PASS",
+          "why": "host was told the media tools by name: ['mcp__f27media__media_generate_image', 'mcp__f27media__media_generate_locked', 'media_generate_image', 'media_generate_locked']"
+        },
+        "credentials": {
+          "grade": "PASS",
+          "why": "the MCP media server was reached and registered with no provider credential present anywhere in the session"
+        },
+        "failures": {
+          "grade": "NOT MEASURED",
+          "why": "no server failed in this run, so the host-visible failure path was not exercised here (it is exercised by the negative-control shape)"
+        },
+        "accounting": {
+          "grade": "NOT MEASURED",
+          "why": "invoking a registered MCP media tool requires a model turn to call it; the local-model route boots the engine but no local inference server is running on this host, so no tool call was issued and no cost record could be inspected."
+        }
+      },
+      "transcript": [
+        "mcp_ready: {\"f27media-late\": [\"media_generate_image\", \"media_generate_locked\"], \"f27media\": [\"mcp__f27media__media_generate_image\", \"mcp__f27media__media_generate_locked\"]}",
+        "mcp_failed: {}",
+        "event types seen: ['capability_activation', 'execution_policy', 'mcp_ready', 'ready', 'workspace_policy']",
+        "fixture contacted: True"
+      ]
+    },
+    {
+      "shape": "control/absent-server",
+      "description": "an MCP server that cannot start must be reported to the host, not silently dropped",
+      "clauses": {
+        "failures": {
+          "grade": "PASS",
+          "why": "absence reported with a reason: {\"f27missing\": \"Transport error: MCP stdio server exited before responding\"}"
+        }
+      },
+      "transcript": [
+        "mcp_ready: {}",
+        "mcp_failed: {\"f27missing\": \"Transport error: MCP stdio server exited before responding\"}"
+      ]
+    }
+  ]
+}

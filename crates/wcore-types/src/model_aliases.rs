@@ -182,6 +182,30 @@ pub fn vertex_gemini_flash() -> String {
     from_env_or(VERTEX_GEMINI_FLASH, "E2E_VERTEX_GEMINI_FLASH")
 }
 
+// ── Local-model route ──────────────────────────────────────────────────────
+
+/// Model-id prefix that routes to a LOCAL inference server rather than a
+/// remote provider API.
+///
+/// This is the prefix the engine's own `MissingApiKey` remediation text
+/// names, verbatim: "To use a LOCAL model with Ollama, select a model id
+/// prefixed with `ollama:` (e.g. `ollama:qwen3-coder:30b`) — no API key is
+/// needed." It is defined here, in the bottom crate, so the config layer
+/// (which must NOT demand a remote credential for a local model) and the
+/// engine bootstrap (which must fail loudly if nothing claims the route)
+/// agree on one spelling.
+pub const LOCAL_MODEL_PREFIX: &str = "ollama:";
+
+/// Whether `model` names a local inference target, for which no remote
+/// provider credential exists or is required.
+///
+/// The comparison is on the raw model string BEFORE
+/// [`expand_short_form`], because `ollama:` short-forms are not expanded —
+/// the bare model name after the prefix is handed to the local server as-is.
+pub fn is_local_model(model: &str) -> bool {
+    model.starts_with(LOCAL_MODEL_PREFIX)
+}
+
 // ── Short-form alias resolver ──────────────────────────────────────────────
 //
 // Closes debt-register B.4 (HC-3-followup). The `--model bedrock:sonnet`
