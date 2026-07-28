@@ -54,9 +54,139 @@ private = { ignore = true }
 [advisories]
 # version = 2 schema (cargo-deny >= 0.14)
 yanked = "deny"
-# Populate ONLY with documented workarounds. Each entry must reference a
-# tracking issue and rationale.
-ignore = []
+
+# Populate ONLY with documented workarounds. Every entry must carry, at
+# minimum: the advisory id, the DATE it was accepted, EVERY parent path with
+# the path count stated explicitly, a reachability/threat note per path, the
+# advisory's own `patched` / `unaffected` ranges READ OUT OF the RustSec source
+# (not from memory), what would remove it, and a tracking item. Never a bare id.
+#
+# This list was EMPTY before 2026-07-29 and stayed empty on purpose while the
+# gate was red — see `.cargo/audit.toml`, whose predecessor entry was found
+# wrong in three ways at once (it named one parent path of three, its threat
+# model covered only the path it named, and it claimed no upstream fix existed
+# when three were published). That is the failure mode these rules exist to
+# prevent.
+#
+# ── What was NOT done, and why it matters ──────────────────────────────────
+# cargo-deny 0.18+ exposes `[advisories] unmaintained = "workspace"`, which
+# would silence every TRANSITIVE unmaintained advisory in one line and turn
+# this whole section green instantly. That is a policy weakening dressed as a
+# config knob, and it is not taken. `unmaintained` is left at its default so a
+# newly-unmaintained transitive still fails the gate loudly.
+#
+# ── Parent traces: methodology ─────────────────────────────────────────────
+# Every trace below was READ OUT OF the tool, per the recipe in
+# `.github/osv-scanner.toml`. `Cargo.lock` was first checked for MULTIPLE
+# resolved versions of each crate (a crate can sit in the tree at several
+# semver-incompatible versions at once, and a trace covering one of them is a
+# blind spot). Each resolves to exactly ONE version, so one invocation each:
+#
+#   cargo tree -i bincode@1.3.3      --all-features --target all --edges normal,build,dev
+#   cargo tree -i ttf-parser@0.25.1  --all-features --target all --edges normal,build,dev
+#
+# `--all-features --target all --edges normal,build,dev` is deliberately WIDER
+# than the graph cargo-deny itself evaluates (deny.toml sets
+# `all-features = false`), so the traces cover feature- and platform-gated
+# paths the gate does not even look at. Each printed ONE path root.
+#
+# ── RUSTSEC-2025-0141 — bincode 1.3.3, "unmaintained" ──────────────────────
+# Accepted 2026-07-29. Advisory source read from
+# rustsec/advisory-db/crates/bincode/RUSTSEC-2025-0141.md:
+#   informational = "unmaintained"; [versions] patched = []; NO `unaffected`.
+# That is decisive and it kills the obvious-looking fix. bincode 2.0.1 and
+# 3.0.0 ARE published — but with `patched = []` and no `unaffected` range,
+# EVERY published version of the package is in scope, and the advisory's own
+# url points at the v3.0 README announcing that development has permanently
+# ceased. Bumping bincode does not clear this; only removing it does.
+#
+# PARENT PATHS: 1 (one, counted off the tree output, not asserted).
+#
+#   bincode v1.3.3
+#   └── syntect v5.3.0
+#       └── wcore-cli v0.12.25
+#
+# Reachability for that one path: bincode is syntect's serialization format for
+# its BUNDLED, COMPILE-TIME-EMBEDDED syntax and theme dumps. wcore-cli reaches
+# it from `crates/wcore-cli/src/tui/widgets/diff.rs`, which calls
+# `SyntaxSet::load_defaults_newlines()` and `ThemeSet::load_defaults()` to
+# highlight the TUI diff view. The deserialized bytes are the ones compiled
+# into the syntect rlib; NO user-supplied or network-supplied data is fed to
+# bincode on this path — syntect's `yaml-load` feature (the runtime
+# `.sublime-syntax` loader) is already OFF at `Cargo.toml`, dropped by an
+# earlier lane to eliminate `yaml-rust`/RUSTSEC-2024-0320. This is materially
+# unlike the quick-xml case that predecessor entry got wrong: there the omitted
+# paths parsed USER-SUPPLIED documents; here there is no second path to omit
+# and no untrusted input on the only one.
+#
+# What would remove it: a syntect release that moves off bincode 1.x. syntect
+# 5.3.0 is the LATEST published version (crates.io), so there is nothing to
+# bump to. Dropping syntect's `dump-load` feature would remove bincode but also
+# delete `default-syntaxes`/`default-themes`, i.e. TUI syntax highlighting —
+# a functional regression traded for an informational advisory. Not taken.
+#
+# Tracking: `.planning/BACKLOG.md` -> `BL-F29-DENY-UNMAINTAINED`, and
+# `.github/osv-scanner.toml` (RUSTSEC-2025-0141, ignoreUntil 2026-09-02).
+#
+# ── RUSTSEC-2026-0192 — ttf-parser 0.25.1, "unmaintained" ──────────────────
+# Accepted 2026-07-29. Advisory source read from
+# rustsec/advisory-db/crates/ttf-parser/RUSTSEC-2026-0192.md:
+#   informational = "unmaintained"; [versions] patched = []; NO `unaffected`.
+# The author has declared the crate unmaintained outright; no version clears it.
+#
+# PARENT PATHS: 1 (one root; it fans out across five first-party crates BELOW
+# `wcore-tools`, which is fan-out of a single third-party chain, not a second
+# supply-chain path):
+#
+#   ttf-parser v0.25.1
+#   └── lopdf v0.42.0
+#       └── pdf-extract v0.12.0
+#           └── wcore-tools v0.12.25
+#               ├── wcore-agent  (-> wcore-cli)
+#               ├── wcore-browser (-> wcore-agent)
+#               ├── wcore-cli
+#               ├── wcore-cua    (-> wcore-agent)
+#               └── wcore-mcp    (-> wcore-agent / wcore-cli / wcore-skills /
+#                                    wcore-plugin-subprocess / wcore-eval /
+#                                    wcore-evolve / wcore-eval-scenarios[dev])
+#
+# Reachability, stated honestly and NOT minimised: this path DOES touch
+# untrusted input. `wcore-tools` extracts text from PDFs supplied by the user
+# via the Read tool; ttf-parser parses embedded font tables from those files.
+# That is a real parsing surface on attacker-influenced bytes. It is accepted
+# ONLY because the advisory is `informational = "unmaintained"` with NO known
+# vulnerability and NO patch in existence — there is nothing to apply. If a
+# CONCRETE ttf-parser vulnerability is ever published, this entry must be
+# deleted and the PDF path re-examined, not re-justified.
+#
+# What would remove it, and why it is out of reach here: `lopdf` made
+# `ttf-parser` OPTIONAL in 0.44.0 (it is REQUIRED in 0.42.0), so a lopdf bump
+# would drop it. But `pdf-extract 0.12.0` declares `lopdf = "^0.42"`, which for
+# a 0.x crate resolves to `>=0.42.0, <0.43.0` — lopdf 0.44 is out of range —
+# and pdf-extract 0.12.0 is the LATEST published pdf-extract. Reaching lopdf
+# 0.44 therefore requires a `[patch]` override carrying a forked third-party
+# crate, which makes the supply chain worse, not better. The upstream fix is
+# pdf-extract/lopdf moving to `skrifa`; that is their decision, not ours.
+#
+# Tracking: `.planning/BACKLOG.md` -> `BL-F29-DENY-UNMAINTAINED`, and
+# `.github/osv-scanner.toml` (RUSTSEC-2026-0192, ignoreUntil 2026-09-02).
+#
+# ── Eliminated at source rather than ignored (do NOT add these back) ───────
+# RUSTSEC-2024-0370 (proc-macro-error 1.0.4) was the third unmaintained
+# finding at this gate's baseline. It is GONE from `Cargo.lock`, not muted:
+# its sole path was `proc-macro-error <- utoipa-gen 4.3.1 <- utoipa 4.2.3 <-
+# wcore-acp <- wcore-cli`, and `utoipa-gen` 5.x dropped the dependency. The
+# workspace pin moved `utoipa = "4.2"` -> `"5"`. Do NOT float utoipa back below
+# 5 — it reintroduces this advisory.
+#
+# ROTATION POLICY: on every dependency bump, re-run
+# `cargo deny --manifest-path Cargo.toml check` and DELETE any entry whose
+# advisory has cleared. Re-derive the trace from `cargo tree -i` on every
+# review; never carry a trace forward on trust. An empty list is the goal.
+ignore = [
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3 unmaintained (patched=[], no version clears it). ONE parent path, read from `cargo tree -i bincode@1.3.3 --all-features --target all`: bincode <- syntect 5.3.0 <- wcore-cli. Reachability: syntect's compile-time-embedded syntax/theme dumps only (SyntaxSet::load_defaults_newlines in tui/widgets/diff.rs); no user- or network-supplied bytes reach bincode on this path (syntect `yaml-load` already off). syntect 5.3.0 is the latest published release, so there is nothing to bump to; dropping `dump-load` would delete TUI syntax highlighting. Accepted 2026-07-29. Tracked: .planning/BACKLOG.md BL-F29-DENY-UNMAINTAINED + .github/osv-scanner.toml (ignoreUntil 2026-09-02)." },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser 0.25.1 unmaintained (patched=[], author declared EOL, no version clears it). ONE parent path, read from `cargo tree -i ttf-parser@0.25.1 --all-features --target all`: ttf-parser <- lopdf 0.42.0 <- pdf-extract 0.12.0 <- wcore-tools <- {wcore-agent, wcore-browser, wcore-cli, wcore-cua, wcore-mcp}. Reachability NOT minimised: this path DOES parse untrusted input (embedded font tables in user-supplied PDFs via the Read tool). Accepted only because the advisory is informational-unmaintained with no known vulnerability and NO patch in existence. lopdf made ttf-parser optional in 0.44.0, but pdf-extract 0.12.0 (latest) pins lopdf ^0.42 = >=0.42.0,<0.43.0, so reaching it needs a forked [patch] override — worse supply chain, not better. If a concrete ttf-parser CVE is ever published, DELETE this entry and re-examine the PDF path. Accepted 2026-07-29. Tracked: .planning/BACKLOG.md BL-F29-DENY-UNMAINTAINED + .github/osv-scanner.toml (ignoreUntil 2026-09-02)." },
+]
 
 # ---------------------------------------------------------------------------
 # Bans

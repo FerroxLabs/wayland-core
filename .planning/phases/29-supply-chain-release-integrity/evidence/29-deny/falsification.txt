@@ -1,0 +1,32 @@
+# FALSIFICATION BATTERY — cargo-deny gate
+# 2026-07-29, hetzner-dsm /root/wayland-29-deny, cargo-deny 0.20.2.
+# Verbatim stdout of falsify.sh (committed alongside). Each mutation must
+# FLIP the verdict green -> red; a green that survives its own mutation is a
+# self-passing gate.
+#
+# cargo-deny exit codes are a BITMASK: advisories=1 bans=2 licenses=4 sources=8.
+# Cross-check: the pre-fix baseline exited 5 = 1|4 = advisories + licenses.
+# Every one of the four sections is proven able to fail INDEPENDENTLY below.
+# ------------------------------------------------------------------------
+===== F0 control: unmutated tree must be GREEN =====
+FALSIFY tag=F0-control rc=0 errors=0 verdict=[advisories ok, bans ok, licenses ok, sources ok]
+===== F1: revert the license one-liner -> licenses MUST fail =====
+FALSIFY tag=F1-license-reverted rc=4 errors=1 verdict=[advisories ok, bans ok, licenses FAILED, sources ok]
+===== F2: drop RUSTSEC-2025-0141 from ignore -> advisories MUST fail =====
+FALSIFY tag=F2-bincode-unignored rc=1 errors=1 verdict=[advisories FAILED, bans ok, licenses ok, sources ok]
+===== F3: drop RUSTSEC-2026-0192 from ignore -> advisories MUST fail =====
+FALSIFY tag=F3-ttfparser-unignored rc=1 errors=1 verdict=[advisories FAILED, bans ok, licenses ok, sources ok]
+===== F4: ban a crate that IS in the tree -> bans MUST fail =====
+FALSIFY tag=F4-bans-serde rc=2 errors=1 verdict=[advisories ok, bans FAILED, licenses ok, sources ok]
+===== F5: empty allow-registry -> sources MUST fail =====
+FALSIFY tag=F5-sources-empty rc=8 errors=744 verdict=[advisories ok, bans ok, licenses ok, sources FAILED]
+===== F6: remove MIT from allowlist -> licenses MUST fail =====
+FALSIFY tag=F6-license-no-mit rc=4 errors=144 verdict=[advisories ok, bans ok, licenses FAILED, sources ok]
+===== restore + final control: must be GREEN again =====
+FALSIFY tag=F7-restored-control rc=0 errors=0 verdict=[advisories ok, bans ok, licenses ok, sources ok]
+ M Cargo.lock
+ M Cargo.toml
+ M crates/wcore-acp/src/transport/rest.rs
+ M crates/wcore-acp/tests/rest_roundtrip.rs
+ M crates/wcore-fixture-harness/Cargo.toml
+ M deny.toml

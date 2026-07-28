@@ -237,11 +237,27 @@ serde_json = "1"
 # `deny_unknown_fields`.
 serde_ignored = "0.1"
 
-# OpenAPI 3.0.3 document generation for the REST transport (wcore-acp).
-# Pinned to 4.x for axum 0.7 compatibility; utoipa 5 requires axum 0.8
-# (a repo-wide bump). `axum_extras` adds the Path-extractor glue so path
-# params document cleanly.
-utoipa = { version = "4.2", features = ["axum_extras"] }
+# OpenAPI 3.1.0 document generation for the REST transport (wcore-acp).
+#
+# Moved 4.2 -> 5 on 2026-07-29 to eliminate RUSTSEC-2024-0370 at source:
+# `utoipa-gen` 4.x has a REQUIRED `proc-macro-error ^1.0` dependency (an
+# unmaintained crate with `patched = []`, so no bump of it can ever clear the
+# advisory); `utoipa-gen` 5.x dropped it entirely. `cargo tree -i
+# proc-macro-error@1.0.4` showed exactly one path, through this crate.
+#
+# The previous comment here claimed "utoipa 5 requires axum 0.8 (a repo-wide
+# bump)". That is FALSE at the dependency level and was measured to be so:
+# neither utoipa 4.2.3 nor utoipa 5.5.0 declares axum as a dependency, optional
+# or otherwise. `axum_extras` is a codegen-behaviour flag forwarded to
+# `utoipa-gen?/axum_extras`; the axum-0.8 coupling is purely SEMANTIC (utoipa 5
+# infers params against axum 0.8's extractor + `/{id}` route syntax). This repo
+# does not rely on that inference — `wcore-acp/src/transport/rest.rs` declares
+# every path param explicitly via `params((...))` and already writes `{id}`
+# brace syntax. axum stays on 0.7.
+#
+# The real, wire-visible cost of the bump: `GET /openapi.json` now emits
+# OpenAPI **3.1.0** instead of 3.0.3.
+utoipa = { version = "5", features = ["axum_extras"] }
 
 # Async trait support
 async-trait = "0.1"

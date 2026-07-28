@@ -182,7 +182,14 @@ async fn rest_openapi_doc_served_over_live_listener() {
         .json()
         .await
         .unwrap();
-    assert!(doc["openapi"].as_str().unwrap().starts_with("3.0"));
+    // 2026-07-29: utoipa 4 -> 5 moved the emitted spec from 3.0.3 to 3.1.0.
+    // Updated fact, same strictness (see the sibling assertion in
+    // `transport::rest::tests::get_openapi_json_has_paths_and_resolves_schemas`).
+    assert!(
+        doc["openapi"].as_str().unwrap().starts_with("3.1"),
+        "openapi version: {}",
+        doc["openapi"]
+    );
     assert!(doc["paths"]["/v1/sessions"].is_object());
     assert!(
         doc["components"]["schemas"]["SessionMetadata"].is_object(),

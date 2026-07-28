@@ -275,10 +275,19 @@ pub struct ApiDoc;
 
 /// `GET /openapi.json` — the OpenAPI document as JSON.
 ///
-/// utoipa 4.x emits OpenAPI 3.0.3. The mainstream SDK generators
-/// (`openapi-generator`, Speakeasy, `openapi-typescript`) consume it as-is;
-/// a strict 3.1 consumer requires the repo-wide axum-0.8 + utoipa-5 bump,
-/// tracked as a separate decision.
+/// Emits **OpenAPI 3.1.0** (utoipa 5). It emitted 3.0.3 under utoipa 4 until
+/// 2026-07-29, when the workspace moved to utoipa 5 to drop the unmaintained
+/// `proc-macro-error` (RUSTSEC-2024-0370) from the dependency tree at source.
+///
+/// The bump did NOT require the axum 0.8 migration the old pin comment
+/// predicted: utoipa declares no axum dependency at either major, and every
+/// path parameter below is declared explicitly via `params((...))` rather than
+/// inferred from an axum extractor. axum remains 0.7.
+///
+/// Consumer note: 3.1.0 is a wire-visible change to a public endpoint. The
+/// mainstream SDK generators (`openapi-generator`, Speakeasy,
+/// `openapi-typescript`) all support 3.1; a consumer pinned strictly to 3.0.x
+/// must be updated.
 async fn openapi_json() -> impl IntoResponse {
     Json(ApiDoc::openapi())
 }
@@ -945,8 +954,15 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         // Version + the two keystone paths are registered.
+        //
+        // 2026-07-29: was `starts_with("3.0")`. utoipa 5 emits OpenAPI 3.1.0
+        // where utoipa 4 emitted 3.0.3, so this is an updated FACT about the
+        // document, not a relaxed assertion — it is exactly as strict as
+        // before and still fails on an absent, malformed or wrong version.
+        // The bump itself was taken to remove `proc-macro-error`
+        // (RUSTSEC-2024-0370) from the dependency tree at source.
         assert!(
-            doc["openapi"].as_str().unwrap().starts_with("3.0"),
+            doc["openapi"].as_str().unwrap().starts_with("3.1"),
             "openapi version: {}",
             doc["openapi"]
         );

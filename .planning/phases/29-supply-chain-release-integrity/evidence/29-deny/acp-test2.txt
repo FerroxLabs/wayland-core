@@ -1,0 +1,186 @@
+   Compiling wcore-acp v0.12.25 (/root/wayland-29-deny/crates/wcore-acp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.74s
+     Running unittests src/lib.rs (target/debug/deps/wcore_acp-05233bade702049a)
+
+running 129 tests
+test auth::tests::bearer_missing_header ... ok
+test auth::tests::api_key_missing_header ... ok
+test auth::tests::bearer_wrong_scheme_rejected ... ok
+test a2a::tests::default_handler_echo_message ... ok
+test a2a::tests::default_handler_handshake_returns_self_identity ... ok
+test a2a::tests::default_handler_capabilities_starts_empty ... ok
+test a2a::tests::set_capabilities_round_trip ... ok
+test auth::tests::scheme_serialization_tags ... ok
+test auth::tests::deny_all_denies ... ok
+test auth::tests::constant_time_eq_correctness ... ok
+test cursor::tests::a_cursor_from_another_stream_is_refused_even_when_the_position_is_in_range ... ok
+test cursor::tests::a_caught_up_cursor_yields_nothing_without_erroring ... ok
+test cursor::tests::a_position_ahead_of_the_stream_is_refused_rather_than_answered_with_nothing ... ok
+test cursor::tests::a_reconnecting_client_receives_exactly_what_it_missed_in_order_once ... ok
+test cursor::tests::an_evicted_position_is_refused_with_the_oldest_still_servable ... ok
+test cursor::tests::positions_are_never_reused_after_eviction ... ok
+test cursor::tests::positions_start_at_one_and_strictly_increase ... ok
+test cursor::tests::resuming_a_stream_continues_the_numbering_rather_than_restarting_it ... ok
+test cursor::tests::the_eviction_boundary_is_exact ... ok
+test cursor::tests::the_genesis_cursor_yields_everything_retained ... ok
+test cursor::tests::retention_is_bounded_so_a_disconnected_client_cannot_grow_the_log ... ok
+test idempotency::tests::a_different_command_under_a_used_identity_is_a_named_conflict ... ok
+test idempotency::tests::a_full_ledger_refuses_a_new_identity_instead_of_evicting_a_guarantee ... ok
+test idempotency::tests::a_malformed_identity_is_refused_rather_than_used_as_a_key ... ok
+test idempotency::tests::a_full_ledger_still_replays_a_known_identity ... ok
+test idempotency::tests::a_repeated_identity_yields_one_effect_and_two_identical_receipts ... ok
+test negotiate::tests::a_client_at_the_floor_is_accepted_at_the_server_version ... ok
+test negotiate::tests::a_client_below_the_floor_is_refused_by_name_not_downgraded ... ok
+test idempotency::tests::recording_twice_under_one_identity_does_not_rewrite_the_receipt ... ok
+test negotiate::tests::a_newer_client_is_met_at_the_server_version_and_told_so ... ok
+test negotiate::tests::an_unparseable_version_is_refused_rather_than_compared ... ok
+test negotiate::tests::the_server_version_is_the_one_the_handshake_advertises ... ok
+test negotiate::tests::version_comparison_is_numeric_and_not_lexicographic ... ok
+test protocol::tests::agent_info_exposes_no_secret_fields ... ok
+test protocol::tests::agent_info_omits_absent_description ... ok
+test protocol::tests::agent_not_found_code_value ... ok
+test protocol::tests::agents_list_request_rejects_unknown_fields ... ok
+test protocol::tests::agents_list_response_roundtrip ... ok
+test protocol::tests::error_code_distinct_values ... ok
+test protocol::tests::deny_unknown_fields_on_request ... ok
+test protocol::tests::initialize_request_rejects_unknown_fields ... ok
+test protocol::tests::initialize_response_roundtrips_with_capability ... ok
+test protocol::tests::jsonrpc_request_roundtrip ... ok
+test protocol::tests::jsonrpc_response_with_error ... ok
+test protocol::tests::message_event_text_delta_serializes ... ok
+test protocol::tests::session_create_with_agent_roundtrips ... ok
+test protocol::tests::server_capabilities_is_forward_compatible ... ok
+test protocol::tests::session_create_without_agent_is_byte_identical ... ok
+test protocol::tests::session_metadata_roundtrip ... ok
+test protocol::tests::tool_call_roundtrip ... ok
+test roles::tests::a_higher_role_satisfies_a_lower_requirement ... ok
+test roles::tests::a_lower_role_does_not_satisfy_a_higher_requirement ... ok
+test roles::tests::a_policy_grants_the_named_role_and_denies_above_it ... ok
+test roles::tests::a_principal_the_policy_does_not_name_is_denied_everything ... ok
+test roles::tests::a_role_refusal_is_a_different_error_from_an_authentication_failure ... ok
+test roles::tests::an_explicit_default_role_applies_only_where_it_was_asked_for ... ok
+test roles::tests::an_unclassified_method_requires_admin_so_the_omission_is_loud ... ok
+test roles::tests::no_recognised_role_is_denied_everything_including_reads ... ok
+test roles::tests::role_parsing_is_case_and_whitespace_tolerant_but_not_permissive ... ok
+test client::tests::create_then_get_roundtrips_over_http ... ok
+test roles::tests::the_refusal_does_not_name_the_principal ... ok
+test roles::tests::the_refusal_names_the_required_role_and_the_held_one ... ok
+test roles::tests::the_resume_read_is_classified_rather_than_falling_through_to_admin ... ok
+test client::tests::delete_then_get_returns_session_error ... ok
+test roster::tests::default_id_reports_configured_default ... ok
+test roster::tests::contains_default_answers_from_list ... ok
+test server::tests::a2a_capabilities_with_handler_returns_set_caps ... ok
+test server::tests::a2a_handshake_no_handler_returns_protocol_error ... ok
+test server::tests::a2a_handshake_with_handler_returns_self_identity ... ok
+test server::tests::a2a_message_send_with_handler_echoes ... ok
+test server::tests::create_stores_tools_and_send_falls_back_to_them ... ok
+test server::tests::create_then_get_roundtrips ... ok
+test server::tests::create_with_agent_but_no_roster_is_agent_error ... ok
+test server::tests::create_with_authorized_agent_records_selector ... ok
+test server::tests::create_with_unauthorized_agent_is_agent_error ... ok
+test server::tests::create_without_agent_records_none ... ok
+test server::tests::delete_missing_errors ... ok
+test client::tests::list_returns_created_sessions ... ok
+test server::tests::delete_then_get_errors ... ok
+test server::tests::initialize_advertises_agent_selection ... ok
+test server::tests::list_agents_empty_without_roster ... ok
+test server::tests::list_agents_returns_roster_catalog ... ok
+test server::tests::profile_agent_without_router_fails_closed ... ok
+test server::tests::profile_agent_routes_to_supervisor_not_engine ... ok
+test server::tests::profile_open_failure_fails_closed_with_no_dangling_session ... ok
+test server::tests::send_message_per_call_tools_override_stored ... ok
+test server::tests::send_message_with_engine_proxies_stream ... ok
+test server::tests::send_message_missing_session_errors ... ok
+test server::tests::send_message_without_engine_returns_error_event ... ok
+test server::tests::tool_definitions_accepted_in_create ... ok
+test transport::http::tests::auth_error_maps_to_401 ... ok
+test transport::http::tests::bad_path_is_404 ... ok
+test transport::http::tests::delete_session_returns_204 ... ok
+test transport::http::tests::get_agents_defaults_to_empty ... ok
+test transport::http::tests::bad_json_body_is_400 ... ok
+test transport::http::tests::get_session_by_id ... ok
+test transport::http::tests::get_sessions_lists ... ok
+test transport::http::tests::session_not_found_maps_to_404 ... ok
+test transport::rest::tests::get_agents_returns_empty_default ... ok
+test transport::rest::tests::get_doc_returns_html ... ok
+test transport::rest::tests::get_health_ok ... ok
+test transport::http::tests::get_initialize_returns_handshake ... ok
+test transport::http::tests::post_sessions_creates ... ok
+test transport::rest::tests::post_approval_resolve_accepts_always_scope ... ok
+test transport::rest::tests::get_tools_returns_empty_default ... ok
+test transport::http::tests::post_messages_returns_sse ... ok
+test transport::rest::tests::list_get_delete_sessions ... ok
+test transport::rest::tests::post_approval_resolve_approves_pending_call ... ok
+test turn::tests::mock_turn_engine_emits_ordered_stream_with_one_terminal ... ok
+test transport::ws::tests::clean_close_returns_none ... ok
+test transport::ws::tests::roundtrip_request_response ... ok
+test transport::rest::tests::get_session_not_found_maps_to_404 ... ok
+test transport::stdio::tests::parse_error_surfaces_as_serde ... ok
+test turn::tests::mock_turn_engine_error_terminal_is_accepted ... ok
+test transport::rest::tests::post_v1_sessions_creates ... ok
+test transport::stdio::tests::roundtrip_request_response ... ok
+test transport::rest::tests::get_initialize_returns_capabilities ... ok
+test transport::rest::tests::post_approval_resolve_deny_path ... ok
+test transport::stdio::tests::clean_eof_returns_none ... ok
+test transport::rest::tests::post_prompt_returns_sse ... ok
+test transport::rest::tests::post_approval_resolve_missing_call_returns_404 ... ok
+test transport::rest::tests::post_approval_resolve_is_auth_gated ... ok
+test transport::ws::tests::parse_error_surfaces_as_serde ... ok
+test transport::rest::tests::apidoc_serializes_with_all_documented_paths ... ok
+test transport::rest::tests::auth_gates_v1_but_not_spec ... ok
+test transport::rest::tests::get_openapi_json_has_paths_and_resolves_schemas ... ok
+test client::tests::send_message_streams_done_event ... ok
+test server::tests::list_returns_newest_first ... ok
+test client::tests::sse_parser_fails_on_unbounded_delimiterless_stream ... ok
+
+test result: ok. 129 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.68s
+
+     Running tests/approval_gate.rs (target/debug/deps/approval_gate-182d7b5ee719ec13)
+
+running 2 tests
+test force_posture_emits_bare_tool_call_without_gate ... ok
+test mutating_tool_emits_approval_required_before_result ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/rest_roundtrip.rs (target/debug/deps/rest_roundtrip-cf85c96b7c794900)
+
+running 2 tests
+test rest_create_prompt_sse_delete_roundtrip ... ok
+test rest_openapi_doc_served_over_live_listener ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/roles_and_idempotency.rs (target/debug/deps/roles_and_idempotency-b3ea5954b75ee6a6)
+
+running 11 tests
+test a_principal_the_policy_never_named_is_denied_even_a_read ... ok
+test a_handler_that_cannot_honour_a_key_refuses_it_rather_than_ignoring_it ... ok
+test the_wire_carries_the_distinct_codes_and_statuses_not_just_distinct_types ... ok
+test a_key_reused_for_a_different_command_is_refused_and_the_original_still_replays ... ok
+test with_no_policy_installed_the_server_performs_no_role_gating_and_reports_that ... ok
+test the_rest_surface_cannot_be_used_to_walk_around_a_role_refusal ... ok
+test a_repeated_key_yields_one_session_counted_from_the_session_list ... ok
+test an_unclassified_route_is_refused_rather_than_reaching_dispatch ... ok
+test a_repeated_delete_under_one_key_does_not_become_a_spurious_not_found ... ok
+test the_unauthenticated_spec_routes_stay_reachable ... ok
+test a_role_refusal_and_an_auth_failure_are_different_answers_from_one_server ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/typed_client_recovery.rs (target/debug/deps/typed_client_recovery-00bd6851fb304276)
+
+running 4 tests
+test a_cursor_that_fell_out_of_retention_is_refused_naming_where_to_resync ... ok
+test the_ahead_and_unknown_session_refusals_survive_the_wire_with_their_own_statuses ... ok
+test a_cursor_from_another_stream_is_refused_over_the_wire_not_silently_served ... ok
+test a_severed_typed_client_recovers_the_exact_gap_over_a_real_socket ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
+   Doc-tests wcore_acp
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

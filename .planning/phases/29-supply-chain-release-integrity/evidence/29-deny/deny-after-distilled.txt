@@ -1,0 +1,16 @@
+### DISTILLED CAPTURE — deny-after.txt
+# Source: /root/deny-after.txt on hetzner-dsm (full capture retained there).
+# Full capture size: 19371 lines / 1264015 bytes. ~95% of it is warning[duplicate]
+# inverse-dependency trees (multiple-versions = warn), which carry no verdict.
+# Distilled with: grep -n '^error\[' -A 60 ; plus all warning[] headers and the final line.
+###
+
+--- counts (from the FULL capture) ---
+error[] blocks : 0
+warning[] blocks: 59
+  59 warning[duplicate]
+
+--- every error block, verbatim ---
+
+--- final verdict line ---
+advisories ok, bans ok, licenses ok, sources ok
