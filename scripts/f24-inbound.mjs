@@ -44,7 +44,11 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
-import { partition as correlate, instrumentFault } from './f24-correlate.mjs';
+import {
+  partition as correlate,
+  instrumentFault,
+  matches as correlationMatches,
+} from './f24-correlate.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -752,7 +756,21 @@ class InboundMatrix {
       seen1.length === 1,
       `POST rc=${r1.status} ${r1.output.split('\n')[0]} | arrivals(journal)=${seen1.length} want=1 | turns(fixture-journal)=${this.turnsFor(c1).length}`,
     );
-    const routed = seen1.length === 1 && (seen1[0].text ?? '').includes(c1);
+    // MUST go through the correlate module, not `String.includes`.
+    //
+    // This exact line survived the first pass of the matcher repair and the
+    // live run caught it: `arrivalsFor` was fixed, so telegram/admit counted
+    // its arrival correctly, while telegram/route re-tested the SAME arrival
+    // with the OLD exact matcher and reported
+    // `carries_correlation=false` against
+    // `"F24C3\-REPLY f24c3\-telegram\-admit\-67ac190c"` — a reply that had
+    // plainly arrived, in the right conversation, carrying the right token.
+    //
+    // Recorded because it is the sharpest available demonstration of
+    // LANE-BRIEF §6b-ii: a PARTIAL instrument repair leaves the defect live at
+    // whichever call site was missed, and the missed site fails in exactly the
+    // direction that blames the product.
+    const routed = seen1.length === 1 && correlationMatches(seen1[0].text, c1);
     const convOk = seen1.length === 1 && seen1[0].conversation_id === cfg.expectConversation;
     this.record(
       adapter,

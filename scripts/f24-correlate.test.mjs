@@ -18,6 +18,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 
 import {
   classify,
@@ -188,6 +189,45 @@ test('unescapeMarkdownV2 round-trips every reserved character', () => {
   for (const ch of MARKDOWN_V2_RESERVED) {
     assert.equal(unescapeMarkdownV2(escapeMarkdownV2(ch)), ch, `reserved char ${ch}`);
   }
+});
+
+// ── guard against a PARTIAL repair ───────────────────────────────────────────
+//
+// Measured on hetzner at 237636c9, first live telegram run: `arrivalsFor` had
+// been repaired but `runMatrix`'s route check still compared with
+// `String.includes`, so telegram/admit counted its arrival while telegram/route
+// reported `carries_correlation=false` about THE SAME arrival. The repair was
+// real and the defect was still live, at the one call site that was missed.
+//
+// A comment saying "always use the correlate module" would not have caught it.
+// This scan does.
+test('no correlation comparison in the driver bypasses the correlate module', () => {
+  const src = fs.readFileSync(new URL('./f24-inbound.mjs', import.meta.url), 'utf8');
+  // Guard the guard: a scan of an empty or missing file passes vacuously, which
+  // is the self-passing-gate class this repository has measured repeatedly.
+  assert.ok(src.length > 10_000, `driver source implausibly small: ${src.length} bytes`);
+  assert.ok(src.includes('f24-correlate.mjs'), 'driver must import the correlate module');
+
+  // `.includes(<a correlation variable>)` — the matrix names them c1, c1b, c3,
+  // c4, or `correlation`.
+  const offenders = src
+    .split('\n')
+    .map((line, i) => [i + 1, line])
+    .filter(([, line]) => /\.includes\(\s*(c\d+b?|correlation)\b/.test(line));
+  assert.deepEqual(
+    offenders,
+    [],
+    `raw substring comparison against a correlation token:\n${offenders
+      .map(([n, l]) => `  ${n}: ${l.trim()}`)
+      .join('\n')}`,
+  );
+
+  // And prove the scan can fail, on a string known to contain the pattern.
+  const planted = "const routed = (seen1[0].text ?? '').includes(c1);";
+  assert.ok(
+    /\.includes\(\s*(c\d+b?|correlation)\b/.test(planted),
+    'the scan pattern must match the exact line that was missed',
+  );
 });
 
 test('skeleton is too short to trip the fuzzy tier on trivial tokens', () => {

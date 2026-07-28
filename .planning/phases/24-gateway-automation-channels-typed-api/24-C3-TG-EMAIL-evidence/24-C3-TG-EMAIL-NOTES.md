@@ -89,3 +89,90 @@ instrumenting it, and leaves the next unanticipated mangling silent.
 - [ ] hetzner worktree + targeted build.
 
 Nothing measured yet. No claim of any kind is made in this file about a leg passing.
+
+---
+
+## T+~75min — Task 1 first live run on hetzner, and what it caught
+
+Binary: `/root/wayland-24-c3-tg-email/target/release/wayland-core`, built from `ddc7cfe0`,
+`cargo build -p wcore-cli --release`, `BUILDRC=0`. Driver at `237636c9`.
+Run dir `/root/f24tg-run1`.
+
+```
+INBOUND MATRIX RED platform=linux runtime=json-stream legs=20/20 failed=1
+arrivals_total=9 telegram_arrivals=3 turns_total=12 instrument_fault=false
+telegram fixture: submitted=5 still_pending=[] polls=176 max_concurrent_getupdates=1
+```
+
+Per-leg, telegram:
+
+| leg | result | evidence |
+|---|---|---|
+| admit | PASS | `SUBMIT 200 {"ok":true,"update_id":1}` / arrivals(journal)=1 want=1 / turns=1 |
+| route | **FAIL** | `reply_text="F24C3\-REPLY f24c3\-telegram\-admit\-67ac190c" carries_correlation=false` |
+| dedupe | PASS | before=1 after=1 / positive-control fresh-id arrivals=1 |
+| access | PASS | arrivals=0 want=0, turns=0 want=0, CONTROL admit-leg-arrived=1 (control held) |
+| bind | PASS | conv1="24030001" conv2="24030002" distinct=true |
+
+The three webhook adapters stayed 15/15 PASS through the refactor.
+
+### The `route` FAIL is an INSTRUMENT fault, and it is the most useful thing this run produced
+
+Read the evidence string. The reply **arrived**, in the **right conversation**
+(`conversation_id="24030001"` equals `want`), carrying the **right token** — in its
+MarkdownV2-escaped form, exactly as predicted in the T+0 note before anything was run.
+`carries_correlation=false` is the harness being wrong about a working product.
+
+The cause is a **partial repair**. `arrivalsFor()` was moved onto `f24-correlate.mjs`, which is
+why `admit` counted its arrival correctly. But `runMatrix`'s route check re-tested that same
+arrival on a separate line that still read:
+
+```js
+const routed = seen1.length === 1 && (seen1[0].text ?? '').includes(c1);
+```
+
+So one call site was repaired and one was missed, and the missed one failed **in the direction
+that blames the product**. That is LANE-BRIEF §6b-ii demonstrated inside a single lane rather
+than across two.
+
+Fixes applied, both of them:
+1. the route check now goes through `correlationMatches()`;
+2. a **source scan** in `f24-correlate.test.mjs` fails if any line in the driver compares a
+   correlation variable with `String.includes` — because a comment would not have caught this,
+   and the scan does. The scan asserts the source is >10kB first, so it cannot pass vacuously.
+
+Self-test: **16 passed, 0 failed** (Mac and hetzner, node v22.21.1).
+
+### Independent observables recorded this run
+
+- `max_concurrent_getupdates=1` — counted by the fixture, in another process, from overlapping
+  open requests. **1** is correct: one poller on the token. **2** would mean two `ChannelManager`s
+  competing and silently destroying each other's reads (F24-C3-H4); **0** would mean the runtime
+  polled nothing. So a "fix" that works by starting nothing cannot pass this.
+- `submitted=5 still_pending=[]` — every update the fixture was given was consumed.
+- 5 submitted, 3 arrivals: admit + dedupe-control + bind arrived; the dedupe replay and the
+  denied sender correctly did not. That accounting balances exactly.
+
+## T+~80min — Task 2 scope correction, measured from the lockfile
+
+The brief's premise is **half right**, and the half that is wrong needs saying before any
+fixture is built:
+
+- **IMAP inbound uses `native-tls`** (`crates/wcore-channel-email/Cargo.toml:13`), which is
+  OpenSSL on Linux. `native_tls::TlsConnector::new()` at `imap.rs:194` therefore picks up
+  OpenSSL's default verify paths, and **OpenSSL honours `SSL_CERT_FILE`**. A self-signed IMAP
+  fixture IS reachable from a child-scoped env var on Linux. The brief is correct here.
+- **SMTP outbound does NOT use native-tls.** `Cargo.toml:11` pins
+  `lettre = { default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }`
+  and `smtp.rs:78` builds `AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)`. The
+  resolved dependency set in `Cargo.lock` (the `lettre` block) contains **`webpki-roots 1.0.7`
+  and NOT `rustls-native-certs`**.
+
+`webpki-roots` is a **compiled-in Mozilla root set**. It reads no file and no environment
+variable. So `SSL_CERT_FILE` has **no effect whatsoever** on the SMTP path — not on Linux, not
+on macOS, not on Windows. This is a different and stronger blocker than the macOS one the brief
+flagged, and it applies to the leg that captures the REPLY.
+
+Consequence for the five legs on email: `route` (and the reply half of `admit`) cannot be
+captured through SMTP by any environment-variable mechanism. To be proven executably, not
+asserted, before it is reported.
