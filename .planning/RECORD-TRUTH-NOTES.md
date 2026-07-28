@@ -69,13 +69,72 @@ only under-allocate the caller's own descendant. That is the safe direction.
 carried NOT MET on a §4 premise that is 1/3 intact and 2/3 false at HEAD, and the
 intact third is about a different code path than the requirement.
 
-### T1.d Still to establish
-- the live evidence (control child 8 turns vs narrowed child 3) — locate + verify
-- whether the canary tests (`f21_02_no_channel_canary.rs`) now assert PRESENCE
-- run the relevant tests on hetzner (targeted, `-p` only)
+### T1.d Live evidence — LOCATED and it is strong
+`.planning/phases/21-child-authority-and-budget-inheritance/21-02-VACUITY-SUMMARY.md`
+(lane `lane/f21-02-vacuity`, evidence host hetzner-dsm). §3.1 records, from
+`crates/wcore-cli/tests/f21_02_child_budget_live.rs`, two runs of real
+`wayland-core acp serve` differing ONLY by the `budget` object the parent's own
+model puts on its `Delegate` call:
+
+```
+F21-02 LIVE: control child served 8 turns, narrowed child served 3 turns
+under a 900-token sub-allocation of a 100000-token root.
+test result: ok. 10 passed; 0 failed; finished in 4.71s
+```
+
+§3.2 records the mutation control: revert the spawn seam to unconditional
+`sub_budget(None)` and the narrowed child is served **8** turns — differential
+collapses. So the gate is proven red-able, not merely green.
+
+### T1.e The canary is genuinely INVERTED — verified by reading it
+`crates/wcore-agent/tests/f21_02_no_channel_canary.rs` header states it inverts
+the old absence-canary and asserts the channel EXISTS. It reads only
+`crates/*/src`, and asserts its own crawl collected >100 files so a broken walk
+cannot make it vacuous. This is the correct repair of a self-passing gate.
+
+### T1.f The 21-02 lane's own F-1 (HIGH) was subsequently FIXED
+21-02-VACUITY-SUMMARY §5 F-1 said the phase corpus's `budget_no_channel_canary`
+greps the literal `sub_budget(Some(` while excluding `crates/wcore-budget/`, so it
+still reported "NO-CHANNEL canary intact" against a live channel — a blind gate.
+At HEAD `budget_no_channel_canary` returns **0 hits** in
+`crates/wcore-cli/tests/child_authority_corpus/surfaces.rs`; commit `d29413c1`
+("grade the budget legs on enforcement, not on channel absence", +218/-42 across
+the corpus) repaired it. F-1 is CLOSED at HEAD.
+
+### T1.g F-2 (MEDIUM) was explicitly routed to BACKLOG and NEVER ARRIVED
+21-02-VACUITY-SUMMARY §5 F-2: `max_iterations` unclamped
+(`delegate.rs` → `spawner.rs:2283`), stated "per the brief's severity policy this
+is BACKLOG, not blocking". `grep -c max_iterations .planning/BACKLOG.md` = **0**.
+Third independent sighting of the drop pattern → feeds T3.
 
 ---
 
-## T2 — F23A-01-H2 — not yet started
-## T3 — dropped-findings sweep — not yet started
+## T2 — F23A-01-H2
+
+### T2.a The fix is REAL at HEAD
+- `81508b74` 2026-07-27 08:15:18 — *test(agent): prove D1 — a completed tool error
+  strands the turn*. Adds `crates/wcore-agent/src/orchestration/d1_refusal_terminal_tests.rs`
+  (RED first — correct TDD order).
+- `32a5fc90` 2026-07-27 08:27:20 — *fix(agent,tools): stop a finished tool call from
+  stranding its turn*. 7 files, +240/-36, incl. `orchestration/mod.rs` (+135) which
+  is exactly the `PreparedToolLease::start` → `lease.fail(...)` span the seam
+  request named as the suspected leak.
+- Module IS wired: `orchestration/mod.rs:78` `mod d1_refusal_terminal_tests;` —
+  so the five tests actually compile and run, not orphaned.
+- Five tests, matching the seam request's three triggers plus two more:
+  `refused_read_leaves_turn_committable`, `failed_grep_...`, `failed_glob_...`,
+  `opaque_shell_error_...`, `approval_denial_control_...` (the last is a control).
+
+### T2.b The census underneath is genuinely STALE — brief confirmed
+`crates/wcore-eval-scenarios/tests/f23a_boundary_drive.rs` last touched
+`481682b0` **2026-07-26 22:49:40**, i.e. the day BEFORE the 07-27 fix. So the
+16-route quarantine census has NOT been re-measured at HEAD.
+`WAYLAND_F23A_SELFTEST` exists (`f23a_boundary_drive.rs:21,41`) — control is
+present in source; whether it was ever made to FIRE is the open question.
+
+## T3 — dropped-findings sweep — IN PROGRESS
+Confirmed dropped so far (grep count in `.planning/BACKLOG.md` = 0 for each):
+F23A-01-M1, F23A-01-M2, F23A-01-M3 (MEDIUM), F23A-01-H2 (HIGH), plus 21-02 F-2.
+Whole-phase gaps in BACKLOG: **Phase 22 = 0, 23A = 0, 23B = 0, 27 = 0** entries.
+
 ## T4 — CRITERIA-GAP-LEDGER rows — not yet started
