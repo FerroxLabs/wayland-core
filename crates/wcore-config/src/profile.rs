@@ -679,12 +679,11 @@ fn copy_tree_inner(
         // names an export publishes. A selection never reaches inside an item,
         // so it cannot half-copy one.
         let rel = normalized_join(rel_prefix, &name_str);
-        if is_top_level {
-            if let Some(f) = keep.as_ref() {
-                if !f(&rel) {
-                    continue;
-                }
-            }
+        if is_top_level
+            && let Some(f) = keep.as_ref()
+            && !f(&rel)
+        {
+            continue;
         }
         let from = entry.path();
         // Use symlink_metadata so a symlink is detected as a symlink (not its
