@@ -62,8 +62,10 @@ cat > "$SESSIONS/$SID.json" <<JSON
   "model": "claude-opus-4",
   "cwd": "/tmp/probe",
   "messages": [
-    { "role": "user", "content": "my secret plan is $CANARY" },
-    { "role": "assistant", "content": "acknowledged" }
+    { "role": "user",
+      "content": [ { "type": "text", "text": "my secret plan is $CANARY" } ] },
+    { "role": "assistant",
+      "content": [ { "type": "text", "text": "acknowledged" } ] }
   ]
 }
 JSON
