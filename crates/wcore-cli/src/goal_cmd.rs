@@ -395,6 +395,12 @@ async fn run_goal(options: RunOptions) -> anyhow::Result<()> {
     let effects_dir = std::fs::canonicalize(&options.effects_dir)?;
 
     let handle = open_journal(&options.journal)?;
+    // ONE handle, cloned to share authority. `SessionJournal::open` takes an
+    // exclusive cross-process writer lease and an independent second open fails
+    // closed, so the Goal loop must clone this handle rather than reopen the
+    // path. Found by the live run, not by the suite: every unit test builds a
+    // single driver, so nothing in-process ever opened the journal twice.
+    let loop_driver = GoalLoop::new(GoalKernel::new(handle.clone()));
     let driver = GoalFleetDriver::new(
         handle,
         GoalId::new(&options.goal),
@@ -450,8 +456,6 @@ async fn run_goal(options: RunOptions) -> anyhow::Result<()> {
     // a terminal state any other way.
     if options.terminate {
         let goal_id = GoalId::new(&options.goal);
-        let loop_driver = GoalLoop::new(GoalKernel::new(open_journal(&options.journal)?));
-
         let cursor = loop_driver
             .run_fleet(&goal_id, |owner| async move {
                 match driver
@@ -503,10 +507,11 @@ async fn run_goal(options: RunOptions) -> anyhow::Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("goal {} did not terminate: {e}", options.goal))?;
 
-        let terminal = open_journal(&options.journal)
+        let terminal = loop_driver
+            .kernel()
+            .goal(&goal_id)
             .ok()
-            .map(GoalKernel::new)
-            .and_then(|kernel| kernel.goal(&goal_id).ok().flatten())
+            .flatten()
             .map_or_else(
                 || "unknown".to_owned(),
                 |state| format!("{:?}", state.lifecycle),
