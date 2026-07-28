@@ -57,6 +57,12 @@ struct Row {
     heuristic_tokens: usize,
     scripted_input_tokens: u64,
     is_error: bool,
+    /// The `ToolResult.content` of a failing row, retained so the sanity
+    /// gate can print WHY a tool errored. Previously the gate told the
+    /// operator to "see scratch workdir for details" while `cleanup_workdir`
+    /// deleted that directory on the same path — the failure was
+    /// undiagnosable by construction. `None` for successful rows.
+    error_detail: Option<String>,
 }
 
 impl Row {
@@ -117,12 +123,19 @@ async fn main() -> ExitCode {
     // broken fixture rather than silently writing a degraded markdown.
     if rows.iter().any(|r| r.is_error) {
         eprintln!(
-            "tool_token_bench: at least one tool returned is_error=true \
-             (see scratch workdir for details). Refusing to write markdown."
+            "tool_token_bench: at least one tool returned is_error=true. \
+             Refusing to write markdown. The failing ToolResult content is \
+             printed below (the scratch workdir is deleted on this path, so \
+             it cannot be inspected afterwards)."
         );
         for r in &rows {
             if r.is_error {
-                eprintln!("  - {} / {}: error", r.tool, r.scenario);
+                eprintln!(
+                    "  - {} / {}: error: {}",
+                    r.tool,
+                    r.scenario,
+                    r.error_detail.as_deref().unwrap_or("<no content captured>")
+                );
             }
         }
         cleanup_workdir(&workdir);
@@ -286,6 +299,7 @@ async fn dispatch_one(
         heuristic_tokens: heuristic,
         scripted_input_tokens: usage.input_tokens,
         is_error,
+        error_detail: if is_error { Some(content) } else { None },
     })
 }
 
