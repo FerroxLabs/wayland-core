@@ -57,30 +57,39 @@ real hardware, none visible from source review, two actively masked by gates tha
 
 ---
 
-## 2. Running right now — six lanes
+## 2. The overnight wave — six dispatched, six merged
 
 | Lane | Doing |
 |---|---|
-| `lane/30-02` | Phase 30 trial protocol. Owns `peer_delta`, **UNPROVEN on all 148 surface rows** |
+| ~~`lane/30-02`~~ | **MERGED.** Wayland loses two comparatives — **but the protocol that produced them is defective and the lane proved it by running it** (see §2b) |
 | ~~`lane/24-c3-h2`~~ | **MERGED.** Gateway hosts inbound; `F24-C3-H4` spun out |
 | ~~`lane/27-gaps`~~ | **MERGED.** Goal still NOT ACHIEVED and the lane says so — but audio flowed for the first time, and the credential-free path was made real |
-| `lane/22-c3` | Phase 22 Criterion 3 — "one loop owner", **never attempted in three passes** |
+| ~~`lane/22-c3`~~ | **MERGED.** Criterion 3 **PARTIAL** — the first honest grade in four passes. Enforced over the Goal lifecycle, convention outside it, and it says which is which |
 | ~~`lane/29-h1`~~ | **MERGED.** `F29-02-H1` closed at source; `ignore = []`, both vulnerable versions out of the lock |
-| `lane/28-h2` | `F-28-02-002` — the stale-lease DoS, **the one finding blocking Phase 28's acceptance gate** |
+| ~~`lane/28-h2`~~ | **MERGED, FIXED.** Stale-lease DoS reclaimed and quarantined. Ledger row still reads `OPEN` — the lane refused to mark its own homework, so `lane/28-adj` adjudicates independently |
 
-Merge each as it reports, then continue Phase 30 serially: **30-02 → 30-03 → 30-04.**
+**Now running:** `lane/30-03` (positioning — the call 30-01 and 30-02 both declined),
+`lane/28-adj` (independent adjudication), `lane/24-c3-h4`, `lane/headless-keyring`.
 
-**Both HIGH lanes added 2026-07-28 late**, after grounding the findings rather than trusting their
-write-ups:
+### 2a. I grounded both HIGH lanes before dispatch, and got two things wrong. Both matter.
 
-- `F29-02-H1` — `wcore-tools` depends on quick-xml **directly** (`Cargo.toml:109`), `doc-extract`
-  is **default-on** (`:135`), and `doc_tool.rs:644,775` parses **user-supplied** docx/pptx. So the
-  audit.toml "sole path" is false and `0194` is reachable with attacker-controlled input. The
-  calamine leg stays withdrawn — it resolves to quick-xml 0.31.0, which neither advisory names.
-- `F-28-02-002` — the word **`stale` appears nowhere** in the `acl_lease` module. The wedge is not
-  faulty staleness handling, it is the **absence of any staleness concept**. The named mutex
-  already handles `WAIT_ABANDONED`, so the mutex is not the wedge; the persisted lease record is.
-  SeanDesktop re-verified reachable before dispatch.
+I wrote the grounding below into the dispatch briefs as fact. The lanes disproved both, **against
+explicit instructions from me not to**, and were right to.
+
+- **`F29-02-H1` — I told the lane the calamine leg was withdrawn as wrong and not to resurrect it.**
+  It re-measured instead. Both advisories declare `patched = [">= 0.41.0"]` with **no `unaffected`
+  range**, so quick-xml 0.31.0 is in scope after all, and `cargo audit` with the ignore list
+  bypassed reports **4 vulnerabilities, not 2**. I had relayed a withdrawal nobody had checked
+  against the advisory metadata.
+- **`F-28-02-002` — I claimed no expiry, reclamation or owner-liveness existed, having grepped for
+  the word `stale`.** All of it existed under other names: `owner_pid`, `owner_creation_time`,
+  `owner_is_live()`, `recover_dead_leases_locked()`. **A keyword grep is not a concept measurement**,
+  and the brief I wrote pointed at the wrong repair. The real defect was two `return Err` aborting
+  the whole recovery pass forever — and `storage.rs:59` **already named it in its own words**
+  ("there is no quarantine path"). Someone documented the defect and nobody acted on it.
+
+**The generalisable rule: a brief's grounding is a claim, not a premise.** Both lanes produced the
+right answer by treating my instructions as falsifiable. Write briefs that make that explicit.
 
 ---
 
