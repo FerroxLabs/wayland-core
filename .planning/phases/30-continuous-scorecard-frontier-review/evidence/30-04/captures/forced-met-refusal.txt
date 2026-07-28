@@ -1,0 +1,6 @@
+--- (a) the PLAN GATE AS WRITTEN seds "verdict", but the field is "grade" ---
+PLAN_SED_IS_A_NO_OP=YES (it would have forced nothing and then reported an unexpected acceptance)
+--- (b) the CORRECTED forcing: grade NOT_MET -> MET ---
+FORCED_COUNT=2
+REFUSED_AS_REQUIRED
+wayland-scorecard: criterion `CRIT-01` is graded MET but evidence reference `OPERATOR-COMPLETENESS-148-OF-148` is marked UNPROVEN
