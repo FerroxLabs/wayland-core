@@ -45,6 +45,13 @@ path = "bin/wayland-release.rs"
 name = "wayland-channel-sink"
 path = "bin/wayland-channel-sink.rs"
 
+# Phase 24 (F24-05): the journey receipt tool. Adds NO dependency — clap,
+# serde_json, sha2 and anyhow are already declared below — so the workspace
+# manifest and the lockfile stay untouched.
+[[bin]]
+name = "wayland-journey"
+path = "bin/wayland-journey.rs"
+
 [dependencies]
 # Async runtime — used by the runner for spawn/timeout/stderr-drain.
 tokio        = { workspace = true }

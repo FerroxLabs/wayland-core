@@ -10,8 +10,23 @@ const MAX_ARTIFACT_FILES: usize = 4096;
 const MAX_ARTIFACT_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ARTIFACT_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 
+/// The shortest secret [`SecretRedactor::from_secret_set`] will accept.
+pub const MIN_SECRET_BYTES: usize = 8;
+
+/// A secret too short to redact safely. [`SecretRedactor::from_secret`] SILENTLY
+/// DROPS these, which leaves the caller believing it redacted when it did not —
+/// a fail-open. The set constructor refuses instead of inheriting that.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error(
+    "secret at index {index} is {len} bytes; the minimum is {MIN_SECRET_BYTES} — a shorter secret is silently dropped, which is a fail-open"
+)]
+pub struct SecretTooShort {
+    pub index: usize,
+    pub len: usize,
+}
+
 #[derive(Clone, Default)]
-pub(crate) struct SecretRedactor {
+pub struct SecretRedactor {
     secrets: Vec<String>,
 }
 
@@ -19,13 +34,44 @@ impl SecretRedactor {
     pub(crate) fn from_secret(secret: Option<String>) -> Self {
         Self {
             secrets: secret
-                .filter(|value| value.len() >= 8)
+                .filter(|value| value.len() >= MIN_SECRET_BYTES)
                 .into_iter()
                 .collect(),
         }
     }
 
-    pub(crate) fn text(&self, value: impl Into<String>) -> (String, bool) {
+    /// Build a redactor over a SET of secrets, refusing a too-short entry
+    /// rather than filtering it away. This is an addition; `from_secret` and
+    /// its callers are untouched.
+    pub fn from_secret_set(
+        secrets: impl IntoIterator<Item = String>,
+    ) -> Result<Self, SecretTooShort> {
+        let secrets: Vec<String> = secrets.into_iter().collect();
+        for (index, secret) in secrets.iter().enumerate() {
+            if secret.len() < MIN_SECRET_BYTES {
+                return Err(SecretTooShort {
+                    index,
+                    len: secret.len(),
+                });
+            }
+        }
+        Ok(Self { secrets })
+    }
+
+    /// The secrets this redactor holds, so a caller can report how many it
+    /// applied without keeping a parallel count that could drift.
+    pub fn secret_count(&self) -> usize {
+        self.secrets.len()
+    }
+
+    /// True when any held secret still appears in `value`. The redact entry
+    /// point re-reads what it wrote and asserts this is false: a redactor that
+    /// reports success without checking its own output is a claim, not a check.
+    pub fn any_present(&self, value: &str) -> bool {
+        self.secrets.iter().any(|secret| value.contains(secret))
+    }
+
+    pub fn text(&self, value: impl Into<String>) -> (String, bool) {
         let mut value = value.into();
         let mut detected = false;
         for secret in &self.secrets {

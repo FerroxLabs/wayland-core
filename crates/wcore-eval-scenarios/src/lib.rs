@@ -57,6 +57,7 @@ mod egress_evidence;
 mod filesystem_evidence;
 pub mod fixtures;
 pub mod hook_scenarios;
+pub mod journey;
 pub mod judge;
 pub mod mcp_scenarios;
 pub mod personas;
@@ -68,7 +69,11 @@ pub mod pty_capture;
 pub mod qa;
 pub mod receipt;
 pub mod receipt_policy;
-mod redaction;
+// Made public for Phase 24 Success Criterion 5: the journey driver promises
+// exact-secret redaction before any capture reaches a planning document, and a
+// mitigation reachable by nothing is not a mitigation. `wayland-journey redact`
+// is the entry point; see `journey.rs`.
+pub mod redaction;
 /// Phase 29 signed release manifest + role-scoped trust root (F29-01/F29-04).
 pub mod release_integrity;
 /// Phase 29 closed four-state release ledger (F29-04).
