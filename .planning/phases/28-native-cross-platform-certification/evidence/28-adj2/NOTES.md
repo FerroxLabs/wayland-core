@@ -64,3 +64,15 @@ Repair: whitespace-normalise the captured text before matching, and self-test th
 against a known-positive and a known-negative in the same run. Marker lines from
 `adj2repro-base.log` are NOT to be trusted for the `size_error` field; the raw text is the
 authority for that observation.
+
+- `[t3]` **ADJ-001 closed.** M3 now FAILS the disclosure test (was byte-identical green). M4 added
+  and also fails, proving the test reads the production emit path, not just the pure function.
+- `[t4]` **ADJ-002 fixed and live-proven** at `9c4d2612` (binary `b3b235fc`): 0-byte lease reclaimed
+  in-flight, execution RUNS, second pass silent. M5/M6 confirm the fix and its guard rail are both
+  load-bearing. Suite 136/0/23.
+- `[t5]` Classifier repaired and self-tested (`known_positive`, `known_negative`,
+  `old_matcher_missed_it` all True). Base log re-classified: the wedge string appears 4x, so the
+  original `size_error=False` was purely instrument error.
+- `[t6]` Clippy 4 warnings (= base, zero new). Live acceptance 20/3, the 3 pre-existing bwrap reds.
+  Box restored: 0 active leases, quarantine removed, backups intact.
+- `[t7]` SUMMARY written. Lane complete.
