@@ -58,6 +58,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -176,67 +177,127 @@ function gradeInstrument(facts) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// The local LLM stub.
+// The LLM stub — runs as its OWN OS PROCESS (this file re-execs itself with
+// `--llm-stub`).
 //
 // Two jobs: (1) let a one-shot session complete a turn rather than dying on a
 // provider error, and (2) HOLD the response open for a controllable time, so
 // this driver decides exactly how long an "ordinary session" stays alive and
-// therefore how long its channel poller runs. `llm_hit` is also the
+// therefore how long its channel poller runs. The journal is also the
 // independent proof that the session finished booting — used by the grader to
 // tell a genuine refutation ("it booted and did not poll") apart from an
 // instrument fault ("it never booted").
+//
+// WHY A SEPARATE PROCESS, MEASURED NOT ASSUMED. The first version ran the stub
+// in this driver's own event loop and the very first live run graded
+// INCOMPLETE with `llm stub never bound`. Node is single-threaded: the
+// driver's `Atomics.wait` busy-wait blocks the same event loop that has to
+// accept the socket, so `listen()` could never complete. The same deadlock
+// would ALSO have silently starved every later request — the driver blocks for
+// 2s between submissions in the steady-state leg, and an in-process stub would
+// have been unable to answer the session for the whole of it. That would not
+// have failed loudly; it would have looked like a session that booted and
+// declined to poll, i.e. a FALSE REFUTATION of the very finding under test.
+// Out-of-process removes the coupling entirely.
 // ───────────────────────────────────────────────────────────────────────────
 
+function runAsLlmStub(holdMs, journalPath) {
+  fs.writeFileSync(journalPath, '');
+  let hits = 0;
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => {
+      body += c;
+    });
+    req.on('end', () => {
+      hits += 1;
+      fs.appendFileSync(
+        journalPath,
+        `${JSON.stringify({ at: new Date().toISOString(), path: req.url, hit: hits })}\n`,
+      );
+      // Hold, so the session (and therefore its channel poller) stays alive for
+      // a duration this driver controls.
+      setTimeout(() => {
+        const payload = {
+          id: 'f24cl',
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model: 'f24cl-stub',
+          choices: [
+            { index: 0, message: { role: 'assistant', content: 'ack' }, finish_reason: 'stop' },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        };
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(payload));
+      }, holdMs);
+    });
+  });
+  server.listen(0, '127.0.0.1', () => {
+    process.stdout.write(`LLMSTUB_READY url=http://127.0.0.1:${server.address().port}\n`);
+  });
+}
+
 class LlmStub {
-  constructor(holdMs, journalPath) {
+  constructor(holdMs, journalPath, runDir, children, noteFn) {
     this.holdMs = holdMs;
     this.journalPath = journalPath;
-    this.hits = 0;
+    this.runDir = runDir;
+    this.children = children;
+    this.note = noteFn;
+  }
+
+  /** Hits are counted from the stub's OWN journal, written by another process. */
+  get hits() {
+    try {
+      return fs
+        .readFileSync(this.journalPath, 'utf8')
+        .split('\n')
+        .filter((l) => l.trim().length > 0).length;
+    } catch {
+      return 0;
+    }
   }
 
   start() {
-    fs.writeFileSync(this.journalPath, '');
-    this.server = http.createServer((req, res) => {
-      let body = '';
-      req.on('data', (c) => {
-        body += c;
-      });
-      req.on('end', () => {
-        this.hits += 1;
-        fs.appendFileSync(
-          this.journalPath,
-          `${JSON.stringify({ at: new Date().toISOString(), path: req.url, hit: this.hits })}\n`,
-        );
-        // Hold, so the session (and therefore its channel poller) stays alive
-        // for a duration this driver controls.
-        setTimeout(() => {
-          const payload = {
-            id: 'f24cl',
-            object: 'chat.completion',
-            created: Math.floor(Date.now() / 1000),
-            model: 'f24cl-stub',
-            choices: [
-              { index: 0, message: { role: 'assistant', content: 'ack' }, finish_reason: 'stop' },
-            ],
-            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-          };
-          const s = JSON.stringify(payload);
-          res.writeHead(200, { 'content-type': 'application/json' });
-          res.end(s);
-        }, this.holdMs);
-      });
-    });
-    this.server.listen(0, '127.0.0.1');
-    // Block until bound.
-    for (let i = 0; i < 200 && !this.server.address(); i += 1) sleep(25);
-    const a = this.server.address();
-    if (!a) throw new Error('llm stub never bound');
-    this.url = `http://127.0.0.1:${a.port}/v1`;
+    const logPath = path.join(this.runDir, 'llm-stub.log');
+    fs.writeFileSync(logPath, '');
+    const fd = fs.openSync(logPath, 'a');
+    const child = spawn(
+      process.execPath,
+      [
+        fileURLToPath(import.meta.url),
+        '--llm-stub',
+        '--hold-ms',
+        String(this.holdMs),
+        '--journal',
+        this.journalPath,
+      ],
+      { stdio: ['ignore', fd, fd], windowsHide: true },
+    );
+    this.children.push(child);
+    const re = /LLMSTUB_READY url=(http:\/\/127\.0\.0\.1:\d+)/;
+    let banner = '';
+    for (let i = 0; i < 200; i += 1) {
+      banner = fs.readFileSync(logPath, 'utf8');
+      if (re.test(banner)) break;
+      sleep(50);
+    }
+    const m = re.exec(banner);
+    if (!m) throw new Error(`llm stub never bound (log ${byteLen(logPath)} bytes): ${banner}`);
+    this.url = `${m[1]}/v1`;
+    this.child = child;
     return this.url;
   }
 
   stop() {
-    if (this.server) this.server.close();
+    if (this.child) {
+      try {
+        this.child.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
   }
 }
 
@@ -754,13 +815,7 @@ async function leg4(run) {
 // the self-test passes on the BROKEN instrument too.
 // ───────────────────────────────────────────────────────────────────────────
 
-function selfTest() {
-  const results = [];
-  const assert = (name, cond, detail) => {
-    results.push({ name, pass: Boolean(cond), detail });
-    process.stdout.write(`${cond ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}\n`);
-  };
-
+function selfTest(assert) {
   // The naive matcher this instrument replaced: a single global maximum over
   // the whole run, with no window scoping.
   const naiveMaxOpen = (trace) => trace.reduce((m, p) => Math.max(m, p.open), 0);
@@ -837,7 +892,98 @@ function selfTest() {
       polls_total: 0,
     }).fault === true,
   );
+}
 
+/**
+ * Self-test for the SECOND instrument repair — the LLM stub moved out of
+ * process. Live, because the defect was a runtime deadlock that no amount of
+ * pure-function testing would have shown.
+ *
+ * Three assertions again, and the third is the one that matters: it proves the
+ * OLD in-process shape genuinely could not work, so the repair is not
+ * decoration.
+ */
+async function selfTestStub(results, assert) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'f24cl-selftest-'));
+  const journal = path.join(dir, 'llm.jsonl');
+  const children = [];
+  const stub = new LlmStub(50, journal, dir, children, () => {});
+
+  // 1. KNOWN-POSITIVE: the out-of-process stub binds AND still answers after
+  //    this driver has blocked its own event loop — the exact condition the
+  //    steady-state leg creates for 2s at a time between submissions.
+  let url = null;
+  let answered = false;
+  try {
+    url = stub.start();
+    sleep(1200); // block the driver's loop, as the real legs do
+    const r = await httpJson(`${url}/chat/completions`, {
+      method: 'POST',
+      body: { model: 'x', messages: [] },
+      timeoutMs: 8000,
+    });
+    answered = Boolean(r.choices);
+  } catch (e) {
+    answered = false;
+    url = url ?? `ERR:${e.message}`;
+  }
+  assert(
+    'stub known-positive: out-of-process stub answers even after the driver blocks its own loop',
+    answered,
+    `url=${url}`,
+  );
+
+  // 2. KNOWN-NEGATIVE: hits are read from the stub's own journal, written by
+  //    another process — so a stub that was never called reads 0, and the
+  //    grader can still tell "never booted" from "booted and silent".
+  const freshJournal = path.join(dir, 'never-called.jsonl');
+  fs.writeFileSync(freshJournal, '');
+  const coldStub = new LlmStub(1, freshJournal, dir, [], () => {});
+  assert(
+    'stub known-negative: an uncalled stub reports 0 hits, so a fabricated hit count cannot pass',
+    coldStub.hits === 0 && stub.hits >= 1,
+    `cold=${coldStub.hits} live=${stub.hits}`,
+  );
+
+  // 3. THE OLD SHAPE WOULD HAVE MISSED IT. Reproduce the original in-process
+  //    deadlock: listen(), then block the loop exactly as the old `start()`
+  //    did. `address()` stays null forever, so the old code could only ever
+  //    throw 'llm stub never bound' — which is precisely what the first live
+  //    run reported. Without this assertion the repair is unproven.
+  const inProc = http.createServer(() => {});
+  inProc.listen(0, '127.0.0.1');
+  let addrDuringBlock = inProc.address();
+  for (let i = 0; i < 20 && !addrDuringBlock; i += 1) {
+    sleep(25); // the OLD blocking busy-wait, verbatim in shape
+    addrDuringBlock = inProc.address();
+  }
+  assert(
+    'the OLD in-process stub would have MISSED it — listen() cannot complete while the loop is blocked',
+    addrDuringBlock === null,
+    `address during blocking wait = ${JSON.stringify(addrDuringBlock)}`,
+  );
+  inProc.close();
+
+  stub.stop();
+  for (const c of children) {
+    try {
+      c.kill('SIGKILL');
+    } catch {
+      /* ignore */
+    }
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+  return results;
+}
+
+async function runSelfTests() {
+  const results = [];
+  const assert = (name, cond, detail) => {
+    results.push({ name, pass: Boolean(cond), detail });
+    process.stdout.write(`${cond ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}\n`);
+  };
+  selfTest(assert);
+  await selfTestStub(results, assert);
   const failed = results.filter((r) => !r.pass);
   process.stdout.write(
     `\nSELFTEST_TOTAL=${results.length} SELFTEST_PASSED=${results.length - failed.length} SELFTEST_FAILED=${failed.length}\n`,
@@ -848,7 +994,15 @@ function selfTest() {
 // ───────────────────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
-  const out = { binary: null, runDir: null, leg: 'all', selfTest: false, holdMs: 30_000 };
+  const out = {
+    binary: null,
+    runDir: null,
+    leg: 'all',
+    selfTest: false,
+    holdMs: 30_000,
+    llmStub: false,
+    journal: null,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--binary') out.binary = argv[++i];
@@ -856,6 +1010,8 @@ function parseArgs(argv) {
     else if (a === '--leg') out.leg = argv[++i];
     else if (a === '--hold-ms') out.holdMs = Number(argv[++i]);
     else if (a === '--self-test') out.selfTest = true;
+    else if (a === '--llm-stub') out.llmStub = true;
+    else if (a === '--journal') out.journal = argv[++i];
     else {
       process.stderr.write(`f24-channel-lease: unknown argument ${a}\n`);
       process.exit(2);
@@ -866,7 +1022,12 @@ function parseArgs(argv) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  if (args.selfTest) process.exit(selfTest());
+  if (args.llmStub) {
+    // Runs as the out-of-process LLM stub and never returns.
+    runAsLlmStub(args.holdMs, args.journal);
+    return new Promise(() => {});
+  }
+  if (args.selfTest) process.exit(await runSelfTests());
   if (!args.binary || !args.runDir) {
     process.stderr.write('f24-channel-lease: --binary and --run-dir are required\n');
     process.exit(2);
@@ -875,7 +1036,13 @@ async function main() {
   const run = new Run(args);
   const out = { run_id: run.runId, legs: [], notes: [] };
   try {
-    run.llm = new LlmStub(args.holdMs, path.join(run.runDir, 'llm.jsonl'));
+    run.llm = new LlmStub(
+      args.holdMs,
+      path.join(run.runDir, 'llm.jsonl'),
+      run.runDir,
+      run.children,
+      (t) => run.note(t),
+    );
     run.llmUrl = run.llm.start();
     run.note(`llm stub at ${run.llmUrl} holding ${args.holdMs}ms`);
     run.startTgFixture();
