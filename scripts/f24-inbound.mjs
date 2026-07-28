@@ -960,6 +960,57 @@ class InboundMatrix {
         `senders bound to DISTINCT sessions. That remains unproven for email.`,
     );
 
+    // ── steady state ───────────────────────────────────────────────────────
+    //
+    // THE LEG THIS LANE EXISTS FOR. F24-C3-H4 lost 5 of 6 messages in steady
+    // state on Telegram because two managers competed for one destructive read.
+    // Email carries the same hazard in two forms — `\Seen` on a non-PEEK fetch,
+    // and a UID watermark persisted OUTSIDE the session and keyed by
+    // (host, user, mailbox), so two pollers race on a shared file. That root
+    // cause is reported fixed, but email had never been driven at all, so
+    // nothing had confirmed the fix reaches it or that email has no second loss
+    // mode of its own.
+    //
+    // Six messages, delivered back-to-back rather than one at a time, because a
+    // race needs concurrency to show. Graded on three independent counts:
+    // deliveries the fixture accepted, fetches the fixture served, and turns a
+    // DIFFERENT fixture journalled.
+    const steadyN = 6;
+    const steadyTokens = [];
+    const fetchesBeforeSteady = fetchCount();
+    for (let i = 0; i < steadyN; i += 1) {
+      const c = `f24c3-email-steady${i}-${tag}`;
+      steadyTokens.push(c);
+      send('allowed@fixture.invalid', `hello ${c}`, `${tag}.10${i}`);
+    }
+    for (let i = 0; i < 60; i += 1) {
+      const got = steadyTokens.filter((c) => this.turnsFor(c).length >= 1).length;
+      if (got >= steadyN) break;
+      process.stdout.write(
+        `[inbound] steady state: ${got}/${steadyN} turns after ${i}s ${new Date().toISOString()}\n`,
+      );
+      sleep(1000);
+    }
+    const perToken = steadyTokens.map((c) => this.turnsFor(c).length);
+    const turnsSeen = perToken.filter((n) => n >= 1).length;
+    const duplicated = perToken.filter((n) => n > 1).length;
+    const fetchesAfterSteady = fetchCount();
+    const report = this.mailReport();
+    const steadyMsgs =
+      report && report.ok ? report.messages.filter((m) => m.uid >= 1000 + 5) : [];
+    const multiFetched = steadyMsgs.filter((m) => m.fetch_count > 1).length;
+    const unfetched = steadyMsgs.filter((m) => m.fetch_count === 0).length;
+    rec(
+      'steady-state',
+      turnsSeen === steadyN && duplicated === 0 && unfetched === 0 && multiFetched === 0,
+      `${steadyN} messages delivered back-to-back | turns per message=${JSON.stringify(perToken)} ` +
+        `(want all 1) | delivered-and-never-fetched=${unfetched} want=0 | ` +
+        `fetched-more-than-once=${multiFetched} want=0 | ` +
+        `imap.uid_fetch ${fetchesBeforeSteady}->${fetchesAfterSteady} | ` +
+        `max_concurrent_imap_sessions=${report && report.ok ? report.max_concurrent_imap_sessions : 'unread'} ` +
+        `(2 would mean two pollers competing on one mailbox; 0 would mean nothing polled at all)`,
+    );
+
     this.emailProbe = probe;
     return probe;
   }
