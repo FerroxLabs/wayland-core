@@ -107,8 +107,33 @@ What Phase 29 *does* pin is `receipt_body_sha256` + `receipt_signing_key_id`. A 
 receipt has BOTH new. So any future release manifest must pin the superseding pair, not the
 original — that is a seam consequence to surface, not to act on unilaterally.
 
-## Still to establish
+## M7 — CLOSED. Both established.
 
-1. Prove the verifier REJECTS a tampered superseding receipt before trusting it accepting a good
-   one (the instrument-carries-the-defect trap).
-2. Rust verification of both receipts — needs hetzner (no cargo on the Mac).
+1. **Tamper rejection proven, and the probe carried the defect first.** `probe-supersession-tamper.sh`
+   scored case 4 GREEN on its first run because `f28-verify-bindings.py` sets
+   `base = receipt.resolve().parent` and `resolve()` FOLLOWS SYMLINKS — the symlinked receipt in
+   the test farm redirected verification at the real phase directory, making every planted tamper
+   invisible. Fixed by copying the receipt under test as a real file. Final: 4 tampers rejected,
+   1 pristine control accepted, rc=0.
+2. **Rust: 28 passed / 0 failed / 0 ignored / 0 filtered** on hetzner-dsm, run BY FILE. Both
+   receipts verified in one run, each under its own key. Non-vacuity proven via `--nocapture`
+   (both new tests early-`return` when the file is absent, so exit status alone would not have
+   distinguished a skip). Failure proven by appending ONE newline to the superseded receipt:
+   27 passed / 1 failed, the single failure being my assertion, restore → 28/0.
+
+## M8 — final state
+
+- original receipt sha256 `c4ab82ae…` == its value at base `1b9f148f`. **Untouched, verified by
+  `git diff --name-only` returning empty AND by shasum both sides.**
+- superseding receipt `body_sha256` `8db1ef07600f644166b422956b13b4f9b5d75af5dc7d0822aa7a4a16746116fb`,
+  key_id `phase-28-certification-supersession-001-2026-07-29`, gate `true`.
+- shared fence (`wcore-cli/src/lib.rs`, `main.rs`) diffed against merge-base `1b9f148f`: **empty**.
+- no files deleted anywhere in the lane; all 10 deletions are replaced lines inside
+  `f28-build-receipt.py`.
+
+### One honest non-result
+
+`lint-plan-gates.py evidence/28-receipt` returns `0 plan(s), 0 gate(s) examined: 0 HIGH`. That is
+a **vacuous pass** — this lane authored no PLAN.md, so the linter had nothing to examine. It is
+recorded here so the rc=0 is not mistaken for a lint result. This is the same class as the
+zero-execution suites the phase inventoried; the honest reading is "not applicable", not "clean".
