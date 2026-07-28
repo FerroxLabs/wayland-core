@@ -1,0 +1,7 @@
+VERIFY_START Tue 07/28/2026 21:47:12.12 
+JOURNEY VERIFIED platform=windows commit=978f49d778ce74cd5777d153866d734b16bbf705 steps=17 submitted=12 arrived=12 unique=12 duplicates=0 losses=0
+GOOD_RC=0 
+wayland-journey: receipt records platform "windows", expected "linux"
+WRONGPLATFORM_RC=1 
+wayland-journey: receipt records candidate commit "978f49d778ce74cd5777d153866d734b16bbf705", expected "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+WRONGCOMMIT_RC=1 
