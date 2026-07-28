@@ -188,9 +188,14 @@ route was unreachable. Fixed at `9fe6ad86`. Same shape as the `[browser.policy]`
 
 ## 6. Do first, next session
 
-1. **Merge the four running lanes as they report**, verifying each rather than trusting it.
-2. **Continue Phase 30 serially** — 30-02 → 30-03 → 30-04. 30-03 is where positioning is decided;
-   30-01 and 30-02 deliberately decline to position.
+1. ~~**Merge the four running lanes as they report**~~ — **DONE.** Ten lanes dispatched overnight,
+   eight merged, each verified rather than trusted.
+2. ~~**Continue Phase 30 serially**~~ — **DONE through 30-03; 30-04 is running.**
+   **This line was WRONG as written:** it said *"30-03 is where positioning is decided."* It is not.
+   **The verdict is 30-04's, and 30-03's plan forbids it twice.** I carried the error into the
+   30-03 dispatch brief; the lane reconciled it by fixing the **claim boundary** any position must
+   live inside, and said so instead of quietly obeying. **Third time overnight a lane was right
+   against my brief** — see §2a.
 3. **One contract regeneration over the merged tree** once the wave settles — never per-lane
    (`CLASS-CONTRACT-01`). Desktop must re-pin in the same train.
 4. **Do not treat the 11 can-ship-open criteria as blocking.** That is precisely what turned
