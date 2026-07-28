@@ -318,3 +318,29 @@ live epoch, so once a successor claims epoch 2, a resurrected epoch-1 owner's
 termination is refused. The missing half is only the liveness evidence that says the
 old owner is gone — which is what a lease is. Fixing next, mirroring the ledger's
 proven design rather than inventing a second one.
+
+---
+
+## M8 — close-out
+
+HIGH from M7 FIXED (`84228e92` lease, `bc047d56` `--lease` wiring), and the fix was
+re-proven live: kill -9 → 9 descendants → 0 → restart REFUSED while the lease was live
+(`EARLY_RC=1`) → past the lease, superseded, 4/4 completed, terminated canonically at
+epoch 2 (`LATE_RC=0`, `cursor_seq=Some(48)`), effects 4/4 with the gate falsified
+(`--expect 99` → rc=1).
+
+`wcore-cli` shows 2 failures (`release_binary_smoke` /
+`plugin_discovery_e2e`, both `capabilities.browser_suite`). **Measured at BASE
+`0b16f867`: `4 tests run: 2 passed, 2 failed` — the same two.** Pre-existing; this lane
+touches no plugin-discovery code.
+
+`cargo check --workspace --all-targets` rc=0 / ERRCOUNT=0 — run deliberately because new
+`SessionEvent` variants are exactly the change class that breaks downstream exhaustive
+matches while a `-p` check stays green.
+
+Shared fence `crates/wcore-cli/src/{lib,main}.rs`: **untouched**, verified by
+`git diff $BASE --stat` against the captured SHA, never against the branch name.
+
+Verdict written to `22-C3-SUMMARY.md`: **Criterion 3 = PARTIAL**. The construction is
+real and structurally enforced over the Goal lifecycle; four of five engines have no
+product path through it, and engine invocation outside a Goal remains convention.
