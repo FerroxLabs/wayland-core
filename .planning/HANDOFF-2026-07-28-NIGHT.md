@@ -90,7 +90,7 @@ write-ups:
 |---|---|
 | `F24-C3-H2` | `run_gateway` builds no `InboundSubscriber` and no webhook host. Config says `enabled = true`; `rc=7`, nothing listening. Being fixed. |
 | `F-28-02-002` | Stale AppContainer lease = DoS. **OPEN at HIGH by choice** — 28-04 declined a MEDIUM re-score that a literal reading permitted, because the downgrade opens the accept path and passes the gate. |
-| `F29-02-H1` | `.cargo/audit.toml` silences RUSTSEC on a stated "sole path"; the graph has three. |
+| ~~`F29-02-H1`~~ | **CLOSED AT SOURCE, merged.** Suppression removed entirely (`ignore = []`), both vulnerable quick-xml versions gone from the lock. |
 | `F29-03-01` | `self-update` installs nothing until a trust root + manifest asset exist. Fail-closed by design. |
 
 ---
@@ -116,6 +116,15 @@ write-ups:
   every iteration, bound the loop, commit before any long wait. It killed six lanes today.
 - **The instrument that hunts a defect class tends to carry it — now eight times.** Run every
   checker against a known-positive *and* a known-negative before trusting it.
+- **A WITHDRAWN finding leg is not a settled one.** `F29-02-H1`'s calamine leg was withdrawn as
+  "wrong" because quick-xml 0.31.0 is "not named by either advisory". Nobody checked the advisory
+  metadata: both declare `patched = [">= 0.41.0"]` with **no `unaffected` range**, so every
+  version below 0.41.0 is in scope. `cargo audit` with the ignore list bypassed reports **4
+  vulnerabilities, not 2**. The withdrawal made a HIGH look smaller than it was, and it was
+  carried forward into a lane brief unchallenged. **Re-measure a withdrawal the same way you
+  re-measure a finding** — a correction is a claim too. The lane that caught this did so by
+  refusing an explicit instruction in its brief and showing the tool output instead; that is the
+  behaviour to want.
 
 ---
 
