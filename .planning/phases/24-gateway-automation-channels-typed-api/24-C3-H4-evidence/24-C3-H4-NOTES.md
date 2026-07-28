@@ -282,3 +282,5 @@ this finding.
 - [x] positive proof — inbound arrives (8/8 turns + replies) AND cron fires (1)
 - [x] gates
 - [ ] SUMMARY
+
+- [x] SUMMARY written — `24-C3-H4-SUMMARY.md`
