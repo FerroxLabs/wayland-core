@@ -132,9 +132,38 @@ Third independent sighting of the drop pattern → feeds T3.
 `WAYLAND_F23A_SELFTEST` exists (`f23a_boundary_drive.rs:21,41`) — control is
 present in source; whether it was ever made to FIRE is the open question.
 
-## T3 — dropped-findings sweep — IN PROGRESS
-Confirmed dropped so far (grep count in `.planning/BACKLOG.md` = 0 for each):
-F23A-01-M1, F23A-01-M2, F23A-01-M3 (MEDIUM), F23A-01-H2 (HIGH), plus 21-02 F-2.
+## T3 — dropped-findings sweep — INVENTORY COMPLETE
+
+Method: for each finding id named in `.planning/SEAM-REQUESTS/*.md` and in every
+summary containing "→ BACKLOG" / "filed to BACKLOG" / "goes to BACKLOG" /
+"logged to BACKLOG", `grep -c <id> .planning/BACKLOG.md`. Zero ⇒ dropped.
+
 Whole-phase gaps in BACKLOG: **Phase 22 = 0, 23A = 0, 23B = 0, 27 = 0** entries.
+By contrast Phase 28 = 63 and Phase 29 = 43 — those lanes DID file. So this is a
+per-lane discipline failure, not a broken process everywhere.
+
+### DROPPED — 18 findings, 2 of them HIGH
+
+| id | sev | source |
+|---|---|---|
+| (21-02 F-2) `max_iterations` unclamped | MEDIUM | 21-02-VACUITY-SUMMARY §5 |
+| F22-M1 | MEDIUM | SEAM-REQUESTS/22.md SR-22-1 |
+| F22-M2 | MEDIUM | SEAM-REQUESTS/22.md SR-22-2 |
+| F23A-01-M1 | MEDIUM | SEAM-REQUESTS/23A.md SR-23A-1 |
+| F23A-01-M2 | MEDIUM | SEAM-REQUESTS/23A.md SR-23A-1 |
+| F23A-01-M3 | MEDIUM | SEAM-REQUESTS/23A.md SR-23A-1 |
+| **F23A-01-H2** | **HIGH** | SEAM-REQUESTS/23A.md SR-23A-2 — **FIXED at `32a5fc90`** |
+| 23B-M1 … 23B-M4 | MEDIUM ×4 | SEAM-REQUESTS/23B.md SR-23B-04 |
+| **23B-H1** | **HIGH** | SEAM-REQUESTS/23B.md SR-23B-05 — still OPEN |
+| F24-01-M1, F24-01-M2 | MEDIUM ×2 | SEAM-REQUESTS/24.md SEAM-24-04 |
+| F24-01-L1 | LOW | SEAM-REQUESTS/24.md SEAM-24-04 |
+| F24-J-M1 | MEDIUM | 24-C5-FINISH-SUMMARY.md:273 |
+| F26-02-B, F26-02-E | MEDIUM ×2 | 26-02-SUMMARY.md:151,153 |
+| Phase 27 MCP tool-naming inconsistency | MEDIUM | 27-GAPS-SUMMARY.md:93-100, 254 |
+| Phase 27 pre-existing over-1000-line files | MEDIUM | SEAM-REQUESTS/27.md SR-27-4 |
+
+### PRESENT (control — proves the grep discriminates, not a tautology)
+F26-04-B, F26-04-C, F-28-02-003/004/005/006, F-28-01-R001, F-28C-01/02/03,
+F-KR-09, F29-03-04, F29-CEN-06 — all found with count ≥1.
 
 ## T4 — CRITERIA-GAP-LEDGER rows — not yet started
