@@ -724,6 +724,19 @@ fn escape_case(id: &str) {
         apply.combined()
     );
 
+    // And the escape reached NOTHING: no entry containing it was admitted to
+    // the store. A refusal reported to the operator over a store that took the
+    // content anyway is not a refusal.
+    let listed = t.run(&["migrate", "quarantined"]);
+    listed.assert_no_panic(&case.id);
+    assert_eq!(
+        listed.stdout.matches("reason:").count(),
+        0,
+        "case {id}: an item carrying a root escape was ADMITTED to the \
+         quarantine store:\n{}",
+        listed.stdout
+    );
+
     // Never followed: the escape targets are real system paths, so their
     // contents must not appear anywhere in what the product emitted.
     for leaked in ["root:x:", "/etc/shadow", "PATH=/usr"] {
@@ -979,7 +992,22 @@ fn hostile_deeply_nested_configuration_is_named_not_panicked() {
 // RESOURCE PRESSURE
 // ===========================================================================
 
-fn bounds_case(id: &str) {
+/// A refusal is a NAMED refusal that DENIES ADMISSION, and both halves are
+/// asserted.
+///
+/// The product's contract, established in 26-02, is that a surface past a
+/// ceiling is refused at `QuarantineStore::admit`, the refusal is reported to
+/// the operator verbatim (`… — refused: <reason>`), and the item still
+/// BALANCES in the accounting — a refusal is never a silent drop. So asserting
+/// `quarantined == 0` would flag correct behaviour: the refused item is
+/// accounted in the quarantined column while being absent from the store.
+/// What must be asserted instead is that the refusal was named AND that the
+/// offending surface did not reach the store.
+///
+/// `admitted_ceiling` is how many entries the store is allowed to hold
+/// afterwards — 0 when the whole offending item was refused, and the
+/// per-admission file ceiling when the case pushes an item COUNT past it.
+fn bounds_case(id: &str, admitted_ceiling: usize) {
     let (_out, manifest) = materialise(id);
     let case = case_of(&manifest);
     assert_eq!(case.expect, "refused");
@@ -990,40 +1018,56 @@ fn bounds_case(id: &str) {
     apply.assert_no_panic(&case.id);
 
     let text = apply.combined();
-    // The declared outcome is a REFUSAL that the operator is told about. Either
-    // the command fails with a named reason, or it succeeds having named the
-    // refused surface — silently importing it is the outcome this forbids.
-    let named = text.contains("too large")
-        || text.contains("too many")
-        || text.contains("exceeds")
-        || text.contains("refus")
-        || text.contains("ceiling")
-        || text.contains("limit");
     assert!(
-        named,
-        "case {id}: nothing in the output names a refusal, so an oversized \
-         surface was absorbed silently.\nexit={:?}\n{}",
-        apply.code, text
+        text.contains("refused:"),
+        "case {id}: nothing in the output names a refusal, so a surface past a \
+         ceiling was absorbed silently.\nexit={:?}\n{text}",
+        apply.code
     );
-    if let Some(acct) = Accounting::parse(&apply.stdout) {
-        assert!(acct.balances(), "case {id}: conservation broke: {acct:?}");
-        assert_eq!(
-            acct.quarantined, 0,
-            "case {id}: a surface past the ceiling was CONTAINED rather than \
-             refused, so the ceiling did not hold: {acct:?}"
-        );
-    }
+    assert!(
+        text.contains("exceeds"),
+        "case {id}: the refusal does not name the ceiling it hit, so an operator \
+         cannot tell what to do about it.\n{text}"
+    );
+    let acct = Accounting::parse(&apply.stdout)
+        .unwrap_or_else(|| panic!("case {id}: no Accounting line:\n{}", apply.stdout));
+    assert!(
+        acct.balances(),
+        "case {id}: a refusal must still balance — a refused item that vanishes \
+         from the accounting is a silent drop: {acct:?}"
+    );
+
+    // The half that proves the ceiling actually held: the store.
+    let listed = t.run(&["migrate", "quarantined"]);
+    listed.assert_no_panic(&case.id);
+    let admitted = listed.stdout.matches("reason:").count();
+    assert_eq!(
+        admitted, admitted_ceiling,
+        "case {id}: the store holds {admitted} entries but the ceiling permits \
+         {admitted_ceiling}. A refusal the operator is told about, over a store \
+         that took the content anyway, is not a refusal.\n{}",
+        listed.stdout
+    );
     assert_eq!(sentinel_before, t.sentinel_digest(), "sentinel changed");
 }
 
+/// A single member past the 4 MiB per-file ceiling: the whole item is refused,
+/// so the store must be EMPTY afterwards.
 #[test]
 fn hostile_oversized_member_hits_the_declared_refusal() {
-    bounds_case("bounds-oversized-member");
+    bounds_case("bounds-oversized-member", 0);
 }
 
+/// 600 executable items against a 512-file ceiling: the first 512 are admitted
+/// and every one past it is refused BY NAME. The ceiling is read from the
+/// product's own constant rather than retyped, so a change to it cannot make
+/// this test quietly assert the wrong number.
 #[test]
 fn hostile_excessive_item_count_hits_the_declared_refusal() {
-    bounds_case("bounds-item-count");
+    bounds_case(
+        "bounds-item-count",
+        wcore_cli::migrate::quarantine::MAX_QUARANTINE_FILES,
+    );
 }
 
 // ===========================================================================

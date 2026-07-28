@@ -142,6 +142,26 @@ pub fn build_plan(home: &Path, include_credentials: bool) -> Result<MigrationPla
             &mut mcp_conflicts,
             &mut deferred,
         )?;
+        // A document that PARSES but maps to nothing is the silently-empty
+        // result that reads as success. Found by the hostile case
+        // `malformed-deepnest`: a 400-level-deep YAML document carrying no key
+        // this importer recognises deserialises cleanly into an all-`None`
+        // config, and the profile was then reported as imported with no
+        // indication that nothing came with it. Named here rather than
+        // refused, because an operator whose peer profile genuinely inherits
+        // its model from elsewhere is not doing anything wrong — but they must
+        // be told, or they discover it later as missing functionality.
+        //
+        // The relative source path is used deliberately: a machine path in a
+        // warning would cross the same boundary 26-01 closed in the emitted
+        // plan.
+        if p.config.provider.is_none() && p.config.model.is_none() {
+            warnings.push(format!(
+                "profile {:?}: {}/config.yaml declares neither a provider nor a \
+                 model — imported empty",
+                p.name, p.source_path
+            ));
+        }
         profiles.push(p);
     }
 
