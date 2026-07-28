@@ -447,7 +447,7 @@ mod sys {
         // synchronous LockFileEx call.
         let ok = unsafe {
             LockFileEx(
-                file.as_raw_handle() as *mut c_void,
+                file.as_raw_handle(),
                 LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
                 0,
                 1,
