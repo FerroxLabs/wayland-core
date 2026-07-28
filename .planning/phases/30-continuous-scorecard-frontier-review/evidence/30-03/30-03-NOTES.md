@@ -83,6 +83,77 @@ The 6 UNPROVEN legs are `LEG-03/08/13` (security, all three tools) and `LEG-05/1
 - **`/usr/bin/cat` does not exist on this Mac** — it is `/bin/cat`. The plan's `/usr/bin/` list
   (git, grep, shasum, cut, wc) is correct; `cat` is not in it and must not be added.
 
+## 3b. MEASURED — `peer_delta` is still UNPROVEN on all 148 surface rows
+
+The brief asked me to establish this rather than assume it. Measured, not assumed:
+
+| Measurement | Command | Result |
+|---|---|---|
+| surface rows | `grep -cv '^#' evidence/30-01/surface-truths.tsv` | **148** |
+| rows carrying UNPROVEN | `grep -c UNPROVEN` (149 incl. the header comment) | **all 148** |
+| last commit touching the file | `rtk proxy git log -- surface-truths.tsv` | `4f749251` — **30-01's own commit** |
+
+So 30-02 did **not** move it. That is consistent rather than surprising: 30-02's comparatives are
+**dimension**-level (correctness / recovery / cost across three tools), while `peer_delta` is a
+**surface**-row truth. Nothing in 30-02 produced a per-surface peer comparison, so the honest
+state is unchanged: **`peer_delta` UNPROVEN on 148/148 rows.** It becomes a limitation, not a claim.
+
+## 3c. MEASURED — the other limitation inputs
+
+- **6 UNPROVEN legs**: `LEG-03/08/13` security (all three tools), `LEG-05/10/15` cognitive_tax.
+- **6 shipped commands owned by no coverage family** (30-01, MEDIUM): `init`, `mcp-serve`,
+  `models`, `profile`, `project-context`, `setup` — **15 surface rows**. Three of the six
+  (`setup`, `init`, `profile`) are first-run and credential-adjacent.
+- **2 UNRESOLVED evidence IDs**: `PEER-PROBE-2026-07-26` (HIGH — names no openable artifact yet
+  carries half the Delta column in six families) and `F05-TRUTH-{n}` (LOW — template, not instance).
+  Plus 1 PARTIAL: `F28-MATRIX-651`.
+- **Dependencies**: serde, serde_json, sha2, thiserror, anyhow, clap all already declared in
+  `wcore-eval-scenarios/Cargo.toml`. **No new dependency needed**, as the plan requires.
+
+## 3d. DESIGN DECISION — how a comparative claim is BOUNDED, and why it is not "interval only"
+
+This is the one genuine design tension in the plan and it is recorded because it is a judgement.
+
+**The tension.** The plan states the rule two different ways:
+- must_haves truth 3, first: the ledger sentences are correct *"because each is bound to a named
+  evidence ID, a pinned peer baseline and **a stated limitation**"*;
+- must_haves truth 3, second: *"a COMPARATIVE claim must carry a resolving evidence reference, a
+  pinned peer baseline and **a real interval**"*.
+
+These are not the same requirement, and **taken literally the second one refuses the mandatory
+controls**: the ledger's delta sentences are comparative and carry **no interval at all**, because
+they are structural observations of two pinned source trees, not sampled measurements. A census has
+no sampling variance; demanding an interval on it demands a meaningless number. But simply dropping
+the interval requirement would let the 0/30 correctness result be published as bare superiority,
+which is the exact sentence this plan exists to prevent.
+
+**The resolution: a comparative claim must be BOUNDED, and there are exactly two ways to be
+bounded — determined by scope, not by the author's choice.**
+
+| Evidence scope | Bounding requirement | Why |
+|---|---|---|
+| `SCRIPTED_HARNESS` / `LIVE_PROVIDER` | **a real interval**, and the directional rule applies | a sampled measurement has variance, so bounds are meaningful and mandatory |
+| `STATIC_SOURCE` | **an explicit unproven-qualifier in the claim text** | a census of two pinned trees has no variance; what makes it honest is that it withholds the assertion |
+
+**The loophole this could open is closed by scope containment, not by trust.** A claim resting on
+the trial legs cites `SCRIPTED_HARNESS` evidence, and containment then forces the claim's own scope
+to `SCRIPTED_HARNESS` — so it lands in row 1 and the interval is mandatory. It cannot relabel itself
+`STATIC_SOURCE` to reach row 2, because its evidence's scope does not contain that claim. The two
+rules interlock; neither works alone.
+
+A `STATIC_SOURCE` comparative with **no** qualifier is refused as `unbounded_superiority`. So
+*"Wayland is architecturally superior to Hermes"* is refused even at static scope, while
+*"Core architectural lead, operationally unproven"* is accepted. That is the distinction the plan
+is actually reaching for, and it is what makes the checker a classifier rather than a word ban.
+
+**Consequence I am recording rather than hiding:** the ledger fragment the plan quotes as
+*"this is Core's clearest unique capability"* is refused **when quoted alone**, because severed from
+its family's `runtime certification required` qualifier it is an unhedged superlative. Quoted with
+its qualifier it is accepted. I have four verbatim ledger controls that pass, so the plan's floor of
+two accepted controls is met without weakening the rule. The severed-fragment case is carried in the
+attack corpus as a finding in its own right: **truncating a hedge is itself a way to manufacture an
+unsupported claim**, and it is worth having a rule fire on it.
+
 ## 4. Still to establish
 
 - `peer_delta` state across the 148 surface rows — 30-01 had it UNPROVEN on all of them; the brief
