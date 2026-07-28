@@ -1,0 +1,3 @@
+123:PANEL_POSITION=FIXED
+124-The original finding specifically cites a persistent Denial of Service, which independent hardware verification confirms is fully resolved by the new quarantine mechanism. The untested defect pertains solely to a newly introduced, secondary operator disclosure feature rather than the core DoS mitigation. Because the repaired state strictly dominates the vulnerable baseline—which also failed to revoke grants and provided zero disclosure during manual remediation—the primary threat is demonstrably neutralized. The missing test coverage for the reporting branch is a distinct quality assurance defect, not a failure to remediate the documented high-severity vulnerability.
+125-Hook system message: [ijfw] Session 10 complete (0 memory entries).

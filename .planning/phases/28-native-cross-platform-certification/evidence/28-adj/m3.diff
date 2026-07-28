@@ -1,0 +1,32 @@
+--- crates/wcore-sandbox/src/backends/appcontainer/acl_lease.rs	2026-07-29 00:54:30
++++ /private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/acl_lease.m3.rs	2026-07-29 01:00:57
+@@ -766,23 +766,13 @@
+     // automatically. Refusing forever did not revoke them either — it only
+     // also disabled the sandbox — so quarantining strictly dominates, but the
+     // operator is told exactly what may remain.
+-    let residual = if lease.intents.is_empty() {
++    // M3 MUTANT (adjudication 28-adj): the residual-grant disclosure branch is
++    // deleted. The report now tells the operator NOTHING was left behind even
++    // when the reclaimed lease recorded un-revokable ACL grants. If the suite
++    // stays green, no test guards that disclosure.
++    let residual =
+         "It recorded NO filesystem ACL grant, so nothing was left behind on this machine."
+-            .to_string()
+-    } else {
+-        format!(
+-            "It recorded {} filesystem ACL grant(s) under a SID that cannot be \
+-             reconstructed from its digest, so they could NOT be revoked automatically \
+-             and may remain on: {}. Review those paths.",
+-            lease.intents.len(),
+-            lease
+-                .intents
+-                .iter()
+-                .map(|intent| intent.path.as_str())
+-                .collect::<Vec<_>>()
+-                .join(", ")
+-        )
+-    };
++            .to_string();
+     format!(
+         "RECLAIMED a stale AppContainer ACL lease: {reason}, and its owning process {} is \
+          gone. This was persistent on-disk state — NOT a platform limitation, NOT an SSH \

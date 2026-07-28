@@ -123,7 +123,7 @@ A2 crossing raised by 28-02 itself: Criterion 1's subject matter is the hostile 
 
 **Executable check.** cargo nextest run -p wcore-cli --test sandbox_activeness (2/2) and --lib -E 'test(sandbox_cmd)' (6/6); re-run matrix evidence/28-03/macos-cells.json 216/216 with activeness observed on all 24 sandbox cells; mutation test - probe rewired through a raw shell yields 1 passed 1 FAILED
 
-### `F-28-02-002` — OPEN
+### `F-28-02-002` — FIXED
 
 the stale AppContainer lease wedge is a PERSISTENT DENIAL OF SERVICE: a file nobody knows to look for permanently refuses all sandboxed execution, with a message that reads like a platform limitation
 
@@ -134,9 +134,20 @@ the stale AppContainer lease wedge is a PERSISTENT DENIAL OF SERVICE: a file nob
 | Phase 28 re-score | **HIGH** |
 | Contradicted criterion | none |
 | Dispositions available | `FIXED,DISPROVED` |
-| Disposition | **OPEN** |
+| Disposition | **FIXED** |
+| Re-adjudicated by | `28-ADJUDICATION.md` (lane `28-adj`, independent of the lane that authored the repair) |
 
-OPEN, and this is the finding that prevents the acceptance gate from passing. Scored HIGH by 28-02 (not CRITICAL, because the measured behaviour is fail-closed), and I did NOT re-score it. A literal reading of the contract's section 3.1 bands is arguable at MEDIUM - it contradicts no criterion, the Windows matrix passed 219/219 in the as-found state, and the wedged state was reached only by the control - and MEDIUM would open ACCEPTED and DEFERRED. That downgrade is declined DELIBERATELY: re-scoring a finding downward so its accept path opens is one of the three named forgeries an adjudication plan is most exposed to, and doing it here would convert the one blocking finding into paperwork. It is therefore left at the severity Phase 28's own plan 02 gave it, with only FIXED or DISPROVED available, and neither is reachable in this plan because repairing a production defect is outside its scope by design. A later reader may reopen the score deliberately; they should read this row first.
+**Re-adjudicated FIXED on 2026-07-29 by an independent lane that did not author the repair** (`28-ADJUDICATION.md`). The row below records what was tried against the FIXED claim, not what the repair's own summary asserted.
+
+The repair is genuinely merged, which was checked first because the authoring lane's summary still says it is not: `15821c03` and `3f3f93dc` are both ancestors of the integration branch, and the whole `acl_lease` module is byte-identical to what was tested on hardware (sha256 `bc6bdac1`). A dead-owner lease that cannot reconcile against its own profile is now MOVED into a `quarantine` sub-directory and the recovery pass CONTINUES, instead of returning `Err` and aborting the pass on every later `ExecutionIdentity::start`.
+
+**What survived the attack.** `owner_is_live` is the FIRST statement in the per-lease loop, so it dominates all THREE mutating branches - profile deletion, reclamation and cleanup - not merely the reclaim path; the honour-when-alive leg is therefore stronger than the repair claimed for it. The quarantine allow-list is narrow and fails closed on every adjacent shape: only a real directory of that name is skipped, a junction or a plain file of that name still hard-errors, and no product code ever reads back out of that directory, so it introduces no writable surface and no trust crossing. The authoring lane's claim that dropping the allow-list kills only the re-entrancy test is CORRECT, and the reason - which that lane did not state - is that its mutation harness runs each test in its own process while the test lease root is keyed on process id; in the full suite, where all four share a root, the allow-list is guarded harder still.
+
+**What did not survive, and is filed rather than absorbed.** The predicted fourth self-passing gate exists and is now MEASURED. The test named `reclamation_reports_grants_it_could_not_revoke` does not test that: it never calls `reclamation_report`, and its assertion is satisfied by the file move preserving contents. Mutant `M3`, which deletes the residual-grant disclosure so an operator is told nothing was left behind while un-revokable ACL grants remain, leaves the suite at **133 passed, 0 failed, 23 ignored** - byte-identical to pristine. That is `F-28-ADJ-001`, and it is NOT folded into this row: the disclosure is a secondary property of the repair rather than this finding's subject, and even with zero disclosure the repaired state strictly dominates refusing forever, which never revoked those grants either and whose documented remedy - delete the file by hand - disclosed nothing at all. The finding's own message clause IS pinned, by `a_leaked_test_lease_is_diagnosed_by_name`, which asserts the remedy and all three denied false explanations; that is precisely what defeated the internal pass arguing to keep this row OPEN.
+
+**Severity was not touched and no accept path was opened.** The deliberate refusal to downgrade to MEDIUM, recorded by 28-04 and preserved here, still stands: this row reaches a terminal disposition by repair on hardware, which is the only route the contract left open at HIGH. Cross-audit 3/3 FIXED (codex `gpt-5.6-sol`, gemini `3.1-pro`, kimi K3), with the dissent recorded in the adjudication. `KR-05` is NOT closed by this: the `default_for_platform()` residual remains held by `F-28-04-002` (DEFERRED), which this repair narrows but does not moot, since a lease can still wedge through doors this repair did not open.
+
+**Executable check.** independent re-measurement on `SeanDesktop` at `3f3f93dc` (byte-identical to integration HEAD): pristine `wcore-sandbox --lib` = 133 passed, 0 failed, 23 ignored, and mutant `M3` = the SAME 133/0/23 with `MUT_COMPILED=True` and `APPLIED_SHA256=8dc05b5c`, which is what proves `F-28-ADJ-001` (`evidence/28-adj/m3.log`, `m3.diff`, `adj-m3.ps1`); lane 28-h2 mutants M1 (allow-list removed -> `quarantine_directory_does_not_become_a_second_wedge` FAILED) and M2 (`owner_is_live` bypassed -> `live_owner_unreconcilable_lease_is_honoured_not_reclaimed` FAILED) at `evidence/28-h2/mutate2-m1.log` and `mutate2-m2.log`; before/after hardware repro at `evidence/28-h2/repro-before.log` (wedged: refused, `ran=False`, twice, permanent) versus `repro-head.log` (reclaimed in flight, `Exit code: 0`, `F28H2RAN`); `live_owner_is_never_reclaimed` and `killed_owner_is_recovered_before_next_execution` ok under `WAYLAND_SANDBOX_LIVE_WINDOWS=1` against a real `CreateAppContainerProfile` identity (`evidence/28-h2/final.log`)
 
 ### `F-28-04-001` — FIXED
 
@@ -1170,7 +1181,7 @@ Architectural impossibility, not a defect in the candidate: no budget fixes it. 
 python3 .planning/scripts/f28-ledger.py --self-test
 P=.planning/phases/28-native-cross-platform-certification
 python3 .planning/scripts/f28-ledger.py --validate $P/evidence/28-04/findings.tsv --allow-open
-python3 .planning/scripts/f28-ledger.py --validate $P/evidence/28-04/findings.tsv   # MUST fail: F28L-002
+python3 .planning/scripts/f28-ledger.py --validate $P/evidence/28-04/findings.tsv   # now PASSES: see below
 python3 .planning/scripts/f28-ledger.py --check-a2 $P/evidence/28-04/findings.tsv
 python3 .planning/scripts/f28-ledger.py --check-downgrades $P/evidence/28-04/findings.tsv
 python3 .planning/scripts/f28-ledger.py --check-backlog-ids $P/evidence/28-04/findings.tsv .planning/BACKLOG.md
@@ -1179,9 +1190,37 @@ python3 .planning/scripts/f28-ledger.py --check-completeness $P/evidence/28-04/f
     $P/evidence/28-03/candidate.json $P/evidence/28-01/known-red.tsv
 ```
 
-The strict `--validate` **must fail with exactly one `F28L-002` on `F-28-02-002`**. A run in
-which it passes means either the finding was repaired or it was laundered, and the difference
-is the whole point.
+**The strict `--validate` used to fail with exactly one `F28L-002` on `F-28-02-002`. As of
+2026-07-29 it passes, and this paragraph records which of the two fork branches that is.**
+
+The original wording was: *"A run in which it passes means either the finding was repaired or it
+was laundered, and the difference is the whole point."* It was **repaired.** `F-28-02-002` was
+re-adjudicated `FIXED` by `lane/28-adj`, a lane independent of the one that authored the repair,
+against a merged fix re-measured on real Windows hardware; the row above carries the executable
+check and `28-ADJUDICATION.md` carries what was tried against the claim and failed to break it.
+No severity was downgraded and no accept path was opened — the two forgeries this ledger names.
+
+**Moving the row does not make the gate vacuous, and here is why that is checkable rather than
+asserted.** `F28L-002`'s ability to fire never depended on this production row. `--self-test`
+proves it against synthetic fixtures — `_ledger_row(disposition=OPEN)` under both `allow_open`
+settings (`f28-ledger.py:836`) — and reads `findings.tsv` not at all. A gate whose only proof of
+life is a permanently-broken production row is a gate nobody can ever satisfy, which is the
+opposite of the discipline. Three checks were run to prove the tooth is still in:
+
+```bash
+# 1. the rule still fires on a row with NO disposition
+sed '39s/\tFIXED\t/\t\t/' $P/evidence/28-04/findings.tsv > /tmp/nodisp.tsv
+python3 .planning/scripts/f28-ledger.py --validate /tmp/nodisp.tsv          # F28L-002, rc=1
+# 2. and on a row still OPEN
+sed '39s/\tFIXED\t/\tOPEN\t/' $P/evidence/28-04/findings.tsv > /tmp/open.tsv
+python3 .planning/scripts/f28-ledger.py --validate /tmp/open.tsv            # F28L-002, rc=1
+# 3. and FIXED without an executable check is still rejected, so this row could not be
+#    laundered by simply writing FIXED into it
+python3 .planning/scripts/f28-ledger.py --validate /tmp/noevidence.tsv      # F28L-008, rc=1
+```
+
+All three were measured red before this paragraph was written; the transcript is in
+`evidence/28-adj/gate-falsification.log`.
 
 **And read the dissent first.** `28-01-decision-evidence/decision-dissent.txt` says in terms:
 *if a future plan, executor or reviewer keeps the four dispositions but drops or softens A2 —
