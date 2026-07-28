@@ -150,9 +150,19 @@ short-circuit the count checks.
 Two runs were dispatched on `lane/28-cleanup`: **30362524522** and **30363073170**.
 
 **Honest status: at the time of writing both are still `queued` — no macOS runner had picked
-them up ~35 minutes after dispatch.** I have therefore **not** obtained a macOS result, and I am
-not claiming one. What changed is that the blocker is now a queue wait on known-present hardware
-rather than an asserted absence of a machine. `28-04` should read the two run IDs above.
+them up ~50 minutes after dispatch, across 9 polls.** I have therefore **not** obtained a macOS
+result, and I am not claiming one.
+
+The cause is *not* the macOS runner class, and I checked rather than assumed. The repository's
+whole Actions queue is saturated while five lanes push concurrently: `ci.yml` runs
+`30363995482` and `30363993960` were `pending` at the same moment, and `30363828443` /
+`30363077139` were `cancelled` outright. This workflow deliberately declares no `concurrency`
+group, so it is not being cancelled — only queued behind everything else.
+
+So the blocker moved from *"no such machine exists"* (false) to *"a queue wait on known-present
+hardware"* (measured). **`28-04` should read runs 30362524522 / 30363073170 — they will complete
+without further action.** If the queue is still saturated then, re-dispatch is a single
+`gh workflow run` once this branch reaches the default branch.
 
 One mechanical finding worth carrying forward: `gh workflow run` returns
 `HTTP 404: workflow not found on the default branch`, because the REST API resolves a dispatchable
