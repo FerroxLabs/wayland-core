@@ -224,6 +224,27 @@ A measured refusal is a result. If your investigation concludes the thing is not
 conclusion — with the call sites that make it so — is the deliverable. Write it down and commit
 it *before* you attempt the build, not after it fails.
 
+### 6b-ii. Noting a gate defect without fixing the instrument is not a fix
+
+**Measured 2026-07-29, and it is the cleanest demonstration this program has produced.** A lane
+recorded an under-detection in its own harness — a console line wrap put a newline inside the
+phrase its matcher searched for, so the matcher reported absence while the raw log contained the
+string four times. It **wrote the defect up and moved on without repairing the harness**. Its next
+lane hit **the identical defect again**, reporting `size_error=False` against a log containing the
+error four times.
+
+So:
+
+- **When you find a defect in your own instrument, repair the instrument in the same lane.** A
+  written-up instrument defect is a defect you have agreed to keep.
+- **Give the repaired instrument a self-test with three assertions, not two:** known-positive
+  passes, known-negative fails, **and the old broken matcher would have missed it**. That third
+  assertion is the only one that proves the repair does anything — without it the self-test passes
+  on the broken instrument too.
+
+This is the eleventh recorded instance of an instrument carrying the defect class it hunts, and the
+first proven to have **recurred because the earlier sighting was documented rather than fixed**.
+
 **Two more measurement traps established the same day, both of which silently destroy a
 result rather than failing loudly:**
 
