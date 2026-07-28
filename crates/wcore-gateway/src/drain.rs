@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::ledger::{DeliveryLedger, LedgerError};
+use crate::ledger::{AbandonReason, DeliveryLedger, LedgerError};
 
 /// How a drain ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,9 +171,13 @@ impl DrainController {
         if outcome == DrainOutcome::Forced {
             abandoned = ledger.pending();
             for id in &abandoned {
-                // Recorded durably, so a restart sees an abandonment rather
-                // than inferring a loss from an absent record.
-                ledger.abandon(id)?;
+                // Recorded durably WITH ITS REASON, so a restart sees an
+                // abandonment rather than inferring a loss from an absent
+                // record — and so `gateway abandoned` can tell an operator
+                // that this one ran out of shutdown budget (safe to re-run)
+                // rather than having an unknown fate (must be checked at the
+                // destination first).
+                ledger.abandon(id, AbandonReason::DrainBudgetExpired)?;
             }
             abandoned_turns = self.turns_in_flight();
         }

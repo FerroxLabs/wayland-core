@@ -84,7 +84,10 @@ fn a_crash_mid_attempt_still_delivers_exactly_once_after_restart() {
     let mut ledger = DeliveryLedger::open(dir.path()).expect("open ledger");
     for id in &ids {
         assert!(
-            matches!(ledger.accept(id).expect("accept"), Accept::Accepted),
+            matches!(
+                ledger.accept(id, Some("ops-room")).expect("accept"),
+                Accept::Accepted
+            ),
             "a first accept of {id} must be Accepted"
         );
     }
@@ -163,7 +166,7 @@ fn a_provably_settled_delivery_is_not_re_performed() {
     let mut sink = Sink::new(dir.path());
 
     let mut ledger = DeliveryLedger::open(dir.path()).expect("open");
-    ledger.accept("only").expect("accept");
+    ledger.accept("only", Some("ops-room")).expect("accept");
     ledger.begin_attempt("only").expect("attempt");
     assert!(sink.deliver("only"));
     ledger.settle("only", true).expect("settle");
@@ -186,8 +189,14 @@ fn a_provably_settled_delivery_is_not_re_performed() {
 fn re_accepting_a_known_id_is_reported_as_a_duplicate() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut ledger = DeliveryLedger::open(dir.path()).expect("open");
-    assert!(matches!(ledger.accept("x").unwrap(), Accept::Accepted));
-    assert!(matches!(ledger.accept("x").unwrap(), Accept::Duplicate));
+    assert!(matches!(
+        ledger.accept("x", Some("ops-room")).unwrap(),
+        Accept::Accepted
+    ));
+    assert!(matches!(
+        ledger.accept("x", Some("ops-room")).unwrap(),
+        Accept::Duplicate
+    ));
     assert_eq!(ledger.pending().len(), 1, "a duplicate creates no new work");
 }
 
@@ -202,14 +211,14 @@ fn the_ledger_is_bounded_under_sustained_delivery() {
 
     for i in 0..5_000 {
         let id = format!("s-{i}");
-        ledger.accept(&id).unwrap();
+        ledger.accept(&id, Some("ops-room")).unwrap();
         ledger.begin_attempt(&id).unwrap();
         ledger.settle(&id, true).unwrap();
     }
     // Two deliveries deliberately left unsettled — they must survive every
     // compaction no matter how old they are.
-    ledger.accept("survivor-a").unwrap();
-    ledger.accept("survivor-b").unwrap();
+    ledger.accept("survivor-a", Some("ops-room")).unwrap();
+    ledger.accept("survivor-b", Some("ops-room")).unwrap();
     ledger.begin_attempt("survivor-b").unwrap();
 
     let before = std::fs::metadata(DeliveryLedger::journal_path(dir.path()))
@@ -254,7 +263,7 @@ fn drain_closes_admission_first_then_reports_falling_counts_and_exits_clean() {
         "an admitting gateway admits turns"
     );
     for id in ["p1", "p2", "p3"] {
-        ledger.accept(id).unwrap();
+        ledger.accept(id, Some("ops-room")).unwrap();
     }
 
     assert!(ctl.is_admitting());
@@ -321,7 +330,7 @@ fn a_drain_over_budget_exits_forced_and_names_what_it_abandoned() {
     let _stuck = ctl
         .begin_turn()
         .expect("an admitting gateway admits a turn");
-    ledger.accept("never-settles").unwrap();
+    ledger.accept("never-settles", Some("ops-room")).unwrap();
     ledger.begin_attempt("never-settles").unwrap();
 
     ctl.close_admission();
@@ -364,7 +373,7 @@ fn a_clean_drain_leaves_the_journal_durable() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut ledger = DeliveryLedger::open(dir.path()).expect("open");
     let ctl = DrainController::new();
-    ledger.accept("flushed").unwrap();
+    ledger.accept("flushed", Some("ops-room")).unwrap();
     ledger.begin_attempt("flushed").unwrap();
     ledger.settle("flushed", true).unwrap();
 

@@ -41,7 +41,7 @@ use wcore_cron::store::CronStore;
 use wcore_cron::{CronError, tick_once_at};
 
 use crate::drain::{DrainController, DrainOutcome, DrainReport};
-use crate::ledger::{Accept, DeliveryLedger, DeliveryState, LedgerError};
+use crate::ledger::{AbandonReason, Accept, DeliveryLedger, DeliveryState, LedgerError};
 use crate::lifecycle::{GatewayState, LifecycleError, Transition};
 
 #[derive(Debug, thiserror::Error)]
@@ -101,6 +101,20 @@ fn is_delivery(target: &Target) -> bool {
     matches!(target, Target::Channel { .. })
 }
 
+/// The destination an operator would name for this target.
+///
+/// The channel NAME only — never the message text. The body is recoverable
+/// from the cron job the delivery id identifies, and copying bodies into the
+/// durable append-only ledger would give personal data a second home with its
+/// own retention and deletion obligations that the ledger has no business
+/// owning.
+fn destination_of(target: &Target) -> Option<&str> {
+    match target {
+        Target::Channel { channel_name, .. } => Some(channel_name.as_str()),
+        _ => None,
+    }
+}
+
 /// Take the ledger guard.
 ///
 /// A `std::sync` mutex rather than an async one, and deliberately so: no guard
@@ -143,7 +157,7 @@ impl JobHandler for LedgeredHandler {
         {
             let mut l = lock(&self.ledger);
             match l
-                .accept(&id)
+                .accept(&id, destination_of(target))
                 .map_err(|e| CronError::Dispatch(e.to_string()))?
             {
                 Accept::Accepted => {}
@@ -173,16 +187,29 @@ impl JobHandler for LedgeredHandler {
                     // terminal, and nameable by an operator. That is the honest
                     // outcome — a delivery whose fate is genuinely unknown must
                     // be surfaced, not guessed at in either direction.
+                    //
+                    // "Nameable" is `wayland-core gateway abandoned`. Until
+                    // that surface existed this arm's only trace was the
+                    // `tracing::warn!` below, which an unattended gateway
+                    // writes to a log nobody is reading — the abandonment was
+                    // recorded and terminal but NOT nameable, so a message the
+                    // product had decided not to send left nothing an operator
+                    // could query. The reason is persisted with it because a
+                    // fate-unknown abandonment must be checked at the
+                    // destination before anything is re-sent, unlike a
+                    // drain-budget one.
                     if !destination_dedupes
                         && matches!(l.state(&id), Some(DeliveryState::Attempted))
                     {
-                        l.abandon(&id)
+                        l.abandon(&id, AbandonReason::OutcomeUnknownNoDedup)
                             .map_err(|e| CronError::Dispatch(e.to_string()))?;
                         l.flush().map_err(|e| CronError::Dispatch(e.to_string()))?;
                         tracing::warn!(
                             delivery = %id,
+                            destination = destination_of(target).unwrap_or("unknown"),
                             "delivery outcome is unknown and this destination cannot \
-                             recognise a replay; abandoning rather than duplicating it"
+                             recognise a replay; abandoning rather than duplicating it. \
+                             Query it with `wayland-core gateway abandoned`"
                         );
                         return Ok(());
                     }
@@ -534,7 +561,7 @@ mod tests {
         // starting from empty.
         {
             let mut l = lock(&ledger);
-            l.accept(&id).unwrap();
+            l.accept(&id, Some("ops-room")).unwrap();
             l.begin_attempt(&id).unwrap();
         }
 
@@ -548,8 +575,28 @@ mod tests {
         assert_eq!(
             lock(&ledger).state(&id),
             Some(DeliveryState::Abandoned),
-            "it is recorded terminally and nameable, not silently dropped"
+            "it is recorded terminally, not silently dropped"
         );
+
+        // ...and NAMEABLE, which is a separate claim this assertion used to
+        // make without checking. `state()` is an in-process lookup by an id the
+        // test already had; it cannot show that an operator who does NOT know
+        // the id can find the delivery. That takes the read path.
+        let named = lock(&ledger).abandoned();
+        assert_eq!(named.len(), 1, "exactly one abandonment must be findable");
+        assert_eq!(named[0].id, id, "and it must name the message");
+        assert_eq!(
+            named[0].destination.as_deref(),
+            Some("ops-room"),
+            "and where it was going"
+        );
+        assert_eq!(
+            named[0].reason,
+            Some(AbandonReason::OutcomeUnknownNoDedup),
+            "and why it was given up on — a drain-budget abandonment is safe to \
+             re-run, this one may already have landed"
+        );
+        assert!(!named[0].at.is_empty(), "and when");
     }
 
     /// The other half: where the destination CAN recognise a replay, the retry
@@ -572,7 +619,7 @@ mod tests {
         let id = fire.delivery_id();
         {
             let mut l = lock(&ledger);
-            l.accept(&id).unwrap();
+            l.accept(&id, Some("ops-room")).unwrap();
             l.begin_attempt(&id).unwrap();
         }
 
@@ -601,7 +648,7 @@ mod tests {
         let id = fire.delivery_id();
         {
             let mut l = lock(&ledger);
-            l.accept(&id).unwrap();
+            l.accept(&id, Some("ops-room")).unwrap();
             l.begin_attempt(&id).unwrap();
             l.settle(&id, true).unwrap();
         }
