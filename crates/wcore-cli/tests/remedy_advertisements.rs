@@ -286,7 +286,7 @@ fn keyval_re() -> Regex {
     // pattern without the CLOSING backtick recovered nothing at all from case
     // 5's own pre-fix string -- measured, this test file's first run.
     Regex::new(
-        r#"(?:^|[^\w.\-])`?([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)`?\s*(?:=|\sto\s)\s*`?("[^"]*"|\[[^\]]*\]|true|false|-?\d+)"#,
+        r#"(?:^|[^\w.\-])(`?)([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)`?\s*(=|\sto\s)\s*`?("[^"]*"|\[[^\]]*\]|true|false|-?\d+)"#,
     )
     .unwrap()
 }
@@ -299,6 +299,11 @@ struct Advertised {
     file: String,
     line: usize,
     context: String,
+    /// The whole string that carries this assignment. Kept because an operator
+    /// pastes the WHOLE snippet, not one key: checking keys one at a time
+    /// reported `missing field transport` against a snippet that supplies
+    /// `transport` two lines down. Also used for the admission rule.
+    carrier: String,
 }
 
 /// Bind each assignment to a section header POSITIONALLY.
@@ -342,9 +347,21 @@ fn advertised_assignments(text: &str, file: &str, line: usize, context: &str) ->
     let mut out = Vec::new();
     for cap in keyval_re().captures_iter(&masked) {
         let whole = cap.get(0).unwrap();
-        let key = cap[1].to_string();
-        let value = cap[2].to_string();
-        let at = cap.get(1).unwrap().start();
+        let backtick = !cap[1].is_empty();
+        let key = cap[2].to_string();
+        let is_to_form = cap[3].trim() == "to";
+        let value = cap[4].to_string();
+        let at = cap.get(2).unwrap().start();
+
+        // The prose `X to "Y"` form is loose enough to swallow ordinary English:
+        // the shipped string "storage.credentials.backend is set to \"plaintext\""
+        // yielded the key `set`, which then bound to a nearby header and reported
+        // a config key nobody ever advertised. So the `to` form requires a key
+        // that is dotted or explicitly backticked -- and case 5's real pre-fix
+        // wording ("set `credentials.backend` to ...") was both.
+        if is_to_form && !key.contains('.') && !backtick {
+            continue;
+        }
 
         let before = heads.iter().filter(|(s, _, _)| *s < at).next_back();
         let same_line_after = heads
@@ -365,6 +382,7 @@ fn advertised_assignments(text: &str, file: &str, line: usize, context: &str) ->
             file: file.to_string(),
             line,
             context: context.to_string(),
+            carrier: text.to_string(),
         });
     }
     out
@@ -454,12 +472,23 @@ fn schema_leaf_names(v: &serde_json::Value, out: &mut BTreeSet<String>) {
     }
 }
 
+/// Resolve a dotted path, descending into arrays.
+///
+/// Arrays matter: `[[hooks.pre_tool_use]]` is an array-of-tables, so the path
+/// `hooks.pre_tool_use.command` has to look INSIDE an element. Treating an array
+/// as a dead end reported three shipped hook snippets as unhonourable when they
+/// are correct.
 fn json_at<'a>(v: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
-    let mut cur = v;
-    for seg in path.split('.') {
-        cur = cur.as_object()?.get(seg)?;
+    fn go<'a>(cur: &'a serde_json::Value, segs: &[&str]) -> Option<&'a serde_json::Value> {
+        let Some((head, rest)) = segs.split_first() else {
+            return Some(cur);
+        };
+        match cur {
+            serde_json::Value::Array(items) => items.iter().find_map(|it| go(it, segs)),
+            _ => go(cur.as_object()?.get(*head)?, rest),
+        }
     }
-    Some(cur)
+    go(v, &path.split('.').collect::<Vec<_>>())
 }
 
 // ---------------------------------------------------------------- the checks
@@ -494,69 +523,110 @@ fn advertised_config_assignments_survive_the_real_loader() {
     let mut illustrative_reasons: Vec<String> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
 
+    // Group by the carrying string. An operator pastes a whole snippet, so the
+    // snippet is the unit under test: checking `mcp.servers.x.command` alone
+    // reported `missing field transport` against a snippet that supplies
+    // `transport` two lines further down -- a defect of the instrument, not the
+    // product.
+    let mut groups: Vec<(String, Vec<Advertised>)> = Vec::new();
     for adv in sweep_advertised() {
-        let root = adv.path.split('.').next().unwrap_or_default().to_string();
-        let leaf = adv.path.rsplit('.').next().unwrap_or_default().to_string();
+        match groups.iter_mut().find(|(c, _)| *c == adv.carrier) {
+            Some((_, v)) => v.push(adv),
+            None => groups.push((adv.carrier.clone(), vec![adv])),
+        }
+    }
 
-        // Admission. Either the root is a real ConfigFile field (so the path is
-        // about THIS product's config and any depth error inside it is a real
-        // defect), or the leaf name is one the schema knows and the carrying
-        // string is config-flavoured (which is how a WRONG root -- the case 1
-        // and case 5(a) defect shape -- gets admitted at all).
-        let admitted = roots.contains(&root) || leaves.contains(&leaf);
-        if !admitted {
+    for (carrier, advs) in groups {
+        // Rule A: the root is a real `ConfigFile` field, so the path is about
+        // THIS product's config and any depth or value error inside it is real.
+        // Rule B: the root is NOT a field -- which is the case 1 / case 5(a)
+        // defect shape itself -- so admit on the LEAF name being one the schema
+        // knows, but only from a string that is talking about configuration.
+        // Without rule B's second half, `[server] port = 8080` (a mock server in
+        // an eval scenario) and a cron tool's `skills=[]` parameter doc get
+        // admitted and red the gate on text that is perfectly correct.
+        let carrier_is_config_flavoured = carrier.to_lowercase().contains("config");
+        let admitted: Vec<&Advertised> = advs
+            .iter()
+            .filter(|a| {
+                let root = a.path.split('.').next().unwrap_or_default();
+                let leaf = a.path.rsplit('.').next().unwrap_or_default();
+                roots.contains(root) || (carrier_is_config_flavoured && leaves.contains(leaf))
+            })
+            .collect();
+        if admitted.is_empty() {
             continue;
         }
+        let adv = admitted[0];
 
-        let snippet = format!("{} = {}", adv.path, adv.value);
-        // Illustrative text (`proposers = ["provider", ...]`, `model =
-        // "{model}"`) is not literal TOML. Skip it, but ONLY when generic TOML
-        // rejects it -- if generic TOML accepts it and ConfigFile does not, that
-        // is exactly the case 5(b)/(c) defect and must red.
-        // `toml::from_str::<toml::Value>` and NOT `snippet.parse::<toml::Value>()`:
-        // under toml 1.x the `FromStr` impl rejected every one of these, so the
-        // first run of this gate skipped 36 of 36 candidates as "illustrative"
-        // and checked ZERO. The anti-vacuity floor below is the only reason that
-        // was visible instead of shipping as a green.
-        let generic = match toml::from_str::<toml::Value>(&snippet) {
-            Ok(v) => v,
-            Err(e) => {
-                illustrative_reasons.push(format!("{} :: {}", snippet, e));
-                illustrative += 1;
-                continue;
-            }
+        // Prefer the carrier VERBATIM when it is itself a well-formed TOML
+        // document (pasteable snippets: the browser hint, the `init` template,
+        // the eval-scenario configs). That preserves array-of-table syntax and
+        // sibling required fields, which a reconstruction destroys. Fall back to
+        // reconstructing dotted keys for prose remedies, which are not TOML.
+        // `toml::from_str::<toml::Value>` and NOT `str::parse::<toml::Value>()`:
+        // under toml 1.x the `FromStr` impl rejected every candidate, so the
+        // first run of this gate skipped 36 of 36 as "illustrative" and checked
+        // ZERO. The anti-vacuity floor below is the only reason that was visible
+        // instead of shipping as a green.
+        let reconstructed = admitted
+            .iter()
+            .map(|a| format!("{} = {}", a.path, a.value))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (snippet, generic) = match toml::from_str::<toml::Value>(&carrier) {
+            Ok(v) => (carrier.clone(), v),
+            Err(_) => match toml::from_str::<toml::Value>(&reconstructed) {
+                Ok(v) => (reconstructed.clone(), v),
+                Err(e) => {
+                    // Illustrative text (`proposers = ["provider", ...]`) is not
+                    // literal TOML. Skipping it is safe ONLY because generic
+                    // TOML rejected it: if generic TOML accepts it and
+                    // `ConfigFile` does not, that is exactly the case 5(b)/(c)
+                    // defect and it reds below.
+                    illustrative_reasons.push(format!("{reconstructed} :: {e}"));
+                    illustrative += admitted.len();
+                    continue;
+                }
+            },
         };
-        checked += 1;
+        checked += admitted.len();
 
-        let expected = serde_json::to_value(&generic)
-            .ok()
-            .and_then(|v| json_at(&v, &adv.path).cloned());
+        let as_generic = serde_json::to_value(&generic).ok();
 
         match toml::from_str::<ConfigFile>(&snippet) {
             Err(e) => failures.push(format!(
-                "{}:{} [{}] advertises `{}` -- the real loader REJECTS it, so an \
-                 operator who follows this text ends up with a config that will \
-                 not load at all: {}",
-                adv.file, adv.line, adv.context, snippet, e
+                "{}:{} [{}] advertises\n    {}\n  -- the real loader REJECTS it, so \
+                 an operator who follows this text ends up with a config that will \
+                 not load AT ALL, which is strictly worse than ignoring the advice: \
+                 {}",
+                adv.file,
+                adv.line,
+                adv.context,
+                snippet.replace('\n', "\n    "),
+                e
             )),
             Ok(cfg) => {
                 let round = serde_json::to_value(&cfg).expect("ConfigFile -> JSON");
-                match json_at(&round, &adv.path) {
-                    None => failures.push(format!(
-                        "{}:{} [{}] advertises `{}` -- it parses without error and \
-                         is then SILENTLY DISCARDED: `{}` does not exist in the \
-                         schema the loader reads. The operator gets no diagnostic \
-                         at all and the setting never takes effect.",
-                        adv.file, adv.line, adv.context, snippet, adv.path
-                    )),
-                    Some(got) => {
-                        if let Some(want) = expected {
-                            if *got != want {
-                                failures.push(format!(
-                                    "{}:{} [{}] advertises `{}` but the loader ends \
-                                     up holding {} at `{}`",
-                                    adv.file, adv.line, adv.context, snippet, got, adv.path
-                                ));
+                for a in &admitted {
+                    match json_at(&round, &a.path) {
+                        None => failures.push(format!(
+                            "{}:{} [{}] advertises `{} = {}` -- it parses without \
+                             error and is then SILENTLY DISCARDED: `{}` does not \
+                             exist in the schema the loader reads. The operator gets \
+                             NO diagnostic at all and the setting never takes effect.",
+                            a.file, a.line, a.context, a.path, a.value, a.path
+                        )),
+                        Some(got) => {
+                            let want = as_generic.as_ref().and_then(|v| json_at(v, &a.path));
+                            if let Some(want) = want {
+                                if got != want {
+                                    failures.push(format!(
+                                        "{}:{} [{}] advertises `{} = {}` but the \
+                                         loader ends up holding {} at `{}`",
+                                        a.file, a.line, a.context, a.path, a.value, got, a.path
+                                    ));
+                                }
                             }
                         }
                     }
