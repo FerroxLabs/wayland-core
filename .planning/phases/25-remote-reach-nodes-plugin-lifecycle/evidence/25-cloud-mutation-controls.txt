@@ -1,0 +1,26 @@
+########## CONTROL: PRISTINE must be ACCEPTED ##########
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.01s
+
+########## M1: drop the previous_state clause ##########
+test backends::cloud::tests::each_clause_reddens_alone ... FAILED
+test backends::cloud::tests::a_stop_start_cycle_is_refused_by_every_clause_independently ... FAILED
+test result: FAILED. 12 passed; 2 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.01s
+
+########## M2: drop the RAM-witness clause ##########
+test backends::cloud::tests::a_stop_start_cycle_is_refused_by_every_clause_independently ... FAILED
+test backends::cloud::tests::each_clause_reddens_alone ... FAILED
+test result: FAILED. 12 passed; 2 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.01s
+
+########## M3: drop the boot-id clause ##########
+test backends::cloud::tests::each_clause_reddens_alone ... FAILED
+test backends::cloud::tests::a_stop_start_cycle_is_refused_by_every_clause_independently ... FAILED
+test result: FAILED. 12 passed; 2 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.01s
+
+########## M4: drop the nonce tag from machine create ##########
+test backends::cloud::tests::a_created_machine_is_tagged_with_the_task_nonce ... FAILED
+test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.01s
+
+########## RESTORED: must be ACCEPTED again ##########
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.01s
+--- restoration check ---
+RESTORED CLEAN

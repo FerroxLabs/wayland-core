@@ -1,0 +1,36 @@
+=== HOST / DATE ===
+Ubuntu-2404-noble-amd64-base
+2026-07-28T08:15:43Z
+app: wayland-f25-test  (token variable name WAYLAND_F25_CLOUD_TOKEN; value never printed)
+
+=== create one machine, used for BOTH halves ===
+machine: 80e9e51a1d42d8
+
+############ HALF A — SUSPEND / START (the reference transition) ############
+--- before (state planted in guest RAM) ---
+{"stdout":"WITNESS=f25-witness-suspend\nBOOT_ID=080bbc1b-81f8-4090-a7b7-b48ef017128a\nUPTIME=1\n","stderr":"","exit_code":0,"exit_signal":0}
+--- suspend ---
+200
+{"ok":true}
+state read back from vendor after suspend: suspended
+--- start (resume) ---
+{"previous_state":"suspended","migrated":false,"new_host":""}
+--- after ---
+{"stdout":"WITNESS=f25-witness-suspend\nBOOT_ID=080bbc1b-81f8-4090-a7b7-b48ef017128a\nUPTIME=4\n","stderr":"","exit_code":0,"exit_signal":0}
+
+############ HALF B — STOP / START (the CONTROL, must NOT look like hibernation) ############
+--- before (state planted in guest RAM) ---
+{"stdout":"WITNESS=f25-witness-stop\nBOOT_ID=080bbc1b-81f8-4090-a7b7-b48ef017128a\nUPTIME=4\n","stderr":"","exit_code":0,"exit_signal":0}
+--- stop ---
+200
+{"ok":true}
+--- start ---
+{"previous_state":"stopped","migrated":false,"new_host":""}
+--- after ---
+{"stdout":"WITNESS=MISSING\nBOOT_ID=751ec4fb-e3c4-489c-823d-6170a4d497ab\nUPTIME=4\n","stderr":"","exit_code":0,"exit_signal":0}
+
+=== CLEANUP ===
+200
+{"ok":true}
+machines remaining in the app: 0 []
+CLEANUP_VERIFIED_EXIT=0

@@ -1,10 +1,16 @@
 # Phase 25 — status at hand-back (2026-07-27, lane/25)
 
-All four plans executed. **Two of four Success Criteria are MET.** Graded verbatim below.
+All four plans executed. Graded verbatim below.
 
 Branch: `lane/25` (worktree of `waylandcore-ferrox`, based on
 `plan/f20-unified-audit-repair` @ `de977949`, plus the coordinator's base
 `Cargo.lock` fix `9a86b287` cherry-picked so `--locked` works).
+
+**UPDATE 2026-07-28, `lane/25-cloud` @ `5e620ef0`.** The Fly credential arrived and the
+cloud leg was run. **Criterion 1 is now MET** and **Criterion 4's cloud half is closed**,
+leaving SSH as its only unmeasured surface. Criteria 2 and 3 are untouched by that lane and
+their gradings below stand as written. Detail: `25-CLOUD-SUMMARY.md`,
+`evidence/25-cloud-ledger.txt`.
 
 ---
 
@@ -24,8 +30,25 @@ Branch: `lane/25` (worktree of `waylandcore-ferrox`, based on
 > **1. The same task runs locally, in a container, over SSH, and on one hibernating cloud
 > backend with equivalent policy, receipts, cancellation, and cleanup.**
 
-**NOT MET** — unchanged from 25-01. Three of four surfaces. The cloud leg is unexercised
-for want of a credential only Sean can mint. Nothing in 25-02/03/04 changed this.
+**MET** — closed by `lane/25-cloud` on 2026-07-28 at `5e620ef0`, once Sean minted the Fly
+credential. See `25-CLOUD-SUMMARY.md` and `evidence/25-cloud-ledger.txt`.
+
+The cloud leg was **broken, not merely unexercised**: machine create sent no request body,
+no nonce metadata was ever set, and the task never ran on the machine — stdout was the
+submitted input echoed back by the controller. The last two would have produced a FALSE
+GREEN rather than a failure. All three are fixed.
+
+Cloud now reports `yes / vendor_api_call`, runs the reference task (exit 0, machine
+`8ed9d7dc3e5618`, terminal Success), and diffs **EQUIVALENT** against local and container at
+the same commit. Hibernation is observed as a genuine **suspend**, not a stop: a `/dev/shm`
+witness survived the transition and the guest `boot_id` was unchanged, while the stop/start
+control on the same machine lost the witness and changed the boot id. A separate provenance
+gate — a task reading a file only the guest has — proves the work ran on the machine rather
+than being echoed, which the equivalence diff alone cannot detect.
+
+QUALIFICATION: the **ssh** leg was not re-run at this commit (`WAYLAND_EXEC_SSH_TARGET`
+unset, 25-01's `f25-ssh-target` host entry gone). The four-surface claim is a composition
+across two commits: local + container + cloud proven together here, ssh proven at 25-01.
 
 > **2. Nodes pair, advertise capability, revoke, recover offline, and handle mixed versions
 > without losing authority attribution.**
@@ -49,22 +72,39 @@ all four negative cases holding and one divergence recorded PARTIAL. Detail:
 > **4. Compromised keys/plugins/backends and denied secret/egress paths fail closed with no
 > orphaned execution.**
 
-**NOT MET.** The fail-closed half holds: all five hostile cases refuse on both hosts with
-named verdicts, nonzero exits and no fallback. The no-orphan half holds for **local** and
-**container** only — **SSH and cloud report `NOT MEASURED`**, and those are precisely the
-two backends that inherit no proven reaping mechanism. Two of four surfaces unmeasured is
-not "across every reference backend".
+**NOT MET** — but the cloud half is now closed, leaving SSH as the only unmeasured surface.
+
+The fail-closed half holds: all five hostile cases refuse on both hosts with named verdicts,
+nonzero exits and no fallback. The no-orphan half holds for **local**, **container** and now
+**cloud**. **SSH alone still reports `NOT MEASURED`.**
+
+Cloud closed by `lane/25-cloud` on 2026-07-28 at `5e620ef0`. It previously could not have
+measured anything at all: machines were created with no metadata while the scan filtered on
+`metadata.wayland_task_nonce`, so the filter matched a key nothing carried and the scan would
+have returned an empty list unconditionally — a structural false zero. With the tag set, the
+scan is checked in both directions: a **real leaked machine** (`82d1d97b062338`, leaked by a
+`tail -1` parse defect in the lane's own script, not planted) was found as `count 1
+(MEASURED)` with its raw row and a nonzero exit; an unused nonce measures `0 (MEASURED)`;
+after the destroy the same nonce measures `0 (MEASURED)`; and the app is verified empty.
+
+SSH remains correct-but-unmeasured, and one unmeasured surface is still not "across every
+reference backend".
 
 ---
 
 ## What is genuinely broken or unresolved
 
-1. **The cloud credential** still blocks Criterion 1. Reserved to Sean.
-   (`evidence/25-01-cloud-credential-probe.txt`)
+1. ~~**The cloud credential** still blocks Criterion 1. Reserved to Sean.~~
+   **RESOLVED 2026-07-28** — Sean minted the credential; `lane/25-cloud` ran the leg and found
+   the backend was **broken, not merely unexercised** (three HIGH defects, two of which would
+   have produced a false green). All fixed. (`25-CLOUD-SUMMARY.md`)
 2. **No SSH trust between the two physical hosts** blocks the cross-machine half of
    Criterion 2. Reserved to Sean. (`25-03-NODE-EVIDENCE.md` §7)
-3. **SSH and cloud orphan surfaces are unmeasurable on the proof hosts**, which blocks
-   Criterion 4. They report `NOT MEASURED`, never zero.
+3. **The SSH orphan surface is unmeasurable on the proof hosts**, which blocks Criterion 4.
+   It reports `NOT MEASURED`, never zero.
+   The **cloud** orphan surface was closed on 2026-07-28 by `lane/25-cloud`: it is now
+   MEASURED, checked by a real leaked machine the scan found and by an unused nonce it
+   correctly measured as zero. (`evidence/25-cloud-orphan-control.txt`)
 4. **The Windows Job Object reaping mechanism is not proven** and is not claimed by this
    phase. The orphan claim is an observation and is INDEPENDENT of the escalated
    `live_future_drop_reaps_descendant_job_tree`.

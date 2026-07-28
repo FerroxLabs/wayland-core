@@ -1,0 +1,114 @@
+=== HOST / COMMIT ===
+Ubuntu-2404-noble-amd64-base
+2026-07-28T08:13:49Z
+commit: 5e620ef06487dc9477a2b10f2fe0045dd642c29d
+
+=== the leak, as the vendor sees it (independent instrument) ===
+http status: 200
+machine count: 1
+  82d1d97b062338 started {'wayland_task_nonce': 'f25-provenance-oracle'}
+
+########## POSITIVE CONTROL: the scan MUST find the leaked machine ##########
+orphan scan for task f25-provenance-oracle (nonce f25-provenance-oracle)
+
+  backend    cloud
+  mechanism  NONE: stopping a cloud machine is a vendor API call, not a kernel mechanism. ProcessTreeMechanism has no variant for it, and if the API call does not land the machine keeps running
+  method     GET /apps/<app>/machines?metadata.wayland_task_nonce=<nonce>
+  count      1 (MEASURED)
+  row        machine 82d1d97b062338 (aged-paper-9847) state=started
+
+  backend    container
+  mechanism  kernel-backed: ProcessTreeMechanism::DockerContainerReap — the container daemon force-removing the container and its whole tree
+  method     docker ps -a --filter label=wayland.task.nonce=<nonce>
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    local
+  mechanism  kernel-backed: ProcessTreeMechanism::LinuxPidNamespaceReap — the platform sandbox backend's PID namespace, with /proc descendant discovery
+  method     live-task registry UNION a real enumeration of the host process table
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    ssh
+  mechanism  BEST-EFFORT: a remote process group killed over the same ssh transport. ProcessTreeMechanism has NO variant that crosses an ssh connection, so nothing kernel-backed on the controller reaps the far end; a remote child that calls setsid survives
+  method     WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned
+  count      NOT MEASURED — the surface could not be enumerated (WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned), so no count exists — this is NOT zero orphans
+  rows       (none)
+
+TOTAL: 1 orphan(s) measured across 4 backend(s); 1 surface(s) NOT measured
+wayland-core backend: 1 orphaned execution surface(s) still carry nonce f25-provenance-oracle
+SCAN_WITH_LEAK_EXIT=1   (nonzero is REQUIRED here: an orphan exists)
+
+########## NEGATIVE CONTROL: a nonce nothing carries must measure 0, not fail ##########
+orphan scan for task f25-nonce-that-never-existed (nonce f25-nonce-that-never-existed)
+
+  backend    cloud
+  mechanism  NONE: stopping a cloud machine is a vendor API call, not a kernel mechanism. ProcessTreeMechanism has no variant for it, and if the API call does not land the machine keeps running
+  method     GET /apps/<app>/machines?metadata.wayland_task_nonce=<nonce>
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    container
+  mechanism  kernel-backed: ProcessTreeMechanism::DockerContainerReap — the container daemon force-removing the container and its whole tree
+  method     docker ps -a --filter label=wayland.task.nonce=<nonce>
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    local
+  mechanism  kernel-backed: ProcessTreeMechanism::LinuxPidNamespaceReap — the platform sandbox backend's PID namespace, with /proc descendant discovery
+  method     live-task registry UNION a real enumeration of the host process table
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    ssh
+  mechanism  BEST-EFFORT: a remote process group killed over the same ssh transport. ProcessTreeMechanism has NO variant that crosses an ssh connection, so nothing kernel-backed on the controller reaps the far end; a remote child that calls setsid survives
+  method     WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned
+  count      NOT MEASURED — the surface could not be enumerated (WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned), so no count exists — this is NOT zero orphans
+  rows       (none)
+
+TOTAL: 0 orphan(s) measured across 4 backend(s); 1 surface(s) NOT measured
+SCAN_UNUSED_NONCE_EXIT=0
+
+########## CLEANUP: destroy the leaked machine ##########
+200
+{"ok":true}
+DESTROY_ISSUED_FOR=82d1d97b062338
+
+########## POST-CLEANUP: the same scan must now measure ZERO ##########
+orphan scan for task f25-provenance-oracle (nonce f25-provenance-oracle)
+
+  backend    cloud
+  mechanism  NONE: stopping a cloud machine is a vendor API call, not a kernel mechanism. ProcessTreeMechanism has no variant for it, and if the API call does not land the machine keeps running
+  method     GET /apps/<app>/machines?metadata.wayland_task_nonce=<nonce>
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    container
+  mechanism  kernel-backed: ProcessTreeMechanism::DockerContainerReap — the container daemon force-removing the container and its whole tree
+  method     docker ps -a --filter label=wayland.task.nonce=<nonce>
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    local
+  mechanism  kernel-backed: ProcessTreeMechanism::LinuxPidNamespaceReap — the platform sandbox backend's PID namespace, with /proc descendant discovery
+  method     live-task registry UNION a real enumeration of the host process table
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    ssh
+  mechanism  BEST-EFFORT: a remote process group killed over the same ssh transport. ProcessTreeMechanism has NO variant that crosses an ssh connection, so nothing kernel-backed on the controller reaps the far end; a remote child that calls setsid survives
+  method     WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned
+  count      NOT MEASURED — the surface could not be enumerated (WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned), so no count exists — this is NOT zero orphans
+  rows       (none)
+
+TOTAL: 0 orphan(s) measured across 4 backend(s); 1 surface(s) NOT measured
+SCAN_AFTER_CLEANUP_EXIT=0   (zero is REQUIRED here)
+
+########## EMPTINESS PROOF: the app holds no machines at all ##########
+http status: 200
+machine count: 0
+raw: []
+APP_EMPTY_EXIT=0   (zero means the app genuinely holds no machines)
+
+=== EXIT LEDGER (each captured before any pipe) ===
+SCAN_WITH_LEAK_EXIT=1 SCAN_UNUSED_NONCE_EXIT=0 SCAN_AFTER_CLEANUP_EXIT=0 APP_EMPTY_EXIT=0

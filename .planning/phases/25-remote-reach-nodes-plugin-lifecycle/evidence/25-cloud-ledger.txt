@@ -1,0 +1,175 @@
+F25 LANE 25-cloud — VERDICT LEDGER
+HOST: hetzner-dsm (Ubuntu-2404-noble-amd64-base) — the authoritative Linux build/proof host
+COMMIT PROVED: 5e620ef06487dc9477a2b10f2fe0045dd642c29d (branch lane/25-cloud)
+DATE: 2026-07-28
+BINARY: ./target/release/wayland-core, mtime 1785211823 > cloud.rs mtime 1785211496 (FRESH — the
+        build is newer than its source, so it is not a stale artifact)
+CREDENTIAL: sourced from /root/.wayland-f25-cloud.env (0600). The token value appears in NO
+        evidence file — verified by grepping every committed artifact for the literal value on the
+        host that holds it: 0 files matched.
+APP SCOPE: wayland-f25-test, a dedicated app inside org sean-donahoe. See SCOPE NOTE below.
+
+=== CRITERION 1 — the fourth surface ===
+F25-SC1-CLOUD-AVAILABLE: PASS  probe=vendor_api_call detail="vendor API answered 200 for app
+        wayland-f25-test machine listing". Was `NO / credential_absent` at 25-01.
+        evidence=25-cloud-live-run.txt
+F25-SC1-CLOUD-RUN: PASS  exit=0 machine=8ed9d7dc3e5618 terminal=Success wall_ms=9745
+        evidence=25-cloud-live-run.txt, 25-cloud/receipt-cloud.json
+F25-SC1-CLOUD-RECEIPT-INTEGRITY: PASS exit=0 (body digest, event ordering, single terminal event)
+F25-SC1-CLOUD-HIBERNATION: OBSERVED — and observed as a SUSPEND, not a stop. See below.
+F25-SC1-NORMALIZED-DIFF: EQUIVALENT differing_fields=none, across local + container + cloud at
+        THIS commit. exit=0. evidence=25-cloud-live-run.txt
+F25-SC1-CLOUD-PROVENANCE: PASS — the task ran ON the machine, it was not echoed by the controller.
+        evidence=25-cloud-provenance.txt
+F25-SC1-SSH-AT-THIS-COMMIT: NOT RUN — WAYLAND_EXEC_SSH_TARGET is unset on hetzner-dsm and the
+        f25-ssh-target host entry 25-01 used no longer exists. The ssh surface PASSED at 25-01's
+        commit against a containerised sshd; it was NOT re-run here. The four-surface claim is
+        therefore a composition across two commits, and that is stated rather than smoothed over.
+F25-SC1-VERDICT: MET, with the ssh qualification recorded immediately above.
+
+=== THE HIBERNATION CLAIM, AND WHAT MAKES IT A SUSPEND ===
+Binding condition C1 (25-01-panel-dissent.txt): the reference transition is `suspend`; a
+`stop`/`start` cycle must NEVER be reported as hibernation.
+
+The receipt's hibernation field is `observed` and carries this transition list verbatim:
+    created:created
+    started:started
+    suspended:suspended
+    resumed:started previous_state=suspended
+    ram-witness before=f25-ram-witness-f25-reference-nonce
+                boot_id=d9b32269-d2e2-46cd-a840-6327465d7b04 uptime=1s
+              / after=f25-ram-witness-f25-reference-nonce
+                boot_id=d9b32269-d2e2-46cd-a840-6327465d7b04 uptime=3s
+
+STATE CARRIED ACROSS THE TRANSITION: a witness string written to /dev/shm — a tmpfs, so it lives
+in guest RAM and nowhere else — SURVIVED, and the guest kernel's boot_id was IDENTICAL on both
+sides. The machine did not come back; it resumed.
+
+F25-CLOUD-SUSPEND-VS-STOP-CONTROL: PASS — both transitions driven on ONE machine
+(80e9e51a1d42d8) minutes apart, so the transition is the only difference between the halves.
+evidence=25-cloud-suspend-vs-stop-control.txt
+
+    signal                  HALF A: suspend/start        HALF B: stop/start (control)
+    ----------------------  ---------------------------  ------------------------------
+    /dev/shm witness        f25-witness-suspend (KEPT)   MISSING (LOST)
+    guest boot_id           080bbc1b… -> 080bbc1b…       080bbc1b… -> 751ec4fb… (CHANGED)
+    guest uptime            1s -> 4s                     4s -> 4s
+    start previous_state    "suspended"                  "stopped"
+
+MEASURED WEAKNESS, RECORDED RATHER THAN OMITTED: in HALF B the uptime read 4s on BOTH sides by
+coincidence, so the uptime clause ALONE would not have caught that stop. The witness, the boot_id
+and previous_state each caught it. This is the concrete reason the discriminator uses four
+independent clauses instead of one, and it is evidence that a single-signal implementation would
+have produced a false green on this exact run.
+
+F25-CLOUD-DISCRIMINATOR-MUTATIONS: PASS — pristine ACCEPTED before and after; each mutation
+reddens exactly the tests claiming to cover it; file restored byte-for-byte.
+evidence=25-cloud-mutation-controls.txt
+    pristine                              14 passed / 0 failed
+    M1 drop previous_state clause         2 failed  (a_stop_start_cycle…, each_clause_reddens_alone)
+    M2 drop RAM-witness clause            2 failed  (same two)
+    M3 drop boot-id clause                2 failed  (same two)
+    M4 drop the nonce tag from create     1 failed  (a_created_machine_is_tagged_with_the_task_nonce)
+    restored                              14 passed / 0 failed, RESTORED CLEAN
+
+=== THE PROVENANCE GATE — why the equivalence diff is not sufficient on its own ===
+The reference task is `cat input.bin`, whose output is byte-identical to its own input. A backend
+that echoed the submitted input back would produce EXACTLY the artifact digest the other three
+backends produce, and `backend diff` would report EQUIVALENT while nothing ran in the cloud. That
+is what the old cloud backend did. So equivalence on the reference task is necessary but NOT
+sufficient, and a separate gate was required.
+
+F25-SC1-CLOUD-PROVENANCE: PASS. A task `cat /etc/alpine-release` — a file the Ubuntu controller
+does not have — was run through the shipped binary on both backends:
+    guest file, read by an INDEPENDENT instrument (raw API exec on a separate machine): "3.20.10\n"
+    sha256(guest file)            = bf4e4df148b791a0915b623982122ab212b50e0a4b363a8b75fe60e12293ac17
+    sha256(submitted input)       = 0f7545d631dd44c993749b9ba2f66684427ca7eb761223e1adeccde7713c2370
+    cloud receipt artifact sha256 = bf4e4df148b791a0915b623982122ab212b50e0a4b363a8b75fe60e12293ac17
+    NEGATIVE CONTROL — same task on local: terminal=Failure{exit-1}, artifact=None
+The cloud artifact is the GUEST's file and is not the echo digest, and the controller cannot
+perform the task at all. The task ran on the cloud machine.
+
+=== CRITERION 4 — the cloud orphan surface ===
+F25-SC4-CLOUD-ENUMERABLE: PASS — the cloud surface now reports MEASURED counts instead of
+        NOT MEASURED. method="GET /apps/<app>/machines?metadata.wayland_task_nonce=<nonce>"
+F25-SC4-CLOUD-POSITIVE-CONTROL: PASS — scan found a REAL leaked machine.
+        count=1 (MEASURED), row="machine 82d1d97b062338 (aged-paper-9847) state=started",
+        scan exit=1 (nonzero REQUIRED — an orphan existed). evidence=25-cloud-orphan-control.txt
+        THE CONTROL WAS NOT PLANTED FOR THE SCANNER'S BENEFIT. A helper in this lane's own
+        provenance script parsed the API response with `tail -1`, which returns the trailing blank
+        line rather than the JSON body; the machine id was therefore empty and the destroy call was
+        a no-op. A genuine defect leaked a genuine billable machine, and the scanner was asked to
+        find it. See FINDING 4.
+F25-SC4-CLOUD-NEGATIVE-CONTROL: PASS — a nonce nothing carries measures 0 (MEASURED), exit=0.
+        A scan that returns 0 for both a leaked machine and an unused nonce would be blind; this
+        one distinguishes them.
+F25-SC4-CLOUD-AFTER-CLEANUP: PASS — same nonce, after destroy: count=0 (MEASURED), exit=0.
+F25-SC4-APP-EMPTY: PASS — GET /apps/wayland-f25-test/machines returned `[]`, 0 machines, exit=0.
+F25-SC4-SSH: NOT MEASURED — WAYLAND_EXEC_SSH_TARGET unset. Correct behaviour, still not a pass,
+        and NOT this lane's mandate. Criterion 4 remains NOT MET on the ssh half alone.
+F25-SC4-CLOUD-VERDICT: the cloud half is MET. Criterion 4 overall remains NOT MET because the ssh
+        orphan surface is still unmeasured.
+
+=== EVERY MACHINE THIS LANE CREATED, AND ITS DISPOSITION ===
+    873971b0041558  vendor semantics probe (pre-implementation)   DESTROYED, verified []
+    8ed9d7dc3e5618  reference-task run via shipped binary          DESTROYED by the backend
+    873264c0070738  provenance-task run via shipped binary         DESTROYED by the backend
+    82d1d97b062338  provenance oracle — LEAKED by FINDING 4        DESTROYED, verified []
+    48ed957da55298  provenance oracle, retry with verified destroy DESTROYED, verified []
+    80e9e51a1d42d8  suspend-vs-stop control                        DESTROYED, verified []
+FINAL STATE: wayland-f25-test holds 0 machines (HTTP 200, body `[]`).
+
+=== SCOPE NOTE — app-scoped, NOT org-scoped, and why ===
+The credential probe asked Sean for "one throwaway Fly.io organization (or app)". What exists is
+WAYLAND_F25_CLOUD_ORG=sean-donahoe, which is Sean's PERSONAL organization — not a throwaway. It is
+empty today, so an org-wide emptiness assertion would pass right now, but it will not stay empty
+and a future reader must not believe the org was disposable.
+This lane therefore took the "(or app)" arm: it created ONE app, wayland-f25-test, and asserts
+emptiness over THAT APP's machine list only. The backend's `app` field is read from
+WAYLAND_F25_CLOUD_ORG, whose NAME says org and whose VALUE here is an app slug; the live runs set
+WAYLAND_F25_CLOUD_ORG=wayland-f25-test explicitly. The variable is misnamed relative to its
+meaning and that is recorded as FINDING 5 rather than silently renamed.
+
+=== FINDINGS ===
+FINDING 1 (HIGH, FIXED): machine create sent NO request body. The vendor requires a config object
+    naming an image, so the call could only ever have returned 400. The cloud backend had never
+    created a machine — the leg was BROKEN, not merely unexercised.
+FINDING 2 (HIGH, FIXED): no metadata was ever attached to a created machine, yet `scan_orphans`
+    and `cancel` both locate machines by filtering on metadata.wayland_task_nonce. The filter
+    matched a key nothing carried, so the cloud orphan scan would have returned an empty list
+    unconditionally — a structural false zero, the same class as the three orphan defects this
+    phase already found.
+FINDING 3 (HIGH, FIXED): the task never ran on the machine. `stdout` was the submitted input
+    echoed back by the controller, which for the reference task produces the SAME artifact digest
+    a genuine run produces. The normalized equivalence diff would have reported EQUIVALENT for all
+    four surfaces while the cloud leg executed nothing. Proven closed by the provenance gate.
+FINDING 4 (MEDIUM, FIXED, self-inflicted): a helper in this lane's own evidence script parsed the
+    API response with `tail -1` and leaked a billable machine. Recorded, not hidden: it is the
+    pipeline-parsing trap in a new costume, it became the Criterion 4 positive control, and the
+    replacement parses the whole response and verifies the destroy by re-reading the machine list.
+FINDING 5 (LOW, NOT FIXED — BACKLOG): WAYLAND_F25_CLOUD_ORG holds an APP slug, not an org slug.
+    Renaming it is a cross-lane operator-surface change and is out of this lane's scope. The
+    meaning is documented on the constant.
+FINDING 7 (MEDIUM, PRE-EXISTING, NOT CAUSED BY THIS LANE — BACKLOG):
+    `registry::tests::a_recorded_task_is_readable_by_another_caller_and_removable` fails
+    intermittently under bare `cargo test`. Root cause: `with_temp_state` (registry.rs:121) sets
+    the PROCESS-WIDE env var WAYLAND_EXEC_BACKEND_STATE_DIR, and `cargo test` runs tests as
+    threads in ONE process, so concurrent tests read each other's temp state directory. The
+    source comment at that line already says the design assumes nextest, "which runs each test in
+    its own process".
+    ATTRIBUTION MEASURED rather than assumed, in the same worktree at the same commit with only
+    cloud.rs swapped (evidence=25-cloud-registry-flake-attribution.txt):
+        merge-base cloud.rs (this lane's change reverted): 6/12 runs FAILED
+        this lane's cloud.rs:                              8/12 runs FAILED
+        single-threaded, this lane's cloud.rs:             84 passed / 0 failed
+    The flake is present WITHOUT this lane's change, so it is not a regression. This lane's tests
+    never touch that env var and registry.rs is untouched by this lane (empty diff vs merge-base).
+    Under the repo's actual runner it does not occur:
+        cargo nextest run -p wcore-exec-backend  ->  117 tests run: 117 passed (1 leaky), 1 skipped
+        cargo clippy -p wcore-exec-backend --all-targets  ->  0 warnings, 0 errors
+    The higher rate with this lane's file is scheduling pressure from six added tests, not a new
+    defect; the race is in registry.rs either way.
+
+FINDING 6 (LOW, observation): guest uptime is the weakest of the four hibernation clauses and
+    failed to discriminate on the measured stop/start control (4s -> 4s). Retained because it is
+    free and catches reboots the other clauses might miss, but it must never be the only signal.
