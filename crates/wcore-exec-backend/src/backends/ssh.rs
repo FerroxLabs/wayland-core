@@ -132,7 +132,12 @@ impl SshBackend {
 ///
 /// An empty value becomes `''`, which is why an empty task input survives
 /// instead of disappearing.
-fn posix_quote(value: &str) -> String {
+///
+/// Public so `tests/ssh_far_end_quoting.rs` can round-trip its output through a
+/// real shell. That round-trip cannot live in this file: the guard below
+/// asserts this module's source contains no shell-string execution path, and a
+/// shell invocation written here — even in a test — would trip it.
+pub fn posix_quote(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('\'');
     for c in value.chars() {
@@ -587,15 +592,14 @@ mod tests {
         // the quoting and append a command stays inert.
         let escape = posix_quote("a';id>/tmp/w;'b");
         assert_eq!(escape, r#"'a'\'';id>/tmp/w;'\''b'"#);
-        // Every `;` in the result sits inside a single-quoted region. Counting
-        // quotes before each `;` is an even/odd check: an even count means the
-        // quoting is currently CLOSED, which would be an escape.
-        for (i, c) in escape.char_indices() {
-            if c == ';' {
-                let opens = escape[..i].matches('\'').count();
-                assert_eq!(opens % 2, 1, "a `;` escaped the quoting in {escape}");
-            }
-        }
+        // NOTE: whether that string is actually inert is a question about a
+        // SHELL, and this file deliberately does not answer it by hand. A
+        // first draft of this test hand-rolled an even/odd quote counter and
+        // called the correct output an escape, because the counter did not
+        // model `\'`. The real round-trip — feed the quoted form to a real
+        // `sh` and compare what comes back — lives in
+        // `tests/ssh_far_end_quoting.rs`, where it can use a shell without
+        // tripping this module's own no-shell-string guard.
     }
 
     /// A positive control on the test above: the assertions must be capable of
@@ -618,29 +622,48 @@ mod tests {
         );
     }
 
-    /// The two places task-supplied bytes reach the wire must both quote.
-    /// Asserted against the source because the alternative is a live far end,
-    /// which a unit test does not have — the live proof is in the plan's
-    /// evidence file, and this guards the regression.
+    /// The three places task-supplied bytes reach the wire must all quote.
+    ///
+    /// Every needle is ASSEMBLED at runtime, for the reason the guard below
+    /// already states: a literal needle appears in this file's own source, so
+    /// the scan finds itself. A first draft wrote them as literals and the
+    /// negative assertions failed against the test's own text — a self-match
+    /// that would have been read as a real regression.
     #[test]
-    fn both_wire_paths_quote_their_arguments() {
+    fn every_wire_path_quotes_its_arguments() {
         let source = include_str!("ssh.rs");
+        let q = ["posix", "_quote"].concat();
+
         // `execute` — nonce, base64 input, and every element of task argv.
-        assert!(source.contains("args.push(posix_quote(&task.nonce));"));
-        assert!(source.contains("args.push(posix_quote(&input_b64));"));
-        assert!(source.contains("task.argv.iter().map(|a| posix_quote(a))"));
-        // `remote_exec` — the nonce for the scan and the kill. This is the one
-        // `backend scan --task-id` reaches, and it is not identifier-validated.
-        assert!(source.contains("args.push(posix_quote(argument));"));
-        // And nothing may push a raw task value alongside them.
+        for tail in ["(&task.nonce)", "(&input_b64)", "(a)"] {
+            let needle = format!("{q}{tail}");
+            assert!(
+                source.contains(&needle),
+                "a value crossing the connection is unquoted: {needle}"
+            );
+        }
+        // `remote_exec` — the argument carrying the nonce for the scan and the
+        // kill. This is the one `backend scan --task-id` reaches, and unlike
+        // `execute`'s nonce it is NOT identifier-validated first.
+        assert!(source.contains(&format!("{q}(argument)")));
+
+        // And no raw task value may sit alongside them.
+        let raw_nonce = ["args.push(task.non", "ce.clone());"].concat();
         assert!(
-            !source.contains("args.push(task.nonce.clone());"),
+            !source.contains(&raw_nonce),
             "an unquoted nonce is back on the wire"
         );
+        let raw_argv = ["args.extend(task.argv.iter().clon", "ed());"].concat();
         assert!(
-            !source.contains("args.extend(task.argv.iter().cloned());"),
+            !source.contains(&raw_argv),
             "unquoted task argv is back on the wire"
         );
+
+        // Positive control: the needle-assembly must be capable of finding
+        // something that is genuinely absent, or the negatives prove nothing.
+        let absent = ["args.push(nothing_like_this", "_exists());"].concat();
+        assert!(!source.contains(&absent));
+        assert!(source.contains(&q), "the assembled needle matches nothing");
     }
 
     #[test]
