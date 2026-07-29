@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "session_id": "8ea00290-0f3b-4047-8c74-4b6143048be7",
+  "started_at": "2026-07-29T13:45:02.771Z",
+  "updated_at": "2026-07-29T13:45:02.915Z",
+  "session_complete": true,
+  "turns": [
+    {
+      "turn": 0,
+      "round_trip": 1,
+      "ts": "2026-07-29T13:45:02.771Z",
+      "provider": "anthropic",
+      "model": "ollama:smollm2:135m",
+      "retention": "ephemeral1h",
+      "uncached_input_tokens": 4095,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "output_tokens": 189,
+      "invalidation_cause": "no_marker",
+      "cost_usd": 0.0756,
+      "cost_source": "provider_defaults",
+      "uncached_equivalent_usd": 0.0756,
+      "watermark_tokens": 4095,
+      "conservative_watermark_tokens": 10013,
+      "autocompact_threshold_tokens": 167000,
+      "emergency_limit_tokens": 197000
+    }
+  ],
+  "compactions": []
+}
