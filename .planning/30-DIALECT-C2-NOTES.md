@@ -278,3 +278,87 @@ The order of work is now forced:
 ## T+2 — status
 
 Two structural findings recorded (cost degeneracy, compiler not wired). Next: build the wiring.
+
+---
+
+## T+3 — MEASUREMENT 3: the compiler works, and it uncovered a SECOND confound underneath
+
+Live on `hetzner-dsm`, worktree `/root/wayland-30c2` @ `9a2e2554`. Real `wayland-core` binary
+(330,464,344 bytes), real loopback meter, 30 trials per arm, **same protocol file, same oracle,
+same binary, same invocation — the ONLY difference between the arms is the script source.**
+
+Protocol file digest read back on the host: `sha256 d18407e0b96bf753f66adc1eab7d21cbaeca1b9e627cecf0159095938b83ef25`
+— byte-identical to the frozen v1 protocol, so both arms ran against the genuinely frozen document.
+
+Live discovery against this lane's own build reproduced the prior lane's corpus digest exactly:
+`10c85fbd29ba89bdd08539c63d73744efb5616f584ed84c7f96e4c4a9e8f1323`, 8 declared tools
+`Bash,Edit,Forge,Glob,Grep,Read,ToolSearch,Write`. Compile selected `Write`,
+`translation_sha256 3ad52c367219ff4278abe86d66401be1983a0b145b83ddc657c1e463a778b4dd`,
+`dialect verify` OK.
+
+### 3a. The A/B, as printed by the binary
+
+```
+ARM-A  script=frozen_script_v1   driven_tools=-      trials=30 success=0
+ARM-B  script=dialect_compiled   driven_tools=Write  trials=30 success=0
+```
+
+**Arm B is 0/30 too. The compiled dialect did not fix the number.**
+
+### 3b. But the two arms failed for COMPLETELY DIFFERENT reasons — read from the harness's own
+### session transcript, not from its exit status
+
+| arm | tool called | tool_result | |
+|---|---|---|---|
+| A (v1 frozen) | `write_file` `{path, content}` | `Unknown tool: write_file` | the dialect confound |
+| B (v2 compiled) | `Write` `{file_path, content}` | `Refused to write TRIAL-ARTIFACT.txt: path must be absolute: "TRIAL-ARTIFACT.txt"` | **something else entirely** |
+
+Elapsed corroborates: 502 ms/trial in arm A (bounced immediately on an unknown tool) versus
+2514 ms/trial in arm B (accepted the call, ran the tool, refused inside it).
+
+**So the compiler did exactly what it was built to do, and it is provable in the product's own
+words: the failure moved from "I do not have that tool" to "I have that tool and I declined this
+argument".** That is the confound being removed. It is just not the only confound.
+
+### 3c. FINDING C (HIGH) — the second confound is a SLOT VALUE, and the compiler structurally
+### cannot fix it
+
+`wayland-core`'s `Write` requires an **absolute** path. The canonical script's `Path` slot is the
+literal `TRIAL-ARTIFACT.txt`, which is **relative**. Hermes accepted a relative path and wrote the
+file 30/30; Wayland refuses relative paths outright.
+
+The dialect compiler translates **tool names** and **parameter names**. It does not translate
+**parameter values** — and the second confound lives entirely in the value.
+
+**It cannot be fixed by extending the compiler, and the reason is structural.** Selection reads the
+tokenized tool *name* and the declared JSON Schema. "This parameter must be absolute" appears in
+**neither**: it is in the tool's prose description and in its runtime behaviour. The compiler
+deliberately never reads descriptions (that exclusion is what makes `qual_a_generic_tool_with_
+semantics_in_its_description_is_refused` a published blind spot). So a path convention is invisible
+to the instrument by design.
+
+**Compiling names does not compile conventions.** That sentence is the finding.
+
+### 3d. Why nobody could have seen this before now
+
+The prior lane could not have found it, and this is not a criticism — it is the mechanism. Its
+compiler was never wired to the runner (T+2), so **no compiled translation had ever been executed
+against a harness.** `30-DIALECT.md` says *"Live, against the real corpus: `Write` selected for the
+write intents"* — true, and selection is not execution. The second confound was masked by the first
+and could only appear once the first was removed.
+
+That is also the strongest argument that the wiring was worth building: **the instrument's first
+real run immediately produced a finding that four rounds of unit tests and a 4/4 expert panel did
+not.**
+
+### 3e. What I must NOT do
+
+Absolutizing the path **for Wayland only** would be hand-tuning an arm, i.e. the forbidden act by
+another route. Any change to the slot value must apply to the canonical script for **every** arm,
+must be re-registered before any leg is scored, and must be shown semantics-preserving for the
+oracle check. That is a protocol v3 question, not a repair I may make mid-measurement.
+
+## T+3 — status
+
+Compiler proven to work and proven insufficient. Next: a labelled DIAGNOSTIC (not a scored leg)
+absolutizing the path for BOTH arms, to prove the diagnosis rather than assert it.
