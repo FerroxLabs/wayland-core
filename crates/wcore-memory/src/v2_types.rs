@@ -361,6 +361,20 @@ pub enum ProcedureStatus {
     Active,
     Archived,
     Pinned,
+    /// 23A-C1: the user revoked this procedure's artifact. **Terminal.**
+    ///
+    /// Distinct from `Archived`, and the distinction is the whole point.
+    /// `Archived` is a *curator* judgement ("this draft is not earning its
+    /// place") and is reversible in spirit — nothing about it expresses user
+    /// intent. `Revoked` is a *user* statement ("do not give me this"), and a
+    /// status the product may re-enter on its own would not be a revocation at
+    /// all.
+    ///
+    /// Before this variant existed, revocation was representable only on the
+    /// filesystem, so a revoked skill's procedure row stayed `Staged` and
+    /// `Staged → Active` remained legal — which made governed promotion a
+    /// resurrection path for the exact artifact the user had removed.
+    Revoked,
 }
 
 impl ProcedureStatus {
@@ -370,6 +384,7 @@ impl ProcedureStatus {
             ProcedureStatus::Active => "active",
             ProcedureStatus::Archived => "archived",
             ProcedureStatus::Pinned => "pinned",
+            ProcedureStatus::Revoked => "revoked",
         }
     }
 
@@ -377,8 +392,25 @@ impl ProcedureStatus {
     /// Staged → Active | Archived
     /// Active → Archived | Pinned
     /// Pinned → Active | Archived
+    ///
+    /// 23A-C1 adds: **any status → Revoked**, and **Revoked → nothing**.
+    ///
+    /// Revocation is always reachable because it encodes user intent, and a
+    /// state the user cannot reach from wherever the procedure happens to sit
+    /// is not a usable control. Revoked is terminal because every exit from it
+    /// is a resurrection: `Revoked → Active` is promotion undoing a user
+    /// decision, and `Revoked → Staged` re-arms the drafter against it. The
+    /// supported way back is `rollback`, which is a *governed* operation
+    /// carrying its own journal entry and its own restore of the retained
+    /// bytes — not a bare status edit.
     pub fn can_transition_to(self, next: ProcedureStatus) -> bool {
         use ProcedureStatus::*;
+        if self == Revoked {
+            return false;
+        }
+        if next == Revoked {
+            return true;
+        }
         matches!(
             (self, next),
             (Staged, Active)
@@ -399,6 +431,7 @@ impl FromStr for ProcedureStatus {
             "active" => Ok(ProcedureStatus::Active),
             "archived" => Ok(ProcedureStatus::Archived),
             "pinned" => Ok(ProcedureStatus::Pinned),
+            "revoked" => Ok(ProcedureStatus::Revoked),
             _ => Err(format!("unknown procedure status: {s}")),
         }
     }
@@ -665,6 +698,53 @@ mod tests {
         // Forbidden:
         assert!(!Archived.can_transition_to(Staged));
         assert!(!Archived.can_transition_to(Active));
+    }
+
+    /// 23A-C1. `Revoked` must be reachable from everywhere and be a dead end.
+    ///
+    /// The `Revoked → Active` case is the one that matters: before this
+    /// variant existed a revoked skill's row stayed `Staged`, and `Staged →
+    /// Active` was legal, so governed promotion could re-activate precisely
+    /// the artifact the user had removed.
+    #[test]
+    fn revoked_is_reachable_from_every_status_and_is_terminal() {
+        use ProcedureStatus::*;
+        let all = [Staged, Active, Archived, Pinned];
+
+        for s in all {
+            assert!(
+                s.can_transition_to(Revoked),
+                "{} -> revoked must be permitted; revocation is user intent and \
+                 must be reachable wherever the procedure happens to sit",
+                s.as_str()
+            );
+        }
+
+        for s in all {
+            assert!(
+                !Revoked.can_transition_to(s),
+                "revoked -> {} must be forbidden; every exit from Revoked is a \
+                 resurrection. The supported way back is `rollback`, which is a \
+                 governed operation with a journal entry, not a status edit",
+                s.as_str()
+            );
+        }
+        assert!(!Revoked.can_transition_to(Revoked));
+    }
+
+    /// The string form must round-trip, or a revoked row rehydrates from the
+    /// database as an error and the caller's fallback decides what a revoked
+    /// procedure is. `as_str` and `from_str` are the persistence boundary.
+    #[test]
+    fn revoked_status_string_round_trips() {
+        assert_eq!(ProcedureStatus::Revoked.as_str(), "revoked");
+        assert_eq!(
+            "revoked".parse::<ProcedureStatus>().unwrap(),
+            ProcedureStatus::Revoked
+        );
+        // Known-negative in the same test, so a parser that returned Ok for
+        // everything could not pass this by accident.
+        assert!("revocated".parse::<ProcedureStatus>().is_err());
     }
 
     #[test]
