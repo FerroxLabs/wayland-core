@@ -101,3 +101,51 @@ rather than shipped red; recoverable from `git show 189599ca -- .github/workflow
   lane path (NOT `/Users/seandonahoe/dev/waylandcore`). Brief + both prior triage
   reports read. Nothing measured by me yet. This file committed before any
   investigation, per §6b-i.
+
+- **T2 — C4 MECHANISM NAMED AND MEASURED.** `zombie-probe.c`, built static on
+  `hetzner-dsm` (Ubuntu 24.04, Docker 29.2.1 — near-exact runner match), four arms:
+
+  | arm | PID 1 | probe says | `/proc` state | verdict |
+  |---|---|---|---|---|
+  | native (no container) | `systemd` | GONE | `-` (entry gone) | TEST_WOULD_PASS |
+  | container, **CI's exact flags** | the test command itself | **ALIVE** | **`Z`** | **TEST_WOULD_FAIL** |
+  | container + `--init` | `docker-init` (tini) | GONE | `-` | TEST_WOULD_PASS |
+  | container + `--init`, descendant left **genuinely alive** | `docker-init` | ALIVE | `S` | TEST_WOULD_FAIL |
+
+  Self-test 3/3 on the same binary. A3, the discriminator, reads:
+  `/proc state=Z probe_alive=1 (a corpse the probe calls ALIVE)`.
+
+  **The mechanism.** `DOCKER_RUN` (ci.yml:283) carries no `--init`, so PID 1 inside
+  the container is the test command. Nothing in `crates/` sets
+  `PR_SET_CHILD_SUBREAPER` (grepped — the only `prctl` uses are credential drops in
+  `wcore-eval-scenarios/src/process_tree.rs`), so an orphaned descendant reparents to
+  PID 1. Rust's `Child::wait()` issues `waitpid(<specific pid>)`, never `wait(-1)`, so
+  PID 1 cannot incidentally reap an adopted orphan. The corpse stays a zombie
+  indefinitely. **Containment genuinely succeeded** — the process holds nothing and
+  its listener is dead — but every one of the 13 probes reports it as surviving.
+
+  **Why it is exactly 13, and not approximately 13.** All four test families use a
+  probe that a zombie satisfies. The counts add to 13 with nothing left over:
+
+  | probe site | shape | zombie satisfies it because | n |
+  |---|---|---|---|
+  | `runner_contracts.rs:125` | `kill(pid,0)==0 \|\| errno != ESRCH` | `kill` returns 0 for a zombie | 7 |
+  | `pty_capture.rs:783` | identical | same | 2 |
+  | `wcore-sandbox/tests/process_capture.rs:12` | `Path::new("/proc/{pid}").exists()` | a zombie has a `/proc` entry | 2 |
+  | `wcore-swarm/src/worktree_tests/linux.rs:629` | `/proc/{pid}` | same | 2 |
+
+  This also explains, without further assumption, every prior observation: native
+  passes (systemd reaps), 96-core parallel native passes (PID 1 identity is a
+  container property, not a concurrency one), and it is not the missing `ps`
+  (no probe shells out).
+
+  **Fix I own: add `--init` to `DOCKER_RUN`.** It does NOT make the tests unfailable
+  — arm 4 is the control: under `--init`, a genuinely live descendant still reads
+  ALIVE and the test still fails.
+
+  **Second defect, NOT mine to fix, reported not carried:** the probes conflate a
+  corpse with a live process. On any host without a reaping init they will fail
+  again. The correct probe reads `/proc/<pid>/stat` field 3 and excludes `Z`.
+
+  **Falsifiable prediction, stated before the run:** with `--init` the 13 pass in
+  real CI. If they do not, this mechanism is wrong and I will say so.
