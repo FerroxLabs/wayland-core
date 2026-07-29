@@ -1,0 +1,15 @@
+WLRC=0
+--- error/stream_end events ---
+error {"type": "error", "error": {"code": "engine_error", "message": "Session persistence authority unavailable: secure recovery storage is unavailable: no OS keyring was usable and no encrypted credentials vault is unlocked. On a headless host set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor \u2014 preferred) or WAYLAND_VAULT_PASSPHRASE to unlock the encrypted vault, or turn durable sessions off with [session] enabled = false", "retryable": false}}
+stream_end {"type": "stream_end", "msg_id": "m1", "finish_reason": "error", "usage": {"input_tokens": 0, "output_tokens": 0}}
+--- egress allowlist mentions of flux ---
+fluxrouter.ai/v1
+--- stderr tail ---
+s in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+2026-07-28T23:48:08.492557Z  INFO F-014: channels auto-registered from ~/.wayland/channels count=0
+2026-07-28T23:48:08.492577Z  WARN vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+2026-07-28T23:48:08.492631Z  WARN transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden
+2026-07-28T23:48:08.492646Z  INFO Phase 1B-2: inbound channel subscriber spawned
+2026-07-28T23:48:08.493029Z  INFO F24_CHANNEL_LEASE=owner — this process owns inbound polling for this home holder="session" pid=1838299 dir=/root/f27cred-diag-QqQ2UE/channels
+2026-07-28T23:48:08.493046Z  INFO F-014: channel_manager.start_all() complete — inbound polling active
+WLDONE_DIAG

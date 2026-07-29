@@ -1,0 +1,26 @@
+=== inputs ===
+POSITIVE ch=1 rate=16000 width=2 frames=55735 seconds=3.48
+NEGATIVE ch=1 rate=16000 width=2 frames=55735 (all-zero samples)
+POSITIVE_BYTES=115566
+NEGATIVE_BYTES=111514
+
+=== Q1: provider transcription route, in the product's own wire shape ===
+POSITIVE http=200 bytes=458
+  text='The quick brown fox jumps over the lazy dog near the riverbank.'
+  verbatim_match=True
+  has_segments=True language='English' duration=3.483437568
+  body_carries_cost=False
+  cost headers: x-flux-billed-seconds: 10 x-flux-cost-usd: 0.016670 
+NEGATIVE_CONTROL http=200 bytes=292
+  text='Thank you.'
+  verbatim_match=False
+  has_segments=True language='English' duration=3.483437568
+  body_carries_cost=False
+  cost headers: x-flux-billed-seconds: 10 x-flux-cost-usd: 0.016670 
+
+=== Q2: provider TTS route ===
+model=flux-voice http=500 bytes=76 body={"error":{"message":"Internal server error","type":"internal_server_error"}}
+model=flux-voice-fast http=500 bytes=76 body={"error":{"message":"Internal server error","type":"internal_server_error"}}
+model=flux-auto http=500 bytes=76 body={"error":{"message":"Internal server error","type":"internal_server_error"}}
+
+WLDONE_FLUX_VOICE_PROBE

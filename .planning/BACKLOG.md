@@ -1430,3 +1430,65 @@ unrepaired. It matters beyond tidiness because Phase 30's own verdict quotes its
 from this file — the **criteria text is current**; only the progress table is stale. 30-04 graded
 against the artifacts on disk, not against the table, and did not edit ROADMAP.md from inside the
 phase being graded.
+
+### `BL-F27-MCP-DISCOVERY-NAMING` — a tool's host-visible name depends on what else is in the session (MEDIUM)
+
+`27-GAPS-SUMMARY.md:99` and `evidence/27-gaps/c3-generation/README.md:80` both record this
+finding as dispositioned "to BACKLOG per the standing severity policy". **It was never filed** —
+before this entry, `.planning/BACKLOG.md` contained zero Phase 27 rows, so a MEDIUM that the
+policy makes non-blocking *by filing it* was simply dropped. Filed now (INV-26-27 BLOCKER-27-M1).
+
+Measured, same fixture, same two tools: shape B (config server alone) and shape C (late server
+alone) each announce `media_generate_image` / `media_generate_locked`. Shape D (both) announces
+the **late** server's tools under the bare names and renames the **config-declared** server's to
+`mcp__f27media__media_generate_image`. So a host that learned `media_generate_image` from a
+config server in one session sees the same server's tool under a different name in the next,
+purely because a late server carried a colliding name — and `RemoveMcpServer`'s own doc comment
+says configured servers "remain authoritative", which is the opposite of how the collision
+resolves. Prefixing on collision is sound; which side gets prefixed looks inverted.
+
+MEDIUM, not higher: names stay unique and functional within a session, nothing is silently
+dropped, and no security or correctness property breaks. Criterion 27-C3 cannot honestly be
+called fully met while it stands, because the criterion's word is "consistent". Cost 0.5.
+
+### `BL-F27-FLUX-IMAGE-DEFAULT-ARM-401` — `wayland-core image` default arm returns 401 on a cleared paid key (HIGH, argument for MEDIUM)
+
+Measured live on `hetzner-dsm` with a cleared paid Flux key, same key and same run:
+
+```
+wayland-core image --prompt "..." --out a-default.png
+  -> rc=1  "image generation failed: API error 401: {"error":{"message":"unauthorized"}}"  no artifact
+wayland-core image --model flux-image --prompt "..." --out a-flux.png
+  -> rc=0  wrote a-flux.png (46216 bytes)  JPEG 1024x1024
+```
+
+`flux_image.rs:31` sets `DEFAULT_IMAGE_MODEL = "flux-image-together-flux"`; the key's entitlement
+list contains `flux-image` and not that arm. The user is therefore told their **credential** is
+unauthorized when the credential is fine and only the default arm is not entitled, and the
+subcommand's own help promises a distinct `premium_locked` message for exactly this situation —
+which never fires. There is a precedent for the honest form: `image_gen.rs:403` signposts
+`OPENAI_IMAGE_MODEL` when a model is unavailable. The CLI image path has no equivalent.
+
+Graded HIGH by the precedent of 27-C2(a) (an advertised remedy naming the wrong thing) with an
+explicit argument for MEDIUM: a working `--model` escape exists, so the user is not left with
+zero options. **Residual uncertainty, stated rather than hidden:** whether a different Flux plan
+entitles `flux-image-together-flux` is not knowable from this side — only Sean can confirm. If
+it normally is entitled, this drops to MEDIUM (a bad error message on an unusual plan).
+Evidence: `.planning/phases/27-*/evidence/27-credentialled/shape-a-live-hetzner.log`.
+
+### `BL-F27-FLUX-PROVIDER-PREFIX-UNSUPPORTED` — `-m flux-router:flux-fast` boots into anthropic and blames the wrong key (MEDIUM)
+
+With `FLUX_API_KEY` in the environment **and** a populated `[providers.flux-router]` block,
+`-m flux-router:flux-fast` fails at init:
+
+```
+init_failed: No API key found. Provide via --api-key, config file, or environment variable
+(API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY). Provider 'anthropic' requires an API key. To use
+a LOCAL model with Ollama, select a model id prefixed with `ollama:` ...
+```
+
+The `provider:model` prefix works for `ollama:` and the message advertises it, so the form looks
+general. It is not. The working invocation is `-p flux-router -m flux-fast` plus a `[default]`
+block. The message names neither Flux nor the credential that was present. Cost 0.25 — either
+accept the prefix for registered providers, or name the configured-but-unselected provider in
+the error. Evidence: `evidence/27-credentialled/27-NOTES.md`.
