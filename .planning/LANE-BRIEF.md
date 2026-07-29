@@ -112,6 +112,23 @@ export PATH=/root/.cargo/bin:$PATH      # a bare `cargo` exits 127 — that is P
    record the evidence and the dissent, and proceed. Escalate only on genuine deadlock, and
    bring the split with you.
 
+## 3b. `rtk` rewrites tool output — measured, and wider than first thought
+
+`rtk` proxies shell tools and **re-renders their output**. It returns rc=0 with well-formed text,
+so nothing looks wrong. Two classes measured:
+
+- **`git log`** — silently drops merge commits. One lane's merge-base came back wrong; had it been
+  used, every fence number in its report would have been false.
+- **`grep`** — also rewritten. Found 2026-07-29 by a lane whose extractions were being altered
+  underneath it. Another lane's `git diff` came back re-indented by two spaces, which blinded a
+  `^-` removal-line matcher and produced a false "no removals" fence result.
+
+**Rule: anything load-bearing goes through `/usr/bin/git`, `/usr/bin/grep`, or `rtk proxy`.** That
+means merge-bases, fence diffs, evidence extraction, panel-vote extraction, and any count you will
+report. Convenience reads are fine unproxied; measurements are not.
+
+**If a number will appear in your summary, it must come from an unproxied tool.**
+
 ## 4. Cross-audit panel (for checkpoints and any judgement call)
 
 ```bash
