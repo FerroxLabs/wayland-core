@@ -54,6 +54,11 @@ use wcore_gateway::lifecycle::{GatewayState, StatusProjection};
 use wcore_gateway::pidlock::{PidLock, process_is_alive};
 use wcore_gateway::service::{ServiceSpec, is_registerable_binary};
 
+/// `support-bundle`. A child module rather than more of this file, which is
+/// already past the 1000-line bound AGENTS.md sets — and a child module keeps
+/// the declaration here instead of in `lib.rs`, which every lane shares.
+mod support;
+
 /// The file the RUNNING gateway republishes its projection into.
 ///
 /// Deliberately separate from `gateway.pid`: the pid record is written once
@@ -122,6 +127,23 @@ pub enum GatewayCmd {
         #[command(flatten)]
         scope: ScopeArgs,
         /// Emit JSON instead of the operator view.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Collect redacted health, log and configuration evidence a support
+    /// engineer can act on, into a directory you can read before you send it.
+    ///
+    /// Reads only from disk, so it answers whether or not a gateway is
+    /// running — which is the point, since a bundle is wanted precisely when
+    /// something has already failed.
+    SupportBundle {
+        #[command(flatten)]
+        scope: ScopeArgs,
+        /// Where to write the bundle. Must not already contain anything.
+        /// Defaults to a timestamped directory inside the gateway home.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Emit the manifest as JSON instead of the operator view.
         #[arg(long)]
         json: bool,
     },
@@ -259,6 +281,9 @@ pub async fn run(args: GatewayArgs) -> Result<()> {
         }
         GatewayCmd::Status { scope, json } => status(&scope, json).await,
         GatewayCmd::Abandoned { scope, json } => abandoned(&scope, json),
+        GatewayCmd::SupportBundle { scope, out, json } => {
+            support::support_bundle(&scope, out, json).await
+        }
         GatewayCmd::Drain { scope, budget_ms } => drain(&scope, budget_ms),
         GatewayCmd::Run { scope, detach } => run_gateway(&scope, detach).await,
     }
