@@ -82,6 +82,15 @@ without it no peer comparative can be re-taken at all.
    error at `ready`**, so a Desktop built on the old digest **will refuse to start** against this
    Core:
 
+   > **SUPERSEDED, 2026-07-29 — do NOT hand over the pair below yet.** Plan `22-C1` merged after the
+   > regeneration and adds two additive protocol events (`goal_snapshot`, `goal_transition`),
+   > `EVENT_SPECS` 49→51 and `CONTRACT_MINOR` 8→9. **A second regeneration is owed**, and the pair
+   > below is for the tree *before* those events. The re-cut pair replaces it.
+   >
+   > This is the coordination hazard `CLASS-CONTRACT-01` describes, arriving exactly as predicted:
+   > any wire-touching merge after a regeneration invalidates it. **The regeneration must be the
+   > LAST thing before the tag.**
+
    - `source_inputs_digest` → `sha256:c99443599a273e00c72900b12f32aa371d27b83f30e8a0f5a13f0c2191380562`
    - `fixture_digest` → `sha256:de2b19bdf52ea9ef2934a4b0fa43d5cd54befb6f1e0d7b4b2e2af60154723bb8`
    - `schema_digest` **unchanged**; `minor` still 8.
