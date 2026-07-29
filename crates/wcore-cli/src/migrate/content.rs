@@ -735,7 +735,14 @@ mod tests {
             super::super::quarantine::MAX_QUARANTINE_TOTAL_BYTES,
             32 * 1024 * 1024
         );
-        assert!(MAX_IMPORT_FILES > super::super::quarantine::MAX_QUARANTINE_FILES);
+        // A compile-time assertion, because both operands are constants: the
+        // data-import bound is larger than the executable one, and the two are
+        // separate values rather than one shared value that a future edit could
+        // raise for both at once.
+        const _: () = assert!(
+            MAX_IMPORT_FILES > super::super::quarantine::MAX_QUARANTINE_FILES,
+            "the data-import bound and the executable bound must stay distinct"
+        );
         assert_eq!(
             MAX_IMPORT_FILE_BYTES,
             super::super::quarantine::MAX_QUARANTINE_FILE_BYTES,
