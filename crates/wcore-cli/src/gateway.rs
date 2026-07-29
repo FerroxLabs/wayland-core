@@ -142,6 +142,50 @@ pub enum GatewayCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Record that you have reviewed an abandoned delivery and dealt with it.
+    ///
+    /// Until a delivery is acknowledged the gateway treats it as outstanding
+    /// work and will NEVER compact its record away, however old it is. That is
+    /// what makes `gateway abandoned` trustworthy: a message the product failed
+    /// to deliver cannot age out of the journal before anybody sees it. The
+    /// acknowledgement is your signature that it can.
+    ///
+    /// Nothing writes this automatically, including a successful re-send. A
+    /// surface that empties itself is not a surface.
+    Ack {
+        #[command(flatten)]
+        scope: ScopeArgs,
+        /// The delivery id, exactly as `gateway abandoned` prints it.
+        id: String,
+    },
+    /// Send an abandoned delivery again, through the channel it was bound for.
+    ///
+    /// The message body is not kept in the ledger; it is read back from the
+    /// cron job the delivery id names. The original delivery key rides the send,
+    /// so a destination that can recognise a replay will suppress this if the
+    /// first copy did land — which is the safest possible re-send and costs
+    /// nothing to do.
+    ///
+    /// Destinations that CANNOT recognise a replay are the reason the delivery
+    /// was abandoned in the first place, so for anything that was already
+    /// in flight this verb refuses without `--confirm-not-delivered`. Check the
+    /// destination before you pass it.
+    Resend {
+        #[command(flatten)]
+        scope: ScopeArgs,
+        /// The delivery id, exactly as `gateway abandoned` prints it.
+        id: String,
+        /// Confirm you have checked the destination and the message is NOT
+        /// there. Required whenever an attempt was already in flight when the
+        /// delivery was abandoned, because that attempt may have landed and
+        /// re-sending would put a second copy at the destination.
+        #[arg(long)]
+        confirm_not_delivered: bool,
+        /// Acknowledge the abandonment as well, in one step. Explicit, because
+        /// a re-send does not answer whether the destination now has two copies.
+        #[arg(long)]
+        ack: bool,
+    },
     /// Collect redacted health, log and configuration evidence a support
     /// engineer can act on, into a directory you can read before you send it.
     ///
@@ -293,6 +337,13 @@ pub async fn run(args: GatewayArgs) -> Result<()> {
         }
         GatewayCmd::Status { scope, json } => status(&scope, json).await,
         GatewayCmd::Abandoned { scope, json } => abandoned(&scope, json),
+        GatewayCmd::Ack { scope, id } => ack(&scope, &id),
+        GatewayCmd::Resend {
+            scope,
+            id,
+            confirm_not_delivered,
+            ack: also_ack,
+        } => resend(&scope, &id, confirm_not_delivered, also_ack).await,
         GatewayCmd::SupportBundle { scope, out, json } => {
             support::support_bundle(&scope, out, json).await
         }
@@ -648,6 +699,7 @@ fn abandoned(scope: &ScopeArgs, json: bool) -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "home": home.display().to_string(),
                 "abandoned": found,
+                "unacknowledged": ledger.unacknowledged_abandoned_count(),
                 "dropped_past_retention": dropped,
                 "quarantined": ledger.quarantined(),
             }))?
@@ -684,7 +736,43 @@ fn abandoned(scope: &ScopeArgs, json: bool) -> Result<()> {
                 // than admitting the gap.
                 None => println!("    why:    (not recorded — pre-dates reason tracking)"),
             }
+            // Whether re-sending this can duplicate is the operator's next
+            // question, so it is answered here rather than left to be
+            // discovered when `gateway resend` refuses.
+            match a.was_attempted {
+                Some(false) => println!(
+                    "    resend: safe — no attempt had started, so it cannot be at the \
+                     destination"
+                ),
+                Some(true) => println!(
+                    "    resend: CHECK THE DESTINATION FIRST — an attempt was in flight and \
+                     may have landed"
+                ),
+                None => println!(
+                    "    resend: CHECK THE DESTINATION FIRST — this record pre-dates attempt \
+                     tracking, so whether it landed is unknown"
+                ),
+            }
+            if let Some(r) = &a.resent {
+                println!("    resent: {r}");
+            }
+            match &a.acknowledged {
+                Some(t) => println!("    acked:  {t}"),
+                None => println!("    acked:  no — retained until `gateway ack {}`", a.id),
+            }
         }
+    }
+
+    // The count that has to stay small. Exempting unacknowledged abandonments
+    // from compaction means the journal's bound is review rather than a cap, so
+    // an unreviewed backlog must be loud rather than quietly truncated.
+    let unacked = ledger.unacknowledged_abandoned_count();
+    if unacked > 0 {
+        println!();
+        println!(
+            "{unacked} abandonment(s) are UNACKNOWLEDGED and are exempt from compaction \
+             until they are. Review each, then `gateway ack <id>`."
+        );
     }
 
     // Never silent about its own incompleteness.
@@ -704,6 +792,191 @@ fn abandoned(scope: &ScopeArgs, json: bool) -> Result<()> {
             ledger.quarantined()
         );
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ack / resend — disposing of an abandonment
+// ---------------------------------------------------------------------------
+
+/// Open this home's ledger, naming the home in any failure.
+fn open_ledger(scope: &ScopeArgs) -> Result<(PathBuf, wcore_gateway::ledger::DeliveryLedger)> {
+    let home = scope.home()?;
+    let ledger = wcore_gateway::ledger::DeliveryLedger::open(&home)
+        .with_context(|| format!("cannot read the delivery ledger in {}", home.display()))?;
+    Ok((home, ledger))
+}
+
+/// Mark an abandonment reviewed, so compaction may eventually retire it.
+fn ack(scope: &ScopeArgs, id: &str) -> Result<()> {
+    let (home, mut ledger) = open_ledger(scope)?;
+    let already = ledger
+        .abandoned()
+        .into_iter()
+        .find(|a| a.id == id)
+        .and_then(|a| a.acknowledged);
+
+    // The ledger refuses an id that is not abandoned; the message names the
+    // surface that lists the valid ones rather than leaving the operator to
+    // guess whether they typed the id wrong or the delivery is simply live.
+    ledger.acknowledge(id).with_context(|| {
+        format!(
+            "cannot acknowledge {id} in {}; `gateway abandoned` lists what can be",
+            home.display()
+        )
+    })?;
+    ledger.flush().context("cannot flush the delivery ledger")?;
+
+    match already {
+        Some(at) => println!("{id} was already acknowledged at {at}; left unchanged."),
+        None => println!(
+            "Acknowledged {id}. It is now eligible for compaction once the journal passes \
+             its retention cap."
+        ),
+    }
+    Ok(())
+}
+
+/// Re-send an abandoned delivery through the channel it was bound for.
+///
+/// The whole point of the ledger is that it does NOT hold message bodies, so
+/// this reconstructs the message from the cron job the delivery id names. That
+/// is also why the re-send is honest about what it can do: a delivery whose job
+/// has since been edited or deleted cannot be re-sent, and this says so rather
+/// than sending something that was never scheduled.
+async fn resend(scope: &ScopeArgs, id: &str, confirmed: bool, also_ack: bool) -> Result<()> {
+    let (home, mut ledger) = open_ledger(scope)?;
+
+    let record = ledger
+        .abandoned()
+        .into_iter()
+        .find(|a| a.id == id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no abandoned delivery {id} in {}; `gateway abandoned` lists what there is",
+                home.display()
+            )
+        })?;
+
+    // `None` — a record written before attempt tracking existed — is read as
+    // "may have landed". Guessing the other way would silently authorise a
+    // duplicate, which is the exact outcome the abandonment prevented.
+    if record.was_attempted != Some(false) && !confirmed {
+        bail!(
+            "{id} was already in flight when it was abandoned, so it may have reached {}. \
+             Re-sending could put a second copy there.\n\n  {}\n\nCheck the destination. If \
+             the message is NOT there, re-run with --confirm-not-delivered.",
+            record.destination.as_deref().unwrap_or("its destination"),
+            record
+                .reason
+                .map(|r| r.describe().to_string())
+                .unwrap_or_else(|| "(reason not recorded)".to_string()),
+        );
+    }
+
+    // The body lives with the schedule, not with the ledger.
+    let store = wcore_cron::FileCronStore::new(
+        wcore_gateway::automation::AutomationPlane::schedule_dir(&home).join("jobs.json"),
+    );
+    let jobs = wcore_cron::CronStore::list(&store)
+        .await
+        .context("cannot read the schedule this delivery came from")?;
+    // Matched by prefix rather than by splitting on ':', because a job id may
+    // itself contain a colon and the delivery id is `cron:{job}:{millis}[:{occ}]`.
+    let job = jobs
+        .iter()
+        .filter(|j| id.starts_with(&format!("cron:{}:", j.id)))
+        // Longest id wins, so one job id that is a prefix of another cannot
+        // shadow it.
+        .max_by_key(|j| j.id.len())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "the job that produced {id} is no longer in the schedule, so its message \
+                 cannot be reconstructed. The ledger deliberately does not keep bodies."
+            )
+        })?;
+
+    let (channel_name, text) = match &job.target {
+        wcore_cron::Target::Channel { channel_name, text } => (channel_name.clone(), text.clone()),
+        other => bail!(
+            "job {} no longer targets a channel ({other:?}), so {id} cannot be re-sent",
+            job.id
+        ),
+    };
+
+    // Real adapters, from this home's own channel configuration — the same
+    // registration path `gateway run` uses. A re-send that went through a
+    // different code path would not be a re-send.
+    let mut manager = wcore_channels_registry::wcore_channels::ChannelManager::new();
+    let config = crate::channel::resolve_config_for_credentials()
+        .context("cannot resolve the configuration that holds channel credentials")?;
+    let creds: Arc<dyn wcore_config::credentials::CredentialsStore> = Arc::from(
+        config
+            .open_credentials_store()
+            .map_err(|e| anyhow::anyhow!("cannot open the credentials store: {e}"))?,
+    );
+    let registered = wcore_channels_registry::auto_register_from_dir(
+        &mut manager,
+        &home.join("channels"),
+        creds,
+    )
+    .await
+    .context("cannot register channels for the re-send")?;
+    if registered == 0 {
+        bail!(
+            "no channels are registered in {}, so {id} cannot be re-sent",
+            home.join("channels").display()
+        );
+    }
+
+    // The ORIGINAL delivery key rides the send. On a destination that can
+    // recognise a replay this makes the re-send free of risk: if the first copy
+    // did land, the destination suppresses this one. On a destination that
+    // cannot, it changes nothing — and that is precisely the case
+    // `--confirm-not-delivered` exists to gate.
+    let dedupes = manager.supports_outbound_idempotency(&channel_name).await;
+    let msg = wcore_channels_registry::wcore_channels::OutgoingMessage::text(
+        channel_name.clone(),
+        text.clone(),
+    );
+    let receipt = manager
+        .send_to_keyed(&channel_name, msg, Some(id))
+        .await
+        .with_context(|| format!("re-send of {id} to {channel_name} failed"))?;
+
+    // Recorded only after the send actually returned a receipt. A re-send noted
+    // before the send would be the same false-success the abandonment exists to
+    // avoid.
+    ledger
+        .mark_resent(id)
+        .context("the message was re-sent but the ledger could not record it")?;
+    if also_ack {
+        ledger
+            .acknowledge(id)
+            .context("the message was re-sent but the acknowledgement could not be recorded")?;
+    }
+    ledger.flush().context("cannot flush the delivery ledger")?;
+
+    println!("Re-sent {id} to {channel_name}.");
+    println!("  receipt:      {}", receipt.id);
+    println!(
+        "  replay-safe:  {}",
+        if dedupes {
+            "yes — the destination honours the delivery key, so a landed first copy \
+             suppressed this one"
+        } else {
+            "no — this destination cannot recognise a replay; if the first copy did land, \
+             there are now two"
+        }
+    );
+    println!(
+        "  abandonment:  still listed{}",
+        if also_ack {
+            ", acknowledged"
+        } else {
+            " and UNACKNOWLEDGED — `gateway ack` it once you have confirmed the outcome"
+        }
+    );
     Ok(())
 }
 
