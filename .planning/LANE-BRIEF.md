@@ -138,7 +138,13 @@ so nothing looks wrong. Two classes measured:
   underneath it. Another lane's `git diff` came back re-indented by two spaces, which blinded a
   `^-` removal-line matcher and produced a false "no removals" fence result.
 
-**Rule: anything load-bearing goes through `/usr/bin/git`, `/usr/bin/grep`, or `rtk proxy`.** That
+- **`cargo`** — also rewritten, and this one is the worst of the three. It reports the pass count
+  correctly and **strips `0 ignored` and `0 filtered out`** — the exact two fields §3.2 requires you
+  to read back to catch a suite that exits 0 having run nothing. **So the proxy silently removes
+  the evidence the anti-vacuity rule is built on.** Measured 2026-07-29.
+
+**Rule: anything load-bearing goes through `/usr/bin/git`, `/usr/bin/grep`, `/usr/bin/env cargo`
+(absolute path), or `rtk proxy`.** That
 means merge-bases, fence diffs, evidence extraction, panel-vote extraction, and any count you will
 report. Convenience reads are fine unproxied; measurements are not.
 
