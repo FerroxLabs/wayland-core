@@ -23,10 +23,20 @@ for i in $(seq 1 "$REPS"); do
   log="$OUT/rep-$i.log"
   "$CARGO" test "$@" > "$log" 2>&1
   rc=$?
-  # Sum every "N passed" across all test binaries in this rep.
-  ran=$(awk 'match($0, /[0-9]+ passed/) {
-               s = substr($0, RSTART, RLENGTH); sub(/ passed/, "", s); t += s
-             } END { print t+0 }' "$log")
+  # EXECUTED = passed + failed, summed across every test binary in this rep.
+  #
+  # Instrument repair (LANE-BRIEF §6b-ii): this originally counted only
+  # "N passed", so a rep in which the ONE targeted test FAILED reported
+  # `ran=0` and was graded VACUOUS instead of FAIL -- the harness scored a
+  # real failure as "did not run". Vacuity means ZERO TESTS EXECUTED, which
+  # is passed+failed, not passed alone.
+  # grep -o (not awk match) because awk's match() is SINGLE-SHOT per line: on
+  # the summary line "0 passed; 1 failed; ..." it matched "0 passed", added 0,
+  # and never saw the "1 failed" -- regrading a real failure as VACUOUS. That
+  # went unnoticed for exec-backend only because its line read "88 passed".
+  ran=$(grep -oE '[0-9]+ (passed|failed)' "$log" \
+        | grep -oE '^[0-9]+' \
+        | awk '{ t += $1 } END { print t+0 }')
   if [ "$ran" -lt "$MIN_TESTS" ]; then
     vacuous=$((vacuous+1)); verdict="VACUOUS(ran=$ran)"
   elif [ "$rc" -eq 0 ]; then
