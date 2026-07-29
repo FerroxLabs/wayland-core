@@ -1153,6 +1153,41 @@ baseline at all**.
 > string compare.** §3 item 2 is complete.
 >
 > **(b) — capability flags advertised on linkage — is UNCHANGED and still open.**
+>
+> **LATE CORRECTION 2026-07-30 (`lane/27-c2b-readiness`, verified independently by the orchestrator):
+> the paragraph immediately above is WRONG, and it is wrong in the way this same re-grade taught the
+> brief to watch for. (b) is CLOSED.**
+>
+> - **`bootstrap.rs:754` is a registry-ADMISSION gate, not the wire.** Grading (b) off it graded off a
+>   line that reads `true` forever — a **permanently-red instrument**, the exact §3b-iii defect this
+>   re-grade added to `LANE-BRIEF.md`.
+> - **Readiness IS published**, 187 lines later at `bootstrap.rs:939-942`, via
+>   `PluginCapabilitySet::from_verified(..).narrowed_to_live()`, which runs real
+>   `wcore_browser::liveness::probe()` and `wcore_cua::liveness::probe()`
+>   (`output/protocol_sink.rs:190,206`).
+> - **The fix landed at `85b60a2f`, 2026-07-28 16:44, titled *"advertise browser/CUA capabilities on
+>   liveness, not linkage"* — and `85b60a2f` is an ANCESTOR of `71acfd19`, this re-grade's own base.**
+>   The criterion was satisfied two days before it was graded open.
+> - Measured on the real 337 MB binary on headless `hetzner-dsm`, flags read from the product's own
+>   `ready` event: `browser_suite=None, computer_use=None`, two narrowing WARNs carrying reason and
+>   remedy. **Same binary with the dependencies planted: both `True`, zero WARNs** — the positive arm
+>   exists, so this is a discrimination and not an absence.
+> - **`:754` should stay unconditional.** Making it conditional would *unregister* the CUA tool,
+>   converting a loud typed error into a silently missing feature. The earlier lane was right to
+>   decline it; both sides of the reify-time argument were right and only the ledger's evidence was
+>   wrong.
+> - **SR-27-1..3 were never required** — the criterion is satisfied by narrowing an existing boolean's
+>   value, with no wire change. The corpus is **GREEN**: 15 passed, 23 commands, 52 events,
+>   `CONTRACT_MINOR = 10`. **`SEAM-REQUESTS/27.md` SR-27-2 is itself stale** — it asks for minor 8→9
+>   and the tree is at 10.
+> - A real defect was found beside it and fixed: the probe re-derived the sidecar program in a
+>   **second copy** of `SupervisorConfig::local_camoufox`'s expression, under a docstring asserting
+>   they agreed, with nothing enforcing it. Proven **behaviourally** — on the pre-fix tree a one-word
+>   rename withdrew the capability from a browser that *is* installed, and the pre-fix suite still
+>   passed 5/0.
+>
+> **Only (c) remains, and two of its three legs are blocked on a display-capable host** that hetzner
+> cannot provide — which the liveness probe now correctly refuses.
 > `crates/wcore-agent/src/bootstrap.rs:754` is still
 > `PluginRunner::new().with_computer_use_advertised(true)`, unconditional. (Note the row's
 > `bootstrap.rs:696` line number has moved to `:754`.) The in-source justification is that
