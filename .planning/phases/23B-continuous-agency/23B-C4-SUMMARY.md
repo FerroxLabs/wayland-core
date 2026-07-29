@@ -165,6 +165,31 @@ write-heavy session really does cost more than its uncached counterfactual
 (Anthropic charges 1.25× input for a cache write). Both directions are now
 asserted, each on a shape that exhibits it.
 
+### The broad `wcore-agent --lib` run is red — and it is red at the BASE
+
+`cargo test -p wcore-agent --lib` on this lane's HEAD: `2184 passed; 17 failed`.
+I did not report that as a pass and I did not report it as my regression — I
+built the merge-base in a separate worktree and ran the same command:
+
+| Run | Commit | Result |
+|---|---|---|
+| lane HEAD, run 1 | `f8b437fb` | 2184 passed; **17 failed**; 3 ignored |
+| lane HEAD, run 2 | `f8b437fb` | 2189 passed; **12 failed**; 3 ignored |
+| **merge-base** | **`4a872413`** | 2164 passed; **17 failed**; 3 ignored |
+
+The base — containing none of this lane's code — fails 17 in the same families
+(`engine::audit_2026_05_22_tests`, `session::tests`, `session_journal::fault_tests`,
+`session_lifecycle::tests`, `orchestration::f13_durability_tests`,
+`engine::retry_wedge_protection_tests`). The failing set also **moves between two
+runs of the identical binary**, which a code regression does not do, and
+`--test-threads=1 session:: session_journal::` on the lane HEAD passes
+**96/96**. Pre-existing flake in the integration branch under parallel load;
+**something the orchestrator should know about, and not this lane's.**
+
+`cargo test -p wcore-cli --lib` also shows `test always_fails ... FAILED` in a
+one-test binary on both trees — the `31-vacuous-greens` canary, which is
+supposed to fail. The real suite in the same invocation: `1854 passed; 0 failed`.
+
 ### Known-negatives carried
 
 Every suite carries at least one assertion that must fail if the instrument is
