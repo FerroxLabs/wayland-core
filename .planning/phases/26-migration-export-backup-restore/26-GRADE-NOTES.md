@@ -177,3 +177,94 @@ real-credential evidence covers code that has since changed in exactly the modul
 responsible for the property. It is evidence FOR the property and it is **not evidence
 at HEAD**. (The direction is favourable — the later commits harden — but that is an
 argument, not a measurement, and the whole point of this leg was to stop arguing.)
+
+---
+
+## M4 — the import half, LIVE on the real binary (minute ~110). This is the decisive leg.
+
+Built `wcore-cli` release at my HEAD on `hetzner-dsm` (`/root/wayland-grade26`,
+`wayland-core 0.12.25`). Drove `migrate hermes --yes` against the COMMITTED hermes
+fixture plus one sentinel of each content class F26-02 names.
+
+**Two probe generations, and the first one's failure is the point.** v1 hand-authored a
+`config.yaml`; the profile failed to parse, so its known-positive went RED and it
+correctly declared its own five absences meaningless. v2 used the committed fixture but
+wrote the exec directive as ` ```!shell `, which the block regex
+`(?s)```!\s*\n` does not match — **my error, not the product's**. v3 uses the real
+syntax from `tests/fixtures/portability-exec/skills/repo-status/SKILL.md`.
+
+**v3 result — positive control PASS, so the zeros are real:**
+
+```
+Imported 13 profiles (0 skipped), 0 MCP servers, 0 credentials.
+Accounting: discovered=16 imported=14 quarantined=2 excluded=0
+
+=== FILES IN WAYLAND HOME ===
+HOME/config.toml
+HOME/migrate-quarantine/index.json
+HOME/migrate-quarantine/payloads/mcp_server_ijfw-memory-dc8580321779/mcp-server.json
+HOME/migrate-quarantine/payloads/skill_skills_probe-exec-a11e5e4fc1b6/SKILL.md
+TOTAL: 4
+
+Q1 CONTAINMENT: PASS — the executable skill IS in the home (quarantined)
+Q2 IMPORT:      data-skill body files_containing=0  (product reported Outcome::Imported)
+```
+
+**Q1 is the positive control that makes Q2 mean something**: the probe demonstrably CAN
+see a skill-shaped write, because it found the quarantined one. Q2's zero is therefore a
+measurement, not a dead instrument.
+
+v2 additionally measured the other four classes with the same control passing
+(config.toml present with `[profiles.*]`):
+
+| class | sentinel | files containing it in the Wayland home |
+|---|---|---|
+| persona (`SOUL.md`) | `SOUL-SENTINEL-9f31` | **0** |
+| memory note | `MEMORY-SENTINEL-4b77` | **0** |
+| settings | `SETTINGS-SENTINEL-c21a` | **0** |
+| asset | `ASSET-SENTINEL-77de` | **0** |
+| data skill body | `DATASKILL-SENTINEL-1a2b` | **0** |
+
+**After importing a 13-profile, 542-skill, 13-persona peer home, the Wayland home
+contains FOUR files.** One config.toml, one quarantine index, two inert payloads.
+
+### F26-GRADE-H1 confirmed live — "Imported" is reported for content that is never written
+
+The plan preview and the apply report contradict each other about the same items, in the
+same run: `Detected but NOT imported in this pass: 542 skill directories` and
+`Accounting: … imported=14`, where the 14 includes the data skill whose bytes are
+nowhere on disk. Neither reading matches the filesystem.
+
+### Containment is real but its coverage is narrow — measured on Sean's REAL install
+
+`peer_skill_roots()` scans only `<home>/skills`, `<home>/plugin-skills`,
+`<home>/profiles/*/skills` and `<home>/agents/*/skills`, and `scan_peer_skills()` only
+looks at an IMMEDIATE child directory holding a `SKILL.md`. Against `~/.hermes`,
+read-only, with a negative control on the matcher:
+
+```
+TOTAL SKILL.md in the real home : 1909
+skills/<d>/SKILL.md             :   22
+plugin-skills/<d>/SKILL.md      :    0
+profiles/<p>/skills/<d>/SKILL.md:  252
+agents/<a>/skills/<d>/SKILL.md  :    0
+SCANNED: 274 / 1909      UNSCANNED: 1635
+negative control (./zzz-not-a-root/*/SKILL.md): 0
+```
+
+(My first pass at this used zsh globs and returned all-zeros including for a directory I
+could see had 122 — the instrument-death trap in §3b-i. Re-measured with `/usr/bin/find`
+exact-shape patterns, which is what the numbers above are.)
+
+**86% of the real install's skills are never classified.** This is NOT a live-execution
+hole, and I want to be exact about why: an unscanned skill is not imported either, so
+nothing executable escapes containment. The property holds — but it holds substantially
+**because almost nothing is imported**, which is the vacuous-satisfaction shape the
+ledger already flagged elsewhere in this program. A future lane that wires skill import
+without widening `peer_skill_roots` at the same time turns this from a completeness gap
+into a containment gap.
+
+Also measured: the committed `tests/fixtures/portability/hermes` corpus has **540 skill
+directories and ZERO `SKILL.md` files**, so `t13 conservation holds over both full
+committed corpora` exercises skill classification on **0 of 540**. The real install does
+use `SKILL.md` (1909), so this is a fixture-fidelity gap, not a product one.
