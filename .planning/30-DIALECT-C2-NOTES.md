@@ -191,3 +191,90 @@ not that the pins were lost.
 
 Confound analysis done and it corrects the inherited framing on 3 of 9 legs. Next: (a) audit the
 compiler's own test suite for a real negative control, (b) attempt peer provisioning at the pins.
+
+---
+
+## T+2 — MEASUREMENT 2: **the compiler is not connected to the trial runner.** HIGH.
+
+This is the finding that decides the lane. Established by reading `bin/wayland-scorecard.rs`, with
+known-positives alive in the same invocations per LANE-BRIEF §3b-i.
+
+### 2a. The measurement
+
+**Known-positive 1** — the runner's script source exists and is reached:
+`/usr/bin/grep -n 'steps_for' bin/wayland-scorecard.rs` → `914:fn steps_for(`, `936: let steps =
+steps_for(protocol, dimension)?;`. Instrument alive.
+
+**Known-positive 2** — `TranslationV1` is a real symbol with real uses:
+`/usr/bin/grep -rn 'TranslationV1' bin/ src/ | wc -l` → **9**. Non-zero. Instrument alive.
+
+**The query** — every occurrence of `TranslationV1` and `CompiledStepV1` *in the CLI binary*:
+
+```
+bin/wayland-scorecard.rs:27   use ... CompiledStepV1, ToolSchemaCorpusV1, TranslationV1, ...
+bin/wayland-scorecard.rs:635      CompiledStepV1::ToolCall(call) => Some(call.tool_name.as_str())
+bin/wayland-scorecard.rs:659      let translation: TranslationV1 = serde_json::from_slice(...)
+```
+
+Line 635 is inside `DialectCommand::Compile` and only builds a **display string** of resolved tool
+names for the `DIALECT_COMPILE=OK … tool_names=…` line. Line 659 is inside `DialectCommand::Verify`.
+
+**So a compiled translation is written by `dialect compile` and read back by exactly one consumer:
+`dialect verify`, which re-digests it. Nothing executes it.**
+
+Corroborating, from the runner side:
+
+- `TrialsCommand::Run` (line 244) takes `--protocol --invocation --dimension --trials
+  --workspace-root --out`. **There is no `--translation`, no `--corpus`, no `--dialect` argument.**
+- `drive_leg` (line 929) obtains its script from `steps_for(protocol, dimension)` (line 936), and
+  `steps_for` (line 914) reads `protocol["fixture_script"][dimension]` and deserializes it straight
+  into `Vec<OpenAiStep>`.
+
+**There is no code path from a `TranslationV1` to an executed trial.**
+
+### 2b. Why this is worse than the missing peers
+
+`30-DIALECT-PROTOCOL-V2.md` §5 lists four execution preconditions: corpus for all three harnesses,
+`cohort_eligibility` ELIGIBLE, translations compiled and verified, peers re-provisioned at their
+pins. **All four can be satisfied and protocol v2 still cannot be executed**, because `trials run`
+physically cannot consume a translation. It would re-read `protocol.fixture_script` — and the only
+`fixture_script` that exists is **v1's, the one that says `write_file`.**
+
+Run today with a perfect three-harness cohort, the v2 re-take would reproduce v1's numbers exactly.
+
+So the prior lane's own precondition list is incomplete, in the same shape as its "what v2 does not
+fix" list is incomplete on cost (T+1). Both omissions point the same way: **the compiler was built
+to the water's edge and graded on its unit tests rather than on its ability to drive a trial.**
+
+### 2c. What the 27 existing tests do and do not prove
+
+`/usr/bin/grep -c '#[test]'` → `dialect.rs` **21**, `dialect_discovery.rs` **6**. `#[ignore]` count
+**0** in both, so the suite is not vacuous by the §3.2 flavour-(a) mechanism.
+
+Read the names: `g1_*` (vocabulary), `g2_*` (permutation invariance), `g3_*` (refusal, no ranking),
+`g4_verify_accepts_a_real_translation_and_rejects_a_tuned_one`, `qual_*` (published blind spots),
+`tokenizer_*`, `cohort_*`, plus discovery-parser tests.
+
+**Every one of them is a unit test on the selection filter or the discovery parser.** Not one of
+them starts a harness, and not one of them asserts that two harnesses driven by their own compiled
+translations perform the *same work*. So the suite proves the compiler's *choice* is unbiased; it
+proves nothing about whether a compiled script drives a real harness at all.
+
+That is exactly the hole the lane brief names: *"prove the compiler does not itself become the
+confound."* It currently is not proven, and cannot be, because the compiler's output is never run.
+
+### 2d. Consequence for this lane
+
+The order of work is now forced:
+
+1. **Wire the translation into the runner** — `trials run --translation`, `CompiledStepV1` →
+   `OpenAiStep`. Without it nothing else in this lane is executable. (Not a fenced file:
+   `bin/wayland-scorecard.rs` is neither `wcore-cli/src/lib.rs` nor `main.rs`.)
+2. **Equivalence test + negative control** — semantically identical trial, two dialects, identical
+   work; and a deliberately mis-compiled dialect that must redden.
+3. **Provision peers at the pins** (both pins confirmed present on the Mac, T+1f) and re-take
+   whatever the instrument makes valid.
+
+## T+2 — status
+
+Two structural findings recorded (cost degeneracy, compiler not wired). Next: build the wiring.
