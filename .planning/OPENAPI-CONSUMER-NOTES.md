@@ -118,7 +118,76 @@ this consumer cannot break on the change. Verified by reading it, and re-verifie
 So the answer is not "nobody parses it" — it is "exactly one thing parses it, it ships with us,
 and it is structurally indifferent to the version."
 
+## M4 — live measurement off the REAL binary (hetzner-dsm, never the Mac)
+
+Built targeted, not full-workspace: `cargo build -p wcore-cli --bin wayland-core` at lane HEAD
+`fd18b8f3` in `/root/wayland-openapi`. `Finished dev profile in 1m 40s`, `0` lines matching `^error`.
+Binary: `wayland-core 0.12.25`.
+
+**Getting the real binary to serve took a real fix, and it is worth recording** because it is a
+live-testing obstacle the next lane will hit: `wayland-core acp serve` **exits 1** on a headless
+Linux box —
+
+```
+wayland-core acp: keychain store failed: authentication error: keychain store failed:
+no keychain backend available: Secret Service: no result found
+```
+
+`--api-key` does not avoid it: the key is persisted through `store_api_key` (`wcore-cli/src/
+acp.rs:321`) *before* the bind, and `keyring` on Linux is Secret-Service-over-D-Bus. Passing the
+flag still stores. Working recipe, verified: run the whole server under
+`dbus-run-session` with `gnome-keyring-daemon --unlock --components=secrets` fed an ephemeral
+passphrase on **stdin**. Then it binds:
+
+```
+wayland-core acp: serving on http://127.0.0.1:18777 (ACP on /sessions, REST on /v1, docs at /doc)
+```
+
+**Measured, live, `curl` against that listener** — `HTTP/1.1 200 OK`,
+`content-type: application/json`, `18286` bytes, `8` paths / `10` operations:
+
+| Measurement | Value |
+|---|---|
+| `openapi` version field | **`3.1.0`** (exact, not a prefix) |
+| fields in 3.1 form `type: [T, "null"]` | **9** |
+| fields in 3.0 form `nullable: true` | **0** |
+
+**§8's 9/0 independently reproduced off the real binary.** The nine sites, which §8 did not have:
+
+```
+/components/schemas/AgentInfo/properties/description
+/components/schemas/ApprovalResolveRequest/properties/answer
+/components/schemas/ApprovalResolveRequest/properties/prefix
+/components/schemas/ApprovalResolveRequest/properties/resume_token
+/components/schemas/SessionCreateRequest/properties/agent
+/components/schemas/SessionCreateRequest/properties/model
+/components/schemas/SessionCreateRequest/properties/system_prompt
+/components/schemas/SessionCreateResponse/properties/model
+/components/schemas/SessionMetadata/properties/model
+```
+
+**The one consumer, re-verified live rather than only by reading.** `GET /doc` → `200`, 2237 bytes.
+I re-ran the viewer's exact parse (`spec.paths` → `Object.entries` → `op.summary ||
+op.description`) over the live 3.1.0 document: **10 operations render**. The viewer never reads
+`spec["openapi"]`, so it is indifferent to the version by construction.
+
+**Secret hygiene.** The server printed a first-run API key to its own stderr log. That log is NOT
+copied into the repo. Sweep of the served document against that value: **0 hits**. The keyring
+passphrase was generated on the remote host and injected on stdin — never in argv, never on disk,
+never echoed.
+
+## M5 — a second, SEPARATE finding (not the version change; do not conflate)
+
+Every one of the 10 operations carries only `operationId`, `responses`, `tags`. **Not one has
+`summary` or `description`**, so the `/doc` viewer renders bare `METHOD /path` rows with no prose —
+`with summary/description = 0`.
+
+**This is NOT a regression from the utoipa bump.** utoipa derives operation summary/description
+from the `///` doc comment on the handler fn in *both* majors, and no handler in `rest.rs` has one
+(`#[utoipa::path(...)]` sits directly on each fn with no doc comment, and no explicit `summary =`).
+So it was equally empty under 3.0.3. Calling it a bump regression would have been a false
+attribution — it is pre-existing. Graded **LOW**, non-blocking → BACKLOG.
+
 ## Still to establish
 
-- Live shape count off the real binary (hetzner). **UNANSWERED.**
 - The fixture + its three-assertion self-test. **NOT BUILT.**
