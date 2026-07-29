@@ -61,11 +61,22 @@ env["HOME"] = workdir
 config_path = os.path.join(config_root, "wayland-core", "config.toml")
 with open(config_path, "w") as handle:
     handle.write(
-        "[provider]\nname = \"anthropic\"\n\n"
         "[storage.credentials.backend.encrypted_file]\n"
         f"cipher_path = \"{os.path.join(workdir, 'credentials.enc')}\"\n"
         f"key_params_path = \"{os.path.join(workdir, 'credentials.kdf.json')}\"\n"
     )
+os.chmod(config_path, 0o600)
+
+# A PLACEHOLDER, not a credential. The engine refuses to boot without some key
+# configured, but this drive never issues a `message` command, so no provider
+# round trip is ever made and no real key is needed or used. Redirecting HOME
+# above also detaches the process from hetzner's `/root/.wayland/.env`, which
+# injects a real `ANTHROPIC_API_KEY` into anything started on this box
+# (LANE-BRIEF 3b-ii) — so this drive provably is NOT running against Sean's
+# key. That detachment is deliberate.
+env["ANTHROPIC_API_KEY"] = "placeholder-no-provider-call-is-made-in-this-drive"
+env.pop("OPENAI_API_KEY", None)
+env.pop("API_KEY", None)
 
 # Durable sessions refuse to start against a plaintext credential backend, and
 # durable sessions are the whole point here — a Goal lives in the session
