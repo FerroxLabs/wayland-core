@@ -182,3 +182,64 @@ Shipped so far:
 - (t+45m) design fixed; command variant and full task ledger explicitly declined with reasons.
 - (t+2h) protocol surface committed + pushed; wcore-protocol --lib 125/125 with all 5 new
   goal tests named in the output.
+
+## Measurement 4 (t+~3h) — the corpus test was ALREADY RED at base. Proved with the test itself.
+
+Two independent measurements now agree, and the second is the Rust gate rather than my
+Python port of it. Both taken on `hetzner-dsm`.
+
+**At base `8bcb052b`** (`/root/wayland-22-c1-base`, detached, untouched by this lane):
+
+```
+cargo test -p wcore-protocol --test desktop_contract_corpus
+  -> test result: FAILED. 14 passed; 1 failed; 0 ignored
+  -> checked_corpus_matches_real_serializers_byte_for_byte
+     drift: drifted=[adversarial/events/{fixture,schema,version}-mismatch.jsonl,
+                     events/ready.json, manifest.json]   missing=[]  extra=[]
+     "...; run `wcore-contract generate`"
+```
+
+**At my HEAD `e0b22b9e`** (`/root/wayland-22-c1`):
+
+```
+cargo test -p wcore-protocol --test desktop_contract_corpus
+  -> test result: FAILED. 13 passed; 2 failed; 0 ignored
+  -> checked_corpus_matches_real_serializers_byte_for_byte
+     missing=[events/goal_snapshot.json, events/goal_transition.json]
+     drifted=[the same 5, plus schema/{core-event,host-command,producer-complete}.schema.json]
+  -> manifest_pins_generator_and_all_three_digests   left: Number(8)  right: 9
+     (my deliberate CONTRACT_MINOR 8 -> 9)
+```
+
+So: **this gate did not go from green to red in my lane. It went from red to differently-red.**
+The regeneration was already owed at base, by three other lanes' edits to SOURCE_INPUTS files
+(`wcore-agent/src/bootstrap.rs`, `wcore-agent/src/output/protocol_sink.rs`,
+`wcore-cli/src/main.rs`). I am adding two named fixtures and one deliberate minor bump to a
+regeneration that has to happen anyway. That is the whole content of the seam request.
+
+I am NOT reporting this as green. It is red, it is red for a reason I can name exactly, and
+the fix is a single `wcore-contract generate` over the merged tree by the lane that owns it.
+
+### Gates that stayed green — these are the ones that would have caught a breaking change
+
+```
+cargo test -p wcore-protocol --test golden_v0_1_21          -> ok. 22 passed; 0 failed
+cargo test -p wcore-protocol --test host_decoder_contract   -> ok. 31 passed; 0 failed
+cargo test -p wcore-protocol --test desktop_contract_adversarial -> ok. 17 passed; 0 failed
+cargo test -p wcore-protocol --lib                          -> ok. 125 passed; 0 failed
+```
+
+`golden_v0_1_21` pins the wire contract. It is green, which is the evidence that the two new
+events are genuinely ADDITIVE and no existing shape moved. If I had touched `ready` or any
+existing variant, that is where it would have shown.
+
+`inventory_is_exactly_eighteen_commands_and_fifty_one_events ... ok` — the 49 -> 51 count is
+real, and that assertion is a gate that goes red on a miscount (it did, at 49, before I
+updated it).
+
+## Log
+- (t0) worktree created, baseline measured, notes committed.
+- (t+25m) drift probe written, self-tested 3/3, base drift proved pre-existing.
+- (t+45m) design fixed; command variant and full task ledger explicitly declined with reasons.
+- (t+2h) protocol surface committed + pushed; wcore-protocol --lib 125/125, 5 new tests named.
+- (t+3h) base-vs-HEAD corpus comparison taken; golden 22/22 green proves additivity.
