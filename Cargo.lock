@@ -9614,6 +9614,7 @@ dependencies = [
  "ratatui",
  "regex",
  "reqwest",
+ "rusqlite",
  "self-replace",
  "serde",
  "serde_json",

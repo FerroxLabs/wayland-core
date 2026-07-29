@@ -60,5 +60,11 @@ pub mod shell;
 // Filesystem-aware SQLite journal-mode selection. WAL corrupts databases on
 // network filesystems (measured); every SQLite call site selects through here.
 pub mod sqlite_journal;
+// Consistent point-in-time capture of a live SQLite database. A WAL database is
+// a trio of files that is only meaningful together; copying them independently
+// yields a corrupt restore (measured). Needs a real connection, so it is gated
+// on the same `sqlite` feature as `sqlite_journal`'s connection-taking half.
+#[cfg(feature = "sqlite")]
+pub mod sqlite_snapshot;
 pub mod tools;
 pub mod workspace_trust;

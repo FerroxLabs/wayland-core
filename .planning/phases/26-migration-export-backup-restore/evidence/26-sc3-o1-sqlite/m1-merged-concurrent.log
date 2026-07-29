@@ -1,0 +1,39 @@
+[m1-merged-concurrent] prefilling memory.db to ~150 MiB ...
+[m1-merged-concurrent] prefill done in 0.8s, memory.db = 158.3 MiB
+[m1-merged-concurrent] waiting for writers: 0/3 started (iter 0, 1785342703)
+[m1-merged-concurrent] waiting for writers: 3/3 started (iter 1, 1785342704)
+[m1-merged-concurrent] journal modes reported by writers: {'w0': 'wal', 'w1': 'wal', 'w2': 'wal'}
+[m1-merged-concurrent] pre-archive committed high-water marks: {'w0': 2226, 'w1': 2249, 'w2': 2213}
+[m1-merged-concurrent] backup create rc=0 in 10.22s
+archive: /tmp/lane-backup-sqlite-m1-merged-concurrent/backup.tar.gz
+payloads: 2
+tree_digest: 2e9dfb0497fca86357a8c6f19685d4fd7b6f9e338800a73e660bacec89af16b8
+credentials_backend: unknown
+secrets_carried: no
+sqlite_captures: 1
+sqlite_capture: memory.db
+omitted_sqlite_sidecars: memory.db-shm,memory.db-wal
+windows_unrestorable_paths: 0
+[m1-merged-concurrent] post-archive committed high-water marks: {'w0': 22629, 'w1': 21785, 'w2': 22134}
+[m1-merged-concurrent] commits during archive window: w0=+20403, w1=+19536, w2=+19921
+[m1-merged-concurrent] backup restore rc=0
+restored: /tmp/lane-backup-sqlite-m1-merged-concurrent/restored
+payloads: 2
+recovered_before_start: 0
+remap_disposition: remapped
+credential remap: backend `unknown` — 0 credential source(s) will be absent after restore. action: none required; every secret source resolves inside the restored home.
+[m1-merged-concurrent] restored entries: ['config.toml', 'memory.db']
+---- RESULT ----
+   ...(integrity_check problem lines elided)...
+ARM: concurrent
+WRITERS: 3
+ARCHIVE-SECONDS: 10.22
+PRE-ARCHIVE-COMMITTED: 6688
+RESTORED-SIDECARS: []
+INTEGRITY-CHECK: ok
+INTEGRITY-PROBLEM-LINES: 0
+MISSING-COMMITTED-ROWS: 0
+MISSING-BY-WRITER: {'w0': 0, 'w1': 0, 'w2': 0}
+VERDICT: PASS
+WLRC=0
+WLDONE

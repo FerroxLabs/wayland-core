@@ -429,7 +429,9 @@ unicode-width = "0.2"
 libc = "0.2"
 
 # W5 memory v2 dependencies — SQLite (bundled to avoid system-lib drift on Windows)
-rusqlite      = { version = "0.32", features = ["bundled", "blob", "chrono"] }
+# `backup` exposes sqlite3_backup_*, the online-backup API `sqlite_snapshot`
+# uses to capture a LIVE WAL database consistently (F26-SC3-O1).
+rusqlite      = { version = "0.32", features = ["bundled", "blob", "chrono", "backup"] }
 sqlite-vec    = "0.1"
 uuid          = { version = "1", features = ["v4", "v5", "v7", "serde"] }
 parking_lot   = "0.12"
