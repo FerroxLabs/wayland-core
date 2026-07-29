@@ -21,7 +21,7 @@ use super::spec::{
 
 pub const CONTRACT_NAME: &str = "wayland-desktop-core";
 pub const CONTRACT_MAJOR: u64 = 1;
-pub const CONTRACT_MINOR: u64 = 9;
+pub const CONTRACT_MINOR: u64 = 10;
 pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/11";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
