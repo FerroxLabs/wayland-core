@@ -16,6 +16,7 @@
 //! | [`kernel`] | the sole writer of Goal transitions over the existing F12 chain |
 //! | [`ledger`] | the durable Fleet task ledger above the existing executors, and its claim fence |
 //! | [`fleet`] | the wire: the ledger as the Fleet dispatcher's source of work, one claim per agent |
+//! | [`wire`] | the projection onto the host protocol, so a Goal is observable off the CLI (F22-C1) |
 //!
 //! The reduced projection (`GoalState`, `GoalLifecycle`, `GoalTaskState`) lives
 //! beside the other reduced state in `session_journal::model`, for the same
@@ -27,6 +28,7 @@ mod kernel;
 mod ledger;
 mod record;
 pub mod strategy;
+pub mod wire;
 
 pub use fleet::{
     FleetRecovery, FleetRun, GoalFleetDriver, TaskAssignment, TaskExecution, TaskExecutor,
@@ -38,6 +40,9 @@ pub use record::{AuthorityUnreconstructable, GoalAuthorityRecord};
 pub use strategy::{
     AnvilTag, CouncilTag, DirectOutcome, DirectTag, FleetOutcome, FleetTag, ForgeFlowsTag,
     GoalLoop, GoalLoopError, LoopOwner, StrategyTag, StrategyTermination,
+};
+pub use wire::{
+    event_line, goal_projection, goal_snapshot_event, goal_state_digest, goal_transition_event,
 };
 
 // Re-exported so callers work in one vocabulary: the durable projection and the

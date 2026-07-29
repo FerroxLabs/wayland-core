@@ -1251,6 +1251,42 @@ pub enum ProtocolEvent {
         #[serde(flatten)]
         invalidation: AnvilReceiptInvalidation,
     },
+    /// Complete host-observable projection of one durable Goal at a cursor
+    /// (F22-C1).
+    ///
+    /// Additive. Before this event a host could not observe a Goal in any form
+    /// — durable Goals existed only on the CLI surface — so nothing about any
+    /// existing event's shape changes to carry it.
+    ///
+    /// The projection is derived from the reduced journal state, never from
+    /// anything held in memory beside it. `state_digest` is taken over the
+    /// canonical JSON of the FULL reduced `GoalState`, including the parts this
+    /// projection summarises, so a host can always establish which chain state
+    /// its view corresponds to.
+    GoalSnapshot {
+        goal_version: u16,
+        session_id: String,
+        goal_id: String,
+        cursor: RecoveryCursor,
+        state_digest: String,
+        goal: crate::goal::GoalProjection,
+    },
+    /// One durable Goal transition, as a content-free milestone (F22-C1).
+    ///
+    /// Carries the milestone and the cursor it landed at, not the payload —
+    /// the same split `turn_recovery_lifecycle` uses against
+    /// `session_recovery_snapshot`. A host that wants the state after a
+    /// transition reads the next `goal_snapshot`, which keeps the transition
+    /// stream cheap and keeps exactly one shape authoritative for Goal content.
+    GoalTransition {
+        goal_version: u16,
+        session_id: String,
+        goal_id: String,
+        cursor: RecoveryCursor,
+        transition: crate::goal::GoalTransitionKind,
+        /// The lifecycle the Goal is in AFTER the transition.
+        lifecycle: crate::goal::GoalLifecycleWire,
+    },
     Pong,
 }
 

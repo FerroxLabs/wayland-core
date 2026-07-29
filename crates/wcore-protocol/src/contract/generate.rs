@@ -21,7 +21,7 @@ use super::spec::{
 
 pub const CONTRACT_NAME: &str = "wayland-desktop-core";
 pub const CONTRACT_MAJOR: u64 = 1;
-pub const CONTRACT_MINOR: u64 = 8;
+pub const CONTRACT_MINOR: u64 = 9;
 pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/11";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
@@ -1164,6 +1164,15 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
         (
             "durable_child_model_v1".into(),
             ContractCapabilityStatus::Available,
+        ),
+        // F22-C1. ShapeOnly, NOT Available, and the difference is load-bearing:
+        // Core emits `goal_snapshot`/`goal_transition`, but there is no host
+        // command to pull one, because answering a command requires the CLI
+        // command loop in `crates/wcore-cli/src/main.rs`. Advertising this
+        // `Available` would claim a round trip that nothing completes.
+        (
+            "durable_goals_v1".into(),
+            ContractCapabilityStatus::ShapeOnly,
         ),
         (
             "host_delegated_delivery".into(),
