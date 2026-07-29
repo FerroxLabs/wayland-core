@@ -1341,6 +1341,15 @@ pub enum GoalControlRefusalReason {
     IterationCeilingReached,
     /// A task with that id is already declared in this Goal's ledger.
     TaskAlreadyDeclared,
+    /// The task named a dependency that is not declared in this Goal's ledger.
+    ///
+    /// Distinct from [`Self::Malformed`] and from [`Self::JournalError`] on
+    /// purpose. The ledger refuses an undeclared dependency because treating
+    /// one as satisfied would release a dependent on a task that never exists;
+    /// the host's fix is to declare the dependency FIRST and re-issue, which is
+    /// a different action from correcting a malformed field and a very
+    /// different one from retrying a failed disk write.
+    DependencyNotDeclared,
     /// The command was structurally valid but a field was not usable —
     /// an empty id, an out-of-range bound.
     Malformed,

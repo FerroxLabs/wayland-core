@@ -189,6 +189,18 @@ fn a_wire_declare_task_lands_in_the_durable_ledger_with_its_dependency() {
     let journal = journal(dir.path(), "task-positive");
     drive(&journal, &wire(&open_json("g-1")));
 
+    // The dependency must be declared FIRST. The ledger refuses a dependency
+    // on an undeclared task rather than treating it as satisfied, so a real
+    // control plane declares the graph in topological order.
+    let build = format!(
+        r#"{{"type":"goal_declare_task","goal_version":1,"request_id":"r-build","session_id":"{SESSION}","goal_id":"g-1","task_id":"build"}}"#
+    );
+    let built = drive(&journal, &wire(&build));
+    assert!(
+        refusal_reason(&built).is_none(),
+        "declaring a root task must be accepted: {built:?}"
+    );
+
     let declare = format!(
         r#"{{"type":"goal_declare_task","goal_version":1,"request_id":"r-task","session_id":"{SESSION}","goal_id":"g-1","task_id":"publish","depends_on":["build"],"idempotency_key":"idem-publish"}}"#
     );
@@ -209,6 +221,51 @@ fn a_wire_declare_task_lands_in_the_durable_ledger_with_its_dependency() {
     assert!(
         task.depends_on.contains("build"),
         "the declared dependency must survive into the chain"
+    );
+}
+
+/// KNOWN-NEGATIVE, found by this suite failing for real: a dependency on an
+/// undeclared task is refused, and refused with its OWN reason.
+///
+/// The first version of this suite declared `publish -> build` without
+/// declaring `build`, and the handler answered `journal_error`. That was
+/// technically true and operationally useless: `journal_error` tells a host to
+/// retry a write, when the actual fix is to declare the dependency first. The
+/// handler now checks the ledger's rule itself and says so.
+#[test]
+fn a_dependency_on_an_undeclared_task_is_refused_with_its_own_reason() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let journal = journal(dir.path(), "task-undeclared-dep");
+    drive(&journal, &wire(&open_json("g-1")));
+
+    let orphan = format!(
+        r#"{{"type":"goal_declare_task","goal_version":1,"request_id":"r","session_id":"{SESSION}","goal_id":"g-1","task_id":"publish","depends_on":["build"]}}"#
+    );
+    let events = drive(&journal, &wire(&orphan));
+    assert_eq!(
+        refusal_reason(&events),
+        Some(GoalControlRefusalReason::DependencyNotDeclared),
+        "an undeclared dependency must be named as such, not collapsed into a journal error: {events:?}"
+    );
+
+    // And nothing was written: a refused declaration must not half-land.
+    let state = GoalKernel::new(journal.clone())
+        .goal(&GoalId::new("g-1"))
+        .expect("read")
+        .expect("goal exists");
+    assert!(
+        state.tasks.is_empty(),
+        "a refused task declaration must leave the ledger untouched"
+    );
+
+    // THIRD ASSERTION — the old shape would have missed it. Before this
+    // reason existed the answer was `JournalError`, which is the SAME value a
+    // genuine disk failure produces, so a matcher keyed on it could not tell
+    // a fixable graph mistake from an unfixable I/O one.
+    assert_ne!(
+        refusal_reason(&events),
+        Some(GoalControlRefusalReason::JournalError),
+        "the pre-repair answer must no longer be what this path returns"
     );
 }
 

@@ -326,6 +326,24 @@ fn handle_declare_task(
             GoalControlRefusalReason::TaskAlreadyDeclared,
         );
     }
+    // The reducer refuses a dependency on an undeclared task, because treating
+    // an unknown dependency as satisfied would release a dependent on a task
+    // that never exists. Checked HERE too so the host gets that specific
+    // reason: collapsing it into `JournalError` would tell a control plane to
+    // retry a write when the actual fix is to declare the dependency first.
+    if task.depends_on.contains(&task.task_id)
+        || task
+            .depends_on
+            .iter()
+            .any(|dependency| !state.tasks.contains_key(dependency))
+    {
+        return refuse(
+            &task.request_id,
+            &task.session_id,
+            &task.goal_id,
+            GoalControlRefusalReason::DependencyNotDeclared,
+        );
+    }
     let Some(journal) = journal else {
         return refuse(
             &task.request_id,
