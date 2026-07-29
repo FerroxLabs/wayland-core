@@ -121,3 +121,45 @@ the fix is the message, and the message must not assert entitlement either.
 **Decision:** fix the message (and type the 401 rather than letting it fall through a dead
 402-only mapper). Do **not** silently change `DEFAULT_IMAGE_MODEL`. File the default-arm
 question as a finding carrying the cost figure and the key-scoping caveat, for Sean.
+
+## MEASURED — defect 3 (media accounting): the two media shapes are NOT symmetric
+
+One real transcription + one real image, headers captured (`f27-media-cost-probe.sh`):
+
+| Shape | cost in response HEADERS | cost in JSON BODY | priceable at all? |
+|---|---|---|---|
+| transcription | **YES** — `x-flux-cost-usd: 0.016670`, `x-flux-billed-seconds: 10`, `x-flux-routed-model: flux-voice-fast` | no (`duration/language/segments/task/text` only) | **yes, from headers** |
+| image generation | **NO** — `IMG_COST_HEADER_PRESENT=0` | **no** — body keys are only `created`, `data`; no `usage`, no cost | **NO — provider prices it nowhere** |
+| chat completion (contrast) | `x-flux-cost-usd: 0.000036`, `x-flux-available: 264213742` | `usage.cost_usd: 3.6e-05` | already priced |
+
+So the brief's premise "the provider returns billing data in the response" holds for
+**transcription only**. For images the provider returns no billing data in any channel, so no
+amount of product wiring can price an image call on this provider. That half of C3 accounting
+is **not a product defect** — it is a provider limitation, and should be recorded as such.
+
+Also: the transcription round-trip returned the prompt text **verbatim**
+(`' The quick brown fox jumps over the lazy dog near the riverbank.'`), which independently
+confirms the model id I hardcoded (`flux-voice-fast`) is correct.
+
+## INSTRUMENT DEFECT found and REPAIRED in this lane (§6b-ii)
+
+My own spend meter read the credit counter from `/v1/models`. **That route does not carry
+`x-flux-available`** (verified: only date/content-type/cf-* headers). The meter therefore
+printed `CREDIT_BEFORE=` / `CREDIT_AFTER=` — empty — **with exit status 0**. A silently empty
+spend figure is the "silently destroys a result rather than failing loudly" class, occurring
+inside the instrument built to meter spend. The counter actually lives on
+`/v1/chat/completions`.
+
+Repaired (right route + loud failure on absence), with a three-assertion self-test at
+`credit-meter-selftest.sh`:
+
+```
+ASSERT_1_KNOWN_POSITIVE=PASS (repaired matcher read 264213742, rc=0)
+ASSERT_2_KNOWN_NEGATIVE=PASS (repaired matcher rc=3 and said UNREADABLE)
+ASSERT_3_OLD_MATCHER_MISSED_IT=PASS (old rc=0 + empty on a counter-less response; repaired rc=3)
+SELFTEST_RESULT=PASS
+```
+
+Assertion 3 is the one that proves the repair does anything: the old form returns
+**success-shaped output** (rc 0, empty string) on a counter-less response, i.e. it would have
+reported no spend at all and I would have believed it.
