@@ -1,90 +1,57 @@
 //! What `TriggerBound::max_in_flight` actually does. Measured, not read.
 //!
 //! Phase 24 Criterion 2, lane `24-c4-support`. `24-PHASE-VERDICT.md` §3 records
-//! the field as *"stored and clamped but not enforced at dispatch"*. That is
-//! nearly right and the difference matters, so it is measured here rather than
-//! restated: the field is not an unenforced bound, it is a bound on a quantity
-//! **the runner's dispatch model cannot produce**. `dispatch_and_record` is
-//! `.await`ed inline inside the selection loop and the production handler
-//! (`wcore_agent::cron::EngineJobHandler`) does not spawn, so a job's fires are
-//! serialized end to end and no job can ever have two outstanding.
+//! the field as *"stored and clamped but not enforced at dispatch"*. Two
+//! things are true and neither is quite that, so both are asserted here.
 //!
-//! # Why that is a finding and not a shrug
+//! # 1. The value is unreachable above 2 — and above 1 on six of seven variants
 //!
-//! `cron show` renders `max_in_flight=<N>` for any N the job carries, up to
-//! `CEILING_IN_FLIGHT` (16). An operator reading that is told they may have up
-//! to N fires of this job outstanding. They may have one. This is the same
-//! shape as the `poll:` trigger this phase already retired — a surface
-//! promising behaviour the runtime does not implement — except inverted: poll
-//! claimed a fire that never happened, this claims concurrency that never
-//! happens.
+//! `CronJob::effective_bound()` clamps any persisted bound to the trigger
+//! variant's `default_bound()`, one-way. Every variant's default is
+//! `max_in_flight = 1` **except `Event`, which is 2**. A job carrying a
+//! persisted `max_in_flight` of `CEILING_IN_FLIGHT` (16) therefore has an
+//! EFFECTIVE bound of 1 on `once`/`interval`/`cron`/`webhook`/`poll`/
+//! `commitment`, and 2 on `event`.
 //!
-//! # The measurement is DIFFERENTIAL, and the probe carries a positive control
+//! **`CEILING_IN_FLIGHT = 16` is decorative**: it bounds a value that every
+//! variant default already bounds at 2 or below, so no input reaches it.
 //!
-//! A bare "peak concurrency was 1" is free on a broken probe: a counter that
-//! never increments, a handler that is never called, a scenario that produced
-//! no fires at all. So this file
+//! This lane's first version of this file did not know that. It set a persisted
+//! bound of 8 on an `interval` job, never looked at the effective bound, and
+//! reported the resulting "peak concurrency 1" as a measurement of what a bound
+//! of 8 buys. It was a measurement of a bound of 1. The mistake was caught by
+//! driving the real `cron status` verb, which printed `max_in_flight=1` for the
+//! job the test believed carried 8 — **a live drive correcting a green test**.
+//! `the_effective_bound_can_never_exceed_two` is the replacement, and it
+//! asserts the clamp rather than trusting the value it just wrote.
 //!
-//!   1. proves the probe CAN see concurrency above 1, by driving two
-//!      dispatches through it concurrently on purpose;
-//!   2. proves the scenario really fires, by asserting a non-zero fire count;
-//!   3. compares `max_in_flight = 1` against `max_in_flight = 8` and shows the
-//!      two are INDISTINGUISHABLE.
+//! # 2. The runner never reads the field
 //!
-//! Assertion 3 is the one that carries the claim. Assertions 1 and 2 are what
-//! make it worth anything.
+//! Asserted as a source census over `runner.rs` rather than as a concurrency
+//! measurement, and deliberately so. `dispatch_and_record` is `.await`ed inline
+//! in the selection loop, so a probe driving that API would observe peak
+//! concurrency 1 no matter what the code said — a tautology wearing a
+//! measurement's clothes. What is actually claimed is narrower and checkable:
+//! the runner enforces `deadline` and `min_interval_secs` and does not
+//! reference `max_in_flight` at all. The census carries a known-positive
+//! control on the sibling field that IS enforced, so a census that matched
+//! nothing cannot pass.
+//!
+//! # Why this is a finding and not a shrug
+//!
+//! `cron status` renders `max_in_flight=2` on every event job. An operator
+//! reading it is told two fires of that job may be outstanding. One may. Same
+//! shape as the `poll:` trigger this phase already retired: a surface stating
+//! behaviour the runtime does not implement. `crates/wcore-cli/src/cron.rs`
+//! now annotates the line instead of silently echoing it.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-use async_trait::async_trait;
 use chrono::{DateTime, Duration, TimeZone, Utc};
+use wcore_cron::CronJob;
 use wcore_cron::job::Target;
-use wcore_cron::lease::LeaseHandle;
-use wcore_cron::runner::JobHandler;
-use wcore_cron::store::{CronStore, FileCronStore};
 use wcore_cron::trigger::{CEILING_IN_FLIGHT, Trigger, TriggerBound};
-use wcore_cron::{CronJob, Result, tick_once_at};
 
 fn t0() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 7, 29, 12, 0, 0).unwrap()
-}
-
-/// Records the PEAK number of dispatches inside the handler at one time.
-///
-/// Holds an await point between the increment and the decrement, so two
-/// overlapping dispatches are observable. Without that yield the probe could
-/// report 1 purely because it never gave the executor a chance to interleave —
-/// which would be a dead instrument producing the answer this file is looking
-/// for.
-#[derive(Default, Clone)]
-struct ConcurrencyProbe {
-    inside: Arc<AtomicUsize>,
-    peak: Arc<AtomicUsize>,
-    fires: Arc<AtomicUsize>,
-}
-
-impl ConcurrencyProbe {
-    fn peak(&self) -> usize {
-        self.peak.load(Ordering::SeqCst)
-    }
-    fn fires(&self) -> usize {
-        self.fires.load(Ordering::SeqCst)
-    }
-}
-
-#[async_trait]
-impl JobHandler for ConcurrencyProbe {
-    async fn dispatch(&self, _t: &Target) -> Result<()> {
-        let now = self.inside.fetch_add(1, Ordering::SeqCst) + 1;
-        self.peak.fetch_max(now, Ordering::SeqCst);
-        self.fires.fetch_add(1, Ordering::SeqCst);
-        // A real await point, so an overlapping dispatch can actually be seen.
-        tokio::task::yield_now().await;
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        self.inside.fetch_sub(1, Ordering::SeqCst);
-        Ok(())
-    }
 }
 
 fn slash(cmd: &str) -> Target {
@@ -93,115 +60,141 @@ fn slash(cmd: &str) -> Target {
     }
 }
 
-/// One interval job, long overdue, carrying `max_in_flight = n`. Returns the
-/// probe after a single tick.
-async fn drive_overdue_interval(n: u32) -> ConcurrencyProbe {
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn CronStore> = Arc::new(FileCronStore::new(dir.path().join("jobs.json")));
-    let probe = ConcurrencyProbe::default();
-    let handler: Arc<dyn JobHandler> = Arc::new(probe.clone());
+/// Every variant, constructed. Kept exhaustive against `Trigger::KINDS` by
+/// `every_kind_is_covered` below, so a new variant cannot slip past this file.
+fn all_triggers() -> Vec<Trigger> {
+    vec![
+        Trigger::Once { at: t0() },
+        Trigger::Interval { every_secs: 900 },
+        Trigger::Cron {
+            expression: "0 9 * * *".to_string(),
+        },
+        Trigger::Event {
+            topic: "build.finished".to_string(),
+        },
+        Trigger::Webhook {
+            path: "/hook".to_string(),
+            require_auth: true,
+        },
+        Trigger::Poll {
+            url: "https://example.invalid/x".to_string(),
+            every_secs: 600,
+        },
+        Trigger::Commitment {
+            deadline: t0() + Duration::hours(1),
+            heartbeat_secs: 300,
+        },
+    ]
+}
 
-    let mut job = CronJob::with_trigger(
-        Trigger::Interval { every_secs: 60 },
-        slash("/in-flight-probe"),
-    )
-    .unwrap();
-    job.created_at = t0();
-    job.last_fired = Some(t0());
-    // The bound under test. `clamp_to` narrows it against the variant default,
-    // so the stored value is whatever the product would really carry.
-    job.bound = Some(TriggerBound::new(1, n));
-    store.insert(job.clone()).await.unwrap();
+#[test]
+fn every_kind_is_covered() {
+    let covered: Vec<&str> = all_triggers().iter().map(|t| t.kind()).collect();
+    for k in Trigger::KINDS {
+        assert!(
+            covered.contains(k),
+            "trigger kind {k:?} is not covered here"
+        );
+    }
+    assert_eq!(covered.len(), Trigger::KINDS.len());
+}
 
-    // Thirty periods overdue. If the dispatcher had any notion of outstanding
-    // fires, this is the scenario in which it would use it.
-    let now = t0() + Duration::minutes(30);
-    tick_once_at(&store, &handler, None, &LeaseHandle::unleased(), now)
-        .await
+// ---------------------------------------------------------------------------
+// 1. Reachability of the value
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_effective_bound_can_never_exceed_two() {
+    for trigger in all_triggers() {
+        let kind = trigger.kind();
+        let mut job = CronJob::with_trigger(trigger, slash("/probe")).unwrap();
+
+        // POSITIVE CONTROL: the persisted value really is the ceiling, so a
+        // clamped result below is the clamp acting rather than a value never
+        // written. This is the exact control whose absence produced this
+        // file's first wrong result.
+        job.bound = Some(TriggerBound::new(1, CEILING_IN_FLIGHT));
+        assert_eq!(
+            job.bound.as_ref().unwrap().max_in_flight,
+            CEILING_IN_FLIGHT,
+            "{kind}: the persisted bound must really carry the ceiling"
+        );
+
+        let effective = job.effective_bound().max_in_flight;
+        assert!(
+            effective <= 2,
+            "{kind}: a persisted {CEILING_IN_FLIGHT} produced an EFFECTIVE \
+             bound of {effective}; no variant default permits more than 2"
+        );
+    }
+}
+
+#[test]
+fn only_event_permits_more_than_one_and_only_two() {
+    let mut above_one: Vec<(&str, u32)> = Vec::new();
+    for trigger in all_triggers() {
+        let n = trigger.default_bound().max_in_flight;
+        if n > 1 {
+            above_one.push((trigger.kind(), n));
+        }
+    }
+    assert_eq!(
+        above_one,
+        vec![("event", 2)],
+        "exactly one variant is expected to permit concurrency, and only two: \
+         got {above_one:?}"
+    );
+}
+
+#[test]
+fn the_ceiling_constant_is_unreachable_by_any_input() {
+    let widest = all_triggers()
+        .iter()
+        .map(|t| t.default_bound().max_in_flight)
+        .max()
         .unwrap();
-    probe
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_probe_can_observe_concurrency_above_one() {
-    // POSITIVE CONTROL, and the load-bearing one. Every other assertion in
-    // this file is "concurrency stayed at 1", which a probe that cannot count
-    // past 1 — or that is never called — satisfies for free.
-    let probe = ConcurrencyProbe::default();
-    let a = probe.clone();
-    let b = probe.clone();
-    let (ra, rb) = tokio::join!(async move { a.dispatch(&slash("/a")).await }, async move {
-        b.dispatch(&slash("/b")).await
-    },);
-    ra.unwrap();
-    rb.unwrap();
-    assert_eq!(probe.fires(), 2, "both dispatches must have run");
-    assert_eq!(
-        probe.peak(),
-        2,
-        "the probe must be able to SEE two overlapping dispatches, or every \
-         'peak was 1' result below is meaningless"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_generous_in_flight_bound_buys_no_concurrency_at_all() {
-    // The measurement. `max_in_flight = 8` against `max_in_flight = 1`, same
-    // scenario, and the two must be indistinguishable — which is what makes
-    // the field decorative rather than merely permissive.
-    let one = drive_overdue_interval(1).await;
-    let eight = drive_overdue_interval(8).await;
-
-    // Anti-vacuity: the scenario really did fire. A run that dispatched
-    // nothing would report peak 1 (in fact 0) and prove nothing.
+    assert_eq!(widest, 2, "the widest variant default; got {widest}");
     assert!(
-        one.fires() > 0 && eight.fires() > 0,
-        "the scenario must actually fire: one={} eight={}",
-        one.fires(),
-        eight.fires()
-    );
-
-    assert_eq!(
-        one.peak(),
-        1,
-        "a bound of 1 should hold at 1 (it does, but not because it is enforced)"
-    );
-    assert_eq!(
-        eight.peak(),
-        1,
-        "MEASURED: `max_in_flight = 8` produced peak concurrency {}. The runner \
-         awaits `dispatch_and_record` inline, so a job's fires are serialized \
-         end to end and the bound has no subject. If this assertion ever \
-         reddens, the dispatch model grew real concurrency and \
-         `max_in_flight` must be enforced at the new dispatch point.",
-        eight.peak()
-    );
-    assert_eq!(
-        one.peak(),
-        eight.peak(),
-        "the two bounds must be indistinguishable — that is the finding"
-    );
-    assert_eq!(
-        one.fires(),
-        eight.fires(),
-        "and they must produce the same number of fires: {} vs {}",
-        one.fires(),
-        eight.fires()
+        widest < CEILING_IN_FLIGHT,
+        "CEILING_IN_FLIGHT ({CEILING_IN_FLIGHT}) bounds nothing while the \
+         widest default is {widest}. If a default ever reaches the ceiling the \
+         constant becomes live and this file's premise changes."
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn even_the_ceiling_buys_nothing() {
-    // The most generous bound the product will accept at all. If any value
-    // were going to produce concurrency, it is this one.
-    let probe = drive_overdue_interval(CEILING_IN_FLIGHT).await;
-    assert!(probe.fires() > 0, "the scenario must actually fire");
+// ---------------------------------------------------------------------------
+// 2. The runner does not read the field
+// ---------------------------------------------------------------------------
+
+/// The runner's own source, compiled into this test. A census over text rather
+/// than over behaviour, because the behaviour is serial by construction and a
+/// behavioural probe would pass on any implementation.
+const RUNNER_SRC: &str = include_str!("../src/runner.rs");
+
+#[test]
+fn the_runner_enforces_the_other_two_bound_fields_and_not_this_one() {
+    // KNOWN-POSITIVE CONTROL FIRST. The sibling fields ARE enforced, and if
+    // this census cannot find them then it cannot find anything, and the zero
+    // below would be free.
+    let interval_hits = RUNNER_SRC.matches("min_interval_secs").count();
+    let deadline_hits = RUNNER_SRC.matches("is_spent").count();
+    assert!(
+        interval_hits > 0,
+        "census is dead: `min_interval_secs` IS enforced in runner.rs and was \
+         not found"
+    );
+    assert!(
+        deadline_hits > 0,
+        "census is dead: `is_spent` IS enforced in runner.rs and was not found"
+    );
+
+    // The claim.
+    let in_flight_hits = RUNNER_SRC.matches("max_in_flight").count();
     assert_eq!(
-        probe.peak(),
-        1,
-        "`max_in_flight = CEILING_IN_FLIGHT` ({CEILING_IN_FLIGHT}) produced peak \
-         concurrency {} — the ceiling constant bounds a quantity the runtime \
-         does not produce",
-        probe.peak()
+        in_flight_hits, 0,
+        "`max_in_flight` now appears {in_flight_hits} time(s) in runner.rs \
+         while `min_interval_secs` appears {interval_hits} and `is_spent` \
+         {deadline_hits}. If the field became load-bearing, delete this test \
+         and the NOTE in crates/wcore-cli/src/cron.rs."
     );
 }
