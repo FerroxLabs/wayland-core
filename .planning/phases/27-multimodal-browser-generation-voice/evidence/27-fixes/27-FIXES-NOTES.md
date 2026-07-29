@@ -89,3 +89,35 @@ truthful-about-cause — it is *uninformative*. It follows that:
 Open question for the fix (cross-audit next): change `DEFAULT_IMAGE_MODEL` to `flux-image`,
 or fix the message, or both. Changing a default has cost implications (contract documents
 together-flux as the ~$0.01 cheapest arm; measured image ≈ $0.08).
+
+## DECIDED — defect 2 fix, after cross-audit (§4) + adversarial pass
+
+Panel (all three returned non-empty; no vote dropped — byte counts 543 / 521 / 2117):
+
+| Member | Q1 change the default arm? | Q2 message |
+|---|---|---|
+| codex gpt-5.6-sol | both, but via a **key-scoped runtime `/models` check**, not a static swap | name both causes, name the model |
+| gemini 3.1-pro | **message only** — "8x cost increase on all users based on one key" | name both causes, name the model |
+| kimi K3 | **both** — swap the default, flag the doc stale | name both causes + list-models action |
+
+**Q2 is unanimous** and is what I implement: never assert the credential is bad.
+
+**Q1: I take the minority (gemini), and here is the adversarial argument that carried it.**
+The consensus-to-swap rests on "the default is absent from the catalogue, therefore it is
+stale." But I *proved* the catalogue is **key-scoped** (bogus key → HTTP 500 named auth error,
+so the 77 ids are what THIS key is served). "Absent for this key" therefore does NOT entail
+"absent for all keys" — the generalization the swap requires is exactly the one my own
+measurement forbids. Against that, the cost is measured and one-directional: documented
+together-flux ≈ $0.01 vs measured flux-image ≈ $0.08, an **8x silent cost increase imposed on
+every user** to fix a message defect. Codex's dynamic-catalogue variant avoids the cost
+generalization but buys an extra round-trip and a new failure mode on every image call.
+
+**Most important: the brief's framing is falsified by the measurement.** The brief posed the
+residual as "either the default is unentitled and the upstream 401 is *truthful*, or ...".
+It is **not truthful** — the same byte-identical 401 is returned for a gibberish model id and
+for an invalid key. So the product cannot infer *any* cause from it. That settles the choice:
+the fix is the message, and the message must not assert entitlement either.
+
+**Decision:** fix the message (and type the 401 rather than letting it fall through a dead
+402-only mapper). Do **not** silently change `DEFAULT_IMAGE_MODEL`. File the default-arm
+question as a finding carrying the cost figure and the key-scoping caveat, for Sean.
