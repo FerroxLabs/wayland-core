@@ -766,3 +766,124 @@ the existing variant, which would have invented an assembler decision that never
 - **T+185** — Council leg exposed §12. Fixed, rebuilt, re-run green.
 - **T+205** — Anvil leg green through both arms. **All five engines live-proven.**
 
+---
+
+## §14. KILL MID-FLIGHT — the goal terminates EXACTLY ONCE
+
+`kill -9` on the **process group** mid-wave, workers holding `/bin/sleep 40`, lease 120s.
+
+```
+descendants BEFORE kill: 9
+descendants AFTER kill:  0
+transitions emitted by the KILLED process (expect 0): 0
+```
+
+**A. Restart while the lease is live — a nested owner is REFUSED, live, from the product:**
+
+```
+EARLY_RC=1
+GOAL: recovery=resumed iterations=1 resume_count=2 resumable=true revoked=0 drained=0
+wayland-core goal: goal g-k2 did not terminate: invalid journal state transition:
+  goal g-k2: loop owner Fleet (epoch 1) is already live; a nested loop owner is refused
+```
+
+The Goal is left **non-terminal and resumable** — a refusal, not a corruption.
+
+**B. Past the lease — supersede, complete, terminate:**
+
+```
+LATE_RC=0
+GOAL: run_complete waves=1 iterations=1 completed=4 delivered=4
+GOAL: canonical_transition strategy=fleet
+      terminal=Terminated { terminal: PartiallyCompleted { completed: 4, failed: 0 } }
+      cursor_seq=Some(48)
+```
+
+**C. EXACTLY ONCE — counted off the product's own projection (`goal stream`):**
+
+| Record | Count | Meaning |
+|---|---|---|
+| `loop_owner_claimed` | **2** | two epochs — the killed owner, then its successor |
+| `loop_owner_finished` | **1** | **ONE termination**, across a `kill -9` and THREE `goal run` invocations |
+
+**Duplicate termination is as wrong as none, and there was no duplicate.**
+
+**D. A third run against the terminated Goal does not re-terminate it:**
+
+```
+GOAL: recovery=already-terminal PartiallyCompleted { completed: 4, failed: 0 } resumable=false
+GOAL: not resumable; stopping without dispatch
+loop_owner_finished AFTER the third run: still 1
+```
+
+### The counter is not stuck, and the product gate can go red
+
+My first count returned **0** — because the journal is **binary-framed** and `grep` refused
+it (`binary file matches`). A zero-for-free again; it was visible only because 0 was the
+*failure* value here. Repaired by reading through the product verb instead of the raw file.
+**Third instrument defect of this lane, and the reason every number above comes from
+`goal stream`, not from `grep` over `j.jsonl`.**
+
+```
+N2 known-positive: terminated goal      -> loop_owner_finished = 1   (must be 1)
+N2 known-negative: goal that never ran  -> loop_owner_finished = 0   (must be 0)
+```
+
+The product's own `--expect` gate is falsifiable at a point, not just in one direction —
+exactly one value passes and every neighbour reds:
+
+```
+--expect 8 -> rc=1 | 9 -> rc=1 | 10 -> rc=0 | 11 -> rc=1 | 12 -> rc=1
+GOAL-STREAM: goal=g-k2 events=10 transitions=9 snapshots=1
+```
+
+## §15. ONE-VARIABLE NEGATIVE CONTROL — an engine bypassing the canonical path REDDENS
+
+Gate: *a Council run must terminate its Goal through the canonical transition*
+(`canonical_transition_lines == 1 && loop_owner_finished == 1`).
+Same command, same config, same binary. **One variable: `WAYLAND_GOAL_ID` set or unset.**
+
+```
+CONTROL (attached):        crucible rc=0
+   canonical_transition_lines=1  loop_owner_finished=1   GATE=GREEN  rc=0
+
+NEGATIVE CONTROL (bypass): crucible rc=0   <- the engine STILL RAN
+   canonical_transition_lines=0  loop_owner_finished=0   GATE=RED    rc=1
+```
+
+Two things this establishes at once:
+
+1. **The gate can fail**, and fails precisely when an engine reaches its own terminal
+   without going through the Goal.
+2. **It re-derives the honest ceiling I refused to inherit (§1).** The bypassing run
+   exited **0** and produced a real council answer. An engine invoked with no Goal still
+   runs and still terminates its own way. That is **convention, not construction** — the
+   earlier lane's §6.2 is still true and I am not claiming otherwise.
+
+## §16. Re-derived: the "≥40 test call sites" ceiling — I did NOT inherit it
+
+The earlier lane said closing the bypass needs threading a loop-owner token through the
+five entry points, editing **≥40 existing test call sites**, and called it a Sean-level
+scope call. **I did not need to test that claim, because I did not take that route** — the
+opt-in attachment wraps each engine's existing entry point instead of changing its
+signature, so zero engine signatures moved and no engine test was touched.
+
+**What that does and does not settle.** It settles that all five engines terminate
+canonically *from the product* without a mass test edit. It does **not** settle whether an
+engine could be made structurally incapable of terminating outside a Goal — that still
+needs the signature change, and I am leaving that claim exactly where the earlier lane left
+it rather than pretending my route closed it.
+
+## §17. Fence exposure vs `861d1b1a` (measured, unproxied, against the SHA)
+
+```
+$ /usr/bin/git diff --numstat 861d1b1a -- crates/wcore-cli/src/lib.rs crates/wcore-cli/src/main.rs
+61      0       crates/wcore-cli/src/main.rs
+$ /usr/bin/git diff 861d1b1a -- crates/wcore-cli/src/main.rs | /usr/bin/grep -c '^-[^-]'
+0
+```
+
+`main.rs` **+61 / −0**, ONE contiguous block, no reordering and no renames.
+`lib.rs` **untouched**. The env-based attachment for Direct and Council exists precisely to
+hold this to one block instead of four.
+
