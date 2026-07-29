@@ -695,10 +695,21 @@ async fn discover_dialect(
         std::fs::write(&path, contents.replace("{{BASE_URL}}", &base_url))?;
     }
 
+    // `{{BASE_URL}}` is substituted in ARGV as well as in seed files. The fixture binds port 0, so
+    // a harness that takes its endpoint on the command line rather than from an environment
+    // variable or a config file cannot otherwise be pointed at it. The facility is available to
+    // every harness identically and, like the seed-file facility, is carried as DATA in the
+    // invocation so a reader sees exactly what each harness needed.
+    let args: Vec<String> = invocation
+        .args
+        .iter()
+        .map(|arg| arg.replace("{{BASE_URL}}", &base_url))
+        .collect();
+
     let started = Instant::now();
     let mut child = {
         let mut cmd = tokio::process::Command::new(&invocation.program);
-        cmd.args(&invocation.args)
+        cmd.args(&args)
             .current_dir(&workspace)
             .kill_on_drop(true)
             .env_clear()
