@@ -1418,3 +1418,239 @@ fn t21_provenance_document_is_deterministic_and_key_ordered() {
     assert!(a.find("skill:m").unwrap() < a.find("skill:z").unwrap());
     assert_eq!(doc.len(), 3);
 }
+
+// ===========================================================================
+// SC2 — the PROVENANCE half: an artifact on disk resolves back to its source
+// ===========================================================================
+
+/// After an import, can you still tell where each artifact came from?
+///
+/// # Why "the record exists" was not enough
+///
+/// `t9` proves every CONTAINED item carries a full provenance record, and
+/// `t15`/`t16` prove an export carries one. None of them asks the question an
+/// operator actually asks, which is the reverse: *here is a directory in my
+/// skills root — where did it come from?* Before this test's fix,
+/// `ProvenanceDocument` recorded the peer identity and the source path and
+/// **named no destination at all**, so that question had no answer: an
+/// imported skill lands under a `sanitize_component`-ed name that is
+/// digest-disambiguated on collision, and the real corpus reuses skill names
+/// across profiles, so the mapping is not recoverable by inspection.
+///
+/// # Four assertions, and the fourth is the one that proves the repair works
+///
+///   A1 known-positive       — a live imported skill's on-disk path resolves to
+///                             the peer identity, tool and source path.
+///   A2 known-negative       — a path in the same home that was NOT imported
+///                             (one the user authored) resolves to nothing, and
+///                             neither does an ADJACENT name, so the matcher is
+///                             not merely returning everything.
+///   A3 one vocabulary       — a CONTAINED item and a STAGED persona resolve
+///                             through the same lookup as a live one.
+///   A4 the-old-shape-misses — the same query, against the same document with
+///                             the destinations stripped (which is byte-for-byte
+///                             the record shape that shipped before this
+///                             change), returns EMPTY. Without A4, A1 would
+///                             pass just as well on a document that recorded
+///                             nothing new.
+#[test]
+#[serial]
+fn t23_an_imported_artifact_resolves_back_to_the_peer_it_came_from() {
+    let sentinel = Path::new("/tmp/never-created-by-this-test");
+    let (_g, home) = rooted();
+    let peer = peer_home_with_fixtures(sentinel, sentinel);
+    let report = migrate::run_import(
+        wcore_config::portability::PeerSource::Hermes,
+        &args_for(peer.path()),
+    )
+    .unwrap();
+    assert!(
+        report.files_written >= 2,
+        "this test needs a real import to interrogate; report={report:?}"
+    );
+
+    let doc = migrate::imported_provenance(home.path()).unwrap();
+    assert!(
+        !doc.is_empty(),
+        "the provenance document must exist and be non-empty before any absence \
+         is claimed about it"
+    );
+
+    // -- A1 known-positive --------------------------------------------------
+    // Assert the artifact is really there FIRST; a missing file would make
+    // every lookup below return a comforting zero.
+    let landed = home.path().join("skills/release-notes/SKILL.md");
+    assert!(landed.is_file(), "{landed:?} must exist for A1 to mean anything");
+
+    let hits = doc.resolve_path("skills/release-notes/SKILL.md");
+    assert_eq!(
+        hits.len(),
+        1,
+        "exactly one record must claim this path; got {:?}",
+        hits.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+    );
+    assert_eq!(hits[0].0, "skill:skills/release-notes");
+    assert_eq!(hits[0].1.source_tool, "hermes");
+    assert_eq!(hits[0].1.source_path, "skills/release-notes");
+    assert_eq!(
+        hits[0].1.written_path.as_deref(),
+        Some("skills/release-notes"),
+        "the record must name where the bytes landed"
+    );
+    // The directory itself resolves as readily as a file inside it.
+    assert_eq!(doc.resolve_path("skills/release-notes").len(), 1);
+
+    // -- A2 known-negative --------------------------------------------------
+    // A skill the USER authored, sitting in the same root, has no provenance.
+    // This is the answer that makes the command worth having: it must be able
+    // to say "not imported".
+    let mine = home.path().join("skills/my-own-skill");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(mine.join("SKILL.md"), "---\nname: mine\n---\nmine\n").unwrap();
+    assert!(
+        doc.resolve_path("skills/my-own-skill/SKILL.md").is_empty(),
+        "a skill this machine authored must not be attributed to a peer"
+    );
+    // The prefix boundary, which is not hypothetical: a real import writes
+    // `notes` and `notes-<digest>` side by side.
+    assert!(
+        doc.resolve_path("skills/release-notes-2/SKILL.md").is_empty(),
+        "an adjacent name must not be covered by a shorter one"
+    );
+
+    // -- A3 one vocabulary: contained and staged resolve through this too ----
+    let contained: Vec<&str> = doc
+        .entries
+        .iter()
+        .filter(|(_, p)| {
+            p.written_path
+                .as_deref()
+                .is_some_and(|w| w.starts_with("migrate-quarantine/"))
+        })
+        .map(|(id, _)| id.as_str())
+        .collect();
+    assert!(
+        !contained.is_empty(),
+        "the executable fixtures must be contained AND locatable"
+    );
+    let q_path = doc
+        .get(contained[0])
+        .unwrap()
+        .written_path
+        .clone()
+        .unwrap();
+    assert!(
+        home.path().join(&q_path).exists(),
+        "a contained item's recorded destination must be real: {q_path}"
+    );
+    assert_eq!(doc.resolve_path(&q_path).len(), 1);
+
+    let staged: Vec<&str> = doc
+        .entries
+        .iter()
+        .filter(|(_, p)| {
+            p.written_path
+                .as_deref()
+                .is_some_and(|w| w.starts_with("migrate-imported/personas/"))
+        })
+        .map(|(id, _)| id.as_str())
+        .collect();
+    assert_eq!(
+        staged.len(),
+        1,
+        "the peer's one SOUL.md must be staged and locatable; got {staged:?}"
+    );
+    let persona_path = doc.get(staged[0]).unwrap().written_path.clone().unwrap();
+    assert!(home.path().join(&persona_path).is_file());
+
+    // Every record at HEAD names a destination — the F26-GRADE-H1 shape one
+    // level up: a provenance entry that says an item was imported without
+    // saying where it is.
+    assert!(
+        doc.without_destination().is_empty(),
+        "records with no destination: {:?}",
+        doc.without_destination()
+    );
+
+    // -- A4 the-old-shape-misses --------------------------------------------
+    // Reconstruct the record shape that shipped before this change — identical
+    // in every field except that no destination was ever recorded — and run the
+    // IDENTICAL query A1 just passed.
+    let mut legacy = doc.clone();
+    for p in legacy.entries.values_mut() {
+        p.written_path = None;
+        p.deduplicated_with = None;
+    }
+    assert_eq!(legacy.len(), doc.len(), "the legacy shape loses no ENTRIES");
+    assert!(
+        legacy.resolve_path("skills/release-notes/SKILL.md").is_empty(),
+        "the pre-change record shape must be unable to answer this — if it can, \
+         this test proves nothing"
+    );
+    assert_eq!(
+        legacy.without_destination().len(),
+        legacy.len(),
+        "every pre-change record was destination-less"
+    );
+}
+
+/// The deduplication case, stated rather than left for a reader to discover.
+///
+/// A real peer install carries the same skill under many profiles. Those
+/// identities share ONE destination, so a naive reading of `written_path`
+/// would conclude each produced its own copy — and a later selective rollback
+/// would delete a directory a second identity still depends on.
+#[test]
+fn t24_deduplicated_identities_share_one_destination_and_say_so() {
+    let src = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let body = "---\nname: shared\n---\nsame bytes\n";
+    let mut doc = ProvenanceDocument::new();
+
+    for profile in ["alpha", "beta"] {
+        let d = src.path().join(profile).join("shared");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("SKILL.md"), body).unwrap();
+    }
+    let mut store = wcore_cli::migrate::content::ImportedContentStore::new(home.path());
+    for profile in ["alpha", "beta"] {
+        store
+            .import_skill(&wcore_cli::migrate::content::ContentRequest {
+                id: format!("skill:profiles/{profile}/skills/shared"),
+                source_dir: Some(src.path().join(profile).join("shared")),
+                inline: None,
+                source_tool: "hermes".into(),
+                source_version: None,
+                source_path: format!("profiles/{profile}/skills/shared"),
+                name: "shared".into(),
+            })
+            .unwrap();
+    }
+    for (id, p) in &store.provenance().entries {
+        doc.insert(id.clone(), p.clone());
+    }
+
+    // Known-positive first: the bytes really are on disk, once.
+    assert!(home.path().join("skills/shared/SKILL.md").is_file());
+    assert_eq!(store.files_written(), 1);
+
+    // BOTH identities resolve from the one path, and the second says whose
+    // bytes it is reading.
+    let hits = doc.resolve_path("skills/shared/SKILL.md");
+    assert_eq!(
+        hits.len(),
+        2,
+        "a shared destination must return every identity that claims it; got {:?}",
+        hits.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+    );
+    let dedup: Vec<&str> = hits
+        .iter()
+        .filter_map(|(_, p)| p.deduplicated_with.as_deref())
+        .collect();
+    assert_eq!(
+        dedup,
+        vec!["skill:profiles/alpha/skills/shared"],
+        "exactly one of the two must be marked as reading another's bytes"
+    );
+    assert!(doc.without_destination().is_empty());
+}
