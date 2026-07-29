@@ -54,6 +54,23 @@ pub struct OpRecord {
     /// False until the prior tree has been fully captured into the undo store.
     /// While false the target has NOT been touched, so there is nothing to undo.
     pub preserved: bool,
+    /// The paths, relative to `target`, that this operation may mutate.
+    ///
+    /// Empty means the WHOLE tree — the restore case, where the operation
+    /// replaces everything and the undo store is a full copy.
+    ///
+    /// A non-empty scope is what makes this journal usable by an operation that
+    /// touches a bounded part of a home it must otherwise not disturb. `migrate`
+    /// is that case: it writes `quarantine/` and `config.toml` into a live
+    /// Wayland home that also holds `memory.db`, sessions and assets, and
+    /// copying all of those on every import would be an unacceptable price for
+    /// rollback — while restoring all of them on a rollback would silently undo
+    /// unrelated concurrent work.
+    ///
+    /// `#[serde(default)]` so a record written before scoping existed still
+    /// deserializes, and reads as the whole-tree operation it was.
+    #[serde(default)]
+    pub scope: Vec<String>,
     /// Still open. A completed operation deletes its record entirely, so an
     /// existing file is itself the open signal; the field keeps a record
     /// self-describing when read by a human or a proof script.
@@ -79,10 +96,30 @@ pub struct OpGuard {
     record: OpRecord,
 }
 
-/// Begin an operation against `target`.
+/// Begin a WHOLE-TREE operation against `target`.
 ///
 /// Writes the durable intent record BEFORE the caller touches anything.
 pub fn begin(target: &Path, kind: &str) -> Result<OpGuard, BackupError> {
+    begin_scoped(target, kind, &[])
+}
+
+/// Begin an operation that may mutate only `scope` (paths relative to
+/// `target`). An empty scope is the whole tree, i.e. [`begin`].
+///
+/// The scope is declared UP FRONT and recorded durably, because it is what a
+/// recovery pass in some later process — which has no idea what the operation
+/// was — needs in order to undo the right thing and nothing else.
+///
+/// `pre_digest` is scoped to match: comparing a whole-home digest would make the
+/// record's own exactness check fail whenever anything else in the home changed
+/// while the import ran, which is not this operation's business. The whole-home
+/// comparison is still available to a caller or a proof harness through
+/// [`target_digest`], and it is the stronger claim precisely because it also
+/// catches a write OUTSIDE the declared scope.
+pub fn begin_scoped(target: &Path, kind: &str, scope: &[&str]) -> Result<OpGuard, BackupError> {
+    for rel in scope {
+        reject_escaping_scope(rel)?;
+    }
     let root = target.join(JOURNAL_DIR);
     std::fs::create_dir_all(&root).map_err(BackupError::io("create journal dir"))?;
 
@@ -95,7 +132,11 @@ pub fn begin(target: &Path, kind: &str) -> Result<OpGuard, BackupError> {
     // Digest BEFORE anything exists in the journal beyond the directory itself,
     // and exclude the journal directory so the value is comparable with a tree
     // that has no journal at all.
-    let pre_digest = digest_excluding_journal(target)?;
+    let pre_digest = if scope.is_empty() {
+        digest_excluding_journal(target)?
+    } else {
+        scoped_digest(target, scope)?
+    };
 
     let record = OpRecord {
         op_id: op_id.clone(),
@@ -106,6 +147,7 @@ pub fn begin(target: &Path, kind: &str) -> Result<OpGuard, BackupError> {
         pre_digest,
         preserved: false,
         open: true,
+        scope: scope.iter().map(|s| (*s).to_string()).collect(),
     };
     write_record(&record_path, &record)?;
 
@@ -139,15 +181,24 @@ impl OpGuard {
     /// silently lost because nothing planned to overwrite it.
     pub fn preserve_target(&mut self, target: &Path) -> Result<(), BackupError> {
         std::fs::create_dir_all(&self.undo_dir).map_err(BackupError::io("create undo dir"))?;
-        copy_tree_excluding_journal(target, &self.undo_dir)?;
+        if self.record.scope.is_empty() {
+            copy_tree_excluding_journal(target, &self.undo_dir)?;
+        } else {
+            preserve_scope(target, &self.undo_dir, &self.record.scope)?;
+        }
         self.record.preserved = true;
         write_record(&self.record_path, &self.record)
+    }
+
+    /// The declared scope, empty for a whole-tree operation.
+    pub fn scope(&self) -> &[String] {
+        &self.record.scope
     }
 
     /// Undo this operation to the exact pre-operation tree.
     pub fn rollback(&mut self, target: &Path) -> Result<(), BackupError> {
         if self.record.preserved {
-            restore_from_undo(target, &self.undo_dir)?;
+            undo(target, &self.undo_dir, &self.record.scope)?;
         }
         self.close()
     }
@@ -237,7 +288,7 @@ pub fn recover_with(
 
         let undo_dir = root.join(format!("undo-{}", record.op_id));
         if record.preserved {
-            restore_from_undo(target, &undo_dir)?;
+            undo(target, &undo_dir, &record.scope)?;
         }
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&undo_dir);
@@ -256,6 +307,18 @@ fn write_record(path: &Path, record: &OpRecord) -> Result<(), BackupError> {
         .map_err(BackupError::io("write journal record"))
 }
 
+/// Undo an operation, honouring its declared scope.
+fn undo(target: &Path, undo_dir: &Path, scope: &[String]) -> Result<(), BackupError> {
+    if !undo_dir.is_dir() {
+        return Ok(());
+    }
+    if scope.is_empty() {
+        restore_from_undo(target, undo_dir)
+    } else {
+        restore_scope(target, undo_dir, scope)
+    }
+}
+
 /// Replace `target`'s content with the preserved copy, exactly.
 fn restore_from_undo(target: &Path, undo_dir: &Path) -> Result<(), BackupError> {
     if !undo_dir.is_dir() {
@@ -263,6 +326,133 @@ fn restore_from_undo(target: &Path, undo_dir: &Path) -> Result<(), BackupError> 
     }
     clear_tree_excluding_journal(target)?;
     copy_tree_all(undo_dir, target)
+}
+
+/// The marker recording which scope entries did NOT exist before the operation.
+///
+/// Without it a rollback cannot tell "this path was preserved as empty" from
+/// "this path did not exist", and the difference is the whole property: an
+/// import that CREATES `quarantine/` must have that directory removed on
+/// rollback, not left behind as an empty shell that changes the home's digest.
+const ABSENT_MARKER: &str = "absent.json";
+
+/// Copy each scope entry that exists into the undo store, and record the ones
+/// that do not.
+fn preserve_scope(target: &Path, undo_dir: &Path, scope: &[String]) -> Result<(), BackupError> {
+    std::fs::create_dir_all(undo_dir).map_err(BackupError::io("create undo dir"))?;
+    let mut absent: Vec<String> = Vec::new();
+    for rel in scope {
+        reject_escaping_scope(rel)?;
+        let from = target.join(rel);
+        let meta = match from.symlink_metadata() {
+            Ok(m) => m,
+            Err(_) => {
+                absent.push(rel.clone());
+                continue;
+            }
+        };
+        let to = undo_dir.join(scope_store_name(rel));
+        if meta.is_dir() && !meta.file_type().is_symlink() {
+            copy_tree_all(&from, &to)?;
+        } else if meta.is_file() {
+            std::fs::copy(&from, &to).map_err(BackupError::io("preserve scoped file"))?;
+        } else {
+            // A symlink at a scope root is not something this operation may
+            // mutate blind, and copying it would not round-trip. Record it as
+            // absent so rollback removes whatever replaced it, rather than
+            // silently materializing a copy of its destination.
+            absent.push(rel.clone());
+        }
+    }
+    let bytes = serde_json::to_vec(&absent)
+        .map_err(|e| BackupError::Journal(format!("serialize absent set: {e}")))?;
+    wcore_config::atomic_io::atomic_write(undo_dir.join(ABSENT_MARKER), &bytes)
+        .map_err(BackupError::io("write absent marker"))
+}
+
+/// Restore exactly the declared scope and nothing else.
+fn restore_scope(target: &Path, undo_dir: &Path, scope: &[String]) -> Result<(), BackupError> {
+    let absent: Vec<String> = std::fs::read(undo_dir.join(ABSENT_MARKER))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+
+    for rel in scope {
+        reject_escaping_scope(rel)?;
+        let dest = target.join(rel);
+        // Remove whatever the operation left there, whether it existed before
+        // or not. An entry the operation CREATED must go; an entry it edited
+        // must be replaced wholesale rather than merged, or a file the
+        // operation added inside a preserved directory would survive.
+        remove_any(&dest)?;
+        if absent.iter().any(|a| a == rel) {
+            continue;
+        }
+        let from = undo_dir.join(scope_store_name(rel));
+        let Ok(meta) = from.symlink_metadata() else {
+            continue;
+        };
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(BackupError::io("create scope parent"))?;
+        }
+        if meta.is_dir() {
+            copy_tree_all(&from, &dest)?;
+        } else {
+            std::fs::copy(&from, &dest).map_err(BackupError::io("restore scoped file"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Digest of just the declared scope, computed through the same tree digest the
+/// whole-tree path uses so the two are the same arithmetic.
+pub fn scoped_digest(target: &Path, scope: &[&str]) -> Result<String, BackupError> {
+    let shadow = tempfile::tempdir().map_err(BackupError::io("scope shadow dir"))?;
+    let owned: Vec<String> = scope.iter().map(|s| (*s).to_string()).collect();
+    preserve_scope(target, shadow.path(), &owned)?;
+    Ok(wcore_config::portability::tree_digest(shadow.path())
+        .map_err(BackupError::io("digest scope shadow"))?
+        .digest)
+}
+
+/// A scope entry is a path INSIDE the target. Anything that could climb out of
+/// it — an absolute path, a `..` component, a Windows drive prefix — is refused
+/// at declaration time, because a scope is also what a later recovery pass in
+/// another process will delete and rewrite.
+fn reject_escaping_scope(rel: &str) -> Result<(), BackupError> {
+    use std::path::Component;
+    if rel.is_empty() {
+        return Err(BackupError::Journal("empty scope entry".to_string()));
+    }
+    let p = Path::new(rel);
+    for c in p.components() {
+        match c {
+            Component::Normal(_) => {}
+            _ => {
+                return Err(BackupError::Journal(format!(
+                    "scope entry must be a relative path inside the target: {rel}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Flatten a scope entry to one undo-store name, so a nested scope entry does
+/// not collide with a preserved directory of the same prefix.
+fn scope_store_name(rel: &str) -> String {
+    rel.replace(['/', '\\'], "%2F")
+}
+
+fn remove_any(path: &Path) -> Result<(), BackupError> {
+    let Ok(meta) = path.symlink_metadata() else {
+        return Ok(());
+    };
+    if meta.is_dir() && !meta.file_type().is_symlink() {
+        std::fs::remove_dir_all(path).map_err(BackupError::io("remove scoped dir"))
+    } else {
+        std::fs::remove_file(path).map_err(BackupError::io("remove scoped file"))
+    }
 }
 
 /// Remove the journal directory once no records remain, so a recovered tree
@@ -540,6 +730,171 @@ mod tests {
         assert!(
             names.iter().all(|n| n.contains(&format!(".{pid}.json"))),
             "record names must carry the owning pid: {names:?}"
+        );
+    }
+
+    /// The scoped case, which is what `migrate` needs: the operation may only
+    /// touch `quarantine/` and `config.toml`, and a rollback must put those two
+    /// back EXACTLY while leaving everything else in the home alone — including
+    /// work that a concurrent, unrelated process did while the import ran.
+    #[test]
+    fn a_scoped_rollback_restores_its_scope_exactly_and_touches_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join("quarantine/payloads/keep")).unwrap();
+        std::fs::write(home.join("config.toml"), "profiles = 0\n").unwrap();
+        std::fs::write(home.join("quarantine/index.json"), "{\"entries\":{}}").unwrap();
+        std::fs::write(home.join("quarantine/payloads/keep/a.md"), "prior").unwrap();
+        // Out of scope, and expensive: this must never be copied or restored.
+        std::fs::create_dir_all(home.join("sessions")).unwrap();
+        std::fs::write(home.join("memory.db"), "PRIOR DB").unwrap();
+        std::fs::write(home.join("sessions/s1.json"), "prior session").unwrap();
+
+        let scope = ["quarantine", "config.toml"];
+        let pre_all = target_digest(&home).unwrap();
+
+        let mut guard = begin_scoped(&home, "migrate", &scope).unwrap();
+        assert_eq!(guard.scope(), &["quarantine", "config.toml"]);
+        guard.preserve_target(&home).unwrap();
+
+        // The undo store holds the scope and NOTHING else.
+        let stored: Vec<String> = std::fs::read_dir(guard.undo_dir())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !stored.iter().any(|n| n.contains("memory.db")),
+            "an out-of-scope path was copied into the undo store: {stored:?}"
+        );
+
+        // A half-applied import: a payload written, the index rewritten, a
+        // profile added, and a prior payload removed.
+        std::fs::create_dir_all(home.join("quarantine/payloads/new")).unwrap();
+        std::fs::write(home.join("quarantine/payloads/new/b.md"), "imported").unwrap();
+        std::fs::write(
+            home.join("quarantine/index.json"),
+            "{\"entries\":{\"x\":1}}",
+        )
+        .unwrap();
+        std::fs::remove_file(home.join("quarantine/payloads/keep/a.md")).unwrap();
+        std::fs::write(home.join("config.toml"), "profiles = 13\n").unwrap();
+        // Meanwhile, an unrelated part of the home moves on.
+        std::fs::write(home.join("memory.db"), "CONCURRENT DB").unwrap();
+
+        std::mem::forget(guard); // the owner died mid-apply
+
+        let report = recover_with(&home, |_| false).unwrap();
+        assert_eq!(report.recovered, 1);
+
+        // The scope is exactly back.
+        assert_eq!(
+            std::fs::read_to_string(home.join("config.toml")).unwrap(),
+            "profiles = 0\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("quarantine/index.json")).unwrap(),
+            "{\"entries\":{}}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("quarantine/payloads/keep/a.md")).unwrap(),
+            "prior",
+            "a payload the interrupted import deleted was not put back"
+        );
+        assert!(
+            !home.join("quarantine/payloads/new").exists(),
+            "a payload the interrupted import created survived the rollback"
+        );
+        // And out-of-scope work was NOT reverted.
+        assert_eq!(
+            std::fs::read_to_string(home.join("memory.db")).unwrap(),
+            "CONCURRENT DB",
+            "a scoped rollback reverted an out-of-scope file it never owned"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("sessions/s1.json")).unwrap(),
+            "prior session"
+        );
+        assert_ne!(
+            target_digest(&home).unwrap(),
+            pre_all,
+            "premise check: the whole-home digest legitimately differs, because \
+             the concurrent out-of-scope write is not this rollback's business"
+        );
+    }
+
+    /// A scope entry that did not exist before must be REMOVED on rollback, not
+    /// left behind as an empty shell. `quarantine/` is created by the first
+    /// import, so this is the ordinary first-run case, and the home's digest
+    /// only returns to its pre-operation value if the directory goes.
+    #[test]
+    fn a_scope_entry_created_by_the_operation_is_removed_on_rollback() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("memory.db"), "DB").unwrap();
+        let pre = target_digest(&home).unwrap();
+        assert!(!home.join("quarantine").exists());
+        assert!(!home.join("config.toml").exists());
+
+        let mut guard = begin_scoped(&home, "migrate", &["quarantine", "config.toml"]).unwrap();
+        guard.preserve_target(&home).unwrap();
+        std::fs::create_dir_all(home.join("quarantine/payloads/x")).unwrap();
+        std::fs::write(home.join("quarantine/payloads/x/s.md"), "contained").unwrap();
+        std::fs::write(home.join("quarantine/index.json"), "{}").unwrap();
+        std::fs::write(home.join("config.toml"), "profiles = 3\n").unwrap();
+        std::mem::forget(guard);
+
+        assert_eq!(recover_with(&home, |_| false).unwrap().recovered, 1);
+        assert!(
+            !home.join("quarantine").exists(),
+            "a directory the operation created survived its rollback"
+        );
+        assert!(!home.join("config.toml").exists());
+        assert_eq!(
+            target_digest(&home).unwrap(),
+            pre,
+            "a first-run rollback did not return the home to its exact \
+             pre-operation state"
+        );
+    }
+
+    /// A scope entry is a path inside the target. Refusing at declaration time
+    /// matters because the scope is later acted on by a DIFFERENT process, which
+    /// deletes and rewrites every entry it names.
+    #[test]
+    fn a_scope_entry_that_could_escape_the_target_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        for bad in ["../elsewhere", "/etc/passwd", "a/../../b", ""] {
+            let err = begin_scoped(&home, "migrate", &[bad]).unwrap_err();
+            assert!(
+                matches!(err, BackupError::Journal(_)),
+                "scope entry {bad:?} was accepted: {err:?}"
+            );
+        }
+        // Positive control: an ordinary nested entry IS accepted, so the check
+        // above is not passing by refusing everything.
+        let ok = begin_scoped(&home, "migrate", &["a/b/c"]).unwrap();
+        assert_eq!(ok.scope(), &["a/b/c"]);
+    }
+
+    /// A record written before scoping existed must still deserialize, and must
+    /// read as the whole-tree operation it was — otherwise an upgrade turns a
+    /// pending rollback into a silent no-op.
+    #[test]
+    fn a_pre_scope_record_still_reads_as_a_whole_tree_operation() {
+        let json = serde_json::json!({
+            "op_id": "1-2", "pid": 2, "kind": "restore",
+            "started_utc": "1970-01-01T00:00:00Z", "target": "/tmp/x",
+            "pre_digest": "d", "preserved": true, "open": true
+        });
+        let rec: OpRecord = serde_json::from_value(json).unwrap();
+        assert!(
+            rec.scope.is_empty(),
+            "a pre-scope record must mean whole-tree"
         );
     }
 
