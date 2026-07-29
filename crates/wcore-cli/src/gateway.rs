@@ -35,6 +35,23 @@
 //! would consume is budget not spent live-proving the kill-and-recover path.
 //! The gap is named rather than absorbed.
 //!
+//! `support-bundle` is a NINTH verb, outside that contract's nine. It is here
+//! for the opposite reason to why `doctor` and `logs` are not: it *does*
+//! appear in a Success Criterion clause — Criterion 4's "produce useful
+//! redacted health/log/support evidence" — and it was the only clause of the
+//! phase goal with no operator surface at all.
+//!
+//! `support-bundle` was added by lane `24-c4-support` closing **`F24-C4-H1`**
+//! (HIGH, raised by `24-PHASE-VERDICT.md` §5). `wcore_gateway::support_bundle`
+//! had been written, canary-tested and mutation-gated, and then wired to
+//! nothing: a census of the workspace returned one `pub mod` declaration and
+//! two references inside the module's own test file — **zero production call
+//! sites**. Criterion 4's second half ("produce useful redacted health/log/
+//! support evidence") was therefore unreachable from the shipped binary while
+//! the gap ledger recorded the criterion MET. That is the same
+//! advertised-but-dead class as `F24-MB-1`, and this verb is what makes the
+//! capability an operator can actually reach.
+//!
 //! # Where each verb's authority lives
 //!
 //! No policy is invented here. `install`/`uninstall`/`start`/`stop` render
@@ -42,7 +59,9 @@
 //! `for_this_platform()` is the single platform-selection point in the
 //! workspace; `status` renders `wcore_gateway::lifecycle::StatusProjection`;
 //! `drain` drives `wcore_gateway::drain::DrainController` through the
-//! `AutomationPlane`. This module is a surface, not a second implementation.
+//! `AutomationPlane`; `support-bundle` drives
+//! `wcore_gateway::support_bundle::collect` and adds no redaction rule of its
+//! own. This module is a surface, not a second implementation.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -147,6 +166,34 @@ pub enum GatewayCmd {
         /// exists for an operator starting one by hand without a service.
         #[arg(long)]
         detach: bool,
+    },
+    /// Collect a REDACTED evidence bundle an operator can attach to a ticket.
+    ///
+    /// F24-C4-H1. The collector, its two-layer redaction and its canary suite
+    /// already existed in `wcore_gateway::support_bundle`; nothing called
+    /// them. This is the call site.
+    ///
+    /// Deliberately does NOT require a running gateway — a bundle is wanted
+    /// precisely when the runtime is wedged or dead. It records liveness as a
+    /// member instead, because `gateway-status.json` is rewritten every tick
+    /// and a bundle carrying `Running` from a process that exited an hour ago
+    /// would mislead the person reading it.
+    #[command(name = "support-bundle")]
+    SupportBundle {
+        #[command(flatten)]
+        scope: ScopeArgs,
+        /// Directory to write the bundle into. Created if absent; refused if
+        /// it already has contents, because whatever was already there would
+        /// ship inside the bundle.
+        ///
+        /// REQUIRED, with no default: this artifact is built to cross a trust
+        /// boundary, and the product choosing its location for the operator is
+        /// how a bundle ends up somewhere nobody meant to send it from.
+        #[arg(long)]
+        out: PathBuf,
+        /// Emit the manifest as JSON instead of the operator view.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -261,6 +308,7 @@ pub async fn run(args: GatewayArgs) -> Result<()> {
         GatewayCmd::Abandoned { scope, json } => abandoned(&scope, json),
         GatewayCmd::Drain { scope, budget_ms } => drain(&scope, budget_ms),
         GatewayCmd::Run { scope, detach } => run_gateway(&scope, detach).await,
+        GatewayCmd::SupportBundle { scope, out, json } => support_bundle(&scope, &out, json),
     }
 }
 
@@ -505,6 +553,159 @@ async fn status(scope: &ScopeArgs, json: bool) -> Result<()> {
         "  binary version:     {}",
         proj.binary_version.as_deref().unwrap_or("-")
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// support-bundle  (F24-C4-H1)
+// ---------------------------------------------------------------------------
+
+/// Where the config and credentials files this bundle enumerates KEY NAMES
+/// from actually live.
+///
+/// This is not a free choice. `wcore_config::wayland_config_dir()` returns
+/// `$WAYLAND_HOME` when it is set and `~/.config/wayland-core` (or the
+/// platform equivalent) when it is not — so the config directory and the
+/// gateway home are the SAME directory under a `WAYLAND_HOME` deployment and
+/// DIFFERENT directories otherwise. A bundle that assumed either shape
+/// unconditionally would enumerate the wrong profile's key names half the
+/// time, and a key-name list from the wrong profile is worse than none:
+/// support would debug a configuration the gateway never read.
+///
+/// `--home` is a `WAYLAND_HOME` override (see [`ScopeArgs::home`]), so when it
+/// is given the config dir is that home; otherwise the resolution is deferred
+/// to the crate that owns it.
+fn bundle_config_sources(scope: &ScopeArgs, home: &Path) -> (PathBuf, PathBuf) {
+    match &scope.home {
+        Some(_) => (home.join("config.toml"), home.join("credentials.toml")),
+        None => (
+            wcore_config::config::global_config_path(),
+            wcore_config::config::credentials_storage_path(),
+        ),
+    }
+}
+
+/// Every known secret, re-scanned across the finished bundle.
+///
+/// The post-condition, and it is not decoration. `collect` scrubs each member
+/// as it writes it; this asks the opposite question afterwards — *is any known
+/// secret still present anywhere under the bundle root?* — over the bytes that
+/// were actually written, including members no scrub path touched. A leak
+/// found here is a redaction defect, and the verb refuses rather than handing
+/// the operator an artifact they are about to attach to a ticket.
+///
+/// Reads bytes and converts lossily rather than `read_to_string`, because a
+/// member that is not valid UTF-8 would otherwise be skipped silently — and a
+/// secret that survived into a non-text member is still a leak.
+fn members_still_carrying_a_known_secret(
+    root: &Path,
+    redactor: &wcore_gateway::support_bundle::Redactor,
+) -> Vec<PathBuf> {
+    wcore_gateway::support_bundle::bundle_files(root)
+        .into_iter()
+        .filter(|p| match std::fs::read(p) {
+            Ok(bytes) => redactor.scrub(&String::from_utf8_lossy(&bytes)).1 > 0,
+            Err(_) => false,
+        })
+        .collect()
+}
+
+fn support_bundle(scope: &ScopeArgs, out: &Path, json: bool) -> Result<()> {
+    use wcore_gateway::support_bundle::{BundleSources, Redactor};
+
+    let home = scope.home()?;
+    let (config, credentials) = bundle_config_sources(scope, &home);
+
+    // Liveness is written as a PROJECTION rather than tacked on afterwards, so
+    // it is scrubbed like every other member, is listed in `manifest.members`,
+    // and is covered by the canary scan. A file in the bundle that the
+    // manifest does not declare is the "absent vs never-collected" ambiguity
+    // this module's collector exists to avoid, in reverse.
+    let tmp = tempfile::tempdir().context("cannot create a staging directory for the bundle")?;
+    let liveness_path = tmp.path().join("gateway-liveness.json");
+    let live = read_live_projection(&home);
+    let liveness = serde_json::json!({
+        "alive": live.is_some(),
+        "note": "derived from the pid record plus a liveness check, NOT from \
+                 gateway-status.json; a projection outlives the process that \
+                 wrote it",
+        "projection": live,
+    });
+    std::fs::write(&liveness_path, serde_json::to_vec_pretty(&liveness)?)
+        .context("cannot stage the liveness member")?;
+
+    let sources = BundleSources {
+        config: Some(config),
+        credentials: Some(credentials),
+        log: Some(home.join("gateway.log")),
+        projections: vec![
+            liveness_path,
+            status_path(&home),
+            crate::channel::channel_health_path(&home),
+            wcore_gateway::ledger::DeliveryLedger::journal_path(&home),
+        ],
+    };
+
+    // The scrubber learns the values of every secret-marked environment
+    // variable of THIS process. That is the operator's shell, not the
+    // service's — so it is a backstop over a backstop, and the manifest
+    // records how many it knew precisely so a reader can see when it knew
+    // nothing.
+    let mut redactor = Redactor::new();
+    redactor.learn_from_environment();
+
+    let manifest = wcore_gateway::support_bundle::collect(&home, out, &sources, &redactor)
+        .with_context(|| format!("cannot collect a support bundle into {}", out.display()))?;
+
+    let leaked = members_still_carrying_a_known_secret(out, &redactor);
+    if !leaked.is_empty() {
+        bail!(
+            "REDACTION FAILURE — do NOT send this bundle. {} member(s) under {} \
+             still contain a known secret value: {}",
+            leaked.len(),
+            out.display(),
+            leaked
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&manifest)?);
+        return Ok(());
+    }
+
+    println!("support bundle: {}", out.display());
+    println!("  home:            {}", home.display());
+    println!("  gateway alive:   {}", live.is_some());
+    println!("  members:         {}", manifest.members.len());
+    for m in &manifest.members {
+        println!("    {m}");
+    }
+    println!("  known secrets:   {}", manifest.known_secrets);
+    println!("  redactions:      {}", manifest.redactions);
+    if manifest.absent_sources.is_empty() {
+        println!("  absent sources:  none");
+    } else {
+        println!("  absent sources:  {}", manifest.absent_sources.len());
+        for a in &manifest.absent_sources {
+            println!("    {a}");
+        }
+    }
+    if manifest.known_secrets == 0 {
+        // Said out loud rather than left to be inferred from a `0`. A clean
+        // bundle produced by a scrubber that knew no secrets is clean for a
+        // much weaker reason than one produced by a scrubber that knew many,
+        // and the operator deciding whether to attach it should be told which
+        // of those they are holding.
+        println!(
+            "  NOTE: the scrubber knew zero secret values, so only STRUCTURAL \
+             elision protected this bundle. Read it before you send it."
+        );
+    }
+    println!("  read it before you attach it: {}", out.display());
     Ok(())
 }
 
@@ -1629,5 +1830,170 @@ mod tests {
                 "`{gap}` is a RECORDED GAP — adding it means updating the module header and 24-B-GATEWAY-SURFACE.md"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // support-bundle  (F24-C4-H1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_support_bundle_verb_is_reachable_from_the_command_line() {
+        // THE REGRESSION THIS BLOCK EXISTS FOR. `wcore_gateway::support_bundle`
+        // shipped with zero production call sites: an operator could not
+        // produce a bundle by any means, while the criteria ledger recorded
+        // Criterion 4 as MET. Asserting the module exists would NOT have
+        // caught that — the module did exist. The reachable thing is the verb,
+        // so the verb is what is asserted, read off the built clap command.
+        let names = verb_names();
+        assert!(
+            names.iter().any(|n| n == "support-bundle"),
+            "`gateway support-bundle` must be a real subcommand: {names:?}"
+        );
+    }
+
+    #[test]
+    fn the_verb_actually_calls_the_collector() {
+        // Reachability is necessary and not sufficient: a verb that parses and
+        // then does nothing is the same defect with a nicer `--help`. This
+        // drives the handler and asserts a bundle exists on disk afterwards.
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("config.toml"), "[providers]\napi_key = \"x\"\n").unwrap();
+        let out = dir.path().join("bundle");
+
+        let scope = ScopeArgs {
+            profile: Some("t".into()),
+            home: Some(home.clone()),
+        };
+        support_bundle(&scope, &out, false).expect("the verb must produce a bundle");
+
+        let manifest_path = out.join("manifest.json");
+        assert!(
+            manifest_path.exists(),
+            "no manifest at {}",
+            manifest_path.display()
+        );
+        let manifest: wcore_gateway::support_bundle::BundleManifest =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        assert!(
+            manifest.members.iter().any(|m| m == "config-keys.txt"),
+            "the config key names must be collected: {:?}",
+            manifest.members
+        );
+        assert!(
+            manifest
+                .members
+                .iter()
+                .any(|m| m == "gateway-liveness.json"),
+            "liveness must be a declared member, not an undeclared extra file: {:?}",
+            manifest.members
+        );
+        for m in &manifest.members {
+            assert!(out.join(m).exists(), "declared member {m} is not on disk");
+        }
+    }
+
+    #[test]
+    fn a_dead_gateway_is_reported_dead_rather_than_from_a_stale_projection() {
+        // The trap this member exists for: `gateway-status.json` is rewritten
+        // every tick and outlives the process that wrote it. Seed a projection
+        // that says `Running` with a pid that is not alive, and require the
+        // bundle to say the gateway is NOT alive.
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let mut proj = StatusProjection::stopped("t");
+        proj.state = GatewayState::Running;
+        proj.pid = Some(u32::MAX); // not a live pid on any of the three families
+        std::fs::write(
+            home.join(STATUS_FILE),
+            serde_json::to_string(&proj).unwrap(),
+        )
+        .unwrap();
+        // POSITIVE CONTROL: the misleading projection really is on disk and
+        // really does claim Running, or "reported dead" would prove nothing.
+        let raw = std::fs::read_to_string(home.join(STATUS_FILE)).unwrap();
+        assert!(raw.contains("unning"), "seeded projection: {raw}");
+
+        let out = dir.path().join("bundle");
+        let scope = ScopeArgs {
+            profile: Some("t".into()),
+            home: Some(home.clone()),
+        };
+        support_bundle(&scope, &out, false).unwrap();
+
+        let liveness = std::fs::read_to_string(out.join("gateway-liveness.json")).unwrap();
+        assert!(
+            liveness.contains("\"alive\": false"),
+            "a bundle must not inherit liveness from a projection: {liveness}"
+        );
+    }
+
+    #[test]
+    fn the_leak_detector_finds_a_planted_secret_and_is_quiet_on_a_clean_tree() {
+        // The post-condition scan is a NEGATIVE claim — "no member still
+        // carries a known secret" — and a negative passes for free on a dead
+        // instrument. Both directions are asserted here, and the positive one
+        // is what makes the negative worth anything.
+        use wcore_gateway::support_bundle::Redactor;
+        const PLANT: &str = "F24C4-LEAK-DETECTOR-PROBE-9a71fe30";
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("b");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::write(root.join("clean.txt"), "nothing here").unwrap();
+
+        let mut redactor = Redactor::new();
+        assert!(redactor.learn(PLANT), "the probe must be learnable");
+
+        // KNOWN-NEGATIVE first, so a detector that always reports a hit fails.
+        assert!(
+            members_still_carrying_a_known_secret(&root, &redactor).is_empty(),
+            "a clean tree must produce no findings"
+        );
+
+        // KNOWN-POSITIVE, in a NON-UTF8 member: `read_to_string` would skip
+        // this file silently and report the tree clean.
+        let mut bytes = vec![0xff, 0xfe];
+        bytes.extend_from_slice(PLANT.as_bytes());
+        std::fs::write(root.join("nested/leaky.bin"), &bytes).unwrap();
+
+        let found = members_still_carrying_a_known_secret(&root, &redactor);
+        assert_eq!(
+            found.len(),
+            1,
+            "the planted secret must be found: {found:?}"
+        );
+        assert!(
+            found[0].ends_with("nested/leaky.bin"),
+            "and the scan must recurse: {found:?}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_home_redirects_the_config_key_sources_with_it() {
+        // `--home` is a WAYLAND_HOME override, and WAYLAND_HOME scopes the
+        // config directory to itself. A bundle that read the ambient config
+        // path while the operator asked about a different home would enumerate
+        // a DIFFERENT profile's key names than the gateway they are debugging.
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("explicit-home");
+        let scope = ScopeArgs {
+            profile: None,
+            home: Some(home.clone()),
+        };
+        let (config, credentials) = bundle_config_sources(&scope, &home);
+        assert_eq!(config, home.join("config.toml"));
+        assert_eq!(credentials, home.join("credentials.toml"));
+
+        // And with no `--home`, resolution is deferred to the crate that owns
+        // it rather than reinvented here.
+        let ambient = ScopeArgs {
+            profile: None,
+            home: None,
+        };
+        let (c2, _) = bundle_config_sources(&ambient, &home);
+        assert_eq!(c2, wcore_config::config::global_config_path());
     }
 }
