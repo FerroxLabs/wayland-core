@@ -24,8 +24,12 @@ Raw transcripts: `c4-probe-RESULT.txt`, `bwrap-grant-RESULT.txt`.
 - **`WAYLAND_ALLOW_NO_SANDBOX=1` is not set anywhere, and nothing is skipped.** The
   20 bwrap tests now *run*. The skip-escalation env var is armed so that if the
   grant ever regresses, the leg goes **red** rather than qualifying out quietly.
-- **Two defects in my own instruments, repaired in this lane**, each with a
-  three-assertion self-test whose third assertion is that the old shape missed it.
+- **68 failed → 2** in the real CI run (`30410531297`). Graded by name, **65 of the
+  original 68 now pass**; the 3 that do not are the one Sean-reserved true red and
+  two pre-classified container-timing flakes. Nothing was silently skipped:
+  `50 skipped` both before and after, and `12838` tests ran where `12820` did.
+- **Four defects in my own instruments, repaired in this lane**, three of which
+  would each have produced a wrong headline.
 
 ---
 
@@ -189,17 +193,100 @@ objection is answered by measurement, not by argument. The residual risk is the
 
 ---
 
-## 4. The real CI run
+## 4. The real CI run — id `30410531297`
 
-<!-- FILLED IN AFTER THE RUN -->
+`gh run list -R FerroxLabs/wayland-core --branch lane/ci-image`
+Job `CI (linux-containerized)` = `90445351454`, head SHA `8c93cfe8`.
+Log pulled with `gh api /repos/.../actions/jobs/90445351454/logs` (the `--log`
+path is intercepted by `rtk` and returns rc=1 without downloading).
+
+### The number
+
+```
+attempt 1  Summary [ 480.990s] 12838 tests run: 12836 passed (2 slow, 1 flaky, 1 leaky), 2 failed, 50 skipped
+attempt 2  Summary [ 473.056s] 12838 tests run: 12835 passed (1 slow, 1 leaky),          3 failed, 50 skipped
+```
+
+**68 failed → 2.** The job's conclusion is **failure**, and that is the honest
+outcome: two real failures remain and I am reporting them red rather than
+engineering a green.
+
+### The original 68, graded BY NAME (not by crate total)
+
+| grade | n |
+|---|---|
+| **PASS** | **65** |
+| FAIL | 3 |
+
+The three, unioned across both attempts (attempt 1 had 2; attempt 2 added one more):
+
+| test | class | mine? |
+|---|---|---|
+| `wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte` | **R1 — the one true red** | **No.** Sean-reserved: needs `wcore-contract generate`, forbidden by brief §0. Already a fenced seam request in `RED-68-TRIAGE.md`. |
+| `wcore-cli::deterministic_openai_loop packaged_f04_run_is_repeatable_and_content_addressed` | C5 container timing | No. Pre-classified C5; passes serially on the build host. |
+| `wcore-cli::deterministic_openai_loop packaged_core_cancels_an_active_stream` | C5 container timing | No. Failed in attempt 2 only — flaky, not deterministic. |
+
+The arithmetic closes exactly: 68 = C1 23 + C3 20 + C4 13 + C2 6 + C5 3 + K1 1 +
+S1 1 + R1 1. Failing now = R1 (1) + two of C5 (2) = 3. So **every member of C1,
+C2, C3 and C4 — all 62 — now passes**, plus K1, S1 and the third C5.
+
+### The falsifiable prediction I stated before the run
+
+I predicted the 13 reaping tests would pass with `--init`, and said I would call
+the mechanism wrong if they did not. Graded individually by name:
+
+```
+C4 descendant reaping (n=13) -> {'PASS': 13}
+```
+
+**13/13. The prediction held**, so the zombie/no-reaping-init mechanism stands as
+the named cause rather than a hypothesis.
+
+### That nothing was silently skipped — the check that matters
+
+A cluster of failures turning into a cluster of *skips* would look identical in a
+pass count. It did not happen:
+
+- **`50 skipped` in both attempts — the identical number the pre-fix run reported.**
+  Not one test converted from failing to skipped.
+- **`12838` tests run, up from `12820`.** More tests execute, not fewer.
+- **Zero `WCORE_SANDBOX_SKIP` records**, with `WCORE_REQUIRE_ENFORCING_SANDBOX=1`
+  armed — so a skip would have been a hard failure, not a silent pass. The step
+  printed: `no sandbox-qualified skips recorded — the enforcing sandbox was live
+  for this leg`. **That is the load-bearing proof the bwrap grant works in real
+  CI**, and it is a positive signal rather than an absence.
+- The image really did install them:
+  `Setting up python3 (3.11.2-1+b1)`, `Setting up procps (2:4.0.2-3)`,
+  `Setting up bubblewrap (0.8.0-2+deb12u1)`.
+
+### Other legs
+
+`Eval acceptance gate (Linux)`, `Browser live e2e`, and all four `Build` jobs:
+**success**. The self-hosted Windows leg (`CI (Array)`) failed with
+`12487 tests run: 12411 passed, 76 failed, 116 skipped` — **not this lane**. Every
+one of my seven diff hunks lands between ci.yml lines 283 and 484, and the
+`ci-linux` job spans 268–501, so the Windows job is untouched by this change.
+macOS was still queued on shared runners when I finished; it is likewise untouched.
 
 ---
 
 ## 5. Defects in my own instruments, repaired here (§6b-ii)
 
-Three, all repaired in this lane rather than written up and carried.
+Four, all repaired in this lane rather than written up and carried. Three of the
+four would each have produced a wrong headline.
 
-1. **I read "absent from the Windows failure list" as "passed on Windows".** For a
+1. **My CI grader indexed 2 status lines and called the other 66 "ABSENT".** I cut
+   the log at the `Summary` line, but `final-status-level = "all"` makes nextest
+   print the full per-test status list *after* that line, and `status-level = "fail"`
+   means passes appear nowhere else. So my first grading of the 68 returned
+   `ABSENT: 66, FAIL: 2` — which, reported as-is, would have claimed I could not
+   verify 66 of the tests I had just fixed. Repaired to index the whole log; the
+   repaired instrument indexes **12,838 distinct tests, exactly matching the run's
+   own `Summary` count** — an independent third oracle confirming the index is
+   complete rather than merely larger. That agreement is what makes the 65/3
+   grading trustworthy; without it "65 passed" would rest on absence again.
+
+2. **I read "absent from the Windows failure list" as "passed on Windows".** For a
    `#[cfg(target_os = "linux")]` test, absence means it **does not exist** there. I
    used that shape to argue the bwrap tests had native coverage elsewhere, which
    would have overstated the case for skipping them. Repaired:
@@ -208,12 +295,12 @@ Three, all repaired in this lane rather than written up and carried.
    `PASSED`. Self-test **3 passed, 0 failed**; A3 reports
    `repaired=NOT_PRESENT_ON_WINDOWS  old=PASSED_ON_WINDOWS` — i.e. the old shape
    provably misclassified.
-2. **My first bwrap matrix put `--ro-bind / /` after `--proc`/`--dev`**, overmounting
+3. **My first bwrap matrix put `--ro-bind / /` after `--proc`/`--dev`**, overmounting
    them, and produced a spurious `cannot create /dev/null` that was my harness's
    error and not the kernel's. It did not change the B-vs-C conclusion (both failed
    identically at the proc mount), but an unexplained error in a capability matrix
    is exactly how a wrong recipe gets adopted. Recorded rather than dropped.
-3. **A YAML defect my pre-push validation caught before it shipped.** My step name
+4. **A YAML defect my pre-push validation caught before it shipped.** My step name
    contained `expected: none`; an unquoted colon-space is invalid YAML and would
    have made the **entire workflow unparseable** — producing a run that measured
    nothing while looking like a lane that had done its job. The validator now also
