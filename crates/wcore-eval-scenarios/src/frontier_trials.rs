@@ -152,6 +152,18 @@ pub enum FrontierTrialError {
         dimension: String,
         distinct: usize,
     },
+
+    #[error(
+        "leg `{tool}`/`{dimension}` contains {count} DIAGNOSTIC trials (`{marker}`); a diagnostic \
+         run deviates from the registered protocol on purpose, so it identifies a cause and can \
+         never be folded into a scored measurement"
+    )]
+    DiagnosticTrialsCannotBeScored {
+        tool: String,
+        dimension: String,
+        count: usize,
+        marker: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -861,6 +873,15 @@ pub struct TrialRecordV1 {
     /// mechanically instead of a reader having to remember.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dialect: Option<crate::dialect_exec::TrialDialectV1>,
+    /// Set when the trial was driven under a DIAGNOSTIC instrument modification — a deliberate
+    /// deviation from the registered protocol, run to identify a cause rather than to score a leg.
+    ///
+    /// A leg containing any diagnostic trial is refused by [`proportion_measurement`]. That is the
+    /// point: a diagnostic must be **structurally incapable** of becoming a published number, not
+    /// merely conventionally discouraged. "We ran it with a tweak and it passed" is precisely the
+    /// shape a flattering result takes, so the tweak carries its own disqualification with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
 }
 
 /// Fold a leg's trials into a bounded proportion measurement.
@@ -917,6 +938,20 @@ fn assert_homogeneous_dialect(
 ) -> Result<(), FrontierTrialError> {
     if trials.is_empty() {
         return Ok(());
+    }
+    // Checked FIRST. A diagnostic leg is disqualified whatever else is true of it, so no other
+    // refusal can be "fixed" into a pass that a diagnostic marker should have blocked anyway.
+    let diagnostics: Vec<&str> = trials
+        .iter()
+        .filter_map(|t| t.diagnostic.as_deref())
+        .collect();
+    if let Some(marker) = diagnostics.first() {
+        return Err(FrontierTrialError::DiagnosticTrialsCannotBeScored {
+            tool: tool.token().to_string(),
+            dimension: dimension.token().to_string(),
+            count: diagnostics.len(),
+            marker: (*marker).to_string(),
+        });
     }
     let dialect_driven = trials.iter().filter(|t| t.dialect.is_some()).count();
     let frozen_script = trials.len() - dialect_driven;
@@ -1032,6 +1067,7 @@ mod tests {
                 bound_tool_label: "wayland".to_string(),
                 resolved_tool_names: vec!["Write".to_string()],
             }),
+            diagnostic: None,
         }
     }
 
@@ -1095,6 +1131,56 @@ mod tests {
             }
             other => panic!("expected MixedTranslationDigests, got {other:?}"),
         }
+    }
+
+    /// A diagnostic run deviates from the registered protocol on purpose. It must be structurally
+    /// incapable of becoming a published number — including when it would be FLATTERING, which is
+    /// the only case anybody would be tempted to fold it in.
+    #[test]
+    fn a_diagnostic_leg_cannot_be_scored_even_when_every_trial_succeeded() {
+        let sha = "a".repeat(64);
+        let mut trials = vec![record(0, true, Some(&sha)), record(1, true, Some(&sha))];
+        for t in &mut trials {
+            t.diagnostic = Some("DIAG_ABSOLUTIZE_PATHS".to_string());
+        }
+        // Precondition: identical trials WITHOUT the stamp fold to a perfect 1.0. So the refusal
+        // below is caused by the stamp and by nothing else.
+        let clean: Vec<TrialRecordV1> = trials
+            .iter()
+            .cloned()
+            .map(|mut t| {
+                t.diagnostic = None;
+                t
+            })
+            .collect();
+        assert!(
+            (fold(&clean).expect("clean folds").estimate - 1.0).abs() < f64::EPSILON,
+            "known-positive: the same trials must score 1.0 unstamped"
+        );
+
+        match fold(&trials) {
+            Err(FrontierTrialError::DiagnosticTrialsCannotBeScored { count, .. }) => {
+                assert_eq!(count, 2);
+            }
+            other => panic!("expected DiagnosticTrialsCannotBeScored, got {other:?}"),
+        }
+    }
+
+    /// One stamped trial poisons the leg. A diagnostic quietly mixed into a scored run is the
+    /// realistic accident, not a wholly-diagnostic leg.
+    #[test]
+    fn a_single_diagnostic_trial_disqualifies_the_whole_leg() {
+        let sha = "a".repeat(64);
+        let mut trials = vec![
+            record(0, true, Some(&sha)),
+            record(1, true, Some(&sha)),
+            record(2, false, Some(&sha)),
+        ];
+        trials[2].diagnostic = Some("DIAG_ABSOLUTIZE_PATHS".to_string());
+        assert!(matches!(
+            fold(&trials),
+            Err(FrontierTrialError::DiagnosticTrialsCannotBeScored { count: 1, .. })
+        ));
     }
 
     /// The guard must not swallow the zero-trial refusal it sits in front of.
