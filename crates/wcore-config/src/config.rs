@@ -970,6 +970,26 @@ pub struct ToolsConfig {
     /// retained temporarily for compatibility paths removed in F09.
     #[serde(default)]
     pub allow_no_sandbox: Option<bool>,
+    /// F27-C3 — operator-supplied USD-per-artifact prices for billable media
+    /// generation, keyed by the backend label the tool reports (e.g.
+    /// `"OpenAI gpt-image-1"`). Matching is exact first, then longest prefix,
+    /// so `"OpenAI"` prices the family and `"OpenAI gpt-image-1"` overrides
+    /// one member.
+    ///
+    /// ```toml
+    /// [tools.media_pricing]
+    /// "OpenAI gpt-image-1" = 0.08
+    /// ```
+    ///
+    /// **Empty by default, deliberately.** Measured in Phase 27: FluxRouter
+    /// returns no cost for an image in any channel — not a header, not the
+    /// body — so nothing can price that call except the operator. Any figure
+    /// resolved from this map is recorded as `local_rate_card`, never as
+    /// provider-reported, so an estimate can never be read as the provider's
+    /// own number. With no entry, a media call is recorded with its units and
+    /// reported `unpriced` — never as `$0.00`.
+    #[serde(default)]
+    pub media_pricing: std::collections::BTreeMap<String, f64>,
 }
 
 impl Default for ToolsConfig {
@@ -983,6 +1003,8 @@ impl Default for ToolsConfig {
             env_passthrough: Vec::new(),
             sandbox: None,
             allow_no_sandbox: None,
+            // F27-C3: empty means "price nothing and say so", never "$0".
+            media_pricing: std::collections::BTreeMap::new(),
         }
     }
 }
