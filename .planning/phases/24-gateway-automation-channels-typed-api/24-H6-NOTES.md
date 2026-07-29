@@ -132,3 +132,29 @@ directory — `wcore-channel-email/src/uid_store.rs` AND
 `cargo test -p wcore-channel-matrix` = **36 passed / 0 failed / 0 ignored**;
 `cargo test -p wcore-channels-registry` (downstream consumer) = **11 passed / 0 failed**;
 `cargo fmt --all -- --check` clean. Fence diff vs captured BASE SHA `e77b44b0` = **0 bytes**.
+
+---
+
+## T+~200min — run 2 ABANDONED as contaminated (and I probably damaged another lane)
+
+Attempted a second full run for reproduction. Killed it; not graded, in either direction.
+
+Mechanism established, not assumed:
+- `ss -lptn` showed `127.0.0.1:18787` — the driver's **fixed** `[inbound_webhook] bind` — held
+  by **pid 1923079, the `24-gwsurface` lane's binary**, started ~04:20. My run 2 (04:22:50)
+  could never bind it, so its webhook adapters stalled (`awaiting f24c3-sms-steady2 0/1 after 51s`).
+- `f24-inbound-run.sh:18-20` `pkill`s **global** patterns. The other lane launched 04:20:36;
+  my launcher fired those pkills at 04:22:50 — **I very likely killed their sink and LLM
+  fixture two minutes into their run.** They were simultaneously stuck on
+  `awaiting f24c3-matrix-steady2 0/1`.
+- Host had 3 sinks / 3 llm / 4 telegram / 4 matrix fixtures alive at once.
+
+Cleaned up **only mine**, by pid and absolute path, never by shared pattern — run 2's group,
+my binaries, and one binary leaked from run 1. Verified zero `wayland-24-h6` processes remain
+and the other lane's listener on 18787 is untouched.
+
+**Run 1 stands: it finished 04:08:04, the other lane started 04:20:36 — no overlap.** Its
+`failed=0` across 36 legs including every webhook adapter is itself evidence its webhook bound.
+
+Reproduction load therefore sits on the unit suite (5 loop tests, mutation-proven, no fixture,
+no port), not on repeated live runs.

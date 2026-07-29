@@ -12,6 +12,8 @@ gate-can-fail: "PROVEN by a 4-mutation sweep before any pass was trusted. M1 (th
 fence-exposure: "zero — 0 bytes in crates/wcore-cli/src/{lib,main}.rs, .github/workflows/ci.yml and .planning/BACKLOG.md vs the captured merge-base SHA e77b44b0"
 instrument-defects-found: 3
 instrument-defects-mine: 2
+live-runs-graded: 1
+live-runs-abandoned: "1 — run 2 discarded as contaminated: f24-inbound.mjs binds a FIXED webhook port and pkills global process patterns, so two lanes cannot run it concurrently. My launcher likely damaged the 24-gwsurface lane's concurrent run; flagged in §2e and §8.0."
 ---
 
 # 24-H6 — matrix no longer loses what arrives while it is down
@@ -192,6 +194,42 @@ Unit-level: `steady_state_delivery_is_unaffected_by_cursor_persistence` demands 
 `["$m1","$m2","$m3"]` in order across three successive resumed syncs. It demands arrivals > 0,
 so a path that denied everything scores zero and fails.
 
+### 2e. Only ONE graded live run, and why the second was abandoned rather than reported
+
+The finding lane reproduced 3/3. **I have one graded run.** I attempted a second and killed it
+as contaminated; I am not reporting its numbers in either direction.
+
+`f24-inbound.mjs` **cannot be run concurrently on `hetzner-dsm`**, and I established the
+mechanism rather than assuming a flake:
+
+- The config it writes carries a **fixed** `[inbound_webhook] bind = "127.0.0.1:18787"`. While
+  my run 2 was live, `ss -lptn` showed that port held by **pid 1923079 — another lane's
+  binary**, started ~04:20. My run's webhook could never bind, so its webhook-delivered
+  adapters (slack / whatsapp / sms) stalled. Run 2's first visible symptom was
+  `awaiting f24c3-sms-steady2: 0/1 after 51s`.
+- `scripts/f24-inbound-run.sh:18-20` runs `pkill -f 'wayland-core --json-stream'`,
+  `pkill -f 'scripts/f24-sink.mjs'` and `pkill -f 'scripts/f24-llm-fixture.mjs'` — **global
+  patterns, not run-scoped.** The other lane's run launched at 04:20:36; my launcher fired
+  those `pkill`s at 04:22:50. **I very probably killed that lane's sink and LLM fixture about
+  two minutes into their run**, and their run was simultaneously stuck on
+  `awaiting f24c3-matrix-steady2: 0/1`. Reported here because they need to know, and because a
+  lane seeing only its own red would file a product regression.
+- Host state at the time: 3 sinks, 3 LLM fixtures, 4 telegram fixtures and 4 matrix fixtures
+  alive at once.
+
+I killed **only my own** processes (run 2's process group, my binaries by absolute path, plus a
+binary leaked from run 1) — by pid, never by shared pattern, precisely so I would not repeat
+the damage. Verified afterwards: zero `wayland-24-h6` processes remain, and the other lane's
+listener on 18787 is untouched.
+
+**Run 1 was clean and is the graded one.** It completed at `04:08:04`; the other lane's run
+started at `04:20:36`, so there was no overlap. Its `failed=0` across 36 legs — including every
+webhook-delivered adapter — is itself evidence the webhook bound normally on that run.
+
+What carries the reproduction load instead is the unit suite: five loop tests over the real
+`sync_loop`, proven able to fail by a four-mutation sweep, runnable by anyone on any host with
+no fixture and no port.
+
 ---
 
 ## 3. The gates were proven able to fail BEFORE any pass was trusted
@@ -353,7 +391,21 @@ number in the criterion is single-platform. **Marking it MET would be wrong.**
 change, no `Cargo.lock` edit. `MatrixChannel::new` / `with_base` signatures are unchanged, so
 no downstream crate is affected (`wcore-channels-registry` 11/11 green).
 
-**Two coordination notes.**
+**THREE coordination notes — the third is a live hazard affecting other lanes right now.**
+
+0. **`f24-inbound.mjs` must be serialized across lanes on `hetzner-dsm`.** It binds a **fixed**
+   `127.0.0.1:18787`, and its launcher `pkill`s three **global** process-name patterns
+   (`wayland-core --json-stream`, `scripts/f24-sink.mjs`, `scripts/f24-llm-fixture.mjs`). Two
+   concurrent runs destroy each other: one loses the webhook port, and whichever launches
+   second reaps the other's sink and LLM fixture. This happened between my run 2 and the
+   `24-gwsurface` lane's gateway run on 2026-07-29 — **both** stalled on a `steady2` leg, and
+   **my launcher is the likely cause of theirs.** Neither run is a measurement. Any lane that
+   saw only its own red here would file a spurious product regression. The cheap fixes are a
+   run-scoped webhook port and run-scoped `pkill` patterns; I did not make them because that
+   file is shared with four other drivers and a change to its process handling mid-flight is
+   exactly the wrong thing to do while other lanes are running against it. **See §2e.**
+
+**Two further coordination notes.**
 
 1. `scripts/f24-inbound.mjs` is shared with four other drivers. `gradeRestart`'s parameter is
    renamed `servedInInitial` → `servedAfterRestart`, and two new exports are added
