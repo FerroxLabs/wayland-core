@@ -322,5 +322,11 @@ four would each have produced a wrong headline.
   a build-host measurement.
 - **Did not address the one true red**, the contract-digest guard (R1). It is
   Sean-reserved and already written as a fenced seam request in `RED-68-TRIAGE.md`.
-- **Did not re-push to retrigger.** One push, one run, polled.
+- **Did not re-push to retrigger the measurement** — the `ci.yml` change was pushed
+  once, as `8c93cfe8`, and run `30410531297` is that commit. But to be exact: I
+  pushed **twice**. The second push (`a7f80239`) is `.planning/` documentation only,
+  landed after the measurement completed, and it started a second run
+  (`30413739128`) that consumes shared runner capacity. It cannot change the result
+  above and I did not wait on it, but it is a cost I incurred and it would have been
+  cheaper to write the report before pushing the fix.
 - Did not merge, open a PR, tag, close an issue, or touch `main`.
