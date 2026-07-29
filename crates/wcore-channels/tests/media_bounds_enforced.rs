@@ -160,6 +160,7 @@ async fn one_byte_over_the_declared_bound_is_refused_and_the_reason_names_it() {
     let err = mgr
         .fetch_media_on("over-bound", &att())
         .await
+        .map(|b| b.len())
         .expect_err("one byte over the declared bound must be refused");
 
     let msg = err.to_string();
@@ -229,9 +230,16 @@ async fn the_unchecked_path_still_yields_oversize_bytes_that_the_manager_refuses
     let mut mgr = ChannelManager::new();
     mgr.register(Box::new(ch)).await;
 
+    // `.map(len)` before `expect_err` on purpose: on the Ok path the payload is
+    // 100 KiB, and `expect_err` renders the ENTIRE Vec<u8> into the panic
+    // message. Measured while mutation-proving this suite — the 26 MiB case
+    // below produced a 125 MB panic that buried every other result in the run.
+    // A failure must be readable, so the success value is reduced to its length
+    // before it can ever be printed.
     let err = mgr
         .fetch_media_on("discord-shape", &att())
         .await
+        .map(|b| b.len())
         .expect_err(
             "the manager must refuse a payload over the channel's DECLARED \
              bound — this is the assertion that fails against the pre-fix \
@@ -293,9 +301,13 @@ async fn an_adapter_that_declares_nothing_is_still_bounded_by_the_finite_default
     mgr.register(Box::new(SilentChannel { payload: over }))
         .await;
 
+    // `.map(len)` before `expect_err` — see the note above. This is the case
+    // that produced a 125 MB panic message when it failed under mutation,
+    // because the Ok value here is a 26 MiB Vec<u8>.
     let err = mgr
         .fetch_media_on("silent", &att())
         .await
+        .map(|b| b.len())
         .expect_err("the finite default must bind an adapter that declares nothing");
     assert!(
         err.to_string()
@@ -358,7 +370,11 @@ async fn the_reported_bounds_are_the_bounds_that_get_enforced() {
         .expect("a registered channel must report its bounds");
     assert_eq!(reported.max_bytes, declared);
 
-    let err = mgr.fetch_media_on("reporter", &att()).await.unwrap_err();
+    let err = mgr
+        .fetch_media_on("reporter", &att())
+        .await
+        .map(|b| b.len())
+        .unwrap_err();
     assert!(
         err.to_string().contains(&reported.max_bytes.to_string()),
         "the number enforced must be the number reported, got: {err}"
