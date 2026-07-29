@@ -103,3 +103,54 @@ server-pushed; neither is user-authored and both are re-obtained by installing t
 They are **counted and named** in `deferred_other`, never imported — importing them would
 inflate an "imported" count without migrating anything of the user's.
 
+## T4 — both peers are REALLY INSTALLED on this Mac, so the proof uses real homes
+
+The brief pointed at `~/dev/resources/{grok-build,gemini-cli}`, which are the products'
+**source repositories**. Sean also has both products installed:
+
+```
+~/.grok    config.toml  auth.json  version.json  skills/(5)  bundled/(5)
+           marketplace-cache/(78 SKILL.md, 188 exec-bit files)  vendor/ sessions/
+~/.gemini  settings.json  GEMINI.md  package.json  agents/(33) commands/(1) extensions/(1)
+           google_accounts.json  mcp-oauth-tokens.json  installation_id   NO skills/
+```
+
+Both treated **read-only**; nothing inside either was executed or modified, and the staging
+script asserts that by digesting every source path before and after
+(`SOURCE-INTEGRITY: PASS`).
+
+Real facts the live import must be judged against, measured before running anything:
+
+| | grok | gemini |
+|---|---|---|
+| model declared | **NO** — `config.toml` has `[cli] [marketplace] [ui]`, no `[models]` | **NO** — no `model` block |
+| MCP servers | 0 | **14** (4 `type`+`url`, 10 stdio) |
+| credential store | `auth.json` (OIDC session) | `google_accounts.json`, `mcp-oauth-tokens.json`, `installation_id`; **no `oauth_creds.json`** |
+| auth type declared | — | `security.auth.selectedType = "gemini-api-key"` |
+| version declared | `version.json` → `0.2.103` | `package.json` = `{"type":"commonjs"}`, no version |
+| user skills | 5, **all 0644** | none |
+
+Two consequences, both honest rather than convenient:
+
+- **`peer_version` was WRONG for grok.** It probed `VERSION`/`version`/`MANIFEST.json` and
+  returned `None` against a home that plainly declares `"version": "0.2.103"`. Found only by
+  driving the real tree. Fixed in `facb3c7b`.
+- **Credential secrecy.** Every `mcpServers` entry in the real `settings.json` was inspected
+  key-by-key: only `command`/`args`/`type`/`url`, and the single `env` holds `PATH`. So
+  `settings.json` ships verbatim with no secret. The credential-store FILES are never copied
+  — same-named placeholders are written so the by-reference path is exercised, and every
+  substitution is printed by the staging script.
+
+## T5 — the hostile case, per peer, from REAL trees
+
+| peer | hostile payload | where it came from | modes at source |
+|---|---|---|---|
+| gemini | `skills/async-pr-review/scripts/{async-review,check-async-review}.sh`, `skills/ci/scripts/ci.mjs`, `skills/pr-address-comments/scripts/fetch-pr-info.js` | the gemini-cli project's own `.gemini/skills/`, which is the identical layout `Storage.getUserSkillsDir()` returns | **4 × 0755** |
+| grok | `skills/brand/scripts/{extract-colors,inject-brand-context,validate-asset}.cjs` | `~/.grok/marketplace-cache/.../skills/brand/`, placed where a marketplace INSTALL puts it | **3 × 0755** |
+
+**grok's `~/.grok/skills/` carries no exec-bit helper today** (measured: 0 of 5). The hostile
+payload is therefore a real marketplace skill's real bytes at its real install destination,
+not a naturally-occurring one — stated because the difference matters.
+
+7 exec-bit helpers survived transport to hetzner intact (verified there with `find -perm -u+x`).
+
