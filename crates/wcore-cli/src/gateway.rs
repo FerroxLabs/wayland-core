@@ -1159,6 +1159,22 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
     let mut channel_manager = wcore_channels_registry::wcore_channels::ChannelManager::new();
     let channels_dir = home.join("channels");
     let mut registration_error: Option<String> = None;
+    // F24-C3-H6a. The subset of `registration_error` that a `channel reload`
+    // does NOT re-evaluate and CANNOT repair, so it must survive one.
+    //
+    // `registration_error` is the only field `channel health` fails on once
+    // `registered >= configured`, and the reload success path used to clear it
+    // to `None` outright. Reload re-runs adapter registration and nothing else,
+    // so clearing the whole field also erased two process-lifetime facts —
+    // that this process has no inbound stack at all, and that it lost the
+    // inbound polling lease. Measured on the shipped binary: `channel health`
+    // exited 1 naming the lost lease, one `channel reload` later it exited 0,
+    // and nothing about the dead path had changed.
+    //
+    // An operator running the documented recovery command was told the
+    // degradation was gone. That is worse than not reporting it, because it
+    // actively retires the operator's suspicion.
+    let mut persistent_error: Option<String> = None;
     let mut registered_n = 0usize;
     let mut gateway_config: Option<wcore_config::config::Config> = None;
     match crate::channel::resolve_config_for_credentials().and_then(|c| {
@@ -1257,6 +1273,13 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                         Some(prev) => format!("{prev}; inbound dispatch unavailable: {e}"),
                         None => format!("inbound dispatch unavailable: {e}"),
                     });
+                    // F24-C3-H6a. The inbound host is built ONCE, here. No
+                    // reload rebuilds it, so this is true for the life of the
+                    // process and a reload must not clear it.
+                    persistent_error = Some(match persistent_error.take() {
+                        Some(prev) => format!("{prev}; inbound dispatch unavailable: {e}"),
+                        None => format!("inbound dispatch unavailable: {e}"),
+                    });
                     None
                 }
             }
@@ -1289,6 +1312,16 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
             poll_lease.owner_pid()
         );
         registration_error = Some(match registration_error.take() {
+            Some(prev) => format!("{prev}; inbound polling owned by another process"),
+            None => "inbound polling owned by another process".to_string(),
+        });
+        // F24-C3-H6a. The lease is attempted ONCE, above. No reload re-attempts
+        // it, so "this gateway will send but not poll" stays true for the life
+        // of the process however many times the operator reloads. Note the fact
+        // being preserved is about THIS process's polling, not about who else
+        // holds the lease now — the statement does not decay if the other
+        // holder exits, because this process still is not polling.
+        persistent_error = Some(match persistent_error.take() {
             Some(prev) => format!("{prev}; inbound polling owned by another process"),
             None => "inbound polling owned by another process".to_string(),
         });
@@ -1455,14 +1488,35 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                                     // Arc, so a reloaded adapter is delivered
                                     // through the already-running inbound stack
                                     // without re-spawning it.
+                                    // F24-C3-H6b. The start decision is stated
+                                    // here rather than left to `reload`,
+                                    // because the right to poll belongs to the
+                                    // lease and `ChannelManager` cannot see it.
+                                    // The STARTUP path already gates
+                                    // `start_all` on `poll_lease.is_owner()`;
+                                    // this is the same gate on the same
+                                    // decision, which is why it must not be a
+                                    // default hidden inside `reload`.
+                                    let start_policy = if poll_lease.is_owner() {
+                                        wcore_channels_registry::wcore_channels::StartPolicy::StartNewlyRegistered
+                                    } else {
+                                        wcore_channels_registry::wcore_channels::StartPolicy::LeaveStopped
+                                    };
                                     let (report, names) = {
                                         let mut guard = channels.write().await;
-                                        let report = guard.reload(desired).await;
+                                        let report =
+                                            guard.reload(desired, start_policy).await;
                                         let names = guard.list_names().len();
                                         (report, names)
                                     };
                                     registered_n = names;
-                                    registration_error = None;
+                                    // F24-C3-H6a. Clear only what this reload
+                                    // actually re-evaluated — adapter
+                                    // registration — and restore the facts it
+                                    // did not. `= None` here is what let a
+                                    // reload report a dead inbound path as
+                                    // healthy.
+                                    registration_error = persistent_error.clone();
 
                                     // F24-C3-H5. Re-registering the ADAPTER is
                                     // only half a reload. The inbound access
@@ -1509,13 +1563,22 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                                         // half-applied reload becomes the next
                                         // finding.
                                         Some(Err(e)) => {
-                                            registration_error = Some(format!(
+                                            // Appended, not assigned: a
+                                            // persistent fact restored two
+                                            // lines above must not be
+                                            // overwritten by this one.
+                                            let note = format!(
                                                 "channel reload: adapters reloaded but inbound \
                                                  policies did NOT: {e}. The previously loaded \
                                                  policies are still in effect, so a newly added \
                                                  channel will deny every message until this is \
                                                  fixed and reload is run again."
-                                            ));
+                                            );
+                                            registration_error =
+                                                Some(match registration_error.take() {
+                                                    Some(prev) => format!("{prev}; {note}"),
+                                                    None => note,
+                                                });
                                             format!("KEPT-STALE ({e})")
                                         }
                                         // No inbound stack in this process (no
@@ -1535,16 +1598,27 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                                         policies_note
                                     );
                                 }
+                                // These two branches already leave health
+                                // failing, so they cannot produce a false
+                                // green — but they must still not DROP the
+                                // persistent fact from the message an operator
+                                // reads.
                                 Err(e) => {
                                     eprintln!("[gateway] channel reload failed: {e}");
-                                    registration_error = Some(e.to_string());
+                                    registration_error = Some(match &persistent_error {
+                                        Some(prev) => format!("{prev}; {e}"),
+                                        None => e.to_string(),
+                                    });
                                 }
                             }
                         }
                         Err(e) => {
                             eprintln!("[gateway] channel reload: credentials store: {e}");
-                            registration_error =
-                                Some(format!("credentials store unavailable: {e}"));
+                            let note = format!("credentials store unavailable: {e}");
+                            registration_error = Some(match &persistent_error {
+                                Some(prev) => format!("{prev}; {note}"),
+                                None => note,
+                            });
                         }
                     }
                 }
