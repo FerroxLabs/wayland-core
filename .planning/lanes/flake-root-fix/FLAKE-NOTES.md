@@ -251,6 +251,56 @@ straddled another test's mutation. The test I wrote to prove the fix had become 
 VICTIM of the race it sits beside. Fixed by pinning `session.directory`. Had I read
 only the pass/fail bit and not the diff, I would have wrongly concluded the fix failed.
 
+## FIX 3 — the reader/writer gap and the EnvGuard blind spot (Kind B, wcore-config)
+
+Closing the *writers* was not enough, and the iteration is the interesting part:
+
+1. After serializing every WRITER, `wcore-config --lib` still failed. The failures were
+   **readers**: `test_resolve_*` and `approval_mode_parses_from_toml_and_resolves_onto_config`
+   panicking with `No API key found`. `Config::resolve` reads `WAYLAND_HOME` (through
+   `wayland_config_dir()`) and the API-key vars, so those tests CONSUME exactly the state
+   the group's writers mutate — but they were not group members. **`#[serial]` serializes
+   writers against writers; an unlisted reader still races them.** Only 4 such readers
+   existed; all now join `wayland_home_env`.
+
+2. Failures still remained, in a test that WAS in the group. Cause: my census matched only
+   `set_var("VAR", ..)` **directly**, so mutations routed through a helper —
+   `EnvGuard::set(&[("WAYLAND_HOME", None)])` — were invisible to it. That blind spot hid
+   **10 `WAYLAND_HOME` mutators in `wcore-config/src/profile.rs`, all in the DEFAULT serial
+   group** while every `config.rs` peer was in `wayland_home_env`. An entire regime split
+   that my instrument had reported as clean. Fixed: `profile.rs` 29 `#[serial]` ->
+   `#[serial(wayland_home_env)]`; three `credentials.rs` vault tests widened to
+   `#[serial(vault_passphrase_env, wayland_home_env)]` because they move `WAYLAND_HOME`
+   too; `wcore-eval-scenarios` gains a `serial_test` dev-dep for its two `WCORE_EVAL_BIN`
+   discovery tests.
+
+## INSTRUMENT REPAIRS (five, all found by the third self-test assertion)
+
+Every one of these would have silently corrupted a reported number.
+
+1. **Harness counted only `N passed`** — a rep whose single targeted test FAILED reported
+   `ran=0` and graded VACUOUS: a real failure scored as "did not run".
+2. **`awk match()` is single-shot per line** — repair (1) still failed, because on
+   `0 passed; 1 failed` it matched `0 passed`, added 0, and never saw the failure. Masked
+   for exec-backend only because its line read `88 passed`. Now `grep -o`.
+3. **Brace counting included braces inside string literals** —
+   `std::fs::write(&path, "{ not json")` left depth permanently positive, so a fn body
+   never closed and swallowed following tests. Produced a FALSE POSITIVE naming
+   `google_meet_token_status_absent_when_unparsable` a `WAYLAND_HOME` mutator; it touches
+   no env at all.
+4. **No state for a Rust string spanning lines** — a `format!` containing a shell
+   `printf '{{...}}'` unbalanced the count and one fn body swallowed **8** following
+   tests, producing a FALSE POSITIVE naming `wcore-mcp`. **Verified before editing, so no
+   wcore-mcp change was made.** Notably repair (3) made this case WORSE than no stripping
+   at all: raw, those braces balance; half-stripped, they do not.
+5. **Serial-group regex captured a single name** — `serial_test`'s supported multi-key
+   form `#[serial(a, b)]` regraded as UNPROTECTED. Split detection is now "do all mutators
+   share a COMMON group", since a multi-key test bridges groups.
+
+Self-tests: `selftest_rsutil.py` (6 assertions, incl. two "the prior version got this
+wrong" checks run against the REAL source file, because the synthetic fixture did not
+reproduce the bug and asserting on it would have been self-passing).
+
 ## NOT A DEFECT — do not "fix"
 
 `always_fails` (`crates/wcore-cli/src/plugin/scaffold.rs:274`) is a **string literal the
