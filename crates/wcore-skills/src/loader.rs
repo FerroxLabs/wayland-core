@@ -272,6 +272,22 @@ fn collect_skill_md<'a>(
 
         while let Ok(Some(entry)) = read_dir.next_entry().await {
             let path = entry.path();
+
+            // F23A-C1-H3: a rollback stages the restored tree beside its target before the
+            // final rename(2), so a staging directory is either mid-restore or the remains
+            // of a kill inside one. Either way its contents are a partial copy, and
+            // discovering it would reintroduce exactly the "present, loadable, incomplete"
+            // state the atomic restore removes. Matched by explicit prefix rather than by a
+            // blanket dotted-directory rule, which would change which skills load for users
+            // who never touched governance.
+            if path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|n| n.starts_with(crate::govern::ROLLBACK_STAGING_PREFIX))
+            {
+                continue;
+            }
+
             // Follow symlinks: entry.file_type() does NOT traverse symlinks,
             // so use tokio::fs::metadata() which resolves the target type.
             let is_dir = match tokio::fs::metadata(&path).await {
