@@ -87,3 +87,60 @@ reports the same value regardless of what happened.
 - [ ] Build the cost record + prove variance.
 - [ ] Live probe on hetzner with the burn key, reading the arm back from the product's own output.
 - [ ] Secret sweep with liveness control.
+
+---
+
+## T+~3h — what is established, with the measurement behind each
+
+### Landed
+- `crates/wcore-tools/src/media_cost.rs` — the record. 8 unit tests green.
+- `image_generate` emits it into its result JSON (reaches model AND host via
+  `ToolResult.output`, needing no wire-contract change) plus a structured
+  `wcore::media_cost` tracing line and an optional session ledger.
+- `[tools.media_pricing]` operator rate card, empty by default, merged
+  global+project key-by-key.
+- `crates/wcore-agent/tests/f27_media_generation.rs` — hermetic fixture serving
+  BOTH `/v1/images/generations` and MCP streamable-HTTP. 12/12 green,
+  0 ignored, 0 filtered.
+
+### Mutation control — 13/13, `MUTATION_CONTROL=PASS`
+Every accounting gate proved able to fail (M1 invariant units, M2 dead
+provider-cost channel, M3 failure recorded as $0, M4 local estimate laundered
+as provider truth). The M2 case is the important one: it shows the *unpriced*
+assertion stays GREEN under mutation, so it cannot be the only evidence — the
+cost-header control is what carries it.
+
+### Live probe — two instrument defects found and repaired before any result
+1. The credential parser anchored on `FLUX_API_KEY` at line start; the file is
+   `export FLUX_API_KEY=...`, so it fell through and handed the provider the
+   whole shell line. Provider replied `401 ... Received=expo****`. **That reads
+   exactly like a dead key and would have been reported as a credential
+   blocker.** Repaired, plus a post-parse reject for anything still containing
+   `=` or a space.
+2. `--json-stream` with a positional prompt exits after the capability
+   handshake without driving a turn: three byte-identical 4506-byte captures
+   containing no model turn. Switched to `--no-tui`.
+3. Third: the run then died at `Session persistence authority unavailable` —
+   an isolated headless profile has no vault. Added `[session] enabled = false`.
+
+### Live findings so far (real spend on the burn key)
+- **`wayland-core image --model flux-image` SUCCEEDED**: wrote a 199,576-byte
+  JPEG, 1024x1024. A genuine billable generation, and `accounting_hits=0` in
+  both its streams. **This is a SECOND billable generation surface**
+  (`FluxImageClient`, `crates/wcore-providers/src/flux_image.rs`) that does not
+  go through the tool and produces no cost record.
+- **Arm read back from the product's own output** per §3b-ii: the same boot
+  logged `vision: using flux-auto at https://api.fluxrouter.ai/v1/...` and
+  `transcription: ... api.fluxrouter.ai`. FluxRouter, not Anthropic.
+- **`image_generate` registered with ONLY `FLUX_API_KEY` set** — through the
+  config-provider arm the honest-unavailable advisory did not name. Fixed, and
+  the anti-drift guard that was structurally blind to it repaired in the same
+  commit with a three-assertion self-test.
+- **`image_gen` logged `at  `** (empty base_url) where every other media
+  resolver printed its full Flux URL. Fixed to log the resolved endpoint.
+
+### Still open
+- [ ] Re-run the live probe on the rebuilt binary for the tool-path spend.
+- [ ] Decide/act on the `image` subcommand accounting gap.
+- [ ] Secret sweep with liveness control.
+- [ ] SUMMARY.
