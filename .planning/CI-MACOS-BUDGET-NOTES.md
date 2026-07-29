@@ -194,3 +194,15 @@ Same 22-minute window, integration branch still on the unmodified config, identi
 `file` says `Mach-O 64-bit executable arm64`; `./wayland-core --version` → `wayland-core
 0.12.25`, rc=0, on `uname -m = arm64`. Lane-branch route known-positive: run 30419996325 on
 `lane/24-gateway-surface` carries `wayland-core-x86_64-apple-darwin`.
+
+### M10 — arm B2: the opt-in restores full macOS coverage
+
+Run 30427849371, commit cf7fc02e, an EMPTY commit whose only content is the token
+`[ci-darwin]`. Dispatched 11 jobs including all three macOS jobs — identical to arm A under
+the unmodified config. A→B1 isolates the change; B1→B2 isolates the token.
+
+| arm | run | jobs | macOS |
+|---|---|---|---|
+| A  unmodified config      | 30425956850 | 11 | 3 |
+| B1 change, no token       | 30427513255 |  8 | 0 |
+| B2 change, `[ci-darwin]`  | 30427849371 | 11 | 3 |

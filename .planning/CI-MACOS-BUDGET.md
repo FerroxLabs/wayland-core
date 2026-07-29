@@ -142,16 +142,26 @@ workflow in memory:
 
 Both arms are pushes to `lane/ci-macos-budget`, same repo, same shared macOS queue, 30 min apart.
 
-| arm | commit | config | jobs at dispatch | macOS jobs |
-|---|---|---|---|---|
-| **A (baseline)** | `27df8b7c` | unmodified `ci.yml` | 11 | **3** |
-| **B1 (repaired)** | `d8daf8e0` | this change, no token | 8 | **0** |
+| arm | run | commit | config | jobs at dispatch | macOS jobs |
+|---|---|---|---|---|---|
+| **A (baseline)** | 30425956850 | `27df8b7c` | unmodified `ci.yml` | 11 | **3** |
+| **B1 (repaired, no token)** | 30427513255 | `d8daf8e0` | this change | **8** | **0** |
+| **B2 (repaired, `[ci-darwin]`)** | 30427849371 | `cf7fc02e` | this change | 11 | **3** |
 
 Arm A was a **docs-only** commit (a notes file) and still scheduled three macOS jobs — which is
-the waste, stated plainly. Arm B1 (run `30427513255`) dispatched all 8 jobs at 06:14:11Z and
-retained: `CI (Array)` self-hosted Windows, `CI (linux-containerized)`, `Build (x86_64-pc-windows-msvc)`,
+the waste, stated plainly. Arm B1 dispatched all 8 jobs at 06:14:11Z and retained:
+`CI (Array)` self-hosted Windows, `CI (linux-containerized)`, `Build (x86_64-pc-windows-msvc)`,
 `Build (aarch64-pc-windows-msvc)`, `Build (x86_64-unknown-linux-gnu)`,
 `Build (aarch64-unknown-linux-gnu)`, the eval gate and browser-live.
+
+**Arm B2 is the arm that proves the capability was not destroyed.** An empty commit whose only
+content is the token — `git commit --allow-empty -m "[ci-darwin] ..."` — restored the job set to
+**exactly arm A's**: `CI (macos-latest)`, `Build (aarch64-apple-darwin)` and
+`Build (x86_64-apple-darwin)` all scheduled, 11 jobs, byte-identical job names. So the opt-in is
+not a degraded substitute for the lane trigger; it reproduces it on demand.
+
+Read together the three arms isolate a single variable each: A→B1 is *the change*, B1→B2 is
+*the token*.
 
 Arm A additionally demonstrated the failure in miniature: its macOS jobs never obtained runners,
 and because a run holds its branch's concurrency slot until it completes, **it blocked the next
