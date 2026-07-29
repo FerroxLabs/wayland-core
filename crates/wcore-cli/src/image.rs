@@ -98,7 +98,7 @@ pub async fn run_with_config_path(args: ImageArgs, config_path: &Path) -> Result
     let client = FluxImageClient::new(&api_key, &base_url);
     let response = match client.generate(&request).await {
         Ok(r) => r,
-        Err(e) => bail!("{}", format_provider_error(&e)),
+        Err(e) => bail!("{}", format_provider_error(&e, &request.model, &base_url)),
     };
 
     if response.data.is_empty() {
@@ -136,7 +136,11 @@ pub async fn run_with_config_path(args: ImageArgs, config_path: &Path) -> Result
 
 /// Map a [`ProviderError`] to a user-facing message, keeping the typed
 /// entitlement distinction (feature lock vs account state) intact.
-fn format_provider_error(e: &ProviderError) -> String {
+///
+/// `model` and `base_url` are the ones the request actually used, so the 401
+/// arm can name the arm that failed and point at a command that resolves the
+/// ambiguity.
+fn format_provider_error(e: &ProviderError, model: &str, base_url: &str) -> String {
     match e {
         ProviderError::PremiumLocked { .. }
         | ProviderError::UpgradeRequired { .. }
@@ -144,6 +148,25 @@ fn format_provider_error(e: &ProviderError) -> String {
         ProviderError::Api { status, message } if *status == 403 => {
             // Contract §3.6: gpt-image arms require a verified OpenAI org.
             format!("image generation refused (HTTP 403): {message}")
+        }
+        ProviderError::Api { status, .. } if *status == 401 => {
+            // MEASURED (phase 27 lane 27-fixes): this route returns a
+            // byte-identical `{"error":{"message":"unauthorized"}}` for THREE
+            // distinct causes — an invalid key, a model id that does not exist,
+            // and a model the key is not entitled to. Rendering it as a
+            // credential verdict sends the user to rotate a key that is fine.
+            // The catalogue is key-scoped, so listing it is what actually
+            // resolves the ambiguity.
+            format!(
+                "image generation was rejected with HTTP 401 for model `{model}`.\n\
+                 This provider returns an identical 401 for BOTH an invalid API key AND a \
+                 model that is unknown or not enabled for your plan, so this status alone \
+                 does not tell you which — do not assume your key is bad.\n\
+                 Resolve it by listing the models your key can actually use:\n    \
+                 curl -sS -H \"Authorization: Bearer $FLUX_API_KEY\" {base_url}/models\n\
+                 If `{model}` is absent from that list, pick one that is present:\n    \
+                 wayland-core image --model <id> --prompt ...",
+            )
         }
         other => format!("image generation failed: {other}"),
     }
@@ -368,7 +391,54 @@ mod tests {
             capability: "image generation".into(),
             message: "image generation requires a paid plan".into(),
         };
-        let msg = format_provider_error(&e);
+        let msg = format_provider_error(&e, "flux-image", "https://api.fluxrouter.ai/v1");
         assert!(msg.contains("paid Flux plan"));
+    }
+
+    /// MEASURED live (lane 27-fixes): the image route answers with a
+    /// byte-identical `{"error":{"message":"unauthorized"}}` HTTP 401 for an
+    /// invalid key, for a nonexistent model id, and for the shipped default
+    /// arm. So a 401 must never be rendered as a credential verdict.
+    #[test]
+    fn api_401_does_not_blame_the_credential_and_names_the_model() {
+        let e = ProviderError::Api {
+            status: 401,
+            message: r#"{"error":{"message":"unauthorized"}}"#.into(),
+        };
+        let msg = format_provider_error(
+            &e,
+            "flux-image-together-flux",
+            "https://api.fluxrouter.ai/v1",
+        );
+
+        // 1. Names the arm that actually failed — without it the user cannot
+        //    tell which of --model / the default is at fault.
+        assert!(
+            msg.contains("flux-image-together-flux"),
+            "401 message must name the model it used; got: {msg}"
+        );
+        // 2. Presents BOTH indistinguishable causes rather than asserting one.
+        assert!(
+            msg.contains("invalid API key") && msg.contains("not enabled for your plan"),
+            "401 message must name both causes; got: {msg}"
+        );
+        // 3. The regression guard: the OLD message was the bare `Display` of
+        //    the error, i.e. it surfaced the raw upstream "unauthorized" and
+        //    nothing else. Assert we no longer hand the user that verdict bare,
+        //    and that we explicitly tell them not to assume the key is bad.
+        let old_message = format!("image generation failed: {e}");
+        assert_ne!(
+            msg, old_message,
+            "401 must no longer fall through to the generic arm"
+        );
+        assert!(
+            msg.contains("do not assume your key is bad"),
+            "401 message must actively counter the 'unauthorized' reading; got: {msg}"
+        );
+        // 4. Gives the user the one command that resolves the ambiguity.
+        assert!(
+            msg.contains("/models"),
+            "401 message must point at the key-scoped model catalogue; got: {msg}"
+        );
     }
 }

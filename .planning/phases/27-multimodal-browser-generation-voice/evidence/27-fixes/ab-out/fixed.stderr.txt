@@ -1,0 +1,53 @@
+[2m2026-07-29T00:42:08.394700Z[0m [33m WARN[0m WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+[2m2026-07-29T00:42:12.156209Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m36
+[2m2026-07-29T00:42:12.156510Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m36
+[2m2026-07-29T00:42:12.159708Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+[2m2026-07-29T00:42:12.159737Z[0m [33m WARN[0m not advertising computer_use: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"computer_use" [3mreason[0m[2m=[0mneither DISPLAY nor WAYLAND_DISPLAY is set, so no display server is reachable and the X11 backend cannot connect [3mremedy[0m[2m=[0mrun inside a graphical session, or export DISPLAY for an available X server (e.g. an Xvfb instance) before starting
+[2m2026-07-29T00:42:12.160177Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+[2m2026-07-29T00:42:12.160442Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback
+[2m2026-07-29T00:42:12.160454Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices
+[2m2026-07-29T00:42:12.160460Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue
+[2m2026-07-29T00:42:12.160466Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search
+[2m2026-07-29T00:42:12.160471Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists
+[2m2026-07-29T00:42:12.160477Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums
+[2m2026-07-29T00:42:12.160483Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library
+[2m2026-07-29T00:42:12.160496Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao
+[2m2026-07-29T00:42:12.160540Z[0m [32m INFO[0m image_gen: using gpt-image-1 at https://api.fluxrouter.ai/v1 (active OpenAI-wire provider)
+[2m2026-07-29T00:42:12.160551Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+[2m2026-07-29T00:42:12.160616Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-29T00:42:12.160645Z[0m [32m INFO[0m transcription: using flux-voice-fast at https://api.fluxrouter.ai/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-29T00:42:12.160694Z[0m [32m INFO[0m tts: using OpenAI TTS at https://api.fluxrouter.ai/v1 (active OpenAI-wire provider)
+[2m2026-07-29T00:42:12.161077Z[0m [33m WARN[0m video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+[2m2026-07-29T00:42:12.161137Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-29T00:42:12.161440Z[0m [33m WARN[0m plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool [3mplugin[0m[2m=[0mwayland-cua [3mtool[0m[2m=[0mexecute [3mfq_name[0m[2m=[0mCua::execute
+[2m2026-07-29T00:42:12.164055Z[0m [33m WARN[0m semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+[2m2026-07-29T00:42:12.164151Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T00:42:12.164194Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T00:42:12.169008Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T00:42:12.574872Z[0m [32m INFO[0m transcription: using flux-voice-fast at https://api.fluxrouter.ai/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-29T00:42:12.575687Z[0m [32m INFO[0m F-014: channels auto-registered from ~/.wayland/channels [3mcount[0m[2m=[0m0
+[2m2026-07-29T00:42:12.575736Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-29T00:42:12.575777Z[0m [32m INFO[0m Phase 1B-2: inbound channel subscriber spawned
+[2m2026-07-29T00:42:12.576330Z[0m [32m INFO[0m F24_CHANNEL_LEASE=owner — this process owns inbound polling for this home [3mholder[0m[2m=[0m"session" [3mpid[0m[2m=[0m2750508 [3mdir[0m[2m=[0m./ab-out/home/channels
+[2m2026-07-29T00:42:12.576361Z[0m [32m INFO[0m F-014: channel_manager.start_all() complete — inbound polling active
+[2m2026-07-29T00:42:12.622895Z[0m [33m WARN[0m WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+Pricing unavailable for flux-router/flux-fast; the call remains bounded by the token envelope and cost is unpriced, not $0.
+> ToolSearch({"query":"transcribe_audio"})
+  └> [
+  {
+    "description": "Transcribe speech to text from an audio file. Provide EITHER `audio_path` (local file) OR `audio_url` (http/https URL — private/internal addresses are rejected). Optionally pass `language` as an ISO-639-1 code (e.g. \"en\") to hint the model. Supported formats: MP3, MP4/M4A, AAC, WAV, OGG, WEBM, FLAC. Hard size cap: 25 MB.",
+    "name": "transcribe_audio",
+    "parameters": {
+      "properties": {
+        "audio_path": {
+          "description": "Absolute or relative pa...
+[2m2026-07-29T00:42:19.205849Z[0m [32m INFO[0m external edits detected (transcript-suppressed): User edited 960 files while I was thinking (`/root/wayland-27-fixes/docs`, `/root/wayland-27-fixes/docs/design`, `/root/wayland-27-fixes/docs/design/flux-282-reference`, `/root/wayland-27-fixes/docs/decisions`, `/root/wayland-27-fixes/docs/…[truncated]
+Pricing unavailable for flux-router/flux-fast; the call remains bounded by the token envelope and cost is unpriced, not $0.
+> transcribe_audio({"audio_path":"/root/wayland-27-fixes/pos.wav"})
+  └> {"bytes":125442,"language":"English","mime":"audio/wav","segments":[{"end_seconds":3.679999828338623,"start_seconds":0.0,"text":" The quick brown fox jumps over the lazy dog near the riverbank."}],"success":true,"transcript":" The quick brown fox jumps over the lazy dog near the riverbank."}
+[2m2026-07-29T00:42:22.290555Z[0m [32m INFO[0m external edits detected (transcript-suppressed): User edited 3 files while I was thinking (`/root/wayland-27-fixes/ab-out/fixed.stderr.txt`, `/root/wayland-27-fixes/ab-out/home/channels`, `/root/wayland-27-fixes/pos.wav`) — re-read each before proceeding.
+Pricing unavailable for flux-router/flux-fast; the call remains bounded by the token envelope and cost is unpriced, not $0.
+[2m2026-07-29T00:42:24.366290Z[0m [32m INFO[0m external edits detected (transcript-suppressed): User edited 3 files while I was thinking (`/root/wayland-27-fixes/ab-out/fixed.stderr.txt`, `/root/wayland-27-fixes/ab-out/home/channels`, `/root/wayland-27-fixes/ab-out/fixed.stdout.txt`) — re-read each before proceeding.
+[2m2026-07-29T00:42:24.439216Z[0m [32m INFO[0m auto-memorize skipped this session; no facts saved [3mskip_reason[0m[2m=[0mSome(BelowFactThreshold) [3mcandidates[0m[2m=[0m0
+
+[turns: 3 | tokens: 6124 in (28288 cached) / 197 out | cache: 0 created, 28288 read]

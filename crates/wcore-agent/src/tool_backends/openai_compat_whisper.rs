@@ -30,6 +30,22 @@ impl OpenAiCompatWhisperBackend {
             backend_id,
         }
     }
+
+    /// Resolved request endpoint. Exposed so the resolver wiring is
+    /// unit-assertable without a network round-trip.
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    /// Model sent in the multipart form.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Backend label used in log lines and error messages.
+    pub fn backend_id(&self) -> &str {
+        self.backend_id
+    }
 }
 
 #[async_trait]
