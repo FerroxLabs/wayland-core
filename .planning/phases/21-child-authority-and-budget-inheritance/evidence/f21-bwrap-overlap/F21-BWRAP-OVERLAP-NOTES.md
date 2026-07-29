@@ -137,3 +137,99 @@ All nine additions named and executed:
 `nested_file_and_deep_chain_collapse_to_the_outermost_directory`,
 `string_prefix_sibling_is_not_treated_as_nested`, and the live
 `required_live_bwrap_overlapping_deny_runs_shell_and_still_contains` — all `ok`.
+
+---
+
+## T4 — known-negatives, on both platforms
+
+Uncommitted harnesses (deleted after the run) drive the committed tests' arm 2 with an
+injected deny list and report the three observables:
+
+Linux, `cargo test -p wcore-sandbox --test f21bwo_kn -- --nocapture` at head:
+```
+KN as_committed : shell_ran=true parent_leak=false git_leak=false abort=false
+KN drop_ancestor: shell_ran=true parent_leak=true  git_leak=false abort=false
+KN no_deny      : shell_ran=true parent_leak=true  git_leak=true  abort=false
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+macOS 26.3, `cargo test -p wcore-sandbox --test f21bwo_macos_kn -- --nocapture`:
+```
+KN-macos as_committed : shell_ran=true parent_leak=false git_leak=false
+KN-macos drop_ancestor: shell_ran=true parent_leak=true  git_leak=false
+KN-macos no_deny      : shell_ran=true parent_leak=true  git_leak=true
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+`drop_ancestor` matters twice: it proves the parent-containment assertion **can** fire, and
+`git_leak=false` in the same row proves the two assertions are **independent** — `.git` is
+still enforced on its own when the ancestor is removed, so the ancestor mask is not the only
+thing doing the work.
+
+## T5 — macOS: no analogue (MEASURED, not inferred)
+
+`crates/wcore-sandbox/src/backends/sandbox_exec.rs`, new
+`overlapping_read_deny_runs_shell_and_still_contains`. Production `build_profile` +
+production `execute`, three-way assertion that both nested denies reach the profile as
+independent SBPL rules.
+
+Run under the LANE-BRIEF §0 **Darwin-behaviour exception** — single crate, single filtered
+test, on the Mac, because `sandbox-exec` is macOS-only and no permitted build host runs
+macOS. **Disclosed as required.**
+
+```
+$ /Users/seandonahoe/.cargo/bin/cargo test -p wcore-sandbox --lib \
+    overlapping_read_deny_runs_shell_and_still_contains -- --nocapture
+test backends::sandbox_exec::tests::overlapping_read_deny_runs_shell_and_still_contains ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 104 filtered out; finished in 0.05s
+```
+
+**macOS TOLERATES the overlapping pair**: the shell ran and both denies were enforced. SBPL
+`(deny file-read* (subpath …))` rules are independent last-match-wins predicates; there is no
+mount, so there is nothing to abort.
+
+## T6 — THE UNMASKING (this is the headline)
+
+`cargo test -p wcore-cli --test child_authority_corpus` at head `a9902ed5` on `hetzner-dsm`:
+**29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out** in 24.29 s.
+
+The `corpus_tool` **standalone × live** cell — the exact cell 21-C3 §4 recorded as masked by
+this defect — has flipped, through the **real `wayland-core` binary in a headless PTY**:
+
+| cell | at `fde83e9a` (21-C3, pre-fix) | at `a9902ed5` (post-fix) |
+|---|---|---|
+| `corpus_tool` linux standalone live | **NOT-EXPRESSIBLE** — "the delegated child's shell never ran"; `Exit code: 1 … bwrap: Can't mkdir …/workspace/.git` | **REFUSED** |
+
+Verbatim, post-fix:
+
+> `corpus_tool :: linux :: standalone :: live :: REFUSED :: obtained no Bash effect :: the
+> delegated child's SHELL RAN — its stdout marker returned on the wire in a served provider
+> request — and its write still produced no effect in the hermetic home. 2 delegated child
+> provider turn(s) arrived. ATTRIBUTED TO WORKSPACE CONTAINMENT, NOT TOOL AUTHORITY. The same
+> shell command's write to a RELATIVE path — inside the child's own workspace, where
+> containment has nothing to bind — succeeded and returned its marker on the wire. So the
+> child demonstrably HELD and exercised Bash, and only the out-of-workspace destination was
+> refused.`
+
+**This is the both-halves proof at the shipped-binary level, and it is not my instrument —
+it is the phase's own corpus.** Half 1: the child's shell RAN, its marker returned on the
+wire, and a relative-path write inside its own workspace SUCCEEDED. Half 2: the
+out-of-workspace write still produced NO effect. The child holds and exercises Bash and is
+still contained.
+
+Three things follow, and the third cuts against the fix looking better than it is:
+
+1. One of 21-C3-02's four masking mechanisms is **gone**. This cell was never measuring
+   enforcement; now it is.
+2. The refusal is attributed to **workspace containment** — which IS one of the two mechanisms
+   `21-04-PHASE-VERDICT.md` named. 21-C3 §4 said neither named mechanism was among the four
+   causes. Post-fix, on this one cell, the verdict's mechanism is the real one. The verdict
+   was right about the mechanism and wrong that it had been measured.
+3. **The tool dimension is still NOT proved enforced.** The corpus says so itself in the same
+   row: the refusal is containment, not tool authority. My fix removed the shell-can't-run
+   limit (21-C3-04's first half); the checkout-root limit (its second half) stands.
+
+`corpus_tool` **host-protocol × live** is still NOT-EXPRESSIBLE, cause "the delegated child's
+shell never ran" — that cell is masked by the **confirmer** (21-C3-03), a different mechanism
+this fix does not touch. Expected, and it is the control that shows the flip above is
+specific to the bubblewrap path rather than a general loosening.
