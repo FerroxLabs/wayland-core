@@ -56,7 +56,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import DiscordFixture from './f24-discord-fixture.mjs';
 
@@ -156,8 +156,14 @@ class MediaDiscordFixture extends DiscordFixture {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+// MUST be async. The DiscordFixture runs IN THIS PROCESS, so a synchronous
+// sleep (e.g. `spawnSync`) blocks Node's event loop and the fixture can never
+// accept the binary's connection — the dial happens and gets ECONNREFUSED
+// while the driver sits in a "waiting for IDENTIFY" loop that cannot serve it.
+// That produced a full three-leg NOT MEASURED run before it was repaired: an
+// instrument defect masquerading as a product failure.
 function sleep(ms) {
-  spawnSync(process.execPath, ['-e', `setTimeout(()=>{}, ${ms})`]);
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 function readJournal(file) {
@@ -205,7 +211,7 @@ async function runLeg({ label, ack, withAttachment, binary, rootDir, budgetMs })
   for (let i = 0; i < 100 && !llmUrl; i += 1) {
     const m = /http:\/\/127\.0\.0\.1:\d+/.exec(fs.readFileSync(llmLog, 'utf8'));
     if (m) llmUrl = m[0];
-    else sleep(100);
+    else await sleep(100);
   }
   if (!llmUrl) throw new Error('llm fixture never announced a URL');
   note(`llm fixture at ${llmUrl}`);
@@ -290,7 +296,7 @@ async function runLeg({ label, ack, withAttachment, binary, rootDir, budgetMs })
     if (rep.identify_count > 0 && rep.live_gateway_connections > 0) {
       identified = true;
       note(`gateway IDENTIFYed after ~${i * 250}ms`);
-    } else sleep(250);
+    } else await sleep(250);
   }
 
   let dispatched = 0;
@@ -320,10 +326,10 @@ async function runLeg({ label, ack, withAttachment, binary, rootDir, budgetMs })
         note(`turn observed at the LLM fixture after ~${i * 250}ms`);
         break;
       }
-      sleep(250);
+      await sleep(250);
     }
     // Let the ack state machine finish its completion reaction.
-    sleep(2500);
+    await sleep(2500);
   } else {
     note('binary never IDENTIFYed — this leg is NOT MEASURED, not a pass');
   }
@@ -336,7 +342,7 @@ async function runLeg({ label, ack, withAttachment, binary, rootDir, budgetMs })
   } catch {
     /* already gone */
   }
-  sleep(800);
+  await sleep(800);
   try {
     child.kill('SIGKILL');
   } catch {
