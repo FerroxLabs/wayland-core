@@ -27,7 +27,8 @@ use wcore_eval_scenarios::dialect::{
     CompiledStepV1, ToolSchemaCorpusV1, TranslationV1, VOCABULARY_VERSION, canonical_script,
     cohort_eligibility, compile_script, vocabulary_carries_no_product_token,
 };
-use wcore_eval_scenarios::dialect_discovery::RunningDiscoveryMeter;
+use wcore_eval_scenarios::dialect_discovery::{DiscoveryManifestV1, RunningDiscoveryMeter};
+use wcore_eval_scenarios::dialect_exec::{DialectBindingV1, bind_translation};
 use wcore_eval_scenarios::fixtures::openai::{OpenAiFixtureScript, OpenAiStep};
 use wcore_eval_scenarios::frontier_trials::{
     ALL_DIMENSIONS, ALL_TOOLS, ComparativeResultV1, DeltaV1, DimensionV1, LegStatusV1, LegV1,
@@ -260,6 +261,24 @@ enum TrialsCommand {
         /// JSON Lines output, one `TrialRecordV1` per trial.
         #[arg(long)]
         out: PathBuf,
+
+        // ---- protocol v2: drive from a compiled dialect instead of the frozen script ----
+        //
+        // All three must be supplied together or none at all. Supplying a translation without
+        // the corpus it was compiled from and the discovery manifest that says which harness
+        // declared that corpus would leave the two checks digests cannot make — see
+        // `dialect_exec`.
+        /// A `TranslationV1` from `dialect compile`. When given, the protocol's frozen
+        /// `fixture_script` is NOT used and this harness is driven in its own dialect.
+        #[arg(long, requires_all = ["corpus", "discovery_manifest"])]
+        translation: Option<PathBuf>,
+        /// The `ToolSchemaCorpusV1` the translation was compiled against.
+        #[arg(long, requires = "translation")]
+        corpus: Option<PathBuf>,
+        /// The `DiscoveryManifestV1` naming the harness that declared that corpus. This is the
+        /// only thing that stops harness A being driven with harness B's dialect.
+        #[arg(long, requires = "translation")]
+        discovery_manifest: Option<PathBuf>,
     },
     /// Fold per-trial records into the bounded result set.
     ///
@@ -845,6 +864,9 @@ fn run_trials(command: TrialsCommand) -> anyhow::Result<String> {
             trials,
             workspace_root,
             out,
+            translation,
+            corpus,
+            discovery_manifest,
         } => {
             let protocol_json: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(&protocol)?)?;
@@ -860,6 +882,28 @@ fn run_trials(command: TrialsCommand) -> anyhow::Result<String> {
                      cognitive_tax is UNPROVEN by construction of the protocol"
                 ),
             };
+            // Protocol v2. `clap`'s `requires_all` already guarantees all-or-nothing, so an
+            // partially-specified dialect never reaches here.
+            let binding = match (&translation, &corpus, &discovery_manifest) {
+                (Some(t), Some(c), Some(m)) => {
+                    let translation: TranslationV1 = serde_json::from_slice(&std::fs::read(t)?)?;
+                    let corpus: ToolSchemaCorpusV1 = serde_json::from_slice(&std::fs::read(c)?)?;
+                    let manifest: DiscoveryManifestV1 =
+                        serde_json::from_slice(&std::fs::read(m)?)?;
+                    // The harness label comes from the INVOCATION we are about to spawn, never
+                    // from the translation — otherwise the thing being checked would be
+                    // supplying its own answer.
+                    Some(bind_translation(
+                        &dimension,
+                        invocation.tool.token(),
+                        &translation,
+                        &corpus,
+                        &manifest,
+                    )?)
+                }
+                _ => None,
+            };
+
             let runtime = tokio::runtime::Runtime::new()?;
             let records = runtime.block_on(drive_leg(
                 &protocol_json,
@@ -867,6 +911,7 @@ fn run_trials(command: TrialsCommand) -> anyhow::Result<String> {
                 dim,
                 trials,
                 &workspace_root,
+                binding.as_ref(),
             ))?;
             let mut lines = String::new();
             for record in &records {
@@ -886,15 +931,29 @@ fn run_trials(command: TrialsCommand) -> anyhow::Result<String> {
                 .iter()
                 .filter(|r| r.outcome == TrialOutcomeV1::NoContact)
                 .count();
+            // The script provenance is printed on the SAME line as the score. A reader who sees
+            // `success=0` must be able to see, without opening another file, whether the harness
+            // was driven in its own dialect or in the frozen script's.
+            let (script_mode, driven_tools, translation_sha) = match &binding {
+                Some(b) => (
+                    "dialect_compiled",
+                    b.provenance.resolved_tool_names.join(","),
+                    b.provenance.translation_sha256.clone(),
+                ),
+                None => ("frozen_script_v1", "-".to_string(), "-".to_string()),
+            };
             Ok(format!(
                 "TRIALS_RUN tool={} dimension={} trials={} success={} harness_incompatible={} \
-                 no_contact={} out={}\n",
+                 no_contact={} script={} driven_tools={} translation_sha256={} out={}\n",
                 invocation.tool.token(),
                 dim.token(),
                 records.len(),
                 successes,
                 incompatible,
                 no_contact,
+                script_mode,
+                driven_tools,
+                translation_sha,
                 out.display()
             ))
         }
@@ -932,8 +991,19 @@ async fn drive_leg(
     dimension: DimensionV1,
     trials: u32,
     workspace_root: &Path,
+    binding: Option<&DialectBindingV1>,
 ) -> anyhow::Result<Vec<TrialRecordV1>> {
-    let steps = steps_for(protocol, dimension)?;
+    // Protocol v2 drives from the harness's OWN compiled dialect. v1 drives from the frozen
+    // script, which named `write_file` — a tool two of the three harnesses never exposed.
+    //
+    // The oracle, the canary, the fault, the trial isolation, the environment discipline and the
+    // scoring below are IDENTICAL in both modes. The script is the only thing that differs, which
+    // is what makes a v1-vs-v2 A/B on one harness a clean read of the dialect effect alone.
+    let steps = match binding {
+        Some(b) => b.steps.clone(),
+        None => steps_for(protocol, dimension)?,
+    };
+    let dialect_provenance = binding.map(|b| b.provenance.clone());
     let target_path = protocol
         .get("oracle")
         .and_then(|o| o.get("target_path"))
@@ -1090,6 +1160,7 @@ async fn drive_leg(
             fixture_violations: observation.violations.clone(),
             elapsed_ms,
             exit_status,
+            dialect: dialect_provenance.clone(),
         });
 
         if consecutive_timeouts >= 3 {

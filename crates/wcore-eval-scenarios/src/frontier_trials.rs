@@ -128,6 +128,30 @@ pub enum FrontierTrialError {
 
     #[error("bootstrap needs at least one sample and at least one resample")]
     EmptyBootstrap,
+
+    #[error(
+        "leg `{tool}`/`{dimension}` mixes {dialect_driven} dialect-compiled trials with \
+         {frozen_script} frozen-script trials; a v1 trial spoke one competitor's dialect and a v2 \
+         trial spoke the harness's own, so folding them into one proportion re-creates the \
+         confound the dialect compiler exists to remove"
+    )]
+    MixedDialectProvenance {
+        tool: String,
+        dimension: String,
+        dialect_driven: usize,
+        frozen_script: usize,
+    },
+
+    #[error(
+        "leg `{tool}`/`{dimension}` mixes {distinct} DIFFERENT translation digests; every trial in \
+         one leg must be driven by the identical compiled dialect or the leg measures the \
+         translations rather than the harness"
+    )]
+    MixedTranslationDigests {
+        tool: String,
+        dimension: String,
+        distinct: usize,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -827,6 +851,16 @@ pub struct TrialRecordV1 {
     pub fixture_violations: Vec<String>,
     pub elapsed_ms: u64,
     pub exit_status: Option<i32>,
+    /// Dialect provenance, present ONLY on a trial driven from a compiled translation (protocol
+    /// v2). Absent on every v1 record ever written.
+    ///
+    /// This field is what makes a v1 and a v2 record structurally unpoolable. A v1 run spoke one
+    /// competitor's dialect for all three harnesses; a v2 run speaks each harness's own. Averaging
+    /// the two would reintroduce the confound this whole exercise exists to remove, and an
+    /// `Option` that is `None` on exactly the confounded records lets an assembler refuse the mix
+    /// mechanically instead of a reader having to remember.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialect: Option<crate::dialect_exec::TrialDialectV1>,
 }
 
 /// Fold a leg's trials into a bounded proportion measurement.
@@ -840,6 +874,7 @@ pub fn proportion_measurement(
     scope: ScopeV1,
     trials: &[TrialRecordV1],
 ) -> Result<MeasurementV1, FrontierTrialError> {
+    assert_homogeneous_dialect(tool, dimension, trials)?;
     let scored: Vec<&TrialRecordV1> = trials
         .iter()
         .filter(|t| t.outcome.enters_proportion())
@@ -861,6 +896,50 @@ pub fn proportion_measurement(
         estimate: f64::from(successes) / f64::from(n),
         interval,
     })
+}
+
+/// Refuse a leg whose trials were not all driven by the identical dialect.
+///
+/// Two distinct mixes are refused, and they fail for different reasons:
+///
+/// - **v1 mixed with v2** — some trials carry no `dialect` (frozen-script, one competitor's
+///   dialect for everybody) and some carry one (each harness's own). Folding them averages a
+///   confounded arm with an unconfounded one.
+/// - **two different translations** — every trial carries a dialect but not the same one. The
+///   proportion would then be measuring which translation each trial happened to get.
+///
+/// An empty slice is not a mix and is left to [`wilson_score_interval`]'s zero-trial refusal, so
+/// this guard cannot mask that one.
+fn assert_homogeneous_dialect(
+    tool: ToolV1,
+    dimension: DimensionV1,
+    trials: &[TrialRecordV1],
+) -> Result<(), FrontierTrialError> {
+    if trials.is_empty() {
+        return Ok(());
+    }
+    let dialect_driven = trials.iter().filter(|t| t.dialect.is_some()).count();
+    let frozen_script = trials.len() - dialect_driven;
+    if dialect_driven > 0 && frozen_script > 0 {
+        return Err(FrontierTrialError::MixedDialectProvenance {
+            tool: tool.token().to_string(),
+            dimension: dimension.token().to_string(),
+            dialect_driven,
+            frozen_script,
+        });
+    }
+    let distinct: std::collections::BTreeSet<&str> = trials
+        .iter()
+        .filter_map(|t| t.dialect.as_ref().map(|d| d.translation_sha256.as_str()))
+        .collect();
+    if distinct.len() > 1 {
+        return Err(FrontierTrialError::MixedTranslationDigests {
+            tool: tool.token().to_string(),
+            dimension: dimension.token().to_string(),
+            distinct: distinct.len(),
+        });
+    }
+    Ok(())
 }
 
 /// Fold a leg's trials into a bounded continuous measurement (cost).
@@ -916,6 +995,7 @@ mod tests {
             fixture_violations: vec!["unexpected_request".to_string()],
             elapsed_ms: 10,
             exit_status: Some(1),
+            dialect: None,
         }];
         assert!(matches!(
             proportion_measurement(
@@ -926,6 +1006,118 @@ mod tests {
             ),
             Err(FrontierTrialError::ZeroTrials { .. })
         ));
+    }
+
+    // ---- the anti-pooling guard ---------------------------------------------------------
+
+    fn record(index: u32, success: bool, dialect: Option<&str>) -> TrialRecordV1 {
+        TrialRecordV1 {
+            tool: ToolV1::Wayland,
+            dimension: DimensionV1::Correctness,
+            index,
+            outcome: if success {
+                TrialOutcomeV1::Success
+            } else {
+                TrialOutcomeV1::Failure
+            },
+            fixture_requests: 2,
+            token_units: 20,
+            fixture_violations: vec![],
+            elapsed_ms: 10,
+            exit_status: Some(0),
+            dialect: dialect.map(|sha| crate::dialect_exec::TrialDialectV1 {
+                vocabulary_version: crate::dialect::VOCABULARY_VERSION.to_string(),
+                corpus_sha256: "c".repeat(64),
+                translation_sha256: sha.to_string(),
+                bound_tool_label: "wayland".to_string(),
+                resolved_tool_names: vec!["Write".to_string()],
+            }),
+        }
+    }
+
+    fn fold(trials: &[TrialRecordV1]) -> Result<MeasurementV1, FrontierTrialError> {
+        proportion_measurement(
+            ToolV1::Wayland,
+            DimensionV1::Correctness,
+            ScopeV1::ScriptedHarness,
+            trials,
+        )
+    }
+
+    /// KNOWN-POSITIVE. Without this, every assertion below passes on a guard that refuses
+    /// everything — the classic self-passing gate.
+    #[test]
+    fn a_homogeneous_leg_folds_normally_in_both_provenances() {
+        let frozen = vec![record(0, true, None), record(1, false, None)];
+        let m = fold(&frozen).expect("an all-v1 leg must still fold");
+        assert_eq!(m.trials, 2);
+        assert!((m.estimate - 0.5).abs() < f64::EPSILON);
+
+        let sha = "a".repeat(64);
+        let compiled = vec![
+            record(0, true, Some(&sha)),
+            record(1, true, Some(&sha)),
+        ];
+        let m = fold(&compiled).expect("an all-v2 leg must fold");
+        assert_eq!(m.trials, 2);
+        assert!((m.estimate - 1.0).abs() < f64::EPSILON);
+    }
+
+    /// The confound this whole lane exists to remove, attempted through the back door: average a
+    /// v1 arm (one competitor's dialect) with a v2 arm (the harness's own).
+    #[test]
+    fn a_leg_mixing_frozen_script_and_dialect_compiled_trials_is_refused() {
+        let sha = "a".repeat(64);
+        let mixed = vec![record(0, false, None), record(1, true, Some(&sha))];
+        match fold(&mixed) {
+            Err(FrontierTrialError::MixedDialectProvenance {
+                dialect_driven,
+                frozen_script,
+                ..
+            }) => {
+                assert_eq!((dialect_driven, frozen_script), (1, 1));
+            }
+            other => panic!("expected MixedDialectProvenance, got {other:?}"),
+        }
+    }
+
+    /// Every trial compiled, but not from the same translation — the proportion would be
+    /// measuring which mapping each trial drew.
+    #[test]
+    fn a_leg_mixing_two_translation_digests_is_refused() {
+        let mixed = vec![
+            record(0, true, Some(&"a".repeat(64))),
+            record(1, false, Some(&"b".repeat(64))),
+        ];
+        match fold(&mixed) {
+            Err(FrontierTrialError::MixedTranslationDigests { distinct, .. }) => {
+                assert_eq!(distinct, 2);
+            }
+            other => panic!("expected MixedTranslationDigests, got {other:?}"),
+        }
+    }
+
+    /// The guard must not swallow the zero-trial refusal it sits in front of.
+    #[test]
+    fn the_dialect_guard_does_not_mask_the_zero_trial_refusal() {
+        assert!(matches!(fold(&[]), Err(FrontierTrialError::ZeroTrials { .. })));
+    }
+
+    /// A v1 record on disk has no `dialect` key at all. It must still deserialize, or every
+    /// 30-02 capture becomes unreadable — and it must round-trip WITHOUT gaining the key, or the
+    /// published record digests change.
+    #[test]
+    fn a_v1_record_without_a_dialect_key_still_deserializes_and_round_trips_clean() {
+        let v1 = r#"{"tool":"wayland","dimension":"correctness","index":0,"outcome":"FAILURE",
+                     "fixture_requests":2,"token_units":20,"fixture_violations":[],
+                     "elapsed_ms":502,"exit_status":0}"#;
+        let parsed: TrialRecordV1 = serde_json::from_str(v1).expect("v1 records stay readable");
+        assert!(parsed.dialect.is_none());
+        let out = serde_json::to_string(&parsed).expect("serializes");
+        assert!(
+            !out.contains("dialect"),
+            "a v1 record must not grow a dialect key on re-serialization: {out}"
+        );
     }
 
     #[test]
