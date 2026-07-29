@@ -527,11 +527,16 @@ class ClauseRun {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
-  const out = { binary: null, runDir: path.join(os.tmpdir(), `f24-c3-clauses-${Date.now()}`) };
+  const out = {
+    binary: null,
+    runDir: path.join(os.tmpdir(), `f24-c3-clauses-${Date.now()}`),
+    allAtStart: false,
+  };
   for (let i = 2; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--binary') out.binary = argv[++i];
     else if (a === '--run-dir') out.runDir = argv[++i];
+    else if (a === '--all-at-start') out.allAtStart = true;
     else {
       process.stderr.write(`unknown argument: ${a}\n`);
       process.exit(2);
@@ -554,10 +559,38 @@ async function main() {
     R.startFixtures();
     R.writeBaseConfig();
 
-    // Two adapters at start. The THIRD is written later, for the reload leg.
     R.writeSlackChannel('f24finone', 'U24FINONE');
     R.writeSlackChannel('f24fintwo', 'U24FINTWO');
-    R.note('base config: 2 channels on disk, 1 held back for the reload leg');
+
+    // ── THE LIFECYCLE CONTROL (`--all-at-start`) ─────────────────────────────
+    //
+    // Run 3 measured `f24finthree`, added by `channel reload`, as registered,
+    // healthy, accepting its webhook with HTTP 200 — and denying every message
+    // (`inbound denied … reason=sender not in dm allowlist`), producing no turn
+    // and no reply.
+    //
+    // Two hypotheses fit that identically, and reporting the first without
+    // excluding the second would be a fabricated HIGH against working code:
+    //   H1 (product) `channel reload` re-registers ADAPTERS but never reloads
+    //                the INBOUND ACCESS POLICY map, so the new channel has no
+    //                policy and every sender falls through to deny.
+    //   H2 (fixture) the third config is simply wrong under any lifecycle.
+    //
+    // This mode changes EXACTLY ONE variable: the third channel is on disk
+    // BEFORE the gateway starts, so it arrives through the startup path instead
+    // of the reload path. Same generator, same secrets, same sender, same token
+    // shape, same submit call, same binary, same fixtures.
+    //
+    // Sharing `writeSlackChannel` is deliberate and is what makes this a control
+    // rather than a second experiment: a standalone script would re-derive the
+    // config and any divergence in it would silently become the variable under
+    // test.
+    if (args.allAtStart) {
+      R.writeSlackChannel('f24finthree', 'U24FINTHREE');
+      R.note('CONTROL MODE --all-at-start: 3 channels on disk BEFORE start; reload legs skipped');
+    } else {
+      R.note('base config: 2 channels on disk, 1 held back for the reload leg');
+    }
 
     // ── HEALTH: the pre-start control ────────────────────────────────────────
     // Health must REFUSE when no gateway is running. Without this leg, a health
@@ -621,7 +654,9 @@ async function main() {
         // configured and registered are counted from DIFFERENT places by design
         // (channel.rs docs, F24-D-H2). Asserting both, and asserting they agree,
         // is what makes `0,0` unable to pass.
-        const okCounts = rep.configured === 2 && rep.registered === 2 && !rep.registration_error;
+        const want = args.allAtStart ? 3 : 2;
+        const okCounts =
+          rep.configured === want && rep.registered === want && !rep.registration_error;
         const perAdapter = Array.isArray(rep.channels) ? rep.channels : [];
         const named = perAdapter.map((c) => `${c.channel}:${c.state}`).join(',');
         // Every non-Healthy state MUST carry a reason (health.rs contract).
@@ -631,7 +666,7 @@ async function main() {
         R.record(
           'health',
           'reports-running-gateway',
-          okCounts && perAdapter.length === 2 && reasonContractHeld,
+          okCounts && perAdapter.length === want && reasonContractHeld,
           `configured=${rep.configured} registered=${rep.registered} ` +
             `registration_error=${rep.registration_error ?? 'none'} ` +
             `per_adapter=[${named}] reason_contract_held=${reasonContractHeld}`,
@@ -645,7 +680,25 @@ async function main() {
     // NOT be registered. Without this control, "registered=3 after reload"
     // would also pass on a gateway that rescans on every tick regardless.
     let preReloadRegistered = null;
-    if (bound) {
+    if (bound && args.allAtStart) {
+      // CONTROL MODE. The third channel came up through the STARTUP path. The
+      // one question is whether the identical config the reload path denies is
+      // admitted here. Everything else is held fixed.
+      const before = R.arrivals().records.length;
+      const c3 = R.postSlackInbound('f24finthree', 'U24FINTHREE', 'DF24FINTHREE');
+      const gotC3 = R.waitForArrival(c3.token, 90_000);
+      const after = R.arrivals().records.length;
+      R.record(
+        'lifecycle-control',
+        'same-config-admitted-when-present-at-startup',
+        gotC3.found && after > before,
+        `token=${c3.token} accepted=${c3.accepted} http=${c3.httpStatus} tier=${gotC3.tier} ` +
+          `arrivals_before=${before} arrivals_after=${after}. ` +
+          `PASS here + FAIL in the reload run isolates the defect to the RELOAD PATH. ` +
+          `FAIL here would mean the config is at fault and there is NO product defect.`,
+        after - before,
+      );
+    } else if (bound) {
       R.writeSlackChannel('f24finthree', 'U24FINTHREE');
       R.note('third channel written to disk; gateway NOT yet told');
       sleep(5000);
@@ -661,7 +714,9 @@ async function main() {
     }
 
     // ── RELOAD: the reload itself, then PROVE THE NEW ADAPTER CARRIES TRAFFIC ─
-    if (bound) {
+    // Skipped in control mode: there is nothing to reload, the third channel was
+    // present at startup. Running it there would measure a different question.
+    if (bound && !args.allAtStart) {
       const rl = R.channelReload();
       R.note(`channel reload rc=${rl.status} out=${(rl.stdout || rl.stderr).slice(0, 200).replace(/\n/g, ' ')}`);
       sleep(12_000);
