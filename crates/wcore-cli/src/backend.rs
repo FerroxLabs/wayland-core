@@ -418,7 +418,10 @@ fn verify_receipt(path: &PathBuf, against_backend: Option<&str>) -> Result<()> {
     // rotated-out or foreign key has a perfectly intact body and is caught
     // only here.
     let reference = reference_backend_named(name, reference_budget())
-        .with_context(|| format!("resolving backend '{name}' to obtain its live verifying key"))?;
+        .with_context(|| format!("resolving backend '{name}' to obtain its live verifying key"))?
+        .ok_or_else(|| {
+            anyhow!("unknown backend '{name}' — cannot establish identity against it")
+        })?;
     match receipt.verify(&reference.identity, &reference.verifying_key) {
         Ok(()) => {
             println!(
