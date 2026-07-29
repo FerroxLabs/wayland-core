@@ -1,0 +1,22 @@
+== git HEAD ==
+f8b437fb fix(23B-C4): attribute the opening round-trip when no cache marker was honoured
+
+== cargo test -p wcore-agent --lib cache_ledger ==
+running 20 tests
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 2184 filtered out; finished in 0.00s
+
+== cargo test -p wcore-agent --test cache_ledger_engine_test ==
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+
+== cargo test -p wcore-cli --test cache_ledger_cli ==
+running 13 tests
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+== pre-existing cache_diagnostics + compact regressions ==
+running 14 tests
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 2190 filtered out; finished in 0.00s
+running 118 tests
+test result: ok. 118 passed; 0 failed; 0 ignored; 0 measured; 2086 filtered out; finished in 0.01s
+running 15 tests
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.68s
