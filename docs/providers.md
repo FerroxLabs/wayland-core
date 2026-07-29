@@ -481,3 +481,41 @@ omit behaviour via the `omit_max_tokens_when_unsized` compat flag:
 [providers.my-router.compat]
 omit_max_tokens_when_unsized = true   # unknown model + omitted cap ⇒ omit the field
 ```
+
+### Image-generation model (`image_model`)
+
+The built-in `image_generate` tool posts to the active provider's OpenAI-wire
+`/v1/images/generations` endpoint. That endpoint's **model namespace is
+per-provider and does not follow your chat model** — a key issued for one
+provider is generally not entitled to another's image model. The default is
+therefore part of each provider's compat preset:
+
+| Provider | Default image model |
+|---|---|
+| `openai` | `gpt-image-1` |
+| `flux-router` | `flux-image` |
+| everything else | none — the tool falls back to `gpt-image-1` |
+
+Override per account when your key is entitled to a different model (for
+example an OpenAI org that only has `dall-e-3`):
+
+```toml
+[providers.openai.compat]
+image_model = "dall-e-3"
+```
+
+The `OPENAI_IMAGE_MODEL` environment variable still takes precedence over both
+the config value and the preset, and applies to whichever OpenAI-wire provider
+is active:
+
+```bash
+OPENAI_IMAGE_MODEL=dall-e-3 wayland-core -p openai "generate a logo"
+```
+
+> Previously there was a single global default of `gpt-image-1` for every
+> OpenAI-wire provider, so `image_generate` failed on a Flux Router session
+> unless the user knew to set `OPENAI_IMAGE_MODEL=flux-image` (F-27C3-04).
+
+Note this governs the **tool** only. The separate `wayland-core image`
+subcommand talks to Flux Router directly and takes its arm from `--model`
+(default `flux-image-together-flux`).
