@@ -344,3 +344,98 @@ Shared fence `crates/wcore-cli/src/{lib,main}.rs`: **untouched**, verified by
 Verdict written to `22-C3-SUMMARY.md`: **Criterion 3 = PARTIAL**. The construction is
 real and structurally enforced over the Goal lifecycle; four of five engines have no
 product path through it, and engine invocation outside a Goal remains convention.
+
+= = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = =
+
+# PART II — lane `lane/22-c3-goal`, 2026-07-29
+
+Everything above this line was written by the earlier lane `lane/22-c3` and is
+**preserved unedited**. Everything below is mine. Base `861d1b1a` (which already
+contains all of the above). Append-and-commit after every measurement.
+
+---
+
+## §0. FIRST FINDING — my dispatch brief's premise is stale, in two layers
+
+My brief states C3 "remains untouched", "was never attempted", and that "five engines
+still return five types". **All three were true when written; none is true at my base.**
+I establish this before building, because building against a stale premise would have
+produced a second copy of an existing construction.
+
+**Layer 1 — the phase verdict is stale.** `22-PHASE-VERDICT.md` §`UPDATE — 2026-07-27`
+re-grades C3 **FAILED, unchanged**, stating "No lane attempted 22-02 Task 3." Written
+2026-07-27 by lane `lane/22-wire`.
+
+**Layer 2 — a C3 lane ran AFTER that update and nobody re-graded.** Unproxied `git log`:
+
+```
+$ /usr/bin/git log --format='%h %ad %s' --date=short -- .../22-C3-NOTES.md .../22-C3-SUMMARY.md
+aa60fc4b 2026-07-29 docs(22-c3): SUMMARY with an honest PARTIAL grade on Criterion 3
+8894f443 2026-07-29 docs(22-c3): gate results, the live transcript, and a HIGH I found in my own construction
+d82ac121 2026-07-28 docs(22-c3): record the closed-back-door design and the full terminal mapping
+0e33c08d 2026-07-28 docs(22-c3): record the Criterion 3 enforcement-ceiling determination before building
+```
+
+Ordering: verdict UPDATE (07-27) → C3 lane builds the adapter surface (07-28/29) → **no
+re-grade**. The verdict AND the `GOAL-*` COMPETITIVE-LEDGER row both still assert a fact
+the tree falsifies.
+
+**Layer 3 — confirmed against SOURCE, not against the summary.** A summary can itself be
+advertised-but-dead (ten recorded instances on this programme), so I checked the tree:
+
+```
+$ /usr/bin/grep -n "pub fn from_" crates/wcore-agent/src/goal/strategy.rs
+262:    pub fn from_direct(owner: LoopOwner<DirectTag>, outcome: DirectOutcome<'_>) -> Self {
+300:    pub fn from_forgeflows(
+347:    pub fn from_fleet(owner: LoopOwner<FleetTag>, outcome: FleetOutcome<'_>) -> Self {
+378:    pub fn from_council(
+464:    pub fn from_anvil(
+```
+
+Five adapters, 880 lines, present. **The construction exists.** "Five engines return five
+types" remains literally true of the *engines' own signatures* — the adapter surface that
+converges them onto `StrategyTermination` is what exists.
+
+### What this changes about my job
+
+I am **not** building the adapter surface. I am closing the **PARTIAL**. The earlier
+lane's own §6 names the gap and that gap is my work:
+
+1. **Four of five engines have no PRODUCT path.** Only Fleet is reachable via a shipped
+   verb (`wayland-core goal run --terminate`). Direct, ForgeFlows, Council, Anvil
+   terminate canonically **in tests only**. Against my brief's own instruction — "prove
+   each engine's *production* path reaches it, not just that a function exists" — this is
+   exactly the **advertised-but-dead** class in a new costume.
+2. **An engine invoked outside any Goal is unenforced** — convention, not construction.
+   The earlier lane measured the reason (≥40 existing test call sites; 22-02 Task 3's
+   `<done>` forbids modifying existing tests) and called it a Sean-level scope call.
+3. Linux only; no Windows leg.
+
+**Grading position, stated BEFORE I build so it cannot be retrofitted:** item 1 is
+squarely mine and is the whole difference between a construction and a product property.
+Item 2 I will **re-derive rather than inherit** — an inherited impossibility claim is
+precisely what this programme has been wrong about three times.
+
+---
+
+## §1. What I still have to establish
+
+- [ ] Re-derive item 2's ≥40-call-site claim myself. Do NOT inherit it.
+- [ ] Give the four unwired engines a product path, or prove it impossible with the call
+      sites that make it so.
+- [ ] **Nested-owner proof.** A known-negative is self-passing on a dead instrument. Must
+      search the CONCEPT (retry / re-run / attempt / backoff / verify-again / max_*),
+      state the query, and carry a known-positive in the SAME invocation.
+- [ ] Kill-mid-flight: the goal terminates **exactly once**. The earlier lane proved claim
+      durability; termination *cardinality* is a different assertion and is mine.
+- [ ] A one-variable negative control that reddens.
+- [ ] State plainly whether F05 rows 2 (mid-flight monitor) and 4 (learned policy) become
+      reachable. Default answer is "they remain unwired" unless I actually wire them.
+
+## §2. Log
+
+- **T+0** — worktree verified `.../lane-22-c3-goal`, branch `lane/22-c3-goal`, HEAD
+  `861d1b1a`. Confirmed NOT the dirty `/Users/seandonahoe/dev/waylandcore` checkout.
+- **T+9** — §0 established and committed. Premise stale; job re-scoped from "build the
+  adapter surface" to "close the PARTIAL".
+
