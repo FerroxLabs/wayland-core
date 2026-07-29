@@ -96,7 +96,7 @@ impl TestRepo {
     }
 
     fn open(&self) -> IndexStore {
-        IndexStore::open(&self.store_path, &self.root).expect("open store")
+        IndexStore::open(&self.store_path, &self.root, wcore_repomap::JournalMode::Wal).expect("open store")
     }
 
     fn refresh(&self) -> wcore_repomap::IndexStats {
@@ -591,7 +591,7 @@ fn a_corrupt_store_returns_a_structured_error_naming_the_file() {
         let _ = fs::remove_file(PathBuf::from(path));
     }
 
-    match IndexStore::open(&repo.store_path, &repo.root) {
+    match IndexStore::open(&repo.store_path, &repo.root, wcore_repomap::JournalMode::Wal) {
         Err(RepoMapError::Store { path, message }) => {
             assert_eq!(path, repo.store_path, "the error must name the store file");
             assert!(
@@ -623,7 +623,7 @@ fn a_store_written_by_a_future_schema_is_refused_with_a_rebuild_hint() {
         )
         .expect("bump schema version");
     }
-    match IndexStore::open(&repo.store_path, &repo.root) {
+    match IndexStore::open(&repo.store_path, &repo.root, wcore_repomap::JournalMode::Wal) {
         Err(RepoMapError::Store { message, .. }) => {
             assert!(message.contains("9999"), "{message}");
             assert!(message.contains("rebuild"), "{message}");

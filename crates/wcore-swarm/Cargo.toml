@@ -12,7 +12,7 @@ rust-version.workspace = true
 # (argv mode — no shell interpretation), per AGENTS.md cross-platform rules.
 
 [dependencies]
-wcore-config        = { workspace = true }
+wcore-config        = { workspace = true, features = ["sqlite"] }
 wcore-sandbox       = { workspace = true }
 wcore-types         = { workspace = true }
 # M5.7 — SwarmMemoryBridge wires Swarm dispatch into wcore-memory's
