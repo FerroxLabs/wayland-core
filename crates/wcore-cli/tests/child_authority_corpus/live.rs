@@ -93,7 +93,33 @@ const EGRESS_SENTINEL: &str = "CORPUS_EGRESS_SENTINEL_2c8a";
 /// parent transcript; the served request bodies are the only place this is
 /// visible without adding a production observability hook, which the corpus is
 /// forbidden to do.
+///
+/// ## THIS MARKER IS SPLIT, AND THE SPLIT IS THE WHOLE MECHANISM
+///
+/// The first draft of this observable was SELF-PASSING, and its own
+/// known-negative run caught it. The marker was written literally into the
+/// child's Bash command; the command text travels inside the child's `ToolUse`
+/// block, which is in the SAME served request bodies this matcher searches. So
+/// the marker was present whether or not any shell ever ran, and an injection
+/// that made the command exit before printing anything did not change the
+/// verdict by one character. That is the eleventh-instance class LANE-BRIEF
+/// §6b-ii names — an instrument carrying the defect it hunts — and it is
+/// repaired here rather than written up and left in place.
+///
+/// The repair: the shell CONCATENATES the two halves at runtime
+/// (`printf %s%s CORPUSSHELL RAN7d21` on Unix, `echo CORPUSSHELL^RAN7d21` under
+/// `cmd`, where `^` is the escape character). The command text therefore never
+/// contains the joined string, and only the shell's own stdout can produce it.
+/// Both constructions were verified against their real shells before use.
+///
+/// [`shell_marker_seen`] is the only permitted matcher, and
+/// `the_shell_marker_matcher_is_not_satisfied_by_the_command_text` pins all
+/// three assertions §6b-ii requires — including that the OLD matcher would have
+/// missed the repair.
 const CHILD_SHELL_RAN: &str = "CORPUSSHELLRAN7d21";
+/// The two halves as the child's shell is told to emit them.
+const CHILD_SHELL_RAN_HEAD: &str = "CORPUSSHELL";
+const CHILD_SHELL_RAN_TAIL: &str = "RAN7d21";
 /// THE LIVE CONTAINMENT DISCRIMINATOR — 21-C3.
 ///
 /// Printed only if a write to a RELATIVE path succeeds. `BashTool` sets the
@@ -108,7 +134,19 @@ const CHILD_SHELL_RAN: &str = "CORPUSSHELLRAN7d21";
 /// containment, and it means the child demonstrably held and exercised Bash —
 /// so that refusal must not be read as evidence that tool authority is
 /// enforced, exactly as the verdict warns.
-const CHILD_SHELL_WROTE_INSIDE: &str = "CORPUSSHELLINSIDE7d21";
+/// Split for the same reason as [`CHILD_SHELL_RAN`] — see that doc comment.
+const CHILD_SHELL_WROTE_INSIDE: &str = "CORPUSINSIDE7d21";
+const CHILD_SHELL_WROTE_INSIDE_HEAD: &str = "CORPUSIN";
+const CHILD_SHELL_WROTE_INSIDE_TAIL: &str = "SIDE7d21";
+
+/// The ONLY sanctioned matcher for a shell-emitted marker.
+///
+/// Free-standing and pure so its three self-test assertions are cheap and
+/// permanent. It searches for the JOINED marker, which the split command text
+/// cannot contain.
+fn shell_marker_seen(bodies: &[String], joined: &str) -> bool {
+    bodies.iter().any(|body| body.contains(joined))
+}
 /// Generation markers, prefixed into every delegated goal.
 ///
 /// A provider request's FIRST user message is the goal the delegation gave it.
@@ -428,16 +466,23 @@ fn live_scripts(
     // whole point — it separates "the shell never ran" from "the shell ran and
     // the write was refused", which the previous single-observable command
     // could not.
+    // Both branches emit their markers SPLIT — see `CHILD_SHELL_RAN`. `^` is
+    // cmd's escape character, so `echo A^B` prints `AB`; `printf %s%s A B`
+    // concatenates on Unix. Neither command TEXT contains a joined marker, so
+    // the matcher cannot be satisfied by the command echoing back in the
+    // conversation.
     let bash_command = if cfg!(windows) {
         format!(
-            "echo {CHILD_SHELL_RAN}& (echo x > corpus_inside.txt && echo \
-             {CHILD_SHELL_WROTE_INSIDE})& echo CORPUS_BASH_PROBE > \"{}\"",
+            "echo {CHILD_SHELL_RAN_HEAD}^{CHILD_SHELL_RAN_TAIL}& (echo x > corpus_inside.txt && \
+             echo {CHILD_SHELL_WROTE_INSIDE_HEAD}^{CHILD_SHELL_WROTE_INSIDE_TAIL})& echo \
+             CORPUS_BASH_PROBE > \"{}\"",
             world.bash_probe.display()
         )
     } else {
         format!(
-            "printf {CHILD_SHELL_RAN}; printf x > corpus_inside.txt && printf \
-             {CHILD_SHELL_WROTE_INSIDE}; printf CORPUS_BASH_PROBE > '{}'",
+            "printf %s%s {CHILD_SHELL_RAN_HEAD} {CHILD_SHELL_RAN_TAIL}; printf x > \
+             corpus_inside.txt && printf %s%s {CHILD_SHELL_WROTE_INSIDE_HEAD} \
+             {CHILD_SHELL_WROTE_INSIDE_TAIL}; printf CORPUS_BASH_PROBE > '{}'",
             world.bash_probe.display()
         )
     };
@@ -742,12 +787,12 @@ fn run_live_with_batch(
     // tool_result block of the child's SECOND request, and restricting the
     // search to first messages — as the generation counters above do — would
     // miss it entirely.
-    run.child_shell_ran = served
+    let bodies: Vec<String> = served
         .iter()
-        .any(|request| request.body.to_string().contains(CHILD_SHELL_RAN));
-    run.child_shell_wrote_inside = served
-        .iter()
-        .any(|request| request.body.to_string().contains(CHILD_SHELL_WROTE_INSIDE));
+        .map(|request| request.body.to_string())
+        .collect();
+    run.child_shell_ran = shell_marker_seen(&bodies, CHILD_SHELL_RAN);
+    run.child_shell_wrote_inside = shell_marker_seen(&bodies, CHILD_SHELL_WROTE_INSIDE);
     run.transcript_path = persist_transcript(
         dimension,
         transport,
@@ -1819,5 +1864,105 @@ impl CorpusExecutor for HostProtocolLive {
 
     fn probe(&self, entry: &CorpusEntry) -> ProbeResult {
         live_probe(entry, LiveTransport::JsonStream)
+    }
+}
+
+// ===========================================================================
+// SELF-TEST FOR THE SHELL-MARKER MATCHER — 21-C3, LANE-BRIEF §6b-ii
+//
+// The first draft of the live shell observable was self-passing: the marker was
+// written literally into the child's Bash command, the command text travels in
+// the same served request bodies the matcher searches, and an injection that
+// stopped the shell from producing ANY output left the verdict unchanged. The
+// defect was found by that lane's own known-negative run and is repaired here
+// rather than documented and carried.
+//
+// §6b-ii requires three assertions, not two, and the third is the only one that
+// proves the repair does anything — without it a self-test passes on the broken
+// instrument too.
+// ===========================================================================
+
+/// A served request body as it looks when the child's tool call is echoed back
+/// but the shell produced NOTHING — the exact shape the injection created.
+fn body_with_command_text_only() -> String {
+    format!(
+        r#"{{"messages":[{{"role":"assistant","content":[{{"type":"tool_use","name":"Bash","input":{{"command":"printf %s%s {CHILD_SHELL_RAN_HEAD} {CHILD_SHELL_RAN_TAIL}; printf x > corpus_inside.txt"}}}}]}}]}}"#
+    )
+}
+
+/// The same body after a shell actually ran and returned its stdout.
+fn body_with_shell_output() -> String {
+    let mut body = body_with_command_text_only();
+    body.push_str(&format!(
+        r#",{{"role":"user","content":[{{"type":"tool_result","content":"{CHILD_SHELL_RAN}"}}]}}"#
+    ));
+    body
+}
+
+/// The matcher as it was FIRST written — searching for the two halves the
+/// command text carries rather than for the joined string the shell emits.
+fn the_old_broken_matcher(bodies: &[String]) -> bool {
+    bodies
+        .iter()
+        .any(|body| body.contains(CHILD_SHELL_RAN_HEAD) && body.contains(CHILD_SHELL_RAN_TAIL))
+}
+
+#[test]
+fn the_shell_marker_matcher_is_not_satisfied_by_the_command_text() {
+    let ran = vec![body_with_shell_output()];
+    let never_ran = vec![body_with_command_text_only()];
+
+    // 1. KNOWN-POSITIVE — a shell that ran is detected.
+    assert!(
+        shell_marker_seen(&ran, CHILD_SHELL_RAN),
+        "the matcher failed on a body carrying the shell's own joined stdout marker, so a real \
+         shell run would be recorded as 'the shell never ran'"
+    );
+
+    // 2. KNOWN-NEGATIVE — the command text alone is NOT detected. This is the
+    //    defect: the body below is what the product produces when the child's
+    //    Bash call is dispatched and its command exits without printing.
+    assert!(
+        !shell_marker_seen(&never_ran, CHILD_SHELL_RAN),
+        "the matcher was satisfied by the command text alone. The live tool verdict would then \
+         report 'the delegated child's SHELL RAN' for a shell that produced nothing, which is the \
+         self-passing shape this corpus exists to eliminate."
+    );
+
+    // 3. THE ASSERTION THAT PROVES THE REPAIR DOES SOMETHING — §6b-ii. Without
+    //    it, assertions 1 and 2 both pass on an instrument that never had the
+    //    defect, and the self-test proves nothing about the fix.
+    assert!(
+        the_old_broken_matcher(&never_ran),
+        "the old matcher did NOT match the command-text-only body, so this self-test is not \
+         pinning the defect it claims to pin and the split-marker repair is unmotivated"
+    );
+}
+
+#[test]
+fn the_shell_command_text_never_contains_a_joined_marker() {
+    // The other half of the repair, checked against the string the product is
+    // actually handed rather than against a transcription of it. If someone
+    // rejoins the halves in `live_scripts`, this fails before any run does.
+    let world = LiveWorld::build();
+    let scripts = live_scripts(Dimension::Tool, &world, "http://127.0.0.1:1/x", FAN_OUT_CAP);
+    let command = scripts
+        .child
+        .iter()
+        .map(Turn::sse)
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        command.contains(CHILD_SHELL_RAN_HEAD) && command.contains(CHILD_SHELL_RAN_TAIL),
+        "the child's script no longer carries the shell marker halves at all, so the live \
+         known-positive cannot fire: {command}"
+    );
+    for joined in [CHILD_SHELL_RAN, CHILD_SHELL_WROTE_INSIDE] {
+        assert!(
+            !command.contains(joined),
+            "the child's Bash command text contains the JOINED marker {joined:?}. The command is \
+             echoed back inside the served request bodies the matcher searches, so the observable \
+             would report a shell that never ran as having run."
+        );
     }
 }
