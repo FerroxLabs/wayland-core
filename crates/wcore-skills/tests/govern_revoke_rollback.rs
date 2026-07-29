@@ -499,15 +499,26 @@ fn a_successful_restore_publishes_whole_and_leaves_no_staging_behind() {
 
 #[tokio::test]
 async fn a_staging_directory_is_never_discovered_as_a_skill() {
-    let f = fixture();
+    // `additional_skills_dirs` maps each `--add-dir` to `<dir>/.wayland-core/skills`, so the
+    // project root is what gets passed, not the skills directory itself. Getting this wrong
+    // is what the known-positive below caught on the first run: the loader returned `[]` and
+    // every negative assertion in this test passed for free.
+    let proj = tempfile::tempdir().unwrap();
+    let skills = proj.path().join(".wayland-core").join("skills");
+    std::fs::create_dir_all(&skills).unwrap();
 
-    // A real skill, so the loader is demonstrably alive in this same invocation. Without it,
-    // "the staging directory was not loaded" passes for free on a loader that loads nothing.
-    write_draft(&f.skills, "control-visible", "ctl-sig", "control body\n");
+    // A real skill, so the loader is demonstrably alive in this same invocation.
+    let control = skills.join("control-visible");
+    std::fs::create_dir_all(&control).unwrap();
+    std::fs::write(
+        control.join("SKILL.md"),
+        "---\nname: control-visible\ndescription: proves the loader ran\n---\nbody\n",
+    )
+    .unwrap();
 
     // A staging directory as a kill mid-restore would leave it: correctly named, holding a
     // complete-looking SKILL.md.
-    let staged = f.skills.join(format!(
+    let staged = skills.join(format!(
         "{}deadbeef.partial",
         wcore_skills::govern::ROLLBACK_STAGING_PREFIX
     ));
@@ -518,9 +529,13 @@ async fn a_staging_directory_is_never_discovered_as_a_skill() {
     )
     .unwrap();
 
-    let tmp = tempfile::tempdir().unwrap();
-    let loaded =
-        wcore_skills::loader::load_all_skills(tmp.path(), &[f.skills.clone()], true, None).await;
+    let loaded = wcore_skills::loader::load_all_skills(
+        proj.path(),
+        &[proj.path().to_path_buf()],
+        true,
+        None,
+    )
+    .await;
     let names: Vec<&str> = loaded.iter().map(|s| s.name.as_str()).collect();
 
     assert!(
