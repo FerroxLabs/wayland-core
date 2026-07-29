@@ -1,0 +1,168 @@
+=== 26-SC2-PEERS live proof ===
+binary : /root/wayland-26-sc2-peers/target/release/wayland-core
+version: wayland-core 0.12.25
+staged : /tmp/lane-26-sc2-peers-stage
+workdir: /tmp/lane-26-sc2-peers-work
+
+--- P0: the exec-bit instrument, proven on a known-positive AND a known-negative ---
+  chmod 0755 -> stat reports 755 ; chmod 0644 -> stat reports 644
+PASS: P0 the filesystem honours the execute bit and stat reports it BOTH ways
+
+############################################################
+### PEER: grok
+############################################################
+source: /tmp/lane-26-sc2-peers-stage/grok-home
+  SKILL.md in <home>/skills : 6
+  exec-bit files there      : 3
+PASS: grok H0-CONTROL the hostile helper IS executable at source (755): skills/brand/scripts/extract-colors.cjs
+
+--- driving: migrate grok --home <staged> --yes ---
+import rc=0
+    Migration plan: grok → wayland-core
+    Source: /tmp/lane-26-sc2-peers-stage/grok-home
+    
+    Profiles (1):
+      • grok/root
+          provider=? model=?
+          credential: auth.json.key found — NOT imported (pass --include-credentials)
+    
+    Detected but NOT imported — no Wayland equivalent to map onto:
+      • 4 bundled
+      • 6 marketplace-cache
+      • 26 sessions
+      These stay on the source install. Importing them would mean guessing a
+      mapping, and a wrong guess in a settings key changes runtime behaviour.
+    
+    Imported 1 profile (0 skipped), 0 MCP servers, 0 credentials.
+    Accounting: discovered=7 imported=7 quarantined=0 excluded=0 (the last three sum to the first).
+    Content written: 23 files — 6 skills, 0 personas, 0 memory notes.
+      3 imported files carried an execute bit; it was REMOVED. Measured against the
+      real peer trees, 68 of 349 peer skills ship a .sh/.py/.js helper, and a skill is
+      classified on its SKILL.md prose — so those helpers import live. They arrive inert:
+      running one is an explicit act (`sh <script>`), which goes through tool approval.
+
+L1 SKILL.md that LANDED under <wayland home>/skills: 6 (source had 6)
+PASS: grok L1 real peer skills imported
+PASS: grok L2 the root profile is in the written config.toml
+
+--- hostile case: a real skill carrying a real executable helper ---
+  source : 755  sha256[0:16]=36d21f3905e5762c  skills/brand/scripts/extract-colors.cjs
+  landed : 644  sha256[0:16]=36d21f3905e5762c  skills/brand/scripts/extract-colors.cjs
+PASS: grok X1 the helper's BYTES crossed unchanged (a migration, not a filter)
+PASS: grok X2 the imported helper carries no execute bit (644) — measured with stat, on disk
+  exec-bit files under the LIVE skills root: 0 (source had 3)
+PASS: grok X4 ZERO of 3 source exec bits survived the import
+
+  F26-SC2-M1 on grok: skills carrying Wayland's ```! directive = 0
+  F26-SC2-M1 on grok: files in quarantine                     = 0
+PASS: grok M1 confirmed — no real grok skill uses Wayland's directive, so all import live
+
+--- provenance: ask the product where a landed artifact came from ---
+    skills/brand/SKILL.md came from:
+      • skill:skills/brand
+          from:  skills/brand (grok)
+          at:    skills/brand
+          digest: a9436326ab4ec24a45e8dc0441344459d74e5a4d5330827b0475d5c6338fd9b3
+PASS: grok Q1 known-positive — a landed artifact resolves to its grok source
+    No import record covers skills/locally-authored/SKILL.md
+    Nothing this machine imported from a peer landed there.
+PASS: grok Q2 known-negative — a locally authored skill is NOT attributed to grok
+
+PASS: grok S1 the SOURCE helper is byte- and mode-identical after the import
+
+############################################################
+### PEER: gemini
+############################################################
+source: /tmp/lane-26-sc2-peers-stage/gemini-home
+  SKILL.md in <home>/skills : 13
+  exec-bit files there      : 4
+PASS: gemini H0-CONTROL the hostile helper IS executable at source (755): skills/async-pr-review/scripts/async-review.sh
+
+--- driving: migrate gemini --home <staged> --yes ---
+import rc=0
+    Migration plan: gemini → wayland-core
+    Source: /tmp/lane-26-sc2-peers-stage/gemini-home
+    
+    Profiles (1):
+      • gemini/root
+          provider=? model=?
+          mcp: com.brave/brave-search-mcp, com.canva-canva-mcp, com.github-github-mcp-server, com.microsoft-playwright-mcp, com.notion-notion-mcp, com.notion/notion-mcp, com.slack-slack-mcp, e2e-echo-server, hello-echo-mcp, ijfw-memory, io.github.taylorwilsdon-google-workspace-mcp, wayland-concierge-diag, wayland-image-generation, wayland-search-skills
+    
+    MCP servers to add (14): com.brave/brave-search-mcp, com.canva-canva-mcp, com.github-github-mcp-server, com.microsoft-playwright-mcp, com.notion-notion-mcp, com.notion/notion-mcp, com.slack-slack-mcp, e2e-echo-server, hello-echo-mcp, ijfw-memory, io.github.taylorwilsdon-google-workspace-mcp, wayland-concierge-diag, wayland-image-generation, wayland-search-skills
+    
+    Detected but NOT imported — no Wayland equivalent to map onto:
+      • 1 commands
+      • 3 credential_files
+      • 1 extensions
+      These stay on the source install. Importing them would mean guessing a
+      mapping, and a wrong guess in a settings key changes runtime behaviour.
+      ! gemini authenticates with "gemini-api-key"; wayland-core does not consume that grant, so authentication must be re-established here
+      ! settings.json declares no model.name and there is no oauth_creds.json — the root setup imported empty
+    
+    Will be QUARANTINED — imported but INERT until you promote them (9):
+      • mcp_server:com.brave/brave-search-mcp — mcp definition carries a launch command
+      • mcp_server:com.microsoft-playwright-mcp — mcp definition carries a launch command
+      • mcp_server:e2e-echo-server — mcp definition carries a launch command
+      • mcp_server:hello-echo-mcp — mcp definition carries a launch command
+      • mcp_server:ijfw-memory — mcp definition carries a launch command
+      • mcp_server:io.github.taylorwilsdon-google-workspace-mcp — mcp definition carries a launch command
+      • mcp_server:wayland-concierge-diag — mcp definition carries a launch command
+      • mcp_server:wayland-image-generation — mcp definition carries a launch command
+      • mcp_server:wayland-search-skills — mcp definition carries a launch command
+      Quarantined content is written outside every directory the agent loads skills from,
+      so it cannot run. Review it, then promote what you want with:
+        wayland-core migrate promote --id <identity>
+    
+    Imported 1 profile (0 skipped), 5 MCP servers, 0 credentials.
+    Accounting: discovered=29 imported=20 quarantined=9 excluded=0 (the last three sum to the first).
+    Content written: 33 files — 13 skills, 0 personas, 1 memory note.
+      4 imported files carried an execute bit; it was REMOVED. Measured against the
+      real peer trees, 68 of 349 peer skills ship a .sh/.py/.js helper, and a skill is
+      classified on its SKILL.md prose — so those helpers import live. They arrive inert:
+      running one is an explicit act (`sh <script>`), which goes through tool approval.
+      Personas and memory notes are STAGED under migrate-imported/ — they are not active until
+      you move them where you want them. Personas are stored with forged trust
+      delimiters neutralized.
+    
+    Quarantined 9 items — inert until an explicit promotion:
+      • mcp_server:com.brave/brave-search-mcp — mcp definition carries a launch command
+      • mcp_server:com.microsoft-playwright-mcp — mcp definition carries a launch command
+      • mcp_server:e2e-echo-server — mcp definition carries a launch command
+      • mcp_server:hello-echo-mcp — mcp definition carries a launch command
+      • mcp_server:ijfw-memory — mcp definition carries a launch command
+      • mcp_server:io.github.taylorwilsdon-google-workspace-mcp — mcp definition carries a launch command
+      • mcp_server:wayland-concierge-diag — mcp definition carries a launch command
+      • mcp_server:wayland-image-generation — mcp definition carries a launch command
+      • mcp_server:wayland-search-skills — mcp definition carries a launch command
+      Review with: wayland-core migrate quarantined
+
+L1 SKILL.md that LANDED under <wayland home>/skills: 13 (source had 13)
+PASS: gemini L1 real peer skills imported
+PASS: gemini L2 the root profile is in the written config.toml
+
+--- hostile case: a real skill carrying a real executable helper ---
+  source : 755  sha256[0:16]=bdfc4bb7f0626555  skills/async-pr-review/scripts/async-review.sh
+  landed : 644  sha256[0:16]=bdfc4bb7f0626555  skills/async-pr-review/scripts/async-review.sh
+PASS: gemini X1 the helper's BYTES crossed unchanged (a migration, not a filter)
+PASS: gemini X2 the imported helper carries no execute bit (644) — measured with stat, on disk
+  exec-bit files under the LIVE skills root: 0 (source had 4)
+PASS: gemini X4 ZERO of 4 source exec bits survived the import
+
+  F26-SC2-M1 on gemini: skills carrying Wayland's ```! directive = 0
+  F26-SC2-M1 on gemini: files in quarantine                     = 10
+PASS: gemini M1 confirmed — no real gemini skill uses Wayland's directive, so all import live
+
+--- provenance: ask the product where a landed artifact came from ---
+    skills/pr-address-comments/SKILL.md came from:
+      • skill:skills/pr-address-comments
+          from:  skills/pr-address-comments (gemini)
+          at:    skills/pr-address-comments
+          digest: 271bb00f45cce80ac5df51eb607c695a43ec577c34fd671b61ba6e4320b880b7
+PASS: gemini Q1 known-positive — a landed artifact resolves to its gemini source
+    No import record covers skills/locally-authored/SKILL.md
+    Nothing this machine imported from a peer landed there.
+PASS: gemini Q2 known-negative — a locally authored skill is NOT attributed to gemini
+
+PASS: gemini S1 the SOURCE helper is byte- and mode-identical after the import
+
+26-SC2-PEERS LIVE PROOF: PASS

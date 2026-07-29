@@ -1,0 +1,47 @@
+=== 26-SC2-PEERS known-negative self-test ===
+repo    : /root/wayland-26-sc2-peers
+base    : 5be910561f688c75d39492e7b982d6e100772a64
+
+--- A: known-positive (unmutated build) ---
+A-RC=0   21 PASS / 0 FAIL
+PASS: A the unmutated build passes
+
+--- B: known-negative — write_tree preserves the source execute bit ---
+B APPLIED: yes (11 changed lines)
+B COMPILED: yes
+B-RC=1   17 PASS / 4 FAIL
+PASS: B the proof goes RED with the mitigation removed
+B REQUIRED-RED assertions, verbatim:
+    FAIL: grok X2 the imported helper is STILL EXECUTABLE (755)
+    FAIL: grok X4 3 execute bits survived
+    FAIL: gemini X2 the imported helper is STILL EXECUTABLE (755)
+    FAIL: gemini X4 4 execute bits survived
+PASS: B the specific assertion 'grok X2' went red
+PASS: B the specific assertion 'grok X4' went red
+PASS: B the specific assertion 'gemini X2' went red
+PASS: B the specific assertion 'gemini X4' went red
+
+--- C: the base commit cannot be asked the question at all ---
+base HEAD: 5be910561f688c75d39492e7b982d6e100772a64
+C base binary built (debug)
+  base: migrate grok -> rc=2
+      error: unrecognized subcommand 'grok'
+      
+      Usage: wayland-core migrate <COMMAND>
+      
+PASS: C the base build has no 'grok' importer — the old shape could not have caught this
+  base: migrate gemini -> rc=2
+      error: unrecognized subcommand 'gemini'
+      
+      Usage: wayland-core migrate <COMMAND>
+      
+PASS: C the base build has no 'gemini' importer — the old shape could not have caught this
+  base: migrate quarantined -> rc=0
+PASS: C-CONTROL the base binary accepts 'migrate quarantined', so C measured absence not breakage
+
+--- D: restore and re-verify at the same commit ---
+D RESTORED: yes
+D-RC=0   21 PASS / 0 FAIL
+PASS: D green again at the same commit — B's red is attributable to the mutation
+
+KNOWN-NEGATIVE SELF-TEST: PASS

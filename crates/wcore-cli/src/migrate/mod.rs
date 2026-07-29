@@ -53,6 +53,8 @@ use wcore_config::portability::{
 };
 
 pub mod content;
+pub mod gemini;
+pub mod grok;
 pub mod hermes;
 pub mod openclaw;
 pub mod provenance;
@@ -72,6 +74,10 @@ pub enum MigrateCmd {
     Hermes(HermesArgs),
     /// Import an OpenClaw setup (`~/.openclaw`) into wayland-core.
     Openclaw(HermesArgs),
+    /// Import a grok setup (`$GROK_HOME` or `~/.grok`) into wayland-core.
+    Grok(HermesArgs),
+    /// Import a gemini-cli setup (`~/.gemini`) into wayland-core.
+    Gemini(HermesArgs),
     /// List imported content held in quarantine.
     Quarantined,
     /// Show the provenance of content this machine imported — what came from a
@@ -244,6 +250,8 @@ impl MigrationPlan {
     pub fn to_portability(&self) -> PortabilityPlan {
         let source = match self.source {
             "openclaw" => PeerSource::OpenClaw,
+            "grok" => PeerSource::Grok,
+            "gemini" => PeerSource::Gemini,
             _ => PeerSource::Hermes,
         };
         let mut out = PortabilityPlan::new(source, self.source_home.display().to_string());
@@ -567,6 +575,16 @@ fn detect_and_plan(source: PeerSource, args: &HermesArgs) -> Result<(PathBuf, Mi
             let plan = openclaw::build_plan(&home, args.include_credentials)?;
             Ok((home, plan))
         }
+        PeerSource::Grok => {
+            let home = grok::detect_home(args.home.as_deref())?;
+            let plan = grok::build_plan(&home, args.include_credentials)?;
+            Ok((home, plan))
+        }
+        PeerSource::Gemini => {
+            let home = gemini::detect_home(args.home.as_deref())?;
+            let plan = gemini::build_plan(&home, args.include_credentials)?;
+            Ok((home, plan))
+        }
     }
 }
 
@@ -575,6 +593,8 @@ pub fn run(cmd: MigrateCmd) -> Result<()> {
     match cmd {
         MigrateCmd::Hermes(args) => run_source(PeerSource::Hermes, args),
         MigrateCmd::Openclaw(args) => run_source(PeerSource::OpenClaw, args),
+        MigrateCmd::Grok(args) => run_source(PeerSource::Grok, args),
+        MigrateCmd::Gemini(args) => run_source(PeerSource::Gemini, args),
         MigrateCmd::Quarantined => run_quarantined(),
         MigrateCmd::Imported(args) => run_imported(args),
         MigrateCmd::Promote(args) => run_promote(args),
@@ -1212,6 +1232,11 @@ fn peer_version(home: &std::path::Path, source: PeerSource) -> Option<String> {
     let candidates: &[&str] = match source {
         PeerSource::Hermes => &["VERSION", "version"],
         PeerSource::OpenClaw => &["VERSION", "version"],
+        // grok records the installed channel/version beside its binary rather
+        // than in a root VERSION file; the plain names are still probed because
+        // a packaged install may drop one, and a miss is an honest `None`.
+        PeerSource::Grok => &["VERSION", "version"],
+        PeerSource::Gemini => &["VERSION", "version"],
     };
     for name in candidates {
         if let Ok(s) = std::fs::read_to_string(home.join(name)) {
@@ -1221,7 +1246,31 @@ fn peer_version(home: &std::path::Path, source: PeerSource) -> Option<String> {
             }
         }
     }
-    // Both peers also record a version inside their manifest, when present.
+    // grok records its installed version in `version.json`, NOT in a plain
+    // `VERSION` file. Found by driving the real `~/.grok` on this machine —
+    // the probe list above returned `None` against a home that plainly declares
+    // `"version": "0.2.103"`, which is the honest-absence rule turning into a
+    // silently missing fact.
+    if matches!(source, PeerSource::Grok)
+        && let Ok(s) = std::fs::read_to_string(home.join("version.json"))
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&s)
+        && let Some(ver) = v.get("version").and_then(|x| x.as_str())
+        && !ver.is_empty()
+        && ver.len() <= 64
+    {
+        return Some(ver.to_string());
+    }
+    // gemini-cli records its version in the installed package manifest.
+    if matches!(source, PeerSource::Gemini)
+        && let Ok(s) = std::fs::read_to_string(home.join("package.json"))
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&s)
+        && let Some(ver) = v.get("version").and_then(|x| x.as_str())
+        && !ver.is_empty()
+        && ver.len() <= 64
+    {
+        return Some(ver.to_string());
+    }
+    // Both original peers also record a version inside their manifest, when present.
     if let Ok(s) = std::fs::read_to_string(home.join("MANIFEST.json"))
         && let Ok(v) = serde_json::from_str::<serde_json::Value>(&s)
         && let Some(ver) = v.get("source_version").and_then(|x| x.as_str())
