@@ -97,3 +97,56 @@ as measured until a test at HEAD fails.
 2. Consolidate 7 (and 1/4/5 where the mechanism differs) onto one bound-
    enforcing intake.
 3. Show the known-negative goes red again when the enforcement is removed.
+
+---
+
+## M4 — the claim is REFUTED, measured
+
+Base `5457710e`, hetzner `/root/wayland-27c1-base`, new suite
+`crates/wcore-tools/tests/media_intake_unification_test.rs`:
+
+```
+test result: FAILED. 10 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+The four RED (full capture: `BASE-5457710e-RED.txt`):
+
+| Test | Base behaviour |
+|---|---|
+| `audio_refuses_a_traversal_segment` | returned `Ok(("audio/wav", ...))` for a path carrying `..` |
+| `audio_refuses_a_symlinked_leaf` | followed the symlink and returned the target's bytes |
+| `audio_refuses_a_denylisted_credential_path` | **READ a file under a deny-listed credential path and returned its bytes as `audio/wav`** |
+| `an_extension_that_contradicts_the_bytes_...` | `vision_analyze` admitted a PNG named `.jpg` — the cross-check lived only in the composer's private table |
+
+So `.planning/CRITERIA-GAP-LEDGER.md:677` — *"measured already correct on the
+duplicated paths. Real value, zero defect value"* — **does not survive.** It
+was scoped to a four-path census that omitted the defective surface.
+
+Two tests passed at base **for the wrong reason** and are recorded as such
+rather than counted: `audio_refuses_a_relative_path` and
+`audio_refuses_a_unc_target` both failed with ENOENT on Linux, not with a
+policy refusal. The UNC one discriminates only on Windows, which this lane did
+not run.
+
+## M5 — my own bound gate was self-passing, and is repaired
+
+First version of the bound known-negative used a `cap + 1` fixture. Deleting
+the stat-side cap from `admit_open` left it **green** — because the
+defence-in-depth check after `take(cap + 1)` refuses citing the same number.
+Repaired with a `3 × cap` sparse fixture, which makes the two enforcement
+points report different numbers, plus a third assertion pinning that the
+read-side number did NOT appear. Re-mutated: both surfaces now go RED, citing
+`26214401` / `20971521` — i.e. exactly `cap + 1`, the string the broken
+assertion was searching for. Full two-round capture:
+`MUTATION-cap-removed.txt`.
+
+## M6 — measured exclusion: `video_analyze` is not an intake path
+
+`wcore-agent/src/tool_backends/video_analyze.rs` never ingests the caller's
+bytes — it hands the path to `ffmpeg` as a subprocess argument, so its
+discipline is argv-injection defence plus a realpath whitelist, which
+`media_intake` neither provides nor should. The frames it then reads are
+ffmpeg-produced files in an engine-owned tempdir with a hardcoded
+`image/jpeg`: engine-produced bytes, no caller-supplied name. Excluded from
+the consolidation deliberately, recorded rather than dropped. The unbounded
+`tokio::fs::read` on those frames is a MEDIUM for BACKLOG, not this criterion.
