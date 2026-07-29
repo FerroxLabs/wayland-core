@@ -56,6 +56,7 @@ use wcore_protocol::events::ToolCategory;
 use wcore_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
+use crate::media_intake::{AUDIO_KINDS, IntakeError, IntakePolicy, MediaKind, admit_bytes};
 use crate::url_safety::is_safe_url;
 use crate::website_policy::check_website_access;
 
@@ -78,8 +79,24 @@ const SUPPORTED_AUDIO_MIMES: &[&str] = &[
     "audio/flac",
 ];
 
+/// The [`IntakePolicy`] this surface applies over the shared media intake.
+/// The caps and the accepted set are this tool's; the mechanism is not.
+pub fn audio_intake_policy() -> IntakePolicy {
+    IntakePolicy::new(
+        TRANSCRIPTION_MIN_BYTES as u64,
+        TRANSCRIPTION_MAX_BYTES as u64,
+    )
+    .accepting(AUDIO_KINDS)
+    .named("audio")
+}
+
 /// Result of sniffing an audio file's magic bytes. Returns `None`
 /// when the header doesn't match any supported audio container.
+///
+/// Delegates to [`MediaKind::from_magic`] — the single magic-byte table for
+/// every media class the engine ingests — and narrows it to audio. Keeping a
+/// second table here is how a WAV came to be classified as a WebP image on the
+/// other side of the tree.
 ///
 /// Magic-byte references:
 /// * MP3: `FF Fx` (MPEG sync) or `ID3` (ID3v2 header).
@@ -93,36 +110,33 @@ pub fn detect_audio_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.len() < 4 {
         return None;
     }
-
-    if &bytes[..4] == b"OggS" {
-        return Some("audio/ogg");
-    }
-    if &bytes[..4] == b"fLaC" {
-        return Some("audio/flac");
-    }
-    if bytes[..4] == [0x1A, 0x45, 0xDF, 0xA3] {
-        return Some("audio/webm");
-    }
-    if bytes.len() >= 3 && &bytes[..3] == b"ID3" {
-        return Some("audio/mpeg");
-    }
-    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
-        return Some("audio/wav");
-    }
-    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
-        return Some("audio/mp4");
-    }
-    if bytes.len() >= 2 && bytes[0] == 0xFF {
-        let b1 = bytes[1];
-        if b1 == 0xF1 || b1 == 0xF9 {
-            return Some("audio/aac");
-        }
-        if (b1 & 0xE0) == 0xE0 {
-            return Some("audio/mpeg");
-        }
-    }
-    None
+    MediaKind::from_magic(bytes)
+        .filter(|k| k.is_audio())
+        .map(MediaKind::as_str)
 }
+
+/// Render a shared-intake refusal in this surface's historical wording, so
+/// unifying the mechanism does not churn a string a host may be matching on.
+fn render_audio_intake_error(e: IntakeError) -> String {
+    match e {
+        IntakeError::TooLarge { actual, .. } => {
+            format!("Audio too large: {actual} bytes (limit {TRANSCRIPTION_MAX_BYTES} bytes)")
+        }
+        IntakeError::TooSmall { actual } => {
+            format!("Audio too small to be valid ({actual} bytes)")
+        }
+        IntakeError::NotRegularFile(p) => {
+            format!("Audio path is not a regular file: {}", p.display())
+        }
+        IntakeError::UnrecognisedFormat
+        | IntakeError::FormatMismatch { .. }
+        | IntakeError::KindNotAccepted { .. } => UNSUPPORTED_AUDIO_FORMAT.to_string(),
+        other => other.to_string(),
+    }
+}
+
+const UNSUPPORTED_AUDIO_FORMAT: &str =
+    "Unsupported audio format (only MP3, MP4/M4A, AAC, WAV, OGG, WEBM, FLAC are supported)";
 
 /// Validate that a string looks like a transcription-acceptable URL.
 pub fn validate_audio_url(url: &str) -> Result<(), String> {
@@ -333,12 +347,23 @@ impl TranscribeAudioTool {
 
     /// Resolve a source (URL, local path, or direct bytes) into raw
     /// bytes plus sniffed MIME.
+    ///
+    /// Every arm goes through the shared [`crate::media_intake`]. Before this
+    /// was unified the local-path arm applied NO path validation — no
+    /// absolute-path requirement, no traversal refusal, no UNC refusal (an
+    /// outbound SMB connect and a NetNTLM leak on Windows), no system-path
+    /// deny-list and no symlink discipline — and read with an unbounded
+    /// `fs::read` issued against a SECOND by-name resolution, so the declared
+    /// 25 MB cap bounded a `stat` the read never consulted.
     pub async fn resolve_source(
         &self,
         source: &AudioSource,
     ) -> Result<(&'static str, Vec<u8>), String> {
+        let policy = audio_intake_policy();
         let bytes = match source {
             AudioSource::Bytes { mime, bytes } => {
+                // Caller-supplied bytes still face the shared caps; the caller
+                // has already decided the MIME, so only the bounds apply.
                 let len = bytes.len();
                 if len < TRANSCRIPTION_MIN_BYTES {
                     return Err(format!("Audio too small to be valid ({len} bytes)"));
@@ -366,43 +391,22 @@ impl TranscribeAudioTool {
                 self.fetcher.fetch(url).await?
             }
             AudioSource::Path(path) => {
-                let meta = std::fs::metadata(path)
-                    .map_err(|e| format!("Failed to stat audio file: {e}"))?;
-                if !meta.is_file() {
-                    return Err(format!(
-                        "Audio path is not a regular file: {}",
-                        path.display()
-                    ));
-                }
-                if (meta.len() as usize) > TRANSCRIPTION_MAX_BYTES {
-                    return Err(format!(
-                        "Audio file too large: {} bytes (limit {} bytes)",
-                        meta.len(),
-                        TRANSCRIPTION_MAX_BYTES,
-                    ));
-                }
-                std::fs::read(path).map_err(|e| format!("Failed to read audio file: {e}"))?
+                // ONE resolution. The shared intake validates the path, opens
+                // it exactly once through a symlink-refusing walk, bounds it
+                // from THAT descriptor before any payload read, and proves the
+                // container from the bytes it actually read.
+                let admitted = crate::media_intake::admit_path(path, &policy)
+                    .map_err(render_audio_intake_error)?;
+                let mime = admitted.kind.as_str();
+                debug_assert!(SUPPORTED_AUDIO_MIMES.contains(&mime));
+                return Ok((mime, admitted.bytes));
             }
         };
 
-        if bytes.len() < TRANSCRIPTION_MIN_BYTES {
-            return Err(format!(
-                "Audio too small to be valid ({} bytes)",
-                bytes.len()
-            ));
-        }
-        if bytes.len() > TRANSCRIPTION_MAX_BYTES {
-            return Err(format!(
-                "Audio too large: {} bytes (limit {} bytes)",
-                bytes.len(),
-                TRANSCRIPTION_MAX_BYTES,
-            ));
-        }
-        let mime = detect_audio_mime(&bytes).ok_or_else(|| {
-            "Unsupported audio format (only MP3, MP4/M4A, AAC, WAV, OGG, WEBM, FLAC \
-             are supported)"
-                .to_string()
-        })?;
+        // Fetched bytes face the SAME caps and the SAME format decision a
+        // local path would have faced.
+        let kind = admit_bytes(&bytes, &policy).map_err(render_audio_intake_error)?;
+        let mime = kind.as_str();
         debug_assert!(SUPPORTED_AUDIO_MIMES.contains(&mime));
         Ok((mime, bytes))
     }
@@ -804,6 +808,19 @@ mod tests {
         assert_eq!(backend.snapshot().len(), 0);
     }
 
+    /// Wording changed deliberately when this path joined the shared intake,
+    /// and the assertion GAINED clauses rather than losing one.
+    ///
+    /// Before: `Failed to stat audio file: No such file or directory` — a
+    /// message describing an implementation step (`fs::metadata`) that the
+    /// unified path no longer performs, because it opens once instead of
+    /// stat-ing by name and then reading by name again.
+    ///
+    /// After: `File not found: <path>` — the SAME wording the PDF and document
+    /// surfaces already produce for the same condition, so a host matching on
+    /// "not found" now gets one answer from every media surface instead of
+    /// three. The assertion now additionally requires that the refusal names
+    /// the offending path, which the old message did not carry.
     #[test]
     fn missing_local_path_rejected() {
         let backend = Arc::new(CapturingTranscriptionBackend::new("never called"));
@@ -814,8 +831,13 @@ mod tests {
         );
         assert!(r.is_error);
         assert!(
-            r.content.contains("Failed to stat") || r.content.contains("not a regular file"),
+            r.content.contains("not found") || r.content.contains("not a regular file"),
             "got: {}",
+            r.content
+        );
+        assert!(
+            r.content.contains("/nonexistent/path/audio.mp3"),
+            "the refusal must name the path it refused; got: {}",
             r.content
         );
         assert_eq!(backend.snapshot().len(), 0);

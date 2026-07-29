@@ -1,0 +1,74 @@
+Bound-enforcement mutation proof — lane 27-c1-intake
+Host: hetzner-dsm  Worktree: /root/wayland-27c1
+Mutation: delete the stat-side max_bytes check from media_intake::admit_open
+Command: cargo test -p wcore-tools --test media_intake_unification_test
+
+===============================================================================
+ROUND 1 — the ORIGINAL instrument (cap+1 fixture). SELF-PASSING.
+===============================================================================
+MUTATION APPLIED
+running 14 tests
+...
+test audio_over_the_declared_cap_is_refused_before_it_is_read ... ok
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+  ^^ THE ENFORCEMENT UNDER TEST WAS DELETED AND THE GATE STAYED GREEN.
+
+  Cause: the fixture was exactly `cap + 1`. With the stat-side cap present the
+  refusal cites `cap + 1` (from the stat). With it deleted, the defence-in-depth
+  check after the bounded `take(cap + 1)` ALSO refuses citing `cap + 1`. The
+  assertion `err.contains(oversize)` could not tell the two apart.
+
+  This is a self-passing gate found in this lane's own instrument, of the class
+  LANE-BRIEF §3.2 enumerates. Per §6b-ii the instrument was REPAIRED in the same
+  lane rather than written up and left.
+
+===============================================================================
+ROUND 2 — the REPAIRED instrument (3x-cap sparse fixture).
+===============================================================================
+
+--- A. UNMUTATED ---
+running 14 tests
+test audio_over_the_declared_cap_is_refused_from_the_stat_not_from_the_read ... ok
+test image_over_the_declared_cap_is_refused_from_the_stat_not_from_the_read ... ok
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+--- B. MUTATED (stat-side cap deleted from admit_open) ---
+MUTATION APPLIED: stat-side cap removed from admit_open
+
+test image_over_the_declared_cap_is_refused_from_the_stat_not_from_the_read ... FAILED
+test audio_over_the_declared_cap_is_refused_from_the_stat_not_from_the_read ... FAILED
+
+---- image_over_the_declared_cap_..._not_from_the_read stdout ----
+must cite the FULL length 62914560; got: Image too large for vision API:
+20971521 bytes (limit 20971520 bytes)
+
+---- audio_over_the_declared_cap_..._not_from_the_read stdout ----
+refusal must cite the FULL length 78643200 taken from the descriptor's own
+metadata BEFORE any payload read; got: Audio too large: 26214401 bytes
+(limit 26214400 bytes)
+
+test result: FAILED. 12 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+
+--- restored ---
+=== restored: 0 modified files ===
+
+===============================================================================
+THE THREE ASSERTIONS LANE-BRIEF §6b-ii REQUIRES
+===============================================================================
+1. Known-positive passes:  `a_valid_wav_is_still_admitted_with_its_bytes_intact`
+   and `a_valid_png_...` are green in both rounds — an under-cap file is still
+   admitted with every byte intact, so the gate is not refusing everything.
+
+2. Known-negative fails when the enforcement is removed: Round 2B, both
+   surfaces, non-zero exit, named failures.
+
+3. THE OLD BROKEN MATCHER WOULD HAVE MISSED IT: the mutated build's actual
+   refusal numbers are 26214401 and 20971521 — i.e. exactly `cap + 1`, which is
+   precisely the string the original `err.contains(oversize)` assertion was
+   searching for when `oversize` was `cap + 1`. The original assertion would
+   have matched the mutated build's output and reported PASS. Round 1 is the
+   direct measurement of that, not an inference.
+
+Counts read back verbatim from the runner. `0 ignored; 0 filtered out` present
+in every line, so no test was skipped and no filter matched nothing.

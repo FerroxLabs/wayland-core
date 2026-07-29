@@ -44,10 +44,7 @@
 //! and defers vendor-specific image handling to the backend wired by
 //! the host.
 
-use std::fs::File;
-#[cfg(not(unix))]
-use std::fs::OpenOptions;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -57,7 +54,9 @@ use wcore_protocol::events::ToolCategory;
 use wcore_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
-use crate::path_validation::validate_user_path;
+use crate::media_intake::{
+    AdmittedMedia, IMAGE_KINDS, IntakeError, IntakePolicy, MediaKind, admit_bytes, admit_path,
+};
 use crate::url_safety::is_safe_url;
 use crate::website_policy::check_website_access;
 
@@ -82,37 +81,54 @@ const SUPPORTED_MIME_PREFIXES: &[&str] = &[
     "image/webp",
 ];
 
+/// The [`IntakePolicy`] this surface applies over the shared media intake.
+/// The caps and the accepted set are this tool's; the mechanism is not.
+pub fn image_intake_policy() -> IntakePolicy {
+    IntakePolicy::new(VISION_MIN_BYTES as u64, VISION_MAX_BYTES as u64)
+        .accepting(IMAGE_KINDS)
+        .named("image")
+}
+
 /// Result of sniffing an image's magic bytes. Returns `None` when the
 /// header doesn't match any supported image type.
 ///
+/// Delegates to [`MediaKind::from_magic`] — the single magic-byte table for
+/// every media class the engine ingests — and narrows it to the image classes.
 /// Mirrors `_detect_image_mime_type` from the Python original. Pure
 /// magic-byte inspection — no file system access, no external deps.
 pub fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.len() < 4 {
         return None;
     }
-    // PNG: 89 50 4E 47 0D 0A 1A 0A
-    if bytes.len() >= 8 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" {
-        return Some("image/png");
-    }
-    // JPEG: FF D8 FF
-    if bytes.len() >= 3 && &bytes[..3] == b"\xff\xd8\xff" {
-        return Some("image/jpeg");
-    }
-    // GIF87a / GIF89a
-    if bytes.len() >= 6 && (&bytes[..6] == b"GIF87a" || &bytes[..6] == b"GIF89a") {
-        return Some("image/gif");
-    }
-    // BMP: "BM"
-    if bytes.len() >= 2 && &bytes[..2] == b"BM" {
-        return Some("image/bmp");
-    }
-    // WEBP: "RIFF" .... "WEBP"
-    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        return Some("image/webp");
-    }
-    None
+    MediaKind::from_magic(bytes)
+        .filter(|k| k.is_image())
+        .map(MediaKind::as_str)
 }
+
+/// Render a shared-intake refusal in this surface's historical wording, so
+/// unifying the mechanism does not churn a string a host may be matching on.
+pub fn render_image_intake_error(e: IntakeError) -> String {
+    match e {
+        IntakeError::TooLarge { actual, .. } => format!(
+            "Image too large for vision API: {actual} bytes (limit {VISION_MAX_BYTES} bytes)"
+        ),
+        IntakeError::TooSmall { actual } => {
+            format!("Image too small to be valid ({actual} bytes)")
+        }
+        IntakeError::NotRegularFile(p) => {
+            format!("Not a regular image file: {}", p.display())
+        }
+        IntakeError::NetworkPath(_) => "Network/UNC image paths are not allowed".to_string(),
+        IntakeError::Path(reason) => format!("Invalid image path: {reason}"),
+        IntakeError::UnrecognisedFormat
+        | IntakeError::FormatMismatch { .. }
+        | IntakeError::KindNotAccepted { .. } => UNSUPPORTED_IMAGE_FORMAT.to_string(),
+        other => other.to_string(),
+    }
+}
+
+const UNSUPPORTED_IMAGE_FORMAT: &str =
+    "Unsupported image format (only PNG, JPEG, GIF, BMP, WEBP are supported)";
 
 /// Validate that a string looks like a vision-acceptable URL. Allows
 /// only http/https schemes, requires a host, and runs SSRF defense
@@ -141,7 +157,7 @@ pub fn validate_image_url(url: &str) -> Result<(), String> {
 /// fetch. Returns the filesystem path for a `file://` URI or any non-`http(s)`
 /// string (a desktop drag-drop sends an absolute temp path, not a URL);
 /// `None` for `http(s)://` URLs, which stay on the fetcher path. Path SAFETY is
-/// enforced later by [`validate_user_path`], not here.
+/// enforced later by the shared [`crate::media_intake`], not here.
 fn local_image_path(image_url: &str) -> Result<Option<PathBuf>, String> {
     if image_url.starts_with("http://") || image_url.starts_with("https://") {
         return Ok(None);
@@ -159,134 +175,28 @@ fn local_image_path(image_url: &str) -> Result<Option<PathBuf>, String> {
     Ok(Some(PathBuf::from(image_url)))
 }
 
-/// True for a Windows UNC / network path (`\\server\share`, `\\?\UNC\...`).
-/// Opening one triggers an outbound SMB connection (a NetNTLM-hash leak
-/// vector) before any content check, so the vision local-file path refuses it
-/// up front.
+// `is_unc_path` and `open_local_image` used to live here. Both moved into
+// `crate::media_intake` when the six media surfaces were consolidated onto one
+// intake: the UNC guard is now applied ONCE, inside `media_intake::admit_open`,
+// still through `wcore_config::network_path::has_unc_prefix` (lane
+// `wal-followups`' single implementation), and the symlink-refusing open walk
+// became `media_intake::open_once`, which is private so no other module can
+// open a caller-named media file. Keeping a second copy here would have
+// restored the duplication both lanes removed.
+/// The composer / vision local-file boundary.
 ///
-/// Delegates to [`wcore_config::network_path::has_unc_prefix`], the single
-/// implementation. The local copy this replaces used `Component::Prefix`,
-/// which **never matches on a Unix target** — so on Linux and macOS it was a
-/// constant `false`, and the guard could not be exercised on the platform its
-/// tests actually ran on. The shared version answers identically everywhere.
-///
-/// This is a check on the path's SPELLING. A file on an SMB-mounted `Z:\` or
-/// an NFS-mounted `$HOME` is not spelled differently and is deliberately still
-/// allowed: the hazard here is the outbound dial-out that a UNC *name* causes,
-/// and an already-mounted share is admin-established access. The question "is
-/// this file stored on a network filesystem" is a different one, answered by
-/// `wcore_config::network_path::classify_path`.
-fn is_unc_path(path: &std::path::Path) -> bool {
-    wcore_config::network_path::has_unc_prefix(path)
-}
-
-/// Open a local image without following a symlink/reparse point.
-///
-/// `O_NONBLOCK` prevents a hostile FIFO from hanging before the regular-file
-/// check. Unix walks from `/` with directory handles and `openat(O_NOFOLLOW)`
-/// so a raced parent rename cannot redirect the final open. Windows rejects
-/// reparse-point parents before opening the leaf reparse point itself.
-fn open_local_image(path: &Path) -> Result<File, String> {
-    #[cfg(unix)]
-    {
-        use std::ffi::CString;
-        use std::os::fd::{AsRawFd as _, FromRawFd as _};
-        use std::os::unix::ffi::OsStrExt as _;
-        use std::path::Component;
-
-        let mut parts = path.components();
-        if !matches!(parts.next(), Some(Component::RootDir)) {
-            return Err(format!("Image path is not absolute: {}", path.display()));
-        }
-        let names = parts
-            .map(|part| match part {
-                Component::Normal(name) => CString::new(name.as_bytes())
-                    .map_err(|_| format!("Image path contains NUL: {}", path.display())),
-                _ => Err(format!(
-                    "Image path contains an unsupported component: {}",
-                    path.display()
-                )),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if names.is_empty() {
-            return Err(format!("Image path has no file name: {}", path.display()));
-        }
-
-        let mut parent = File::open("/")
-            .map_err(|e| format!("Cannot open image path root for {}: {e}", path.display()))?;
-        for (index, name) in names.iter().enumerate() {
-            let is_leaf = index + 1 == names.len();
-            let flags = if is_leaf {
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC
-            } else {
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC
-            };
-            // SAFETY: `parent` is a live directory descriptor for every
-            // non-leaf iteration, `name` is NUL-terminated, and no pointer is
-            // retained after `openat` returns.
-            let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
-            if fd < 0 {
-                return Err(format!(
-                    "Cannot open image path component in {}: {}",
-                    path.display(),
-                    std::io::Error::last_os_error()
-                ));
-            }
-            // SAFETY: `openat` returned a new owned descriptor on success.
-            let opened = unsafe { File::from_raw_fd(fd) };
-            if is_leaf {
-                return Ok(opened);
-            }
-            parent = opened;
-        }
-        unreachable!("non-empty component walk returns at the leaf")
-    }
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-
-        for parent in path.ancestors().skip(1) {
-            let metadata = std::fs::symlink_metadata(parent).map_err(|e| {
-                format!(
-                    "Cannot inspect image path component {}: {e}",
-                    parent.display()
-                )
-            })?;
-            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-                return Err(format!(
-                    "Image symlinks/reparse points are not allowed: {}",
-                    parent.display()
-                ));
-            }
-        }
-
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)
-            .map_err(|e| format!("Cannot open image file {}: {e}", path.display()))?;
-        let metadata = file
-            .metadata()
-            .map_err(|e| format!("Cannot stat image file {}: {e}", path.display()))?;
-        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err(format!(
-                "Image symlinks/reparse points are not allowed: {}",
-                path.display()
-            ));
-        }
-        Ok(file)
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        OpenOptions::new()
-            .read(true)
-            .open(path)
-            .map_err(|e| format!("Cannot open image file {}: {e}", path.display()))
-    }
+/// Classifies the argument (a `file://` URI or a bare path) and hands it to
+/// the SHARED [`crate::media_intake`] chokepoint, which owns path validation,
+/// UNC refusal, the symlink-refusing open-once walk, the descriptor-derived
+/// caps and the magic-byte decision. This surface owns only its policy.
+pub fn admit_local_image(
+    image_path: &str,
+    policy: &IntakePolicy,
+) -> Result<AdmittedMedia, IntakeError> {
+    let path = local_image_path(image_path)
+        .map_err(IntakeError::Path)?
+        .ok_or_else(|| IntakeError::Path("Composer attachments must be local files".to_string()))?;
+    admit_path(&path, policy)
 }
 
 /// Resolve one local image path into sniffed MIME and bounded bytes.
@@ -296,52 +206,18 @@ fn open_local_image(path: &Path) -> Result<File, String> {
 /// exactly once, rejects symlink/reparse components and non-regular files, and
 /// bounds a file that grows after its metadata check.
 pub fn load_local_image(image_path: &str) -> Result<(&'static str, Vec<u8>), String> {
-    let path = local_image_path(image_path)?
-        .ok_or_else(|| "Composer attachments must be local files".to_string())?;
-    if is_unc_path(&path) {
-        return Err("Network/UNC image paths are not allowed".to_string());
-    }
-    let validated = validate_user_path(&path).map_err(|e| format!("Invalid image path: {e}"))?;
-    let file = open_local_image(&validated)?;
-    let meta = file
-        .metadata()
-        .map_err(|e| format!("Cannot stat image file {}: {e}", validated.display()))?;
-    if !meta.is_file() {
-        return Err(format!("Not a regular image file: {}", validated.display()));
-    }
-    if meta.len() > VISION_MAX_BYTES as u64 {
-        return Err(format!(
-            "Image too large for vision API: {} bytes (limit {} bytes)",
-            meta.len(),
-            VISION_MAX_BYTES,
-        ));
-    }
-
-    use std::io::Read as _;
-    let mut buf = Vec::with_capacity(meta.len().min(VISION_MAX_BYTES as u64) as usize);
-    file.take(VISION_MAX_BYTES as u64 + 1)
-        .read_to_end(&mut buf)
-        .map_err(|e| format!("Failed to read image file {}: {e}", validated.display()))?;
-    validate_image_bytes(buf)
+    let admitted =
+        admit_local_image(image_path, &image_intake_policy()).map_err(render_image_intake_error)?;
+    let mime = admitted.kind.as_str();
+    debug_assert!(SUPPORTED_MIME_PREFIXES.contains(&mime));
+    Ok((mime, admitted.bytes))
 }
 
+/// Bound and classify bytes a fetcher already produced. Faces the SAME caps
+/// and the SAME format decision a local path would have faced.
 fn validate_image_bytes(bytes: Vec<u8>) -> Result<(&'static str, Vec<u8>), String> {
-    if bytes.len() < VISION_MIN_BYTES {
-        return Err(format!(
-            "Image too small to be valid ({} bytes)",
-            bytes.len()
-        ));
-    }
-    if bytes.len() > VISION_MAX_BYTES {
-        return Err(format!(
-            "Image too large for vision API: {} bytes (limit {} bytes)",
-            bytes.len(),
-            VISION_MAX_BYTES,
-        ));
-    }
-    let mime = detect_image_mime(&bytes).ok_or_else(|| {
-        "Unsupported image format (only PNG, JPEG, GIF, BMP, WEBP are supported)".to_string()
-    })?;
+    let kind = admit_bytes(&bytes, &image_intake_policy()).map_err(render_image_intake_error)?;
+    let mime = kind.as_str();
     debug_assert!(SUPPORTED_MIME_PREFIXES.contains(&mime));
     Ok((mime, bytes))
 }
@@ -945,27 +821,15 @@ mod tests {
         assert!(res.is_err(), "a directory must be rejected, got: {res:?}");
     }
 
-    #[test]
-    fn unc_guard_flags_unc_on_every_platform() {
-        // Ordinary paths are never UNC (the common case).
-        assert!(!is_unc_path(std::path::Path::new("/Users/me/x.png")));
-        assert!(!is_unc_path(std::path::Path::new("relative/x.png")));
-
-        // A UNC path is now flagged on EVERY platform. The previous local
-        // implementation used `Component::Prefix`, which never matches on a
-        // Unix target, so this assertion was `#[cfg(windows)]`-gated and the
-        // guard was never exercised by the Linux/macOS test runs. That gate is
-        // gone deliberately — it is the defect this consolidation removes.
-        assert!(is_unc_path(std::path::Path::new(r"\\server\share\x.png")));
-        assert!(is_unc_path(std::path::Path::new(
-            r"\\?\UNC\server\share\x.png"
-        )));
-
-        // A verbatim path to a LOCAL disk is not a UNC share, and must not be
-        // refused with a message that names the wrong hazard. (It is still
-        // rejected — by `validate_user_path`, as a device/verbatim path.)
-        assert!(!is_unc_path(std::path::Path::new(r"\\?\C:\Users\me\x.png")));
-    }
+    // TWO UNC tests used to live here and both moved to `crate::media_intake`,
+    // where they were folded into `unc_guard_flags_unc_on_every_platform`:
+    //   * `is_network_path_flags_unc_only` (mine), and
+    //   * `unc_guard_flags_unc_on_every_platform` (`lane/wal-followups`).
+    // Their site disappeared because `load_local_image` now delegates to the
+    // chokepoint and carries no UNC check of its own. The union of both
+    // assertion sets is asserted there, including the `\\?\C:\` verbatim-local
+    // case, which is the one whose classification the UNC consolidation
+    // changed.
 
     /// End-to-end: a local image drives the backend, with the null fetcher
     /// proving the local path never crosses the network seam.

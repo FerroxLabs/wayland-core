@@ -47,7 +47,7 @@ use wcore_protocol::events::ToolCategory;
 use wcore_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
-use crate::path_validation::validate_user_path;
+use crate::media_intake::{AdmittedHandle, IntakeError, IntakePolicy, MediaKind, admit_open};
 use crate::tool_output_limits::DEFAULT_MAX_BYTES;
 use crate::truncate_utf8;
 
@@ -77,6 +77,20 @@ pub const MAX_DOC_TEXT_BYTES: usize = DEFAULT_MAX_BYTES;
 /// every format (not just csv).
 #[cfg_attr(not(feature = "doc-extract"), allow(dead_code))]
 const MAX_ON_DISK_BYTES: u64 = 50 * 1024 * 1024;
+
+/// The [`IntakePolicy`] this surface applies over the shared media intake.
+///
+/// This is the ONE surface that legitimately ingests headerless input — a CSV
+/// or plain-text file has no container signature — so it is the only policy in
+/// the tree that sets `allow_unclassified`, and it must still name
+/// [`MediaKind::Unclassified`] in its accepted set to receive it. Everything
+/// else (the caps, the OOXML admission) is the shared mechanism.
+fn doc_intake_policy() -> IntakePolicy {
+    IntakePolicy::new(1, MAX_ON_DISK_BYTES)
+        .accepting(&[MediaKind::Ooxml, MediaKind::Unclassified])
+        .allowing_unclassified()
+        .named("document")
+}
 
 /// Read-only office-document text-extraction tool.
 #[derive(Debug, Default, Clone, Copy)]
@@ -211,9 +225,19 @@ impl Tool for DocExtractTool {
             };
         };
 
-        // Same path discipline as ReadTool / PdfTool.
-        let validated = match validate_user_path(Path::new(path)) {
-            Ok(p) => p,
+        // ONE resolution, through the SHARED intake. It validates the path,
+        // opens it exactly once through a symlink-refusing walk, bounds it from
+        // THAT descriptor and proves the container signature from the bytes it
+        // actually read — then hands the SAME open handle back. Nothing below
+        // re-resolves the name.
+        let admitted = match admit_open(Path::new(path), &doc_intake_policy()) {
+            Ok(h) => h,
+            Err(IntakeError::NotFound(_)) | Err(IntakeError::NotRegularFile(_)) => {
+                return ToolResult {
+                    content: format!("Document not found or not a regular file: {path}"),
+                    is_error: true,
+                };
+            }
             Err(e) => {
                 return ToolResult {
                     content: format!("Refused to read {path}: {e}"),
@@ -221,13 +245,6 @@ impl Tool for DocExtractTool {
                 };
             }
         };
-
-        if !validated.is_file() {
-            return ToolResult {
-                content: format!("Document not found or not a regular file: {path}"),
-                is_error: true,
-            };
-        }
 
         // `sheet` may arrive as a string or a number per the schema.
         let sheet = input
@@ -251,7 +268,7 @@ impl Tool for DocExtractTool {
             .map(|n| n as usize)
             .unwrap_or(0);
 
-        extract(&validated, path, sheet.as_deref(), offset, max_bytes)
+        extract(admitted, path, sheet.as_deref(), offset, max_bytes)
     }
 
     fn max_result_size(&self) -> usize {
@@ -304,18 +321,19 @@ const MAX_GRID_CELLS: u64 = 1_000_000;
 
 #[cfg(feature = "doc-extract")]
 fn extract(
-    disk_path: &Path,
+    admitted: AdmittedHandle,
     display: &str,
     sheet: Option<&str>,
     offset: usize,
     max_bytes: usize,
 ) -> ToolResult {
+    let disk_path = admitted.validated_path.clone();
     // Extract enough to cover the requested window [offset, offset+max_bytes],
     // clamped to a hard ceiling so an absurd offset can't drive the extractor to
     // its structural caps for nothing. The extractor's own byte early-stops use
     // this budget; window_text then slices out the [offset..] chunk.
     let budget = offset.saturating_add(max_bytes).min(MAX_EXTRACT_BUDGET);
-    match extract_inner(disk_path, sheet, budget) {
+    match extract_inner(admitted, sheet, budget) {
         Ok(text) => {
             // The extractor filling its budget exactly means the document has
             // more content than this window shows.
@@ -331,7 +349,16 @@ fn extract(
                 let full = if budget >= MAX_EXTRACT_BUDGET {
                     text
                 } else {
-                    extract_inner(disk_path, sheet, MAX_EXTRACT_BUDGET).unwrap_or(text)
+                    // A SECOND full admission, not a bare re-open: the ceiling
+                    // extraction re-enters the same chokepoint and gets its own
+                    // validated descriptor. There is no code path in this tool
+                    // that reads a handle the intake did not produce.
+                    match admit_open(&disk_path, &doc_intake_policy()) {
+                        Ok(again) => {
+                            extract_inner(again, sheet, MAX_EXTRACT_BUDGET).unwrap_or(text)
+                        }
+                        Err(_) => text,
+                    }
                 };
                 if let Some(path) = write_doc_artifact(display, &full) {
                     content.push_str(&format!(
@@ -376,30 +403,19 @@ fn write_doc_artifact(display: &str, full_markdown: &str) -> Option<std::path::P
 }
 
 #[cfg(feature = "doc-extract")]
-fn extract_inner(path: &Path, sheet: Option<&str>, max_bytes: usize) -> Result<String, String> {
-    use std::fs::File;
-    use std::io::{Read, Seek, SeekFrom};
+fn extract_inner(
+    admitted: AdmittedHandle,
+    sheet: Option<&str>,
+    max_bytes: usize,
+) -> Result<String, String> {
+    // The handle, the length and the container class all came from the SAME
+    // descriptor the shared intake opened and validated. Nothing here reopens
+    // a name, and nothing here re-decides a bound the intake already enforced.
+    let AdmittedHandle { kind, file, .. } = admitted;
 
-    // Open ONCE: every step below works from this handle or the archive built
-    // from it — no validate-then-reopen TOCTOU.
-    let mut file = File::open(path).map_err(|e| e.to_string())?;
-    let meta = file.metadata().map_err(|e| e.to_string())?;
-    if !meta.is_file() {
-        return Err("not a regular file".to_string());
-    }
-    if meta.len() > MAX_ON_DISK_BYTES {
-        return Err(format!(
-            "file too large ({} bytes > {MAX_ON_DISK_BYTES} limit)",
-            meta.len()
-        ));
-    }
-
-    let mut magic = [0u8; 4];
-    let n = file.read(&mut magic).map_err(|e| e.to_string())?;
-    file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-
-    // OOXML (docx/xlsx/pptx) is a ZIP container (`PK\x03\x04`).
-    if n >= 4 && &magic == b"PK\x03\x04" {
+    // OOXML (docx/xlsx/pptx) is a ZIP container (`PK\x03\x04`), proved by the
+    // intake rather than re-sniffed here.
+    if kind == MediaKind::Ooxml {
         let mut archive =
             zip::ZipArchive::new(file).map_err(|e| format!("not a valid zip archive: {e}"))?;
         check_zip_declared_limits(&mut archive)?;
@@ -875,7 +891,7 @@ fn render_markdown_table<I: Iterator<Item = Vec<String>>>(
 /// with an honest message (NO-STUBS: an honest blocker, not silent success).
 #[cfg(not(feature = "doc-extract"))]
 fn extract(
-    _disk_path: &Path,
+    _admitted: AdmittedHandle,
     display: &str,
     _sheet: Option<&str>,
     _offset: usize,

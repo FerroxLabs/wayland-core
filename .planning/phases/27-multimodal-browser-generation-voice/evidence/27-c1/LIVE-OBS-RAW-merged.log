@@ -1,0 +1,73 @@
+binary:  /root/wayland-27c1m/target/release/wayland-core
+version: wayland-core 0.12.25
+fixtures: /tmp/tmp.YGjBEGBIBE
+
+### Provider read-back: every capture below is a file THIS MOCK wrote.
+### If the engine had talked to api.anthropic.com the capture would be empty.
+
+=== OBS audio/valid — audio_path=/tmp/tmp.YGjBEGBIBE/good.wav
+  captured requests: 2
+  TOOL_RESULT is_error=True: {"error":"groq transcription returned HTTP 401: {\"error\":{\"message\":\"Invalid API Key\",\"type\":\"invalid_request_error\",\"code\":\"invalid_api_key\"}}\n","success":false}
+
+=== OBS audio/denylisted — audio_path=/tmp/tmp.YGjBEGBIBE/.ssh/id_rsa
+  captured requests: 2
+  TOOL_RESULT is_error=True: {"error":"Invalid path: path targets a denied system location: \"/tmp/tmp.YGjBEGBIBE/.ssh/id_rsa\"","success":false}
+
+=== OBS audio/traversal — audio_path=/tmp/tmp.YGjBEGBIBE/sub/../good.wav
+  captured requests: 2
+  TOOL_RESULT is_error=True: {"error":"Invalid path: path contains traversal (..): \"/tmp/tmp.YGjBEGBIBE/sub/../good.wav\"","success":false}
+
+=== OBS audio/symlink — audio_path=/tmp/tmp.YGjBEGBIBE/linked.wav
+  captured requests: 2
+  TOOL_RESULT is_error=True: {"error":"Cannot open audio path component in /tmp/tmp.YGjBEGBIBE/linked.wav: Too many levels of symbolic links (os error 40)","success":false}
+
+=== OBS audio/over-cap — audio_path=/tmp/tmp.YGjBEGBIBE/over-cap.wav
+  captured requests: 2
+  TOOL_RESULT is_error=True: {"error":"Audio too large: 78643200 bytes (limit 26214400 bytes)","success":false}
+
+=== OBS audio/relative — audio_path=good.wav
+  captured requests: 2
+  TOOL_RESULT is_error=True: {"error":"Invalid path: path must be absolute: \"good.wav\"","success":false}
+
+=== OBS host/valid-png — /root/wayland-27c1m/crates/wcore-fixture-harness/fixtures/f27/intake/valid-image.png
+--- what the USER saw (error/result events on the protocol stream):
+--- what went ON THE WIRE to the provider:
+
+=== OBS host/mismatch — /root/wayland-27c1m/crates/wcore-fixture-harness/fixtures/f27/intake/mismatch-png-body-jpg-ext.jpg
+--- what the USER saw (error/result events on the protocol stream):
+"type":"error","msg_id":"m1","error":{"code":"engine_error","message":"composer attachment rejected: attachment 1 (/root/wayland-27c1m/crates/wcore-fixture-harness/fixtures/f27/intake/mismatch-png-body-jpg-ext.jpg) extension declares image/jpeg but bytes are image/png","retryable":false}
+"message":"composer attachment rejected: attachment 1 (/root/wayland-27c1m/crates/wcore-fixture-harness/fixtures/f27/intake/mismatch-png-body-jpg-ext.jpg) extension declares image/jpeg but bytes are image/png"
+--- what went ON THE WIRE to the provider:
+
+=== OBS host/pdf-as-image — /root/wayland-27c1m/crates/wcore-fixture-harness/fixtures/f27/intake/valid-doc.pdf
+--- what the USER saw (error/result events on the protocol stream):
+"type":"error","msg_id":"m1","error":{"code":"engine_error","message":"composer attachment rejected: attachment 1 (/root/wayland-27c1m/crates/wcore-fixture-harness/fixtures/f27/intake/valid-doc.pdf) could not be loaded: Unsupported image format (only PNG, JPEG, GIF, BMP, WEBP are supported)","retryable":false}
+"message":"composer attachment rejected: attachment 1 (/root/wayland-27c1m/crates/wcore-fixture-harness/fixtures/f27/intake/valid-doc.pdf) could not be loaded: Unsupported image format (only PNG, JPEG, GIF, BMP, WEBP are supported)"
+--- what went ON THE WIRE to the provider:
+
+### secret sweep — the fixture bytes must not appear in any capture
+matches for the fixture credential string in /root/wayland-27c1m-live: 0
+
+DONE
+=== wire capture line counts (0 = the engine never called the provider) ===
+audio-denylisted.jsonl       2
+audio-over-cap.jsonl         2
+audio-relative.jsonl         2
+audio-symlink.jsonl          2
+audio-traversal.jsonl        2
+audio-valid.jsonl            2
+host-mismatch.jsonl          0
+host-pdf-as-image.jsonl      0
+host-valid-png.jsonl         1
+
+=== host-valid-png outbound content ===
+  TEXT 'describe the attachment'
+  IMAGE part media_type=image/png data_len=100
+  TEXT 'Current date: 2026-07-29'
+
+=== both lanes UNC tests, merged tree ===
+test media_intake::tests::a_verbatim_local_path_is_still_refused_but_no_longer_as_a_network_path ... ok
+test media_intake::tests::refuses_a_unc_target_without_touching_the_filesystem ... ok
+test media_intake::tests::unc_guard_flags_unc_on_every_platform ... ok
+test media_intake::tests::refuses_a_truncated_header ... ok
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 987 filtered out; finished in 0.00s

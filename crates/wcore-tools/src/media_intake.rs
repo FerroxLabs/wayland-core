@@ -1,70 +1,138 @@
-//! One bounded, open-once, magic-byte-validated intake for attachments and
-//! documents.
+//! **The** bounded, open-once, magic-byte-validated intake for every piece of
+//! media the engine ingests — images, audio and documents, from a local path or
+//! from bytes a connector already fetched.
 //!
 //! # Why this module exists
 //!
 //! Phase 27 measured the shipped binary's intake paths on `hetzner-dsm` and
-//! found them to disagree in ONE way that matters. Traced at the syscall level
+//! found them to disagree. Traced at the syscall level
 //! (`strace -f -y -e trace=openat,statx,...`, evidence
 //! `.planning/phases/27-multimodal-browser-generation-voice/evidence/27-01/`):
 //!
-//! - The composer/vision path resolves the caller's name, opens it ONCE, and
-//!   every subsequent fact — size, bytes, format — comes from THAT descriptor
-//!   (`statx(fd, "", AT_EMPTY_PATH, ...)`, then a bounded `take()` on the same
-//!   handle). Measured: 2 by-name resolutions, 1 `openat`, all later reads by
-//!   descriptor. That is the correct idiom and it is preserved unchanged.
-//! - The PDF path resolves the name (`validate_user_path`), resolves it AGAIN
-//!   (`is_file()`), and then hands the PATH to an extractor that performs a
-//!   THIRD, independent resolution and reads whatever that resolution finds.
-//!   Measured: 3 by-name resolutions and an `openat` issued by a third party
-//!   that never saw the validated handle. The bytes parsed are therefore not
-//!   provably the bytes validated.
+//! - The composer/vision path resolves the caller's name, opens it ONCE with an
+//!   `openat(O_NOFOLLOW)` component walk, and every subsequent fact — size,
+//!   bytes, format — comes from THAT descriptor. That is the correct idiom.
+//! - The PDF path resolved the name three times and handed the PATH to an
+//!   extractor that opened it independently. The bytes parsed were therefore
+//!   not provably the bytes validated.
+//! - The `transcribe_audio` local-file path (measured by lane `27-c1-intake`,
+//!   and MISSING from the earlier four-path census) applied **no path
+//!   validation at all** — no absolute-path requirement, no traversal check, no
+//!   UNC refusal, no system-path deny-list — and read with an unbounded
+//!   `fs::read` after a separate `fs::metadata`, so its declared 25 MB cap
+//!   bounded a stat it did not read from.
 //!
-//! This module generalizes the idiom the office-document tool already proves:
-//! validate the caller-supplied path, refuse non-regular and network targets,
-//! open EXACTLY ONCE, take the size from that descriptor, decide admissibility
-//! from a bounded prefix read off that same descriptor, and read the remainder
-//! from it under a bounded `take`. Callers receive BYTES, never a path to
-//! re-open.
+//! # The one sequence
+//!
+//! [`admit_open`] is the single primitive. Everything else is a projection of
+//! it:
+//!
+//! 1. refuse network/UNC targets before touching the filesystem,
+//! 2. validate the path (absolute, traversal, null bytes, system deny-list,
+//!    symlink-target deny-list, non-regular targets),
+//! 3. open EXACTLY ONCE through a symlink-refusing component walk — a raced
+//!    parent rename cannot redirect the final open, a hostile FIFO cannot block
+//!    it (`O_NONBLOCK`), and a Windows reparse point is refused,
+//! 4. take the length from THAT descriptor and enforce both caps BEFORE any
+//!    payload read,
+//! 5. read a bounded prefix from that descriptor and decide the class from it,
+//! 6. cross-check the extension's claim against the detected class,
+//! 7. hand back the descriptor (or bounded bytes read from it) — never a path
+//!    for the caller to re-open.
 //!
 //! # What this module does NOT do
 //!
 //! It does not widen any accepted-format set and it does not change any cap.
-//! Unification is about HOW a file is admitted, not about WHAT is admitted.
+//! Each surface supplies its own [`IntakePolicy`]; only the mechanism is
+//! shared. Unification is about HOW a file is admitted, not about WHAT is
+//! admitted.
 
 use std::fs::File;
-use std::io::Read as _;
-use std::path::{Path, PathBuf};
+#[cfg(not(unix))]
+use std::fs::OpenOptions;
+use std::io::{Read as _, Seek as _};
+// `Prefix` is deliberately absent: UNC classification is no longer done here.
+// It lives in `wcore_config::network_path`, reached via `is_unc_path` below.
+use std::path::{Component, Path, PathBuf};
 
 use thiserror::Error;
 
 use crate::path_validation::validate_user_path;
 
-/// Bytes read to decide admissibility. Every container this module admits is
-/// identifiable from its first few bytes; 8 covers the longest signature (PNG).
-const MAGIC_PREFIX_BYTES: usize = 8;
+/// Bytes read to decide admissibility.
+///
+/// 12 is the minimum that separates every container this module admits:
+/// `RIFF....WAVE` (audio) from `RIFF....WEBP` (image) needs bytes 8..12, and
+/// the MP4/M4A `ftyp` atom sits at offset 4..8. A shorter prefix silently
+/// classified a WAV file as a WebP image, which is exactly the kind of
+/// cross-class confusion a shared intake exists to prevent.
+const MAGIC_PREFIX_BYTES: usize = 12;
 
 /// Format classes this intake can identify from bytes alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaKind {
+    // ── images ──
     Png,
     Jpeg,
     Gif,
     Bmp,
     Webp,
+    // ── documents ──
     Pdf,
     /// An OOXML container (docx / xlsx / pptx). Which of the three it is can
     /// only be decided by inspecting the archive, which is the document tool's
     /// job — this layer proves only that it IS a ZIP container.
     Ooxml,
+    // ── audio ──
+    Mp3,
+    Mp4Audio,
+    Aac,
+    Wav,
+    Ogg,
+    Webm,
+    Flac,
+    /// Bytes that match no container signature. NEVER returned by
+    /// [`MediaKind::from_magic`] — a surface only sees it when its policy sets
+    /// [`IntakePolicy::allow_unclassified`], which exists for the one surface
+    /// that legitimately ingests headerless input (CSV / plain text through
+    /// the office-document tool). Every other surface refuses it.
+    Unclassified,
 }
+
+/// The image classes `vision_analyze` and the composer accept.
+pub const IMAGE_KINDS: &[MediaKind] = &[
+    MediaKind::Png,
+    MediaKind::Jpeg,
+    MediaKind::Gif,
+    MediaKind::Bmp,
+    MediaKind::Webp,
+];
+
+/// The audio classes `transcribe_audio` accepts.
+pub const AUDIO_KINDS: &[MediaKind] = &[
+    MediaKind::Mp3,
+    MediaKind::Mp4Audio,
+    MediaKind::Aac,
+    MediaKind::Wav,
+    MediaKind::Ogg,
+    MediaKind::Webm,
+    MediaKind::Flac,
+];
 
 impl MediaKind {
     /// The extension-declared class, or `None` when the name declares nothing
     /// this module recognises. A name is a claim; it is only ever cross-checked
     /// against detected bytes, never trusted on its own.
     pub fn from_extension(path: &Path) -> Option<Self> {
-        let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+        let raw = path.extension()?.to_str()?;
+        // A dropped path can carry a URL-ish `?query` / `#fragment` tail. Strip
+        // it so the declared class is still recognised and still cross-checked
+        // — dropping the check would be the weaker behaviour.
+        let ext = raw
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(raw)
+            .to_ascii_lowercase();
         Some(match ext.as_str() {
             "png" => Self::Png,
             "jpg" | "jpeg" => Self::Jpeg,
@@ -73,30 +141,80 @@ impl MediaKind {
             "webp" => Self::Webp,
             "pdf" => Self::Pdf,
             "docx" | "xlsx" | "pptx" => Self::Ooxml,
+            "mp3" => Self::Mp3,
+            "m4a" | "mp4" => Self::Mp4Audio,
+            "aac" => Self::Aac,
+            "wav" | "wave" => Self::Wav,
+            "ogg" | "oga" | "opus" => Self::Ogg,
+            "webm" => Self::Webm,
+            "flac" => Self::Flac,
             _ => return None,
         })
     }
 
     /// Decide the class from a bounded prefix. Returns `None` when the prefix
     /// matches nothing admissible.
+    ///
+    /// Order matters: the `RIFF` container is disambiguated by bytes 8..12
+    /// before any shorter signature is considered, so a WAV is never mistaken
+    /// for a WebP.
     pub fn from_magic(prefix: &[u8]) -> Option<Self> {
-        if prefix.starts_with(b"\x89PNG\r\n\x1a\n") {
-            Some(Self::Png)
-        } else if prefix.starts_with(&[0xFF, 0xD8, 0xFF]) {
-            Some(Self::Jpeg)
-        } else if prefix.starts_with(b"GIF87a") || prefix.starts_with(b"GIF89a") {
-            Some(Self::Gif)
-        } else if prefix.starts_with(b"BM") {
-            Some(Self::Bmp)
-        } else if prefix.starts_with(b"RIFF") {
-            Some(Self::Webp)
-        } else if prefix.starts_with(b"%PDF-") {
-            Some(Self::Pdf)
-        } else if prefix.starts_with(b"PK\x03\x04") {
-            Some(Self::Ooxml)
-        } else {
-            None
+        // ── containers needing 12 bytes, checked first ──
+        if prefix.len() >= 12 && prefix.starts_with(b"RIFF") {
+            return match &prefix[8..12] {
+                b"WEBP" => Some(Self::Webp),
+                b"WAVE" => Some(Self::Wav),
+                _ => None,
+            };
         }
+        if prefix.len() >= 12 && &prefix[4..8] == b"ftyp" {
+            return Some(Self::Mp4Audio);
+        }
+
+        // ── 8-byte and shorter signatures ──
+        if prefix.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return Some(Self::Png);
+        }
+        if prefix.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            return Some(Self::Jpeg);
+        }
+        if prefix.starts_with(b"GIF87a") || prefix.starts_with(b"GIF89a") {
+            return Some(Self::Gif);
+        }
+        if prefix.starts_with(b"%PDF-") {
+            return Some(Self::Pdf);
+        }
+        if prefix.starts_with(b"PK\x03\x04") {
+            return Some(Self::Ooxml);
+        }
+        if prefix.starts_with(b"OggS") {
+            return Some(Self::Ogg);
+        }
+        if prefix.starts_with(b"fLaC") {
+            return Some(Self::Flac);
+        }
+        if prefix.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+            return Some(Self::Webm);
+        }
+        if prefix.starts_with(b"ID3") {
+            return Some(Self::Mp3);
+        }
+        // BMP is a two-byte signature, so it is checked after every longer one.
+        if prefix.starts_with(b"BM") {
+            return Some(Self::Bmp);
+        }
+        // ADTS/MPEG frame sync is the loosest signature in the table and is
+        // therefore last.
+        if prefix.len() >= 2 && prefix[0] == 0xFF {
+            let b1 = prefix[1];
+            if b1 == 0xF1 || b1 == 0xF9 {
+                return Some(Self::Aac);
+            }
+            if (b1 & 0xE0) == 0xE0 {
+                return Some(Self::Mp3);
+            }
+        }
+        None
     }
 
     pub fn as_str(self) -> &'static str {
@@ -108,7 +226,23 @@ impl MediaKind {
             Self::Webp => "image/webp",
             Self::Pdf => "application/pdf",
             Self::Ooxml => "application/vnd.openxmlformats",
+            Self::Mp3 => "audio/mpeg",
+            Self::Mp4Audio => "audio/mp4",
+            Self::Aac => "audio/aac",
+            Self::Wav => "audio/wav",
+            Self::Ogg => "audio/ogg",
+            Self::Webm => "audio/webm",
+            Self::Flac => "audio/flac",
+            Self::Unclassified => "application/octet-stream",
         }
+    }
+
+    pub fn is_image(self) -> bool {
+        IMAGE_KINDS.contains(&self)
+    }
+
+    pub fn is_audio(self) -> bool {
+        AUDIO_KINDS.contains(&self)
     }
 }
 
@@ -130,6 +264,18 @@ pub enum IntakeError {
     NotFound(PathBuf),
     #[error("Cannot open {path}: {reason}")]
     Open { path: PathBuf, reason: String },
+    /// A component of the path could not be opened — the symlink-refusing walk
+    /// reports the whole path plus the OS reason. Distinguished from
+    /// [`IntakeError::Open`] because refusing a symlinked PARENT is a different
+    /// user-facing fact from failing to open the leaf.
+    #[error("Cannot open {noun} path component in {path}: {reason}")]
+    OpenComponent {
+        noun: &'static str,
+        path: PathBuf,
+        reason: String,
+    },
+    #[error("Symlinks/reparse points are not allowed: {0}")]
+    Symlink(PathBuf),
     #[error("File too large: {actual} bytes (limit {limit} bytes)")]
     TooLarge { actual: u64, limit: u64 },
     #[error("File too small to be valid ({actual} bytes)")]
@@ -155,6 +301,18 @@ pub struct AdmittedMedia {
     pub bytes: Vec<u8>,
 }
 
+/// An admitted, still-open handle for a surface that streams rather than
+/// buffering (the OOXML archive reader). The handle is positioned at byte 0
+/// and is the SAME descriptor every admission fact was decided from.
+#[derive(Debug)]
+pub struct AdmittedHandle {
+    pub validated_path: PathBuf,
+    pub kind: MediaKind,
+    /// Length taken from the descriptor's own metadata.
+    pub len: u64,
+    pub file: File,
+}
+
 /// The caps and accepted set a surface applies over this shared intake. Each
 /// surface keeps its own policy; only the mechanism is shared.
 #[derive(Debug, Clone)]
@@ -164,6 +322,21 @@ pub struct IntakePolicy {
     /// When `Some`, only these classes are admitted. `None` admits any class
     /// this module can identify.
     pub accept: Option<&'static [MediaKind]>,
+    /// The word a surface uses for its media in path-level diagnostics
+    /// ("image", "audio", "document"). Preserves each surface's historical
+    /// wording through unification.
+    pub noun: &'static str,
+    /// Refuse a file whose extension declares a class the bytes contradict.
+    /// On by default — a name that disagrees with its content is the
+    /// classic confused-deputy input.
+    pub cross_check_extension: bool,
+    /// Admit bytes matching no container signature as
+    /// [`MediaKind::Unclassified`] instead of refusing them. OFF by default.
+    /// Set ONLY by the office-document surface, which legitimately ingests
+    /// headerless CSV and plain text. The surface must still name
+    /// `Unclassified` in its `accept` list, so turning this on is not enough
+    /// on its own.
+    pub allow_unclassified: bool,
 }
 
 impl IntakePolicy {
@@ -172,11 +345,30 @@ impl IntakePolicy {
             min_bytes,
             max_bytes,
             accept: None,
+            noun: "media",
+            cross_check_extension: true,
+            allow_unclassified: false,
         }
     }
 
     pub fn accepting(mut self, kinds: &'static [MediaKind]) -> Self {
         self.accept = Some(kinds);
+        self
+    }
+
+    pub fn named(mut self, noun: &'static str) -> Self {
+        self.noun = noun;
+        self
+    }
+
+    pub fn without_extension_cross_check(mut self) -> Self {
+        self.cross_check_extension = false;
+        self
+    }
+
+    /// See [`IntakePolicy::allow_unclassified`].
+    pub fn allowing_unclassified(mut self) -> Self {
+        self.allow_unclassified = true;
         self
     }
 }
@@ -198,19 +390,151 @@ fn is_unc_path(path: &Path) -> bool {
     wcore_config::network_path::has_unc_prefix(path)
 }
 
-/// Admit a caller-supplied path as bytes, resolving the name EXACTLY ONCE for
-/// the read.
+/// Open a media file without following a symlink/reparse point.
 ///
-/// Sequence, and the order is the contract:
-/// 1. validate the path (traversal, null bytes, secret deny-list),
-/// 2. refuse network targets,
-/// 3. open once — every later fact comes from this descriptor,
-/// 4. take the length from the descriptor and enforce both caps BEFORE any
-///    payload read,
-/// 5. read a bounded prefix from the descriptor and decide the class from it,
-/// 6. cross-check the extension's claim against the detected class,
-/// 7. read the remainder from the same descriptor under a bounded take.
-pub fn admit_path(path: &Path, policy: &IntakePolicy) -> Result<AdmittedMedia, IntakeError> {
+/// `O_NONBLOCK` prevents a hostile FIFO from hanging before the regular-file
+/// check. Unix walks from `/` with directory handles and `openat(O_NOFOLLOW)`
+/// so a raced parent rename cannot redirect the final open. Windows rejects
+/// reparse-point parents before opening the leaf reparse point itself.
+///
+/// Private on purpose: this is the ONLY place in the tree that opens a
+/// caller-named media file, and keeping it private is what makes that
+/// compiler-checked rather than convention.
+fn open_once(path: &Path, noun: &'static str) -> Result<File, IntakeError> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let mut parts = path.components();
+        if !matches!(parts.next(), Some(Component::RootDir)) {
+            return Err(IntakeError::Path(format!(
+                "{noun} path is not absolute: {}",
+                path.display()
+            )));
+        }
+        let names = parts
+            .map(|part| match part {
+                Component::Normal(name) => CString::new(name.as_bytes()).map_err(|_| {
+                    IntakeError::Path(format!("{noun} path contains NUL: {}", path.display()))
+                }),
+                _ => Err(IntakeError::Path(format!(
+                    "{noun} path contains an unsupported component: {}",
+                    path.display()
+                ))),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if names.is_empty() {
+            return Err(IntakeError::Path(format!(
+                "{noun} path has no file name: {}",
+                path.display()
+            )));
+        }
+
+        let mut parent = File::open("/").map_err(|e| IntakeError::OpenComponent {
+            noun,
+            path: path.to_path_buf(),
+            reason: e.to_string(),
+        })?;
+        for (index, name) in names.iter().enumerate() {
+            let is_leaf = index + 1 == names.len();
+            let flags = if is_leaf {
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC
+            } else {
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC
+            };
+            // SAFETY: `parent` is a live directory descriptor for every
+            // non-leaf iteration, `name` is NUL-terminated, and no pointer is
+            // retained after `openat` returns.
+            let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+            if fd < 0 {
+                let err = std::io::Error::last_os_error();
+                // ENOENT anywhere on the walk — leaf or an intermediate
+                // directory — is "not found" as the user means it. Reporting a
+                // missing parent as a component-open failure would be a
+                // regression against the wording every other media surface
+                // produces for the same condition.
+                if err.kind() == std::io::ErrorKind::NotFound {
+                    return Err(IntakeError::NotFound(path.to_path_buf()));
+                }
+                return Err(IntakeError::OpenComponent {
+                    noun,
+                    path: path.to_path_buf(),
+                    reason: err.to_string(),
+                });
+            }
+            // SAFETY: `openat` returned a new owned descriptor on success.
+            let opened = unsafe { File::from_raw_fd(fd) };
+            if is_leaf {
+                return Ok(opened);
+            }
+            parent = opened;
+        }
+        unreachable!("non-empty component walk returns at the leaf")
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+        for parent in path.ancestors().skip(1) {
+            let metadata =
+                std::fs::symlink_metadata(parent).map_err(|e| IntakeError::OpenComponent {
+                    noun,
+                    path: parent.to_path_buf(),
+                    reason: e.to_string(),
+                })?;
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(IntakeError::Symlink(parent.to_path_buf()));
+            }
+        }
+
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => IntakeError::NotFound(path.to_path_buf()),
+                _ => IntakeError::Open {
+                    path: path.to_path_buf(),
+                    reason: e.to_string(),
+                },
+            })?;
+        let metadata = file.metadata().map_err(|e| IntakeError::Open {
+            path: path.to_path_buf(),
+            reason: e.to_string(),
+        })?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(IntakeError::Symlink(path.to_path_buf()));
+        }
+        Ok(file)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = noun;
+        OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => IntakeError::NotFound(path.to_path_buf()),
+                _ => IntakeError::Open {
+                    path: path.to_path_buf(),
+                    reason: e.to_string(),
+                },
+            })
+    }
+}
+
+/// **The** primitive. Admit a caller-supplied path and hand back the OPEN
+/// descriptor every admission fact was decided from, positioned at byte 0.
+///
+/// Use this when the caller streams (an archive reader). Use [`admit_path`]
+/// when the caller wants bounded bytes.
+pub fn admit_open(path: &Path, policy: &IntakePolicy) -> Result<AdmittedHandle, IntakeError> {
     if is_unc_path(path) {
         return Err(IntakeError::NetworkPath(path.to_path_buf()));
     }
@@ -220,13 +544,7 @@ pub fn admit_path(path: &Path, policy: &IntakePolicy) -> Result<AdmittedMedia, I
     }
 
     // THE ONLY resolution of this name that the admitted bytes depend on.
-    let mut file = File::open(&validated).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => IntakeError::NotFound(validated.clone()),
-        _ => IntakeError::Open {
-            path: validated.clone(),
-            reason: e.to_string(),
-        },
-    })?;
+    let mut file = open_once(&validated, policy.noun)?;
 
     // Everything below is by descriptor. A name re-pointed from here on cannot
     // change which bytes are admitted.
@@ -250,10 +568,14 @@ pub fn admit_path(path: &Path, policy: &IntakePolicy) -> Result<AdmittedMedia, I
 
     let mut prefix = [0u8; MAGIC_PREFIX_BYTES];
     let prefix_len = read_prefix(&mut file, &mut prefix)?;
-    let detected =
-        MediaKind::from_magic(&prefix[..prefix_len]).ok_or(IntakeError::UnrecognisedFormat)?;
+    let detected = match MediaKind::from_magic(&prefix[..prefix_len]) {
+        Some(kind) => kind,
+        None if policy.allow_unclassified => MediaKind::Unclassified,
+        None => return Err(IntakeError::UnrecognisedFormat),
+    };
 
-    if let Some(declared) = MediaKind::from_extension(&validated)
+    if policy.cross_check_extension
+        && let Some(declared) = MediaKind::from_extension(&validated)
         && declared != detected
     {
         return Err(IntakeError::FormatMismatch {
@@ -269,16 +591,37 @@ pub fn admit_path(path: &Path, policy: &IntakePolicy) -> Result<AdmittedMedia, I
         });
     }
 
-    // The prefix is already consumed from the handle; keep it and append the
-    // bounded remainder read from the SAME handle.
+    file.rewind().map_err(|e| IntakeError::Open {
+        path: validated.clone(),
+        reason: e.to_string(),
+    })?;
+
+    Ok(AdmittedHandle {
+        validated_path: validated,
+        kind: detected,
+        len,
+        file,
+    })
+}
+
+/// Admit a caller-supplied path as bounded bytes, resolving the name EXACTLY
+/// ONCE. A projection of [`admit_open`].
+pub fn admit_path(path: &Path, policy: &IntakePolicy) -> Result<AdmittedMedia, IntakeError> {
+    let AdmittedHandle {
+        validated_path,
+        kind,
+        len,
+        file,
+    } = admit_open(path, policy)?;
+
     let mut bytes = Vec::with_capacity(len.min(policy.max_bytes) as usize);
-    bytes.extend_from_slice(&prefix[..prefix_len]);
     // `+ 1` so a file that grew past the cap between the stat and the read is
-    // still detected rather than silently truncated.
-    file.take(policy.max_bytes - prefix_len as u64 + 1)
+    // still detected rather than silently truncated. This is the bound that
+    // matters: it applies to the READ, not to a stat the read never consulted.
+    file.take(policy.max_bytes + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| IntakeError::Open {
-            path: validated.clone(),
+            path: validated_path.clone(),
             reason: e.to_string(),
         })?;
     if bytes.len() as u64 > policy.max_bytes {
@@ -289,15 +632,16 @@ pub fn admit_path(path: &Path, policy: &IntakePolicy) -> Result<AdmittedMedia, I
     }
 
     Ok(AdmittedMedia {
-        validated_path: validated,
-        kind: detected,
+        validated_path,
+        kind,
         bytes,
     })
 }
 
-/// Decide a class for bytes a connector already fetched, so a channel cannot
-/// introduce a class the composer would have refused. There is no path here and
-/// therefore no resolution to protect — only the format decision is shared.
+/// Decide a class for bytes a connector or fetcher already produced, so a
+/// channel or a remote URL cannot introduce a class a local path would have
+/// been refused. There is no path here and therefore no resolution to protect
+/// — the caps and the format decision are what is shared.
 pub fn admit_bytes(bytes: &[u8], policy: &IntakePolicy) -> Result<MediaKind, IntakeError> {
     let len = bytes.len() as u64;
     if len > policy.max_bytes {
@@ -309,8 +653,11 @@ pub fn admit_bytes(bytes: &[u8], policy: &IntakePolicy) -> Result<MediaKind, Int
     if len < policy.min_bytes {
         return Err(IntakeError::TooSmall { actual: len });
     }
-    let detected = MediaKind::from_magic(&bytes[..bytes.len().min(MAGIC_PREFIX_BYTES)])
-        .ok_or(IntakeError::UnrecognisedFormat)?;
+    let detected = match MediaKind::from_magic(&bytes[..bytes.len().min(MAGIC_PREFIX_BYTES)]) {
+        Some(kind) => kind,
+        None if policy.allow_unclassified => MediaKind::Unclassified,
+        None => return Err(IntakeError::UnrecognisedFormat),
+    };
     if let Some(accept) = policy.accept
         && !accept.contains(&detected)
     {
@@ -339,6 +686,9 @@ fn read_prefix(file: &mut File, buf: &mut [u8]) -> Result<usize, IntakeError> {
             }
         }
     }
+    // The caller (`admit_open`) rewinds the handle once the class is decided,
+    // so a streaming or buffering caller reads the WHOLE body from this same
+    // descriptor starting at byte 0.
     Ok(filled)
 }
 
@@ -352,6 +702,10 @@ mod tests {
     const JPEG: &[u8] = b"\xff\xd8\xff\xe0JFIF-body-bytes";
     const PDF: &[u8] = b"%PDF-1.4 body bytes here";
     const ZIP: &[u8] = b"PK\x03\x04ooxml-container-bytes";
+    const WAV: &[u8] = b"RIFF\x24\x08\x00\x00WAVEfmt more-bytes";
+    const WEBP: &[u8] = b"RIFF\x24\x08\x00\x00WEBPVP8 more-bytes";
+    const FLAC: &[u8] = b"fLaC\x00\x00\x00\x22more-bytes-here";
+    const OGG: &[u8] = b"OggS\x00\x02\x00\x00more-bytes-here";
 
     fn any() -> IntakePolicy {
         IntakePolicy::new(1, 1024 * 1024)
@@ -371,12 +725,31 @@ mod tests {
             ("b.jpg", JPEG, MediaKind::Jpeg),
             ("c.pdf", PDF, MediaKind::Pdf),
             ("d.docx", ZIP, MediaKind::Ooxml),
+            ("e.wav", WAV, MediaKind::Wav),
+            ("f.webp", WEBP, MediaKind::Webp),
+            ("g.flac", FLAC, MediaKind::Flac),
+            ("h.ogg", OGG, MediaKind::Ogg),
         ] {
             let p = write(dir.path(), name, bytes);
             let got = admit_path(&p, &any()).unwrap();
             assert_eq!(got.kind, kind, "{name}");
             assert_eq!(got.bytes, bytes, "{name} must return every byte exactly");
         }
+    }
+
+    /// A 8-byte prefix classified `RIFF....WAVE` as a WebP IMAGE, because
+    /// `RIFF` alone was treated as the WebP signature. Once audio shares this
+    /// intake that is a cross-class confusion, not a cosmetic one: a WAV would
+    /// have been admitted to an image-only surface.
+    #[test]
+    fn riff_is_disambiguated_between_wav_and_webp() {
+        assert_eq!(MediaKind::from_magic(WAV), Some(MediaKind::Wav));
+        assert_eq!(MediaKind::from_magic(WEBP), Some(MediaKind::Webp));
+        // RIFF with an unknown form is not admitted to either class.
+        assert_eq!(MediaKind::from_magic(b"RIFF\x00\x00\x00\x00AVI "), None);
+        // And the 8-byte prefix that used to be enough is now not enough to
+        // claim WebP.
+        assert_eq!(MediaKind::from_magic(b"RIFF\x00\x00\x00\x00"), None);
     }
 
     #[test]
@@ -394,6 +767,8 @@ mod tests {
             ("jpeg-body.png", JPEG),
             ("not-a-pdf.pdf", PNG),
             ("not-a-container.docx", PDF),
+            ("wav-body.webp", WAV),
+            ("png-body.wav", PNG),
         ] {
             let p = write(dir.path(), name, bytes);
             assert!(
@@ -474,13 +849,38 @@ mod tests {
         }
     }
 
+    /// The body read is bounded by `take(max + 1)` on the SAME descriptor, so
+    /// the ingest allocation can never exceed the cap by more than one byte
+    /// even if the stat under-reported. Proved by reading the whole admitted
+    /// body back and asserting the length.
+    #[test]
+    fn the_body_read_is_bounded_by_the_cap_not_by_the_stat() {
+        let dir = tempdir().unwrap();
+        let body = [PNG, &vec![3u8; 4096][..]].concat();
+        let p = write(dir.path(), "big.png", &body);
+        // A generous cap admits it and returns every byte.
+        let ok = admit_path(&p, &IntakePolicy::new(1, 1 << 20)).unwrap();
+        assert_eq!(ok.bytes.len(), body.len());
+        // A cap below the body length refuses; nothing oversize is returned.
+        assert!(matches!(
+            admit_path(&p, &IntakePolicy::new(1, 100)),
+            Err(IntakeError::TooLarge { .. })
+        ));
+    }
+
     #[test]
     fn an_accept_list_refuses_a_class_it_does_not_name() {
         let dir = tempdir().unwrap();
         let p = write(dir.path(), "doc.pdf", PDF);
-        let images_only = any().accepting(&[MediaKind::Png, MediaKind::Jpeg]);
+        let images_only = any().accepting(IMAGE_KINDS);
         assert!(matches!(
             admit_path(&p, &images_only),
+            Err(IntakeError::KindNotAccepted { .. })
+        ));
+        // And the converse: an image is refused by an audio-only surface.
+        let png = write(dir.path(), "pic.png", PNG);
+        assert!(matches!(
+            admit_path(&png, &any().accepting(AUDIO_KINDS)),
             Err(IntakeError::KindNotAccepted { .. })
         ));
     }
@@ -551,25 +951,112 @@ mod tests {
         ));
     }
 
-    /// Connector-supplied bytes face the SAME format decision as a composer
-    /// path, so a channel cannot introduce a class the composer would refuse.
+    /// The UNC guard, asserted at the one place the intake now consults it.
+    ///
+    /// This test absorbs TWO predecessors so neither lane's assertions are
+    /// lost to the merge:
+    ///   * `vision_tools::is_network_path_flags_unc_only` (mine, relocated
+    ///     when the guard moved into the chokepoint), and
+    ///   * `vision_tools::unc_guard_flags_unc_on_every_platform`
+    ///     (`lane/wal-followups`), whose site disappeared because
+    ///     `load_local_image` now delegates to this module and no longer
+    ///     carries a UNC check of its own.
+    ///
+    /// The union is asserted, not the intersection. The `\\?\C:\` case is
+    /// theirs and is the one that matters: a verbatim path to a LOCAL disk is
+    /// not a UNC share, and must not be refused with a message naming the
+    /// wrong hazard. It is still refused — see
+    /// `a_verbatim_local_path_is_still_refused_but_no_longer_as_a_network_path`.
+    #[test]
+    fn unc_guard_flags_unc_on_every_platform() {
+        // Ordinary paths are never UNC (the common case).
+        assert!(!is_unc_path(Path::new("/Users/me/x.png")));
+        assert!(!is_unc_path(Path::new("relative/x.png")));
+        // Every UNC spelling, on EVERY platform. The implementation this
+        // replaced used `Component::Prefix`, which never matches on a Unix
+        // target, so these were `#[cfg(windows)]`-gated and never ran here.
+        assert!(is_unc_path(Path::new(r"\\server\share\x.png")));
+        assert!(is_unc_path(Path::new("//server/share/x.png")));
+        assert!(is_unc_path(Path::new(r"\\?\UNC\server\share\x.png")));
+        // A verbatim path to a LOCAL disk is not a network path.
+        assert!(!is_unc_path(Path::new(r"\\?\C:\Users\me\x.png")));
+    }
+
+    #[test]
+    fn refuses_a_relative_path_and_a_traversal() {
+        assert!(admit_path(Path::new("relative.png"), &any()).is_err());
+        assert!(admit_path(Path::new("./relative.png"), &any()).is_err());
+        let dir = tempdir().unwrap();
+        let traversal = dir.path().join("..").join("escape.png");
+        assert!(admit_path(&traversal, &any()).is_err());
+    }
+
+    /// The open must refuse a symlinked LEAF and a symlinked PARENT. This is
+    /// the discipline the image path already had and the audio path did not;
+    /// unification moves it under every surface.
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_symlinked_leaf_and_a_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+        let dir = tempdir().unwrap();
+        let target = write(dir.path(), "target.png", PNG);
+        let link = dir.path().join("link.png");
+        symlink(&target, &link).unwrap();
+        assert!(admit_path(&link, &any()).is_err(), "symlinked leaf");
+
+        let actual_parent = dir.path().join("actual-parent");
+        fs::create_dir(&actual_parent).unwrap();
+        write(&actual_parent, "nested.png", PNG);
+        let linked_parent = dir.path().join("linked-parent");
+        symlink(&actual_parent, &linked_parent).unwrap();
+        let err = admit_path(&linked_parent.join("nested.png"), &any()).unwrap_err();
+        assert!(
+            err.to_string().contains("path component"),
+            "symlinked parent, got: {err}"
+        );
+    }
+
+    /// A FIFO must not block the open. `O_NONBLOCK` is what makes this a
+    /// refusal rather than a hang, so the assertion is that the call RETURNS.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_refused_and_does_not_block() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = tempdir().unwrap();
+        let fifo = dir.path().join("pipe.png");
+        let c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c` is a valid NUL-terminated pathname; 0o600 is a
+        // conventional owner-only fixture permission.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert!(admit_path(&fifo, &any()).is_err());
+    }
+
+    /// Connector-supplied bytes face the SAME format decision as a path, so a
+    /// channel cannot introduce a class a local path would refuse.
     #[test]
     fn connector_bytes_face_the_same_format_decision() {
-        let images_only = any().accepting(&[MediaKind::Png, MediaKind::Jpeg]);
+        let images_only = any().accepting(IMAGE_KINDS);
         assert_eq!(admit_bytes(PNG, &images_only).unwrap(), MediaKind::Png);
         assert!(matches!(
             admit_bytes(PDF, &images_only),
             Err(IntakeError::KindNotAccepted { .. })
         ));
         assert!(matches!(
+            admit_bytes(WAV, &images_only),
+            Err(IntakeError::KindNotAccepted { .. })
+        ));
+        assert!(matches!(
             admit_bytes(b"junk", &images_only),
             Err(IntakeError::UnrecognisedFormat)
         ));
+        let audio_only = any().accepting(AUDIO_KINDS);
+        assert_eq!(admit_bytes(WAV, &audio_only).unwrap(), MediaKind::Wav);
     }
 
-    /// The whole point of the module: the caller gets BYTES, so there is no
-    /// path left for a second resolution to disagree about. A repoint after
-    /// admission cannot change what was admitted.
+    /// The whole point of the module: the caller gets BYTES (or the same open
+    /// handle), so there is no path left for a second resolution to disagree
+    /// about. A repoint after admission cannot change what was admitted.
     #[test]
     fn a_repoint_after_admission_cannot_change_the_admitted_bytes() {
         let dir = tempdir().unwrap();
@@ -582,5 +1069,19 @@ mod tests {
             admitted.bytes, PNG,
             "admitted bytes must be immune to a later repoint"
         );
+    }
+
+    /// `admit_open` hands back the SAME descriptor, rewound, so a streaming
+    /// caller reads the bytes that were admitted rather than re-opening.
+    #[test]
+    fn admit_open_returns_the_same_handle_rewound_to_zero() {
+        let dir = tempdir().unwrap();
+        let p = write(dir.path(), "stream.docx", ZIP);
+        let mut handle = admit_open(&p, &any()).unwrap();
+        assert_eq!(handle.kind, MediaKind::Ooxml);
+        assert_eq!(handle.len, ZIP.len() as u64);
+        let mut read_back = Vec::new();
+        handle.file.read_to_end(&mut read_back).unwrap();
+        assert_eq!(read_back, ZIP, "handle must be positioned at byte 0");
     }
 }

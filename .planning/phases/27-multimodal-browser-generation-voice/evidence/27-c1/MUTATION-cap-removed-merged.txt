@@ -1,0 +1,17 @@
+########## BOUND MUTATION — re-proved on the RECONCILED tree (merge of integration fc7ecafb) ##########
+Merged HEAD 8a85913c. Same mutation: delete the stat-side cap from media_intake::admit_open.
+
+--- A. UNMUTATED ---
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+--- B. MUTATED ---
+test image_over_the_declared_cap_is_refused_from_the_stat_not_from_the_read ... FAILED
+  must cite the FULL length 62914560; got: Image too large for vision API: 20971521 bytes (limit 20971520 bytes)
+test audio_over_the_declared_cap_is_refused_from_the_stat_not_from_the_read ... FAILED
+  refusal must cite the FULL length 78643200 ...; got: Audio too large: 26214401 bytes (limit 26214400 bytes)
+test result: FAILED. 12 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+=== restored: 0 modified ===
+
+The mutated numbers are again exactly cap+1 — the value the pre-repair cap+1
+fixture searched for. The instrument repair survived the merge, which is
+precisely where it could have quietly regressed.

@@ -1,12 +1,19 @@
 //! JSON-stream composer attachment lowering.
 //!
 //! Local paths are resolved at the host protocol boundary so providers never
-//! receive filesystem paths. The shared `wcore-tools` loader owns path and
-//! file-handle safety; this module owns the composer-specific PNG/JPEG contract
-//! and provider-neutral base64 projection.
+//! receive filesystem paths. The shared `wcore_tools::media_intake` chokepoint
+//! owns path validation, the open-once walk, the byte caps and the magic-byte
+//! decision — including the extension-versus-bytes cross-check, which this
+//! module used to re-implement against its own extension table. This module
+//! owns only the composer-specific PNG/JPEG contract, the aggregate byte
+//! budget and the provider-neutral base64 projection.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use thiserror::Error;
+use wcore_tools::media_intake::IntakeError;
+use wcore_tools::vision_tools::{
+    admit_local_image, image_intake_policy, render_image_intake_error,
+};
 use wcore_types::message::ContentBlock;
 
 pub const COMPOSER_MAX_FILES: usize = 8;
@@ -53,18 +60,29 @@ pub fn load_composer_images(files: &[String]) -> Result<Vec<ContentBlock>, Attac
         });
     }
 
+    let policy = image_intake_policy();
     let mut total_bytes = 0usize;
     let mut images = Vec::with_capacity(files.len());
     for (offset, path) in files.iter().enumerate() {
         let index = offset + 1;
-        let (mime, bytes) =
-            wcore_tools::vision_tools::load_local_image(path).map_err(|reason| {
-                AttachmentError::Load {
-                    index,
-                    path: path.clone(),
-                    reason,
-                }
-            })?;
+        // ONE resolution, through the shared chokepoint. The extension-versus-
+        // bytes disagreement now arrives as a typed `FormatMismatch` rather
+        // than being recomputed here against a second extension table.
+        let admitted = admit_local_image(path, &policy).map_err(|e| match e {
+            IntakeError::FormatMismatch { declared, detected } => AttachmentError::MimeMismatch {
+                index,
+                path: path.clone(),
+                declared,
+                detected: detected.to_string(),
+            },
+            other => AttachmentError::Load {
+                index,
+                path: path.clone(),
+                reason: render_image_intake_error(other),
+            },
+        })?;
+        let mime = admitted.kind.as_str();
+        let bytes = admitted.bytes;
         total_bytes = total_bytes
             .checked_add(bytes.len())
             .filter(|total| *total <= COMPOSER_MAX_TOTAL_BYTES)
@@ -78,32 +96,12 @@ pub fn load_composer_images(files: &[String]) -> Result<Vec<ContentBlock>, Attac
                 mime: mime.to_string(),
             });
         }
-        if let Some(declared) = extension_mime(path)
-            && declared != mime
-        {
-            return Err(AttachmentError::MimeMismatch {
-                index,
-                path: path.clone(),
-                declared,
-                detected: mime.to_string(),
-            });
-        }
         images.push(ContentBlock::Image {
             mime: mime.to_string(),
             data: STANDARD.encode(bytes),
         });
     }
     Ok(images)
-}
-
-fn extension_mime(path: &str) -> Option<&'static str> {
-    let path = path.split(['?', '#']).next().unwrap_or(path);
-    let extension = path.rsplit_once('.')?.1.to_ascii_lowercase();
-    match extension.as_str() {
-        "png" => Some("image/png"),
-        "jpg" | "jpeg" => Some("image/jpeg"),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
