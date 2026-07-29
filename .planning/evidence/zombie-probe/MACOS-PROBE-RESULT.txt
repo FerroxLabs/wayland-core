@@ -1,0 +1,15 @@
+== zombie-probe-macos ==
+SZOMB == 5
+ABI sizeof(struct kinfo_proc)        = 648
+ABI offsetof(kp_proc.p_stat)         = 36
+ABI offsetof(kp_proc.p_pid)          = 40
+ABI sizeof(struct extern_proc)       = 296
+ARM A: real unreaped corpse        pid=66984   kill(pid,0)_says_alive=1  proc_pidinfo.pbi_status=-1 (errno=3 No such process)  sysctl.p_stat=5  sysctl.p_pid_readback=66984  || RUST-ARM-ALGORITHM: rc=1 raw_p_stat=5 raw_p_pid=66984 -> DEAD(zombie)
+ARM A independent oracle (ps): Z   
+   (ps exit=0)
+ARM B: genuinely live process      pid=67038   kill(pid,0)_says_alive=1  proc_pidinfo.pbi_status=2 (errno=0 -)  sysctl.p_stat=2  sysctl.p_pid_readback=67038  || RUST-ARM-ALGORITHM: rc=1 raw_p_stat=2 raw_p_pid=67038 -> LIVE
+ARM D: live, other user (launchd)  pid=1       kill(pid,0)_says_alive=0  proc_pidinfo.pbi_status=-1 (errno=1 Operation not permitted)  sysctl.p_stat=2  sysctl.p_pid_readback=1  || RUST-ARM-ALGORITHM: rc=1 raw_p_stat=2 raw_p_pid=1 -> LIVE
+ARM C: fully reaped (gone)         pid=67043   kill(pid,0)_says_alive=0  proc_pidinfo.pbi_status=-1 (errno=3 No such process)  sysctl.p_stat=-2  sysctl.p_pid_readback=-1  || RUST-ARM-ALGORITHM: rc=0 raw_p_stat=-99 raw_p_pid=-99 -> DEAD(gone)
+
+READING: the correct macOS arm is whichever probe reports 5 (SZOMB)
+for ARM A while reporting a NON-5 live state for ARM B.
