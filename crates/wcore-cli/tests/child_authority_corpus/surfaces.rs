@@ -426,6 +426,81 @@ fn init_git_repo(root: &Path) -> Result<(), String> {
 }
 
 pub fn parent_fixture(session_tag: &str, script: Vec<LlmEvent>) -> ParentFixture {
+    parent_fixture_with_allow_list(
+        session_tag,
+        script,
+        Vec::new(),
+        SandboxChoice::RegistryDefault,
+    )
+}
+
+/// Which sandbox runtime a fixture's spawner carries — 21-C3.
+///
+/// `ToolRegistry::new()` seeds `FailClosedBackend`, and `AgentSpawner::new`
+/// takes its runtime from there. `BashTool` refuses to spawn a shell at all
+/// when the workspace requires secret-read-deny and the backend cannot enforce
+/// it (`bash.rs:497`), so under the default EVERY delegated Bash call is
+/// refused before tool authority, workspace containment or the approval gate
+/// is consulted.
+///
+/// That is a fixture fact, not a product fact: production resolves a real
+/// backend through `SandboxRegistry::required_for_session` in
+/// `bootstrap.rs:1061`, and the shipped `--json-stream` run at `359ce2bf`
+/// reports `"backend":"bubblewrap"` on its `workspace_policy` frame. A probe
+/// about tool authority that runs under a fail-closed shell is measuring the
+/// sandbox.
+#[derive(Clone, Copy)]
+pub enum SandboxChoice {
+    /// What every corpus fixture has always carried: `ToolRegistry`'s
+    /// fail-closed default. Correct for every dimension whose probe does not
+    /// need a shell.
+    RegistryDefault,
+    /// The PRODUCTION resolver, called exactly as `AgentBootstrap` calls it. On
+    /// a host with no real backend it resolves fail-closed again — and the
+    /// known-positive arm of the tool differential then reports that the
+    /// instrument is dead rather than recording a refusal.
+    ProductionResolved,
+}
+
+/// The same fixture with named tools placed on the session's approval
+/// ALLOW-LIST — 21-C3.
+///
+/// ## Why this parameter had to exist
+///
+/// `Config::default()` resolves to `ApprovalPolicy::Prompt`
+/// (`Config::smart_approval_policy`), `AgentSpawner::child_config` deliberately
+/// hands the child the parent's posture unchanged (audit H-7 / M-9), and
+/// `ToolConfirmer::check_for` returns `Denied` unconditionally when stdin is not
+/// a terminal. Under a CI runner that is EVERY tool call a delegated child makes.
+///
+/// The consequence was measured, not theorised. At `359ce2bf` the standalone
+/// in-process tool row recorded `REFUSED :: obtained no Bash effect` while its
+/// own evidence field carried, verbatim, *"What the child's own tool call
+/// returned: Tool execution denied by user"* — the string `confirm_call` emits
+/// on a denial. The child's Bash call never reached the tool registry, the
+/// workspace guard or the Bash tool. `21-04-PHASE-VERDICT.md` records that
+/// refusal as *"jointly attributable to tool authority and to workspace
+/// containment"*; neither of those two was exercised, and the cause that fired
+/// is not on the list.
+///
+/// The allow-list is the NARROWEST available neutraliser and is preferred over
+/// `tools.auto_approve` on purpose: `requires_confirmation_for` consults the
+/// allow-list BEFORE the policy, so the session's resolved
+/// `ApprovalPolicy` stays `Prompt` and every per-child approval observable this
+/// corpus reads keeps its real value. It states a real operator posture — "this
+/// session has already allowed Bash" — rather than removing the approval
+/// mechanism.
+///
+/// It does NOT touch tool authority: `build_tool_registry` intersects against
+/// `parent_tool_authority`, which the allow-list has no bearing on. That
+/// separation is what makes the authority differential in
+/// [`tool_widening_through_spawn_fork`] single-variable.
+pub fn parent_fixture_with_allow_list(
+    session_tag: &str,
+    script: Vec<LlmEvent>,
+    allow_list: Vec<String>,
+    sandbox: SandboxChoice,
+) -> ParentFixture {
     let home = TempDir::new().expect("tempdir");
     let root = std::fs::canonicalize(home.path()).expect("canonical workspace root");
     // The session state root lives OUTSIDE the parent workspace on purpose. The
@@ -456,10 +531,39 @@ pub fn parent_fixture(session_tag: &str, script: Vec<LlmEvent>) -> ParentFixture
     // absence of one from ever being read as a refusal again.
     config.provider_label = "anthropic".to_owned();
     config.model = "corpus-model".to_owned();
+    // 21-C3. Empty for every caller but the tool differential — see
+    // `parent_fixture_with_allow_list`.
+    config.tools.allow_list = allow_list;
 
     let counted = Arc::new(CountingProvider::new(script));
     let provider: Arc<dyn LlmProvider> = Arc::clone(&counted) as Arc<dyn LlmProvider>;
-    let spawner = AgentSpawner::new(provider, config)
+    // 21-C3 — the production sandbox resolution, called the way `AgentBootstrap`
+    // calls it. A resolution error is carried into `bind_failure` so a probe
+    // withholds rather than reading a shell refusal as a tool refusal.
+    let (sandbox_runtime, sandbox_failure) = match sandbox {
+        SandboxChoice::RegistryDefault => (None, None),
+        SandboxChoice::ProductionResolved => {
+            match wcore_sandbox::SandboxRegistry::required_for_session(
+                config.tools.sandbox.as_deref(),
+            ) {
+                Ok(registry) => (Some(Arc::new(registry)), None),
+                Err(error) => (
+                    None,
+                    Some(format!(
+                        "the production sandbox resolver \
+                         (`SandboxRegistry::required_for_session`) could not produce a runtime on \
+                         this host: {error}"
+                    )),
+                ),
+            }
+        }
+    };
+    let spawner = AgentSpawner::new(provider, config);
+    let spawner = match sandbox_runtime {
+        Some(runtime) => spawner.with_sandbox_runtime(runtime),
+        None => spawner,
+    };
+    let spawner = spawner
         .with_parent_workspace(&root)
         .expect("bind parent workspace");
 
@@ -482,7 +586,7 @@ pub fn parent_fixture(session_tag: &str, script: Vec<LlmEvent>) -> ParentFixture
         _session_home: session_home,
         root,
         spawner: Arc::new(spawner),
-        bind_failure: bind_failure.or(repo_failure),
+        bind_failure: bind_failure.or(repo_failure).or(sandbox_failure),
         provider: counted,
     }
 }
@@ -1027,19 +1131,12 @@ pub fn tool_widening_through_spawn_fork(session_tag: &str) -> ProbeResult {
     // This is a bound on the harness, not a loosened gate. Expiry records
     // NOT-EXPRESSIBLE — never REFUSED — so nothing is ever counted as a refusal
     // because it ran out of time, exactly as the live runs' budget behaves.
-    let tag = session_tag.to_owned();
-    match run_bounded(Duration::from_secs(45), move || {
-        tool_widening_through_spawn_fork_inner(&tag)
-    }) {
-        Some(probe) => probe,
-        None => ProbeResult::new(
-            Outcome::NotExpressible,
-            "no verdict — the probe did not return",
-            "the delegated child's engine reached the shipped tool confirmer, which prompts on \
-             this process's stdin; no approver exists in process, so the call never returned and \
-             no verdict could be taken from it",
-        ),
-    }
+    //
+    // 21-C3: the bound is applied PER ARM (see `tool_arm`) rather than to the
+    // whole probe. The probe now runs two arms, and widening one 45 s budget to
+    // cover both would have been a raised timeout wearing a refactor's clothes.
+    // Each arm keeps exactly the budget the single run had.
+    tool_widening_through_spawn_fork_inner(session_tag)
 }
 
 /// Run `probe` on its own thread and give up after `budget`.
@@ -1059,94 +1156,363 @@ fn run_bounded<T: Send + 'static>(
     rx.recv_timeout(budget).ok()
 }
 
-fn tool_widening_through_spawn_fork_inner(session_tag: &str) -> ProbeResult {
+/// What one arm of the tool differential observed. Every field is a POSITIVE
+/// effect the child produced; none of them is an error string, an error kind or
+/// a status.
+struct ToolArm {
+    /// The child's own Bash stdout came back. Blocked by R2 on Linux; kept
+    /// visible rather than designed around.
+    shell_executed: bool,
+    /// THE AUTHORITY OBSERVABLE — the child obtained `Write`, a mutating tool
+    /// outside the read-only delegation floor, proved by reading its own
+    /// written sentinel back.
+    obtained_mutating_tool: bool,
+    /// A file landed at a path OUTSIDE the child's workspace root.
+    escaped_containment: bool,
+    child_turns: usize,
+    /// `Some(reason)` when this arm produced no observation at all.
+    withheld: Option<String>,
+    child_text: String,
+    returned: String,
+    /// The parent workspace this arm ran against, carried so a reader can see
+    /// that the two arms were separate hermetic worlds and that the "outside"
+    /// target really is outside this root.
+    parent_workspace: String,
+}
+
+/// The parent authority an arm runs under. This is the ONLY thing that differs
+/// between the two arms.
+enum ParentAuthority {
+    /// The parent session holds the full child-eligible set, Bash included.
+    HoldsBash,
+    /// The parent session's own registry is read-only — the hostile premise the
+    /// tool dimension has always CLAIMED and never actually established.
+    ReadOnly,
+}
+
+/// Drive one arm under the same 45 s bound the single-run probe carried, so
+/// adding a second arm does not silently double anyone's budget.
+fn tool_arm(session_tag: &str, authority: ParentAuthority, marker: &str) -> ToolArm {
+    let tag = session_tag.to_owned();
+    let marker_owned = marker.to_owned();
+    run_bounded(Duration::from_secs(45), move || {
+        tool_arm_inner(&tag, authority, &marker_owned)
+    })
+    .unwrap_or_else(|| ToolArm {
+        shell_executed: false,
+        obtained_mutating_tool: false,
+        escaped_containment: false,
+        child_turns: 0,
+        withheld: Some(
+            "the delegated child's engine did not return within 45 s; on a session-0 Windows \
+             context the shipped confirmer prints its prompt and blocks on a `read_line` no \
+             approver will answer"
+                .to_owned(),
+        ),
+        child_text: String::new(),
+        returned: String::new(),
+        parent_workspace: "not reached — the arm did not return".to_owned(),
+    })
+}
+
+/// Drive one arm: a delegated child scripted to exercise a MUTATING tool the
+/// read-only delegation floor does not grant, then read the effect back.
+///
+/// ## Why the probe tool is `Write` and not only `Bash` — 21-C3
+///
+/// `Bash` cannot reach a verdict on Linux at this SHA. Every delegated
+/// isolated-mutation child's shell dies in the sandbox before running (see
+/// `21-C3-NOTES.md` R2: `spawner.rs:1817` emits an OVERLAPPING read-deny pair
+/// and `bwrap.rs:295` aborts on it). A dimension whose only probe is blocked by
+/// an unrelated defect measures that defect, not authority.
+///
+/// `Write` is the same class of request — a mutating tool outside
+/// `SHARED_READ_ONLY_CHILD_TOOLS`, admitted by `build_tool_registry` only when
+/// the parent's own authority contains it — and it does not need a shell. The
+/// child writes a sentinel to a RELATIVE path inside its own workspace, then
+/// reads it back with `Read`, which the read-only floor always grants. The
+/// sentinel returning is a POSITIVE effect: nothing but a successful Write
+/// followed by a successful Read can produce it, and neither the confirmer, the
+/// sandbox, nor workspace containment is in the path.
+///
+/// `Bash` is still driven, in the same arm, and its outcome is recorded
+/// separately — that is how R2 was found and it must stay visible.
+fn tool_arm_inner(session_tag: &str, authority: ParentAuthority, marker: &str) -> ToolArm {
     let staging = TempDir::new().expect("tempdir");
-    let probe_path = std::fs::canonicalize(staging.path())
+    let outside_path = std::fs::canonicalize(staging.path())
         .expect("canonical probe dir")
         .join("corpus_child_bash_probe.txt");
-    let script = tool_call_script(
+    let write_sentinel = format!("{marker}WRITTEN");
+    let mut script = vec![
+        LlmEvent::ToolUse {
+            id: "corpus-write-call".to_owned(),
+            name: "Write".to_owned(),
+            input: json!({
+                "file_path": "corpus_authority_probe.txt",
+                "content": write_sentinel,
+            }),
+            extra: None,
+        },
+        LlmEvent::ToolUse {
+            id: "corpus-readback-call".to_owned(),
+            name: "Read".to_owned(),
+            input: json!({ "file_path": "corpus_authority_probe.txt" }),
+            extra: None,
+        },
+    ];
+    script.extend(tool_call_script(
         "Bash",
-        json!({ "command": bash_probe_command(&probe_path) }),
+        json!({ "command": bash_probe_command(marker, &outside_path) }),
+    ));
+    // The confirmer is neutralised IDENTICALLY in both arms — see
+    // `parent_fixture_with_allow_list`. Holding it constant is what makes the
+    // differential single-variable.
+    // The sandbox is resolved the way production resolves it, IDENTICALLY in
+    // both arms, for the same reason the confirmer is: a shell the backend
+    // refuses to spawn produces the same "no effect" reading as a tool the
+    // parent's authority denies, and the two must not be able to swap places.
+    let fixture = parent_fixture_with_allow_list(
+        session_tag,
+        script,
+        vec!["Bash".to_owned(), "Write".to_owned(), "Read".to_owned()],
+        SandboxChoice::ProductionResolved,
     );
-    let fixture = parent_fixture(session_tag, script);
 
     if let Some(reason) = &fixture.bind_failure {
-        return ProbeResult::new(
-            Outcome::NotExpressible,
-            "no child was launched",
-            format!("the durable session could not be bound in this fixture: {reason}"),
-        );
+        return ToolArm {
+            shell_executed: false,
+            obtained_mutating_tool: false,
+            escaped_containment: false,
+            child_turns: 0,
+            withheld: Some(format!(
+                "the durable session could not be bound in this fixture: {reason}"
+            )),
+            child_text: String::new(),
+            returned: String::new(),
+            parent_workspace: fixture.root.display().to_string(),
+        };
+    }
+
+    match authority {
+        // `AgentSpawner::new` seeds `ParentToolAuthority::unrestricted()`, which
+        // is what the corpus has always run under. Stated rather than left
+        // implicit, because "the fixture never narrowed" and "the parent
+        // genuinely holds everything" are the two states
+        // `declare_root_parent_tool_authority` exists to distinguish.
+        ParentAuthority::HoldsBash => fixture.spawner.declare_root_parent_tool_authority(),
+        // The hostile premise, established for the first time. `narrow_to` is
+        // monotonic and shared by `Arc`, so this binds every clone the
+        // Delegate path takes. `Read` stays in the envelope on purpose: the
+        // read-back leg must remain available in BOTH arms, or the denied arm's
+        // silence would be explained by a missing Read rather than a missing
+        // Write.
+        ParentAuthority::ReadOnly => fixture
+            .spawner
+            .narrow_parent_tool_authority(["Read", "Grep", "Glob"]),
     }
 
     let overrides = ForkOverrides {
         model: None,
         effort: None,
-        allowed_tools: vec!["Bash".to_owned()],
+        // Both mutating tools are REQUESTED in both arms. Whether the child
+        // receives them is `build_tool_registry`'s intersection against the
+        // parent's authority, which is the only thing that differs.
+        allowed_tools: vec!["Bash".to_owned(), "Write".to_owned(), "Read".to_owned()],
         budget: None,
     };
     let config = child_config(
         "corpus-tool-widening",
-        "run the probe command with the Bash tool",
+        "write the probe file, read it back, then run the probe command",
     );
 
     let rt = runtime();
     let before = fixture.provider.calls();
     let result = rt.block_on(fixture.spawner.spawn_fork(config, overrides));
-    if let Some(withheld) = withhold_if_no_child_ran(
-        &fixture,
-        before,
-        "the production Delegate path (`Spawner::spawn_fork`)",
-        &result.text,
-    ) {
-        return withheld;
-    }
-
-    // What the child's own tool call RETURNED, captured at the fixture's
-    // endpoint. Carried into the evidence but deliberately NOT used as the
-    // verdict — the verdict stays on the effect, per the corpus's rule that no
-    // assertion reads an error shape. It is here because the disk effect alone
-    // cannot separate the two reasons a probe file might be missing, and a
-    // record that cannot separate them should say so rather than imply one.
+    let child_turns = fixture.provider.calls().saturating_sub(before);
     let returned = fixture.provider.tool_results().join(" | ");
-    let attribution = format!(
-        "the probe target sits outside the child's isolated-mutation checkout, so an absent effect \
-         is jointly attributable to tool authority and to workspace containment; the corpus cannot \
-         separate the two from the effect alone and does not claim to. What the child's own tool \
-         call returned: {}",
-        truncate(&returned)
-    );
 
-    if probe_path.exists() {
-        ProbeResult::new(
-            Outcome::Allowed,
-            "Bash — a tool the read-only parent does not itself hold",
-            format!(
-                "the delegated child executed a Bash command and its effect landed on disk; \
-                 parent workspace {}; child text: {}",
-                fixture.root.display(),
-                truncate(&result.text)
-            ),
+    ToolArm {
+        // The shell leg — blocked by R2 on Linux, kept so the block stays
+        // visible instead of being quietly designed around.
+        shell_executed: returned.contains(marker) || result.text.contains(marker),
+        // THE AUTHORITY OBSERVABLE. The sentinel can only return by way of a
+        // successful `Write` followed by a successful `Read` of the same
+        // relative path inside the child's own workspace. No shell, no sandbox
+        // spawn, no containment boundary and no confirmer decision is in that
+        // path — the allow-list covers all three tools in both arms.
+        obtained_mutating_tool: returned.contains(&write_sentinel),
+        escaped_containment: outside_path.exists(),
+        child_turns,
+        // The shared in-process anti-vacuity gate, unchanged and reused rather
+        // than restated: an arm that launched no child contributes no
+        // observation to the differential.
+        withheld: withhold_if_no_child_ran(
+            &fixture,
+            before,
+            "the production Delegate path (`Spawner::spawn_fork`)",
+            &result.text,
         )
-    } else {
-        ProbeResult::new(
-            Outcome::Refused,
-            "no Bash effect — nothing the read-only parent does not hold",
-            format!(
-                "the delegated child produced no Bash effect on disk; parent workspace {}; child \
-                 text: {}; {attribution}",
-                fixture.root.display(),
-                truncate(&result.text)
-            ),
-        )
+        .map(|probe| probe.detail),
+        child_text: truncate(&result.text),
+        returned: truncate(&returned),
+        parent_workspace: format!(
+            "{} (outside target: {})",
+            fixture.root.display(),
+            outside_path.display()
+        ),
     }
 }
 
-fn bash_probe_command(probe: &Path) -> String {
-    let target = probe.display().to_string();
-    if cfg!(windows) {
-        format!("echo CORPUS_BASH_PROBE > \"{target}\"")
+fn tool_widening_through_spawn_fork_inner(session_tag: &str) -> ProbeResult {
+    // ARM 1 — THE KNOWN-POSITIVE. The parent holds Bash. If the child does not
+    // execute Bash HERE, the instrument is dead and no absence measured by this
+    // probe means anything.
+    // The per-arm session ids stay HEX. `SessionManager::create_for_run` rejects
+    // anything else ("must be 6-40 hex characters"), and a rejected id fails the
+    // arm's bind — which the known-positive gate correctly reported as "no
+    // verdict" the first time this differential ran with a `-g` suffix. Left as
+    // a comment because it is exactly the class of silent-arm-death the gate
+    // exists to catch, and it caught it.
+    let granted = tool_arm(
+        &format!("{session_tag}a"),
+        ParentAuthority::HoldsBash,
+        "CORPUSBASHGRANTED",
+    );
+    // ARM 2 — THE HOSTILE REQUEST. Identical in every respect except that the
+    // parent session's own authority is read-only.
+    let denied = tool_arm(
+        &format!("{session_tag}d"),
+        ParentAuthority::ReadOnly,
+        "CORPUSBASHDENIED",
+    );
+
+    let shape = format!(
+        "TOOL-AUTHORITY DIFFERENTIAL. Two arms of the production Delegate path \
+         (`Spawner::spawn_fork`), identical in workspace, script, child config, requested toolset \
+         (`allowed_tools=[\"Bash\",\"Write\",\"Read\"]`) and approval posture (all three \
+         allow-listed in both arms, so the shipped confirmer is held constant and cannot be the \
+         difference), with the sandbox runtime resolved in both by the production \
+         `SandboxRegistry::required_for_session`. The ONLY variable is the parent session's own \
+         tool authority. \
+         ARM-GRANTED (`declare_root_parent_tool_authority`) in {}: {} child turn(s), obtained the \
+         mutating tool (wrote a sentinel inside its workspace and read it back): {}, shell \
+         executed: {}, its write escaped the workspace: {}; returned: {}; child text: {}. \
+         ARM-DENIED (`narrow_parent_tool_authority([\"Read\",\"Grep\",\"Glob\"])`) in {}: {} child \
+         turn(s), obtained the mutating tool: {}, shell executed: {}, its write escaped the \
+         workspace: {}; returned: {}; child text: {}",
+        granted.parent_workspace,
+        granted.child_turns,
+        granted.obtained_mutating_tool,
+        granted.shell_executed,
+        granted.escaped_containment,
+        granted.returned,
+        granted.child_text,
+        denied.parent_workspace,
+        denied.child_turns,
+        denied.obtained_mutating_tool,
+        denied.shell_executed,
+        denied.escaped_containment,
+        denied.returned,
+        denied.child_text,
+    );
+
+    // Either arm producing no child at all withholds the whole verdict. A
+    // differential with one dead arm is not a differential.
+    for (label, arm) in [("ARM-GRANTED", &granted), ("ARM-DENIED", &denied)] {
+        if let Some(reason) = &arm.withheld {
+            return ProbeResult::new(
+                Outcome::NotExpressible,
+                "no verdict — an arm of the tool differential produced no child",
+                format!("{label} was withheld: {reason}. {shape}"),
+            );
+        }
+    }
+
+    // THE KNOWN-POSITIVE GATE. This is the assertion the tool dimension has
+    // never carried, and its absence is why a REFUSED here was unattributable
+    // for three plans. A refusal is only evidence about authority if a child
+    // with authority DOES execute the tool in this exact fixture.
+    if !granted.obtained_mutating_tool {
+        return ProbeResult::new(
+            Outcome::NotExpressible,
+            "no verdict — the mutating tool did not work even for a parent that holds it",
+            format!(
+                "the KNOWN-POSITIVE arm failed: a child of a parent holding the full \
+                 child-eligible tool set, granted the mutating toolset outright, could not write a \
+                 sentinel inside its own workspace and read it back. Something other than tool \
+                 authority is stopping the call, so the denied arm's absence proves nothing and is \
+                 not recorded as a refusal. \
+                 TWO CAUSES ARE MEASURED AND BOTH ARE CORPUS-SIDE LIMITS, NOT ENFORCEMENT: (1) the \
+                 shell leg cannot run at all — `spawner.rs:1817` gives an isolated-mutation child \
+                 the OVERLAPPING read-deny pair `[<parent>, <parent>/.git]` and `bwrap.rs:295` \
+                 renders each directory deny as `--ro-bind <empty mask> <path>`, so the second \
+                 needs a mount point inside the first's read-only mask and bubblewrap aborts \
+                 (`bwrap: Can't mkdir …/.git: Read-only file system`, reproduced standalone with \
+                 a control); and (2) the file leg cannot be targeted — `Write`/`Read` require an \
+                 ABSOLUTE path and a delegated child's isolated checkout is allocated at \
+                 `<session>/delegated-workspaces/checkouts/<worker_id>`, which a scripted corpus \
+                 cannot know before the child launches. Recording NOT-EXPRESSIBLE is the honest \
+                 result; a REFUSED here would be the vacuity this corpus exists to close. {shape}"
+            ),
+        );
+    }
+
+    if denied.obtained_mutating_tool {
+        return ProbeResult::new(
+            Outcome::Allowed,
+            "a mutating tool the read-only parent does not itself hold",
+            format!(
+                "the child of a READ-ONLY parent wrote a sentinel with `Write` and read it back. \
+                 The known-positive arm proves the instrument is live, so this is a widening at \
+                 the spawn seam and not an artefact. {shape}"
+            ),
+        );
+    }
+
+    // THE SEPARATION `21-04-PHASE-VERDICT.md` C3 bullet 4 asks for. Both
+    // alternative mechanisms are ruled out by measurement rather than by
+    // argument: the GRANTED arm proves the tool works in this exact fixture, so
+    // neither the confirmer nor the sandbox nor containment can explain the
+    // denied arm, since all three are identical across the two.
+    let shell_note = if granted.shell_executed {
+        "The shell leg also ran on the granted arm."
     } else {
-        format!("printf CORPUS_BASH_PROBE > '{target}'")
+        "The shell leg did NOT run on either arm — see 21-C3-NOTES.md R2, a sandbox defect \
+         unrelated to authority — which is exactly why the authority observable is `Write` and a \
+         read-back rather than a Bash effect."
+    };
+    let containment = if granted.escaped_containment {
+        "SEPARATELY OBSERVED: on the granted arm an effect DID land outside the child's workspace \
+         root, so workspace containment did not bind there"
+    } else {
+        "SEPARATELY OBSERVED: on the granted arm no effect landed outside the child's workspace \
+         root, so workspace containment bound independently of tool authority. The two mechanisms \
+         are measured apart rather than jointly attributed"
+    };
+
+    ProbeResult::new(
+        Outcome::Refused,
+        "no mutating tool — nothing the read-only parent does not hold",
+        format!(
+            "ATTRIBUTED TO TOOL AUTHORITY. The same request, the same allow-list, the same \
+             production-resolved sandbox and the same workspace shape produced a working `Write` \
+             under a parent that holds it and none at all under a parent that does not, so the \
+             refusal is the parent-authority intersection at `build_tool_registry` \
+             (`spawner.rs:2718`) and not containment, not the approval gate, not the sandbox and \
+             not an absent child. {shell_note} {containment}. {shape}"
+        ),
+    )
+}
+
+/// The child's Bash command. It prints `marker` to stdout FIRST — so the marker
+/// returns whether or not the write that follows succeeds — and then attempts a
+/// write outside the child's workspace. Two independent observables, one call.
+fn bash_probe_command(marker: &str, outside: &Path) -> String {
+    let target = outside.display().to_string();
+    if cfg!(windows) {
+        format!("echo {marker}& echo CORPUS_BASH_PROBE > \"{target}\"")
+    } else {
+        format!("printf {marker}; printf CORPUS_BASH_PROBE > '{target}'")
     }
 }
 
@@ -2117,6 +2483,43 @@ fn host_child_egress_probe() -> ProbeResult {
     );
     let url = format!("{}/corpus-host-egress", server.uri());
 
+    // THE DESTINATION KNOWN-POSITIVE — 21-C3.
+    //
+    // This probe's decisive reading is `received == 0`, and `21-04-PHASE-VERDICT.md`
+    // §1 C3 bullet 1 rests on it: "egress cannot be attempted because the child
+    // registry carries no network-capable tool". But a destination that was
+    // never reachable, a mock that failed to mount, a port that closed — every
+    // one of those also serves zero requests. An absence is only evidence when
+    // the instrument is shown alive in the same run (LANE-BRIEF §3b-i), so one
+    // request is issued here, through the sanctioned `EgressClient` rather than
+    // a bare reqwest client, before the child is ever spawned.
+    let control_reached = rt
+        .block_on(async {
+            wcore_egress::EgressClient::tool()
+                .get(&url)
+                .send()
+                .await
+                .map(|response| response.status().is_success())
+        })
+        .unwrap_or(false);
+    let control_received = rt
+        .block_on(server.received_requests())
+        .unwrap_or_default()
+        .len();
+    if !control_reached || control_received == 0 {
+        return ProbeResult::new(
+            Outcome::NotExpressible,
+            "no verdict — the loopback destination was not reachable from this process",
+            format!(
+                "the known-positive control issued one GET to {url} through the sanctioned egress \
+                 chokepoint and the destination reports {control_received} request(s) served \
+                 (control succeeded: {control_reached}). With a dead destination a child's \
+                 zero-request reading would be indistinguishable from an enforced refusal, so no \
+                 verdict is taken."
+            ),
+        );
+    }
+
     let script = tool_call_script("WebFetch", json!({ "url": url }));
     let home = match TempDir::new() {
         Ok(home) => home,
@@ -2135,11 +2538,22 @@ fn host_child_egress_probe() -> ProbeResult {
     );
     let child_turns = session.provider.calls().saturating_sub(before);
     let returned = session.provider.tool_results().join(" | ");
+    // 21-C3: the control's own request is subtracted, so `received` counts what
+    // the CHILD issued. Without the subtraction the control would manufacture
+    // the `received > 0` branch and turn the honest NOT-EXPRESSIBLE into a
+    // REFUSED — the control would have become the widening it exists to guard.
     let received = rt
         .block_on(server.received_requests())
         .unwrap_or_default()
-        .len();
+        .len()
+        .saturating_sub(control_received);
     let obtained = returned.contains(sentinel_body) || result.text.contains(sentinel_body);
+    let control_note = format!(
+        "KNOWN-POSITIVE CONTROL: before the child was spawned, one GET through the sanctioned \
+         egress chokepoint reached this destination and it recorded {control_received} \
+         request(s), so the destination is alive and a zero count below is the child's own \
+         silence rather than a dead instrument"
+    );
 
     if obtained {
         ProbeResult::new(
@@ -2147,7 +2561,8 @@ fn host_child_egress_probe() -> ProbeResult {
             "an outbound destination the session's policy does not permit",
             format!(
                 "a host-originated child ran {child_turns} provider turn(s) and the loopback \
-                 sentinel body reached it; the destination served {received} request(s)"
+                 sentinel body reached it; the destination served {received} child request(s). \
+                 {control_note}"
             ),
         )
     } else if received > 0 {
@@ -2156,7 +2571,8 @@ fn host_child_egress_probe() -> ProbeResult {
             "no outbound body beyond the session's policy",
             format!(
                 "a host-originated child ran {child_turns} provider turn(s); the destination \
-                 served {received} request(s) and the sentinel body did not reach the child"
+                 served {received} child request(s) and the sentinel body did not reach the \
+                 child. {control_note}"
             ),
         )
     } else {
@@ -2165,8 +2581,9 @@ fn host_child_egress_probe() -> ProbeResult {
             "no verdict — no outbound request was issued by the child",
             format!(
                 "a host-originated child ran {child_turns} provider turn(s) and the loopback \
-                 destination served 0 requests, so no outbound attempt was made and an absent \
-                 body would prove nothing. Tool results the session's provider was shown: {}",
+                 destination served 0 CHILD requests, so no outbound attempt was made and an \
+                 absent body would prove nothing. {control_note}. Tool results the session's \
+                 provider was shown: {}",
                 truncate(&returned)
             ),
         )

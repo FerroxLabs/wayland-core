@@ -1,0 +1,32 @@
+############ BASELINE (no injection) ############
+COMBINATION :: corpus_tool :: linux :: standalone :: live :: REFUSED :: obtained no Bash effect :: the delegated child's SHELL RAN — its stdout marker returned on the wire in a served provider reque
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 6.84s
+
+COMBINATION :: corpus_fan_out :: linux :: standalone :: live :: REFUSED :: obtained no breadth beyond the parent cap of 5 (0 children ran) :: a batch of 8 was requested and 0 child provider turns arri
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 14.07s
+
+############ KN-1: the child's shell never runs ############
+# injection: the Bash command exits before printing the CHILD_SHELL_RAN marker.
+1
+COMBINATION :: corpus_tool :: linux :: standalone :: live :: REFUSED :: obtained no Bash effect :: the delegated child's SHELL RAN — its stdout marker returned on the wire in a served provider request — and its write still produced no effect in the hermeti
+COMBINATION :: corpus_tool :: linux :: host-protocol :: live :: REFUSED :: obtained no Bash effect :: the delegated child's SHELL RAN — its stdout marker returned on the wire in a served provider request — and its write still produced no effect in the herm
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 6.65s
+
+############ KN-2: the inside write fails, containment not separable ############
+# injection: the relative inside write is redirected to an unwritable path.
+1
+COMBINATION :: corpus_tool :: linux :: standalone :: live :: REFUSED :: obtained no Bash effect :: the delegated child's SHELL RAN — its stdout marker returned on the wire in a served provider request — and its write still produced no effect in the hermeti
+LIVE :: corpus_tool :: linux :: headless-pty :: wayland-core --no-tui --provider anthropic "delegate the task"  (attached to a real PTY; WAYLAND_HOME=/tmp/.tmpIFD4TO) :: the delegated child's SHELL RAN — its stdout marker returned on the wire in a served pro
+COMBINATION :: corpus_tool :: linux :: host-protocol :: live :: REFUSED :: obtained no Bash effect :: the delegated child's SHELL RAN — its stdout marker returned on the wire in a served provider request — and its write still produced no effect in the herm
+LIVE :: corpus_tool :: linux :: json-stream :: wayland-core --json-stream --provider anthropic  (stdin: one `message` command; WAYLAND_HOME=/tmp/.tmpPGBjnn) :: the delegated child's SHELL RAN — its stdout marker returned on the wire in a served provider requ
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 6.54s
+
+############ KN-3: the at-cap fan-out control admits no child ############
+# injection: the control batch is itself over the cap, so it must admit none.
+1
+COMBINATION :: corpus_fan_out :: linux :: standalone :: live :: NOT-EXPRESSIBLE :: obtained no verdict — the breadth seam admitted no child even at the cap :: the AT-CAP live control requested a batch of 99 through the same transport and produced 0 delegated
+COMBINATION :: corpus_fan_out :: linux :: host-protocol :: live :: NOT-EXPRESSIBLE :: obtained no verdict — the breadth seam admitted no child even at the cap :: the AT-CAP live control requested a batch of 99 through the same transport and produced 0 delega
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 4.88s
+
+############ RESTORED ############
+1
