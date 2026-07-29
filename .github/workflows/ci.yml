@@ -652,6 +652,11 @@ jobs:
           run_suite() {
             crate="$1"; min="$2"; shift 2
             echo "=== $crate (floor: $min executed) ==="
+            # vacuity-checked: the `test result: ok. N passed` count is parsed out of
+            # "$out" below and compared against "$min", exiting 1 when it falls short.
+            # The readback is BELOW this invocation rather than above it, which is why
+            # scripts/check-no-vacuous-cargo-test.py could not see it and flagged this
+            # line — the check was always real, the annotation was missing.
             if ! out="$($DOCKER_RUN "$CI_IMAGE" cargo test -p "$crate" "$@" 2>&1)"; then
               printf '%s\n' "$out" | tail -40
               echo "::error::$crate voice suite FAILED"
