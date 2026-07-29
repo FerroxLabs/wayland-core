@@ -358,7 +358,30 @@ class ClauseRun {
 
   // ── inbound submission ─────────────────────────────────────────────────────
 
-  /** POST a Slack events webhook. Returns the correlation token planted. */
+  /**
+   * POST a Slack events webhook. Returns {token, post, accepted}.
+   *
+   * # The route, and why it is asserted rather than assumed
+   *
+   * `inbound_webhook.rs:12-15` documents exactly three routes:
+   *   GET  /webhooks/:channel   (Meta hub.challenge handshake)
+   *   POST /webhooks/:channel   (runtime delivery, EVERY connector)
+   *   GET  /healthz
+   *
+   * Run 1 of this driver posted to an invented `/channels/:name/slack/events`
+   * and got `404` on every submit. The driver then graded the run FAIL with
+   * `arrivals=0`, i.e. **it reported my own wrong URL as product inbound loss.**
+   * That is the instrument carrying the defect class it hunts, failing in the
+   * direction that blames the product — the same shape that made one lane report
+   * `replied=0` against eight real arrivals. Repaired here rather than written
+   * up (§6b-ii: a documented instrument defect is a defect you have agreed to
+   * keep, and that sequence has already recurred once on this program).
+   *
+   * `accepted` is now returned so the caller can distinguish "the product
+   * received this and did nothing" (a real finding) from "the product never
+   * received it" (an instrument fault). Those are opposite diagnoses and they
+   * previously produced the same number.
+   */
   postSlackInbound(channelName, user, channelId) {
     const token = `f24c3fin-${channelName}-${hex(4)}`;
     const body = JSON.stringify({
@@ -381,13 +404,36 @@ class ClauseRun {
         .update(`v0:${ts}:${body}`)
         .digest('hex');
 
+    const url = `http://127.0.0.1:${WEBHOOK_PORT}/webhooks/${channelName}`;
     const r = run([
       process.execPath,
       '-e',
-      `fetch('http://127.0.0.1:${WEBHOOK_PORT}/channels/${channelName}/slack/events',{method:'POST',headers:{'content-type':'application/json','x-slack-request-timestamp':'${ts}','x-slack-signature':'${sig}'},body:${JSON.stringify(body)}}).then(async r=>{process.stdout.write('ST '+r.status+' '+(await r.text()).slice(0,200))}).catch(e=>{process.stdout.write('ERR '+e.message);process.exit(1)})`,
+      `fetch(${JSON.stringify(url)},{method:'POST',headers:{'content-type':'application/json','x-slack-request-timestamp':'${ts}','x-slack-signature':'${sig}'},body:${JSON.stringify(body)}}).then(async r=>{process.stdout.write('ST '+r.status+' '+(await r.text()).slice(0,200))}).catch(e=>{process.stdout.write('ERR '+e.message);process.exit(1)})`,
     ], { timeout: 30_000 });
-    this.note(`submit ${channelName} token=${token} -> ${r.stdout || r.stderr}`);
-    return { token, post: r };
+
+    // Parse the HTTP status the product actually returned.
+    const m = /ST (\d{3})/.exec(r.stdout || '');
+    const httpStatus = m ? Number(m[1]) : null;
+    const accepted = httpStatus !== null && httpStatus >= 200 && httpStatus < 300;
+
+    this.note(
+      `submit ${channelName} token=${token} url=${url} http=${httpStatus ?? 'none'} ` +
+        `accepted=${accepted} raw=${(r.stdout || r.stderr).slice(0, 160).replace(/\n/g, ' ')}`,
+    );
+
+    // A submission the product never accepted cannot produce a reply, and
+    // grading its absence as LOSS blames the product for the harness's mistake.
+    // 404 in particular means the ROUTE was wrong — the connector was never
+    // reached, so nothing about the connector has been measured.
+    if (!accepted) {
+      this.fault(
+        `submit/${channelName}`,
+        `webhook POST to ${url} returned http=${httpStatus ?? 'transport-error'}; ` +
+          `the product never accepted this message, so its absence downstream is an ` +
+          `INSTRUMENT fault and MUST NOT be graded as inbound loss`,
+      );
+    }
+    return { token, post: r, accepted, httpStatus };
   }
 
   /**
@@ -542,7 +588,7 @@ async function main() {
         'gateway',
         'inbound-arrives-post-fixes',
         got1.found,
-        `token=${s1.token} tier=${got1.tier} after=${got1.after_ms}ms ` +
+        `token=${s1.token} accepted=${s1.accepted} http=${s1.httpStatus} tier=${got1.tier} after=${got1.after_ms}ms ` +
           `arrivals=${a.records.length} turns=${t.records.length}`,
         a.records.length,
       );
@@ -631,7 +677,7 @@ async function main() {
         'reconnect-reload',
         'reloaded-adapter-actually-carries-inbound',
         got3.found && after > before,
-        `token=${s3.token} tier=${got3.tier} arrivals_before=${before} arrivals_after=${after} ` +
+        `token=${s3.token} accepted=${s3.accepted} http=${s3.httpStatus} tier=${got3.tier} arrivals_before=${before} arrivals_after=${after} ` +
           `after=${got3.after_ms}ms`,
         after - before,
       );
@@ -646,7 +692,7 @@ async function main() {
         'reconnect-reload',
         'unchanged-adapter-survives-the-reload',
         got1b.found && afterOld > beforeOld,
-        `token=${s1b.token} tier=${got1b.tier} arrivals_before=${beforeOld} arrivals_after=${afterOld}`,
+        `token=${s1b.token} accepted=${s1b.accepted} http=${s1b.httpStatus} tier=${got1b.tier} arrivals_before=${beforeOld} arrivals_after=${afterOld}`,
         afterOld - beforeOld,
       );
     }

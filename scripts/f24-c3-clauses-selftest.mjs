@@ -144,6 +144,80 @@ check('grader: a control of exactly 1 is live and does not fail the leg', () => 
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 2b. Submit acceptance — "never received" vs "received and dropped"
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// FOUND LIVE IN RUN 1 OF THIS DRIVER, and repaired in this lane rather than
+// written up. The driver posted to an invented route, every submit returned
+// `404`, and the driver graded the resulting zero arrivals as FAIL — reporting
+// **its own wrong URL as product inbound loss**. Two opposite diagnoses were
+// producing the same number, and the collapse blamed the product.
+
+function acceptedFrom(stdout) {
+  const m = /ST (\d{3})/.exec(stdout || '');
+  const httpStatus = m ? Number(m[1]) : null;
+  return { httpStatus, accepted: httpStatus !== null && httpStatus >= 200 && httpStatus < 300 };
+}
+
+check('known-positive: a 200 submit is accepted', () => {
+  const a = acceptedFrom('ST 200 ok');
+  assert(a.accepted === true, 'want accepted');
+  assert(a.httpStatus === 200, `want 200, got ${a.httpStatus}`);
+});
+
+check('known-negative: a 404 submit is NOT accepted and is an instrument fault', () => {
+  const a = acceptedFrom('ST 404 ');
+  assert(a.accepted === false, '404 must not be accepted');
+  assert(a.httpStatus === 404, `want 404, got ${a.httpStatus}`);
+});
+
+check('a transport error is not silently read as accepted', () => {
+  const a = acceptedFrom('ERR fetch failed');
+  assert(a.httpStatus === null, 'no status parsed');
+  assert(a.accepted === false, 'an unparseable submit must never count as accepted');
+});
+
+check('THE THIRD ASSERTION: the old driver had no acceptance check at all', () => {
+  // The pre-repair driver returned only {token, post} and every caller read the
+  // arrival journal directly. Under a 404 storm that path yields found=false,
+  // which the leg grader turns into FAIL — a product accusation.
+  const oldDriverWouldGrade = (arrivalFound) => (arrivalFound ? 'PASS' : 'FAIL — product lost it');
+  const newDriverGrades = (arrivalFound, accepted) =>
+    !accepted ? 'INCOMPLETE — instrument fault' : arrivalFound ? 'PASS' : 'FAIL — product lost it';
+
+  const a = acceptedFrom('ST 404 ');
+  assert(
+    oldDriverWouldGrade(false) === 'FAIL — product lost it',
+    'precondition: the old shape must blame the product, else this case proves nothing',
+  );
+  assert(
+    newDriverGrades(false, a.accepted) === 'INCOMPLETE — instrument fault',
+    'the repaired driver must grade a never-accepted submit INCOMPLETE, not LOSS',
+  );
+  // And the repair must NOT launder a genuine product loss into INCOMPLETE.
+  assert(
+    newDriverGrades(false, true) === 'FAIL — product lost it',
+    'a submit the product ACCEPTED and then dropped must still grade FAIL',
+  );
+});
+
+check('source scan: the driver posts to the documented route, not an invented one', () => {
+  const driverPath = path.join(path.dirname(new URL(import.meta.url).pathname), 'f24-c3-clauses.mjs');
+  const src = fs.readFileSync(driverPath, 'utf8');
+  assert(src.length > 10_000, 'driver source implausibly small — scan would be vacuous');
+  // inbound_webhook.rs:12-15 documents exactly: POST /webhooks/:channel
+  assert(/\/webhooks\/\$\{channelName\}/.test(src), 'driver must POST to /webhooks/:channel');
+  assert(
+    !/\/slack\/events/.test(src.replace(/^\s*\*.*$/gm, '')),
+    'the invented /slack/events route must not survive outside comments',
+  );
+  assert(
+    /this\.fault\(\s*`submit\//.test(src),
+    'an unaccepted submit must raise an instrument fault',
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 3. Journal reading — an empty file and an absent file must not read alike
 // ─────────────────────────────────────────────────────────────────────────────
 
