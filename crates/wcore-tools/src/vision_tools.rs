@@ -214,7 +214,6 @@ fn validate_image_bytes(bytes: Vec<u8>) -> Result<(&'static str, Vec<u8>), Strin
     Ok((mime, bytes))
 }
 
-
 /// Source of an image — either a remote URL the fetcher must resolve,
 /// or raw bytes already loaded by the caller (used for hermetic tests).
 #[derive(Debug, Clone)]

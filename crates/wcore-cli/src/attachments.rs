@@ -11,7 +11,9 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use thiserror::Error;
 use wcore_tools::media_intake::IntakeError;
-use wcore_tools::vision_tools::{admit_local_image, image_intake_policy, render_image_intake_error};
+use wcore_tools::vision_tools::{
+    admit_local_image, image_intake_policy, render_image_intake_error,
+};
 use wcore_types::message::ContentBlock;
 
 pub const COMPOSER_MAX_FILES: usize = 8;

@@ -378,9 +378,9 @@ fn truncate(text: String, max: usize) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wcore_tools::vision_tools::VISION_MAX_BYTES;
     use wcore_tools::transcription_tools::CapturingTranscriptionBackend;
     use wcore_tools::vision_tools::CapturingVisionBackend;
+    use wcore_tools::vision_tools::VISION_MAX_BYTES;
 
     /// Minimal valid PNG header — passes `detect_image_mime` + min-size.
     fn png_bytes() -> Vec<u8> {

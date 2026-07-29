@@ -119,9 +119,9 @@ pub fn detect_audio_mime(bytes: &[u8]) -> Option<&'static str> {
 /// unifying the mechanism does not churn a string a host may be matching on.
 fn render_audio_intake_error(e: IntakeError) -> String {
     match e {
-        IntakeError::TooLarge { actual, .. } => format!(
-            "Audio too large: {actual} bytes (limit {TRANSCRIPTION_MAX_BYTES} bytes)"
-        ),
+        IntakeError::TooLarge { actual, .. } => {
+            format!("Audio too large: {actual} bytes (limit {TRANSCRIPTION_MAX_BYTES} bytes)")
+        }
         IntakeError::TooSmall { actual } => {
             format!("Audio too small to be valid ({actual} bytes)")
         }

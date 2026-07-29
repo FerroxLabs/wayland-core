@@ -47,9 +47,7 @@ use wcore_protocol::events::ToolCategory;
 use wcore_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
-use crate::media_intake::{
-    AdmittedHandle, IntakeError, IntakePolicy, MediaKind, admit_open,
-};
+use crate::media_intake::{AdmittedHandle, IntakeError, IntakePolicy, MediaKind, admit_open};
 use crate::tool_output_limits::DEFAULT_MAX_BYTES;
 use crate::truncate_utf8;
 
@@ -356,8 +354,9 @@ fn extract(
                     // validated descriptor. There is no code path in this tool
                     // that reads a handle the intake did not produce.
                     match admit_open(&disk_path, &doc_intake_policy()) {
-                        Ok(again) => extract_inner(again, sheet, MAX_EXTRACT_BUDGET)
-                            .unwrap_or(text),
+                        Ok(again) => {
+                            extract_inner(again, sheet, MAX_EXTRACT_BUDGET).unwrap_or(text)
+                        }
                         Err(_) => text,
                     }
                 };
