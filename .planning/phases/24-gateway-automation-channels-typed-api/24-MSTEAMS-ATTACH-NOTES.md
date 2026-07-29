@@ -148,3 +148,20 @@ enforced on at least one adapter instead of zero.
 
 Severity: MEDIUM (a latent unenforced bound, not an active data-loss bug on a shipped
 path) → BACKLOG per §5, EXCEPT for the part I close myself on msteams.
+
+## 8. Live results (appended after the runs — see 24-MSTEAMS-ATTACH.md for the full account)
+
+- Run 1 FAILED 1/5 with an EMPTY fixture journal. Cause was my own driver, not the
+  adapter: `Atomics.wait` blocks Node's main thread, so the in-process HTTP fixture
+  could never accept. Fixture moved to its own OS process. **M4 also PASSED in that
+  dead run** — the self-passing class — and was hardened to require that a valid
+  token was accepted in the same run.
+- Run clean: **5/5**. BF journal `[token, openid, jwks, activity_out ×3]`.
+- Mutation 1 (`map_attachments -> Vec::new()`): M2 reddens ALONE. 4/5.
+- Mutation 2 (drop the `contentUrl` filter): M3 reddens ALONE, and the failure output
+  shows the exact phantom predicted — `Document (text/html)` and
+  `Other (application/vnd.microsoft.card.adaptive)` in the agent's prompt. 4/5.
+- Gates: clippy clean (3 crates, all targets), `cargo fmt --all -- --check` clean,
+  msteams 38 passed / 0 ignored / 0 filtered, channels 114+17, registry 11.
+- Fence vs merge-base `15cda12d`: **0** lines in `wcore-cli/src/{lib,main}.rs`, with a
+  known-positive control (`inbound.rs` numstat = 1) proving the instrument alive.
