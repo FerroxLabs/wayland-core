@@ -124,6 +124,17 @@ stderr empty (0 B). Harness restores the source in a `finally:` and re-verifies;
 - [x] gateway reload calls it (`gateway.rs`, with the KEPT-STALE refusal)
 - [x] unit tests incl. posture-equality; mutation-proved they can fail (M1 + M2)
 - [x] hetzner build + targeted tests: 5 + 2 + 10 + 1 executed, 0 failed at `44a7cc16`
-- [ ] clippy + wider wcore-agent regression
-- [ ] live driver run: reload leg green, posture asserted, denial still denied
-- [ ] SUMMARY
+- [x] clippy clean; `-p wcore-agent --lib` serial 2170 passed / 0 failed (parallel run's 15
+      failures are journal-lease contention, re-run serially at the same commit)
+- [x] instrument fault #4 found by running (ANSI escapes) and REPAIRED in-lane, 3 assertions
+      over verbatim captured bytes; self-test 20 → 32 passed
+- [x] live: control PASS 6/6; reload on the fixed binary PASS 11/11; reload on the PRE-FIX
+      binary FAIL 8/11 — same driver, same harness commit, only the binary differs
+- [x] SUMMARY written
+
+## T+200 — final position
+
+`24-C3` is NOT MET and this lane does not claim it: `media` and `native actions` are still at
+zero evidence on every adapter, and the `reconnect` half of reconnect/reload is untouched. What
+this lane closes is F24-C3-H5 itself, both facets, live-proven — plus a MEDIUM (H5b) that the
+naive version of the same repair would have shipped.
