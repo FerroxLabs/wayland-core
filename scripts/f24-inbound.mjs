@@ -217,17 +217,66 @@ export function gradeSteady(counts, want) {
 ///   LOSS        it did not, and every control held — attributable to the product
 ///   INCOMPLETE  a control did not hold, so a zero is not attributable at all
 ///
-/// The INCOMPLETE state is the whole point. `servedInInitial` comes from the
-/// FIXTURE's own report in another process: if the fixture never put the gap
-/// event in the post-restart initial sync's timeline, then "it did not arrive"
-/// is a harness fault and reporting it as product loss would be a fabricated
-/// HIGH against working code — which this program has already come within one
-/// step of doing (a dedupe FAIL that was really a 90s replay against a 60s TTL).
-export function gradeRestart({ preArrivals, postArrivals, servedInInitial, gapArrivals }) {
-  const controlsHeld = preArrivals >= 1 && postArrivals >= 1 && servedInInitial === true;
+/// The INCOMPLETE state is the whole point. `servedAfterRestart` comes from the
+/// FIXTURE's own report in another process: if the fixture never served the gap
+/// event to the restarted process at all, then "it did not arrive" is a harness
+/// fault and reporting it as product loss would be a fabricated HIGH against
+/// working code — which this program has already come within one step of doing
+/// (a dedupe FAIL that was really a 90s replay against a 60s TTL).
+///
+/// **F24-C3-H6 instrument repair (24-h6).** This control was `servedInInitial`:
+/// it demanded the gap event appear in a post-restart INITIAL sync's timeline.
+/// That is where the gap event lands only while the product is BROKEN. A fixed
+/// adapter resumes from a persisted cursor, so after a restart it issues an
+/// INCREMENTAL sync and never an initial one — and the old control was
+/// therefore false on every correct run, forcing `INCOMPLETE` and making a PASS
+/// unreachable by construction. The probe could report the defect but could not
+/// report the fix. Widened to "the fixture served the gap event on SOME sync
+/// after the restart", which is what the exclusion always meant: H2 is "the
+/// fixture never served it", not "the fixture never served it on an initial
+/// sync". Strictly stronger — it still excludes H2, and it now grades both
+/// states of the product instead of one.
+export function gradeRestart({ preArrivals, postArrivals, servedAfterRestart, gapArrivals }) {
+  const controlsHeld = preArrivals >= 1 && postArrivals >= 1 && servedAfterRestart === true;
   if (!controlsHeld) return { state: 'INCOMPLETE', graded: false, ok: false };
   if (gapArrivals >= 1) return { state: 'PASS', graded: true, ok: true };
   return { state: 'LOSS', graded: true, ok: false };
+}
+
+/// Did the fixture serve `gapId` on any sync after the restart, and on which
+/// KIND of sync? Reads the fixture's own per-sync record (`syncs[]`, another
+/// process), which carries `initial`, `since` and `served` for every request.
+///
+/// `where` is the mechanism in one field, and it is the difference between the
+/// two states of this defect:
+///   'initial'      served only on a sync whose timeline the adapter discards
+///                  — the message was offered and thrown away (the defect);
+///   'incremental'  served on a resumed sync — the adapter asked for the window
+///                  it missed and was given it (the fix).
+export function servedAfterRestartFrom(allSyncs, syncsBeforeRestart, gapId) {
+  const after = (allSyncs ?? []).filter((s) => s.sync > syncsBeforeRestart);
+  const carrying = after.filter((s) => (s.served ?? []).includes(gapId));
+  const onIncremental = carrying.some((s) => s.initial === false);
+  const onInitial = carrying.some((s) => s.initial === true);
+  return {
+    served: carrying.length > 0,
+    where: onIncremental ? 'incremental' : onInitial ? 'initial' : null,
+    on_initial: onInitial,
+    on_incremental: onIncremental,
+    syncs_after_restart: after.length,
+    served_lists: after.map((s) => ({ sync: s.sync, initial: s.initial, served: s.served })),
+  };
+}
+
+/// The extraction this repair replaces, kept executable so the self-test can
+/// assert the repair actually changes an outcome. NEVER call this from the
+/// driver. It looks ONLY inside post-restart initial syncs, so on a fixed
+/// product — where there is no post-restart initial sync — it returns false and
+/// forces INCOMPLETE.
+export function legacyServedInInitialOnly(initialSyncs, initialsBefore, gapId) {
+  return (initialSyncs ?? [])
+    .slice(initialsBefore)
+    .some((s) => (s.served ?? []).includes(gapId));
 }
 
 /// The grader this module replaces, kept executable so the self-test can assert
@@ -2275,50 +2324,65 @@ class InboundMatrix {
     );
 
     // ── 4. restart, and wait for the adapter to actually sync again ───────
+    //
+    // Keyed on `sync_total`, NOT `initial_sync_total`. The old form waited for
+    // an INITIAL sync, which a correctly-resuming adapter never issues after a
+    // restart — so on fixed code it burned its full 90s budget and then failed
+    // the liveness leg for the one reason that means the fix worked. `sync_total`
+    // increments on every /sync of either kind, so this leg means "the restarted
+    // process reached the homeserver" on both states of the product.
     const initialsBefore = (this.mxReport()?.initial_sync_total) ?? 0;
+    const syncsBeforeRestart = (this.mxReport()?.sync_total) ?? 0;
     this.startBinary('core-restarted');
     let report = null;
     let cameBack = false;
     for (let i = 0; i < 90; i += 1) {
       report = this.mxReport();
-      if (report && report.ok && report.initial_sync_total > initialsBefore) {
+      if (report && report.ok && report.sync_total > syncsBeforeRestart) {
         cameBack = true;
         this.note(
-          `restarted binary issued an initial sync after ${i}s ` +
-            `(initial_sync_total ${initialsBefore} -> ${report.initial_sync_total})`,
+          `restarted binary issued a /sync after ${i}s ` +
+            `(sync_total ${syncsBeforeRestart} -> ${report.sync_total}, ` +
+            `initial_sync_total ${initialsBefore} -> ${report.initial_sync_total})`,
         );
         break;
       }
       process.stdout.write(
         `[inbound] waiting for the restarted binary to /sync: ${i}s ` +
-          `initial_syncs=${report?.initial_sync_total ?? '?'} ${new Date().toISOString()}\n`,
+          `syncs=${report?.sync_total ?? '?'} ${new Date().toISOString()}\n`,
       );
       sleep(1000);
     }
     rec(
       'restarted-binary-resyncs',
       cameBack,
-      `initial_sync_total ${initialsBefore} -> ${report?.initial_sync_total ?? 'UNREADABLE'} ` +
-        `(want an increase: the restarted process must reach the homeserver at all)`,
+      `sync_total ${syncsBeforeRestart} -> ${report?.sync_total ?? 'UNREADABLE'} ` +
+        `(want an increase: the restarted process must reach the homeserver at all). ` +
+        `initial_sync_total ${initialsBefore} -> ${report?.initial_sync_total ?? '?'} — an ` +
+        `increase here means it re-seeded; no increase means it resumed a persisted cursor`,
     );
 
     // ── 5. THE H2 EXCLUSION — did the fixture SERVE the gap event? ────────
     // Read from the fixture's own report, in another process, listing exactly
-    // which event ids each initial sync's timeline carried.
-    const newInitials = (report?.initial_syncs ?? []).slice(initialsBefore);
-    const servedInInitial = newInitials.some((s) => (s.served ?? []).includes(evId('gap')));
+    // which event ids every post-restart sync carried, and on which kind.
+    // Deliberately NOT restricted to initial syncs: see `gradeRestart`. That
+    // restriction made a PASS unreachable on a fixed adapter.
+    const servedProbe = servedAfterRestartFrom(report?.syncs, syncsBeforeRestart, evId('gap'));
+    const servedAfterRestart = servedProbe.served;
     rec(
-      'gap-event-was-in-the-initial-sync-timeline',
-      servedInInitial,
-      `the fixture served ${newInitials.length} initial sync(s) after the restart; ` +
-        `their timelines carried ${JSON.stringify(newInitials.map((s) => s.served))}; ` +
-        `looking for ${evId('gap')} -> ${servedInInitial}. ` +
+      'gap-event-was-served-to-the-restarted-process',
+      servedAfterRestart,
+      `the fixture answered ${servedProbe.syncs_after_restart} sync(s) after the restart; ` +
+        `they carried ${JSON.stringify(servedProbe.served_lists)}; ` +
+        `looking for ${evId('gap')} -> ${servedAfterRestart} (on a ${servedProbe.where ?? 'n/a'} sync). ` +
         `THIS IS THE H2 EXCLUSION: without it a zero below could mean the fixture never ` +
-        `served the message, which is a harness fault and not product loss`,
+        `served the message, which is a harness fault and not product loss. ` +
+        `where=incremental means the adapter resumed and ASKED for the window it missed; ` +
+        `where=initial means it was offered the window on a sync whose timeline it discards`,
     );
-    if (!servedInInitial) {
+    if (!servedAfterRestart) {
       fault =
-        `the fixture did not serve ${evId('gap')} inside any initial sync after the restart, so ` +
+        `the fixture did not serve ${evId('gap')} on any sync after the restart, so ` +
         `"the gap message did not arrive" cannot be attributed to the product. Graded ` +
         `INCOMPLETE rather than LOSS.`;
     }
@@ -2344,7 +2408,7 @@ class InboundMatrix {
     const verdict = gradeRestart({
       preArrivals: seenPre.length,
       postArrivals: seenPost.length,
-      servedInInitial,
+      servedAfterRestart,
       gapArrivals: seenGap.length,
     });
     const graded = verdict.graded;
@@ -2353,19 +2417,21 @@ class InboundMatrix {
         'gap-message-survives-the-restart',
         false,
         `NOT GRADED — a control did not hold (pre=${seenPre.length} post=${seenPost.length} ` +
-          `served_in_initial=${servedInInitial}). arrivals for the gap message=${seenGap.length}. ` +
+          `served_after_restart=${servedAfterRestart}). arrivals for the gap message=${seenGap.length}. ` +
           `${fault ?? 'A zero here is not attributable to the product while a control is down.'}`,
       );
     } else {
       rec(
         'gap-message-survives-the-restart',
         verdict.ok,
-        `verdict=${verdict.state} arrivals=${seenGap.length} want>=1 for a message delivered to the homeserver while the ` +
-          `binary was down and served back inside the post-restart initial sync. ` +
+        `verdict=${verdict.state} arrivals=${seenGap.length} want>=1 for a message delivered to the ` +
+          `homeserver while the binary was down and served back to the restarted process. ` +
           `CONTROLS HELD: pre-restart delivery=${seenPre.length}, post-restart delivery=` +
-          `${seenPost.length}, fixture served the event in an initial sync=${servedInInitial}. ` +
-          `A zero here is silent inbound loss across a restart (sync.rs:190 holds the "since" ` +
-          `cursor in a process-local, sync.rs:217 discards the initial sync's timeline).`,
+          `${seenPost.length}, fixture served the event after the restart=${servedAfterRestart} ` +
+          `(on a ${servedProbe.where ?? 'n/a'} sync). ` +
+          `A zero here is silent inbound loss across a restart: the cursor did not survive the ` +
+          `process, so the first /sync after the restart was an initial sync whose timeline the ` +
+          `replay guard discards — exactly the window that was missed.`,
       );
     }
 
@@ -2375,7 +2441,12 @@ class InboundMatrix {
       instrument_fault: fault,
       gap_event_id: evId('gap'),
       gap_arrivals: seenGap.length,
-      initial_syncs_after_restart: newInitials,
+      served_after_restart: servedProbe,
+      // The mechanism in one field: 'incremental' means the adapter resumed a
+      // persisted cursor and asked for the window it missed; 'initial' means it
+      // re-seeded and was handed that window on a timeline it discards.
+      gap_served_on: servedProbe.where,
+      initial_syncs_after_restart: (report?.initial_syncs ?? []).slice(initialsBefore),
       legs: probe,
     };
     return this.matrixRestartProbe;

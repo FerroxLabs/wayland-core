@@ -35,6 +35,8 @@ import {
   gradeSteady,
   gradeRestart,
   naiveGradeRestart,
+  servedAfterRestartFrom,
+  legacyServedInInitialOnly,
   pidIsLive,
   LEGS,
   ADAPTERS,
@@ -624,14 +626,14 @@ test('T5 the five transcribed conditions still match the driver source (drift gu
 
 test('R1 KNOWN-POSITIVE: gap message arrived with controls held is a PASS', () => {
   eq(
-    gradeRestart({ preArrivals: 1, postArrivals: 1, servedInInitial: true, gapArrivals: 1 }).state,
+    gradeRestart({ preArrivals: 1, postArrivals: 1, servedAfterRestart: true, gapArrivals: 1 }).state,
     'PASS',
     'gap survived',
   );
 });
 
 test('R2 KNOWN-NEGATIVE: gap lost with every control held is LOSS', () => {
-  const v = gradeRestart({ preArrivals: 1, postArrivals: 1, servedInInitial: true, gapArrivals: 0 });
+  const v = gradeRestart({ preArrivals: 1, postArrivals: 1, servedAfterRestart: true, gapArrivals: 0 });
   eq(v.state, 'LOSS', 'attributable loss');
   eq(v.graded, true, 'graded');
   eq(v.ok, false, 'not ok');
@@ -641,23 +643,109 @@ test('R3 THIRD ASSERTION — the NAIVE grader reports LOSS where this one report
   // The instrument fault this probe is built to avoid: the fixture never served
   // the gap event in the post-restart initial sync, so there was nothing to
   // lose. A probe without the H2 exclusion calls that a product defect.
-  const obs = { preArrivals: 1, postArrivals: 1, servedInInitial: false, gapArrivals: 0 };
+  const obs = { preArrivals: 1, postArrivals: 1, servedAfterRestart: false, gapArrivals: 0 };
   eq(gradeRestart(obs).state, 'INCOMPLETE', 'this grader refuses to attribute it');
   eq(gradeRestart(obs).graded, false, 'and does not grade it');
   // THE ASSERTION THAT PROVES THE REPAIR DOES SOMETHING:
   eq(naiveGradeRestart(obs).state, 'LOSS', 'the old grader would have fabricated a HIGH here');
 });
 
+// ── FIFTH INSTRUMENT DEFECT (found in lane 24-h6) ──────────────────────────
+//
+// The H2 exclusion demanded the gap event appear in a post-restart INITIAL
+// sync. That is only where it lands while the product is BROKEN: an adapter
+// that persists its cursor resumes with an INCREMENTAL sync after a restart and
+// never issues an initial one. So the control was false on every correct run,
+// `gradeRestart` returned INCOMPLETE, and the probe COULD NOT EXPRESS A PASS —
+// the mirror image of the self-passing gate this same probe was repaired for
+// once already. It could report the defect but not the fix.
+//
+// Repaired to "the fixture served the gap on SOME sync after the restart",
+// which is what H2 always meant. Three assertions, per LANE-BRIEF §6b-ii.
+
+const SYNCS_FIXED = [
+  { sync: 10, initial: true, since: null, served: ['$pre'] }, // before the restart
+  { sync: 11, initial: false, since: 's7', served: ['$gap'] }, // resumed: asked for the window
+];
+const SYNCS_BROKEN = [
+  { sync: 10, initial: true, since: null, served: ['$pre'] },
+  { sync: 11, initial: true, since: null, served: ['$gap'] }, // re-seeded: offered, then discarded
+];
+
+test('R5 KNOWN-POSITIVE: the gap served on a resumed INCREMENTAL sync is excluded-and-graded', () => {
+  const probe = servedAfterRestartFrom(SYNCS_FIXED, 10, '$gap');
+  eq(probe.served, true, 'the fixture did serve the gap event after the restart');
+  eq(probe.where, 'incremental', 'and it did so on a resumed sync — the mechanism of the fix');
+  eq(
+    gradeRestart({ preArrivals: 1, postArrivals: 1, servedAfterRestart: probe.served, gapArrivals: 1 })
+      .state,
+    'PASS',
+    'a fixed adapter can now reach PASS',
+  );
+});
+
+test('R6 KNOWN-NEGATIVE: a gap the fixture never served is still INCOMPLETE, never LOSS', () => {
+  const probe = servedAfterRestartFrom(
+    [{ sync: 11, initial: false, since: 's7', served: [] }],
+    10,
+    '$gap',
+  );
+  eq(probe.served, false, 'the fixture served nothing — a harness fault, not product loss');
+  eq(probe.where, null, 'and there is no kind of sync to name');
+  const v = gradeRestart({
+    preArrivals: 1,
+    postArrivals: 1,
+    servedAfterRestart: probe.served,
+    gapArrivals: 0,
+  });
+  eq(v.state, 'INCOMPLETE', 'the widened control has NOT weakened the H2 exclusion');
+  eq(v.graded, false, 'and still refuses to attribute it');
+});
+
+test('R7 THIRD ASSERTION — the OLD initial-only extraction misses the fixed product entirely', () => {
+  // The repair must demonstrably change an outcome, or the self-test passes on
+  // the broken instrument too.
+  const repaired = servedAfterRestartFrom(SYNCS_FIXED, 10, '$gap');
+  const legacy = legacyServedInInitialOnly(
+    SYNCS_FIXED.filter((s) => s.initial),
+    1,
+    '$gap',
+  );
+  eq(repaired.served, true, 'the repaired extraction finds the gap event');
+  eq(legacy, false, 'the OLD extraction does not — there is no post-restart initial sync');
+  // ...and that difference is the difference between reporting the fix and
+  // silently grading it unproven.
+  eq(
+    gradeRestart({ preArrivals: 1, postArrivals: 1, servedAfterRestart: legacy, gapArrivals: 1 })
+      .state,
+    'INCOMPLETE',
+    'the old control would have called a working fix UNPROVEN despite the message arriving',
+  );
+
+  // On the BROKEN product both extractions agree — which is why the defect went
+  // unnoticed: the instrument was only ever exercised against broken code.
+  eq(servedAfterRestartFrom(SYNCS_BROKEN, 10, '$gap').served, true, 'repaired agrees on broken');
+  eq(
+    legacyServedInInitialOnly(
+      SYNCS_BROKEN.filter((s) => s.initial),
+      1,
+      '$gap',
+    ),
+    true,
+    'legacy agrees on broken — the two only diverge on a FIXED product',
+  );
+});
+
 test('R4 a dead restart (the process never came back) is INCOMPLETE, not LOSS', () => {
   // Without the post-restart control, a process that came up broken is
   // indistinguishable from one that dropped only the gap message.
   eq(
-    gradeRestart({ preArrivals: 1, postArrivals: 0, servedInInitial: true, gapArrivals: 0 }).state,
+    gradeRestart({ preArrivals: 1, postArrivals: 0, servedAfterRestart: true, gapArrivals: 0 }).state,
     'INCOMPLETE',
     'no post-restart control',
   );
   eq(
-    gradeRestart({ preArrivals: 0, postArrivals: 1, servedInInitial: true, gapArrivals: 0 }).state,
+    gradeRestart({ preArrivals: 0, postArrivals: 1, servedAfterRestart: true, gapArrivals: 0 }).state,
     'INCOMPLETE',
     'no pre-restart control',
   );
@@ -866,31 +954,53 @@ test('P2 matrix homeserver_url STILL has NO default and NO production constant',
   );
 });
 
-test('P3 matrix STILL holds the /sync cursor process-local and STILL discards the initial timeline', () => {
-  // The precondition of the whole restart finding. If someone repairs this, the
-  // probe would go green — and this assertion is what tells the reader the green
-  // means "repaired", not "the defect was never there".
+test('P3 matrix now RESUMES the /sync cursor from disk (F24-C3-H6 fixed in lane 24-h6)', () => {
+  // HISTORY, because a green here must not be misread. Until lane 24-h6 this
+  // test asserted the OPPOSITE — that `sync.rs` still contained
+  // `let mut since: Option<String> = None;` — as the standing precondition of
+  // the restart finding, deliberately written to REDDEN AND NAME ITSELF the
+  // moment someone repaired the product. It did exactly that, on the first run
+  // after the fix landed. Inverted here rather than deleted, so the file still
+  // records that the defect was real and is now closed, and so a REGRESSION
+  // (someone dropping the persistence) reddens again.
   const s = src('crates/wcore-channel-matrix/src/sync.rs');
   assert(
-    s.includes('let mut since: Option<String> = None;'),
-    'the /sync cursor is no longer a process-local `None` seed — the restart finding may be FIXED; ' +
-      're-read sync.rs before reporting the probe result',
+    !s.includes('let mut since: Option<String> = None;'),
+    'the /sync cursor is a process-local `None` seed again — F24-C3-H6 HAS REGRESSED',
   );
+  assert(
+    s.includes('sync_store::load_from(&state_path)'),
+    'sync_loop no longer loads a persisted cursor — the downtime window is being lost again',
+  );
+  assert(
+    s.includes('sync_store::save_to(&state_path, &next_batch)'),
+    'sync_loop no longer persists the cursor — the NEXT restart will lose its window',
+  );
+  // The replay guard must SURVIVE the fix: resuming must not be achieved by
+  // deleting the guard, which would replay the whole room backlog at boot.
   assert(s.includes('let is_initial = since.is_none();'), 'the initial-sync branch changed shape');
-  assert(s.includes('if !is_initial {'), 'the replay guard changed shape');
+  assert(s.includes('if !is_initial {'), 'the replay guard was removed rather than complemented');
 });
 
-test('P4 CONTROL FOR P3 — the same search DOES find persistence in the sibling email adapter', () => {
-  // LANE-BRIEF §3b-i: prove the instrument alive on a known-positive before
-  // reporting an absence. P3's claim is that matrix persists nothing; this
-  // asserts the vocabulary used to look CAN find persistence when it is there.
-  const mx = src('crates/wcore-channel-matrix/src/sync.rs');
+test('P4 CONTROL FOR P3 — the same search finds persistence in BOTH adapters now', () => {
+  // LANE-BRIEF §3b-i: prove the instrument alive on a known-positive. Until
+  // 24-h6 this asserted the vocabulary was found in email and ABSENT in matrix.
+  // The absence is now closed, so the known-positive (email) is what keeps this
+  // honest: if the regex stopped matching anything at all, both halves would
+  // pass vacuously.
+  const mx = src('crates/wcore-channel-matrix/src/sync_store.rs');
   const im = src('crates/wcore-channel-email/src/imap.rs');
   const rx = /persist|watermark|fs::write|fs::read_to_string/;
   assert(rx.test(im), 'the known-positive failed: no persistence vocabulary in imap.rs — INSTRUMENT DEAD');
   assert(
-    !rx.test(mx),
-    'matrix sync.rs now contains persistence vocabulary — the finding may be fixed; re-read it',
+    rx.test(mx),
+    'matrix has no persistence module content — F24-C3-H6 may have been reverted',
+  );
+  // And the shape is the sibling's, not a second invented mechanism: keyed
+  // per-account under the same channel-state directory.
+  assert(
+    mx.includes("join(\"channel-state\")"),
+    'the matrix cursor no longer lives beside the email watermark in channel-state/',
   );
 });
 
