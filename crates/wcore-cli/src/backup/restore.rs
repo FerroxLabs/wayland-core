@@ -487,6 +487,97 @@ mod tests {
         assert!(!target.join("stale").exists());
     }
 
+    /// F26-SC3-H1. A restore that follows an INTERRUPTED restore must not leave
+    /// the interrupted operation's undo store armed behind it.
+    ///
+    /// The sequence is the one a real user produces, because `backup recover` is
+    /// a command they have never heard of: a restore is killed, they simply run
+    /// the restore again, and it succeeds. If the first operation's record and
+    /// undo store survive that, then the NEXT recovery pass — triggered by any
+    /// later interruption, or by the user finally being told about `recover` —
+    /// rolls the home back to a tree that predates the successful restore, and
+    /// the restored content is destroyed.
+    ///
+    /// This test asserts the property in the only place it is observable: run a
+    /// recovery pass after the successful restore and require the tree to still
+    /// be the restored one.
+    #[test]
+    fn a_restore_after_an_interrupted_one_does_not_leave_a_stale_undo_store_armed() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        seed_source(&src);
+        let arc = dir.path().join("a.tar.gz");
+        create_archive(&src, &arc, false).unwrap();
+        let archive_digest = journal::target_digest(&src).unwrap();
+
+        // A live, diverged home.
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(target.join("skills")).unwrap();
+        std::fs::write(target.join("config.toml"), "LIVE PROFILE").unwrap();
+        std::fs::write(target.join("skills/live.md"), "LIVE SKILL").unwrap();
+        let pristine = journal::target_digest(&target).unwrap();
+
+        // --- restore #1, killed mid-apply ---------------------------------
+        // Exactly what `restore_archive` does up to the kill: open the journal,
+        // preserve the prior tree, clear the target, write one payload, die.
+        {
+            let mut guard = journal::begin(&target, "restore").unwrap();
+            guard.preserve_target(&target).unwrap();
+            clear_target(&target).unwrap();
+            std::fs::write(target.join("config.toml"), "[storage]\nx = 1\n").unwrap();
+            std::mem::forget(guard); // the owner died without committing
+        }
+        assert_ne!(
+            journal::target_digest(&target).unwrap(),
+            pristine,
+            "premise: the interrupted restore really did damage the tree"
+        );
+        assert_eq!(
+            journal::list_open(&target).len(),
+            1,
+            "premise: the interrupted restore left exactly one open record"
+        );
+
+        // --- restore #2: the user simply runs it again, and it succeeds ----
+        let out = restore_archive(
+            &arc,
+            &target,
+            RestoreOptions {
+                replace: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(out.written, 2);
+        assert_eq!(
+            journal::target_digest(&target).unwrap(),
+            archive_digest,
+            "premise: the second restore produced the archive's tree"
+        );
+
+        // --- the property ---------------------------------------------------
+        // A recovery pass with EVERY owner dead must find nothing left to undo.
+        // At base this finds the first restore's record, restores its undo store
+        // and destroys the successful restore.
+        let report = journal::recover_with(&target, |_| false).unwrap();
+        assert_eq!(
+            report.recovered, 0,
+            "a stale undo store from an interrupted restore was still armed \
+             after a later restore completed"
+        );
+        assert_eq!(
+            journal::target_digest(&target).unwrap(),
+            archive_digest,
+            "a recovery pass rolled a COMPLETED restore back to a pre-operation \
+             tree — the restored content was destroyed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("skills/demo/SKILL.md")).unwrap(),
+            "archived body"
+        );
+    }
+
     #[test]
     fn a_partial_failure_part_way_through_rolls_back_to_the_exact_prior_tree() {
         let dir = tempfile::tempdir().unwrap();
