@@ -5,9 +5,11 @@ grade-27-C4: NOT MET (3 of 5, up from 1 of 5)
 barge-in: >-
   IMPLEMENTED and proven against the REAL CpalAudioPlayer, not the mock.
   play() now spawns the OS player and keeps a handle; stop() kills it and
-  waits until it is reaped. Known-negative executed: restoring the empty
-  stop() body reds the new test (`0 passed; 1 failed`, 6.01s — the 5 s
-  program ran to completion); the fix greens it. Wired at
+  waits until it is reaped. Known-negative executed TWICE. Cross-platform arm
+  on hetzner: restoring the empty stop() body reds the test (`0 passed; 1
+  failed`, 6.01s — the 5 s program ran to completion). Darwin arm on the real
+  shipped `afplay`: FIXED 0.41s green vs NEGATIVE 7.35s red on a 6 s tone,
+  17.9x. Wired at
   VoiceMode::start_capture, the single chokepoint every capture path goes
   through, so a user starting capture cuts the audio.
 compatibility: >-
@@ -146,6 +148,27 @@ not installable on every host this suite runs on. **The code path is the
 production one — only the program differs** — and it is built through
 `wcore_config::shell::shell_command_builder`, never `Command::new("sh")`
 (AGENTS.md §Forbidden). The Darwin arm below covers the real macOS player.
+
+### 1.3b The Darwin arm — the SHIPPED macOS player, with its own known-negative
+
+The stand-in proves the machinery. `afplay` proves the product. On
+`sean-mac-arm64`, a 6-second 440 Hz WAV played through the production
+`AudioPlayer::play` and interrupted at 400 ms:
+
+```
+FIXED   test ...::darwin_real_afplay_playback_is_cut_by_stop ... ok
+        test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2182 filtered out; 0.41s
+NEGATIVE (empty stop() body restored)
+        test ...::darwin_real_afplay_playback_is_cut_by_stop ... FAILED
+        test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2182 filtered out; 7.35s
+```
+
+**0.41 s against 7.35 s — 17.9x — on a 6-second program.** The negative arm
+took the full length of the audio, which is precisely what a no-op stop
+predicts. The test carries a control asserting this host really did resolve to
+`afplay`, so a pass cannot come from having silently taken another branch.
+Both arms were applied and reverted by file copy, never by a git operation, and
+the tree was verified byte-clean and marker-free afterwards.
 
 ### 1.4 What I refuse to claim: the user still cannot interrupt the agent
 
@@ -344,10 +367,16 @@ issue closed, no `wcore-contract generate`, no runner change, no
 **Darwin exception (LANE-BRIEF §0), used and disclosed.** Machine: Sean's Mac,
 `sean-mac-arm64`. Command: `cargo test -p wcore-agent --features voice --lib
 darwin_real_afplay` — one crate, one named test, never a workspace build,
-never clippy, never release. It qualifies because `afplay` is the program the
-production player resolves to on Darwin and **exists on no permitted host**:
-hetzner is Linux and has no `afplay`, so the shipped macOS playback path is
-provable nowhere else. Everything else in this lane ran on hetzner.
+never clippy, never release. Run twice: once fixed, once with the known-negative
+patch (§1.3b). It qualifies because `afplay` is the program the production
+player resolves to on Darwin and **exists on no permitted host**: hetzner is
+Linux and has no `afplay`, so the shipped macOS playback path is provable
+nowhere else. Everything else in this lane ran on hetzner.
+
+The test plays ~0.4 s of a quiet 440 Hz tone through the default output. **I
+did not change any host audio setting**, did not reconfigure, relabel or stop
+the `sean-mac-arm64` runner, and left no temporary file behind (the WAV is
+written into a `tempfile::tempdir()`).
 
 **No credential was used, needed, echoed, written or transmitted by any leg of
 this lane.**
