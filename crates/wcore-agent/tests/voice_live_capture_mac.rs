@@ -497,8 +497,30 @@ async fn capture_survives_ring_buffer_overflow_past_60s() {
         .map_err(|e| eprintln!("wake pre-roll failed to spawn: {e}"));
     tokio::time::sleep(Duration::from_millis(500)).await;
 
+    // INSTRUMENT DEFECT #2b. A one-shot pre-roll was not enough: the Bluetooth
+    // output sleeps again during the 65 s quiet window and misses the
+    // measurement tone, so the gate reported INDETERMINATE in 2 of 3 runs. It
+    // was declining to claim a product defect, which is correct behaviour — but
+    // a gate that cannot deliver its own precondition is not a gate.
+    //
+    // Fix: hold the speaker awake for the whole quiet window with a continuous
+    // 220 Hz keep-alive. 220 Hz is deliberately OFF-BAND — neither it nor its
+    // harmonics (440/660/880/1100/1320…) land within thousands of Goertzel bins
+    // of the 1 kHz target or of any of the four off-band probes at a 0.25 Hz
+    // bin width — so it keeps the output alive without touching the measurement.
+    let keepalive_path = dir.join("wl-c4-keepalive-220hz.wav");
+    write_wav_mono16(
+        &keepalive_path,
+        44_100,
+        &tone_samples(44_100, (TOTAL_SECS - 3) as f64, 220.0, 6000.0),
+    );
+
     let rec = CpalAudioRecorder::try_default().expect("no default input device");
     rec.start().await.expect("start failed");
+    let mut keepalive = Command::new("afplay")
+        .arg(&keepalive_path)
+        .spawn()
+        .expect("keep-alive spawn failed");
 
     // Run well past the 60 s cap with NO tone, so the ring saturates and every
     // subsequent sample pays the O(n) cost.
@@ -516,6 +538,9 @@ async fn capture_survives_ring_buffer_overflow_past_60s() {
         .expect("afplay spawn failed");
     tokio::time::sleep(Duration::from_secs(5)).await;
     let _ = child.wait();
+    let _ = keepalive.kill();
+    let _ = keepalive.wait();
+    let _ = std::fs::remove_file(&keepalive_path);
 
     let t_stop = std::time::Instant::now();
     let outcome = rec.stop().await.expect("stop failed");

@@ -371,19 +371,41 @@ that per-target defaults are inexpressible.
 
 ### Panel
 
-| leg | vote |
-|---|---|
-| gemini-3.1-pro-preview | `SHIP=NO` |
-| kimi K3 | `SHIP=CONDITIONAL` |
-| codex gpt-5.6-sol | see below |
-| internal adversarial | argued the ALSA premise, and lost to measurement |
+| leg | vote | operational position |
+|---|---|---|
+| gemini-3.1-pro-preview | `SHIP=NO` | do not default now |
+| kimi K3 | `SHIP=CONDITIONAL` | do not default now |
+| codex gpt-5.6-sol | `SHIP=CONDITIONAL` | do not default now |
+| internal adversarial | argued the ALSA premise — **lost to measurement** | — |
 
-Votes extracted **unanchored** (kimi bullet-prefixes and indents, which would
-lose an anchored `^SHIP=` match) and taking the **last** match (codex repeats its
-final block). Both returning legs agree on substance and differ only on ceremony
-— kimi's own self-dissent concedes *"CONDITIONAL is just NO with extra ceremony."*
-I take **NO**, because the ALSA link is a load-time failure and not a
-configuration knob.
+**All three legs returned, and on substance they are unanimous: do not default it
+today.** The split is nominal, not real — kimi's own self-dissent concedes
+*"CONDITIONAL is just NO with extra ceremony"*, and both CONDITIONAL legs name the
+same two preconditions I did (implement interruption; get the voice tests into
+CI). I record my answer as **NO** rather than claiming to have overridden a
+majority: on the only question that decides it — is ALSA a load-time link — all
+three agree with the measurement.
+
+Codex independently reached the ALSA conclusion I measured: *"the dynamic loader
+can reject the entire binary at startup—even when voice is never invoked. The
+tool's self-hiding behavior cannot help because execution never reaches device
+detection."* It also proposes the sharper remedy I endorse: **keep voice opt-in on
+Linux and enable it in macOS/Windows release variants**, rather than one global
+default.
+
+**Two vote-extraction traps hit and survived, both worth recording** because §4
+warns that a wrongly-invoked leg drops its vote silently:
+- **Codex initially returned 39 bytes and no vote — it was blocking on stdin**
+  (`Reading additional input from stdin...`), not refusing. Re-run with
+  `< /dev/null` and it answered fully. Had I scored that first attempt it would
+  have been a dropped vote attributed to the model rather than to my invocation.
+- **My own extraction nearly manufactured a vote.** Codex echoes the prompt, and
+  the prompt lists all three options — so `SHIP=` matched at lines 31/32/33
+  (`YES`, `NO`, `CONDITIONAL`) before codex's real answer at line 44. Taking the
+  **first** match would have recorded `SHIP=YES`, **a vote codex never cast and
+  the opposite of its actual position.** The last-match rule is what saved it, and
+  only by luck of ordering; I verified against the `codex` answer marker rather
+  than trusting the regex.
 
 **Internal adversarial pass**, arguing against the consensus: *the tool self-hides
 when no device is found (verified on a headless host), so a default-on voice
