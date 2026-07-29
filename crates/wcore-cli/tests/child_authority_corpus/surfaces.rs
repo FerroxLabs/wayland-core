@@ -1281,13 +1281,30 @@ fn tool_arm(
 /// Drive one arm: a delegated child scripted to exercise a MUTATING tool the
 /// read-only delegation floor does not grant, then read the effect back.
 ///
-/// ## Why the probe tool is `Write` and not only `Bash` — 21-C3
+/// ## Why the probe drives BOTH `Write` and `Bash` — 21-C3
 ///
-/// `Bash` cannot reach a verdict on Linux at this SHA. Every delegated
-/// isolated-mutation child's shell dies in the sandbox before running (see
-/// `21-C3-NOTES.md` R2: `spawner.rs:1817` emits an OVERLAPPING read-deny pair
-/// and `bwrap.rs:295` aborts on it). A dimension whose only probe is blocked by
-/// an unrelated defect measures that defect, not authority.
+/// Neither observable is sufficient alone, and which one carries the verdict
+/// has changed as the tree moved. Both are driven, and
+/// `ToolArm::obtained_any_mutating_tool` accepts either.
+///
+/// `Bash` could not reach a verdict on Linux while 21-C3-01 was open: every
+/// delegated isolated-mutation child's shell died in the sandbox before running
+/// (`spawner.rs` emitted an OVERLAPPING read-deny pair and `bwrap.rs` aborted
+/// on it). The `f21-bwrap-overlap` lane fixed that in the renderer, and the
+/// shell now runs — measured at `5be91056`: the granted arm reports
+/// `shell executed: true`.
+///
+/// `Write` cannot reach a verdict either, for an unrelated and still-open
+/// reason (21-C3-04): `Write`/`Read` demand an ABSOLUTE path, and a delegated
+/// child's isolated checkout is allocated at
+/// `<session>/delegated-workspaces/checkouts/<worker_id>`, which a scripted
+/// corpus cannot know before the child launches. The granted arm's `Write`
+/// therefore returns `path must be absolute` in every run.
+///
+/// A dimension whose only probe is blocked by an unrelated defect measures that
+/// defect, not authority — which is why keying the gate on `Write` alone made
+/// every tool cell read NOT-EXPRESSIBLE while a working `Bash` differential sat
+/// unread in the same output.
 ///
 /// `Write` is the same class of request — a mutating tool outside
 /// `SHARED_READ_ONLY_CHILD_TOOLS`, admitted by `build_tool_registry` only when
@@ -1536,9 +1553,11 @@ fn tool_widening_through_spawn_fork_inner(session_tag: &str, seam: ChildSpawnSea
             Outcome::Allowed,
             "a mutating tool the read-only parent does not itself hold",
             format!(
-                "the child of a READ-ONLY parent wrote a sentinel with `Write` and read it back. \
-                 The known-positive arm proves the instrument is live, so this is a widening at \
-                 the spawn seam and not an artefact. {shape}"
+                "the child of a READ-ONLY parent obtained a mutating tool outside the read-only \
+                 delegation floor (`Write` sentinel written and read back: {}; `Bash` executed: \
+                 {}). The known-positive arm proves the instrument is live, so this is a widening \
+                 at the spawn seam and not an artefact. {shape}",
+                denied.obtained_mutating_tool, denied.shell_executed
             ),
         );
     }
