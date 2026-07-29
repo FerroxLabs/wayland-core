@@ -426,7 +426,40 @@ fn init_git_repo(root: &Path) -> Result<(), String> {
 }
 
 pub fn parent_fixture(session_tag: &str, script: Vec<LlmEvent>) -> ParentFixture {
-    parent_fixture_with_allow_list(session_tag, script, Vec::new())
+    parent_fixture_with_allow_list(
+        session_tag,
+        script,
+        Vec::new(),
+        SandboxChoice::RegistryDefault,
+    )
+}
+
+/// Which sandbox runtime a fixture's spawner carries — 21-C3.
+///
+/// `ToolRegistry::new()` seeds `FailClosedBackend`, and `AgentSpawner::new`
+/// takes its runtime from there. `BashTool` refuses to spawn a shell at all
+/// when the workspace requires secret-read-deny and the backend cannot enforce
+/// it (`bash.rs:497`), so under the default EVERY delegated Bash call is
+/// refused before tool authority, workspace containment or the approval gate
+/// is consulted.
+///
+/// That is a fixture fact, not a product fact: production resolves a real
+/// backend through `SandboxRegistry::required_for_session` in
+/// `bootstrap.rs:1061`, and the shipped `--json-stream` run at `359ce2bf`
+/// reports `"backend":"bubblewrap"` on its `workspace_policy` frame. A probe
+/// about tool authority that runs under a fail-closed shell is measuring the
+/// sandbox.
+#[derive(Clone, Copy)]
+pub enum SandboxChoice {
+    /// What every corpus fixture has always carried: `ToolRegistry`'s
+    /// fail-closed default. Correct for every dimension whose probe does not
+    /// need a shell.
+    RegistryDefault,
+    /// The PRODUCTION resolver, called exactly as `AgentBootstrap` calls it. On
+    /// a host with no real backend it resolves fail-closed again — and the
+    /// known-positive arm of the tool differential then reports that the
+    /// instrument is dead rather than recording a refusal.
+    ProductionResolved,
 }
 
 /// The same fixture with named tools placed on the session's approval
@@ -466,6 +499,7 @@ pub fn parent_fixture_with_allow_list(
     session_tag: &str,
     script: Vec<LlmEvent>,
     allow_list: Vec<String>,
+    sandbox: SandboxChoice,
 ) -> ParentFixture {
     let home = TempDir::new().expect("tempdir");
     let root = std::fs::canonicalize(home.path()).expect("canonical workspace root");
@@ -503,7 +537,33 @@ pub fn parent_fixture_with_allow_list(
 
     let counted = Arc::new(CountingProvider::new(script));
     let provider: Arc<dyn LlmProvider> = Arc::clone(&counted) as Arc<dyn LlmProvider>;
-    let spawner = AgentSpawner::new(provider, config)
+    // 21-C3 — the production sandbox resolution, called the way `AgentBootstrap`
+    // calls it. A resolution error is carried into `bind_failure` so a probe
+    // withholds rather than reading a shell refusal as a tool refusal.
+    let (sandbox_runtime, sandbox_failure) = match sandbox {
+        SandboxChoice::RegistryDefault => (None, None),
+        SandboxChoice::ProductionResolved => {
+            match wcore_sandbox::SandboxRegistry::required_for_session(
+                config.tools.sandbox.as_deref(),
+            ) {
+                Ok(registry) => (Some(Arc::new(registry)), None),
+                Err(error) => (
+                    None,
+                    Some(format!(
+                        "the production sandbox resolver \
+                         (`SandboxRegistry::required_for_session`) could not produce a runtime on \
+                         this host: {error}"
+                    )),
+                ),
+            }
+        }
+    };
+    let spawner = AgentSpawner::new(provider, config);
+    let spawner = match sandbox_runtime {
+        Some(runtime) => spawner.with_sandbox_runtime(runtime),
+        None => spawner,
+    };
+    let spawner = spawner
         .with_parent_workspace(&root)
         .expect("bind parent workspace");
 
@@ -526,7 +586,7 @@ pub fn parent_fixture_with_allow_list(
         _session_home: session_home,
         root,
         spawner: Arc::new(spawner),
-        bind_failure: bind_failure.or(repo_failure),
+        bind_failure: bind_failure.or(repo_failure).or(sandbox_failure),
         provider: counted,
     }
 }
@@ -1165,7 +1225,16 @@ fn tool_arm_inner(session_tag: &str, authority: ParentAuthority, marker: &str) -
     // The confirmer is neutralised IDENTICALLY in both arms — see
     // `parent_fixture_with_allow_list`. Holding it constant is what makes the
     // differential single-variable.
-    let fixture = parent_fixture_with_allow_list(session_tag, script, vec!["Bash".to_owned()]);
+    // The sandbox is resolved the way production resolves it, IDENTICALLY in
+    // both arms, for the same reason the confirmer is: a shell the backend
+    // refuses to spawn produces the same "no effect" reading as a tool the
+    // parent's authority denies, and the two must not be able to swap places.
+    let fixture = parent_fixture_with_allow_list(
+        session_tag,
+        script,
+        vec!["Bash".to_owned()],
+        SandboxChoice::ProductionResolved,
+    );
 
     if let Some(reason) = &fixture.bind_failure {
         return ToolArm {
