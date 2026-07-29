@@ -176,6 +176,54 @@ impl GoalTerminalState {
     pub fn is_verified(&self) -> bool {
         matches!(self, GoalTerminalState::Verified)
     }
+
+    /// Whether reaching this terminal is a claim ABOUT AN ENGINE'S WORK, and so
+    /// may only be recorded by that engine's loop owner (F22C, Criterion 3).
+    ///
+    /// The taxonomy splits in two, and the split is the whole of the rule:
+    ///
+    /// * **Engine-produced** — `true`. Someone ran a loop and is reporting what
+    ///   it achieved: checks passed, units completed, attempts exhausted, a
+    ///   budget blown, a reason it could not proceed. Such a claim is only
+    ///   meaningful from the owner that did the work, so it is reachable ONLY
+    ///   through `GoalLoopOwnerFinished` — i.e. through one of the five
+    ///   adapters, each of which consumes a `LoopOwner` by value.
+    /// * **Control-plane** — `false`. Nothing is being claimed about a loop's
+    ///   result. The operator cancelled, posture refused the run before it
+    ///   started, a crash was recovered from the journal, a newer run
+    ///   superseded this one, or resume could not rebuild the authority
+    ///   envelope. These are lifecycle facts the supervisor knows without
+    ///   having run an engine, so they stay reachable on the plain path.
+    ///
+    /// # Why this is a match and not a `matches!` list
+    ///
+    /// There is deliberately no wildcard arm. A sixth terminal category added
+    /// tomorrow fails to compile until someone decides which side it is on —
+    /// the loud failure, rather than a silent fall into whichever default the
+    /// author of the new variant never thought about. That is the same device
+    /// `strategy_tag_name` uses for a sixth *strategy*, applied to the
+    /// taxonomy.
+    #[must_use]
+    pub fn requires_loop_owner(&self) -> bool {
+        match self {
+            // Engine-produced: a claim about work that ran.
+            GoalTerminalState::Verified
+            | GoalTerminalState::CriteriaChecked
+            | GoalTerminalState::SelfChecked
+            | GoalTerminalState::PartiallyCompleted { .. }
+            | GoalTerminalState::Exhausted { .. }
+            | GoalTerminalState::NeedsEscalation
+            | GoalTerminalState::Unpriced { .. }
+            | GoalTerminalState::Blocked { .. }
+            | GoalTerminalState::TimedOut => true,
+            // Control-plane: lifecycle facts, no loop result claimed.
+            GoalTerminalState::Cancelled
+            | GoalTerminalState::PermissionDenied
+            | GoalTerminalState::CrashedRecovered
+            | GoalTerminalState::Superseded
+            | GoalTerminalState::AuthorityUnreconstructable { .. } => false,
+        }
+    }
 }
 
 /// Host-observed deterministic evidence that a real executable gate ran and

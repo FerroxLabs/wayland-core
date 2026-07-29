@@ -47,7 +47,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::json;
 
 use wcore_agent::budget_authority::{BudgetAuthorityConfig, BudgetAuthorityCoordinator};
+use wcore_agent::goal::strategy::{AnvilOutcome, GoalLoop, StrategyTermination};
 use wcore_agent::goal::{GoalKernel, GoalLifecycle, GoalRecovery};
+use wcore_agent::orchestration::anvil::TerminalState;
+use wcore_agent::orchestration::anvil::engine::ClimbOutcome;
 use wcore_agent::session_journal::{
     BUDGET_AUTHORITY_SCHEMA_VERSION, BudgetAuthorityCursor, BudgetAuthorityState,
     BudgetWallClockAuthority, CompletionOutcome, DeliveryCompletion, DeliveryOrigin, SessionEvent,
@@ -55,8 +58,7 @@ use wcore_agent::session_journal::{
 };
 use wcore_budget::{BudgetCap, BudgetTracker, ExecutionBudget};
 use wcore_types::goal::{
-    GoalAuthorityRequest, GoalId, GoalStrategy, GoalTerminalState, LoopPolicy, WaitKind,
-    resolve_goal_authority,
+    GoalAuthorityRequest, GoalId, GoalStrategy, LoopPolicy, WaitKind, resolve_goal_authority,
 };
 
 // ── Shared vocabulary ────────────────────────────────────────────────────────
@@ -272,6 +274,47 @@ fn goal_id() -> GoalId {
     GoalId::new("f23-journey-goal")
 }
 
+/// Terminate this journey's Goal the way the shipped product does.
+///
+/// F22C criterion 3 makes an engine verdict sayable only by the Goal's loop
+/// owner: the reducer refuses `SelfChecked` and every other engine-produced
+/// category on the plain `GoalKernel::terminate` path. This journey's Goal is
+/// authorized for Anvil, so it claims the one loop owner and hands Anvil's own
+/// `ClimbOutcome` to `from_anvil`, which is the only constructor of the
+/// `StrategyTermination` the canonical transition consumes.
+///
+/// The journey's assertions are unchanged — the resulting terminal is byte-for
+/// -byte what the raw path used to write. What changed is that this test now
+/// exercises the supervised route the product actually takes.
+fn terminate_as_anvil_owner(
+    kernel: &GoalKernel,
+    terminal: TerminalState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let driver = GoalLoop::new(kernel.clone());
+    let outcome = ClimbOutcome {
+        terminal,
+        stamp: String::new(),
+        checks_passed: 0,
+        checks_total: 0,
+        iterations: 1,
+        valve_fires: 0,
+        winner: None,
+        best_worktree: None,
+        gate_observation: None,
+        landing: None,
+    };
+    tokio::runtime::Builder::new_current_thread()
+        .build()?
+        .block_on(async {
+            driver
+                .run_anvil(&goal_id(), |owner| async move {
+                    StrategyTermination::from_anvil(owner, AnvilOutcome::Climbed(&outcome), 1)
+                })
+                .await
+        })?;
+    Ok(())
+}
+
 /// The memory fact written on day one. Recall on a later day means this exact
 /// value is still readable from durable state after the process that wrote it
 /// stopped existing.
@@ -438,8 +481,14 @@ fn journey_resume(
         kernel
             .resume_from_wait(&goal_id())
             .map_err(|e| format!("resume from the wait: {e}"))?;
-        kernel
-            .terminate(&goal_id(), GoalTerminalState::SelfChecked)
+        // F22C criterion 3: `SelfChecked` is an ENGINE VERDICT, so it is only
+        // sayable by the Goal's loop owner. This journey's Goal is authorized
+        // for Anvil (see `snapshot`), so it terminates the way the product
+        // does — claim the one loop owner, hand the engine's real
+        // `ClimbOutcome` to `from_anvil`, and let the canonical transition
+        // write it. The asserted terminal is unchanged; only the route to it is
+        // now the sanctioned one, which is the point of the criterion.
+        terminate_as_anvil_owner(&kernel, TerminalState::SelfChecked)
             .map_err(|e| format!("terminate the goal: {e}"))?;
         terminal = true;
     }

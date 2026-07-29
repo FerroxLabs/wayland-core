@@ -480,16 +480,51 @@ fn apply_goal_event(
             // canonical transition or not at all. This is what makes "nothing
             // can terminate any other way" a durable rule rather than a naming
             // convention over an API nobody was forced to use.
-            //
-            // A Goal that never claimed an owner is still terminable this way —
-            // but by definition no engine ran it, so there was no loop owner to
-            // be canonical about.
             if let Some(owner) = &goal.loop_owner {
                 return Err(invalid_goal(
                     goal_id,
                     &format!(
                         "loop owner {:?} (epoch {}) holds this goal; terminate through the canonical strategy transition",
                         owner.strategy, owner.epoch
+                    ),
+                ));
+            }
+            // THE COMPLETENESS HALF (F22C, criterion 3 — added by
+            // `lane/22-c3-terminal`).
+            //
+            // The check above closes the bypass only for a Goal that HAS an
+            // owner. This file previously reasoned that the remaining case was
+            // safe because "a Goal that never claimed an owner ... by
+            // definition no engine ran it, so there was no loop owner to be
+            // canonical about."
+            //
+            // That premise is FALSE, and it is exactly the opt-in gap 22-C3 was
+            // left open on. Attaching a Goal to an engine is a caller's choice:
+            // an engine can run a Goal to completion WITHOUT ever claiming, and
+            // then record `SelfChecked` — a full engine verdict — straight down
+            // this path. Nothing above stops it, because no claim was ever
+            // taken. A sixth engine added tomorrow does precisely this by
+            // default, since claiming is the thing it would have to opt into.
+            //
+            // So the rule is not "no second termination while an owner is
+            // live"; it is that an ENGINE VERDICT is only sayable by an engine's
+            // owner. `requires_loop_owner()` is the exhaustive split, and this
+            // is the one place it is enforced: an engine-produced category
+            // reaches the journal through `GoalLoopOwnerFinished` or it does not
+            // reach the journal at all.
+            //
+            // `Verified` is deliberately exempt HERE and refused more strongly
+            // elsewhere: `GoalKernel::terminate` rejects it outright, and
+            // `terminate_verified` demands a `VerifiedTerminal`, obtainable only
+            // from a `HostGateObservation` that has no deserialization route.
+            // Folding it into this refusal would not tighten anything and would
+            // break that older, stronger gate's only route to the journal.
+            if terminal.requires_loop_owner() && !terminal.is_verified() {
+                return Err(invalid_goal(
+                    goal_id,
+                    &format!(
+                        "{terminal:?} is an engine verdict and requires the goal's loop owner; \
+                         claim one and terminate through the canonical strategy transition"
                     ),
                 ));
             }
