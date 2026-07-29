@@ -207,3 +207,85 @@ verbatim that *"`webhook:` and `poll:` are NOT accepted: nothing in this build c
 `cron.rs:350` prints `WILL NEVER FIRE` for persisted legacy jobs. So the **false advertising is
 retired** and `event` fires via `cron publish`. **The plane was not built**: webhook and poll have
 no producers. C2 cannot be MET.
+
+### M8 — NEW FINDING on 24-C4: the support bundle has no operator verb (T+75)
+
+The gap ledger grades `24-C4` **MET on Linux / HTTP+SSE only**. Re-deriving rather than
+inheriting it, I checked the criterion's SECOND half — *"produce useful redacted health/log/support
+evidence"* — against the shipped binary.
+
+```
+/usr/bin/grep -rn "support_bundle" crates/ --include=*.rs
+  crates/wcore-gateway/src/lib.rs:19:            pub mod support_bundle;
+  crates/wcore-gateway/tests/support_bundle_redaction.rs:20  (use ...)
+  crates/wcore-gateway/tests/support_bundle_redaction.rs:269 (doc comment)
+```
+
+**Three hits. One is the module declaration, two are its own test file. ZERO production call sites,
+and no CLI verb.**
+
+Absence discipline (§3b-i), because this is a negative claim:
+- **Instrument proven alive in the same shape:** `/usr/bin/grep -rln "acp" crates/wcore-cli/src`
+  → **6 files**. So the search finds a sibling subsystem's name in the CLI when it is there.
+- **Concept search, not one keyword:** also searched `supportbundle`, `support bundle`,
+  `diagnostic`, `bundle`, `doctor`, `redact` case-insensitively across `crates/wcore-cli/src`.
+  Hits are a TUI `/doctor` diagnostics panel and a `/config` "resolved config (redacted)" view —
+  **neither is a support bundle an operator can hand to support.** `ReleaseVerifier::bundled()` is
+  an unrelated homonym.
+- **Query recorded above so it can be re-run.**
+
+This is the **same advertised-but-dead class** as `F24-C3-H6`/`F24-MB-1` (`media_bounds()` read at
+exactly one site, and that site a test). Filing as **`F24-C4-H1`, severity HIGH**: the criterion
+names support evidence as one of its two halves, and the half is unreachable from the product.
+
+Consequence for the grade: **`24-C4` cannot be MET.** The gap ledger's MET was derived from
+`24-04-SUMMARY.md`'s test evidence for the *recovery* half and did not test the *support-evidence*
+half against the shipped surface. Re-derivation caught it. This is the clearest vindication of the
+"never inherit" rule in this grading.
+
+### M9 — an instrument defect of my own, repaired in-lane (§6b-ii) (T+80)
+
+Measuring whether the support-bundle suite is anti-vacuous, I first ran `/usr/bin/grep -c
+'#\[ignore\]'` → **0**. **That zero was false.** The file's attribute is `#[ignore = "live: …"]`,
+so the literal `]` in my pattern could never match. I had just written a note about known-negative
+assertions being self-passing and then produced one.
+
+Repaired to `#\[ignore` and self-tested with **three** assertions, per §6b-ii:
+
+| # | assertion | result |
+|---|---|---|
+| A1 | known-positive: repaired matcher finds the ignore in this file | **1** ✅ |
+| A2 | known-negative: repaired matcher on `lifecycle.rs` (no ignores) | **0** ✅ |
+| A3 | **the OLD broken matcher would have missed it** | **0** ✅ — repair proven to do something |
+
+A3 is the one that proves the repair is not cosmetic; without it the self-test passes on the broken
+matcher too.
+
+**Corrected measurement:** the suite has **5 `#[test]`**, of which **1 is `#[ignore]`d** —
+`live_bundle_canary`, which is the *only* live one and requires `F24_LIVE_BUNDLE` /
+`F24_LIVE_CANARY_FILE` / `F24_LIVE_SEEDED_DIR`. It is well built (it FAILS rather than skips when
+the vars are absent), but it runs only under `-- --ignored`. So a plain `cargo test -p wcore-gateway`
+exercises the 4 offline redaction tests and **not** the live canary. `24-03-SUMMARY.md`'s
+"canary-proved" therefore describes an opt-in gate, and I downgrade confidence in it accordingly —
+independently of M8, which is the decisive fact.
+
+### M10 — outbound idempotency census (T+82)
+
+```
+/usr/bin/grep -rn "fn supports_outbound_idempotency" crates/ --include=*.rs
+```
+Overrides in **slack, matrix, discord** (3). Trait default `false` at `wcore-channels/src/lib.rs:139`.
+Adapter crates: **10** (`ls -d crates/wcore-channel-*`). So **3 of 10** adapters can suppress a
+cross-restart outbound replay; the other **7 ABANDON** an outcome-unknown delivery. Abandonment is
+honest and fails closed — and it is not delivery. Bears on C1's "without lost … delivery" clause.
+
+### M11 — fence exposure (T+85)
+
+```
+BASE=861d1b1a716240165209336b1fa38d36f9445716
+/usr/bin/git diff --stat "$BASE" HEAD -- crates/wcore-cli/src/lib.rs crates/wcore-cli/src/main.rs
+```
+**Empty — zero fence exposure.** Live control in the same measurement: `git diff --numstat` reports
+`209 0` for `24-GRADE-NOTES.md`, so the diff instrument was alive and the empty fence result is a
+real zero. Files changed by this lane vs base: **1**, `24-GRADE-NOTES.md` (+ this verdict).
+`crates/` or `.github/` paths touched: **0**.
