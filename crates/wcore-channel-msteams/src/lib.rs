@@ -758,6 +758,84 @@ service_url = "https://smba.trafficmanager.net/emea/"
         );
     }
 
+    // 10b. The inbound webhook HOST reaches this connector's authenticated
+    //      ingest — i.e. msteams inbound is exposed, not merely implemented.
+    //
+    // The host (`wcore-agent/src/inbound_webhook.rs`) owns no per-platform
+    // routing table: its handler is generic over `Path(channel)` and its only
+    // dispatch is `manager.ingest_webhook(&channel, &req)`. So driving the
+    // manager by name is the host's own code path, and the error VARIANT is
+    // what the host turns into a status code (`response_for`):
+    //
+    //   Config(_)   -> 404  channel not configured
+    //   Rejected(_) -> 400  fell through to the DEFAULT trait impl (unexposed)
+    //   Auth(_)     -> 401  msteams' own JWT validation ran (exposed)
+    //
+    // Asserting `Auth` and explicitly NOT `Rejected` is therefore a positive
+    // proof of exposure that cannot be satisfied by the unexposed world. This
+    // test exists because `README.md` and the `bootstrap.rs` comment both still
+    // claim msteams inbound is "parsed but not yet exposed over the host",
+    // which is stale — if that claim were true, this test would see `Rejected`.
+    #[tokio::test]
+    async fn manager_dispatch_reaches_msteams_authenticated_ingest_not_the_default_impl() {
+        let mut server = mockito::Server::new_async().await;
+        let token_mock = server
+            .mock("POST", "/token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"access_token":"tk","expires_in":3600,"token_type":"Bearer"}"#)
+            .create_async()
+            .await;
+        let creds = MemCreds::with(&[
+            ("msteams.test.app_id", "app-id-value"),
+            ("msteams.test.app_password", "app-secret-value"),
+        ]);
+        let mut ch = MsTeamsChannel::with_token_url(
+            "msteams",
+            cfg(),
+            creds,
+            format!("{}/token", server.url()),
+        );
+        ch.start().await.unwrap();
+        token_mock.assert_async().await;
+
+        let mut mgr = wcore_channels::ChannelManager::new();
+        mgr.register(Box::new(ch)).await;
+
+        let req = WebhookRequest {
+            method: "POST".into(),
+            headers: vec![],
+            body: r#"{"type":"message"}"#.into(),
+            ..Default::default()
+        };
+
+        let err = mgr
+            .ingest_webhook("msteams", &req)
+            .await
+            .expect_err("unauthenticated POST must not be accepted");
+        assert!(
+            matches!(err, ChannelError::Auth(_)),
+            "host dispatch must reach msteams' JWT validation (-> 401); got {err:?}"
+        );
+        assert!(
+            !matches!(err, ChannelError::Rejected(_)),
+            "Rejected would mean the DEFAULT trait impl ran, i.e. msteams inbound is \
+             NOT exposed over the host; got {err:?}"
+        );
+
+        // Known-negative in the same invocation: an unregistered name must NOT
+        // produce the same answer, so the assertion above is not something every
+        // input satisfies.
+        let unknown = mgr
+            .ingest_webhook("not-a-channel", &req)
+            .await
+            .expect_err("unknown channel must error");
+        assert!(
+            matches!(unknown, ChannelError::Config(_)),
+            "unknown channel must surface Config (-> 404); got {unknown:?}"
+        );
+    }
+
     #[test]
     fn service_urls_match_ignores_trailing_slash_and_case() {
         assert!(service_urls_match(

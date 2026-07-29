@@ -3349,10 +3349,19 @@ impl AgentBootstrap {
             ));
 
             // Inbound webhook host — when enabled, bind an HTTP listener that
-            // routes platform webhook POSTs (Slack / WhatsApp / Twilio SMS) to
-            // each channel's signature-verifying `ingest_webhook`. Off by
-            // default; only the signature-verified connectors override the
-            // trait method, so msteams' unauthenticated parse stays unexposed.
+            // routes platform webhook POSTs (Slack / WhatsApp / Twilio SMS /
+            // MS Teams) to each channel's authenticating `ingest_webhook`. Off
+            // by default. The host holds no per-platform allow-list: it routes
+            // `/webhooks/:channel` by name, and safety comes from the trait
+            // default, which returns `Rejected` so a connector that has NOT
+            // implemented an authenticated ingest is never exposed.
+            //
+            // msteams DOES implement one (Bot Framework JWT: signature,
+            // issuer, audience, expiry, plus a serviceUrl claim/Activity
+            // binding), so it is exposed and authenticated. This comment
+            // previously said the opposite; the regression test that pins it is
+            // `manager_dispatch_reaches_msteams_authenticated_ingest_not_the_default_impl`
+            // in `wcore-channel-msteams`.
             inbound_webhook =
                 crate::inbound_webhook::spawn(std::sync::Arc::clone(&lifted), &inbound_webhook_cfg);
             if inbound_webhook.is_some() {

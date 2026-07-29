@@ -38,6 +38,25 @@ pub struct SmtpConfig {
     pub user_credential_handle: String,
     /// Credentials-store key for the SMTP password.
     pub password_credential_handle: String,
+
+    /// Optional path to a PEM file holding one or more extra TLS trust
+    /// anchors for the SMTP connection.
+    ///
+    /// Needed because the SMTP path is built on `lettre` +
+    /// `tokio1-rustls-tls`, whose default certificate store is the
+    /// **compiled-in** `webpki-roots` Mozilla bundle. That path reads no
+    /// platform trust store on any OS, so a relay with a private or
+    /// self-signed chain — a corporate MTA, or a test relay — is otherwise
+    /// unreachable, and neither `SSL_CERT_FILE` nor adding the CA to the
+    /// system keychain changes that. (Contrast the IMAP path, which uses
+    /// `native-tls` and therefore *does* follow the platform store.)
+    ///
+    /// This ADDS anchors; it never disables verification. There is
+    /// deliberately no option to accept invalid certificates or hostnames —
+    /// trusting a named CA and switching verification off are different
+    /// decisions, and only the first one is offered here.
+    #[serde(default)]
+    pub tls_root_cert_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -287,11 +287,16 @@ pub trait Channel: Send + Sync {
     ///
     /// Default: **unsupported** — poll-based connectors (telegram,
     /// matrix, signal, …) and any connector whose inbound path is not yet
-    /// signature-verified return `Rejected`, so the host never exposes an
-    /// unauthenticated parse to the network. Webhook connectors that
-    /// verify the platform signature (Slack, WhatsApp, Twilio SMS)
-    /// override this to verify → parse → enqueue (mirroring their existing
-    /// `ingest_*` methods) and return a [`WebhookResponse`].
+    /// authenticated return `Rejected`, so the host never exposes an
+    /// unauthenticated parse to the network. This default is the ONLY thing
+    /// keeping such a connector off the network: the host routes
+    /// `/webhooks/:channel` by name and holds no per-platform allow-list.
+    ///
+    /// Connectors that authenticate the caller override this to verify →
+    /// parse → enqueue (mirroring their existing `ingest_*` methods) and
+    /// return a [`WebhookResponse`]. Today: Slack, WhatsApp and Twilio SMS
+    /// (HMAC signature over the raw body) and MS Teams (Bot Framework JWT —
+    /// signature, issuer, audience, expiry, plus a `serviceUrl` claim binding).
     ///
     /// Takes `&self` (not `&mut self`): connectors enqueue through their
     /// interior-mutable inbox, so the host can ingest concurrently with

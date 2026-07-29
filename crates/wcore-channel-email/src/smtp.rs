@@ -15,8 +15,11 @@ use lettre::message::header::{HeaderName, HeaderValue};
 use lettre::message::{Attachment, Message, MultiPart, SinglePart, header::ContentType};
 use lettre::transport::smtp::AsyncSmtpTransport;
 use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::client::{Certificate, Tls, TlsParameters};
 use lettre::transport::smtp::response::Response;
 use lettre::{AsyncTransport, Tokio1Executor};
+use rustls_pki_types::CertificateDer;
+use rustls_pki_types::pem::PemObject;
 
 use crate::error::EmailError;
 
@@ -68,20 +71,94 @@ impl LettreSender {
     /// Build a STARTTLS sender for `host:port` with username/password
     /// SASL PLAIN auth. Returns Err if the relay builder rejects the
     /// host (e.g. malformed name).
+    ///
+    /// `tls_root_cert_path`, when set, names a PEM file holding one or more
+    /// additional trust anchors to accept **in addition to** the roots this
+    /// build already trusts. It is the only way to reach a relay presenting a
+    /// private or self-signed chain, because this crate builds `lettre` with
+    /// `tokio1-rustls-tls`, whose `CertificateStore::Default` resolves to the
+    /// compiled-in `webpki-roots` Mozilla bundle — no platform trust store is
+    /// consulted on any OS, so `SSL_CERT_FILE` and the system keychain have no
+    /// effect on this path. (The IMAP path is unrelated: it uses `native-tls`,
+    /// which does consult the platform store.)
+    ///
+    /// Certificate and hostname verification stay **fully enabled**: lettre's
+    /// `add_root_certificate` only appends to the root store, and its
+    /// verification-disabling branch is gated solely on `accept_invalid_certs` /
+    /// `accept_invalid_hostnames`, neither of which is set here or reachable
+    /// from config. Adding a root is a trust decision; disabling verification is
+    /// not the same thing and is deliberately not offered.
     pub fn new(
         host: &str,
         port: u16,
         username: String,
         password: String,
+        tls_root_cert_path: Option<&str>,
     ) -> Result<Self, EmailError> {
         let creds = Credentials::new(username, password);
-        let transport = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
+        let mut builder = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
             .map_err(|e| EmailError::Smtp(format!("build relay {host}: {e}")))?
             .port(port)
-            .credentials(creds)
-            .build();
-        Ok(Self { inner: transport })
+            .credentials(creds);
+
+        if let Some(path) = tls_root_cert_path {
+            // `starttls_relay` has already installed
+            // `Tls::Required(TlsParameters::new(host))`, so an extra anchor can
+            // only be introduced by replacing those parameters wholesale.
+            builder = builder.tls(Tls::Required(build_tls_params(host, path)?));
+        }
+
+        Ok(Self {
+            inner: builder.build(),
+        })
     }
+}
+
+/// Read a PEM trust anchor from `path` and build STARTTLS parameters for
+/// `host` that trust it in addition to the compiled-in roots.
+///
+/// Split out from `LettreSender::new` so the PEM read/parse failure modes are
+/// unit-testable without standing up an SMTP relay.
+///
+/// # Why the anchors are counted here
+///
+/// `lettre::…::Certificate::from_pem` does NOT reject input that contains no
+/// certificate. On the rustls path it is implemented as
+/// `CertificateDer::pem_slice_iter(pem).collect::<Result<Vec<_>, _>>()`, and
+/// that iterator yields **nothing** for bytes with no PEM block rather than an
+/// error — so the collect succeeds and returns an EMPTY certificate set.
+/// `add_root_certificate` then pushes a certificate carrying zero anchors and
+/// lettre's `for rustls_cert in cert.rustls` loop iterates zero times.
+///
+/// The result would be a sender that builds cleanly, silently trusts only the
+/// default roots, and fails much later with an opaque TLS error — the operator
+/// having pointed the setting at a private key, an empty file or a typo'd path.
+/// Counting the anchors converts that into a config error at connect time,
+/// naming the file. (`from_pem` on the native-tls path *does* reject such
+/// input; this crate builds lettre with rustls, so it does not.)
+pub(crate) fn build_tls_params(host: &str, path: &str) -> Result<TlsParameters, EmailError> {
+    let pem = std::fs::read(path)
+        .map_err(|e| EmailError::Smtp(format!("read smtp tls_root_cert_path {path}: {e}")))?;
+
+    // Parsed with the same parser lettre uses, so this count cannot disagree
+    // with what lettre will actually load.
+    let anchors = CertificateDer::pem_slice_iter(&pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| EmailError::Smtp(format!("parse smtp tls_root_cert_path {path}: {e}")))?;
+    if anchors.is_empty() {
+        return Err(EmailError::Smtp(format!(
+            "smtp tls_root_cert_path {path} contains no CERTIFICATE PEM block; \
+             refusing to build a sender that would silently fall back to the \
+             default roots"
+        )));
+    }
+
+    let cert = Certificate::from_pem(&pem)
+        .map_err(|e| EmailError::Smtp(format!("parse smtp tls_root_cert_path {path}: {e}")))?;
+    TlsParameters::builder(host.to_string())
+        .add_root_certificate(cert)
+        .build()
+        .map_err(|e| EmailError::Smtp(format!("build tls params for {host}: {e}")))
 }
 
 #[async_trait]
@@ -440,6 +517,56 @@ pub(crate) fn response_message_id(r: &Response) -> String {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// A misconfigured anchor path must be a loud error, not a silent fallback
+    /// to the default roots.
+    ///
+    /// This is the failure mode that would hide the whole feature: if a typo'd
+    /// path degraded quietly to "compiled-in roots only", an operator pointing
+    /// at a corporate CA would get an unexplained TLS failure at send time
+    /// instead of a config error at connect time.
+    #[test]
+    fn tls_root_cert_path_that_does_not_exist_errors() {
+        // `let ... else` rather than `expect_err`: `TlsParameters` is not
+        // `Debug`, so the `Result` cannot be unwrapped by the usual helpers.
+        let Err(err) =
+            build_tls_params("smtp.acme.com", "/nonexistent/wayland-test/no-such-ca.pem")
+        else {
+            panic!("a missing anchor file must not be ignored");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tls_root_cert_path") && msg.contains("no-such-ca.pem"),
+            "error must name the offending setting and path; got: {msg}"
+        );
+    }
+
+    /// A file that exists but is not a certificate must also error rather than
+    /// being silently skipped.
+    #[test]
+    fn tls_root_cert_path_with_garbage_contents_errors() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "wl-email-bad-ca-{}-{}.pem",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"this is not a certificate\n").unwrap();
+
+        let result = build_tls_params("smtp.acme.com", path.to_str().unwrap());
+        let _ = std::fs::remove_file(&path);
+
+        let Err(err) = result else {
+            panic!("a non-PEM anchor file must not be ignored");
+        };
+        assert!(
+            err.to_string().contains("tls_root_cert_path"),
+            "error must name the offending setting; got: {err}"
+        );
+    }
 
     /// In-memory MailSender for tests. Records every send + a programmable
     /// outcome script — pop one outcome per call.
