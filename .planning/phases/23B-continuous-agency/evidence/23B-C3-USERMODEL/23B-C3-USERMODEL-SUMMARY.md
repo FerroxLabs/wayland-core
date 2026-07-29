@@ -5,8 +5,10 @@ Criterion text (verbatim, `23B-PHASE-VERDICT.md:19`):
 > See and control memory/**user-model** activation, provenance, correction, forgetting,
 > privacy, retention, nudges.
 
-Base `plan/f20-unified-audit-repair` @ `eaff921d`. Integration merged mid-lane
-(`gh/plan/f20-unified-audit-repair` @ `632ad619`), clean, no conflicts.
+Base `plan/f20-unified-audit-repair` @ `eaff921d`. Lane HEAD `c3d79b99`. Integration merged twice (it moves under you): first at
+`632ad619`, then again at `49d0ba51` before finishing. Both clean, no conflicts. All
+numbers below re-verified at the final merged HEAD; live drives re-run there **19/19** and
+**11/11**.
 
 **My grade: criterion 3 is still NOT MET.** On the user-model half, **1 of 7 verbs is
 closed**, 3 are half, 3 are not met. I graded per verb and not as a whole, because the
@@ -147,7 +149,7 @@ I graded nudges **NOT MET**, not HALF. Deferral stated plainly is not redefining
 | `fixed-wire.log` | **3 passed, 0 failed, 0 ignored, 0 filtered out** |
 | `usermodel-live-drive.log` + `.sh` | **19/19 GREEN** through the shipped binary |
 | `memory-correct-live-drive.log` + `.sh` | **11/11 GREEN** — memory-half `/memory correct` |
-| `final-suites-and-show.log` | **3711 passed, 0 failed, 8 skipped**; live `/usermodel show` output |
+| `final-suites-and-show.log` | **3711 passed, 0 failed, 8 skipped** (re-run at the final merged HEAD `c3d79b99`: **3716 passed, 0 failed, 8 skipped**); live `/usermodel show` output |
 | `credential-sweep.log` | live-key hits **0** |
 
 The wire proof (`crates/wcore-agent/tests/user_model_correction_wire.rs`) correct**s**,
