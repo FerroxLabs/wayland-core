@@ -68,6 +68,8 @@ const TOMBSTONES: &str = "tombstones";
 const JOURNAL: &str = "journal.jsonl";
 /// Payload subdirectory inside a generation.
 const PAYLOAD: &str = "payload";
+/// Subdirectory holding promotion grants. One file per promoted artifact.
+pub(crate) const PROMOTIONS: &str = "promotions";
 
 /// Hard cap on a single snapshot, so a pathological skill directory cannot fill the
 /// user's disk during what is supposed to be a *remedial* operation.
@@ -106,7 +108,7 @@ pub enum GovernError {
     NoRoot,
 }
 
-fn io_err(path: &Path, source: std::io::Error) -> GovernError {
+pub(crate) fn io_err(path: &Path, source: std::io::Error) -> GovernError {
     GovernError::Io {
         path: path.display().to_string(),
         source,
@@ -160,6 +162,35 @@ pub enum JournalEvent {
         skill_name: String,
         signature: Option<String>,
         revocation_id: String,
+        at: String,
+    },
+    /// 23A-C1: a skill was granted model-facing status by a governed promotion.
+    /// Carries the content digest so the record says *which bytes* were promoted,
+    /// not merely which name.
+    Promoted {
+        promotion_id: String,
+        skill_name: String,
+        signature: Option<String>,
+        procedure_id: Option<String>,
+        content_digest: String,
+        authority: String,
+        target_dir: PathBuf,
+        at: String,
+    },
+    /// A promotion was refused. Recorded because a refusal is the governance
+    /// system doing its job, and an unlogged refusal is indistinguishable from a
+    /// promotion that was never attempted.
+    PromotionRefused {
+        skill_name: String,
+        reason: String,
+        at: String,
+    },
+    /// A promotion grant was withdrawn -- either explicitly, or because the
+    /// artifact it was bound to was revoked.
+    PromotionWithdrawn {
+        promotion_id: String,
+        skill_name: String,
+        reason: String,
         at: String,
     },
 }
@@ -266,6 +297,22 @@ impl GovernanceStore {
         create_dir_all(&tombstones)?;
         write_atomic(&tombstones.join(format!("{revocation_id}.json")), &encoded)?;
 
+        // ---- 3b. withdraw any promotion grant for this artifact. ----
+        //
+        // 23A-C1 resurrection hazard. A promotion grant is what lifts the loader's
+        // quarantine, so a grant that outlived its revocation would mean: revoke,
+        // then have the artifact return by any route at all, and it comes back
+        // **model-facing** rather than quarantined -- strictly worse than the state
+        // before the user ever revoked it. Withdrawal happens here, inside `revoke`,
+        // rather than being left to the caller, because a caller that forgets is the
+        // whole failure mode.
+        //
+        // Ordered after the tombstone so a crash between the two leaves suppression
+        // durable with a stale grant, which the loader resolves in the safe
+        // direction: `revoked` is checked before `promoted`, so the skill is dropped
+        // regardless of the grant.
+        self.withdraw_promotions_for(&skill_name, signature.as_deref(), "artifact revoked")?;
+
         // ---- 4. history ----
         self.append_journal(&JournalEvent::Revoked {
             revocation_id: revocation_id.clone(),
@@ -311,7 +358,33 @@ impl GovernanceStore {
         // Restore the bytes BEFORE clearing suppression. If this order were reversed a crash
         // in between would leave the draft un-suppressed and absent, so the drafter would
         // recreate it from scratch and the user's retained version would be orphaned.
-        copy_tree(&payload, &record.source_dir)?;
+        //
+        // 23A-C1: the restore is **staged and renamed**, not copied straight into place.
+        //
+        // A direct `copy_tree` into `source_dir` writes the user's skills directory file by
+        // file, so a kill part-way through leaves a **partially-restored skill directory**:
+        // present, loadable, and missing content. That is the same half-written-state class
+        // this program already measured on an interrupted migration, and it sat on a shipped
+        // verb. `rename(2)` is atomic, so the restored directory either does not exist or is
+        // the complete retained tree, with no third state for a kill to land in.
+        //
+        // Staging lives outside the skills tree (see `promote::staging_root_for`) because
+        // `collect_skill_md` does not skip dot-directories -- a half-built staging directory
+        // holding a `SKILL.md` inside the skills root would be discovered and loaded.
+        let parent = record.source_dir.parent().ok_or_else(|| {
+            GovernError::NotFound(record.source_dir.display().to_string())
+        })?;
+        let staging_root = crate::promote::staging_root_for(parent);
+        create_dir_all(&staging_root)?;
+        let staged = staging_root.join(uuid::Uuid::new_v4().to_string());
+        copy_tree(&payload, &staged)?;
+        crate::promote::sync_dir(&staged);
+        create_dir_all(parent)?;
+        if let Err(e) = std::fs::rename(&staged, &record.source_dir) {
+            let _ = std::fs::remove_dir_all(&staged);
+            return Err(io_err(&record.source_dir, e));
+        }
+        crate::promote::sync_dir(parent);
 
         std::fs::remove_file(&tombstone).map_err(|e| io_err(&tombstone, e))?;
 
@@ -437,7 +510,7 @@ impl GovernanceStore {
             .collect())
     }
 
-    fn append_journal(&self, event: &JournalEvent) -> Result<(), GovernError> {
+    pub(crate) fn append_journal(&self, event: &JournalEvent) -> Result<(), GovernError> {
         use std::io::Write;
         create_dir_all(&self.root)?;
         let path = self.journal_path();
@@ -489,15 +562,15 @@ fn new_revocation_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-fn create_dir_all(p: &Path) -> Result<(), GovernError> {
+pub(crate) fn create_dir_all(p: &Path) -> Result<(), GovernError> {
     std::fs::create_dir_all(p).map_err(|e| io_err(p, e))
 }
 
-fn write_atomic(p: &Path, bytes: &[u8]) -> Result<(), GovernError> {
+pub(crate) fn write_atomic(p: &Path, bytes: &[u8]) -> Result<(), GovernError> {
     if let Some(parent) = p.parent() {
         create_dir_all(parent)?;
     }
