@@ -1,0 +1,61 @@
+=== BASELINES (a mutation against an already-red gate proves nothing)
+  B1 flux default
+    executed=1 passed=1 failed=0  -> GREEN
+    [OK]   B1 = GREEN
+  B2 openai non-regression
+    executed=1 passed=1 failed=0  -> GREEN
+    [OK]   B2 = GREEN
+  B3 models differ (compat layer)
+    executed=1 passed=1 failed=0  -> GREEN
+    [OK]   B3 = GREEN
+  B4 merge ripple
+    executed=1 passed=1 failed=0  -> GREEN
+    [OK]   B4 = GREEN
+  B5 env outranks compat
+    executed=1 passed=1 failed=0  -> GREEN
+    [OK]   B5 = GREEN
+
+=== M1 — revert the fix: flux_router_defaults declares no image model.
+        This is EXACTLY the pre-fix state: the resolver falls back to the
+        global gpt-image-1, which is what failed live on a Flux key.
+    executed=1 passed=0 failed=1  -> RED
+    [OK]   M1-flux = RED
+    executed=1 passed=0 failed=1  -> RED
+    [OK]   M1-differ = RED
+    executed=1 passed=1 failed=0  -> GREEN
+    [OK]   M1-openai-unaffected = GREEN
+
+=== M2 — give OpenAI the Flux model. The two-provider 'differ' assertion
+        must catch it; asserting each value alone would not.
+    executed=1 passed=0 failed=1  -> RED
+    [OK]   M2-differ = RED
+    executed=1 passed=0 failed=1  -> RED
+    [OK]   M2-openai = RED
+    executed=1 passed=0 failed=1  -> RED
+    [OK]   M2-resolver-differ = RED
+
+=== M3 — drop the merge() arm (the documented ProviderCompat gotcha: a
+        field not threaded through merge compiles and silently discards
+        every user override).
+    executed=1 passed=0 failed=1  -> RED
+    [OK]   M3-merge = RED
+
+=== M4 — resolver ignores the compat argument (the #310 shape: endpoint
+        and key resolved from config, model left global).
+    executed=1 passed=0 failed=1  -> RED
+    [OK]   M4-flux = RED
+    executed=1 passed=0 failed=1  -> RED
+    [OK]   M4-differ = RED
+
+=== RESTORED baseline re-check (a mutation left in place would poison
+    every later measurement in this lane)
+    executed=1 passed=1 failed=0  -> GREEN
+    [OK]   R1 = GREEN
+    executed=1 passed=1 failed=0  -> GREEN
+    [OK]   R2 = GREEN
+    executed=1 passed=1 failed=0  -> GREEN
+    [OK]   R3 = GREEN
+    [OK]   sources byte-identical to pre-mutation
+
+MUTATION_CONTROL_PASSES=18 MUTATION_CONTROL_FAILS=0
+MUTATION_CONTROL=PASS
