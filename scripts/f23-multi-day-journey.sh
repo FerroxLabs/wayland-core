@@ -64,7 +64,38 @@ case "$(uname -s)" in
   *) echo "FATAL: unsupported platform $(uname -s); Windows runs the .ps1 port" >&2; exit 66 ;;
 esac
 
-[ -n "$ROOT" ] || ROOT="$HOME/.f23-journey-$PLATFORM"
+# ── The journey root, derived explicitly ────────────────────────────────────
+# NEVER `$HOME` bare. A systemd transient service does not export HOME, so under
+# `set -u` (line 28) the bare read aborts the script at this line before it does
+# any work at all. That is precisely how the scheduled day-2 resume died:
+#   scripts/f23-multi-day-journey.sh: line 67: HOME: unbound variable   (rc=1)
+# The failure is invisible to a shell test, because an interactive or ssh shell
+# always exports HOME — it only appears under the scheduler that actually runs
+# this script. The Windows port guards the same class with an explicit -Root
+# parameter (f23-multi-day-journey.ps1:28); this is that same shape on Linux.
+#
+# Order: explicit --root, then HOME if it is actually set, then the passwd
+# database — which is authoritative and present regardless of the environment.
+# If all three yield nothing, REFUSE. A default here would silently relocate a
+# multi-day journey's state and read an empty run log as "the journey did not
+# run", turning a lost root into a false negative.
+if [ -z "$ROOT" ]; then
+  HOME_DIR="${HOME:-}"
+  if [ -z "$HOME_DIR" ]; then
+    HOME_DIR=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)
+  fi
+  if [ -z "$HOME_DIR" ]; then
+    HOME_DIR=$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null \
+      | sed -n 's/^NFSHomeDirectory: //p')
+  fi
+  if [ -z "$HOME_DIR" ]; then
+    echo "FATAL: no --root given, HOME is unset, and no home directory could be" >&2
+    echo "       derived from the passwd database; pass --root explicitly" >&2
+    exit 64
+  fi
+  ROOT="$HOME_DIR/.f23-journey-$PLATFORM"
+fi
+echo "F23_04_JOURNEY_ROOT=$ROOT"
 RUNLOG="$ROOT/runlog.txt"
 DECISION="$REPO/.planning/phases/23B-continuous-agency/23B-04-CLOCK-DECISION.md"
 

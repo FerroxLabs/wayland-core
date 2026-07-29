@@ -29,7 +29,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use wcore_agent::goal::strategy::{
-    DirectOutcome, FleetOutcome, GoalLoop, GoalLoopError, StrategyTermination, strategy_tag_name,
+    AnvilOutcome, CouncilRunOutcome, DirectOutcome, FleetOutcome, GoalLoop, GoalLoopError,
+    StrategyTermination, strategy_tag_name,
 };
 use wcore_agent::goal::{GoalKernel, GoalLifecycle};
 use wcore_agent::orchestration::anvil::TerminalState;
@@ -199,7 +200,7 @@ async fn each_of_the_five_strategies_produces_exactly_one_canonical_transition()
                     .run_council(&id, |owner| async move {
                         StrategyTermination::from_council(
                             owner,
-                            Err(&wcore_agent::orchestration::council::run::CouncilError::UnpriceableRoster),
+                            CouncilRunOutcome::Failed(&wcore_agent::orchestration::council::run::CouncilError::UnpriceableRoster),
                         )
                     })
                     .await
@@ -210,7 +211,9 @@ async fn each_of_the_five_strategies_produces_exactly_one_canonical_transition()
                     .run_anvil(&id, |owner| async move {
                         StrategyTermination::from_anvil(
                             owner,
-                            Err(&EngineError::Gate("sandbox refused".to_owned())),
+                            AnvilOutcome::EngineFailed(&EngineError::Gate(
+                                "sandbox refused".to_owned(),
+                            )),
                             REQUIRED_STABILITY,
                         )
                     })
@@ -326,7 +329,9 @@ async fn a_strategy_the_durable_record_did_not_authorize_is_refused() {
         .run_council(&id, |owner| async move {
             StrategyTermination::from_council(
                 owner,
-                Ok(&wcore_agent::orchestration::council::driver::CouncilRunResult::Cancelled),
+                CouncilRunOutcome::Ran(
+                    &wcore_agent::orchestration::council::driver::CouncilRunResult::Cancelled,
+                ),
             )
         })
         .await;
@@ -411,7 +416,7 @@ async fn an_anvil_climb_reaches_verified_only_on_real_host_observed_gate_evidenc
         .run_anvil(&id, |owner| async move {
             StrategyTermination::from_anvil(
                 owner,
-                Ok(&climb(TerminalState::Verified, Some(observation))),
+                AnvilOutcome::Climbed(&climb(TerminalState::Verified, Some(observation))),
                 REQUIRED_STABILITY,
             )
         })
@@ -479,7 +484,7 @@ async fn an_anvil_climb_claiming_verified_without_evidence_is_refused_not_downgr
             .run_anvil(&id, |owner| async move {
                 StrategyTermination::from_anvil(
                     owner,
-                    Ok(&climb(TerminalState::Verified, observation)),
+                    AnvilOutcome::Climbed(&climb(TerminalState::Verified, observation)),
                     REQUIRED_STABILITY,
                 )
             })
@@ -643,7 +648,9 @@ async fn a_council_that_could_not_be_priced_is_unpriced_and_not_blocked() {
         .run_council(&id, |owner| async move {
             StrategyTermination::from_council(
                 owner,
-                Err(&wcore_agent::orchestration::council::run::CouncilError::UnpriceableRoster),
+                CouncilRunOutcome::Failed(
+                    &wcore_agent::orchestration::council::run::CouncilError::UnpriceableRoster,
+                ),
             )
         })
         .await
@@ -711,7 +718,11 @@ async fn every_anvil_terminal_state_maps_to_exactly_one_canonical_category() {
         let driver = opened(&path, &id, GoalStrategy::Anvil);
         driver
             .run_anvil(&id, |owner| async move {
-                StrategyTermination::from_anvil(owner, Ok(&climb(state, None)), REQUIRED_STABILITY)
+                StrategyTermination::from_anvil(
+                    owner,
+                    AnvilOutcome::Climbed(&climb(state, None)),
+                    REQUIRED_STABILITY,
+                )
             })
             .await
             .expect("anvil terminates");

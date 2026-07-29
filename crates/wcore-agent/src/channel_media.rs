@@ -67,7 +67,8 @@ const IMAGE_DESCRIBE_PROMPT: &str =
 // `build_turn_prompt` surfaces into the turn.
 const IMAGE_NO_VISION_NOTICE: &str = "[Inbound image received but NOT analyzed: no vision backend is configured, so the \
      assistant cannot see this image. Do not guess its contents. To enable image \
-     understanding, set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY.]";
+     understanding, set ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or \
+     FLUX_API_KEY, or configure an OpenAI-wire provider (FluxRouter / OpenAI).]";
 const AUDIO_NO_TRANSCRIPTION_NOTICE: &str = "[Inbound audio received but NOT transcribed: no transcription backend is configured, so \
      the assistant cannot hear this audio. To enable transcription, set GROQ_API_KEY or \
      OPENAI_API_KEY.]";

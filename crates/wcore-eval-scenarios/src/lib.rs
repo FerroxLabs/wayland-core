@@ -57,6 +57,13 @@ pub mod dialect;
 /// SEPARATE instrument, because the shared meter retains digests rather than bodies and is a hard
 /// scope fence.
 pub mod dialect_discovery;
+/// Phase 30 dialect EXECUTION seam (SR-30-3, second half): verify a compiled translation, bind it
+/// to the harness whose discovery manifest declared its corpus, and lower it to fixture steps.
+///
+/// Before this module a `TranslationV1` was written by `dialect compile` and read back only by
+/// `dialect verify`; no code path carried one into a trial, so protocol v2 could meet all four of
+/// its execution preconditions and still replay v1's `write_file` script.
+pub mod dialect_exec;
 /// Phase 28 E5 black-box probe definitions (F28-01), one per dimension plus one per
 /// mandatory cell. Executed by `scripts/f28-native-matrix.mjs`.
 pub mod e5_cases;

@@ -1,0 +1,9 @@
+   Compiling wcore-eval-scenarios v0.12.25 (/root/wayland-vacuous-greens/crates/wcore-eval-scenarios)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.67s
+     Running tests/sbom_contract.rs (target/debug/deps/sbom_contract-77e6cc20f6f3bb2a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+WLRC=0

@@ -68,6 +68,22 @@ pub enum IndexCmd {
     Verify,
 }
 
+/// Choose the index store's journal mode from the filesystem backing it.
+///
+/// `wcore-repomap` is deliberately isolated with no internal `wcore-*`
+/// dependencies, so it cannot run the detector itself and takes the mode as
+/// a parameter. This is the single seam where the workspace's one detector
+/// (`wcore_config::sqlite_journal`) is translated into repomap's mirror
+/// type — the filesystem probe is NOT reimplemented here.
+fn index_journal_mode(store_path: &std::path::Path) -> wcore_repomap::JournalMode {
+    match wcore_config::sqlite_journal::SqliteJournalMode::for_db_path(store_path) {
+        wcore_config::sqlite_journal::SqliteJournalMode::Wal => wcore_repomap::JournalMode::Wal,
+        wcore_config::sqlite_journal::SqliteJournalMode::Truncate => {
+            wcore_repomap::JournalMode::Truncate
+        }
+    }
+}
+
 /// Entry point for the `index` subcommand.
 ///
 /// # Errors
@@ -85,7 +101,7 @@ pub fn run(args: IndexArgs) -> anyhow::Result<ExitCode> {
     match args.cmd {
         IndexCmd::Build => {
             let started = std::time::Instant::now();
-            let mut store = IndexStore::open(&store_path, &root)?;
+            let mut store = IndexStore::open(&store_path, &root, index_journal_mode(&store_path))?;
             let stats = store.refresh(&IndexOptions::default())?;
             let elapsed_ms = started.elapsed().as_millis();
             println!(
@@ -111,7 +127,7 @@ pub fn run(args: IndexArgs) -> anyhow::Result<ExitCode> {
 
         IndexCmd::Status => {
             let started = std::time::Instant::now();
-            let store = IndexStore::open(&store_path, &root)?;
+            let store = IndexStore::open(&store_path, &root, index_journal_mode(&store_path))?;
             // Measured as a WARM START: the wall time to open a store and be
             // able to answer from it, with no refresh. That is the number a
             // long-running session actually pays.
@@ -141,7 +157,7 @@ pub fn run(args: IndexArgs) -> anyhow::Result<ExitCode> {
         }
 
         IndexCmd::Search { query, limit } => {
-            let store = IndexStore::open(&store_path, &root)?;
+            let store = IndexStore::open(&store_path, &root, index_journal_mode(&store_path))?;
             let outcome = search(&store, &SearchQuery::new(query).with_limit(limit))?;
             for hit in &outcome.hits {
                 let modalities = hit
@@ -178,7 +194,7 @@ pub fn run(args: IndexArgs) -> anyhow::Result<ExitCode> {
         }
 
         IndexCmd::Verify => {
-            let store = IndexStore::open(&store_path, &root)?;
+            let store = IndexStore::open(&store_path, &root, index_journal_mode(&store_path))?;
             let report = store.verify(&IndexOptions::default())?;
             println!(
                 "F23_INDEX=verify agrees={} records={} in_scope={} changed={} \

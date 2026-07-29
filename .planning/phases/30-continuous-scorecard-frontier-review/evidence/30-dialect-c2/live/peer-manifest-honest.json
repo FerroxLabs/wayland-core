@@ -1,0 +1,9 @@
+{
+ "tool_label": "hermes",
+ "tool_version": "synthetic-peer-dialect",
+ "captured_at_utc": "2026-07-29T00:00:00Z",
+ "corpus_sha256": "b6f0e7a3e14c64b9cb852e22cceb4fc534b3800c375d4c8fe85afd3b609434f9",
+ "requests_observed": 1,
+ "model_requested": "fixture-chat-v1",
+ "notes": []
+}
