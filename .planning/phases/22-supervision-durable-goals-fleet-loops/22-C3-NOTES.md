@@ -696,3 +696,73 @@ see a loop further out. **It is corroborating, not load-bearing.** The load-bear
 argument is Q5: `LoopOwner` is neither `Clone` nor `Copy` and every adapter takes it by
 value, so a loop around an adapter does not compile — and that gate is now proven alive.
 
+---
+
+## §11. LIVE — all five engines, shipped release binary, hetzner
+
+`wayland-core 0.12.25` release, `/root/wayland-22c3goal/target/release/wayland-core`, Linux.
+
+**No credential was used, and none was needed.** A local canned OpenAI-compatible endpoint
+on `127.0.0.1:18422` (unique port — many lanes are live) serves the model tokens; every
+layer under test is production code. Harness liveness was itself checked with a
+known-positive (a real `choices` array came back) **and a negative control** — the same
+probe against a dead port returns `rc=7`, so the probe can go red.
+Config was isolated with `XDG_CONFIG_HOME=/root/c3-live/cfg` rather than editing
+`/root/.config`, which is shared with the other live lanes on this host.
+
+| # | Engine | Shipped verb driven | Canonical transition observed |
+|---|---|---|---|
+| 1 | **Fleet** | `goal run --terminate` | `PartiallyCompleted { completed: 3, failed: 0 }`, `cursor_seq=Some(22)` |
+| 2 | **Direct** | `wayland-core -p canned "say hi"` (env attach) | `NeedsEscalation`, `cursor_seq=Some(2)` |
+| 3 | **ForgeFlows** | `workflow run c3flow --goal …` | `PartiallyCompleted { completed: 0, failed: 1 }`, `cursor_seq=Some(2)` |
+| 4 | **Council** | `crucible "what is 2+2"` (env attach) | `PartiallyCompleted { completed: 1, failed: 0 }`, `cursor_seq=Some(2)` |
+| 5 | **Anvil** | `forge "…" --goal …` | `Blocked { reason: "probe builder failed: …" }`, `cursor_seq=Some(2)` |
+
+Every line above is the product's own `GOAL: canonical_transition strategy=… terminal=…`
+output, read back from the DURABLE record by `print_canonical_transition`, not from the
+value the adapter returned.
+
+**Direct's `NeedsEscalation` is the point, not a disappointment.** It is the documented
+mapping for a *completed* Direct run: Direct has no verification owner, so `SelfChecked`
+would assert checks that never ran. The engine succeeded; the taxonomy under-claims.
+
+**Anvil exercised BOTH new arms**, which matters because one of them did not exist before
+this lane:
+- `AnvilOutcome::ForgeFailed` — a `ForgeError::Worktree` (dirty checkout) reached
+  `Blocked`. **`from_anvil` could not previously accept this at all** (§7).
+- `AnvilOutcome::Climbed` — a second run got past the forge, the climb returned
+  `TerminalState::Blocked`, and the 1:1 lift mapped it.
+
+## §12. A SECOND advertised-but-dead defect — found in MY OWN wiring, by the live run
+
+The Council leg **exited 0, printed a fused council answer, and terminated NO Goal.**
+
+```
+$ grep "canonical_transition" out.txt
+!!! NO CANONICAL TRANSITION EMITTED !!!    RC=0
+```
+
+**Cause: the `crucible` verb has TWO routes to a council and I had attached one.**
+`run_crucible` line 345 → `run_crucible_auto` → `drive_council` (attached); `run_crucible`
+line 394 → `run_council` **directly** (not attached). A plain
+`[crucible] proposers = [...]` config — **the default, manual mode** — takes the second.
+
+So my first Council wiring was itself advertised-but-dead: the flag existed, the code
+compiled, 3000+ tests were green, and the default path terminated nothing.
+
+**It was caught only because the gate asserts the transition LINE rather than the exit
+status.** `RC=0` was a full pass on every other signal. This is the brief's *"a 'sole path'
+that had three"* warning arriving in my own construction, and it is the single strongest
+argument in this lane for driving the real binary rather than trusting green tests.
+
+Fixed by attaching the manual path too, using a new `CouncilRunOutcome::RanManual` that
+carries a bare `CouncilOutcome` — rather than fabricating an empty `AssemblyPlan` to reach
+the existing variant, which would have invented an assembler decision that never happened.
+
+## §13. Log (continued)
+
+- **T+140** — canned-provider harness up, self-probed, negative control red.
+- **T+165** — legs 1–3 green (Fleet, Direct, ForgeFlows).
+- **T+185** — Council leg exposed §12. Fixed, rebuilt, re-run green.
+- **T+205** — Anvil leg green through both arms. **All five engines live-proven.**
+
