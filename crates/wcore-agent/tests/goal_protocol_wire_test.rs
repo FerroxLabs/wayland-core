@@ -15,11 +15,13 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use wcore_agent::goal::strategy::{FleetOutcome, GoalLoop, StrategyTermination};
 use wcore_agent::goal::{
     GoalKernel, event_line, goal_projection, goal_snapshot_event, goal_state_digest, goal_stream,
 };
 use wcore_agent::session_journal::SessionJournal;
 use wcore_protocol::goal::{GoalLifecycleWire, GoalTransitionKind};
+use wcore_swarm::fleet::ShardSummary;
 use wcore_types::goal::{
     GoalAuthorityRequest, GoalAuthoritySnapshot, GoalId, GoalStrategy, GoalTerminalState,
     LoopPolicy, WaitKind, resolve_goal_authority,
@@ -199,14 +201,30 @@ fn a_partial_completion_reaches_the_wire_with_its_counts_intact() {
             1_721_000_000_000,
         )
         .expect("opens");
-    kernel
-        .terminate(
-            &id,
-            GoalTerminalState::PartiallyCompleted {
-                completed: 11,
-                failed: 3,
-            },
-        )
+    // F22C criterion 3: `PartiallyCompleted` is an engine verdict, so it is
+    // sayable only by the Goal's loop owner. This strengthens the test rather
+    // than complicating it — the counts on the wire are now carried all the way
+    // from a REAL Fleet outcome through `from_fleet` and the canonical
+    // transition, instead of being a literal handed to the kernel. If the
+    // adapter ever rounded 11-and-3 into success or failure, this now catches
+    // it; before, it could not have.
+    let shards = [ShardSummary {
+        shard_id: 0,
+        agent_count: 14,
+        successes: 11,
+        failures: 3,
+        payload: serde_json::Value::Null,
+    }];
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime")
+        .block_on(async {
+            GoalLoop::new(kernel.clone())
+                .run_fleet(&id, |owner| async move {
+                    StrategyTermination::from_fleet(owner, FleetOutcome::Dispatched(&shards))
+                })
+                .await
+        })
         .expect("terminates");
 
     let state = kernel.goal(&id).expect("reads").expect("exists");
