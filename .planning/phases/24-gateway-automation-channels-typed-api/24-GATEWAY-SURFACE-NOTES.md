@@ -31,13 +31,39 @@ the tested one.
 - **Not re-deriving F24-C3-H2.** Per coordinator: `gateway run` DOES opt into inbound dispatch;
   it is built and merged. Reading `24-C3-H2-SUMMARY.md` rather than re-establishing from source.
 
+## Established — measurement setup (T+~35min)
+
+- **Baseline (committed, `--json-stream`)**, from `24-MATRIX-SIGNAL.md` §2a, 3 runs:
+  **36/42 legs ran, `failed=0`, 6 NOT MEASURED (email, pre-existing SMTP/webpki-roots
+  blocker)**, `restart_verdict=LOSS` (a known open HIGH on matrix inbound restart, NOT mine
+  to fix). Binary source there was `aa4351aa`.
+- **Confound spotted and being controlled for:** the committed baseline was taken at binary
+  `aa4351aa`; my base is `e77b44b0`, which is LATER and contains the double-manager and
+  reload-denial fixes. A gateway-vs-baseline diff would therefore confound *surface* with
+  *commit*. So I run **BOTH surfaces at MY commit** — same binary, same driver, same
+  fixtures, only `--runtime` differs. That makes any divergence attributable to the surface
+  alone. The committed baseline is retained as the third point of comparison.
+- **hetzner**: `/root/wayland-24-gwsurface` @ `3fe3832a`, built rc=0 in 5m40s.
+  `wayland-core 0.12.25 (source 3fe3832a...)`, sha256
+  `851c049a957c8a8c28fcf6e056c0c9873950ffe528bc253f0814bda7598417fa`. node v22.21.1.
+  Host was IDLE at start (load 1.04, **zero** cargo/rustc running), so §6's contention
+  caveat does not apply to these figures.
+- **Instrument proven able to redden** — `scripts/f24-matrix-signal-selftest.mjs`:
+  **`SELFTEST GREEN passed=41 failed=0`**. Read the counts, not the exit status. It carries
+  the third-assertion pattern §6b-ii demands:
+  - `T3` universal denial CANNOT manufacture a steady green (the brief's headline trap);
+  - `T4` the five original legs all pass on an adapter that goes deaf after the burst —
+    i.e. the steady leg is the only one that can see that class;
+  - `R3`/`V3`/`Z3` the OLD grader/verdict/liveness check each disagree with the repaired one
+    on the same input, which is what proves the repairs do anything.
+- `--runtime` is validated (`f24-inbound.mjs:2683`): a typo exits 2 rather than silently
+  measuring `--json-stream` and labelling it `gateway`.
+
 ## Still to establish
 
-1. Read `24-C3-H2-SUMMARY.md` (2 min) + locate the committed `--json-stream` 42-cell baseline.
-2. Prove my gate can redden before trusting any pass (§3.2) — incl. that a zero-arrival green
-   grades FAIL (`gradeSteady` requires `arrived === want && want > 0`, needs confirming live).
-3. Run the 42-cell matrix on hetzner against `gateway run`.
-4. Surface-to-surface diff; report divergence with defect-grade rigour.
+1. Run A: 42-cell matrix, `--runtime gateway`, at `3fe3832a`.
+2. Run B: 42-cell matrix, `--runtime json-stream`, at `3fe3832a` (paired same-commit control).
+3. Surface-to-surface diff; report any divergence with defect-grade rigour.
 
 ## Standing constraints for this lane
 
