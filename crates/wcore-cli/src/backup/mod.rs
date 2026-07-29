@@ -476,10 +476,25 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     })
 }
 
-/// True when a directory exists and contains at least one entry.
+/// True when a directory exists and holds at least one entry of USER state.
+///
+/// The journal directory does not count. It is this module's own bookkeeping,
+/// and counting it made the answer depend on whether an operation had ever been
+/// interrupted here: a home that was empty, whose restore was then killed,
+/// afterwards "held state" — so the retry was refused until the operator passed
+/// `--replace` to overwrite nothing at all.
+///
+/// Excluding it also removes an accidental protection. An interrupted restore
+/// clears the target before it writes, so its wreckage held nothing BUT the
+/// journal; the refusal that protects a live home was surviving only because the
+/// bookkeeping happened to be counted. `restore_archive` now settles the
+/// interrupted operation before it asks this question, which is what makes the
+/// answer describe the user's real home rather than the wreckage.
 pub(crate) fn dir_holds_state(dir: &Path) -> bool {
     match std::fs::read_dir(dir) {
-        Ok(mut it) => it.next().is_some(),
+        Ok(mut it) => {
+            it.any(|e| e.is_ok_and(|e| e.file_name() != std::ffi::OsStr::new(journal::JOURNAL_DIR)))
+        }
         Err(_) => false,
     }
 }
@@ -553,5 +568,21 @@ mod tests {
         std::fs::write(dir.path().join("x"), "1").unwrap();
         assert!(dir_holds_state(dir.path()));
         assert!(!dir_holds_state(&dir.path().join("absent")));
+    }
+
+    #[test]
+    fn the_journals_own_bookkeeping_is_not_user_state() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(journal::JOURNAL_DIR)).unwrap();
+        std::fs::write(dir.path().join(journal::JOURNAL_DIR).join("1.json"), "{}").unwrap();
+        assert!(
+            !dir_holds_state(dir.path()),
+            "a home holding only journal bookkeeping was counted as occupied"
+        );
+        std::fs::write(dir.path().join("config.toml"), "real").unwrap();
+        assert!(
+            dir_holds_state(dir.path()),
+            "real user state alongside a journal was not counted"
+        );
     }
 }

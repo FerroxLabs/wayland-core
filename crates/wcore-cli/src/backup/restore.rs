@@ -65,6 +65,24 @@ pub fn restore_archive(
     target: &Path,
     opts: RestoreOptions,
 ) -> Result<RestoreOutcome, BackupError> {
+    restore_archive_with(archive_path, target, opts, crate::cron::process_is_alive)
+}
+
+/// Inner restore with an injectable liveness probe, mirroring
+/// [`journal::recover_with`].
+///
+/// The seam exists because the pre-start recovery (step 4) is keyed on the
+/// owning process being DEAD, and a test that stages an interrupted restore does
+/// so inside the live test process — whose pid is, correctly, reported alive. A
+/// test using the public entry point would therefore find nothing to recover and
+/// pass for the wrong reason, which is the self-passing class this program keeps
+/// finding. Production always passes the real probe.
+pub fn restore_archive_with(
+    archive_path: &Path,
+    target: &Path,
+    opts: RestoreOptions,
+    is_alive: impl Fn(u32) -> bool,
+) -> Result<RestoreOutcome, BackupError> {
     // 1. Verify before writing anything. `unpack` re-reads the payload bytes;
     //    `verify_archive` is what proves they match the manifest.
     let manifest = archive::verify_archive(archive_path)?;
@@ -112,7 +130,7 @@ pub fn restore_archive(
     //
     //    Only DEAD owners are acted on — a concurrent restore's work is not
     //    ours to undo (the #181 rule, enforced inside `journal::recover`).
-    let recovery = journal::recover(target)?;
+    let recovery = journal::recover_with(target, is_alive)?;
 
     // 5. Refuse an occupied target unless replacement was asked for explicitly.
     let occupied = dir_holds_state(target);
@@ -570,13 +588,18 @@ mod tests {
         );
 
         // --- restore #2: the user simply runs it again, and it succeeds ----
-        let out = restore_archive(
+        // The staged interruption's record carries THIS process's pid, which is
+        // genuinely alive, so the real probe would correctly decline to recover
+        // it and the test would pass having exercised nothing. `|_| false` is
+        // the production situation: the owner is dead.
+        let out = restore_archive_with(
             &arc,
             &target,
             RestoreOptions {
                 replace: true,
                 ..Default::default()
             },
+            |_| false,
         )
         .unwrap();
         assert_eq!(out.written, 2);
@@ -649,7 +672,8 @@ mod tests {
 
         // A plain restore — no --replace — must STILL refuse, and must leave the
         // home in its true pre-operation state.
-        let err = restore_archive(&arc, &target, RestoreOptions::default()).unwrap_err();
+        let err =
+            restore_archive_with(&arc, &target, RestoreOptions::default(), |_| false).unwrap_err();
         assert!(
             matches!(err, BackupError::TargetOccupied(_)),
             "an interrupted restore disarmed the occupied-target refusal: {err:?}"
@@ -691,13 +715,14 @@ mod tests {
             clear_target(&target).unwrap();
             std::mem::forget(guard);
         }
-        let out = restore_archive(
+        let out = restore_archive_with(
             &arc,
             &target,
             RestoreOptions {
                 replace: true,
                 ..Default::default()
             },
+            |_| false,
         )
         .unwrap();
         assert_eq!(

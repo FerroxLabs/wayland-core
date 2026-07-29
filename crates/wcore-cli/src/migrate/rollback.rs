@@ -81,9 +81,20 @@ impl ApplyGuard {
     /// original is unreachable. It also means the ordinary user gesture after a
     /// crash, which is to run the import again, restores the home first.
     pub fn open(home: &Path) -> Result<Self> {
+        Self::open_with(home, crate::cron::process_is_alive)
+    }
+
+    /// Inner open with an injectable liveness probe, mirroring
+    /// [`journal::recover_with`] and [`crate::backup::restore::restore_archive_with`].
+    ///
+    /// A test that stages an interrupted import does so inside the live test
+    /// process, whose pid is correctly reported alive; through the public entry
+    /// point it would find nothing to recover and pass without exercising the
+    /// recovery at all.
+    pub fn open_with(home: &Path, is_alive: impl Fn(u32) -> bool) -> Result<Self> {
         std::fs::create_dir_all(home)
             .with_context(|| format!("create wayland home {}", home.display()))?;
-        let recovered_before_start = journal::recover(home)
+        let recovered_before_start = journal::recover_with(home, is_alive)
             .context("roll back an import left in flight by a dead process")?
             .recovered;
 
@@ -341,7 +352,11 @@ mod tests {
         std::fs::write(home.join("config.toml"), "WRECKED").unwrap();
         std::mem::forget(g);
 
-        let g2 = ApplyGuard::open(&home).unwrap();
+        // The staged interruption's record carries THIS process's pid, which is
+        // alive, so the real probe would decline to recover it and the test
+        // would pass having exercised nothing. `|_| false` is the production
+        // situation.
+        let g2 = ApplyGuard::open_with(&home, |_| false).unwrap();
         assert_eq!(
             g2.recovered_before_start(),
             1,
