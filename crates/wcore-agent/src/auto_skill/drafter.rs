@@ -124,23 +124,23 @@ impl SkillDrafter {
         // A store that cannot be resolved or read must not block drafting outright --
         // that would let one unreadable file disable the learn loop entirely -- so the
         // suppression check degrades to "not revoked" and says so loudly.
-        if let Some(store) = self.governance() {
-            if store.is_revoked(&name, Some(&trigger.signature)) {
-                if let Err(e) = store.record_suppression(&name, Some(&trigger.signature)) {
-                    tracing::warn!(
-                        target: "wcore_agent::auto_skill",
-                        error = %e,
-                        skill = %name,
-                        "could not journal draft suppression; draft still suppressed"
-                    );
-                }
-                tracing::info!(
+        if let Some(store) = self.governance()
+            && store.is_revoked(&name, Some(&trigger.signature))
+        {
+            if let Err(e) = store.record_suppression(&name, Some(&trigger.signature)) {
+                tracing::warn!(
                     target: "wcore_agent::auto_skill",
+                    error = %e,
                     skill = %name,
-                    "draft suppressed: this skill was revoked by the user"
+                    "could not journal draft suppression; draft still suppressed"
                 );
-                return Err(DraftError::Revoked { name });
             }
+            tracing::info!(
+                target: "wcore_agent::auto_skill",
+                skill = %name,
+                "draft suppressed: this skill was revoked by the user"
+            );
+            return Err(DraftError::Revoked { name });
         }
 
         let body = compose_body(&name, trigger);
