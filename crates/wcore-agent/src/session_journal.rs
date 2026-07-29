@@ -3021,14 +3021,20 @@ mod fault_tests {
         // Re-sealing here is what lets `verify_chain` be asserted, which is the
         // check that used to reject these frames with `ChecksumMismatch`.
         let body = serde_json::to_vec(&explicit).unwrap();
-        explicit["checksum"] =
-            serde_json::Value::String(JournalEnvelope::checksum_of_stored_bytes(&body).unwrap());
+        let sealed = JournalEnvelope::checksum_of_stored_bytes(&body).unwrap();
+        assert_ne!(
+            sealed, envelope.checksum,
+            "the explicit encoding must genuinely hash differently — otherwise \
+             this fixture is not exercising the defect"
+        );
+        explicit["checksum"] = serde_json::Value::String(sealed.clone());
         let body = serde_json::to_vec(&explicit).unwrap();
 
         // The decode collapses `Some(Value::Null)` to `None` for the one
         // blessed field that is an `Option<serde_json::Value>`; replay must
         // report what the journal records.
         let mut expected = envelope.clone();
+        expected.checksum = sealed;
         let SessionEvent::ToolIntentRecordedV2 { effect_receipt, .. } = &mut expected.event else {
             unreachable!("the fixture is a ToolIntentRecordedV2")
         };
