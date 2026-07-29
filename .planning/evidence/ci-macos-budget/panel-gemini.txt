@@ -1,0 +1,16 @@
+**Q1.** The proposed fix is the right mechanism. 
+- (a) Dropping from 3 jobs to 1 still leaves 7.46 jobs/hour from lanes (approaching the 11.25 limit), providing no buffer for spikes, and breaks the requirement for agents to get x86 binaries. 
+- (b) Concurrency groups only cancel jobs within the *same* group; they do not manipulate the global GitHub-hosted queue priority. The integration branch would still be stuck behind the 100+ queued lane jobs waiting for runners. 
+- (c) Self-hosted runners introduce unacceptable maintenance overhead and provisioning delay for an acute queue crisis.
+The opt-in mechanism immediately sheds 96% of the load exactly where it is wasted (continuous WIP pushes).
+
+**Q2.** **What stops:** macOS-specific clippy lints, macOS-specific `nextest` coverage, and the generation of downloadable macOS aarch64/x86_64 binaries on every WIP push. 
+**Acceptability:** Highly acceptable. 99% of logic, syntax, and dependency errors are cross-platform and will be caught by the unconstrained Linux/Windows jobs. The integration branch still enforces the strict macOS gate before merging to `main`, ensuring no regressions escape the lane.
+
+**Q3.** **Failure mode:** Discoverability. Agents (or humans) will push code, poll for a macOS artifact to test, and get stuck or hallucinate when the artifact simply doesn't exist because they forgot the `[ci-darwin]` token.
+**How to close it:** The `budget` job must write a visible note to the GitHub Actions Step Summary (e.g., `echo "macOS jobs skipped. Include '[ci-darwin]' in commit message to build macOS artifacts." >> $GITHUB_STEP_SUMMARY`). Additionally, this token must be explicitly documented in the agent's `GEMINI.md`/`CLAUDE.md` instructions.
+
+**Q4.** Yes. 
+The arm64 Build job is entirely redundant compute. Because the "CI (macos-latest)" job already executes `cargo build --release` on an arm64 runner, you can simply append the `actions/upload-artifact` step to the end of the existing CI job. This preserves the required downloadable artifact for testing while permanently eliminating 33% of the macOS queue pressure across all branches.
+
+PANEL_POSITION=ENDORSE

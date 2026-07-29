@@ -1,0 +1,22 @@
+You are auditing a CI capacity decision for a Rust monorepo on GitHub Actions. Answer concretely; do not hedge.
+
+MEASURED FACTS (all from the live GitHub API, 10.84h window, 303 CI runs):
+1. Hosted macOS runner concurrency ceiling for this account: 5 (peak concurrent executed macOS jobs observed = 5). Throughput 11.25 executed macOS jobs/hour; median macOS job 19.6 min.
+2. Every CI run schedules 3 macOS jobs: "CI (macos-latest)" (fmt+clippy+full nextest+audit+release smoke+eval gate) and two compile-only "Build (aarch64-apple-darwin)" / "Build (x86_64-apple-darwin)" jobs that each upload a release binary artifact.
+3. macOS job demand = 22.4 jobs/hour vs capacity 11.25/hour. ~2x oversubscribed permanently; the queue never drains. Observed macOS queue waits of 4h06m, 5h03m, 5h31m; a live run had macOS jobs still queued after 80 min while its Linux and Windows jobs started 1-8 SECONDS after dispatch (within-run control, so this is macOS-pool-specific, not account throttling).
+4. Demand split: 96.3% of macOS jobs created come from `lane/**` branches (5-8 parallel agent worktrees pushing continuously); 3.7% from the long-lived integration branch `plan/f20-unified-audit-repair`. The integration branch got 7 executed macOS jobs in 10.8 hours and has produced ZERO CI verdicts in 9 hours.
+5. concurrency group is `CI-${{ github.ref }}` (per-ref) with cancel-in-progress only for pull_request. So lane runs do NOT evict integration runs via concurrency; they starve them of macOS RUNNERS. The integration branch's own pushes evict its own pending runs, and because the head-of-line run takes ~7h (gated on macOS), the branch's verdict rate is ~1 per 7h on an already-stale SHA.
+6. The `lane/**` push trigger was added deliberately, for ONE stated reason: a lane agent cannot compile for macOS or Windows locally (it only has a Linux build host), so it needs CI to produce a macOS or Windows binary artifact for its own unmerged changes. Deleting the trigger would re-break that.
+7. Windows is NOT constrained: hosted windows-latest jobs started in 2-5s, and there is also a self-hosted Windows runner. Linux is not constrained either.
+8. workflow_dispatch is NOT available: GitHub only exposes that trigger for workflows already present on the DEFAULT branch, and ci.yml on `main` has no workflow_dispatch. So a manual-dispatch-based opt-in cannot fire for this branch.
+
+PROPOSED FIX: On `lane/**` pushes only, do not schedule the three macOS jobs by default. Schedule them only when the head-commit message contains an opt-in token `[ci-darwin]` (alias `[ci-macos]`). `main`, the integration branch, and all pull_request events keep the full unmodified matrix. Windows and Linux coverage on lane pushes is completely unchanged. Implemented via a tiny `budget` job that emits JSON matrices consumed by `strategy.matrix: ${{ fromJSON(needs.budget.outputs.*) }}`, with the commit message passed through `env:` (never interpolated into a `run:` string).
+
+QUESTIONS — answer each:
+Q1. Is the proposed fix the right mechanism, or is one of these better: (a) drop from 3 macOS jobs to fewer by collapsing overlapping coverage; (b) give the integration branch its own concurrency group; (c) self-hosted macOS runner; (d) something else?
+Q2. What SPECIFICALLY stops being covered on lane pushes, and is that acceptable given the integration branch still runs the full macOS matrix on every push and lanes merge serially?
+Q3. What is the biggest failure mode or blind spot of the commit-message opt-in token, and how would you close it?
+Q4. Note: "Build (aarch64-apple-darwin)" is arguably redundant with "CI (macos-latest)" because macos-latest IS arm64 and that job already does `cargo build --release -p wcore-cli`. But only the Build job uploads a downloadable artifact, and that artifact was added specifically so a machine that cannot compile for arm64 macOS can still live-test. Should the arm64 Build job be dropped on the integration branch to save a third of macOS cost? Answer yes or no with reasoning.
+
+End your answer with exactly one line of the form:
+PANEL_POSITION=ENDORSE or PANEL_POSITION=REVISE or PANEL_POSITION=REJECT

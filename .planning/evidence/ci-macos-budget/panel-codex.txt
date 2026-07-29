@@ -1,0 +1,41 @@
+Q1. The proposed lane-only opt-in is the right primary mechanism.
+
+It attacks the actual problem: uncontrolled admission to a shared five-runner macOS pool. Removing default lane demand reduces macOS arrivals from 22.4 jobs/hour to roughly 0.83 jobs/hour before opt-ins—far below the 11.25 jobs/hour capacity. Almost half of current lane macOS demand could be opted back in before reaching saturation.
+
+The alternatives do not replace it:
+
+- Collapsing the redundant arm64 Build job would reduce demand from roughly 22.4 to 14.9 jobs/hour if applied everywhere. The pool would remain overloaded.
+- A separate integration concurrency group changes run cancellation and serialization, not runner allocation. The branch already has a separate per-ref group; it cannot reserve macOS runners.
+- A dedicated self-hosted macOS runner would add capacity, but introduces cost, maintenance, security, and availability concerns. It is justified only if routine native testing of every lane push is genuinely required.
+- Larger/dedicated hosted runners are another capacity-purchase option, but unnecessary when 96.3% of demand is speculative lane work that does not require macOS on every push.
+
+Use admission control now. Separately consolidate genuinely duplicated work where coverage and artifacts can be preserved.
+
+Q2. On an ordinary `lane/**` push, the following macOS execution disappears:
+
+- Native macOS execution of fmt, clippy, full nextest, audit, release smoke, and the eval gate.
+- The arm64 macOS release build and its downloadable binary artifact.
+- The x86_64 macOS release build and its downloadable binary artifact.
+- Consequently, lane-local detection of macOS-only compilation, linking, target configuration, dependency, runtime, release, and packaging failures.
+
+Linux and Windows coverage remains unchanged. Some platform-independent checks may therefore still execute elsewhere, but their macOS-specific execution does not.
+
+That is acceptable, provided the integration protocol is strict: merge one lane, then require the full macOS matrix to pass on the integration branch’s current SHA before merging the next lane. Merely scheduling macOS on every integration push is insufficient because a newer push can replace the pending integration run, recreating stale-SHA verdicts. Mac-specific lane work and any lane needing downloadable Darwin binaries should opt in before merge.
+
+Q3. The biggest failure mode is silent omission: an agent forgets the token, receives an otherwise green lane run, and treats that result as though macOS was validated. The defect is then discovered only after integration.
+
+Close that gap with all three controls:
+
+- Automatically enable Darwin jobs when the lane diff touches known macOS-sensitive paths: Apple-specific source, target configuration, packaging, signing, platform dependencies, or Darwin workflow code.
+- Make the budget check and run summary explicitly report `DARWIN_SKIPPED` or `DARWIN_REQUESTED`; never allow a skipped run to look like a complete cross-platform verdict.
+- Enforce a protected current-SHA full-matrix integration check before the next serial lane merge.
+
+Keep the token as the explicit escape hatch for live artifact testing. Match it case-insensitively, recognize both documented aliases, and test the empty-matrix path so “no Darwin jobs” produces an intentional skip rather than an invalid matrix or misleading success.
+
+Q4. No.
+
+Dropping the arm64 Build job as currently structured removes the downloadable arm64 artifact, which is the job’s distinct and explicitly required deliverable. It also saves only one-third of the integration branch’s macOS jobs; because integration accounts for 3.7% of macOS demand, that reduces total demand by only about 1.2%. It does not materially address saturation.
+
+The correct later optimization is to upload the arm64 release binary from `CI (macos-latest)` and then remove the separate arm64 Build job after proving the artifact is equivalent and usable for live testing. Do not drop the job before transferring that artifact responsibility.
+
+PANEL_POSITION=ENDORSE
