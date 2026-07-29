@@ -939,6 +939,14 @@ async fn resend(scope: &ScopeArgs, id: &str, confirmed: bool, also_ack: bool) ->
             home.join("channels").display()
         );
     }
+    // Registering an adapter does NOT connect it. Without this the send fails
+    // with "channel not started" — measured on the first live run of this verb,
+    // against a real gateway home and a real destination, and invisible to every
+    // unit test because they drive the adapters directly.
+    manager
+        .start_all()
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot start the channels for the re-send: {e}"))?;
 
     // The ORIGINAL delivery key rides the send. On a destination that can
     // recognise a replay this makes the re-send free of risk: if the first copy

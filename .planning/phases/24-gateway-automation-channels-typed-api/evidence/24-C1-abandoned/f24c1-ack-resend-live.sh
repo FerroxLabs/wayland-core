@@ -205,8 +205,25 @@ $BIN gateway abandoned --profile $P 2>&1
 
 echo ""
 echo "=== 15. KNOWN-NEGATIVE: both verbs refuse an id that is not abandoned ==="
-$BIN gateway ack --profile $P "cron:not-a-real-delivery:1" 2>&1 | tail -3
-echo "ACK_BOGUS_RC=$?"
+# NOT piped. The first version of this block was `... 2>&1 | tail -3` followed by
+# `$?`, which reports TAIL's status, not the command's — it printed
+# ACK_BOGUS_RC=0 for a command that had genuinely failed, i.e. the assertion
+# passed on a dead instrument. That is LANE-BRIEF §3.2's first named
+# self-passing class, reproduced by this harness. Repaired here rather than
+# noted, per §6b-ii.
+$BIN gateway ack --profile $P "cron:not-a-real-delivery:1" > $RUN/ack-bogus.out 2>&1
+ACK_BOGUS_RC=$?
+$BIN gateway resend --profile $P "cron:not-a-real-delivery:1" --confirm-not-delivered \
+  > $RUN/resend-bogus.out 2>&1
+RESEND_BOGUS_RC=$?
+echo "ACK_BOGUS_RC=$ACK_BOGUS_RC     (non-zero REQUIRED)"
+echo "RESEND_BOGUS_RC=$RESEND_BOGUS_RC  (non-zero REQUIRED)"
+tail -2 $RUN/ack-bogus.out
+tail -2 $RUN/resend-bogus.out
+# Self-test of the repair, third assertion per §6b-ii: the OLD shape would have
+# missed this. Demonstrated, not asserted.
+$BIN gateway ack --profile $P "cron:not-a-real-delivery:1" 2>&1 | tail -1 > /dev/null
+echo "OLD_PIPED_SHAPE_RC=$?  (0 — this is the defect being repaired: same failing command, wrong status)"
 
 echo ""
 echo "=== 16. cross-check the surface against the RAW ledger ==="
