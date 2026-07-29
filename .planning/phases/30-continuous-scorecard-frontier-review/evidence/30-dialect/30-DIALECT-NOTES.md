@@ -70,13 +70,54 @@ the compiler.** Deliverable is the compiler + its bias guard + a registered prot
 verdict + a statement of what becomes re-takeable. Live evidence targeted at the *discovery*
 pass (real declared schemas off the wire), which is not a comparative.
 
+## T+30 — measured answers to the open questions
+
+**Q: can the frozen meter give me the `tools` array?** **No.** `fixtures/openai.rs:311`
+`FixtureRequestRecord` holds `body_sha256`, `semantic_body_sha256`, `semantic_leaf_sha256`,
+`model` — no body. That is SR-30-1 restated. And the file is a hard scope fence.
+⇒ **Discovery gets its OWN instrument**, a separate loopback schema-capture meter. The frozen
+meter stays byte-untouched, which also keeps every 30-02 number meaning what it meant.
+
+**Q: does Wayland Core even declare tools on that wire?** **Yes** —
+`crates/wcore-providers/src/openai.rs:806` `body["tools"] = json!(Self::build_tools(&request.tools))`.
+So the harness's own declaration is observable on the wire for the tool under test.
+
+**Q: are the 30-02 peer installs still on hetzner?** **No** — they were disposable directories and
+are gone (`find /root /srv /opt` for `pyproject.toml`/`openclaw.mjs`: 0 hits; no `inv-*.json`).
+`/root/wayland-30-02` (the repo worktree) survives. Re-provisioning is possible — Sean's reference
+checkouts are on the Mac at `/Users/seandonahoe/dev/resources/openclaw` (and hermes) — but costs
+a 392 MB bundle transfer (which failed at 42% last time) plus a 243 s OpenClaw build.
+`df -h /root` = 720G free, so space is not the constraint; time and the lane budget are.
+
+**Q: fixture uses a FIFO cursor keyed on nothing?** Confirmed: `handle_chat_completion` pops
+`steps[cursor]` with no reference to the request at all (`openai.rs:522`). So a compiled script is
+served exactly as authored — the compiler is the only thing that has to be right.
+
+## T+30 — SCOPE DECISION (taken, not parked — brief §3.3)
+
+Deliver, in this order:
+
+1. `dialect.rs` in `wcore-eval-scenarios` — canonical semantic script + identity-blind compiler.
+2. A discovery meter (new file, NOT `fixtures/openai.rs`) that records the declared `tools` array.
+3. `wayland-scorecard dialect {discover,compile,verify}`.
+4. **Commit 1–3 with SYNTHETIC corpora only, BEFORE capturing any real schema.** That makes the
+   vocabulary's pre-registration provable from git order — the same technique that made 30-02's
+   protocol a pre-registration rather than a document. If I capture Wayland's real schema first
+   and then write the vocabulary, the vocabulary is tuned and G1 is worthless.
+5. Only then: live capture on hetzner against the real `wayland-core` binary.
+6. Protocol v2 pre-registration document + json, panel, verdict.
+
+**Not doing in this lane:** re-taking or publishing the nine comparatives. The brief forbids it
+until the panel clears the compiler, and peer re-provisioning is a separate cost.
+
+**Credential note:** every leg of this work is loopback-only. `~/.wayland-secrets/flux.env` is
+expected to stay unopened; spend on it should be $0. Recorded here up front so the claim is
+falsifiable later.
+
 ## STILL TO ESTABLISH
 
-- [ ] Does the fixture retain enough of the request to read the `tools` array at discovery time?
-      (It records digests, not bodies — SR-30-1. Discovery may need its own capture path that is
-      NOT a change to the frozen meter.)
-- [ ] Are the peer installs still present on hetzner from lane/30-02?
-- [ ] Compiler location: new module in `wcore-eval-scenarios` (not `fixtures/openai.rs`, fenced).
-- [ ] Panel run (4-way) on the compiler + protocol v2, before any re-run.
+- [ ] Compiler + tests green on hetzner (`cargo test -p wcore-eval-scenarios`).
+- [ ] Real Wayland schema captured off the wire.
+- [ ] Panel (4-way) on the compiler + bias guard + v2.
 
 ---
