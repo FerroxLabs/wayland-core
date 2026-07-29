@@ -398,6 +398,49 @@ fn render_event(e: &JournalEvent) -> String {
             revocation_id,
             ..
         } => format!("{at}  draft-refused  {skill_name}  (id {revocation_id})"),
+
+        // Promotion side of the journal. Rendered here rather than filtered out: an operator
+        // asking "what has governance done to my skills" needs the grants as much as the
+        // revocations, and a promotion is the event that makes a generated skill
+        // model-visible. The digest is shown because the grant is bound to bytes, not to a
+        // name -- without it the record cannot answer "which version was approved".
+        JournalEvent::Promoted {
+            at,
+            skill_name,
+            promotion_id,
+            content_digest,
+            authority,
+            ..
+        } => format!(
+            "{at}  promoted       {skill_name}  (id {promotion_id}) by {authority}  \
+             digest {digest}",
+            digest = short_digest(content_digest)
+        ),
+        // A refusal is governance working. An unlogged refusal is indistinguishable from a
+        // promotion nobody attempted, so it gets a line of its own.
+        JournalEvent::PromotionRefused {
+            at,
+            skill_name,
+            reason,
+        } => format!("{at}  promo-refused  {skill_name}  — {reason}"),
+        JournalEvent::PromotionWithdrawn {
+            at,
+            skill_name,
+            promotion_id,
+            reason,
+        } => format!("{at}  promo-withdrawn {skill_name}  (id {promotion_id}) — {reason}"),
+    }
+}
+
+/// Shorten a `sha256:<64 hex>` digest for a terminal line, keeping the algorithm prefix so a
+/// reader can tell a truncated digest from a short one. Anything unrecognised is passed
+/// through untouched rather than blindly sliced, which would panic on a multi-byte boundary.
+fn short_digest(d: &str) -> String {
+    match d.split_once(':') {
+        Some((algo, hex)) if hex.len() > 12 && hex.is_char_boundary(12) => {
+            format!("{algo}:{}…", &hex[..12])
+        }
+        _ => d.to_string(),
     }
 }
 

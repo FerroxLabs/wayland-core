@@ -69,7 +69,7 @@ fn proj() -> Proj {
 }
 
 async fn load_names(p: &Proj) -> Vec<String> {
-    wcore_skills::loader::load_all_skills(&p.root, &[p.root.clone()], true, None)
+    wcore_skills::loader::load_all_skills(&p.root, std::slice::from_ref(&p.root), true, None)
         .await
         .into_iter()
         .map(|s| s.name)
