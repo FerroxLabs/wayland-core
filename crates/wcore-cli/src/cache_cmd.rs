@@ -391,6 +391,10 @@ fn summary_json(s: &LedgerSummary) -> serde_json::Value {
             "total_input_tokens".into(),
             serde_json::json!(s.total_input_tokens()),
         );
+        obj.insert(
+            "priced_round_trips".into(),
+            serde_json::json!(s.priced_round_trips()),
+        );
     }
     v
 }
