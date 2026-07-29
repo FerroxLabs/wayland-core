@@ -407,6 +407,7 @@ pub fn test_config() -> Config {
             env_passthrough: Vec::new(),
             sandbox: None,
             allow_no_sandbox: None,
+            media_pricing: Default::default(),
         },
         session: SessionConfig {
             enabled: false,
