@@ -32,7 +32,7 @@ use wcore_types::goal::{GoalId, GoalTerminalState};
 const SESSION: &str = "goal-control-session";
 
 fn journal(dir: &Path, name: &str) -> SessionJournal {
-    SessionJournal::open(&dir.join(format!("{name}.jsonl")), SESSION).expect("journal opens")
+    SessionJournal::open(dir.join(format!("{name}.jsonl")), SESSION).expect("journal opens")
 }
 
 fn parent() -> GoalParentEnvelope {
@@ -45,8 +45,14 @@ fn wire(json: &str) -> ProtocolCommand {
 }
 
 fn drive(journal: &SessionJournal, command: &ProtocolCommand) -> Vec<ProtocolEvent> {
-    handle_goal_control(Some(journal), Some(SESSION), &parent(), 1_700_000_000_000, command)
-        .expect("a goal control command must be handled, never fall through")
+    handle_goal_control(
+        Some(journal),
+        Some(SESSION),
+        &parent(),
+        1_700_000_000_000,
+        command,
+    )
+    .expect("a goal control command must be handled, never fall through")
 }
 
 fn refusal_reason(events: &[ProtocolEvent]) -> Option<GoalControlRefusalReason> {
@@ -353,7 +359,10 @@ fn an_advance_at_a_stale_cursor_is_refused_rather_than_applied() {
     let (stale_seq, stale_digest) = cursor_of(&journal, "g-1");
 
     // The Goal moves underneath them.
-    drive(&journal, &wire(&advance_json("g-1", stale_seq, &stale_digest)));
+    drive(
+        &journal,
+        &wire(&advance_json("g-1", stale_seq, &stale_digest)),
+    );
 
     let iterations_before = GoalKernel::new(journal.clone())
         .goal(&GoalId::new("g-1"))

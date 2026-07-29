@@ -208,8 +208,12 @@ pub fn handle_goal_control(
         ProtocolCommand::GoalAdvance(advance) => {
             Some(handle_advance(journal, live_session_id, advance))
         }
-        ProtocolCommand::GoalCancel(cancel) => Some(handle_cancel(journal, live_session_id, cancel)),
-        ProtocolCommand::GoalResync(resync) => Some(handle_resync(journal, live_session_id, resync)),
+        ProtocolCommand::GoalCancel(cancel) => {
+            Some(handle_cancel(journal, live_session_id, cancel))
+        }
+        ProtocolCommand::GoalResync(resync) => {
+            Some(handle_resync(journal, live_session_id, resync))
+        }
         _ => None,
     }
 }
@@ -277,7 +281,8 @@ fn handle_open(
         },
     };
     // The intersection, never the request.
-    let snapshot = resolve_goal_authority(&request, &parent.effective_limits, parent.digest.clone());
+    let snapshot =
+        resolve_goal_authority(&request, &parent.effective_limits, parent.digest.clone());
     match kernel.open_goal(&goal_id, &open.objective, &snapshot, now_unix_ms) {
         Ok(_) => snapshot_for(&kernel, &open.session_id, &goal_id, &open.request_id),
         Err(_) => refuse(
@@ -357,7 +362,12 @@ fn handle_declare_task(
         .clone()
         .unwrap_or_else(|| format!("idem-{}", task.task_id));
     let ledger = GoalLedger::new(journal.clone());
-    match ledger.declare_task(&goal_id, &TaskId::new(&task.task_id), &task.depends_on, &key) {
+    match ledger.declare_task(
+        &goal_id,
+        &TaskId::new(&task.task_id),
+        &task.depends_on,
+        &key,
+    ) {
         Ok(()) => snapshot_for(&kernel, &task.session_id, &goal_id, &task.request_id),
         Err(_) => refuse(
             &task.request_id,

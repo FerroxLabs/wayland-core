@@ -1066,9 +1066,7 @@ pub fn goal_status_summary(app: &App) -> Option<String> {
     // fresh session is `goal_not_found`, which by definition arrives with zero
     // Goals and zero transitions — so gating on those two only would make the
     // single most likely refusal invisible.
-    if app.goals.is_empty()
-        && app.goal_last_transition.is_none()
-        && app.goal_last_refusal.is_none()
+    if app.goals.is_empty() && app.goal_last_transition.is_none() && app.goal_last_refusal.is_none()
     {
         return None;
     }
