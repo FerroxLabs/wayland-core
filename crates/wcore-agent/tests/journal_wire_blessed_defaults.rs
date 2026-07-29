@@ -188,18 +188,26 @@ fn tool_intent() -> SessionEvent {
 /// covers the spliced bytes — exactly what a producer emitting that encoding
 /// stores. The spliced frame is last, so no later frame's `previous_checksum`
 /// depends on it and the failure can only be the envelope checksum.
-fn journal_bytes(session_id: &str, splice: impl Fn(&[u8]) -> Vec<u8>) -> Vec<u8> {
+fn journal_bodies(session_id: &str, splice: impl Fn(&[u8]) -> Vec<u8>) -> Vec<Vec<u8>> {
     let first = seal(&material(session_id, 0, GENESIS_CHECKSUM, &turn_started()));
     let previous = stored_checksum(&first);
-    let second = splice(&material(session_id, 1, &previous, &tool_intent()));
-    [frame(&first), frame(&second)].concat()
+    let second = seal(&splice(&material(session_id, 1, &previous, &tool_intent())));
+    vec![first, second]
+}
+
+fn journal_file(bodies: &[Vec<u8>]) -> Vec<u8> {
+    bodies.iter().flat_map(|body| frame(body)).collect()
+}
+
+fn load_bodies(bodies: &[Vec<u8>]) -> Result<(), JournalError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("blessed.journal");
+    std::fs::write(&path, journal_file(bodies)).expect("write fixture");
+    SessionJournal::recovered_state(&path).map(|_| ())
 }
 
 fn load(session_id: &str, splice: impl Fn(&[u8]) -> Vec<u8>) -> Result<(), JournalError> {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("blessed.journal");
-    std::fs::write(&path, journal_bytes(session_id, splice)).expect("write fixture");
-    SessionJournal::recovered_state(&path).map(|_| ())
+    load_bodies(&journal_bodies(session_id, splice))
 }
 
 /// KNOWN-POSITIVE. The identical construction with nothing spliced must load.
@@ -253,39 +261,21 @@ fn wire_blessed_defaults_are_readable() {
 /// trust them", this test goes green and the integrity check is gone.
 #[test]
 fn a_tampered_body_is_still_rejected() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("tampered.journal");
-
-    let bytes = journal_bytes("s-tamper", |body| {
+    let mut bodies = journal_bodies("s-tamper", |body| {
         splice_after(body, IDEMPOTENCY_KEY, ",\"retry_of\":null")
     });
-    let text = String::from_utf8(bytes).expect("utf8");
-    // Same length, so every frame header stays valid.
+    let text = String::from_utf8(bodies[1].clone()).expect("utf8");
+    // Same length, so the frame header stays valid; `frame` then recomputes the
+    // frame digest over the tampered body, so check (1) passes and the envelope
+    // checksum is the only thing left that can reject it.
     let tampered = text.replacen("\"tool\":\"Write\"", "\"tool\":\"Xrite\"", 1);
     assert_ne!(text, tampered, "the tamper must actually apply");
-    // Re-digest every frame over the tampered body so check (1) passes and the
-    // envelope checksum is the only thing left that can reject it.
-    std::fs::write(&path, rebuild_frames(tampered.as_bytes())).expect("write fixture");
+    bodies[1] = tampered.into_bytes();
 
-    match SessionJournal::recovered_state(&path) {
+    match load_bodies(&bodies) {
         Err(JournalError::ChecksumMismatch { seq }) => assert_eq!(seq, 1),
         other => panic!("tampered content must be rejected, got {other:?}"),
     }
-}
-
-/// Re-frame a journal whose bodies were edited in place, recomputing each frame
-/// digest so the frame-level check cannot be what rejects it.
-fn rebuild_frames(bytes: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut offset = 0;
-    while offset < bytes.len() {
-        let length =
-            u32::from_be_bytes(bytes[offset + 4..offset + 8].try_into().expect("length")) as usize;
-        let body = &bytes[offset + 12..offset + 12 + length];
-        out.extend_from_slice(&frame(body));
-        offset += 12 + length + 32;
-    }
-    out
 }
 
 /// THE THIRD ASSERTION — the shape that already exists would have missed this.
