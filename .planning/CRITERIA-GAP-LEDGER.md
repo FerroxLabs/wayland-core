@@ -1224,6 +1224,29 @@ product, that becomes a money-correctness issue and moves up immediately.
 **Grade measured: NOT MET. NOTHING WAS EXERCISED.** No audio flowed on any machine. No interruption.
 No cancellation. No event ordering observed. `crates/*/tests/` contains no voice test.
 
+> **RE-GRADE 2026-07-30 (`lane/ledger-regrade`, `71acfd19`) — headline UNCHANGED: NOT MET. But the
+> sentence above it is false, and the classification survives for a different reason than it states.**
+>
+> - *"`crates/*/tests/` contains no voice test"* — **false.**
+>   `crates/wcore-agent/tests/voice_live_capture_mac.rs` (28 KB) exists with **4 test fns, 0
+>   `#[ignore]`**, and no env-gated early return. Control: 502 test files repo-wide.
+> - *"No audio flowed on any machine"* — **false.** `27-VOICE-MAC.md` records capture proven live:
+>   a 1 kHz tone detected at ratio **116.66** against a same-device, same-duration control arm at
+>   **1.15**.
+> - *"No interruption"* — **false.** `27-VOICE-BARGEIN.md` grades it *"NOT MET (3 of 5, up from
+>   1 of 5)"*, with barge-in **implemented and proven against the real `CpalAudioPlayer`, not the
+>   mock**.
+> - **What DOES hold is the reachability classification**, and it is the reason the grade stands:
+>   `voice` is still absent from every `default` list — `wcore-cli/Cargo.toml:31` is
+>   `default = ["remote-registry", "workflow", "monitor", "review_artifact"]` and `voice` appears
+>   only at `:58`. **The feature is not in the shipped artifact.**
+> - Open blocker, named by `27-GAPS-SUMMARY.md:140-143`: **no local speech-to-text path exists in
+>   the tree.**
+>
+> See also the 2026-07-29 correction below on the ordered-events sub-clause: 6 of 51 event fixtures
+> already carry `event_id` + monotonic `sequence`, so that clause is satisfiable by an existing
+> mechanism.
+
 **Reachability — measured, because the whole release classification turns on it.** All three panel
 members independently attacked my original classification of this criterion for resting on an
 unverified premise. They were right to, so I measured it:
@@ -1269,6 +1292,18 @@ not built.
 
 > **"Deterministic corpora and packaged smokes pass on native macOS, Linux, and Windows."**
 > (`ROADMAP.md:155`)
+
+> **RE-GRADED 2026-07-30 (`lane/ledger-regrade`, `71acfd19`): NOT MET → PARTIAL.**
+>
+> *"Zero packaged smokes ran on zero platforms"* is **false**. `27-GAPS-SUMMARY.md:146-166` records
+> **three packaged smokes** — each a *published release archive*, extracted and executed on the real
+> OS: **macOS aarch64, Linux x86_64 (digest-verified), Windows x86_64 (digest-verified)**. Result
+> **8 PASS / 1 RED, byte-identical grades on all three**, across nine probes run under a throwaway
+> `WAYLAND_HOME` with 18 credential variables stripped.
+>
+> The distinction that keeps it off MET is real and worth preserving: this is **MET for the shipped
+> release, NOT MET for the candidate**. The phase candidate is unsmoked, and the **two aarch64
+> targets are NOT MEASURED** — recorded as neither zero nor passing, which is the honest third state.
 
 **Grade measured: NOT MET.** **Zero packaged smokes ran on zero platforms.** Every Linux measurement
 in Phase 27 came from a `cargo build --release` binary **inside a build tree** — not a packaged
