@@ -100,10 +100,76 @@ pub struct Manifest {
     /// This is precisely what a redacted archive cannot round-trip.
     #[serde(default)]
     pub absent_secrets: Vec<String>,
+    /// Payload paths carried as a CONSISTENT SQLITE CAPTURE rather than as the
+    /// bytes that were on disk (F26-SC3-O1).
+    ///
+    /// Recorded for the same reason [`Manifest::absent_secrets`] is: the module
+    /// documents a byte-exact round trip, and this is the named, bounded set
+    /// where that is not true. Their archived bytes are a folded, checkpointed
+    /// snapshot of the database, so they are logically exact and byte-different.
+    /// `#[serde(default)]` so a v1 archive written before this existed still
+    /// deserializes — its absence correctly means "nothing was captured".
+    #[serde(default)]
+    pub sqlite_captures: Vec<String>,
+    /// Derived SQLite sidecar paths (`-wal`, `-shm`, `-journal`) deliberately
+    /// NOT carried, because the capture above already absorbed them.
+    ///
+    /// Named rather than merely dropped: a reader comparing a restored home
+    /// against its source will find these missing, and silence would make that
+    /// look like data loss instead of the intended normalization.
+    #[serde(default)]
+    pub omitted_sqlite_sidecars: Vec<String>,
 }
 
 pub const FORMAT_ID: &str = "wayland-core-backup";
 pub const FORMAT_VERSION: u32 = 1;
+
+/// Which payloads are SQLite databases, and which are their derived sidecars.
+///
+/// Computed over the WHOLE payload set before any file is read, because the two
+/// answers are interdependent: a `-wal` is only a sidecar if the file it names
+/// is genuinely a database. Deciding per-file inside the read loop would either
+/// drop an unrelated file that happens to end in `-wal`, or carry a real sidecar
+/// whose database sorted after it.
+#[derive(Debug, Default)]
+pub(crate) struct SqliteCapturePlan {
+    /// Root-relative paths that are SQLite databases (by header magic).
+    pub(crate) databases: std::collections::BTreeSet<String>,
+    /// Root-relative sidecar paths that must not be carried.
+    pub(crate) omitted_sidecars: std::collections::BTreeSet<String>,
+}
+
+impl SqliteCapturePlan {
+    pub(crate) fn for_payloads(payloads: &[Payload]) -> Self {
+        use wcore_config::sqlite_snapshot::{DERIVED_SIDECAR_SUFFIXES, is_sqlite_database};
+
+        let mut plan = Self::default();
+        for Payload { rel, abs } in payloads {
+            if is_sqlite_database(abs) {
+                plan.databases.insert(rel.clone());
+            }
+        }
+        // A sidecar's root-relative path is its database's path plus the
+        // suffix — they always share a directory — so this needs no filesystem
+        // access and cannot be confused by an unrelated `-wal` elsewhere.
+        let present: std::collections::BTreeSet<&str> =
+            payloads.iter().map(|p| p.rel.as_str()).collect();
+        for db in &plan.databases {
+            for suffix in DERIVED_SIDECAR_SUFFIXES {
+                let side = format!("{db}{suffix}");
+                if present.contains(side.as_str()) {
+                    plan.omitted_sidecars.insert(side);
+                }
+            }
+        }
+        // A database is never also a sidecar. Belt and braces: if some future
+        // file were both, carrying it as a capture is the safe reading.
+        for db in &plan.databases {
+            plan.omitted_sidecars.remove(db);
+        }
+        plan
+    }
+}
 
 impl Manifest {
     /// Digest over the payload set, derived from the manifest alone.
@@ -152,14 +218,36 @@ pub fn create_archive(
     let (payloads, omitted) = collect_payloads(home, !include_secrets)?;
     let credentials = super::remap::capture_credentials(home, include_secrets)?;
 
+    // F26-SC3-O1. A WAL-mode SQLite database is a TRIO of files that is only
+    // meaningful together; reading each independently while a writer commits
+    // produced a restored database that failed `integrity_check` with 100
+    // problem lines while `create` and `restore` both exited 0. Decide which
+    // payloads are databases BEFORE reading anything, so the read loop below
+    // never touches a sidecar.
+    let plan = SqliteCapturePlan::for_payloads(&payloads);
+    let captures = tempfile::tempdir().map_err(BackupError::io("create capture dir"))?;
+
     let mut entries = Vec::with_capacity(payloads.len());
     let mut blobs: Vec<(String, Vec<u8>)> = Vec::with_capacity(payloads.len());
-    for Payload { rel, abs } in &payloads {
-        let bytes = std::fs::read(abs).map_err(BackupError::io("read payload"))?;
+    for (index, Payload { rel, abs }) in payloads.iter().enumerate() {
+        if plan.omitted_sidecars.contains(rel) {
+            continue;
+        }
+        let bytes = if plan.databases.contains(rel) {
+            let dest = captures.path().join(format!("capture-{index}.db"));
+            wcore_config::sqlite_snapshot::snapshot_database(abs, &dest)
+                .map_err(|e| BackupError::SqliteCapture(format!("{rel}: {e}")))?;
+            std::fs::read(&dest).map_err(BackupError::io("read sqlite capture"))?
+        } else {
+            std::fs::read(abs).map_err(BackupError::io("read payload"))?
+        };
         entries.push(PayloadEntry {
             path: rel.clone(),
             bytes: bytes.len() as u64,
             sha256: sha256_hex(&bytes),
+            // The SOURCE file's mode, even for a capture: the restored database
+            // must land with the permissions the user's database had, not with
+            // whatever the temporary capture file happened to get.
             mode: file_mode(abs),
         });
         blobs.push((rel.clone(), bytes));
@@ -174,6 +262,8 @@ pub fn create_archive(
         payloads: entries,
         credentials,
         absent_secrets: omitted,
+        sqlite_captures: plan.databases.iter().cloned().collect(),
+        omitted_sqlite_sidecars: plan.omitted_sidecars.iter().cloned().collect(),
     };
 
     let bytes = pack(&manifest, &blobs)?;
