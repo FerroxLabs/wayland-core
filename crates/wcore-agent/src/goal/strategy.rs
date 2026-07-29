@@ -255,7 +255,6 @@ pub enum FleetOutcome<'a> {
 /// `CouncilError` still reaches its exact terminal category (`Unpriced`,
 /// `Exhausted{Resource}`, …) rather than being flattened. Only an error that is
 /// genuinely not a `CouncilError` falls through to `DriverFailed`.
-#[derive(Debug)]
 pub enum CouncilRunOutcome<'a> {
     /// The council ran and produced a result.
     Ran(&'a CouncilRunResult),
@@ -263,6 +262,21 @@ pub enum CouncilRunOutcome<'a> {
     Failed(&'a CouncilError),
     /// The driver failed around the council, for a stated reason.
     DriverFailed { detail: String },
+}
+
+/// Hand-written because [`CouncilRunResult`] is not `Debug`, and deriving it
+/// there to satisfy this enum would be a drive-by change to the council's public
+/// API. The variant name is all a diagnostic needs here.
+impl std::fmt::Debug for CouncilRunOutcome<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ran(_) => f.write_str("CouncilRunOutcome::Ran(..)"),
+            Self::Failed(error) => write!(f, "CouncilRunOutcome::Failed({error})"),
+            Self::DriverFailed { detail } => {
+                write!(f, "CouncilRunOutcome::DriverFailed({detail})")
+            }
+        }
+    }
 }
 
 impl<'a> CouncilRunOutcome<'a> {
