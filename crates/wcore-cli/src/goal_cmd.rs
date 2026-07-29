@@ -19,6 +19,7 @@
 //! | `task` | declare a task, its dependency set and its idempotency key |
 //! | `run` | recover, revoke expired leases, drain the outbox, then drive waves through the real `FleetDispatcher` |
 //! | `status` | the canonical JSON projection of Goal + task state, replayed from the chain |
+//! | `stream` | the same state as the HOST protocol sees it: the ordered `goal_transition` / `goal_snapshot` JSON-stream lines (F22-C1) |
 //! | `exec-task` | the effect boundary: the idempotency gate, then the operator's command |
 //!
 //! ## Why `exec-task` is a product verb and not a test fixture
@@ -44,7 +45,7 @@ use clap::{Args, Subcommand};
 
 use wcore_agent::goal::{
     FleetOutcome, GoalFleetDriver, GoalKernel, GoalLoop, StrategyTermination, TaskAssignment,
-    TaskExecution, TaskExecutor, WaveOutcome,
+    TaskExecution, TaskExecutor, WaveOutcome, event_line, goal_stream,
 };
 use wcore_agent::session_journal::SessionJournal;
 use wcore_swarm::fleet::{FleetDispatcher, ShardSummary};
@@ -176,6 +177,31 @@ pub enum GoalCommand {
         #[arg(long)]
         goal: String,
     },
+    /// The Goal as the HOST protocol sees it (F22-C1).
+    ///
+    /// Emits the ordered producer stream for one Goal as JSON Lines: every
+    /// durable Goal-level transition as a `goal_transition` at the cursor it
+    /// landed at, then the current `goal_snapshot`. Replayed from the chain
+    /// through the SAME reducer every other view uses, so this cannot show a
+    /// state the journal does not hold.
+    ///
+    /// A verb rather than a flag on `status` because the two answer different
+    /// questions: `status` prints the reduced state for a human, `stream` emits
+    /// the wire a host consumes. Collapsing them would make one of the two
+    /// answers a rendering of the other.
+    Stream {
+        #[arg(long)]
+        journal: PathBuf,
+        #[arg(long)]
+        goal: String,
+        /// How many events the caller expects. Exit 1 on a mismatch, so this is
+        /// a gate that can go red rather than a print — the same discipline
+        /// `effects --expect` carries, and for the same reason: a stream that
+        /// emitted nothing must not be indistinguishable from a stream that
+        /// emitted everything.
+        #[arg(long)]
+        expect: Option<usize>,
+    },
     /// The effect boundary: idempotency gate, then the operator's command.
     ///
     /// Not normally invoked by hand — `run` spawns it — but it is a real verb so
@@ -261,6 +287,11 @@ pub async fn run(args: GoalArgs) -> anyhow::Result<()> {
             .await
         }
         GoalCommand::Status { journal, goal } => status(&journal, &goal),
+        GoalCommand::Stream {
+            journal,
+            goal,
+            expect,
+        } => stream(&journal, &goal, expect),
         GoalCommand::ExecTask { effects_dir, argv } => {
             exec_task_from_env(&effects_dir, &argv).await
         }
@@ -578,6 +609,43 @@ fn status(journal: &std::path::Path, goal: &str) -> anyhow::Result<()> {
     // A surface that renders its own shape is a surface that can disagree with
     // the chain, which is the parallel lifecycle this phase exists to remove.
     println!("{}", serde_json::to_string_pretty(&state)?);
+    Ok(())
+}
+
+/// The host-protocol producer stream for one Goal (F22-C1).
+///
+/// Stdout carries ONLY JSON Lines, so the output is directly consumable by a
+/// host decoder; the count summary goes to stderr for the same reason.
+fn stream(journal: &std::path::Path, goal: &str, expect: Option<usize>) -> anyhow::Result<()> {
+    if !journal.exists() {
+        anyhow::bail!("no journal at {}", journal.display());
+    }
+    let envelopes = SessionJournal::replay(journal)
+        .map_err(|e| anyhow::anyhow!("failed to replay {}: {e}", journal.display()))?;
+    let events = goal_stream(&session_for(journal), goal, &envelopes)
+        .map_err(|e| anyhow::anyhow!("failed to project goal {goal}: {e}"))?;
+    if events.is_empty() {
+        anyhow::bail!("no goal {goal} in {}", journal.display());
+    }
+    for event in &events {
+        println!(
+            "{}",
+            event_line(event)
+                .map_err(|e| anyhow::anyhow!("failed to serialize goal event: {e}"))?
+        );
+    }
+    // Counts on stderr, so a caller can assert what was emitted without having
+    // to parse the stream it is asserting about.
+    let transitions = events.len().saturating_sub(1);
+    eprintln!(
+        "GOAL-STREAM: goal={goal} events={} transitions={transitions} snapshots=1",
+        events.len()
+    );
+    if let Some(expect) = expect
+        && events.len() != expect
+    {
+        anyhow::bail!("expected {expect} goal events, emitted {}", events.len());
+    }
     Ok(())
 }
 

@@ -319,7 +319,7 @@ mod tests {
         ];
         let rendered = statuses
             .iter()
-            .map(|status| serde_json::to_value(status).unwrap())
+            .map(|status| serde_json::to_value(status).unwrap().to_string())
             .collect::<BTreeSet<_>>();
         assert_eq!(rendered.len(), 3, "statuses collapsed: {rendered:?}");
         assert_eq!(
@@ -359,7 +359,7 @@ mod tests {
         ];
         let rendered = kinds
             .iter()
-            .map(|kind| serde_json::to_value(kind).unwrap())
+            .map(|kind| serde_json::to_value(kind).unwrap().to_string())
             .collect::<BTreeSet<_>>();
         assert_eq!(rendered.len(), 8, "wire kinds collapsed: {rendered:?}");
     }

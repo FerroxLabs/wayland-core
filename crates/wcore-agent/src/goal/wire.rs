@@ -32,8 +32,8 @@ use wcore_protocol::goal::{
 };
 
 use crate::session_journal::{
-    GoalLifecycle, GoalState, GoalTaskAttemptStatus, GoalTaskState, JournalError,
-    state_payload_digest,
+    GoalLifecycle, GoalState, GoalTaskAttemptStatus, GoalTaskState, JournalEnvelope, JournalError,
+    SessionEvent, replay_state, state_payload_digest,
 };
 
 use super::record::GoalAuthorityRecord;
@@ -197,6 +197,88 @@ pub fn event_line(event: &ProtocolEvent) -> Result<String, JournalError> {
     serde_json::to_string(event).map_err(|error| {
         JournalError::InvalidTransition(format!("goal event is not serializable: {error}"))
     })
+}
+
+/// Which wire transition, if any, one journal envelope represents for `goal_id`.
+///
+/// Returns `None` for every event that is not a Goal-level transition for this
+/// Goal — including `GoalTaskDeclared` and `GoalTaskTransitioned`, which move
+/// the task ledger rather than the Goal's own lifecycle and are observed
+/// through the next snapshot's task summaries instead.
+fn transition_kind_for(event: &SessionEvent, goal_id: &str) -> Option<GoalTransitionKind> {
+    let (id, kind) = match event {
+        SessionEvent::GoalOpened { goal_id, .. } => (goal_id, GoalTransitionKind::Opened),
+        SessionEvent::GoalIterationStarted { goal_id, .. } => {
+            (goal_id, GoalTransitionKind::IterationStarted)
+        }
+        SessionEvent::GoalWaitBegun { goal_id, .. } => (goal_id, GoalTransitionKind::WaitBegun),
+        SessionEvent::GoalWaitResolved { goal_id } => (goal_id, GoalTransitionKind::WaitResolved),
+        SessionEvent::GoalRunResumed { goal_id, .. } => (goal_id, GoalTransitionKind::RunResumed),
+        SessionEvent::GoalLoopOwnerClaimed { goal_id, .. } => {
+            (goal_id, GoalTransitionKind::LoopOwnerClaimed)
+        }
+        SessionEvent::GoalLoopOwnerFinished { goal_id, .. } => {
+            (goal_id, GoalTransitionKind::LoopOwnerFinished)
+        }
+        SessionEvent::GoalTerminated { goal_id, .. } => (goal_id, GoalTransitionKind::Terminated),
+        _ => return None,
+    };
+    (id == goal_id).then_some(kind)
+}
+
+/// The complete ordered producer stream for one Goal, replayed from the chain.
+///
+/// This is the serialized sequence a host replays: every durable Goal-level
+/// transition in journal order, each at the cursor it landed at, followed by the
+/// current snapshot.
+///
+/// ## Why the lifecycle is folded through the real reducer
+///
+/// Each transition reports the lifecycle AFTER it, and deriving that from the
+/// transition kind alone would be a guess for `RunResumed` and
+/// `LoopOwnerClaimed` — neither of which determines a lifecycle by itself. So
+/// this folds the journal prefix through [`replay_state`], the SAME reducer that
+/// produces every other view of the chain. A second lifecycle rule beside the
+/// reducer is the parallel lifecycle Phase 22 exists to remove, and it would be
+/// the third one in this file if it were written here.
+///
+/// The prefix fold is quadratic in the number of Goal transitions. That is a
+/// deliberate trade for correctness on a stream that is bounded by a Goal's loop
+/// ceiling, not by session length.
+pub fn goal_stream(
+    session_id: &str,
+    goal_id: &str,
+    envelopes: &[JournalEnvelope],
+) -> Result<Vec<ProtocolEvent>, JournalError> {
+    let mut events = Vec::new();
+    for (index, envelope) in envelopes.iter().enumerate() {
+        let Some(kind) = transition_kind_for(&envelope.event, goal_id) else {
+            continue;
+        };
+        let state = replay_state(&envelopes[..=index])?;
+        let Some(goal) = state.goals.get(goal_id) else {
+            return Err(JournalError::InvalidTransition(format!(
+                "goal {goal_id} has a transition at seq {} but no reduced state",
+                envelope.seq
+            )));
+        };
+        events.push(goal_transition_event(
+            session_id,
+            goal_id,
+            RecoveryCursor {
+                journal_sequence: Some(envelope.seq),
+                journal_digest: envelope.checksum.clone(),
+            },
+            kind,
+            &goal.lifecycle,
+        ));
+    }
+
+    let final_state = replay_state(envelopes)?;
+    if let Some(goal) = final_state.goals.get(goal_id) {
+        events.push(goal_snapshot_event(session_id, goal)?);
+    }
+    Ok(events)
 }
 
 #[cfg(test)]

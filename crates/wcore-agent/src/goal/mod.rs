@@ -42,7 +42,8 @@ pub use strategy::{
     GoalLoop, GoalLoopError, LoopOwner, StrategyTag, StrategyTermination,
 };
 pub use wire::{
-    event_line, goal_projection, goal_snapshot_event, goal_state_digest, goal_transition_event,
+    event_line, goal_projection, goal_snapshot_event, goal_state_digest, goal_stream,
+    goal_transition_event,
 };
 
 // Re-exported so callers work in one vocabulary: the durable projection and the
