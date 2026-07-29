@@ -67,6 +67,29 @@ pub const CANONICAL_STEPS: [&str; 17] = [
 /// The only arrival source a receipt may claim. See the module docs.
 pub const ARRIVAL_SOURCE_INDEPENDENT_SINK: &str = "independent-sink";
 
+/// The number of outbound channel adapters the product ships. A coverage claim
+/// is meaningless without the population it is drawn from: "3 adapters" is a
+/// different statement depending on whether the product has four or forty.
+///
+/// The population, as `wcore_channels_registry::channel_factory_for` dispatches
+/// it: `slack`, `telegram`, `email`, `discord`, `sms`, `whatsapp`, `signal`,
+/// `matrix`, `msteams`, and `imessage` (macOS-only).
+///
+/// Kept as a constant rather than counted from the registry at runtime so that
+/// a receipt written today and read next year is interpreted against the
+/// population it was actually written about, and so this crate does not take a
+/// dependency on the registry merely to divide by ten. `ADAPTER_POPULATION`
+/// below is the roster the constant is asserted against.
+pub const REGISTERED_ADAPTER_TOTAL: u64 = 10;
+
+/// The named roster behind [`REGISTERED_ADAPTER_TOTAL`]. Exists so the constant
+/// is checkable against something rather than being a bare number a reader has
+/// to trust.
+pub const ADAPTER_POPULATION: [&str; 10] = [
+    "slack", "telegram", "email", "discord", "sms", "whatsapp", "signal", "matrix", "msteams",
+    "imessage",
+];
+
 /// The schema tag a receipt must carry, so a future shape change is a loud
 /// parse refusal rather than a silently different meaning.
 pub const RECEIPT_SCHEMA: &str = "wayland.journey.receipt/1";
@@ -114,6 +137,83 @@ pub struct DeliveryCounts {
     pub losses: u64,
 }
 
+/// What one channel adapter carried, at the independent sink.
+///
+/// `endpoint` is recorded alongside `adapter` deliberately. The adapter name is
+/// what the driver *configured*; the endpoint is what the sink *observed being
+/// called*. A driver that names three adapters while all three land on one
+/// endpoint has configured three and exercised one, and only the endpoint can
+/// tell you that. Recording just the name would reproduce the very blindness
+/// this type exists to remove, one level up.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdapterDelivery {
+    /// The platform tag from the channel config — `slack`, `whatsapp`, `sms`.
+    pub adapter: String,
+    /// The endpoint the independent sink recorded this adapter calling, e.g.
+    /// `chat.postMessage`. Observed, never configured.
+    pub endpoint: String,
+    /// Deliveries submitted through this adapter.
+    pub submitted: u64,
+    /// Arrival records at the sink attributed to this adapter's endpoint.
+    pub arrived: u64,
+    /// Distinct arrival bodies at the sink for this adapter's endpoint.
+    pub unique: u64,
+}
+
+/// Which slice of the adapter population a journey's delivery leg actually
+/// exercised.
+///
+/// # Why this field exists
+///
+/// Phase 24 Criterion 1 was graded `12 of 12 clean` off a run in which **one**
+/// adapter of ten carried every delivery — Slack, the sole adapter implementing
+/// the property under test. The journey receipt then inherited that run and
+/// added no field that could reveal it: a receipt reading
+/// `submitted=12 arrived=12 unique=12 duplicates=0 losses=0` is **byte-identical**
+/// whether one adapter ran or ten. Three platform receipts were published in
+/// that shape and every one of them was Slack-only.
+///
+/// A receipt that cannot distinguish 1-of-10 from 10-of-10 is not neutral about
+/// coverage — it silently reads as the stronger claim, because a reader has
+/// nothing to read it against. So the field is **mandatory**: a journey may
+/// honestly exercise one adapter, but it may not decline to say so.
+///
+/// This deliberately does NOT impose a minimum. A one-adapter journey is a
+/// legitimate journey and refusing it would be inventing a stricter criterion
+/// than the one written down. Enforcing a *matrix* is a separate, explicit
+/// decision the caller makes with `verify --min-adapters N`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdapterCoverage {
+    /// The adapter population this coverage is a fraction OF.
+    pub registered_total: u64,
+    /// One entry per adapter actually exercised. Never empty.
+    pub exercised: Vec<AdapterDelivery>,
+}
+
+impl AdapterCoverage {
+    /// Distinct adapters exercised.
+    #[must_use]
+    pub fn adapter_count(&self) -> u64 {
+        self.exercised
+            .iter()
+            .map(|entry| entry.adapter.as_str())
+            .collect::<BTreeSet<_>>()
+            .len() as u64
+    }
+
+    /// `slack,sms,whatsapp` — sorted, so two receipts are comparable by string.
+    #[must_use]
+    pub fn adapter_list(&self) -> String {
+        self.exercised
+            .iter()
+            .map(|entry| entry.adapter.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
 /// The journey receipt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JourneyReceipt {
@@ -145,6 +245,9 @@ pub struct JourneyReceipt {
     pub arrival_source: String,
     /// The five numbers.
     pub counts: DeliveryCounts,
+    /// Which adapters carried those numbers. Mandatory — see
+    /// [`AdapterCoverage`] for why a receipt is not allowed to be silent here.
+    pub adapter_coverage: AdapterCoverage,
     /// The ordered steps.
     pub steps: Vec<JourneyStep>,
 }
@@ -197,6 +300,52 @@ pub enum JourneyError {
     NoDeliveries,
     #[error("delivery reconciliation is not clean: duplicates={duplicates} losses={losses}")]
     DirtyReconciliation { duplicates: u64, losses: u64 },
+    #[error(
+        "receipt names zero exercised adapters; a delivery tally that cannot say which adapter \
+         carried it reads as the whole population"
+    )]
+    EmptyAdapterCoverage,
+    #[error(
+        "adapter_coverage.registered_total is {found}, expected {expected}; a coverage fraction \
+         against the wrong population overstates or understates itself"
+    )]
+    WrongAdapterPopulation { found: u64, expected: u64 },
+    #[error(
+        "adapter {adapter:?} claims {submitted} submitted; an adapter that carried nothing is not \
+         coverage and listing it inflates the fraction"
+    )]
+    IdleAdapterClaimed { adapter: String, submitted: u64 },
+    #[error(
+        "adapter {adapter:?} is listed twice; one entry per adapter, or the sums are ambiguous"
+    )]
+    DuplicateAdapter { adapter: String },
+    #[error(
+        "adapter {adapter:?} carries an empty observed endpoint; the endpoint is what distinguishes \
+         a configured adapter from an exercised one"
+    )]
+    EmptyAdapterEndpoint { adapter: String },
+    #[error(
+        "{count} adapters share the observed endpoint {endpoint:?}; adapters that all land on one \
+         endpoint were configured separately and exercised as one"
+    )]
+    SharedAdapterEndpoint { endpoint: String, count: usize },
+    #[error(
+        "per-adapter {field} sums to {sum} but the receipt's top-level count is {total}; the \
+         breakdown and the headline are describing different runs"
+    )]
+    AdapterCountsUnreconciled {
+        field: &'static str,
+        sum: u64,
+        total: u64,
+    },
+    #[error(
+        "receipt exercises {found} adapter(s) of {population}; caller required at least {required}"
+    )]
+    InsufficientAdapterCoverage {
+        found: u64,
+        required: u64,
+        population: u64,
+    },
     #[error("binary digest mismatch: receipt records {recorded}, verifier computed {computed}")]
     DigestMismatch { recorded: String, computed: String },
     // NOT named `source`: thiserror treats a field of that name as the error
@@ -299,7 +448,88 @@ pub fn verify_structure(
             expected: ARRIVAL_SOURCE_INDEPENDENT_SINK.to_string(),
         });
     }
-    verify_counts(&receipt.counts)
+    verify_counts(&receipt.counts)?;
+    verify_adapter_coverage(&receipt.adapter_coverage, &receipt.counts)
+}
+
+/// The adapter-coverage checks, separable so each refusal is directly testable.
+///
+/// This is the half of the receipt that Phase 24 was missing. Everything here
+/// exists to stop a single-adapter run from reading as a matrix — see
+/// [`AdapterCoverage`].
+pub fn verify_adapter_coverage(
+    coverage: &AdapterCoverage,
+    counts: &DeliveryCounts,
+) -> Result<(), JourneyError> {
+    if coverage.exercised.is_empty() {
+        return Err(JourneyError::EmptyAdapterCoverage);
+    }
+    if coverage.registered_total != REGISTERED_ADAPTER_TOTAL {
+        return Err(JourneyError::WrongAdapterPopulation {
+            found: coverage.registered_total,
+            expected: REGISTERED_ADAPTER_TOTAL,
+        });
+    }
+
+    let mut seen_adapters = BTreeSet::new();
+    // Endpoint -> how many distinct adapters claimed it. Three adapters that all
+    // land on `chat.postMessage` are one adapter wearing three names, which is
+    // the exact failure this whole type exists to make visible.
+    let mut endpoint_users: std::collections::BTreeMap<&str, usize> =
+        std::collections::BTreeMap::new();
+
+    for entry in &coverage.exercised {
+        if !seen_adapters.insert(entry.adapter.as_str()) {
+            return Err(JourneyError::DuplicateAdapter {
+                adapter: entry.adapter.clone(),
+            });
+        }
+        if entry.endpoint.trim().is_empty() {
+            return Err(JourneyError::EmptyAdapterEndpoint {
+                adapter: entry.adapter.clone(),
+            });
+        }
+        if entry.submitted == 0 {
+            return Err(JourneyError::IdleAdapterClaimed {
+                adapter: entry.adapter.clone(),
+                submitted: entry.submitted,
+            });
+        }
+        *endpoint_users.entry(entry.endpoint.as_str()).or_insert(0) += 1;
+    }
+
+    if let Some((endpoint, count)) = endpoint_users.iter().find(|(_, count)| **count > 1) {
+        return Err(JourneyError::SharedAdapterEndpoint {
+            endpoint: (*endpoint).to_string(),
+            count: *count,
+        });
+    }
+
+    // The breakdown must add up to the headline. Without this, a receipt could
+    // carry an honest-looking three-adapter list beside a twelve-delivery
+    // headline that only one of them produced.
+    for (field, sum, total) in [
+        (
+            "submitted",
+            coverage.exercised.iter().map(|e| e.submitted).sum::<u64>(),
+            counts.submitted,
+        ),
+        (
+            "arrived",
+            coverage.exercised.iter().map(|e| e.arrived).sum::<u64>(),
+            counts.arrived,
+        ),
+        (
+            "unique",
+            coverage.exercised.iter().map(|e| e.unique).sum::<u64>(),
+            counts.unique,
+        ),
+    ] {
+        if sum != total {
+            return Err(JourneyError::AdapterCountsUnreconciled { field, sum, total });
+        }
+    }
+    Ok(())
 }
 
 /// The count reconciliation, on its own so its refusals are directly testable.
@@ -339,14 +569,33 @@ pub fn verify_counts(counts: &DeliveryCounts) -> Result<(), JourneyError> {
 ///
 /// The verifier hashes the file ITSELF. Trusting a digest handed to it by the
 /// same driver that wrote the receipt would make the check a restatement.
+/// `min_adapters` is the caller's explicit matrix demand. `None` verifies a
+/// journey on its own terms — a one-adapter journey is legitimate and passes,
+/// but the success line then SAYS `adapters=1/10`, so nobody can read it as ten.
+///
+/// The coverage is printed, not merely validated. A field that a receipt carries
+/// and no consumer surfaces is an advertised-but-dead surface, and the whole
+/// reason this defect survived three platform receipts is that nothing ever
+/// printed which adapter carried them.
 pub fn verify_receipt(
     raw: &str,
     binary: &Path,
     expect_platform: &str,
     expect_commit: &str,
+    min_adapters: Option<u64>,
 ) -> Result<String, JourneyError> {
     let receipt = parse_receipt(raw)?;
     verify_structure(&receipt, expect_platform, expect_commit)?;
+    let exercised = receipt.adapter_coverage.adapter_count();
+    if let Some(required) = min_adapters
+        && exercised < required
+    {
+        return Err(JourneyError::InsufficientAdapterCoverage {
+            found: exercised,
+            required,
+            population: receipt.adapter_coverage.registered_total,
+        });
+    }
     let computed = sha256_file(binary)?;
     if !computed.eq_ignore_ascii_case(&receipt.binary_sha256) {
         return Err(JourneyError::DigestMismatch {
@@ -356,7 +605,7 @@ pub fn verify_receipt(
     }
     Ok(format!(
         "JOURNEY VERIFIED platform={} commit={} steps={} submitted={} arrived={} unique={} \
-         duplicates={} losses={}",
+         duplicates={} losses={} adapters={}/{} exercised={}",
         receipt.platform,
         receipt.candidate_commit,
         receipt.steps.len(),
@@ -365,6 +614,9 @@ pub fn verify_receipt(
         receipt.counts.unique,
         receipt.counts.duplicates,
         receipt.counts.losses,
+        exercised,
+        receipt.adapter_coverage.registered_total,
+        receipt.adapter_coverage.adapter_list(),
     ))
 }
 
@@ -379,6 +631,11 @@ pub enum BindError {
     DriverDisagreement(Vec<String>),
     #[error("two receipts claim the same platform {0:?}")]
     DuplicatePlatform(String),
+    #[error(
+        "receipts disagree on which adapters were exercised: {0:?}; a bound set is one candidate \
+         measured over one delivery surface, not three platforms each measuring a different one"
+    )]
+    AdapterDisagreement(Vec<String>),
 }
 
 /// The executable form of the three-platform binding discipline: the platforms
@@ -414,14 +671,39 @@ pub fn bind_receipts(receipts: &[JourneyReceipt]) -> Result<String, BindError> {
             return Err(BindError::DuplicatePlatform(receipt.platform.clone()));
         }
     }
+    // Three platforms that each drove a DIFFERENT adapter are three
+    // one-adapter journeys, and binding them would let the union read as a
+    // matrix that no single platform ever ran.
+    let adapter_sets: BTreeSet<String> = receipts
+        .iter()
+        .map(|r| r.adapter_coverage.adapter_list())
+        .collect();
+    if adapter_sets.len() != 1 {
+        return Err(BindError::AdapterDisagreement(
+            adapter_sets.into_iter().collect::<Vec<_>>(),
+        ));
+    }
+
     let commit = commits.into_iter().next().unwrap_or_default();
     let driver = drivers.into_iter().next().unwrap_or_default();
+    let adapters = adapter_sets.into_iter().next().unwrap_or_default();
+    let population = receipts
+        .first()
+        .map(|r| r.adapter_coverage.registered_total)
+        .unwrap_or_default();
+    let exercised = receipts
+        .first()
+        .map(|r| r.adapter_coverage.adapter_count())
+        .unwrap_or_default();
     Ok(format!(
-        "BOUND commit={} driver={} receipts={} platforms={}",
+        "BOUND commit={} driver={} receipts={} platforms={} adapters={}/{} exercised={}",
         commit,
         driver,
         receipts.len(),
         seen.into_iter().collect::<Vec<_>>().join(","),
+        exercised,
+        population,
+        adapters,
     ))
 }
 
@@ -547,6 +829,21 @@ mod tests {
                 unique: 12,
                 duplicates: 0,
                 losses: 0,
+            },
+            // Deliberately the historically-published shape: all 12 deliveries
+            // carried by Slack alone, at Slack's endpoint. This fixture is the
+            // one the old receipt could not distinguish from a ten-adapter run,
+            // and keeping it that way means the refusal tests below are graded
+            // against the real defect rather than a tidied-up version of it.
+            adapter_coverage: AdapterCoverage {
+                registered_total: REGISTERED_ADAPTER_TOTAL,
+                exercised: vec![AdapterDelivery {
+                    adapter: "slack".into(),
+                    endpoint: "chat.postMessage".into(),
+                    submitted: 12,
+                    arrived: 12,
+                    unique: 12,
+                }],
             },
             steps: steps(),
         }
