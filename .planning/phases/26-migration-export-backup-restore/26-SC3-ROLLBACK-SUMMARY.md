@@ -26,12 +26,23 @@ uncatchable `SIGKILL` against a captured pre-operation state.
 interrupted (the corpora are synthetic), and I did not touch SC2's import/export or
 quarantine paths, nor `wcore-skills/src/govern.rs`.
 
+All figures below are read back out of the committed logs in
+`evidence/26-sc3-rollback/proofs/`, all from one binary,
+`BIN-SHA256: ddbb1fa28a3d7c20beade95a513bb8b18b90d4aad466b6e60853d40ee79b0237`.
+Kill timing is stochastic, so the mid/pre/post split moves between runs; these are
+the numbers of the run whose logs are committed, not the best run I saw.
+
 | noun | before | after |
 |---|---|---|
 | **backup** | interruption implicit; no arm of its own | 9 kills swept across a measured 58 ms window; source home moved **0** times; **0** unverifiable archives published |
-| **restore** | exact rollback proven at ONE kill point | **9/9** kills mid-flight, **9/9** homes byte-identical, 0 unexplained byte diffs |
-| **profile migration** | interruption met, **rollback absent** | journal + reverse-apply; **7/9** mid-apply kills, **9/9** interrupted homes byte-identical |
+| **restore** | exact rollback proven at ONE kill point | **9/9** kills mid-flight, **9/9** interrupted homes byte-identical, 0 unexplained byte diffs |
+| **profile migration** | interruption met, **rollback absent** | journal + reverse-apply; **6/9** mid-apply kills, **8/8** interrupted homes byte-identical |
 | **reciprocal portability** | same as migration | openclaw peer: **6/9** mid-apply, **8/8** byte-identical |
+
+In each migrate run the 9th trial completed before its kill landed (`post`), and
+`ROLLBACK-ARM-COMPLETED-REVERTED: 0` — recovery correctly left that finished import
+alone rather than reverting it. That is why 8, not 9, homes are compared against PRE:
+only interrupted operations should come back.
 
 ---
 
@@ -42,15 +53,18 @@ at a delay swept across the operation's window **measured on the hardware**, not
 guessed. Mid-flight is classified by an **open journal record**, which states
 directly that the process died inside the window the journal covers.
 
-- **restore**, 9 points from 339 ms to 3051 ms across a 3.4 s window: inside
-  `clear_target` (the home at its emptiest), first payload, mid-payload-loop, last
-  payload, and the credential rewrite. 9/9 landed mid-flight.
-- **migrate**, 9 points from 19 ms to 193 ms across a 215 ms window: inside
-  `preserve_target`, inside the `admit` loop, at the index rewrite, and around the
-  single atomic `config.toml` write. 7/9 (hermes) and 6/9 (openclaw) landed
-  mid-apply; the rest landed pre-apply or post-completion and are graded as such.
-- **backup create**, 9 points across a measured 58 ms window: 6 before publication,
-  3 after. The three that published produced archives that **verify**.
+- **restore** — 9 points at 347, 695, 1042 … 3127 ms across a measured 3475 ms
+  window: inside `clear_target` (the home at its emptiest), first payload, through
+  the payload loop, last payload, and the credential rewrite. **9/9 landed
+  mid-flight**, each with an open journal record and `recovered: 1`.
+- **migrate** — 9 points at 18, 37, 55, 74, 93, 111, 130, 148, 167 ms across a
+  measured 186 ms window: inside `preserve_target` (trials 1–2 landed there, before
+  any mutation — correctly graded `pre`, home already identical), through the
+  `admit` loop and the index rewrites (trials 3–8, all `mid`), and trial 9 after the
+  single atomic `config.toml` write completed (`post`).
+- **backup create** — 9 points across a measured 58 ms window: 6 landed before
+  publication (no archive on disk), 3 after. The three that published produced
+  archives that **verify**; `CREATE-ARM-UNVERIFIABLE-ARCHIVES: 0`.
 
 ## The byte-identity evidence
 
@@ -67,10 +81,11 @@ bookkeeping, and an exclusion list is otherwise a place to hide a difference.
 
 **Every proof carries a known-negative arm** — the identical kills with the rollback
 removed — which must leave the home DIFFERENT from PRE. It did, every time:
-4/4, 5/5 and 9/9 mid-flight kills damaged the home when nothing rolled it back. Had
-that arm reported "identical", the property arm would have proven nothing and the
-run FAILS on that gate. A third `nokill` arm proves recovery does **not** revert a
-completed operation: 9/9 completed, 0 recovered, 0 reverted, on all three proofs.
+`NOROLLBACK-ARM-MID-DAMAGED` was **7/7** (hermes), **7/7** (openclaw) and **9/9**
+(backup/restore). Had that arm reported "identical", the property arm would have
+proven nothing, and the run FAILS on that gate rather than passing quietly. A third
+`nokill` arm proves recovery does **not** revert a completed operation: **9/9
+completed, 0 recovered, 0 reverted** on all three proofs.
 
 ---
 
@@ -200,10 +215,20 @@ cargo fmt --all -- --check                rc=0 (Mac)
 
 portability-interrupt-proof.sh            PROOF-OK   DIGEST-EQUAL: yes   [regression, pre-existing]
 portability-migrate-interrupt-proof.sh    PROOF: PASS peer=hermes mid=6 recovered=9   [regression, pre-existing]
-portability-migrate-rollback-proof.sh --peer hermes     PROOF: PASS
-portability-migrate-rollback-proof.sh --peer openclaw   PROOF: PASS
-portability-backup-rollback-sweep.sh                    PROOF: PASS
+portability-migrate-rollback-proof.sh --peer hermes     PROOF: PASS   [NEW]
+portability-migrate-rollback-proof.sh --peer openclaw   PROOF: PASS   [NEW]
+portability-backup-rollback-sweep.sh                    PROOF: PASS   [NEW]
 ```
+
+The three new proofs print their own instrument self-test, and it discriminates:
+
+```
+PID-TARGETING-CONTROL: direct-launch comm='wayland-core' function-launch comm='sh'
+```
+
+That line is the §6b-ii third assertion made visible — the launch mechanism the
+harness originally used names `sh`, so the repaired check would have failed on the
+broken version rather than passing on both.
 
 Both pre-existing interruption proofs still pass, so the recovery-ordering change did
 not regress the single-kill restore proof or migrate's forward convergence.

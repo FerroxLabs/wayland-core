@@ -1,0 +1,116 @@
+=== migrate ROLLBACK proof (SC3: exact pre-operation state) ===
+BIN: /root/wayland-26sc3/target/release/wayland-core
+BIN-SHA256: ddbb1fa28a3d7c20beade95a513bb8b18b90d4aad466b6e60853d40ee79b0237
+PEER: hermes
+TRIALS-PER-ARM: 9
+ITEMS: 220
+DATE-UTC: 2026-07-29T14:00:41Z
+HOST: Ubuntu-2404-noble-amd64-base
+CORPUS-PROFILES: 8
+CORPUS-SKILLS: 24
+CORPUS-KIND: hermes
+CORPUS-ROOT: /tmp/tmp.ooSUw2cias/seed-peer
+CORPUS-PROFILES: 8
+CORPUS-SKILLS: 220
+CORPUS-KIND: hermes
+CORPUS-ROOT: /tmp/tmp.ooSUw2cias/main-peer
+PID-TARGETING-CONTROL: direct-launch comm='wayland-core' function-launch comm='sh'
+TEMPLATE-ENTRIES: 24
+TEMPLATE-PROFILES: 9
+TEMPLATE-PAYLOAD-FILES: 24
+PRE-OPERATION-DIGEST: b96e18fc9b420fa0c832e918abeef63c7d5d1e9c7434e2c1dece07d949ab22e9
+COPY-FIDELITY-CONTROL: pass
+REFERENCE-DURATION-MS: 186
+POST-IMPORT-DIGEST: 167cdbe286e96c9bce42c453ed710b3bb45bcd2a8dcb0bdfa0ca7f8eec6042f0
+MUTATION-CONTROL: pass (PRE != POST)
+SCOPE-PROBE: armed, reference import rc=0
+
+--- ARM: rollback (kill=yes rollback=yes) ---
+TRIAL-TABLE[rollback]: trial delay_ms class recovered digest_equal journal_residue
+TRIAL[rollback]: 1 18 pre 0 yes no
+TRIAL[rollback]: 2 37 pre 0 yes no
+TRIAL[rollback]: 3 55 mid 1 yes no
+TRIAL[rollback]: 4 74 mid 1 yes no
+TRIAL[rollback]: 5 93 mid 1 yes no
+TRIAL[rollback]: 6 111 mid 1 yes no
+TRIAL[rollback]: 7 130 mid 1 yes no
+TRIAL[rollback]: 8 148 mid 1 yes no
+TRIAL[rollback]: 9 167 post 0 no no
+ARM-rollback CLASS-MID: 6
+ARM-rollback CLASS-PRE: 2
+ARM-rollback CLASS-POST: 1
+ARM-rollback INTERRUPTED-EQUAL-PRE: 8
+ARM-rollback INTERRUPTED-DIFFERS-PRE: 0
+ARM-rollback COMPLETED-REVERTED-TO-PRE: 0
+ARM-rollback MID-DAMAGED-BEFORE-ROLLBACK: 6
+ARM-rollback JOURNAL-RESIDUE: 0
+ARM-rollback RECOVERED-OPERATIONS: 6
+ARM-rollback BYTE-DIFF-UNEXPLAINED: 0
+
+--- ARM: norollback (kill=yes rollback=no) ---
+TRIAL-TABLE[norollback]: trial delay_ms class recovered digest_equal journal_residue
+TRIAL[norollback]: 1 18 pre 0 yes no
+TRIAL[norollback]: 2 37 pre 0 yes yes
+TRIAL[norollback]: 3 55 mid 0 no yes
+TRIAL[norollback]: 4 74 mid 0 no yes
+TRIAL[norollback]: 5 93 mid 0 no yes
+TRIAL[norollback]: 6 111 mid 0 no yes
+TRIAL[norollback]: 7 130 mid 0 no yes
+TRIAL[norollback]: 8 148 mid 0 no yes
+TRIAL[norollback]: 9 167 mid 0 no yes
+ARM-norollback CLASS-MID: 7
+ARM-norollback CLASS-PRE: 2
+ARM-norollback CLASS-POST: 0
+ARM-norollback INTERRUPTED-EQUAL-PRE: 2
+ARM-norollback INTERRUPTED-DIFFERS-PRE: 7
+ARM-norollback COMPLETED-REVERTED-TO-PRE: 0
+ARM-norollback MID-DAMAGED-BEFORE-ROLLBACK: 7
+ARM-norollback JOURNAL-RESIDUE: 8
+ARM-norollback RECOVERED-OPERATIONS: 0
+ARM-norollback BYTE-DIFF-UNEXPLAINED: 7
+
+--- ARM: nokill (kill=no rollback=yes) ---
+TRIAL-TABLE[nokill]: trial delay_ms class recovered digest_equal journal_residue
+TRIAL[nokill]: 1 18 post 0 no no
+TRIAL[nokill]: 2 37 post 0 no no
+TRIAL[nokill]: 3 55 post 0 no no
+TRIAL[nokill]: 4 74 post 0 no no
+TRIAL[nokill]: 5 93 post 0 no no
+TRIAL[nokill]: 6 111 post 0 no no
+TRIAL[nokill]: 7 130 post 0 no no
+TRIAL[nokill]: 8 148 post 0 no no
+TRIAL[nokill]: 9 167 post 0 no no
+ARM-nokill CLASS-MID: 0
+ARM-nokill CLASS-PRE: 0
+ARM-nokill CLASS-POST: 9
+ARM-nokill INTERRUPTED-EQUAL-PRE: 0
+ARM-nokill INTERRUPTED-DIFFERS-PRE: 0
+ARM-nokill COMPLETED-REVERTED-TO-PRE: 0
+ARM-nokill MID-DAMAGED-BEFORE-ROLLBACK: 0
+ARM-nokill JOURNAL-RESIDUE: 0
+ARM-nokill RECOVERED-OPERATIONS: 0
+ARM-nokill BYTE-DIFF-UNEXPLAINED: 0
+
+=== VERDICT INPUTS ===
+ROLLBACK-ARM-MID: 6
+ROLLBACK-ARM-INTERRUPTED-EQUAL-PRE: 8
+ROLLBACK-ARM-INTERRUPTED-DIFFERS-PRE: 0
+ROLLBACK-ARM-COMPLETED-REVERTED: 0
+ROLLBACK-ARM-JOURNAL-RESIDUE: 0
+ROLLBACK-ARM-RECOVERED: 6
+ROLLBACK-ARM-BYTE-DIFF-UNEXPLAINED: 0
+NOROLLBACK-ARM-MID: 7
+NOROLLBACK-ARM-MID-DAMAGED: 7
+NOROLLBACK-ARM-INTERRUPTED-EQUAL-PRE: 2
+NOKILL-ARM-MID: 0
+NOKILL-ARM-POST: 9
+NOKILL-ARM-RECOVERED: 0
+NOKILL-ARM-COMPLETED-REVERTED: 0
+
+PROOF: PASS
+  6/9 kills landed mid-apply (open journal record observed);
+  all 8 interrupted homes came back byte-identical to the pre-operation
+  digest b96e18fc9b420fa0c832e918abeef63c7d5d1e9c7434e2c1dece07d949ab22e9, with no journal residue and 6 operations recovered.
+  Known-negative arm: 7/7 mid-apply kills left the home DIFFERENT
+  from PRE without a rollback, so the comparison can report a difference.
+  No-kill arm: 9/9 imports completed, 0 recovered, 0 reverted.
