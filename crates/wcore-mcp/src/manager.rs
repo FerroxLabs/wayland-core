@@ -1474,25 +1474,15 @@ mod tests {
     // `health()` entry, with the failure cause preserved (was log-and-forget).
     // -----------------------------------------------------------------------
 
+    /// Third of the four hand-rolled zombie checks. It guessed `true`
+    /// ("gone") on an unreadable `/proc/<pid>/stat` while the copy in
+    /// `transport/stdio.rs` guessed `false` ("alive") on the identical input —
+    /// two files in one crate disagreeing about the same syscall. The
+    /// centralised probe answers `Indeterminate` there instead of guessing.
+    /// See `.planning/ZOMBIE-PROBE.md`.
     #[cfg(unix)]
     fn process_gone_or_zombie(pid: i32) -> bool {
-        // SAFETY: signal 0 is a standard liveness probe and sends no signal.
-        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
-            return true;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            std::fs::read_to_string(format!("/proc/{pid}/stat"))
-                .map(|stat| {
-                    stat.rsplit_once(')')
-                        .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
-                })
-                .unwrap_or(true)
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            false
-        }
+        !wcore_types::process_liveness::process_is_alive(pid as u32)
     }
 
     #[cfg(unix)]

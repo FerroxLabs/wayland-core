@@ -1145,54 +1145,20 @@ async fn shutdown_signal() {
 /// causing every Windows `cron daemon` invocation to spawn a duplicate
 /// daemon because the PID check always reported "dead."
 pub(crate) fn process_is_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        // /proc/<pid> existence check — no libc required.
-        std::path::Path::new(&format!("/proc/{pid}")).exists()
-            // macOS doesn't have /proc; fall back to kill(pid, 0) via std.
-            || {
-                use std::process::Command;
-                Command::new("kill")
-                    .args(["-0", &pid.to_string()])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false)
-            }
-    }
-    #[cfg(windows)]
-    {
-        // OpenProcess with PROCESS_QUERY_LIMITED_INFORMATION does not
-        // require SeDebugPrivilege and works for processes owned by the
-        // same user. GetExitCodeProcess returns STILL_ACTIVE (0x103)
-        // while the process is running; any other code means it exited.
-        // `STILL_ACTIVE` lives in `Win32::Foundation` (typed as `NTSTATUS = i32`)
-        // in `windows-sys = 0.59`, not under `System::Threading`.
-        use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE, STILL_ACTIVE};
-        use windows_sys::Win32::System::Threading::{
-            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-        };
-
-        // SAFETY: Win32 FFI. OpenProcess returns NULL on failure.
-        let handle: HANDLE = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };
-        if handle.is_null() {
-            // OpenProcess failed — process does not exist or access denied.
-            // Treat as dead so a stale PID file does not block a restart.
-            return false;
-        }
-        let mut exit_code: u32 = 0;
-        // SAFETY: handle is valid (non-NULL) and exit_code is a local u32.
-        let ok = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
-        // SAFETY: handle was opened by us and must be closed exactly once.
-        unsafe { CloseHandle(handle) };
-        // STILL_ACTIVE is NTSTATUS (i32); GetExitCodeProcess returns u32. Cast
-        // for the comparison — both encode the same 0x103 bit pattern.
-        ok != 0 && exit_code as i32 == STILL_ACTIVE
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = pid;
-        false
-    }
+    // ZOMBIE-PROBE lane: every platform arm moved to
+    // `wcore_types::process_liveness`, and three defects moved out with them.
+    //
+    //  * The Linux arm tested `/proc/<pid>` existence, which a **zombie**
+    //    satisfies — a cron daemon that had exited without being reaped held
+    //    its PID file forever and `cron daemon` refused to start.
+    //  * The macOS fallback shelled out to the `kill` binary, which the
+    //    slim CI image does not ship (the same ENOENT that took nextest down
+    //    in run 26396718138), and which reports a zombie as alive anyway.
+    //  * The Windows arm compared against `STILL_ACTIVE` (259), so a process
+    //    whose genuine exit code was 259 read as still running. The
+    //    centralised arm uses `WaitForSingleObject`, which has no such
+    //    ambiguity.
+    wcore_types::process_liveness::process_is_alive(pid)
 }
 
 #[cfg(test)]

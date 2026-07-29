@@ -117,29 +117,23 @@ async fn hung_scenario_does_not_leak_pid() {
     // Give the OS a moment to actually reap.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Post-check via libc::kill(pid, 0) — the canonical "does this
-    // process exist?" probe. Returns 0 if alive, -1 with ESRCH if gone.
-    // Originally shelled out to `/bin/kill -0 <pid>` but the ci-linux
-    // slim Debian docker image (`rust:1.95-slim-bookworm`) doesn't
-    // ship the kill binary, causing the test to panic with ENOENT and
-    // taking nextest down with it (CI run 26396718138, job 77699695683).
-    // The libc path has the same semantic check + no binary dep.
+    // Post-check that the child is really gone.
+    //
+    // Originally shelled out to `/bin/kill -0 <pid>` but the ci-linux slim
+    // Debian docker image (`rust:1.95-slim-bookworm`) doesn't ship the kill
+    // binary, causing the test to panic with ENOENT and taking nextest down
+    // with it (CI run 26396718138, job 77699695683). It then became an
+    // in-process `libc::kill(pid, 0)`, which has the same defect the shell
+    // form had: a **zombie** satisfies it, so a leaked-but-dead child and a
+    // genuinely leaked child are indistinguishable. Now uses the one
+    // zombie-aware probe. See `.planning/ZOMBIE-PROBE.md`.
     #[cfg(unix)]
     {
-        // SAFETY: kill(pid, 0) tests existence + permission only, no
-        // signal sent. Return 0 = alive; -1 with ESRCH = gone (success).
-        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-        let alive = if rc == 0 {
-            true
-        } else {
-            !matches!(
-                std::io::Error::last_os_error().raw_os_error(),
-                Some(libc::ESRCH)
-            )
-        };
+        use wcore_types::process_liveness::{process_is_alive, process_liveness};
         assert!(
-            !alive,
-            "PID {pid} should be gone after wait(); libc::kill(0) reports alive — likely leak"
+            !process_is_alive(pid),
+            "PID {pid} should be gone after wait(); probe reports {:?} — likely leak",
+            process_liveness(pid)
         );
     }
 

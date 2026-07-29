@@ -74,19 +74,12 @@ fn dangerous_grant(activation_id: &str) -> wcore_types::execution_policy::Danger
     .expect("trusted local launch must resolve")
 }
 
+/// One of four independent hand-rolled zombie checks this workspace grew, all
+/// Linux-only and already disagreeing with each other on the malformed-stat
+/// branch. Replaced by the single cross-platform probe; see
+/// `.planning/ZOMBIE-PROBE.md`.
 fn process_running(pid: u32) -> bool {
-    // SAFETY: signal 0 only checks process existence.
-    if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
-        return false;
-    }
-    #[cfg(target_os = "linux")]
-    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        && let Some((_, fields)) = stat.rsplit_once(") ")
-        && fields.starts_with('Z')
-    {
-        return false;
-    }
-    true
+    wcore_types::process_liveness::process_is_alive(pid)
 }
 
 async fn read_pid(path: &std::path::Path) -> u32 {

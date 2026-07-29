@@ -121,38 +121,20 @@ async fn wait_for_orphan_state(path: &std::path::Path, timeout: Duration) -> Opt
     }
 }
 
-#[cfg(unix)]
+/// Does `pid` name a process that is still RUNNING?
+///
+/// This used to be a hand-rolled `kill(pid, 0) == 0` on unix, which is
+/// satisfied by a **zombie** — a descendant that was killed successfully but
+/// has no reaping init to collect its exit status. Seven tests in this file
+/// certified a corpse as a surviving orphan on exactly that shape. The
+/// zombie-aware probe now lives in one place for the whole workspace; see
+/// `wcore_types::process_liveness` and `.planning/ZOMBIE-PROBE.md`.
+///
+/// `Indeterminate` (e.g. EPERM) deliberately counts as EXISTS, so a
+/// containment assertion that cannot see the process fails loud rather than
+/// declaring a success it did not observe.
 fn process_exists(pid: u32) -> bool {
-    // SAFETY: signal 0 performs only an existence/permission check.
-    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    result == 0
-        || !matches!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH)
-        )
-}
-
-#[cfg(windows)]
-fn process_exists(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
-    // `PROCESS_SYNCHRONIZE`, not the bare `SYNCHRONIZE`: windows-sys 0.59 does
-    // not export a standalone `SYNCHRONIZE` from `Win32::System::Threading` at
-    // all (its only `SYNCHRONIZE` lives in `Win32::Storage::FileSystem`, typed
-    // `FILE_ACCESS_RIGHTS`). `PROCESS_SYNCHRONIZE` is the same 0x0010_0000 bit
-    // typed as `PROCESS_ACCESS_RIGHTS`, which is what `OpenProcess` takes.
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
-    };
-
-    // SAFETY: the handle is used only for a zero-time liveness query and is
-    // closed on every successful OpenProcess path.
-    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
-    if process.is_null() {
-        return false;
-    }
-    let exited = unsafe { WaitForSingleObject(process, 0) } == WAIT_OBJECT_0;
-    unsafe { CloseHandle(process) };
-    !exited
+    wcore_types::process_liveness::process_is_alive(pid)
 }
 
 fn listener_accepts_connections(port: u16) -> bool {
