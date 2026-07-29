@@ -41,7 +41,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 
 use wcore_agent::goal::{
     FleetOutcome, GoalFleetDriver, GoalKernel, GoalLoop, StrategyTermination, TaskAssignment,
@@ -75,6 +75,105 @@ pub const ENV_WORKER: &str = "WAYLAND_GOAL_WORKER";
 /// exercisable from the command line rather than only reasoned about.
 pub const DEFAULT_PARENT_ENVELOPE: &str = "wayland-core-goal-fleet/v1";
 
+/// The five loop owners, as a command-line value.
+///
+/// Deliberately a mirror of [`GoalStrategy`] rather than a re-spelling: the
+/// `From` impl below is an exhaustive match, so a sixth `GoalStrategy` variant
+/// fails to compile here instead of silently becoming unreachable from the
+/// product. There is no `_` arm; do not add one.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum GoalStrategyArg {
+    Direct,
+    ForgeFlows,
+    Fleet,
+    Council,
+    Anvil,
+}
+
+impl From<GoalStrategyArg> for GoalStrategy {
+    fn from(arg: GoalStrategyArg) -> Self {
+        match arg {
+            GoalStrategyArg::Direct => Self::Direct,
+            GoalStrategyArg::ForgeFlows => Self::ForgeFlows,
+            GoalStrategyArg::Fleet => Self::Fleet,
+            GoalStrategyArg::Council => Self::Council,
+            GoalStrategyArg::Anvil => Self::Anvil,
+        }
+    }
+}
+
+/// How another verb asks to be run INSIDE a Goal (F22C, Success Criterion 3).
+///
+/// `workflow run`, `crucible` and `anvil forge` each take one of these as an
+/// optional pair of flags. When it is absent the verb behaves byte-for-byte as
+/// it did before; when present, that verb's REAL engine invocation is wrapped in
+/// `GoalLoop::run_<strategy>` and terminates through the one canonical
+/// transition. Nothing here re-implements an engine — the point of attaching to
+/// the shipped verb rather than adding a `goal drive` verb is that the path
+/// under proof is the product's own.
+#[derive(Args, Debug, Clone)]
+pub struct GoalAttachArgs {
+    /// Journal holding the durable Goal. Required with `--goal`.
+    #[arg(long = "goal-journal", requires = "goal")]
+    pub goal_journal: Option<PathBuf>,
+    /// Id of an already-opened Goal to run this engine as the loop owner of.
+    #[arg(long = "goal", requires = "goal_journal")]
+    pub goal: Option<String>,
+    /// Loop-owner claim lease. A claim is evidence the owner is alive; once it
+    /// expires a successor may supersede it, which is what stops a `kill -9`
+    /// from deadlocking the Goal permanently.
+    #[arg(long = "goal-lease", default_value = "60s")]
+    pub goal_lease: String,
+}
+
+impl GoalAttachArgs {
+    /// Build the loop driver and Goal id, or `None` when not attaching.
+    ///
+    /// Returns an error rather than silently ignoring the flags if the journal
+    /// cannot be opened: an attachment that quietly degraded into an unattached
+    /// run would make "this engine terminated through the canonical transition"
+    /// unfalsifiable from the outside, which is the whole defect class this
+    /// criterion exists to close.
+    pub fn resolve(&self) -> anyhow::Result<Option<(GoalLoop, GoalId)>> {
+        let (Some(journal), Some(goal)) = (self.goal_journal.as_ref(), self.goal.as_ref()) else {
+            return Ok(None);
+        };
+        let lease = humantime::parse_duration(&self.goal_lease)
+            .map_err(|e| anyhow::anyhow!("invalid --goal-lease '{}': {e}", self.goal_lease))?;
+        let handle = open_journal(journal)?;
+        let lease_ms = u64::try_from(lease.as_millis()).unwrap_or(u64::MAX);
+        let driver = GoalLoop::new(GoalKernel::new(handle)).with_lease_ms(lease_ms);
+        Ok(Some((driver, GoalId::new(goal))))
+    }
+}
+
+/// Print the canonical transition a Goal actually landed on, read back from the
+/// DURABLE record rather than from the value the adapter returned.
+///
+/// Reading it back matters: the adapter's own output would report what the
+/// engine *asked* for, which is the tautology class §3.2 of the lane brief warns
+/// about. This prints what the reducer accepted.
+pub fn print_canonical_transition(
+    driver: &GoalLoop,
+    goal_id: &GoalId,
+    strategy: &str,
+    cursor: &wcore_protocol::events::RecoveryCursor,
+) {
+    let terminal = driver
+        .kernel()
+        .goal(goal_id)
+        .ok()
+        .flatten()
+        .map_or_else(
+            || "unknown".to_owned(),
+            |state| format!("{:?}", state.lifecycle),
+        );
+    println!(
+        "GOAL: canonical_transition strategy={strategy} terminal={terminal} cursor_seq={:?}",
+        cursor.journal_sequence
+    );
+}
+
 #[derive(Args, Debug)]
 pub struct GoalArgs {
     #[command(subcommand)]
@@ -98,6 +197,17 @@ pub enum GoalCommand {
         /// would be a second loop vocabulary beside the canonical taxonomy.
         #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u32).range(1..))]
         iterations: u32,
+        /// Which of the five loop owners this Goal authorizes (F22C).
+        ///
+        /// Before this flag existed `open` hard-coded `Fleet`, so the DURABLE
+        /// record could never say anything else and `GoalLoop::claim::<S>` had
+        /// to refuse every non-Fleet strategy with `StrategyMismatch`. That is
+        /// why four of the five adapters had no product caller: not because the
+        /// adapters were missing, but because no Goal could ever be opened for
+        /// them. Defaults to `fleet` so every existing invocation, and 22-03's
+        /// kill/restart proof, are byte-for-byte unchanged.
+        #[arg(long, default_value = "fleet")]
+        strategy: GoalStrategyArg,
         /// Token ceiling this Goal may reserve across every task attempt.
         #[arg(long, default_value_t = 10_000)]
         max_tokens: u64,
@@ -239,6 +349,7 @@ pub async fn run(args: GoalArgs) -> anyhow::Result<()> {
             max_tokens,
             parent_max_tokens,
             parent_envelope,
+            strategy,
         } => open_goal(
             &journal,
             &goal,
@@ -247,6 +358,7 @@ pub async fn run(args: GoalArgs) -> anyhow::Result<()> {
             max_tokens,
             parent_max_tokens,
             &parent_envelope,
+            strategy.into(),
         ),
         GoalCommand::Task {
             journal,
@@ -347,6 +459,7 @@ fn open_goal(
     max_tokens: u64,
     parent_max_tokens: u64,
     parent_envelope: &str,
+    strategy: GoalStrategy,
 ) -> anyhow::Result<()> {
     let handle = open_journal(journal)?;
     let driver = GoalFleetDriver::new(handle, GoalId::new(goal), session_for(journal));
@@ -354,7 +467,7 @@ fn open_goal(
         requested_limits: [("max_tokens".to_owned(), max_tokens)]
             .into_iter()
             .collect(),
-        strategy: GoalStrategy::Fleet,
+        strategy,
         loop_policy: if iterations == 1 {
             LoopPolicy::Once
         } else {
@@ -371,7 +484,10 @@ fn open_goal(
     driver
         .open(objective, &snapshot, now_unix_ms())
         .map_err(|e| anyhow::anyhow!("failed to open goal {goal}: {e}"))?;
-    println!("GOAL: opened goal={goal} iterations={iterations} envelope={parent_envelope}");
+    println!(
+        "GOAL: opened goal={goal} strategy={strategy:?} iterations={iterations} \
+         envelope={parent_envelope}"
+    );
     Ok(())
 }
 
