@@ -2021,7 +2021,26 @@ impl AgentBootstrap {
         // before. The `honcho` path round-trips through a live Honcho
         // deployment. Failures degrade silently — telemetry is best-effort,
         // never blocks bootstrap.
-        let user_id = "default";
+        // The identity every user-model bucket on this session is keyed by —
+        // READ here and WRITTEN by the engine's per-turn `observe`.
+        //
+        // This used to be a hardcoded `"default"` while every write path used
+        // `resolve_user_model_user_id()` (which reads `WAYLAND_USER_ID`). On
+        // any host that sets that variable — which is the entire reason it
+        // exists — the model was written under the real id and read back from
+        // `"default"`, so nothing the layer learned ever reached the prompt.
+        // An advertised surface that is dead in exactly the deployment it was
+        // built for.
+        //
+        // It was also a CROSS-USER READ, which is the worse half: with the
+        // render pinned to `"default"`, a process running with `WAYLAND_USER_ID`
+        // UNSET wrote its inferred brief into the one bucket that every OTHER
+        // user's prompt rendered from. Two processes sharing a memory base with
+        // different values for the variable therefore leaked one user's
+        // inferred traits into another user's system prompt — and onward to the
+        // provider. Resolving both ends from the same function closes it by
+        // construction rather than by two call sites agreeing.
+        let user_id = crate::engine::resolve_user_model_user_id();
         // v0.8.0 Task M — hoist the `UserModelBackend` out of the
         // `user_ctx_block` scope so it can ALSO be installed on the
         // engine for per-turn write-back. v0.7.0 read-only at
@@ -2136,15 +2155,15 @@ impl AgentBootstrap {
             }
         };
         let corrections = match correction_store.as_ref() {
-            Some(s) => s.corrections(user_id).await,
+            Some(s) => s.corrections(&user_id).await,
             None => wcore_user_model::Corrections::default(),
         };
         // Corrections render even when no user-model backend is installed:
         // an explicit statement about oneself should not be conditional on
         // the inference machinery being switched on.
         let user_ctx_block = if let Some(b) = user_model_backend.as_ref() {
-            let brief = b.brief(user_id).await.unwrap_or_default();
-            let prefs = b.preferences(user_id).await.unwrap_or_default();
+            let brief = b.brief(&user_id).await.unwrap_or_default();
+            let prefs = b.preferences(&user_id).await.unwrap_or_default();
             crate::user_context::render_user_context_block_with_corrections(
                 &brief,
                 &prefs,
