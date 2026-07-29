@@ -1,0 +1,32 @@
+[base-r4] donor archive: donor.tar.gz
+[base-r4] prefilling memory.db to ~300 MiB ...
+[base-r4] prefill done in 1.8s, memory.db = 307.7 MiB
+[base-r4] waiting for writers: 0/3 started (iter 0, 1785344416)
+[base-r4] waiting for writers: 3/3 started (iter 1, 1785344417)
+[base-r4] journal modes reported by writers: {'w0': 'wal', 'w1': 'wal', 'w2': 'wal'}
+[base-r4] pre-restore committed high-water marks: {'w0': 1643, 'w1': 1636, 'w2': 1669}
+[base-r4] restore --replace launched pid=269283
+[base-r4] waiting for preserved=true (iter 20, 1.0s, records=1)
+[base-r4] preserved=True after 1.01s op_id=1785344416593-269283
+[base-r4] post-capture committed high-water marks: {'w0': 3468, 'w1': 3570, 'w2': 3520}
+[base-r4] commits during capture window: w0=+1825, w1=+1934, w2=+1851
+[base-r4] restore killed, reaped rc=-9
+[base-r4] open journal records after kill: 1
+[base-r4] backup recover rc=0
+recovered_operations: 1
+skipped_live_owner: 0
+rolled_back: 1785344416593-269283
+[base-r4] home entries after rollback: ['config.toml', 'memory.db', 'memory.db-shm', 'memory.db-wal']
+---- RESULT ----
+ARM: concurrent
+WRITERS: 3
+CAPTURE-SECONDS: 1.01
+PRE-RESTORE-COMMITTED: 4948
+RECOVERED-OPERATIONS: 1
+ROLLED-BACK-SIDECARS: ['memory.db-shm', 'memory.db-wal']
+INTEGRITY-CHECK: wrong # of entries in index sqlite_autoindex_rows_committed_1
+INTEGRITY-PROBLEM-LINES: 1
+MISSING-COMMITTED-ROWS: 0
+MISSING-BY-WRITER: {'w0': 0, 'w1': 0, 'w2': 0}
+IMPOSSIBLE-SURPLUS-ROWS: 0
+VERDICT: FAIL

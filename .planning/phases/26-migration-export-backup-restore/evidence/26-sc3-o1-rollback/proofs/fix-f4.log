@@ -1,0 +1,33 @@
+[fix-f4] donor archive: donor.tar.gz
+[fix-f4] prefilling memory.db to ~300 MiB ...
+[fix-f4] prefill done in 1.8s, memory.db = 307.7 MiB
+[fix-f4] waiting for writers: 0/3 started (iter 0, 1785344731)
+[fix-f4] waiting for writers: 3/3 started (iter 1, 1785344732)
+[fix-f4] journal modes reported by writers: {'w0': 'wal', 'w1': 'wal', 'w2': 'wal'}
+[fix-f4] pre-restore committed high-water marks: {'w0': 1825, 'w1': 1867, 'w2': 1813}
+[fix-f4] restore --replace launched pid=349427
+[fix-f4] waiting for preserved=true (iter 20, 1.0s, records=0)
+[fix-f4] waiting for preserved=true (iter 40, 2.0s, records=1)
+[fix-f4] preserved=True after 2.57s op_id=1785344732506-349427
+[fix-f4] post-capture committed high-water marks: {'w0': 4969, 'w1': 5155, 'w2': 4968}
+[fix-f4] commits during capture window: w0=+3144, w1=+3288, w2=+3155
+[fix-f4] restore killed, reaped rc=-9
+[fix-f4] open journal records after kill: 1
+[fix-f4] backup recover rc=0
+recovered_operations: 1
+skipped_live_owner: 0
+rolled_back: 1785344732506-349427
+[fix-f4] home entries after rollback: ['config.toml', 'memory.db']
+---- RESULT ----
+ARM: concurrent
+WRITERS: 3
+CAPTURE-SECONDS: 2.57
+PRE-RESTORE-COMMITTED: 5505
+RECOVERED-OPERATIONS: 1
+ROLLED-BACK-SIDECARS: []
+INTEGRITY-CHECK: ok
+INTEGRITY-PROBLEM-LINES: 0
+MISSING-COMMITTED-ROWS: 0
+MISSING-BY-WRITER: {'w0': 0, 'w1': 0, 'w2': 0}
+IMPOSSIBLE-SURPLUS-ROWS: 0
+VERDICT: PASS

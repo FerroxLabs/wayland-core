@@ -1,0 +1,121 @@
+=== backup/restore ROLLBACK sweep (SC3, multi-point) ===
+BIN: target/release/wayland-core
+BIN-SHA256: 172e87f477bbe2736f2316ecbc6905d08be837ba2147679cabf53b93e6cdd36f
+TRIALS-PER-ARM: 9
+PACE-MS: 40
+DATE-UTC: 2026-07-29T17:41:05Z
+HOST: Ubuntu-2404-noble-amd64-base
+ARCHIVE-PAYLOADS: 82
+PRE-OPERATION-DIGEST: 1e96962c54d7a30fb85190fe9c0401a78e79701fe0bf5515afe00f42b7465c5d
+COPY-FIDELITY-CONTROL: pass
+PID-TARGETING-CONTROL: direct-launch comm='wayland-core' function-launch comm='sh'
+REFERENCE-DURATION-MS: 3401
+POST-RESTORE-DIGEST: 062b4ee30d5003ffc84946940c7ce5635a29f364e6ba09e26b53af7edda1dfba
+MUTATION-CONTROL: pass (PRE != POST)
+
+--- ARM: rollback (kill=yes rollback=yes) ---
+TRIAL-TABLE[rollback]: trial delay_ms class recovered digest_equal journal_residue
+TRIAL[rollback]: 1 340 mid 1 yes no
+TRIAL[rollback]: 2 680 mid 1 yes no
+TRIAL[rollback]: 3 1020 mid 1 yes no
+TRIAL[rollback]: 4 1360 mid 1 yes no
+TRIAL[rollback]: 5 1700 mid 1 yes no
+TRIAL[rollback]: 6 2040 mid 1 yes no
+TRIAL[rollback]: 7 2380 mid 1 yes no
+TRIAL[rollback]: 8 2720 mid 1 yes no
+TRIAL[rollback]: 9 3060 mid 1 yes no
+ARM-rollback CLASS-MID: 9
+ARM-rollback CLASS-PRE: 0
+ARM-rollback CLASS-POST: 0
+ARM-rollback INTERRUPTED-EQUAL-PRE: 9
+ARM-rollback INTERRUPTED-DIFFERS-PRE: 0
+ARM-rollback COMPLETED-REVERTED-TO-PRE: 0
+ARM-rollback MID-DAMAGED-BEFORE-ROLLBACK: 9
+ARM-rollback JOURNAL-RESIDUE: 0
+ARM-rollback RECOVERED-OPERATIONS: 9
+ARM-rollback BYTE-DIFF-UNEXPLAINED: 0
+
+--- ARM: norollback (kill=yes rollback=no) ---
+TRIAL-TABLE[norollback]: trial delay_ms class recovered digest_equal journal_residue
+TRIAL[norollback]: 1 340 mid 0 no yes
+TRIAL[norollback]: 2 680 mid 0 no yes
+TRIAL[norollback]: 3 1020 mid 0 no yes
+TRIAL[norollback]: 4 1360 mid 0 no yes
+TRIAL[norollback]: 5 1700 mid 0 no yes
+TRIAL[norollback]: 6 2040 mid 0 no yes
+TRIAL[norollback]: 7 2380 mid 0 no yes
+TRIAL[norollback]: 8 2720 mid 0 no yes
+TRIAL[norollback]: 9 3060 mid 0 no yes
+ARM-norollback CLASS-MID: 9
+ARM-norollback CLASS-PRE: 0
+ARM-norollback CLASS-POST: 0
+ARM-norollback INTERRUPTED-EQUAL-PRE: 0
+ARM-norollback INTERRUPTED-DIFFERS-PRE: 9
+ARM-norollback COMPLETED-REVERTED-TO-PRE: 0
+ARM-norollback MID-DAMAGED-BEFORE-ROLLBACK: 9
+ARM-norollback JOURNAL-RESIDUE: 9
+ARM-norollback RECOVERED-OPERATIONS: 0
+ARM-norollback BYTE-DIFF-UNEXPLAINED: 9
+
+--- ARM: nokill (kill=no rollback=yes) ---
+TRIAL-TABLE[nokill]: trial delay_ms class recovered digest_equal journal_residue
+TRIAL[nokill]: 1 340 post 0 no no
+TRIAL[nokill]: 2 680 post 0 no no
+TRIAL[nokill]: 3 1020 post 0 no no
+TRIAL[nokill]: 4 1360 post 0 no no
+TRIAL[nokill]: 5 1700 post 0 no no
+TRIAL[nokill]: 6 2040 post 0 no no
+TRIAL[nokill]: 7 2380 post 0 no no
+TRIAL[nokill]: 8 2720 post 0 no no
+TRIAL[nokill]: 9 3060 post 0 no no
+ARM-nokill CLASS-MID: 0
+ARM-nokill CLASS-PRE: 0
+ARM-nokill CLASS-POST: 9
+ARM-nokill INTERRUPTED-EQUAL-PRE: 0
+ARM-nokill INTERRUPTED-DIFFERS-PRE: 0
+ARM-nokill COMPLETED-REVERTED-TO-PRE: 0
+ARM-nokill MID-DAMAGED-BEFORE-ROLLBACK: 0
+ARM-nokill JOURNAL-RESIDUE: 0
+ARM-nokill RECOVERED-OPERATIONS: 0
+ARM-nokill BYTE-DIFF-UNEXPLAINED: 0
+
+--- ARM: create (kill mid-archive) ---
+CREATE-DURATION-MS: 57
+TRIAL[create]: 1 delay_ms=5 home_moved=no archive=absent
+TRIAL[create]: 2 delay_ms=11 home_moved=no archive=absent
+TRIAL[create]: 3 delay_ms=17 home_moved=no archive=absent
+TRIAL[create]: 4 delay_ms=22 home_moved=no archive=absent
+TRIAL[create]: 5 delay_ms=28 home_moved=no archive=absent
+TRIAL[create]: 6 delay_ms=34 home_moved=no archive=verifies
+TRIAL[create]: 7 delay_ms=39 home_moved=no archive=verifies
+TRIAL[create]: 8 delay_ms=45 home_moved=no archive=verifies
+TRIAL[create]: 9 delay_ms=51 home_moved=no archive=verifies
+ARM-create SOURCE-HOME-MOVED: 0
+ARM-create PARTIAL-ARCHIVES-ON-DISK: 0
+ARM-create NO-ARCHIVE-PUBLISHED: 5
+
+=== VERDICT INPUTS ===
+ROLLBACK-ARM-MID: 9
+ROLLBACK-ARM-INTERRUPTED-EQUAL-PRE: 9
+ROLLBACK-ARM-INTERRUPTED-DIFFERS-PRE: 0
+ROLLBACK-ARM-COMPLETED-REVERTED: 0
+ROLLBACK-ARM-JOURNAL-RESIDUE: 0
+ROLLBACK-ARM-RECOVERED: 9
+ROLLBACK-ARM-BYTE-DIFF-UNEXPLAINED: 0
+NOROLLBACK-ARM-MID: 9
+NOROLLBACK-ARM-MID-DAMAGED: 9
+NOKILL-ARM-POST: 9
+NOKILL-ARM-RECOVERED: 0
+NOKILL-ARM-COMPLETED-REVERTED: 0
+CREATE-ARM-SOURCE-MOVED: 0
+CREATE-ARM-UNVERIFIABLE-ARCHIVES: 0
+CREATE-ARM-NO-ARCHIVE-PUBLISHED: 5
+CREATE-ARM-DURATION-MS: 57
+
+PROOF: PASS
+  restore: 9/9 kills landed mid-flight (open journal record); all 9
+  interrupted homes came back byte-identical to 1e96962c54d7a30fb85190fe9c0401a78e79701fe0bf5515afe00f42b7465c5d, 0 unexplained byte diffs,
+  no journal residue, 9 operations recovered. Known-negative: 9/9
+  mid-flight kills left the home DIFFERENT from PRE without a rollback.
+  No-kill arm: 9/9 completed, 0 recovered, 0 reverted.
+  backup: 9 kills, source home moved 0 times, 0 unverifiable archives published.
