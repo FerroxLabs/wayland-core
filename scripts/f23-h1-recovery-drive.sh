@@ -25,13 +25,14 @@
 # one, and is emitted ONLY after every check passed.
 set -uo pipefail
 
-BINARY=""; SHA=""; NONCE=""; EXPECT=""
+BINARY=""; SHA=""; NONCE=""; EXPECT=""; SHAPE="effect_receipt"
 while [ $# -gt 0 ]; do
   case "$1" in
     --binary) BINARY="$2"; shift 2 ;;
     --sha)    SHA="$2";    shift 2 ;;
     --nonce)  NONCE="$2";  shift 2 ;;
     --expect) EXPECT="$2"; shift 2 ;;
+    --shape)  SHAPE="$2";  shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -66,9 +67,10 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 SESSION="s-$NONCE"
 
-python3 "$GEN" --out "$WORK/$SESSION.journal" --session-id "$SESSION" --nonce "$NONCE" || exit 4
+python3 "$GEN" --out "$WORK/$SESSION.journal" --session-id "$SESSION" --nonce "$NONCE" \
+  --shape "$SHAPE" || exit 4
 # The fixture must actually carry the defect, or the whole run is vacuous.
-grep -q '"effect_receipt":null' "$WORK/$SESSION.journal" \
+grep -q "\"$SHAPE\":null" "$WORK/$SESSION.journal" \
   || { echo "fixture does not carry the explicit null it exists to carry" >&2; exit 4; }
 
 run_verb() {
@@ -130,5 +132,5 @@ else
   [ "$RC" -eq 0 ] || fail "the journal stopped being readable on a second pass"
 fi
 
-[ "$FAILED" -eq 0 ] || { echo "F23_H1_DRIVE=FAIL platform=$PLATFORM mode=$EXPECT nonce=$NONCE"; exit 1; }
-echo "F23_H1_DRIVE=PASS platform=$PLATFORM mode=$EXPECT nonce=$NONCE"
+[ "$FAILED" -eq 0 ] || { echo "F23_H1_DRIVE=FAIL platform=$PLATFORM mode=$EXPECT shape=$SHAPE nonce=$NONCE"; exit 1; }
+echo "F23_H1_DRIVE=PASS platform=$PLATFORM mode=$EXPECT shape=$SHAPE nonce=$NONCE"

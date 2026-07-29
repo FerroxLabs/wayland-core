@@ -30,13 +30,13 @@ use crate::goal::GoalAuthorityRecord;
 /// so a null that is never written is a null nobody can miss.
 ///
 /// READ SIDE: a journal ALREADY on disk carries the old encoding, and its
-/// stored hash covers bytes this predicate no longer produces. Those are
-/// recovered — without loosening the integrity check — by
-/// `session_journal::recover_legacy_effect_receipt`, which restores the exact
-/// value the writer held and then re-hashes under
-/// [`LegacyEffectReceiptEncoding`]. The stored SHA-256 still has to match
-/// EXACTLY; the mode selects which of two precisely-specified encodings is
-/// hashed, it never skips a check.
+/// stored hash covers bytes this predicate no longer produces. That is no
+/// longer this predicate's problem for the JOURNAL — `computed_checksum` now
+/// hashes the checksum material exactly as it was written, so any encoding a
+/// producer stored the hash of verifies, and
+/// `session_journal::restore_explicit_null_receipt` only restores the value
+/// fidelity the decode loses. The SNAPSHOT digest still re-encodes, and still
+/// depends on [`LegacyEffectReceiptEncoding`].
 fn is_absent_json_value(value: &Option<serde_json::Value>) -> bool {
     if LEGACY_EFFECT_RECEIPT_ENCODING.with(std::cell::Cell::get) {
         value.is_none()
