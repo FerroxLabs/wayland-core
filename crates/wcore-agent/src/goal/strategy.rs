@@ -473,16 +473,22 @@ impl StrategyTermination {
             }
             CouncilRunOutcome::RanManual(outcome) => council_counts(outcome),
             // One model's answer, no roster to count and no verification owner.
-            CouncilRunOutcome::Ran(CouncilRunResult::Direct { .. }) => GoalTerminalState::NeedsEscalation,
+            CouncilRunOutcome::Ran(CouncilRunResult::Direct { .. }) => {
+                GoalTerminalState::NeedsEscalation
+            }
             CouncilRunOutcome::Ran(CouncilRunResult::Cancelled) => GoalTerminalState::Cancelled,
-            CouncilRunOutcome::Failed(CouncilError::UnpriceableRoster) => GoalTerminalState::Unpriced {
-                detail: CouncilError::UnpriceableRoster.to_string(),
-            },
-            CouncilRunOutcome::Failed(error @ CouncilError::OverBudget { .. }) => GoalTerminalState::Exhausted {
-                kind: ExhaustionKind::Resource,
-                attempts: 0,
-                detail: error.to_string(),
-            },
+            CouncilRunOutcome::Failed(CouncilError::UnpriceableRoster) => {
+                GoalTerminalState::Unpriced {
+                    detail: CouncilError::UnpriceableRoster.to_string(),
+                }
+            }
+            CouncilRunOutcome::Failed(error @ CouncilError::OverBudget { .. }) => {
+                GoalTerminalState::Exhausted {
+                    kind: ExhaustionKind::Resource,
+                    attempts: 0,
+                    detail: error.to_string(),
+                }
+            }
             CouncilRunOutcome::Failed(error @ CouncilError::DailyBudgetExhausted { .. }) => {
                 GoalTerminalState::Exhausted {
                     kind: ExhaustionKind::Resource,
@@ -498,9 +504,11 @@ impl StrategyTermination {
                     detail: error.to_string(),
                 }
             }
-            CouncilRunOutcome::Failed(error @ CouncilError::NoResolver) => GoalTerminalState::Blocked {
-                reason: error.to_string(),
-            },
+            CouncilRunOutcome::Failed(error @ CouncilError::NoResolver) => {
+                GoalTerminalState::Blocked {
+                    reason: error.to_string(),
+                }
+            }
         };
         owner.terminate(terminal)
     }

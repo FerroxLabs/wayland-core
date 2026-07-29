@@ -203,15 +203,10 @@ pub fn print_canonical_transition(
     strategy: &str,
     cursor: &wcore_protocol::events::RecoveryCursor,
 ) {
-    let terminal = driver
-        .kernel()
-        .goal(goal_id)
-        .ok()
-        .flatten()
-        .map_or_else(
-            || "unknown".to_owned(),
-            |state| format!("{:?}", state.lifecycle),
-        );
+    let terminal = driver.kernel().goal(goal_id).ok().flatten().map_or_else(
+        || "unknown".to_owned(),
+        |state| format!("{:?}", state.lifecycle),
+    );
     println!(
         "GOAL: canonical_transition strategy={strategy} terminal={terminal} cursor_seq={:?}",
         cursor.journal_sequence

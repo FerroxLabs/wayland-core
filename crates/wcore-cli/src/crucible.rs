@@ -16,13 +16,13 @@
 
 use std::sync::Arc;
 
+use wcore_agent::goal::{CouncilRunOutcome, StrategyTermination};
 use wcore_agent::orchestration::council::{
     AssemblyPlan, COUNCIL_PROPOSER_SYSTEM_PROMPT, CouncilApprover, CouncilDecision, CouncilOutcome,
     CouncilOverrides, CouncilProviderResolver, CouncilRunResult, DEFAULT_PROPOSER_MAX_TOKENS,
     GateConfig, ProposerSpec, Roster, Stakes, classify_task, drive_council, log_assembly,
     run_council, validate_and_build,
 };
-use wcore_agent::goal::{CouncilRunOutcome, StrategyTermination};
 use wcore_agent::spawner::{AgentSpawner, SubAgentConfig};
 use wcore_config::config::{CliArgs, Config, ConfigFile, load_merged_config_file};
 use wcore_config::crucible::{AssemblyMode, CouncilMode, CrucibleConfig};
