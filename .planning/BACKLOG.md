@@ -1493,7 +1493,47 @@ block. The message names neither Flux nor the credential that was present. Cost 
 accept the prefix for registered providers, or name the configured-but-unselected provider in
 the error. Evidence: `evidence/27-credentialled/27-NOTES.md`.
 
-## BL-23B-H1 — session journal read-back mismatch (MEDIUM, non-reproducing)
+## BL-23B-H1 — session journal read-back mismatch — **RESOLVED 2026-07-29. HIGH restored, root-caused, FIXED.**
+
+> **This row and the `23B-H1` row further down this file contradicted each other — one MEDIUM
+> non-reproducing, one HIGH open. Both are now closed by `lane/23b-h1-journal`. Read this block
+> first; the original text of both rows is preserved below for the record.**
+>
+> **Root cause:** `session_journal.rs:107` computed the checksum over a **re-serialization of the
+> decoded event, not the bytes on disk**, making integrity depend on serde encode/decode being a
+> bijection over `SessionEvent`. It is not — the reader's own `known_omitted_default` (`:2405`)
+> blesses **fifteen** raw encodings as explicit-defaults-equivalent-to-absent, every one dropped by
+> the decode. So `verify_chain_from` (`:2004`) called corrupt exactly what
+> `reject_unknown_event_fields` (`:2154`) had declared valid three lines earlier. `effect_receipt`
+> was **one member of that class, not the class**; `retry_of` and `pre_hook_phase_id` sit in the same
+> match arm and were still open, so the earlier fix was **necessary but not sufficient**.
+>
+> **The MEDIUM disposition is superseded, and the severity returns to HIGH.** It rested on a
+> non-reproduction, and this row said so itself — *"a non-reproduction, not a disproof … root cause
+> remains unidentified"*. There is now a **deterministic** reproduction (**1/1 → 0/1, 0.00s**) plus a
+> discriminating live control: at base, `retry_of` reproduced `journal checksum mismatch at
+> sequence 1` while `effect_receipt` did not. **A deterministic reproduction outranks a
+> non-reproduction.**
+>
+> **Neither "load-sensitive" nor "sequence 16" was intrinsic.** The failure fires when a run reaches
+> an event carrying a blessed encoding; longer runs reach more event kinds — which is exactly
+> 23B-01's own ~203 KB vs ~71 KB observation. Load correlates with reaching the tool-event boundary;
+> it does not cause it. A two-frame fixture gives the identical error at sequence 1. Both earlier
+> tests paired blessed bytes with a checksum from a *different* encoding — an unrealisable
+> combination — which is why two lanes chased a 9/10.
+>
+> **The fix is strictly tighter, not looser**, and repairs journals already on disk: it still catches
+> every value change, now also catches reordering and whitespace the re-encoding normalised away,
+> and the only newly-accepted bytes are ones `reject_unknown_event_fields` already blesses and which
+> runs first, failing closed.
+>
+> **Narrowing caveat, carried from the lane:** `retry_of` / `pre_hook_phase_id` need a producer other
+> than the current Rust writer — version skew or host interop — which is why the allowlist exists.
+>
+> **Open follow-up, deliberately NOT fixed:** `reducer.rs:15` is `sha256(to_vec(state))` with a
+> parallel ~10-entry allowlist — **structurally identical by reading, not by measurement.** The lane
+> refused to ship a change to a second integrity surface without a red-before-green, which is the
+> standard it held others to. Single call site to change: `snapshot.rs:111`. **Measure first.**
 
 **Source:** `23B-H1`, originally graded HIGH. **Disposition 2026-07-29: MEDIUM, backlog.**
 
@@ -1768,7 +1808,12 @@ all, so any assertion about recovery behaviour passes vacuously. **This cost
 23B-01's own driver a self-passing gate before it was caught.** Consider either
 resuming on an existing id, or naming `--resume` in the error text.
 
-### `23B-H1` — a cleanly-exited run can write a journal the product cannot read back (HIGH)
+### `23B-H1` — a cleanly-exited run can write a journal the product cannot read back (HIGH) — **RESOLVED 2026-07-29, see `BL-23B-H1` above**
+
+> **DUPLICATE OF `BL-23B-H1` earlier in this file, which graded the same finding MEDIUM while this
+> row held it HIGH.** Both are now closed by `lane/23b-h1-journal`; the reconciliation and root cause
+> are recorded on that row. This row's HIGH grade was the correct one. Text below preserved
+> unedited for the record.
 
 Source: `.planning/SEAM-REQUESTS/23B.md` SR-23B-05, which states plainly that this
 "should be promoted to a tracked issue, not left as a backlog row". Filed here
@@ -1990,4 +2035,38 @@ Display-surface residue of `C4-F3`. Not on the pricing path.
 there, so applying the local compat would price a **real remote** member at $0 —
 an error in the dangerous direction. Closing `C4-F3` for council needs per-member
 route resolution first. **Do not "extend the fix" here without it.**
+
+
+---
+
+### `BL-23B-H1-SNAPSHOT` — the snapshot digest may have the same defect, unmeasured (unGRADED — measure first)
+
+Named by `lane/23b-h1-journal`, which **deliberately did not fix it**. `reducer.rs:15` is
+`sha256(to_vec(state))` carrying a parallel ~10-entry allowlist — **structurally identical to the
+journal defect it just closed, by reading, not by measurement.** It has no red-before-green, and
+shipping a change to a second integrity surface on a reading alone is exactly the standard that lane
+held the two prior lanes to.
+
+Single call site to change: `snapshot.rs:111`. **Reproduce before repairing.** If it does not
+reproduce, that is a real result and should be recorded as one — the journal defect's own history is
+a warning about how easily a non-reproduction gets mistaken for a disproof.
+
+### `BL-25C4-WIN-EGRESS-TEST` — `transport_failure_records_one_stable_error_class` fails on Windows (MEDIUM, test-only)
+
+Measured 3/3 in isolation on `SeanDesktop` by `lane/25-c4-windows`, which **did not weaken it**.
+Windows sends no RST for a released loopback port (raw .NET probe: no answer in 2000 ms, 3/3), so
+the transport classifies **Timeout** where the test asserts **Connect**. A test-only Unix
+assumption, pre-existing, and the product behaviour underneath is not implicated.
+
+### `BL-SMALLDEF-FLOOR-INTERVAL` — `FLOOR_INTERVAL_SECS`, same shape as the deleted ceiling, different risk (LOW)
+
+A unanimous 3/3 cross-audit panel wanted this deleted alongside `CEILING_IN_FLIGHT` "for coherence".
+`lane/small-defects` **dissented and kept it**, on the grounds that it bounds a partly *input-derived*
+value and is therefore one variant-author slip away from load-bearing — unlike the ceiling, whose
+seven variant defaults are all literals. Recorded so nobody re-opens it as an oversight.
+
+### `BL-SMALLDEF-MAX-IN-FLIGHT` — `max_in_flight` is advertised but unenforced (MEDIUM)
+
+Distinct from the deleted `CEILING_IN_FLIGHT`, and the finding the original `F24-C2-M1` row conflated
+with it. Enforcing it is a **feature**, not a repair — scope it as one.
 
