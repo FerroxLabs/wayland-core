@@ -447,7 +447,137 @@ async fn live_capture_contains_known_tone_and_control_arm_does_not() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Cancellation on a PROVEN-FLOWING stream.
+// 3. Ring-buffer overflow: does capture SURVIVE past the 60 s cap?
+// ---------------------------------------------------------------------------
+
+/// `RingBuffer::push` calls `Vec::remove(0)` once the ring is full — an O(n)
+/// memmove over 960_000 `i16` (1.92 MB) **per sample**, executed inside the
+/// cpal input callback while holding the shared state lock. At 16 kHz that is
+/// ~30 GB/s of memmove. Arithmetic alone cannot say whether a given machine
+/// survives it, so this measures rather than asserts.
+///
+/// The discriminating trick: the tone is played **only during the final
+/// seconds**, i.e. deep into the overflow regime. If the callback has stalled
+/// or is dropping buffers, the retained tail will not contain the tone.
+#[tokio::test(flavor = "multi_thread")]
+async fn capture_survives_ring_buffer_overflow_past_60s() {
+    const TOTAL_SECS: u64 = 70;
+    const TONE_TAIL_SECS: f64 = 4.0;
+
+    let dir = std::env::temp_dir();
+    let tone_path = dir.join("wl-c4-overflow-1khz.wav");
+    write_wav_mono16(
+        &tone_path,
+        44_100,
+        &tone_samples(44_100, TONE_TAIL_SECS, TONE_HZ, 12000.0),
+    );
+
+    // INSTRUMENT DEFECT #2, found by running this gate twice and repaired here
+    // rather than written up (LANE-BRIEF §6b-ii). The first run FAILED with
+    // tail ratio 0.41; an immediate re-run PASSED with 11227.13. A gate that
+    // reports a product defect on one run and a clean pass on the next is not
+    // measuring the product. The most likely confound is the acoustic path,
+    // not the ring buffer: the host's default output is a Bluetooth speaker,
+    // which sleeps and misses the first seconds of playback.
+    //
+    // Two repairs:
+    //  (a) a wake-up pre-roll BEFORE capture starts, so the speaker is awake
+    //      by the measurement window. It lands at t≈0 of a 70 s capture and is
+    //      therefore evicted by the 60 s ring cap, so it cannot contaminate;
+    //  (b) the tone is now scored over the WHOLE retained buffer as well as
+    //      the tail, which separates the two failure causes that the original
+    //      single assertion conflated:
+    //        whole LOW  -> the tone never reached the mic: acoustic path
+    //                      failed, INDETERMINATE, says nothing about the ring;
+    //        whole HIGH but tail LOW -> the tone did reach the mic but is
+    //                      absent from the retained tail: a REAL degradation.
+    let _ = Command::new("afplay")
+        .arg(&tone_path)
+        .status()
+        .map_err(|e| eprintln!("wake pre-roll failed to spawn: {e}"));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let rec = CpalAudioRecorder::try_default().expect("no default input device");
+    rec.start().await.expect("start failed");
+
+    // Run well past the 60 s cap with NO tone, so the ring saturates and every
+    // subsequent sample pays the O(n) cost.
+    tokio::time::sleep(Duration::from_secs(TOTAL_SECS - 5)).await;
+    let rms_in_overflow = rec.current_rms();
+    assert!(
+        rec.is_recording(),
+        "recorder fell out of recording state during overflow"
+    );
+
+    // Now inject the tone, deep inside the overflow regime.
+    let mut child = Command::new("afplay")
+        .arg(&tone_path)
+        .spawn()
+        .expect("afplay spawn failed");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let _ = child.wait();
+
+    let t_stop = std::time::Instant::now();
+    let outcome = rec.stop().await.expect("stop failed");
+    let stop_elapsed = t_stop.elapsed();
+    let _ = std::fs::remove_file(&tone_path);
+
+    let wav = match outcome {
+        RecordingOutcome::Captured { wav_path } => wav_path,
+        RecordingOutcome::Empty => panic!("70 s capture returned Empty"),
+    };
+    let samples = read_wav_mono16(&wav);
+    let _ = std::fs::remove_file(&wav);
+
+    // The ring is capped at 60 s @ 16 kHz.
+    const CAP: usize = 16_000 * 60;
+    eprintln!(
+        "OVERFLOW: total={TOTAL_SECS}s retained={} samples ({:.1}s) cap={CAP} \
+         rms_in_overflow={rms_in_overflow} stop_took={:?}",
+        samples.len(),
+        samples.len() as f64 / 16_000.0,
+        stop_elapsed
+    );
+
+    assert!(
+        samples.len() <= CAP,
+        "ring exceeded its documented 60 s cap: {} > {CAP}",
+        samples.len()
+    );
+
+    // THE REAL QUESTION: is the retained tail still real, live audio?
+    let tail_len = (16_000.0 * TONE_TAIL_SECS) as usize;
+    let tail = &samples[samples.len().saturating_sub(tail_len)..];
+    let tail_ratio = tone_ratio(tail, 16_000.0);
+    let whole_ratio = tone_ratio(&samples, 16_000.0);
+    eprintln!(
+        "OVERFLOW TAIL: {} samples, rms={:.1}, tail_ratio={tail_ratio:.2}, \
+         whole_buffer_ratio={whole_ratio:.2}",
+        tail.len(),
+        rms(tail)
+    );
+
+    // Cause separation — see INSTRUMENT DEFECT #2 above.
+    assert!(
+        whole_ratio >= TONE_PRESENT_RATIO,
+        "INDETERMINATE, NOT a product defect. The injected tone is absent from \
+         the ENTIRE retained buffer (whole={whole_ratio:.2}), so it never \
+         reached the microphone at all — the speaker->mic acoustic path failed \
+         (sleeping Bluetooth output, volume, proximity). This run says NOTHING \
+         about the ring buffer. Re-run; do not report a capture defect."
+    );
+    assert!(
+        tail_ratio >= TONE_PRESENT_RATIO,
+        "REAL DEGRADATION PAST THE 60s CAP: the tone DID reach the mic \
+         (whole={whole_ratio:.2}) but is absent from the retained tail \
+         (tail={tail_ratio:.2} < {TONE_PRESENT_RATIO}). Because the acoustic \
+         path is proven good this run, the O(n) `Vec::remove(0)` in \
+         RingBuffer::push, running inside the cpal callback, is implicated."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 4. Cancellation on a PROVEN-FLOWING stream.
 // ---------------------------------------------------------------------------
 
 /// C4 `cancellation`. Proves the stream was flowing *before* the cancel, so
