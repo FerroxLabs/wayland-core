@@ -21,6 +21,10 @@
 //! `Z`; on Windows it is an exited process whose pid is still reserved by the
 //! handle its parent holds — the same observable hazard.
 
+// Only the unix corpse construction reads the child's stdout to EOF; the
+// Windows one uses `wait()`. Ungated, this is an `unused_imports` warning on
+// Windows, which `clippy -D warnings` turns into a CI failure.
+#[cfg(unix)]
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
