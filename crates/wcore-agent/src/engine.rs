@@ -4135,13 +4135,6 @@ impl AgentEngine {
         self.learned_policy = Some(policy);
     }
 
-    /// The installed learned policy, for a spawner handing it to a child.
-    pub(crate) fn learned_policy(
-        &self,
-    ) -> Option<&std::sync::Arc<wcore_permissions::LearnedPolicy>> {
-        self.learned_policy.as_ref()
-    }
-
     /// True when this engine can actually apply the learned-policy pre-filter
     /// to the children it spawns — i.e. a policy is installed. Read by
     /// bootstrap's capability report so `learned_policy` is only ever
