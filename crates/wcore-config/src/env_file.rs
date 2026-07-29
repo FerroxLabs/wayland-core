@@ -488,11 +488,17 @@ mod tests {
     // ── Startup loader ──────────────────────────────────────────────────
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(wayland_home_env)]
     fn load_wayland_env_file_applies_without_overriding() {
-        // Snapshot the env vars this test mutates so it restores them on exit
-        // (it touches process-global state; #[serial] keeps it off the other
-        // env-reading tests' threads).
+        // Snapshot the env vars this test mutates so it restores them on exit.
+        //
+        // MUST name the `wayland_home_env` group. serial_test's groups are
+        // INDEPENDENT locks: a bare `#[serial]` takes the default group, which
+        // does not exclude `#[serial(wayland_home_env)]`. This test was the only
+        // WAYLAND_HOME mutator in the `wcore-config` lib binary sitting in the
+        // default group while all ~14 others were in `wayland_home_env`, so it
+        // ran CONCURRENTLY with every one of them despite looking protected.
+        // It was one of the two measured victims of the 25-rep baseline.
         let prev_home = std::env::var_os("WAYLAND_HOME");
         let prev_foo = std::env::var_os("FOO_API_KEY");
         let prev_bar = std::env::var_os("BAR_API_KEY");

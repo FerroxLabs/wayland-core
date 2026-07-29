@@ -113,9 +113,18 @@ mod tests {
     /// the probe cannot be trivially always-true or always-false.
     #[cfg(target_os = "linux")]
     #[test]
+    #[serial_test::serial]
     fn linux_narrows_without_a_display_and_keeps_the_capability_with_one() {
-        // These two vars are what `Platform::current` and the X11 backend read;
-        // no other test in this module touches them.
+        // These two vars are what `Platform::current` and the X11 backend read.
+        //
+        // The previous comment added "no other test in this module touches
+        // them" and drew no `#[serial]` from it. The unit of contention is the
+        // test BINARY, not the module: `adapter.rs` in this same crate has
+        // `restricted_wayland_compositor_refuses_to_register` and
+        // `permissive_wayland_compositor_succeeds`, both `#[serial]`, both
+        // mutating `WAYLAND_DISPLAY`. Being the lone unprotected mutator, this
+        // test defeated their serialisation entirely. Joins the same (default)
+        // group they use.
         let prior_x11 = std::env::var_os("DISPLAY");
         let prior_wl = std::env::var_os("WAYLAND_DISPLAY");
 
