@@ -135,8 +135,122 @@ no capture device.
 
 ---
 
+## M-2 — the probes are real, and one suspicion of mine is REFUTED
+
+Read both probe implementations in full.
+
+`wcore-browser/src/liveness.rs` (257 lines) and `wcore-cua/src/liveness.rs`
+(162 lines). Both are non-executing by design, both are monotone-clearing, and
+both narrow only on `Unavailable` — `Indeterminate` deliberately keeps the
+capability.
+
+- **Browser:** `Ready` if `which(camofox_program())` resolves, else `Ready` if a
+  sidecar answers `<base>/health` in 500 ms, else `Unavailable`. Feature
+  `browserbase` (credentialed) and feature `chromium` both short-circuit to
+  `Indeterminate` and never narrow.
+- **CUA:** on Linux, `Unavailable` iff neither `DISPLAY` nor `WAYLAND_DISPLAY`
+  is set. macOS/Windows → `Indeterminate` (no honest non-executing probe for a
+  window-server session).
+
+**REFUTED — a defect I predicted and did not find.** I suspected the probe
+resolved a *different* program name than the supervisor spawns: the probe
+resolves `camofox-browser` (no `u`) while the recorded live failure in the
+phase verdict is `spawn camoufox: No such file or directory`. If so the probe
+would be checking the wrong binary. It is not:
+
+```
+crates/wcore-browser/src/supervisor.rs:71-72   WAYLAND_CAMOUFOX_BIN | "camofox-browser"
+crates/wcore-browser/src/liveness.rs:88        WAYLAND_CAMOUFOX_BIN | "camofox-browser"
+```
+
+Byte-identical resolution in both. `camofox` is the real upstream package name
+(`@askjo/camofox-browser`, `backends/camoufox.rs:3`); the crate/module is
+spelled `camoufox`, the program is not. Recorded as work correctly NOT done.
+
+## M-3 — HIGH candidate: the `true` arm has never been shown to WORK
+
+`crates/wcore-cli/tests/plugin_discovery_e2e.rs` is the prior lane's A/B and it
+is genuinely good — same binary, same plugins, one variable, and its negative
+leg anchors on `plugins: true` so it cannot pass for the wrong reason.
+
+But look at how the **positive** leg plants its fact (lines 88-99):
+
+```rust
+cmd.env("WAYLAND_CAMOUFOX_BIN",
+        std::env::current_exe().expect("resolve test binary path"));
+cmd.env("DISPLAY", ":0");
+```
+
+The "browser" is **the test binary itself**, and the "display" is a string
+`:0` that nothing connects to. The test is honest about it — its own assertion
+message says *"browser_suite is pure linkage here"*. And that is correct for
+what that test is for: it proves the narrowing fires.
+
+**But it means the `true` arm is still unproven.** The dispatch's third proof
+obligation is explicit: *a capability that reports `true` must be shown to
+actually work, not merely to link.* After this repair, `browser_suite: true`
+means **"a path resolved"** — satisfiable by `/bin/echo`, by a text file with
+the +x bit, or by the test binary. `computer_use: true` on Linux means
+**"a string is set in the environment"** — `DISPLAY=:99` with no X server
+satisfies it.
+
+So the repair moved the flag from *linkage* to *resolvability*, not to
+*liveness*. That is a real and worthwhile narrowing — it removes the exact
+headless case that started this — but it does not discharge C2's honesty bar,
+and grading it as if it did would repeat the phase's original error one level up.
+
+**To measure, not assert:** whether `DISPLAY=:99` with no X server yields
+`computer_use: true` on the shipped binary. That is a one-variable positive
+control for the false-`true` residual, and hetzner can run it.
+
+## M-4 — C3 and C4 existence: my pre-registered prior on voice was WRONG
+
+Instrument control first (`media_intake`, the sibling lane's file, known to
+exist): `/usr/bin/grep -rl … | wc -l` → **2**. Non-zero, instrument alive.
+
+**C4 voice — EXISTS, and substantially.** I predicted it was compiled into no
+shipped artifact. That prediction was wrong and I am recording it as wrong:
+
+```
+crates/wcore-agent/src/tool_backends/voice_mode.rs   37.8K
+crates/wcore-agent/src/tool_backends/tts.rs          41.0K
+crates/wcore-agent/src/tool_backends/piper.rs        35.0K
+crates/wcore-agent/src/tool_backends/openai_compat_whisper.rs  5.5K
+crates/wcore-tools/src/{voice_mode,tts_tool,transcription_tools}.rs
+crates/wcore-agent/examples/f27_voice_capture.rs   ← built for THIS criterion
+```
+
+**C3 generation — EXISTS.**
+
+```
+crates/wcore-agent/src/tool_backends/image_gen.rs    58.3K  (largest backend)
+crates/wcore-tools/src/image_generation_tool.rs
+```
+
+So for both, "does it exist" is answered **yes** and the open question is
+narrower: **is it reachable from the shipped binary**, which the same binary
+run that serves C2 can answer cheaply. No ledger claim of absence is made.
+
+## M-5 — hetzner is a genuine negative control (not a synthetic one)
+
+```
+ssh hetzner-dsm → Ubuntu-2404-noble-amd64-base
+df -h /root → 1.8T total, 698G avail (59% used) — safe to build
+which camofox-browser camoufox → (nothing, rc=1)
+DISPLAY=[] WAYLAND_DISPLAY=[]
+```
+
+This is better than the e2e test's synthetic Dead arm: the box is dead in its
+**natural** state, with no env manipulation at all. Worktree `/root/wayland-27bv`
+created detached at `861d1b1a`. Release build of `-p wcore-cli --bin wayland-core`
+started (targeted, per §2 — not a full workspace build).
+
 ## Log
 
 - **T+0** worktree verified, brief + verdict + MEDIA-* ledger row read.
 - **T+1** M-1 recorded: narrowing landed and is wired; lane pivots from build
   to measure. NOTES committed (this file).
+- **T+2** M-2 probes read; camofox/camoufox naming suspicion refuted.
+- **T+3** M-3 recorded: HIGH candidate — `true` proves resolvability, not work.
+- **T+4** M-4 recorded: voice and generation both EXIST; my voice prior was wrong.
+- **T+5** M-5 hetzner negative control confirmed natural; release build running.
