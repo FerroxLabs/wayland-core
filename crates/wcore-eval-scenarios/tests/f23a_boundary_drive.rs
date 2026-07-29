@@ -529,6 +529,17 @@ async fn generated_draft_is_refused_at_every_route_while_user_content_is_not() {
                  (a discriminating check reports false under substitution)"
             );
         }
+        // The third assertion of `list_tags_hidden_matcher_selftest`, taken on
+        // the LIVE info stream rather than a synthetic rendering: the matcher
+        // R7 used before this lane, evaluated against the same bytes. It is
+        // expected to print `true` while R7 above prints `false` — that
+        // disagreement is the measurement that the old instrument was vacuous
+        // here, not merely arguably vacuous.
+        let legacy_r7 = info.contains(&probed_name) && info.contains("(hidden)");
+        println!(
+            "F23A-SELFTEST-LEGACY: R7 /skill list old_matcher={legacy_r7} \
+             (unbound conjunct; disagreement with the R7 line above is the repair)"
+        );
         let toothless: Vec<&str> = route_checks
             .iter()
             .filter(|(_, refused)| *refused)
