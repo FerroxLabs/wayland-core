@@ -1,0 +1,5 @@
+{"seq":1,"ts":"1.000000","endpoint":"chat.postMessage","conversation_id":"DF24FINONE","text":"F24C3-REPLY f24c3-fin-f24finone-d48f1327","auth_fingerprint":"sha256:499b0a71c384","answered":true,"idempotency_key":null,"suppressed":false,"at":"2026-07-29T01:47:07.853Z"}
+{"seq":2,"ts":"2.000000","endpoint":"chat.postMessage","conversation_id":"DF24FINONE","text":"F24C3-REPLY f24c3-fin-f24finone-fdabef9e","auth_fingerprint":"sha256:499b0a71c384","answered":true,"idempotency_key":null,"suppressed":false,"at":"2026-07-29T01:48:57.783Z"}
+--TURNS--
+{"seq":1,"kind":"chat.completions","at":"2026-07-29T01:47:07.813Z","model":"f24c3-fixture","stream":true,"user_text":"<@U24C3FINBOT> f24c3-fin-f24finone-d48f1327\nCurrent date: 2026-07-29","correlation":"f24c3-fin-f24finone-d48f1327","reply":"F24C3-REPLY f24c3-fin-f24finone-d48f1327"}
+{"seq":2,"kind":"chat.completions","at":"2026-07-29T01:48:57.750Z","model":"f24c3-fixture","stream":true,"user_text":"<@U24C3FINBOT> f24c3-fin-f24finone-fdabef9e\nCurrent date: 2026-07-29","correlation":"f24c3-fin-f24finone-fdabef9e","reply":"F24C3-REPLY f24c3-fin-f24finone-fdabef9e"}
