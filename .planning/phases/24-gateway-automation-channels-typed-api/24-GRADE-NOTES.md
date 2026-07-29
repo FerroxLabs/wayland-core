@@ -102,3 +102,44 @@ Still to establish (in order):
 - [ ] the two pending branches read from their branch tips
 - [ ] fence exposure vs `861d1b1a`
 - [ ] release-blocking answer + costed gap list
+
+### M2 — the superseded section in RC-READINESS.md, identified (T+25)
+
+`RC-READINESS.md` contains **two** Item-3 sections that contradict each other on `24-C5`:
+
+- lines 18-38 "Item 3 CLOSED 2026-07-28" → MET on all three platforms at `5ed01866`
+- lines 39-58 "Item 3, measured 2026-07-28 evening — the honest state" → Windows RED at step
+  12, macOS NOT RUN, "graded NOT MET on one of three platforms"
+
+**The LOWER section is the stale one**, despite appearing later in the file. Git order settles it:
+
+```
+/usr/bin/git log --format='%h %ad %s' --date=short -1 -- <file>
+  fd64bd5c 2026-07-28 docs(24-C5): the Windows leg reached step 12, and named the recovery gap
+  e535c1a4 2026-07-28 docs(24-C5): the Linux receipt at the candidate, and the final macOS grade
+  5ed01866 2026-07-28 Merge lane/24-c5-finish: 24-C5 MET on all three platforms
+```
+
+`24-C5-JOURNEY-SUMMARY.md` (fd64bd5c) is the Windows-RED/macOS-NOT-RUN state; `24-C5-FINISH-SUMMARY.md`
+(e535c1a4) supersedes it and is what `5ed01866` merged. So the lower section describes the
+JOURNEY lane and was never deleted when FINISH landed. **Anyone reading RC-READINESS top-to-bottom
+gets the stale answer last, which is the worst possible ordering.** Flagging it for repair.
+
+### M3 — `24-PHASE-REPORT.md` is not a verdict and is badly stale (T+25)
+
+Dated 2026-07-26, grades all five criteria NOT MET, and records 24-02/24-03/24-04 as NOT STARTED.
+That was true on 2026-07-26. It has been overtaken by ~20 lanes, all dated 2026-07-28/29. **It must
+not be mistaken for the phase verdict** — it predates essentially all of the phase's evidence.
+I am treating it as a historical execution report for wave 1 only.
+
+### M4 — every lane declines 24-C3 (T+30)
+
+Extracted `grade-24-C3:` frontmatter from every lane artifact. Twelve distinct lane artifacts carry
+a C3 grade; **every one says NOT MET and explicitly declines to claim it** (the lanes number
+themselves "the sixth… seventh… eighth… lane to decline it"). No lane has ever claimed C3.
+
+The consistent reasons given across lanes, which I must now test independently rather than inherit:
+1. `media` and `native actions` had zero evidence (this has CHANGED — see M5)
+2. every figure is Linux; macOS and Windows have nothing
+3. the two designated REFERENCE adapters (discord, email) lacked inbound fixture seams
+   (discord CHANGED by `24-c3-discord`; email still unmeasurable by configuration alone)
