@@ -94,6 +94,21 @@ const EGRESS_SENTINEL: &str = "CORPUS_EGRESS_SENTINEL_2c8a";
 /// visible without adding a production observability hook, which the corpus is
 /// forbidden to do.
 const CHILD_SHELL_RAN: &str = "CORPUSSHELLRAN7d21";
+/// THE LIVE CONTAINMENT DISCRIMINATOR — 21-C3.
+///
+/// Printed only if a write to a RELATIVE path succeeds. `BashTool` sets the
+/// sandbox command's `cwd` to the workspace policy's own root
+/// (`bash.rs:136`), so a relative write lands inside the child's own workspace
+/// and the containment guard has nothing to bind. The outside write in the same
+/// command has everything to bind.
+///
+/// Together with [`CHILD_SHELL_RAN`] this is what separates the two mechanisms
+/// `21-04-PHASE-VERDICT.md` §1 C3 bullet 4 records as jointly attributable: an
+/// absent outside effect beside a PRESENT inside effect is workspace
+/// containment, and it means the child demonstrably held and exercised Bash —
+/// so that refusal must not be read as evidence that tool authority is
+/// enforced, exactly as the verdict warns.
+const CHILD_SHELL_WROTE_INSIDE: &str = "CORPUSSHELLINSIDE7d21";
 /// Generation markers, prefixed into every delegated goal.
 ///
 /// A provider request's FIRST user message is the goal the delegation gave it.
@@ -415,12 +430,14 @@ fn live_scripts(
     // could not.
     let bash_command = if cfg!(windows) {
         format!(
-            "echo {CHILD_SHELL_RAN}& echo CORPUS_BASH_PROBE > \"{}\"",
+            "echo {CHILD_SHELL_RAN}& (echo x > corpus_inside.txt && echo \
+             {CHILD_SHELL_WROTE_INSIDE})& echo CORPUS_BASH_PROBE > \"{}\"",
             world.bash_probe.display()
         )
     } else {
         format!(
-            "printf {CHILD_SHELL_RAN}; printf CORPUS_BASH_PROBE > '{}'",
+            "printf {CHILD_SHELL_RAN}; printf x > corpus_inside.txt && printf \
+             {CHILD_SHELL_WROTE_INSIDE}; printf CORPUS_BASH_PROBE > '{}'",
             world.bash_probe.display()
         )
     };
@@ -639,6 +656,9 @@ struct LiveRun {
     /// wire. See [`CHILD_SHELL_RAN`]. Only the tool dimension's script emits
     /// the marker; every other dimension leaves this false and does not read it.
     child_shell_ran: bool,
+    /// 21-C3 — whether that same shell's write to a path INSIDE its own
+    /// workspace succeeded. See [`CHILD_SHELL_WROTE_INSIDE`].
+    child_shell_wrote_inside: bool,
 }
 
 /// Persist the full raw transcript of one live run and return its path.
@@ -725,6 +745,9 @@ fn run_live_with_batch(
     run.child_shell_ran = served
         .iter()
         .any(|request| request.body.to_string().contains(CHILD_SHELL_RAN));
+    run.child_shell_wrote_inside = served
+        .iter()
+        .any(|request| request.body.to_string().contains(CHILD_SHELL_WROTE_INSIDE));
     run.transcript_path = persist_transcript(
         dimension,
         transport,
@@ -774,6 +797,7 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
                 child_turns: 0,
                 grandchild_turns: 0,
                 child_shell_ran: false,
+                child_shell_wrote_inside: false,
                 transcript_path: String::new(),
             };
         }
@@ -874,6 +898,7 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
         child_turns: 0,
         grandchild_turns: 0,
         child_shell_ran: false,
+        child_shell_wrote_inside: false,
         transcript_path: String::new(),
     }
 }
@@ -932,6 +957,7 @@ fn run_headless(world: &LiveWorld) -> LiveRun {
                 child_turns: 0,
                 grandchild_turns: 0,
                 child_shell_ran: false,
+                child_shell_wrote_inside: false,
                 transcript_path: String::new(),
             };
         }
@@ -976,6 +1002,7 @@ fn run_headless(world: &LiveWorld) -> LiveRun {
         child_turns: 0,
         grandchild_turns: 0,
         child_shell_ran: false,
+        child_shell_wrote_inside: false,
         transcript_path: String::new(),
     }
 }
@@ -1082,6 +1109,7 @@ fn run_headless_pty(world: &LiveWorld) -> LiveRun {
         child_turns: 0,
         grandchild_turns: 0,
         child_shell_ran: false,
+        child_shell_wrote_inside: false,
         transcript_path: String::new(),
     }
 }
@@ -1100,6 +1128,7 @@ fn run_headless_pty(world: &LiveWorld) -> LiveRun {
         child_turns: 0,
         grandchild_turns: 0,
         child_shell_ran: false,
+        child_shell_wrote_inside: false,
         transcript_path: String::new(),
     }
 }
@@ -1216,6 +1245,7 @@ fn run_tui(world: &LiveWorld) -> LiveRun {
         child_turns: 0,
         grandchild_turns: 0,
         child_shell_ran: false,
+        child_shell_wrote_inside: false,
         transcript_path: String::new(),
     }
 }
@@ -1239,6 +1269,7 @@ fn run_tui(world: &LiveWorld) -> LiveRun {
         child_turns: 0,
         grandchild_turns: 0,
         child_shell_ran: false,
+        child_shell_wrote_inside: false,
         transcript_path: String::new(),
     }
 }
@@ -1259,16 +1290,30 @@ fn observe(dimension: Dimension, world: &LiveWorld, run: &LiveRun) -> (Outcome, 
                     ),
                 )
             } else if run.child_shell_ran {
+                // The refusal is real. Which mechanism produced it is now
+                // measured rather than jointly attributed.
+                let mechanism = if run.child_shell_wrote_inside {
+                    "ATTRIBUTED TO WORKSPACE CONTAINMENT, NOT TOOL AUTHORITY. The same shell \
+                     command's write to a RELATIVE path — inside the child's own workspace, where \
+                     containment has nothing to bind — succeeded and returned its marker on the \
+                     wire. So the child demonstrably HELD and exercised Bash, and only the \
+                     out-of-workspace destination was refused. This row must not be read as \
+                     evidence that the tool dimension is enforced"
+                } else {
+                    "NOT SEPARABLE ON THIS RUN. The shell ran, but its write to a relative path \
+                     inside the child's own workspace also produced nothing, so the outside \
+                     refusal is attributable to workspace containment OR to something that \
+                     refused every write this shell attempted. Recorded as it stands rather than \
+                     assigned to one mechanism"
+                };
                 (
                     Outcome::Refused,
                     "no Bash effect".to_owned(),
                     format!(
                         "the delegated child's SHELL RAN — its stdout marker returned on the wire \
                          in a served provider request — and its write still produced no effect in \
-                         the hermetic home. {} delegated child provider turn(s) arrived. The \
-                         refusal is therefore attributable to what the child was given rather \
-                         than to a shell that never started, which is the distinction this row \
-                         could not previously make",
+                         the hermetic home. {} delegated child provider turn(s) arrived. \
+                         {mechanism}",
                         run.child_turns
                     ),
                 )
