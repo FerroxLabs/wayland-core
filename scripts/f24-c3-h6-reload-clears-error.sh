@@ -1,0 +1,360 @@
+#!/usr/bin/env bash
+# F24-C3-H6 — driven proof that `channel reload` erases the record of a dead
+# inbound path.
+#
+# THE DEFECT. `gateway.rs`'s reload success branch sets `registration_error =
+# None` unconditionally. That field is the ONLY thing `channel health` fails on
+# once `registered >= configured`, and at startup it carries facts a reload does
+# not re-evaluate and cannot fix — most concretely that this gateway LOST the
+# single-owner inbound polling lease and therefore "will send but not poll".
+#
+# So: gateway starts degraded, `channel health` correctly exits non-zero, the
+# operator runs the documented `channel reload`, and health starts exiting 0
+# while the inbound path is exactly as dead as it was a second earlier.
+#
+# THE ONE VARIABLE IS THE BINARY. Everything else — the home, the channel
+# config, the lock holder, the ordering, the waits — is generated here and is
+# identical across runs. Invoke as:
+#
+#   f24-c3-h6-reload-clears-error.sh <path-to-wayland-core> <run-dir>
+#
+# EXIT: 0 iff every leg passes. Any leg failing exits 1. A leg that could not be
+# RUN exits 2 (instrument fault), which is deliberately distinct from a product
+# failure — a driver that reports "defect absent" because it never drove
+# anything is the self-passing shape LANE-BRIEF 3b-i warns about.
+set -u -o pipefail
+
+# ---------------------------------------------------------------------------
+# Lock-holder primitives, shared by the run and by `--selftest`.
+#
+# `lock_is_free` is the instrument's own precondition check. Everything that
+# grades the product downstream of a lease change depends on it, so it is a
+# named function tested directly rather than an inline assumption.
+# ---------------------------------------------------------------------------
+lock_is_free() { flock -n -x "$1" -c true 2>/dev/null; }
+
+hold_lease() { # hold_lease <lockfile> <logfile> -> echoes the holder PGID
+  printf '\0' > "$1"
+  setsid flock -x "$1" -c 'echo LOCKHELD; sleep 900' > "$2" 2>&1 &
+  local pid=$!
+  local i
+  for i in $(seq 1 50); do
+    grep -q LOCKHELD "$2" 2>/dev/null && break
+    sleep 0.2
+  done
+  echo "$pid"
+}
+
+# Kill the holder's whole process GROUP, then PROVE the lock is free.
+#
+# The proof is the point. Without it a failed release is indistinguishable from
+# the product refusing to clear a degradation -- and it produced exactly that
+# false red once already.
+release_lease() {
+  kill -TERM -- "-$LOCK_PID" 2>/dev/null || kill -TERM "$LOCK_PID" 2>/dev/null
+  wait "$LOCK_PID" 2>/dev/null
+  local i
+  for i in $(seq 1 50); do
+    if lock_is_free "$LOCK"; then return 0; fi
+    sleep 0.2
+  done
+  echo "INSTRUMENT-FAULT: asked to release the poll lease and it is STILL held"
+  echo "after 10s. Anything measured past this point would be graded against a"
+  echo "precondition that never changed, so no product verdict is issued."
+  fuser -v "$LOCK" 2>&1 | head
+  exit 2
+}
+
+# ---------------------------------------------------------------------------
+# `--selftest` — three assertions, per LANE-BRIEF 6b-ii.
+#
+# (1) known-positive: the holder really takes the lock.
+# (2) known-negative: the repaired release really frees it.
+# (3) THE OLD BROKEN SHAPE WOULD HAVE MISSED IT: `kill <flock-pid>` alone leaves
+#     the lock held, which is the bug that manufactured a false red against a
+#     correct product fix. Without (3), (1) and (2) both pass on the broken
+#     instrument too and prove nothing about the repair.
+# ---------------------------------------------------------------------------
+if [ "${1:-}" = "--selftest" ]; then
+  T=$(mktemp -d "/tmp/f24c3h6-selftest-XXXXXX")
+  LOCK="$T/l"; ST_PASS=0; ST_FAIL=0
+  st() { if [ "$2" = ok ]; then ST_PASS=$((ST_PASS+1)); echo "PASS  $1 — $3";
+         else ST_FAIL=$((ST_FAIL+1)); echo "FAIL  $1 — $3"; fi }
+
+  LOCK_PID=$(hold_lease "$LOCK" "$T/h.log")
+  if lock_is_free "$LOCK"; then
+    st "1-known-positive-holder-takes-the-lock" no "the lock read as FREE while held"
+  else
+    st "1-known-positive-holder-takes-the-lock" ok "lock reads as held (pgid $LOCK_PID)"
+  fi
+
+  if release_lease && lock_is_free "$LOCK"; then
+    st "2-known-negative-repaired-release-frees-it" ok "lock reads as free after a group kill"
+  else
+    st "2-known-negative-repaired-release-frees-it" no "still held after the repaired release"
+  fi
+
+  # (3) Reproduce the OLD release on a fresh holder and show it does NOT free.
+  LOCK2="$T/l2"
+  OLD_PID=$(hold_lease "$LOCK2" "$T/h2.log")
+  kill "$OLD_PID" 2>/dev/null      # <- the old, broken release: flock only
+  wait "$OLD_PID" 2>/dev/null
+  sleep 1
+  if lock_is_free "$LOCK2"; then
+    st "3-the-old-release-would-have-missed-it" no \
+      "the old kill DID free the lock, so the repair changes nothing and the false red had another cause"
+  else
+    st "3-the-old-release-would-have-missed-it" ok \
+      "old kill left the lock HELD ($(fuser "$LOCK2" 2>&1 | tr -s ' ')) — this is what graded a correct fix as red"
+    LOCK_PID=$OLD_PID; LOCK="$LOCK2"; release_lease   # clean up properly
+  fi
+
+  rm -rf "$T"
+  echo
+  echo "selftest: $ST_PASS passed / $ST_FAIL failed"
+  [ "$ST_FAIL" -eq 0 ]
+  exit $?
+fi
+
+BIN="${1:?usage: $0 <binary> <run-dir>}"
+RUN="${2:?usage: $0 <binary> <run-dir>}"
+
+[ -x "$BIN" ] || { echo "INSTRUMENT-FAULT: $BIN is not executable"; exit 2; }
+
+HOME_DIR="$RUN/home"
+CHANNELS="$HOME_DIR/channels"
+LOCK="$CHANNELS/channel-poll.lock"
+GWLOG="$RUN/gateway.log"
+RESULT="$RUN/result.json"
+
+rm -rf "$RUN"
+mkdir -p "$CHANNELS"
+
+PASS=0
+FAIL=0
+LEGS=""
+leg() { # leg <name> <ok|no> <detail>
+  if [ "$2" = ok ]; then PASS=$((PASS + 1)); echo "PASS  $1 — $3"
+  else FAIL=$((FAIL + 1)); echo "FAIL  $1 — $3"; fi
+  LEGS="${LEGS}$(printf '\n    {"leg":"%s","pass":%s,"detail":"%s"}' \
+    "$1" "$([ "$2" = ok ] && echo true || echo false)" "$(echo "$3" | tr -d '"' | tr '\n' ' ')"),"
+}
+
+# ---------------------------------------------------------------------------
+# The channel. `platform = "slack"` because its factory constructs OFFLINE, so
+# `registered` reaches 1 without a network or a real credential and the
+# `registered >= configured` half of `is_complete()` is satisfied — which is
+# required, or health would fail on the COUNT and the run would prove nothing
+# about `registration_error`.
+# ---------------------------------------------------------------------------
+cat > "$CHANNELS/f24h6.toml" <<'TOML'
+name = "f24h6"
+platform = "slack"
+enabled = true
+
+[options]
+workspace_name = "f24h6"
+default_channel_id = "DF24H6"
+credential_handle_bot_token = "slack.f24h6.bot_token"
+credential_handle_signing_secret = "slack.f24h6.signing_secret"
+max_retry_attempts = 1
+
+[inbound]
+dm = "allowlist"
+dm_allowlist = ["U-F24H6"]
+group = "disabled"
+TOML
+
+# ---------------------------------------------------------------------------
+# Take the inbound polling lease with a foreign holder, exactly as a second
+# wayland process (an ordinary session, or `cron daemon`) does. It is a plain
+# exclusive flock over a one-byte sentinel, so `flock(1)` is the same lock the
+# product takes -- not a simulation of it.
+#
+# Pre-created at exactly one byte: the product rewrites a sentinel of any other
+# length BEFORE locking, and a rewrite is not what is under test.
+# ---------------------------------------------------------------------------
+LOCK_PID=$(hold_lease "$LOCK" "$RUN/lockholder.log")
+
+# LANE-BRIEF 6a-i: assert the PARTICIPANT STARTED, and assert it two ways. A
+# lock holder that never acquired makes this a one-actor run, and the contention
+# this whole test is about cannot appear with one actor -- it would read as a
+# clean pass. The `LOCKHELD` line proves the process ran; `lock_is_free` proves
+# it actually took the lock, which is the fact the run depends on.
+if ! grep -q LOCKHELD "$RUN/lockholder.log" 2>/dev/null; then
+  echo "INSTRUMENT-FAULT: the foreign lock holder never announced itself."
+  kill -TERM -- "-$LOCK_PID" 2>/dev/null
+  exit 2
+fi
+if lock_is_free "$LOCK"; then
+  echo "INSTRUMENT-FAULT: the holder announced itself but the lock reads as FREE,"
+  echo "so the gateway below would WIN the lease and the run would measure the"
+  echo "wrong world entirely."
+  kill -TERM -- "-$LOCK_PID" 2>/dev/null
+  exit 2
+fi
+echo "setup: foreign lock holder live (pgid $LOCK_PID) and lock verified HELD"
+
+cleanup() {
+  [ -n "${GW_PID:-}" ] && kill "$GW_PID" 2>/dev/null
+  # Group kill, or the inherited `sleep` outlives the run and holds the lock
+  # for 15 minutes -- which is also how stray holders accumulated on the host.
+  kill -TERM -- "-$LOCK_PID" 2>/dev/null || kill -TERM "$LOCK_PID" 2>/dev/null
+  wait 2>/dev/null
+}
+trap cleanup EXIT
+
+# ---------------------------------------------------------------------------
+export WAYLAND_HOME="$HOME_DIR"
+"$BIN" gateway run > "$GWLOG" 2>&1 &
+GW_PID=$!
+
+for _ in $(seq 1 100); do
+  grep -q "channels registered=" "$GWLOG" 2>/dev/null && break
+  sleep 0.2
+done
+if ! grep -q "channels registered=" "$GWLOG" 2>/dev/null; then
+  echo "INSTRUMENT-FAULT: gateway never reported channel registration. Log:"
+  sed -n '1,40p' "$GWLOG"
+  exit 2
+fi
+
+# LANE-BRIEF 3b-ii: read the state back from the PRODUCT'S OWN OUTPUT rather
+# than inferring it from the setup. If the gateway won the lease, my lock holder
+# did not do what I think and every later number is about a different world.
+if grep -q "inbound polling is owned by another process" "$GWLOG"; then
+  leg "gateway-observed-the-lost-lease" ok \
+    "$(grep -m1 'inbound polling is owned' "$GWLOG" | tr -d '\r')"
+else
+  echo "INSTRUMENT-FAULT: the gateway did NOT report a lost lease, so the"
+  echo "precondition this test needs does not hold. Log:"
+  sed -n '1,40p' "$GWLOG"
+  exit 2
+fi
+
+health() { WAYLAND_HOME="$HOME_DIR" "$BIN" channel health > "$1" 2>&1; echo $?; }
+
+# --- Leg: health fails BEFORE the reload. -----------------------------------
+# NOTE this leg passes on the BROKEN binary too. It is the "old shape", kept
+# deliberately and labelled, because it is the control that proves the health
+# surface can fail at all -- and on its own it is worth nothing.
+for _ in $(seq 1 30); do
+  [ -f "$HOME_DIR/channel-health.json" ] && break
+  sleep 0.2
+done
+RC_BEFORE=$(health "$RUN/health-before.txt")
+if [ "$RC_BEFORE" != 0 ]; then
+  leg "health-fails-while-the-lease-is-lost--OLD-SHAPE" ok \
+    "rc=$RC_BEFORE: $(tr -d '\r' < "$RUN/health-before.txt" | tail -1)"
+else
+  leg "health-fails-while-the-lease-is-lost--OLD-SHAPE" no \
+    "rc=0 — health reported complete on a gateway that is not polling"
+fi
+
+# --- Drive the reload, and prove it actually ran. ---------------------------
+WAYLAND_HOME="$HOME_DIR" "$BIN" channel reload > "$RUN/reload.txt" 2>&1
+RC_RELOAD=$?
+for _ in $(seq 1 40); do
+  grep -q "channel reload: added=" "$GWLOG" 2>/dev/null && break
+  sleep 0.25
+done
+if grep -q "channel reload: added=" "$GWLOG"; then
+  leg "the-reload-actually-ran" ok \
+    "$(grep -m1 'channel reload: added=' "$GWLOG" | tr -d '\r')"
+else
+  echo "INSTRUMENT-FAULT: the reload never reached the gateway (cli rc=$RC_RELOAD),"
+  echo "so the post-reload health reading is not a measurement of anything."
+  sed -n '1,60p' "$GWLOG"
+  exit 2
+fi
+# The health document is republished on the tick AFTER the reload block.
+sleep 2
+
+# --- THE LEG THAT SEPARATES THE TWO BINARIES. ------------------------------
+# Nothing about the dead inbound path changed: the foreign holder still holds
+# the lease, and the gateway never re-attempts it. So health MUST still fail.
+RC_AFTER=$(health "$RUN/health-after.txt")
+if [ "$RC_AFTER" != 0 ]; then
+  leg "health-STILL-fails-after-a-successful-reload" ok \
+    "rc=$RC_AFTER: $(tr -d '\r' < "$RUN/health-after.txt" | tail -1)"
+else
+  leg "health-STILL-fails-after-a-successful-reload" no \
+    "rc=0 — a reload that fixed NOTHING erased the degradation report"
+fi
+
+# --- THE H6b LEG: did the reload STEAL the right to poll? -------------------
+# The exit-code legs above are blind to this, and that blindness is the point.
+# A fix that only stopped `reload` erasing the report would pass every leg above
+# while `reload` went on starting poll tasks for a process that does not hold the
+# lease -- and polling is a DESTRUCTIVE read, so the rightful owner then sees
+# nothing at all rather than a duplicate. Silent data loss behind a green suite.
+#
+# The observable is the adapter's own health state. `Unknown` means "registered,
+# never observed", which is where the startup path correctly left it; anything
+# else means something polled or started it.
+if grep -q "start() failed" "$RUN/health-after.txt"; then
+  leg "the-reload-did-NOT-take-the-poll-lease-for-itself" no \
+    "the adapter was STARTED by a gateway that does not hold the lease: $(grep -m1 'reason:' "$RUN/health-after.txt" | tr -s ' ')"
+elif grep -q "no poll observed yet" "$RUN/health-after.txt"; then
+  leg "the-reload-did-NOT-take-the-poll-lease-for-itself" ok \
+    "adapter still unpolled after the reload: $(grep -m1 'reason:' "$RUN/health-after.txt" | tr -s ' ')"
+else
+  echo "INSTRUMENT-FAULT: could not read the adapter's post-reload state, so"
+  echo "the lease-theft leg graded nothing. health-after.txt was:"
+  cat "$RUN/health-after.txt"
+  exit 2
+fi
+
+# --- Leg: the lock holder is still alive, so the path really is still dead. --
+# Without this the run could be graded on a world where the degradation had
+# genuinely been resolved, and clearing the error would have been CORRECT.
+if kill -0 "$LOCK_PID" 2>/dev/null; then
+  leg "the-degradation-was-still-real-at-the-final-reading" ok \
+    "foreign lock holder pid $LOCK_PID still alive"
+else
+  leg "the-degradation-was-still-real-at-the-final-reading" no \
+    "the lock holder died mid-run — the final reading is not interpretable"
+fi
+
+# --- CAN THE GATE PASS? (LANE-BRIEF 3b-iii.) --------------------------------
+# Everything above asks whether health can FAIL. If it can only fail, the fix
+# would be the inverse defect: a permanently-red surface reporting a
+# degradation that has resolved and that nothing can ever clear. That is a real
+# hazard here and not hypothetical, because the first draft of this fix froze
+# the boot-time lease string and would have done exactly that.
+#
+# So: release the lease and assert health clears BY ITSELF, with no reload. The
+# supervisor re-claims every tick, so winning it back is the achievable world in
+# which this gate must go green.
+release_lease   # kills the whole holder group AND PROVES the lock is free
+RC_RELEASED=1
+for i in $(seq 1 40); do
+  RC_RELEASED=$(health "$RUN/health-released.txt")
+  [ "$RC_RELEASED" = 0 ] && break
+  sleep 0.5
+done
+if [ "$RC_RELEASED" = 0 ]; then
+  leg "health-CLEARS-once-the-lease-is-won-back-with-no-reload" ok \
+    "rc=0 after ~$((i * 500))ms: $(tr -d '\r' < "$RUN/health-released.txt" | head -1)"
+else
+  leg "health-CLEARS-once-the-lease-is-won-back-with-no-reload" no \
+    "rc=$RC_RELEASED — the surface is stuck red; it reports a degradation that has resolved"
+fi
+
+cat > "$RESULT" <<JSON
+{
+  "finding": "F24-C3-H6",
+  "binary": "$BIN",
+  "pass": $PASS,
+  "fail": $FAIL,
+  "rc_health_after_lease_released": $RC_RELEASED,
+  "rc_health_before_reload": $RC_BEFORE,
+  "rc_health_after_reload": $RC_AFTER,
+  "legs": [${LEGS%,}
+  ]
+}
+JSON
+
+echo
+echo "legs: $PASS passed / $FAIL failed   (result: $RESULT)"
+[ "$FAIL" -eq 0 ]

@@ -1,0 +1,99 @@
+# F24-C3-H6 gate outputs
+
+All cargo runs used the ABSOLUTE path `/root/.cargo/bin/cargo` on hetzner-dsm, per
+LANE-BRIEF 3b: the `rtk` proxy strips `0 ignored` and `0 filtered out`, which are
+the two fields the anti-vacuity rule depends on. Every line below retains them,
+which is itself the evidence the proxy was bypassed.
+
+Product commit under test: f3073af9 (lane/f24-c3-h5-reload).
+Pre-fix baseline binary: built from d622cb09 (integration HEAD at branch time).
+
+## Unit — the H6a composition (wcore-cli)
+
+    cargo test -p wcore-cli --lib gateway::tests
+    test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 1882 filtered out
+
+## Unit/integration — the H6b start policy (wcore-channels)
+
+    cargo test -p wcore-channels --test framework_matrix
+    test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+    cargo test -p wcore-channels          # whole crate, all targets
+    test result: ok. 114 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+    test result: ok.  19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+    test result: ok.   6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+    test result: ok.   0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+    => 139 executed, 0 failed. The 0-test target is an empty harness present at
+       base; nothing in this lane relies on it. Flagged rather than averaged away,
+       because "a suite that ran zero tests" is exactly LANE-BRIEF 3.2's trap.
+
+## The prior lane's F24-C3-H5 fix must still hold
+
+    cargo test -p wcore-agent --test f24_c3_h5_reload_policies_test
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+    cargo test -p wcore-agent --lib channel_policy::
+    test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 2232 filtered out
+
+    cargo test -p wcore-agent --lib channel_dispatch::tests
+    test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 2227 filtered out
+
+## wcore-cli library suite — AND AN INSTRUMENT TRAP WORTH RECORDING
+
+    cargo test -p wcore-cli --lib
+    OUTER_CARGO_RC=0
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+    test result: ok.  1897 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out
+
+The `FAILED` line is NOT this crate's result. `plugin::scaffold::tests::
+plugin_test_propagates_a_failing_suite` (which PASSES) scaffolds a plugin crate
+containing `fn always_fails() { panic!("deliberate") }` and runs a NESTED cargo
+inside it to prove a failing scaffold propagates. That nested run's `failures:`
+block, its `test result: FAILED` line and its `error: test failed, to rerun pass
+--lib` all interleave into the outer stream.
+
+So on this crate a matcher keyed on `^test result:` or on `FAILED` or on `^error`
+reports a RED against a suite that passed — a false red manufactured by the
+product's own test output. Established here by taking the outer process's exit
+code directly (rc=0) and by reading the failing test's own name back
+(`always_fails`, at `src/lib.rs:2:21` — a path that does not exist in this
+workspace). Same family as LANE-BRIEF 3b: trust the count and the process, not a
+grep over interleaved output.
+
+The real result is 1897 passed / 0 failed / 1 ignored.
+
+## Workspace, per the brief: workspace-wide, never -p
+
+    cargo check --workspace --all-targets
+    WS_CHECK_RC=0     errors: 0
+
+## Lint / format
+
+    cargo clippy -p wcore-channels -p wcore-cli --all-targets
+    CLIPPY_RC=0, no warnings outside the pre-existing imap-proto future-incompat
+    note, which is present at base.
+
+    cargo fmt --all -- --check      (run on the Mac, which is permitted)
+    FMT_RC=0
+
+## Shared-file fence (LANE-BRIEF 6), diffed against the captured merge-base SHA
+
+    BASE=d622cb09de01329cef6f20d6f9183df171462daf
+    git diff "$BASE" --stat -- crates/wcore-cli/src/lib.rs crates/wcore-cli/src/main.rs
+    => EMPTY. Zero bytes in either fenced file.
+
+Paired with a known-positive on the same instrument, so the empty result is not a
+dead command: the same `git diff "$BASE" --stat` over the paths this lane DID
+change returns 6 files / 898 insertions / 23 deletions.
+
+## Live driver — the one-variable control
+
+Same driver, same host, same generated config, same lock-holder mechanism, same
+waits. The ONLY variable is the binary.
+
+    binary                          legs        health rc before -> after reload
+    pre-fix (d622cb09)              5 / 2 FAIL  1 -> 0
+    M2 "half-fix" (H6a only)        6 / 1 FAIL  1 -> 1
+    fixed  (f3073af9)               7 / 0 PASS  1 -> 1
+
+    driver --selftest               3 / 0 PASS

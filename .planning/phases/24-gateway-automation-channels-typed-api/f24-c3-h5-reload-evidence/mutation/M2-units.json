@@ -1,0 +1,16 @@
+{
+  "arm": "M2",
+  "suites": {
+    "gateway-unit (H6a composition)": {
+      "rc": 0,
+      "verdict": "ok. 16 passed",
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered out": 1882,
+      "failed_tests": []
+    }
+  },
+  "mutation_applied": true,
+  "restored": true
+}

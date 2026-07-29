@@ -1,0 +1,19 @@
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /tmp/f24c3h6-fixed3/home/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+[2m2026-07-29T22:54:08.786480Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24h6 [3mplatform[0m[2m=[0mslack
+[gateway] channels registered=1
+[2m2026-07-29T22:54:08.787176Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) — vision tool will be hidden
+[2m2026-07-29T22:54:08.787206Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY / OPENAI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) — tool hidden
+[gateway] inbound: subscriber spawned, webhook host disabled policies=1
+[2m2026-07-29T22:54:08.787524Z[0m [33m WARN[0m F24_CHANNEL_LEASE=observer — another process owns inbound polling; this process will NOT poll (sending is unaffected) [3mholder[0m[2m=[0m"gateway" [3mowner_pid[0m[2m=[0m"unknown" [3mdir[0m[2m=[0m/tmp/f24c3h6-fixed3/home/channels
+F24_CHANNEL_LEASE=observer owner_pid=unknown holder=gateway: another wayland-core process is already receiving messages for this home; this one will not poll for inbound messages. Sending still works.
+[gateway] inbound polling is owned by another process (pid None); this gateway will send but not poll
+[2m2026-07-29T22:54:08.788034Z[0m [32m INFO[0m headless cron handler: using the caller's ChannelManager; not registering or starting a second one
+[gateway] started pid=1735500 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+[2m2026-07-29T22:54:09.791656Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24h6 [3mplatform[0m[2m=[0mslack
+[gateway] channel reload: added=[] replaced=["f24h6"] removed=[] unchanged=[] policies=1
+[2m2026-07-29T22:54:12.795281Z[0m [33m WARN[0m channel start() failed; skipping and continuing with the rest [3mchannel[0m[2m=[0mf24h6 [3merror[0m[2m=[0mauth failed: no value for credential handle "slack.f24h6.bot_token"
+[2m2026-07-29T22:54:12.795386Z[0m [32m INFO[0m F24_CHANNEL_LEASE=acquired — this process has taken over inbound polling [3mholder[0m[2m=[0m"gateway" [3mpid[0m[2m=[0m1735500
+F24_CHANNEL_LEASE=acquired holder=gateway pid=1735500: this process has taken over inbound message polling for this home.
+[gateway] shutdown signal received
+[gateway] drain Clean: observations=1 abandoned=0 flushed=true
+[gateway] stopped (clean=true)

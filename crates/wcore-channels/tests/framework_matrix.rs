@@ -22,7 +22,7 @@ use wcore_channels::binding::{BindingSource, BindingTable, ConversationRef, Rout
 use wcore_channels::error::ChannelError;
 use wcore_channels::event::{ChannelEvent, ConnectionState, MessageReceipt};
 use wcore_channels::health::HealthState;
-use wcore_channels::manager::ChannelManager;
+use wcore_channels::manager::{ChannelManager, StartPolicy};
 use wcore_channels::media::{MediaBounds, RawAttachment, normalize};
 use wcore_channels::mock::MockChannel;
 use wcore_channels::outgoing::OutgoingMessage;
@@ -565,7 +565,10 @@ async fn reload_keeps_the_running_instance_of_an_unchanged_adapter() {
     assert_eq!(before.id, "ORIGINAL-out");
 
     let report = mgr
-        .reload(vec![Box::new(ContractChannel::new("acme", "REPLACEMENT"))])
+        .reload(
+            vec![Box::new(ContractChannel::new("acme", "REPLACEMENT"))],
+            StartPolicy::StartNewlyRegistered,
+        )
         .await;
     assert_eq!(report.unchanged, vec!["acme".to_string()]);
     assert!(report.replaced.is_empty());
@@ -590,9 +593,12 @@ async fn reload_replaces_an_adapter_whose_fingerprint_changed() {
     mgr.start_all().await.unwrap();
 
     let report = mgr
-        .reload(vec![Box::new(
-            ContractChannel::new("acme", "ROTATED").with_fingerprint(Some("fp-v2")),
-        )])
+        .reload(
+            vec![Box::new(
+                ContractChannel::new("acme", "ROTATED").with_fingerprint(Some("fp-v2")),
+            )],
+            StartPolicy::StartNewlyRegistered,
+        )
         .await;
     assert_eq!(report.replaced, vec!["acme".to_string()]);
     let after = mgr
@@ -619,9 +625,12 @@ async fn reload_treats_an_unfingerprintable_adapter_as_changed() {
     mgr.start_all().await.unwrap();
 
     let report = mgr
-        .reload(vec![Box::new(
-            ContractChannel::new("acme", "FRESH").with_fingerprint(None),
-        )])
+        .reload(
+            vec![Box::new(
+                ContractChannel::new("acme", "FRESH").with_fingerprint(None),
+            )],
+            StartPolicy::StartNewlyRegistered,
+        )
         .await;
     assert_eq!(report.replaced, vec!["acme".to_string()]);
     assert!(report.unchanged.is_empty());
@@ -636,7 +645,10 @@ async fn reload_adds_new_adapters_and_removes_deconfigured_ones() {
     mgr.start_all().await.unwrap();
 
     let report = mgr
-        .reload(vec![Box::new(ContractChannel::new("fresh", "B"))])
+        .reload(
+            vec![Box::new(ContractChannel::new("fresh", "B"))],
+            StartPolicy::StartNewlyRegistered,
+        )
         .await;
     assert_eq!(report.added, vec!["fresh".to_string()]);
     assert_eq!(report.removed, vec!["gone".to_string()]);
@@ -646,5 +658,90 @@ async fn reload_adds_new_adapters_and_removes_deconfigured_ones() {
         "a removed adapter must not linger in the health surface"
     );
     assert!(mgr.health_of("fresh").is_some());
+    mgr.stop_all().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// F24-C3-H6b — reload must not take the right to poll for itself.
+//
+// `reload` used to end in an unconditional `start_all`, so applying an adapter
+// set and beginning to poll were one act. They are two decisions, and only the
+// caller can make the second: the right to poll a home belongs to whoever holds
+// the single-owner inbound polling lease. The gateway gates its STARTUP
+// `start_all` on that lease and then reached `reload`, which started the poll
+// tasks regardless.
+//
+// Polling is a destructive read (Telegram's `offset=` confirm deletes; IMAP sets
+// `\Seen`), so the loser of that race sees NOTHING, not a duplicate. Both
+// directions are asserted below, per LANE-BRIEF 3b-iii: a gate that cannot pass
+// measures as little as one that cannot fail.
+// ---------------------------------------------------------------------------
+
+/// `LeaveStopped` must leave the newly added adapter registered and UNPOLLED.
+///
+/// `Unknown` is the assertion because it is the state that means "registered,
+/// never observed". A started adapter cannot be in it.
+#[tokio::test]
+async fn reload_with_leave_stopped_registers_without_starting_a_poll_task() {
+    let mut mgr = ChannelManager::new().with_poll_interval(Duration::from_millis(50));
+
+    let report = mgr
+        .reload(
+            vec![Box::new(ContractChannel::new("unpolled", "A"))],
+            StartPolicy::LeaveStopped,
+        )
+        .await;
+    assert_eq!(report.added, vec!["unpolled".to_string()]);
+
+    // Long enough that a spawned poll task at the 50 ms interval would have run
+    // several times and moved the state off `Unknown`.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let health = mgr
+        .health_of("unpolled")
+        .expect("a registered adapter must appear in the health surface");
+    assert_eq!(
+        health.state,
+        HealthState::Unknown,
+        "reload was told LeaveStopped but polled anyway; a gateway that does not \
+         hold the inbound polling lease would be stealing a destructive read \
+         from the process that does. reason={:?}",
+        health.reason
+    );
+    mgr.stop_all().await.unwrap();
+}
+
+/// The same call with `StartNewlyRegistered` MUST reach a polled state.
+///
+/// Without this the test above passes on a `reload` that can never start
+/// anything at all — the permanently-red instrument LANE-BRIEF 3b-iii describes.
+#[tokio::test]
+async fn reload_with_start_newly_registered_does_start_a_poll_task() {
+    let mut mgr = ChannelManager::new().with_poll_interval(Duration::from_millis(50));
+
+    let report = mgr
+        .reload(
+            vec![Box::new(ContractChannel::new("polled", "A"))],
+            StartPolicy::StartNewlyRegistered,
+        )
+        .await;
+    assert_eq!(report.added, vec!["polled".to_string()]);
+
+    let mut observed = HealthState::Unknown;
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if let Some(h) = mgr.health_of("polled")
+            && h.state != HealthState::Unknown
+        {
+            observed = h.state;
+            break;
+        }
+    }
+    assert_ne!(
+        observed,
+        HealthState::Unknown,
+        "StartNewlyRegistered never produced an observation, so the assertion in \
+         the LeaveStopped test above would hold no matter what reload did"
+    );
     mgr.stop_all().await.unwrap();
 }
