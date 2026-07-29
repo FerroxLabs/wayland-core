@@ -1369,6 +1369,16 @@ async fn drive_session(
     // by — the post-stop drain is too late for the common one-turn case.
     let mut cost: Option<CostReport> = None;
 
+    // Turn-level timing trace, off unless `WCORE_EVAL_TURN_TRACE` is set.
+    //
+    // Exists because a `Failure::OverTime` is otherwise UNREADABLE: it reports
+    // only "the turn crossed its budget", which is the same observation whether
+    // the engine never produced a first token or produced one and then ignored
+    // a cancellation. Those are a harness-budget problem and a product defect
+    // respectively, and CI run 30434804220 could not tell them apart. Writes to
+    // stderr so it never contaminates the child's json-stream on stdout.
+    let turn_trace = std::env::var_os("WCORE_EVAL_TURN_TRACE").is_some();
+
     for (turn_idx, turn) in scenario.turns.iter().enumerate() {
         let turn_start = Instant::now();
 
@@ -1462,6 +1472,12 @@ async fn drive_session(
         prompt_dispatch_time =
             prompt_dispatch_time.saturating_add(prompt_dispatch_started.elapsed());
         let prompt_sent_at = Instant::now();
+        if turn_trace {
+            eprintln!(
+                "[turn-trace] turn={turn_idx} t={:.3}s prompt_sent",
+                turn_start.elapsed().as_secs_f64()
+            );
+        }
 
         let mut turn_text = String::new();
         // D2: Stop-mid-turn — send stop once after the first event that
@@ -1490,6 +1506,12 @@ async fn drive_session(
                 }
                 Err(e) => {
                     if e.downcast_ref::<TurnTimeout>().is_some() {
+                        if turn_trace {
+                            eprintln!(
+                                "[turn-trace] turn={turn_idx} t={:.3}s TURN_TIMEOUT stop_pending={stop_pending}",
+                                turn_start.elapsed().as_secs_f64()
+                            );
+                        }
                         return Err(e);
                     }
                     runner_error = Some(format!("stdout decode error: {e}"));
@@ -1497,6 +1519,13 @@ async fn drive_session(
                 }
             };
             capability_evidence.capture(&ev);
+            if turn_trace {
+                eprintln!(
+                    "[turn-trace] turn={turn_idx} t={:.3}s event={}",
+                    turn_start.elapsed().as_secs_f64(),
+                    ev.get("type").and_then(Value::as_str).unwrap_or("?")
+                );
+            }
             // D2: wait for observable model/tool activity, then cancel the
             // active run future. The current event is still dispatched below,
             // so a triggering text delta remains visible to the evaluator.
@@ -1517,6 +1546,12 @@ async fn drive_session(
                 sline.push(b'\n');
                 stdin.write_all(&sline).await?;
                 stdin.flush().await?;
+                if turn_trace {
+                    eprintln!(
+                        "[turn-trace] turn={turn_idx} t={:.3}s stop_sent",
+                        turn_start.elapsed().as_secs_f64()
+                    );
+                }
             }
 
             // Dispatch by "type" tag — same model the W0 host decoder
@@ -1759,6 +1794,12 @@ async fn drive_session(
         }
 
         let elapsed = turn_start.elapsed();
+        if turn_trace {
+            eprintln!(
+                "[turn-trace] turn={turn_idx} t={:.3}s turn_end stop_pending={stop_pending}",
+                elapsed.as_secs_f64()
+            );
+        }
         // `final_text` reflects the MOST RECENT turn's assistant text, even if
         // empty (finding #7) — a final turn that produced only tool calls must
         // not leave `final_text` showing a stale earlier turn's prose.

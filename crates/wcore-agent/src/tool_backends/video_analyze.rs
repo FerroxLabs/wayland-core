@@ -506,14 +506,16 @@ fn select_step(_frame_count: usize) -> usize {
 /// Note: `check_ffmpeg_available()` is async (it spawns a child once),
 /// so this resolver is async too. The bootstrap site calls it inside
 /// the existing tokio runtime.
-pub async fn build_video_analyze_backend() -> Option<Arc<dyn VideoAnalysisBackend>> {
+pub async fn build_video_analyze_backend(
+    config: &wcore_config::config::Config,
+) -> Option<Arc<dyn VideoAnalysisBackend>> {
     if !check_ffmpeg_available().await {
         tracing::warn!(
             "video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)"
         );
         return None;
     }
-    let vision = build_vision_backend()?;
+    let vision = build_vision_backend(config)?;
     tracing::info!("video_analyze: ffmpeg + vision backend present — tool enabled");
     Some(Arc::new(FfmpegFrameVideoBackend::new(vision)))
 }
@@ -632,8 +634,17 @@ mod tests {
             std::env::remove_var("ANTHROPIC_API_KEY");
             std::env::remove_var("OPENAI_API_KEY");
             std::env::remove_var("GEMINI_API_KEY");
+            // Arm 5 of `build_vision_backend` (added closing BL-F24-C3-H7).
+            // Without clearing this the test would resolve a backend — and
+            // silently STOP TESTING the gate — on any box where the operator
+            // has FLUX_API_KEY exported, which is exactly the box this lane
+            // runs its live leg on.
+            std::env::remove_var("FLUX_API_KEY");
         }
-        let got = build_video_analyze_backend().await;
+        // Default `Config` carries no api_key, so arm 4 (active OpenAI-wire
+        // provider) also declines.
+        let cfg = wcore_config::config::Config::default();
+        let got = build_video_analyze_backend(&cfg).await;
         // Whether ffmpeg is present or not, with no vision key we MUST
         // return None. (If ffmpeg is absent we also return None — the
         // separate `*_when_ffmpeg_missing` test cannot be hermetic on
@@ -658,7 +669,8 @@ mod tests {
             unsafe {
                 std::env::set_var("ANTHROPIC_API_KEY", "test-key");
             }
-            let got = build_video_analyze_backend().await;
+            let cfg = wcore_config::config::Config::default();
+            let got = build_video_analyze_backend(&cfg).await;
             unsafe {
                 std::env::remove_var("ANTHROPIC_API_KEY");
             }

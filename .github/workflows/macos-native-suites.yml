@@ -98,14 +98,24 @@ jobs:
             echo "PROBE_RESULT=unusable (rc=$?)"
           fi
 
+      # `cargo test` is retained here DELIBERATELY. Both targets are
+      # `#![cfg(target_os = "macos")]` with every case `#[ignore]`d, so they need
+      # `-- --ignored`, and the "Assert both suites executed" step below is a
+      # STRONGER guard than nextest's `no-tests = "fail"`: it pins the exact
+      # expected count (`running 1 test`, `1 passed; 0 failed`) and additionally
+      # catches flavour B (an env-gated early return printing `^skip:`), which a
+      # non-zero-test check cannot see. Exit status is ignored on purpose —
+      # PIPESTATUS[0] is recorded to a file the gate step reads back separately.
       - name: Run hard_process_containment_macos
         id: containment
+        # vacuity-checked: count pinned in the dedicated gate step below.
         run: |
           set -uo pipefail
           vx cargo test -p wcore-sandbox --test hard_process_containment_macos \
             -- --ignored --test-threads=1 2>&1 | tee /tmp/containment.log
           echo "rc=${PIPESTATUS[0]}" | tee -a /tmp/containment.rc
 
+      # vacuity-checked: as above — count asserted in the dedicated gate step.
       - name: Run live_integrity_macos
         id: integrity
         if: always()

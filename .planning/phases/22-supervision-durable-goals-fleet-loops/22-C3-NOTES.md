@@ -344,3 +344,624 @@ Shared fence `crates/wcore-cli/src/{lib,main}.rs`: **untouched**, verified by
 Verdict written to `22-C3-SUMMARY.md`: **Criterion 3 = PARTIAL**. The construction is
 real and structurally enforced over the Goal lifecycle; four of five engines have no
 product path through it, and engine invocation outside a Goal remains convention.
+
+= = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = =
+
+# PART II — lane `lane/22-c3-goal`, 2026-07-29
+
+Everything above this line was written by the earlier lane `lane/22-c3` and is
+**preserved unedited**. Everything below is mine. Base `861d1b1a` (which already
+contains all of the above). Append-and-commit after every measurement.
+
+---
+
+## §0. FIRST FINDING — my dispatch brief's premise is stale, in two layers
+
+My brief states C3 "remains untouched", "was never attempted", and that "five engines
+still return five types". **All three were true when written; none is true at my base.**
+I establish this before building, because building against a stale premise would have
+produced a second copy of an existing construction.
+
+**Layer 1 — the phase verdict is stale.** `22-PHASE-VERDICT.md` §`UPDATE — 2026-07-27`
+re-grades C3 **FAILED, unchanged**, stating "No lane attempted 22-02 Task 3." Written
+2026-07-27 by lane `lane/22-wire`.
+
+**Layer 2 — a C3 lane ran AFTER that update and nobody re-graded.** Unproxied `git log`:
+
+```
+$ /usr/bin/git log --format='%h %ad %s' --date=short -- .../22-C3-NOTES.md .../22-C3-SUMMARY.md
+aa60fc4b 2026-07-29 docs(22-c3): SUMMARY with an honest PARTIAL grade on Criterion 3
+8894f443 2026-07-29 docs(22-c3): gate results, the live transcript, and a HIGH I found in my own construction
+d82ac121 2026-07-28 docs(22-c3): record the closed-back-door design and the full terminal mapping
+0e33c08d 2026-07-28 docs(22-c3): record the Criterion 3 enforcement-ceiling determination before building
+```
+
+Ordering: verdict UPDATE (07-27) → C3 lane builds the adapter surface (07-28/29) → **no
+re-grade**. The verdict AND the `GOAL-*` COMPETITIVE-LEDGER row both still assert a fact
+the tree falsifies.
+
+**Layer 3 — confirmed against SOURCE, not against the summary.** A summary can itself be
+advertised-but-dead (ten recorded instances on this programme), so I checked the tree:
+
+```
+$ /usr/bin/grep -n "pub fn from_" crates/wcore-agent/src/goal/strategy.rs
+262:    pub fn from_direct(owner: LoopOwner<DirectTag>, outcome: DirectOutcome<'_>) -> Self {
+300:    pub fn from_forgeflows(
+347:    pub fn from_fleet(owner: LoopOwner<FleetTag>, outcome: FleetOutcome<'_>) -> Self {
+378:    pub fn from_council(
+464:    pub fn from_anvil(
+```
+
+Five adapters, 880 lines, present. **The construction exists.** "Five engines return five
+types" remains literally true of the *engines' own signatures* — the adapter surface that
+converges them onto `StrategyTermination` is what exists.
+
+### What this changes about my job
+
+I am **not** building the adapter surface. I am closing the **PARTIAL**. The earlier
+lane's own §6 names the gap and that gap is my work:
+
+1. **Four of five engines have no PRODUCT path.** Only Fleet is reachable via a shipped
+   verb (`wayland-core goal run --terminate`). Direct, ForgeFlows, Council, Anvil
+   terminate canonically **in tests only**. Against my brief's own instruction — "prove
+   each engine's *production* path reaches it, not just that a function exists" — this is
+   exactly the **advertised-but-dead** class in a new costume.
+2. **An engine invoked outside any Goal is unenforced** — convention, not construction.
+   The earlier lane measured the reason (≥40 existing test call sites; 22-02 Task 3's
+   `<done>` forbids modifying existing tests) and called it a Sean-level scope call.
+3. Linux only; no Windows leg.
+
+**Grading position, stated BEFORE I build so it cannot be retrofitted:** item 1 is
+squarely mine and is the whole difference between a construction and a product property.
+Item 2 I will **re-derive rather than inherit** — an inherited impossibility claim is
+precisely what this programme has been wrong about three times.
+
+---
+
+## §1. What I still have to establish
+
+- [ ] Re-derive item 2's ≥40-call-site claim myself. Do NOT inherit it.
+- [ ] Give the four unwired engines a product path, or prove it impossible with the call
+      sites that make it so.
+- [ ] **Nested-owner proof.** A known-negative is self-passing on a dead instrument. Must
+      search the CONCEPT (retry / re-run / attempt / backoff / verify-again / max_*),
+      state the query, and carry a known-positive in the SAME invocation.
+- [ ] Kill-mid-flight: the goal terminates **exactly once**. The earlier lane proved claim
+      durability; termination *cardinality* is a different assertion and is mine.
+- [ ] A one-variable negative control that reddens.
+- [ ] State plainly whether F05 rows 2 (mid-flight monitor) and 4 (learned policy) become
+      reachable. Default answer is "they remain unwired" unless I actually wire them.
+
+## §2. Log
+
+- **T+0** — worktree verified `.../lane-22-c3-goal`, branch `lane/22-c3-goal`, HEAD
+  `861d1b1a`. Confirmed NOT the dirty `/Users/seandonahoe/dev/waylandcore` checkout.
+- **T+9** — §0 established and committed. Premise stale; job re-scoped from "build the
+  adapter surface" to "close the PARTIAL".
+
+---
+
+## §3. MEASURED — the advertised-but-dead gap, with the query that found it
+
+**Query** (unproxied, glob quoted — an earlier unquoted run was eaten by zsh with
+`no matches found: --include=*.rs`, which is the §3b-i trap arriving in my own hands):
+
+```
+$ /usr/bin/grep -rn "from_direct\|from_forgeflows\|from_fleet\|from_council\|from_anvil" \
+    crates --include='*.rs' | /usr/bin/grep -v "^crates/wcore-agent/src/goal/strategy.rs"
+```
+
+**Known-positive in the same style**, to prove the instrument is alive:
+`/usr/bin/grep -rn "fn main" crates/wcore-cli/src --include='*.rs' | wc -l` → **23**.
+
+**Result: 24 hits. 23 of them are `crates/wcore-agent/tests/goal_strategy_test.rs`.
+Exactly ONE is production — `crates/wcore-cli/src/goal_cmd.rs:532`, `from_fleet`.**
+
+That is the finding stated precisely: **four of the five adapters have zero production
+callers.** `from_direct`, `from_forgeflows`, `from_council`, `from_anvil` are reachable
+only from a test binary. A caller of the shipped product cannot make four of the five
+engines terminate through the canonical transition, because no shipped code path calls
+those adapters at all.
+
+This is the **advertised-but-dead** class (ten recorded instances on this programme, four
+found on 2026-07-29). The construction is real, the type-level enforcement is real, and
+**four fifths of it is dead code from the product's point of view.**
+
+## §4. Where each engine's REAL production path lives
+
+Measured, not assumed:
+
+| Engine | Production entry point | Shipped verb |
+|---|---|---|
+| Fleet | `FleetDispatcher` via `GoalFleetDriver` | `goal run --terminate` — **already canonical** |
+| ForgeFlows | `WorkflowRunner::run` — `crates/wcore-cli/src/workflow.rs:241` | `workflow run <NAME>` |
+| Council | `drive_council` — `crates/wcore-cli/src/crucible.rs:459` | `crucible` |
+| Anvil | `run_climb` via `forge.rs:821` — `crates/wcore-cli/src/anvil.rs:42 run_forge` | `anvil forge` |
+| Direct | `Engine::run` | main agent loop — entry still to be located |
+
+So the four unwired engines **do** have shipped verbs. They simply do not route their
+termination through the Goal. That makes the gap closable without inventing a demo path.
+
+## §5. Design decision (Decide-don't-park), taken before building
+
+**Rejected: a new `goal drive` verb that re-implements each engine's invocation.** It
+would be a parallel demo path — a fifth way to start an engine, proving only that the
+demo reaches the transition. That is the advertised-but-dead defect rebuilt one level up.
+
+**Chosen: attach the Goal to each engine's EXISTING production verb.** Each of
+`workflow run`, `crucible`, `anvil forge` and the Direct loop gains an opt-in
+`--goal <id> --journal <path>` pair. When supplied, that verb's real engine invocation
+runs INSIDE `GoalLoop::run_<strategy>` and terminates through its adapter. When absent,
+the path is byte-for-byte what it is today.
+
+This is the pattern `goal run --terminate` already established, adopted for the same
+stated reason: an always-on termination would break 22-03's kill/restart proof, which
+re-enters the same verb. Opt-in keeps every existing invocation and every existing test
+unchanged — which also means I do **not** have to edit the ≥40 test call sites the earlier
+lane measured as blocking, because I am not changing any engine signature.
+
+**What this does and does not buy.** It makes all five engines terminate through one
+canonical transition *when driven under a Goal*, from the product, on the engines' real
+entry points. It does **not** make an engine invoked with no Goal impossible — that
+remains convention, and §6 of the earlier SUMMARY is still correct about it. I will
+re-derive that ceiling myself rather than inherit it (§1).
+
+## §6. The live-proof problem, and how I intend to solve it without a credential
+
+Four of the five engines need an LLM provider to reach termination. I have no credential
+and credentials are Sean-reserved. Measured: there is **no offline/mock provider** in
+production code — `StubProvider` is `#[cfg(test)]` in `spawner.rs`, `FixtureProvider` is
+`wcore-evolve`'s and is a `ParaphraseProvider`, not an `LlmProvider`.
+
+**Plan: a local canned-response HTTP endpoint on hetzner, pointed at by `base_url`.**
+Providers are HTTP + `ProviderCompat`, so an OpenAI-compatible server on `127.0.0.1:<port>`
+with a dummy key exercises the **real** provider code, the **real** engine loop and the
+**real** termination path — only the model's tokens are canned. No secret involved, so
+this does not touch the credential rule at all. Unique port per §"many lanes are live".
+
+**Stated honestly up front:** this proves the *termination path*, not model quality. If
+it turns out an engine cannot be driven to termination this way, I will say so and show
+the call sites, not invent an exit (Honesty rule: no "termination state 4").
+
+---
+
+## §7. NEW FINDING — the adapters were typed against engine internals, not the
+## shipped verbs. Two of five did not even compile against production.
+
+This is the strongest evidence I have that the four adapters had never been production
+wired, and I did not have to argue for it — the compiler produced it.
+
+**Anvil.** `from_anvil` took `Result<&ClimbOutcome, &EngineError>`. The shipped forge
+entry point is `drive_climb_full`, which returns `Result<ClimbOutcome, ForgeError>`.
+`ForgeError` (`NoGate`, `Lease`, `Worktree`, `GateUnrunnable`, `Receipt`, `Disabled`) is a
+disjoint type from `EngineError` (`Builder`, `Gate`). **There was no way to call the Anvil
+adapter from the Anvil verb.**
+
+**Council.** `from_council` took `Result<&CouncilRunResult, &CouncilError>`. The shipped
+`drive_council` returns `anyhow::Result<CouncilRunResult>`. Compiler, verbatim:
+
+```
+error[E0308]: mismatched types
+   --> crates/wcore-cli/src/crucible.rs:510:74
+    |  StrategyTermination::from_council(owner, Err(&error))
+    |                                                ^^^^^^ expected `&CouncilError`, found `&Error`
+```
+
+**Why this matters more than the call-site count.** A missing caller is consistent with
+"nobody got round to it". A signature that *cannot accept* what the production entry point
+returns is proof the wiring was never attempted, because attempting it fails to compile on
+the first try. The construction was verified against the engines' internal APIs and the
+tests exercised those same internal APIs, so the test suite could be fully green while the
+product path did not typecheck.
+
+**What I did NOT do:** squeeze `ForgeError::NoGate` into `EngineError::Builder`, or flatten
+every council error into `Blocked`. Both would have compiled. The module itself already
+names that anti-pattern — *"squeezing that into `FleetError::Timeout` to satisfy a
+signature would be a fabricated terminal"* — and it already had the answer:
+`FleetOutcome::DriverFailed`. I mirrored it: `AnvilOutcome` and `CouncilRunOutcome`, each
+with a typed arm and a `DriverFailed` arm. `CouncilRunOutcome::from_anyhow` **downcasts**,
+so a wrapped `CouncilError` still lands on its exact category — `Unpriced` survives, which
+is the one carrier the 22-02 census said the lifted taxonomy had to add.
+
+## §8. A defect in MY OWN instrument, found and repaired in-lane (§6b-ii)
+
+I gated each build on `grep -c "Checking wcore-cli"`. It returned **0** on a build that had
+succeeded — because `cargo check --all-targets` prints **`Compiling wcore-cli`** for the
+binary target, not `Checking`. So my gate reported "the crate was not built" while it had
+been built cleanly, and, worse, the same matcher returning 0 is what a genuinely skipped
+build looks like. **A known-negative that fires for free — §3b-i, arriving in my own hands
+for the second time this lane** (the first was zsh eating `--include=*.rs`).
+
+§6b-ii is explicit that writing this up and moving on is not a fix, so I repaired the
+matcher to `grep -cE "(Checking|Compiling) wcore-cli v"` and gave it the required **three**
+assertions, run on hetzner:
+
+```
+A1 known-positive, repaired matcher (expect >0): 1
+A2 known-negative, repaired matcher (expect  0): 0
+A3 known-positive, OLD broken matcher (expect 0 = would have MISSED it): 0
+--- repaired matcher on the real build log (expect 1): 1
+```
+
+**A3 is the one that matters** — it shows the old matcher scored 0 on a log that genuinely
+contains the build, so the repair changes an outcome rather than decorating a passing test.
+
+## §9. Log (continued)
+
+- **T+40** — `goal open --strategy` landed; ForgeFlows attached to `workflow run`;
+  `cargo check -p wcore-cli --all-targets` rc=0, errors=0.
+- **T+70** — Anvil + Council attached. Two adapter signature changes forced by §7.
+  Test call sites adapted mechanically (no assertion changed, nothing `#[ignore]`d,
+  nothing deleted) — disclosed because the earlier lane's SUMMARY claimed "no existing
+  test was modified" and that is no longer true of this file.
+- **T+75** — instrument defect §8 found and repaired.
+- **T+95** — all five engines wired; `cargo check -p wcore-cli --all-targets` rc=0,
+  errors=0, wcore-cli built (repaired matcher = 1).
+
+---
+
+## §10. NESTED-OWNER PROOF — with its queries, its known-positives, and its limits
+
+The criterion's second half — *"with no nested verification/retry owner"* — is a
+**known-negative**, so per §3b-i it is the single easiest thing in this lane to pass
+without doing any work. Every query below therefore carries a **known-positive in the same
+sweep**, and the queries are stated so a reader can re-run them.
+
+### What I am and am not claiming
+
+**I am NOT claiming nothing in Core ever retries.** That would be false and easy to catch:
+`goal/fleet.rs` retries TASKS (attempt records, leases, epochs), Anvil climbs up to
+`max_iterations`, ForgeFlows re-attempts schema validation, Council re-solicits proposals.
+Those are engines doing their jobs.
+
+**I AM claiming:** once a Goal has a loop owner, there is exactly ONE owner of that Goal's
+verification/retry, and no second owner can produce, repeat or override its termination.
+That is the claim the four queries below test.
+
+### Q1 — who can WRITE a canonical termination?
+
+```
+$ /usr/bin/grep -rn "finish_loop_owner\|GoalLoopOwnerFinished" crates --include='*.rs' \
+    | /usr/bin/grep -v "^crates/wcore-agent/tests/"
+```
+Known-positive in the same sweep: `finish_loop_owner` → **6 hits** (instrument alive).
+
+**Result: exactly ONE production writer** — `strategy.rs:721`, inside `GoalLoop::finish`.
+Every other hit is the reducer, the model, the wire projection or a doc comment — readers,
+not writers. `GoalKernel::finish_loop_owner` is `pub(crate)`.
+
+### Q2 — the retry/verification CONCEPT, across its whole vocabulary
+
+Searched (not one keyword — §3b-i.3):
+`retry|retries|re_?try|attempt|reattempt|backoff|re_?run|rerun|re_?verify|reverify|max_attempts|max_iterations|escalat`
+Known-positive: `attempt` matches **237 files** workspace-wide (instrument alive).
+
+**Result inside `crates/wcore-agent/src/goal/`: 40 hits, none of which is a Goal-level
+retry owner.** Every `strategy.rs` hit is an `attempts:` **payload field of a terminal
+state** — data recorded ABOUT what an engine did, not a mechanism that re-runs it. Every
+`fleet.rs` hit is TASK-level attempt bookkeeping, owned by the 22-03 ledger at one level.
+
+### Q3 — every call site of the five `run_*` entry points
+
+```
+$ /usr/bin/grep -rnE "\.run_(direct|forgeflows|fleet|council|anvil)\(" crates --include='*.rs'
+```
+Known-positive: `run_fleet` → **5 hits** (instrument alive).
+
+**Result: exactly FIVE production call sites, one per engine, no engine twice:**
+
+| Engine | Production call site |
+|---|---|
+| Anvil | `crates/wcore-cli/src/anvil.rs:119` |
+| Council | `crates/wcore-cli/src/crucible.rs:498` |
+| ForgeFlows | `crates/wcore-cli/src/workflow.rs:260` |
+| Fleet | `crates/wcore-cli/src/goal_cmd.rs:658` |
+| Direct | `crates/wcore-cli/src/main.rs:2031` |
+
+The two further hits (`strategy.rs:857`, `:868`) are inside `#[cfg(test)] mod tests`, which
+begins at line **774** — verified, because `grep -v "/tests/"` does NOT exclude an inline
+test module and would otherwise have inflated this count.
+
+### Q4 — production callers of the kernel's RAW terminate paths
+
+```
+$ /usr/bin/grep -rnE "\.terminate\(|\.terminate_verified\(" crates --include='*.rs' \
+    | /usr/bin/grep -v "/tests/" | /usr/bin/grep -v "owner.terminate"
+```
+**Result: ZERO Goal-related hits.** All seven matches are process/job termination in
+`wcore-sandbox` and `wcore-eval-scenarios` — a different `terminate`. So no production code
+reaches a Goal terminal except through the five adapters.
+
+### Q5 — the compile-level refusal, FALSIFIED rather than asserted
+
+A `compile_fail` doctest passes when the snippet fails to compile for **any** reason —
+including a typo I introduced while editing it. So it is worthless unless falsified. I
+removed the retry loop (one variable: `for outcome in outcomes` →
+`if let Some(outcome) = outcomes.first()`) so `owner` moves exactly once:
+
+```
+test ... from_anvil (line 512) - compile fail ... FAILED
+---- stdout ----
+Test compiled successfully, but it's marked `compile_fail`.
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out
+NEGATIVE_CONTROL_RC=101
+```
+Restored; `git diff --stat` on the file is **empty**. **The retry loop is the only reason
+that gate is green**, so the borrow-checker refusal of a nested retry owner is real.
+
+### The honest limit of Q3
+
+The "no enclosing loop" check I ran reads only 6 lines above each call site, so it cannot
+see a loop further out. **It is corroborating, not load-bearing.** The load-bearing
+argument is Q5: `LoopOwner` is neither `Clone` nor `Copy` and every adapter takes it by
+value, so a loop around an adapter does not compile — and that gate is now proven alive.
+
+---
+
+## §11. LIVE — all five engines, shipped release binary, hetzner
+
+`wayland-core 0.12.25` release, `/root/wayland-22c3goal/target/release/wayland-core`, Linux.
+
+**No credential was used, and none was needed.** A local canned OpenAI-compatible endpoint
+on `127.0.0.1:18422` (unique port — many lanes are live) serves the model tokens; every
+layer under test is production code. Harness liveness was itself checked with a
+known-positive (a real `choices` array came back) **and a negative control** — the same
+probe against a dead port returns `rc=7`, so the probe can go red.
+Config was isolated with `XDG_CONFIG_HOME=/root/c3-live/cfg` rather than editing
+`/root/.config`, which is shared with the other live lanes on this host.
+
+| # | Engine | Shipped verb driven | Canonical transition observed |
+|---|---|---|---|
+| 1 | **Fleet** | `goal run --terminate` | `PartiallyCompleted { completed: 3, failed: 0 }`, `cursor_seq=Some(22)` |
+| 2 | **Direct** | `wayland-core -p canned "say hi"` (env attach) | `NeedsEscalation`, `cursor_seq=Some(2)` |
+| 3 | **ForgeFlows** | `workflow run c3flow --goal …` | `PartiallyCompleted { completed: 0, failed: 1 }`, `cursor_seq=Some(2)` |
+| 4 | **Council** | `crucible "what is 2+2"` (env attach) | `PartiallyCompleted { completed: 1, failed: 0 }`, `cursor_seq=Some(2)` |
+| 5 | **Anvil** | `forge "…" --goal …` | `Blocked { reason: "probe builder failed: …" }`, `cursor_seq=Some(2)` |
+
+Every line above is the product's own `GOAL: canonical_transition strategy=… terminal=…`
+output, read back from the DURABLE record by `print_canonical_transition`, not from the
+value the adapter returned.
+
+**Direct's `NeedsEscalation` is the point, not a disappointment.** It is the documented
+mapping for a *completed* Direct run: Direct has no verification owner, so `SelfChecked`
+would assert checks that never ran. The engine succeeded; the taxonomy under-claims.
+
+**Anvil exercised BOTH new arms**, which matters because one of them did not exist before
+this lane:
+- `AnvilOutcome::ForgeFailed` — a `ForgeError::Worktree` (dirty checkout) reached
+  `Blocked`. **`from_anvil` could not previously accept this at all** (§7).
+- `AnvilOutcome::Climbed` — a second run got past the forge, the climb returned
+  `TerminalState::Blocked`, and the 1:1 lift mapped it.
+
+## §12. A SECOND advertised-but-dead defect — found in MY OWN wiring, by the live run
+
+The Council leg **exited 0, printed a fused council answer, and terminated NO Goal.**
+
+```
+$ grep "canonical_transition" out.txt
+!!! NO CANONICAL TRANSITION EMITTED !!!    RC=0
+```
+
+**Cause: the `crucible` verb has TWO routes to a council and I had attached one.**
+`run_crucible` line 345 → `run_crucible_auto` → `drive_council` (attached); `run_crucible`
+line 394 → `run_council` **directly** (not attached). A plain
+`[crucible] proposers = [...]` config — **the default, manual mode** — takes the second.
+
+So my first Council wiring was itself advertised-but-dead: the flag existed, the code
+compiled, 3000+ tests were green, and the default path terminated nothing.
+
+**It was caught only because the gate asserts the transition LINE rather than the exit
+status.** `RC=0` was a full pass on every other signal. This is the brief's *"a 'sole path'
+that had three"* warning arriving in my own construction, and it is the single strongest
+argument in this lane for driving the real binary rather than trusting green tests.
+
+Fixed by attaching the manual path too, using a new `CouncilRunOutcome::RanManual` that
+carries a bare `CouncilOutcome` — rather than fabricating an empty `AssemblyPlan` to reach
+the existing variant, which would have invented an assembler decision that never happened.
+
+## §13. Log (continued)
+
+- **T+140** — canned-provider harness up, self-probed, negative control red.
+- **T+165** — legs 1–3 green (Fleet, Direct, ForgeFlows).
+- **T+185** — Council leg exposed §12. Fixed, rebuilt, re-run green.
+- **T+205** — Anvil leg green through both arms. **All five engines live-proven.**
+
+---
+
+## §14. KILL MID-FLIGHT — the goal terminates EXACTLY ONCE
+
+`kill -9` on the **process group** mid-wave, workers holding `/bin/sleep 40`, lease 120s.
+
+```
+descendants BEFORE kill: 9
+descendants AFTER kill:  0
+transitions emitted by the KILLED process (expect 0): 0
+```
+
+**A. Restart while the lease is live — a nested owner is REFUSED, live, from the product:**
+
+```
+EARLY_RC=1
+GOAL: recovery=resumed iterations=1 resume_count=2 resumable=true revoked=0 drained=0
+wayland-core goal: goal g-k2 did not terminate: invalid journal state transition:
+  goal g-k2: loop owner Fleet (epoch 1) is already live; a nested loop owner is refused
+```
+
+The Goal is left **non-terminal and resumable** — a refusal, not a corruption.
+
+**B. Past the lease — supersede, complete, terminate:**
+
+```
+LATE_RC=0
+GOAL: run_complete waves=1 iterations=1 completed=4 delivered=4
+GOAL: canonical_transition strategy=fleet
+      terminal=Terminated { terminal: PartiallyCompleted { completed: 4, failed: 0 } }
+      cursor_seq=Some(48)
+```
+
+**C. EXACTLY ONCE — counted off the product's own projection (`goal stream`):**
+
+| Record | Count | Meaning |
+|---|---|---|
+| `loop_owner_claimed` | **2** | two epochs — the killed owner, then its successor |
+| `loop_owner_finished` | **1** | **ONE termination**, across a `kill -9` and THREE `goal run` invocations |
+
+**Duplicate termination is as wrong as none, and there was no duplicate.**
+
+**D. A third run against the terminated Goal does not re-terminate it:**
+
+```
+GOAL: recovery=already-terminal PartiallyCompleted { completed: 4, failed: 0 } resumable=false
+GOAL: not resumable; stopping without dispatch
+loop_owner_finished AFTER the third run: still 1
+```
+
+### The counter is not stuck, and the product gate can go red
+
+My first count returned **0** — because the journal is **binary-framed** and `grep` refused
+it (`binary file matches`). A zero-for-free again; it was visible only because 0 was the
+*failure* value here. Repaired by reading through the product verb instead of the raw file.
+**Third instrument defect of this lane, and the reason every number above comes from
+`goal stream`, not from `grep` over `j.jsonl`.**
+
+```
+N2 known-positive: terminated goal      -> loop_owner_finished = 1   (must be 1)
+N2 known-negative: goal that never ran  -> loop_owner_finished = 0   (must be 0)
+```
+
+The product's own `--expect` gate is falsifiable at a point, not just in one direction —
+exactly one value passes and every neighbour reds:
+
+```
+--expect 8 -> rc=1 | 9 -> rc=1 | 10 -> rc=0 | 11 -> rc=1 | 12 -> rc=1
+GOAL-STREAM: goal=g-k2 events=10 transitions=9 snapshots=1
+```
+
+## §15. ONE-VARIABLE NEGATIVE CONTROL — an engine bypassing the canonical path REDDENS
+
+Gate: *a Council run must terminate its Goal through the canonical transition*
+(`canonical_transition_lines == 1 && loop_owner_finished == 1`).
+Same command, same config, same binary. **One variable: `WAYLAND_GOAL_ID` set or unset.**
+
+```
+CONTROL (attached):        crucible rc=0
+   canonical_transition_lines=1  loop_owner_finished=1   GATE=GREEN  rc=0
+
+NEGATIVE CONTROL (bypass): crucible rc=0   <- the engine STILL RAN
+   canonical_transition_lines=0  loop_owner_finished=0   GATE=RED    rc=1
+```
+
+Two things this establishes at once:
+
+1. **The gate can fail**, and fails precisely when an engine reaches its own terminal
+   without going through the Goal.
+2. **It re-derives the honest ceiling I refused to inherit (§1).** The bypassing run
+   exited **0** and produced a real council answer. An engine invoked with no Goal still
+   runs and still terminates its own way. That is **convention, not construction** — the
+   earlier lane's §6.2 is still true and I am not claiming otherwise.
+
+## §16. Re-derived: the "≥40 test call sites" ceiling — I did NOT inherit it
+
+The earlier lane said closing the bypass needs threading a loop-owner token through the
+five entry points, editing **≥40 existing test call sites**, and called it a Sean-level
+scope call. **I did not need to test that claim, because I did not take that route** — the
+opt-in attachment wraps each engine's existing entry point instead of changing its
+signature, so zero engine signatures moved and no engine test was touched.
+
+**What that does and does not settle.** It settles that all five engines terminate
+canonically *from the product* without a mass test edit. It does **not** settle whether an
+engine could be made structurally incapable of terminating outside a Goal — that still
+needs the signature change, and I am leaving that claim exactly where the earlier lane left
+it rather than pretending my route closed it.
+
+## §17. Fence exposure vs `861d1b1a` (measured, unproxied, against the SHA)
+
+```
+$ /usr/bin/git diff --numstat 861d1b1a -- crates/wcore-cli/src/lib.rs crates/wcore-cli/src/main.rs
+61      0       crates/wcore-cli/src/main.rs
+$ /usr/bin/git diff 861d1b1a -- crates/wcore-cli/src/main.rs | /usr/bin/grep -c '^-[^-]'
+0
+```
+
+`main.rs` **+61 / −0**, ONE contiguous block, no reordering and no renames.
+`lib.rs` **untouched**. The env-based attachment for Direct and Council exists precisely to
+hold this to one block instead of four.
+
+---
+
+## §18. A FOURTH instrument defect of my own — the pipe that stole the exit status
+
+My gate script ran `cargo clippy … | tail -25; echo CLIPPY_RC=$?`. It printed
+**`CLIPPY_RC=0` while clippy had FAILED** — `$?` was `tail`'s status, not clippy's. This is
+the **first** self-passing class named in the lane brief (§3.2: *"a pipe steals exit
+status"*), and I wrote it into my own harness.
+
+It was caught only because the clippy error text was still visible in the same output. Had
+I trimmed the log, I would have reported a clean clippy off a red run.
+
+**Repaired** by redirecting to a file and capturing the status with no pipe in between:
+
+```
+cargo clippy -p wcore-agent -p wcore-cli --all-targets --all-features -- -D warnings \
+  > /tmp/c3-clippy.txt 2>&1
+echo CLIPPY_RC=$?          # now clippy's own status
+```
+Re-run after repair: **`CLIPPY_RC=101`** — i.e. the repaired instrument immediately
+reported a red the broken one had called green. That is the §6b-ii third assertion
+satisfied by events rather than by a contrived case.
+
+## §19. A REAL clippy regression I introduced, and what caused it
+
+Declaring `FORGE_REQUIRED_STABILITY` between `#[allow(clippy::too_many_arguments)]` and the
+`drive_climb_full` it guarded **detached the attribute from its function**, unsuppressing a
+lint that had been suppressed since before this lane. `drive_climb_full` has ten
+parameters; none of them is mine.
+
+Fixed by moving the const **above** the function's doc block, with a comment recording why
+it lives there. A second, genuine instance then appeared — `open_goal` reached eight
+parameters because `--strategy` is new — and took an explicit `#[allow]` with a stated
+reason, matching `forge.rs`'s existing pattern for flat CLI entry points.
+
+Final: **`CLIPPY_RC=0`, `clippy error lines: 0`**, captured without a pipe.
+
+## §20. `cargo fmt` and the wcore-cli red, classified rather than assumed
+
+**fmt.** First check was **RED** — 8,537 diff bytes, all in match arms I had rewritten with
+`sed`, which does not know about line width. Applied `cargo fmt --all`; re-check
+**0 bytes, rc=0**.
+
+**The one wcore-cli red.** Full-crate run: `2336 tests run: 2335 passed (3 slow, 1 flaky),
+1 timed out, 9 skipped`. The red is
+`remedy_advertisements::advertised_tool_names_resolve_to_a_real_tool`, `TRY 2 TMT` at
+60.004s — a genuine timeout, **not** the `exec failed` fd-exhaustion class the brief warns
+about, so the brief's "reclassify it" escape does not apply.
+
+I did **not** assume it was pre-existing. Measured in two steps:
+
+| Run | Result |
+|---|---|
+| that test ALONE at HEAD `d47756c7` | `1 test run: 0 passed, 1 timed out` — so NOT lane contention |
+| that test ALONE at **BASE `861d1b1a`** | `1 test run: 0 passed, 1 timed out`, `TRY 2 TMT [60.004s]` — **identical** |
+
+**Pre-existing at base, unchanged by this lane.** The hetzner worktree was reset back to
+`d47756c7` afterwards and the restore was verified in the same log.
+
+## §21. Final gate results
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` (Mac) | rc=0, **0 bytes** |
+| `cargo clippy -p wcore-agent -p wcore-cli --all-targets --all-features -- -D warnings` | **rc=0, 0 error lines** (status captured without a pipe) |
+| `cargo check --workspace --all-targets` | rc=0 — run deliberately, since new adapter variants are the change class that breaks downstream exhaustive matches while `-p` stays green |
+| `cargo nextest run -p wcore-agent` | **3079 run, 3079 passed**, 11 skipped |
+| `cargo nextest run -p wcore-agent --test goal_strategy_test` | **17 run, 17 passed, 0 skipped** |
+| `cargo test --doc -p wcore-agent -- goal::strategy` | **2 passed, 0 failed** (nextest does NOT run doctests) |
+| `cargo nextest run -p wcore-cli` | 2336 run, 2335 passed, **1 timed out — pre-existing at BASE (§20)** |
+
+## §22. Log (final)
+
+- **T+230** — kill/exactly-once + negative control complete.
+- **T+250** — orchestrator process died; branch survived at `a0fe57d3`, one uncommitted
+  file recovered intact and committed. **Every measurement above was already committed.**
+- **T+265** — clippy regression §19 fixed; fmt applied; wcore-cli red classified at BASE.
+

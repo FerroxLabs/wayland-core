@@ -224,7 +224,30 @@ fn t2_skill_without_a_directive_is_data_and_needs_no_promotion() {
     );
 
     // And end to end: it is IMPORTED, not quarantined.
-    let (_g, _home) = rooted();
+    //
+    // # F26-GRADE-H1 — this test used to be self-passing, and here is the fix
+    //
+    // The previous version asserted exactly two things:
+    // `!store.contains("skill:skills/release-notes")` (a KNOWN-NEGATIVE) and
+    // `report.quarantined >= 2` (which proves the executable SIBLINGS were
+    // contained). Neither one looks at the place a data skill would land, so
+    // **a no-op import passed it** — and a no-op import is precisely what the
+    // product was doing: `mod.rs` recorded `Outcome::Imported` for a
+    // `Classification::Data` skill with no write of any kind.
+    //
+    // The repaired test carries THREE assertions, per the rule that a repaired
+    // instrument needs a third one:
+    //
+    //   A1 known-positive       — the skill's bytes ARE in the Wayland home,
+    //                             and are the bytes the peer had.
+    //   A2 known-negative       — it is NOT in quarantine (unchanged intent).
+    //   A3 the-old-test-misses  — the report's own file count is non-zero, and
+    //                             is the number A1's file is drawn from. A3 is
+    //                             what makes this fail on the no-op the old
+    //                             test passed: under the old product both A2
+    //                             and `quarantined >= 2` held, while A1 and A3
+    //                             were false.
+    let (_g, home) = rooted();
     let peer = peer_home_with_fixtures(sentinel, sentinel);
     let report = migrate::run_import(
         wcore_config::portability::PeerSource::Hermes,
@@ -232,15 +255,101 @@ fn t2_skill_without_a_directive_is_data_and_needs_no_promotion() {
     )
     .unwrap();
     let store = QuarantineStore::for_current_home();
+
+    // A1 — known-positive: the data skill exists in the Wayland home, with the
+    // peer's bytes. Existence is asserted BEFORE any absence is claimed, so a
+    // dead instrument cannot supply a comforting zero.
+    let landed = home.path().join("skills").join("release-notes");
+    assert!(
+        landed.join("SKILL.md").is_file(),
+        "a data skill must be WRITTEN into the Wayland home, not merely counted; \
+         home held: {:?}",
+        std::fs::read_dir(home.path().join("skills"))
+            .map(|rd| rd
+                .filter_map(Result::ok)
+                .map(|e| e.file_name())
+                .collect::<Vec<_>>())
+            .unwrap_or_default()
+    );
+    let imported_body = std::fs::read_to_string(landed.join("SKILL.md")).unwrap();
+    assert_eq!(
+        imported_body, body,
+        "the imported bytes must be the peer's bytes"
+    );
+
+    // A2 — known-negative, licensed by A1: it imported live rather than into
+    // containment.
     assert!(
         !store.contains("skill:skills/release-notes").unwrap(),
         "a directive-free skill must import without ceremony"
     );
-    // Positive half: the run DID quarantine the executable siblings, so the
-    // absence above is not the absence of any import at all.
     assert!(
         report.quarantined >= 2,
         "expected the two executable fixtures to be contained; report={report:?}"
+    );
+
+    // A3 — the assertion the old test lacked, and the one that fails on a
+    // no-op: the product's OWN reported file count is non-zero and covers at
+    // least the skill A1 just read back.
+    assert!(
+        report.files_written >= 1 && report.skills_imported >= 1,
+        "the report must count files it actually wrote; report={report:?}"
+    );
+}
+
+/// F26-GRADE-H1, the discriminating half: a run that writes nothing must NOT
+/// be reportable as an import.
+///
+/// This is the self-test for the repaired instrument above. It drives the SAME
+/// public path against a peer home whose only data skill has been made
+/// unreadable, and asserts the product refuses to count it. Without this, `t2`
+/// alone could still pass on a product that wrote a file for unrelated reasons.
+#[test]
+#[serial]
+fn t2b_a_data_skill_that_cannot_be_written_is_not_counted_as_imported() {
+    let sentinel = Path::new("/tmp/never-created-by-this-test");
+    let (_g, home) = rooted();
+    let peer = peer_home_with_fixtures(sentinel, sentinel);
+
+    // Block the live skills destination with a regular FILE, so every skill
+    // write must fail with ENOTDIR. Chosen over a permission bit deliberately:
+    // the CI/build host for this repo runs as root, where `chmod 000` is not
+    // enforced and the "failure" leg would silently become a success leg — the
+    // dead-instrument shape this phase keeps finding. A file where a directory
+    // must be created fails for root too, and on every platform.
+    std::fs::write(home.path().join("skills"), b"not a directory").unwrap();
+
+    let report = migrate::run_import(
+        wcore_config::portability::PeerSource::Hermes,
+        &args_for(peer.path()),
+    )
+    .unwrap();
+
+    // The items are accounted for — nothing is silently lost — but NONE is
+    // counted as imported, and the file count agrees.
+    assert!(
+        report.balances(),
+        "a failed write must still balance the accounting; report={report:?}"
+    );
+    assert_eq!(
+        report.skills_imported, 0,
+        "a skill that could not be written must not be counted as imported; report={report:?}"
+    );
+    // The refusal is NAMED, not dropped: the failed item appears in the
+    // operator-facing notices with its reason.
+    assert!(
+        report
+            .quarantine_notices
+            .iter()
+            .any(|n| n.contains("skill:skills/release-notes") && n.contains("refused")),
+        "a refused import must be named; notices={:?}",
+        report.quarantine_notices
+    );
+    // And the blocked destination is still the file we put there — the import
+    // did not clobber it to make room for itself.
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("skills")).unwrap(),
+        "not a directory"
     );
 }
 
@@ -352,6 +461,16 @@ async fn t5_quarantined_content_is_absent_from_what_the_agent_would_load() {
     assert!(
         !names.iter().any(|n| n == "repo-status"),
         "the quarantined skill must be absent from what the agent would load; got {names:?}"
+    );
+    // F26-GRADE-H1, the other half of the same enumeration: the DATA skill from
+    // the same import IS listed. This is the strongest available statement that
+    // the import is real — not "a file exists" but "the real loader will hand
+    // this skill to the agent" — and it is a live positive control for the
+    // absence directly above, taken in the SAME enumeration rather than a
+    // separate one that could differ.
+    assert!(
+        names.iter().any(|n| n == "release-notes"),
+        "an imported data skill must be loadable by the real loader; got {names:?}"
     );
 
     // Positive control for the ENUMERATION itself: promote the same item and

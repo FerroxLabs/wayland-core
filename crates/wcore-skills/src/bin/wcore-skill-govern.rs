@@ -245,6 +245,31 @@ fn cmd_history(store: &GovernanceStore) -> Result<(), String> {
             JournalEvent::DraftSuppressed { at, skill_name, .. } => {
                 println!("{at}  DRAFT-SUPPRESSED {skill_name}")
             }
+            // 23A-C1 promotion events. Rendered here too rather than wildcarded: this
+            // binary's `history` is advertised as "the append-only journal", and a
+            // renderer that silently dropped three of six event kinds would make the
+            // promotion record look empty to anyone auditing through this surface --
+            // the same shape of defect as a governance read that fails open.
+            JournalEvent::Promoted {
+                at,
+                skill_name,
+                promotion_id,
+                content_digest,
+                ..
+            } => println!(
+                "{at}  PROMOTED        {skill_name}  (id {promotion_id}, digest {content_digest})"
+            ),
+            JournalEvent::PromotionRefused {
+                at,
+                skill_name,
+                reason,
+            } => println!("{at}  PROMOTE-REFUSED {skill_name}  ({reason})"),
+            JournalEvent::PromotionWithdrawn {
+                at,
+                skill_name,
+                promotion_id,
+                reason,
+            } => println!("{at}  PROMOTE-WITHDRAWN {skill_name}  (id {promotion_id}, {reason})"),
         }
     }
     Ok(())
