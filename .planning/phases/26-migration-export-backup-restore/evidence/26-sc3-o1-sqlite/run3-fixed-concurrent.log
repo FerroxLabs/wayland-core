@@ -1,0 +1,39 @@
+[run3-fixed-concurrent] prefilling memory.db to ~150 MiB ...
+[run3-fixed-concurrent] prefill done in 0.8s, memory.db = 158.3 MiB
+[run3-fixed-concurrent] waiting for writers: 0/3 started (iter 0, 1785340852)
+[run3-fixed-concurrent] waiting for writers: 3/3 started (iter 1, 1785340853)
+[run3-fixed-concurrent] journal modes reported by writers: {'w0': 'wal', 'w1': 'wal', 'w2': 'wal'}
+[run3-fixed-concurrent] pre-archive committed high-water marks: {'w0': 721, 'w1': 717, 'w2': 839}
+[run3-fixed-concurrent] backup create rc=0 in 9.97s
+archive: /tmp/lane-backup-sqlite-run3-fixed-concurrent/backup.tar.gz
+payloads: 2
+tree_digest: eca384774023eac3f347804b39c4c9202cd6d66f7242dc398472112d3473a613
+credentials_backend: unknown
+secrets_carried: no
+sqlite_captures: 1
+sqlite_capture: memory.db
+omitted_sqlite_sidecars: memory.db-shm,memory.db-wal
+windows_unrestorable_paths: 0
+[run3-fixed-concurrent] post-archive committed high-water marks: {'w0': 24080, 'w1': 24019, 'w2': 24331}
+[run3-fixed-concurrent] commits during archive window: w0=+23359, w1=+23302, w2=+23492
+[run3-fixed-concurrent] backup restore rc=0
+restored: /tmp/lane-backup-sqlite-run3-fixed-concurrent/restored
+payloads: 2
+recovered_before_start: 0
+remap_disposition: remapped
+credential remap: backend `unknown` — 0 credential source(s) will be absent after restore. action: none required; every secret source resolves inside the restored home.
+[run3-fixed-concurrent] restored entries: ['config.toml', 'memory.db']
+---- RESULT ----
+   ...(integrity_check problem lines elided)...
+ARM: concurrent
+WRITERS: 3
+ARCHIVE-SECONDS: 9.97
+PRE-ARCHIVE-COMMITTED: 2277
+RESTORED-SIDECARS: []
+INTEGRITY-CHECK: ok
+INTEGRITY-PROBLEM-LINES: 0
+MISSING-COMMITTED-ROWS: 0
+MISSING-BY-WRITER: {'w0': 0, 'w1': 0, 'w2': 0}
+VERDICT: PASS
+WLRC=0
+WLDONE

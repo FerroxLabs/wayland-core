@@ -88,3 +88,6 @@ PLAN-AMENDMENTS.md
 # fixture exists to reproduce. These carry canary tokens, never real secrets
 # (proven by scripts/portability-corpus-gen.py + its gate).
 !crates/wcore-cli/tests/fixtures/portability/**/.env
+
+# Python bytecode from the proof harnesses under scripts/.
+__pycache__/

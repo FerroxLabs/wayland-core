@@ -1,0 +1,39 @@
+[b1-base-concurrent] prefilling memory.db to ~150 MiB ...
+[b1-base-concurrent] prefill done in 0.8s, memory.db = 158.3 MiB
+[b1-base-concurrent] waiting for writers: 0/3 started (iter 0, 1785341195)
+[b1-base-concurrent] waiting for writers: 3/3 started (iter 1, 1785341196)
+[b1-base-concurrent] journal modes reported by writers: {'w0': 'wal', 'w1': 'wal', 'w2': 'wal'}
+[b1-base-concurrent] pre-archive committed high-water marks: {'w0': 2282, 'w1': 2350, 'w2': 2305}
+[b1-base-concurrent] backup create rc=0 in 10.39s
+archive: /tmp/lane-backup-sqlite-b1-base-concurrent/backup.tar.gz
+payloads: 4
+tree_digest: b1838716123af68ebe561c7d0a5e4188cbf4379af8bb789fde2357ee990c0ef0
+credentials_backend: unknown
+secrets_carried: no
+windows_unrestorable_paths: 0
+[b1-base-concurrent] post-archive committed high-water marks: {'w0': 26542, 'w1': 26781, 'w2': 26138}
+[b1-base-concurrent] commits during archive window: w0=+24260, w1=+24431, w2=+23833
+[b1-base-concurrent] backup restore rc=0
+restored: /tmp/lane-backup-sqlite-b1-base-concurrent/restored
+payloads: 4
+recovered_before_start: 0
+remap_disposition: remapped
+credential remap: backend `unknown` — 0 credential source(s) will be absent after restore. action: none required; every secret source resolves inside the restored home.
+[b1-base-concurrent] restored entries: ['config.toml', 'memory.db', 'memory.db-shm', 'memory.db-wal']
+---- RESULT ----
+ARM: concurrent
+WRITERS: 3
+ARCHIVE-SECONDS: 10.39
+   ...(integrity_check problem lines elided)...
+ARM: concurrent
+WRITERS: 3
+ARCHIVE-SECONDS: 10.39
+PRE-ARCHIVE-COMMITTED: 6937
+RESTORED-SIDECARS: ['memory.db-shm', 'memory.db-wal']
+INTEGRITY-CHECK: *** in database main ***
+INTEGRITY-PROBLEM-LINES: 101
+MISSING-COMMITTED-ROWS: 0
+MISSING-BY-WRITER: {'w0': 0, 'w1': 0, 'w2': 0}
+VERDICT: FAIL
+WLRC=1
+WLDONE

@@ -350,6 +350,11 @@ mod tests {
             }],
             credentials: cap,
             absent_secrets: absent,
+            // These fixtures describe credential remapping, which is orthogonal
+            // to the SQLite capture record. Empty is the honest value: this
+            // fixture home holds no database.
+            sqlite_captures: Vec::new(),
+            omitted_sqlite_sidecars: Vec::new(),
         }
     }
 
