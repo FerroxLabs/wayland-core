@@ -540,6 +540,12 @@ async fn builtin_shape_record_varies_with_the_requested_work() {
         3,
         "fixture should have received three distinct sizes, got {sizes:?}"
     );
+    let prompts = fixture.image_prompts();
+    assert_eq!(
+        prompts,
+        vec!["scene landscape", "scene square", "scene portrait"],
+        "each call must have carried its own prompt to the wire"
+    );
 }
 
 /// A rate card prices the very call the silent-provider test leaves unpriced,
