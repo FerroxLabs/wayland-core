@@ -15,13 +15,16 @@ Verdict grade at lane start: **NOT MET**. Base `lane/grade-23b`, worktree HEAD `
 
 | # | Verb | State at lane start | State now |
 |---|---|---|---|
-| 1 | activation | unmeasured | — |
-| 2 | provenance | wired, never driven live | — |
-| 3 | correction | wired for episodes; user-model precedence absent (G3c) | — |
-| 4 | forgetting | wired to the row; **no outbound-prompt proof** (G3a) | — |
-| 5 | privacy | wired, never driven live | — |
-| 6 | retention | wired, never driven live | — |
-| 7 | nudges | `NudgeBudget` exists, **no user-reachable surface** (G3b) | — |
+| 1 | activation | no surface of any kind | **CLOSED** for memory (per-process limitation stated) |
+| 2 | provenance | episodic only; blind to what is in the prompt | **CLOSED** for memory |
+| 3 | correction | episodes only; user-model precedence absent (G3c) | **CLOSED** for memory; G3c NOT DONE |
+| 4 | forgetting | row-level only; **no outbound-prompt proof** (G3a) | **CLOSED**, wire- and live-proved |
+| 5 | privacy | accepted and did nothing for semantic | **CLOSED**, wire- and live-proved |
+| 6 | retention | accepted and did nothing for semantic | **CLOSED**, wire-proved |
+| 7 | nudges | `NudgeBudget` unreachable (G3b) | **HALF** — reachable+settable, but nothing exists to bound |
+
+**Final: see `23B-C3-SUMMARY.md`.** Five of seven closed for the memory subsystem; nudges half;
+the user-model half of the criterion untouched. Criterion as a whole: still NOT MET.
 
 ---
 
