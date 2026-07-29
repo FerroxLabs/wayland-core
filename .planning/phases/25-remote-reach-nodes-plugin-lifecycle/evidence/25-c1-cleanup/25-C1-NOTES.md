@@ -54,11 +54,41 @@ Cancellation is already covered: `REMOTE_KILL` (`ssh.rs:549`) ends with
 `rm -rf "$root" 2>/dev/null || true`, and the wall-clock timeout path routes through
 `self.cancel()` (`ssh.rs:332`).
 
+## t1 — the leak REPRODUCED live at BASE
+
+`evidence/25-c1-cleanup/ssh-cleanup-BASE.txt`, driven by `f25c1-ssh-cleanup.sh` on
+`hetzner-dsm` against a dedicated containerised sshd far end (`f25c1-sshd`, port 2226,
+far-end hostname `ddc848056f15` — a different host name and a different `/tmp` from the
+controller `Ubuntu-2404-noble-amd64-base`).
+
+Binary provenance read out of the binary itself, not assumed from the directory:
+
+```
+tree HEAD:  20a76bd473787bcdd1dbc51ba513118256086e88   (lane base + NOTES, pre-fix)
+binary sha: aeb00fd682e0cfd3cb7aef52ce3b7ddb2fc4c54dbec54cacab3ab41fb4ed3996
+fixed-shape  '|| status=$?'  : 0      <- the fix is NOT in this binary
+known-positive 'rm -rf $root': 2      <- but the reader can find the script
+```
+
+| measurement | BASE |
+|---|---|
+| `F25C1-INSTRUMENT` (decoy planted / removed) | `positive=1 negative=0` — the counter answers in both directions |
+| `F25C1-TASK-RAN-ON-FAR-END` | `1` — the task's own body wrote `f25c1fail ran on ddc848056f15` |
+| **`F25C1-LEAKED-ROOTS-AFTER-FAILING-TASK`** | **`1`** — `/tmp/wayland-f25-f25c1fail` survived |
+| **`F25C1-LEAKED-INPUT-BYTES`** | **`1`** — `input.bin` is readable and contains the task's input verbatim |
+| `F25C1-ROOTS-AFTER-SUCCEEDING-TASK` | `0` — the success path already cleaned up |
+| receipt terminal | `Failure { code: "exit-7" }`, integrity OK |
+
+So the defect is exactly as FINDING 5 describes, it is still live at the graded base, and
+the leaked artefact is the task's input bytes — not merely an empty directory.
+
 ## Still to establish
 
-- [ ] Leak reproduced live on a real ssh far end at BASE (count > 0, `input.bin` present).
-- [ ] Instrument proven alive: a known-positive (a planted root) must be counted, and a
-      successful task must count 0 at the same commit — otherwise "0 roots" is free.
-- [ ] Leak gone at FIXED commit (count 0) with the same failing task.
-- [ ] Exit status still propagates after the fix (the failing task must still report its code).
+- [x] Leak reproduced live on a real ssh far end at BASE (count 1, `input.bin` present).
+- [x] Instrument proven alive in both directions in the same phase.
+- [ ] Leak gone at FIXED commit (count 0) with the same failing task, with the witness still
+      proving the task ran on the far end.
+- [ ] Exit status still propagates after the fix.
+- [ ] `cargo test -p wcore-exec-backend --test ssh_remote_runner_cleanup` green with a real
+      executed count.
 - [ ] Cloud cancellation driven live: terminal state + receipt + post-cancel machine count.
