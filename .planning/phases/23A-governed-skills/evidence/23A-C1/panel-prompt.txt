@@ -1,0 +1,42 @@
+Rust CLI agent product. An autonomous "skill drafter" writes files into the user's GLOBAL
+config skills directory (<config_dir>/wayland-core/skills/auto-<sig>/{SKILL.md,manifest.json})
+with NO user action, triggered after N successful turns. The files are quarantined from
+execution (both model-invocation and slash paths refuse them), and they ARE visible via
+`/skill list` as "(hidden)". But there is no revoke and no rollback: nothing in the product
+can undo the mutation of a directory the user owns. A separate memory-DB "Procedure" row
+exists from a DIFFERENT code path, with no binding between the DB row and the on-disk file.
+
+I must make this REVERSIBLE before making it capable. I cannot edit the CLI's main.rs
+(fenced by another workstream), so new flags are out; crate-level binaries are an
+established pattern in this repo and are available to me.
+
+Proposed design:
+1. New module `wcore-skills::govern`, state under <config_dir>/wayland-core/skills-governance/:
+   - `journal.jsonl` append-only history (revoke/rollback events, timestamped)
+   - `generations/<revocation_id>/` retaining the exact bytes removed
+   - revoke(name) -> RevocationId: snapshot bytes -> append journal -> remove skill dir -> write tombstone
+   - rollback(revocation_id): restore exact bytes -> append journal (history NOT erased)
+   - is_revoked(name) -> bool, consulted by the drafter so a revoked draft is NOT re-created next session
+2. `SkillDrafter::draft()` consults is_revoked() and suppresses re-creation.
+3. A new crate binary exposes revoke/rollback/list; a seam request covers later main.rs wiring.
+
+Answer these SPECIFICALLY, and disagree where you disagree:
+
+Q1. Is a tombstone that blocks re-drafting the right semantics for "revoke", or is revoke
+correctly just a delete (and re-drafting is acceptable/desirable)? Which is right and why?
+
+Q2. Should the tombstone be keyed on the skill NAME, or on the drafter's content SIGNATURE,
+or on a content hash? The drafter derives the name from the signature (auto-<sig>). What
+breaks under each choice?
+
+Q3. Is retaining removed bytes under the same global config directory the right place for a
+rollback store, or does that reintroduce the same "product wrote to my directory without
+asking" complaint it is meant to cure? Where else could it go?
+
+Q4. What is the single most likely way this design is WRONG or will fail in production?
+Be concrete.
+
+Q5. Given limited budget: revocation+rollback ONLY, or attempt governed promotion too?
+
+End your answer with a line exactly of the form:
+PANEL_POSITION=<one sentence stating your overall verdict>
