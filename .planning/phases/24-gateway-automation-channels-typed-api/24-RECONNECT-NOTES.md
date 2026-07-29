@@ -193,3 +193,114 @@ proven to miss it**.
 Evidence: `24-RECONNECT-evidence/fixture-seq-repro.mjs`,
 `fixture-seq-repro-BEFORE.json` (529 bytes, cross-checked `/usr/bin/wc -c` and `ls -la`, since
 `wc -c` has returned 0 for a 72-byte file on this program).
+
+### T+1h10 — instrument repaired, and proven able to fail
+
+`nextSeq()` is now the only place `s` is minted. `f24-media-actions.mjs` had a **copy** of the
+same derivation (`s || this.dispatched.length + 1`) and therefore a latent copy of the same bug;
+it now calls the shared allocator. Also added `/__control/drop` (destroy sockets, no WS close
+frame), `/__control/replay` (suppress the replay — the negative-control lever), and four report
+journals so a driver never infers the drop or the replay.
+
+`scripts/f24-reconnect-selftest.mjs`, **17 passed / 0 failed**, with R3 extracting the pre-repair
+fixture **byte-exact** from `15cda12d` rather than re-implementing it.
+
+Four-mutation sweep of the repaired instrument, each asserted to apply exactly once, tree
+restored byte-identical (sha256 equal before/after):
+
+| mutation | reddened | assertions that failed |
+|---|---|---|
+| MI1 the drop is announced but never performed | yes | R1b, R1d |
+| MI2 RESUME replays the whole journal | yes | R1d, **R2b** |
+| MI3 the replay is not journalled | yes | R1d |
+| MI4 the replay kill-switch is inert | yes | **R4** |
+
+Distinct attribution per mutation — not one blanket assertion wearing four names. The sweep also
+caught **my own harness defect**: `check()` did not wrap `fn()`, so a thrown assertion escaped
+`main()`, exited 2 (the USAGE code), never incremented `failed`, and never printed the
+`passed=N failed=M` line. All three mutations initially "reddened" with `NO VERDICT LINE`,
+grading correctly only by accident of the exit code. Repaired, not noted.
+
+### T+1h40 — RUN 1: NOT MEASURED, and it presented as total inbound message loss
+
+Live on `hetzner-dsm`, real `gateway run`, release binary sha256
+`41d4a639ca1287d5dc989c84ac63cc1777b3852782edff39bd28c1418fca2218`.
+
+The driver reported **0/2 on its own pre-drop control** and 0/2 on the gap. Read naively that is
+catastrophic inbound loss. It was not. From the LLM fixture's own journal, in a different OS
+process:
+
+```
+{"seq":1,...,"user_text":"hello f24rc-0c425c-before-1\n...","correlation":"no-correlation",...}
+{"seq":3,...,"user_text":"hello f24rc-0c425c-during-3\n...","correlation":"no-correlation",...}
+```
+
+**All six messages arrived. Five turns executed.** The one denial in the gateway log
+(`inbound denied channel=f24rcdisc reason=sender not in dm allowlist`) was my decoy, correctly
+denied.
+
+**Root cause: my token shape.** The shared `f24-llm-fixture.mjs:89` echoes only
+`/f24c3-[a-z0-9-]+/i`; my `f24rc-` tokens produced `F24C3-REPLY no-correlation` for every turn, so
+the census could match nothing. **The sixth instrument fault on this criterion, and the fifth to
+fail in the direction that blames the product.**
+
+It was caught *only* because the known-positive control failed first and refused to grade. Had I
+written the run without it — or graded the gap leg before the control — this lane would have
+filed a fabricated CRITICAL against a working adapter.
+
+Repaired three ways rather than noted: `mintToken()` is now the single source of the shape; a
+**live preflight** asks the running fixture to echo a minted token (and a wrong-shaped one, which
+must NOT come back) and aborts with NOT MEASURED in milliseconds; and T1/T2/T3 assert the shape
+against the **live** shared fixture, with T3 proving the old shape yields a `lost` from a real
+fixture reply.
+
+### T+2h — RUN 2: the measurement. Discord reconnect PASSES.
+
+`F24RECONNECT PASS legs=7/7 lost=0 duplicated=0 leaked=0 mode=measurement`
+
+| leg | result |
+|---|---|
+| pre-drop-control | PASS 2/2 replied (KNOWN-POSITIVE) |
+| upstream-drop-really-happened | PASS 1 socket destroyed, no WS close frame, live 1 → 0 |
+| adapter-reconnected | PASS **~750 ms, via RESUME (+1)**, connections 1 → 2 |
+| **gap-messages-survive-the-upstream-drop** | **PASS 2/2**, each dispatched to **0 live sockets**, fixture replayed 3 on RESUME |
+| no-duplicate-turns-around-the-window | PASS — raw deliveries **6 vs 6** dispatches |
+| post-reconnect-control | PASS 1/1 (KNOWN-POSITIVE #2) |
+| decoy-and-phantom-score-zero | PASS `leaked=[]` |
+
+From the product's own log:
+```
+WARN  gateway session ended; backing off before reconnect
+      error=ws read: WebSocket protocol error: Connection reset without closing handshake
+      backoff_ms=1000 resumable=true
+DEBUG sent RESUME session_id=f24c3-sess-1-… seq=3
+DEBUG RESUMED received; replayed events will flow as dispatches
+```
+
+`each reached 0 live socket(s) at dispatch time` is the load-bearing number: there genuinely was
+no connection when the gap messages were dispatched, so their arrival can only be the replay.
+
+### T+2h15 — the one-variable negative control REDDENS
+
+Same binary, same config, same message plan, same token shape. **One variable: the fixture
+accepts RESUME and replays nothing.**
+
+`F24RECONNECT FAIL legs=6/7 lost=2 duplicated=0 leaked=0 mode=CONTROL-no-replay`
+
+```
+FAIL gap-messages-survive-the-upstream-drop — 0/2 … fixture replayed 0 message(s) on RESUME.
+     lost=[f24c3-rc-6d0292-during-3, f24c3-rc-6d0292-during-4]
+PASS pre-drop-control            (still 2/2)
+PASS post-reconnect-control      (still 1/1)
+PASS adapter-reconnected         (still ~750ms via RESUME)
+PASS decoy-and-phantom-score-zero
+```
+
+**Exactly one leg flipped.** Both known-positives stayed green, the reconnect still happened, and
+raw deliveries fell 6 → 3. So the loss detector fires, and it fires *specifically*, which is what
+makes run 2's `lost=0` a measurement rather than a free zero.
+
+Captures: `24-RECONNECT-evidence/live/{run2-discord,control-no-replay,run1-not-measured}/`.
+Byte counts cross-checked `/usr/bin/wc -c` vs `stat -f%z`. Secret sweep over every capture for the
+per-run minted vault passphrase: **0 hits**, with a known-positive (`sent RESUME`, 1 hit) proving
+the grep was alive.

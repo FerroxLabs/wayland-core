@@ -1,0 +1,286 @@
+{
+  "schema": "wayland.reconnect.upstream-drop/1",
+  "mode": "measurement",
+  "binary": "/root/wayland-24-reconnect/target/release/wayland-core",
+  "legs_total": 7,
+  "legs_failed": 0,
+  "verdict": "PASS",
+  "census": {
+    "rows": [
+      {
+        "token": "f24c3-rc-4c1de3-phantom-never",
+        "phase": "phantom",
+        "expect": "silence",
+        "replies": 0
+      },
+      {
+        "token": "f24c3-rc-4c1de3-before-1",
+        "phase": "before",
+        "expect": "reply",
+        "replies": 1
+      },
+      {
+        "token": "f24c3-rc-4c1de3-before-2",
+        "phase": "before",
+        "expect": "reply",
+        "replies": 1
+      },
+      {
+        "token": "f24c3-rc-4c1de3-during-3",
+        "phase": "during",
+        "expect": "reply",
+        "replies": 1
+      },
+      {
+        "token": "f24c3-rc-4c1de3-during-4",
+        "phase": "during",
+        "expect": "reply",
+        "replies": 1
+      },
+      {
+        "token": "f24c3-rc-4c1de3-during-decoy-5",
+        "phase": "during-decoy",
+        "expect": "silence",
+        "replies": 0
+      },
+      {
+        "token": "f24c3-rc-4c1de3-after-6",
+        "phase": "after",
+        "expect": "reply",
+        "replies": 1
+      }
+    ],
+    "lost": [],
+    "duplicated": [],
+    "leaked": []
+  },
+  "plan": [
+    {
+      "token": "f24c3-rc-4c1de3-phantom-never",
+      "phase": "phantom",
+      "expect": "silence"
+    },
+    {
+      "token": "f24c3-rc-4c1de3-before-1",
+      "phase": "before",
+      "expect": "reply"
+    },
+    {
+      "token": "f24c3-rc-4c1de3-before-2",
+      "phase": "before",
+      "expect": "reply"
+    },
+    {
+      "token": "f24c3-rc-4c1de3-during-3",
+      "phase": "during",
+      "expect": "reply"
+    },
+    {
+      "token": "f24c3-rc-4c1de3-during-4",
+      "phase": "during",
+      "expect": "reply"
+    },
+    {
+      "token": "f24c3-rc-4c1de3-during-decoy-5",
+      "phase": "during-decoy",
+      "expect": "silence"
+    },
+    {
+      "token": "f24c3-rc-4c1de3-after-6",
+      "phase": "after",
+      "expect": "reply"
+    }
+  ],
+  "phantom": "f24c3-rc-4c1de3-phantom-never",
+  "dropped_sockets": 1,
+  "reconnect": {
+    "reconnected": true,
+    "ms": 750,
+    "resumes": 1,
+    "identifies": 0
+  },
+  "fixture_report": {
+    "bot_id": "999000111222333444",
+    "port": 37171,
+    "tcp_connections": 27,
+    "client_errors": [],
+    "total_gateway_connections": 2,
+    "max_concurrent_gateway_connections": 1,
+    "live_gateway_connections": 1,
+    "identify_count": 1,
+    "resume_count": 1,
+    "bad_token_identifies": 0,
+    "heartbeats": 1,
+    "dispatched_total": 6,
+    "dispatch_socket_deliveries": 6,
+    "dispatch_ledger": [
+      {
+        "id": "17853042978295e2520",
+        "s": 2,
+        "sockets": 1
+      },
+      {
+        "id": "1785304297839ca2a66",
+        "s": 3,
+        "sockets": 1
+      },
+      {
+        "id": "17853042993959362b3",
+        "s": 4,
+        "sockets": 1
+      },
+      {
+        "id": "17853042994055091a9",
+        "s": 5,
+        "sockets": 1
+      },
+      {
+        "id": "17853042994133e44e0",
+        "s": 6,
+        "sockets": 1
+      },
+      {
+        "id": "1785304300467f45aa4",
+        "s": 7,
+        "sockets": 1
+      }
+    ],
+    "duplicate_seq_numbers": 0,
+    "forced_drops": 1,
+    "forced_drop_sockets": 1,
+    "resume_replays": [
+      {
+        "conn": 2,
+        "after": 3,
+        "replayed": [
+          "17853042993959362b3",
+          "17853042994055091a9",
+          "17853042994133e44e0"
+        ],
+        "at": 1785304299888
+      }
+    ],
+    "resume_replayed_total": 3,
+    "sent_total": 5,
+    "sent": [
+      {
+        "id": "17853042985340",
+        "channel_id": "900000001",
+        "content": "F24C3-REPLY f24c3-rc-4c1de3-before-1",
+        "nonce": "19fac6db425-0",
+        "message_reference": null,
+        "at": 1785304298534
+      },
+      {
+        "id": "17853042985791",
+        "channel_id": "900000001",
+        "content": "F24C3-REPLY f24c3-rc-4c1de3-before-2",
+        "nonce": "19fac6db453-1",
+        "message_reference": null,
+        "at": 1785304298579
+      },
+      {
+        "id": "17853042999742",
+        "channel_id": "900000001",
+        "content": "F24C3-REPLY f24c3-rc-4c1de3-during-3",
+        "nonce": "19fac6db9c5-2",
+        "message_reference": null,
+        "at": 1785304299974
+      },
+      {
+        "id": "17853043000253",
+        "channel_id": "900000001",
+        "content": "F24C3-REPLY f24c3-rc-4c1de3-during-4",
+        "nonce": "19fac6db9f8-3",
+        "message_reference": null,
+        "at": 1785304300025
+      },
+      {
+        "id": "17853043007174",
+        "channel_id": "900000001",
+        "content": "F24C3-REPLY f24c3-rc-4c1de3-after-6",
+        "nonce": "19fac6dbcad-4",
+        "message_reference": null,
+        "at": 1785304300717
+      }
+    ],
+    "typing_total": 0,
+    "reactions_total": 0,
+    "rest_hits": 30,
+    "coverage": {
+      "implemented": [
+        "op10_hello",
+        "op2_identify",
+        "op0_ready",
+        "op1_heartbeat/op11_ack",
+        "op6_resume_with_replay",
+        "op0_message_create_dispatch",
+        "rest_users_me",
+        "rest_create_message",
+        "rest_typing",
+        "rest_reactions"
+      ],
+      "not_implemented": [
+        "zlib/etf_compression",
+        "shard_negotiation",
+        "rate_limit_buckets",
+        "guild_or_permission_state",
+        "voice",
+        "op9_invalid_session_negotiation"
+      ]
+    },
+    "fixture_notes": []
+  },
+  "results": [
+    {
+      "leg": "pre-drop-control",
+      "ok": true,
+      "detail": "2/2 replied; each dispatch reached 1/1 socket(s). KNOWN-POSITIVE: if this is not full, no zero anywhere else in this run is readable."
+    },
+    {
+      "leg": "upstream-drop-really-happened",
+      "ok": true,
+      "detail": "destroyed 1 socket(s) with no WS close frame; live_gateway_connections 1 -> 0. Confirmed from the fixture journal, not assumed — a probe that grades a disconnect it cannot confirm grades an event that may never have occurred."
+    },
+    {
+      "leg": "adapter-reconnected",
+      "ok": true,
+      "detail": "back after ~750ms via RESUME (+1); total gateway connections 1 -> 2"
+    },
+    {
+      "leg": "post-reconnect-control",
+      "ok": true,
+      "detail": "1/1 replied. KNOWN-POSITIVE #2: proves the adapter is ALIVE after the drop, so a zero on the gap messages cannot be explained by a dead adapter."
+    },
+    {
+      "leg": "gap-messages-survive-the-upstream-drop",
+      "ok": true,
+      "detail": "2/2 of the messages delivered DURING the disconnect window produced a turn. Each reached 0/0 live socket(s) at dispatch time (0 = there really was no connection). fixture replayed 3 message(s) on RESUME. lost=[]"
+    },
+    {
+      "leg": "no-duplicate-turns-around-the-window",
+      "ok": true,
+      "detail": "duplicated=[] over 5 expected-reply tokens. Fixture-side raw deliveries 6 vs 6 dispatches (a raw duplicate the product deduped is visible here even when the turn count is 1)."
+    },
+    {
+      "leg": "decoy-and-phantom-score-zero",
+      "ok": true,
+      "detail": "decoy (non-allowlisted sender, dispatched INSIDE the window) and phantom (never dispatched) both scored zero: leaked=[]. This is what makes the zeros above measurements rather than free."
+    }
+  ],
+  "notes": [
+    "fixture up on http://127.0.0.1:37171 (ephemeral port — no cross-lane collision)",
+    "preflight correlation: minted=f24c3-rc-4c1de3-preflight-0 echoed=true | wrong-shape=f24rc-4c1de3-wrongshape-0 echoed=false (must be false)",
+    "IDENTIFYed after ~750ms (tcp=5 live=1)",
+    "sent f24c3-rc-4c1de3-before-1 (phase=before expect=reply) -> 1 socket(s)",
+    "sent f24c3-rc-4c1de3-before-2 (phase=before expect=reply) -> 1 socket(s)",
+    "pre-drop control: 2/2 replied after ~1500ms",
+    "sent f24c3-rc-4c1de3-during-3 (phase=during expect=reply) -> 0 socket(s)",
+    "sent f24c3-rc-4c1de3-during-4 (phase=during expect=reply) -> 0 socket(s)",
+    "sent f24c3-rc-4c1de3-during-decoy-5 (phase=during-decoy expect=silence) -> 0 socket(s)",
+    "gap messages: 2/2 replied after ~1000ms",
+    "sent f24c3-rc-4c1de3-after-6 (phase=after expect=reply) -> 1 socket(s)",
+    "post-reconnect control: 1/1 replied after ~1000ms"
+  ],
+  "replies_seen": 5
+}

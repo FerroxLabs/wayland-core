@@ -1,0 +1,270 @@
+{
+  "schema": "wayland.reconnect.upstream-drop/1",
+  "mode": "CONTROL-no-replay",
+  "binary": "/root/wayland-24-reconnect/target/release/wayland-core",
+  "legs_total": 7,
+  "legs_failed": 1,
+  "verdict": "FAIL",
+  "census": {
+    "rows": [
+      {
+        "token": "f24c3-rc-6d0292-phantom-never",
+        "phase": "phantom",
+        "expect": "silence",
+        "replies": 0
+      },
+      {
+        "token": "f24c3-rc-6d0292-before-1",
+        "phase": "before",
+        "expect": "reply",
+        "replies": 1
+      },
+      {
+        "token": "f24c3-rc-6d0292-before-2",
+        "phase": "before",
+        "expect": "reply",
+        "replies": 1
+      },
+      {
+        "token": "f24c3-rc-6d0292-during-3",
+        "phase": "during",
+        "expect": "reply",
+        "replies": 0
+      },
+      {
+        "token": "f24c3-rc-6d0292-during-4",
+        "phase": "during",
+        "expect": "reply",
+        "replies": 0
+      },
+      {
+        "token": "f24c3-rc-6d0292-during-decoy-5",
+        "phase": "during-decoy",
+        "expect": "silence",
+        "replies": 0
+      },
+      {
+        "token": "f24c3-rc-6d0292-after-6",
+        "phase": "after",
+        "expect": "reply",
+        "replies": 1
+      }
+    ],
+    "lost": [
+      "f24c3-rc-6d0292-during-3",
+      "f24c3-rc-6d0292-during-4"
+    ],
+    "duplicated": [],
+    "leaked": []
+  },
+  "plan": [
+    {
+      "token": "f24c3-rc-6d0292-phantom-never",
+      "phase": "phantom",
+      "expect": "silence"
+    },
+    {
+      "token": "f24c3-rc-6d0292-before-1",
+      "phase": "before",
+      "expect": "reply"
+    },
+    {
+      "token": "f24c3-rc-6d0292-before-2",
+      "phase": "before",
+      "expect": "reply"
+    },
+    {
+      "token": "f24c3-rc-6d0292-during-3",
+      "phase": "during",
+      "expect": "reply"
+    },
+    {
+      "token": "f24c3-rc-6d0292-during-4",
+      "phase": "during",
+      "expect": "reply"
+    },
+    {
+      "token": "f24c3-rc-6d0292-during-decoy-5",
+      "phase": "during-decoy",
+      "expect": "silence"
+    },
+    {
+      "token": "f24c3-rc-6d0292-after-6",
+      "phase": "after",
+      "expect": "reply"
+    }
+  ],
+  "phantom": "f24c3-rc-6d0292-phantom-never",
+  "dropped_sockets": 1,
+  "reconnect": {
+    "reconnected": true,
+    "ms": 750,
+    "resumes": 1,
+    "identifies": 0
+  },
+  "fixture_report": {
+    "bot_id": "999000111222333444",
+    "port": 43333,
+    "tcp_connections": 117,
+    "client_errors": [],
+    "total_gateway_connections": 2,
+    "max_concurrent_gateway_connections": 1,
+    "live_gateway_connections": 1,
+    "identify_count": 1,
+    "resume_count": 1,
+    "bad_token_identifies": 0,
+    "heartbeats": 10,
+    "dispatched_total": 6,
+    "dispatch_socket_deliveries": 3,
+    "dispatch_ledger": [
+      {
+        "id": "1785304329819b35e3b",
+        "s": 2,
+        "sockets": 1
+      },
+      {
+        "id": "1785304329828392327",
+        "s": 3,
+        "sockets": 1
+      },
+      {
+        "id": "1785304331390068d89",
+        "s": 4,
+        "sockets": 0
+      },
+      {
+        "id": "17853043313999b0c44",
+        "s": 5,
+        "sockets": 0
+      },
+      {
+        "id": "178530433140898a65b",
+        "s": 6,
+        "sockets": 0
+      },
+      {
+        "id": "1785304377189b9e6b3",
+        "s": 7,
+        "sockets": 1
+      }
+    ],
+    "duplicate_seq_numbers": 0,
+    "forced_drops": 1,
+    "forced_drop_sockets": 1,
+    "resume_replays": [
+      {
+        "conn": 2,
+        "after": 3,
+        "replayed": [],
+        "at": 1785304331881
+      }
+    ],
+    "resume_replayed_total": 0,
+    "sent_total": 3,
+    "sent": [
+      {
+        "id": "17853043305130",
+        "channel_id": "900000001",
+        "content": "F24C3-REPLY f24c3-rc-6d0292-before-1",
+        "nonce": "19fac6e3110-0",
+        "message_reference": null,
+        "at": 1785304330513
+      },
+      {
+        "id": "17853043305511",
+        "channel_id": "900000001",
+        "content": "F24C3-REPLY f24c3-rc-6d0292-before-2",
+        "nonce": "19fac6e3137-1",
+        "message_reference": null,
+        "at": 1785304330551
+      },
+      {
+        "id": "17853043774372",
+        "channel_id": "900000001",
+        "content": "F24C3-REPLY f24c3-rc-6d0292-after-6",
+        "nonce": "19fac6ee85c-2",
+        "message_reference": null,
+        "at": 1785304377437
+      }
+    ],
+    "typing_total": 0,
+    "reactions_total": 0,
+    "rest_hits": 117,
+    "coverage": {
+      "implemented": [
+        "op10_hello",
+        "op2_identify",
+        "op0_ready",
+        "op1_heartbeat/op11_ack",
+        "op6_resume_with_replay",
+        "op0_message_create_dispatch",
+        "rest_users_me",
+        "rest_create_message",
+        "rest_typing",
+        "rest_reactions"
+      ],
+      "not_implemented": [
+        "zlib/etf_compression",
+        "shard_negotiation",
+        "rate_limit_buckets",
+        "guild_or_permission_state",
+        "voice",
+        "op9_invalid_session_negotiation"
+      ]
+    },
+    "fixture_notes": []
+  },
+  "results": [
+    {
+      "leg": "pre-drop-control",
+      "ok": true,
+      "detail": "2/2 replied; each dispatch reached 1/1 socket(s). KNOWN-POSITIVE: if this is not full, no zero anywhere else in this run is readable."
+    },
+    {
+      "leg": "upstream-drop-really-happened",
+      "ok": true,
+      "detail": "destroyed 1 socket(s) with no WS close frame; live_gateway_connections 1 -> 0. Confirmed from the fixture journal, not assumed — a probe that grades a disconnect it cannot confirm grades an event that may never have occurred."
+    },
+    {
+      "leg": "adapter-reconnected",
+      "ok": true,
+      "detail": "back after ~750ms via RESUME (+1); total gateway connections 1 -> 2"
+    },
+    {
+      "leg": "post-reconnect-control",
+      "ok": true,
+      "detail": "1/1 replied. KNOWN-POSITIVE #2: proves the adapter is ALIVE after the drop, so a zero on the gap messages cannot be explained by a dead adapter."
+    },
+    {
+      "leg": "gap-messages-survive-the-upstream-drop",
+      "ok": false,
+      "detail": "0/2 of the messages delivered DURING the disconnect window produced a turn. Each reached 0/0 live socket(s) at dispatch time (0 = there really was no connection). fixture replayed 0 message(s) on RESUME. lost=[f24c3-rc-6d0292-during-3,f24c3-rc-6d0292-during-4]"
+    },
+    {
+      "leg": "no-duplicate-turns-around-the-window",
+      "ok": true,
+      "detail": "duplicated=[] over 5 expected-reply tokens. Fixture-side raw deliveries 3 vs 6 dispatches (a raw duplicate the product deduped is visible here even when the turn count is 1)."
+    },
+    {
+      "leg": "decoy-and-phantom-score-zero",
+      "ok": true,
+      "detail": "decoy (non-allowlisted sender, dispatched INSIDE the window) and phantom (never dispatched) both scored zero: leaked=[]. This is what makes the zeros above measurements rather than free."
+    }
+  ],
+  "notes": [
+    "fixture up on http://127.0.0.1:43333 (ephemeral port — no cross-lane collision)",
+    "preflight correlation: minted=f24c3-rc-6d0292-preflight-0 echoed=true | wrong-shape=f24rc-6d0292-wrongshape-0 echoed=false (must be false)",
+    "IDENTIFYed after ~750ms (tcp=5 live=1)",
+    "CONTROL MODE: fixture will accept RESUME and replay NOTHING — the gap must be reported LOST",
+    "sent f24c3-rc-6d0292-before-1 (phase=before expect=reply) -> 1 socket(s)",
+    "sent f24c3-rc-6d0292-before-2 (phase=before expect=reply) -> 1 socket(s)",
+    "pre-drop control: 2/2 replied after ~1500ms",
+    "sent f24c3-rc-6d0292-during-3 (phase=during expect=reply) -> 0 socket(s)",
+    "sent f24c3-rc-6d0292-during-4 (phase=during expect=reply) -> 0 socket(s)",
+    "sent f24c3-rc-6d0292-during-decoy-5 (phase=during-decoy expect=silence) -> 0 socket(s)",
+    "gap messages: 0/2 replied — BUDGET EXPIRED after 45000ms",
+    "sent f24c3-rc-6d0292-after-6 (phase=after expect=reply) -> 1 socket(s)",
+    "post-reconnect control: 1/1 replied after ~1000ms"
+  ],
+  "replies_seen": 3
+}
