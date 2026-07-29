@@ -296,6 +296,23 @@ Rules:
   mid-build when this was written.
 - Clean up your own `target/` when your lane ends. Do not delete another lane's tree.
 
+## 6a-i. A concurrency test self-passes when a PARTICIPANT NEVER STARTED
+
+New shape, found 2026-07-29 by `lane/wal-followups` while proving SQLite WAL corruption.
+
+Its first run failed to reproduce and **read as a clean pass**: 45,342 writes, `integrity_check=ok`,
+both processes exited 0. The truth was that writer A had died at `open` with `database is locked`
+(the schema migration's exclusive lock), so **only one writer ever ran** — and a concurrency defect
+cannot appear with one participant. The run was not a negative result; it was not the experiment.
+
+**Assert that every participant reached a START marker, not merely that the run exited.** The same
+shape covers any test whose defect requires N simultaneous actors: contention, races, fleet
+dispatch, lease contention, multi-writer anything. Exit status tells you nothing about how many
+actors were present.
+
+Generalises the existing rule: a known-negative is self-passing on a dead instrument, and *an actor
+that never launched is a dead instrument*.
+
 ## 6a-ii. `/tmp` on hetzner is SHARED between lanes — your glob will catch their files
 
 A lane on 2026-07-29 ran a post-fix check that reported its defect still present. The evidence
