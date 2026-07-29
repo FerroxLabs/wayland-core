@@ -1,0 +1,66 @@
+# 23A-CENSUS — running NOTES (append-only, committed as I go)
+
+Lane `lane/23a-census`. Worktree
+`/Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-23a-census`.
+Base / lane HEAD at start: `8bcb052b2aa6b1a9e3f2ed00af935a58c92c1f11`
+(= `plan/f20-unified-audit-repair` at fetch time).
+
+Per LANE-BRIEF §6b-i this file is committed inside the first 15 minutes and
+re-committed after **every** measurement. There is no partial credit for
+uncommitted reasoning.
+
+---
+
+## T+0 — established facts (measured, not assumed)
+
+1. **The driver has not moved since before the fix.**
+   `git log --format='%h %ad' --date=short -- crates/wcore-eval-scenarios/tests/f23a_boundary_drive.rs`
+   → exactly one commit, `481682b0 2026-07-26`.
+   The D1/F23A-01-H2 fix is `32a5fc90 2026-07-27`
+   ("fix(agent,tools): stop a finished tool call from stranding its turn"),
+   with regression tests `81508b74 2026-07-27`
+   (`crates/wcore-agent/src/orchestration/d1_refusal_terminal_tests.rs`).
+   So the driver predates the fix by one day and **has never been run against
+   the fixed engine**. This is exactly the gap this lane exists to close.
+
+2. **`crates/wcore-eval-scenarios/src/governed_skill_drive.rs` DOES NOT EXIST**
+   at HEAD (`ls` → No such file). 23A-01's plan called for a shared harness in
+   that file and 23A-02/23A-04 both list it in `read_first`. It was never
+   written; the driver carries its own private `BoundaryEnv`. Recorded as a
+   plan-vs-tree divergence, to be graded in the report.
+
+3. **The driver contains 3 `#[tokio::test]` fns**, not 16 route probes:
+   - `refused_skill_tool_call_does_not_kill_the_session` (D1 probe, route R1 shape)
+   - `refused_read_tool_call_does_not_kill_the_session` (D1 scope discriminator, NOT a skills route)
+   - `generated_draft_is_refused_at_every_route_while_user_content_is_not`
+     — this single test is the only one that touches census routes, and it
+     drives **R1, R6, R7, R8** and nothing else.
+   So on inspection the live driver reaches **4 of 16** census routes. The
+   remaining 12 are graded by the census on code reading alone. That is the
+   headline hypothesis to confirm or refute by measurement.
+
+4. **The census's own SHA is `2ecdfdf5`, not HEAD.** Every `path:line`
+   citation in `23A-01-SURFACE-CENSUS.md` must be re-resolved at
+   `8bcb052b` before it can be called current; line numbers will have drifted
+   and at least `orchestration/mod.rs` and `skill_tool.rs` were edited by the
+   D1 fix itself.
+
+## T+0 — what I still have to establish
+
+- [ ] Re-resolve all 16 route citations at HEAD (Mac-side read; no cargo).
+- [ ] Build `wayland-core` at HEAD on hetzner and run the driver, reading back
+      the executed count (`N passed`) per target — NEVER the exit status, and
+      never via a `-- <filter>` (flavour (c) of the zero-tests trap).
+- [ ] Two-run differential for `WAYLAND_F23A_SELFTEST=refusal`: run A without
+      the env var, run B with it. **They must DISAGREE.** Two runs that agree
+      prove nothing about the control.
+- [ ] Grade each of the 16 routes: live-driven / static-only / undrivable, with
+      the reason.
+
+## Traps I am holding (from the brief)
+
+- Byte-count every capture; `${PIPESTATUS[0]}` after a pipeline returns empty here.
+- `wcore-agent --lib` fails 13–19 in parallel, passes 2160/0 serial → run serially.
+- Instruments carry the defect they hunt; repair in-lane with a 3-assertion
+  self-test whose third assertion is "the old shape would have missed it".
+- Run targets by file (`--test <name>`), never by filter.
