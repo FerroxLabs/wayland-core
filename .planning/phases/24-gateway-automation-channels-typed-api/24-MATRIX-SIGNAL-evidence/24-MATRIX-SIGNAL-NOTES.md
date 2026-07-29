@@ -166,9 +166,69 @@ must independently report that the initial sync it served DID contain the gap ev
 6. Self-test with the mandatory three assertions.
 7. Live run on hetzner.
 
+## T+95 — INSTRUMENTS BUILT AND SELF-TESTED. Two of my own defects found and repaired.
+
+Committed `aa4351aa`, pushed. hetzner worktree `/root/wayland-24-matrix-signal` at the same SHA.
+
+### What was built
+
+| file | what |
+|---|---|
+| `scripts/f24-matrix-fixture.mjs` | homeserver with real `/sync` cursor semantics + `initial_syncs[].served` |
+| `scripts/f24-signal-fixture.mjs` | fake `signal-cli`, JSON-RPC on stdio, spawned BY THE PRODUCT |
+| `scripts/f24-inbound.mjs` | both adapters wired; new `steady` leg for EVERY adapter; matrix restart probe |
+| `scripts/f24-matrix-signal-selftest.mjs` | 33 assertions |
+
+`LEGS` is now `admit / dedupe / access / bind / route / steady`; `ADAPTERS` is now 7.
+Expected legs = 7 × 6 = 42.
+
+### TWO INSTRUMENT DEFECTS, MINE, FOUND BY THE SELF-TEST BEFORE ANY LIVE RUN
+
+Both failed **in the direction that blames the product** — which is what an under-detecting
+instrument does by default, and is why each had to be caught by an assertion rather than by
+a red.
+
+1. **The fixture sent `{rooms: {<roomId>: ...}}` instead of `{rooms: {join: {<roomId>: ...}}}`.**
+   `sync.rs:61-65` deserialises `Rooms { #[serde(default)] join }`, so the missing `join` key
+   would have defaulted to an EMPTY map, `parse_sync_events` would have iterated nothing, and
+   **every matrix leg would have reported ZERO ARRIVALS as a product defect.** This is exactly
+   the fabricated-HIGH shape the brief warns about. Caught by M2.
+2. **The self-test read the fixture's stdout with `child.stdout.on('data')` while blocking the
+   event loop with `Atomics.wait`.** The handler never ran, so it reported "no frame appeared
+   on stdout" while the fixture was emitting correctly. Caught by S1/S3/S4 failing.
+
+Both **repaired here, not written up and carried** (§6b-ii). The repair for (2) is structural
+— all stdio interaction happens in one top-level-await block and the observations are frozen
+into plain data, so the synchronous `test()` calls keep the hard-fail-on-thenable guard.
+
+### The self-test is PROVEN ABLE TO FAIL
+
+Not by mutation, but by history: its first execution was **26 passed / 7 failed** and the 7
+were two genuine defects. Restored: **33 passed / 0 failed** on macOS.
+
+### The mandatory THIRD assertions (§6b-ii)
+
+- `T4` — the five ORIGINAL legs **all pass** on a simulated adapter that delivers the startup
+  burst perfectly and then goes deaf, while `steady` catches it. This is the assertion that
+  proves the new leg does anything; without it T1-T3 would pass on a driver that never added
+  it. `T5` is a drift guard asserting the five transcribed conditions still exist verbatim in
+  `runMatrix`.
+- `R3` — `naiveGradeRestart` (the grader without the H2 exclusion, kept executable) reports
+  **LOSS** on the exact observation where `gradeRestart` reports **INCOMPLETE**. That is the
+  fabricated HIGH, demonstrated rather than asserted.
+
+### Product-contract assertions (P1-P8)
+
+Read from source so a product change reddens here and names itself rather than silently
+changing what a green run means. Notably `P3` asserts `sync.rs` STILL holds the cursor
+process-local — if someone repairs it, the probe would go green and P3 is what tells the
+reader the green means "repaired", not "never broken". `P4` is P3's known-positive control.
+
 ## Status
 
 T+0: worktree created, brief + 24-C3-FINISH read, harness outlined.
 T+35: both seams verified from the shipped construction path. Matrix restart defect candidate
 found by source read, with a sibling reference implementation proving it is not a tradeoff.
-Nothing live yet.
+T+95: instruments built, self-tested 33/33 on macOS, two of my own defects found and repaired.
+Committed + pushed `aa4351aa`. hetzner build launched. **Nothing live yet — no product number
+has been taken.**
