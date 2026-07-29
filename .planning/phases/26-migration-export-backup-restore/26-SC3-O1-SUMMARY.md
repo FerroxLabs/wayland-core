@@ -136,6 +136,13 @@ preference**, so I measured instead of counting votes.
 The chosen primitive needs neither: it copies pages and never executes the
 schema, so the vec0 question and the rowid question both stop existing.
 
+**And that is now a run, not an argument.**
+`a_database_carrying_vec0_and_fts5_virtual_tables_is_captured` builds a database
+through `wcore_memory::db::Db` — the real schema, real `vec0` tables from the
+loadable extension, real `fts5` — asserts the virtual tables are present before
+archiving so it cannot pass vacuously, and shows the capture round-trips them
+with `integrity_check=ok` and the same vtab count.
+
 ### What the fix does NOT promise
 
 The captured bytes are a consistent **database**, not a byte-identical **file** —
@@ -153,7 +160,7 @@ capture them" — the second is what the defect looked like from outside.
 |------|--------|
 | `cargo test -p wcore-config --features sqlite --lib` | **571 passed; 0 failed; 0 ignored; 0 filtered out** (x2) |
 | `cargo test -p wcore-config --features sqlite --lib sqlite_snapshot` | **4 passed; 0 failed; 0 ignored; 567 filtered out** |
-| `cargo test -p wcore-cli --test backup_sqlite_capture` | **2 passed; 0 failed; 0 ignored; 0 filtered out** |
+| `cargo test -p wcore-cli --test backup_sqlite_capture` | **3 passed; 0 failed; 0 ignored; 0 filtered out** |
 | `cargo clippy -p wcore-config --features sqlite --all-targets` | no lints |
 | `cargo clippy -p wcore-cli --all-targets` | no lints |
 | `cargo fmt --all -- --check` | clean |
@@ -199,9 +206,6 @@ written by three processes now restores to a database that passes
 - **Only local ext4 was exercised.** The interaction between this capture and a
   network filesystem (where `sqlite_journal` selects TRUNCATE, so there is no
   WAL to fold) is untested. Expected benign; unmeasured.
-- **`vec0` was not exercised end-to-end.** The chosen primitive is page-level so
-  it cannot depend on the module, but I did not build a `vec0` fixture and prove
-  it. The claim rests on the primitive's mechanism, not on a run.
 - Windows: not exercised. The capture is platform-neutral Rust, but that is an
   expectation, not a measurement.
 
