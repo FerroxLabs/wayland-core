@@ -950,11 +950,11 @@ impl VoiceModeTool {
     /// TUI has no error surface for this binding; failures show up in
     /// the next `status` action or on `stop` via the transcript.
     pub async fn toggle_record(&self) -> bool {
-        if !self.inner.is_recording() {
-            if let Some(reason) = self.readiness_block() {
-                tracing::warn!("voice_mode: refusing to start capture — {reason}");
-                return false;
-            }
+        if !self.inner.is_recording()
+            && let Some(reason) = self.readiness_block()
+        {
+            tracing::warn!("voice_mode: refusing to start capture — {reason}");
+            return false;
         }
         if self.inner.is_recording() {
             // Stop fires fire-and-forget — transcription is a separate
@@ -1045,10 +1045,11 @@ can pick it up."
         // Readiness gate — only on the two actions that begin a
         // capture. `stop` / `cancel` / `status` must stay reachable so a
         // session that somehow started can always be wound down.
-        if matches!(action, "start" | "toggle_record") && !self.inner.is_recording() {
-            if let Some(reason) = self.readiness_block() {
-                return error_result(&reason);
-            }
+        if matches!(action, "start" | "toggle_record")
+            && !self.inner.is_recording()
+            && let Some(reason) = self.readiness_block()
+        {
+            return error_result(&reason);
         }
         match action {
             "toggle_record" => {
