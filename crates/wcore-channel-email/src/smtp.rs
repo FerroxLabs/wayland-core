@@ -485,6 +485,49 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    /// A misconfigured anchor path must be a loud error, not a silent fallback
+    /// to the default roots.
+    ///
+    /// This is the failure mode that would hide the whole feature: if a typo'd
+    /// path degraded quietly to "compiled-in roots only", an operator pointing
+    /// at a corporate CA would get an unexplained TLS failure at send time
+    /// instead of a config error at connect time.
+    #[test]
+    fn tls_root_cert_path_that_does_not_exist_errors() {
+        let err = build_tls_params("smtp.acme.com", "/nonexistent/wayland-test/no-such-ca.pem")
+            .expect_err("a missing anchor file must not be ignored");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tls_root_cert_path") && msg.contains("no-such-ca.pem"),
+            "error must name the offending setting and path; got: {msg}"
+        );
+    }
+
+    /// A file that exists but is not a certificate must also error rather than
+    /// being silently skipped.
+    #[test]
+    fn tls_root_cert_path_with_garbage_contents_errors() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "wl-email-bad-ca-{}-{}.pem",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"this is not a certificate\n").unwrap();
+
+        let result = build_tls_params("smtp.acme.com", path.to_str().unwrap());
+        let _ = std::fs::remove_file(&path);
+
+        let err = result.expect_err("a non-PEM anchor file must not be ignored");
+        assert!(
+            err.to_string().contains("tls_root_cert_path"),
+            "error must name the offending setting; got: {err}"
+        );
+    }
+
     /// In-memory MailSender for tests. Records every send + a programmable
     /// outcome script — pop one outcome per call.
     pub struct RecordingSender {

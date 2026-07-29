@@ -904,6 +904,40 @@ password_credential_handle = "email.acme.smtp_pass"
         assert_eq!(cfg.from_address, "bot@acme.com");
         assert_eq!(cfg.smtp.host, "smtp.acme.com");
         assert!(cfg.imap.is_none());
+        // Absent key stays absent — the extra trust anchor is opt-in, so an
+        // existing config must keep resolving to the compiled-in roots alone.
+        assert_eq!(cfg.smtp.tls_root_cert_path, None);
+    }
+
+    /// `smtp.tls_root_cert_path` survives the TOML -> `EmailConfig` hop.
+    ///
+    /// `SmtpConfig` is `deny_unknown_fields`, so before the field existed this
+    /// exact document was a hard parse ERROR. That is what makes this a real
+    /// assertion about the config plumbing rather than a restatement of serde's
+    /// defaults: it is the known-positive half of the pair with the
+    /// `assert_eq!(.., None)` above.
+    #[test]
+    fn config_carries_smtp_tls_root_cert_path() {
+        let raw = r#"
+name = "acme-email"
+platform = "email"
+
+[options]
+from_address = "bot@acme.com"
+
+[options.smtp]
+host = "smtp.acme.com"
+port = 587
+user_credential_handle = "email.acme.smtp_user"
+password_credential_handle = "email.acme.smtp_pass"
+tls_root_cert_path = "/etc/wayland/corporate-ca.pem"
+"#;
+        let outer: wcore_channels::ChannelConfig = toml::from_str(raw).unwrap();
+        let cfg: EmailConfig = outer.options.try_into().unwrap();
+        assert_eq!(
+            cfg.smtp.tls_root_cert_path.as_deref(),
+            Some("/etc/wayland/corporate-ca.pem")
+        );
     }
 
     // -----------------------------------------------------------------
