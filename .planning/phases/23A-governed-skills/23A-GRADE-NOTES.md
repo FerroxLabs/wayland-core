@@ -74,3 +74,52 @@ Per brief §3b / §3b-i, and because two named instruments may have poisoned ear
       pending delta separately, marked pending-not-merged.
 - [ ] Verify the 34-assertion / 35-kill claims are not self-passing (executed counts, known-positives).
 - [ ] Gap list with lane-session costs and credential-vs-build classification.
+
+## T+40 — MEASURED. The decisive fact is the SHIPPED SURFACE, not the code.
+
+All via `/usr/bin/git`, each absence carrying a known-positive control in the same invocation.
+
+### M1 — merged base `861d1b1a` DOES contain revoke + rollback (library)
+`git cat-file -e 861d1b1a:crates/wcore-skills/src/govern.rs` → exists, **566 lines**.
+Public surface read back: `revoke()` :221, `rollback()` :290, `live_revocations()` :330,
+`is_revoked()` :370, `record_suppression()` :400, `journal()` :426, `governance_root()` :460.
+So `23A-04-SUMMARY.md`'s "Clause 3 NOT MET — nothing implements revocation" and "Clause 4
+NOT MET" are **STALE**: that summary is dated 2026-07-26, the merge `460fad3b` is 2026-07-29.
+
+### M2 — but at base those verbs are NOT reachable on the binary customers install
+`git show 861d1b1a:crates/wcore-cli/src/main.rs | grep -n skills_promote|skills_revoke|...`
+- `skills_promote` present (:474) but `run_skills_promote` (:2537) is an **unconditional
+  `bail!`** — "temporarily unavailable while governed promotion is being implemented".
+- `skills_revoke`, `skills_rollback`, `skills_govern` → **NOT PRESENT AT ALL** at base.
+Control: `skills_archive` IS present (:483, :1546) in the same grep — instrument alive.
+
+### M3 — the merged capability ships to nobody (verified, with control)
+```
+git show 861d1b1a:.github/workflows/release.yml | /usr/bin/grep -c "wayland-core"   -> 31  [KNOWN-POSITIVE]
+git show 861d1b1a:.github/workflows/release.yml | /usr/bin/grep -c "skill-govern"   ->  0  [the absence]
+```
+`git grep -n wcore-skill-govern 861d1b1a -- ':!*.rs'` → **9 hits, every one a `.planning/`
+document**; zero workflow, zero packaging manifest, zero Cargo `[[bin]]` declaration outside
+auto-discovery. So `23A-C1-SUMMARY.md:53`'s "The capability ships and is drivable today" is
+**false as customers experience it** — it is buildable from source, not shipped.
+This independently reproduces the pending lane's HIGH. I did not take it on trust.
+
+### M4 — clause (a) enforcement call sites are real at base
+`loader.rs:448` sets `disable_model_invocation = true`; `slash/skill.rs:115-117` refuses
+("this skill is quarantined and cannot be run"); `refs.rs` filters at :129/:294/:313/:325/:335.
+`slash/skill.rs:327` is a unit assert on the refusal string.
+
+### M5 — pending `3a2234d7` adds exactly the missing surface
+`promote.rs` **ABSENT at base** (rc≠0) / **PRESENT at 3a2234d7** — control `loader.rs` present
+at both, so the negative is not a dead instrument. Diff vs merge-base `75babf32`: 20 files,
++2941/−188, incl. `promote.rs` (589), `govern_catalog_enforcement.rs` (299),
+`skills_promote_advertised_and_works.rs` (319, replacing `skills_promote_not_advertised.rs`),
+`ProcedureStatus::Revoked` in `wcore-memory/src/v2_types.rs`, and four flags wired in `main.rs`
+(:479 promote, :496 revoke, :502 rollback, :507 govern; dispatch :1566-1583).
+NOTE the doc says head `597c3275`; branch head is `3a2234d7` (the docs commit on top).
+
+### M6 — 23A-02 and 23A-03 remain `status: not_started` in-tree; 23A-04 discharges only its Task 3.
+
+## OPEN
+- [ ] F23A-01-H2 (any errored tool call kills the session) — open or fixed at base?
+- [ ] Audit pending lane's live-proof + kill harness for self-passing before crediting 34/35-kill claims.
