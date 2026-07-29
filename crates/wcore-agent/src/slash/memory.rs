@@ -173,7 +173,12 @@ impl MemoryHandler {
     /// that already resolved — and falls through to the fact store, where the
     /// corrected triple is re-embedded in the same statement as the text.
     fn correct(&self, args: &[String]) -> Result<SlashOutcome, SlashError> {
-        let api = self.runtime_api("correct")?;
+        // Pre-check preserved from before 23B-C3: a backend with NO store at
+        // all must refuse as a SlashError, not as a "refused" success line.
+        // "There is nothing here to act on" and "that id is not in the store"
+        // are different answers, and the first one is a misconfiguration the
+        // user needs to see as an error.
+        let (api, _) = self.controls("correct")?;
         let (id, rest) = args
             .split_first()
             .ok_or_else(|| SlashError::Bad("/memory correct <id> <corrected text>".to_string()))?;
@@ -206,7 +211,8 @@ impl MemoryHandler {
     /// an episode forget from a fact forget rather than having to trust that
     /// "removed" meant the thing they saw.
     fn forget(&self, args: &[String]) -> Result<SlashOutcome, SlashError> {
-        let api = self.runtime_api("forget")?;
+        // See `correct` — the no-store refusal stays a SlashError.
+        let (api, _) = self.controls("forget")?;
         let id = args
             .first()
             .ok_or_else(|| SlashError::Bad("/memory forget <id>".to_string()))?;
