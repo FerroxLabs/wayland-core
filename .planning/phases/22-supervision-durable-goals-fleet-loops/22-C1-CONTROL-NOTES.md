@@ -66,12 +66,52 @@ once over the merged tree. **I will not edit the pinned numbers and will not reg
 the corpus test was ALREADY RED at base per `22-C1-SUMMARY.md` §5 (14 passed / 1 failed at
 `8bcb052b`) — so I must take a base-side differential before claiming attribution for its state.
 
-## OPEN QUESTIONS
+## T+1 — OPEN QUESTIONS, RESOLVED
 
-- [ ] Which `ProtocolCommand` variant is absent from `COMMAND_SPECS`? (blocks the count I report)
-- [ ] Where is the CLI command loop's `ProtocolCommand` match, and is it exhaustive?
-- [ ] Does `wcore-agent` expose a Goal *mutation* entry point a dispatcher can call, or only the
-      read paths (`goal_snapshot_event`, `goal_stream`)? If only read paths exist, control needs
-      an agent-side surface too and the cost is larger than the ledger's "1-2 lane-sessions".
-- [ ] Is the corpus test red at base in THIS worktree (differential), or did an intervening merge
-      fix it?
+**Q1: which variant is enum-only?** `grant_workspace_capability`. Measured by set-differencing
+the enum block against the `"commands/*.json"` fixture paths in `COMMAND_SPECS`, **both
+directions** — `comm -13` (specs not in enum) is EMPTY, which is what proves the extractor is not
+simply dropping entries. So: `COMMAND_SPECS` = **18**, `ProtocolCommand` = **19**, delta = 1.
+Any count I report must say WHICH of the two it is.
+
+**Q2: is the command-loop match exhaustive?** **No — and this is the trap of the whole task.**
+`crates/wcore-cli/src/main.rs:5431` ends the mid-turn match with
+
+```rust
+_ => { eprintln!("[protocol] Ignoring command during active message processing"); }
+```
+
+and the idle loop binds a catch-all `other` at `:4935`. **So new `ProtocolCommand` variants
+compile clean and are SILENTLY IGNORED at runtime.** The compiler will not force me to write a
+dispatcher. This is exactly the advertised-but-dead class the prior lane refused to create, and it
+means "it builds" is worth nothing here — only an end-to-end drive is evidence.
+
+**Q3: does an agent-side Goal mutation surface exist?** **Yes.** `GoalKernel` (`goal/kernel.rs`)
+exposes real mutations: `open_goal:75`, `start_iteration:100`, `begin_wait:113`,
+`resume_from_wait:129`, `terminate:146`, `terminate_verified:160`, plus reads `goal:314` /
+`cursor:319`. `GoalLedger` owns the task side. So control does NOT need a new agent-side engine —
+it needs a *binding* from the protocol command loop to `GoalKernel`.
+
+**Q4: can the command loop reach a journal?** `SessionJournal` is `#[derive(Debug, Clone)]`
+(`session_journal.rs:209`) over an `Arc<Mutex<JournalWriter>>`, and `AgentEngine` holds
+`session_journal: Option<SessionJournal>` at `engine.rs:2460` — but **private, with no accessor**
+(`grep '^\s+pub fn [a-z_]*(journal|recovery|goal)'` returns only the five `recovery_*` fns). So an
+additive `pub fn` accessor on the engine is required.
+
+## T+1 — the scope divergence I must not paper over
+
+The prior lane's suggested next increment was `GoalResync` — a **pull**. That is still
+OBSERVATION. My brief asks for **control** (open / task / run / cancel). These are not the same
+deliverable and shipping the resync would not close the criterion.
+
+`goal run` is the hard one: `goal_cmd.rs:278-321` shows it drives the real `FleetDispatcher` with
+worker subprocesses, waves, leases and shard timeouts. That is a long-running blocking drive, not
+a command-loop reply. Putting it inline in the protocol command loop would block the session.
+**Flagging now, deciding later, and I will state the outcome rather than quietly dropping the
+verb.**
+
+## T+1 — the dispatcher pattern to mirror
+
+`handle_session_resync` (`main.rs:3682`) is the house pattern, and I will match it rather than
+invent one: version check → session-identity check → operate → emit typed event, with every
+refusal going out as a typed `*_unavailable` event rather than a silent drop or a log line.
