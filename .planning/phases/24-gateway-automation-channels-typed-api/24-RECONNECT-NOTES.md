@@ -111,3 +111,85 @@ I'd both lose my own run and damage four other lanes'.
   branch `lane/24-reconnect`, HEAD == BASE == `15cda12d`. Fence exposure at this point: zero by
   construction (no commits yet).
 - **T+13** this file committed before any measurement.
+
+### T+25 — harness concurrency repair VERIFIED landed (not trusted)
+
+Read the source rather than taking the dispatch's word:
+
+- `scripts/f24-inbound.mjs:176` — `const WEBHOOK_PORT = Number(process.env.F24_WEBHOOK_PORT ?? 18787);`
+  Default unchanged, overridable. **Repair is real.**
+- `scripts/f24-inbound-run.sh` — the three `pkill`s are now scoped to `${BINARY}` and
+  `${RUN_DIR}` rather than the global `wayland-core --json-stream` / `f24-sink.mjs` /
+  `f24-llm-fixture.mjs` patterns. **Repair is real.**
+
+Separately, and better for me: **`f24-discord-fixture.mjs` binds an ephemeral port**
+(`this.server.listen(0, '127.0.0.1', …)`, line ~198) and reports it back. So the discord driver
+has no fixed-port collision surface at all and is inherently concurrency-safe. That removes the
+strongest reason to avoid running while four other lanes are live.
+
+### T+30 — adapter taxonomy, verified in source
+
+`scripts/f24-inbound.mjs:102` `TRANSPORT`:
+
+| adapter | transport | is an upstream drop expressible? |
+|---|---|---|
+| slack, whatsapp, sms | `webhook` | **NO** — the remote dials *us*. There is no upstream connection for our side to lose. Out of scope by construction, and I will say so rather than score them. |
+| telegram, email, matrix | `poll` | yes — the fixture can refuse/close mid-poll |
+| signal | `subprocess` | yes, but the "upstream" is a spawned child, not a network peer |
+| **discord** | WebSocket gateway (separate driver, `f24-discord-inbound.mjs`) | **YES — and it is the only adapter with a real session-resume protocol** |
+
+`f24-discord-inbound.mjs:284` spawns `this.args.binary, ['gateway', 'run']`. **The discord driver
+already drives the real installed surface**, which is what my dispatch demands. It is the target.
+
+Discord's product-side reconnect surface (`crates/wcore-channel-discord/src/gateway.rs`) is fully
+built: `OP_RESUME=6`, `OP_RECONNECT=7`, `ResumeState{session_id, resume_gateway_url, seq}`,
+`decide_handshake()`, and an outer `gateway_loop` that carries `resume` across a dropped socket
+by `&mut` so it survives an `Err` return. That is exactly the machinery that has never been
+driven.
+
+### T+45 — FIRST RESULT, and it is against my own instrument, not the product
+
+**`f24-discord-fixture.mjs` CANNOT express a gap replay.** A message dispatched while no client
+is connected is allocated a sequence number that COLLIDES with an already-delivered one, so
+`RESUME` never replays it. Measured, not reasoned:
+
+```
+$ node .planning/.../24-RECONNECT-evidence/fixture-seq-repro.mjs
+{"fixture_seq_table":[{"id":"PRE-1","s":2},{"id":"PRE-2","s":3},
+                      {"id":"GAP-1","s":3},{"id":"POST-1","s":4}],
+ "client1_last_seq":3, "client1_saw":["PRE-1","PRE-2"],
+ "live_conns_after_drop":0, "gap_dispatch_reached_sockets":0,
+ "client2_resumed":true, "client2_saw":["POST-1"],
+ "duplicate_seq_numbers_in_fixture_table":1,
+ "KNOWN_POSITIVE_pre_messages_seen":true,
+ "KNOWN_POSITIVE_post_resume_message_seen":true,
+ "GAP_REPLAYED_ON_RESUME":false}                                    rc=1
+```
+
+**Mechanism**, `f24-discord-fixture.mjs:486`:
+
+```js
+this.dispatched.push({ id, s: s || this.dispatched.length + 1, payload, sockets: targets.length, ... });
+```
+
+With zero identified connections `targets` is empty, so the `for` loop never runs, `s` stays `0`,
+and the fallback `this.dispatched.length + 1` is used. That fallback **forgets that READY
+consumed sequence 1**: at the gap, `dispatched.length` is 2, so `GAP-1` is numbered `3` — the
+number `PRE-2` already holds. The client resumes from `seq=3`, the replay filter is
+`x.s > after`, and the gap message is filtered out **by its own sequence number**.
+
+**Why this matters more than the bug itself:** a reconnect probe built on this fixture would
+report `GAP-1` missing for *every* product, including a perfectly correct one. It would read as
+inbound message loss — a fabricated HIGH. This is the same shape as `24-H6` §5a (a probe that
+could report the defect but not the fix) and `24-H5` §6 (an ANSI-blind matcher reading `null`
+and blaming the product). **Both known-positives passed in the same invocation**, which is the
+only reason the zero is worth anything: the client is provably alive and provably receiving.
+
+Per LANE-BRIEF §6b-ii I repair the instrument **in this lane** — writing it up and moving on is
+how the identical defect recurred once already on this program. The repair needs three
+assertions, not two: known-positive passes, known-negative fails, **and the pre-repair fixture is
+proven to miss it**.
+
+Evidence: `24-RECONNECT-evidence/fixture-seq-repro.mjs`,
+`fixture-seq-repro-BEFORE.json` (529 bytes, cross-checked `/usr/bin/wc -c` and `ls -la`, since
+`wc -c` has returned 0 for a 72-byte file on this program).
