@@ -243,3 +243,76 @@ updated it).
 - (t+45m) design fixed; command variant and full task ledger explicitly declined with reasons.
 - (t+2h) protocol surface committed + pushed; wcore-protocol --lib 125/125, 5 new tests named.
 - (t+3h) base-vs-HEAD corpus comparison taken; golden 22/22 green proves additivity.
+
+## Measurement 5 (t+~4h) — LIVE. 7 goal events off the shipped binary, with counts.
+
+Driven on `hetzner-dsm` against `target/debug/wayland-core`, build identity asserted BEFORE
+any measurement: `wayland-core 0.12.25 (source 884bca8c1a7bca5f393790bc705af3d1402caa06)` —
+my lane HEAD. Caller-generated nonce `22c1-1785289395-14405`. Script and captures committed
+under `22C1-EVIDENCE/live/`.
+
+The Goal was opened, given two tasks with a real dependency, and driven through the REAL
+`FleetDispatcher` with `--terminate`, so the chain being projected was written by the product:
+
+```
+GOAL: run_complete waves=2 iterations=2 completed=2 delivered=2
+GOAL: canonical_transition strategy=fleet terminal=Terminated { terminal:
+      PartiallyCompleted { completed: 2, failed: 0 } } cursor_seq=Some(17)
+```
+
+Then the NEW surface:
+
+```
+$ wayland-core goal stream --journal … --goal g-22c1-…
+GOAL-STREAM: events=7 transitions=6 snapshots=1
+stdout bytes=3164   stderr bytes=77
+lines=7  goal_snapshot=1  goal_transition=6  valid_json_lines=7  invalid=0
+```
+
+Ordered wire output, decoded:
+
+| # | type | transition | cursor seq | lifecycle after |
+|---|---|---|---|---|
+| 0 | goal_transition | opened | 0 | opened |
+| 1 | goal_transition | run_resumed | 3 | **opened** |
+| 2 | goal_transition | loop_owner_claimed | 4 | **opened** |
+| 3 | goal_transition | iteration_started | 5 | running |
+| 4 | goal_transition | iteration_started | 11 | running |
+| 5 | goal_transition | loop_owner_finished | 17 | terminated |
+| 6 | goal_snapshot | — | 17 | terminated / partially_completed{completed:2,failed:0} |
+
+**Rows 1 and 2 are the design decision paying off, empirically.** `run_resumed` and
+`loop_owner_claimed` both report `opened`, because neither transition determines a lifecycle by
+itself. A projection that derived the lifecycle from the transition's NAME would have written
+`running` for both and been wrong twice in a seven-event stream. Folding through `replay_state`
+— THE reducer — is what makes those two rows right, and it is exactly the case I could not have
+guessed.
+
+The snapshot carries the task ledger with dependencies and outcomes intact:
+
+```
+task build    completed epoch=1 attempts=1 deps=[]        outcome={"state":"self_checked"}
+task publish  completed epoch=1 attempts=1 deps=["build"] outcome={"state":"self_checked"}
+iterations 2/4  resume_count 1  loop_owner_epochs 1
+```
+
+### Every gate in the drive was falsified in the same run
+
+| gate | falsification | rc |
+|---|---|---|
+| `--expect 999` (wrong) | must refuse | **1** — "expected 999 goal events, emitted 7" |
+| `--expect 7` (right) | must pass | **0** |
+| `--goal g-does-not-exist` | must refuse, not print an empty Goal | **1**, stdout **0 bytes** |
+| replay determinism | second stream must be byte-identical | sha256 `3b7682b6…` on both |
+
+Every capture byte-counted; `${PIPESTATUS[0]}` avoided entirely — each rc is read from `$?`
+immediately after the command, never across a pipe.
+
+## Log
+- (t0) worktree created, baseline measured, notes committed.
+- (t+25m) drift probe written, self-tested 3/3, base drift proved pre-existing.
+- (t+45m) design fixed; command variant and full task ledger explicitly declined with reasons.
+- (t+2h) protocol surface committed + pushed; wcore-protocol --lib 125/125, 5 new tests named.
+- (t+3h) base-vs-HEAD corpus comparison taken; golden 22/22 green proves additivity.
+- (t+3h30) TUI surface: App.goals + bridge arms + status-bar segment + 6 bridge tests.
+- (t+4h) LIVE drive: 7 events off the shipped binary, all four gates falsified.
