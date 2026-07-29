@@ -6,6 +6,33 @@
 the current tree, tests and evidence artifacts. **Where a phase verdict and the tree disagree, the
 tree wins and the disagreement is stated.**
 
+> ## RE-GRADED 2026-07-30 by lane `lane/ledger-regrade` at `71acfd19`
+>
+> **Read `.planning/CRITERIA-STATUS.md` first.** It carries one line per criterion — the current
+> grade, the sentence that justifies it, and the date. This file is the working record behind it.
+>
+> **Every `#### ` row below was re-measured against `71acfd19`.** Headline grades are corrected
+> in place with a dated block; original text is left intact per this file's convention. **Where a
+> headline and its dated correction disagree, the LATEST dated block wins.**
+>
+> **Four things a reader of the 2026-07-28 text must know:**
+>
+> 1. **The §0 headline, §2 cost roll-up, §3 must-close ranking and §6 honest read are all stale.**
+>    Open criteria are **14 of 18, not 18**; release-blocking is **4, not 7**. Three criteria
+>    closed outright (`23A-C1`, `24-C5`, `25-C2`) and one release blocker was a two-word string
+>    that has since been fixed (`27-C2(a)`).
+> 2. **§3's number-one item is no longer true.** *"Three of eight advertised trigger kinds can
+>    never fire … the worst failure mode in the ledger"* — `webhook:` and `poll:` are now refused
+>    at add and removed from `--help`, and `event:` has a real producer (`cron publish`).
+> 3. **One falsifier in this file cannot pass in any achievable world** — `22-C3`'s, named in its
+>    own row. A grade driven by it was never measured, whatever it said.
+> 4. **Two correction blocks in this file are themselves stale** — `22-C3`'s 2026-07-29 block and
+>    `23A-C1`'s 2026-07-29 block. Both are flagged in place.
+>
+> Full method, every command and every control: `.planning/LEDGER-REGRADE-NOTES.md`.
+> Every number below came from `/usr/bin/grep` or `/usr/bin/git` (LANE-BRIEF §3b), and every
+> absence carries the known-positive that proves the instrument was alive.
+
 ---
 
 ## 0. Headline
@@ -120,6 +147,26 @@ would require **adding the attack surface in order to test it**.
 **Cost: 2–3 lane-sessions + one fenced protocol seam.** **Not release-blocking** — no customer
 symptom; the property holds, the proof is narrow.
 
+> **RE-GRADE 2026-07-30 (`lane/ledger-regrade`, `71acfd19`) — headline UNCHANGED: NOT MET.
+> The 2026-07-30 correction above is accurate at HEAD; I re-ran its two load-bearing
+> measurements independently.**
+>
+> - `SubAgentConfig|ForkOverrides` under `crates/wcore-protocol/` → **0**. **Known-positive
+>   control, same needle, same invocation style, repo-wide → 34 files.** The instrument is
+>   alive and the seam genuinely does not exist. **The "fenced protocol seam" and Desktop
+>   re-pin in the paragraph above and in the §2 cost roll-up are BUDGET FOR WORK THAT DOES NOT
+>   EXIST** — strike them from any planning that reads this row.
+> - `spawn_host_child_with_overrides` (`spawner.rs:1163`) and
+>   `spawn_child_with_authority` (`spawner.rs:95`) are present; `spawn_host_child` delegates
+>   with `ForkOverrides::default()` (`:1142`), byte-identical for existing callers as claimed;
+>   `child_authority_corpus/surfaces.rs:1425` drives the new entry point.
+>
+> **Can the falsifier pass?** Yes — a child-spawn variant added to `ProtocolCommand` would flip
+> it. It is a live gate, not a dead one.
+>
+> **Still short, and I can evidence none of it as closed:** tool *live* cells on both surfaces,
+> and Windows unmeasured by anyone at this SHA.
+
 ---
 
 ### PHASE 22 — Supervision, Durable Goals, Fleet, and Loops
@@ -166,6 +213,50 @@ fixtures already exist, so this is command-direction work only.
 
 **Cost: revised down to 1–2 lane-sessions + one fenced protocol seam** (was 3–4). **Not
 release-blocking** — Goal's only shipped entry point is the CLI, and the CLI path works.
+
+> **RE-GRADED 2026-07-30 (`lane/ledger-regrade`, `71acfd19`): FAILED (one surface of three) →
+> PARTIAL.** The header and the 2026-07-29 correction's closing requirement are both stale, and
+> one claim made by the implementing lane does not survive measurement.
+>
+> **What closed:**
+>
+> - **The host protocol now CONTROLS.** `ProtocolCommand` carries **five** typed Goal variants —
+>   `GoalOpen`, `GoalDeclareTask`, `GoalAdvance`, `GoalCancel`, `GoalResync`
+>   (`wcore-protocol/src/commands.rs:328-340`) — plus a `GoalControlRefused` event
+>   (`events.rs:1303`), handled at `wcore-agent/src/goal/control.rs:76`. Control: the same
+>   file returns **0** for a token I invented, so the 33 `Goal` hits are real.
+> - **The fixture clause is CLOSED, and `22-C1-CONTROL-SUMMARY.md:275`'s "still 2 of 8 —
+>   orchestrator-only" is STALE. All 8 are on disk**, under
+>   `crates/wcore-protocol/contracts/desktop/v1/`: `commands/goal_{open,declare_task,advance,cancel,resync}.json`
+>   and `events/goal_{snapshot,transition,control_refused}.json`, every one of them listed in
+>   `manifest.json`'s `fixture_inventory` with `capability: durable_goals_v1` (`available`).
+>   The manifest reads `commands:23, events:52, fixtures:159, contract.minor:10` — exactly the
+>   counts that lane requested. **The regeneration it was waiting on has happened.**
+>
+> **What did NOT close, and why this is PARTIAL and not MET:**
+>
+> - **`22-C1-CONTROL-SUMMARY.md:273` claims "TUI CONTROLS: MET". That is an API-existence claim,
+>   not a reachability claim.** `TuiEngine::issue_goal_control` is defined at
+>   `wcore-cli/src/tui/engine_bridge.rs:1217` and has **ZERO call sites** — exactly one
+>   non-comment occurrence repo-wide, its own definition. No keybinding, no slash command, no
+>   test. **Both-direction control:** the sibling `run_stop_hooks` in the same file returns
+>   **12** references including real call sites (`tui/mod.rs:854`, `main.rs:2125/2164/5837`),
+>   so the caller-search finds callers when callers exist. **No TUI user can invoke Goal
+>   control at HEAD.** The lane disclosed that it never drove a live TUI; it did not disclose
+>   that nothing calls the method at all.
+> - The criterion's *"consumed later at D2"* clause is a Desktop-side deliverable and is not
+>   observable from this repository. Recorded as NOT MEASURED, not as met.
+>
+> **One measurement in the 2026-07-29 correction table is wrong in a way worth naming.** It
+> lists four TUI files including `statusline/mod.rs`. At HEAD the files naming the `Goal`
+> **type** are `app.rs` (23), `engine_bridge.rs` (7), `protocol_bridge.rs` (54),
+> `widgets/statusbar.rs` (4). `statusline/mod.rs` matched only the English word "goal" in a
+> comment at `:174` — *"the goal is to neutralize cursor/escape control"*. A case-insensitive
+> grep for a CamelCase type name is how that got in.
+>
+> **Closing it now requires** one thing only: a user-reachable TUI route into
+> `issue_goal_control`. No protocol seam, no contract regeneration, no Desktop co-pin — those
+> are done. **Cost: well under 1 lane-session.**
 
 #### 22-C3 — FAILED (measured, not built)
 
@@ -232,6 +323,37 @@ Single crate, no protocol change, no credential, no second machine.
 **Cost: 2–3 lane-sessions.** **Not release-blocking** — architecture consistency; no customer
 symptom.
 
+> **RE-GRADED 2026-07-30 (`lane/ledger-regrade`, `71acfd19`): FAILED (measured, not built) →
+> PARTIAL.** The header is wrong on both of its words: it **is** built, and the thing that
+> "measured" it could not measure anything.
+>
+> **THE FALSIFIER CANNOT PASS IN ANY ACHIEVABLE WORLD — CONFIRMED INDEPENDENTLY AT HEAD.**
+> *"Grep for `GoalTerminalState` under `crates/wcore-agent/src/orchestration/` returns zero
+> hits"* → **0**, as it always will. **Known-positive in the same directory in the same sweep:
+> `ClimbOutcome` → 21.** The instrument is alive; the needle points at a directory the adapter
+> was never going to live in. There is no code anyone could write that turns this gate green
+> short of relocating `goal/strategy.rs`, which nothing proposes. **This row's headline grade
+> was never measured.**
+>
+> **The corrected falsifier passes, and I ran it:** `GoalTerminalState` across
+> `crates/wcore-agent/src/` → **88** references; `goal/strategy.rs` alone → **62**; repo-wide
+> → **24 files across 4 crates** (wcore-agent 17, wcore-cli 3, wcore-protocol 3, wcore-types 1).
+> That is exactly what the 2026-07-30 correction claims, verified by a third party.
+> `goal/strategy.rs` is **45,886 bytes** at HEAD (the correction's "41.8 KB" is the older size).
+> All five owner result types are adapted in it — `ClimbOutcome` 8, `CouncilRunResult` 8,
+> `WorkflowRunError` 6, `ShardSummary` 6, `DirectOutcome` 11; control, an invented type name → 0.
+>
+> **The taxonomy claim holds under reading, not just grepping.**
+> `GoalTerminalState::requires_loop_owner()` (`wcore-types/src/goal.rs:207`) is an exhaustive
+> `match` with **no wildcard arm** — nine engine-produced variants to `true`, five control-plane
+> variants to `false` — and it is enforced unconditionally at
+> `session_journal/reducer.rs:522`. A sixth category will not compile.
+>
+> **Half A ADVANCED, not closed. Half B CLOSED and pre-existing.** Residual verified open at
+> HEAD: `GoalKernel::terminate` is still `pub` (`goal/kernel.rs:146`), un-goaled invocation is
+> still opt-in, and the refusal is not live-proven because the CLI has no raw-terminate verb.
+> **PARTIAL is the honest grade; MET is not evidenced and I do not award it.**
+
 #### 22-C3 — CORRECTION (2026-07-29, lane/record-truth): **PARTIAL, not FAILED — and the row's own falsifier is broken**
 
 **Three separate things are wrong with the row above, and they need separating.**
@@ -271,6 +393,24 @@ LANE-BRIEF §3.2. Per §6b-ii it is repaired here rather than merely noted:
 **Grade: PARTIAL** (built, merged to lane refs, self-graded PARTIAL, not yet integrated).
 **Not release-blocking**, unchanged.
 
+> **THIS CORRECTION BLOCK IS ITSELF STALE — flagged 2026-07-30 by `lane/ledger-regrade` at
+> `71acfd19`.** It is the second correction in this file to go stale, and the second time
+> `22-C3` has done it.
+>
+> - **Its point (b) — *"It is NOT in the integration branch, and that must not be glossed"* — is
+>   FALSE at HEAD.** `/usr/bin/git merge-base --is-ancestor f68f3ddd HEAD` succeeds:
+>   **`f68f3ddd` IS an ancestor of `71acfd19`.** The adapter is in integration. The parenthetical
+>   in the grade line above — *"not yet integrated"* — must not be read forward.
+> - Its point (a) and its repaired falsifier are both **correct and still correct**; the repaired
+>   falsifier is the one I ran above and it discriminates.
+> - Its grade of **PARTIAL** is the right answer and agrees with my re-grade. It reached it
+>   through one true premise and one false one.
+>
+> **Why this keeps happening to this row:** the row is graded off a gate that cannot go green
+> (see the block above), so every reader who checks the gate sees FAILED and every reader who
+> checks the code sees the adapter. The gate is the defect. It is repaired in the block above
+> and both corrected forms are recorded; do not re-derive the grade from the original text.
+
 #### 22-C4 — PARTIAL
 
 > **"Session-local fixed/dynamic, event-driven, and manual loops remain bounded across reconnect,
@@ -294,6 +434,19 @@ Single crate.
 
 **Cost: 1–2 lane-sessions.** **Not release-blocking.**
 
+> **RE-GRADE 2026-07-30 (`lane/ledger-regrade`, `71acfd19`) — headline UNCHANGED: PARTIAL.
+> One measurement moved; the gap did not.**
+>
+> `start_iteration` now has **two** production callers, not one: `goal/fleet.rs:475` **and**
+> `goal/control.rs:431`, the latter added by 22-C1's host `GoalAdvance` path. Control: 21
+> occurrences repo-wide including tests, so the caller-search is alive.
+>
+> **This does not move the grade.** The new caller is the host command path, not one of the
+> four non-Fleet loop owners the criterion names. Every non-Fleet *loop owner* is still
+> unbounded, and preemption and missed intervals still have no mechanism. The sentence
+> *"`start_iteration` has exactly one production caller"* above is now false; the sentence it
+> was supporting is still true.
+
 #### 22-C5 — PARTIAL
 
 > **"Existing journal compatibility is proved or migrated explicitly without silently invalidating
@@ -316,6 +469,13 @@ a working Anthropic key — **Sean-reserved**, and it is the only part of this c
 
 **Cost: 1 lane-session** for the Windows legs (cheapest open item in the ledger).
 **BLOCKED (partially)**: the `tool_execution_*` region needs a credential. **Not release-blocking.**
+
+> **RE-GRADE 2026-07-30 (`lane/ledger-regrade`, `71acfd19`) — headline UNCHANGED: PARTIAL, and
+> the row is accurate.** Re-checked against the phase directory:
+> `22-01-JOURNAL-COMPAT.md:225` still reads *"the Windows legs of M1–M5 were **NOT RUN**"* and
+> `:227` still carries **`F22-06-LEG-WINDOWS: NOT RUN`**. No newer artifact exists in
+> `.planning/phases/22-supervision-durable-goals-fleet-loops/`. **This is the only row in the
+> ledger where nothing at all has moved, and it remains the cheapest open item.**
 
 ---
 
@@ -377,6 +537,50 @@ Also open and unfixed: **F23A-01-H2**, any errored tool call kills the session, 
 **Cost: 3–4 lane-sessions to close the criterion. 0.25 lane-sessions for the honest interim** —
 `#[arg(hide = true)]` on the flag, or remove it, so the binary stops advertising a dead surface.
 **RELEASE-BLOCKING at the advertisement level** (see §3).
+
+> **RE-GRADED 2026-07-30 (`lane/ledger-regrade`, `71acfd19`): NOT MET → MET (for the shipped
+> surface). NO LONGER RELEASE-BLOCKING. This row has moved further than any other in the
+> ledger, and BOTH its earlier texts are now false.**
+>
+> **⚠ THE 2026-07-29 CORRECTION BLOCK ABOVE IS ITSELF STALE.** Every one of its three
+> load-bearing claims is false at HEAD:
+>
+> | 2026-07-29 correction says | At `71acfd19` |
+> |---|---|
+> | *"the flag is hidden"*, `#[arg(…, hide = true)]` | **FALSE — RE-ADVERTISED.** `wcore-cli/src/main.rs:489` is a plain `#[arg(long, value_name = "SKILL_OR_PROCEDURE_ID")]`. `:475` reads *"23A-C1: RE-ADVERTISED because governed promotion now exists"* |
+> | *"`run_skills_promote` is still a `bail!`"* | **FALSE.** `main.rs:2657-2659` delegates: `wcore_cli::skill_govern::run_promote(id).await` |
+> | *"`23A-C1` stays NOT MET … the 3–4 lane-sessions to close the criterion stand"* | **FALSE.** They were spent. `lane/23a-c1-governed` (head **`597c3275`, an ancestor of HEAD**) grades it **MET-for-the-shipped-surface** |
+>
+> **The row's own two absences were the right conclusion from the wrong instrument.** It says
+> *"revoked — nothing implements it. Grep for any revoke surface returns zero"* and
+> *"rolled back — nothing implements it. Zero."* — **stating no query and showing no
+> known-positive**, which is precisely the self-passing shape LANE-BRIEF §3b-i warns about. At
+> HEAD, `crates/wcore-cli/src/skill_govern.rs` (13.8 KB) ships all four verbs:
+>
+> | verb | site |
+> |---|---|
+> | `--skills-govern` (list installed / promoted / revoked) | `skill_govern.rs:96` |
+> | **`--skills-revoke <NAME>`** | `skill_govern.rs:212` |
+> | **`--skills-rollback <REVOCATION_ID>`** | `skill_govern.rs:238` |
+> | `--skills-promote` (governed) | `skill_govern.rs:256` |
+>
+> with a revocation journal (`JournalEvent::Revoked`, `:170-175`) and `store.live_revocations()`
+> (`:99`) behind the `observe` clause.
+>
+> **The implementing lane graded itself honestly and its control reddens**: rollback over 35
+> kills went **PARTIAL 11/35 before** the atomic fix and **PARTIAL 0/35 after**, so the zero is
+> not a free zero. It found and disclosed its own HIGH on the way — *"the revocation capability
+> shipped to nobody; and rollback wrote the user's skills directory non-atomically"*.
+>
+> **What is deliberately NOT claimed** (`23A-C1-GOVERNED.md` §9-10), and I do not claim it
+> either: that every conceivable resurrection route is structurally closed; `promote_new`
+> materialisation; purging `evolved_prompts` rows on revoke (the crate graph forbids the
+> dependency); promotion authority beyond the invoking surface, because no identity system
+> exists. **MET for the shipped surface, not MET in the absolute — the distinction is the
+> lane's own and I keep it.**
+>
+> **§3's item 4 and §2's "Yes" for this row are both void.** The advertisement complaint is
+> gone because the thing being advertised now works.
 
 ---
 
@@ -487,6 +691,32 @@ decision** on the remaining seven.
 **Cost: 2–3 lane-sessions**, plus the product decision, which is Sean's.
 **RELEASE-BLOCKING for macOS and Windows** (see §3).
 
+> **RE-GRADED 2026-07-30 (`lane/ledger-regrade`, `71acfd19`): NOT MET → PARTIAL. The
+> platform half is closed; the conjunction is not.**
+>
+> **Every platform clause this row names as unmet is now met.** `24-C5-FINISH-SUMMARY.md`
+> frontmatter, `grade-24-C1`: *"upgrade and rollback now **PERFORMED and observed on all three
+> platforms**; the **12-of-12 clean tally holds on all three**."* Both were driven at candidate
+> `978f49d7` (Linux, Windows) and `eba6e9d7` (macOS). So:
+> *"upgrade and rollback were never performed on any platform"* — **false**;
+> *"the whole measurement is Linux only"* — **false**;
+> *"the 12-of-12 clean tally is short (F24-C-M1)"* — **false**.
+>
+> **The abandoned-delivery HIGH is closed** — `acknowledge` and `resend` are in
+> `wcore-cli/src/gateway.rs` (`resend_needs_confirmation` `:820`, `async fn resend(… also_ack)`
+> `:861`, regression test `:1854`), matching the 2026-07-29 CLOSED block above.
+>
+> **Why PARTIAL and not MET.** The criterion is a conjunction and its no-loss half is unchanged:
+> exactly-once delivery holds on **1 of 10** adapters (Slack), and on the other nine an
+> outcome-unknown delivery is abandoned. That is the correct and only available trade for the
+> **7 of 10 platforms with no idempotency primitive at all**, so closing it is a **product
+> decision, not implementation** — and that decision is still Sean's and still unmade.
+> Matrix and Discord (≈0.5 session each) remain the only two cheap ones, and
+> `BL-24C1-DISCORD-WINDOW` still needs a credential that exists on no build host.
+>
+> **§3 item 3's macOS/Windows demand on this row is satisfied. The residual is not a platform
+> gap and no number of lane-sessions closes it.**
+
 #### 24-C2 — PARTIAL
 
 > **CORRECTED 2026-07-28 by `lane/24-triggers` (merged `5d93a407`), which probed the real tick
@@ -544,6 +774,31 @@ kill-mid-fire continuation run; the PTY surface test; macOS.
 **Cost: 3–4 lane-sessions.** **RELEASE-BLOCKING** — three of eight advertised trigger kinds are
 inert (see §3).
 
+> **RE-GRADE 2026-07-30 (`lane/ledger-regrade`, `71acfd19`) — headline UNCHANGED: PARTIAL.
+> But the sentence that made this the ledger's NUMBER-ONE release blocker is no longer true,
+> and §3 item 1 must be re-ranked.**
+>
+> §3 ranks this first on: *"`--trigger event:`, `--trigger webhook:` and `--trigger poll:` are
+> documented in the shipped `--help`. They validate, persist and list. Nothing ever fires them.
+> **This is the worst failure mode in the ledger**: the customer gets no error."* At HEAD:
+>
+> | Trigger | State at `71acfd19` |
+> |---|---|
+> | `event:` | **Has a real producer.** `cron publish <topic>` — `CronCmd::Publish` (`wcore-cli/src/cron.rs:112`), dispatched `:235`, `publish_cmd` at `:264` publishes into the schedule's event queue |
+> | `webhook:` | **Refused at add**, `cron.rs:52-54`: *"`webhook:` and `poll:` are NOT accepted: nothing in this build can [fire them] … a job that never runs"* |
+> | `poll:` | Same refusal, same site |
+> | pre-existing persisted jobs | Printed **under the job, not as a footnote**: `WILL NEVER FIRE — {reason}` (`cron.rs:350`), via `job.effective_trigger().no_producer_reason()` |
+>
+> **The silent-acceptance failure mode is gone.** A customer can no longer register automation
+> that quietly never runs; they are refused at the point of creation, and anything already on
+> disk is labelled. The 2026-07-28 correction block above described this repair and is
+> **accurate at HEAD** — it is §3's ranking, written against the pre-repair text, that is stale.
+>
+> **Still PARTIAL, and I do not upgrade it**: the *plane* was not built. `webhook` still needs an
+> inbound route and credential scheme; `poll` still needs an egress-routed client and a defined
+> response contract; the kill-mid-fire continuation run, the PTY surface gate and macOS are all
+> still absent. **The false promise was retired; the capability was not delivered.**
+
 #### 24-C3 — PARTIAL (Linux), NOT MET (macOS, Windows)
 
 > **"Reference channels prove setup/auth, access, routing, media, native actions, idempotency,
@@ -559,6 +814,22 @@ adapter was never finished, and 24-03 Task 3 was only partially run. macOS and W
 
 **Cost: 2–3 lane-sessions.** **Partially release-blocking** — channels are a headline capability
 and the inbound half is unproven end-to-end.
+
+> **RE-GRADE 2026-07-30 (`lane/ledger-regrade`, `71acfd19`) — headline UNCHANGED: NOT MET.
+> Work has landed, the implementing lane declines to claim the criterion, and a NEW HIGH is
+> open and unfixed.**
+>
+> `24-C3-FINISH.md` frontmatter: *"**STILL NOT MET, and this lane does not claim it.** Two of
+> the four untouched clauses are now measured on Linux (**health PASS**, **reconnect/reload
+> PARTIAL** — reload registers but does not admit). **media and native actions remain untouched
+> for every adapter.**"* Fence exposure zero — 0 Rust files changed.
+>
+> **NEW HIGH, open at HEAD and not carried anywhere else in this ledger:**
+> **`F24-C3-H5` — `channel reload` registers a new adapter and reports it healthy, but never
+> reloads its inbound access policy, so every message to it is silently denied.** Measured,
+> proven with a one-variable control, **NOT fixed.** This is a live customer-visible
+> silent-drop, and it is the same family as the failure mode §3 ranks first. Any reader using
+> §3 to plan should treat this as a candidate for that list.
 
 #### 24-C4 — MET on Linux / HTTP+SSE only
 
@@ -578,6 +849,17 @@ idempotency handling**; stdio and WebSocket have **none of the three**; everythi
 
 **Cost: 2 lane-sessions.** **Not release-blocking if HTTP/SSE is the shipped host transport** —
 which it is for the Desktop app. Record the transport envelope explicitly in the release notes.
+
+> **RE-GRADED 2026-07-30 (`lane/ledger-regrade`, `71acfd19`): MET on Linux / HTTP+SSE only →
+> MET-WITH-STATED-EXCEPTIONS.** `24-C4-SUPPORT-SUMMARY.md` verdict: *"24-C4 half two goes
+> NOT MET → MET on Linux. The criterion goes PARTIAL → MET-WITH-STATED-EXCEPTIONS. **The
+> phase's single release blocker is closed.**"* `F24-C4-H1` closed; `F24-C2-M1` and
+> `F24-C4-M1` opened as MEDIUM.
+>
+> The transport envelope in the row above is unchanged and still needs stating in the release
+> notes: **HTTP/SSE supported; REST `/v1` role-gated but with no resume route and no
+> idempotency handling; stdio and WebSocket have none of the three.** The recommendation to
+> declare the envelope rather than build three more transports stands.
 
 #### 24-C5 — NOT MET (no evidence, any platform)
 
@@ -604,6 +886,32 @@ constraint: no Cargo on the Mac**, so the macOS leg needs the CI-published
 "unobtainable macOS binary" premise recorded in `23A-04-SUMMARY.md:40` **must not be reused**.
 
 **Cost: 3–4 lane-sessions.** **RELEASE-BLOCKING for the declared platform envelope** (see §3, §4).
+
+> **RE-GRADED 2026-07-30 (`lane/ledger-regrade`, `71acfd19`): NOT MET (no evidence, any
+> platform) → MET. NO LONGER RELEASE-BLOCKING. This is the most stale row in the ledger and
+> every one of its three absences is false at HEAD.**
+>
+> `24-C5-FINISH-SUMMARY.md` frontmatter, `grade-24-C5`: *"**MET.** All three platforms drive
+> the 17-step journey to a verified receipt: **Linux and Windows at candidate `978f49d7`,
+> macOS at `eba6e9d7`**. F24-J-H3 fixed and the **Windows recovery OBSERVED, not asserted**."*
+>
+> | Row's absence | At `71acfd19` |
+> |---|---|
+> | *"no journey driver exists under `crates/wcore-eval-scenarios/tests/`"* | **FALSE** — `crates/wcore-eval-scenarios/tests/journey_receipt_contract.rs`, **21 `#[test]` fns** |
+> | *"no receipt schema"* | **FALSE** — the contract test above guards it |
+> | *"no receipt on any platform"* | **FALSE** — `24-C5-finish-evidence/{linux-journey-at-candidate,windows-journey,macos-journey}.log` |
+>
+> **This row's history is the clearest argument in the file for re-measuring before planning.**
+> An intermediate lane (`24-C5-JOURNEY-SUMMARY.md`) graded it *"MET on Linux. NOT MET on
+> Windows — red at platform-recover … NOT RUN on macOS"*, found and fixed two HIGH defects and
+> left a third (`F24-J-H3`) open; the finishing lane closed that HIGH and took the remaining
+> two platforms. A reader who stopped at either the original row or the intermediate summary
+> would have budgeted **3–4 lane-sessions of work that no longer exists.**
+>
+> **§4's Sean-reserved item — the RC platform envelope — is materially defused.** The decision
+> was framed as *"either accept 5–7 lane-sessions to close `24-C5` and `24-C1`'s macOS/Windows
+> legs, or declare the RC Linux-only."* **Both have been closed.** The envelope question is now
+> a release-notes question, not a work question. See `.planning/DECISION-RC-PLATFORM-ENVELOPE.md`.
 
 ---
 
@@ -644,6 +952,37 @@ real hosts. No credential, no new machine, **no Sean action.**
 federation is not a first-release capability, and the mechanism is proven against a separate machine
 identity.
 
+> **RE-GRADED 2026-07-30 (`lane/ledger-regrade`, `71acfd19`): NOT MET → MET (as written), with
+> a recorded dissenting reading that I am carrying forward rather than resolving.**
+>
+> The row's single unmet clause was *"**nodes**, plural, meaning genuinely distinct machines"*.
+> `lane/25-hosts` (merge `6861b3aa`, **ancestor of HEAD**) re-ran the corpus with `hetzner-dsm`
+> and `SeanD@seandesktop` as the two hosts, entirely through the shipped binary
+> (`25-HOSTS-SUMMARY.md:154-172`). All six properties PASS:
+>
+> | property | what made it a real measurement rather than a loopback |
+> |---|---|
+> | PAIR | genuinely different node keys and OS strings; *"a loopback proof would have shown one key on both sides"* |
+> | ADVERTISE | different capability sets from **real probes** — node `appcontainer`, controller `bubblewrap` |
+> | MIXED VERSIONS | a **second Windows binary built from the same tree** with `NODE_CONTRACT_MAJOR = 99` — not a flag, not a hand-edited record |
+> | REVOKE | far end could not re-pair itself despite presenting a genuine proof |
+> | OFFLINE | a **real partition between two physical hosts** (`iptables -I OUTPUT … DROP`), verified installed and verified removed |
+> | ATTRIBUTION | HOLDS after all five disruptions |
+>
+> **The attribution control pair is the reason a HOLDS is worth something.** Its negative
+> control copies the node's real state dir and deletes **only** `keys/node.key`, so the backend
+> key is byte-identical and node identity is the single variable: POSITIVE `EXIT=0`, NEGATIVE
+> `attribution BROKEN … EXIT=1`. The lane **discarded two earlier control runs of its own** that
+> were red for the wrong reason, and said so.
+>
+> **The dissent, kept because the evidence supports both readings** (`25-HOSTS-SUMMARY.md:209-237`):
+> the controller **cannot verify a node-minted receipt** — `node attribution` refuses with
+> *"this host does not hold the signing key … only its integrity, which is not the same claim"*.
+> Attribution can therefore only be verified on the machine that produced the work. **A reader
+> who takes "authority attribution" to mean *the controller can audit the node* should read this
+> as NOT MET.** I grade the criterion **as written** — attribution is not lost — and record that
+> the stricter reading is available and was raised by the implementing lane itself, not by me.
+
 #### 25-C4 — NOT MET
 
 > **"Compromised keys/plugins/backends and denied secret/egress paths fail closed with no orphaned
@@ -668,6 +1007,40 @@ and run the orphan scan with the same positive/negative control pair the cloud s
 
 **Cost: 0.5–1 lane-session. NO LONGER BLOCKED.** **Not release-blocking** — a measurement gap on
 one execution backend, with the fail-closed half already holding.
+
+> **RE-GRADED 2026-07-30 (`lane/ledger-regrade`, `71acfd19`): NOT MET → PARTIAL. The row's
+> named unmet clause is CLOSED; two open items it never knew about take its place.**
+>
+> **The SSH orphan surface is measured, on two far ends, each checked in both directions**
+> (`25-HOSTS-SUMMARY.md:80-150`) — `lane/25-hosts`, merge `6861b3aa`, ancestor of HEAD:
+>
+> | far end | negative | positive | after reap |
+> |---|---|---|---|
+> | containerised sshd (full POSIX) | unused nonce → `0 (MEASURED)`, exit 0 | **a REAL orphan the product itself leaked** — remote `setsid` child, controller killed `-9` → `2 (MEASURED)`, exit **1** | `0 (MEASURED)`, exit 0 |
+> | the real Windows host | unused nonce → `0 (MEASURED)` | primary `.pid` signal → `1 (MEASURED)`, exit **1** | — |
+>
+> **The positive control was not planted** — it is an orphan the product left, which is a
+> stronger arm than the cloud surface's. A **third far end with `ps` removed** was built purely
+> to prove the `NOT MEASURED` branch is reachable rather than dead code, and the same binary
+> still MEASURED against the POSIX far end in the same run. And a **structural false zero was
+> caught in flight**: the Windows secondary sweep read `0 (MEASURED)` while two independent
+> instruments saw the orphan, because `ps -eo` was rejected and stderr discarded — fixed, then
+> `1 (MEASURED)` exit 1.
+>
+> **The Windows egress-denial leg is also MET** (`25-C4-WINDOWS-SUMMARY.md:275`), with a
+> **vendor-answered positive arm**, a **pre-fix fail-open arm proving the gate can fail**, an
+> out-of-product network control, and a measured **TLS peer identity** that excludes the
+> localhost-proxy / TLS-interceptor / hosts-redirect story a cross-auditor raised. A HIGH
+> regression that the original Linux fix had shipped was found and closed there.
+>
+> **Why PARTIAL and not MET — taken from the implementing lane, not invented here.**
+> `25-C4-WINDOWS-SUMMARY.md:278-281`: *"Criterion 4 overall remains PARTIAL for reasons this
+> lane did not own — the **un-denied POST path**, and the missing **`--i-accept-exfil-risk`
+> interlock** that is an owner decision."* Plus: the Windows **container** surface could not be
+> enumerated (Docker Desktop absent) and the product correctly refuses to read that as zero;
+> and one **genuine platform RED** is reported red rather than relaxed
+> (`wcore-egress::tests::transport_failure_records_one_stable_error_class`, pre-existing, fails
+> 3/3 isolated).
 
 ---
 
@@ -697,6 +1070,32 @@ chokepoint (a refactor of correct code — genuine architecture value, zero defe
 and a macOS leg.
 
 **Cost: 2 lane-sessions.** **Not release-blocking** — the duplicated paths were measured correct.
+
+> **RE-GRADE 2026-07-30 (`lane/ledger-regrade`, `71acfd19`) — headline UNCHANGED: PARTIAL.
+> But the row's RED gate is GREEN, and that sentence must not be read forward.**
+>
+> The row says *"The plan's own gate requiring `media_intake` in `attachments.rs` and
+> `channel_media.rs` is **RED and reported RED**."* At HEAD both are routed:
+>
+> - `crates/wcore-agent/src/channel_media.rs:41` imports `wcore_tools::media_intake::admit_bytes`
+>   and **calls it at `:295` and `:329`**.
+> - `crates/wcore-cli/src/attachments.rs:71` calls `admit_local_image`, which is
+>   `wcore-tools/src/vision_tools.rs:192` and itself routes through `media_intake`
+>   (`vision_tools.rs:57`). `vision_tools.rs:179-180` records the consequence directly: the UNC
+>   guard *"is now applied ONCE, inside `media_intake::admit_open`, when the six media surfaces
+>   were consolidated onto one intake."*
+> - `crates/wcore-tools/tests/media_intake_unification_test.rs` guards it with **paired
+>   audio/image controls** — every audio refusal has a named `_control` twin, so a one-sided
+>   pass cannot hide.
+>
+> **This gate could pass and now does — it is a live gate, not a dead one.** Contrast `22-C3`'s.
+>
+> **PARTIAL stands** and I do not upgrade it: `27-MEDIA-INTAKE.md` grades it *"PARTIAL
+> (unchanged grade; one of its two clauses materially advanced, the other still RED and
+> reported RED)"*. The PTY drive was never taken and macOS still has no artifact.
+> That lane also found and fixed a **HIGH** on the way — four user-facing vision remediation
+> strings named only ANTHROPIC/OPENAI/GEMINI, so a FluxRouter user following them verbatim
+> would set `OPENAI_API_KEY=<flux key>` and **misdirect the credential to a third party**.
 
 #### 27-C2 — NOT MET
 
@@ -737,6 +1136,37 @@ baseline at all**.
 **Cost: 0.2 lane-sessions for (a). 2 lane-sessions + one Desktop co-release train for (b) and (c).**
 **RELEASE-BLOCKING** (see §3).
 
+> **RE-GRADED 2026-07-30 (`lane/ledger-regrade`, `71acfd19`): NOT MET → PARTIAL. (a) is
+> CLOSED; (b) and (c) are unchanged. Still release-blocking, but for (b) only.**
+>
+> **(a) — the two-word string — is FIXED.** §3 called it *"the highest leverage per unit of
+> effort in the entire ledger"*, and it was taken. `wcore-browser/src/tool.rs:500-501` now
+> carries the reasoning in-source: *"the section header here MUST be the one the config loader
+> reads (`[browser.policy]`). It named `[browser]`, which `#[serde(default)]` silently drops,
+> so following this hint verbatim left the tool disabled with no diagnostic."* The text is no
+> longer a literal in the error path — it comes from
+> `wcore-browser/src/config_hint::disabled_by_default_hint()`, whose snippets emit
+> `[browser.policy]` (`config_hint.rs:29,37`), and **the snippets are round-tripped through the
+> real loader** by `crates/wcore-agent/tests/browser_config_hint_roundtrip.rs`, which asserts
+> *"snippet names [browser]; the loader reads [browser.policy]"* as its failure message
+> (`config_hint.rs:91`). **The fix is guarded against re-drift by the loader itself, not by a
+> string compare.** §3 item 2 is complete.
+>
+> **(b) — capability flags advertised on linkage — is UNCHANGED and still open.**
+> `crates/wcore-agent/src/bootstrap.rs:754` is still
+> `PluginRunner::new().with_computer_use_advertised(true)`, unconditional. (Note the row's
+> `bootstrap.rs:696` line number has moved to `:754`.) The in-source justification is that
+> per-OS reification self-gates at reify time — **that is a different property from *publishing
+> live readiness***, which is what the criterion asks for, and it does not stop the Desktop app
+> rendering a capability that cannot work. Still behind `SEAM-REQUESTS/27.md` SR-27-1..3.
+>
+> **(c) — the three policy baselines — are UNCHANGED.** `27-BROWSER-VOICE.md:141-142`:
+> downloads-root confinement, the approval gate on a computer-use operation, and process count
+> before/during/after plus one reaper interval *"still have **no baseline**"*. That lane grades
+> **27-C2 PARTIAL** and explicitly adds none.
+>
+> **Revised cost: 2 lane-sessions + one Desktop co-release train** — the 0.2 is spent.
+
 #### 27-C3 — NOT MET
 
 > **"Built-in, MCP-only, late-MCP, and combined media generation expose consistent discovery,
@@ -761,6 +1191,31 @@ matters.
 calls produce no cost record.* If media generation is billable or budget-governed in the shipped
 product, that becomes a money-correctness issue and moves up immediately.
 
+> **RE-GRADED 2026-07-30 (`lane/ledger-regrade`, `71acfd19`): NOT MET → PARTIAL.**
+>
+> The row's central claim — *"**None of the four generation shapes was exercised.**"* — is
+> false at HEAD. `27-C3-MEDIA-SUMMARY.md:8`: *"Honest verdict: C3 is NOT MET, and is now
+> **PARTIAL**. Two of its four clauses moved on real [hardware]."* Measured (`:114-132`):
+>
+> | shape | state |
+> |---|---|
+> | built-in | exercised |
+> | **MCP-only** | discovered and callable over real transport; a missing credential fails closed as `isError` on a *successful* transport call |
+> | **combined** | measured — **MCP can advertise `image_generate` and shadow the built-in with no marker** (threat T-27-03-08). Measured, **not resolved** |
+> | **late-MCP** | **NOT EXERCISED.** *"The fixture makes it reachable; I did not reach it."* |
+>
+> **`F-27C3-04` is CLOSED** — *the built-in image tool is broken by default for anyone on
+> FluxRouter* — *"live-proved on both arms with a live known-negative"*
+> (`F27-IMAGE-DEFAULT-SUMMARY.md:18`), with a source-revert known-negative, a mutation control
+> and a secret sweep alongside it. That lane also established that the `wayland-core image`
+> subcommand does **not** share the defect, because it bypasses the affected path.
+>
+> **The caveat in the row above is UNCHANGED and still the thing worth Sean's eye:** the
+> missing cost record is now *asserted as a test so it cannot drift* — **it was not fixed**
+> (`27-C3-MEDIA-SUMMARY.md:286`). Whether that blocks still turns on the product question this
+> ledger's §5 correctly records as unmeasured: **is media generation billable in the shipped
+> product?**
+
 #### 27-C4 — NOT MET
 
 > **"Streaming voice supports interruption, cancellation, compatibility, accounting, and ordered
@@ -768,6 +1223,29 @@ product, that becomes a money-correctness issue and moves up immediately.
 
 **Grade measured: NOT MET. NOTHING WAS EXERCISED.** No audio flowed on any machine. No interruption.
 No cancellation. No event ordering observed. `crates/*/tests/` contains no voice test.
+
+> **RE-GRADE 2026-07-30 (`lane/ledger-regrade`, `71acfd19`) — headline UNCHANGED: NOT MET. But the
+> sentence above it is false, and the classification survives for a different reason than it states.**
+>
+> - *"`crates/*/tests/` contains no voice test"* — **false.**
+>   `crates/wcore-agent/tests/voice_live_capture_mac.rs` (28 KB) exists with **4 test fns, 0
+>   `#[ignore]`**, and no env-gated early return. Control: 502 test files repo-wide.
+> - *"No audio flowed on any machine"* — **false.** `27-VOICE-MAC.md` records capture proven live:
+>   a 1 kHz tone detected at ratio **116.66** against a same-device, same-duration control arm at
+>   **1.15**.
+> - *"No interruption"* — **false.** `27-VOICE-BARGEIN.md` grades it *"NOT MET (3 of 5, up from
+>   1 of 5)"*, with barge-in **implemented and proven against the real `CpalAudioPlayer`, not the
+>   mock**.
+> - **What DOES hold is the reachability classification**, and it is the reason the grade stands:
+>   `voice` is still absent from every `default` list — `wcore-cli/Cargo.toml:31` is
+>   `default = ["remote-registry", "workflow", "monitor", "review_artifact"]` and `voice` appears
+>   only at `:58`. **The feature is not in the shipped artifact.**
+> - Open blocker, named by `27-GAPS-SUMMARY.md:140-143`: **no local speech-to-text path exists in
+>   the tree.**
+>
+> See also the 2026-07-29 correction below on the ordered-events sub-clause: 6 of 51 event fixtures
+> already carry `event_id` + monotonic `sequence`, so that clause is satisfiable by an existing
+> mechanism.
 
 **Reachability — measured, because the whole release classification turns on it.** All three panel
 members independently attacked my original classification of this criterion for resting on an
@@ -814,6 +1292,18 @@ not built.
 
 > **"Deterministic corpora and packaged smokes pass on native macOS, Linux, and Windows."**
 > (`ROADMAP.md:155`)
+
+> **RE-GRADED 2026-07-30 (`lane/ledger-regrade`, `71acfd19`): NOT MET → PARTIAL.**
+>
+> *"Zero packaged smokes ran on zero platforms"* is **false**. `27-GAPS-SUMMARY.md:146-166` records
+> **three packaged smokes** — each a *published release archive*, extracted and executed on the real
+> OS: **macOS aarch64, Linux x86_64 (digest-verified), Windows x86_64 (digest-verified)**. Result
+> **8 PASS / 1 RED, byte-identical grades on all three**, across nine probes run under a throwaway
+> `WAYLAND_HOME` with 18 credential variables stripped.
+>
+> The distinction that keeps it off MET is real and worth preserving: this is **MET for the shipped
+> release, NOT MET for the candidate**. The phase candidate is unsmoked, and the **two aarch64
+> targets are NOT MEASURED** — recorded as neither zero nor passing, which is the honest third state.
 
 **Grade measured: NOT MET.** **Zero packaged smokes ran on zero platforms.** Every Linux measurement
 in Phase 27 came from a `cargo build --release` binary **inside a build tree** — not a packaged
