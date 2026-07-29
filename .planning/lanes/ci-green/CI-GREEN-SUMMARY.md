@@ -215,9 +215,53 @@ as release.
 
 ---
 
-## Gate results
+## Gate results — hetzner-dsm, HEAD `5aac14ac`
 
-*(filled in below from the full-suite run)*
+```
+$ cargo nextest run --workspace --profile ci --no-fail-fast
+    Starting 12990 tests across 556 binaries (51 tests skipped)
+  TRY 3 FAIL [ 0.006s] ( 9385/12990) wcore-protocol::desktop_contract_corpus manifest_pins_generator_and_all_three_digests
+  TRY 3 FAIL [ 0.169s] (10011/12990) wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+     Summary [74.364s] 12990 tests run: 12988 passed (1 leaky), 2 failed, 51 skipped
+
+$ cargo clippy -p wcore-cli -p wcore-exec-backend -p wcore-eval-scenarios --all-targets -- -D warnings
+CLIPPY_EXIT=0
+$ cargo fmt --all -- --check
+FMT_EXIT=0
+```
+
+**Exactly two failures remain, and they are the two contract-corpus tests that are not
+mine.** All three named defects are gone from the suite.
+
+Counts move from CI's `12987 run / 50 skipped` to `12990 run / 51 skipped`: +3
+`build_script_provenance` cases and +1 `#[ignore]`d probe fixture.
+
+### A test the orchestrator did NOT name — reporting rather than absorbing
+
+An earlier full-suite pass at `640d7d4d` showed **three** failures: the two corpus tests plus
+`wcore-cli::migrate_hermes import_is_idempotent_without_overwrite`. It did not recur in the
+final run. Per LANE-BRIEF §6 I re-ran it alone at the same commit rather than reporting a
+regression — and it is worse than a contention artifact:
+
+```
+MIGRATE_HERMES single-attempt (--retries 0), 25 reps in isolation: pass=10 fail=15
+```
+
+**A 60% per-attempt failure rate**, i.e. ~21.6% chance of a hard CI failure even with the CI
+profile's `retries = 2`. It happened not to fire in CI run 30434804220.
+
+Cause, from the failure payload: the two config dumps are byte-identical except that
+`[profiles.alpha]` and `[profiles.beta]` swap order. `wcore-config/src/config.rs:319` declares
+`pub profiles: HashMap<String, ProfileConfig>`, so TOML serialization emits profile tables in
+arbitrary hash order and **every config write reshuffles the file**. The test asserts byte
+equality across two successive round-trips and loses that coin flip 60% of the time.
+
+Not caused by this lane: my diff touches none of `wcore-config`, `migrate`, or that test, and
+`pub profiles: HashMap` dates to `da5a18b5` (2026-06-08). Graded MEDIUM (a noisy config
+rewrite plus a flaky test, no correctness or security impact), so per LANE-BRIEF §5 it goes
+to BACKLOG rather than being fixed here — the fix is a `HashMap → BTreeMap` change to a
+public type in `wcore-config`, which is not something a CI-green lane should smuggle in
+mid-merge-train.
 
 ## Files changed
 
@@ -231,5 +275,45 @@ as release.
 | `crates/wcore-exec-backend/tests/node_contract.rs` | derive identity in a cleaned child environment |
 
 **Shared-file fence:** `crates/wcore-cli/src/lib.rs` and `src/main.rs` are **untouched** in
-every commit on this branch. `main.rs` was mutated only transiently on hetzner for the two
-known-negatives and reverted; `git status --porcelain` came back empty afterwards.
+every commit on this branch. Verified against the captured merge-base, not the branch name:
+```
+BASE=1097cfb300d19b3524d696cce58ad85d5c7a33fe
+git diff "$BASE" --stat -- crates/wcore-cli/src/lib.rs crates/wcore-cli/src/main.rs   # empty
+```
+`main.rs` was mutated only transiently on hetzner for the two known-negatives and reverted;
+`git status --porcelain` came back empty afterwards.
+
+---
+
+## What I did NOT do
+
+- **Did not touch the Desktop contract corpus.** Both
+  `wcore-protocol::desktop_contract_corpus` tests are still red, as instructed. No
+  `wcore-contract generate`, no fixture edits, no `crates/wcore-protocol/**` changes at all.
+- **Did not fix `migrate_hermes`.** Reported above with a measured rate instead.
+- **Did not use `#[ignore]` to silence the node-contract test**, and did not raise any budget
+  without proving the resulting test can still fail.
+- **Did not merge into `plan/f20-unified-audit-repair`**, open a PR, tag, or touch `main`.
+- **No macOS or Windows CI evidence.** The lane pushes did not carry `[ci-darwin]`, so the
+  macOS legs were budget-skipped. The Darwin arm of the node-contract pair was proven on the
+  local Mac instead; the Windows legs are untouched by every file in this diff except
+  `ci.yml`, whose change is scoped to the two Linux container invocations.
+
+## Rule deviations, disclosed
+
+- **Mac `cargo` run.** `cargo test -p wcore-exec-backend --test node_contract` was run on the
+  Mac under the LANE-BRIEF §0 Darwin-behaviour exception — single crate, single test file,
+  and the assertion (`/etc/hostname` and `/proc` absent, so `machine_id` degenerates) is
+  behaviour no permitted host can exhibit. No workspace build, no clippy, no release build.
+- **`git reset --hard` on hetzner, once.** LANE-BRIEF §0 forbids it. I used it in the first
+  hetzner sync script on `/root/wayland-ci-green`, my own dedicated worktree on my own branch
+  `hz/ci-green`, targeting my own pushed commit — no other lane's state was reachable. I
+  switched to `git merge --ff-only` for every subsequent sync. Flagging rather than burying.
+- **No credential was needed or used.** Every proof here runs against local fixtures.
+
+## For the orchestrator to serialize
+
+Nothing. No protocol seam, no contract request, no shared-file edit. `ci.yml` is edited, and
+if another lane also edits `ci.yml` the two changes are in different jobs (`ci-linux`'s two
+`env:` values) and should merge cleanly, but that is the one file worth checking during the
+merge train.
