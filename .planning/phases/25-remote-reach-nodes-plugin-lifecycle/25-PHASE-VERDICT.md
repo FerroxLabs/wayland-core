@@ -462,6 +462,42 @@ effective harness-proven breadth is two, not four.
 
 ---
 
+## Cross-audit panel — the two contestable calls
+
+Two grades were genuinely arguable and were put to the panel with the measured facts, the
+grading vocabulary, and no indication of my own leaning. Both members converged with my
+call, independently and for the criterion-text reason rather than the vibe.
+
+**Question A — Criterion 1: MET-WITH-STATED-EXCEPTIONS or PARTIAL?**
+
+| member | position | reasoning (verbatim, condensed) |
+|---|---|---|
+| codex `gpt-5.6-sol` | **PARTIAL** | *"Cloud cancellation is entirely unproven, so a required behavior cannot receive an exception-based pass. The reproduced SSH cleanup leak directly violates cleanup and leaves sensitive task inputs behind."* Also flagged the cross-commit composition as not proving four surfaces equivalent in one coherent implementation. |
+| gemini `3.1-pro-preview` | **PARTIAL** | *"The complete lack of cancellation testing on the cloud backend means a core dimension of the criterion was never measured, preventing it from reaching the threshold for an exception-based pass."* |
+
+**Question B — Criterion 2: MET-WITH-STATED-EXCEPTIONS or PARTIAL?**
+
+| member | position | reasoning (verbatim, condensed) |
+|---|---|---|
+| codex `gpt-5.6-sol` | **MET-WITH-STATED-EXCEPTIONS** | *"Controller-side verification is an important architectural limitation, but the criterion requires attribution not be lost — not that the controller perform the audit."* |
+| gemini `3.1-pro-preview` | **MET-WITH-STATED-EXCEPTIONS** | *"The literal clauses of the criterion were empirically satisfied... The limitations regarding central controller verification and dead refresh code represent documented defects that do not violate the strictly stated text of the goal."* |
+
+**Basis: unanimous, both questions.** Codex took the LAST emitted block (it repeats its final
+answer); gemini was invoked with `--skip-trust` or it returns nothing. Both were probed with
+the full fact set, not a one-word question.
+
+**The internal adversarial position, which did not win but is preserved.** Against Criterion 2:
+a phase that cannot audit a node's work *from the controller* has not really shipped
+distributed authority attribution — it has shipped a receipt stamp that only the producer can
+check, which is close to self-certification, and the phase's own ledger says *"a failure here
+is the finding, not a harness problem."* The panel's answer is that the criterion's text
+governs and its text says *losing*, not *auditing*. I record the dissent because a reader
+building on Criterion 2 should know that controller-side audit does not exist (gap **G7**),
+and because if the roadmap ever meant the stronger reading, this criterion is PARTIAL and
+G7 becomes blocking rather than a 2-session improvement.
+
+---
+
 ## Ungradeable
 
 | item | why |
