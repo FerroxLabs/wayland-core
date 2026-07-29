@@ -145,3 +145,17 @@ Correction to the brief I was given: the endpoint **is** covered, just not by a 
 `rest_openapi_doc_served_over_live_listener ... ok` (2 passed) and
 `transport::rest::tests::get_openapi_json_has_paths_and_resolves_schemas ... ok` (129 passed).
 Both green at this commit.
+
+## M10 — cross-audit + adversarial pass (see CONTRACT-REGEN.md §5)
+
+codex=C, gemini=C, kimi=D ("C is a reasonable stopgap"). All three rejected A and B.
+Internal adversarial pass argued the minority case that demoting the source digest removes
+the only tripwire for behaviour-not-shape producer changes; checked its best candidate
+(`85b60a2f`) and the argument FAILED — that change is within the already-declared value
+domain, so the digest firing on it was noise. Consensus survives. Recommendation is C plus
+one refinement: hard in CI, advisory at `ready`.
+
+## M11 — final state
+
+Report written to `.planning/CONTRACT-REGEN.md`. Fence 0 lines, 0 `.rs` changed,
+SOURCE_INPUTS untouched, observation.rs untouched. Lane complete.
