@@ -65,6 +65,78 @@ export const CANONICAL_STEPS = [
 export const RECEIPT_SCHEMA = 'wayland.journey.receipt/1';
 export const ARRIVAL_SOURCE = 'independent-sink';
 
+/// The adapter population the coverage fraction is drawn from, as
+/// `wcore_channels_registry::channel_factory_for` dispatches it. Mirrors
+/// `wcore_eval_scenarios::journey::REGISTERED_ADAPTER_TOTAL`; the Rust verifier
+/// refuses a receipt that disagrees, so the two cannot drift silently.
+export const REGISTERED_ADAPTER_TOTAL = 10;
+
+// ── the adapter table ───────────────────────────────────────────────────────
+//
+// Three of the ten, each on a DISTINCT sink endpoint. The endpoint is what the
+// sink observed being called, so a per-adapter tally keyed on it cannot be
+// satisfied by three channel configs that all funnel into one code path.
+export const ADAPTERS = [
+  {
+    adapter: 'slack',
+    channel: 'f24jsink',
+    endpoint: 'chat.postMessage',
+    config: (url) => [
+      'name = "f24jsink"',
+      'platform = "slack"',
+      'enabled = true',
+      '',
+      '[options]',
+      'workspace_name = "f24j-fixture"',
+      'default_channel_id = "f24j-room"',
+      'credential_handle_bot_token = "slack.f24j.bot_token"',
+      'credential_handle_signing_secret = "slack.f24j.signing_secret"',
+      `api_base_url = "${url}"`,
+      'max_retry_attempts = 1',
+      '',
+    ],
+  },
+  {
+    adapter: 'whatsapp',
+    channel: 'f24jwa',
+    endpoint: 'whatsapp.messages',
+    config: (url) => [
+      'name = "f24jwa"',
+      'platform = "whatsapp"',
+      'enabled = true',
+      '',
+      '[options]',
+      'workspace_name = "f24j-fixture"',
+      'phone_number_id = "f24j-phone"',
+      'default_recipient = "f24j-recipient"',
+      'credential_handle_access_token = "whatsapp.f24j.access_token"',
+      'credential_handle_app_secret = "whatsapp.f24j.app_secret"',
+      `api_base_url = "${url}"`,
+      'graph_version = "v21.0"',
+      'max_retry_attempts = 1',
+      '',
+    ],
+  },
+  {
+    adapter: 'sms',
+    channel: 'f24jsms',
+    endpoint: 'twilio.messages',
+    config: (url) => [
+      'name = "f24jsms"',
+      'platform = "sms"',
+      'enabled = true',
+      '',
+      '[options]',
+      'from_number = "+15005550006"',
+      'credential_handle_account_sid = "sms.f24j.account_sid"',
+      'credential_handle_auth_token = "sms.f24j.auth_token"',
+      `api_base_url = "${url}"`,
+      'max_retry_attempts = 1',
+      '',
+    ],
+  },
+];
+
 const PROFILE = 'f24j';
 const SERVICE_NAME = `wayland-core-gateway-${PROFILE}`;
 const DELIVERY_COUNT = 12;
@@ -320,6 +392,12 @@ class Journey {
       '[secrets]',
       `"slack.f24j.bot_token" = "${this.botToken}"`,
       `"slack.f24j.signing_secret" = "${this.signingSecret}"`,
+      // The other two adapters' credential handles. Same synthetic values, so
+      // the redaction sweep still has one secret set to hunt for.
+      `"whatsapp.f24j.access_token" = "${this.botToken}"`,
+      `"whatsapp.f24j.app_secret" = "${this.signingSecret}"`,
+      `"sms.f24j.account_sid" = "${this.botToken}"`,
+      `"sms.f24j.auth_token" = "${this.signingSecret}"`,
       '',
     ].join('\n');
     const credentialsPath = path.join(this.home, 'credentials.toml');
@@ -375,21 +453,27 @@ class Journey {
     }
     this.sinkUrl = match[1];
 
-    const config = [
-      'name = "f24jsink"',
-      'platform = "slack"',
-      'enabled = true',
-      '',
-      '[options]',
-      'workspace_name = "f24j-fixture"',
-      'default_channel_id = "f24j-room"',
-      'credential_handle_bot_token = "slack.f24j.bot_token"',
-      'credential_handle_signing_secret = "slack.f24j.signing_secret"',
-      `api_base_url = "${this.sinkUrl}"`,
-      'max_retry_attempts = 1',
-      '',
-    ].join('\n');
-    fs.writeFileSync(path.join(this.home, 'channels', 'f24jsink.toml'), config);
+    // THREE adapters, not one.
+    //
+    // Every Phase 24 journey receipt published before this change carried
+    // `submitted=12 arrived=12 unique=12 duplicates=0 losses=0` on all three
+    // platforms — and every one of those twelve rode Slack, the single adapter
+    // of ten that implements the property the tally is about. The receipt had
+    // no field naming the adapter, so a one-adapter run and a ten-adapter run
+    // produced identical numbers and the platform matrix read as a delivery
+    // matrix it never was.
+    //
+    // The sink has served the WhatsApp and Twilio outbound endpoints since lane
+    // 24-c3 landed them, with a comment noting "the journey never calls these".
+    // It does now. Each adapter lands on a DISTINCT endpoint, which is what
+    // makes the per-adapter tally an observation rather than a restatement of
+    // the config.
+    for (const spec of ADAPTERS) {
+      fs.writeFileSync(
+        path.join(this.home, 'channels', `${spec.channel}.toml`),
+        spec.config(this.sinkUrl).join('\n'),
+      );
+    }
 
     // A positive control on the sink itself. If the health endpoint does not
     // answer, every later arrival count would be zero for a reason that has
@@ -507,29 +591,65 @@ class Journey {
   // ── step 9 ───────────────────────────────────────────────────────────────
   deliveriesSubmit() {
     this.bodies = [];
+    // body -> the adapter that was asked to carry it. Recorded at SUBMIT time
+    // from the channel argv, so the later tally can be cross-checked against
+    // what the sink independently observed rather than assumed to agree.
+    this.bodyAdapter = new Map();
     const lines = [];
+    const perAdapter = new Map(ADAPTERS.map((s) => [s.adapter, 0]));
     for (let i = 1; i <= DELIVERY_COUNT; i += 1) {
+      // Round-robin, so the split is even and no adapter can be starved by an
+      // ordering accident into contributing zero and being silently dropped
+      // from the coverage list.
+      const spec = ADAPTERS[(i - 1) % ADAPTERS.length];
       const body = `f24j-delivery-${String(i).padStart(2, '0')}`;
       this.bodies.push(body);
+      this.bodyAdapter.set(body, spec.adapter);
+      perAdapter.set(spec.adapter, perAdapter.get(spec.adapter) + 1);
       const argv = this.core(
         'cron',
         'add',
         '--trigger',
         'every:15',
         '--channel',
-        'f24jsink',
+        spec.channel,
         '--text',
         body,
       );
       const r = this.must(argv);
-      lines.push(`${body}: ${r.output.trim().split('\n').pop()}`);
+      lines.push(`${body} -> ${spec.adapter}: ${r.output.trim().split('\n').pop()}`);
     }
     this.counts.submitted = DELIVERY_COUNT;
+    const split = [...perAdapter.entries()].map(([a, n]) => `${a}=${n}`).join(' ');
     this.step(
       'deliveries-submit',
-      `${shellish(this.core('cron', 'add', '--trigger', 'every:15', '--channel', 'f24jsink', '--text', 'f24j-delivery-NN'))} x${DELIVERY_COUNT}`,
-      `submitted=${DELIVERY_COUNT}\n${lines.join('\n')}`,
+      `${shellish(this.core('cron', 'add', '--trigger', 'every:15', '--channel', '<per-adapter>', '--text', 'f24j-delivery-NN'))} x${DELIVERY_COUNT} across ${ADAPTERS.length} adapters`,
+      `submitted=${DELIVERY_COUNT}\nsubmitted_by_adapter=${split}\n${lines.join('\n')}`,
     );
+  }
+
+  // Per-adapter coverage, keyed on the endpoint the SINK recorded rather than
+  // on the channel this driver configured. Those two agreeing is the finding;
+  // asserting the second and reporting it as the first would be exactly the
+  // restatement this receipt exists to refuse.
+  adapterCoverage() {
+    const wanted = new Set(this.bodies);
+    const seen = this.arrivals().filter((a) => !a.suppressed && wanted.has(a.text));
+    const exercised = [];
+    for (const spec of ADAPTERS) {
+      const mine = seen.filter((a) => a.endpoint === spec.endpoint);
+      const submitted = [...this.bodyAdapter.entries()].filter(
+        ([, adapter]) => adapter === spec.adapter,
+      ).length;
+      exercised.push({
+        adapter: spec.adapter,
+        endpoint: spec.endpoint,
+        submitted,
+        arrived: mine.length,
+        unique: new Set(mine.map((a) => a.text)).size,
+      });
+    }
+    return { registered_total: REGISTERED_ADAPTER_TOTAL, exercised };
   }
 
   arrivals() {
@@ -667,12 +787,30 @@ class Journey {
           `duplicates=${t.duplicates} losses=${t.losses}`,
       );
     }
+    // Per-adapter, from the endpoint the SINK observed. A headline of
+    // `12/12/12/0/0` is the number that was published three times over a
+    // one-adapter run; the breakdown is what makes it interpretable.
+    const coverage = this.adapterCoverage();
+    const idle = coverage.exercised.filter((e) => e.arrived === 0);
+    if (idle.length > 0) {
+      // §6a-i: a participant that never started makes the run a different
+      // experiment, not a negative result. An adapter that submitted but never
+      // arrived means the multi-adapter claim is not the one being measured.
+      throw new StepFailure(
+        `adapter(s) ${idle.map((e) => e.adapter).join(',')} submitted but produced ZERO arrivals ` +
+          `at the independent sink; this run did not exercise the adapter set it claims`,
+      );
+    }
+    const perAdapter = coverage.exercised
+      .map((e) => `  ${e.adapter} endpoint=${e.endpoint} submitted=${e.submitted} arrived=${e.arrived} unique=${e.unique}`)
+      .join('\n');
     this.step(
       'delivery-reconcile',
-      `tally the independent sink's journal ${this.journalPath}`,
+      `tally the independent sink's journal ${this.journalPath}, per observed endpoint`,
       `arrival_source=${ARRIVAL_SOURCE}\nsubmitted=${t.submitted}\narrived=${t.arrived}\n` +
         `unique=${t.unique}\nduplicates=${t.duplicates}\nlosses=${t.losses}\n` +
-        `journal_lines_total=${this.arrivals().length}`,
+        `journal_lines_total=${this.arrivals().length}\n` +
+        `adapters_exercised=${coverage.exercised.length}/${REGISTERED_ADAPTER_TOTAL}\n${perAdapter}`,
     );
   }
 
@@ -840,6 +978,7 @@ class Journey {
       finished_at: new Date().toISOString(),
       arrival_source: ARRIVAL_SOURCE,
       counts: this.counts,
+      adapter_coverage: this.adapterCoverage(),
       steps: this.steps,
     };
   }
