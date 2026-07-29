@@ -309,11 +309,48 @@ panic!("deliberate"); }`. A scaffolded crate gets picked up as a workspace membe
 deliberate panic surfaces in `cargo test -p wcore-cli --lib`. It is a FIXTURE and is
 SUPPOSED to fail. At least six prior lanes have re-diagnosed it. Untouched.
 
+## HEADLINE RESULTS (all rates measured on hetzner-dsm, unproxied `cargo`)
+
+| target | BEFORE | AFTER |
+|---|---|---|
+| `wcore-config --lib` (25 reps) | **16/25 fail** (14 assertion + **2 SIGSEGV**) | **0/25** (0 SIGSEGV) |
+| `wcore-exec-backend --lib` (25 reps) | **18/25 = 72%** | **0/25** |
+| `migrate_hermes::import_is_idempotent…` (25 reps) | **13/25 = 52%** | **0/25** |
+| new determinism test (30 reps) | n/a | **0/30** — and **10/10 FAIL** with the fix stripped |
+| census: unprotected mutators of a contended var | **9** | **0** |
+| census: serial-regime splits | **4** (pre-dedup) | **0** |
+
+Every AFTER run reported `0 ignored; 0 filtered out` and a full executed count, so none
+is a vacuous green. The exec-backend AFTER run was taken at **4x the load** of its
+BEFORE run — for a logic race that makes failure more likely, so 0/25 is conservative.
+
+## PRE-EXISTING, NOT MINE
+
+`scripts/check-no-vacuous-cargo-test.py` **fails at BASE** (rc=1) on
+`.github/workflows/ci.yml:655` — a bare `cargo test` that can exit 0 having run zero
+tests. Identical rc=1 on my branch; I touched 0 files under `.github/`. Flagging because
+a guard that is red is not enforcing anything.
+
+## STILL OPEN / NOT DONE
+
+- **The `setenv` UB is not closed.** `#[serial]` serializes writers against writers and
+  (now) against the readers I could identify, but glibc's `setenv` remains non-thread-safe
+  against ANY concurrent `getenv` anywhere in the process, including inside third-party
+  crates. 0 SIGSEGV in 25 after-reps vs 2 in 25 before is a real improvement, but absence
+  over 25 reps is not proof of absence. Fully closing it means never mutating process env
+  in a multi-threaded process — injection everywhere — which is far larger than this lane.
+  The `StateDirGuard` in `wcore-exec-backend` is the pattern to copy.
+- I swept `crates/`. I did NOT sweep for iteration-order dependence beyond serialized
+  config maps (e.g. code that takes "the first" element of a `HashMap`).
+- Only `wcore-config`, `wcore-exec-backend`, `wcore-browser`, `wcore-cua`,
+  `wcore-eval-scenarios` were rate-measured. Other crates were censused, not re-measured.
+
 ## Status log
 
 - [x] Worktree verified, hetzner worktree created at base.
-- [x] Full census (test vs production, + `#[serial]` attribution).
-- [x] Harness self-test (3 assertions).
-- [x] Baseline + after for wcore-exec-backend: 18/25 -> 0/25.
-- [ ] Kind A HashMap ordering fix + rate.
-- [ ] wcore-config --lib baseline + after.
+- [x] Full census, five instrument repairs, self-tested.
+- [x] wcore-exec-backend 18/25 -> 0/25.
+- [x] Kind A serialization determinism: hermes 13/25 -> 0/25; known-negative 10/10.
+- [x] wcore-config --lib 16/25 -> 0/25, SIGSEGV 2/25 -> 0/25.
+- [x] Census 9 -> 0 unprotected, splits -> 0.
+- [x] Merged gh/plan/f20-unified-audit-repair; census still 0/0; merged tree green.
