@@ -1545,3 +1545,37 @@ already has, then the existing live probe closes the leg.
 
 **Routed here because the lane's own report was its only home** — that is the findings-leak class
 (20 dropped findings recovered on 2026-07-28, two of them HIGH).
+
+## BL-F24-MSTEAMS-H1 — `wcore-channels::media` was advertised-but-dead (MEDIUM)
+
+**Source:** `24-msteams-attach`, 2026-07-29. Report:
+`.planning/phases/24-gateway-automation-channels-typed-api/24-MSTEAMS-ATTACH.md`.
+
+The module header says **"never drop silently"**. Measured at `15cda12d`:
+
+| symbol | production call sites |
+|---|---|
+| `media_bounds()` | **1 — and it is a test** |
+| `normalize_all()` | **2 — its own definition and its own unit test** |
+| `max_message_len()` *(control)* | **7, with real production callers** |
+
+The control is what makes those zeros a measurement rather than a dead grep. **Four adapters that
+parse attachments bypass the module entirely.** This is the same defect `24-media-actions` filed as
+`F24-C3-H6` from the opposite direction — two lanes, two routes, one surface.
+
+**Partly closed already:** msteams is now the module's **first and only production consumer**
+(`wcore-channel-msteams/src/inbound.rs` → `normalize_all(&candidates, Channel::media_bounds())`).
+`lane/24-media-bounds` is making the declaration load-bearing for the remaining adapters and has
+been told msteams is now a live known-positive it can use rather than build.
+
+**Residual after that lane lands:** the four bypassing adapters, and the wire gap below.
+
+**Fenced seam request (NOT actioned — needs the contract train):** `wcore_channels::Attachment`
+has **no disposition field**, so when an attachment is dropped or degraded the *reason* cannot
+reach the agent. The agent sees a shorter list and cannot tell absence from rejection. Adding it is
+a wire change and must ride the contract regeneration that is owed before any tag — it must not be
+done ad hoc.
+
+**Also corrected by that lane:** a fourth stale advertised-but-dead site — the operator-facing
+msteams config schema still read *"send-only MVP; inbound webhook receive is deferred to v0.8.3"*,
+long false. That family now stands at nine recorded instances.
