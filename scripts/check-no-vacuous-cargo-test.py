@@ -3,10 +3,9 @@
 
 WHY THIS EXISTS
 ---------------
-`cargo nextest` fails closed on an empty run: `.config/nextest.toml` sets
-`no-tests = "fail"` under `[profile.default]`, inherited by ci / e2e / eval.
-**`cargo test` has no such setting and no such default.** Measured on this
-checkout (hetzner-dsm, cargo 1.96.0, nextest 0.9.137):
+`cargo nextest` fails closed on an empty run (exit 4, `NO_TESTS_RUN`).
+**`cargo test` has no such option and no such default — none at all.**
+Measured on this checkout (hetzner-dsm, cargo 1.96.0, nextest 0.9.137):
 
     $ cargo test -p wcore-eval-scenarios --test packaged_driver_gate
     running 0 tests
@@ -19,8 +18,8 @@ checkout (hetzner-dsm, cargo 1.96.0, nextest 0.9.137):
     rc=4
 
 There are ~488 integration-test binaries reachable by a bare `cargo test` in
-this workspace, of which 39 carry a file-level `#![cfg(...)]` (18 feature-gated,
-21 platform-gated) and 23 have every case `#[ignore]`d. Any of those compiles or
+this workspace, of which 44 carry a file-level `#![cfg(...)]` (17 feature-gated,
+27 platform-gated) and 23 have every case `#[ignore]`d. Any of those compiles or
 collects to EMPTY under the wrong feature/platform/filter and prints
 `test result: ok`. An instrument that cannot fail is not evidence.
 
@@ -34,7 +33,12 @@ An executable `cargo test` line is a violation unless one of:
     the preceding 10 lines, meaning the caller reads the EXECUTED COUNT back
     explicitly rather than trusting exit status.
 
-`cargo nextest run` is never a violation — `no-tests = "fail"` covers it.
+`cargo nextest run` is never a violation. NOTE: nextest's fail-closed behaviour
+is a CLI option (`--no-tests=fail`) and a version default, NOT a config key — a
+`no-tests = "fail"` key under `[profile.default]` was measured to be silently
+ignored ("ignoring unknown configuration key"). The release-integrity gates
+therefore pass `--no-tests=fail` explicitly, and `.config/nextest.toml` pins a
+`nextest-version.required` floor. See that file's header for the measurement.
 
 FALSE POSITIVES ARE HANDLED BY DECLARATION, NOT SUPPRESSION
 -----------------------------------------------------------
@@ -66,6 +70,12 @@ CARGO_TEST = re.compile(r"\bcargo\s+(?:\+\S+\s+)?(?!next)test\b")
 
 COMMENT_PREFIXES = ("#", "//", "*", "///", "//!", "<!--")
 
+# Backtick-quoted prose, e.g. a YAML step name mentioning `cargo test`.
+BACKTICKED = re.compile(r"`[^`]*`")
+
+# A YAML step label: `- name: ...` / `name: ...`. Never an executed command.
+YAML_NAME = re.compile(r"^-?\s*name:\s")
+
 
 def scan_text(text: str) -> list[tuple[int, str]]:
     """Return [(lineno, line)] for every executable, unguarded `cargo test`."""
@@ -73,10 +83,19 @@ def scan_text(text: str) -> list[tuple[int, str]]:
     violations: list[tuple[int, str]] = []
     for i, raw in enumerate(lines):
         line = raw.strip()
-        if not CARGO_TEST.search(line):
+        # Strip backtick-quoted spans BEFORE matching. A YAML step name such as
+        # `- name: No vacuous \`cargo test\` invocations` is prose, not an
+        # invocation — this guard false-fired on its own CI wiring step on first
+        # run. Markdown-style backticks are how this repo quotes commands in
+        # prose everywhere, so this is the general fix, not a special case.
+        probe = BACKTICKED.sub("", line)
+        if not CARGO_TEST.search(probe):
             continue
         # Prose, doc comments, YAML/justfile/shell comments: not executable.
         if line.startswith(COMMENT_PREFIXES):
+            continue
+        # A YAML step name is a label, never a command.
+        if YAML_NAME.match(line):
             continue
         # `--no-run` builds the binary and stops. It cannot report a vacuous pass.
         if "--no-run" in line:
@@ -133,7 +152,7 @@ def run(root: Path) -> int:
         print()
         print(f"GATE: FAILED — {total} unguarded `cargo test` invocation(s).")
         print("Fix by ONE of:")
-        print("  1. use `cargo nextest run` (preferred — `no-tests = \"fail\"` is already set);")
+        print("  1. use `cargo nextest run --no-tests=fail` (preferred);")
         print("  2. add `--no-run` if you only meant to compile;")
         print("  3. read the executed count back yourself and annotate the line")
         print(f"     `{MARKER} <how you assert N>` within {MARKER_WINDOW} lines above it.")
@@ -154,6 +173,7 @@ harness:
 """
 
 NEGATIVE = """\
+      - name: No vacuous `cargo test` invocations
 # This comment mentions `cargo test` in prose and must NOT fire.
 #   run: cargo test -p wcore-foo --test bar
 harness:
@@ -195,6 +215,18 @@ def self_test() -> int:
     else:
         print("A3a PASS the real pre-fix ci.yml:266 line IS caught (it shipped unguarded)")
 
+    # A4 — REGRESSION: this guard false-fired on its own CI step name, a YAML
+    # label containing `cargo test` in backticks. Both defences are asserted.
+    for label, fixture in (
+        ("yaml step name", "      - name: No vacuous `cargo test` invocations\n"),
+        ("backticked prose", '        run: echo "see `cargo test` docs"\n'),
+    ):
+        v = scan_text(fixture)
+        if v:
+            failures.append(f"A4 {label}: expected 0 violations, got {v}")
+        else:
+            print(f"A4 PASS  {label} does not false-fire (real defect, found on first run)")
+
     # A3b — a NAIVE substring matcher is not an acceptable substitute: it
     # false-fires on the clean fixture. This proves the filtering does real
     # work rather than the guard passing trivially.
@@ -209,7 +241,7 @@ def self_test() -> int:
         for f in failures:
             print("SELF-TEST FAIL:", f)
         return 1
-    print("\nSELF-TEST: PASSED (4 assertions)")
+    print("\nSELF-TEST: PASSED (6 assertions)")
     return 0
 
 

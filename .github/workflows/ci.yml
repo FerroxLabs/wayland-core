@@ -285,7 +285,7 @@ jobs:
       # `cargo nextest run` on the identical binary exits 4 ("no tests to run")
       # via `no-tests = "fail"` in .config/nextest.toml.
       - name: F01 packaged wayland-eval driver gate
-        run: vx cargo nextest run --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
+        run: vx cargo nextest run --no-tests=fail --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
         env:
           WAYLAND_BUILD_SOURCE_SHA: ${{ github.sha }}
           WCORE_EVAL_BIN: ${{ github.workspace }}/target/release/wayland-core${{ runner.os == 'Windows' && '.exe' || '' }}
@@ -585,7 +585,7 @@ jobs:
       # (`cargo install --locked cargo-nextest` in the Dockerfile heredoc), and
       # the two neighbouring steps in this job already use it.
       - name: F01 packaged wayland-eval driver gate
-        run: $DOCKER_RUN -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} "$CI_IMAGE" cargo nextest run --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
+        run: $DOCKER_RUN -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} "$CI_IMAGE" cargo nextest run --no-tests=fail --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
 
       - name: Security audit
         run: $DOCKER_RUN "$CI_IMAGE" cargo audit
