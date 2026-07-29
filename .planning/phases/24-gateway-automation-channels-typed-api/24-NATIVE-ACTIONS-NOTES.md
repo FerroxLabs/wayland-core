@@ -115,3 +115,52 @@ shortcode mapping is live end-to-end, not just that two reactions arrived.
 Slack A2 `not-supported` is a MEASUREMENT, not an assumption: the fixture would have counted a
 typing call at `/api/*typing*` had one been made, and counted zero. The declared surface says
 slack keeps the trait's SILENT no-op default (`lib.rs:264-266` states this explicitly).
+
+## T+95 — msteams + discord, keepalive lifecycle, and TWO instrument defects in my own gate
+
+Full matrix `/root/f24na-full1`, 11/11 gates PASS:
+
+| adapter | A1 receipt | A2 typing | A3 terminal | counted at platform |
+|---|---|---|---|---|
+| telegram | fired | fired | fired | `["👀","✅"]` typing=1 |
+| matrix | fired | fired | fired | `["👀","✅"]` typing=1 |
+| slack | fired | not-supported | fired | `["👀","✅"]` typing=0 |
+| msteams | not-supported | fired | not-supported | `[]` typing=1 |
+| discord | fired | fired | fired | `["👀","✅"]` typing=1 |
+
+### Instrument defect 1 — `fx.replies is not iterable` killed the discord leg
+`DiscordFixture` is the one fixture not derived from `AckLedger`. FAILED LOUDLY (threw) rather
+than grading a zero — the safe direction. Repaired: describing fields (`replies`, `journal`)
+guarded; grading fields (`reactions`, `typing`) deliberately left FATAL, because an
+empty-array fallback would turn a missing instrument into a clean `not-fired` (§3b-i free
+negative). Self-test assertions 5 and 6 cover both halves.
+
+### Instrument defect 2 — MY KEEPALIVE GATE RAISED A FALSE LEAK ALARM
+First run reported `typing_after=2` → a product leak. It was not. The window opened at
+`turn_ran`+3s, but `turn_ran` is observed when the LLM fixture RECEIVES the request and the
+keepalive leg then holds the response 12s — so the window opened ~9s BEFORE the turn ended and
+counted two in-turn refreshes as leakage.
+
+Real timeline, read back from the fixture journal (`/root/f24na-run7`), seconds after submit:
+```
+0.0 submit | 0.1 👀 | 0.1 typing | 5.1 typing | 10.1 typing | 12.7 ✅ + reply | (watch to ~17)
+```
+Repaired: the window is anchored to the first PLATFORM-SIDE post-guard-drop marker — the
+terminal reaction, or the reply for a no-`react` adapter — because `run_turn:544-555` drops the
+typing guard BEFORE sending either. Self-test assertions 7/8/9, where 9 is the §6b-ii third
+assertion: the OLD marker reports 2 phantom signals on the same real timeline the repaired one
+grades as 0.
+
+**Post-repair verdict, twice: `during=3 after=0 loop_ran=true aborted=true`, watched 14s past
+the guard drop — telegram (`run8`) and msteams (`run9`, exercising the reply-fallback marker).
+`AbortOnDrop` genuinely aborts.**
+
+### NEW FINDING candidate — asymmetric ack diagnostics
+msteams + `ack = "both"`: reactions silently do nothing. Gateway log (8921 bytes, instrument
+proven alive: 10 lines match the channel name) contains EXACTLY ONE diagnostic:
+```
+DEBUG ack 'seen' reaction failed (non-fatal) channel=f24na error=react is unsupported on platform msteams
+```
+That is the RECEIPT only. The TERMINAL reaction is `let _ =` (`channel_inbound.rs:552`) and
+`react_on` (`manager.rs:750-763`) does not log either — so the terminal drop is silent at EVERY
+log level. At the default `info` level the operator gets NOTHING for either.
