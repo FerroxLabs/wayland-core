@@ -168,3 +168,124 @@ bounds what reaches the model but NOT what is downloaded). Do not grade this unt
 2. Establish which adapters actually perform a native action inbound, and whether the ack
    surface is reachable from the gateway inbound path.
 3. Then measure what is genuinely reachable, with counts, and prove the gate can redden.
+
+---
+
+# T+75 — M4 resolved, native actions fully defined, two more instrument defects
+
+## M0-c. `head -30` truncation nearly produced a false absence
+
+My production-`Attachment {`-construction list was cut by `head -30` and discord was **not in
+it**. I was one step from reporting "the reference adapter never builds an inbound attachment".
+It does — `crates/wcore-channel-discord/src/gateway.rs:381-391`. **A truncated list is not an
+absence.** All absence claims in this lane are re-run without `head`.
+
+## M0-d. A SUBSTRING false POSITIVE — the mirror of §3b-i
+
+I reported `AckMode|ack_mode` = **56 hits**. That number was wrong. `ack_mode` matches inside
+**fallb`ack_mode`ls**:
+
+| search | count |
+|---|---|
+| `/usr/bin/grep -rn "AckMode\|ack_mode"` (substring) | 56 |
+| …of which are `fallback_models` contaminant | **38** |
+| `/usr/bin/grep -rnw "AckMode\|ack_mode"` (word-boundary) | **14** |
+
+§3b-i is written about false *negatives*; this is the same defect class producing a false
+*positive*, and an inflated "56 call sites" would have made a decorative surface look
+well-used. **All counts in this lane use `-w` where the token can embed.**
+
+## M4 RESOLVED — the declared bound is enforced NOWHERE; three different numbers are in play
+
+`fetch_media_on` (`manager.rs:774-785`) does **not** consult `media_bounds()`; it delegates
+straight to the adapter. Where a cap exists it is an unrelated hardcoded constant:
+
+| adapter | **DECLARES** `media_bounds()` | **ACTUALLY** enforced | where | divergence |
+|---|---|---|---|---|
+| discord | 25 MiB / 10 attachments | **100 MiB** | `discord/src/rest.rs:370` `MAX_MEDIA_BYTES` | **4× larger than declared** |
+| email | 10 MiB / 20 attachments | **2 MiB** | `email/src/imap.rs:619` `MAX_INLINE_ATTACHMENT_BYTES` | **5× smaller than declared** |
+| other 8 | (trait default 25 MiB / 10) | nothing declared, nothing consulted | — | — |
+
+The trait doc at `wcore-channels/src/lib.rs:165-166` states the bound is *"Enforced by
+[`media::normalize`]"*. **`media::normalize` has no production caller.** The doc asserts an
+enforcement that does not occur.
+
+`max_attachments` is enforced nowhere at all. Control proving the instrument: the sibling
+declared bound `max_message_len` has **9** non-definition production uses, so this search shape
+DOES find consumers when they exist; `max_attachments` has **0** outside declarations,
+`media.rs` itself, and one test.
+
+Worse for discord specifically: its `MessageAttachment` (`gateway.rs:129-135`) deserializes only
+`url` and `content_type` — **it never parses Discord's `size` field**, so a per-attachment size
+bound is unenforceable there *by construction*, independent of the dead `normalize` path.
+
+**Grading this honestly:** the OOM/SSRF defenses are real and correct (host allowlist +
+`read_body_capped`). What is decorative is the **declared, per-adapter `MediaBounds` API** and
+the `MediaDisposition::Degraded` "never drop silently" record, which no production path emits.
+I file this as **F24-C3-H6 (MEDIUM)** — no memory-safety or SSRF exposure, but an advertised
+enforcement surface that does nothing, on the exact clause I was sent to measure.
+
+## M5. `native actions` — the production path, fully mapped
+
+`channel_inbound.rs:503-556`, `run_turn`, a three-step best-effort state machine gated by
+`AckMode`:
+
+1. `ack.reactions()` → `react_on(ch, conv, msg_id, "👀")` **on receipt**
+2. `ack.typing()` → `spawn_typing_keepalive(...)` wrapped in `AbortOnDrop` for the turn
+3. after dispatch → `react_on(..., "✅")` on Ok / `"❌"` on Err
+
+`AckMode` defaults to **`Off`** (`dispatch/access.rs:191`), so **no native action fires unless
+`[inbound] ack` is configured**. That default is itself why six lanes could run inbound matrices
+and never once exercise this clause — the surface is off unless asked for.
+
+Both `react_on` failures are **swallowed** (`tracing::debug!` and `let _ =`). Consequence for
+instrument design: *Core's own logs cannot prove a native action occurred.* It must be measured
+on the PLATFORM side. Fixture-side counting is therefore the only valid instrument, not a
+convenience.
+
+Adapter support (override present in `src/`; counts include in-file `#[cfg(test)]`):
+
+| adapter | react | send_typing | fetch_media | builds inbound Attachment |
+|---|---|---|---|---|
+| discord | yes | yes | yes | **yes** (`gateway.rs:381`) |
+| telegram | yes | yes | yes | yes (`longpoll.rs:220`) |
+| matrix | yes | yes | yes | (lane/24-h6 owns this crate — not touched) |
+| slack | yes | — (default `Ok(())`) | yes | yes |
+| whatsapp | yes | — | yes | yes |
+| msteams | — | yes | — | — |
+| email / imessage / signal / sms | — | — | yes | yes (except sms metadata) |
+
+Trait-default asymmetry, noted and NOT inflated: `send_typing` defaults to a silent `Ok(())`
+(`lib.rs:256`) while `react` defaults to a named `Unsupported` (`lib.rs:279`). The `send_typing`
+default is explicitly documented as deliberate ("platforms without a typing API simply do
+nothing", best-effort, failure ignored). I judge it **defensible as documented**, not a finding.
+Recording it because it means a `send_typing` `Ok` is not evidence of a typing indicator.
+
+## M6. Reachability constraint that shapes the whole measurement
+
+`discord/src/rest.rs:337` — `MEDIA_HOSTS = ["cdn.discordapp.com", "media.discordapp.net"]`, and
+`download_bytes` refuses any other host. There is **no env/config override seam** (`api_base_url`
+is configurable; the CDN allowlist is a hardcoded `const`). So a local fixture **cannot serve
+discord attachment bytes** — correctly, this is deliberate fail-closed SSRF defense
+(`rest.rs:615-622` tests it against `169.254.169.254`).
+
+This does NOT block the media clause on discord, because `enrich()` short-circuits **before any
+fetch** when no backend is configured (`channel_media.rs:164-172`): `Image` + `vision.is_none()`
+→ writes `IMAGE_NO_VISION_NOTICE` and `continue`s. So the honest-degradation half of the media
+clause IS measurable on the reference adapter with zero credentials and zero network.
+
+## Measurement plan (what I will actually drive)
+
+Target: **discord**, a designated reference adapter, via the existing `DiscordFixture`
+(`scripts/f24-discord-fixture.mjs`) which already journals `typing[]`, `reactions[]` and
+`report()` totals. I will NOT edit it, nor `scripts/f24-inbound.mjs`; my driver is a new
+additive file that imports it.
+
+| leg | instrument | positive expectation | negative control that must redden |
+|---|---|---|---|
+| native actions | fixture `reactions_total` / `typing_total` | `ack="both"` → 👀 + ✅ reactions ≥2, typing ≥1 | `ack="off"` → **0 / 0** |
+| media (degraded) | LLM fixture captures turn prompt | image attachment → prompt contains `IMAGE_NO_VISION_NOTICE` | text-only message → notice absent |
+
+Vision live leg: **UNREACHABLE** — no `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`GEMINI_API_KEY`
+available and `build_vision_backend` never consults `FLUX_API_KEY`. Reported as a determination,
+not attempted.
