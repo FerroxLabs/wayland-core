@@ -1,0 +1,2 @@
+[2m2026-07-29T00:38:26.660201Z[0m [33m WARN[0m WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+Error: No API key found. Provide via --api-key, config file, or environment variable (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY).
