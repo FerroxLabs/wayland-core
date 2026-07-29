@@ -12923,7 +12923,7 @@ impl AgentEngine {
     ///    halves of the criterion actually meet.
     fn record_cache_ledger_turn(
         &mut self,
-        turn: u32,
+        turn: usize,
         turn_usage: &TokenUsage,
         effective_model: &str,
         diagnostic: &Option<CacheDiagnostic>,
