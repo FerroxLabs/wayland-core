@@ -68,8 +68,72 @@ build, never clippy, never release. Will record each use with its justification 
 
 - (none yet)
 
+## MEASUREMENT 1 (t+20m) — criterion text is PLATFORM-SILENT
+
+Read from `ROADMAP.md:124-133` and `REQUIREMENTS.md:237-241`, i.e. the source text, not a summary.
+
+**None of Phase 25's four criteria, and none of F25-01..05, names any operating system.** Compare
+with siblings that DO name one: 24-C5 ("passes on macOS, Linux, Windows"), 27-C5 ("native macOS,
+Linux, and Windows"), 28-C1 ("Native macOS, Linux, and Windows"). Phase 28 is *Native
+Cross-Platform Certification* and **depends on** Phases 24-27.
+
+Consequence for grading, stated before I run anything so it cannot be tuned to the result:
+**I cannot grade C1-C4 NOT MET merely for lacking macOS** — the criteria do not ask for macOS, and
+the cross-platform matrix is Phase 28's declared job. The honest finding available to this lane is
+therefore NOT "the criteria are unmet", it is **whether the behaviour behind them actually differs
+on Darwin**. A divergence is a defect against the criterion's own words; an absence of macOS runs
+is not.
+
+## MEASUREMENT 2 (t+30m) — HIGH candidate: node machine_id is Linux-shaped
+
+`crates/wcore-exec-backend/src/node/pairing.rs:102-113`:
+
+```rust
+/// Unix hosts publish the hostname on disk regardless of shell environment.
+fn read_hostname_file() -> Option<String> {
+    for path in ["/etc/hostname", "/proc/sys/kernel/hostname"] {
+```
+
+**The doc comment's claim is false on macOS.** Measured, both sides, unproxied, with live positive
+controls in the same invocation:
+
+| path | macOS (Darwin 25.3.0 arm64) | hetzner-dsm (Linux 6.8.0-101 x86_64) |
+|---|---|---|
+| `/etc/hostname` | ABSENT | EXISTS, `Ubuntu-2404-noble-amd64-base` |
+| `/proc/sys/kernel/hostname` | ABSENT | EXISTS, `Ubuntu-2404-noble-amd64-base` |
+| `/proc` | ABSENT | EXISTS |
+| `/etc/hosts`, `/etc/passwd` (positive control) | EXISTS, EXISTS | — |
+
+The positive control is what makes the two ABSENT rows a measurement rather than a broken probe
+(§3b-i). macOS keeps the hostname in the SystemConfiguration store, not on disk: `scutil --get
+LocalHostName` → `Seans-MacBook-Pro`.
+
+So `local_machine_id()`'s fallback chain on a macOS node reached the way a controller actually
+reaches one (non-login ssh, where `HOSTNAME` is a shell variable and is not exported — the code's
+own comment says this was found by running the real binary over ssh):
+
+1. `WAYLAND_NODE_MACHINE_ID` — unset
+2. `HOSTNAME` — not exported over non-login ssh
+3. `COMPUTERNAME` — Windows only
+4. `read_hostname_file()` — **None on macOS**
+5. → `"unknown-host"`
+
+**Predicted: every macOS node reports `machine_id = unknown-host`.** The field's declared purpose
+(`pairing.rs:39-41`) is "Stable per-host discriminator. Distinguishes two nodes an operator happened
+to give confusingly similar names" — on Darwin it distinguishes nothing, and two macOS nodes
+collide. Note this is the *same class* of bug the comment records having already fixed for Linux;
+the fix was Linux-shaped and Darwin kept the pre-fix behaviour. That is the
+"works-on-the-surface-we-test" shape the brief asked for.
+
+Not a key-forgery issue — `key_id` carries security and the code says so. Severity judged after
+the live measurement, not before.
+
+**Still a PREDICTION at this point. Must be executed, not reasoned.** `NodeIdentity::local()` is
+`pub`, so it is provable under the §0 single-crate exception.
+
 ## Open / next
 
-1. Read the four criteria from the PLAN files, not the summaries' paraphrase.
-2. Confirm or revise the Darwin-specificity ranking against that text.
-3. Run the Darwin legs; run anything hetzner could prove on hetzner.
+1. Execute the machine_id prediction on Darwin via the §0 exception; execute the same on hetzner.
+2. Check the C4 orphan/liveness leg (`wcore_types::process_liveness`) for Darwin divergence.
+3. Check C3 plugin-load for a `.dylib`/quarantine path.
+4. Say plainly which legs need Darwin and which prove nothing re-run.
