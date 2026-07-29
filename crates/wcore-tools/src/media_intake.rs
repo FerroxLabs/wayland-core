@@ -509,6 +509,46 @@ mod tests {
             admit_path(&p, &any()),
             Err(IntakeError::NetworkPath(_))
         ));
+        // The forward-slash spelling of the same share. Windows accepts it;
+        // the pre-consolidation local check happened to catch it by matching a
+        // bare `//` prefix, and the shared check catches it as an actual UNC
+        // name. Asserted so the consolidation cannot quietly narrow the guard.
+        assert!(matches!(
+            admit_path(&PathBuf::from("//server/share/image.png"), &any()),
+            Err(IntakeError::NetworkPath(_))
+        ));
+    }
+
+    /// The one input whose CLASSIFICATION the UNC consolidation changed.
+    ///
+    /// `\\?\C:\…` is a verbatim path to a **local disk**. The local
+    /// `is_network_path` this file used to carry matched any `\\` prefix, so it
+    /// called that a network path and refused it as `NetworkPath` — the right
+    /// refusal for the wrong reason. It is now correctly not-UNC, and the
+    /// refusal comes from `validate_user_path`'s device/verbatim guard instead.
+    ///
+    /// The assertion that matters is **still rejected**: a consolidation that
+    /// tightened the naming while opening a hole would be a bad trade, so the
+    /// rejection is asserted here rather than reasoned about in a comment.
+    #[test]
+    fn a_verbatim_local_path_is_still_refused_but_no_longer_as_a_network_path() {
+        let p = PathBuf::from(r"\\?\C:\Users\alice\image.png");
+        let err = admit_path(&p, &any()).expect_err("verbatim paths must stay refused");
+        assert!(
+            !matches!(err, IntakeError::NetworkPath(_)),
+            "a verbatim path to a local disk is not a network path; got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("device") || err.to_string().contains("verbatim"),
+            "expected the device/verbatim refusal, got: {err}"
+        );
+
+        // And the verbatim UNC form is the opposite case: it IS a network
+        // path, and must not fall into the device/verbatim bucket.
+        assert!(matches!(
+            admit_path(&PathBuf::from(r"\\?\UNC\server\share\image.png"), &any()),
+            Err(IntakeError::NetworkPath(_))
+        ));
     }
 
     /// Connector-supplied bytes face the SAME format decision as a composer
