@@ -56,11 +56,15 @@ impl SlashHandler for MemoryHandler {
                 "forget" => self.forget(rest),
                 "privacy" => self.privacy(rest),
                 "retention" => self.retention(rest),
+                // 23B-C3 additions: the two verbs of criterion 3 that had no
+                // user-reachable surface at all.
+                "nudge" | "nudges" => self.nudge(rest),
                 other => Err(SlashError::Bad(format!(
                     "/memory: unknown sub-action '{other}'. Try: /memory show [partition] | \
                      /memory why <query> | /memory correct <id> <text> | /memory forget <id> | \
                      /memory privacy <partition> [reason|--clear] | \
-                     /memory retention <partition> <days> | /memory clear <partition>"
+                     /memory retention <partition> <days> | /memory nudge [on|off|cap <n>] | \
+                     /memory clear <partition>"
                 ))),
             },
         }
@@ -156,8 +160,18 @@ impl MemoryHandler {
         Ok(handled(out))
     }
 
+    /// 23B-C3: routes through [`wcore_memory::MemoryApi::correct_recalled`]
+    /// rather than `MemoryControls::correct_episode` directly.
+    ///
+    /// `correct_episode` hardcodes `Partition::Episodic`, so before this a
+    /// user who ran `/memory why`, saw a semantic fact sitting in their
+    /// prompt, and tried to correct it was told `NotFound` while the wrong
+    /// claim kept being sent to the provider on every cold turn. The dispatch
+    /// tries the episode store first — byte-identical behaviour for every id
+    /// that already resolved — and falls through to the fact store, where the
+    /// corrected triple is re-embedded in the same statement as the text.
     fn correct(&self, args: &[String]) -> Result<SlashOutcome, SlashError> {
-        let (_api, controls) = self.controls("correct")?;
+        let api = self.runtime_api("correct")?;
         let (id, rest) = args
             .split_first()
             .ok_or_else(|| SlashError::Bad("/memory correct <id> <corrected text>".to_string()))?;
@@ -167,13 +181,13 @@ impl MemoryHandler {
                     .to_string(),
             ));
         }
-        match controls.correct_episode(
-            &AccessToken::MainAgent,
+        match block_on(api.correct_recalled(
             Tier::Project,
             id,
             &rest.join(" "),
             "operator",
-        ) {
+            AccessToken::MainAgent,
+        )) {
             Ok(r) => Ok(handled(format!(
                 "/memory correct: {} corrected in {}/{}",
                 r.id,
@@ -184,12 +198,17 @@ impl MemoryHandler {
         }
     }
 
+    /// 23B-C3: routes through [`wcore_memory::MemoryApi::forget_recalled`].
+    /// Same reason as [`Self::correct`] — see that doc comment. The receipt
+    /// names the partition the item was actually found in, so a user can tell
+    /// an episode forget from a fact forget rather than having to trust that
+    /// "removed" meant the thing they saw.
     fn forget(&self, args: &[String]) -> Result<SlashOutcome, SlashError> {
-        let (_api, controls) = self.controls("forget")?;
+        let api = self.runtime_api("forget")?;
         let id = args
             .first()
             .ok_or_else(|| SlashError::Bad("/memory forget <id>".to_string()))?;
-        match controls.forget_episode(&AccessToken::MainAgent, Tier::Project, id, "operator") {
+        match block_on(api.forget_recalled(Tier::Project, id, "operator", AccessToken::MainAgent)) {
             Ok(r) => Ok(handled(format!(
                 "/memory forget: {} removed from {}/{} and recorded in the changelog",
                 r.id,
@@ -197,6 +216,66 @@ impl MemoryHandler {
                 r.tier.as_str()
             ))),
             Err(e) => Ok(handled(format!("/memory forget refused: {e}"))),
+        }
+    }
+
+    /// 23B-C3 — `/memory nudge [on|off|cap <n>]`.
+    ///
+    /// `NudgeBudget` shipped in F23-03 with a cap, an off switch and an atomic
+    /// claim, and with **no caller anywhere outside its own unit tests** — so
+    /// the criterion's "nudges" clause named a bound no user could see, let
+    /// alone move. This is the surface. With no argument it reports state; the
+    /// mutating forms report the previous value alongside the new one, so a
+    /// no-op is visibly a no-op instead of an unconditional "ok".
+    fn nudge(&self, args: &[String]) -> Result<SlashOutcome, SlashError> {
+        let api = self.runtime_api("nudge")?;
+        let budget = api.nudge_budget().ok_or_else(|| {
+            SlashError::Bad(
+                "/memory nudge: this memory backend has no proactive-nudge path to bound"
+                    .to_string(),
+            )
+        })?;
+        let state = |b: &wcore_memory::NudgeBudget| {
+            format!(
+                "/memory nudge: {} — cap {} per session, {} used, {} remaining",
+                if b.enabled() { "enabled" } else { "OFF" },
+                b.cap(),
+                b.used(),
+                b.remaining()
+            )
+        };
+        match args.first().map(|s| s.as_str()) {
+            None | Some("show") => Ok(handled(state(&budget))),
+            Some("on") => {
+                let was = budget.set_enabled(true);
+                Ok(handled(format!(
+                    "{}\n  (was {})",
+                    state(&budget),
+                    if was { "already enabled" } else { "OFF" }
+                )))
+            }
+            Some("off") => {
+                let was = budget.set_enabled(false);
+                Ok(handled(format!(
+                    "{}\n  (was {})",
+                    state(&budget),
+                    if was { "enabled" } else { "already OFF" }
+                )))
+            }
+            Some("cap") => {
+                let n: u32 = args
+                    .get(1)
+                    .ok_or_else(|| SlashError::Bad("/memory nudge cap <n>".to_string()))?
+                    .parse()
+                    .map_err(|_| {
+                        SlashError::Bad("/memory nudge cap: <n> must be a number".to_string())
+                    })?;
+                let was = budget.set_cap(n);
+                Ok(handled(format!("{}\n  (cap was {was})", state(&budget))))
+            }
+            Some(other) => Err(SlashError::Bad(format!(
+                "/memory nudge: unknown argument '{other}'. Try: /memory nudge [show|on|off|cap <n>]"
+            ))),
         }
     }
 

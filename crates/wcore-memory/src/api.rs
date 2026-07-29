@@ -11,6 +11,15 @@ use crate::v2_types::{
     Procedure, ProcedureId, Query, Tier, UserModel,
 };
 
+/// The refusal a control returns when the backend has no store to act on.
+/// Shared by the `*_recalled` defaults so a `NullMemory` cannot report a
+/// control as applied.
+fn no_controls() -> crate::error::MemoryError {
+    crate::error::MemoryError::InvalidControl(
+        "this memory backend exposes no operator controls".to_string(),
+    )
+}
+
 #[async_trait]
 pub trait MemoryApi: Send + Sync {
     async fn record_episode(&self, ep: Episode, tok: AccessToken) -> Result<EpisodeId>;
@@ -106,6 +115,75 @@ pub trait MemoryApi: Send + Sync {
     /// so rather than reporting a control as applied: the whole value of these
     /// controls is that a user can trust the answer.
     fn controls(&self) -> Option<crate::provenance::MemoryControls> {
+        None
+    }
+
+    /// 23B-C3 — forget a recalled item by the id a user actually saw,
+    /// whichever partition holds it.
+    ///
+    /// `/memory forget <id>` used to call `MemoryControls::forget_episode`
+    /// directly, which hardcodes `Partition::Episodic`. Semantic facts are the
+    /// only partition the engine auto-injects into the outbound provider
+    /// request body, so a user could see a fact in their prompt, ask for it to
+    /// be forgotten, and be told `NotFound` while it kept being sent. This
+    /// tries episodic first (unchanged behaviour for every id that resolved
+    /// before) and falls through to the fact store ONLY on `NotFound` — never
+    /// on a denial, so a gate refusal is still surfaced as a refusal instead
+    /// of being retried against another cell.
+    async fn forget_recalled(
+        &self,
+        tier: Tier,
+        id: &str,
+        actor: &str,
+        tok: AccessToken,
+    ) -> Result<crate::provenance::ForgetReceipt> {
+        let controls = self.controls().ok_or_else(no_controls)?;
+        match controls.forget_episode(&tok, tier, id, actor) {
+            Err(crate::error::MemoryError::NotFound { .. }) => {
+                controls.forget_fact(&tok, tier, id, actor)
+            }
+            other => other,
+        }
+    }
+
+    /// 23B-C3 — correct a recalled item by the id a user actually saw.
+    ///
+    /// The default impl handles episodes and REFUSES OUT LOUD for facts,
+    /// because correcting a fact requires re-embedding the corrected triple
+    /// and this trait's default has no embedder. A silent partial success —
+    /// updating the text and leaving the old vector, or nulling the vector and
+    /// thereby performing a forget — is exactly the "reported a control as
+    /// applied" failure the F23-03 controls exist to avoid.
+    /// `PartitionDispatcher` overrides this and does the re-embed.
+    async fn correct_recalled(
+        &self,
+        tier: Tier,
+        id: &str,
+        corrected: &str,
+        actor: &str,
+        tok: AccessToken,
+    ) -> Result<crate::provenance::CorrectionReceipt> {
+        let controls = self.controls().ok_or_else(no_controls)?;
+        match controls.correct_episode(&tok, tier, id, corrected, actor) {
+            Err(crate::error::MemoryError::NotFound { .. }) => {
+                Err(crate::error::MemoryError::InvalidControl(format!(
+                    "no episode {id} at tier {}; correcting a semantic fact needs a re-embedding \
+                     and this memory backend exposes no embedder",
+                    tier.as_str()
+                )))
+            }
+            other => other,
+        }
+    }
+
+    /// 23B-C3 — the per-session nudge bound, when this backend has one.
+    ///
+    /// Returns `None` for backends with no nudge path. `NudgeBudget` shipped
+    /// in F23-03 with a cap, an off switch and an atomic claim, and with no
+    /// caller anywhere outside its own unit tests — so the criterion's
+    /// "nudges" clause named a control no user could see or reach. This is the
+    /// accessor `/memory nudge` reads.
+    fn nudge_budget(&self) -> Option<std::sync::Arc<crate::provenance::NudgeBudget>> {
         None
     }
 

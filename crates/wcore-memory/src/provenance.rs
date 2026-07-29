@@ -29,7 +29,7 @@
 //! for: a per-session cap and an off switch, both observable when they refuse.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -324,6 +324,144 @@ impl MemoryControls {
         })
     }
 
+    // ----- semantic facts (23B-C3) -----------------------------------------
+
+    /// Remove a semantic fact so no later retrieval can surface it, and
+    /// represent the removal in the changelog.
+    ///
+    /// This exists because [`Self::forget_episode`] hardcodes
+    /// `Partition::Episodic` while the semantic partition is the only one the
+    /// engine auto-injects into the outbound provider request body
+    /// (`AgentEngine::recall_relevant_facts` keeps `Partition::Semantic` hits
+    /// and discards every other partition). Without this, the single class of
+    /// remembered content a user can actually see in their prompt was the one
+    /// class `/memory forget` could not remove: the `DELETE` matched zero rows
+    /// in `episodes` and the control returned `NotFound` while the fact stayed
+    /// in every subsequent prompt.
+    ///
+    /// The row is DELETEd rather than superseded. `superseded_by` is a filter
+    /// every future query has to remember to apply — `facts_cosine_pass` does
+    /// apply it, but a forget must not depend on that discipline holding in a
+    /// query nobody has written yet.
+    pub fn forget_fact(
+        &self,
+        tok: &AccessToken,
+        tier: Tier,
+        id: &str,
+        actor: &str,
+    ) -> Result<ForgetReceipt> {
+        self.gate.check_write(tok, Partition::Semantic, tier)?;
+        let tc = self.db.tier_or_global(tier);
+        let removed = {
+            let conn = tc.conn.lock();
+            conn.execute(
+                "DELETE FROM facts WHERE id = ?1 AND tier = ?2",
+                rusqlite::params![id, tier.as_str()],
+            )
+            .map_err(MemoryError::Db)?
+        };
+        if removed == 0 {
+            return Err(MemoryError::NotFound {
+                partition: Partition::Semantic.to_string(),
+                tier: tier.to_string(),
+                id: id.to_owned(),
+            });
+        }
+        self.record_operation(Partition::Semantic, tier, "forget", actor, id);
+        self.cdc
+            .append_forget(tier, Partition::Semantic, id, actor)?;
+        Ok(ForgetReceipt {
+            id: id.to_owned(),
+            partition: Partition::Semantic,
+            tier,
+            actor: actor.to_owned(),
+            at: now_secs(),
+            in_changelog: true,
+        })
+    }
+
+    /// Replace a semantic fact's `object` — the part of the triple that
+    /// carries the claim — and REWRITE ITS EMBEDDING in the same statement.
+    ///
+    /// The embedding is a required argument rather than something this method
+    /// could omit, and that is the whole design. `facts_cosine_pass` ranks on
+    /// `embedding` and skips rows where it is NULL, so the two lazy
+    /// alternatives are both silent lies: leaving the old vector in place
+    /// means a corrected fact keeps being recalled by the query that matched
+    /// the *wrong* text, and nulling it means "correct" silently performs a
+    /// forget. `MemoryControls` owns no embedder, so the caller that has one
+    /// must supply it; [`crate::api::MemoryApi::correct_recalled`] is the
+    /// production path and the dispatcher's override is where the re-embed
+    /// happens.
+    pub fn correct_fact(
+        &self,
+        tok: &AccessToken,
+        tier: Tier,
+        id: &str,
+        corrected_object: &str,
+        embedding: &[f32],
+        actor: &str,
+    ) -> Result<CorrectionReceipt> {
+        self.gate.check_write(tok, Partition::Semantic, tier)?;
+        let blob = crate::embed::encode_blob(embedding);
+        let tc = self.db.tier_or_global(tier);
+        let changed = {
+            let conn = tc.conn.lock();
+            conn.execute(
+                "UPDATE facts SET object = ?1, embedding = ?2 WHERE id = ?3 AND tier = ?4",
+                rusqlite::params![corrected_object, blob, id, tier.as_str()],
+            )
+            .map_err(MemoryError::Db)?
+        };
+        if changed == 0 {
+            return Err(MemoryError::NotFound {
+                partition: Partition::Semantic.to_string(),
+                tier: tier.to_string(),
+                id: id.to_owned(),
+            });
+        }
+        self.record_operation(Partition::Semantic, tier, "correct", actor, id);
+        self.cdc
+            .append_correction(tier, Partition::Semantic, id, actor)?;
+        Ok(CorrectionReceipt {
+            id: id.to_owned(),
+            partition: Partition::Semantic,
+            tier,
+            actor: actor.to_owned(),
+            at: now_secs(),
+        })
+    }
+
+    /// The triple text a corrected fact will be re-embedded from, so a caller
+    /// embeds exactly the string `facts_cosine_pass` will later render as the
+    /// hit preview. Returns `NotFound` rather than a default, because
+    /// embedding a guessed triple would put a wrong vector on a real row.
+    pub fn fact_triple_after_correction(
+        &self,
+        tier: Tier,
+        id: &str,
+        corrected_object: &str,
+    ) -> Result<String> {
+        let tc = self.db.tier_or_global(tier);
+        let conn = tc.conn.lock();
+        let row: Option<(String, String)> = conn
+            .query_row(
+                "SELECT subject, predicate FROM facts WHERE id = ?1 AND tier = ?2",
+                rusqlite::params![id, tier.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(MemoryError::Db)?;
+        match row {
+            Some((subject, predicate)) => Ok(format!("{subject} {predicate} {corrected_object}")),
+            None => Err(MemoryError::NotFound {
+                partition: Partition::Semantic.to_string(),
+                tier: tier.to_string(),
+                id: id.to_owned(),
+            }),
+        }
+    }
+
     // ----- privacy ----------------------------------------------------------
 
     /// Exclude a grid cell from retrieval. Idempotent: re-scoping an already
@@ -541,10 +679,15 @@ pub fn provenance_for(
 /// a caller's discipline. Delivery scheduling is deliberately NOT implemented:
 /// that is Phase 24's persistent runtime, and shipping half of it here would
 /// mean shipping an unbounded actor with a bound bolted on.
+/// 23B-C3: `cap` and `enabled` are atomics rather than plain fields so the
+/// bound is a control a user can **change** at runtime (`/memory nudge off`,
+/// `/memory nudge cap N`) and not merely a constant they can read. A bound
+/// nobody can move is a configuration decision, not a control, and the
+/// criterion asks for control.
 #[derive(Debug)]
 pub struct NudgeBudget {
-    cap: u32,
-    enabled: bool,
+    cap: AtomicU32,
+    enabled: AtomicBool,
     used: AtomicU32,
 }
 
@@ -570,24 +713,46 @@ impl std::fmt::Display for NudgeRefusal {
     }
 }
 
+/// The default per-session cap when nothing sets one explicitly. Chosen, not
+/// measured: three is small enough that an unnoticed nudge path cannot spend a
+/// session's budget, and the user can raise it.
+pub const DEFAULT_NUDGE_CAP: u32 = 3;
+
 impl NudgeBudget {
     #[must_use]
     pub fn new(cap: u32, enabled: bool) -> Self {
         Self {
-            cap,
-            enabled,
+            cap: AtomicU32::new(cap),
+            enabled: AtomicBool::new(enabled),
             used: AtomicU32::new(0),
         }
     }
 
     #[must_use]
     pub fn cap(&self) -> u32 {
-        self.cap
+        self.cap.load(Ordering::SeqCst)
     }
 
     #[must_use]
     pub fn enabled(&self) -> bool {
-        self.enabled
+        self.enabled.load(Ordering::SeqCst)
+    }
+
+    /// Turn the nudge path on or off for the rest of the session. Returns the
+    /// previous state so a caller can report what actually changed rather
+    /// than echoing the request back.
+    pub fn set_enabled(&self, enabled: bool) -> bool {
+        self.enabled.swap(enabled, Ordering::SeqCst)
+    }
+
+    /// Move the per-session cap. Returns the previous cap.
+    ///
+    /// Lowering the cap below `used` does NOT retroactively refuse claims that
+    /// already succeeded — `remaining()` saturates at zero and every
+    /// subsequent `request()` is refused. A control that pretended to unspend
+    /// an already-spent nudge would be lying about the past.
+    pub fn set_cap(&self, cap: u32) -> u32 {
+        self.cap.swap(cap, Ordering::SeqCst)
     }
 
     #[must_use]
@@ -597,20 +762,24 @@ impl NudgeBudget {
 
     #[must_use]
     pub fn remaining(&self) -> u32 {
-        self.cap.saturating_sub(self.used())
+        self.cap().saturating_sub(self.used())
     }
 
     /// Claim one nudge. The claim is atomic against concurrent callers: the
     /// compare-and-swap loop means two threads racing at `cap - 1` cannot both
     /// succeed, which a read-then-increment would allow.
     pub fn request(&self) -> std::result::Result<u32, NudgeRefusal> {
-        if !self.enabled {
+        if !self.enabled() {
             return Err(NudgeRefusal::Disabled);
         }
         let mut current = self.used.load(Ordering::SeqCst);
         loop {
-            if current >= self.cap {
-                return Err(NudgeRefusal::CapReached { cap: self.cap });
+            // Re-read the cap on every loop turn: `set_cap` may land between
+            // the load and the CAS, and honouring the newest bound is the
+            // point of making it settable.
+            let cap = self.cap();
+            if current >= cap {
+                return Err(NudgeRefusal::CapReached { cap });
             }
             match self.used.compare_exchange(
                 current,
