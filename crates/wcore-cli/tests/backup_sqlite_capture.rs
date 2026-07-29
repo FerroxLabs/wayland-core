@@ -152,6 +152,88 @@ fn a_live_wal_database_is_archived_as_one_consistent_file() {
     );
 }
 
+/// The product's REAL memory schema — `fts5` plus `vec0` virtual tables from the
+/// loadable `sqlite-vec` extension — must survive a capture.
+///
+/// This is the assertion the design decision rests on. `VACUUM INTO` was
+/// rejected partly because it rebuilds from the schema and would therefore need
+/// every virtual-table module registered; the online backup API copies PAGES and
+/// never executes the schema, so it should not care. "Should not care" is a
+/// belief until something runs, and this is that something.
+#[test]
+fn a_database_carrying_vec0_and_fts5_virtual_tables_is_captured() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("config.toml"), "a = 1").unwrap();
+
+    let db_path = home.join("memory.db");
+    {
+        let db = wcore_memory::db::Db::open_global(db_path.clone()).unwrap();
+        db.ensure_vec_table_for_dim(384).unwrap();
+    }
+
+    // Known-positive: the virtual tables really are in this file. Without this
+    // the test would pass just as happily on an empty database.
+    let probe = rusqlite::Connection::open(&db_path).unwrap();
+    let vtabs: i64 = probe
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%USING vec0%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let ftss: i64 = probe
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%USING fts5%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    drop(probe);
+    assert!(
+        vtabs > 0,
+        "no vec0 virtual table was created; test is vacuous"
+    );
+    assert!(
+        ftss > 0,
+        "no fts5 virtual table was created; test is vacuous"
+    );
+
+    let out = dir.path().join("backup.tar.gz");
+    let manifest = archive::create_archive(&home, &out, false).unwrap();
+    assert_eq!(manifest.sqlite_captures, vec!["memory.db".to_string()]);
+
+    let restored = dir.path().join("restored");
+    restore::restore_archive(
+        &out,
+        &restored,
+        restore::RestoreOptions {
+            replace: false,
+            accept_missing_secrets: true,
+            pace_ms: 0,
+        },
+    )
+    .unwrap();
+
+    let conn = rusqlite::Connection::open(restored.join("memory.db")).unwrap();
+    let verdict: String = conn
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(verdict, "ok");
+    let restored_vtabs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%USING vec0%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        restored_vtabs, vtabs,
+        "the capture lost virtual-table definitions"
+    );
+}
+
 #[test]
 fn a_home_with_no_database_is_unaffected() {
     // The control that keeps the capture path from being credited for work it
