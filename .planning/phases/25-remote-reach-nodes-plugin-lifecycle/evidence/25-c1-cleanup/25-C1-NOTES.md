@@ -82,13 +82,70 @@ known-positive 'rm -rf $root': 2      <- but the reader can find the script
 So the defect is exactly as FINDING 5 describes, it is still live at the graded base, and
 the leaked artefact is the task's input bytes — not merely an empty directory.
 
+## t2 — Gap 1b CLOSED live
+
+`ssh-cleanup-FIXED.txt`, same script, same far end, binary rebuilt at `01ebc765`
+(`binary sha 9bc18141…`, `fixed-shape '|| status=$?': 1`).
+
+| measurement | BASE `20a76bd4` | FIXED `01ebc765` |
+|---|---|---|
+| instrument (decoy planted / removed) | 1 / 0 | 1 / 0 |
+| task ran on the far end (witness) | 1 | 1 |
+| **leaked roots after a failing task** | **1** | **0** |
+| **leaked input bytes** | **1** | **0** |
+| roots after a succeeding task | 0 | 0 |
+| receipt terminal | `Failure { code: "exit-7" }` | `Failure { code: "exit-7" }` |
+
+The status still propagates, so cleanup was not bought by swallowing the outcome.
+
+`gate-can-fail.txt`: the fix was reverted IN PLACE (restored from a file copy, never with
+git) and the new test went **RED** — `1 passed; 2 failed; 0 ignored; 0 filtered out`, the
+failure message being *"input.bin — the task's own input bytes — was left on the far end after
+a failing task"*. Restored, tree clean (`git status --porcelain` empty), test **GREEN** at
+`3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`.
+
+## t3 — Gap 1a: cloud cancellation DRIVEN, and it exposed a second defect
+
+The credential needed no Sean action. It did need the app-scope override every earlier live
+run uses (`/root/f25-cloud/live-cloud.sh`): the env file's `WAYLAND_F25_CLOUD_ORG` is
+`sean-donahoe`, a personal ORG, and the backend wants the APP `wayland-f25-test`. Sourcing the
+file alone gives `HTTP 404 app not found`, which reads exactly like a dead credential and is
+not one (`cloud-cancel-PROBE2.txt` records that first wrong attempt rather than hiding it).
+
+`cloud-cancel-BEFORE.txt`, machine `8d967d9fe40308`:
+
+- product read back its own probe basis: `VendorApiCall`, `available: true`, app
+  `wayland-f25-test` — not inferred from what I exported;
+- vendor state timeline from an INDEPENDENT raw API call: `created` → `suspending` → `started`,
+  with the machine's own event types `start, start, suspension, suspension, start`. So the
+  cancel lands on a machine that genuinely hibernated and resumed;
+- census while running = **1** on BOTH instruments (the product's `backend orphans` and the raw
+  vendor call). That is the known-positive that makes the later zeros mean something;
+- `backend cancel --task-id f25c1cancel --backend cloud` → exit 0,
+  `residual: none — the cleanup was verified by re-enumeration`;
+- census after = **0** on both instruments. **No leaked billable machine.**
+- **but: `F25C1-CLOUD-CANCEL-RECEIPT-BEFORE: ABSENT`.** The run process died with
+  `transport failed: machine exec returned HTTP 412: failed_precondition: exec request failed:
+  EOF` and exit 1, and wrote no receipt. Local/container/ssh all write
+  `Cancelled { reason: "operator cancelled" }` (`evidence/25-01/cancellation-transcript.txt`).
+
+**A second, previously unknown defect**, and exactly the kind only driving finds: the cloud
+surface could not attest a cancellation at all. Criterion 1 names receipts AND cancellation as
+equivalence properties, so this is in scope. Fixed at `74e002b2`; re-drive pending.
+
+A separate observation, NOT fixed here: an uncancelled `sleep 120` with `wall_time_ms 60000`
+also ends as a bare transport error (`HTTP 408 deadline_exceeded`, `cloud-cancel-PROBE2.txt`)
+rather than a `Timeout` receipt. Same family, different clause; recorded for BACKLOG.
+
 ## Still to establish
 
 - [x] Leak reproduced live on a real ssh far end at BASE (count 1, `input.bin` present).
 - [x] Instrument proven alive in both directions in the same phase.
-- [ ] Leak gone at FIXED commit (count 0) with the same failing task, with the witness still
-      proving the task ran on the far end.
-- [ ] Exit status still propagates after the fix.
-- [ ] `cargo test -p wcore-exec-backend --test ssh_remote_runner_cleanup` green with a real
-      executed count.
-- [ ] Cloud cancellation driven live: terminal state + receipt + post-cancel machine count.
+- [x] Leak gone at FIXED commit (0 roots) with the witness still proving remote execution.
+- [x] Exit status still propagates after the fix.
+- [x] `cargo test -p wcore-exec-backend --test ssh_remote_runner_cleanup`: 3 passed, 0 ignored,
+      0 filtered out — and proven able to go red.
+- [x] Cloud cancellation driven live: cleanup lands, machine count 1 → 0 on two instruments.
+- [ ] Cloud cancellation re-drive at `74e002b2`: a receipt carrying `Cancelled`.
+- [ ] Regression pass on `wcore-exec-backend` at the final commit.
+- [ ] Token-value sweep over every capture (done once at t3: 0 hits, known-positive 4).
