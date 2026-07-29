@@ -219,9 +219,14 @@ impl Default for McpCurationPolicy {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SecurityConfig {
     /// Master switch for the egress gate. On by default. Disabling is
-    /// **config-file only** (never a bare env var — supply-chain hazard, C8) and
-    /// additionally requires the explicit `--i-accept-exfil-risk` CLI flag at
-    /// the same invocation before a `false` here is honored.
+    /// **config-file only** (never a bare env var — supply-chain hazard, C8).
+    ///
+    /// **A `false` here is honored on its own.** This doc previously claimed an
+    /// explicit `--i-accept-exfil-risk` CLI flag was additionally required.
+    /// **That flag does not exist** (`error: unexpected argument`) — measured
+    /// and corrected 2026-07-29 by lane `25-c4-egress`. Adding the interlock is
+    /// an open owner decision, because requiring a flag changes behaviour for
+    /// every existing user.
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Operator-curated extra allowlist entries — registrable domains (cover
@@ -4291,9 +4296,14 @@ fn merge_config_files_with_trust(
 
     // B2 — security: the egress gate stays ON unless a layer turns it off
     // (most-restrictive `enabled`), and the operator allowlists concatenate
-    // (global first, then project), mirroring the hooks/skills merge. A config
-    // `enabled = false` still requires the `--i-accept-exfil-risk` CLI flag to
-    // be honored (C8), so the merge can't silently disable the boundary.
+    // (global first, then project), mirroring the hooks/skills merge.
+    //
+    // This comment previously asserted that a config `enabled = false` "still
+    // requires the `--i-accept-exfil-risk` CLI flag to be honored (C8), so the
+    // merge can't silently disable the boundary." That flag DOES NOT EXIST, so
+    // the reassurance was false: most-restrictive merge is the ONLY thing
+    // standing between a project-local config and a disabled egress boundary.
+    // Corrected 2026-07-29 by lane `25-c4-egress`.
     let security = SecurityConfig {
         enabled: global.security.enabled && project.security.enabled,
         egress_allow: [global.security.egress_allow, project.security.egress_allow].concat(),
