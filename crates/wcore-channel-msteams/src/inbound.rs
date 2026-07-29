@@ -15,15 +15,39 @@
 //! `serviceUrl` is taken from the activity itself (Teams stamps it per
 //! activity), falling back to the channel's configured service URL.
 //!
-//! **Attachments are NOT parsed in v1.** Teams delivers files as
-//! `attachments[]` entries with `contentType`/`contentUrl`, but fetching them
-//! requires a separate auth-gated download against the Graph/Connector API;
-//! deferred to a follow-up. `attachments` is left empty here.
+//! **Attachments.** Teams delivers files as `attachments[]` entries carrying
+//! `contentType` / `contentUrl` / `name`. Those are normalised onto the host's
+//! [`Attachment`] shape here through [`wcore_channels::media::normalize_all`],
+//! so the adapter's declared [`MediaBounds`] are enforced rather than assumed.
+//! Two Teams-specific facts shape the mapping and are handled explicitly:
+//!
+//! * **Not every `attachments[]` entry is a file.** Teams stamps the message's
+//!   own rich-text rendering as an entry with `contentType: "text/html"` and an
+//!   inline `content` string, and Adaptive Cards arrive the same way. Those
+//!   carry NO `contentUrl`. Treating them as attachments would make every
+//!   formatted Teams message sprout a phantom document in the agent's turn, so
+//!   an entry without a non-empty `contentUrl` is not an attachment.
+//! * **The file wrapper's `contentType` is not a media type.** A real file
+//!   arrives as `application/vnd.microsoft.teams.file.download.info`, which
+//!   classifies to `Other` and would render as that raw vendor string. For that
+//!   wrapper we classify from `name` instead, so `report.pdf` reads as a
+//!   Document and `shot.png` as an Image.
+//!
+//! Teams reports no attachment size, so `size_bytes` is `None` — which the
+//! normaliser treats as "unknown", not as "small". Fetching the bytes is still
+//! a separate auth-gated download against the Graph/Connector API and remains
+//! unimplemented (`fetch_media` stays at the trait default); the reference,
+//! type and kind reach the agent regardless.
 
 use serde::Deserialize;
 use wcore_channels::event::{ChatType, IncomingMessage};
+use wcore_channels::media::{MediaBounds, RawAttachment, normalize_all};
 
 use crate::error::MsTeamsError;
+
+/// Teams' wrapper content type for an uploaded file. It describes the envelope,
+/// not the media, so classification falls back to the filename.
+const TEAMS_FILE_WRAPPER: &str = "application/vnd.microsoft.teams.file.download.info";
 
 /// The slice of a Bot Framework Activity we consume. Every field is
 /// `#[serde(default)]` so partial / unfamiliar payloads deserialize rather
@@ -47,6 +71,24 @@ struct Activity {
     /// RFC3339 timestamp string, e.g. `2026-06-10T12:34:56.789Z`.
     #[serde(default)]
     timestamp: String,
+    #[serde(default)]
+    attachments: Vec<ActivityAttachment>,
+}
+
+/// One `attachments[]` entry on a Bot Framework Activity.
+///
+/// `content` is deliberately NOT deserialized: for a file it is a wrapper
+/// object whose `downloadUrl` is a short-lived pre-authenticated link we do not
+/// yet fetch, and for rich text / Adaptive Cards it is inline markup we must
+/// not surface as a file. `contentUrl`'s presence is what distinguishes the two.
+#[derive(Debug, Deserialize, Default)]
+struct ActivityAttachment {
+    #[serde(rename = "contentType", default)]
+    content_type: String,
+    #[serde(rename = "contentUrl", default)]
+    content_url: String,
+    #[serde(default)]
+    name: String,
 }
 
 /// `from` / `recipient` — a Bot Framework channel account.
@@ -90,6 +132,62 @@ fn chat_type_of(conv: &ConversationAccount) -> ChatType {
     }
 }
 
+/// Map the Activity's `attachments[]` onto host attachments, enforcing `bounds`.
+///
+/// Entries without a `contentUrl` are not files (see the module docs) and are
+/// skipped. Everything that survives that filter is normalised — never dropped:
+/// a degraded attachment keeps its URL and type and is still handed to the
+/// agent, and the reason is logged. It is logged rather than carried on the
+/// message because [`wcore_channels::Attachment`] has no disposition field, and
+/// adding one is a wire-contract change this adapter may not make unilaterally.
+fn map_attachments(
+    raw: &[ActivityAttachment],
+    bounds: MediaBounds,
+) -> Vec<wcore_channels::Attachment> {
+    let candidates: Vec<RawAttachment> = raw
+        .iter()
+        .filter(|a| !a.content_url.trim().is_empty())
+        .map(|a| {
+            // The Teams file wrapper describes the envelope, not the media, so
+            // let the filename classify it instead of the vendor MIME.
+            let content_type = if a.content_type.is_empty()
+                || a.content_type.eq_ignore_ascii_case(TEAMS_FILE_WRAPPER)
+            {
+                None
+            } else {
+                Some(a.content_type.clone())
+            };
+            RawAttachment {
+                url: a.content_url.clone(),
+                content_type,
+                // Teams reports no size on the activity. `None` means unknown,
+                // which normalize() is explicit about NOT treating as small.
+                size_bytes: None,
+                filename: if a.name.is_empty() {
+                    None
+                } else {
+                    Some(a.name.clone())
+                },
+            }
+        })
+        .collect();
+
+    normalize_all(&candidates, bounds)
+        .into_iter()
+        .map(|(attachment, disposition)| {
+            if let Some(reason) = disposition.reason() {
+                tracing::warn!(
+                    url = %attachment.url,
+                    kind = ?attachment.kind,
+                    reason,
+                    "msteams inbound attachment degraded (retained, not fetchable)"
+                );
+            }
+            attachment
+        })
+        .collect()
+}
+
 /// Parse a Bot Framework Activity JSON body into an [`IncomingMessage`].
 ///
 /// Returns:
@@ -102,9 +200,12 @@ fn chat_type_of(conv: &ConversationAccount) -> ChatType {
 ///
 /// `service_url_fallback` is used to build `conversation_id` when the
 /// activity omits its own `serviceUrl` (the channel's configured service URL).
+/// `bounds` is the adapter's declared media intake bound, applied to
+/// `attachments[]` — the caller passes `Channel::media_bounds()`.
 pub fn activity_to_incoming(
     raw_body: &str,
     service_url_fallback: &str,
+    bounds: MediaBounds,
 ) -> Result<Option<IncomingMessage>, MsTeamsError> {
     let activity: Activity =
         serde_json::from_str(raw_body).map_err(|e| MsTeamsError::Parse(e.to_string()))?;
@@ -174,6 +275,7 @@ pub fn activity_to_incoming(
         // engaging in a bot-to-bot loop. Teams does not echo the bot's own
         // outbound back, so is_self has no reliable signal and stays false.
         is_bot: activity.from.role.eq_ignore_ascii_case("bot"),
+        attachments: map_attachments(&activity.attachments, bounds),
         ..IncomingMessage::new(activity.id, conversation_id, author, activity.text, ts_secs)
     };
 
@@ -206,7 +308,14 @@ pub fn service_url_of(raw_body: &str) -> Result<Option<String>, MsTeamsError> {
 mod tests {
     use super::*;
 
+    use wcore_channels::MediaKind;
+
     const SERVICE_FALLBACK: &str = "https://smba.trafficmanager.net/amer/";
+
+    /// The adapter's declared intake bound, as `ingest_activity` passes it.
+    fn bounds() -> MediaBounds {
+        MediaBounds::default()
+    }
 
     #[test]
     fn message_activity_parses_enriched_fields() {
@@ -226,7 +335,7 @@ mod tests {
             }
         }"#;
 
-        let msg = activity_to_incoming(body, SERVICE_FALLBACK)
+        let msg = activity_to_incoming(body, SERVICE_FALLBACK, bounds())
             .expect("parse ok")
             .expect("message activity yields Some");
 
@@ -266,7 +375,7 @@ mod tests {
             "serviceUrl": "https://smba.trafficmanager.net/emea/",
             "timestamp": "2026-06-10T12:34:56Z"
         }"#;
-        let msg = activity_to_incoming(body, SERVICE_FALLBACK)
+        let msg = activity_to_incoming(body, SERVICE_FALLBACK, bounds())
             .expect("parses")
             .expect("is a message");
         assert!(msg.is_bot, "from.role=bot must set is_bot");
@@ -282,7 +391,7 @@ mod tests {
             "recipient": { "id": "28:bot" },
             "conversation": { "id": "19:room@thread.v2", "conversationType": "groupChat" }
         }"#;
-        let msg = activity_to_incoming(body, SERVICE_FALLBACK)
+        let msg = activity_to_incoming(body, SERVICE_FALLBACK, bounds())
             .unwrap()
             .unwrap();
         assert_eq!(msg.chat_type, ChatType::Group);
@@ -302,7 +411,7 @@ mod tests {
             "recipient": { "id": "28:bot" },
             "conversation": { "id": "19:abc@thread.v2" }
         }"#;
-        let out = activity_to_incoming(body, SERVICE_FALLBACK).expect("parse ok");
+        let out = activity_to_incoming(body, SERVICE_FALLBACK, bounds()).expect("parse ok");
         assert!(out.is_none(), "non-message activity must yield None");
     }
 
@@ -316,14 +425,137 @@ mod tests {
             "recipient": { "id": "28:bot" },
             "conversation": { "id": "19:abc@thread.v2", "conversationType": "personal" }
         }"#;
-        let err = activity_to_incoming(body, SERVICE_FALLBACK).expect_err("missing from.id errors");
+        let err = activity_to_incoming(body, SERVICE_FALLBACK, bounds())
+            .expect_err("missing from.id errors");
         assert!(matches!(err, MsTeamsError::Parse(_)), "got {err:?}");
     }
 
     #[test]
+    fn file_attachment_is_parsed_and_classified_by_filename() {
+        // A real Teams file upload: the contentType is the vendor WRAPPER, not
+        // a media type. Classifying from it would yield `Other` and render the
+        // raw vendor string to the agent; the filename is the usable signal.
+        let body = r#"{
+            "type": "message",
+            "id": "att-1",
+            "text": "here you go",
+            "from": { "id": "29:u", "name": "U" },
+            "recipient": { "id": "28:bot" },
+            "conversation": { "id": "19:abc@thread.v2", "conversationType": "personal" },
+            "attachments": [
+                {
+                    "contentType": "application/vnd.microsoft.teams.file.download.info",
+                    "contentUrl": "https://contoso.sharepoint.com/personal/u/report.pdf",
+                    "name": "report.pdf",
+                    "content": { "downloadUrl": "https://download/x", "fileType": "pdf" }
+                },
+                {
+                    "contentType": "image/png",
+                    "contentUrl": "https://contoso.sharepoint.com/personal/u/shot.png",
+                    "name": "shot.png"
+                }
+            ]
+        }"#;
+        let msg = activity_to_incoming(body, SERVICE_FALLBACK, bounds())
+            .unwrap()
+            .unwrap();
+        assert_eq!(msg.attachments.len(), 2, "both files must survive");
+
+        // Wrapper MIME dropped → classified from `report.pdf`.
+        assert_eq!(
+            msg.attachments[0].url,
+            "https://contoso.sharepoint.com/personal/u/report.pdf"
+        );
+        assert_eq!(msg.attachments[0].kind, MediaKind::Document);
+        assert_eq!(
+            msg.attachments[0].content_type, None,
+            "the vendor wrapper is not a media type and must not be reported as one"
+        );
+
+        // A genuine MIME is kept and used.
+        assert_eq!(msg.attachments[1].kind, MediaKind::Image);
+        assert_eq!(
+            msg.attachments[1].content_type.as_deref(),
+            Some("image/png")
+        );
+        assert!(msg.attachments[1].path.is_none(), "nothing is fetched here");
+    }
+
+    #[test]
+    fn rich_text_and_card_entries_are_not_attachments() {
+        // NEGATIVE CONTROL for the phantom-attachment failure: Teams stamps a
+        // formatted message's own HTML rendering into `attachments[]`, and
+        // Adaptive Cards arrive the same way. Neither carries a `contentUrl`.
+        // If this ever regresses, every formatted Teams message grows a bogus
+        // document in the agent's turn prompt.
+        let body = r#"{
+            "type": "message",
+            "id": "att-2",
+            "text": "formatted",
+            "from": { "id": "29:u", "name": "U" },
+            "recipient": { "id": "28:bot" },
+            "conversation": { "id": "19:abc@thread.v2" },
+            "attachments": [
+                { "contentType": "text/html", "content": "<p>formatted</p>" },
+                {
+                    "contentType": "application/vnd.microsoft.card.adaptive",
+                    "content": { "type": "AdaptiveCard", "body": [] }
+                },
+                { "contentType": "image/png", "contentUrl": "   " }
+            ]
+        }"#;
+        let msg = activity_to_incoming(body, SERVICE_FALLBACK, bounds())
+            .unwrap()
+            .unwrap();
+        assert!(
+            msg.attachments.is_empty(),
+            "inline-content entries are not files; got {:?}",
+            msg.attachments
+        );
+    }
+
+    #[test]
+    fn attachments_past_the_declared_bound_are_retained_not_dropped() {
+        // The bound withholds the FETCH; it must never shorten the list, or the
+        // agent answers about a message it was silently shown less of.
+        let entries: Vec<String> = (0..5)
+            .map(|i| {
+                format!(
+                    r#"{{"contentType":"image/png","contentUrl":"https://x/{i}.png","name":"{i}.png"}}"#
+                )
+            })
+            .collect();
+        let body = format!(
+            r#"{{
+                "type": "message",
+                "id": "att-3",
+                "text": "many",
+                "from": {{ "id": "29:u" }},
+                "recipient": {{ "id": "28:bot" }},
+                "conversation": {{ "id": "19:abc@thread.v2" }},
+                "attachments": [{}]
+            }}"#,
+            entries.join(",")
+        );
+        let tight = MediaBounds {
+            max_bytes: MediaBounds::DEFAULT_MAX_BYTES,
+            max_attachments: 2,
+        };
+        let msg = activity_to_incoming(&body, SERVICE_FALLBACK, tight)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            msg.attachments.len(),
+            5,
+            "all five survive the bound; degradation is not truncation"
+        );
+        assert_eq!(msg.attachments[4].url, "https://x/4.png");
+    }
+
+    #[test]
     fn malformed_json_errors() {
-        let err =
-            activity_to_incoming("{ not json", SERVICE_FALLBACK).expect_err("bad json errors");
+        let err = activity_to_incoming("{ not json", SERVICE_FALLBACK, bounds())
+            .expect_err("bad json errors");
         assert!(matches!(err, MsTeamsError::Parse(_)), "got {err:?}");
     }
 }
