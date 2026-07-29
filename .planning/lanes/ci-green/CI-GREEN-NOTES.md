@@ -86,8 +86,75 @@ That isolates the CI failure to the `ci-linux` job specifically: its `docker run
 `actions/checkout` adds a `safe.directory` entry for `/home/runner/work/...` in the RUNNER's
 git config (log lines 96-97) — a different path, a different HOME, a different uid.
 
-## Still to establish
+## t2 — Defect 3 mechanism reproduced on hetzner (with a known-positive control)
 
-- [ ] Reproduce git's refusal under root-vs-other-uid ownership on hetzner (no docker needed).
-- [ ] Distinguish, by measurement, whether Defect 2's `OverTime` means "cancel is broken"
-      or "the pre-stop phase did not fit in 3 s on a loaded box".
+```
+--- as root, repo owned by root (control, expect SUCCESS):
+90ef9c71af7b39087936c1a1c313b8d5b5c77956      rc=0
+--- as root, same repo chowned to uid 1001 (expect FAILURE):
+fatal: detected dubious ownership in repository at '/tmp/cigreen-own'      rc=128
+```
+
+That is the `ci-linux` shape exactly: `docker run` with no `-u` runs as root over a
+workspace owned by the runner uid. `git_output()` filters on `status.success()`, so
+`resolve_source_sha` takes the `Ok("unknown")` arm.
+
+Also established: `wcore-cli` / `wayland-core` do **not** exist on crates.io (queried with
+a UA; `crate ... does not exist`), and **no workflow runs `cargo publish`**. So there is no
+source-distribution build path that a fail-closed release rule could break.
+
+## t3 — Defect 1 fixed and proven on hetzner (`bf9fe2b8`)
+
+Rewrote both `local_identity` tests to derive `NodeIdentity::local` in a CHILD PROCESS with
+`WAYLAND_NODE_MACHINE_ID` / `HOSTNAME` / `COMPUTERNAME` removed, instead of asserting them
+absent in the ambient environment.
+
+| arm | invocation | result |
+|---|---|---|
+| A — proof-host shape | `env -u HOSTNAME … cargo nextest run … node_contract` | `19 tests run: 19 passed, 1 skipped` |
+| B — the CI shape that was red | `HOSTNAME=deadbeefc0de cargo nextest run …` | `19 tests run: 19 passed, 1 skipped` |
+| Darwin (Mac, narrow LANE-BRIEF exception) | `cargo test -p wcore-exec-backend --test node_contract` | `19 passed; 0 failed; 1 ignored` |
+
+Arm B is its own negative control: the derived value was
+`machine_id=ubuntu-2404-noble-amd64-base` (from `/etc/hostname`), **not** `deadbeefc0de`.
+If the env cleaning leaked, the new exact-match assertion would have failed.
+
+KNOWN-NEGATIVE (mutated `read_hostname_file` to read two nonexistent paths, simulating the
+Darwin defect spreading to Linux):
+```
+assertion `left != right` failed: on Linux the fallback must find the hostname file.
+  Reading 'unknown-host' here would mean the Darwin defect has spread.
+Summary [0.897s] 13/19 tests run: 12 passed, 1 failed, 1 skipped     KN_EXIT=100
+```
+Reverted; `19 tests run: 19 passed` again. `REVERT_EXIT=0`.
+
+## t4 — Defect 2 RESOLVED BY MEASUREMENT, and the brief's hypothesis (a) is right for a
+##      different reason than stated
+
+Reproduced first: 48 busy loops on the 96-core box, 30 reps →
+**`TOTAL pass=15 fail=15`.** Not a 2.5% flake under contention — a 50% one.
+
+Then traced it (`WCORE_EVAL_TURN_TRACE=1`, the instrument added in `de47947b`):
+
+```
+PASSING (idle):
+  t=0.000s prompt_sent
+  t=0.000s  … 26 bootstrap events …
+  t=1.889s event=stream_start        <-- 1.9s of engine work before the provider request
+  t=1.928s event=provider_attempt
+  t=1.930s event=text_delta
+  t=1.930s stop_sent
+  t=1.931s event=stream_end          <-- cancellation honoured in ~1 MILLISECOND
+  t=1.931s turn_end stop_pending=false
+
+FAILING (under load), every single one:
+  t=3.001s TURN_TIMEOUT stop_pending=TRUE
+```
+
+`stop_pending=true` on **every** failure means the stop command was NEVER SENT: the 3s turn
+budget expired before a first token existed to cancel on. Across 20 traced runs there is
+**not one** observation of a stop that was sent and not honoured.
+
+So `Failure::OverTime` in this test never measured cancellation. It measured
+time-to-first-token, which is ~1.9-2.1s on an idle 96-core box against a 3.0s budget — under
+a second of slack. The neighbouring packaged scenarios in the same file already use 10s/20s.
