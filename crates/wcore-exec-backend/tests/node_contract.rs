@@ -81,7 +81,12 @@ fn probe_local_identity_in_a_cleaned_environment() -> std::collections::BTreeMap
     for var in ["WAYLAND_NODE_MACHINE_ID", "HOSTNAME", "COMPUTERNAME"] {
         command.env_remove(var);
     }
+    // `shell_command_argv` hands back a `tokio::process::Command` (argv mode, no
+    // shell interpreter). This test is synchronous, so run it through the inner
+    // `std` command rather than pulling a runtime in — same idiom as
+    // `wcore-exec-backend/src/backends/local.rs:189`.
     let output = command
+        .as_std_mut()
         .output()
         .expect("run the local-identity probe fixture");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
