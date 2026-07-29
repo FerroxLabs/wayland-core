@@ -114,3 +114,35 @@ On ONE host all processes share a page cache, so the `-shm` mapping IS coherent 
 The documented failure needs a genuinely second client. Next: mount the same export twice with
 `nosharecache` (separate superblocks → separate inode/page caches → genuinely incoherent mmap)
 and run two concurrent WAL writers with NO artificial truncation.
+
+## M7 — VALID reproduction. The defect is real, and it is NOT the reported one.
+
+Two genuinely incoherent NFS clients of one export (`nosharecache` → separate superblocks,
+`dev=183` vs `dev=184`), same backing file, **no artificial truncation** — just two processes
+using SQLite concurrently. 15s each, journal mode read back from SQLite, not assumed.
+
+```
+NFS + WAL        A writes_ok=5102 errs=3757 rows_by_me_visible=0    lasterr="file is not a database"
+                 B writes_ok=2668 errs=8069 rows_by_me_visible=2214 lasterr="no such table: t"
+                 integrity_check -> *** in database main ***  Rowid 2284 out of order (+more)
+NFS + TRUNCATE   A writes_ok=5886 errs=0 rows_by_me_visible=5886    integrity_check -> ok
+NFS + DELETE     A writes_ok=2673 errs=0 rows_by_me_visible=2673    integrity_check -> ok
+LOCAL + WAL      A writes_ok=103597 errs=0 / B 100473 errs=1(locked) integrity_check -> ok
+```
+
+**Three conclusions, one of which contradicts the brief:**
+
+1. **The defect reproduces.** WAL on a real network filesystem destroys the database.
+   11,826 failed writes and a failed `integrity_check` against 0 failures on the identical
+   mount in TRUNCATE.
+2. **It is NOT SIGBUS. It is silent corruption.** Neither arm was ever killed by a signal —
+   both exited `rc=0` every run. The brief's "the process is killed / it is not a corruption
+   risk you can catch" is **backwards**: the process lives and the *data* dies. Arm A
+   committed 5102 rows and could then see **zero** of them.
+   That is worse, not narrower — a crash is loud, this is silent, and `memory.db` holds
+   long-term user memory.
+3. **The fix is proven, not assumed.** TRUNCATE and DELETE both survive the identical
+   workload on the identical mount with 0 errors and `integrity_check = ok`.
+
+Local-disk WAL control passed in the same session (204k writes, `ok`), so the harness
+discriminates and WAL-on-local is genuinely worth keeping.
