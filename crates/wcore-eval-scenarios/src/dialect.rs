@@ -861,6 +861,135 @@ pub fn frozen_v1_tool_name(dimension: &str) -> Option<&'static str> {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// The symmetric-resolution gate (panel amendment, 4/4).
+//
+// The design as first submitted claimed a refusal was neutral because a comparative cannot be
+// constructed without every compared harness. All four panel members rejected that, and they were
+// right. The comparative CONSTRUCTOR is symmetric; the REPORT is not. If Wayland resolves and a
+// peer refuses, Wayland publishes an absolute number and the peer publishes nothing, and a reader
+// draws exactly the inference the comparative declined to state. Codex named it "selective
+// measurability": a win channel that bypasses every other guard.
+//
+// So resolution is made an ALL-OR-NOTHING property of a dimension across the whole cohort. A
+// refusal for any harness makes that dimension ineligible for EVERY harness — including ours.
+// That is what makes the disqualifying-token list safe to leave vendor-authored: a list tuned to
+// exclude a peer's tools now destroys the vendor's own leg by the same act.
+// ---------------------------------------------------------------------------------------------
+
+/// Per-harness resolution outcome, for the cohort gate. Deliberately carries no translation —
+/// the gate answers eligibility, and eligibility must be settled before any translation is used.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CohortMemberResolutionV1 {
+    /// The harness label. Present HERE and not in [`ToolSchemaCorpusV1`]: the gate reports per
+    /// harness, but the compiler that produced each outcome never saw a label.
+    pub tool_label: String,
+    pub corpus_sha256: String,
+    pub declared_tools: usize,
+    /// `Some(tool)` when the filter resolved; `None` when it refused.
+    pub resolved_tool: Option<String>,
+    /// The refusal's reason token when it refused. Published so a reader can price the blind spot.
+    pub refusal: Option<String>,
+}
+
+/// The cohort-wide eligibility decision for one dimension.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CohortEligibilityV1 {
+    pub dimension: String,
+    pub vocabulary_version: String,
+    pub members: Vec<CohortMemberResolutionV1>,
+    /// True only when EVERY member resolved.
+    pub eligible: bool,
+    /// Set when `eligible` is false: the labels that refused, so the ineligibility names its cause.
+    pub refused_by: Vec<String>,
+}
+
+impl CohortEligibilityV1 {
+    /// The single sentence a report is allowed to make from this decision.
+    pub fn verdict_line(&self) -> String {
+        if self.eligible {
+            format!(
+                "DIALECT_COHORT=ELIGIBLE dimension={} members={} all_resolved=true",
+                self.dimension,
+                self.members.len()
+            )
+        } else {
+            format!(
+                "DIALECT_COHORT=INELIGIBLE dimension={} members={} refused_by={} \
+                 consequence=NO_HARNESS_IS_RUN_OR_PUBLISHED_FOR_THIS_DIMENSION",
+                self.dimension,
+                self.members.len(),
+                self.refused_by.join(",")
+            )
+        }
+    }
+}
+
+/// Decide whether a dimension may be run at all, for the whole cohort.
+///
+/// `cohort` pairs each harness's label with its corpus. The label is used ONLY to report which
+/// member refused; [`select_tool`] is still called with the corpus alone.
+///
+/// **A single refusal makes the dimension ineligible for everybody.** This is the panel's
+/// condition on any re-take and it is deliberately expensive: it is the only rule under which the
+/// vendor cannot profit from a peer being unmeasurable.
+pub fn cohort_eligibility(
+    dimension: &str,
+    cohort: &[(String, ToolSchemaCorpusV1)],
+) -> Result<CohortEligibilityV1, DialectError> {
+    let script = canonical_script(dimension)
+        .ok_or_else(|| DialectError::Serialize(format!("no canonical script for {dimension}")))?;
+    let intents: Vec<IntentV1> = script
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            CanonicalStepV1::Intent { intent, .. } => Some(*intent),
+            _ => None,
+        })
+        .collect();
+
+    let mut members = Vec::new();
+    let mut refused_by = Vec::new();
+    for (label, corpus) in cohort {
+        let mut resolved_tool = None;
+        let mut refusal = None;
+        for intent in &intents {
+            match select_tool(*intent, corpus) {
+                Ok((name, _)) => resolved_tool = Some(name),
+                Err(reason) => {
+                    resolved_tool = None;
+                    refusal = Some(reason.to_string());
+                    break;
+                }
+            }
+        }
+        if refusal.is_some() {
+            refused_by.push(label.clone());
+        }
+        members.push(CohortMemberResolutionV1 {
+            tool_label: label.clone(),
+            corpus_sha256: corpus.sha256()?,
+            declared_tools: corpus.tools.len(),
+            resolved_tool,
+            refusal,
+        });
+    }
+    // An empty or single-member cohort is NOT eligible: a comparative benchmark whose cohort lost
+    // a member has lost the thing it was measuring, and silently proceeding with the survivors is
+    // how "we could not run the competitor, so we win" gets expressed.
+    let eligible = refused_by.is_empty() && cohort.len() >= 2;
+    if cohort.len() < 2 {
+        refused_by.push(format!("COHORT_TOO_SMALL:{}", cohort.len()));
+    }
+    Ok(CohortEligibilityV1 {
+        dimension: dimension.to_string(),
+        vocabulary_version: VOCABULARY_VERSION.to_string(),
+        members,
+        eligible,
+        refused_by,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1207,6 +1336,181 @@ mod tests {
         assert!(
             declared.contains(compiled_name.as_str()),
             "the repaired compiler named `{compiled_name}`, which the harness does not declare"
+        );
+    }
+
+    // ---- The panel's amendment, part A: the symmetric-resolution gate ------------------------
+
+    #[test]
+    fn cohort_is_eligible_only_when_every_member_resolves() {
+        let cohort = vec![
+            ("alpha".to_string(), pascal_corpus()),
+            ("beta".to_string(), snake_corpus()),
+        ];
+        let decision = cohort_eligibility("correctness", &cohort).expect("decides");
+        assert!(decision.eligible, "{}", decision.verdict_line());
+        assert!(decision.refused_by.is_empty());
+        assert!(decision.verdict_line().contains("DIALECT_COHORT=ELIGIBLE"));
+    }
+
+    /// The load-bearing test of the whole amendment. When ONE member refuses, the dimension dies
+    /// for EVERYBODY — including the two members that resolved perfectly well. Without this, the
+    /// vendor publishes a number the refusing peer cannot publish, which is the selective-
+    /// measurability win channel all four panel members named.
+    #[test]
+    fn one_refusal_makes_the_dimension_ineligible_for_every_member() {
+        let cohort = vec![
+            ("alpha".to_string(), pascal_corpus()),
+            ("beta".to_string(), snake_corpus()),
+            ("gamma".to_string(), patch_only_corpus()),
+        ];
+        let decision = cohort_eligibility("correctness", &cohort).expect("decides");
+        assert!(!decision.eligible, "a refusal did not stop the cohort");
+        assert_eq!(decision.refused_by, vec!["gamma".to_string()]);
+        // The two that resolved are recorded as resolving — the gate does not pretend they
+        // failed — and yet the dimension is still ineligible for them.
+        let resolved: Vec<&str> = decision
+            .members
+            .iter()
+            .filter(|m| m.resolved_tool.is_some())
+            .map(|m| m.tool_label.as_str())
+            .collect();
+        assert_eq!(resolved, vec!["alpha", "beta"]);
+        assert!(
+            decision
+                .verdict_line()
+                .contains("NO_HARNESS_IS_RUN_OR_PUBLISHED_FOR_THIS_DIMENSION"),
+            "{}",
+            decision.verdict_line()
+        );
+    }
+
+    /// "We could not run the competitor, so we win" must not be expressible. A cohort that has
+    /// lost a member is not a smaller cohort, it is a broken one.
+    #[test]
+    fn a_cohort_of_one_is_never_eligible() {
+        let cohort = vec![("alpha".to_string(), pascal_corpus())];
+        let decision = cohort_eligibility("correctness", &cohort).expect("decides");
+        assert!(!decision.eligible);
+        assert!(
+            decision
+                .refused_by
+                .iter()
+                .any(|r| r.contains("COHORT_TOO_SMALL"))
+        );
+    }
+
+    // ---- The panel's amendment, part B: the counterfactual qualification suite ----------------
+    //
+    // These tests exist to PUBLISH the compiler's blind spots, not to demonstrate that it has
+    // none. Several of them assert a REFUSAL, and each such refusal is a real limitation a reader
+    // must be able to price. Every schema here is product-blind and synthetic.
+
+    /// A rich surface can be made unmeasurable by ADDING a tool that is itself perfectly valid.
+    /// Codex: "adding a valid tool can destroy eligibility". Measured true, and recorded as a
+    /// limitation rather than patched away — patching it would require a tie-break, and a
+    /// tie-break is the lever G3 exists to remove.
+    #[test]
+    fn qual_adding_a_valid_tool_flips_compile_to_ambiguous() {
+        let script = canonical_script("correctness").expect("script");
+        let sparse = ToolSchemaCorpusV1::new(vec![tool("Write", write_schema("path", "content"))]);
+        assert!(
+            compile_script(&script, &sparse).is_ok(),
+            "sparse surface must resolve"
+        );
+
+        let mut richer = sparse.tools.clone();
+        richer.push(tool("save_file", write_schema("path", "content")));
+        let richer = ToolSchemaCorpusV1::new(richer);
+        let error = compile_script(&script, &richer).expect_err("richer surface now refuses");
+        assert!(error.to_string().contains("DIALECT_AMBIGUOUS"), "{error}");
+        // The cohort gate is what stops this asymmetry being bankable: the sparse harness cannot
+        // publish while the rich one refuses.
+        let decision = cohort_eligibility(
+            "correctness",
+            &[("sparse".to_string(), sparse), ("rich".to_string(), richer)],
+        )
+        .expect("decides");
+        assert!(!decision.eligible);
+    }
+
+    /// A tool that is functionally CAPABLE of the oracle but carries a disqualifying token is
+    /// refused. `edit_file` on many harnesses creates a missing file. The filter cannot know that
+    /// and does not guess. This is the single largest unclosed bias surface in the design: the
+    /// disqualifying list is vendor-authored and this test is what makes its cost visible.
+    #[test]
+    fn qual_a_capable_but_denylisted_tool_is_refused() {
+        let script = canonical_script("correctness").expect("script");
+        let capable_but_named_edit =
+            ToolSchemaCorpusV1::new(vec![tool("edit_file", write_schema("path", "content"))]);
+        let error =
+            compile_script(&script, &capable_but_named_edit).expect_err("denylist token wins");
+        assert!(
+            error.to_string().contains("DIALECT_NO_CANDIDATE"),
+            "{error}"
+        );
+    }
+
+    /// A generic tool whose SEMANTICS live in its description — `filesystem`, with an `operation`
+    /// discriminator — is refused twice over: no action token in the name, and a required
+    /// parameter the canonical script cannot supply. Codex predicted this shape specifically.
+    #[test]
+    fn qual_a_generic_tool_with_semantics_in_its_description_is_refused() {
+        let script = canonical_script("correctness").expect("script");
+        let generic = ToolSchemaCorpusV1::new(vec![DeclaredToolV1 {
+            name: "filesystem".to_string(),
+            description: "Perform a filesystem operation. Use operation=write to create a file."
+                .to_string(),
+            parameters: json!({
+                "type":"object",
+                "properties":{
+                    "operation":{"type":"string"},
+                    "path":{"type":"string"},
+                    "content":{"type":"string"}
+                },
+                "required":["operation","path","content"]
+            }),
+        }]);
+        let error = compile_script(&script, &generic).expect_err("generic surface refuses");
+        assert!(
+            error.to_string().contains("DIALECT_NO_CANDIDATE"),
+            "{error}"
+        );
+    }
+
+    /// Sparse and rich surfaces that BOTH resolve must both resolve — richness is only fatal when
+    /// it creates a genuine collision, not merely because there are more tools present.
+    #[test]
+    fn qual_richness_alone_does_not_cause_refusal() {
+        let script = canonical_script("correctness").expect("script");
+        let mut rich = pascal_corpus().tools;
+        for extra in ["WebFetch", "TodoWrite", "NotebookEdit", "MultiEdit", "Grep"] {
+            rich.push(tool(
+                extra,
+                json!({"type":"object","properties":{"query":{"type":"string"}},
+                       "required":["query"]}),
+            ));
+        }
+        let rich = ToolSchemaCorpusV1::new(rich);
+        let translation = compile_script(&script, &rich).expect("rich surface still resolves");
+        match &translation.steps[0] {
+            CompiledStepV1::ToolCall(call) => assert_eq!(call.tool_name, "Write"),
+            other => panic!("expected a tool call, got {other:?}"),
+        }
+    }
+
+    /// `TodoWrite` contains the action token `write`. It must NOT be selectable — if it were, a
+    /// harness exposing it alongside a real writer would go ambiguous, and one exposing only it
+    /// would compile into a call that cannot satisfy the oracle.
+    #[test]
+    fn qual_an_action_token_inside_an_unrelated_name_does_not_qualify() {
+        let script = canonical_script("correctness").expect("script");
+        let decoy =
+            ToolSchemaCorpusV1::new(vec![tool("TodoWrite", write_schema("path", "content"))]);
+        let error = compile_script(&script, &decoy).expect_err("todo token disqualifies");
+        assert!(
+            error.to_string().contains("DIALECT_NO_CANDIDATE"),
+            "{error}"
         );
     }
 
