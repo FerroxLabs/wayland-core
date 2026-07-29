@@ -1,0 +1,18 @@
+{
+  "finding": "F24-C3-H6",
+  "binary": "./target/debug/wayland-core",
+  "pass": 7,
+  "fail": 0,
+  "rc_health_after_lease_released": 0,
+  "rc_health_before_reload": 1,
+  "rc_health_after_reload": 1,
+  "legs": [
+    {"leg":"gateway-observed-the-lost-lease","pass":true,"detail":"[gateway] inbound polling is owned by another process (pid None); this gateway will send but not poll "},
+    {"leg":"health-fails-while-the-lease-is-lost--OLD-SHAPE","pass":true,"detail":"rc=1: wayland-core channel: 0 of 1 configured channels are NOT registered in the running gateway: inbound polling owned by another process "},
+    {"leg":"the-reload-actually-ran","pass":true,"detail":"[gateway] channel reload: added=[] replaced=[f24h6] removed=[] unchanged=[] policies=1 "},
+    {"leg":"health-STILL-fails-after-a-successful-reload","pass":true,"detail":"rc=1: wayland-core channel: 0 of 1 configured channels are NOT registered in the running gateway: inbound polling owned by another process "},
+    {"leg":"the-reload-did-NOT-take-the-poll-lease-for-itself","pass":true,"detail":"adapter still unpolled after the reload:  reason: registered; no poll observed yet "},
+    {"leg":"the-degradation-was-still-real-at-the-final-reading","pass":true,"detail":"foreign lock holder pid 2073021 still alive "},
+    {"leg":"health-CLEARS-once-the-lease-is-won-back-with-no-reload","pass":true,"detail":"rc=0 after ~1500ms: configured: 1   registered: 1 "}
+  ]
+}

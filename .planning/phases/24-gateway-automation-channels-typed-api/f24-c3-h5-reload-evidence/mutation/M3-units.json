@@ -1,0 +1,21 @@
+{
+  "arm": "M3",
+  "suites": {
+    "gateway-unit (H6a composition)": {
+      "rc": 101,
+      "verdict": "FAILED. 12 passed",
+      "failed": 4,
+      "ignored": 0,
+      "measured": 0,
+      "filtered out": 1882,
+      "failed_tests": [
+        "test gateway::tests::clearing_the_registration_error_leaves_a_live_lease_degradation_reported ... FAILED",
+        "test gateway::tests::clearing_the_registration_error_leaves_an_absent_inbound_stack_reported ... FAILED",
+        "test gateway::tests::every_component_appears_exactly_once_and_in_a_stable_order ... FAILED",
+        "test gateway::tests::winning_the_lease_back_clears_the_lease_component_without_a_reload ... FAILED"
+      ]
+    }
+  },
+  "mutation_applied": true,
+  "restored": true
+}

@@ -95,6 +95,24 @@ pub struct ChannelManager {
     health: HealthMap,
 }
 
+/// Whether a [`ChannelManager::reload`] may begin polling what it registered.
+///
+/// F24-C3-H6b. Deliberately has **no `Default`** and is a required positional
+/// argument: the right to poll a home belongs to whoever holds the single-owner
+/// inbound polling lease, which is knowledge this crate does not have. A default
+/// would be a guess made in the one place that cannot know the answer, and the
+/// measured defect was exactly that guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartPolicy {
+    /// Spawn poll tasks for adapters that do not already have one. The caller is
+    /// asserting it holds the right to poll this home.
+    StartNewlyRegistered,
+    /// Register and replace adapters but spawn NO poll task. The adapter set is
+    /// updated so outbound sends use current configuration, while inbound
+    /// polling is left to whichever process owns it.
+    LeaveStopped,
+}
+
 /// What a [`ChannelManager::reload`] did to the registered set.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReloadReport {
@@ -577,7 +595,36 @@ impl ChannelManager {
     /// asymmetry is deliberate: treating unknown as unchanged means an operator
     /// rotates a credential, reloads, sees success, and keeps sending through
     /// the adapter holding the old one.
-    pub async fn reload(&mut self, desired: Vec<Box<dyn Channel>>) -> ReloadReport {
+    ///
+    /// # Why the caller must state a [`StartPolicy`]
+    ///
+    /// F24-C3-H6b. This used to end with an unconditional `let _ =
+    /// self.start_all()`, which made "apply a new adapter set" and "begin
+    /// polling" one indivisible act. They are not the same decision, because
+    /// polling is gated by something this type knows nothing about: the
+    /// single-owner inbound polling lease. The gateway gates its STARTUP
+    /// `start_all` on owning that lease and then reached this method, which
+    /// started the poll tasks anyway.
+    ///
+    /// Polling is a DESTRUCTIVE read — Telegram's `offset=` confirm deletes,
+    /// IMAP sets `\Seen` — so a second poller does not cause a duplicate, it
+    /// causes the rightful owner to see nothing at all. A reload silently
+    /// re-acquiring that right is data loss, not a cosmetic defect.
+    ///
+    /// Measured on the shipped binary: a gateway that had correctly declined to
+    /// poll (`state: Unknown, reason: "registered; no poll observed yet"`) was
+    /// driven through one `channel reload` and came back `state: Disconnected,
+    /// reason: "start() failed: …"` — proof that `start()` had been attempted on
+    /// a process that did not hold the lease.
+    ///
+    /// So the decision is the caller's and there is no default. A caller that
+    /// must not poll passes [`StartPolicy::LeaveStopped`] and cannot forget to,
+    /// because the parameter has no default value to omit.
+    pub async fn reload(
+        &mut self,
+        desired: Vec<Box<dyn Channel>>,
+        start: StartPolicy,
+    ) -> ReloadReport {
         let mut report = ReloadReport::default();
 
         let desired_names: std::collections::HashSet<String> =
@@ -640,9 +687,13 @@ impl ChannelManager {
         report.replaced.sort();
         report.removed.sort();
         report.unchanged.sort();
-        // Start anything newly registered. `start_all` skips adapters that
-        // already have a poll task, so an unchanged adapter is untouched here.
-        let _ = self.start_all().await;
+        // Start anything newly registered, but ONLY if the caller holds
+        // whatever right entitles this process to poll. `start_all` skips
+        // adapters that already have a poll task, so an unchanged adapter is
+        // untouched either way.
+        if start == StartPolicy::StartNewlyRegistered {
+            let _ = self.start_all().await;
+        }
         report
     }
 
