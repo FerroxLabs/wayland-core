@@ -1,0 +1,5 @@
+1785330559.066 listening on 127.0.0.1:18733 tool_turns=3
+1785330560.037 POST /v1/chat/completions turn=1 stream=None model=probe msgs=0 tools=0
+1785330560.149 POST /v1/chat/completions turn=2 stream=True model=canned-model msgs=2 tools=8
+1785330560.160 POST /v1/chat/completions turn=3 stream=True model=canned-model msgs=4 tools=8
+1785330560.163 POST /v1/chat/completions turn=4 stream=True model=canned-model msgs=6 tools=8
