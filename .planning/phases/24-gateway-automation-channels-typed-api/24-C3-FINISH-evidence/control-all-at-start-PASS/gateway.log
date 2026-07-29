@@ -1,0 +1,16 @@
+[2m2026-07-29T01:55:37.462984Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24finone [3mplatform[0m[2m=[0mslack
+[2m2026-07-29T01:55:37.463056Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24finthree [3mplatform[0m[2m=[0mslack
+[2m2026-07-29T01:55:37.463080Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24fintwo [3mplatform[0m[2m=[0mslack
+[gateway] channels registered=3
+[gateway] inbound: subscriber spawned, webhook host listening bind=127.0.0.1:18899 policies=3
+[gateway] started pid=3994755 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+[2m2026-07-29T01:55:38.362573Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T01:55:38.362592Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T01:55:38.364729Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T01:55:38.365397Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T01:55:38.403032Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24c3fin-ctl/home/cron
+[2m2026-07-29T01:55:41.432125Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T01:55:41.432152Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T01:55:41.439694Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T01:55:41.441050Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T01:55:41.512189Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24c3fin-ctl/home/cron

@@ -1,0 +1,84 @@
+{
+  "verdict": "PASS",
+  "exit_code": 0,
+  "legs_total": 5,
+  "legs_failed": 0,
+  "arrivals_total": 2,
+  "arrivals_journal_bytes": 540,
+  "turns_total": 2,
+  "turns_journal_bytes": 578,
+  "baseline_arrivals": 1,
+  "instrument_fault": false,
+  "instrument_faults": [],
+  "webhook_host_bound": true,
+  "legs": [
+    {
+      "clause": "health",
+      "leg": "refuses-with-no-gateway",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": null,
+      "control_ok": null,
+      "detail": "rc=1 stdout_bytes=0 stderr=wayland-core channel: no running gateway for /root/f24c3fin-ctl/home — channel health is an OBSERVATION and nothing has observed anything. Start one with `wayland-core gateway start`, or use `wayland-"
+    },
+    {
+      "clause": "gateway",
+      "leg": "webhook-host-bound",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": null,
+      "control_ok": null,
+      "detail": "bound 127.0.0.1:18899"
+    },
+    {
+      "clause": "gateway",
+      "leg": "inbound-arrives-post-fixes",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": 1,
+      "control_ok": true,
+      "detail": "token=f24c3-fin-f24finone-689896ce accepted=true http=200 tier=exact after=3000ms arrivals=1 turns=1"
+    },
+    {
+      "clause": "health",
+      "leg": "reports-running-gateway",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": 3,
+      "control_ok": true,
+      "detail": "configured=3 registered=3 registration_error=none per_adapter=[f24finone:healthy,f24finthree:healthy,f24fintwo:healthy] reason_contract_held=true"
+    },
+    {
+      "clause": "lifecycle-control",
+      "leg": "same-config-admitted-when-present-at-startup",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": 1,
+      "control_ok": true,
+      "detail": "token=f24c3-fin-f24finthree-66456f7b accepted=true http=200 tier=exact arrivals_before=1 arrivals_after=2. PASS here + FAIL in the reload run isolates the defect to the RELOAD PATH. FAIL here would mean the config is at fault and there is NO product defect."
+    }
+  ],
+  "clauses_addressed": [
+    "health",
+    "reconnect-reload"
+  ],
+  "clauses_NOT_addressed": [
+    "media",
+    "native-actions"
+  ],
+  "notes": [
+    "[clauses] 2026-07-29T01:55:35.017Z run dir /root/f24c3fin-ctl",
+    "[clauses] 2026-07-29T01:55:35.021Z fixtures spawned: sink=18898 llm=18897 (separate OS processes)",
+    "[clauses] 2026-07-29T01:55:37.022Z CONTROL MODE --all-at-start: 3 channels on disk BEFORE start; reload legs skipped",
+    "[clauses] 2026-07-29T01:55:37.076Z LEG health/refuses-with-no-gateway PASS assertion=true control=n/a :: rc=1 stdout_bytes=0 stderr=wayland-core channel: no running gateway for /root/f24c3fin-ctl/home — channel health is an OBSERVATION and nothing has observed anything. Start one with `wayland-core gateway start`, or use `wayland-",
+    "[clauses] 2026-07-29T01:55:37.079Z gateway run started (foreground, owned by this driver)",
+    "[clauses] 2026-07-29T01:55:38.173Z webhook host bound after 1s",
+    "[clauses] 2026-07-29T01:55:38.173Z LEG gateway/webhook-host-bound PASS assertion=true control=n/a :: bound 127.0.0.1:18899",
+    "[clauses] 2026-07-29T01:55:38.228Z submit f24finone token=f24c3-fin-f24finone-689896ce url=http://127.0.0.1:18899/webhooks/f24finone http=200 accepted=true raw=ST 200 ",
+    "[clauses] 2026-07-29T01:55:41.229Z journal bytes: arrivals=268 turns=286 (an empty journal and an absent journal both read as 0 records)",
+    "[clauses] 2026-07-29T01:55:41.229Z LEG gateway/inbound-arrives-post-fixes PASS assertion=true control=1 :: token=f24c3-fin-f24finone-689896ce accepted=true http=200 tier=exact after=3000ms arrivals=1 turns=1",
+    "[clauses] 2026-07-29T01:55:41.312Z LEG health/reports-running-gateway PASS assertion=true control=3 :: configured=3 registered=3 registration_error=none per_adapter=[f24finone:healthy,f24finthree:healthy,f24fintwo:healthy] reason_contract_held=true",
+    "[clauses] 2026-07-29T01:55:41.367Z submit f24finthree token=f24c3-fin-f24finthree-66456f7b url=http://127.0.0.1:18899/webhooks/f24finthree http=200 accepted=true raw=ST 200 ",
+    "[clauses] 2026-07-29T01:55:44.369Z LEG lifecycle-control/same-config-admitted-when-present-at-startup PASS assertion=true control=1 :: token=f24c3-fin-f24finthree-66456f7b accepted=true http=200 tier=exact arrivals_before=1 arrivals_after=2. PASS here + FAIL in the reload run isolates the defect to the RELOAD PATH. FAIL here would mean the config is at fault and there is NO product defect."
+  ]
+}
