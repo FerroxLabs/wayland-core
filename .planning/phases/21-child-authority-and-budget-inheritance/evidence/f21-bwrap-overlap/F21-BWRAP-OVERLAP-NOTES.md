@@ -72,3 +72,68 @@ callers and leaves the order-dependence in place for every future one.
 4. macOS: prove overlap tolerated with a real `sandbox-exec` run.
 5. Windows: read the AppContainer deny path; measure or name the gap.
 6. Report anything the unmasking reveals (21-C3-02: four masking mechanisms, this is one).
+
+---
+
+## T1 — primitive reproduction on `hetzner-dsm` (bubblewrap 0.9.0)
+
+`/tmp/f21bwo-repro2`, per-block stderr capture, control first:
+
+```
+--- A_control_parent_only  : rc=0  stdout: SHELL_RAN   stderr: (empty)
+--- B_ancestor_first       : rc=1  stdout: (empty)     stderr: bwrap: Can't mkdir /tmp/f21bwo-repro2/workspace/.git: Read-only file system
+--- C_descendant_first     : rc=0  stdout: SHELL_RAN   stderr: (empty)
+--- D_deduped_ancestoronly : rc=0  stdout: SHELL_RAN   stderr: (empty)
+```
+
+**B vs C is the order-dependence.** Same two paths, opposite order, opposite outcome.
+
+Containment at the primitive level, `/tmp/f21bwo-contain`, with a LEAK CONTROL:
+
+```
+E_no_deny (instrument liveness)  SHELL_RAN  PARENT_READ=LEAKED   GIT_READ=LEAKED
+F_dedup   (ancestor only)        SHELL_RAN  PARENT_READ=REFUSED  GIT_READ=REFUSED
+G_both    (descendant first)     SHELL_RAN  PARENT_READ=REFUSED  GIT_READ=REFUSED
+```
+
+F ≡ G. Dropping the nested deny is containment-equivalent; E proves the probe could
+have seen both secrets, so the REFUSED readings are not free.
+
+## T2 — the fix
+
+`crates/wcore-sandbox/src/backends/bwrap.rs` — `DenyMountKind` + `reduce_read_deny_mounts`.
+Classify each deny once (Directory / NonDirectory / Absent), drop entries strictly nested
+under a **Directory** deny (component-wise `Path::starts_with`) and exact repeats, then
+render. **Renderer, not `spawner.rs`** — reasons in T0.
+
+## T3 — base RED / head GREEN, shipped-backend level
+
+Both worktrees on `hetzner-dsm`, unproxied `/root/.cargo/bin/cargo`.
+
+**BASE `eaff921d` (unfixed)** — the committed live test transplanted verbatim as
+`tests/f21bwo_base_red.rs` (base worktree only, never committed):
+
+```
+thread '…' panicked at crates/wcore-sandbox/tests/f21bwo_base_red.rs:70:5:
+bwrap aborted on the overlapping deny pair (21-C3-01):
+  stderr="bwrap: Can't mkdir /tmp/.tmpGQI7qq/.git: Read-only file system\n"
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+It reached arm 2, which means **arm 1 (the no-deny leak control) PASSED** — the probe
+could read both secrets — so the abort is not an artifact of a dead instrument.
+
+**HEAD `a9902ed5` (fixed)** — `cargo test -p wcore-sandbox --lib`:
+
+```
+test result: ok. 89 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.35s
+```
+
+All nine additions named and executed:
+`absent_ancestor_is_dropped_and_does_not_subsume_its_descendant`,
+`disjoint_denies_are_left_untouched`, `deny_reduction_is_independent_of_input_order`,
+`exact_duplicate_deny_collapses_to_one_mount`,
+`nested_directory_deny_collapses_onto_its_ancestor`, `non_directory_deny_subsumes_nothing`,
+`nested_file_and_deep_chain_collapse_to_the_outermost_directory`,
+`string_prefix_sibling_is_not_treated_as_nested`, and the live
+`required_live_bwrap_overlapping_deny_runs_shell_and_still_contains` — all `ok`.
