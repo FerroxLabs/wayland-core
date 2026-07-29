@@ -193,3 +193,117 @@ ALLOWED.
 
 Next: implement. Hetzner worktree `/root/wayland-21c3` on `hz/21-c3-hostile`, warm build
 running.
+
+---
+
+### t2 — results. Linux, hetzner `/root/wayland-21c3`, branch `hz/21-c3-hostile`
+
+Suite at `a961b421`: **27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out** in 87.9 s.
+Evidence: `evidence/21-c3/21-c3-t1-linux-full.log`. Counts read from an unproxied
+`cargo` invocation, with `ignored` and `filtered out` both present (LANE-BRIEF §3b).
+
+#### R1 — C3-b CLOSED on Linux: fan-out live is now DETERMINED on both surfaces
+
+The live probe now runs the AT-CAP control its in-process sibling has had since
+`359ce2bf`, through the identical transport, world and script shape.
+
+```
+AT-CAP LIVE CONTROL: a batch of 5 admitted 5 delegated child provider turn(s) from 7
+served request(s), so the breadth seam is live in this configuration and the over-cap
+result below is a refusal rather than an absence
+COMBINATION :: corpus_fan_out :: linux :: standalone    :: live :: REFUSED (0 children ran)
+COMBINATION :: corpus_fan_out :: linux :: host-protocol :: live :: REFUSED (0 children ran)
+```
+
+Was NOT-EXPRESSIBLE on both live surfaces at `359ce2bf`. **Known-negative demonstrated:**
+with `FAN_OUT_CAP` injected to 99 the control admits 0 children and both rows flip back
+to `NOT-EXPRESSIBLE :: the breadth seam admitted no child even at the cap`. The gate can
+fail.
+
+#### R2 (HIGH, NEW, PRODUCT) — bubblewrap aborts on overlapping read-deny entries, so a delegated mutating child cannot run ANY shell command on Linux
+
+Found by the tool differential's known-positive arm, then isolated to a two-line
+reproduction with a control.
+
+* `spawner.rs:1817` gives every `IsolatedMutation` child
+  `authority_read_deny: vec![parent_workspace, git_common_dir]`, and `git_common_dir` is
+  `<parent_workspace>/.git` — an **overlapping pair**.
+* `bwrap.rs:295` renders each directory deny as `--ro-bind <empty mask> <denied path>`.
+  The first masks the parent workspace as an empty READ-ONLY directory; the second then
+  needs a mount point at `.git` *inside that read-only mask*, and bwrap aborts.
+
+Measured against `bwrap` directly, control first:
+
+```
+=== CONTROL (known-positive): only the parent denied ===
+SHELL_RAN
+rc=0
+=== DEFECT: parent AND parent/.git denied, the spawner.rs:1817 pair ===
+bwrap: Can't mkdir /tmp/tmp.Fp0XY5mMGd/workspace/.git: Read-only file system
+rc=1
+```
+
+And through the SHIPPED BINARY, live, standalone headless-PTY — the child's own
+`tool_result`, read off the wire:
+
+```
+Exit code: 1
+STDOUT:
+
+STDERR:
+bwrap: Can't mkdir /tmp/.tmpZFK6oo/workspace/.git: Read-only file system
+```
+
+Severity HIGH: the advertised delegated-mutation path cannot execute a shell at all on
+Linux, and it fails as an absence of effect — which reads exactly like enforcement.
+
+#### R3 (HIGH) — every `corpus_tool` REFUSED in the Phase 21 record came from a shell that never ran, and the verdict names neither cause
+
+`21-04-PHASE-VERDICT.md` §1 C3 bullet 4 records the tool REFUSED as *"jointly
+attributable to tool authority and to workspace containment"*. Measured causes at
+`a961b421`, on Linux, one per cell:
+
+| Cell | What the child's own tool call returned | Cause |
+|---|---|---|
+| standalone in-process (at `359ce2bf`) | `Tool execution denied by user` | the shipped CONFIRMER, denying because stdin is not a terminal |
+| standalone in-process (this lane, sandbox resolved as production does) | `bwrap: Can't mkdir …/.git: Read-only file system` | R2 |
+| standalone live | `Exit code: 1 … bwrap: Can't mkdir …/workspace/.git` | R2 |
+| host-protocol live | `Tool execution denied by user` | the CONFIRMER |
+| host-protocol in-process | — | NOT-EXPRESSIBLE, correctly: `SubAgentConfig` has no tool field |
+
+**Four distinct mechanisms, and neither of the two the verdict names is among them.**
+Every one produces the same "no probe file on disk" reading the old probe keyed on.
+
+The corpus now records **NOT-EXPRESSIBLE** for all of these instead of REFUSED. That is a
+loss of four decisive-looking verdicts and a gain of the truth, which is the direction
+this phase has already established as correct.
+
+#### R4 (INSTRUMENT DEFECT IN MY OWN WORK, REPAIRED — LANE-BRIEF §6b-ii)
+
+The first draft of the live shell known-positive was **self-passing**. The marker was
+written literally into the child's Bash command; the command text travels inside the
+child's `ToolUse` block, which is in the SAME served request bodies the matcher searches.
+So `child_shell_ran` was true whether or not any shell ran.
+
+It reported, for two commits, `the delegated child's SHELL RAN … ATTRIBUTED TO WORKSPACE
+CONTAINMENT, NOT TOOL AUTHORITY` on both live surfaces. **That reading was false**, and
+the injection that should have flipped it (`false && printf …`) changed nothing —
+which is how it was caught.
+
+Repaired in this lane rather than written up: the shell now CONCATENATES the halves at
+runtime (`printf %s%s A B` on Unix, `echo A^B` under `cmd`; both verified against their
+real shells before use). Two permanent tests pin it, including the third assertion
+§6b-ii requires — that the OLD matcher WOULD have matched the command-text-only body, so
+the self-test cannot pass on an instrument that never had the defect.
+
+After the repair the same rows read `NOT-EXPRESSIBLE :: the delegated child's shell never
+ran`, which R2 independently explains. Ruled out as a cause of the flip: the split
+construction itself, verified under bwrap on the same host —
+`bwrap … /bin/sh -c "printf %s%s CORPUSSHELL RAN7d21"` → `CORPUSSHELLRAN7d21`, rc 0.
+
+#### R5 — the tool differential's known-positive gate fired twice on real defects
+
+Neither was staged. It withheld the verdict when (a) my per-arm session-id suffix `-g`
+was non-hex and `SessionManager::create_for_run` rejected it, so ARM-GRANTED launched no
+child; and (b) the fixture's fail-closed sandbox, then R2. In both cases the old probe
+would have recorded `REFUSED :: obtained no Bash effect`.
