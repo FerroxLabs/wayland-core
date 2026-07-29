@@ -921,6 +921,107 @@ fn kebab(field: &str) -> String {
     format!("--{}", field.replace('_', "-"))
 }
 
+/// Find every function in `src` whose **entire** body is one unconditional dead end
+/// carrying a `DEAD_END_MARKERS` phrase. Returns `(fn name, stripped body)`.
+///
+/// Extracted from the test body in 23A-C1 so the detector can be exercised against a
+/// synthetic fixture. While it was inline, the only evidence it worked was that it
+/// happened to find a real defect — so the moment the last defect was fixed, the
+/// instrument became both untested and red.
+fn scan_dead_ends(src: &str) -> Vec<(String, String)> {
+    let fn_re =
+        Regex::new(r"(?m)^\s*(?:pub\s+)?(?:async\s+)?fn\s+([a-z_][a-z0-9_]*)\s*\(").unwrap();
+    let mut found = Vec::new();
+    for cap in fn_re.captures_iter(src) {
+        let name = cap[1].to_string();
+        let after = cap.get(0).unwrap().end();
+        let Some(open_rel) = src[after..].find('{') else {
+            continue;
+        };
+        let open = after + open_rel;
+        let bytes = src.as_bytes();
+        let mut depth = 0i32;
+        let mut i = open;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let body = &src[open + 1..i.min(src.len())];
+        // Strip comments, then require the WHOLE body to be one bail/todo. A
+        // conditional dead end (a real feature that refuses in some states) is not
+        // false advertising and must not be flagged.
+        let stripped: String = body
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.starts_with("//") && !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let is_unconditional = stripped.starts_with("anyhow::bail!")
+            || stripped.starts_with("bail!")
+            || stripped.starts_with("unimplemented!")
+            || stripped.starts_with("todo!");
+        if is_unconditional && DEAD_END_MARKERS.iter().any(|m| stripped.contains(m)) {
+            found.push((name, stripped));
+        }
+    }
+    found
+}
+
+/// Anti-vacuity for the dead-end scan, per the standing rule that a repaired
+/// instrument needs three assertions rather than two.
+#[test]
+fn dead_end_detector_self_test() {
+    // 1. KNOWN-POSITIVE — an unconditional dead end is found.
+    let positive = r#"
+        async fn run_something(_id: &str) -> anyhow::Result<()> {
+            anyhow::bail!("this feature is temporarily unavailable while it is built")
+        }
+    "#;
+    let hits = scan_dead_ends(positive);
+    assert_eq!(
+        hits.len(),
+        1,
+        "detector missed an unconditional dead end; it cannot police anything. got {hits:?}"
+    );
+    assert_eq!(hits[0].0, "run_something");
+
+    // 2. KNOWN-NEGATIVE — a *conditional* refusal is a working feature, not false
+    //    advertising, and must not be reported.
+    let negative = r#"
+        async fn run_conditional(id: &str) -> anyhow::Result<()> {
+            if id.is_empty() {
+                anyhow::bail!("this feature is temporarily unavailable for empty ids")
+            }
+            Ok(())
+        }
+    "#;
+    assert!(
+        scan_dead_ends(negative).is_empty(),
+        "detector flagged a conditional refusal; every feature with a guard clause \
+         would be reported as an advertised dead end"
+    );
+
+    // 3. THE ASSERTION THAT PROVES THE DETECTOR DOES ANY WORK. The naive matcher —
+    //    "the source contains a dead-end marker" — reports the conditional case too.
+    //    Without this, assertions 1 and 2 both pass on a detector that is really just
+    //    a substring search plus luck.
+    let naive_flags_the_negative = DEAD_END_MARKERS.iter().any(|m| negative.contains(m));
+    assert!(
+        naive_flags_the_negative,
+        "the naive matcher must actually be wrong on this fixture, or assertion 3 is \
+         vacuous and this self-test would pass on the broken instrument too"
+    );
+}
+
 /// `23A-C1`: a flag that appears in `--help` and can never succeed.
 ///
 /// Finds every function in `wcore-cli/src` whose entire body is an unconditional
@@ -949,10 +1050,6 @@ fn no_unconditional_dead_end_is_reachable_from_an_advertised_flag() {
     }
     walk(&cli_src, &mut sources);
 
-    let fn_re =
-        Regex::new(r"(?m)^\s*(?:pub\s+)?(?:async\s+)?fn\s+([a-z_][a-z0-9_]*)\s*\(").unwrap();
-
-    // fn name -> the dead-end message it always returns
     let mut dead_ends: Vec<(String, String)> = Vec::new();
     let mut file_bodies: Vec<(PathBuf, String)> = Vec::new();
 
@@ -961,60 +1058,30 @@ fn no_unconditional_dead_end_is_reachable_from_an_advertised_flag() {
             continue;
         };
         let src = strip_test_modules(&raw);
-        for cap in fn_re.captures_iter(&src) {
-            let name = cap[1].to_string();
-            let after = cap.get(0).unwrap().end();
-            let Some(open_rel) = src[after..].find('{') else {
-                continue;
-            };
-            let open = after + open_rel;
-            let bytes = src.as_bytes();
-            let mut depth = 0i32;
-            let mut i = open;
-            while i < bytes.len() {
-                match bytes[i] {
-                    b'{' => depth += 1,
-                    b'}' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-            let body = &src[open + 1..i.min(src.len())];
-            // Strip comments, then require the WHOLE body to be one bail/todo.
-            // A conditional dead end (a real feature that refuses in some
-            // states) is not false advertising and must not be flagged.
-            let stripped: String = body
-                .lines()
-                .map(|l| l.trim())
-                .filter(|l| !l.starts_with("//") && !l.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ");
-            let is_unconditional = stripped.starts_with("anyhow::bail!")
-                || stripped.starts_with("bail!")
-                || stripped.starts_with("unimplemented!")
-                || stripped.starts_with("todo!");
-            if !is_unconditional {
-                continue;
-            }
-            if DEAD_END_MARKERS.iter().any(|m| stripped.contains(m)) {
-                dead_ends.push((name, stripped.clone()));
-            }
-        }
+        dead_ends.extend(scan_dead_ends(&src));
         file_bodies.push((path.clone(), src));
     }
 
-    assert!(
-        !dead_ends.is_empty(),
-        "no unconditional dead-end handler was found anywhere in wcore-cli/src. \
-         Either the class is genuinely gone -- in which case delete this test \
-         deliberately, with a note -- or the detector is broken and this test is \
-         passing vacuously. `run_skills_promote` was the known member (23A-C1)."
-    );
+    // The class is empty as of 23A-C1, and that is the goal state rather than a
+    // problem. `run_skills_promote` was the last member: it is now real governed
+    // promotion, and a marker sweep over `wcore-cli/src` returns 0 for all six
+    // `DEAD_END_MARKERS` against a live 110-hit `bail!` control.
+    //
+    // **The old `assert!(!dead_ends.is_empty())` has been REPLACED, not removed.**
+    // It existed to stop the scan passing vacuously, and that job is real — but it
+    // discharged it by requiring a genuine defect to exist in the tree, so fixing the
+    // last defect turned a working instrument red and the file's own header invited
+    // deleting it. Deleting a class scanner because the class is briefly empty is how
+    // the class comes back unnoticed.
+    //
+    // Anti-vacuity now lives in `dead_end_detector_self_test`, which proves the
+    // detector fires on a synthetic dead end, stays silent on a conditional refusal,
+    // and disagrees with the naive matcher. That is a stronger guarantee: the old form
+    // could not distinguish "detector works" from "detector is broken but some other
+    // defect happened to match".
+    if dead_ends.is_empty() {
+        return;
+    }
 
     // Associate each dead end with the clap field its call site reads.
     let field_re = Regex::new(r"(?:cli|args|self)\.([a-z_][a-z0-9_]*)").unwrap();
