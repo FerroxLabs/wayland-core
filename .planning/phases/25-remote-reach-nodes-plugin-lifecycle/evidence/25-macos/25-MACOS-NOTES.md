@@ -219,3 +219,32 @@ was restored byte-identically afterwards (`git diff --stat` empty; `grep -c "MUT
 Note: `Cargo.lock` regenerates on any cargo run (the committed lock predates `wcore-types`'
 `libc`/`windows-sys` deps). Pre-existing drift, not this lane's; restored to HEAD and left
 unstaged to avoid cross-lane conflict.
+
+## MEASUREMENT 6 (t+100m) — C2 divergence EXECUTED on both sides
+
+Darwin: `machine_id=unknown-host os=macos validates=yes key_id_differs=yes` — 19 passed; 0 failed;
+0 ignored; 0 measured; 0 filtered out.
+Linux (hetzner, non-login ssh): `machine_id=ubuntu-2404-noble-amd64-base` — 19 passed; 0 failed;
+0 ignored; 0 measured; 0 filtered out.
+Divergence is now executable on both sides, not measured on one and inferred on the other.
+
+## MEASUREMENT 7 (t+110m) — C3 needs no Darwin run. Two candidate traps closed.
+
+No `target_os = "macos"` anywhere in `crates/wcore-cli/src/plugin/`. Every platform branch is
+`cfg(unix)`/`cfg(windows)` and every `cfg(unix)` body is plain POSIX identical on Darwin and Linux
+(`set_permissions(0o600)` sign.rs:58; `PermissionsExt::mode()` carry generations.rs:432; `symlink`
+generations.rs:585).
+
+- **APFS case-insensitive vs ext4 case-sensitive** — REAL divergence, measured both sides
+  (`Plugin.txt` resolves as `plugin.txt` on macOS; does not on hetzner). **Unreachable**:
+  `validate_plugin_name` restricts to leading `[a-z]` then `[a-z0-9-]`, enforced at 9 call sites.
+- **Gatekeeper / `com.apple.quarantine`** — does not arise. "quarantine" in this codebase is their
+  term for the isolated git clone of a foreign plugin source. Checked, not assumed.
+- **`ps -eo`** (the msys-rejected flag behind the Windows false zero) — works on Darwin: rc=0,
+  852 rows; hetzner 1848 rows. Enumeration instrument is portable.
+
+## MEASUREMENT 8 (t+115m) — report written
+
+`25-MACOS.md` committed. Verdict: lane goal achieved; gap was mis-sized not mis-reported; one
+MEDIUM divergence to BACKLOG; Phase 25 stays 3.5/4; binary-level macOS behaviour remains unproven
+and belongs to Phase 28 (named, not worked around).
