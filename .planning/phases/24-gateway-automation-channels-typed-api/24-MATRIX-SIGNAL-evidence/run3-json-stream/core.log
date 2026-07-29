@@ -1,0 +1,128 @@
+[2m2026-07-29T02:58:33.949125Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T02:58:33.949151Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T02:58:33.951482Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T02:58:35.409793Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24c3email [3mplatform[0m[2m=[0memail
+[2m2026-07-29T02:58:35.409834Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24c3matrix [3mplatform[0m[2m=[0mmatrix
+[2m2026-07-29T02:58:35.409853Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24c3signal [3mplatform[0m[2m=[0msignal
+[2m2026-07-29T02:58:35.409877Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24c3slack [3mplatform[0m[2m=[0mslack
+[2m2026-07-29T02:58:35.409904Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24c3sms [3mplatform[0m[2m=[0msms
+[2m2026-07-29T02:58:35.409932Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24c3telegram [3mplatform[0m[2m=[0mtelegram
+[2m2026-07-29T02:58:35.409963Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24c3whatsapp [3mplatform[0m[2m=[0mwhatsapp
+[2m2026-07-29T02:58:35.409967Z[0m [32m INFO[0m F-014: channels auto-registered from ~/.wayland/channels [3mcount[0m[2m=[0m7
+[2m2026-07-29T02:58:35.410133Z[0m [32m INFO[0m Phase 1B-2: inbound channel subscriber spawned
+[2m2026-07-29T02:58:35.896898Z[0m [32m INFO[0m seeded imap watermark on first connect; pre-existing mail will not be replayed [3mseed_high[0m[2m=[0m999
+[2m2026-07-29T02:58:36.205042Z[0m [34mDEBUG[0m [3mstderr[0m[2m=[0mSIGFIX_READY port=36073 pid=725787
+[2m2026-07-29T02:58:36.712150Z[0m [32m INFO[0m F-014: channel_manager.start_all() complete — inbound polling active
+[2m2026-07-29T02:58:36.712206Z[0m [32m INFO[0m inbound webhook host listening [3mbind[0m[2m=[0m127.0.0.1:18787
+{"type":"ready","version":"0.12.25","session_id":"a4f3285c674f","capabilities":{"tool_approval":true,"thinking":false,"effort":false,"effort_levels":[],"modes":["default","auto_edit","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"plugins":true,"user_model_backend":"local","memory_enabled":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":8,"generator":"wcore-desktop-contract-gen/11","fixture_digest":"sha256:de2b19bdf52ea9ef2934a4b0fa43d5cd54befb6f1e0d7b4b2e2af60154723bb8","schema_digest":"sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54","source_inputs_digest":"sha256:c99443599a273e00c72900b12f32aa371d27b83f30e8a0f5a13f0c2191380562","capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_negotiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","effective_execution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_resolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runtime_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"available","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785293916741,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}}
+{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785293916741,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}
+{"type":"workspace_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aab6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current fingerprint-bound local trust decision"},"profile":"strict","backend":"bubblewrap","writable_roots":["/root/wayland-24-matrix-signal","/tmp/wayland-scratch-u0/contained"],"readable_roots":["/root/.cargo/bin","/root/.rustup","/root/wayland-24-matrix-signal","/tmp/wayland-scratch-u0/contained"],"capabilities":[]}}
+{"type":"capability_activation","capability":"pricing_refresher","stage":"declared"}
+{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","reason":"disabled_by_config"}
+{"type":"capability_activation","capability":"mid_flight_monitor","stage":"declared"}
+{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configured"}
+{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}
+{"type":"capability_activation","capability":"mid_flight_monitor","stage":"ready"}
+{"type":"capability_activation","capability":"cooldown_tracker","stage":"declared"}
+{"type":"capability_activation","capability":"cooldown_tracker","stage":"configured"}
+{"type":"capability_activation","capability":"cooldown_tracker","stage":"constructed"}
+{"type":"capability_activation","capability":"cooldown_tracker","stage":"ready"}
+{"type":"capability_activation","capability":"learned_policy","stage":"declared"}
+{"type":"capability_activation","capability":"learned_policy","stage":"unavailable","reason":"runtime_path_unwired"}
+{"type":"capability_activation","capability":"smart_handoff","stage":"declared"}
+{"type":"capability_activation","capability":"smart_handoff","stage":"unavailable","reason":"disabled_by_config"}
+{"type":"capability_activation","capability":"delegate_isolation","stage":"declared"}
+{"type":"capability_activation","capability":"delegate_isolation","stage":"unavailable","reason":"isolation_not_enforced"}
+{"type":"capability_activation","capability":"procedure_skill_drafting","stage":"declared"}
+{"type":"capability_activation","capability":"procedure_skill_drafting","stage":"configured"}
+{"type":"capability_activation","capability":"procedure_skill_drafting","stage":"constructed"}
+{"type":"capability_activation","capability":"procedure_skill_drafting","stage":"ready"}
+{"type":"capability_activation","capability":"legacy_auto_skill_drafting","stage":"declared"}
+{"type":"capability_activation","capability":"legacy_auto_skill_drafting","stage":"configured"}
+{"type":"capability_activation","capability":"legacy_auto_skill_drafting","stage":"constructed"}
+{"type":"capability_activation","capability":"legacy_auto_skill_drafting","stage":"ready"}
+[2m2026-07-29T02:58:37.393548Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T02:58:37.393575Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T02:58:37.396459Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T02:58:37.397827Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T02:58:37.467597Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24ms-js3/home/cron
+[2m2026-07-29T02:58:59.386233Z[0m [32m INFO[0m inbound denied [3mchannel[0m[2m=[0mf24c3slack [3mreason[0m[2m=[0msender not in dm allowlist
+[2m2026-07-29T02:59:19.388714Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T02:59:19.388730Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T02:59:19.390575Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T02:59:19.391329Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T02:59:19.465440Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24ms-js3/home/cron
+[2m2026-07-29T02:59:59.605840Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T02:59:59.605861Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T02:59:59.607655Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T02:59:59.608218Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T02:59:59.677439Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24ms-js3/home/cron
+[2m2026-07-29T03:00:21.851924Z[0m [32m INFO[0m inbound denied [3mchannel[0m[2m=[0mf24c3whatsapp [3mreason[0m[2m=[0msender not in dm allowlist
+[2m2026-07-29T03:00:41.856573Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T03:00:41.856610Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T03:00:41.858726Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T03:00:41.859094Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T03:00:41.938780Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24ms-js3/home/cron
+[2m2026-07-29T03:01:22.179258Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T03:01:22.179284Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T03:01:22.181498Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T03:01:22.182271Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T03:01:22.269939Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24ms-js3/home/cron
+[2m2026-07-29T03:01:44.425088Z[0m [32m INFO[0m inbound denied [3mchannel[0m[2m=[0mf24c3sms [3mreason[0m[2m=[0msender not in dm allowlist
+[2m2026-07-29T03:02:04.429691Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T03:02:04.429717Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T03:02:04.432301Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T03:02:04.433008Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T03:02:04.520103Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24ms-js3/home/cron
+[2m2026-07-29T03:02:44.715677Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T03:02:44.715702Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T03:02:44.717818Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T03:02:44.718548Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T03:02:44.813180Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24ms-js3/home/cron
+[2m2026-07-29T03:03:06.711129Z[0m [32m INFO[0m inbound denied [3mchannel[0m[2m=[0mf24c3telegram [3mreason[0m[2m=[0msender not in dm allowlist
+[2m2026-07-29T03:03:26.965970Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T03:03:26.965995Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T03:03:26.968432Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T03:03:26.969162Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T03:03:27.065959Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24ms-js3/home/cron
+[2m2026-07-29T03:04:07.225434Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T03:04:07.225461Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T03:04:07.228052Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T03:04:07.228801Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T03:04:07.336404Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24ms-js3/home/cron
+[2m2026-07-29T03:04:29.220137Z[0m [32m INFO[0m inbound denied [3mchannel[0m[2m=[0mf24c3matrix [3mreason[0m[2m=[0msender not in dm allowlist
+[2m2026-07-29T03:04:49.224178Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T03:04:49.224203Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T03:04:49.226356Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T03:04:49.227074Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T03:04:49.337226Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24ms-js3/home/cron
+[2m2026-07-29T03:05:29.439031Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T03:05:29.439058Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T03:05:29.441476Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T03:05:29.442224Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T03:05:29.551238Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24ms-js3/home/cron
+[2m2026-07-29T03:05:51.683763Z[0m [32m INFO[0m inbound denied [3mchannel[0m[2m=[0mf24c3signal [3mreason[0m[2m=[0msender not in dm allowlist
+[2m2026-07-29T03:06:11.689561Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T03:06:11.689621Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T03:06:11.691904Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T03:06:11.692676Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T03:06:11.799224Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24ms-js3/home/cron
+[2m2026-07-29T03:06:53.600091Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T03:06:53.600115Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T03:06:53.601904Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T03:06:53.602258Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T03:06:53.686340Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24ms-js3/home/cron
+[2m2026-07-29T03:06:57.222721Z[0m [33m WARN[0m failed to send inbound reply [3mchannel[0m[2m=[0mf24c3email [3merror[0m[2m=[0mtransport: Connection error: Connection error: invalid peer certificate: Other(OtherError(CaUsedAsEndEntity))
+[2m2026-07-29T03:07:13.757746Z[0m [33m WARN[0m failed to send inbound reply [3mchannel[0m[2m=[0mf24c3email [3merror[0m[2m=[0mtransport: Connection error: Connection error: invalid peer certificate: Other(OtherError(CaUsedAsEndEntity))
+[2m2026-07-29T03:07:13.757819Z[0m [32m INFO[0m inbound denied [3mchannel[0m[2m=[0mf24c3email [3mreason[0m[2m=[0msender not in dm allowlist
+[2m2026-07-29T03:07:31.261746Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T03:07:31.261760Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T03:07:31.262962Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T03:07:31.263447Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T03:07:31.359229Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24ms-js3/home/cron
+[2m2026-07-29T03:07:34.878375Z[0m [33m WARN[0m failed to send inbound reply [3mchannel[0m[2m=[0mf24c3email [3merror[0m[2m=[0mtransport: Connection error: Connection error: invalid peer certificate: Other(OtherError(CaUsedAsEndEntity))
+[2m2026-07-29T03:07:38.194758Z[0m [33m WARN[0m failed to send inbound reply [3mchannel[0m[2m=[0mf24c3email [3merror[0m[2m=[0mtransport: Connection error: Connection error: invalid peer certificate: Other(OtherError(CaUsedAsEndEntity))
+[2m2026-07-29T03:07:41.481295Z[0m [33m WARN[0m failed to send inbound reply [3mchannel[0m[2m=[0mf24c3email [3merror[0m[2m=[0mtransport: Connection error: Connection error: invalid peer certificate: Other(OtherError(CaUsedAsEndEntity))
+[2m2026-07-29T03:07:44.759922Z[0m [33m WARN[0m failed to send inbound reply [3mchannel[0m[2m=[0mf24c3email [3merror[0m[2m=[0mtransport: Connection error: Connection error: invalid peer certificate: Other(OtherError(CaUsedAsEndEntity))
+[2m2026-07-29T03:07:48.052840Z[0m [33m WARN[0m failed to send inbound reply [3mchannel[0m[2m=[0mf24c3email [3merror[0m[2m=[0mtransport: Connection error: Connection error: invalid peer certificate: Other(OtherError(CaUsedAsEndEntity))
+[2m2026-07-29T03:07:51.344507Z[0m [33m WARN[0m failed to send inbound reply [3mchannel[0m[2m=[0mf24c3email [3merror[0m[2m=[0mtransport: Connection error: Connection error: invalid peer certificate: Other(OtherError(CaUsedAsEndEntity))
