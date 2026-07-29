@@ -212,18 +212,26 @@ impl MemoryHandler {
                     .to_string(),
             ));
         }
+        let corrected_text = rest.join(" ");
         match block_on(api.correct_recalled(
             Tier::Project,
             id,
-            &rest.join(" "),
+            &corrected_text,
             "operator",
             AccessToken::MainAgent,
         )) {
+            // 23B-C3 (user-model lane): print WHAT the item now says, not only
+            // that something was corrected. Driving this live showed it printed
+            // a uuid and a partition and never the text — the identical defect
+            // found in `/memory why`, whose data was right and whose rendering
+            // was not. A user correcting the wrong item sees a success line
+            // either way; only the text tells them which.
             Ok(r) => Ok(handled(format!(
-                "/memory correct: {} corrected in {}/{}",
+                "/memory correct: {} corrected in {}/{}\n      now reads: {}",
                 r.id,
                 r.partition.as_str(),
-                r.tier.as_str()
+                r.tier.as_str(),
+                corrected_text
             ))),
             Err(e) => Ok(handled(format!("/memory correct refused: {e}"))),
         }
