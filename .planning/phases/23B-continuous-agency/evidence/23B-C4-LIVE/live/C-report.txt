@@ -1,0 +1,7 @@
+F23_CACHE=session id=b1bc55b1-4a4d-4f0f-8a56-9974067ba47b round_trips=5 complete=true started=2026-07-29T15:11:25.633Z updated=2026-07-29T15:11:42.896Z path=/root/c4-live/homeC/cache-ledger/b1bc55b1-4a4d-4f0f-8a56-9974067ba47b.json
+F23_CACHE=quality hit_ratio=0.2554 warm_hit_ratio=0.6221 hit_round_trips=2 miss_round_trips=3 warm_round_trips=3 cache_read=9375 cache_write=27312 uncached_input=15 output=462 total_input=36702
+F23_CACHE=invalidation distinct_causes=2 causes=expired:1,history_rewritten:1
+F23_CACHE=invalidation_cause name=expired count=1
+F23_CACHE=invalidation_cause name=history_rewritten count=1
+F23_CACHE=pressure peak_watermark=16997 autocompact_threshold=8000 emergency_limit=29000 peak_pressure=2.1246 compactions=1 micro=0 auto=1 failed=0 tokens_reclaimed=16096
+F23_CACHE=cost usd=0.037402 uncached_equivalent_usd=0.039012 saving_usd=0.001609 saving_ratio=0.0413 cost_truth=priced catalog_priced_round_trips=5 estimated_round_trips=0 unpriced_round_trips=0

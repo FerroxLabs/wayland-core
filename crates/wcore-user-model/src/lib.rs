@@ -12,6 +12,7 @@
 //! `LocalBackend` for `HonchoBackend` via config.
 
 pub mod brief;
+pub mod correction;
 pub mod error;
 pub mod expertise;
 pub mod local;
@@ -20,6 +21,7 @@ pub mod preference_learner;
 pub mod preferences;
 
 pub use brief::{DialecticInference, UserBrief, UserStyle};
+pub use correction::{CorrectionStore, Corrections, UserCorrection};
 pub use error::UserModelError;
 pub use expertise::ExpertiseEstimator;
 pub use local::LocalBackend;

@@ -3,7 +3,10 @@
 //! Wires the existing `ImageGenerationBackend` trait (in
 //! `wcore-tools/src/image_generation_tool.rs`) to five real providers:
 //!
-//! 1. **OpenAI image** (`OPENAI_API_KEY`; `gpt-image-1` default, configurable)
+//! 1. **OpenAI-wire image** (the active provider's key, or `OPENAI_API_KEY`).
+//!    The model is per-provider via `ProviderCompat::image_model` — OpenAI's
+//!    `gpt-image-1`, FluxRouter's `flux-image` — not one global constant
+//!    (F-27C3-04). `OPENAI_IMAGE_MODEL` still overrides both (#265).
 //! 2. **FAL FLUX schnell** (`FAL_API_KEY`)
 //! 3. **Gemini Imagen 3** (`GEMINI_API_KEY`)
 //! 4. **Hugging Face FLUX** (`HF_API_KEY`)
@@ -67,7 +70,16 @@ pub(crate) fn dalle_backend_from_config(config: &Config) -> Option<DalleBackend>
         return None;
     }
     let base = openai_wire_media_base(config)?;
-    Some(DalleBackend::new(config.api_key.clone(), &base))
+    // F-27C3-04 — carry the provider's image-model namespace across with the
+    // endpoint and the key. #310 resolved the first two from config and then
+    // dropped the provider identity, so the model stayed a global `gpt-image-1`
+    // that a FluxRouter key is not entitled to: the tool was advertised,
+    // registered, reachable, and failed on every default Flux session.
+    Some(DalleBackend::new(
+        config.api_key.clone(),
+        &base,
+        config.compat.image_model.as_deref(),
+    ))
 }
 
 /// Resolve a real `ImageGenerationBackend` from the resolved `Config`
@@ -121,10 +133,17 @@ pub fn build_image_gen_backend(
         return Some(Arc::new(backend));
     }
     if let Some(key) = read_env_key("OPENAI_API_KEY") {
-        let backend = DalleBackend::new(key, OPENAI_API_BASE);
+        // This arm is native OpenAI by construction (`OPENAI_API_KEY` at
+        // `api.openai.com`), so it takes OpenAI's own preset model rather than
+        // whatever `config.compat` holds — the active provider here is some
+        // OTHER provider that declined the media endpoint, and inheriting its
+        // image model would send e.g. Anthropic's compat into an OpenAI call.
+        let openai_preset = wcore_config::compat::ProviderCompat::openai_defaults();
+        let backend = DalleBackend::new(key, OPENAI_API_BASE, openai_preset.image_model.as_deref());
         tracing::info!(
-            "image_gen: using OpenAI {} (OPENAI_API_KEY found)",
-            backend.model
+            "image_gen: using OpenAI {} at {} (OPENAI_API_KEY found)",
+            backend.model,
+            backend.endpoint()
         );
         return Some(Arc::new(backend));
     }
@@ -303,21 +322,46 @@ fn prompt_contains_email_pii(prompt: &str) -> bool {
 // 1. OpenAI image generation (gpt-image-1 default; dall-e-3 configurable)
 // ---------------------------------------------------------------------
 
-/// Default OpenAI image model. `gpt-image-1` is the current broadly-available
-/// model; `dall-e-3` is region/tier-gated and returns HTTP 400
-/// (`model does not exist`) on accounts that lack it (#265). Override per-account
-/// with the `OPENAI_IMAGE_MODEL` env var or [`DalleBackend::with_model`].
+/// Last-resort OpenAI-wire image model, used only when neither the
+/// `OPENAI_IMAGE_MODEL` env var nor the active provider's
+/// [`ProviderCompat::image_model`] supplies one — i.e. an OpenAI-wire endpoint
+/// that reached this code without declaring its image namespace (a catalog
+/// alias resolving to `ProviderType::OpenAI`). `gpt-image-1` is the
+/// broadly-available OpenAI model; `dall-e-3` is region/tier-gated and returns
+/// HTTP 400 (`model does not exist`) on accounts that lack it (#265).
+///
+/// **This is not the native-OpenAI default any more.** That lives in
+/// `ProviderCompat::openai_defaults()`, next to FluxRouter's `flux-image`, so
+/// the two are chosen by configuration rather than by one global constant that
+/// happened to name one vendor's model (F-27C3-04).
+///
+/// [`ProviderCompat::image_model`]: wcore_config::compat::ProviderCompat::image_model
 pub const DEFAULT_OPENAI_IMAGE_MODEL: &str = "gpt-image-1";
 
-/// Resolve the OpenAI image model: the `OPENAI_IMAGE_MODEL` env var if set and
-/// non-empty, else [`DEFAULT_OPENAI_IMAGE_MODEL`]. Lets a user who only has
-/// `dall-e-3` (or a newer model) point the backend at it without a code change.
-fn openai_image_model_from_env() -> String {
-    std::env::var("OPENAI_IMAGE_MODEL")
+/// Resolve the model id to send to an OpenAI-wire `/images/generations`
+/// endpoint, in strict precedence order:
+///
+/// 1. **`OPENAI_IMAGE_MODEL` env var** (set and non-empty) — the documented
+///    #265 per-account escape hatch. Kept at the top deliberately: anyone
+///    already relying on it (which, before F-27C3-04, was *every* FluxRouter
+///    user who got the tool working at all) keeps working unchanged.
+/// 2. **`compat_model`** — the active provider's `ProviderCompat::image_model`.
+///    This is the fix: native OpenAI's preset says `gpt-image-1`, FluxRouter's
+///    says `flux-image`, and a user override in `[compat] image_model` merges
+///    over either. No `base_url.contains(...)` anywhere.
+/// 3. [`DEFAULT_OPENAI_IMAGE_MODEL`] — last resort.
+fn resolve_openai_image_model(compat_model: Option<&str>) -> String {
+    if let Some(env_model) = std::env::var("OPENAI_IMAGE_MODEL")
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_OPENAI_IMAGE_MODEL.to_string())
+    {
+        return env_model;
+    }
+    if let Some(m) = compat_model.map(str::trim).filter(|s| !s.is_empty()) {
+        return m.to_string();
+    }
+    DEFAULT_OPENAI_IMAGE_MODEL.to_string()
 }
 
 /// OpenAI image-generation backend. Endpoint: `/v1/images/generations`. The
@@ -339,12 +383,21 @@ impl DalleBackend {
     /// API base such as `https://api.openai.com/v1` or
     /// `https://api.fluxrouter.ai/v1`). The endpoint is derived as
     /// `{base_url}/images/generations` (#310) — no hardcoded host.
-    pub fn new(api_key: String, base_url: &str) -> Self {
+    ///
+    /// `compat_model` is the active provider's `ProviderCompat::image_model`.
+    /// It is an explicit parameter rather than something this constructor
+    /// sniffs from the URL, because the image endpoint's model namespace is
+    /// per-provider and #310 fixed the host and the key while leaving the model
+    /// global — which is what made the tool fail by default for every
+    /// FluxRouter user (F-27C3-04). Pass `None` only from a caller that has no
+    /// provider identity to offer; see [`resolve_openai_image_model`] for the
+    /// precedence.
+    pub fn new(api_key: String, base_url: &str, compat_model: Option<&str>) -> Self {
         Self {
             client: build_ssrf_safe_tool_client(),
             api_key,
             endpoint: join_openai_endpoint(base_url, "images/generations"),
-            model: openai_image_model_from_env(),
+            model: resolve_openai_image_model(compat_model),
         }
     }
 
@@ -380,6 +433,15 @@ impl DalleBackend {
     #[cfg(test)]
     pub(crate) fn api_key(&self) -> &str {
         &self.api_key
+    }
+
+    /// Resolved image model sent in the request body. Public for the same
+    /// reason as [`endpoint`](Self::endpoint): F-27C3-04 is a defect about
+    /// *which model the product actually sends*, so that value has to be
+    /// assertable — and readable back off the resolver's own boot log — rather
+    /// than inferred from configuration the caller believes it set.
+    pub fn model(&self) -> &str {
+        &self.model
     }
 
     /// `gpt-image-1` (and the `gpt-image-*` family) use a different size table
@@ -917,6 +979,10 @@ mod tests {
             std::env::remove_var("FAL_API_KEY");
             std::env::remove_var("GEMINI_API_KEY");
             std::env::remove_var("HF_API_KEY");
+            // F-27C3-04: `OPENAI_IMAGE_MODEL` outranks the compat field by
+            // design. A copy leaked from another test would therefore mask
+            // every assertion about the compat default in this module.
+            std::env::remove_var("OPENAI_IMAGE_MODEL");
         }
     }
 
@@ -931,11 +997,32 @@ mod tests {
     /// (what `"flux-router"` parses to) with an explicit Flux base_url + the
     /// Flux key (#310). NOTE: the pre-fix fixture used `provider: OpenAI`,
     /// which masked the bug — the resolver gate never matched FluxRouter.
+    ///
+    /// F-27C3-04: `compat` comes from `compat_defaults_for` — the SAME
+    /// function the config loader calls — rather than a hand-written literal.
+    /// `Config::default()` leaves `compat` all-`None`, so a hand-built fixture
+    /// would have silently carried no image model and made every assertion
+    /// below pass against the global fallback. That is the identical masking
+    /// the `provider: OpenAI` note above records.
     fn flux_config() -> Config {
         Config {
             provider: ProviderType::FluxRouter,
             api_key: "sk-flux-test".to_string(),
             base_url: "https://api.fluxrouter.ai/v1".to_string(),
+            compat: wcore_config::config::compat_defaults_for(ProviderType::FluxRouter),
+            ..Config::default()
+        }
+    }
+
+    /// A native OpenAI session, built through the same production
+    /// `compat_defaults_for` path as [`flux_config`]. Used for the
+    /// F-27C3-04 non-regression assertion.
+    fn openai_config() -> Config {
+        Config {
+            provider: ProviderType::OpenAI,
+            api_key: "sk-openai-test".to_string(),
+            base_url: "https://api.openai.com".to_string(),
+            compat: wcore_config::config::compat_defaults_for(ProviderType::OpenAI),
             ..Config::default()
         }
     }
@@ -1003,6 +1090,114 @@ mod tests {
         assert!(build_image_gen_backend(&env_only_config(), false).is_none());
     }
 
+    // -- F-27C3-04: per-provider default image model --------------------
+
+    #[test]
+    #[serial]
+    fn flux_session_defaults_to_flux_image_with_no_env_var() {
+        // THE defect. Before this fix a Flux session sent `gpt-image-1`, which
+        // a Flux key is not entitled to, so the built-in tool failed on every
+        // default Flux session and worked only with the undocumented
+        // `OPENAI_IMAGE_MODEL=flux-image`. Measured live by `27-c3-media`.
+        //
+        // `clear_image_gen_env()` removes OPENAI_IMAGE_MODEL, so this asserts
+        // the NO-ENV-VAR arm — the one the user actually gets.
+        clear_image_gen_env();
+        let backend =
+            dalle_backend_from_config(&flux_config()).expect("Flux config must resolve a backend");
+        assert_eq!(
+            backend.model(),
+            "flux-image",
+            "a FluxRouter session with no OPENAI_IMAGE_MODEL must send Flux's own image model"
+        );
+        assert_eq!(
+            backend.endpoint(),
+            "https://api.fluxrouter.ai/v1/images/generations",
+            "the #310 endpoint routing must be unchanged by the model fix"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn openai_session_still_defaults_to_gpt_image_1() {
+        // Non-regression: the whole point of moving the default into
+        // ProviderCompat is that OpenAI keeps ITS model. If this ever reads
+        // "flux-image" the fix has broken every native OpenAI user.
+        clear_image_gen_env();
+        let backend = dalle_backend_from_config(&openai_config())
+            .expect("native OpenAI config must resolve a backend");
+        assert_eq!(backend.model(), "gpt-image-1");
+        assert_eq!(
+            backend.endpoint(),
+            "https://api.openai.com/v1/images/generations"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn openai_and_flux_resolve_different_models_from_the_same_code_path() {
+        // The two assertions above could both pass on a constant if the
+        // resolver ignored compat and something else happened to match. This
+        // drives ONE function with two configs and asserts the results DIFFER
+        // — the property a hardcoded default cannot have.
+        clear_image_gen_env();
+        let flux = dalle_backend_from_config(&flux_config()).expect("flux resolves");
+        let openai = dalle_backend_from_config(&openai_config()).expect("openai resolves");
+        assert_ne!(
+            flux.model(),
+            openai.model(),
+            "the image model must vary with the provider; identical values mean the compat \
+             field is not being read at all"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn openai_image_model_env_var_still_outranks_the_compat_default() {
+        // The #265 escape hatch must keep working. Anyone who found
+        // OPENAI_IMAGE_MODEL=flux-image (the only way the tool worked before
+        // this fix) must not be broken by the fix.
+        clear_image_gen_env();
+        unsafe {
+            std::env::set_var("OPENAI_IMAGE_MODEL", "dall-e-3");
+        }
+        let backend = dalle_backend_from_config(&flux_config()).expect("flux resolves");
+        assert_eq!(
+            backend.model(),
+            "dall-e-3",
+            "an explicit OPENAI_IMAGE_MODEL must outrank the provider preset"
+        );
+        clear_image_gen_env();
+    }
+
+    #[test]
+    #[serial]
+    fn image_model_precedence_is_env_then_compat_then_global_fallback() {
+        // Exercises the resolver directly at all three rungs, including the
+        // whitespace-only cases — an empty override must fall THROUGH, not
+        // resolve to an empty model id the provider would 400 on.
+        clear_image_gen_env();
+        assert_eq!(resolve_openai_image_model(None), DEFAULT_OPENAI_IMAGE_MODEL);
+        assert_eq!(
+            resolve_openai_image_model(Some("   ")),
+            DEFAULT_OPENAI_IMAGE_MODEL
+        );
+        assert_eq!(resolve_openai_image_model(Some("flux-image")), "flux-image");
+        unsafe {
+            std::env::set_var("OPENAI_IMAGE_MODEL", "  env-wins  ");
+        }
+        assert_eq!(resolve_openai_image_model(Some("flux-image")), "env-wins");
+        unsafe {
+            std::env::set_var("OPENAI_IMAGE_MODEL", "   ");
+        }
+        assert_eq!(
+            resolve_openai_image_model(Some("flux-image")),
+            "flux-image",
+            "a whitespace-only env var is not a configuration (R-H2 shape)"
+        );
+        clear_image_gen_env();
+    }
+
     // -- #310: OpenAI-wire provider routing (Flux) ---------------------
 
     #[test]
@@ -1054,12 +1249,20 @@ mod tests {
             "non-OpenAI provider must not hijack the OpenAI image slot"
         );
         // And the env-built backend points at api.openai.com.
-        let backend = DalleBackend::new("sk-openai-env".to_string(), OPENAI_API_BASE);
+        // Same compat the env arm of `build_image_gen_backend` passes: native
+        // OpenAI's own preset, not whatever provider declined the endpoint.
+        let openai_preset = wcore_config::compat::ProviderCompat::openai_defaults();
+        let backend = DalleBackend::new(
+            "sk-openai-env".to_string(),
+            OPENAI_API_BASE,
+            openai_preset.image_model.as_deref(),
+        );
         assert_eq!(
             backend.endpoint(),
             "https://api.openai.com/v1/images/generations"
         );
         assert_eq!(backend.api_key(), "sk-openai-env");
+        assert_eq!(backend.model(), "gpt-image-1");
     }
 
     #[test]

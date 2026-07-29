@@ -69,6 +69,39 @@ Commit to `lane/<PHASE>` only. **Do not merge into `plan/f20-unified-audit-repai
 orchestrator merges lanes serially. Push your branch with `git push gh lane/<PHASE>` (remote
 is `gh`, not `origin`).
 
+### "The previous agent is dead" is an ABSENCE CLAIM — measure it before acting
+
+**Orchestrator rule, earned 2026-07-29 at the orchestrator's own expense.** The harness reported a
+lane as failed with its state lost. I believed it and spawned a replacement onto the same branch
+and the same worktree. **The first agent was still alive.** Its commits and the replacement's
+interleave in the log — one of the first agent's commits has the replacement's commit as its
+parent. Two agents committed into one worktree concurrently. The first then finished, deleted its
+hetzner worktree and its binary *mid-investigation under the second*, and its final commit — the
+one carrying the evidence sections, the lane summary and the captures — **was never pushed**. The
+replacement deleted that branch while recreating a worktree and recovered it **only because git
+prints the SHA of a branch it deletes**.
+
+Nothing was lost, by a margin of one line of terminal output.
+
+A death notice is exactly the shape this file spends pages warning about: an absence, reported by
+an instrument, with no known-positive. Before acting on one, measure it — is the branch still
+advancing, is a process still on the build host, does the worktree still exist. And **never point
+a second agent at a worktree the first may still hold**; give the replacement its own.
+
+**Merging integration INTO your branch is required and fine. Pushing the result to integration
+is not.** These are one keystroke apart and a lane conflated them on 2026-07-29: it merged
+integration forward correctly, then pushed to `plan/f20-unified-audit-repair` instead of to its
+own ref. The push also dragged in a *second, unrelated* lane's in-flight branch that happened to
+be an ancestor — including a fix that had not yet been proven at the time.
+
+Nothing broke, because that fix was proven an hour later. **That is luck, not a process.** The
+orchestrator merges serially so that each lane's work is verified against a tree it has actually
+been tested on; a lane that self-merges removes that check silently and no one can tell from the
+log which merges were reviewed.
+
+Concretely: `git push gh HEAD:lane/<your-lane>`, never `git push gh HEAD:plan/...`. If you find
+yourself typing the integration branch name in a push command, stop.
+
 ## 2. Your workspace (hetzner — where code actually builds)
 
 ```bash
@@ -85,6 +118,37 @@ export PATH=/root/.cargo/bin:$PATH      # a bare `cargo` exits 127 — that is P
 - Check `df -h /root` before a big run. If free space drops under ~150G, prune your own
   `target/` first and say so.
 - When your phase is done, remove your hetzner worktree and its `target/`.
+
+### 2a. `git fetch origin` on hetzner USED TO update nothing but `main` — verify HEAD anyway
+
+Measured 2026-07-29 by the orchestrator. Every hetzner clone was made `--single-branch`, so
+`remote.origin.fetch` was `+refs/heads/main:refs/remotes/origin/main` **and nothing else** —
+37 of 40 tree paths, i.e. both underlying repositories. In those trees:
+
+```
+git fetch origin          # exit 0, prints nothing, updates ONLY origin/main
+git checkout origin/plan/f20-unified-audit-repair   # <- SILENTLY STALE
+```
+
+The remote-tracking ref stayed frozen at whenever someone last fetched it explicitly. The
+orchestrator hit this directly: a checkout that should have landed on the evening's integration
+head landed on a commit **21 hours older**, with a clean exit code and no warning. Had the
+workspace check run, it would have gone green — describing code that no longer exists.
+
+**The refspecs are now widened and 0 trees remain narrow.** The rule outlives the fix:
+
+- **Always assert the SHA you expected after any checkout or pull**, and abort if it differs.
+  `git rev-parse HEAD` compared against a SHA you obtained independently. This is the single
+  check that caught it; nothing else did.
+- Note the remote's NAME differs by host: on the **Mac** the GitHub remote is `gh` and `origin`
+  is a stale **local path** — a trap. On **hetzner** the GitHub remote is `origin`.
+- Get the authoritative head from GitHub itself when it matters:
+  `git ls-remote <remote> <branch>`, or `gh api repos/FerroxLabs/wayland-core/git/ref/heads/<branch>`.
+
+Related instrument defect, same family: `EXIT=$?` **after a pipe reports the last stage's
+status, not the command's.** `git fetch ... | head` reported `FETCH_EXIT=0` while printing
+`fatal: 'gh' does not appear to be a git repository`. Use `set -o pipefail`, or `${PIPESTATUS[0]}`,
+or do not pipe the command whose exit code you are about to trust.
 
 ## 3. The three standing rules (AGENTS.md §11 — established by measurement)
 
@@ -146,7 +210,13 @@ so nothing looks wrong. Two classes measured:
 - **`ls`** — also rewritten: it alters the size column and reorders entries. Found 2026-07-29 by
   `lane/22-remaining`. Anything that counts or sizes files from a directory listing is affected.
 
-**Assume the list is incomplete.** Four tools were found in five days, each after a lane trusted it.
+- **`git status --porcelain`** — collapsed to the single word `ok` on a clean tree. Harmless
+  when clean; the hazard is that a machine-readable format you are parsing is not the format you
+  get back, so any script keying on porcelain output is reading something else. Note this one
+  fired **even though the command was written `command git`** — prefixing `command` does NOT
+  reliably escape the rewrite. Only the absolute path does.
+
+**Assume the list is incomplete.** Five tools were found in five days, each after a lane trusted it.
 The safe posture is that *any* proxied tool may re-render, so reach for the absolute path first
 rather than discovering the fifth member the hard way. The orchestrator hit this too on 2026-07-29:
 `git log` reported an unchanged HEAD immediately after a 24-branch merge train had moved it, and the

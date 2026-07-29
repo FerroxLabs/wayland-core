@@ -393,9 +393,14 @@ fn builtin_tool(
     fixture: &MediaFixture,
     rate_card: MediaRateCard,
 ) -> (ImageGenerationTool, Arc<MediaCostLedger>) {
+    // `None` compat model: this fixture is a bare OpenAI-wire endpoint with no
+    // provider identity, so the resolver's global fallback applies. F-27C3-04's
+    // per-provider defaults are asserted in `image_gen`'s own unit module,
+    // where a real `Config` (and therefore a real `ProviderCompat`) exists.
     let backend = wcore_agent::tool_backends::image_gen::DalleBackend::new(
         FIXTURE_TOKEN.to_string(),
         &fixture.api_base(),
+        None,
     );
     let ledger = MediaCostLedger::shared();
     let tool = ImageGenerationTool::with_backend(Arc::new(backend))
@@ -639,6 +644,7 @@ async fn builtin_shape_bad_credential_fails_closed_and_is_categorised() {
     let backend = wcore_agent::tool_backends::image_gen::DalleBackend::new(
         "not-the-fixture-token".to_string(),
         &fixture.api_base(),
+        None,
     );
     let tool = ImageGenerationTool::with_backend(Arc::new(backend));
 
