@@ -121,3 +121,12 @@ falsifiable later.
 - [ ] Panel (4-way) on the compiler + bias guard + v2.
 
 ---
+
+## T+final — outcome
+
+Compiler + discovery + protocol v2 + 4/4 panel + live capture all landed. Panel struck three of
+my five fairness claims; struck in the code, not footnoted. G6 (symmetric-resolution gate) added
+and live-proven, including the row where Wayland resolves cleanly and is STILL unpublishable.
+
+Cohort gate today: INELIGIBLE, rc=1, COHORT_TOO_SMALL:1. No comparative re-taken — correct.
+Report: `30-DIALECT.md`. Provider spend $0.00 (loopback only; flux.env never opened).
