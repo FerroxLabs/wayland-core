@@ -87,3 +87,62 @@ Evidence: `24-C4-SUPPORT-evidence/`.
 
 Still to do: mutation-prove the 5 new tests and the new production refusal path; then
 the C2/C3 residuals.
+
+---
+
+## M5 — RECONCILIATION (2026-07-29, after the coordinator's message)
+
+Integration is `plan/f20-unified-audit-repair` @ `4a872413`. My base `5140d640`
+(`lane/grade-24`) IS an ancestor of it, so this is a clean fast-forward plus one real
+content conflict: `lane/support-bundle` built the same verb while I was working.
+
+**I am MERGING integration into my lane, not rebasing.** LANE-BRIEF §0 forbids
+`git rebase` outright ("other lanes share the repository object store"). The
+coordinator asked for a rebase; a merge reaches the same stated end — a branch that
+merges cleanly into `4a872413` — moves only my own ref, and does not use the forbidden
+verb. Flagging rather than silently routing around, per §0.
+
+### Read both implementations before touching either. The landed one is better in
+### four places and mine is better in two.
+
+**Landed (`crates/wcore-cli/src/gateway/support.rs`, 298 lines) has that mine LACKS:**
+
+1. **`Redactor::learn_secret_values_from_file(config)` and `(credentials)`** — a library
+   method added for it. **This is a real gap in mine.** My redactor learned from the
+   environment ONLY, so a credential living in `config.toml` was never learned and a log
+   line quoting it would have shipped verbatim. Structural elision covers the config
+   member itself; it does NOT cover the log. Landed wins outright.
+2. **Ledger SUMMARY, not the raw journal.** Mine pushed `deliveries.jsonl` in as a
+   projection; projections are copied whole and the journal is unbounded. Landed's
+   counts tell a support engineer the same thing without the bloat. Landed wins.
+3. **Does not create the state it reports on** — opens the ledger only if the journal
+   already exists, because `DeliveryLedger::open` creates `home`.
+4. **`Uninstalled` vs merely stopped** in the status member, via `is_registered`.
+
+**Mine has that landed LACKS:**
+
+1. **The production post-condition.** Landed has NO equivalent: nothing re-reads the
+   finished bundle. Mine re-scans every known secret across every member over raw bytes
+   and REFUSES with a non-zero exit. Must survive.
+2. **`--home` is honoured for the config/credentials paths.** Landed calls
+   `wcore_config::config::global_config_path()` unconditionally. That reads the process
+   env `WAYLAND_HOME`; `ScopeArgs::home()` does NOT export the flag. So
+   `support-bundle --home /X` (without the env set) collects key names from the AMBIENT
+   config, not `/X`'s — and, worse, `learn_secret_values_from_file` then learns the
+   WRONG secrets and misses `/X`'s. That is a redaction gap, not a cosmetic one.
+   Provisionally `F24-C4-M1`; to be proved by driving `--home` alone.
+
+**Also dropped by landed and worth restoring:** `channel-health.json` as a projection.
+Criterion 4 names "redacted **health**/log/support evidence" and that file is the
+gateway's health publication. Cheap; absent sources are named when missing.
+
+**Overruling my own steer on one point:** landed's `--out` is OPTIONAL with a
+timestamped default under the gateway home. I argued required-with-no-default. I am
+keeping LANDED. The default lands inside the operator's own `$WAYLAND_HOME` — not
+"somewhere nobody meant to send it from" — the path is printed, the read-before-send
+warning is louder than mine, and requiring a flag adds friction at exactly the moment
+something is broken. My argument was a preference, not a defect.
+
+Plan: keep the landed module as the base, graft my post-condition + `--home` honouring
++ `channel-health.json`, port the mutation-proved tests that still apply, then re-prove
+EVERYTHING on the reconciled code.
