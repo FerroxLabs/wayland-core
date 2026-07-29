@@ -241,11 +241,16 @@ async fn recorded_cost_varies_with_the_tokens_and_beats_the_uncached_counterfact
     // really does cost MORE than an uncached one. That is a true fact about
     // prompt caching, not a bug — so both directions are asserted below,
     // each on a shape that actually exhibits it.
+    // EVERY counter scales with `scale`, including outputs. An earlier draft
+    // held the output tokens and the small per-turn inputs fixed, so a 100x
+    // workload only moved cost 48x and the run came back red at `> 50x`. Making
+    // the shape purely linear turns a fuzzy "it moved a lot" into an exact
+    // ratio, which is a strictly stronger guard against an invariant number.
     async fn spend(dir: &std::path::Path, scale: u64) -> (f64, f64) {
         let provider = Arc::new(ScriptedProvider::new(vec![
-            tool_turn("t1", usage(scale, 300, 0, scale)),
-            tool_turn("t2", usage(100, 300, 10 * scale, 0)),
-            text_turn("done", usage(100, 300, 10 * scale, 0)),
+            tool_turn("t1", usage(scale, scale, 0, scale)),
+            tool_turn("t2", usage(scale, scale, 10 * scale, 0)),
+            text_turn("done", usage(scale, scale, 10 * scale, 0)),
         ]));
         let mut config = test_config();
         config.model = "claude-opus-4-7".to_string();
@@ -278,9 +283,11 @@ async fn recorded_cost_varies_with_the_tokens_and_beats_the_uncached_counterfact
     let (large, large_uncached) = spend(large_dir.path(), 100_000).await;
 
     assert!(small > 0.0, "a priced model must produce a non-zero cost");
+    let ratio = large / small;
     assert!(
-        large > small * 50.0,
-        "cost is INVARIANT or barely moving across a 100x workload: {small} -> {large}"
+        (ratio - 100.0).abs() < 0.01,
+        "a 100x workload must cost 100x: {small} -> {large} is {ratio}x \
+         (a constant would give 1.0; a partly-fixed number something between)"
     );
 
     // Read-dominated: the counterfactual, priced through the same catalog with
