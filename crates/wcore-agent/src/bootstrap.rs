@@ -2172,6 +2172,7 @@ impl AgentBootstrap {
                 if self.config.observability.skills_lifecycle {
                     match store.seed_pairs_for(&candidate_names, "auto_drafter", 1) {
                         Ok(pairs) => {
+                            let pairs = drop_revoked_auto_draft_seeds(pairs);
                             let n = sk_router.restore_seeds(pairs);
                             tracing::debug!(
                                 target: "wcore_agent::bootstrap",
@@ -4063,6 +4064,187 @@ fn failover_routing_policy(config: &Config) -> FailoverRoutingPolicy {
         organization: config.provider_policy.organization.clone(),
         require_fresh_pricing: config.provider_policy.require_fresh_pricing,
         require_priced: config.provider_policy.require_priced,
+    }
+}
+
+/// Drop router seeds belonging to skills the user has revoked (`F23A-C1-M1`).
+///
+/// # Why this exists, and why it cannot live in `wcore-skills::govern`
+///
+/// `GovernanceStore::revoke()` is filesystem-only: it deletes the skill directory and writes a
+/// tombstone. It does **not** remove the `evolved_prompts` row the drafter wrote
+/// (`auto_skill/drafter.rs`), because it structurally cannot — `prompt_store.rs` records that
+/// "`wcore-skills` cannot depend on `wcore-evolve` (the dep already runs the other way)". So the
+/// row outlives the revocation, and the only place the two can meet is here, at the bridge
+/// point that already owns both dependencies.
+///
+/// # The hazard
+///
+/// Layer 1b hydrates `auto_drafter` rows for every name in `catalog.visible()`. Today
+/// `visible()` excludes auto-drafts (`loader.rs:448` quarantines them via
+/// `disable_model_invocation`), so this filter is inert. It stops being inert the moment
+/// governed promotion lifts that quarantine — which is work in flight — at which point a
+/// retained row starts seeding the router for content the user explicitly revoked.
+///
+/// There is a second variant that needs **no** promotion at all. `PromptStore::seed_pairs_for`
+/// matches on `WHERE skill_name = ?1` — name alone, no signature, no provenance. So a user who
+/// revokes auto-skill `foo` and later hand-writes their own unrelated skill named `foo` would
+/// have the revoked skill's simulated-success prior hydrated onto the new one.
+///
+/// # Why it filters the seeds and not the candidate list
+///
+/// Filtering `candidate_names` up front would be simpler and is wrong: it would strip the
+/// user's own legitimately-named skill out of Layer 1 and Layer 2 seeding as well, penalising
+/// them for a name collision with something they deleted. Only the stale `auto_drafter` prior
+/// is dropped; everything else about that skill is treated normally.
+///
+/// # Failure posture
+///
+/// An unresolvable or unreadable governance root yields `None`/`Err`, and this returns the
+/// pairs unfiltered rather than dropping every seed. That matches `GovernanceStore::is_revoked`,
+/// which documents the same choice: failing closed would let one bad file silently disable the
+/// learn loop. The drop is logged so it is never silent.
+fn drop_revoked_auto_draft_seeds(pairs: Vec<(String, u64)>) -> Vec<(String, u64)> {
+    match wcore_skills::govern::GovernanceStore::open_default() {
+        Ok(store) => drop_revoked_auto_draft_seeds_with(pairs, &store),
+        Err(e) => {
+            tracing::debug!(
+                target: "wcore_agent::bootstrap",
+                error = %e,
+                "no governance root resolved; auto-draft seeds hydrated unfiltered"
+            );
+            pairs
+        }
+    }
+}
+
+/// Testable core of [`drop_revoked_auto_draft_seeds`], with the store injected so tests can
+/// point at a tempdir instead of the process-global user root (bug #564 in this subsystem).
+fn drop_revoked_auto_draft_seeds_with(
+    pairs: Vec<(String, u64)>,
+    store: &wcore_skills::govern::GovernanceStore,
+) -> Vec<(String, u64)> {
+    // Read the tombstone set ONCE. `is_revoked` re-reads the directory per call, which would be
+    // O(drafts x revocations) file reads on every boot.
+    //
+    // Name-only matching here is not a weakening of `is_revoked`: the router knows skill names
+    // and has no drafter signature to offer, so `is_revoked(name, None)` reduces to exactly the
+    // name comparison this performs.
+    let revoked: std::collections::HashSet<String> = match store.live_revocations() {
+        Ok(live) => live.into_iter().map(|r| r.skill_name).collect(),
+        Err(e) => {
+            tracing::error!(
+                target: "wcore_agent::bootstrap",
+                error = %e,
+                "could not read revocations; auto-draft seeds hydrated unfiltered"
+            );
+            return pairs;
+        }
+    };
+    if revoked.is_empty() {
+        return pairs;
+    }
+    pairs
+        .into_iter()
+        .filter(|(name, _)| {
+            let blocked = revoked.contains(name);
+            if blocked {
+                tracing::info!(
+                    target: "wcore_agent::bootstrap",
+                    skill = %name,
+                    "skill_router: dropped auto-draft seed for a revoked skill"
+                );
+            }
+            !blocked
+        })
+        .collect()
+}
+
+/// `F23A-C1-M1` — the auto-draft router-seed resurrection guard.
+///
+/// Structured as a known-positive, a known-negative, and a **one-variable control**, because the
+/// two obvious ways to fake a pass here are both invisible in a single assertion: a filter that
+/// dropped every seed would satisfy "the revoked seed is gone", and a test whose revocation was
+/// never actually created would satisfy "the surviving seed is present".
+#[cfg(test)]
+mod revoked_auto_draft_seed_tests {
+    use super::drop_revoked_auto_draft_seeds_with;
+    use wcore_skills::govern::GovernanceStore;
+
+    /// Build a governance store on a tempdir root, never the process-global user root
+    /// (bug #564 in this subsystem is exactly that race).
+    fn store_with_revocations(revoke: &[&str]) -> (tempfile::TempDir, GovernanceStore) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = GovernanceStore::new(tmp.path().join("governance"));
+        for name in revoke {
+            let dir = tmp.path().join("skills").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), b"# revoked\n").unwrap();
+            store.revoke(&dir).unwrap();
+        }
+        (tmp, store)
+    }
+
+    fn seeds() -> Vec<(String, u64)> {
+        vec![
+            ("auto-revoked-one".to_string(), 4),
+            ("hand-written-keeper".to_string(), 3),
+        ]
+    }
+
+    #[test]
+    fn a_revoked_skill_loses_its_seed_and_an_unrevoked_one_keeps_its_own() {
+        let (_tmp, store) = store_with_revocations(&["auto-revoked-one"]);
+
+        // Guard against a vacuous run: the revocation must actually be live. If `revoke()`
+        // silently no-opped, the drop below would pass for the wrong reason.
+        assert!(
+            store.is_revoked("auto-revoked-one", None),
+            "precondition: the revocation must be live before the filter is meaningful"
+        );
+
+        let kept = drop_revoked_auto_draft_seeds_with(seeds(), &store);
+
+        // known-negative: the revoked skill's retained prior is gone.
+        assert!(
+            !kept.iter().any(|(n, _)| n == "auto-revoked-one"),
+            "a revoked skill must not hydrate a router seed, got {kept:?}"
+        );
+        // known-positive: and the filter is not universal denial. Without this, a filter that
+        // returned an empty vec unconditionally would pass the assertion above.
+        assert_eq!(
+            kept,
+            vec![("hand-written-keeper".to_string(), 3)],
+            "an unrevoked skill must keep its seed unchanged"
+        );
+    }
+
+    #[test]
+    fn the_control_one_variable_changed_no_revocation_means_nothing_is_dropped() {
+        // THE ASSERTION THAT PROVES THE OTHER TEST MEASURES ANYTHING. Same input, same code
+        // path, same store type -- the only difference is that no revocation exists. If this
+        // ever fails, the drop above was caused by something other than the revocation and the
+        // guard is not doing what it claims.
+        let (_tmp, store) = store_with_revocations(&[]);
+        assert_eq!(
+            drop_revoked_auto_draft_seeds_with(seeds(), &store),
+            seeds(),
+            "with no revocation in force every seed must survive untouched"
+        );
+    }
+
+    #[test]
+    fn revocation_is_matched_by_name_which_is_the_variant_that_needs_no_promotion() {
+        // `PromptStore::seed_pairs_for` matches on `WHERE skill_name = ?1` alone. So a user who
+        // revokes `foo` and later hand-writes an unrelated skill also called `foo` would
+        // otherwise inherit the revoked skill's simulated-success prior. This pins that the
+        // guard keys on the same field the query does.
+        let (_tmp, store) = store_with_revocations(&["collides"]);
+        let kept = drop_revoked_auto_draft_seeds_with(vec![("collides".to_string(), 5)], &store);
+        assert!(
+            kept.is_empty(),
+            "a name collision with a revoked skill must not inherit its prior, got {kept:?}"
+        );
     }
 }
 
