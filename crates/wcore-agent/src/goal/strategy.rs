@@ -858,6 +858,96 @@ mod tests {
         )
     }
 
+    /// Every terminal shape survives the durable round trip when it is written
+    /// the way F22C criterion 3 requires — through the canonical transition.
+    ///
+    /// This carries the ENGINE half of what
+    /// `tests/goal_kernel_test::every_terminal_shape_the_census_measured_survives_a_durable_round_trip`
+    /// used to assert over the plain `GoalKernel::terminate` path. That path now
+    /// refuses an engine verdict, and the integration test asserts the refusal.
+    /// The serialization property it used to prove is not dropped — it is proven
+    /// here instead, over the same list, plus the control-plane shapes so the
+    /// coverage is a superset rather than a partition of the original.
+    ///
+    /// It lives in this module because `finish_loop_owner` is `pub(crate)` for
+    /// the reason stated above: making it public to host a test would reopen the
+    /// exact bypass the criterion closes.
+    #[test]
+    fn every_terminal_shape_survives_the_round_trip_through_the_canonical_transition() {
+        let shapes = vec![
+            GoalTerminalState::Exhausted {
+                kind: ExhaustionKind::Quality,
+                attempts: 3,
+                detail: "schema validation never passed".to_owned(),
+            },
+            GoalTerminalState::Exhausted {
+                kind: ExhaustionKind::Resource,
+                attempts: 64,
+                detail: "dispatch budget".to_owned(),
+            },
+            GoalTerminalState::PartiallyCompleted {
+                completed: 97,
+                failed: 3,
+            },
+            GoalTerminalState::TimedOut,
+            GoalTerminalState::Unpriced {
+                detail: "roster not fully priced".to_owned(),
+            },
+            GoalTerminalState::CriteriaChecked,
+            GoalTerminalState::SelfChecked,
+            GoalTerminalState::NeedsEscalation,
+            GoalTerminalState::Blocked {
+                reason: "gate cannot execute".to_owned(),
+            },
+            GoalTerminalState::Cancelled,
+            GoalTerminalState::PermissionDenied,
+            GoalTerminalState::CrashedRecovered,
+            GoalTerminalState::Superseded,
+        ];
+        assert!(
+            shapes.iter().any(GoalTerminalState::requires_loop_owner),
+            "a list with no engine-produced shape would make this test vacuous"
+        );
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("session.journal");
+
+        {
+            let kernel = GoalKernel::new(
+                SessionJournal::open(&path, "goal-canonical-roundtrip").expect("journal opens"),
+            );
+            for (index, shape) in shapes.iter().enumerate() {
+                let id = GoalId::new(format!("g-canon-{index}"));
+                kernel
+                    .open_goal(&id, "objective", &direct_snapshot(), 1_700_000_000_000)
+                    .expect("open");
+                let epoch = kernel
+                    .claim_loop_owner(&id, GoalStrategy::Direct, 1_700_000_000_000, 60_000)
+                    .expect("claim");
+                kernel
+                    .finish_loop_owner(&id, epoch, shape.clone())
+                    .expect("canonical transition");
+            }
+        }
+
+        // Reopened: a real replay of real frames, not the in-memory state the
+        // writer happened to be holding.
+        let kernel = GoalKernel::new(
+            SessionJournal::open(&path, "goal-canonical-roundtrip").expect("journal reopens"),
+        );
+        for (index, shape) in shapes.iter().enumerate() {
+            let id = GoalId::new(format!("g-canon-{index}"));
+            let goal = kernel.goal(&id).expect("read").expect("goal exists");
+            match goal.lifecycle {
+                crate::session_journal::GoalLifecycle::Terminated { terminal } => assert_eq!(
+                    &terminal, shape,
+                    "terminal shape {index} did not survive the durable round trip"
+                ),
+                other => panic!("expected terminal, got {other:?}"),
+            }
+        }
+    }
+
     fn leased_loop(path: &std::path::Path, clock: &TestClock, lease_ms: u64) -> (GoalLoop, GoalId) {
         let driver = GoalLoop::new(GoalKernel::new(
             SessionJournal::open(path, "goal-strategy-lease").expect("journal opens"),

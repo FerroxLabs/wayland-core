@@ -15,7 +15,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use wcore_agent::goal::strategy::{AnvilOutcome, GoalLoop, StrategyTermination};
 use wcore_agent::goal::{GoalAuthorityRecord, GoalKernel, GoalLifecycle, GoalRecovery};
+use wcore_agent::orchestration::anvil::TerminalState;
+use wcore_agent::orchestration::anvil::engine::ClimbOutcome;
 use wcore_agent::session_journal::{SessionEvent, SessionJournal};
 use wcore_types::goal::{
     ExhaustionKind, GoalAuthorityRequest, GoalAuthoritySnapshot, GoalId, GoalStrategy,
@@ -219,12 +222,29 @@ fn every_terminal_shape_the_census_measured_survives_a_durable_round_trip() {
         GoalTerminalState::Superseded,
     ];
 
+    // F22C criterion 3 splits this list in two, and the split is asserted here
+    // rather than assumed: a shape that claims something about an engine's work
+    // is only sayable by that engine's loop owner, so it is REFUSED on the plain
+    // path. The round trip for those shapes is proven over the canonical
+    // transition instead — `goal::kernel`'s
+    // `every_terminal_shape_survives_the_round_trip_through_the_canonical_transition`
+    // carries the identical assertion over this same list.
+    //
+    // `Verified` is absent from the list for the older reason (Behavior 4): it
+    // is refused on this path outright and needs host-observed gate evidence.
+    let (engine_shapes, control_shapes): (Vec<_>, Vec<_>) =
+        shapes.iter().partition(|s| s.requires_loop_owner());
+    assert!(
+        !engine_shapes.is_empty() && !control_shapes.is_empty(),
+        "the split must exercise both sides, or this test proves nothing about either"
+    );
+
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("session.journal");
 
     {
         let kernel = open_kernel(&path);
-        for (index, shape) in shapes.iter().enumerate() {
+        for (index, shape) in control_shapes.iter().enumerate() {
             let id = goal_id(&format!("g-shape-{index}"));
             kernel
                 .open_goal(
@@ -234,17 +254,45 @@ fn every_terminal_shape_the_census_measured_survives_a_durable_round_trip() {
                     1_700_000_000_000,
                 )
                 .expect("open");
-            kernel.terminate(&id, shape.clone()).expect("terminate");
+            kernel.terminate(&id, (*shape).clone()).expect("terminate");
+        }
+
+        // The refusal, over EVERY engine-produced shape — not one sample. A
+        // Goal that never claimed an owner is exactly the case the plain path
+        // used to wave through, and it is the case a sixth engine would be in
+        // by default.
+        for (index, shape) in engine_shapes.iter().enumerate() {
+            let id = goal_id(&format!("g-engine-{index}"));
+            kernel
+                .open_goal(
+                    &id,
+                    "objective",
+                    &snapshot(GoalStrategy::Fleet, LoopPolicy::Once),
+                    1_700_000_000_000,
+                )
+                .expect("open");
+            assert!(
+                kernel.terminate(&id, (*shape).clone()).is_err(),
+                "{shape:?} is an engine verdict and must not be reachable without a loop owner"
+            );
+            assert!(
+                !kernel
+                    .goal(&id)
+                    .expect("read")
+                    .expect("goal exists")
+                    .is_terminal(),
+                "a refused terminal must leave the Goal live and resumable, not half-applied"
+            );
         }
     }
 
     let kernel = open_kernel(&path);
-    for (index, shape) in shapes.iter().enumerate() {
+    for (index, shape) in control_shapes.iter().enumerate() {
         let id = goal_id(&format!("g-shape-{index}"));
         let goal = kernel.goal(&id).expect("read").expect("goal exists");
         match goal.lifecycle {
             GoalLifecycle::Terminated { terminal } => assert_eq!(
-                &terminal, shape,
+                &&terminal, shape,
                 "terminal shape {index} did not survive the durable round trip"
             ),
             other => panic!("expected terminal, got {other:?}"),
@@ -475,9 +523,44 @@ fn drive_to(kernel: &GoalKernel, id: &GoalId, point: CrashPoint) {
     if point == CrashPoint::Resumed {
         return;
     }
-    kernel
-        .terminate(id, GoalTerminalState::CriteriaChecked)
-        .expect("terminate");
+    // F22C criterion 3: `CriteriaChecked` is an engine verdict and is refused on
+    // the plain path. This Goal is authorized for Anvil, so the crash-point
+    // walk terminates through the canonical transition, exactly as the product
+    // does. The terminal this test replays against is unchanged.
+    terminate_as_anvil_owner(kernel, id, TerminalState::CriteriaChecked);
+}
+
+/// Terminate `id` through the ONE canonical Goal transition.
+///
+/// The Goal must be authorized for Anvil. `from_anvil` is the only constructor
+/// of the `StrategyTermination` that `GoalLoop::finish` consumes, and it takes
+/// the `LoopOwner` by value, so this helper can terminate the Goal once and
+/// cannot terminate it twice.
+fn terminate_as_anvil_owner(kernel: &GoalKernel, id: &GoalId, terminal: TerminalState) {
+    let driver = GoalLoop::new(kernel.clone());
+    let outcome = ClimbOutcome {
+        terminal,
+        stamp: String::new(),
+        checks_passed: 0,
+        checks_total: 0,
+        iterations: 1,
+        valve_fires: 0,
+        winner: None,
+        best_worktree: None,
+        gate_observation: None,
+        landing: None,
+    };
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime")
+        .block_on(async {
+            driver
+                .run_anvil(id, |owner| async move {
+                    StrategyTermination::from_anvil(owner, AnvilOutcome::Climbed(&outcome), 1)
+                })
+                .await
+        })
+        .expect("canonical transition");
 }
 
 #[test]
