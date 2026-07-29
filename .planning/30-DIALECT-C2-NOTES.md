@@ -438,3 +438,60 @@ Stated plainly: **`bind_translation` prevents an accident, not an adversary.**
 
 Compiler proven necessary, proven insufficient, proven not to be a confound itself, and both
 negative controls red. Next: can any leg actually be re-taken?
+
+---
+
+## T+5 — PRIORITY INTERRUPT handled: B1 egress chokepoint, CI red on Windows
+
+`crates/wcore-eval-scenarios/src/dialect_discovery.rs:449` used a raw `reqwest::Client::new()`,
+which `clippy::disallowed_methods` rejects because it bypasses the `wcore_egress::EgressClient`
+egress boundary. Present at base `75babf32`; arrived with already-merged dialect work.
+
+**Fixed, not suppressed.** Routed through `wcore_egress::EgressClient::tool()`, matching the
+existing loopback precedent in this crate (`tests/packaged_driver_gate.rs:104`). Shipped as its own
+commit `983ca230` ahead of the lane's other work so it can merge without waiting.
+
+**No new dependency edge.** `wcore-egress` is already a `[dev-dependencies]` entry of this crate and
+the call sits in a `#[cfg(test)]` module, so the rationale recorded in `Cargo.toml:86-89` for
+`judge.rs`'s scoped allow — *"would add an internal-crate edge this crate avoids"* — does not apply
+to this call site.
+
+### 5a. Gate verified, and proven able to fail
+
+| run | commit | result |
+|---|---|---|
+| `cargo clippy -p wcore-eval-scenarios --all-targets -- -D warnings` | `983ca230` (fix) | **0 error/warning lines** |
+| same command, **falsification control** | `01f83b8f` (parent) | **rc=101**, `error: use of a disallowed method reqwest::Client::new` |
+| `cargo clippy --workspace --all-targets -- -D warnings` (the CI gate verbatim) | `32bf61a9` | **WSRC=0**, `disallowed` count **0**, 440 `Checking` lines |
+| `cargo fmt --all -- --check` (Mac, permitted) | `32bf61a9` | clean |
+
+The falsification control is the point: a clean clippy proves nothing unless the same command is
+shown to fail on the same file one commit earlier. It does.
+
+The single `warning:` line in the workspace log is a third-party future-incompat notice for
+`imap-proto v0.10.2` (line 456). It is pre-existing, not in my files, and does not fail the gate.
+
+### 5b. Sibling sweep — two found, both already suppressed, NEITHER touched
+
+Query, unproxied, with a known-positive in the same invocation (13 `reqwest` hits in the crate, so
+the instrument is alive):
+`/usr/bin/grep -rn -E 'reqwest::(blocking::)?Client(Builder)?::(new|builder)|reqwest::ClientBuilder' src/ bin/ tests/`
+plus a second query for `^\s*use reqwest::` to catch a bare `Client::` that the fully-qualified
+pattern would miss (**0 hits**, so no import-shortened construction exists).
+
+| site | status | disposition |
+|---|---|---|
+| `src/judge.rs:138` | scoped `#[allow(clippy::disallowed_methods)]`, rationale in `Cargo.toml:86-89` | **left alone — reported, argued below** |
+| `tests/openai_fixture_contract.rs:10` | scoped allow | **left alone — not mine, not red** |
+
+**Why I did not remove them.** `judge.rs` is **not** test code: the D9 LLM-as-judge grader makes a
+real outbound HTTPS call to a provider, which is precisely what B1 exists to police, and I think
+that allow is weaker than it looks. But fixing it requires promoting `wcore-egress` from a
+dev-dependency to a normal dependency — a change to the crate dependency graph, in a repository
+with five other lanes live. That is an architectural change, not a lint fix, and bundling it into
+the commit that unblocks CI would have delayed the merge the coordinator asked for.
+
+**Recommendation, offered rather than taken:** promote `wcore-egress` to a normal dependency of
+`wcore-eval-scenarios` and delete both allows. There is no cycle risk — `wcore-egress` sits below
+this crate and this crate already depends on `wcore-protocol`, `wcore-config` and `wcore-types`.
+The `tests/` one is free either way. **I am flagging it, not doing it.**
