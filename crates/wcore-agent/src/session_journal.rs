@@ -3012,13 +3012,34 @@ mod fault_tests {
         explicit["event"]["retry_of"] = serde_json::Value::Null;
         explicit["event"]["effect_receipt"] = serde_json::Value::Null;
         explicit["event"]["pre_hook_phase_id"] = serde_json::Value::Null;
+
+        // 23B-H1: a producer stores the hash of the bytes it WRITES. This test
+        // previously kept the checksum computed from the clean encoding, which
+        // no producer of these bytes could have stored — so the frame verified
+        // only because the re-encoding happened to strip the very fields under
+        // test, and the assertion below never reached the chain check at all.
+        // Re-sealing here is what lets `verify_chain` be asserted, which is the
+        // check that used to reject these frames with `ChecksumMismatch`.
         let body = serde_json::to_vec(&explicit).unwrap();
-        assert_eq!(
-            parse_complete_frames(path, &raw_frame(FRAME_MAGIC, &body))
-                .unwrap()
-                .entries,
-            vec![envelope]
-        );
+        explicit["checksum"] =
+            serde_json::Value::String(JournalEnvelope::checksum_of_stored_bytes(&body).unwrap());
+        let body = serde_json::to_vec(&explicit).unwrap();
+
+        // The decode collapses `Some(Value::Null)` to `None` for the one
+        // blessed field that is an `Option<serde_json::Value>`; replay must
+        // report what the journal records.
+        let mut expected = envelope.clone();
+        let SessionEvent::ToolIntentRecordedV2 { effect_receipt, .. } = &mut expected.event else {
+            unreachable!("the fixture is a ToolIntentRecordedV2")
+        };
+        *effect_receipt = Some(serde_json::Value::Null);
+
+        let entries = parse_complete_frames(path, &raw_frame(FRAME_MAGIC, &body))
+            .unwrap()
+            .entries;
+        assert_eq!(entries, vec![expected]);
+        verify_chain(&entries)
+            .expect("an encoding this reader blesses must also survive its integrity check");
 
         explicit["event"]["future_authority"] = serde_json::Value::Null;
         let body = serde_json::to_vec(&explicit).unwrap();
