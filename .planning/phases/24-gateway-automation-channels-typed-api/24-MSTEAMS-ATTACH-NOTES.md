@@ -101,3 +101,50 @@ neighbourhood; recorded in the summary with the run evidence.
 
 `crates/wcore-cli/src/lib.rs` and `main.rs` — expected ZERO. Diffed against the
 captured merge-base SHA `15cda12d`, never against the branch name.
+
+## 6. Consumer check — the attachment path IS live (not advertised-but-dead)
+
+`crates/wcore-agent/src/channel_dispatch.rs:278-300` — `build_turn_prompt()` renders
+`IncomingMessage.attachments` into the agent's turn text as
+`"\n\n[attachments received with this message:\n  1. {Kind} ({content_type}) — {url}]"`,
+preferring `att.transcribed` when the media enricher populated it. Production call
+sites: `channel_dispatch.rs:139` and `:141` (the real dispatch path, not a test).
+
+So parsing Teams `attachments[]` into that vec has a genuine downstream consumer, and
+the live assertion for this lane is **the attachment line appearing in the turn prompt**,
+not merely a populated struct. Good: that makes the clause falsifiable end-to-end.
+
+## 7. FINDING — advertised-but-dead: the media-bounds module has NO production consumer
+
+Measured with a known-positive control in the SAME shape, same invocation style
+(`/usr/bin/grep -rn "<sym>()" --include='*.rs' crates/`):
+
+| symbol | call sites | production consumer? |
+|---|---|---|
+| `max_message_len()` — **known-positive control** | 7 | YES — `wcore-channels/src/manager.rs:690` |
+| `media_bounds()` | 1 | **NO** — only `wcore-channels/tests/framework_matrix.rs:373` (a test) |
+| `normalize_all(...)` | 2 | **NO** — only its own definition (`media.rs:193`) and its own unit test (`media.rs:330`) |
+| `normalize(...)` (outside `media.rs`) | 1 | **NO** — only `framework_matrix.rs:379/391` (a test) |
+
+The control returning 7 with a real production hit proves the instrument and the query
+shape are alive; the targets returning test-only hits is therefore a measurement, not a
+dead-tool zero.
+
+What this means substantively: `wcore-channels/src/media.rs` opens with
+"**the rule this module exists to enforce: never drop silently**" and `normalize_all`'s
+doc says attachments past the declared bound are "DEGRADED with a reason rather than
+truncated away, because a truncated list is a message the agent answers with no idea it
+was incomplete." **None of that runs in production.** Every channel that parses inbound
+attachments today (slack `inbound.rs:106`, sms `inbound.rs:162`, telegram
+`longpoll.rs:217`, email `imap.rs:467`) hand-rolls its own MIME→`MediaKind` mapping and
+never consults `MediaBounds`. `discord` and `email` bother to *declare* `media_bounds()`
+and nothing ever reads the declaration.
+
+This is the advertised-but-dead class the dispatch brief named — a declared capability
+with no production consumer — and it lands directly on the surface I was sent to build.
+It also shapes the build: implementing msteams attachments through `normalize_all` makes
+msteams the **first production consumer** of the module, so the bound is actually
+enforced on at least one adapter instead of zero.
+
+Severity: MEDIUM (a latent unenforced bound, not an active data-loss bug on a shipped
+path) → BACKLOG per §5, EXCEPT for the part I close myself on msteams.
