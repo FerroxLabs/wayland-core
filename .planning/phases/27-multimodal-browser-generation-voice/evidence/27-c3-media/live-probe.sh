@@ -63,6 +63,13 @@ model = "flux-fast"
 
 [tools]
 auto_approve = true
+
+# Durable sessions need an unlocked vault; this headless isolated profile has
+# none, and without this the run dies at
+# "Session persistence authority unavailable" BEFORE any turn. That failure
+# looked like a probe result on the first attempt and was not one.
+[session]
+enabled = false
 TOML
 echo "PROBE config_written=$HOME_DIR/config.toml   # contains NO credential"
 grep -c "API_KEY\|sk-\|Bearer" "$HOME_DIR/config.toml" > /dev/null 2>&1
@@ -148,8 +155,12 @@ echo "RC_p4-image-subcommand=$?"
 echo "  artifact_bytes=$(wc -c < "$OUT/p4.png" 2>/dev/null || echo 0)"
 echo "--- P4 any cost/accounting token in either stream:"
 echo "  accounting_hits=$(cat "$OUT/p4-image-subcommand".std* | grep -c -iE 'accounting|cost_usd|unpriced' || true)"
-echo "--- P4 liveness control for that grep (a known-positive in the same files):"
-echo "  control_hits=$(cat "$OUT/p4-image-subcommand".std* | grep -c -iE 'image|flux|error|prompt' || true)"
+echo "--- P4 liveness control for that grep (a known-positive in the SAME files):"
+# The first version grepped for words that happen not to appear in a successful
+# run's 52-byte output, so the control returned 0 and proved nothing. Grep for
+# a string the successful run demonstrably writes.
+echo "  control_hits_wrote=$(cat "$OUT/p4-image-subcommand".std* | grep -c -E 'wrote|bytes' || true)"
+echo "  p4_stderr_verbatim: $(cat "$OUT/p4-image-subcommand.stderr")"
 
 unset KEY FLUX_API_KEY
 echo

@@ -97,10 +97,26 @@ pub fn build_image_gen_backend(
 ) -> Option<Arc<dyn ImageGenerationBackend>> {
     // 1. Prefer the active OpenAI-wire provider's resolved key + base_url.
     if let Some(backend) = dalle_backend_from_config(config) {
+        // Log the RESOLVED endpoint, not `config.base_url`.
+        //
+        // Measured 2026-07-29 during the F27-C3 live probe: in a FluxRouter
+        // session `config.base_url` is EMPTY (the Flux default is filled in
+        // downstream by `openai_wire_media_base`), so this line printed
+        // `image_gen: using gpt-image-1 at  (active OpenAI-wire provider)` —
+        // a trailing blank where the billable host should be. That is the one
+        // resolver whose endpoint routing #310 exists to fix, and it was the
+        // only one of the five that did not say where it points; `vision` and
+        // `transcription` on the same boot both printed their full Flux URL.
+        //
+        // This matters beyond tidiness: LANE-BRIEF §3b-ii requires a provider
+        // claim to be read back from the product's own output, because this
+        // host injects `ANTHROPIC_API_KEY` regardless of what the shell
+        // unsets. An empty base_url makes image generation the one media
+        // capability whose arm could NOT be read back.
         tracing::info!(
             "image_gen: using {} at {} (active OpenAI-wire provider)",
             backend.model,
-            config.base_url
+            backend.endpoint()
         );
         return Some(Arc::new(backend));
     }
@@ -351,8 +367,11 @@ impl DalleBackend {
     /// Resolved request endpoint (`{base_url}/images/generations`). Exposed
     /// so the resolver wiring (#310) can be unit-asserted without a network
     /// round-trip.
-    #[cfg(test)]
-    pub(crate) fn endpoint(&self) -> &str {
+    ///
+    /// No longer `#[cfg(test)]`: the resolver's own boot log must be able to
+    /// name the endpoint it will actually bill against. See the call site in
+    /// [`build_image_gen_backend`] for why that matters.
+    pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
 
