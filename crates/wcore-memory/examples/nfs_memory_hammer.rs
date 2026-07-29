@@ -87,7 +87,7 @@ fn episode(label: &str, n: u64) -> Episode {
         // a whole run inside one page and never force the multi-page frame
         // traffic that exercises the wal-index.
         summary: format!("writer {label} episode {n} {}", "x".repeat(400)),
-        atomic_facts: format!("[\"writer {label} fact {n}\"]"),
+        atomic_facts: vec![format!("writer {label} fact {n}")],
         source: format!("nfs-hammer-{label}"),
         source_product: "wayland-core".into(),
         session_id: None,
