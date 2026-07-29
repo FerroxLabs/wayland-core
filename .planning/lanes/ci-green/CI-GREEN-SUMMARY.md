@@ -186,6 +186,32 @@ tag still used `--short`). `cross` runs its container as the invoking uid, so gi
 
 ### Both halves addressed
 
+**End-to-end reproduction of both arms**, on hetzner with Docker 29.2.1 (the version ci.yml's
+own probe used), `rust:1.95-slim-bookworm` + git, a scratch repo `chown`ed to uid 1001 and
+bind-mounted at `/work`:
+
+```
+real HEAD (as root, root-owned) = 696b9a25a51a2183b86309295c0ac4289b00223c
+
+=== ARM 1: the ci-linux invocation as it was (no -e, no -u) ===
+uid=0 HOME=/root
+SHA_ENV=<unset>
+fatal: detected dubious ownership in repository at '/work'
+git_rc=128
+
+=== ARM 2: the same invocation WITH -e WAYLAND_BUILD_SOURCE_SHA (this lane's fix) ===
+uid=0 HOME=/root
+SHA_ENV=696b9a25a51a2183b86309295c0ac4289b00223c
+fatal: detected dubious ownership in repository at '/work'
+git_rc=128
+```
+
+Note the path in the refusal is the literal `/work`. ARM 1 is exactly
+`resolve_source_sha(None, _, || None)` → `"unknown"`. ARM 2 leaves git failing identically
+and still supplies a real 40-hex identity, which the explicit branch takes
+(`explicit_source_sha_wins_over_git`). The fix does not depend on repairing git in the
+container.
+
 **(1) The CI job.** `-e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }}` added to *both*
 `DOCKER_RUN` and `DOCKER_RUN_SANDBOX`, so every containerized step agrees (a differing value
 between the pre-build and the test step would re-trigger `rerun-if-env-changed` and rebuild
@@ -310,6 +336,25 @@ git diff "$BASE" --stat -- crates/wcore-cli/src/lib.rs crates/wcore-cli/src/main
   `hz/ci-green`, targeting my own pushed commit — no other lane's state was reachable. I
   switched to `git merge --ff-only` for every subsequent sync. Flagging rather than burying.
 - **No credential was needed or used.** Every proof here runs against local fixtures.
+
+## Open / left running
+
+- **The lane's own GitHub CI run is still queued.** Every push to `lane/**` cancels the
+  previously *pending* run in the concurrency group, so the runs at `e87c7baf`, `640d7d4d`,
+  `8241c3d2` and `5aac14ac` were all cancelled before any job was created; `30452893479`
+  at `b747731c` is the live one. It is queued behind ubuntu-runner congestion, which
+  `ci.yml` itself documents (a live census of 32 queued / 13 running). **I did not wait for
+  it, and I am not claiming a CI-green result.** What is claimed is the hetzner full-suite
+  number above plus the end-to-end container reproduction, which together close the chain
+  without it.
+- **hetzner worktree left in place** at `/root/wayland-ci-green` (branch `hz/ci-green`,
+  `target/` 49G, disk at 63% with 626G free — well above the 150G floor). LANE-BRIEF §2 says
+  to remove it when done; I deliberately kept it so the merge train can re-verify at the
+  integration commit without a ~10-minute cold rebuild. Remove with
+  `git -C /root/wayland worktree remove --force /root/wayland-ci-green` when the train is
+  through. Also left: `/root/ci-green-*.log` (the raw evidence for every number above) and
+  `/root/ci-green-relbin-x86_64` (the v0.12.25 release binary used for the `--build-info`
+  measurement).
 
 ## For the orchestrator to serialize
 
