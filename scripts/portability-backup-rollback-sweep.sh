@@ -109,6 +109,43 @@ run_restore() {
     "$BIN" backup restore "$ARC" --home "$1" --replace --pace-ms "$PACE_MS"
 }
 
+# --- INSTRUMENT REPAIR: what `$!` actually names ------------------------------
+#
+# Backgrounding the shell FUNCTION above makes `$!` the pid of the SUBSHELL the
+# body runs in, not the product; `kill -9` then kills the wrapper and the
+# product runs to completion. Measured 2026-07-29 in the migrate peer of this
+# proof: 27 of 27 trials reported a fully-completed operation while the script
+# believed it had interrupted every one. The repair is to background the product
+# itself and then CHECK the pid names it.
+launch_restore_bg() {
+    # $1 = home, $2 = logfile
+    "$BIN" backup restore "$ARC" --home "$1" --replace --pace-ms "$PACE_MS" > "$2" 2>&1 &
+}
+
+pid_comm() { cat "/proc/$1/comm" 2>/dev/null; }
+
+PC1="$WORK/pidctl1"; cp -a "$TEMPLATE" "$PC1"
+launch_restore_bg "$PC1" "$WORK/pidctl1.log"
+GOOD_PID=$!
+GOOD_COMM=$(pid_comm "$GOOD_PID")
+kill -9 "$GOOD_PID" 2>/dev/null; wait "$GOOD_PID" 2>/dev/null
+
+PC2="$WORK/pidctl2"; cp -a "$TEMPLATE" "$PC2"
+run_restore "$PC2" > "$WORK/pidctl2.log" 2>&1 &
+BAD_PID=$!
+BAD_COMM=$(pid_comm "$BAD_PID")
+kill -9 "$BAD_PID" 2>/dev/null; wait "$BAD_PID" 2>/dev/null
+pkill -9 -f "backup restore $ARC" 2>/dev/null
+
+echo "PID-TARGETING-CONTROL: direct-launch comm='$GOOD_COMM' function-launch comm='$BAD_COMM'"
+case "$GOOD_COMM" in
+    wayland-core*) : ;;
+    *) FAIL "the kill target is '$GOOD_COMM', not the product; this proof cannot interrupt anything" ;;
+esac
+[ "$GOOD_COMM" != "$BAD_COMM" ] \
+    || FAIL "the pid-targeting control cannot tell the two launch mechanisms apart ('$GOOD_COMM'); it would not have caught the defect it exists for"
+rm -rf "$PC1" "$PC2"
+
 # --- reference timing ---------------------------------------------------------
 REF="$WORK/ref"
 cp -a "$TEMPLATE" "$REF" || FAIL "reference copy failed"
@@ -127,10 +164,12 @@ echo "POST-RESTORE-DIGEST: $POST_DIGEST"
 echo "MUTATION-CONTROL: pass (PRE != POST)"
 
 # --- trial machinery ----------------------------------------------------------
-MID=0; EQUAL=0; DIFFER=0; RESIDUE=0; RECOVERED_TOTAL=0
+MID=0; PRECLASS=0; POSTCLASS=0; INT_EQ=0; INT_NEQ=0; COMP_EQ=0; MID_DIFFER=0
+RESIDUE=0; RECOVERED_TOTAL=0; DIFF_UNEXPLAINED=0
 run_arm() {
     ARM="$1"; DO_KILL="$2"; DO_ROLLBACK="$3"
-    MID=0; EQUAL=0; DIFFER=0; RESIDUE=0; RECOVERED_TOTAL=0
+    MID=0; PRECLASS=0; POSTCLASS=0; INT_EQ=0; INT_NEQ=0; COMP_EQ=0; MID_DIFFER=0
+    RESIDUE=0; RECOVERED_TOTAL=0; DIFF_UNEXPLAINED=0
     echo
     echo "--- ARM: $ARM (kill=$DO_KILL rollback=$DO_ROLLBACK) ---"
     echo "TRIAL-TABLE[$ARM]: trial delay_ms class recovered digest_equal journal_residue"
@@ -142,7 +181,7 @@ run_arm() {
         DELAY_MS=$(( DUR_MS * k / (TRIALS + 1) ))
 
         if [ "$DO_KILL" = yes ]; then
-            run_restore "$H" > "$WORK/$ARM-$k.log" 2>&1 &
+            launch_restore_bg "$H" "$WORK/$ARM-$k.log"
             PID=$!
             python3 -c "import time,sys; time.sleep(float(sys.argv[1])/1000.0)" "$DELAY_MS"
             kill -9 "$PID" 2>/dev/null
@@ -151,10 +190,15 @@ run_arm() {
             run_restore "$H" > "$WORK/$ARM-$k.log" 2>&1
         fi
 
+        # An OPEN JOURNAL RECORD is the mid-flight classifier, not a digest
+        # comparison: it states directly that the process died inside the window
+        # the journal covers, which is the thing being claimed.
         KILL_DIGEST=$(digest_of "$H")
-        if [ "$KILL_DIGEST" = "$PRE_DIGEST" ]; then CLASS=pre
-        elif [ "$KILL_DIGEST" = "$POST_DIGEST" ]; then CLASS=post
-        else CLASS=mid; MID=$((MID + 1)); fi
+        OPEN_RECORDS=$(find "$H/.wayland-backup-journal" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+        if [ "${OPEN_RECORDS:-0}" -gt 0 ]; then CLASS=mid; MID=$((MID + 1))
+        elif [ "$KILL_DIGEST" = "$PRE_DIGEST" ]; then CLASS=pre; PRECLASS=$((PRECLASS + 1))
+        else CLASS=post; POSTCLASS=$((POSTCLASS + 1)); fi
+        [ "$CLASS" = mid ] && [ "$KILL_DIGEST" != "$PRE_DIGEST" ] && MID_DIFFER=$((MID_DIFFER + 1))
 
         REC=0
         if [ "$DO_ROLLBACK" = yes ]; then
@@ -165,8 +209,21 @@ run_arm() {
         fi
 
         FINAL=$(digest_of "$H")
-        if [ "$FINAL" = "$PRE_DIGEST" ]; then EQ=yes; EQUAL=$((EQUAL + 1)); else EQ=no; DIFFER=$((DIFFER + 1)); fi
+        if [ "$FINAL" = "$PRE_DIGEST" ]; then EQ=yes; else EQ=no; fi
+        case "$CLASS" in
+            mid|pre) if [ "$EQ" = yes ]; then INT_EQ=$((INT_EQ + 1)); else INT_NEQ=$((INT_NEQ + 1)); fi ;;
+            post)    [ "$EQ" = yes ] && COMP_EQ=$((COMP_EQ + 1)) ;;
+        esac
         if [ -d "$H/.wayland-backup-journal" ]; then RES=yes; RESIDUE=$((RESIDUE + 1)); else RES=no; fi
+
+        # INDEPENDENT byte-level check: the digest excludes Wayland bookkeeping
+        # by design, so it cannot be the only evidence or the exclusion list
+        # becomes a place to hide a difference.
+        diff -rq "$TEMPLATE" "$H" > "$WORK/$ARM-$k.diff" 2>&1
+        UNEXPLAINED=$(grep -v -e '\.wayland-backup-journal' -e '\.dirty-death' < "$WORK/$ARM-$k.diff" | grep -c . )
+        if [ "$CLASS" != post ] && [ "${UNEXPLAINED:-0}" -gt 0 ]; then
+            DIFF_UNEXPLAINED=$((DIFF_UNEXPLAINED + 1))
+        fi
 
         printf 'TRIAL[%s]: %d %d %s %s %s %s\n' "$ARM" "$k" "$DELAY_MS" "$CLASS" "$REC" "$EQ" "$RES"
 
@@ -184,20 +241,26 @@ run_arm() {
         k=$((k + 1))
     done
     echo "ARM-$ARM CLASS-MID: $MID"
-    echo "ARM-$ARM DIGEST-EQUAL-PRE: $EQUAL"
-    echo "ARM-$ARM DIGEST-DIFFERS-PRE: $DIFFER"
+    echo "ARM-$ARM CLASS-PRE: $PRECLASS"
+    echo "ARM-$ARM CLASS-POST: $POSTCLASS"
+    echo "ARM-$ARM INTERRUPTED-EQUAL-PRE: $INT_EQ"
+    echo "ARM-$ARM INTERRUPTED-DIFFERS-PRE: $INT_NEQ"
+    echo "ARM-$ARM COMPLETED-REVERTED-TO-PRE: $COMP_EQ"
+    echo "ARM-$ARM MID-DAMAGED-BEFORE-ROLLBACK: $MID_DIFFER"
     echo "ARM-$ARM JOURNAL-RESIDUE: $RESIDUE"
     echo "ARM-$ARM RECOVERED-OPERATIONS: $RECOVERED_TOTAL"
+    echo "ARM-$ARM BYTE-DIFF-UNEXPLAINED: $DIFF_UNEXPLAINED"
 }
 
 run_arm rollback yes yes
-R_MID=$MID; R_EQUAL=$EQUAL; R_DIFFER=$DIFFER; R_RESIDUE=$RESIDUE; R_REC=$RECOVERED_TOTAL
+R_MID=$MID; R_INT_EQ=$INT_EQ; R_INT_NEQ=$INT_NEQ; R_COMP_EQ=$COMP_EQ
+R_RESIDUE=$RESIDUE; R_REC=$RECOVERED_TOTAL; R_DIFFU=$DIFF_UNEXPLAINED
 
 run_arm norollback yes no
-N_MID=$MID; N_DIFFER=$DIFFER
+N_MID=$MID; N_MID_DIFFER=$MID_DIFFER
 
 run_arm nokill no yes
-K_REC=$RECOVERED_TOTAL; K_EQUAL=$EQUAL
+K_POST=$POSTCLASS; K_REC=$RECOVERED_TOTAL; K_COMP_EQ=$COMP_EQ
 
 # --- the noun `backup` itself -------------------------------------------------
 # A killed `backup create` must leave the source home untouched, and must leave
@@ -244,32 +307,43 @@ echo "ARM-create NO-ARCHIVE-PUBLISHED: $CREATE_MID"
 echo
 echo "=== VERDICT INPUTS ==="
 echo "ROLLBACK-ARM-MID: $R_MID"
-echo "ROLLBACK-ARM-EQUAL: $R_EQUAL / $TRIALS"
-echo "ROLLBACK-ARM-DIFFER: $R_DIFFER"
+echo "ROLLBACK-ARM-INTERRUPTED-EQUAL-PRE: $R_INT_EQ"
+echo "ROLLBACK-ARM-INTERRUPTED-DIFFERS-PRE: $R_INT_NEQ"
+echo "ROLLBACK-ARM-COMPLETED-REVERTED: $R_COMP_EQ"
 echo "ROLLBACK-ARM-JOURNAL-RESIDUE: $R_RESIDUE"
 echo "ROLLBACK-ARM-RECOVERED: $R_REC"
+echo "ROLLBACK-ARM-BYTE-DIFF-UNEXPLAINED: $R_DIFFU"
 echo "NOROLLBACK-ARM-MID: $N_MID"
-echo "NOROLLBACK-ARM-DIFFER: $N_DIFFER"
+echo "NOROLLBACK-ARM-MID-DAMAGED: $N_MID_DIFFER"
+echo "NOKILL-ARM-POST: $K_POST"
 echo "NOKILL-ARM-RECOVERED: $K_REC"
-echo "NOKILL-ARM-EQUAL-PRE: $K_EQUAL"
+echo "NOKILL-ARM-COMPLETED-REVERTED: $K_COMP_EQ"
 echo "CREATE-ARM-SOURCE-MOVED: $CREATE_HOME_MOVED"
 echo "CREATE-ARM-UNVERIFIABLE-ARCHIVES: $CREATE_BAD_ARCHIVE"
 
 # --- gates --------------------------------------------------------------------
 [ "$R_MID" -ge 3 ] \
     || FAIL "only $R_MID of $TRIALS kills landed mid-restore; the window was not exercised"
-[ "$N_DIFFER" -ge 1 ] \
-    || FAIL "the known-negative arm found every home identical to PRE without any rollback; the digest comparison cannot report a difference"
-[ "$N_DIFFER" -ge "$N_MID" ] \
-    || FAIL "the known-negative arm had $N_MID mid-restore kills but only $N_DIFFER differing homes"
-[ "$R_EQUAL" -eq "$TRIALS" ] \
-    || FAIL "$R_DIFFER of $TRIALS rolled-back homes were NOT byte-identical to the pre-operation state"
+[ "$R_REC" -ge "$R_MID" ] \
+    || FAIL "$R_MID trials were killed mid-restore but only $R_REC operations were recovered"
+[ "$N_MID" -ge 1 ] \
+    || FAIL "the known-negative arm landed no mid-restore kills, so it cannot demonstrate anything"
+[ "$N_MID_DIFFER" -eq "$N_MID" ] \
+    || FAIL "the known-negative arm had $N_MID mid-restore kills but only $N_MID_DIFFER left the home differing from PRE; the digest comparison cannot report a difference"
+[ "$R_INT_NEQ" -eq 0 ] \
+    || FAIL "$R_INT_NEQ interrupted homes were NOT byte-identical to the pre-operation state after rollback"
+[ "$R_DIFFU" -eq 0 ] \
+    || FAIL "$R_DIFFU interrupted homes differ from the template by something OTHER than Wayland bookkeeping"
 [ "$R_RESIDUE" -eq 0 ] \
     || FAIL "$R_RESIDUE rolled-back homes still carry journal bookkeeping"
+[ "$R_COMP_EQ" -eq 0 ] \
+    || FAIL "$R_COMP_EQ COMPLETED restores were reverted to the pre-operation state"
+[ "$K_POST" -eq "$TRIALS" ] \
+    || FAIL "the no-kill arm did not complete every restore ($K_POST of $TRIALS)"
 [ "$K_REC" -eq 0 ] \
     || FAIL "the no-kill arm recovered $K_REC operations; recovery acted on a COMPLETED restore"
-[ "$K_EQUAL" -eq 0 ] \
-    || FAIL "the no-kill arm left $K_EQUAL homes equal to the PRE state; a completed restore was reverted"
+[ "$K_COMP_EQ" -eq 0 ] \
+    || FAIL "the no-kill arm reverted $K_COMP_EQ completed restores to the PRE state"
 [ "$CREATE_HOME_MOVED" -eq 0 ] \
     || FAIL "$CREATE_HOME_MOVED killed 'backup create' runs moved the SOURCE home; create is not read-only"
 [ "$CREATE_BAD_ARCHIVE" -eq 0 ] \
@@ -277,7 +351,9 @@ echo "CREATE-ARM-UNVERIFIABLE-ARCHIVES: $CREATE_BAD_ARCHIVE"
 
 echo
 echo "PROOF: PASS"
-echo "  restore: $R_MID/$TRIALS kills landed mid-flight; all $TRIALS rolled-back homes are"
-echo "  byte-identical to $PRE_DIGEST with no journal residue. Known-negative differed on"
-echo "  $N_DIFFER/$TRIALS, so the comparison can report a difference. No-kill arm recovered 0."
+echo "  restore: $R_MID/$TRIALS kills landed mid-flight (open journal record); all $R_INT_EQ"
+echo "  interrupted homes came back byte-identical to $PRE_DIGEST, 0 unexplained byte diffs,"
+echo "  no journal residue, $R_REC operations recovered. Known-negative: $N_MID_DIFFER/$N_MID"
+echo "  mid-flight kills left the home DIFFERENT from PRE without a rollback."
+echo "  No-kill arm: $K_POST/$TRIALS completed, 0 recovered, 0 reverted."
 echo "  backup: $TRIALS kills, source home moved 0 times, 0 unverifiable archives published."
