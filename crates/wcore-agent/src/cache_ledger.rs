@@ -258,7 +258,11 @@ impl CompactionTrigger {
 /// One compaction attempt.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompactionEvent {
-    pub turn: u64,
+    /// Round-trips already completed when this compaction ran. Compaction
+    /// happens at the TOP of a turn, before the next request goes out, so this
+    /// is "after round-trip N" — it deliberately is not an agent-loop turn
+    /// index, which does not advance one-per-request.
+    pub after_round_trip: u64,
     pub ts: String,
     pub kind: CompactionKind,
     pub trigger: CompactionTrigger,
@@ -343,14 +347,17 @@ impl CacheLedger {
         self.turns.len() as u64 + 1
     }
 
-    /// Was a compaction recorded at or after `turn`? Used to attribute a cache
-    /// miss to [`InvalidationCause::HistoryRewritten`] rather than to whatever
-    /// the prompt/tool-hash comparison guessed. Compaction rewrites the message
-    /// history wholesale, so the NEXT round-trip cannot possibly hit — and
-    /// attributing that to "system prompt drift" would be a lie about a
-    /// self-inflicted miss.
-    pub fn compacted_since_turn(&self, turn: u64) -> bool {
-        self.compactions.iter().any(|c| c.turn >= turn)
+    /// Did a compaction run after the last round-trip recorded? Used to
+    /// attribute a cache miss to [`InvalidationCause::HistoryRewritten`] rather
+    /// than to whatever the prompt/tool-hash comparison guessed. Compaction
+    /// rewrites the message history wholesale, so the NEXT round-trip cannot
+    /// possibly hit — and attributing that to "system prompt drift" would be a
+    /// lie about a self-inflicted miss.
+    pub fn compacted_since_last_round_trip(&self) -> bool {
+        let completed = self.turns.len() as u64;
+        self.compactions
+            .iter()
+            .any(|c| c.after_round_trip >= completed)
     }
 
     pub fn record_turn(&mut self, sample: TurnSample) {
@@ -688,6 +695,180 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+/// Environment kill-switch. Set to `0`, `false` or `off` to stop the engine
+/// writing a ledger at all.
+pub const LEDGER_ENV: &str = "WAYLAND_CACHE_LEDGER";
+
+/// Is ledger recording on? **On by default.**
+///
+/// Deliberately not a TOML opt-in. The `compact.cache_diagnostics` flag it sits
+/// beside defaults to `false`, which is exactly why the cache diagnostics that
+/// already existed were graded unexposed: a surface nobody turns on is a
+/// surface nobody has. A few kilobytes of JSON per session is the whole cost.
+pub fn recording_enabled() -> bool {
+    match std::env::var(LEDGER_ENV) {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        Err(_) => true,
+    }
+}
+
+// ── Engine-side recorder ────────────────────────────────────────────────────
+
+/// The engine's handle on the ledger: accumulates, and flushes to disk after
+/// every record so a killed session still leaves everything up to its last
+/// round-trip on disk.
+///
+/// Arms itself lazily on first use, so it needs no session id at construction
+/// time and adds nothing to the engine's constructors beyond one defaulted
+/// field.
+#[derive(Debug, Default)]
+pub struct CacheLedgerRecorder {
+    ledger: Option<CacheLedger>,
+    path: Option<PathBuf>,
+    /// Directory override — tests point this at a tempdir. `None` means
+    /// [`default_ledger_dir`].
+    dir_override: Option<PathBuf>,
+    /// Retention the engine REQUESTED on the in-flight round-trip, noted where
+    /// the request is built and consumed where the response lands. Held here
+    /// rather than on the engine so recording the request side costs no extra
+    /// engine field. `None` until the first request of a session.
+    pending_retention: Option<CacheRetention>,
+    /// Last flush failure, kept so a persistently unwritable home is
+    /// diagnosable instead of silently producing no ledger.
+    last_error: Option<String>,
+    /// Flush failures seen. After [`Self::MAX_FLUSH_FAILURES`] the recorder
+    /// stops trying: an unwritable home must not cost one failed syscall per
+    /// round-trip for the rest of the session.
+    flush_failures: u32,
+}
+
+impl CacheLedgerRecorder {
+    pub const MAX_FLUSH_FAILURES: u32 = 3;
+
+    /// Point the recorder at a specific directory (tests, and any caller that
+    /// wants a hermetic ledger location).
+    pub fn with_dir(dir: impl Into<PathBuf>) -> Self {
+        Self {
+            dir_override: Some(dir.into()),
+            ..Self::default()
+        }
+    }
+
+    pub fn ledger(&self) -> Option<&CacheLedger> {
+        self.ledger.as_ref()
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    pub fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+
+    fn dir(&self) -> PathBuf {
+        self.dir_override.clone().unwrap_or_else(default_ledger_dir)
+    }
+
+    fn arm(&mut self, session_id: &str) -> &mut CacheLedger {
+        if self.ledger.is_none() {
+            self.ledger = Some(CacheLedger::new(session_id));
+            self.path = Some(ledger_path(&self.dir(), session_id));
+        }
+        self.ledger.as_mut().expect("armed above")
+    }
+
+    /// Note the cache retention the engine asked for on the round-trip about
+    /// to be sent. Recorded on the request side because the response carries
+    /// no retention field — an operator asking "was a 1h cache even requested?"
+    /// cannot be answered from the response alone.
+    pub fn note_retention(&mut self, retention: CacheRetention) {
+        self.pending_retention = Some(retention);
+    }
+
+    /// Retention requested for the in-flight round-trip, or
+    /// [`CacheRetention::None`] when the engine never asked for one.
+    pub fn pending_retention(&self) -> CacheRetention {
+        self.pending_retention.unwrap_or(CacheRetention::None)
+    }
+
+    /// Next round-trip index, 1-based. `1` before anything is recorded.
+    pub fn next_round_trip(&self) -> u64 {
+        self.ledger.as_ref().map_or(1, CacheLedger::next_round_trip)
+    }
+
+    /// Did a compaction run since the last recorded round-trip?
+    pub fn compacted_since_last_round_trip(&self) -> bool {
+        self.ledger
+            .as_ref()
+            .is_some_and(CacheLedger::compacted_since_last_round_trip)
+    }
+
+    pub fn record_turn(&mut self, session_id: &str, sample: TurnSample) {
+        if !recording_enabled() {
+            return;
+        }
+        self.arm(session_id).record_turn(sample);
+        self.flush();
+    }
+
+    pub fn record_compaction(&mut self, session_id: &str, event: CompactionEvent) {
+        if !recording_enabled() {
+            return;
+        }
+        self.arm(session_id).record_compaction(event);
+        self.flush();
+    }
+
+    /// Mark the session finished and flush. Safe to call when nothing was ever
+    /// recorded — it then does nothing, so a session that made no LLM call
+    /// leaves no misleading all-zero ledger behind.
+    pub fn finish(&mut self) {
+        if !recording_enabled() {
+            return;
+        }
+        if let Some(ledger) = self.ledger.as_mut() {
+            if ledger.is_empty() {
+                return;
+            }
+            ledger.mark_complete();
+        }
+        self.flush();
+    }
+
+    /// Finish the current ledger and drop it, so the next record starts a new
+    /// one. Called when the engine resets its conversation id.
+    pub fn rotate(&mut self) {
+        self.finish();
+        self.ledger = None;
+        self.path = None;
+        self.flush_failures = 0;
+        self.last_error = None;
+    }
+
+    fn flush(&mut self) {
+        if self.flush_failures >= Self::MAX_FLUSH_FAILURES {
+            return;
+        }
+        let (Some(ledger), Some(path)) = (self.ledger.as_ref(), self.path.as_ref()) else {
+            return;
+        };
+        if let Err(e) = save(ledger, path) {
+            self.flush_failures += 1;
+            self.last_error = Some(e.to_string());
+            tracing::debug!(
+                target: "cache_ledger",
+                error = %e,
+                failures = self.flush_failures,
+                "cache ledger flush failed",
+            );
+        }
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -875,11 +1056,20 @@ mod tests {
     }
 
     #[test]
-    fn compaction_since_turn_detects_history_rewrite() {
+    fn compaction_since_last_round_trip_detects_history_rewrite() {
         let mut l = CacheLedger::new("sess-compact");
-        assert!(!l.compacted_since_turn(0));
+        // Known-negative: nothing compacted yet, so the flag must be false.
+        // Without this the assertion below could pass on a function that
+        // returns `true` unconditionally.
+        assert!(!l.compacted_since_last_round_trip());
+
+        l.record_turn(sample(1, 1_000, 0, 1_000));
+        l.record_turn(sample(2, 100, 900, 0));
+        assert!(!l.compacted_since_last_round_trip());
+
+        // Compaction after round-trip 2.
         l.record_compaction(CompactionEvent {
-            turn: 4,
+            after_round_trip: 2,
             ts: "2026-07-29T10:04:00.000Z".into(),
             kind: CompactionKind::Auto,
             trigger: CompactionTrigger::Watermark,
@@ -890,15 +1080,25 @@ mod tests {
             items_collapsed: 42,
             error: None,
         });
-        assert!(l.compacted_since_turn(4));
-        assert!(!l.compacted_since_turn(5));
+        assert!(
+            l.compacted_since_last_round_trip(),
+            "a compaction after the last recorded round-trip must be visible"
+        );
+
+        // Once round-trip 3 is recorded, the compaction is no longer "since
+        // the last round-trip" — round-trip 4 must not inherit the attribution.
+        l.record_turn(sample(3, 1_000, 0, 1_000));
+        assert!(
+            !l.compacted_since_last_round_trip(),
+            "the history-rewrite attribution must not persist past the round-trip it explains"
+        );
     }
 
     #[test]
     fn summary_counts_failed_compactions_separately() {
         let mut l = CacheLedger::new("sess-fail");
         l.record_compaction(CompactionEvent {
-            turn: 1,
+            after_round_trip: 1,
             ts: "2026-07-29T10:01:00.000Z".into(),
             kind: CompactionKind::AutoFailed,
             trigger: CompactionTrigger::Watermark,
@@ -917,15 +1117,50 @@ mod tests {
 
     #[test]
     fn ledger_path_cannot_escape_its_directory() {
+        // The invariant is about PATH COMPONENTS, not about the substring
+        // "..": `../../etc/passwd` sanitizes to the single filename
+        // `.._.._etc_passwd.json`, which contains two dots side by side and
+        // traverses nothing. A first draft of this test asserted
+        // `!contains("..")` and failed on that correct output — the assertion
+        // was wrong, not the sanitizer. Assert components instead.
         let dir = Path::new("/tmp/ledgers");
-        let p = ledger_path(dir, "../../etc/passwd");
-        assert_eq!(
-            p.parent().unwrap(),
-            dir,
-            "traversal escaped: {}",
-            p.display()
+        for hostile in [
+            "../../etc/passwd",
+            "..",
+            "....",
+            "/etc/shadow",
+            "a/../../b",
+            "",
+            "C:\\Windows\\System32",
+        ] {
+            let p = ledger_path(dir, hostile);
+            assert_eq!(
+                p.parent().unwrap(),
+                dir,
+                "traversal escaped for {hostile:?}: {}",
+                p.display()
+            );
+            assert!(
+                p.components().count() == dir.components().count() + 1,
+                "extra components for {hostile:?}: {}",
+                p.display()
+            );
+            assert!(
+                !p.components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir)),
+                "parent-dir component for {hostile:?}: {}",
+                p.display()
+            );
+        }
+        // Known-negative for the instrument itself: an UNSANITIZED join really
+        // does escape, so the assertions above are capable of failing.
+        let unsanitized = dir.join("../../etc/passwd");
+        assert!(
+            unsanitized
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir)),
+            "the escape check is vacuous — a raw join must show ParentDir"
         );
-        assert!(!p.to_string_lossy().contains(".."), "{}", p.display());
     }
 
     #[test]

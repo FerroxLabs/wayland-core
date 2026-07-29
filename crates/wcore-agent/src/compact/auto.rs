@@ -63,9 +63,25 @@ pub fn should_autocompact(last_input_tokens: u64, config: &CompactConfig) -> boo
     if !config.enabled {
         return false;
     }
-    let effective_window = config.context_window.saturating_sub(config.output_reserve);
-    let threshold = effective_window.saturating_sub(config.autocompact_buffer);
-    last_input_tokens as usize >= threshold
+    last_input_tokens as usize >= autocompact_threshold(config)
+}
+
+/// The autocompact trigger threshold in tokens:
+/// `context_window - output_reserve - autocompact_buffer`.
+///
+/// F23-04 exposes this so the cache/compaction ledger can report token pressure
+/// as a fraction of the boundary that actually fires, rather than as a raw
+/// watermark a reader has to interpret. Extracted from — not duplicated
+/// alongside — [`should_autocompact`], so the number reported to an operator is
+/// by construction the number the engine acts on.
+///
+/// Note this ignores `config.enabled`: it is the threshold's VALUE, and a
+/// disabled compactor still has one worth showing next to the watermark.
+pub fn autocompact_threshold(config: &CompactConfig) -> usize {
+    config
+        .context_window
+        .saturating_sub(config.output_reserve)
+        .saturating_sub(config.autocompact_buffer)
 }
 
 // ── Core autocompact ────────────────────────────────────────────────────────

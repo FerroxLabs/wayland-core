@@ -2493,6 +2493,12 @@ pub struct AgentEngine {
     plan_active_flag: Option<Arc<AtomicBool>>,
     /// Prompt cache break detector for diagnostics.
     cache_detector: CacheBreakDetector,
+    /// F23-04 — the durable cache/compaction ledger. Arms itself lazily on the
+    /// first recorded round-trip, so it costs the constructors nothing but a
+    /// `Default`. Everything the detector above computes per turn is
+    /// accumulated here and flushed to `<wayland home>/cache-ledger/`, where
+    /// `wayland-core cache report` reads it back without an engine.
+    cache_ledger: crate::cache_ledger::CacheLedgerRecorder,
     compaction_level: wcore_compact::CompactionLevel,
     toon_enabled: bool,
     /// Token-opt: native Bash output compaction gate (cargo/git/test/grep).
@@ -3109,6 +3115,7 @@ impl AgentEngine {
             plan_state: PlanState::default(),
             plan_active_flag: None,
             cache_detector: CacheBreakDetector::new(),
+            cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: config.compact.compaction,
             toon_enabled: config.compact.toon,
             compact_bash: config.compat.compact_bash(),
@@ -3347,6 +3354,7 @@ impl AgentEngine {
             plan_state: PlanState::default(),
             plan_active_flag: None,
             cache_detector: CacheBreakDetector::new(),
+            cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: config.compact.compaction,
             toon_enabled: config.compact.toon,
             compact_bash: config.compat.compact_bash(),
@@ -3666,6 +3674,10 @@ impl AgentEngine {
             flag.store(false, Ordering::Release);
         }
         self.cache_detector = CacheBreakDetector::new();
+        // F23-04: seal the outgoing session's ledger before the conversation id
+        // rotates below, so its record stays attributable to the session that
+        // produced it rather than bleeding into the next one.
+        self.cache_ledger.rotate();
         self.per_turn_costs.clear();
         self.mcp_curation_cache = None;
         self.mcp_cap_cache = None;
@@ -5774,6 +5786,7 @@ impl AgentEngine {
                 .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
         }
         self.fire_on_session_end(turn).await;
+        self.cache_ledger.finish();
         if persist_session {
             self.save_session_mirror();
         }
@@ -9069,6 +9082,7 @@ impl AgentEngine {
                     {
                         self.prepare_durable_conversation().await?;
                         self.fire_on_session_end(turn).await;
+                        self.cache_ledger.finish();
                         self.save_session_mirror();
                         return Err(e);
                     }
@@ -9161,6 +9175,21 @@ impl AgentEngine {
                         input_token_estimate,
                         AGENT_TURN_CACHE_REUSE_WINDOW_SECS,
                     ));
+                    // F23-04: note the retention we are ASKING for. The
+                    // response reports cache tokens but never the requested
+                    // TTL, so "a 1h cache was requested and still missed" is
+                    // unanswerable from the response side alone.
+                    self.cache_ledger.note_retention(match cache_tier {
+                        Some(wcore_providers::cache_tier::CacheTier::Ephemeral5m) => {
+                            wcore_providers::cache_observation::CacheRetention::Ephemeral5m
+                        }
+                        Some(wcore_providers::cache_tier::CacheTier::Ephemeral1h) => {
+                            wcore_providers::cache_observation::CacheRetention::Ephemeral1h
+                        }
+                        Some(wcore_providers::cache_tier::CacheTier::None) | None => {
+                            wcore_providers::cache_observation::CacheRetention::None
+                        }
+                    });
 
                     // Belt-and-suspenders: ensure no `tool_use` in history is
                     // orphaned before sending to the provider. Anthropic 400s
@@ -10389,6 +10418,7 @@ impl AgentEngine {
                         if let Err(e) = self.run_compaction().await {
                             self.prepare_durable_conversation().await?;
                             self.fire_on_session_end(turn).await;
+                            self.cache_ledger.finish();
                             self.save_session_mirror();
                             return Err(e);
                         }
@@ -10726,6 +10756,7 @@ impl AgentEngine {
                                 if let Err(e) = self.run_compaction().await {
                                     self.prepare_durable_conversation().await?;
                                     self.fire_on_session_end(turn).await;
+                                    self.cache_ledger.finish();
                                     self.save_session_mirror();
                                     return Err(e);
                                 }
@@ -11039,8 +11070,13 @@ impl AgentEngine {
                 cache_read_tokens: turn_usage.cache_read_tokens,
                 cache_creation_tokens: turn_usage.cache_creation_tokens,
             };
-            if let Some(diagnostic) = self.cache_detector.check_response(cache_stats.clone()) {
-                match &diagnostic {
+            // F23-04: bound rather than consumed inline, because the ledger
+            // below needs the same diagnostic. `check_response` is stateful
+            // (it advances the round-trip counter and the prompt snapshot), so
+            // calling it twice would silently corrupt the detector.
+            let cache_diagnostic = self.cache_detector.check_response(cache_stats.clone());
+            if let Some(diagnostic) = cache_diagnostic.as_ref() {
+                match diagnostic {
                     CacheDiagnostic::FullMiss { cause } => {
                         // #101: a full cache miss is diagnostic telemetry, NOT a
                         // user error. A `TtlExpiry` (the prompt cache's TTL lapsed
@@ -11105,6 +11141,12 @@ impl AgentEngine {
                     warn.routed_model,
                 );
             }
+
+            // ── F23-04 — record this round-trip into the cache/compaction
+            // ledger. Everything above computes quality, invalidation and
+            // pressure and then throws them away at the end of the turn; this
+            // is the one place the four criterion clauses are made durable.
+            self.record_cache_ledger_turn(turn, &turn_usage, &effective_model, &cache_diagnostic);
 
             let mut assistant_content: Vec<ContentBlock> = Vec::new();
             if !thinking_text.is_empty() {
@@ -11272,6 +11314,7 @@ impl AgentEngine {
                     self.prepare_durable_conversation().await?;
                 }
                 self.fire_on_session_end(turn + 1).await;
+                self.cache_ledger.finish();
                 // v0.8.1 U6 — snapshot the U1 pick BEFORE
                 // `observe_skill_router_outcome` clears it, so the
                 // autonomous-skill bucketer can record which catalog
@@ -11566,11 +11609,13 @@ impl AgentEngine {
                         self.save_session_mirror();
                     }
                     self.fire_on_session_end(turn + 1).await;
+                    self.cache_ledger.finish();
                     return Err(AgentError::UserAborted);
                 }
                 GraphExit::Failed(msg) => {
                     self.prepare_durable_conversation().await?;
                     self.fire_on_session_end(turn + 1).await;
+                    self.cache_ledger.finish();
                     self.save_session_mirror();
                     return Err(AgentError::ApiError(msg));
                 }
@@ -12845,6 +12890,142 @@ impl AgentEngine {
             .collect()
     }
 
+    // ── F23-04: cache / compaction ledger recording ─────────────────────────
+
+    /// The autocompact trigger threshold, as tokens, for this engine's config.
+    fn autocompact_threshold_tokens(&self) -> u64 {
+        auto::autocompact_threshold(&self.compact_config) as u64
+    }
+
+    /// The emergency hard-stop limit, as tokens, for this engine's config.
+    fn emergency_limit_tokens(&self) -> u64 {
+        emergency::emergency_limit(&self.compact_config) as u64
+    }
+
+    /// Record one completed LLM round-trip into the cache/compaction ledger.
+    ///
+    /// Three things here are deliberate and are the substance of Success
+    /// Criterion 4's "cost truth" and "invalidation" clauses:
+    ///
+    /// 1. **The uncached counterfactual is priced through the same catalog**
+    ///    as the real cost, with every cached token moved back into the plain
+    ///    input bucket. A "saving" derived from a different price source than
+    ///    the spend it is subtracted from is not a measurement.
+    /// 2. **`priced` is carried, not discarded.** `resolve_turn_cost` already
+    ///    knows whether the catalog could price this provider×model;
+    ///    forgetting that turns "we cannot price this" into "$0.00 spent".
+    /// 3. **A miss on the round-trip after a compaction is attributed to
+    ///    [`InvalidationCause::HistoryRewritten`]**, overriding the
+    ///    prompt/tool-hash guess. Compaction replaces the message history
+    ///    wholesale, so that miss is self-inflicted and known — reporting it
+    ///    as "system prompt drift" would send an operator hunting a bug that
+    ///    is not there. This is also the only place the cache and compaction
+    ///    halves of the criterion actually meet.
+    fn record_cache_ledger_turn(
+        &mut self,
+        turn: u32,
+        turn_usage: &TokenUsage,
+        effective_model: &str,
+        diagnostic: &Option<CacheDiagnostic>,
+    ) {
+        use crate::cache_ledger::{TurnSample, cause_of_diagnostic};
+        use wcore_providers::cache_observation::InvalidationCause;
+
+        if !crate::cache_ledger::recording_enabled() {
+            return;
+        }
+
+        let provider = self.compat.provider_type().to_string();
+        let resolved = resolve_turn_cost(
+            &provider,
+            effective_model,
+            turn_usage.input_tokens,
+            turn_usage.output_tokens,
+            turn_usage.cache_read_tokens,
+            turn_usage.cache_creation_tokens,
+            &self.compat,
+        );
+        // The counterfactual: the same work with no prompt cache at all, so
+        // every cached token is billed as ordinary input.
+        let uncached_input = turn_usage
+            .input_tokens
+            .saturating_add(turn_usage.cache_read_tokens)
+            .saturating_add(turn_usage.cache_creation_tokens);
+        let uncached = resolve_turn_cost(
+            &provider,
+            effective_model,
+            uncached_input,
+            turn_usage.output_tokens,
+            0,
+            0,
+            &self.compat,
+        );
+
+        let round_trip = self.cache_ledger.next_round_trip();
+        let mut cause = diagnostic.as_ref().and_then(cause_of_diagnostic);
+        if turn_usage.cache_read_tokens == 0
+            && cause.is_some()
+            && self.cache_ledger.compacted_since_last_round_trip()
+        {
+            cause = Some(InvalidationCause::HistoryRewritten);
+        }
+
+        let sample = TurnSample {
+            turn: turn as u64,
+            round_trip,
+            ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            provider,
+            model: effective_model.to_string(),
+            retention: self.cache_ledger.pending_retention(),
+            uncached_input_tokens: turn_usage.input_tokens,
+            cache_read_tokens: turn_usage.cache_read_tokens,
+            cache_write_tokens: turn_usage.cache_creation_tokens,
+            output_tokens: turn_usage.output_tokens,
+            invalidation_cause: cause,
+            cost_usd: resolved.usd,
+            cost_priced: resolved.priced,
+            uncached_equivalent_usd: uncached.usd,
+            watermark_tokens: self.compact_state.last_real_input_tokens,
+            conservative_watermark_tokens: self.compact_state.last_input_tokens,
+            autocompact_threshold_tokens: self.autocompact_threshold_tokens(),
+            emergency_limit_tokens: self.emergency_limit_tokens(),
+        };
+        let session_id = self.conversation_id.clone();
+        self.cache_ledger.record_turn(&session_id, sample);
+    }
+
+    /// Record one compaction attempt into the ledger.
+    fn record_cache_ledger_compaction(
+        &mut self,
+        kind: crate::cache_ledger::CompactionKind,
+        trigger: crate::cache_ledger::CompactionTrigger,
+        pre_tokens: u64,
+        tokens_freed: u64,
+        items_collapsed: u64,
+        error: Option<String>,
+    ) {
+        if !crate::cache_ledger::recording_enabled() {
+            return;
+        }
+        // Compaction runs at the TOP of a turn, before the next request, so
+        // "round-trips already recorded" is exactly "after round-trip N".
+        let after_round_trip = self.cache_ledger.next_round_trip().saturating_sub(1);
+        let event = crate::cache_ledger::CompactionEvent {
+            after_round_trip,
+            ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            kind,
+            trigger,
+            watermark_tokens: self.compact_state.last_real_input_tokens,
+            threshold_tokens: self.autocompact_threshold_tokens(),
+            pre_tokens,
+            tokens_freed,
+            items_collapsed,
+            error,
+        };
+        let session_id = self.conversation_id.clone();
+        self.cache_ledger.record_compaction(&session_id, event);
+    }
+
     /// Run the multi-level compaction pipeline before each API call.
     ///
     /// Execution order: tool-call-args hygiene → microcompact → autocompact →
@@ -12882,6 +13063,18 @@ impl AgentEngine {
                 // the read content a cached diff base references. Bump the file
                 // cache's compaction generation so those bases stop qualifying.
                 self.bump_file_cache_generation();
+                // F23-04: a microcompact is the cheapest pressure relief the
+                // engine has and it happens silently under the autocompact
+                // threshold. Recording it is what makes "why did the cache miss
+                // when the watermark never crossed anything?" answerable.
+                self.record_cache_ledger_compaction(
+                    crate::cache_ledger::CompactionKind::Micro,
+                    crate::cache_ledger::CompactionTrigger::MicroHeuristic,
+                    self.compact_state.last_real_input_tokens,
+                    result.estimated_tokens_freed as u64,
+                    result.cleared_count as u64,
+                    None,
+                );
             }
         }
 
@@ -12951,6 +13144,8 @@ impl AgentEngine {
                     ));
                     // #279(d): capture before `result` is moved into `folded`.
                     let result_pre_compact_tokens = result.pre_compact_tokens;
+                    // F23-04: same reason — needed by the ledger record below.
+                    let result_messages_summarized = result.messages_summarized as u64;
                     // AUDIT A7 — `autocompact` returns `[boundary(User),
                     // summary(User)]`; appending the live user turn
                     // would then yield three consecutive `User`
@@ -13044,8 +13239,25 @@ impl AgentEngine {
                     // prefix, so any read base cached before now is no longer in
                     // the visible transcript. Invalidate diff bases.
                     self.bump_file_cache_generation();
+                    // F23-04: this is the compaction↔cache join. The whole
+                    // message prefix has just been replaced, so the next
+                    // round-trip's cache miss is self-inflicted and the ledger
+                    // must attribute it to `history_rewritten` rather than to
+                    // the hash comparison's guess.
+                    self.record_cache_ledger_compaction(
+                        crate::cache_ledger::CompactionKind::Auto,
+                        if smart_drove {
+                            crate::cache_ledger::CompactionTrigger::SmartForce
+                        } else {
+                            crate::cache_ledger::CompactionTrigger::Watermark
+                        },
+                        result_pre_compact_tokens,
+                        tokens_freed,
+                        result_messages_summarized,
+                        None,
+                    );
                 }
-                Err(auto::CompactError::CircuitBroken { .. }) => {
+                Err(auto::CompactError::CircuitBroken { failures }) => {
                     // Already tripped; logged at circuit-breaker level.
                     // AUDIT A4 — restore the carved-out live user turn:
                     // compaction did not run, the conversation must be
@@ -13053,6 +13265,24 @@ impl AgentEngine {
                     if let Some(turn) = live_user_turn {
                         self.messages.push(turn);
                     }
+                    // F23-04: a compactor that cannot run is the sharpest
+                    // token-pressure fact there is — pressure keeps rising with
+                    // no relief available. Silence here is how a session walks
+                    // into the emergency hard stop with nothing to explain it.
+                    self.record_cache_ledger_compaction(
+                        crate::cache_ledger::CompactionKind::AutoFailed,
+                        if smart_drove {
+                            crate::cache_ledger::CompactionTrigger::SmartForce
+                        } else {
+                            crate::cache_ledger::CompactionTrigger::Watermark
+                        },
+                        self.compact_state.last_real_input_tokens,
+                        0,
+                        0,
+                        Some(format!(
+                            "circuit breaker tripped after {failures} consecutive failures"
+                        )),
+                    );
                 }
                 Err(error)
                     if crate::journal_provider::is_journal_authority_error(&error.to_string()) =>
@@ -13070,6 +13300,20 @@ impl AgentEngine {
                     if let Some(turn) = live_user_turn {
                         self.messages.push(turn);
                     }
+                    // F23-04: record the failure with its reason. `emit_error`
+                    // reaches the live surface only; nothing survived the turn.
+                    self.record_cache_ledger_compaction(
+                        crate::cache_ledger::CompactionKind::AutoFailed,
+                        if smart_drove {
+                            crate::cache_ledger::CompactionTrigger::SmartForce
+                        } else {
+                            crate::cache_ledger::CompactionTrigger::Watermark
+                        },
+                        self.compact_state.last_real_input_tokens,
+                        0,
+                        0,
+                        Some(e.to_string()),
+                    );
                 }
             }
         } else if should_compact {
@@ -15328,6 +15572,7 @@ mod set_config_tests {
             plan_state: Default::default(),
             plan_active_flag: None,
             cache_detector: super::CacheBreakDetector::new(),
+            cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
             compact_bash: false,
@@ -17007,6 +17252,7 @@ mod phase6_tests {
             plan_state: Default::default(),
             plan_active_flag: None,
             cache_detector: super::CacheBreakDetector::new(),
+            cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
             compact_bash: false,
@@ -17322,6 +17568,7 @@ mod compact_tests {
             plan_state: Default::default(),
             plan_active_flag: None,
             cache_detector: super::CacheBreakDetector::new(),
+            cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
             compact_bash: false,
@@ -18711,6 +18958,7 @@ mod plan_mode_tests {
             plan_state: PlanState::default(),
             plan_active_flag: Some(flag),
             cache_detector: super::CacheBreakDetector::new(),
+            cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
             compact_bash: false,
@@ -19159,6 +19407,7 @@ mod hook_integration_tests {
             plan_state: Default::default(),
             plan_active_flag: None,
             cache_detector: super::CacheBreakDetector::new(),
+            cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
             compact_bash: false,
@@ -20017,6 +20266,7 @@ mod approval_bridge_engine_tests {
             plan_state: Default::default(),
             plan_active_flag: None,
             cache_detector: super::CacheBreakDetector::new(),
+            cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
             compact_bash: false,
@@ -21073,6 +21323,7 @@ mod user_model_writeback_tests {
             plan_state: Default::default(),
             plan_active_flag: None,
             cache_detector: super::CacheBreakDetector::new(),
+            cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
             compact_bash: false,
