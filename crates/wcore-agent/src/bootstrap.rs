@@ -1324,7 +1324,7 @@ impl AgentBootstrap {
         // (Anthropic preferred, OpenAI / Gemini auto-fallback). If
         // NONE of the three keys is set the resolver returns None and
         // the tool stays hidden via `Tool::is_available() == false`.
-        if let Some(vision_backend) = crate::tool_backends::build_vision_backend() {
+        if let Some(vision_backend) = crate::tool_backends::build_vision_backend(&self.config) {
             registry.register(Box::new(wcore_tools::vision_tools::VisionAnalyzeTool::new(
                 vision_backend,
                 crate::tool_backends::build_image_fetcher(),
@@ -1367,7 +1367,9 @@ impl AgentBootstrap {
         // because the ffmpeg probe spawns a child process cached in a
         // tokio::sync::OnceCell; `.await` is legal here because `build()`
         // is async.
-        if let Some(b) = crate::tool_backends::video_analyze::build_video_analyze_backend().await {
+        if let Some(b) =
+            crate::tool_backends::video_analyze::build_video_analyze_backend(&self.config).await
+        {
             registry.register(Box::new(
                 wcore_tools::video_analyze_tool::VideoAnalyzeTool::with_backend(b),
             ));
@@ -2773,6 +2775,10 @@ impl AgentBootstrap {
         // tool registry got, and the resolver is now config-aware so it cannot
         // be called after the move. `Option<Arc<_>>` is cheap to clone.
         let media_transcription = crate::tool_backends::build_transcription_backend(&self.config);
+        // Same constraint, same reason, for vision: `build_vision_backend` became
+        // config-aware closing BL-F24-C3-H7, so it too must be resolved before
+        // `self.config` moves into the engine.
+        let media_vision = crate::tool_backends::build_vision_backend(&self.config);
 
         let pricing_refresher_constructed = self.config.provider_chain.enabled;
         let mut engine = if let Some(session) = self.resume_session {
@@ -3248,7 +3254,7 @@ impl AgentBootstrap {
                 // image; set a key") into the attachment so the model never
                 // answers an unseen image blind from a bare URL.
                 let media_enricher = {
-                    let vision = crate::tool_backends::build_vision_backend();
+                    let vision = media_vision.clone();
                     let transcription = media_transcription.clone();
                     let source = Arc::new(crate::channel_media::ManagerMediaSource::new(
                         std::sync::Arc::clone(&lifted),

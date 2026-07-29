@@ -42,7 +42,8 @@ const OPTIONAL_CAPABILITIES: &[Capability] = &[
     Capability {
         label: "Image understanding (vision)",
         tool: "vision_analyze",
-        hint: "set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY",
+        hint: "set ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or FLUX_API_KEY \
+               (or configure an OpenAI-wire provider)",
     },
     Capability {
         label: "Audio transcription",
@@ -57,7 +58,8 @@ const OPTIONAL_CAPABILITIES: &[Capability] = &[
     Capability {
         label: "Video analysis",
         tool: "video_analyze",
-        hint: "set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY (and install ffmpeg)",
+        hint: "set ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or FLUX_API_KEY \
+               (or configure an OpenAI-wire provider), and install ffmpeg",
     },
     Capability {
         label: "Discord",

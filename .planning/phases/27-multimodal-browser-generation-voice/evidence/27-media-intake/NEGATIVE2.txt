@@ -1,0 +1,47 @@
+2026-07-29T10:38:47.268263Z  INFO egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked allowlisted=35
+2026-07-29T10:38:47.268528Z  INFO egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked allowlisted=35
+2026-07-29T10:38:47.271764Z  WARN not advertising browser_suite: the plugin is loaded but no backend can start capability="browser_suite" reason=no browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health remedy=install @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+2026-07-29T10:38:47.271802Z  WARN not advertising computer_use: the plugin is loaded but no backend can start capability="computer_use" reason=neither DISPLAY nor WAYLAND_DISPLAY is set, so no display server is reachable and the X11 backend cannot connect remedy=run inside a graphical session, or export DISPLAY for an available X server (e.g. an Xvfb instance) before starting
+2026-07-29T10:38:47.272241Z  INFO postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+2026-07-29T10:38:47.272459Z  INFO skipping registration of tool whose backend is not configured tool=spotify_playback
+2026-07-29T10:38:47.272471Z  INFO skipping registration of tool whose backend is not configured tool=spotify_devices
+2026-07-29T10:38:47.272477Z  INFO skipping registration of tool whose backend is not configured tool=spotify_queue
+2026-07-29T10:38:47.272483Z  INFO skipping registration of tool whose backend is not configured tool=spotify_search
+2026-07-29T10:38:47.272488Z  INFO skipping registration of tool whose backend is not configured tool=spotify_playlists
+2026-07-29T10:38:47.272494Z  INFO skipping registration of tool whose backend is not configured tool=spotify_albums
+2026-07-29T10:38:47.272500Z  INFO skipping registration of tool whose backend is not configured tool=spotify_library
+2026-07-29T10:38:47.272512Z  INFO skipping registration of tool whose backend is not configured tool=yuanbao
+2026-07-29T10:38:47.272551Z  INFO image_gen: using gpt-image-1 at  (active OpenAI-wire provider)
+2026-07-29T10:38:47.272566Z  INFO web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+2026-07-29T10:38:47.272800Z  INFO vision: using this-model-does-not-exist-27mi at https://api.fluxrouter.ai/v1/chat/completions (active OpenAI-wire provider)
+2026-07-29T10:38:47.272847Z  INFO transcription: using flux-voice-fast at https://api.fluxrouter.ai/v1/audio/transcriptions (active OpenAI-wire provider)
+2026-07-29T10:38:47.272889Z  INFO tts: using OpenAI TTS at  (active OpenAI-wire provider)
+2026-07-29T10:38:47.273199Z  WARN video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+2026-07-29T10:38:47.273246Z  INFO cronjob: wiring WaylandCronScheduler over default FileCronStore
+2026-07-29T10:38:47.273597Z  WARN plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool plugin=wayland-cua tool=execute fq_name=Cua::execute
+2026-07-29T10:38:47.276159Z  WARN semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+2026-07-29T10:38:47.276265Z  INFO W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+2026-07-29T10:38:47.276793Z  INFO user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /root/27mi-live/home/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+2026-07-29T10:38:47.279042Z  INFO transcription: using flux-voice-fast at https://api.fluxrouter.ai/v1/audio/transcriptions (active OpenAI-wire provider)
+2026-07-29T10:38:47.279082Z  INFO vision: using this-model-does-not-exist-27mi at https://api.fluxrouter.ai/v1/chat/completions (active OpenAI-wire provider)
+2026-07-29T10:38:47.279570Z  INFO F-014: channels auto-registered from ~/.wayland/channels count=0
+2026-07-29T10:38:47.279663Z  INFO Phase 1B-2: inbound channel subscriber spawned
+2026-07-29T10:38:47.281623Z  INFO F24_CHANNEL_LEASE=owner — this process owns inbound polling for this home holder="session" pid=218408 dir=/root/27mi-live/home/channels
+2026-07-29T10:38:47.281659Z  INFO F-014: channel_manager.start_all() complete — inbound polling active
+Pricing unavailable for flux-router/flux-auto; the call remains bounded by the token envelope and cost is unpriced, not $0.
+> ToolSearch({"query":"vision_analyze"})
+  └> [
+  {
+    "description": "Analyze images using AI vision. Provides a comprehensive description of the image and answers a specific question about its content. Accepts an http(s):// URL OR a local image file (an absolute path or a file:// URI) — use the local path for a file the user dropped in or one you produced. For URLs, private/internal addresses and policy-blocked hosts are rejected; local paths are subject to the same path-safety rules as the Read tool. Accepted formats: PNG, JPEG, GIF, BM...
+2026-07-29T10:38:50.895063Z  INFO external edits detected (transcript-suppressed): User edited 15 files while I was thinking (`/root/27mi-live/home`, `/root/27mi-live/home/channels`, `/root/27mi-live/home/memory`, `/root/27mi-live/home/memory/changelog`, `/root/27mi-live/home/cron`, `/root/27mi-live/home/projects`, `/root…[truncated]
+Pricing unavailable for flux-router/flux-auto; the call remains bounded by the token envelope and cost is unpriced, not $0.
+> vision_analyze({"image_url":"/root/27mi-live/vision-fixture.png","question":"what text is visible and what shapes are present"})
+  X {"error":"flux-router vision returned HTTP 500: {\"error\":{\"message\":\"Flux Router error: key not allowed to access model. This key can only access models=['flux-fast', 'flux-standard', 'flux-reasoning', 'flux-auto', 'flux-image', 'flux-voice', 'flux-voice-accurate', 'flux-voice-fast', 'flux-pinned-claude-opus', 'flux-pinned-claude-opus-4-6', 'flux-pinned-claude-sonnet', 'flux-pinned-claude-haiku', 'flux-pinned-gpt-5', 'flux-pinned-gpt-5-5', 'flu","success":false}
+2026-07-29T10:38:52.981682Z  INFO external edits detected (transcript-suppressed): User edited 4 files while I was thinking (`/root/27mi-live/NEGATIVE2.txt`, `/root/27mi-live/home/channels`, `/root/27mi-live`, `/root/27mi-live/vision-fixture.png`) — re-read each before proceeding.
+Pricing unavailable for flux-router/flux-auto; the call remains bounded by the token envelope and cost is unpriced, not $0.
+
+* Error from vision_analyze: Flux Router error: key not allowed to access model. This key can only access models=['flux-fast', 'flux-standard', 'flux-reasoning', 'flux-auto', 'flux-image', 'flux-voice', 'flux-voice-accurate', 'flux-voice-fast', 'flux-pinned-claude-opus', 'flux-pinned-claude-opus-4-6', 'flux-pinned-claude-sonnet', 'flux-pinned-claude-haiku', 'flux-pinned-gpt-5', 'flux-pinned-gpt-5-5', 'flu (truncated)2026-07-29T10:38:56.304811Z  INFO external edits detected (transcript-suppressed): User edited 2 files while I was thinking (`/root/27mi-live/NEGATIVE2.txt`, `/root/27mi-live/home/channels`) — re-read each before proceeding.
+2026-07-29T10:38:56.383593Z  INFO auto-memorize skipped this session; no facts saved skip_reason=Some(BelowFactThreshold) candidates=0
+
+[turns: 3 | tokens: 5821 in (3584 cached) / 607 out | cache: 0 created, 3584 read]
