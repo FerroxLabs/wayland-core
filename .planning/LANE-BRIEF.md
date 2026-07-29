@@ -352,3 +352,25 @@ Keep it under ~40 lines: per plan — landed / partial / blocked, the honest ver
 results with real numbers, live evidence one-liner, any HIGH finding, your lane branch name
 and HEAD SHA, and anything the orchestrator must serialize (protocol seams, contract
 requests, shared-file edits). State clearly what you did NOT do.
+
+---
+
+## §3b-ii — hetzner injects a provider credential you did not set
+
+**Added 2026-07-29 after `27-media-intake` nearly published a false live proof.**
+
+`/root/.wayland/.env` on `hetzner-dsm` injects **`ANTHROPIC_API_KEY`** into the product's process
+**regardless of what you `unset` in the shell.** A lane proving "provider X was selected" can
+therefore be silently running on a different arm than the one it believes.
+
+That lane's first live vision proof ran on **arm 1 (Anthropic)** while it believed it was proving
+**arm 5 (Flux)**. It was caught only because the lane read the *resolver's own arm line* back out
+of the log instead of trusting its environment setup.
+
+**The rule:** if your claim depends on which provider, backend or credential was selected, **read
+the selection back from the product's own output** and assert on it. Do not infer it from what you
+exported or unset. An env var you did not set is not a hypothetical on this host — it is the
+default.
+
+This is the same family as the self-passing assertion: the environment you *think* you configured
+is an unverified premise, and on this box it is a **false** one.
