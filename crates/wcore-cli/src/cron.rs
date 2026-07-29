@@ -781,6 +781,26 @@ async fn status_cmd(id: &str, store: &FileCronStore) -> Result<()> {
             .map(|d| d.to_rfc3339())
             .unwrap_or_else(|| "none".to_string())
     );
+    // 24-C4-SUPPORT: `max_in_flight` above 1 promises concurrency this runtime
+    // does not produce. `dispatch_and_record` is awaited inline in the runner's
+    // selection loop and the production handler does not spawn, so a job's
+    // fires are serialized end to end. Measured in
+    // `crates/wcore-cron/tests/in_flight_bound.rs`: `max_in_flight = 8` and
+    // `max_in_flight = 16` both produce peak concurrency 1, indistinguishable
+    // from 1, against a probe proved able to observe 2.
+    //
+    // Said here rather than silently accepted, for the same reason `poll:` is
+    // now refused at `add` instead of being accepted and never fired: a bound
+    // the product echoes back and does not implement is a surface that lies to
+    // the operator who set it. The value is NOT rewritten — narrowing a
+    // persisted field on a render path would make `show` disagree with the
+    // store — it is annotated.
+    if bound.max_in_flight > 1 {
+        println!(
+            "             NOTE: fires are serialized; max_in_flight>1 grants no \
+             concurrency in this build"
+        );
+    }
     println!(
         "retry:       max_attempts={} backoff={}s..{}s  attempts={}{}",
         retry.max_attempts,
