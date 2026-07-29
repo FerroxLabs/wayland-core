@@ -1,0 +1,18 @@
+{"seq":1,"pid":534605,"kind":"spawn","at":"2026-07-29T02:44:58.768Z","argv":["-a","+15550240099","jsonRpc"],"cwd":"/root/wayland-24-matrix-signal"}
+{"seq":2,"pid":534605,"kind":"control.listening","at":"2026-07-29T02:44:58.775Z","port":37173}
+{"seq":3,"pid":534605,"kind":"receive.emitted","at":"2026-07-29T02:51:51.836Z","source":"+15552240001","source_name":"u15552240001","text":"hello f24c3-signal-admit-f24f181f","timestamp":1700000001000}
+{"seq":4,"pid":534605,"kind":"send","at":"2026-07-29T02:51:52.438Z","id":1,"recipient":"+15552240001","group_id":null,"message":"F24C3-REPLY f24c3-signal-admit-f24f181f"}
+{"seq":5,"pid":534605,"kind":"receive.emitted","at":"2026-07-29T02:51:52.863Z","source":"+15552240001","source_name":"u15552240001","text":"hello f24c3-signal-admit-f24f181f","timestamp":1700000001000}
+{"seq":6,"pid":534605,"kind":"receive.emitted","at":"2026-07-29T02:52:12.894Z","source":"+15552240001","source_name":"u15552240001","text":"hello f24c3-signal-dedupe-control-f24f181f","timestamp":1700000002000}
+{"seq":7,"pid":534605,"kind":"send","at":"2026-07-29T02:52:13.037Z","id":2,"recipient":"+15552240001","group_id":null,"message":"F24C3-REPLY f24c3-signal-dedupe-control-f24f181f"}
+{"seq":8,"pid":534605,"kind":"receive.emitted","at":"2026-07-29T02:52:13.921Z","source":"+15559990001","source_name":"u15559990001","text":"hello f24c3-signal-access-f24f181f","timestamp":1700000003000}
+{"seq":9,"pid":534605,"kind":"receive.emitted","at":"2026-07-29T02:52:33.951Z","source":"+15552240002","source_name":"u15552240002","text":"hello f24c3-signal-bind-f24f181f","timestamp":1700000004000}
+{"seq":10,"pid":534605,"kind":"send","at":"2026-07-29T02:52:34.383Z","id":3,"recipient":"+15552240002","group_id":null,"message":"F24C3-REPLY f24c3-signal-bind-f24f181f"}
+{"seq":11,"pid":534605,"kind":"receive.emitted","at":"2026-07-29T02:53:04.984Z","source":"+15552240001","source_name":"u15552240001","text":"hello f24c3-signal-steady0-f24f181f","timestamp":1700000200000}
+{"seq":12,"pid":534605,"kind":"send","at":"2026-07-29T02:53:05.073Z","id":4,"recipient":"+15552240001","group_id":null,"message":"F24C3-REPLY f24c3-signal-steady0-f24f181f"}
+{"seq":13,"pid":534605,"kind":"receive.emitted","at":"2026-07-29T02:53:09.010Z","source":"+15552240001","source_name":"u15552240001","text":"hello f24c3-signal-steady1-f24f181f","timestamp":1700000210000}
+{"seq":14,"pid":534605,"kind":"send","at":"2026-07-29T02:53:09.297Z","id":5,"recipient":"+15552240001","group_id":null,"message":"F24C3-REPLY f24c3-signal-steady1-f24f181f"}
+{"seq":15,"pid":534605,"kind":"receive.emitted","at":"2026-07-29T02:53:13.037Z","source":"+15552240001","source_name":"u15552240001","text":"hello f24c3-signal-steady2-f24f181f","timestamp":1700000220000}
+{"seq":16,"pid":534605,"kind":"send","at":"2026-07-29T02:53:13.288Z","id":6,"recipient":"+15552240001","group_id":null,"message":"F24C3-REPLY f24c3-signal-steady2-f24f181f"}
+{"seq":1,"pid":677130,"kind":"spawn","at":"2026-07-29T02:55:11.112Z","argv":["-a","+15550240099","jsonRpc"],"cwd":"/root/wayland-24-matrix-signal"}
+{"seq":2,"pid":677130,"kind":"control.listening","at":"2026-07-29T02:55:11.119Z","port":33795}

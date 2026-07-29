@@ -31,7 +31,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { gradeSteady, gradeRestart, naiveGradeRestart, LEGS, ADAPTERS, TRANSPORT } from './f24-inbound.mjs';
+import {
+  gradeSteady,
+  gradeRestart,
+  naiveGradeRestart,
+  pidIsLive,
+  LEGS,
+  ADAPTERS,
+  TRANSPORT,
+} from './f24-inbound.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
@@ -751,6 +759,70 @@ test('V5 the transcription still matches the driver source (drift guard)', () =>
   ]) {
     assert(s.includes(f), `driver verdict no longer contains: ${f}`);
   }
+});
+
+// ── liveness must distinguish a zombie ─────────────────────────────────────
+//
+// FOURTH INSTRUMENT DEFECT OF THIS LANE, and the third that failed in the
+// direction that blames the product.
+//
+// The restart probe's central claim is "the binary was down when the gap
+// message was delivered". It checked that with `process.kill(pid, 0)`, which is
+// WRONG under this driver: node reaps children on the event loop, the driver's
+// waits are blocking, so a child that died instantly stays a ZOMBIE and
+// `kill(pid, 0)` succeeds for it.
+//
+// What that cost: run 1 reported `exit_secs=30 (SIGKILL)`, which reads as
+// "--json-stream ignored SIGTERM for 30 seconds" — a PRODUCT claim about
+// shutdown behaviour. It was very probably this bug. Reporting it would have
+// been a fabricated finding against working code, which is precisely what this
+// lane's brief warns is the failure mode of an under-detecting instrument.
+//
+// Measured below rather than argued, with a real process.
+const Z = {};
+{
+  const c = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
+  await delay(400);
+  Z.liveSaysLive = pidIsLive(c.pid); // known-POSITIVE: a genuinely running process
+  c.kill('SIGKILL');
+  // Block the event loop exactly as the driver does, so node cannot reap it.
+  sleep(1500);
+  Z.zombiePid = c.pid;
+  Z.repairedSaysDead = pidIsLive(c.pid) === false; // known-NEGATIVE
+  let old = true;
+  try {
+    process.kill(c.pid, 0);
+  } catch {
+    old = false;
+  }
+  Z.oldCheckSaysAlive = old; // the THIRD assertion's observation
+  const ps = spawnSync('ps', ['-o', 'stat=', '-p', String(c.pid)], { encoding: 'utf8' });
+  Z.psState = (ps.stdout ?? '').trim();
+  await delay(50);
+}
+
+test('Z1 KNOWN-POSITIVE: a genuinely running process is reported live', () => {
+  eq(Z.liveSaysLive, true, 'a running child must be live');
+});
+
+test('Z2 KNOWN-NEGATIVE: a SIGKILLed, unreaped zombie is reported DEAD', () => {
+  assert(
+    Z.psState.startsWith('Z') || Z.psState === '',
+    `the scenario did not actually produce a zombie (ps state=${JSON.stringify(Z.psState)}); ` +
+      `this assertion would be vacuous`,
+  );
+  eq(Z.repairedSaysDead, true, 'a zombie is not a live process');
+});
+
+test('Z3 THIRD ASSERTION — the OLD check reports that same zombie as ALIVE', () => {
+  // Only meaningful while the scenario really is a zombie, asserted in Z2.
+  assert(Z.psState.startsWith('Z'), `not a zombie (ps=${JSON.stringify(Z.psState)}) — Z3 vacuous`);
+  eq(
+    Z.oldCheckSaysAlive,
+    true,
+    'process.kill(pid,0) must still report the zombie alive, or this repair changes nothing',
+  );
+  eq(pidIsLive(Z.zombiePid), false, 'and the repaired check must disagree with it');
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

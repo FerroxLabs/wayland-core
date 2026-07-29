@@ -255,6 +255,52 @@ function run(argv, opts = {}) {
   };
 }
 
+/// Is `pid` a LIVE process — as opposed to a zombie this driver has not reaped?
+///
+/// FOURTH INSTRUMENT DEFECT OF THIS LANE, measured rather than reasoned, and the
+/// third that failed in the direction that blames the product.
+///
+/// `process.kill(pid, 0)` is the obvious liveness check and it is WRONG here.
+/// Node reaps its children on the event loop; this driver's waits are blocking
+/// (`Atomics.wait`), so the loop never turns, the child is never `wait()`ed, and
+/// a process that died instantly stays a ZOMBIE — for which `kill(pid, 0)`
+/// succeeds. Measured directly: SIGKILL a child, block 2s, and
+/// `process.kill(pid,0)` reports ALIVE while `ps -o stat=` reports `Z`.
+///
+/// What that cost: run 1's restart probe reported `exit_secs=30 (SIGKILL)`,
+/// which reads as "`--json-stream` ignored SIGTERM for 30 seconds". That is a
+/// product claim, and it was very probably this bug — the binary may have
+/// exited immediately and simply sat unreaped. Reporting it would have been a
+/// fabricated finding against working shutdown code.
+///
+/// So liveness is read from the OS's own view of the process state, which does
+/// distinguish a zombie.
+function pidIsLive(pid) {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false; // gone entirely
+  }
+  // Still in the table — but a zombie is not running. Linux first (this is
+  // where every figure in this criterion is taken), `ps` as the portable
+  // fallback for macOS/BSD.
+  try {
+    if (process.platform === 'linux' && fs.existsSync(`/proc/${pid}/stat`)) {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+      // The comm field is parenthesised and may itself contain spaces, so the
+      // state is the first token AFTER the last ')'.
+      const state = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/)[0];
+      return state !== 'Z';
+    }
+  } catch {
+    /* fall through to ps */
+  }
+  const r = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' });
+  const state = (r.stdout ?? '').trim();
+  if (!state) return false; // ps cannot see it either
+  return !state.startsWith('Z');
+}
+
 function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
@@ -1049,15 +1095,10 @@ class InboundMatrix {
       /* already gone */
     }
     for (let i = 0; i < budgetSecs; i += 1) {
-      // `process.kill(pid, 0)` throws ESRCH once the pid is gone. The child was
-      // spawned by this process, so it is reaped here and the pid cannot be
-      // recycled behind our back while we hold the handle.
-      let alive = true;
-      try {
-        process.kill(child.pid, 0);
-      } catch {
-        alive = false;
-      }
+      // `pidIsLive`, NOT `process.kill(pid, 0)` — see that function. The child
+      // was spawned by this process and this process's event loop is blocked,
+      // so a dead child sits unreaped and `kill(pid, 0)` calls it alive.
+      const alive = pidIsLive(child.pid);
       if (!alive) {
         this.note(`binary pid=${child.pid} exited after ${i}s`);
         return { stopped: true, secs: i, pid: child.pid };
@@ -1081,9 +1122,7 @@ class InboundMatrix {
     }
     let reaped = false;
     for (let i = 0; i < 15; i += 1) {
-      try {
-        process.kill(child.pid, 0);
-      } catch {
+      if (!pidIsLive(child.pid)) {
         reaped = true;
         break;
       }
@@ -2775,6 +2814,7 @@ if (isMain) {
 
 export {
   InboundMatrix,
+  pidIsLive,
   slackRequest,
   whatsappRequest,
   twilioRequest,
