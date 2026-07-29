@@ -49,6 +49,14 @@ pub mod cost;
 pub mod coverage;
 pub mod cron_scenarios;
 pub mod cross_session;
+/// Phase 30 per-tool dialect compilation (SR-30-3): one canonical SEMANTIC script compiled into
+/// each harness's own tool dialect, so a 0/30 means the harness failed the task rather than failed
+/// to parse it. Identity-blind by type; selection is a filter, not a ranking.
+pub mod dialect;
+/// Phase 30 dialect discovery: capture a harness's own declared `tools` array off the wire, in a
+/// SEPARATE instrument, because the shared meter retains digests rather than bodies and is a hard
+/// scope fence.
+pub mod dialect_discovery;
 /// Phase 28 E5 black-box probe definitions (F28-01), one per dimension plus one per
 /// mandatory cell. Executed by `scripts/f28-native-matrix.mjs`.
 pub mod e5_cases;

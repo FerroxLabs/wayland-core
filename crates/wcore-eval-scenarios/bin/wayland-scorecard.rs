@@ -23,6 +23,11 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::{Parser, Subcommand};
 use sha2::{Digest, Sha256};
 use wcore_eval_scenarios::claims::{ClaimRegisterV1, publish, register_digest};
+use wcore_eval_scenarios::dialect::{
+    CompiledStepV1, ToolSchemaCorpusV1, TranslationV1, VOCABULARY_VERSION, canonical_script,
+    cohort_eligibility, compile_script, vocabulary_carries_no_product_token,
+};
+use wcore_eval_scenarios::dialect_discovery::RunningDiscoveryMeter;
 use wcore_eval_scenarios::fixtures::openai::{OpenAiFixtureScript, OpenAiStep};
 use wcore_eval_scenarios::frontier_trials::{
     ALL_DIMENSIONS, ALL_TOOLS, ComparativeResultV1, DeltaV1, DimensionV1, LegStatusV1, LegV1,
@@ -81,6 +86,86 @@ enum Command {
     Authority {
         #[command(subcommand)]
         command: AuthorityCommand,
+    },
+    /// Phase 30 (SR-30-3) per-tool dialect compilation. ADDITIVE alongside `surfaces`, `verify`,
+    /// `trials`, `claims` and `authority`; none of them is reordered or restructured.
+    Dialect {
+        #[command(subcommand)]
+        command: DialectCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DialectCommand {
+    /// UNSCORED. Launch one harness against a loopback discovery meter and record the tool
+    /// schema THE HARNESS ITSELF declares on the wire.
+    ///
+    /// Nothing here is measured and nothing here enters a comparative. The child is spawned with
+    /// a CLEARED environment plus the same non-secret allowlist `trials run` uses, and the meter
+    /// retains only the `tools` declaration — never `messages`, never an argument value.
+    Discover {
+        /// The same tool-neutral invocation value `trials run` takes. Reused deliberately: a
+        /// second, discovery-only invocation format would be a place for per-tool special-casing
+        /// to reappear.
+        #[arg(long)]
+        invocation: PathBuf,
+        /// Directory that gets the harness's fresh workspace and the two output files.
+        #[arg(long)]
+        workspace_root: PathBuf,
+        /// Optional version string to record in the manifest, e.g. the pinned commit.
+        #[arg(long)]
+        tool_version: Option<String>,
+        /// Seconds to wait for the harness to declare its tools before giving up. A timeout
+        /// yields an EMPTY corpus and a note, never a guess.
+        #[arg(long, default_value_t = 120)]
+        timeout_s: u64,
+        /// Written as `<out-prefix>-corpus.json` and `<out-prefix>-manifest.json`.
+        #[arg(long)]
+        out_prefix: PathBuf,
+    },
+    /// Compile the canonical semantic script for one dimension into ONE harness's dialect.
+    ///
+    /// Takes only the corpus. It is not given, and cannot read, which harness the corpus came
+    /// from — that is the identity-blindness guard, enforced by the type.
+    Compile {
+        #[arg(long)]
+        corpus: PathBuf,
+        /// correctness | recovery | security | cost
+        #[arg(long)]
+        dimension: String,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Recompute a translation's digests from the script and corpus it claims to address.
+    ///
+    /// This is what makes a hand-tuned translation detectable rather than trusted.
+    Verify {
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long)]
+        dimension: String,
+        #[arg(long)]
+        translation: PathBuf,
+    },
+    /// Print the pre-registered vocabulary's self-check: the version token and the result of the
+    /// mechanical "no vocabulary token is a product name" assertion.
+    Vocabulary,
+    /// THE COHORT GATE (panel amendment). Decide whether a dimension may be run AT ALL.
+    ///
+    /// A refusal by ANY harness makes the dimension ineligible for EVERY harness, including ours.
+    /// EXITS NON-ZERO when ineligible, so a driver script cannot proceed past it by accident —
+    /// the whole point of the gate is that it stops a run rather than annotating one.
+    Cohort {
+        /// Repeatable `label=path/to/corpus.json`. At least TWO are required: a comparative
+        /// benchmark that has lost a member has lost the thing it was measuring, and proceeding
+        /// with the survivors is how "we could not run the competitor, so we win" gets expressed.
+        #[arg(long = "member", value_name = "LABEL=CORPUS_JSON")]
+        members: Vec<String>,
+        #[arg(long)]
+        dimension: String,
+        /// Optional path to write the full `CohortEligibilityV1` decision as JSON.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -242,6 +327,7 @@ fn run(cli: Cli) -> anyhow::Result<String> {
         Command::Trials { command } => run_trials(command),
         Command::Claims { command } => run_claims(command),
         Command::Authority { command } => run_authority(command),
+        Command::Dialect { command } => run_dialect(command),
     }
 }
 
@@ -474,6 +560,248 @@ fn run_claims(command: ClaimsCommand) -> anyhow::Result<String> {
 // ---------------------------------------------------------------------------
 // Phase 30 F30-03 trials — one contiguous additive block.
 // ---------------------------------------------------------------------------
+
+/// SR-30-3 — per-tool dialect compilation.
+///
+/// Note what is NOT here: there is no per-tool branch anywhere in this function or anything it
+/// calls. `discover` runs the same code for every harness, and `compile` is not even told which
+/// harness a corpus belongs to.
+fn run_dialect(command: DialectCommand) -> anyhow::Result<String> {
+    match command {
+        DialectCommand::Vocabulary => {
+            let offenders = vocabulary_carries_no_product_token();
+            if !offenders.is_empty() {
+                anyhow::bail!(
+                    "DIALECT_VOCABULARY=TAINTED the vocabulary names a product: {offenders:?}"
+                );
+            }
+            Ok(format!(
+                "DIALECT_VOCABULARY=OK version={VOCABULARY_VERSION} product_tokens_found=0\n"
+            ))
+        }
+        DialectCommand::Cohort {
+            members,
+            dimension,
+            out,
+        } => {
+            let mut cohort = Vec::new();
+            for entry in &members {
+                let (label, path) = entry
+                    .split_once('=')
+                    .ok_or_else(|| anyhow::anyhow!("--member must be LABEL=PATH, got `{entry}`"))?;
+                let corpus: ToolSchemaCorpusV1 = serde_json::from_slice(&std::fs::read(path)?)?;
+                cohort.push((label.to_string(), corpus));
+            }
+            let decision = cohort_eligibility(&dimension, &cohort)?;
+            if let Some(out) = out {
+                std::fs::write(&out, serde_json::to_vec_pretty(&decision)?)?;
+            }
+            let mut report = String::new();
+            for member in &decision.members {
+                report.push_str(&format!(
+                    "  member={} declared_tools={} resolved={} refusal={} corpus_sha256={}\n",
+                    member.tool_label,
+                    member.declared_tools,
+                    member.resolved_tool.as_deref().unwrap_or("-"),
+                    member.refusal.as_deref().unwrap_or("-"),
+                    member.corpus_sha256
+                ));
+            }
+            // A gate that only ever printed would be a gate that cannot fail. Ineligible EXITS
+            // NON-ZERO, after printing every member's outcome so the cause is never a mystery.
+            if !decision.eligible {
+                anyhow::bail!("{}\n{report}", decision.verdict_line());
+            }
+            Ok(format!("{}\n{report}", decision.verdict_line()))
+        }
+        DialectCommand::Compile {
+            corpus,
+            dimension,
+            out,
+        } => {
+            let corpus: ToolSchemaCorpusV1 = serde_json::from_slice(&std::fs::read(&corpus)?)?;
+            let script = canonical_script(&dimension).ok_or_else(|| {
+                anyhow::anyhow!("no canonical script for dimension `{dimension}`")
+            })?;
+            // A refusal is a RESULT, not an error to be worked around. It exits non-zero so a
+            // caller cannot mistake it for a translation, and it names the reason so the leg can
+            // be recorded UNPROVEN with a cause rather than scored as a failure.
+            let translation = compile_script(&script, &corpus)?;
+            std::fs::write(&out, serde_json::to_vec_pretty(&translation)?)?;
+            let calls: Vec<&str> = translation
+                .steps
+                .iter()
+                .filter_map(|step| match step {
+                    CompiledStepV1::ToolCall(call) => Some(call.tool_name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            Ok(format!(
+                "DIALECT_COMPILE=OK dimension={} declared_tools={} calls={} tool_names={} \
+                 corpus_sha256={} translation_sha256={}\n",
+                dimension,
+                corpus.tools.len(),
+                calls.len(),
+                calls.join(","),
+                translation.corpus_sha256,
+                translation.translation_sha256
+            ))
+        }
+        DialectCommand::Verify {
+            corpus,
+            dimension,
+            translation,
+        } => {
+            let corpus: ToolSchemaCorpusV1 = serde_json::from_slice(&std::fs::read(&corpus)?)?;
+            let script = canonical_script(&dimension).ok_or_else(|| {
+                anyhow::anyhow!("no canonical script for dimension `{dimension}`")
+            })?;
+            let translation: TranslationV1 = serde_json::from_slice(&std::fs::read(&translation)?)?;
+            translation.verify(&script, &corpus)?;
+            Ok(format!(
+                "DIALECT_VERIFY=OK dimension={} vocabulary={} corpus_sha256={} \
+                 translation_sha256={}\n",
+                dimension,
+                translation.vocabulary_version,
+                translation.corpus_sha256,
+                translation.translation_sha256
+            ))
+        }
+        DialectCommand::Discover {
+            invocation,
+            workspace_root,
+            tool_version,
+            timeout_s,
+            out_prefix,
+        } => {
+            let invocation: ToolInvocationV1 =
+                serde_json::from_slice(&std::fs::read(&invocation)?)?;
+            let runtime = tokio::runtime::Runtime::new()?;
+            let capture = runtime.block_on(discover_dialect(
+                &invocation,
+                &workspace_root,
+                tool_version,
+                Duration::from_secs(timeout_s),
+            ))?;
+            let corpus_path = out_prefix.with_file_name(format!(
+                "{}-corpus.json",
+                out_prefix
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("dialect")
+            ));
+            let manifest_path = out_prefix.with_file_name(format!(
+                "{}-manifest.json",
+                out_prefix
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("dialect")
+            ));
+            std::fs::write(&corpus_path, serde_json::to_vec_pretty(&capture.corpus)?)?;
+            std::fs::write(
+                &manifest_path,
+                serde_json::to_vec_pretty(&capture.manifest)?,
+            )?;
+            let names: Vec<&str> = capture
+                .corpus
+                .tools
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect();
+            Ok(format!(
+                "DIALECT_DISCOVER label={} declared_tools={} requests={} corpus_sha256={} \
+                 model={} names={}\n",
+                capture.manifest.tool_label,
+                capture.corpus.tools.len(),
+                capture.manifest.requests_observed,
+                capture.manifest.corpus_sha256,
+                capture.manifest.model_requested.as_deref().unwrap_or("-"),
+                names.join(","),
+            ))
+        }
+    }
+}
+
+/// Launch one harness against a discovery meter and capture what it declares.
+///
+/// The environment discipline is copied from `drive_leg` verbatim — `env_clear()` plus the same
+/// non-secret allowlist — because a discovery pass that ran with an ambient credential present
+/// would be a credential leak in an unscored corner where nobody was looking.
+async fn discover_dialect(
+    invocation: &ToolInvocationV1,
+    workspace_root: &Path,
+    tool_version: Option<String>,
+    timeout: Duration,
+) -> anyhow::Result<wcore_eval_scenarios::dialect_discovery::DiscoveryCapture> {
+    let workspace = workspace_root.join(format!("discover-{}", invocation.tool.token()));
+    std::fs::create_dir_all(&workspace)?;
+
+    let meter = RunningDiscoveryMeter::start().await?;
+    let base_url = format!("{}{}", meter.base_url(), invocation.base_url_suffix);
+
+    for (relative, contents) in &invocation.workspace_seed_files {
+        let path = workspace.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, contents.replace("{{BASE_URL}}", &base_url))?;
+    }
+
+    // `{{BASE_URL}}` is substituted in ARGV as well as in seed files. The fixture binds port 0, so
+    // a harness that takes its endpoint on the command line rather than from an environment
+    // variable or a config file cannot otherwise be pointed at it. The facility is available to
+    // every harness identically and, like the seed-file facility, is carried as DATA in the
+    // invocation so a reader sees exactly what each harness needed.
+    let args: Vec<String> = invocation
+        .args
+        .iter()
+        .map(|arg| arg.replace("{{BASE_URL}}", &base_url))
+        .collect();
+
+    let started = Instant::now();
+    let mut child = {
+        let mut cmd = tokio::process::Command::new(&invocation.program);
+        cmd.args(&args)
+            .current_dir(&workspace)
+            .kill_on_drop(true)
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", workspace.display().to_string())
+            .env("LANG", "C.UTF-8")
+            .env(&invocation.base_url_env, &base_url)
+            // The same synthetic literal the frozen protocol uses. It authenticates nothing.
+            .env("OPENAI_API_KEY", "wayland-frontier-trial-not-a-secret");
+        for (key, value) in &invocation.extra_env {
+            cmd.env(key, value);
+        }
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        cmd.spawn()?
+    };
+
+    // Stop as soon as the declaration is in hand — there is nothing further to learn — or when
+    // the harness exits, or at the timeout. A timeout produces an EMPTY corpus and a note.
+    loop {
+        if meter.requests_observed() > 0 && !meter.capture("probe", None).corpus.tools.is_empty() {
+            break;
+        }
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        if started.elapsed() > timeout {
+            let _ = child.start_kill();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let _ = child.kill().await;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let _ = child.start_kill();
+    let capture = meter.capture(invocation.tool.token(), tool_version);
+    meter.shutdown().await?;
+    Ok(capture)
+}
 
 fn run_trials(command: TrialsCommand) -> anyhow::Result<String> {
     match command {

@@ -1,0 +1,132 @@
+# 30-DIALECT — running notes (append-only; committed early per LANE-BRIEF §6b-i)
+
+Lane `lane/30-dialect`, branched from `plan/f20-unified-audit-repair` @ `8bcb052b`.
+Started 2026-07-29.
+
+---
+
+## T+0 — what I read, and what the defect actually is
+
+Read: `30-PHASE-VERDICT.md` §2, `30-02-TRIAL-PROTOCOL.md`, `30-02-TRIAL-RESULTS.md`,
+`.planning/SEAM-REQUESTS/30.md` (SR-30-3), `evidence/30-02/protocol.json`.
+
+The frozen canonical script (`protocol.json.fixture_script`) emits, for correctness / recovery /
+cost, a tool call literally named **`write_file`** with arguments `{path, content}`; for security,
+**`read_file`** with `{path}`. Measured outcome: Hermes 30/30 on correctness and recovery,
+Wayland 0/30, OpenClaw 0/30. Wayland's equivalent tool is named `Write`.
+
+So the script is not neutral — it is one tool's dialect. Two of three harnesses failed to *parse*
+the task, not to *do* it. All nine RUN legs are confounded and 30-03's
+`confounded_leg_supports_no_comparison` mechanically refuses every comparison resting on them.
+
+## T+0 — the constraint that shapes the whole design
+
+`protocol.json` is **frozen** and pre-registered (commit `a7bd5d87`, provably before any
+measurement). Amending it is the single forbidden act of 30-02. So this lane must produce a
+**new pre-registration (protocol v2)** carrying translation digests — not an edit to v1.
+SR-30-3 says this explicitly.
+
+## T+0 — where a tool's own dialect can be obtained mechanically (the key idea)
+
+An OpenAI-compatible agent harness **declares its own tool schema on the wire**: the `tools:`
+array of the `/v1/chat/completions` request body it sends to the model. The loopback fixture
+already sits on that wire and already records request bodies for the purpose of routing.
+
+Therefore the translation does **not** have to be hand-written per tool. It can be *derived from
+the peer's own bytes*: capture each harness's declared `tools` array in an unscored discovery
+pass, then compile the canonical semantic intent into whichever declared tool the harness itself
+advertises for that intent, using that harness's own declared parameter names.
+
+This is the difference between "I wrote a mapping for each tool" (bias hides here) and
+"each tool told the meter what it exposes, and one identical rule read all three answers".
+
+## T+0 — the bias attack surface I have to close, stated before I build
+
+A dialect compiler is where a vendor-run benchmark would cheat. Named risks:
+
+- **R1** — I translate Wayland's intent faithfully and the peers' sloppily.
+- **R2** — the matching rule keys on tokens that happen to be Wayland's names (`Write`, `Edit`).
+- **R3** — I retry / hand-tune until Wayland's translation works and stop early on a peer.
+- **R4** — an ambiguous match gets resolved "helpfully" for us and "strictly" for them.
+- **R5** — I claim byte identity across tools when the bytes necessarily differ.
+
+Planned guards (to be built and panel-attacked, not asserted):
+
+- **G1** pre-register the intent vocabulary *before* capturing any schema, commit order provable;
+  assert no vocabulary token is a product name.
+- **G2** compile on **anonymized** schemas — the compiler never receives tool identity, and a
+  **label-permutation self-test** asserts output is invariant under relabelling.
+- **G3** **refuse on ambiguity**: no clear winner ⇒ `DIALECT_UNRESOLVED` ⇒ leg UNPROVEN.
+  A refusal is never scored as a peer failure.
+- **G4** exactly one compilation attempt per tool from the same inputs; any hand edit invalidates
+  the digest.
+- **G5** hash every translation; state plainly that translations are *semantically* equivalent and
+  **not** byte-identical (codex's exact prescription in SR-30-3).
+
+## T+0 — scope decision, taken up front
+
+Per the lane brief: **do not publish re-taken comparatives in this lane unless the panel clears
+the compiler.** Deliverable is the compiler + its bias guard + a registered protocol v2 + panel
+verdict + a statement of what becomes re-takeable. Live evidence targeted at the *discovery*
+pass (real declared schemas off the wire), which is not a comparative.
+
+## T+30 — measured answers to the open questions
+
+**Q: can the frozen meter give me the `tools` array?** **No.** `fixtures/openai.rs:311`
+`FixtureRequestRecord` holds `body_sha256`, `semantic_body_sha256`, `semantic_leaf_sha256`,
+`model` — no body. That is SR-30-1 restated. And the file is a hard scope fence.
+⇒ **Discovery gets its OWN instrument**, a separate loopback schema-capture meter. The frozen
+meter stays byte-untouched, which also keeps every 30-02 number meaning what it meant.
+
+**Q: does Wayland Core even declare tools on that wire?** **Yes** —
+`crates/wcore-providers/src/openai.rs:806` `body["tools"] = json!(Self::build_tools(&request.tools))`.
+So the harness's own declaration is observable on the wire for the tool under test.
+
+**Q: are the 30-02 peer installs still on hetzner?** **No** — they were disposable directories and
+are gone (`find /root /srv /opt` for `pyproject.toml`/`openclaw.mjs`: 0 hits; no `inv-*.json`).
+`/root/wayland-30-02` (the repo worktree) survives. Re-provisioning is possible — Sean's reference
+checkouts are on the Mac at `/Users/seandonahoe/dev/resources/openclaw` (and hermes) — but costs
+a 392 MB bundle transfer (which failed at 42% last time) plus a 243 s OpenClaw build.
+`df -h /root` = 720G free, so space is not the constraint; time and the lane budget are.
+
+**Q: fixture uses a FIFO cursor keyed on nothing?** Confirmed: `handle_chat_completion` pops
+`steps[cursor]` with no reference to the request at all (`openai.rs:522`). So a compiled script is
+served exactly as authored — the compiler is the only thing that has to be right.
+
+## T+30 — SCOPE DECISION (taken, not parked — brief §3.3)
+
+Deliver, in this order:
+
+1. `dialect.rs` in `wcore-eval-scenarios` — canonical semantic script + identity-blind compiler.
+2. A discovery meter (new file, NOT `fixtures/openai.rs`) that records the declared `tools` array.
+3. `wayland-scorecard dialect {discover,compile,verify}`.
+4. **Commit 1–3 with SYNTHETIC corpora only, BEFORE capturing any real schema.** That makes the
+   vocabulary's pre-registration provable from git order — the same technique that made 30-02's
+   protocol a pre-registration rather than a document. If I capture Wayland's real schema first
+   and then write the vocabulary, the vocabulary is tuned and G1 is worthless.
+5. Only then: live capture on hetzner against the real `wayland-core` binary.
+6. Protocol v2 pre-registration document + json, panel, verdict.
+
+**Not doing in this lane:** re-taking or publishing the nine comparatives. The brief forbids it
+until the panel clears the compiler, and peer re-provisioning is a separate cost.
+
+**Credential note:** every leg of this work is loopback-only. `~/.wayland-secrets/flux.env` is
+expected to stay unopened; spend on it should be $0. Recorded here up front so the claim is
+falsifiable later.
+
+## STILL TO ESTABLISH
+
+- [ ] Compiler + tests green on hetzner (`cargo test -p wcore-eval-scenarios`).
+- [ ] Real Wayland schema captured off the wire.
+- [ ] Panel (4-way) on the compiler + bias guard + v2.
+
+---
+
+## T+final — outcome
+
+Compiler + discovery + protocol v2 + 4/4 panel + live capture all landed. Panel struck three of
+my five fairness claims; struck in the code, not footnoted. G6 (symmetric-resolution gate) added
+and live-proven, including the row where Wayland resolves cleanly and is STILL unpublishable.
+
+Cohort gate today: INELIGIBLE, rc=1, COHORT_TOO_SMALL:1. No comparative re-taken — correct.
+Report: `30-DIALECT.md`. Provider spend $0.00 (loopback only; flux.env never opened).

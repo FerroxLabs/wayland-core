@@ -1,0 +1,9 @@
+{
+  "tool_label": "wayland",
+  "tool_version": "0.12.25 lane/30-dialect@cb38864d",
+  "captured_at_utc": "unix:1785289303",
+  "corpus_sha256": "10c85fbd29ba89bdd08539c63d73744efb5616f584ed84c7f96e4c4a9e8f1323",
+  "requests_observed": 1,
+  "model_requested": "fixture-chat-v1",
+  "notes": []
+}
