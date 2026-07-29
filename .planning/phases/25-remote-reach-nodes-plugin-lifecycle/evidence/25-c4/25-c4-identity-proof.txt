@@ -1,0 +1,20 @@
+F25-C4 IDENTITY PROOF — host=hetzner-dsm commit=e34a323c3c6fe8183baa1be3d073ada6b1f5240b
+date=2026-07-29T13:21:16Z
+local key_id     = "key_id": "734fdfe33de0727253404f3f63b3041733a90a1ed085af2d64a16a9d0a454322"
+container key_id = "key_id": "9c4b6df51086f641776dce68a3c7e39d550c09f77dd08db99102d53c05829777"
+
+=== 1 POSITIVE: local receipt vs local key ===
+INTEGRITY: OK — body digest, event ordering, single terminal event and internal consistency all hold.
+IDENTITY:  OK — the attestation verifies against backend 'local' (key id 734fdfe33de0727253404f3f63b3041733a90a1ed085af2d64a16a9d0a454322). This receipt was signed by the backend it claims to come from.
+EXIT=0
+
+=== 2 NEGATIVE: container receipt vs LOCAL key ===
+INTEGRITY: OK — body digest, event ordering, single terminal event and internal consistency all hold.
+wayland-core backend: IDENTITY: REFUSED — this receipt does NOT verify against backend 'local' (expected key id 734fdfe33de0727253404f3f63b3041733a90a1ed085af2d64a16a9d0a454322, receipt carries key id 9c4b6df51086f641776dce68a3c7e39d550c09f77dd08db99102d53c05829777): receipt is invalid: backend identity mismatch. The body digest is intact, so this is an identity failure, not a tampering failure: the receipt was signed by a different (rotated-out, foreign or compromised) key.
+EXIT=1 (captured separately below)
+REAL_EXIT=1
+
+=== 3 DEFAULT: no flag ===
+INTEGRITY: OK — body digest, event ordering, single terminal event and internal consistency all hold.
+IDENTITY:  NOT ESTABLISHED by this command. A receipt cannot authenticate itself: verifying identity requires a verifying key the caller already pinned, which a receipt file does not carry. Pass --against-backend <name> to check it against a live backend's key, or use the conformance harness.
+REAL_EXIT=0
