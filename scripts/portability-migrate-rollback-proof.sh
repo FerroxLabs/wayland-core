@@ -105,6 +105,62 @@ run_migrate() {
         "$BIN" migrate "$PEER" --home "$2" --yes --overwrite
 }
 
+# --- INSTRUMENT REPAIR: what `$!` actually names ------------------------------
+#
+# The first version of this script backgrounded the shell FUNCTION above:
+#
+#     run_migrate "$H" "$MAIN_CORPUS" > log 2>&1 &
+#     PID=$!
+#     kill -9 "$PID"
+#
+# `$!` is then the pid of the SUBSHELL the function body runs in, not the
+# product. `kill -9` killed the wrapper and the product ran to completion, so
+# every one of 27 trials reported a home that had been fully imported and the
+# proof failed for a reason that had nothing to do with rollback. The failure was
+# loud only because the byte-identity gate happened to be strict; a proof whose
+# gate had been "the home is not corrupt" would have PASSED having never
+# interrupted anything.
+#
+# The repair is to background the product itself — a simple command with an
+# environment prefix, whose `$!` is the product's pid — and then to CHECK that,
+# rather than trusting the shell's semantics on whichever /bin/sh is present.
+launch_migrate_bg() {
+    # $1 = home, $2 = corpus, $3 = logfile
+    WAYLAND_HOME="$1" WAYLAND_MIGRATE_SCOPE_PROBE=1 \
+        "$BIN" migrate "$PEER" --home "$2" --yes --overwrite > "$3" 2>&1 &
+}
+
+# PID-TARGETING CONTROL, with the third assertion §6b-ii requires: it is not
+# enough that the check passes now, it must be a check the BROKEN version would
+# have failed. So both launch mechanisms are measured and compared.
+pid_comm() { cat "/proc/$1/comm" 2>/dev/null; }
+
+PC_HOME="$WORK/pidctl-home"; mkdir -p "$PC_HOME"
+launch_migrate_bg "$PC_HOME" "$MAIN_CORPUS" "$WORK/pidctl.log"
+GOOD_PID=$!
+GOOD_COMM=$(pid_comm "$GOOD_PID")
+kill -9 "$GOOD_PID" 2>/dev/null; wait "$GOOD_PID" 2>/dev/null
+
+PC_HOME2="$WORK/pidctl-home2"; mkdir -p "$PC_HOME2"
+run_migrate "$PC_HOME2" "$MAIN_CORPUS" > "$WORK/pidctl2.log" 2>&1 &
+BAD_PID=$!
+BAD_COMM=$(pid_comm "$BAD_PID")
+kill -9 "$BAD_PID" 2>/dev/null; wait "$BAD_PID" 2>/dev/null
+pkill -9 -f "migrate $PEER --home $MAIN_CORPUS" 2>/dev/null
+
+echo "PID-TARGETING-CONTROL: direct-launch comm='$GOOD_COMM' function-launch comm='$BAD_COMM'"
+case "$GOOD_COMM" in
+    wayland-core*) : ;;
+    *) FAIL "the kill target is '$GOOD_COMM', not the product; this proof cannot interrupt anything" ;;
+esac
+if [ "$GOOD_COMM" = "$BAD_COMM" ]; then
+    # Not a failure of the product — a failure of this control to discriminate.
+    # If both mechanisms name the same thing the control proves nothing, and a
+    # future regression back to the function launch would go unnoticed.
+    FAIL "the pid-targeting control cannot tell the two launch mechanisms apart ('$GOOD_COMM'); it would not have caught the defect it exists for"
+fi
+rm -rf "$PC_HOME" "$PC_HOME2"
+
 # --- the pre-operation home ---------------------------------------------------
 # Built ONCE, then copied per trial. It holds:
 #   * a real prior import (quarantine entries + config profiles) — in scope;
@@ -178,10 +234,21 @@ echo "SCOPE-PROBE: armed, reference import rc=0"
 
 # --- trial machinery ----------------------------------------------------------
 # $1 arm name, $2 do_kill(yes|no), $3 do_rollback(yes|no)
-MID=0; EQUAL=0; DIFFER=0; RESIDUE=0; RECOVERED_TOTAL=0
+#
+# Trials are counted BY CLASS, because the correct outcome differs by class and
+# a single "all trials equal PRE" gate would demand that recovery revert a
+# COMPLETED import — the opposite of what it must do:
+#
+#   interrupted (mid|pre) -> after rollback, byte-identical to PRE
+#   completed   (post)    -> after rollback, NOT equal to PRE; the work stands
+MID=0; PRECLASS=0; POSTCLASS=0
+INT_EQ=0; INT_NEQ=0; COMP_EQ=0; MID_DIFFER=0
+RESIDUE=0; RECOVERED_TOTAL=0
 run_arm() {
     ARM="$1"; DO_KILL="$2"; DO_ROLLBACK="$3"
-    MID=0; EQUAL=0; DIFFER=0; RESIDUE=0; RECOVERED_TOTAL=0
+    MID=0; PRECLASS=0; POSTCLASS=0
+    INT_EQ=0; INT_NEQ=0; COMP_EQ=0; MID_DIFFER=0
+    RESIDUE=0; RECOVERED_TOTAL=0
     echo
     echo "--- ARM: $ARM (kill=$DO_KILL rollback=$DO_ROLLBACK) ---"
     echo "TRIAL-TABLE[$ARM]: trial delay_ms class recovered digest_equal journal_residue"
@@ -196,7 +263,7 @@ run_arm() {
         DELAY_MS=$(( DUR_MS * k / (TRIALS + 1) ))
 
         if [ "$DO_KILL" = yes ]; then
-            run_migrate "$H" "$MAIN_CORPUS" > "$WORK/$ARM-$k.log" 2>&1 &
+            launch_migrate_bg "$H" "$MAIN_CORPUS" "$WORK/$ARM-$k.log"
             PID=$!
             python3 -c "import time,sys; time.sleep(float(sys.argv[1])/1000.0)" "$DELAY_MS"
             # SIGKILL is uncatchable: no handler, no atexit, no Drop. Whatever
@@ -208,14 +275,24 @@ run_arm() {
         fi
 
         # Classify from the home's own state, BEFORE any rollback.
+        #
+        # An OPEN JOURNAL RECORD is the classifier, not a digest comparison.
+        # `config.toml` embeds the absolute home in derived keys, so two homes
+        # at different paths never digest equal even after identical, complete
+        # imports — a digest-only classifier called every completed run `mid`,
+        # which is how the first version of this script mislabelled all 27
+        # trials. An open record means the process died inside the window the
+        # journal covers, which is exactly the thing being claimed.
         KILL_DIGEST=$(digest_of "$H")
-        if [ "$KILL_DIGEST" = "$PRE_DIGEST" ]; then
-            CLASS=pre
-        elif [ "$KILL_DIGEST" = "$POST_DIGEST" ]; then
-            CLASS=post
-        else
+        OPEN_RECORDS=$(find "$H/.wayland-backup-journal" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+        if [ "${OPEN_RECORDS:-0}" -gt 0 ]; then
             CLASS=mid; MID=$((MID + 1))
+        elif [ "$KILL_DIGEST" = "$PRE_DIGEST" ]; then
+            CLASS=pre; PRECLASS=$((PRECLASS + 1))
+        else
+            CLASS=post; POSTCLASS=$((POSTCLASS + 1))
         fi
+        [ "$CLASS" = mid ] && [ "$KILL_DIGEST" != "$PRE_DIGEST" ] && MID_DIFFER=$((MID_DIFFER + 1))
 
         REC=0
         if [ "$DO_ROLLBACK" = yes ]; then
@@ -226,7 +303,13 @@ run_arm() {
         fi
 
         FINAL=$(digest_of "$H")
-        if [ "$FINAL" = "$PRE_DIGEST" ]; then EQ=yes; EQUAL=$((EQUAL + 1)); else EQ=no; DIFFER=$((DIFFER + 1)); fi
+        if [ "$FINAL" = "$PRE_DIGEST" ]; then EQ=yes; else EQ=no; fi
+        case "$CLASS" in
+            mid|pre)
+                if [ "$EQ" = yes ]; then INT_EQ=$((INT_EQ + 1)); else INT_NEQ=$((INT_NEQ + 1)); fi ;;
+            post)
+                [ "$EQ" = yes ] && COMP_EQ=$((COMP_EQ + 1)) ;;
+        esac
 
         # A digest that EXCLUDES the journal directory cannot see bookkeeping
         # left behind, so that is checked separately rather than assumed.
@@ -249,67 +332,84 @@ run_arm() {
         k=$((k + 1))
     done
     echo "ARM-$ARM CLASS-MID: $MID"
-    echo "ARM-$ARM DIGEST-EQUAL-PRE: $EQUAL"
-    echo "ARM-$ARM DIGEST-DIFFERS-PRE: $DIFFER"
+    echo "ARM-$ARM CLASS-PRE: $PRECLASS"
+    echo "ARM-$ARM CLASS-POST: $POSTCLASS"
+    echo "ARM-$ARM INTERRUPTED-EQUAL-PRE: $INT_EQ"
+    echo "ARM-$ARM INTERRUPTED-DIFFERS-PRE: $INT_NEQ"
+    echo "ARM-$ARM COMPLETED-REVERTED-TO-PRE: $COMP_EQ"
+    echo "ARM-$ARM MID-DAMAGED-BEFORE-ROLLBACK: $MID_DIFFER"
     echo "ARM-$ARM JOURNAL-RESIDUE: $RESIDUE"
     echo "ARM-$ARM RECOVERED-OPERATIONS: $RECOVERED_TOTAL"
 }
 
 # --- arm 1: the property ------------------------------------------------------
 run_arm rollback yes yes
-R_MID=$MID; R_EQUAL=$EQUAL; R_DIFFER=$DIFFER; R_RESIDUE=$RESIDUE; R_REC=$RECOVERED_TOTAL
+R_MID=$MID; R_INT_EQ=$INT_EQ; R_INT_NEQ=$INT_NEQ; R_COMP_EQ=$COMP_EQ
+R_RESIDUE=$RESIDUE; R_REC=$RECOVERED_TOTAL
 
 # --- arm 2: the known-negative ------------------------------------------------
-# The identical kills with the rollback REMOVED. This must produce differing
-# digests, or the comparison in arm 1 is a dead instrument.
+# The identical kills with the rollback REMOVED. A mid-apply kill must leave the
+# home DIFFERENT from PRE, or the comparison in arm 1 is a dead instrument that
+# would report "identical" for anything.
 run_arm norollback yes no
-N_MID=$MID; N_EQUAL=$EQUAL; N_DIFFER=$DIFFER
+N_MID=$MID; N_MID_DIFFER=$MID_DIFFER; N_INT_EQ=$INT_EQ
 
 # --- arm 3: recovery must not revert completed work ---------------------------
 run_arm nokill no yes
-K_MID=$MID; K_REC=$RECOVERED_TOTAL; K_EQUAL=$EQUAL
+K_MID=$MID; K_POST=$POSTCLASS; K_REC=$RECOVERED_TOTAL; K_COMP_EQ=$COMP_EQ
 
 echo
 echo "=== VERDICT INPUTS ==="
 echo "ROLLBACK-ARM-MID: $R_MID"
-echo "ROLLBACK-ARM-EQUAL: $R_EQUAL / $TRIALS"
-echo "ROLLBACK-ARM-DIFFER: $R_DIFFER"
+echo "ROLLBACK-ARM-INTERRUPTED-EQUAL-PRE: $R_INT_EQ"
+echo "ROLLBACK-ARM-INTERRUPTED-DIFFERS-PRE: $R_INT_NEQ"
+echo "ROLLBACK-ARM-COMPLETED-REVERTED: $R_COMP_EQ"
 echo "ROLLBACK-ARM-JOURNAL-RESIDUE: $R_RESIDUE"
 echo "ROLLBACK-ARM-RECOVERED: $R_REC"
 echo "NOROLLBACK-ARM-MID: $N_MID"
-echo "NOROLLBACK-ARM-EQUAL: $N_EQUAL"
-echo "NOROLLBACK-ARM-DIFFER: $N_DIFFER"
+echo "NOROLLBACK-ARM-MID-DAMAGED: $N_MID_DIFFER"
+echo "NOROLLBACK-ARM-INTERRUPTED-EQUAL-PRE: $N_INT_EQ"
 echo "NOKILL-ARM-MID: $K_MID"
+echo "NOKILL-ARM-POST: $K_POST"
 echo "NOKILL-ARM-RECOVERED: $K_REC"
-echo "NOKILL-ARM-EQUAL-PRE: $K_EQUAL"
+echo "NOKILL-ARM-COMPLETED-REVERTED: $K_COMP_EQ"
 
 # --- gates --------------------------------------------------------------------
 # Hazard 1: the kills must have landed mid-apply.
 [ "$R_MID" -ge 3 ] \
     || FAIL "only $R_MID of $TRIALS kills landed mid-apply; the window was not exercised"
+[ "$R_REC" -ge "$R_MID" ] \
+    || FAIL "$R_MID trials were killed mid-apply but only $R_REC operations were recovered"
 
 # Hazard 3, the important one: the known-negative must actually fail.
-[ "$N_DIFFER" -ge 1 ] \
-    || FAIL "the known-negative arm reported every home identical to PRE without any rollback; the digest comparison cannot report a difference and arm 1 proves nothing"
-[ "$N_DIFFER" -ge "$N_MID" ] \
-    || FAIL "the known-negative arm had $N_MID mid-apply kills but only $N_DIFFER differing homes"
+[ "$N_MID" -ge 1 ] \
+    || FAIL "the known-negative arm landed no mid-apply kills, so it cannot demonstrate anything"
+[ "$N_MID_DIFFER" -eq "$N_MID" ] \
+    || FAIL "the known-negative arm had $N_MID mid-apply kills but only $N_MID_DIFFER left the home differing from PRE; the digest comparison cannot report a difference and arm 1 proves nothing"
 
-# The property.
-[ "$R_EQUAL" -eq "$TRIALS" ] \
-    || FAIL "$R_DIFFER of $TRIALS rolled-back homes were NOT byte-identical to the pre-operation state"
+# The property: every INTERRUPTED trial comes back byte-identical.
+[ "$R_INT_NEQ" -eq 0 ] \
+    || FAIL "$R_INT_NEQ interrupted homes were NOT byte-identical to the pre-operation state after rollback"
+[ "$R_INT_EQ" -ge "$R_MID" ] \
+    || FAIL "fewer homes came back to PRE ($R_INT_EQ) than were interrupted mid-apply ($R_MID)"
 [ "$R_RESIDUE" -eq 0 ] \
     || FAIL "$R_RESIDUE rolled-back homes still carry journal bookkeeping"
 
 # Recovery must not revert work that finished.
+[ "$R_COMP_EQ" -eq 0 ] \
+    || FAIL "$R_COMP_EQ COMPLETED imports were reverted to the pre-operation state by the rollback arm"
+[ "$K_POST" -eq "$TRIALS" ] \
+    || FAIL "the no-kill arm did not complete every import ($K_POST of $TRIALS reached post)"
 [ "$K_REC" -eq 0 ] \
     || FAIL "the no-kill arm recovered $K_REC operations; recovery acted on a COMPLETED import"
-[ "$K_EQUAL" -eq 0 ] \
-    || FAIL "the no-kill arm left $K_EQUAL homes equal to the PRE state; a completed import was reverted"
+[ "$K_COMP_EQ" -eq 0 ] \
+    || FAIL "the no-kill arm reverted $K_COMP_EQ completed imports to the PRE state"
 
 echo
 echo "PROOF: PASS"
-echo "  $R_MID/$TRIALS kills landed mid-apply; all $TRIALS rolled-back homes are"
-echo "  byte-identical to the pre-operation digest $PRE_DIGEST, with no journal residue."
-echo "  The known-negative arm (same kills, no rollback) differed on $N_DIFFER/$TRIALS,"
-echo "  so the comparison can report a difference."
-echo "  The no-kill arm recovered 0 operations, so a completed import is not reverted."
+echo "  $R_MID/$TRIALS kills landed mid-apply (open journal record observed);"
+echo "  all $R_INT_EQ interrupted homes came back byte-identical to the pre-operation"
+echo "  digest $PRE_DIGEST, with no journal residue and $R_REC operations recovered."
+echo "  Known-negative arm: $N_MID_DIFFER/$N_MID mid-apply kills left the home DIFFERENT"
+echo "  from PRE without a rollback, so the comparison can report a difference."
+echo "  No-kill arm: $K_POST/$TRIALS imports completed, 0 recovered, 0 reverted."
