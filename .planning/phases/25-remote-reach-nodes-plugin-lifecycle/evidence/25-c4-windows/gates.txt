@@ -1,0 +1,84 @@
+F25-C4 WINDOWS — GATES at commit fa16cb53, host SeanDesktop, 2026-07-29T16:41:50.3978839Z
+toolchain: rustc 1.95.0 (59807616e 2026-04-14) x86_64-pc-windows-msvc
+exit codes read from a STATUS FILE (WLRC_* .. WLDONE), read back by a separate ssh call
+
+WLRC_CHECK=0
+WLRC_EGRESS=101
+WLRC_EXECBACKEND=101
+WLRC_CLILIB=0
+WLRC_ISO_EGRESS=101
+WLRC_ISO_REGISTRY=0
+WLDONE
+
+=== cargo check --workspace --all-targets ===
+warning: unused import: `Component`
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 43s
+
+=== test-egress ===
+  test result: FAILED. 26 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s
+  FAILED: tests::transport_failure_records_one_stable_error_class
+
+=== test-execbackend ===
+  test result: FAILED. 86 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+  FAILED: registry::tests::a_recorded_task_is_readable_by_another_caller_and_removable
+
+=== test-cli-lib ===
+  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+  test result: ok. 1866 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 8.42s
+
+=== iso-egress ===
+  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 26 filtered out; finished in 1.01s
+  FAILED: tests::transport_failure_records_one_stable_error_class
+
+=== iso-registry ===
+  test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 0.47s
+  test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+  test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+  test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+  test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+  test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+  test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+=== the one genuine RED, characterised (3/3 reproducible in isolation) ===
+  run1 left: TransportError { class: Timeout }
+  run1 right: TransportError { class: Connect }
+  run1 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 26 filtered out; finished in 1.01s
+  run2 left: TransportError { class: Timeout }
+  run2 right: TransportError { class: Connect }
+  run2 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 26 filtered out; finished in 1.00s
+  run3 left: TransportError { class: Timeout }
+  run3 right: TransportError { class: Connect }
+  run3 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 26 filtered out; finished in 1.03s
+
+=== RAW SOCKET PROBE — the RED is the PLATFORM, not the product ===
+Same experiment as the test, with no wayland-core code in it at all: bind a
+loopback listener on an ephemeral port, Stop() it, then connect to that port.
+
+  probe 1 port=56492 NO-ANSWER-IN-2000ms elapsed=2042
+  probe 2 port=56494 NO-ANSWER-IN-2000ms elapsed=2011
+  probe 3 port=56496 NO-ANSWER-IN-2000ms elapsed=2013
+
+Windows sends no RST for a just-released loopback ephemeral port — the SYN is
+dropped, so the connect TIMES OUT. The test's premise, "closed listener must
+refuse the connection", is a Unix assumption. wcore-egress classified what
+actually happened (Timeout) correctly; the assertion demanding Connect is what
+is wrong on this platform.
+
+NOT FIXED, and deliberately not: weakening the assertion to accept either class
+would be engineering a green. Reported RED with the output, per LANE-BRIEF §5.
+
+PRE-EXISTING, not caused by this lane: the only source file this lane changed is
+crates/wcore-cli/src/backend.rs, and wcore-egress sits BELOW wcore-cli in the
+crate graph — it cannot see the change.
+
+=== registry::tests — a HARNESS mismatch, not a regression ===
+`registry::tests` sets the process-global WAYLAND_EXEC_BACKEND_STATE_DIR, with
+an in-source comment stating the tests "are single-threaded per process under
+nextest, which runs each test in its own process". `cargo test` runs them in ONE
+process on a thread pool, so siblings race. With --test-threads=1: 10 passed,
+0 failed, 77 filtered out. Confirmed, not a defect in the code under test.
+
+=== test-cli-lib's "FAILED. 0 passed; 1 failed" line ===
+Not a wcore-cli failure. It is the captured stdout of a NESTED fixture harness a
+wcore-cli test spawns on purpose ("thread 'always_fails' panicked ... deliberate").
+wcore-cli --lib is 1866 passed / 0 failed, WLRC_CLILIB=0.

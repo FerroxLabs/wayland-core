@@ -236,6 +236,77 @@ pub const COMMAND_SPECS: &[WireSpec] = &[
         "call_id",
         "available"
     ),
+    // F22-C1 — host CONTROL of a durable Goal. Every one of these is answered
+    // in the CLI command loop; none is a shape with no dispatcher.
+    // `Safety`, not `Observational`: each mutates a durable authority-bearing
+    // chain, which is the same class `resume_turn` is graded at.
+    wire!(
+        "goal_open",
+        "commands/goal_open.json",
+        [
+            "goal_version",
+            "request_id",
+            "session_id",
+            "goal_id",
+            "objective",
+            "iterations",
+            "strategy",
+            "max_tokens"
+        ],
+        Safety,
+        "request_id_and_goal_id",
+        "durable_goals_v1"
+    ),
+    wire!(
+        "goal_declare_task",
+        "commands/goal_declare_task.json",
+        [
+            "goal_version",
+            "request_id",
+            "session_id",
+            "goal_id",
+            "task_id"
+        ],
+        Safety,
+        "request_id_and_goal_id",
+        "durable_goals_v1"
+    ),
+    wire!(
+        "goal_advance",
+        "commands/goal_advance.json",
+        [
+            "goal_version",
+            "request_id",
+            "session_id",
+            "goal_id",
+            "cursor"
+        ],
+        Safety,
+        "request_id_goal_id_and_cursor",
+        "durable_goals_v1"
+    ),
+    wire!(
+        "goal_cancel",
+        "commands/goal_cancel.json",
+        [
+            "goal_version",
+            "request_id",
+            "session_id",
+            "goal_id",
+            "cursor"
+        ],
+        Safety,
+        "request_id_goal_id_and_cursor",
+        "durable_goals_v1"
+    ),
+    wire!(
+        "goal_resync",
+        "commands/goal_resync.json",
+        ["goal_version", "request_id", "session_id"],
+        Safety,
+        "request_id_and_goal_id",
+        "durable_goals_v1"
+    ),
     wire!(
         "ping",
         "commands/ping.json",
@@ -787,6 +858,24 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "goal_id_and_cursor",
         "durable_goals_v1"
     ),
+    // F22-C1 — the refusal channel for the five Goal control commands.
+    // `Safety`, not `Observational`: a host that cannot read this cannot
+    // distinguish a refused control command from an accepted no-op, and the
+    // command loop's catch-all arm makes that silence the default.
+    wire!(
+        "goal_control_refused",
+        "events/goal_control_refused.json",
+        [
+            "goal_version",
+            "request_id",
+            "session_id",
+            "goal_id",
+            "reason"
+        ],
+        Safety,
+        "request_id_and_goal_id",
+        "durable_goals_v1"
+    ),
 ];
 
 pub const PRODUCER_COMMAND_TYPES: &[&str] = &[
@@ -808,6 +897,12 @@ pub const PRODUCER_COMMAND_TYPES: &[&str] = &[
     "grant_workspace_capability",
     "approval_resume",
     "host_send_message_result",
+    // F22-C1 host Goal control.
+    "goal_open",
+    "goal_declare_task",
+    "goal_advance",
+    "goal_cancel",
+    "goal_resync",
     "ping",
 ];
 
@@ -869,6 +964,7 @@ pub const PRODUCER_EVENT_TYPES: &[&str] = &[
     "anvil_receipt_invalidated",
     "goal_snapshot",
     "goal_transition",
+    "goal_control_refused",
     "pong",
 ];
 
@@ -1027,6 +1123,32 @@ pub fn command_fixture_values() -> BTreeMap<String, Value> {
         (
             "commands/remove_mcp_server.json".into(),
             json!({"type":"remove_mcp_server","lifecycle_version":1,"request_id":"mcp-remove-001","name":"desktop-tools"}),
+        ),
+        // F22-C1 host Goal control. Every value below is accepted by
+        // `ProtocolCommand` — pinned by the corpus's
+        // `every_command_fixture_deserializes_through_protocol_command`.
+        // Note there is no `parent_max_tokens` anywhere here, and that is not
+        // an omission: the parent envelope is the session's authority and a
+        // host cannot state one. See the module note in `commands.rs`.
+        (
+            "commands/goal_open.json".into(),
+            json!({"type":"goal_open","goal_version":1,"request_id":"goal-open-001","session_id":"session-desktop-001","goal_id":"goal-001","objective":"ship the desktop contract","iterations":8,"strategy":"fleet","max_tokens":10000}),
+        ),
+        (
+            "commands/goal_declare_task.json".into(),
+            json!({"type":"goal_declare_task","goal_version":1,"request_id":"goal-task-001","session_id":"session-desktop-001","goal_id":"goal-001","task_id":"publish","depends_on":["build"],"idempotency_key":"idem-publish"}),
+        ),
+        (
+            "commands/goal_advance.json".into(),
+            json!({"type":"goal_advance","goal_version":1,"request_id":"goal-advance-001","session_id":"session-desktop-001","goal_id":"goal-001","cursor":{"journal_sequence":22,"journal_digest":"sha256:goalcursor"}}),
+        ),
+        (
+            "commands/goal_cancel.json".into(),
+            json!({"type":"goal_cancel","goal_version":1,"request_id":"goal-cancel-001","session_id":"session-desktop-001","goal_id":"goal-001","cursor":{"journal_sequence":22,"journal_digest":"sha256:goalcursor"}}),
+        ),
+        (
+            "commands/goal_resync.json".into(),
+            json!({"type":"goal_resync","goal_version":1,"request_id":"goal-resync-001","session_id":"session-desktop-001","goal_id":"goal-001"}),
         ),
         (
             "commands/approval_resume.json".into(),
@@ -1636,6 +1758,20 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                 },
                 transition: GoalTransitionKind::LoopOwnerClaimed,
                 lifecycle: GoalLifecycleWire::Running,
+            },
+        ),
+        (
+            "events/goal_control_refused.json".into(),
+            ProtocolEvent::GoalControlRefused {
+                goal_version: GOAL_PROTOCOL_VERSION,
+                request_id: "goal-advance-001".into(),
+                session_id: "session-desktop-001".into(),
+                goal_id: "goal-001".into(),
+                // The fixture carries `cursor_stale` deliberately: it is the
+                // reason a correct host hits in normal operation (its view
+                // moved under it), so the shape Desktop must handle well is
+                // the one it will actually see, not a malformed-input case.
+                reason: crate::events::GoalControlRefusalReason::CursorStale,
             },
         ),
         (

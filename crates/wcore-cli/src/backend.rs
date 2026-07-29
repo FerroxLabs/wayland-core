@@ -131,28 +131,90 @@ pub enum ReceiptCmd {
 /// this is a no-op.
 ///
 /// A config that fails to resolve must NOT silently leave the boundary down:
-/// the whole point is that an unarmed policy is a fail-open. We surface the
-/// error and refuse to run the command.
-fn arm_egress_policy() -> Result<()> {
-    let config = wcore_config::config::Config::resolve(&wcore_config::config::CliArgs {
-        provider: None,
-        api_key: None,
-        base_url: None,
-        model: None,
-        max_tokens: None,
-        max_turns: None,
-        system_prompt: None,
-        profile: None,
-        auto_approve: false,
-        project_dir: None,
-    })
-    .context("resolving config to arm the egress policy for `backend`")?;
+/// the whole point is that an unarmed policy is a fail-open. But refusing to run
+/// is not the only way to avoid that, and it was the wrong one:
+/// `Config::resolve` fails with *"No API key found"* on any machine with no
+/// provider credential configured, and `backend` needs no provider at all. The
+/// first version of this function propagated that error, which killed the whole
+/// operator surface — `list`, `probe`, `run`, `cancel`, `orphans`, `scan` — on
+/// such a machine. Measured on `seandesktop` 2026-07-29 by lane
+/// `25-c4-windows`: `backend list` exits 0 with a full table on 0.12.25 and
+/// exits 1 with *"No API key found"* on the fixed binary. It was invisible on
+/// the Linux proof host only because `/root/.wayland/.env` there injects
+/// `ANTHROPIC_API_KEY` into every process.
+///
+/// Two failure shapes, deliberately handled differently, because collapsing
+/// them loses the operator's allowlist:
+///
+/// - [`wcore_config::config::MissingApiKey`] is documented in `wcore-config` as
+///   a *recoverable "needs setup"* condition rather than a config error — the
+///   TOML parsed fine, only the provider credential is absent. Falling back to
+///   [`Config::default`] here would silently discard the operator's real
+///   `[security] egress_allow`, so a host with no provider key could not
+///   allowlist anything for `backend` at all. Measured: with that fallback, an
+///   `egress_allow = ["api.machines.dev"]` config still DENIED. Instead we
+///   re-resolve with a sentinel in `api_key`, which satisfies the provider gate
+///   and nothing else — `backend` opens no provider connection on any path, and
+///   `resolve` does not persist a CLI-supplied key. The `[security]` block then
+///   flows through the ordinary global+project merge, unchanged.
+/// - Any OTHER error is a genuine config fault (e.g. a TOML parse failure). We
+///   do NOT refuse — that is what killed the surface — but we arm from
+///   [`Config::default`], which is `[security] enabled = true` with an EMPTY
+///   operator allowlist, i.e. strictly *stricter* than any resolved config
+///   could have been, since `egress_allow` only ever adds hosts. Fail-closed,
+///   and loud rather than silent.
+fn arm_egress_policy() {
+    /// Satisfies `resolve`'s provider gate on a command that never speaks to a
+    /// provider. Never sent anywhere, never written to the credentials store.
+    const NO_PROVIDER_SENTINEL: &str = "unused-by-backend-no-provider-call-on-this-path";
+
+    fn cli_args(api_key: Option<String>) -> wcore_config::config::CliArgs {
+        wcore_config::config::CliArgs {
+            provider: None,
+            api_key,
+            base_url: None,
+            model: None,
+            max_tokens: None,
+            max_turns: None,
+            system_prompt: None,
+            profile: None,
+            auto_approve: false,
+            project_dir: None,
+        }
+    }
+
+    fn armed_from_defaults(err: &anyhow::Error) -> wcore_config::config::Config {
+        tracing::warn!(
+            error = %err,
+            "could not resolve config to arm the egress boundary for `backend`; \
+             arming it from defaults instead — enforcing, with NO operator \
+             allowlist entries, so any `[security] egress_allow` you configured \
+             is NOT in effect for this command"
+        );
+        wcore_config::config::Config::default()
+    }
+
+    let config = match wcore_config::config::Config::resolve(&cli_args(None)) {
+        Ok(config) => config,
+        Err(err)
+            if err
+                .downcast_ref::<wcore_config::config::MissingApiKey>()
+                .is_some() =>
+        {
+            match wcore_config::config::Config::resolve(&cli_args(Some(
+                NO_PROVIDER_SENTINEL.to_string(),
+            ))) {
+                Ok(config) => config,
+                Err(err) => armed_from_defaults(&err),
+            }
+        }
+        Err(err) => armed_from_defaults(&err),
+    };
     wcore_agent::egress::install_egress_policy(&config);
-    Ok(())
 }
 
 pub async fn run(args: BackendArgs) -> Result<()> {
-    arm_egress_policy()?;
+    arm_egress_policy();
     match args.cmd {
         BackendCmd::List { json } => list(json).await,
         BackendCmd::Probe { name } => probe(&name).await,

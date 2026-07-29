@@ -1,0 +1,50 @@
+=== BASELINE (must be all green) ===
+--- baseline wcore-gateway ---
+test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.11s
+--- baseline wcore-cli ---
+test always_fails ... FAILED
+thread 'always_fails' (42656) panicked at src/lib.rs:2:21:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1875 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 5.41s
+
+=== M1: compaction bounds ALL abandonments again (the pre-lane behaviour) ===
+--- M1 ---
+test ledger::tests::an_unacknowledged_abandonment_is_never_compacted_away ... FAILED
+thread 'ledger::tests::an_unacknowledged_abandonment_is_never_compacted_away' (46778) panicked at crates/wcore-gateway/src/ledger.rs:876:9:
+test result: FAILED. 48 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.11s
+
+=== M2: a re-send silently acknowledges (the rejected auto-ack design) ===
+--- M2 ---
+test ledger::tests::a_resend_is_recorded_without_erasing_the_abandonment ... FAILED
+thread 'ledger::tests::a_resend_is_recorded_without_erasing_the_abandonment' (48205) panicked at crates/wcore-gateway/src/ledger.rs:949:9:
+test result: FAILED. 48 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.11s
+
+=== M3: acknowledge overwrites the first review time ===
+--- M3 ---
+test ledger::tests::acknowledge_preserves_the_abandon_time_and_the_first_review_time ... FAILED
+thread 'ledger::tests::acknowledge_preserves_the_abandon_time_and_the_first_review_time' (49311) panicked at crates/wcore-gateway/src/ledger.rs:915:9:
+test result: FAILED. 48 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.11s
+
+=== M4: abandon stops recording whether an attempt had started ===
+--- M4 ---
+test ledger::tests::abandon_records_whether_an_attempt_had_started ... FAILED
+thread 'ledger::tests::abandon_records_whether_an_attempt_had_started' (50534) panicked at crates/wcore-gateway/src/ledger.rs:1010:9:
+test result: FAILED. 48 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.11s
+
+=== M5: ack/resend accept a delivery that was never abandoned ===
+--- M5 ---
+test ledger::tests::acknowledge_and_resend_refuse_a_delivery_that_is_not_abandoned ... FAILED
+thread 'ledger::tests::acknowledge_and_resend_refuse_a_delivery_that_is_not_abandoned' (51803) panicked at crates/wcore-gateway/src/ledger.rs:967:9:
+test result: FAILED. 48 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.11s
+
+=== M6: the resend guard treats UNKNOWN as safe (the duplicate-authorising bug) ===
+--- M6 ---
+test gateway::tests::resend_demands_confirmation_unless_the_delivery_provably_never_left ... FAILED
+test always_fails ... FAILED
+thread 'always_fails' (58070) panicked at src/lib.rs:2:21:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+thread 'gateway::tests::resend_demands_confirmation_unless_the_delivery_provably_never_left' (56260) panicked at crates/wcore-cli/src/gateway.rs:1863:9:
+test result: FAILED. 1874 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 5.43s
+
+=== TREE RESTORED — must be clean ===
+MUTATE_DONE

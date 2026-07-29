@@ -2761,24 +2761,30 @@ pub struct AgentEngine {
     /// correction must not be reachable from it.
     ///
     /// The id is carried **with** the store rather than read from
-    /// `user_model_user_id` because those two are not the same value.
-    /// `bootstrap.rs` renders the user-context block under a hardcoded
-    /// `"default"`, while `user_model_user_id` resolves `WAYLAND_USER_ID`.
-    /// Keying a correction by the latter would write it into a bucket the
-    /// render site never reads — a correction that reports success and never
-    /// reaches the model, which is precisely the defect class this work
-    /// closes. Pairing them here makes write-bucket and read-bucket the same
-    /// value by construction. (The pre-existing divergence on the *inferred*
-    /// brief is reported as a separate finding, not fixed here.)
+    /// `user_model_user_id`, so that write-bucket and read-bucket are the same
+    /// value by construction rather than by two call sites agreeing. A
+    /// correction keyed to a bucket the render site never reads is a
+    /// correction that reports success and never reaches the model, which is
+    /// precisely the defect class this work closes.
+    ///
+    /// The two values are now also equal: `bootstrap.rs` resolves the render
+    /// site's id through [`resolve_user_model_user_id`] as well. It used to
+    /// hardcode `"default"` while this field resolved `WAYLAND_USER_ID` — the
+    /// divergence 23B-C3 reported and did not fix, closed by `lane/small-defects`
+    /// with `crates/wcore-agent/tests/user_model_identity_wire.rs`. Pairing is
+    /// retained regardless: it is what keeps the guarantee local instead of
+    /// making it depend on a distant call site continuing to agree.
     ///
     /// `None` means no correction store opened (path unwritable); the
     /// `/usermodel` control then refuses out loud rather than reporting a
     /// correction it did not store.
     user_correction_store: Option<(wcore_user_model::CorrectionStore, String)>,
     /// v0.8.0 Task M — user-id key used for write-back. Defaults to
-    /// `"default"` (mirrors the bootstrap read site at
-    /// `bootstrap.rs::user_ctx_block`); overridable via the
-    /// `WAYLAND_USER_ID` env var for multi-user / shared-host setups.
+    /// `"default"`; overridable via the `WAYLAND_USER_ID` env var for
+    /// multi-user / shared-host setups. The bootstrap READ site
+    /// (`bootstrap.rs::user_ctx_block`) resolves through the same
+    /// [`resolve_user_model_user_id`], so the bucket written here is the
+    /// bucket rendered into the prompt.
     /// Cached on the engine so the per-turn write-back doesn't pay an
     /// env-lookup tax on the hot path.
     user_model_user_id: String,
@@ -3034,8 +3040,14 @@ const FLUFF_STOP_SEQUENCES: [&str; 4] = [
 ];
 
 /// v0.8.0 Task M — default user-id key for per-turn user-model
-/// write-back. Mirrors the bootstrap read site (`bootstrap.rs`,
-/// `user_id = "default"`). Override via the `WAYLAND_USER_ID` env var.
+/// write-back, used when `WAYLAND_USER_ID` is unset or empty.
+///
+/// This is a fallback, not a second identity: the bootstrap READ site goes
+/// through [`resolve_user_model_user_id`] too, so read and write resolve to
+/// the same bucket whether or not the variable is set. It previously hardcoded
+/// this literal at the read site only, which made the user model unreachable —
+/// and cross-readable — on exactly the shared hosts `WAYLAND_USER_ID` exists
+/// for.
 const DEFAULT_USER_MODEL_USER_ID: &str = "default";
 
 /// Stage 4c — one-shot, per-process suppression for the `/crucible` gate
@@ -6376,6 +6388,21 @@ impl AgentEngine {
         } else {
             Ok(budget.sub_budget(None))
         }
+    }
+
+    /// The active durable session journal, if this process has one (F22-C1).
+    ///
+    /// Additive read-only accessor. `SessionJournal` is an `Arc`-shared handle,
+    /// so the clone is the SAME chain and the same writer lock — not a second
+    /// journal, which would be a second source of truth for Goal state.
+    ///
+    /// Exposed so the protocol command loop can answer host Goal control
+    /// commands. It grants no authority by itself: `SessionJournal::append`
+    /// refuses every Goal variant, so a holder of this handle still cannot mint
+    /// a Goal transition without going through `GoalKernel`.
+    #[must_use]
+    pub fn session_journal(&self) -> Option<&crate::session_journal::SessionJournal> {
+        self.session_journal.as_ref()
     }
 
     /// Return the fail-closed recovery decision for the active durable

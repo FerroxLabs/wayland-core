@@ -1,0 +1,28 @@
+===== BASE-0.12.25  ackend list  with NO provider API key =====
+EXIT=0
+BACKEND    KIND       AVAILABLE    PROBE BASIS            DETAIL
+local      local      yes          sandbox_backend_probe  platform containment backend 'appcontainer' probed available
+container  container  NO           daemon_ping            docker daemon refused the version ping: error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.47/version": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.
+ssh        ssh        NO           credential_absent      WAYLAND_EXEC_SSH_TARGET is not set
+cloud      cloud      NO           credential_absent      backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+
+Availability is answered from a real probe in every row — the container backend from a daemon ping rather than socket presence, the ssh backend from a real handshake, the cloud backend from an authenticated API call. A backend with no credential reports NO and names what is missing; it never falls back to another backend.
+
+===== FIXED-280b9cdf  ackend list  with NO provider API key =====
+EXIT=1
+wayland-core.exe : warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was 
+supplied; storing credentials as plaintext-0600 at D:\lane-25c4-ev\cfg\allow\credentials.toml. To 
+encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or 
+WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS 
+keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+At line:10 char:8
++   $o = & $b.p backend list 2>&1 | Out-String
++        ~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: WAYLAN...r this profile.:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+wayland-core backend: resolving config to arm the egress policy for `backend`: No API key found. 
+Provide via --api-key, config file, or environment variable (API_KEY, ANTHROPIC_API_KEY, or 
+OPENAI_API_KEY).
+

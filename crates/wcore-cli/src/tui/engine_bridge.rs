@@ -1194,6 +1194,52 @@ pub(crate) enum TuiRecoveryResult {
 }
 
 impl TuiEngine {
+    /// F22-C1 — issue a durable-Goal CONTROL command from the TUI.
+    ///
+    /// ## Why this does not return the result to the caller
+    ///
+    /// Before this method the TUI could observe a Goal and not control one:
+    /// `App.goals` was written only by the protocol bridge, deliberately, so
+    /// the TUI never derives Goal state of its own. Returning the resulting
+    /// projection here would break exactly that — the caller would hold Goal
+    /// state that never went through the event stream, and the terminal would
+    /// have a second, unreplayable source of truth.
+    ///
+    /// So the answer is pushed onto the SAME `ProtocolEvent` channel every
+    /// other Goal view is fed from, and reaches `App` through the same
+    /// `apply_event` arms. The TUI issues a command and renders what comes
+    /// back. It never decides what happened.
+    ///
+    /// Returns how many events were emitted, purely so a caller can tell a
+    /// handled command from an unhandled one. It is never zero for one of the
+    /// five Goal commands: acceptance emits `goal_snapshot`, refusal emits
+    /// `goal_control_refused`.
+    pub async fn issue_goal_control(
+        &self,
+        command: wcore_protocol::commands::ProtocolCommand,
+    ) -> usize {
+        let now_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as u64);
+        let events = {
+            let engine = self.engine.lock().await;
+            let live_session_id = engine.current_session_id();
+            wcore_agent::goal::handle_goal_control(
+                engine.session_journal(),
+                live_session_id.as_deref(),
+                &wcore_agent::goal::GoalParentEnvelope::local_session_default(),
+                now_unix_ms,
+                &command,
+            )
+            .unwrap_or_default()
+        };
+        let emitted = events.len();
+        for event in events {
+            let _ = self.tx.send(event);
+        }
+        emitted
+    }
+
     /// A clone of the protocol event channel sender, so a deferred async action
     /// (e.g. the /auth OAuth round-trip) can post an Info turn back to the
     /// render loop on completion.
