@@ -10,8 +10,20 @@
 //! but DO NOT emit its timeline events — otherwise the bot would replay the
 //! entire room backlog on every startup. Only sync responses AFTER the first
 //! (once `since` is set) contribute `MessageReceived` events.
+//!
+//! **Cursor persistence (F24-C3-H6)**: the replay guard above is only half the
+//! contract. Held in a process-local alone, `since` resets to `None` on every
+//! restart, so the first sync after a restart is an initial sync and the guard
+//! discards its timeline — which is precisely the window the process was down
+//! for. Every message delivered during a deploy, crash or reboot was lost
+//! silently: no error, no retry, no log, and a healthy-looking channel.
+//! [`crate::sync_store`] persists the cursor across restarts so that a restart
+//! **neither replays the backlog nor skips what arrived while we were down** —
+//! the same contract `wcore-channel-email`'s IMAP UID watermark already holds,
+//! and deliberately the same shape rather than a second mechanism.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +33,7 @@ use tokio::sync::{Mutex, watch};
 use wcore_channels::event::{Attachment, ChannelEvent, ChatType, IncomingMessage, MediaKind};
 
 use crate::error::MatrixError;
+use crate::sync_store::{self, Loaded};
 
 /// Long-poll timeout (ms) handed to the homeserver's `/sync`. The HTTP read
 /// timeout is this plus a buffer so a wedged proxy can't park us forever.
@@ -44,6 +57,10 @@ pub(crate) struct SyncArgs {
     pub user_id: String,
     pub inbox: Arc<Mutex<VecDeque<ChannelEvent>>>,
     pub shutdown: watch::Receiver<bool>,
+    /// Where this channel's `/sync` cursor is persisted across restarts.
+    /// Computed from the production account identity in `MatrixChannel::start`;
+    /// tests point it at a temp file so they exercise the real loop.
+    pub state_path: PathBuf,
 }
 
 // ---------------------------------------------------------------------------
@@ -183,11 +200,45 @@ pub(crate) async fn sync_loop(args: SyncArgs) {
         user_id,
         inbox,
         mut shutdown,
+        state_path,
     } = args;
 
-    // `None` until the first /sync completes — the first response only seeds
-    // the cursor and never emits timeline events (replay guard).
-    let mut since: Option<String> = None;
+    // F24-C3-H6. Resume the cursor from disk so a restart neither replays the
+    // room backlog nor skips what the homeserver accumulated while we were
+    // down. `None` here means "seed from an initial sync" — whose timeline the
+    // replay guard discards — so the three states are kept distinct: a corrupt
+    // cursor must not read as a first run, because a first run starts from now
+    // and says nothing about it.
+    let mut since: Option<String> = match sync_store::load_from(&state_path) {
+        Loaded::Cursor(cursor) => {
+            tracing::info!(
+                target: "wcore_channel_matrix::sync",
+                "resumed persisted /sync cursor; messages delivered while this process was down will be served",
+            );
+            Some(cursor)
+        }
+        Loaded::Absent => {
+            tracing::info!(
+                target: "wcore_channel_matrix::sync",
+                "no persisted /sync cursor (first start for this account); seeding from an initial sync — existing room backlog will NOT be replayed",
+            );
+            None
+        }
+        Loaded::Corrupt(reason) => {
+            tracing::warn!(
+                target: "wcore_channel_matrix::sync",
+                reason = reason,
+                path = %state_path.display(),
+                "persisted /sync cursor is unusable; re-seeding from an initial sync. Messages delivered while this process was down are NOT recoverable for this start",
+            );
+            None
+        }
+    };
+    // True while `since` came from disk and the homeserver has not yet accepted
+    // it. A cursor the homeserver rejects would otherwise back off forever —
+    // a permanent wedge on a channel that reports healthy. Cleared on the first
+    // success, and on the one re-seed below, so this can happen at most once.
+    let mut resumed_unverified = since.is_some();
     let mut consecutive_failures: u32 = 0;
 
     loop {
@@ -209,6 +260,9 @@ pub(crate) async fn sync_loop(args: SyncArgs) {
         match result {
             Ok(resp) => {
                 consecutive_failures = 0;
+                // The homeserver accepted whatever cursor we presented, so a
+                // resumed one is now proven good.
+                resumed_unverified = false;
                 let is_initial = since.is_none();
                 let next_batch = resp.next_batch.clone();
                 // Only emit events once `since` is set (i.e. after the first
@@ -230,11 +284,35 @@ pub(crate) async fn sync_loop(args: SyncArgs) {
                 // if stored, send `?since=` next tick — which some homeservers
                 // treat as an initial sync and could replay backlog. Keep the
                 // prior cursor in that case.
-                if !next_batch.is_empty() {
+                if !next_batch.is_empty() && since.as_deref() != Some(next_batch.as_str()) {
+                    // Persist AFTER the events above are in the inbox, so a
+                    // crash in between re-delivers rather than skips. The
+                    // dedupe layer collapses the duplicate; nothing recovers a
+                    // skip.
+                    sync_store::save_to(&state_path, &next_batch);
                     since = Some(next_batch);
                 }
             }
             Err(e) => {
+                // A cursor loaded from disk that this homeserver rejects (an
+                // expired token, a server that lost its state, a file edited by
+                // hand) is unusable and re-presenting it can only fail again.
+                // Without this the loop backs off on it forever: a permanently
+                // wedged channel that still reports healthy. Drop it once, say
+                // so, and fall through to a clean initial sync.
+                if resumed_unverified && matches!(e, MatrixError::Http { status: 400, .. }) {
+                    tracing::warn!(
+                        target: "wcore_channel_matrix::sync",
+                        error = %e,
+                        path = %state_path.display(),
+                        "homeserver rejected the persisted /sync cursor; discarding it and re-seeding from an initial sync. Messages delivered while this process was down are NOT recoverable for this start",
+                    );
+                    sync_store::clear_at(&state_path);
+                    since = None;
+                    resumed_unverified = false;
+                    consecutive_failures = 0;
+                    continue;
+                }
                 tracing::warn!(
                     target: "wcore_channel_matrix::sync",
                     error = %e,
@@ -623,5 +701,351 @@ mod tests {
             msg.attachments.is_empty(),
             "non-mxc media url must be skipped"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // F24-C3-H6 — restart behaviour, driven through the real `sync_loop`.
+    //
+    // These run the actual loop against a `mockito` homeserver and a real
+    // state file, because the defect is not in any pure function: it is in
+    // what the loop does with the cursor across two process lifetimes. Every
+    // assertion below is a COUNT or an exact request-shape, never "no error
+    // occurred" — a loop that delivered nothing at all would otherwise pass.
+    // -----------------------------------------------------------------------
+
+    /// A `/sync` with NO `since` parameter — i.e. an initial sync. The
+    /// production query is `timeout=<ms>` alone on the initial call and
+    /// `timeout=<ms>&since=<cursor>` thereafter, so anchoring the whole query
+    /// distinguishes the two exactly.
+    fn initial_query() -> mockito::Matcher {
+        mockito::Matcher::Regex(r"^timeout=\d+$".to_string())
+    }
+
+    fn resume_query(cursor: &str) -> mockito::Matcher {
+        mockito::Matcher::UrlEncoded("since".into(), cursor.into())
+    }
+
+    /// A `/sync` body with one `m.room.message` in a joined room's timeline.
+    fn body_with_event(next_batch: &str, event_id: &str, text: &str) -> String {
+        format!(
+            r#"{{"next_batch":"{next_batch}","rooms":{{"join":{{"!r:f24.invalid":{{"timeline":{{"events":[
+                {{"type":"m.room.message","sender":"@alice:f24.invalid","event_id":"{event_id}",
+                  "origin_server_ts":1700000000000,"content":{{"msgtype":"m.text","body":"{text}"}}}}
+            ]}}}}}}}}}}"#
+        )
+    }
+
+    fn body_empty(next_batch: &str) -> String {
+        format!(r#"{{"next_batch":"{next_batch}"}}"#)
+    }
+
+    fn tmp_state_path(tag: &str) -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "wcore-matrix-h6-{tag}-{}-{n}.since",
+            std::process::id()
+        ))
+    }
+
+    /// One channel "process lifetime": spawn the real loop, wait for it to
+    /// persist `want_cursor`, then shut it down and return what it delivered.
+    ///
+    /// Waiting on the PERSISTED cursor (rather than on a sleep) is what makes
+    /// these tests deterministic: the loop pushes a response's events into the
+    /// inbox BEFORE persisting that response's `next_batch`, so seeing the
+    /// cursor guarantees the events are already there.
+    async fn run_lifetime(
+        server_url: &str,
+        state_path: &std::path::Path,
+        want_cursor: &str,
+        label: &str,
+    ) -> Vec<ChannelEvent> {
+        let inbox: Arc<Mutex<VecDeque<ChannelEvent>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let (tx, rx) = watch::channel(false);
+        let http = wcore_egress::EgressClient::builder()
+            .user_agent("wcore-matrix-h6-test")
+            .build()
+            .unwrap_or_default();
+        let handle = tokio::spawn(sync_loop(SyncArgs {
+            http,
+            api_base: server_url.to_string(),
+            access_token: "syt_test".to_string(),
+            user_id: BOT.to_string(),
+            inbox: Arc::clone(&inbox),
+            shutdown: rx,
+            state_path: state_path.to_path_buf(),
+        }));
+
+        // Bounded wait — never an unbounded `loop`. 20s ceiling against a
+        // mockito server answering in microseconds.
+        let mut reached = false;
+        for _ in 0..200 {
+            if let Loaded::Cursor(c) = sync_store::load_from(state_path) {
+                if c == want_cursor {
+                    reached = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        let _ = tx.send(true);
+        if tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .is_err()
+        {
+            panic!("{label}: sync_loop did not exit within 5s of shutdown");
+        }
+
+        assert!(
+            reached,
+            "{label}: loop never persisted cursor {want_cursor:?}; file held {:?}",
+            std::fs::read_to_string(state_path).ok(),
+        );
+
+        let drained: Vec<ChannelEvent> = inbox.lock().await.drain(..).collect();
+        drained
+    }
+
+    fn message_ids(events: &[ChannelEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                ChannelEvent::MessageReceived { msg } => Some(msg.id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **PROOF 1 (the defect, positively) and PROOF 2 (no duplicate).**
+    ///
+    /// Lifetime 1 seeds from an initial sync whose timeline carries `$pre`.
+    /// The process then goes down, and `$gap` is delivered to the homeserver
+    /// during the downtime. Lifetime 2 must deliver `$gap` — and must deliver
+    /// `$pre` NOT AT ALL, because the replay guard already declined it.
+    ///
+    /// On the unfixed code lifetime 2 starts from `since = None`, so it issues
+    /// a SECOND initial sync and discards its timeline: the initial-sync mock's
+    /// `expect(1)` reddens, and `$gap` never arrives. Both halves of the
+    /// contract — never replay, never skip — are asserted here, and they pull
+    /// in opposite directions, so neither can be satisfied by doing nothing.
+    #[tokio::test]
+    async fn gap_message_survives_a_restart_and_is_not_duplicated() {
+        let mut server = mockito::Server::new_async().await;
+        let state = tmp_state_path("gap");
+        let _ = std::fs::remove_file(&state);
+
+        // Exactly ONE initial sync may ever happen for this account. Its
+        // timeline carries `$pre`, which the replay guard must swallow.
+        let initial = server
+            .mock("GET", "/_matrix/client/v3/sync")
+            .match_query(initial_query())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body_with_event("s1", "$pre", "before the restart"))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let first = run_lifetime(&server.url(), &state, "s1", "lifetime-1").await;
+        assert_eq!(
+            message_ids(&first),
+            Vec::<String>::new(),
+            "the initial sync's timeline must NOT be replayed into the inbox",
+        );
+
+        // --- the process is down here; the homeserver accumulates `$gap` ---
+
+        let resumed = server
+            .mock("GET", "/_matrix/client/v3/sync")
+            .match_query(resume_query("s1"))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body_with_event(
+                "s2",
+                "$gap",
+                "delivered while you were down",
+            ))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let second = run_lifetime(&server.url(), &state, "s2", "lifetime-2").await;
+
+        assert_eq!(
+            message_ids(&second),
+            vec!["$gap".to_string()],
+            "the restarted process must deliver exactly the downtime window: \
+             `$gap` once, `$pre` never",
+        );
+        // The restart resumed rather than re-seeding. This is the assertion the
+        // unfixed code fails: it would issue a second initial sync.
+        initial.assert_async().await;
+        resumed.assert_async().await;
+
+        let _ = std::fs::remove_file(&state);
+    }
+
+    /// **PROOF 3a — a MISSING cursor degrades safely and says so.**
+    ///
+    /// First start for an account: seed from an initial sync, discard its
+    /// timeline (no backlog replay), and persist immediately so the NEXT
+    /// restart resumes. The "says so" half is the `Absent` classification the
+    /// loop logs from; asserted directly because a log line is not a value.
+    #[tokio::test]
+    async fn a_missing_cursor_seeds_from_now_and_persists_immediately() {
+        let mut server = mockito::Server::new_async().await;
+        let state = tmp_state_path("missing");
+        let _ = std::fs::remove_file(&state);
+        assert!(
+            matches!(sync_store::load_from(&state), Loaded::Absent),
+            "a missing cursor file must classify as Absent, not Corrupt",
+        );
+
+        let initial = server
+            .mock("GET", "/_matrix/client/v3/sync")
+            .match_query(initial_query())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body_with_event("s1", "$backlog", "old room history"))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let events = run_lifetime(&server.url(), &state, "s1", "first-start").await;
+        assert_eq!(
+            message_ids(&events),
+            Vec::<String>::new(),
+            "a first start must not replay the room backlog",
+        );
+        initial.assert_async().await;
+        assert!(
+            matches!(sync_store::load_from(&state), Loaded::Cursor(ref c) if c == "s1"),
+            "the seed must be persisted immediately, or the next restart loses its window",
+        );
+        let _ = std::fs::remove_file(&state);
+    }
+
+    /// **PROOF 3b — a CORRUPT cursor degrades safely and says so.**
+    ///
+    /// Garbage on disk must not be sent to the homeserver, must not wedge the
+    /// loop, and must not be silently mistaken for a first run. It re-seeds,
+    /// classifies as `Corrupt` (which is what the loop's `warn!` is keyed on),
+    /// and replaces the junk with a usable cursor so the wedge cannot persist
+    /// across restarts either.
+    #[tokio::test]
+    async fn a_corrupt_cursor_reseeds_and_does_not_wedge() {
+        let mut server = mockito::Server::new_async().await;
+        let state = tmp_state_path("corrupt");
+        std::fs::write(&state, b"\x00not a cursor at all\n").unwrap();
+        assert!(
+            matches!(sync_store::load_from(&state), Loaded::Corrupt(_)),
+            "garbage must classify as Corrupt — Absent would restart from now in silence",
+        );
+
+        let initial = server
+            .mock("GET", "/_matrix/client/v3/sync")
+            .match_query(initial_query())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body_empty("s_recovered"))
+            .expect(1)
+            .create_async()
+            .await;
+
+        run_lifetime(&server.url(), &state, "s_recovered", "corrupt-recovery").await;
+        initial.assert_async().await;
+        assert!(
+            matches!(sync_store::load_from(&state), Loaded::Cursor(ref c) if c == "s_recovered"),
+            "the corrupt file must be replaced, not left to re-break the next start",
+        );
+        let _ = std::fs::remove_file(&state);
+    }
+
+    /// **PROOF 3c — a cursor the HOMESERVER rejects degrades safely.**
+    ///
+    /// The nastiest shape: the file is structurally fine, so validation passes,
+    /// but the homeserver answers 400. Without the wedge guard the loop backs
+    /// off on that cursor forever — a channel that never delivers another
+    /// message while reporting healthy, which is the permanent-wedge class this
+    /// program has already fixed twice. The loop must discard it once, re-seed,
+    /// and recover inside this test's bounded wait.
+    #[tokio::test]
+    async fn a_cursor_the_homeserver_rejects_is_discarded_rather_than_wedging() {
+        let mut server = mockito::Server::new_async().await;
+        let state = tmp_state_path("rejected");
+        std::fs::write(&state, b"s_stale_from_another_homeserver").unwrap();
+
+        let rejected = server
+            .mock("GET", "/_matrix/client/v3/sync")
+            .match_query(resume_query("s_stale_from_another_homeserver"))
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"errcode":"M_INVALID_PARAM","error":"invalid from token"}"#)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        let reseed = server
+            .mock("GET", "/_matrix/client/v3/sync")
+            .match_query(initial_query())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body_empty("s_fresh"))
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        run_lifetime(&server.url(), &state, "s_fresh", "rejected-cursor").await;
+
+        rejected.assert_async().await;
+        reseed.assert_async().await;
+        assert!(
+            matches!(sync_store::load_from(&state), Loaded::Cursor(ref c) if c == "s_fresh"),
+            "the rejected cursor must be replaced so the wedge cannot survive a restart",
+        );
+        let _ = std::fs::remove_file(&state);
+    }
+
+    /// **PROOF 4 — steady-state delivery is unaffected, COUNTED.**
+    ///
+    /// Three successive incremental syncs after a resume must yield three
+    /// messages, in order, with the cursor advancing each time. Counted rather
+    /// than assumed: a regression that delivered one of three, or delivered
+    /// them out of order, or stopped advancing the cursor, reddens here. The
+    /// assertion demands arrivals > 0, so a path that denied everything cannot
+    /// satisfy it.
+    #[tokio::test]
+    async fn steady_state_delivery_is_unaffected_by_cursor_persistence() {
+        let mut server = mockito::Server::new_async().await;
+        let state = tmp_state_path("steady");
+        std::fs::write(&state, b"s1").unwrap();
+
+        for (from, to, id) in [
+            ("s1", "s2", "$m1"),
+            ("s2", "s3", "$m2"),
+            ("s3", "s4", "$m3"),
+        ] {
+            server
+                .mock("GET", "/_matrix/client/v3/sync")
+                .match_query(resume_query(from))
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(body_with_event(to, id, "steady"))
+                .expect(1)
+                .create_async()
+                .await;
+        }
+        // No mock for `since=s4`: the loop backs off there instead of spinning.
+
+        let events = run_lifetime(&server.url(), &state, "s4", "steady").await;
+        let ids = message_ids(&events);
+        assert_eq!(
+            ids,
+            vec!["$m1".to_string(), "$m2".to_string(), "$m3".to_string()],
+            "three steady-state messages must arrive, once each, in order — got {} of 3",
+            ids.len(),
+        );
+        let _ = std::fs::remove_file(&state);
     }
 }
