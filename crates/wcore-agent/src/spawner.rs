@@ -5285,6 +5285,7 @@ mod posture_inheritance_tests {
                 env_passthrough: Vec::new(),
                 sandbox: None,
                 allow_no_sandbox: None,
+                media_pricing: Default::default(),
             },
             ..Default::default()
         }
