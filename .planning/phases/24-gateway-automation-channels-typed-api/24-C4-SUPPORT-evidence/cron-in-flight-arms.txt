@@ -1,0 +1,8 @@
+--- 2f5a9010-0be3-4c15-abab-00e238b9d2c6 ---
+trigger:     event — @event build.finished
+bound:       min_interval=1s max_in_flight=2 deadline=none
+             NOTE: fires are serialized; max_in_flight>1 grants no concurrency in this build
+--- d72bae15-ee76-4ad5-9f4e-e34b1fd2fdf2 ---
+trigger:     interval — @every 900s
+bound:       min_interval=900s max_in_flight=1 deadline=none
+retry:       max_attempts=3 backoff=60s..3600s  attempts=0
