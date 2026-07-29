@@ -104,3 +104,44 @@ before and after (1757->1757 x4, 19326->19326). `counts`, `source_inputs`, `capa
 - [ ] `golden_v0_1_21.rs` still passes
 - [ ] guard can still FAIL (mutation test — a corpus that matches anything is worthless)
 - [ ] OpenAPI 3.1.0 endpoint — is it in the corpus at all?
+
+## M7 — after-state gates (hetzner, run by FILE not filter, executed counts asserted)
+
+| test file | result | rc |
+|---|---|---|
+| `desktop_contract_corpus` | **15 passed; 0 failed; 0 ignored** (was 14/1) | 0 |
+| `desktop_contract_adversarial` | 17 passed; 0 failed; 0 ignored | 0 |
+| `golden_v0_1_21` | **22 passed; 0 failed; 0 ignored** | 0 |
+| `host_decoder_contract` | 31 passed; 0 failed; 0 ignored | 0 |
+| `approval_resume_contract` | 4 passed; 0 failed; 0 ignored | 0 |
+
+Zero `ignored` everywhere, so none of the three vacuity flavours (all-ignored / env-gated
+early return / filter matching nothing) applies.
+
+Blob-identity check: all 5 regenerated files have byte-identical git blob hashes on hetzner
+and in my Mac commit, so what is committed is verbatim generator output, not a hand-edit.
+
+## M8 — the guard can still FAIL (mutation test)
+
+| probe | mutation | result |
+|---|---|---|
+| M-A | one byte in `events/ready.json` (`session-desktop-001`->`002`) | **FAILED** rc 101, drift=`[ready.json]` |
+| M-B | **one comment line appended to `crates/wcore-agent/src/bootstrap.rs`** | **FAILED** rc 101, drift = all 5 files |
+| M-C | both restored | 15 passed, rc 0 |
+
+M-B is the whole argument in one line: a comment in a **different crate**, with no wire
+effect whatsoever, reddens the Desktop contract corpus. That is the structural defect, and it
+is now measured rather than asserted.
+
+## M9 — OpenAPI 3.1.0: NOT touched by this regeneration
+
+- `grep -rl openapi crates/wcore-protocol/contracts/` -> **0 files**
+- none of the 40 SOURCE_INPUTS mentions openapi
+- the 3.0.3 -> 3.1.0 move is entirely in `wcore-acp` (utoipa 4->5, taken to drop
+  `proc-macro-error` / RUSTSEC-2024-0370)
+
+Correction to the brief I was given: the endpoint **is** covered, just not by a byte fixture —
+`wcore-acp` asserts `starts_with("3.1")` in two places, one of them over a live listener:
+`rest_openapi_doc_served_over_live_listener ... ok` (2 passed) and
+`transport::rest::tests::get_openapi_json_has_paths_and_resolves_schemas ... ok` (129 passed).
+Both green at this commit.

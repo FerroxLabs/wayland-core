@@ -1,0 +1,108 @@
+===== M-A mutate a corpus fixture byte (ready.json session_id)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running tests/desktop_contract_corpus.rs (target/debug/deps/desktop_contract_corpus-04e9f042133619dd)
+
+running 15 tests
+test contradictory_budget_grant_results_cannot_cross_the_wire ... ok
+test authority_fixtures_pin_correlated_current_shapes ... ok
+test inventory_is_exactly_eighteen_commands_and_forty_nine_events ... ok
+test every_command_fixture_deserializes_through_protocol_command ... ok
+test manifest_criticality_uses_only_the_normative_typed_vocabulary ... ok
+test manifest_pins_generator_and_all_three_digests ... ok
+test event_schema_distinguishes_correlated_and_legacy_child_shapes ... ok
+test budget_grant_adversarial_fixtures_fail_closed ... ok
+test checked_corpus_matches_real_serializers_byte_for_byte ... FAILED
+test every_json_artifact_is_canonical_and_lf_terminated ... ok
+test malformed_durable_child_fixtures_are_rejected ... ok
+test durable_child_type_fixtures_round_trip_without_a_parallel_model ... ok
+test producer_complete_schema_keeps_current_and_non_desktop_variants_visible ... ok
+test manifest_ready_and_schema_titles_share_one_contract_identity ... ok
+test generated_schemas_reject_malformed_authority_types_and_enums ... ok
+
+failures:
+
+---- checked_corpus_matches_real_serializers_byte_for_byte stdout ----
+
+thread 'checked_corpus_matches_real_serializers_byte_for_byte' (3305906) panicked at crates/wcore-protocol/tests/desktop_contract_corpus.rs:203:22:
+checked-in Desktop contract corpus must match the generator: Custom { kind: Other, error: "Desktop contract corpus drift: missing=[], extra=[], drifted=[\"events/ready.json\"]; run `wcore-contract generate`" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    checked_corpus_matches_real_serializers_byte_for_byte
+
+test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.50s
+
+error: test failed, to rerun pass `-p wcore-protocol --test desktop_contract_corpus`
+WLRC_MA=101
+===== M-B mutate a SOURCE_INPUT outside wcore-protocol (bootstrap.rs comment)
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.41s
+     Running tests/desktop_contract_corpus.rs (target/debug/deps/desktop_contract_corpus-04e9f042133619dd)
+
+running 15 tests
+test contradictory_budget_grant_results_cannot_cross_the_wire ... ok
+test authority_fixtures_pin_correlated_current_shapes ... ok
+test inventory_is_exactly_eighteen_commands_and_forty_nine_events ... ok
+test every_command_fixture_deserializes_through_protocol_command ... ok
+test manifest_pins_generator_and_all_three_digests ... ok
+test manifest_criticality_uses_only_the_normative_typed_vocabulary ... ok
+test event_schema_distinguishes_correlated_and_legacy_child_shapes ... ok
+test budget_grant_adversarial_fixtures_fail_closed ... ok
+test checked_corpus_matches_real_serializers_byte_for_byte ... FAILED
+test every_json_artifact_is_canonical_and_lf_terminated ... ok
+test malformed_durable_child_fixtures_are_rejected ... ok
+test durable_child_type_fixtures_round_trip_without_a_parallel_model ... ok
+test producer_complete_schema_keeps_current_and_non_desktop_variants_visible ... ok
+test manifest_ready_and_schema_titles_share_one_contract_identity ... ok
+test generated_schemas_reject_malformed_authority_types_and_enums ... ok
+
+failures:
+
+---- checked_corpus_matches_real_serializers_byte_for_byte stdout ----
+
+thread 'checked_corpus_matches_real_serializers_byte_for_byte' (3306509) panicked at crates/wcore-protocol/tests/desktop_contract_corpus.rs:203:22:
+checked-in Desktop contract corpus must match the generator: Custom { kind: Other, error: "Desktop contract corpus drift: missing=[], extra=[], drifted=[\"adversarial/events/fixture-mismatch.jsonl\", \"adversarial/events/schema-mismatch.jsonl\", \"adversarial/events/version-mismatch.jsonl\", \"events/ready.json\", \"manifest.json\"]; run `wcore-contract generate`" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    checked_corpus_matches_real_serializers_byte_for_byte
+
+test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.50s
+
+error: test failed, to rerun pass `-p wcore-protocol --test desktop_contract_corpus`
+WLRC_MB=101
+===== M-C control: restored, must be green again
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running tests/desktop_contract_corpus.rs (target/debug/deps/desktop_contract_corpus-04e9f042133619dd)
+
+running 15 tests
+test contradictory_budget_grant_results_cannot_cross_the_wire ... ok
+test authority_fixtures_pin_correlated_current_shapes ... ok
+test inventory_is_exactly_eighteen_commands_and_forty_nine_events ... ok
+test every_command_fixture_deserializes_through_protocol_command ... ok
+test manifest_pins_generator_and_all_three_digests ... ok
+test manifest_criticality_uses_only_the_normative_typed_vocabulary ... ok
+test event_schema_distinguishes_correlated_and_legacy_child_shapes ... ok
+test budget_grant_adversarial_fixtures_fail_closed ... ok
+test every_json_artifact_is_canonical_and_lf_terminated ... ok
+test malformed_durable_child_fixtures_are_rejected ... ok
+test checked_corpus_matches_real_serializers_byte_for_byte ... ok
+test durable_child_type_fixtures_round_trip_without_a_parallel_model ... ok
+test producer_complete_schema_keeps_current_and_non_desktop_variants_visible ... ok
+test manifest_ready_and_schema_titles_share_one_contract_identity ... ok
+test generated_schemas_reject_malformed_authority_types_and_enums ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.51s
+
+WLRC_MC=0
+WLDONE
+--- restored cleanly? ---
+ M crates/wcore-protocol/contracts/desktop/v1/adversarial/events/fixture-mismatch.jsonl
+ M crates/wcore-protocol/contracts/desktop/v1/adversarial/events/schema-mismatch.jsonl
+ M crates/wcore-protocol/contracts/desktop/v1/adversarial/events/version-mismatch.jsonl
+ M crates/wcore-protocol/contracts/desktop/v1/events/ready.json
+ M crates/wcore-protocol/contracts/desktop/v1/manifest.json
