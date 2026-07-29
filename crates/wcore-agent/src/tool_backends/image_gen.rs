@@ -1249,12 +1249,20 @@ mod tests {
             "non-OpenAI provider must not hijack the OpenAI image slot"
         );
         // And the env-built backend points at api.openai.com.
-        let backend = DalleBackend::new("sk-openai-env".to_string(), OPENAI_API_BASE);
+        // Same compat the env arm of `build_image_gen_backend` passes: native
+        // OpenAI's own preset, not whatever provider declined the endpoint.
+        let openai_preset = wcore_config::compat::ProviderCompat::openai_defaults();
+        let backend = DalleBackend::new(
+            "sk-openai-env".to_string(),
+            OPENAI_API_BASE,
+            openai_preset.image_model.as_deref(),
+        );
         assert_eq!(
             backend.endpoint(),
             "https://api.openai.com/v1/images/generations"
         );
         assert_eq!(backend.api_key(), "sk-openai-env");
+        assert_eq!(backend.model(), "gpt-image-1");
     }
 
     #[test]
