@@ -481,7 +481,7 @@ mod tests {
 
         // The claim that matters is about the SCAN, not the count: the shared
         // walker must reach the user root and must NOT reach either catalog.
-        let found = super::quarantine::scan_peer_skills(h);
+        let found = crate::migrate::quarantine::scan_peer_skills(h);
         let ids: Vec<&str> = found.iter().map(|(f, _)| f.id.as_str()).collect();
         assert!(
             ids.contains(&"skill:skills/mine"),
