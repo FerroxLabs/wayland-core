@@ -208,3 +208,87 @@ transitively) and refuses an empty set with an error naming the file.
 **This is the redden proof for Task 1's gate.** It was not manufactured — the gate failed
 on first execution, against real code, for a real defect, and identified the defect
 precisely. Per §6b-ii the instrument was repaired in-lane rather than written up and left.
+
+---
+
+## T+2:10 — Task 2. The inherited msteams costing is wrong on BOTH counts.
+
+Written down before building anything, per §6b-i.
+
+### E6. msteams is NOT "discord-shaped"
+
+Discord's cost came from a **persistent WebSocket gateway**. msteams inbound is an
+**HTTP webhook** carrying a **Bot Framework JWT** — asymmetric, issuer/audience-bound.
+Those are different transports with different work. The inherited "discord-shaped,
+~2 sessions" estimate is not a description of this connector.
+
+### E7. The README claim is STALE — msteams inbound is already implemented AND routed
+
+`README.md:348` says MS Teams is a send-only MVP whose inbound "is parsed but not yet
+exposed over the host." Both halves fail against current source.
+
+**It is implemented.** `crates/wcore-channel-msteams/src/lib.rs:249` overrides
+`Channel::ingest_webhook` with real authentication, not a stub:
+
+```rust
+let claims = auth.validate(hdr).await.map_err(|e| ChannelError::Auth(e.to_string()))?;
+```
+
+plus a defense-in-depth check that the JWT's `serviceurl` claim matches the Activity's
+`serviceUrl` (blocking replay with a swapped serviceUrl, which matters because the reply
+path trusts that URL). Two auth tests already exist at lib.rs:705 and lib.rs:723.
+
+**It is routed.** The host has **no platform allow-list**. Read in full at
+`crates/wcore-agent/src/inbound_webhook.rs:142-202`, the handler is entirely generic:
+
+```rust
+async fn handle_webhook(State(state): State<HostState>, Path(channel): Path<String>, ...) -> Response {
+    ...
+    let result = state.manager.read().await.ingest_webhook(&channel, &req).await;
+    response_for(&channel, result)
+}
+// route: "/webhooks/:channel"
+```
+
+So `POST /webhooks/msteams` dispatches to the msteams channel by name. Nothing filters it.
+
+Query for the absence-of-allow-list claim, so it can be re-run:
+`/usr/bin/grep -n "slack\|whatsapp\|sms\|msteams\|platform\|route\|path" crates/wcore-agent/src/inbound_webhook.rs`
+— instrument liveness confirmed in the same sweep: `grep -rl "slack" --include='*.rs' crates/`
+returns **54** files, and the ingest_webhook census returns 13 sites across 5 crates, so the
+tooling is alive. The allow-list absence is additionally backed by *reading the whole
+handler*, not by a grep returning zero.
+
+### E8. What is stale, precisely
+
+Three places state the old world, and the bootstrap comment states it as the REASON the
+host is safe — so it is load-bearing, not cosmetic:
+
+| Site | Stale text |
+|------|-----------|
+| `README.md:348` | "MS Teams is a send-only MVP; inbound is parsed but not yet exposed over the host" + "The inbound webhook host serves Slack, WhatsApp, and Twilio SMS only" |
+| `crates/wcore-agent/src/bootstrap.rs:3352-3355` | "only the signature-verified connectors override the trait method, so msteams' unauthenticated parse stays unexposed" |
+| `crates/wcore-channels/src/lib.rs:288-294` | default-impl doc: "Webhook connectors that verify the platform signature (Slack, WhatsApp, Twilio SMS) override this" |
+
+### E9. The three-state discriminator this gives me
+
+`ingest_webhook`'s default impl (`wcore-channels/src/lib.rs:299`) returns
+`ChannelError::Rejected`, and `response_for` maps errors to distinct statuses
+(inbound_webhook.rs:119-140). So one HTTP call separates all three worlds:
+
+| status | meaning |
+|--------|---------|
+| **404** | channel not configured (`ChannelError::Config`) |
+| **400** | reached the DEFAULT trait impl — i.e. genuinely unexposed |
+| **401** | reached **msteams' own JWT validation** — i.e. exposed |
+
+A 401 on an unauthenticated `POST /webhooks/msteams` is therefore positive proof of
+exposure that cannot be confused with "not configured" or "unexposed". That is the gate
+worth building, and it is far cheaper than the inherited estimate.
+
+### Determination (pre-build)
+
+The inbound clause is **not 2 sessions of build** — it is already built. The real remaining
+work is (a) a host-level regression test asserting the 401, and (b) correcting the three
+stale sites. I am building both. If the test does NOT return 401, then the README is right
+and I am wrong — and I will report that instead.
