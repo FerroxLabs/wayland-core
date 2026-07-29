@@ -50,7 +50,6 @@
 //! fatal — a gateway with no model can still run its schedule — but it is still
 //! *reported*, by being returned to the caller rather than swallowed here.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
@@ -78,10 +77,61 @@ pub struct InboundHost {
     /// Number of channels whose `[inbound]` policy was loaded. Zero here with
     /// registered adapters means the policy directory and the registration
     /// directory disagree — the F24-C3-H1 shape.
+    ///
+    /// This is the count **at spawn**. After a
+    /// [`reload_policies`](InboundHost::reload_policies) it is stale by
+    /// construction — read [`ChannelPolicyRegistry::len`] through
+    /// [`InboundHost::policies`] for the live number.
     pub policies_loaded: usize,
+    /// The live access-policy + tool-posture registry the subscriber and the
+    /// dispatcher both read.
+    ///
+    /// F24-C3-H5: exposed so a long-lived runtime (`gateway run`) can refresh
+    /// inbound configuration when the operator adds a channel, WITHOUT tearing
+    /// down and re-spawning the inbound stack. Before this, the maps were
+    /// captured at spawn and unreachable afterwards, so `channel reload`
+    /// registered an adapter that could never be admitted.
+    pub policies: Arc<crate::channel_policy::ChannelPolicyRegistry>,
+    /// The workspace root a channel naming no `tool_workspace_root` is jailed
+    /// to. Retained so [`reload_policies`](InboundHost::reload_policies)
+    /// resolves postures exactly as `spawn` did — re-deriving it at the call
+    /// site is how the two lifecycles drift apart.
+    workspace: String,
 }
 
 impl InboundHost {
+    /// Re-read the channel configs from disk and swap BOTH the access
+    /// policies and the tool postures into the live registry. Returns the
+    /// number of channels now covered.
+    ///
+    /// # Why this is one call and not two
+    ///
+    /// F24-C3-H5 has two facets, and repairing only the first is worse than
+    /// leaving the bug: the reloaded channel starts receiving (so the obvious
+    /// test goes green) while running under the dispatcher's fallback posture
+    /// instead of the one its config asked for. Both maps therefore live in
+    /// one [`ChannelPolicyRegistry`](crate::channel_policy::ChannelPolicyRegistry)
+    /// and move in a single swap; there is no API here that can refresh one.
+    ///
+    /// Reads through [`crate::bootstrap::try_load_channel_policy_configs`],
+    /// the same named seam `spawn` uses, so the reloaded policies come from
+    /// the same directory the adapters were re-registered from (F24-C3-H1).
+    ///
+    /// # It refuses rather than revoking
+    ///
+    /// On a load error the current snapshot is **kept** and the error is
+    /// returned. The two loaders over `<home>/channels` disagree about a
+    /// malformed file — the registry skips it and registers the rest, the
+    /// policy loader hard-errors — so swapping in whatever came back would let
+    /// one typo'd file deny every already-working channel. That is the same
+    /// defect this method exists to fix, arriving from the other direction.
+    pub fn reload_policies(&self) -> Result<usize, wcore_channels::ChannelError> {
+        let configs = crate::bootstrap::try_load_channel_policy_configs()?;
+        Ok(self
+            .policies
+            .replace_from_configs(configs, std::path::Path::new(&self.workspace)))
+    }
+
     /// Stop the webhook host and abort the subscriber.
     pub fn shutdown(self) {
         if let Some((handle, tx)) = self.webhook {
@@ -148,32 +198,18 @@ pub async fn spawn(
     // F24-C3-H1 lives here: the `[inbound]` access policy and tool posture MUST
     // be read from the same directory the adapters were registered from.
     // `load_channel_policy_configs` is the named seam that guarantees it.
+    //
+    // F24-C3-H5: both maps are derived by ONE function and held in ONE shared
+    // registry, which the subscriber, the dispatcher and the caller's reload
+    // path all read. The derivation used to be open-coded here (and again in
+    // `bootstrap.rs`), which is what made it possible to refresh the access
+    // policy and silently forget the tool posture.
     let channel_configs = crate::bootstrap::load_channel_policy_configs();
     let policies_loaded = channel_configs.len();
-
-    let postures: HashMap<String, crate::channel_tools::ChannelToolScope> = channel_configs
-        .iter()
-        .map(|c| {
-            let root = c
-                .inbound
-                .tool_workspace_root
-                .clone()
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::path::PathBuf::from(&workspace));
-            (
-                c.name.clone(),
-                crate::channel_tools::ChannelToolScope {
-                    posture: c.inbound.tools,
-                    workspace_root: root,
-                },
-            )
-        })
-        .collect();
-
-    let policies: HashMap<String, wcore_channels::InboundPolicy> = channel_configs
-        .into_iter()
-        .map(|c| (c.name, c.inbound))
-        .collect();
+    let policies = Arc::new(crate::channel_policy::ChannelPolicyRegistry::from_configs(
+        channel_configs,
+        std::path::Path::new(&workspace),
+    ));
 
     let provider = crate::bootstrap::create_provider_with_oauth(config)
         .map_err(|e| InboundHostError::ProviderUnavailable(e.to_string()))?;
@@ -197,16 +233,16 @@ pub async fn spawn(
     let dispatcher: Arc<dyn crate::channel_inbound::TurnDispatcher> =
         Arc::new(crate::channel_dispatch::ChannelTurnDispatcher::new(
             config.clone(),
-            workspace,
+            workspace.clone(),
             provider,
-            postures,
+            Arc::clone(&policies),
             media_enricher,
         ));
 
     let subscriber = crate::channel_inbound::InboundSubscriber::new(
         Arc::clone(&manager),
         dispatcher,
-        policies,
+        Arc::clone(&policies),
         DEDUPE_TTL_MS,
         DEDUPE_MAX,
     );
@@ -220,6 +256,8 @@ pub async fn spawn(
         webhook,
         webhook_bind,
         policies_loaded,
+        policies,
+        workspace,
     })
 }
 

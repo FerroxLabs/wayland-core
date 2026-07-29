@@ -57,6 +57,7 @@ use wcore_types::execution_policy::{ApprovalPolicy, PolicySource};
 use crate::bootstrap::AgentBootstrap;
 use crate::channel_inbound::TurnDispatcher;
 use crate::channel_media::ChannelMediaEnricher;
+use crate::channel_policy::ChannelPolicyRegistry;
 use crate::channel_tools::ChannelToolScope;
 use crate::engine::AgentEngine;
 use crate::output::OutputSink;
@@ -68,11 +69,19 @@ pub struct ChannelTurnDispatcher {
     config: Config,
     cwd: String,
     provider: Arc<dyn LlmProvider>,
-    /// Per-channel tool posture, keyed by `channel_name`. A channel absent
-    /// from this map falls back to the safe `Conversational` posture rooted
-    /// at `cwd` — so an unconfigured channel can never accidentally get host
-    /// filesystem/shell access.
-    postures: HashMap<String, ChannelToolScope>,
+    /// Per-channel tool posture, read through the registry shared with the
+    /// subscriber. A channel absent from it falls back to the safe
+    /// `Conversational` posture rooted at `cwd` — so an unconfigured channel
+    /// can never accidentally get host filesystem/shell access.
+    ///
+    /// F24-C3-H5, facet 2. This used to be an owned `HashMap` moved in at
+    /// construction, exactly like the subscriber's policy map, and it went
+    /// stale by the same code path. Refreshing only the policies would have
+    /// made a reloaded channel start receiving while running under this
+    /// fallback rather than its configured posture — a green test over the
+    /// wrong permissions, which is worse than the fail-closed bug it replaced.
+    /// The two now move together because they are one object.
+    policies: Arc<ChannelPolicyRegistry>,
     /// Pool keyed by the HASHED session id (not the raw kernel session key,
     /// which contains colons the `SessionManager` rejects). Each value is an
     /// `Arc<Mutex<AgentEngine>>` so concurrent turns for the SAME session
@@ -101,14 +110,14 @@ impl ChannelTurnDispatcher {
         config: Config,
         cwd: String,
         provider: Arc<dyn LlmProvider>,
-        postures: HashMap<String, ChannelToolScope>,
+        policies: Arc<ChannelPolicyRegistry>,
         media: Option<Arc<ChannelMediaEnricher>>,
     ) -> Self {
         Self {
             config,
             cwd,
             provider,
-            postures,
+            policies,
             engines: Arc::new(Mutex::new(HashMap::new())),
             media,
         }
@@ -136,9 +145,8 @@ impl ChannelTurnDispatcher {
     /// Resolve the tool scope for `channel_name`, defaulting to the safe
     /// `Conversational` posture rooted at `cwd` for an unconfigured channel.
     fn scope_for(&self, channel_name: &str) -> ChannelToolScope {
-        self.postures
-            .get(channel_name)
-            .cloned()
+        self.policies
+            .scope_for(channel_name)
             .unwrap_or_else(|| ChannelToolScope {
                 posture: ChannelToolPosture::Conversational,
                 workspace_root: std::path::PathBuf::from(&self.cwd),
@@ -329,6 +337,110 @@ impl TurnDispatcher for ChannelTurnDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- F24-C3-H5 facet 2: the tool posture must not go stale either. ---
+
+    struct NoopProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for NoopProvider {
+        async fn stream(
+            &self,
+            _request: &wcore_types::llm::LlmRequest,
+        ) -> Result<
+            tokio::sync::mpsc::Receiver<wcore_types::llm::LlmEvent>,
+            wcore_providers::ProviderError,
+        > {
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            Ok(rx)
+        }
+    }
+
+    fn dispatcher_over(policies: Arc<ChannelPolicyRegistry>) -> ChannelTurnDispatcher {
+        ChannelTurnDispatcher::new(
+            Config::default(),
+            "/fallback-cwd".to_string(),
+            Arc::new(NoopProvider),
+            policies,
+            None,
+        )
+    }
+
+    fn scope(posture: ChannelToolPosture, root: &str) -> ChannelToolScope {
+        ChannelToolScope {
+            posture,
+            workspace_root: std::path::PathBuf::from(root),
+        }
+    }
+
+    /// The dispatcher must read the posture through the SHARED registry on
+    /// every turn, not out of a map copied at construction.
+    ///
+    /// This is the assertion a policy-only repair fails. Under that repair the
+    /// reloaded channel starts receiving — so an arrivals-only test goes green
+    /// — while running here under `Conversational` rooted at the process cwd
+    /// instead of the `Workspace` jail its config asked for. That is not
+    /// fail-closed and it is worse than the bug it replaced, which is exactly
+    /// why the swap moves both maps at once.
+    #[test]
+    fn a_posture_added_after_construction_is_visible_to_the_dispatcher() {
+        let registry = Arc::new(ChannelPolicyRegistry::default());
+        let dispatcher = dispatcher_over(Arc::clone(&registry));
+
+        // KNOWN-NEGATIVE. Before the swap the channel is unknown, so it gets
+        // the safe fallback. If this ever passes trivially, the test below
+        // proves nothing.
+        let before = dispatcher.scope_for("added");
+        assert_eq!(before.posture, ChannelToolPosture::Conversational);
+        assert_eq!(
+            before.workspace_root,
+            std::path::PathBuf::from("/fallback-cwd"),
+            "pre-swap the dispatcher must fall back to its own cwd"
+        );
+
+        registry.replace(crate::channel_policy::ChannelPolicySnapshot {
+            policies: HashMap::new(),
+            postures: HashMap::from([(
+                "added".to_string(),
+                scope(ChannelToolPosture::Workspace, "/jail"),
+            )]),
+            generation: 0,
+        });
+
+        // THE REPAIR. Same dispatcher instance, no reconstruction.
+        let after = dispatcher.scope_for("added");
+        assert_eq!(
+            after.posture,
+            ChannelToolPosture::Workspace,
+            "the dispatcher must resolve the reloaded channel's configured posture"
+        );
+        assert_eq!(after.workspace_root, std::path::PathBuf::from("/jail"));
+    }
+
+    /// A channel whose posture is REMOVED must fall back to the safe floor,
+    /// not keep the elevated one. Otherwise a reload could grant `Full` and
+    /// never take it away without a restart.
+    #[test]
+    fn a_removed_posture_falls_back_to_the_safe_floor() {
+        let registry = Arc::new(ChannelPolicyRegistry::from_parts(
+            HashMap::new(),
+            HashMap::from([("elevated".to_string(), scope(ChannelToolPosture::Full, "/"))]),
+        ));
+        let dispatcher = dispatcher_over(Arc::clone(&registry));
+        assert_eq!(
+            dispatcher.scope_for("elevated").posture,
+            ChannelToolPosture::Full,
+            "positive control: the elevated posture is in effect before the swap"
+        );
+
+        registry.replace(crate::channel_policy::ChannelPolicySnapshot::default());
+
+        assert_eq!(
+            dispatcher.scope_for("elevated").posture,
+            ChannelToolPosture::Conversational,
+            "a posture removed from disk must revert to the safe floor on reload"
+        );
+    }
 
     #[test]
     fn turn_prompt_is_text_only_without_attachments() {

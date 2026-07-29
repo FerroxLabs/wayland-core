@@ -32,6 +32,13 @@ pub mod channel_lease;
 // polled its adapters and received nothing, while its own
 // `[inbound_webhook] enabled = true` said otherwise.
 pub mod channel_inbound_host;
+// F24-C3-H5 — the per-channel access policy AND tool posture as one shared,
+// swappable object. Both used to be owned maps captured at spawn, so a channel
+// added by `channel reload` was absent from them, fell through to the
+// fail-closed default, and had every message silently denied — while `channel
+// health` reported it healthy and its webhook returned 200. Consumed by
+// `channel_inbound` + `channel_dispatch` + `channel_inbound_host` + `bootstrap`.
+pub mod channel_policy;
 // Channel tool posture: maps a per-channel `ChannelToolPosture` onto a
 // reduced/jailed toolset for channel-originated engines (closes remote
 // host-secret exfiltration). Consumed by `bootstrap` + `channel_dispatch`.

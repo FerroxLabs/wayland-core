@@ -309,9 +309,37 @@ pub fn govern_standalone_spawner(
 /// `$HOME/.wayland/channels` unconditionally — see F24-C3-H1 at the call site
 /// for what that broke, in both directions.
 pub fn load_channel_policy_configs() -> Vec<wcore_channels::config::ChannelConfig> {
+    try_load_channel_policy_configs().unwrap_or_default()
+}
+
+/// The same load, with the error kept.
+///
+/// F24-C3-H5. The two loaders over `<home>/channels` disagree about a
+/// malformed file, and the disagreement is dangerous once a reload can
+/// re-install policies at runtime:
+///
+/// - [`wcore_channels_registry::auto_register_from_dir`] SKIPS an unparseable
+///   file with a warning and returns `Ok`, so the other adapters still
+///   register;
+/// - [`wcore_channels::config::ChannelConfigLoader::load_all`] stops at the
+///   first failure and returns `Err`, which
+///   [`load_channel_policy_configs`]'s `unwrap_or_default` turns into an
+///   EMPTY policy set.
+///
+/// At startup that combination is merely visible (`policies=0` in the gateway's
+/// own log). At RELOAD it would be destructive: one newly-typo'd file would
+/// swap every running channel's policy out for the fail-closed default and
+/// convert a working gateway into universal denial — reintroducing the exact
+/// defect this lane is repairing, by a different route.
+///
+/// So the reload path uses this function and **refuses to swap** on `Err`,
+/// keeping the policies it already has. The startup path keeps its historical
+/// lossy behaviour via [`load_channel_policy_configs`] so this change cannot
+/// alter how an existing deployment boots.
+pub fn try_load_channel_policy_configs()
+-> Result<Vec<wcore_channels::config::ChannelConfig>, wcore_channels::ChannelError> {
     wcore_channels::config::ChannelConfigLoader::new(wcore_channels_registry::channels_dir())
         .load_all()
-        .unwrap_or_default()
 }
 
 /// Builder for creating a fully-initialized `AgentEngine`.
@@ -3188,36 +3216,24 @@ impl AgentBootstrap {
                 // asserts the two loaders "never diverge", and they did.
                 let channel_configs = load_channel_policy_configs();
 
-                // Resolve each channel's tool posture into a concrete scope.
-                // `Workspace` jails to the channel's `tool_workspace_root`
-                // when set, else this engine's working directory.
-                let postures: std::collections::HashMap<
-                    String,
-                    crate::channel_tools::ChannelToolScope,
-                > = channel_configs
-                    .iter()
-                    .map(|c| {
-                        let root = c
-                            .inbound
-                            .tool_workspace_root
-                            .clone()
-                            .map(std::path::PathBuf::from)
-                            .unwrap_or_else(|| std::path::PathBuf::from(&self.workspace));
-                        (
-                            c.name.clone(),
-                            crate::channel_tools::ChannelToolScope {
-                                posture: c.inbound.tools,
-                                workspace_root: root,
-                            },
-                        )
-                    })
-                    .collect();
-
-                let policies: std::collections::HashMap<String, wcore_channels::InboundPolicy> =
-                    channel_configs
-                        .into_iter()
-                        .map(|c| (c.name, c.inbound))
-                        .collect();
+                // Resolve each channel's access policy AND tool posture into
+                // one shared registry. `Workspace` jails to the channel's
+                // `tool_workspace_root` when set, else this engine's working
+                // directory.
+                //
+                // F24-C3-H5: this derivation used to be open-coded here and
+                // again in `channel_inbound_host::spawn`. Two copies of the
+                // same three-line map-build is how the access policy and the
+                // tool posture became separately forgettable — and forgetting
+                // the posture while refreshing the policy is the failure mode
+                // that is WORSE than the original bug, because it is not
+                // fail-closed. One derivation, one object, one swap.
+                let policies = std::sync::Arc::new(
+                    crate::channel_policy::ChannelPolicyRegistry::from_configs(
+                        channel_configs,
+                        std::path::Path::new(&self.workspace),
+                    ),
+                );
 
                 // Inbound-media enricher: resolve image/audio attachments to
                 // derived text (description/transcript) before the turn prompt
@@ -3248,7 +3264,7 @@ impl AgentBootstrap {
                         config_for_dispatch,
                         self.workspace.clone(),
                         provider.clone(),
-                        postures,
+                        std::sync::Arc::clone(&policies),
                         media_enricher,
                     ));
                 let subscriber = crate::channel_inbound::InboundSubscriber::new(
