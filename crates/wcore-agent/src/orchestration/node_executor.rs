@@ -332,7 +332,7 @@ async fn dispatch_once(
     let learned = cfg
         .actor
         .is_sub_agent()
-        .then(|| cfg.learned_policy.as_deref())
+        .then_some(cfg.learned_policy.as_deref())
         .flatten();
     let mut filtered = (cfg.policy_gate.is_some() || learned.is_some())
         .then(|| filter_tool_calls_by_policy(tool_calls, cfg.policy_gate.as_ref(), learned));
