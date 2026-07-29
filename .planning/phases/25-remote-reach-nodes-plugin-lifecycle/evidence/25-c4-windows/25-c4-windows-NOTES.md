@@ -94,3 +94,79 @@ would be the violation, not the fix. Divergence, if any, is expected in the *har
 - [ ] `cargo fmt --all` + `cargo check --workspace --all-targets` (hetzner for the workspace check;
       the Mac may not build).
 - [ ] Disk used under `D:\`, then clean up `target/`.
+
+---
+
+## Host survey (seandesktop, 2026-07-29)
+
+```
+Name UsedGB FreeGB      rustc 1.95.0 (59807616e 2026-04-14)
+C      1193    669      cargo  C:\Users\seand\.cargo\bin\cargo.exe
+D      2039   5413      git    C:\Program Files\Git\bin\git.exe
+E         2   1861
+```
+
+Working tree: `D:\lane-25c4-win` (clone of the existing `C:\ferrox-win` objects, then
+`git fetch origin lane/25-c4-windows`; HEAD = `280b9cdf`). Evidence + configs:
+`D:\lane-25c4-ev`. Nothing created at the root of `C:\`; `C:\actions-runner-*` untouched.
+
+### Credential: NOT present on this host, and none was moved here
+
+```
+WAYLAND_F25_CLOUD_TOKEN user_len=0 machine_len=0
+WAYLAND_F25_CLOUD_ORG   user_len=0 machine_len=0
+FLY_API_TOKEN           user_len=0 machine_len=0
+C:\Users\seand\.wayland-f25-cloud.env exists=False
+```
+(names and lengths only — no value was read, printed or transmitted.)
+
+Per the task's rule I am NOT improvising one and NOT importing hetzner's. Instead the
+proof uses the source fact above: `CloudCredential::from_env` rejects only the EMPTY
+string, so a **deliberately-invalid, clearly-labelled placeholder** gets past the
+`CredentialAbsent` short-circuit and the product opens a real socket. `api.machines.dev`
+then answers **401** where hetzner (holding a valid token, unknown app) got **404**.
+Both are the vendor's servers replying over TLS; the evidentiary property the positive
+control exists to establish — *the request physically left this machine and a remote
+server answered* — is identical. This is stated as a divergence, not hidden.
+
+---
+
+## HARNESS DEFECT FOUND AND REPAIRED (LANE-BRIEF §6b-ii)
+
+**The defect.** I launched the Windows build with
+`Start-Process powershell -File build.ps1 -WindowStyle Hidden` from an ssh command, then
+polled. The poller graded **"`build-status.txt` absent ⇒ STILL-BUILDING"**. It reported
+`STILL-BUILDING` for **12 consecutive polls over ~9 minutes**, quoting a `build.log` frozen
+at exactly `6002` bytes the whole time.
+
+The build was **dead**. `Start-Process` detaches from the ssh session but does not survive
+its teardown, so cargo was killed seconds after my ssh call returned. Confirmed positively,
+not by absence: `Get-CimInstance Win32_Process` showed **zero** cargo/rustc processes whose
+command line contained `lane-25c4-win` (the one live `rustc --crate-name wayland_core` on the
+box belonged to another lane — `mine=False`), and my target tree sat at `files=1474 MB=236`
+across a 60-second window with no change.
+
+This is the §3b-i class exactly: **an absent status file is what a *running* build and a
+*dead* build both look like**, so the poller could not fail.
+
+**The repair, in this lane, not a note for the next one** — `D:\lane-25c4-win\poll.ps1`
+never infers "running" from an absence. It requires a POSITIVE liveness signal (a
+cargo/rustc process whose command line carries this lane's marker) and grades three states:
+`DONE` (status file with `WLDONE`), `UNREADABLE` (status file without `WLDONE`), `BUILDING`
+(liveness procs > 0), `DEAD` (no status file AND no procs).
+
+**Three-assertion self-test, run on the box (the third is the one that proves the repair
+does anything):**
+
+```
+--- A1 known-positive (real marker, build is live) ---
+STATE=BUILDING liveness_procs=4
+--- A2 known-negative (marker no process can carry) ---
+STATE=DEAD no status file AND no cargo/rustc for marker 'lane-25c4-NOSUCH-MARKER' - the build is NOT running
+--- A3 what the OLD matcher would have said in the A2 case ---
+OLD=STILL-BUILDING   <- the old matcher cannot tell A1 from A2
+```
+
+**Second repair:** the build itself now runs in the **foreground** of a long-lived ssh
+connection rather than via `Start-Process`, so the process cannot be orphaned by session
+teardown in the first place.
