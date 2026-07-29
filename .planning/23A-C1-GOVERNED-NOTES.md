@@ -71,4 +71,65 @@ from the same instrument in the same session means zero and not a dead grep.
 5. Live proof on `hetzner-dsm` against the real binary, isolated `WAYLAND_HOME`, with a
    one-variable negative control per leg, plus a repeated mid-promotion kill distribution.
 
+---
+
+## T+25 — NEW FINDING, HIGH: the revocation capability is **unreachable by any customer**
+
+`govern.rs` is real, tested, and correct-looking. **It ships to nobody.**
+
+- The release builds and packages exactly one binary. `.github/workflows/release.yml:30`
+  `BINARY_NAME: wayland-core`; six matrix rows all name `wayland-core` / `wayland-core.exe`;
+  the upload globs `artifacts/wayland-core-*.tar.gz`.
+- `wcore-skill-govern` is a **dev-only auto-discovered bin of a library crate**
+  (`crates/wcore-skills/src/bin/wcore-skill-govern.rs`). It is named in **no** workflow, **no**
+  packaging script, and **no** manifest `[[bin]]` block. Its only non-source reference in the
+  whole tree is its own integration test.
+
+**Instrument check, same file, same invocation (LANE-BRIEF §3b-i):**
+
+```
+/usr/bin/grep -c "wayland-core"  .github/workflows/release.yml   -> 31   [known-positive, ALIVE]
+/usr/bin/grep -c "skill-govern"  .github/workflows/release.yml   ->  0   [the measured absence]
+```
+
+The 31 is the control: the instrument reads that file and returns non-zero for a string that
+is there, so the 0 is a real zero rather than a dead grep, a wrong path or an eaten glob.
+
+**Consequence for the grade.** `RC-READINESS` records 23A-C1 as lacking revocation. That is
+the right grade for the *wrong reason*: the code exists, **the surface does not**. A user who
+installs the release has no command that can revoke or roll back anything. So the top-priority
+item in this lane is not "write revocation" — it is **put revocation on the binary customers
+actually get**, and everything else is worth less until that is true.
+
+## T+25 — the resurrection hazard, made concrete
+
+The brief's hazard is real and I can now name its mechanism exactly:
+
+1. `GovernanceStore::revoke()` is **filesystem-only**. It deletes the skill directory and
+   writes a tombstone. It does **not** touch the P4 `Procedure` row.
+2. That row keeps `status: Staged` (or `Active`). `ProcedureStatus` has no `Revoked`
+   (`v2_types.rs:359`), so revocation is **not representable** in the memory tier.
+3. `can_transition_to` (`v2_types.rs:380-391`) permits `Staged → Active`. Nothing consults
+   governance.
+4. So a governed promotion that materialises an artifact from a promoted procedure would
+   **rebuild the exact directory the user revoked**, and neither the loader
+   (`/usr/bin/grep -n "govern|tombstone|revok" loader.rs` → **1** hit, a comment at line 444,
+   zero code) nor `transition_procedure` would stop it.
+5. `SkillPrioritizer::priority_order` then re-ranks it and `SkillRouter::seed_from_prioritizer`
+   hydrates it into the bandit — the hydration half of the hazard.
+
+The drafter path *is* guarded (`auto_skill/drafter.rs:128`). **The promotion path is not, and
+promotion is the path I am building.** So closing this is mine, exactly as the brief says.
+
+## Revised plan of record
+
+1. Put `skill-revoke` / `skill-rollback` / `skill-promote` / `skill-govern-list` on the
+   **shipped `wayland-core` binary**. Without this nothing else is reachable.
+2. `ProcedureStatus::Revoked`, terminal — no transition out of it, so the DB cannot resurrect.
+3. Governed promotion: consult `GovernanceStore` and **refuse** a revoked name/signature;
+   write a promotion provenance record; install crash-safely (stage + atomic rename).
+4. Loader-side enforcement so a revoked skill **cannot execute** even if its directory returns
+   by some other route.
+5. Restore `--skills-promote` last, only after 1-4 live-prove.
+
 **Nothing below this line is established yet.**
