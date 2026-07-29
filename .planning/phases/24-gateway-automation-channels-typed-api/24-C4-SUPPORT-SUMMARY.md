@@ -449,16 +449,34 @@ M3 is now a *different* mutation from the one that survived pre-rebase (§2) —
 liveness code has no serialized token to mis-spell, so the earlier trap does not recur
 here. The §2 instrument repair still stands on its own test.
 
-### 8.6 Fence and files
+### 8.6 Fence and files — measured against the MERGE-BASE, not the branch name
 
-`crates/wcore-cli/src/gateway.rs` now differs from integration by **documentation only** —
-9 insertions, 4 deletions, every one a `//!` line. All behaviour is in
-`gateway/support.rs`. Neither fenced file (`wcore-cli/src/lib.rs`, `main.rs`) appears in
-my diff at all.
+LANE-BRIEF §6 warns that diffing a branch NAME re-reads it as it is now, attributing
+every lane merged since to you. That trap is live here and I walked into it once:
+`git diff gh/plan/f20-unified-audit-repair HEAD` shows ~555 deletions across
+`wcore-agent/voice_mode.rs`, `wcore-exec-backend/*` and `wcore-tools/voice_mode.rs`.
+**I made none of them.** They are `lane/voice-bargein`, merged to integration AFTER my
+merge-base, so they appear as removals purely because my branch does not contain them
+yet. The correct base is captured once and quoted:
 
-Files of mine vs integration: `crates/wcore-cli/src/gateway.rs` (doc only),
-`crates/wcore-cli/src/gateway/support.rs`, `crates/wcore-cli/src/cron.rs`,
-`crates/wcore-cron/tests/in_flight_bound.rs`.
+```
+BASE=$(git merge-base HEAD gh/plan/f20-unified-audit-repair)   -> 4a872413
+git diff --numstat "$BASE" HEAD -- crates/
+   25    0  crates/wcore-cli/src/cron.rs
+    9    4  crates/wcore-cli/src/gateway.rs
+  303    4  crates/wcore-cli/src/gateway/support.rs
+  200    0  crates/wcore-cron/tests/in_flight_bound.rs
+git diff --name-only "$BASE" HEAD -- crates/wcore-cli/src/{lib,main}.rs | wc -l   -> 0
+git diff --name-only "$BASE" HEAD | wc -l                                        -> 23  (live control)
+```
+
+**Fence exposure: ZERO** — neither shared file is touched, and the control in the same
+invocation reports 23 changed files, so the zero is a real zero and not a dead command.
+
+`crates/wcore-cli/src/gateway.rs` differs by **documentation only**: filtering the diff
+to non-`//!` changed lines yields **0**. All behaviour lives in `gateway/support.rs`.
+
+Four files, none shared with another lane.
 
 ### 8.7 macOS — probed, not assumed, and left
 
