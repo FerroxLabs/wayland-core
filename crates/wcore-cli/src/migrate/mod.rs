@@ -1246,6 +1246,20 @@ fn peer_version(home: &std::path::Path, source: PeerSource) -> Option<String> {
             }
         }
     }
+    // grok records its installed version in `version.json`, NOT in a plain
+    // `VERSION` file. Found by driving the real `~/.grok` on this machine —
+    // the probe list above returned `None` against a home that plainly declares
+    // `"version": "0.2.103"`, which is the honest-absence rule turning into a
+    // silently missing fact.
+    if matches!(source, PeerSource::Grok)
+        && let Ok(s) = std::fs::read_to_string(home.join("version.json"))
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&s)
+        && let Some(ver) = v.get("version").and_then(|x| x.as_str())
+        && !ver.is_empty()
+        && ver.len() <= 64
+    {
+        return Some(ver.to_string());
+    }
     // gemini-cli records its version in the installed package manifest.
     if matches!(source, PeerSource::Gemini)
         && let Ok(s) = std::fs::read_to_string(home.join("package.json"))
