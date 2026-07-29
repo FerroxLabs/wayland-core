@@ -108,6 +108,19 @@ jobs:
   # .planning/evidence/ci-macos-budget/gate.py asserts byte-identity, evaluates the
   # condition against a 9-case truth table, and proves it can fail via four
   # mutation arms (`gate.py --self-test`).
+  #
+  # ── ADDENDUM 2026-07-29 (lane/ci-selfhosted-mac): supply side ────────────
+  # The rationing above is UNCHANGED — it is still correct for everything that
+  # goes to the hosted pool. What changed is that a self-hosted Apple-silicon
+  # runner now exists, so part of the traded-away lane coverage can be bought
+  # back from a different supply rather than by re-loading the hosted queue.
+  # A token-less `lane/**` push now gets its native arm64 compile and its arm64
+  # artifact from `build-darwin-selfhosted` (see that job, at the bottom of this
+  # file, for the serialisation arithmetic that says why only ONE of the three
+  # macOS jobs moved, and for the hermeticity limits that say why it runs no
+  # tests). `CI (macos-latest)` and `Build (x86_64-apple-darwin)` stay hosted and
+  # stay opt-in on lanes. `main`, the integration branch and every PR are
+  # completely untouched by that job and keep the full hermetic hosted matrix.
 
   ci:
     name: CI (${{ matrix.os }})
@@ -450,21 +463,33 @@ jobs:
             echo "- macOS jobs scheduled: **\`${DARWIN}\`**"
             echo
             if [ "$DARWIN" = "true" ]; then
-              echo "DARWIN_REQUESTED — \`CI (macos-latest)\`, \`Build (aarch64-apple-darwin)\` and \`Build (x86_64-apple-darwin)\` are scheduled."
+              echo "DARWIN_REQUESTED — \`CI (macos-latest)\`, \`Build (aarch64-apple-darwin)\` and \`Build (x86_64-apple-darwin)\` are scheduled on the GitHub-hosted pool."
+              echo
+              echo "The self-hosted \`Build (aarch64-apple-darwin) [self-hosted]\` job stands DOWN for this run:"
+              echo "the hosted job of that name is running instead, and both upload the same artifact name."
             else
-              echo "DARWIN_SKIPPED — this run has **no macOS coverage and no macOS binary artifacts**."
+              echo "DARWIN_SKIPPED (hosted pool) — the three GitHub-hosted macOS jobs did not run."
               echo "Linux and Windows coverage are unchanged."
               echo
-              echo "To get them, push again with \`[ci-darwin]\` in the commit message:"
+              echo "**Native arm64 Darwin coverage is still present.** \`Build (aarch64-apple-darwin) [self-hosted]\`"
+              echo "compiles this commit on the self-hosted Apple-silicon runner and uploads"
+              echo "\`wayland-core-aarch64-apple-darwin\`, so \`gh run download -n wayland-core-aarch64-apple-darwin\`"
+              echo "works on this run. That job asserts \`uname -m = arm64\` and \`lipo -archs = arm64\` before uploading."
+              echo
+              echo "Still NOT covered here: the macOS **test/lint verdict** (\`CI (macos-latest)\` — fmt, clippy,"
+              echo "full nextest, audit, release smoke, eval gate) and the **Intel** \`Build (x86_64-apple-darwin)\`"
+              echo "compile + artifact. Both remain on the hosted pool by design; see .planning/CI-SELFHOSTED-MAC.md."
+              echo
+              echo "To get those too, push again with \`[ci-darwin]\` in the commit message:"
               echo '```'
-              echo 'git commit --allow-empty -m "[ci-darwin] need a macOS binary for live testing"'
+              echo 'git commit --allow-empty -m "[ci-darwin] need the full hosted macOS matrix"'
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$DARWIN" = "true" ]; then
-            echo "::notice title=macOS budget::DARWIN_REQUESTED for ${GITHUB_REF_NAME}"
+            echo "::notice title=macOS budget::DARWIN_REQUESTED for ${GITHUB_REF_NAME} — full hosted macOS matrix; self-hosted arm64 job stands down."
           else
-            echo "::warning title=macOS budget::DARWIN_SKIPPED for ${GITHUB_REF_NAME} — no macOS coverage or artifacts in this run; push with [ci-darwin] to enable."
+            echo "::warning title=macOS budget::DARWIN_SKIPPED for ${GITHUB_REF_NAME} — no HOSTED macOS jobs. Native arm64 compile + artifact still produced by the self-hosted runner; the macOS test verdict and the Intel build are absent. Push with [ci-darwin] for the full hosted matrix."
           fi
 
       - uses: actions/checkout@v6
@@ -578,6 +603,62 @@ jobs:
       # only channel that distinguishes "ran and enforced" from "qualified out":
       # nextest captures a PASSING test's output, so a skip that merely prints is
       # invisible in the run that matters — the file is the load-bearing channel.
+      # ── Signed release-manifest drill (handed over by lane/release-trust-root) ──
+      # 2026-07-29. The ONLY check that the bundled release trust root agrees with
+      # the manifest-signing path. The real FerroxLabs trust root was substituted
+      # into RELEASE_TRUST_ROOT_JSON, replacing the placeholder that made
+      # `self-update` fail closed; if the CI signing secret ever drifts from the
+      # bundled public key then NOTHING PUBLISHES AND THE FAILURE IS SILENT. This
+      # drill is what makes that loud, so it has to run on every push, not once.
+      #
+      # WHY A STEP IN THIS JOB AND NOT A DEDICATED ONE. The handover described it
+      # as "about a minute", and that is true of the DRILL, but it is not true of
+      # a job: the script does `cargo build --release -p wcore-eval-scenarios
+      # --bin wayland-release` and then compiles a `wcore-cli` test binary. In a
+      # fresh job both are COLD — the comparable `Build (x86_64-unknown-linux-gnu)`
+      # release compile measures ~16 min, and ubuntu-latest is itself congested
+      # (live census 32 queued / 13 running). A standalone job would therefore
+      # spend ~20-40 min of a contended pool to run a 1-minute check. Here,
+      # target/ is already warm from this job's own pre-build and its
+      # `clippy --all-targets`, so the marginal cost really is about a minute, and
+      # it costs ZERO extra jobs and ZERO extra hops — the same reasoning that
+      # reverted the `budget` job at the top of this file.
+      #
+      # WHY `!cancelled()` AND NOT A PLAIN TRAILING STEP. A trailing step is
+      # skipped whenever an earlier step in the job fails, and clippy is red
+      # repo-wide as of 2026-07-29 — so a plain step would have run ZERO times
+      # while looking correctly configured, which is the always-on requirement
+      # silently unmet. `!cancelled()` decouples it from earlier reds without
+      # spawning work on a cancelled run. It is NOT `always()`: a cancelled job
+      # should not start a fresh compile.
+      #
+      # It is deliberately NOT on a macOS leg (it is pure Linux work and would
+      # compete for the single self-hosted Apple-silicon runner wired up at the
+      # bottom of this file), and release.yml is untouched.
+      #
+      # VERIFIED rather than taken on trust, before wiring: the script reads no
+      # credential (grep for secrets./_KEY/SEED/GITHUB_TOKEN/password returns
+      # zero, against a live known-positive of 9 `trust-root` matches in the same
+      # file), it mints throwaway keys at run time into a mktemp dir it traps away
+      # on exit, and it asserts the EXECUTED test count against EXPECTED_TESTS=10
+      # rather than trusting exit status — the anti-vacuity discipline this repo
+      # requires, already built in by its author.
+      - name: Signed release-manifest drill (trust root vs manifest-signing path)
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          DRILL=.github/scripts/release-manifest-drill.sh
+          TARGET=crates/wcore-cli/tests/release_manifest_pipeline.rs
+          # Fail CLOSED and say which of the two states this is. A missing check
+          # must never read as a pass.
+          for f in "$DRILL" "$TARGET"; do
+            if [ ! -f "$f" ]; then
+              echo "::error title=Release manifest drill::'$f' is ABSENT. On main or the integration branch this means the drill or its test target was DELETED — investigate, do not skip. On lane/ci-selfhosted-mac before lane/release-trust-root merges this is EXPECTED: the ci.yml wiring landed first by design, and importing that lane's crates/ changes is outside this lane's fence."
+              exit 1
+            fi
+          done
+          $DOCKER_RUN "$CI_IMAGE" bash "$DRILL"
+
       - name: Report sandbox skips (none expected now that the grant is in place)
         if: always()
         run: |
@@ -719,6 +800,217 @@ jobs:
             target/${{ matrix.target }}/release/wayland-core.exe
           if-no-files-found: error
           retention-days: 14
+
+  # ── Native arm64 Darwin build on the self-hosted Mac ──────────────────
+  # 2026-07-29, lane/ci-selfhosted-mac. Raw evidence:
+  # .planning/CI-SELFHOSTED-MAC.md, gated by
+  # .planning/evidence/ci-selfhosted-mac/gate.py.
+  #
+  # A self-hosted Apple-silicon runner (`sean-mac-arm64`, labels self-hosted /
+  # macOS / ARM64, all three READ-ONLY i.e. self-detected) now exists. This job
+  # gives token-less `lane/**` pushes their native arm64 Darwin compile and their
+  # arm64 binary artifact back — the coverage the macOS budget change above
+  # traded away — WITHOUT spending any of the hosted macOS pool.
+  #
+  # WHY ONLY THIS ONE JOB, AND NOT ALL THREE. Measured, not assumed. A
+  # self-hosted runner executes ONE job at a time, so moving all three macOS jobs
+  # SERIALISES them behind each other:
+  #   median executed durations (n=14 executed macOS jobs, hosted, 100-run window)
+  #     CI (macos-latest)             26.2 min   (max 32.7)
+  #     Build (aarch64-apple-darwin)  16.5 min   (max 23.5)
+  #     Build (x86_64-apple-darwin)   16.5 min   (max 23.4)
+  #   all three, serial on one runner = 59.2 min  ->  ~3.0 macOS jobs/hour
+  #   the GitHub-hosted pool measures                 11.25 macOS jobs/hour
+  # So "move everything to self-hosted" is a ~3.7x THROUGHPUT DOWNGRADE. The
+  # single runner's advantage is NOT capacity, it is LATENCY WHILE IDLE: it has
+  # no queue, where a live census on 2026-07-29T06:41Z found 39 macOS jobs QUEUED
+  # against 3 in_progress on the hosted pool. Moving the one cheap, high-value
+  # job captures that latency win; moving the expensive one would spend the
+  # runner's entire duty cycle and rebuild the very queue this repairs.
+  #
+  # WHY THIS JOB SPECIFICALLY. It is the only job that UPLOADS the arm64 binary,
+  # and it does so independently of whether the test suite passed (see the
+  # cross-audit note on the `build` matrix above) — which is exactly when a lane
+  # most needs a binary. It answers "does my change compile on arm64 Darwin?",
+  # which is the most common macOS-only break, and it hands back a runnable
+  # binary for live testing. `CI (macos-latest)` (the fmt/clippy/12.8k-test
+  # verdict) and `Build (x86_64-apple-darwin)` (Intel compile-check) stay on the
+  # hosted pool, opt-in via `[ci-darwin]` on lanes — see §"what stays hosted".
+  #
+  # HERMETICITY. This runner is NOT hermetic and this job is scoped accordingly.
+  # It is a developer desktop: a real login keychain, real fsevents, the owner's
+  # PATH and installed tooling, and state that survives between jobs. This repo
+  # has already been bitten by self-hosted statefulness — see the
+  # "Clear stale install-action state" step above, a recurring `CI (Array)` red
+  # caused by the self-hosted Windows runner leaving a locked directory behind
+  # between runs. A permissive desktop also UNDER-detects missing-dependency
+  # bugs: the Linux CI image comment above records 49 of 68 failures that were
+  # nothing but three absent binaries, a class that a machine with everything
+  # installed can never surface. That is why this job is compile-and-upload ONLY
+  # and runs NO tests: a compile result is near-insensitive to ambient machine
+  # state, whereas the 12.8k-test suite (keychain, fsevents, sandbox,
+  # process-reaping) is exactly the thing that would both behave differently on a
+  # real desktop and risk touching the owner's real keychain state.
+  build-darwin-selfhosted:
+    name: Build (aarch64-apple-darwin) [self-hosted]
+    # Deliberately a DISTINCT job name from the hosted `Build
+    # (aarch64-apple-darwin)`. Reusing the hosted name would keep check-name
+    # stability, but it would also make a non-hermetic desktop build
+    # indistinguishable in the checks list from a hermetic ephemeral-VM build.
+    # Given the two have different trust properties, hiding which one produced an
+    # artifact would be actively misleading. The hosted name is unaffected on
+    # `main`, the integration branch and every PR, so no required check changes.
+    #
+    # GATING — three independent restrictions, each load-bearing:
+    #   1. `push` only, NEVER `pull_request`. This repository is PUBLIC
+    #      (`private:false`, `allow_forking:true`) and its fork-PR approval policy
+    #      is `first_time_contributors`, so a RETURNING contributor's fork PR runs
+    #      with no approval at all. Putting a personal machine on the
+    #      pull_request path would let that code execute on the owner's Mac
+    #      alongside his login keychain and SSH keys. NOTE: the self-hosted
+    #      Windows runners are ALREADY exposed this way through the `ci` matrix,
+    #      which does run on `pull_request`. That is pre-existing and is reported
+    #      as a HIGH finding rather than silently widened here.
+    #   2. `lane/**` only. `main` and the integration branch keep the hermetic
+    #      hosted runner, so anything feeding a release-adjacent decision is built
+    #      in a clean ephemeral VM. release.yml is untouched by this lane, so
+    #      every shipped artifact still comes from a hosted runner.
+    #   3. Mutually exclusive with `[ci-darwin]`/`[ci-macos]`. With the token the
+    #      full hosted macOS matrix runs, including its own
+    #      `Build (aarch64-apple-darwin)`, and BOTH jobs would upload the artifact
+    #      name `wayland-core-aarch64-apple-darwin`.
+    #      actions/upload-artifact@v4+ REJECTS a duplicate artifact name within a
+    #      run (409 Conflict), so overlapping them would hard-fail the run. Making
+    #      them exclusive also keeps the artifact name constant, so
+    #      `gh run download -n wayland-core-aarch64-apple-darwin` works on every
+    #      lane run whether or not the token was used.
+    if: >-
+      github.event_name == 'push'
+      && startsWith(github.ref_name, 'lane/')
+      && !(contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]')
+      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]'))
+    runs-on: [self-hosted, macOS, ARM64]
+    # ONE runner, ONE job at a time, on a machine its owner also works on. Without
+    # coalescing, a 5-8-wide lane fan-out pushing ~7.2 times/hour against a
+    # ~16.5-minute build is ~2x oversubscribed and would pile a multi-hour serial
+    # queue onto a personal laptop — the hosted pool's pathology reproduced on one
+    # box. A superseded commit's binary is worthless to the lane that asked for
+    # it, so cancel it. This is a JOB-level group precisely so it cannot affect
+    # any other job: the run-level `cancel-in-progress` above stays false for
+    # pushes, and `main`/integration never reach this job at all.
+    concurrency:
+      group: darwin-selfhosted-${{ github.ref }}
+      cancel-in-progress: true
+    # Hard ceiling on how long this may occupy the owner's machine.
+    timeout-minutes: 45
+    steps:
+      # Runs BEFORE checkout so a mislabelled runner is rejected before it is
+      # handed any repository code.
+      #
+      # This is the Rosetta trap, made fatal instead of trusted. The FIRST
+      # install of this runner carried `ARM64` as a hand-written `custom` label
+      # while the runtime self-reported `X64` — the x64 package under Rosetta. A
+      # job targeting [self-hosted, macOS, ARM64] would have matched it and then
+      # compiled and tested x86_64 under emulation while believing it had
+      # Apple-silicon coverage, and would have uploaded that as
+      # `wayland-core-aarch64-apple-darwin`. The current runner self-detects all
+      # three labels (`read-only`), but a label is a CLAIM and this step is the
+      # check: `uname -m` is measured from the running process, and a mismatch
+      # fails the job rather than producing a mislabelled artifact.
+      - name: Assert this runner really is Apple silicon (label is a claim, not proof)
+        run: |
+          set -euo pipefail
+          echo "runner_name=${RUNNER_NAME:-<unset>}"
+          echo "runner_os=${RUNNER_OS:-<unset>} runner_arch=${RUNNER_ARCH:-<unset>}"
+          UNAME_M="$(uname -m)"
+          echo "uname_m=${UNAME_M}"
+          sw_vers || true
+          if [ "${UNAME_M}" != "arm64" ]; then
+            echo "::error title=Runner arch mismatch::Runner is labelled ARM64 but uname -m reports '${UNAME_M}'. Refusing to build — this is the Rosetta/x64-package trap. Do NOT relabel; reinstall the arm64 runner package."
+            exit 1
+          fi
+          if [ "${RUNNER_ARCH:-}" != "ARM64" ]; then
+            echo "::error title=Runner arch mismatch::RUNNER_ARCH='${RUNNER_ARCH:-<unset>}', expected ARM64."
+            exit 1
+          fi
+          echo "OK: genuine Apple silicon"
+
+      # Default `clean: true` is KEPT on purpose. It runs `git clean -ffdx`, which
+      # wipes target/ and therefore forfeits the warm-cache speedup a self-hosted
+      # runner could give. That is the deliberate trade: this runner's whole
+      # liability is that state survives between jobs, so the one form of
+      # statefulness that is trivially removable is removed. `~/.cargo`'s registry
+      # still persists outside the workspace, which keeps the dependency download
+      # cost down without letting stale compiled artifacts cross between lane
+      # branches. `clean: false` is available as a future lever; it is not taken
+      # here because it trades correctness isolation for minutes.
+      - uses: actions/checkout@v6
+
+      - name: Setup vx (installs Rust from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      # aarch64-apple-darwin is the HOST triple here, so its std is already
+      # present and `--target` needs no `rustup target add` — which matters
+      # because a self-hosted runner is not guaranteed to have rustup on PATH the
+      # way the hosted images are. Kept explicit and tolerant rather than assumed.
+      - name: Ensure aarch64-apple-darwin target (host triple; no-op when present)
+        run: |
+          set -euo pipefail
+          if command -v rustup >/dev/null 2>&1; then
+            rustup target add aarch64-apple-darwin
+          else
+            echo "rustup not on PATH; aarch64-apple-darwin is the host triple, std is present"
+          fi
+
+      - name: Build release binary
+        run: vx cargo build --release --target aarch64-apple-darwin -p wcore-cli
+
+      # The artifact-integrity check. `file -b` / `lipo -archs` are used rather
+      # than `file <path>`, because `file` echoes the PATH it was given and that
+      # path contains `aarch64-apple-darwin` — grepping the un-suppressed output
+      # for an arch token would match the directory name and pass on a binary of
+      # ANY architecture. That is a tautological gate; `-b` removes the filename
+      # so only the measured Mach-O header can satisfy it. No pipeline is used to
+      # decide the outcome either, so no exit status can be stolen by a pipe.
+      - name: Verify the produced binary is genuinely arm64
+        run: |
+          set -euo pipefail
+          BIN="target/aarch64-apple-darwin/release/wayland-core"
+          test -f "$BIN"
+          DESC="$(file -b "$BIN")"
+          ARCHS="$(lipo -archs "$BIN")"
+          echo "file -b   : ${DESC}"
+          echo "lipo -archs: ${ARCHS}"
+          case "$ARCHS" in
+            arm64) echo "OK: lipo reports exactly arm64" ;;
+            *) echo "::error title=Wrong architecture::lipo -archs reported '${ARCHS}', expected exactly 'arm64'"; exit 1 ;;
+          esac
+          case "$DESC" in
+            *arm64*) echo "OK: Mach-O header says arm64" ;;
+            *) echo "::error title=Wrong architecture::file -b reported '${DESC}'"; exit 1 ;;
+          esac
+          # Native execution: it runs on the machine that built it.
+          "$BIN" --version
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@v7
+        with:
+          # Byte-identical to the hosted job's artifact name (guaranteed unique
+          # per run by the mutual exclusion in `if:` above), so the documented
+          # `gh run download -n wayland-core-aarch64-apple-darwin` route is
+          # unchanged for consumers.
+          name: wayland-core-aarch64-apple-darwin
+          path: target/aarch64-apple-darwin/release/wayland-core
+          if-no-files-found: error
+          retention-days: 14
+
+      # Visibility into what this job leaves behind on a machine nobody reimages.
+      - name: Report runner disk (self-hosted runners are not reimaged)
+        if: always()
+        run: df -h / "$RUNNER_TEMP" 2>/dev/null || df -h /
 
   # ── W10: Chromium live e2e (debt-register A.1) ───────────────────────
   # Closes A.1 — chromiumoxide live tests don't run in CI because runners
