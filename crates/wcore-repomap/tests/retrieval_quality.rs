@@ -151,7 +151,8 @@ fn retrieval_quality_meets_the_recorded_precision_and_recall_floor() {
     let store_dir = tempfile::tempdir().expect("store tempdir");
     let store_path = store_dir.path().join("quality.db");
 
-    let mut store = IndexStore::open(&store_path, &root, wcore_repomap::JournalMode::Wal).expect("open store");
+    let mut store =
+        IndexStore::open(&store_path, &root, wcore_repomap::JournalMode::Wal).expect("open store");
     let stats = store.refresh(&IndexOptions::default()).expect("refresh");
     assert!(
         stats.scanned >= 15,
@@ -235,7 +236,12 @@ fn retrieval_quality_meets_the_recorded_precision_and_recall_floor() {
 fn every_hit_carries_provenance_and_a_staleness_verdict() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let store_dir = tempfile::tempdir().expect("store tempdir");
-    let mut store = IndexStore::open(&store_dir.path().join("prov.db"), &root, wcore_repomap::JournalMode::Wal).expect("open store");
+    let mut store = IndexStore::open(
+        &store_dir.path().join("prov.db"),
+        &root,
+        wcore_repomap::JournalMode::Wal,
+    )
+    .expect("open store");
     store.refresh(&IndexOptions::default()).expect("refresh");
 
     let outcome = search(&store, &SearchQuery::new("IndexStore").with_limit(5)).expect("search");
@@ -273,8 +279,12 @@ fn every_hit_carries_provenance_and_a_staleness_verdict() {
 fn a_query_full_text_cannot_serve_falls_back_and_says_so() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let store_dir = tempfile::tempdir().expect("store tempdir");
-    let mut store =
-        IndexStore::open(&store_dir.path().join("fallback.db"), &root, wcore_repomap::JournalMode::Wal).expect("open store");
+    let mut store = IndexStore::open(
+        &store_dir.path().join("fallback.db"),
+        &root,
+        wcore_repomap::JournalMode::Wal,
+    )
+    .expect("open store");
     store.refresh(&IndexOptions::default()).expect("refresh");
 
     // A punctuation-only literal: FTS5's tokenizer discards every character,
@@ -332,8 +342,12 @@ fn editing_an_indexed_file_makes_its_hit_report_itself_stale() {
     .expect("write");
 
     let store_dir = tempfile::tempdir().expect("store tempdir");
-    let mut store =
-        IndexStore::open(&store_dir.path().join("stale.db"), &root, wcore_repomap::JournalMode::Wal).expect("open store");
+    let mut store = IndexStore::open(
+        &store_dir.path().join("stale.db"),
+        &root,
+        wcore_repomap::JournalMode::Wal,
+    )
+    .expect("open store");
     store.refresh(&IndexOptions::default()).expect("refresh");
 
     let before = search(&store, &SearchQuery::new("stale_marker_function")).expect("search");
@@ -360,8 +374,12 @@ fn editing_an_indexed_file_makes_its_hit_report_itself_stale() {
 fn a_query_is_bounded_by_the_limit_the_caller_sets() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let store_dir = tempfile::tempdir().expect("store tempdir");
-    let mut store =
-        IndexStore::open(&store_dir.path().join("bound.db"), &root, wcore_repomap::JournalMode::Wal).expect("open store");
+    let mut store = IndexStore::open(
+        &store_dir.path().join("bound.db"),
+        &root,
+        wcore_repomap::JournalMode::Wal,
+    )
+    .expect("open store");
     store.refresh(&IndexOptions::default()).expect("refresh");
 
     // `the` matches nearly every file in the corpus; without the bound this
