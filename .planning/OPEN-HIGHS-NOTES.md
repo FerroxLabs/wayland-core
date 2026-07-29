@@ -77,9 +77,79 @@ degraded arm. Must confirm the corpse reads `Dead`, not `Indeterminate`.
 
 ## Target 2 — 23A resurrection hazard
 
-**Status: not yet started.** Coordination constraint recorded up front: `lane/23a-c1-governed` is
-live and owns the promotion feature that lifts quarantine. My scope is the **hazard analysis and
-the guard**, not promotion. If they overlap I defer the overlap and say so rather than racing.
+**Status: hazard re-measured at HEAD and CONFIRMED. Guard site decided on dependency-graph
+grounds. Coordination checked — a real divergence found, and it is not a duplication.**
+
+### Re-measured at HEAD (line numbers had drifted, structure held)
+
+| Claim (from `F23A-C1-M1` / `23A-C1-NOTES.md` §6.3) | At `75babf32` |
+|---|---|
+| hydration at `bootstrap.rs:2145` | **moved to `:2173`**, `seed_pairs_for(&candidate_names, "auto_drafter", 1)` |
+| `candidate_names` = `catalog.visible()` | **TRUE**, `bootstrap.rs:2147` |
+| `visible()` filters `!disable_model_invocation` | **TRUE**, `refs.rs:129` |
+| auto-drafts quarantined | **TRUE**, `loader.rs:448` sets `disable_model_invocation = true` |
+| Layer 1b additionally gated | **NEW** — also behind `self.config.observability.skills_lifecycle` (`:2172`) |
+
+**Checked for a second production hydration path** (the "sole path had three" trap):
+`seed_pairs_for` has 2 non-test call sites in `bootstrap.rs` (`:2152` scorer `bench`, `:2173`
+scorer `auto_drafter`). `drafter.rs:511` also calls it with the draft's own name, bypassing
+`visible()` — **but it is inside `#[test] drafted_skill_hydrates_router_seed_via_auto_drafter_scorer`**,
+so it is not a production path. It is still evidence *for* the hazard: it proves the retained row
+hydrates to a 4-success prior whenever the name reaches the candidate list.
+
+### Revocation does not, and structurally CANNOT, purge the row
+
+Concept sweep over `wcore-skills/src/` for `evolved_prompts|PromptStore|prompt_store|auto_drafter`
+→ **0 code hits** (one unrelated doc comment in `router.rs:103`). Known-positive control in the
+same session: `evolved_prompts` across `crates/` → **22** hits, so the instrument is alive and the
+zero is a real zero.
+
+`prompt_store.rs:160-162` states the reason in-tree: *"`wcore-skills` cannot depend on
+`wcore-evolve` (the dep already runs the other way), so callers (e.g. agent bootstrap) bridge the
+two via this helper."*
+
+**This decides the guard site, on the dependency graph rather than on preference.** Making
+`govern::revoke()` purge the `evolved_prompts` row would require `wcore-skills → wcore-evolve`,
+inverting an existing edge. So the only correct place for the guard is **the bridge point: agent
+bootstrap, Layer 1b.** That is the site in my scope.
+
+### `seed_pairs_for` matches on NAME ALONE — this widens the hazard
+
+`prompt_store.rs:163-182` + `:193` — the query is `WHERE skill_name = ?1` and a scorer match.
+**No signature, no provenance, no governance.** So the hazard is not only "a revoked draft comes
+back":
+
+> A user revokes auto-skill `deploy-helper` (directory deleted, tombstone written, DB row
+> retained). Later they hand-write their own unrelated skill named `deploy-helper`. It is visible,
+> so it enters `candidate_names`, and Layer 1b hydrates **the revoked skill's 4-success prior onto
+> the user's new skill.** No promotion required for this variant once quarantine lifts.
+
+The drafter-side guard does not cover this: it suppresses re-*drafting*, it does not remove the row.
+
+### Coordination — divergence found, NOT duplication
+
+`lane/23a-c1-governed` @ `098c2eb9` (read-only inspection) has committed **only** its NOTES file,
+no code. Its plan of record claims the hazard: *"promotion is the path I am building. So closing
+this is mine."* I therefore do **not** touch promotion, `ProcedureStatus`, the loader, or the CLI
+surface — all theirs.
+
+**But its named mechanism is a different store from the graded finding's, and prior measurement
+found its store inert.** Its T+25 chain is `Procedure` row → promotion materialises directory →
+`seed_from_prioritizer` (Layer 2). That is store **(c)** in `23A-C1-NOTES.md` §6.3, which that
+same file measured as **INERT**: *"No path materialises a `Procedure` into an on-disk skill or
+executes one."* Its notes never mention `evolved_prompts`, `seed_pairs_for`, or Layer 1b — store
+**(b)**, which is the one §6.3 measured as gated shut *only* by the quarantine their work lifts.
+
+This is a **recurrence of a recorded error**: `CROSS-AUDIT.md` Q4 records that 2/3 of the panel
+ranked the `Procedure` row top risk and that the measurement showed *"the panel names the wrong
+database"*. The concurrent lane has independently re-selected the wrong database.
+
+Their guards (refuse revoked name at promotion; loader enforcement) would cover the
+directory-rebuild variant. They do **not** cover the name-collision variant above, because those
+guards are directory-level and the row is name-keyed.
+
+**Action: build the Layer 1b guard (mine, non-overlapping), and flag the divergence to them
+rather than fixing their half.**
 
 ## Target 3 — grades resting on a dead instrument
 
