@@ -242,25 +242,25 @@ fn collect_refs(v: &Value, out: &mut Vec<String>) {
 fn encode_nullables_as_3_0(node: &mut Value) {
     match node {
         Value::Object(map) => {
-            let downgrade = match map.get("type") {
-                Some(Value::Array(types)) => types.iter().any(|t| t.as_str() == Some("null")),
-                _ => false,
-            };
-            if downgrade {
-                if let Some(Value::Array(types)) = map.get("type") {
+            // Computed under an immutable borrow, applied after it ends.
+            let downgraded: Option<Value> = match map.get("type") {
+                Some(Value::Array(types)) if types.iter().any(|t| t.as_str() == Some("null")) => {
                     let rest: Vec<Value> = types
                         .iter()
                         .filter(|t| t.as_str() != Some("null"))
                         .cloned()
                         .collect();
-                    let new_type = if rest.len() == 1 {
+                    Some(if rest.len() == 1 {
                         rest[0].clone()
                     } else {
                         Value::Array(rest)
-                    };
-                    map.insert("type".into(), new_type);
-                    map.insert("nullable".into(), json!(true));
+                    })
                 }
+                _ => None,
+            };
+            if let Some(new_type) = downgraded {
+                map.insert("type".into(), new_type);
+                map.insert("nullable".into(), json!(true));
             }
             for (_, v) in map.iter_mut() {
                 encode_nullables_as_3_0(v);
