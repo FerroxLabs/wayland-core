@@ -10,8 +10,23 @@ remaining plans **in wave order, strictly serially**, to completion.
 - **NEVER touch `/Users/seandonahoe/dev/waylandcore`.** It is a different, heavily-dirty
   checkout. Your first action is to verify `git rev-parse --show-toplevel` and abort if it
   resolves there.
-- **NEVER run cargo on the Mac.** The single exception is `cargo fmt --all -- --check`.
-  All compilation, tests and clippy run on hetzner (see §2).
+- **NEVER run cargo on the Mac.** The exceptions are `cargo fmt --all -- --check`, and the
+  **narrow Darwin-behaviour exception** below. All compilation, tests and clippy run on hetzner
+  (see §2).
+
+  **Darwin-behaviour exception, added 2026-07-29.** The rule exists because full builds on the Mac
+  are slow and were causing real problems — not because Darwin behaviour is uninteresting. But **no
+  permitted host runs macOS**, so a behaviour that only Darwin exhibits was unprovable, and a lane
+  correctly named that as a **rule-imposed gap rather than papering over it**. So:
+
+  A **single-crate, single-test** run IS permitted on the Mac when the thing under test is
+  **platform behaviour Darwin alone can demonstrate** — `cargo test -p <crate> --test <file>`, never
+  a workspace build, never clippy, never a release build. **Say in your summary that you used it and
+  why.** If you find yourself wanting it for anything that hetzner could have proven, you do not
+  qualify.
+
+  This was granted after a lane measured macOS liveness semantics **in C** to work around the rule,
+  and found the old check wrong in *both* directions there — a result worth having in Rust.
 - **Never print, echo, or transmit a secret value.** If a plan needs a real credential and
   none is configured, report it as a blocker in your SUMMARY — do NOT embed one.
 
