@@ -107,6 +107,64 @@ give it a Flux base URL and key.** `flux-auto` is the router alias the repo alre
 
 Also measured: `GET /v1/models` → HTTP 200, **77 models**. Instrument alive.
 
+## M5 — the fix, and proof its gate can fail
+
+Landed at `3159a9c5`. `build_vision_backend(&Config)` now carries arms 4 (active
+OpenAI-wire provider, resolved from `Config`) and 5 (`FLUX_API_KEY`), appended not
+prioritised — mirroring `build_transcription_backend` exactly, so **no
+previously-resolving configuration changes backend.** `OpenAiVisionBackend` gained an
+`endpoint` field; `new()` still pins `api.openai.com` so arms 1-3 are untouched.
+
+**Build (hetzner-dsm, `/root/wayland-27mi`, `/usr/bin/env cargo` unproxied):**
+
+```
+cargo test -p wcore-agent --lib tool_backends::
+test result: ok. 238 passed; 0 failed; 3 ignored; 0 measured; 1940 filtered out
+```
+
+**Six new tests, run by `--exact` name so the count cannot be a filter artifact
+(§3.2 flavour (c)):**
+
+```
+running 6 tests
+... all six ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 2175 filtered out
+```
+
+`0 ignored` and a non-zero `6 passed` — this is not a suite that exited 0 having run
+nothing.
+
+**Can the gate fail? Yes — proved by mutation, not asserted.** I reverted
+`vision_backend_from_config` to the pre-fix behaviour (hardcoded `OPENAI_API_BASE` while
+still accepting the caller's Flux key — literally `BL-F24-C3-H7`) and re-ran:
+
+```
+test tool_backends::tests::a_flux_credential_never_resolves_an_openai_host ... FAILED
+panicked at mod.rs:795:
+a FluxRouter credential resolved endpoint https://api.openai.com/v1/chat/completions
+ — that would misdirect the key to a third party (BL-F24-C3-H7)
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2180 filtered out
+```
+
+Mutation reverted by file copy (not `git checkout` — other lanes share the object
+store); post-restore grep confirms the correct form is back, count 1.
+
+**One deviation found by the compiler, not by me:** `self.config` is moved into the
+engine before the enricher is constructed, so the second bootstrap call site could not
+borrow it. Fixed by resolving `media_vision` beside the existing `media_transcription`
+binding, which exists for the identical reason and says so in its comment. This is
+evidence the seam I copied was the right one.
+
+**A finding I did not go looking for.** Four user-facing remediation strings named only
+`ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY` — `capability_advisory.rs:45` and
+`:60`, `channel_media.rs:70` (the one that reaches the model's prompt), and the TUI
+provider list at `tui/surfaces/config.rs:1245`. After this change that advice is not
+merely incomplete: **a FluxRouter user following it verbatim would set
+`OPENAI_API_KEY=<flux key>`, which is precisely the misdirection this fix exists to
+prevent.** Same defect class as the open browser HIGH (`[browser] allowed_origins` vs
+`[browser.policy] allowed_origins`) — an unavailable whose stated fix is wrong. All four
+corrected in the same commit, per §6b-ii: repair the instrument in the lane that finds it.
+
 ---
 
 ## Still to establish
