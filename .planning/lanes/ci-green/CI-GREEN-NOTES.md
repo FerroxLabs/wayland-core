@@ -158,3 +158,30 @@ budget expired before a first token existed to cancel on. Across 20 traced runs 
 So `Failure::OverTime` in this test never measured cancellation. It measured
 time-to-first-token, which is ~1.9-2.1s on an idle 96-core box against a 3.0s budget — under
 a second of slack. The neighbouring packaged scenarios in the same file already use 10s/20s.
+
+## t5 — Defect 2 fix proven (`e87c7baf`)
+
+Fixture stall 10s → 60s; turn budget 3s → 15s; scenario 5s → 20s; and a NEW load-bearing
+assertion bounding `turn.wall_time - first_token_time` (the cancellation latency) at 1s.
+
+| measurement | base `1097cfb3` | fixed `e87c7baf` |
+|---|---|---|
+| 30 reps, 48-core load | `TOTAL pass=15 fail=15` | — |
+| 20 reps, 48-core load | — | `LOAD_TOTAL pass=20 fail=0 flaky=0` |
+
+Worst `stream_start` observed under load: **t=3.329s** — i.e. above the old 3.0s budget,
+which is the failure directly. Worst `turn_end`: t=3.378s, so cancellation latency stayed
+≤49ms against the 1s ceiling and the 60s stall.
+
+KNOWN-NEGATIVES (mutating `main.rs:5099` so the engine delays honouring `Stop`; reverted
+after each, working tree confirmed clean):
+
+- **3s delay** → `cancellation did not abort the active stream promptly: stop was sent on
+  the first text delta at 1.894501386s and the turn did not end until 4.896622323s
+  (3.002120937s later) … failures: [CostMissing]` → `0 passed, 1 failed`.
+  Note `failures: [CostMissing]` — **every pre-existing assertion still passed.** Only the
+  new latency assertion caught it. That is the third assertion LANE-BRIEF §6b-ii requires:
+  the old instrument would have missed a three-second cancellation stall.
+- **30s delay** → `Summary [45.837s] 1 test run: 0 passed, 1 failed`. The 15s turn budget
+  still catches a wholesale cancellation failure, so raising it from 3s did not remove the
+  safety net.

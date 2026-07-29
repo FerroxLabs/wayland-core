@@ -341,21 +341,30 @@ async fn packaged_core_blocks_a_denied_write() {
 /// Core CANCELLED the stream, never because the provider ran out of things to
 /// say. Deliberately 60s (the value `f14_sigkill_recovery` already uses) so the
 /// margin over the measured ~1ms cancellation is unambiguous.
-const CANCELLATION_STALL: Duration = Duration::from_secs(60);
+const CANCELLATION_STALL_MS: u64 = 60_000;
+const CANCELLATION_STALL: Duration = Duration::from_millis(CANCELLATION_STALL_MS);
 
 /// Ceiling on the interval this test actually exists to bound: from the moment
 /// the harness sends `stop` (on the first text delta) to the moment the turn
-/// ends. Measured over 20 runs on hetzner-dsm, idle and under 48-core load:
-/// **≤1ms, every time, with no exceptions** — `stop_sent` and `stream_end`
-/// land in the same millisecond of the turn trace. One second is a 1000x
-/// allowance against that, and a 60x discrimination against `CANCELLATION_STALL`.
+/// ends. Measured on hetzner-dsm, idle and under 48-core load: `stop_sent` and
+/// `stream_end` land in the SAME MILLISECOND of the turn trace when idle, and
+/// the worst observed turn_end under load sat 49ms after the stream started.
+/// One second is a large allowance against that, and a 60x discrimination
+/// against `CANCELLATION_STALL`.
+///
+/// Proven able to fail: with a `sleep(3s)` inserted before the engine honours
+/// `Stop`, this assertion fires — `cancellation did not abort the active stream
+/// promptly … (3.002120937s later)` — while `result.failures` was still exactly
+/// `[CostMissing]`, i.e. every OTHER assertion in this test passed. That is the
+/// three-assertion self-test LANE-BRIEF 6b-ii asks for: the old instrument
+/// would have missed a three-second cancellation stall entirely.
 const CANCELLATION_LATENCY_CEILING: Duration = Duration::from_secs(1);
 
 #[tokio::test]
 async fn packaged_core_cancels_an_active_stream() {
     let fixture = OpenAiFixtureScript::new([OpenAiStep::text_then_stall(
         "before cancellation",
-        CANCELLATION_STALL.as_millis() as u64,
+        CANCELLATION_STALL_MS,
     )])
     .start()
     .await
