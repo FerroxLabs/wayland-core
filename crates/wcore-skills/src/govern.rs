@@ -371,9 +371,10 @@ impl GovernanceStore {
         // Staging lives outside the skills tree (see `promote::staging_root_for`) because
         // `collect_skill_md` does not skip dot-directories -- a half-built staging directory
         // holding a `SKILL.md` inside the skills root would be discovered and loaded.
-        let parent = record.source_dir.parent().ok_or_else(|| {
-            GovernError::NotFound(record.source_dir.display().to_string())
-        })?;
+        let parent = record
+            .source_dir
+            .parent()
+            .ok_or_else(|| GovernError::NotFound(record.source_dir.display().to_string()))?;
         let staging_root = crate::promote::staging_root_for(parent);
         create_dir_all(&staging_root)?;
         let staged = staging_root.join(uuid::Uuid::new_v4().to_string());

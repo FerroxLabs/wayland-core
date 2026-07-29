@@ -224,7 +224,11 @@ fn editing_a_promoted_skill_breaks_its_grant() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     std::fs::create_dir(project.path().join(".git")).unwrap();
-    let dir = install_draft(home.path(), "auto-gamma", "# Auto-drafted skill\n\noriginal\n");
+    let dir = install_draft(
+        home.path(),
+        "auto-gamma",
+        "# Auto-drafted skill\n\noriginal\n",
+    );
 
     assert!(
         bin()

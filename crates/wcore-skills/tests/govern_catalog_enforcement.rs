@@ -248,7 +248,11 @@ async fn promotion_lifts_quarantine_and_an_edit_puts_it_back() {
     );
 
     // One variable: the bytes.
-    std::fs::write(dir.join("SKILL.md"), "---\nname: auto-promoted\n---\n\nTAMPERED\n").unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        "---\nname: auto-promoted\n---\n\nTAMPERED\n",
+    )
+    .unwrap();
 
     let edited = catalog(project.path()).await;
     let e = edited.iter().find(|m| m.name == "auto-promoted").unwrap();

@@ -255,10 +255,7 @@ async fn apply_governance(skills: Vec<SkillMetadata>) -> Vec<SkillMetadata> {
                 Ok(Ok(s)) if s.lifts_quarantine() => {
                     meta.disable_model_invocation = false;
                 }
-                Ok(Ok(crate::promote::PromotionState::DigestMismatch {
-                    promotion_id,
-                    ..
-                })) => {
+                Ok(Ok(crate::promote::PromotionState::DigestMismatch { promotion_id, .. })) => {
                     // Explicitly logged: a promoted skill silently reverting to
                     // quarantine after an edit is correct but surprising, and an
                     // unexplained reversion reads as a bug.

@@ -269,9 +269,7 @@ fn cmd_history(store: &GovernanceStore) -> Result<(), String> {
                 skill_name,
                 promotion_id,
                 reason,
-            } => println!(
-                "{at}  PROMOTE-WITHDRAWN {skill_name}  (id {promotion_id}, {reason})"
-            ),
+            } => println!("{at}  PROMOTE-WITHDRAWN {skill_name}  (id {promotion_id}, {reason})"),
         }
     }
     Ok(())

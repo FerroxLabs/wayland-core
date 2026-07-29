@@ -227,7 +227,10 @@ pub fn run_revoke(name: &str) -> Result<()> {
     println!("  revocation id: {}", rec.revocation_id);
     println!();
     println!("It will not load, will not execute, and will not be re-drafted.");
-    println!("To undo:  wayland-core --skills-rollback {}", rec.revocation_id);
+    println!(
+        "To undo:  wayland-core --skills-rollback {}",
+        rec.revocation_id
+    );
     Ok(())
 }
 
