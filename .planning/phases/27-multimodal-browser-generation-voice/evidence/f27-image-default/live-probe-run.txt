@@ -1,0 +1,31 @@
+PROBE key_received=yes key_len=51   # length only, never the value
+PROBE config_credential_tokens=0   # must be 0
+=== RUN a1-flux-default
+RC_a1-flux-default=0
+  stdout_bytes=1742  stderr_bytes=4397
+--- A1 arm readback (the product's own output — LANE-BRIEF §3b-ii):
+  [2m2026-07-29T15:47:33.303380Z[0m [32m INFO[0m image_gen: using flux-image at https://api.fluxrouter.ai/v1/images/generations (active OpenAI-wire provider)
+  A1_MODEL_SENT=flux-image
+  A1_ENDPOINT=https://api.fluxrouter.ai/v1/images/generations
+--- A1 media_cost record (the product's own accounting line):
+[2m2026-07-29T15:48:43.393700Z[0m [32m INFO[0m media call accounted: image_generate via OpenAI flux-image (OpenAI flux-image): 1 image(s) 1792x1024 = 1.835 MP — unpriced — this provider reports no cost for this call, and no local rate-card entry matched. The call was still billable. [3mtool[0m[2m=[0mimage_generate [3mbackend_id[0m[2m=[0mOpenAI flux-image [3mmodel[0m[2m=[0mOpenAI flux-image [3mimages[0m[2m=[0m1 [3mmegapixels[0m[2m=[0m1.835008 [3mcost_usd[0m[2m=[0mNone
+  A1_OUTCOME_OK_HITS=1  A1_OUTCOME_FAILED_HITS=0
+--- A1 image artifact in the tool result? (data URI or url):
+  A1_IMAGE_HITS=1
+=== RUN a2-known-negative-gpt-image-1
+RC_a2-known-negative-gpt-image-1=0
+  stdout_bytes=0  stderr_bytes=11722
+--- A2 arm readback:
+  [2m2026-07-29T15:49:07.776023Z[0m [32m INFO[0m image_gen: using gpt-image-1 at https://api.fluxrouter.ai/v1/images/generations (active OpenAI-wire provider)
+  A2_MODEL_SENT=gpt-image-1
+[2m2026-07-29T15:50:02.981888Z[0m [32m INFO[0m media call accounted: image_generate via unresolved (unresolved): 1 image(s) 1536x1024 = 1.573 MP — unpriced — the call failed and it is unknown whether the provider billed for it. Not treated as $0. [3mtool[0m[2m=[0mimage_generate [3mbackend_id[0m[2m=[0munresolved [3mmodel[0m[2m=[0munresolved [3mimages[0m[2m=[0m1 [3mmegapixels[0m[2m=[0m1.572864 [3mcost_usd[0m[2m=[0mNone
+[2m2026-07-29T15:50:05.581365Z[0m [32m INFO[0m media call accounted: image_generate via unresolved (unresolved): 1 image(s) 1536x1024 = 1.573 MP — unpriced — the call failed and it is unknown whether the provider billed for it. Not treated as $0. [3mtool[0m[2m=[0mimage_generate [3mbackend_id[0m[2m=[0munresolved [3mmodel[0m[2m=[0munresolved [3mimages[0m[2m=[0m1 [3mmegapixels[0m[2m=[0m1.572864 [3mcost_usd[0m[2m=[0mNone
+  A2_OUTCOME_OK_HITS=0  A2_OUTCOME_FAILED_HITS=4
+
+=== VERDICT
+LIVE_A1_MODEL=PASS   sent=flux-image with OPENAI_IMAGE_MODEL unset
+LIVE_A1_OUTCOME=PASS  the default Flux session generated an image
+LIVE_A2_KNOWN_NEGATIVE=PASS  the pre-fix model still fails on this key
+LIVE_ARMS_DIFFER=YES  (flux-image vs gpt-image-1)
+
+PROBE_DONE captures_in=/root/wayland-f27imgdef-live
