@@ -622,3 +622,15 @@ Frozen v1 protocol digest re-verified identical on host and in repo:
 ## LANE COMPLETE
 
 Deliverable: `.planning/phases/30-continuous-scorecard-frontier-review/30-DIALECT-C2.md`.
+
+### 7d. Host cleanup, and what was deliberately RETAINED
+
+Removed: `/root/wayland-30c2` worktree and its `target/`, every trial workspace, the Hermes source
+tree and its archive. `df -h /root` 697G → **709G free**. Worktree list: 28 remain (known-positive),
+`30c2` count **0**.
+
+**Retained on purpose at `/root/c2` (207 MB):** the Hermes 0.17.0 venv — verified still runnable
+(`Hermes Agent v0.17.0 (2026.6.19)`) — plus every invocation, corpus, manifest and translation. A
+follow-up lane executing SR-30-7 needs a provisioned peer, and re-provisioning it is the exact cost
+SR-30-6 was raised about. **Do not delete `/root/c2` when reclaiming space; it is the only
+provisioned peer on the host.**
