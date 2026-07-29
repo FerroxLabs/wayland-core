@@ -54,6 +54,55 @@ silently moved onto a billed arm. Flux STT is billed `$0.016670` with a 10-secon
 - Does the enricher fold the produced transcript into the turn prompt distinguishably from the
   degraded notice?
 
+## T+40 — route SETTLED from source. The design isolates the variable.
+
+**Adapter: telegram.** Reasons, each read at source:
+- `TelegramConfig::api_base_url` exists (added by F24-C3-H4) — `config.rs:48`. Both the bot-method
+  base AND the file-download base derive from it (`api.rs:658 file_download_url`), so ONE fixture
+  serves `getUpdates`, `getFile` and the media bytes.
+- `api::download_bytes` (`api.rs:898`) has **no host allowlist**. Discord's does
+  (`rest.rs:337 MEDIA_HOSTS = cdn.discordapp.com, media.discordapp.net`, enforced at `rest.rs:349`),
+  so discord physically cannot fetch from a localhost fixture. That is why the predecessor could only
+  reach the degraded direction on discord.
+- `msg.voice` → `MediaKind::Audio` (`longpoll.rs:149-159`), and `resolve_attachments`
+  (`longpoll.rs:217`) sets `Attachment.path = file_id`, resolved lazily by
+  `TelegramChannel::fetch_media` (`lib.rs:379-396`).
+
+**Which transcription arm fires — this is the crux.** `openai_wire_media_base`
+(`tool_backends/shared.rs:56-77`) returns `Some` **only** for `ProviderType::OpenAI` and
+`ProviderType::FluxRouter`; `_ => return None`. So:
+- If the chat provider is declared `openai` (as the predecessor's discord harness did), **arm 3
+  captures transcription and sends it to the LOCAL LLM fixture** — which is exactly the
+  `transcription: using whisper-1 at http://127.0.0.1:36197/...` line in the predecessor's log.
+- If the chat provider is a **Tier-2 OpenAI-compatible** type (`together`, `config.rs:2415`), arm 3
+  returns `None`, chat still speaks OpenAI wire to the local fixture, and **arm 4 (`FLUX_API_KEY`)
+  resolves transcription to the real FluxRouter** at `https://api.fluxrouter.ai/v1` +
+  `audio/transcriptions`, model `flux-voice-fast`.
+
+That is the design: **chat → local fixture (turn prompt captured), transcription → real Flux.**
+One variable, and the credential is the only thing separating leg A from leg B.
+
+Arms 1 and 2 (`GROQ_API_KEY`, `OPENAI_API_KEY`) must be absent from the gateway env — they are,
+and their absence is what makes the negative control total.
+
+**Audio, known ground truth** (macOS `say -v Samantha` → `afconvert -f WAVE -d LEI16@16000 -c 1`):
+- `a1.wav` 133028 B — "The quantum ferret audited nineteen crimson bicycles on Thursday morning."
+- `a2.wav` 136820 B — "Seventeen velvet lighthouses inspected the marmalade orchestra last winter."
+Header verified `RIFF....WAVE` → `detect_audio_mime` returns `audio/wav`
+(`transcription_tools.rs:109`), which is in `SUPPORTED_AUDIO_MIMES`. Both are far above
+`TRANSCRIPTION_MIN_BYTES` (16) and far below `TRANSCRIPTION_MAX_BYTES` (25 MiB).
+
+**Legs** (each differs from A by exactly one variable):
+
+| leg | audio | `FLUX_API_KEY` | purpose |
+|---|---|---|---|
+| A | a1 | present | POSITIVE — real transcript reaches the model |
+| B | a1 | **absent** | NEGATIVE CONTROL — must redden to the degraded notice |
+| C | a2 | present | ANTI-ECHO — different audio must give different transcript |
+
+Leg C is the control the predecessor's shape could not have: a backend returning a canned string
+would pass a naive positive gate. C requires the derived text to TRACK THE AUDIO.
+
 ## Credential handling
 
 `~/.wayland-secrets/flux.env` (mode 600, outside every repo). Loaded via `set -a; . file; set +a`
