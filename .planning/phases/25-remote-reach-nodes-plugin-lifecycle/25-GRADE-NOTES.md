@@ -167,3 +167,15 @@ control `ZZZ_NOT_A_REAL_VAR` -> 0, so the instrument can return zero. **No value
 ### FINAL GRADES
 C1 PARTIAL · C2 MET-WITH-STATED-EXCEPTIONS · C3 MET · C4 PARTIAL
 => 1 MET. Corroborates the competitive ledger; refutes the 4-MET status table.
+
+### Fence exposure, final (vs 861d1b1a)
+Committed by this lane: 25-GRADE-NOTES.md, 25-PHASE-VERDICT.md. Both under
+.planning/phases/25-*/. crates/ touched: 0 files. .github/ touched: 0 files.
+Shared-fence files (wcore-cli lib.rs/main.rs): 0 diff bytes.
+
+**One incidental dirty file, NOT committed and NOT mine:** `AGENTS.md` was modified in the
+working tree by the IJFW hook that fires on a `gemini` invocation (cross-audit panel §4). The
+change is 3 frontmatter lines only — `detected_at` timestamp and a file-extension-ratio
+recount (1522 -> 1775). Left uncommitted and unreverted: the lane brief forbids
+`git checkout`/`git reset` because lanes share the object store. Reported rather than
+silently cleaned. Any lane running the panel will reproduce it.
