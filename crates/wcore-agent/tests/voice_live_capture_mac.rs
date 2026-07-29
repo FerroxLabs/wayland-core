@@ -558,22 +558,41 @@ async fn capture_survives_ring_buffer_overflow_past_60s() {
     );
 
     // Cause separation — see INSTRUMENT DEFECT #2 above.
-    assert!(
-        whole_ratio >= TONE_PRESENT_RATIO,
-        "INDETERMINATE, NOT a product defect. The injected tone is absent from \
-         the ENTIRE retained buffer (whole={whole_ratio:.2}), so it never \
-         reached the microphone at all — the speaker->mic acoustic path failed \
-         (sleeping Bluetooth output, volume, proximity). This run says NOTHING \
-         about the ring buffer. Re-run; do not report a capture defect."
-    );
-    assert!(
-        tail_ratio >= TONE_PRESENT_RATIO,
-        "REAL DEGRADATION PAST THE 60s CAP: the tone DID reach the mic \
-         (whole={whole_ratio:.2}) but is absent from the retained tail \
-         (tail={tail_ratio:.2} < {TONE_PRESENT_RATIO}). Because the acoustic \
-         path is proven good this run, the O(n) `Vec::remove(0)` in \
-         RingBuffer::push, running inside the cpal callback, is implicated."
-    );
+    //
+    // INSTRUMENT DEFECT #3, found by running the repaired gate and repaired
+    // here. The first version of this separation checked `whole_ratio` FIRST
+    // and unconditionally, which is wrong: the tone deliberately occupies only
+    // TONE_TAIL_SECS of a 60 s retained window, so coherent-gain dilution
+    // drives the whole-buffer ratio down by roughly (4/60)^2. Measured
+    // whole=1.67 while tail=137.03 — i.e. the gate shouted "the tone never
+    // reached the microphone" in the very same run in which the tail proved,
+    // at a 6.8x margin over threshold, that it plainly had.
+    //
+    // `whole_ratio` is only meaningful as a TIE-BREAKER, and only when the
+    // tail has already come back low. Correct order:
+    //   tail HIGH                -> capture survived overflow. PASS.
+    //   tail LOW  + whole LOW    -> tone never arrived: acoustic path failed,
+    //                               INDETERMINATE, says nothing about the ring.
+    //   tail LOW  + whole HIGH   -> tone arrived but is missing from the tail:
+    //                               a REAL degradation.
+    if tail_ratio < TONE_PRESENT_RATIO {
+        assert!(
+            whole_ratio >= TONE_PRESENT_RATIO,
+            "INDETERMINATE, NOT a product defect. The injected tone is absent \
+             from the retained tail (tail={tail_ratio:.2}) AND from the whole \
+             retained buffer (whole={whole_ratio:.2}), so it never reached the \
+             microphone — the speaker->mic acoustic path failed (sleeping \
+             Bluetooth output, volume, proximity). This run says NOTHING about \
+             the ring buffer. Re-run; do not report a capture defect."
+        );
+        panic!(
+            "REAL DEGRADATION PAST THE 60s CAP: the tone DID reach the mic \
+             (whole={whole_ratio:.2}) but is absent from the retained tail \
+             (tail={tail_ratio:.2} < {TONE_PRESENT_RATIO}). The acoustic path \
+             is proven good this run, so the O(n) `Vec::remove(0)` in \
+             RingBuffer::push, running inside the cpal callback, is implicated."
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
