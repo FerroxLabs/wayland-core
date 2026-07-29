@@ -1517,3 +1517,31 @@ which emits `F23_H1_REACH=` per run so a non-reaching run can never again be cou
 **Separate, real, and not built:** an unreadable journal has no repair path. Only
 `recover_legacy_effect_receipt` exists, keyed literally to a null receipt, and **all twelve `session`
 verbs read the journal — so one mismatch takes every operator move down at once.**
+
+## BL-F24-C3-H7 — inbound vision is unreachable by code absence, not capability absence (MEDIUM)
+
+**Source:** `24-media-live`, 2026-07-29. Report:
+`.planning/phases/24-gateway-automation-channels-typed-api/24-MEDIA-LIVE.md`.
+
+The predecessor lane graded the live vision leg "unreachable with the available credential". That
+verdict still holds, but **the reason it gave was wrong**, and the corrected reason is actionable
+where the original was not. Re-measured rather than inherited:
+
+- `build_vision_backend()` **takes no `&Config`** and reads only ANTHROPIC / OPENAI / GEMINI.
+  **Zero Flux sites workspace-wide** (control: `transcription_backend_from_config` = 7 refs, so the
+  instrument discriminates).
+- `OpenAiVisionBackend` posts to a **hardcoded `openai.com` URL**. Substituting a key would
+  therefore **misdirect the credential to a third party** rather than fail closed — the reason this
+  must not be worked around by key substitution.
+- Flux **does** serve vision on the same OpenAI wire: proven live, HTTP 200, ground truth recovered.
+
+So the blocker is ours, not the vendor's: the config seam that transcription already has does not
+exist for vision. Same shape as the transcription resolver at `tool_backends/mod.rs:344` before it
+was extended.
+
+**Not fixed** — the finding landed at end of lane and a blind change there would have been
+unproven. Cost is small and bounded: give `build_vision_backend()` the config seam its sibling
+already has, then the existing live probe closes the leg.
+
+**Routed here because the lane's own report was its only home** — that is the findings-leak class
+(20 dropped findings recovered on 2026-07-28, two of them HIGH).
