@@ -1923,3 +1923,19 @@ legs re-run; neither is evidence today. Evidence:
 
 **Owned by Phase 30's lane, not by lane/record-truth** — filed here only so it is
 not lost, per the rule this whole section exists to enforce.
+
+---
+
+### `BL-F27-NEEDLESS-UPDATE` — pre-existing clippy `needless_update` in a cache-ledger test (MEDIUM)
+
+Found by `lane/f27-image-default` while gating its own change, and **proven not to be
+its own**: `crates/wcore-agent/tests/cache_ledger_engine_test.rs` and all of
+`crates/wcore-types/` are byte-identical to that lane's base, with a control on a
+file it *did* change (168 lines of diff). `needless_update` fires when a struct
+field is **removed**, and the lane added one — so the lint was already latent and
+was surfaced, not caused, by the merge.
+
+`cache_ledger_engine_test.rs:82`, a `TokenUsage` literal carrying a `..Default::default()`
+that no longer covers any field. Test-only, no product impact. Left untouched by
+its finder on the surgical-changes rule.
+

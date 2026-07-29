@@ -102,13 +102,34 @@ symptom; the property holds, the proof is narrow.
 **The specific unmet clause: *identical* across three surfaces.** One surface exists. Agreement
 needs at least two. No producer fixtures exist, so the D2 consumption clause has nothing to consume.
 
-**Closing it requires**: a TUI Goal surface (`wcore-cli/src/tui/`), a typed host-protocol Goal
-command and event set (`wcore-protocol` ⇒ **fenced seam + Desktop co-pin**), and the canonical
-serialized fixtures. The canonical projection they must consume already exists and is emitted by
-`goal status`.
+> **CORRECTED 2026-07-29 by the orchestrator — three of the four measurements above are STALE.**
+> Work landed after `873cc389`. Original text kept intact; the current measurement follows.
 
-**Cost: 3–4 lane-sessions + one fenced protocol seam.** **Not release-blocking** — Goal is a new
-capability whose only shipped entry point is the CLI, and the CLI path works.
+**Re-measured at HEAD:**
+
+| Claim in the row above | Status at HEAD | Evidence |
+|---|---|---|
+| Zero `Goal` symbols in `wcore-protocol/src/` | **FALSE** | `contract/spec.rs:35-41` imports `GoalProjection`, `GoalLifecycleWire`, `GoalTransitionKind`, `GoalTaskWire`, …; `:755` is commented *"F22-C1 — durable Goals become observable to a host for the first time"* |
+| Zero goal references under `wcore-cli/src/tui/` | **FALSE** | four files — `app.rs`, `protocol_bridge.rs`, `statusline/mod.rs`, `widgets/statusbar.rs` |
+| No producer fixtures exist | **FALSE** | `contracts/desktop/v1/events/goal_snapshot.json` and `goal_transition.json`, plus `goal_id_and_cursor` in the manifest |
+| *identical* across three surfaces | **STILL UNMET**, but for a different reason than stated | see below |
+
+**The real gap is narrower and sharper than "one surface of three": all three surfaces now
+OBSERVE a Goal; only the CLI can CONTROL one.**
+
+- **CLI** — observes *and* controls (`goal Open/Task/Run/Status/Effects`).
+- **TUI** — observes only, and deliberately so: `app.rs:277` states the `goals` map is *"written
+  ONLY by the protocol bridge … so the TUI never derives Goal state of its own"*. Read-only by design.
+- **Host protocol** — observes only. `crates/wcore-protocol/src/commands.rs` contains **zero** `Goal`
+  variants, so a host can watch a Goal advance and cannot open, task, run, or cancel one.
+
+**Closing it requires** a typed Goal **command** set in `wcore-protocol/src/commands.rs` (⇒ **fenced
+seam + Desktop co-pin + one contract regeneration**), the TUI wired to issue those commands rather
+than only render, and fixtures extended to cover the command direction. The projection and both event
+fixtures already exist, so this is command-direction work only.
+
+**Cost: revised down to 1–2 lane-sessions + one fenced protocol seam** (was 3–4). **Not
+release-blocking** — Goal's only shipped entry point is the CLI, and the CLI path works.
 
 #### 22-C3 — FAILED (measured, not built)
 
