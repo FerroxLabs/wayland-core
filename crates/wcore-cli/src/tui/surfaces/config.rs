@@ -1241,8 +1241,14 @@ pub(crate) const PROVIDER_CATALOG: &[ProviderEntry] = &[
     ProviderEntry {
         name: "vision_analyze",
         category: "Vision",
-        description: "Describe and analyse images. Picks Anthropic → OpenAI → Gemini.",
-        env_vars: &["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"],
+        description: "Describe and analyse images. Picks Anthropic → OpenAI → Gemini → \
+                      active OpenAI-wire provider → FluxRouter.",
+        env_vars: &[
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+            "FLUX_API_KEY",
+        ],
         signup_url: "https://console.anthropic.com/",
         deferred: false,
     },

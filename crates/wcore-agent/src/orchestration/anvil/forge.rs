@@ -618,6 +618,21 @@ fn build_prompt(task: &str, feedback: Option<&BuildFeedback>) -> String {
     }
 }
 
+/// Consecutive green gate runs the shipped forge requires before the reserved
+/// `verified` stamp.
+///
+/// Public because `StrategyTermination::from_anvil` takes the bar as a parameter
+/// and re-checks the climb's observation against it. If the CLI hard-coded its
+/// own copy, raising the bar here would silently leave the Goal path granting
+/// `Verified` at the old one — a divergence with no compile error and no test
+/// failure. One constant, two readers.
+///
+/// Declared ABOVE `drive_climb_full`'s doc block on purpose: putting it between
+/// that block and the function detached the `#[allow(clippy::too_many_arguments)]`
+/// from what it guards, and clippy went red on a lint that had been suppressed
+/// since before this lane.
+pub const FORGE_REQUIRED_STABILITY: u32 = 1;
+
 /// Assemble and run a live gated-forge climb, emitting the receipt at exit.
 ///
 /// The caller supplies the `spawner` (already built with a provider) and the
@@ -792,7 +807,7 @@ pub async fn drive_climb_full(
         task: task.to_string(),
         // A1-minimal stability: 1-of-1 (a single green run). N-of-M flake
         // quarantine for `verified` is a documented follow-up.
-        stability: StabilityPolicy::new(1, 1),
+        stability: StabilityPolicy::new(FORGE_REQUIRED_STABILITY, FORGE_REQUIRED_STABILITY),
         max_iterations: 3,
         gate_closure_digest: digest.clone(),
         // Stall rule (spec §6.4): two consecutive identical fail-sets buys

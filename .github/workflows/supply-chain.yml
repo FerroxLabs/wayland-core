@@ -122,13 +122,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # nextest with an EXPLICIT `--no-tests=fail`, not `cargo test`: a run that
+      # collects ZERO tests must exit non-zero instead of printing
+      # `test result: ok. 0 passed` and exiting 0. A byte-determinism contract
+      # that certifies nothing is worse than no contract, because it reports
+      # green. Measured on this checkout: a filter matching no test name exits 0
+      # under `cargo test` and 4 under nextest.
+      #
+      # The flag is passed at the call site rather than left to configuration:
+      # `no-tests` is a CLI option only — a `no-tests = "fail"` key under
+      # `[profile.default]` in .config/nextest.toml was measured to be silently
+      # IGNORED ("ignoring unknown configuration key"). See that file's header.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
       # The offline half. Runs the pinned f29 fixture through the transform
       # and compares against the checked-in expected document byte for byte —
       # no cargo metadata, no network, no platform dependence. If this is green
       # and the live half below is red, the difference is in the metadata, not
       # in the transform.
       - name: SBOM determinism contract (offline, pinned fixture)
-        run: cargo test --locked -p wcore-eval-scenarios --test sbom_contract
+        run: cargo nextest run --no-tests=fail --locked -p wcore-eval-scenarios --test sbom_contract
 
       - name: Build wayland-release
         run: cargo build --locked -p wcore-eval-scenarios --bin wayland-release

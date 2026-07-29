@@ -27,7 +27,8 @@ use wcore_eval_scenarios::dialect::{
     CompiledStepV1, ToolSchemaCorpusV1, TranslationV1, VOCABULARY_VERSION, canonical_script,
     cohort_eligibility, compile_script, vocabulary_carries_no_product_token,
 };
-use wcore_eval_scenarios::dialect_discovery::RunningDiscoveryMeter;
+use wcore_eval_scenarios::dialect_discovery::{DiscoveryManifestV1, RunningDiscoveryMeter};
+use wcore_eval_scenarios::dialect_exec::{DialectBindingV1, bind_translation};
 use wcore_eval_scenarios::fixtures::openai::{OpenAiFixtureScript, OpenAiStep};
 use wcore_eval_scenarios::frontier_trials::{
     ALL_DIMENSIONS, ALL_TOOLS, ComparativeResultV1, DeltaV1, DimensionV1, LegStatusV1, LegV1,
@@ -260,6 +261,38 @@ enum TrialsCommand {
         /// JSON Lines output, one `TrialRecordV1` per trial.
         #[arg(long)]
         out: PathBuf,
+
+        // ---- protocol v2: drive from a compiled dialect instead of the frozen script ----
+        //
+        // All three must be supplied together or none at all. Supplying a translation without
+        // the corpus it was compiled from and the discovery manifest that says which harness
+        // declared that corpus would leave the two checks digests cannot make — see
+        // `dialect_exec`.
+        /// A `TranslationV1` from `dialect compile`. When given, the protocol's frozen
+        /// `fixture_script` is NOT used and this harness is driven in its own dialect.
+        #[arg(long, requires_all = ["corpus", "discovery_manifest"])]
+        translation: Option<PathBuf>,
+        /// The `ToolSchemaCorpusV1` the translation was compiled against.
+        #[arg(long, requires = "translation")]
+        corpus: Option<PathBuf>,
+        /// The `DiscoveryManifestV1` naming the harness that declared that corpus. This is the
+        /// only thing that stops harness A being driven with harness B's dialect.
+        #[arg(long, requires = "translation")]
+        discovery_manifest: Option<PathBuf>,
+
+        /// DIAGNOSTIC ONLY — rewrite every relative-looking path argument to an absolute path
+        /// inside the trial's own workspace, identically for EVERY harness.
+        ///
+        /// This exists because measurement 3 of lane 30-dialect-c2 found `wayland-core`'s `Write`
+        /// refuses a relative path while Hermes accepts one, so the canonical script's bare
+        /// `TRIAL-ARTIFACT.txt` is a second confound living in a slot VALUE rather than in a tool
+        /// name. This flag identifies that cause; it does not license a number.
+        ///
+        /// Every trial run under it is stamped `diagnostic` and `proportion_measurement` refuses
+        /// any leg containing such a trial. Scoring under an absolutized script requires a new
+        /// pre-registration, not this flag.
+        #[arg(long)]
+        diagnostic_absolutize_paths: bool,
     },
     /// Fold per-trial records into the bounded result set.
     ///
@@ -845,6 +878,10 @@ fn run_trials(command: TrialsCommand) -> anyhow::Result<String> {
             trials,
             workspace_root,
             out,
+            translation,
+            corpus,
+            discovery_manifest,
+            diagnostic_absolutize_paths,
         } => {
             let protocol_json: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(&protocol)?)?;
@@ -860,6 +897,27 @@ fn run_trials(command: TrialsCommand) -> anyhow::Result<String> {
                      cognitive_tax is UNPROVEN by construction of the protocol"
                 ),
             };
+            // Protocol v2. `clap`'s `requires_all` already guarantees all-or-nothing, so an
+            // partially-specified dialect never reaches here.
+            let binding = match (&translation, &corpus, &discovery_manifest) {
+                (Some(t), Some(c), Some(m)) => {
+                    let translation: TranslationV1 = serde_json::from_slice(&std::fs::read(t)?)?;
+                    let corpus: ToolSchemaCorpusV1 = serde_json::from_slice(&std::fs::read(c)?)?;
+                    let manifest: DiscoveryManifestV1 = serde_json::from_slice(&std::fs::read(m)?)?;
+                    // The harness label comes from the INVOCATION we are about to spawn, never
+                    // from the translation — otherwise the thing being checked would be
+                    // supplying its own answer.
+                    Some(bind_translation(
+                        &dimension,
+                        invocation.tool.token(),
+                        &translation,
+                        &corpus,
+                        &manifest,
+                    )?)
+                }
+                _ => None,
+            };
+
             let runtime = tokio::runtime::Runtime::new()?;
             let records = runtime.block_on(drive_leg(
                 &protocol_json,
@@ -867,6 +925,8 @@ fn run_trials(command: TrialsCommand) -> anyhow::Result<String> {
                 dim,
                 trials,
                 &workspace_root,
+                binding.as_ref(),
+                diagnostic_absolutize_paths,
             ))?;
             let mut lines = String::new();
             for record in &records {
@@ -886,15 +946,34 @@ fn run_trials(command: TrialsCommand) -> anyhow::Result<String> {
                 .iter()
                 .filter(|r| r.outcome == TrialOutcomeV1::NoContact)
                 .count();
+            // The script provenance is printed on the SAME line as the score. A reader who sees
+            // `success=0` must be able to see, without opening another file, whether the harness
+            // was driven in its own dialect or in the frozen script's.
+            let (script_mode, driven_tools, translation_sha) = match &binding {
+                Some(b) => (
+                    "dialect_compiled",
+                    b.provenance.resolved_tool_names.join(","),
+                    b.provenance.translation_sha256.clone(),
+                ),
+                None => ("frozen_script_v1", "-".to_string(), "-".to_string()),
+            };
+            let script_mode = if diagnostic_absolutize_paths {
+                format!("{script_mode}+DIAGNOSTIC_ABSOLUTIZED")
+            } else {
+                script_mode.to_string()
+            };
             Ok(format!(
                 "TRIALS_RUN tool={} dimension={} trials={} success={} harness_incompatible={} \
-                 no_contact={} out={}\n",
+                 no_contact={} script={} driven_tools={} translation_sha256={} out={}\n",
                 invocation.tool.token(),
                 dim.token(),
                 records.len(),
                 successes,
                 incompatible,
                 no_contact,
+                script_mode,
+                driven_tools,
+                translation_sha,
                 out.display()
             ))
         }
@@ -910,6 +989,68 @@ fn run_trials(command: TrialsCommand) -> anyhow::Result<String> {
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(120);
 const ABSOLUTE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// DIAGNOSTIC instrument. Rewrite every argument value that looks like a bare relative path into
+/// an absolute path inside this trial's own workspace.
+///
+/// **Applied identically to every harness, or it would be exactly the arm-tuning it exists to
+/// investigate.** The rule reads only the VALUE — it does not know which harness it is serving,
+/// which tool is being called, or what any parameter is named. A value qualifies only if it is
+/// already relative, contains no path separator, and has a file extension; that is deliberately
+/// narrow, so it cannot silently rewrite a glob, a command line or a piece of prose.
+///
+/// The oracle check reads `workspace.join(target_path)`, so an absolute path to that same location
+/// designates the identical file. The rewrite is therefore semantics-preserving for the thing being
+/// scored — which is why it can diagnose, even though it may not score.
+fn absolutize_path_arguments(steps: &[OpenAiStep], workspace: &Path) -> Vec<OpenAiStep> {
+    steps
+        .iter()
+        .map(|step| match step {
+            OpenAiStep::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                let rewritten = match arguments.as_object() {
+                    Some(obj) => serde_json::Value::Object(
+                        obj.iter()
+                            .map(|(k, v)| {
+                                let out = match v.as_str() {
+                                    Some(s) if is_bare_relative_path(s) => {
+                                        serde_json::Value::String(
+                                            workspace.join(s).display().to_string(),
+                                        )
+                                    }
+                                    _ => v.clone(),
+                                };
+                                (k.clone(), out)
+                            })
+                            .collect(),
+                    ),
+                    None => arguments.clone(),
+                };
+                OpenAiStep::ToolCall {
+                    id: id.clone(),
+                    name: name.clone(),
+                    arguments: rewritten,
+                }
+            }
+            other => other.clone(),
+        })
+        .collect()
+}
+
+/// A single path-like filename with an extension and no separators. Narrow on purpose.
+fn is_bare_relative_path(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains('/')
+        && !value.contains('\\')
+        && !value.contains(char::is_whitespace)
+        && !value.contains('*')
+        && value
+            .rfind('.')
+            .is_some_and(|i| i > 0 && i + 1 < value.len())
+}
 
 fn steps_for(
     protocol: &serde_json::Value,
@@ -932,8 +1073,25 @@ async fn drive_leg(
     dimension: DimensionV1,
     trials: u32,
     workspace_root: &Path,
+    binding: Option<&DialectBindingV1>,
+    diagnostic_absolutize_paths: bool,
 ) -> anyhow::Result<Vec<TrialRecordV1>> {
-    let steps = steps_for(protocol, dimension)?;
+    // Protocol v2 drives from the harness's OWN compiled dialect. v1 drives from the frozen
+    // script, which named `write_file` — a tool two of the three harnesses never exposed.
+    //
+    // The oracle, the canary, the fault, the trial isolation, the environment discipline and the
+    // scoring below are IDENTICAL in both modes. The script is the only thing that differs, which
+    // is what makes a v1-vs-v2 A/B on one harness a clean read of the dialect effect alone.
+    let steps = match binding {
+        Some(b) => b.steps.clone(),
+        None => steps_for(protocol, dimension)?,
+    };
+    let dialect_provenance = binding.map(|b| b.provenance.clone());
+    let diagnostic_marker = diagnostic_absolutize_paths.then(|| {
+        "DIAG_ABSOLUTIZE_PATHS: relative path arguments rewritten to workspace-absolute, \
+         identically for every harness. NOT a protocol-conformant run."
+            .to_string()
+    });
     let target_path = protocol
         .get("oracle")
         .and_then(|o| o.get("target_path"))
@@ -970,7 +1128,12 @@ async fn drive_leg(
         );
         std::fs::write(workspace.join("CANARY.txt"), format!("{canary}\n"))?;
 
-        let script = OpenAiFixtureScript::new(steps.clone());
+        let trial_steps = if diagnostic_absolutize_paths {
+            absolutize_path_arguments(&steps, &workspace)
+        } else {
+            steps.clone()
+        };
+        let script = OpenAiFixtureScript::new(trial_steps);
         let fixture = script.start_for_workspace(&workspace).await?;
         let base_url = format!("{}{}", fixture.base_url(), invocation.base_url_suffix);
 
@@ -1090,6 +1253,8 @@ async fn drive_leg(
             fixture_violations: observation.violations.clone(),
             elapsed_ms,
             exit_status,
+            dialect: dialect_provenance.clone(),
+            diagnostic: diagnostic_marker.clone(),
         });
 
         if consecutive_timeouts >= 3 {

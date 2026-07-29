@@ -13,9 +13,32 @@
 //! detect → plan (preview) → confirm → apply, and `--dry-run` stops after the
 //! preview.
 //!
-//! Skills, personas (`SOUL.md`), and long-term memory are detected and counted
-//! in the preview but are NOT written in this slice — they are tracked for a
-//! follow-up rather than silently dropped.
+//! Skills, personas (`SOUL.md`) and memory notes are **imported**, not merely
+//! counted (see [`content`]). Data skills land live in the Wayland skills root;
+//! personas and memory notes land staged, for reasons recorded on
+//! [`content::ImportedContentStore::import_persona`] and
+//! [`content::ImportedContentStore::import_memory_note`]. Executable content
+//! goes to [`quarantine`] and stays inert until an operator promotes it.
+//!
+//! # Two content classes are deliberately NOT imported, and this is the reason
+//!
+//! Both are decisions, not omissions, and both are argued here so a reader does
+//! not have to infer them from an absence:
+//!
+//! - **Peer settings.** The parts of a peer's configuration that have a Wayland
+//!   equivalent — provider, model, base URL, MCP servers, credentials — are
+//!   already imported, as profiles. What is left (OpenClaw's `flows/`,
+//!   `tasks/`, `tui/`, `workspace/`, `identity/`, Hermes's non-`model:` keys)
+//!   has **no Core semantics to map onto**, so importing it would mean guessing
+//!   a mapping. Settings are the one content class where a wrong guess can
+//!   *reduce* safety — approval mode, egress policy, sandbox posture and
+//!   trust flags all live there — so an unmappable setting is reported in the
+//!   deferred inventory and left on the peer's disk rather than approximated.
+//! - **Assets.** Measured against the real peer home,
+//!   `profiles/*/skins/**` holds **0 files**; no Core surface consumes a peer
+//!   asset; and assets are the highest-byte, lowest-value class in a peer tree.
+//!   A skill's OWN assets are imported, because they travel inside the skill
+//!   directory and the skill is useless without them.
 
 use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
@@ -29,12 +52,14 @@ use wcore_config::portability::{
     CredentialRef, DiscoveredItem, ItemKind, PeerSource, PortabilityPlan, is_root_profile_id,
 };
 
+pub mod content;
 pub mod hermes;
 pub mod openclaw;
 pub mod provenance;
 pub mod quarantine;
 pub mod select;
 
+use content::{ContentRequest, ImportedContentStore};
 use quarantine::{Classification, QuarantineRequest, QuarantineStore};
 use select::{Accounting, Outcome, QuarantineReason, Selection};
 
@@ -244,16 +269,14 @@ impl MigrationPlan {
             out.items.push(item);
         }
 
-        let d = &self.deferred;
-        if d.skills > 0 {
-            out.deferred.insert("skill_directories".into(), d.skills);
-        }
-        if d.personas > 0 {
-            out.deferred.insert("persona_files".into(), d.personas);
-        }
-        if d.memory_files > 0 {
-            out.deferred.insert("memory_notes".into(), d.memory_files);
-        }
+        // F26-GRADE-H1: skills, personas and memory notes are no longer
+        // reported as deferred, because they are no longer deferred — each is
+        // discovered by `ImportSurface`, published with a selectable identity,
+        // and written. Emitting them here as well would restate the original
+        // defect in the machine-readable document: one run, two incompatible
+        // claims about the same items. `MigrationPlan::deferred` is retained as
+        // the SOURCE-side inventory the mappers build (and the hermes mapper's
+        // tests assert), not as a claim about what this import skipped.
         for (k, v) in &self.deferred_other {
             if *v > 0 {
                 out.deferred.insert(k.clone(), *v);
@@ -289,6 +312,35 @@ pub struct MigrationReport {
     pub discovered: usize,
     pub imported: usize,
     pub excluded: usize,
+    /// **Files this run actually wrote into the Wayland home**, taken from the
+    /// writer's own counter rather than from the item count.
+    ///
+    /// Added for F26-GRADE-H1. A per-item count can be inflated by an outcome
+    /// recorded beside a write that never happened — which is exactly the
+    /// defect this field exists to make impossible to hide: if the categories
+    /// below are non-zero and this is zero, the report contradicts itself
+    /// visibly instead of agreeing with itself falsely.
+    pub files_written: usize,
+    /// Data skills written into the live skills root.
+    pub skills_imported: usize,
+    /// Persona bodies written into the staging root.
+    pub personas_imported: usize,
+    /// Memory notes written into the staging root.
+    pub memory_imported: usize,
+    /// Skills whose content was byte-identical to one already written this run,
+    /// so they were recorded rather than duplicated on disk. Counted in
+    /// `skills_imported`; reported separately so the file count and the item
+    /// count can be reconciled by a reader.
+    pub skills_deduplicated: usize,
+}
+
+/// Running totals of what the content writer actually put on disk.
+#[derive(Debug, Default)]
+struct ContentTally {
+    skills: usize,
+    personas: usize,
+    memory: usize,
+    deduplicated: usize,
 }
 
 impl MigrationReport {
@@ -336,16 +388,31 @@ struct ImportPlanDocument {
 }
 
 /// Everything this plan discovers beyond 26-01's profile/MCP vocabulary.
+///
+/// Before F26-GRADE-H1 this held exactly one field, which is why persona,
+/// memory, settings and asset content all measured **0 files written** against
+/// a real 13-profile peer home. Skills, personas and memory notes are now each
+/// discovered, published, selectable, and — the part that was missing —
+/// actually written (see [`content`]).
 struct ImportSurface {
     /// Peer skill directories, with the classification the EXISTING detector
     /// gave each one.
     skills: Vec<(quarantine::ScannedExecutable, Classification)>,
+    /// Peer persona bodies (`SOUL.md`). Data by construction — a persona is
+    /// prose — but staged rather than activated; see
+    /// [`ImportedContentStore::import_persona`].
+    personas: Vec<quarantine::ScannedData>,
+    /// Peer memory notes. Data, staged for the structural reason recorded on
+    /// [`ImportedContentStore::import_memory_note`].
+    memory: Vec<quarantine::ScannedData>,
 }
 
 impl ImportSurface {
     fn scan(home: &std::path::Path) -> Self {
         Self {
             skills: quarantine::scan_peer_skills(home),
+            personas: quarantine::scan_peer_personas(home),
+            memory: quarantine::scan_peer_memory(home),
         }
     }
 }
@@ -399,6 +466,17 @@ fn published_items(plan: &MigrationPlan, surface: &ImportSurface) -> Vec<Publish
                 "data"
             },
             executable_reason: class.reason().map(|r| r.to_string()),
+        });
+    }
+    // Personas and memory notes are prose: data by construction, and published
+    // so they are selectable by the SAME identity vocabulary everything else
+    // uses rather than importing invisibly.
+    for d in surface.personas.iter().chain(surface.memory.iter()) {
+        out.push(PublishedItem {
+            identity: d.id.clone(),
+            source_path: d.relative.clone(),
+            class: "data",
+            executable_reason: None,
         });
     }
     out.sort_by(|a, b| a.identity.cmp(&b.identity));
@@ -608,6 +686,8 @@ fn apply_plan(
     // twice; anything that never gets one is named by `unaccounted()`.
     let mut acct = Accounting::over(published.iter().map(|p| p.identity.clone()));
     let store = QuarantineStore::for_current_home();
+    let mut content = ImportedContentStore::for_current_home();
+    let mut written = ContentTally::default();
 
     // --- containment first, so nothing executable can be written live -------
     let mut contained: Vec<String> = Vec::new();
@@ -621,7 +701,38 @@ fn apply_plan(
                 // A skill body with no directive is not a shell surface, so it
                 // imports without ceremony — treating everything as dangerous
                 // trains an operator to promote without reading.
-                acct.record(&found.id, Outcome::Imported);
+                //
+                // F26-GRADE-H1: the outcome is recorded FROM THE WRITE, not
+                // beside it. Before this, `Outcome::Imported` was recorded here
+                // with no write of any kind, so `imported=` counted content the
+                // filesystem did not hold and the same run also printed those
+                // items under "Detected but NOT imported". A failed write is now
+                // a NAMED failure that still balances — never a silent success.
+                let req = ContentRequest {
+                    id: found.id.clone(),
+                    source_dir: Some(found.dir.clone()),
+                    inline: None,
+                    source_tool: source.as_str().to_string(),
+                    source_version: peer_version(&plan.source_home, source),
+                    source_path: found.relative.clone(),
+                    name: found.name.clone(),
+                };
+                match content.import_skill(&req) {
+                    Ok(item) => {
+                        written.skills += 1;
+                        if item.deduplicated_with.is_some() {
+                            written.deduplicated += 1;
+                        }
+                        acct.record(&found.id, Outcome::Imported);
+                    }
+                    Err(e) => {
+                        acct.record(
+                            &found.id,
+                            Outcome::Quarantined(QuarantineReason::ImportFailed(e.to_string())),
+                        );
+                        contained.push(format!("{} — refused: {e}", found.id));
+                    }
+                }
             }
             Classification::Executable(reason) => {
                 let req = QuarantineRequest {
@@ -652,6 +763,68 @@ fn apply_plan(
                         );
                         contained.push(format!("{} — refused: {e}", found.id));
                     }
+                }
+            }
+        }
+    }
+
+    // --- personas and memory notes: prose, imported STAGED ------------------
+    // Both are data, and both are written rather than counted — the whole point
+    // of F26-GRADE-H1. They land staged rather than live because Core has no
+    // destination for either without a decision only the operator holds; the
+    // full argument is on `content::ImportedContentStore::import_persona` and
+    // `::import_memory_note`. As with skills, the outcome comes from the write.
+    for (items, is_persona) in [(&surface.personas, true), (&surface.memory, false)] {
+        for d in items {
+            if !selection.wants(&d.id) {
+                acct.record(&d.id, Outcome::Excluded);
+                continue;
+            }
+            let body = match std::fs::read(&d.path) {
+                Ok(b) => b,
+                Err(e) => {
+                    acct.record(
+                        &d.id,
+                        Outcome::Quarantined(QuarantineReason::ImportFailed(e.to_string())),
+                    );
+                    contained.push(format!("{} — refused: {e}", d.id));
+                    continue;
+                }
+            };
+            let req = ContentRequest {
+                id: d.id.clone(),
+                source_dir: None,
+                inline: Some((d.name.clone(), body)),
+                source_tool: source.as_str().to_string(),
+                source_version: peer_version(&plan.source_home, source),
+                source_path: d.relative.clone(),
+                name: d.name.clone(),
+            };
+            let result = if is_persona {
+                content.import_persona(&req)
+            } else {
+                content.import_memory_note(&req)
+            };
+            match result {
+                // The count is incremented only on a successful write, and the
+                // authoritative file total still comes from the store's own
+                // counter (`content.files_written()`) rather than from here —
+                // two independent numbers that a reader can cross-check, which
+                // is the property F26-GRADE-H1 was missing.
+                Ok(_) => {
+                    if is_persona {
+                        written.personas += 1;
+                    } else {
+                        written.memory += 1;
+                    }
+                    acct.record(&d.id, Outcome::Imported);
+                }
+                Err(e) => {
+                    acct.record(
+                        &d.id,
+                        Outcome::Quarantined(QuarantineReason::ImportFailed(e.to_string())),
+                    );
+                    contained.push(format!("{} — refused: {e}", d.id));
                 }
             }
         }
@@ -771,6 +944,15 @@ fn apply_plan(
             acct.undiscovered()
         );
     }
+    // Persist the run's provenance for everything that landed. Done BEFORE the
+    // config patch so an interruption cannot leave written content with no
+    // record of where it came from — an imported item with no provenance cannot
+    // be selectively rolled back or judged when its source is later found
+    // malicious, which is the property `provenance.rs` exists to hold.
+    content
+        .flush()
+        .map_err(|e| anyhow::anyhow!("recording import provenance failed: {e}"))?;
+
     let report = MigrationReport {
         profiles_added: selected.len(),
         profiles_skipped: plan.profiles.len() - selected.len(),
@@ -781,6 +963,11 @@ fn apply_plan(
         discovered,
         imported,
         excluded,
+        files_written: content.files_written(),
+        skills_imported: written.skills,
+        personas_imported: written.personas,
+        memory_imported: written.memory,
+        skills_deduplicated: written.deduplicated,
     };
 
     patch_global_config(|f| {
@@ -938,30 +1125,21 @@ fn render_plan(plan: &MigrationPlan, include_credentials: bool, overwrite: bool)
         );
     }
 
-    let d = &plan.deferred;
-    if d.skills + d.personas + d.memory_files > 0 {
-        println!("\nDetected but NOT imported in this pass (tracked for a follow-up):");
-        if d.skills > 0 {
-            println!(
-                "  • {} skill director{}",
-                d.skills,
-                plural(d.skills, "y", "ies")
-            );
+    // F26-GRADE-H1: this block used to list skills, personas and memory as
+    // "Detected but NOT imported" in the SAME run whose accounting counted them
+    // as imported — two incompatible statements about one set of items. Those
+    // three classes are imported now, so they are no longer listed here.
+    // `deferred_other` remains, because the classes it names genuinely are not
+    // imported and naming them is what keeps them from being silently lost.
+    if !plan.deferred_other.is_empty() {
+        println!("\nDetected but NOT imported — no Wayland equivalent to map onto:");
+        for (kind, n) in &plan.deferred_other {
+            println!("  • {n} {kind}");
         }
-        if d.personas > 0 {
-            println!(
-                "  • {} SOUL.md persona file{}",
-                d.personas,
-                plural(d.personas, "", "s")
-            );
-        }
-        if d.memory_files > 0 {
-            println!(
-                "  • {} memory note{}",
-                d.memory_files,
-                plural(d.memory_files, "", "s")
-            );
-        }
+        println!(
+            "  These stay on the source install. Importing them would mean guessing a\n  \
+             mapping, and a wrong guess in a settings key changes runtime behaviour."
+        );
     }
     for w in &plan.warnings {
         println!("  ! {w}");
@@ -1026,6 +1204,37 @@ fn print_report(report: &MigrationReport, plan: &MigrationPlan) {
         "Accounting: discovered={} imported={} quarantined={} excluded={} (the last three sum to the first).",
         report.discovered, report.imported, report.quarantined, report.excluded,
     );
+    // F26-GRADE-H1: the item counts above are now reported BESIDE the file
+    // count they are supposed to describe. If content is claimed imported and
+    // no files were written, the two lines contradict each other where a user
+    // can see it — which is the whole difference between this report and the
+    // one that said `imported=14` over four files.
+    println!(
+        "Content written: {} file{} — {} skill{}, {} persona{}, {} memory note{}.",
+        report.files_written,
+        plural(report.files_written, "", "s"),
+        report.skills_imported,
+        plural(report.skills_imported, "", "s"),
+        report.personas_imported,
+        plural(report.personas_imported, "", "s"),
+        report.memory_imported,
+        plural(report.memory_imported, "", "s"),
+    );
+    if report.skills_deduplicated > 0 {
+        println!(
+            "  ({} skill{} were byte-identical to one already imported and share its copy.)",
+            report.skills_deduplicated,
+            plural(report.skills_deduplicated, "", "s"),
+        );
+    }
+    if report.personas_imported > 0 || report.memory_imported > 0 {
+        println!(
+            "  Personas and memory notes are STAGED under {}/ — they are not active until\n  \
+             you move them where you want them. Personas are stored with forged trust\n  \
+             delimiters neutralized.",
+            content::IMPORT_STAGE_DIR,
+        );
+    }
     if report.quarantined > 0 {
         println!(
             "\nQuarantined {} item{} — inert until an explicit promotion:",

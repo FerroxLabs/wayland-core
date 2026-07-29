@@ -1,0 +1,1107 @@
+{
+  "generated_at": "2026-07-29T07:10:00.093Z",
+  "binary": "/root/wayland-24na/target/release/wayland-core",
+  "out_dir": "/root/f24na-final1",
+  "adapters": [
+    "telegram",
+    "matrix",
+    "slack",
+    "whatsapp",
+    "msteams",
+    "discord"
+  ],
+  "instrument_selftest": [
+    {
+      "name": "known-positive: 👀 then ✅ with typing grades all three FIRED",
+      "pass": true
+    },
+    {
+      "name": "known-negative: an empty ledger grades NOT-FIRED, never fired",
+      "pass": true
+    },
+    {
+      "name": "THE REPAIR: two 👀 and no terminal reaction — identity grading says NOT-FIRED where the old count-only matcher says FIRED",
+      "pass": true
+    },
+    {
+      "name": "silent-default trap: zero typing on a non-declaring adapter grades NOT-SUPPORTED, not NOT-FIRED",
+      "pass": true
+    },
+    {
+      "name": "THE REPAIR (ledger read): a fixture with no `replies` is read successfully — where the old unguarded read THREW and killed the leg",
+      "pass": true
+    },
+    {
+      "name": "free-negative guard: a fixture missing `reactions`/`typing` THROWS rather than grading a silent NOT-FIRED",
+      "pass": true
+    },
+    {
+      "name": "known-positive (real measured timeline): 3 refreshes during a 12.7s turn, 0 after — loop ran AND guard aborted",
+      "pass": true
+    },
+    {
+      "name": "known-negative (synthetic leak): refreshes continuing past the terminal reaction grade NOT-ABORTED",
+      "pass": true
+    },
+    {
+      "name": "THE REPAIR (keepalive window): the OLD turn-observation marker reports 2 phantom post-turn signals on the same real timeline the repaired marker grades as 0",
+      "pass": true
+    }
+  ],
+  "matrix": {
+    "telegram": {
+      "declares": {
+        "react": true,
+        "typing": true,
+        "react_site": "wcore-channel-telegram/src/lib.rs:373",
+        "typing_site": "wcore-channel-telegram/src/lib.rs:360"
+      },
+      "a1_receipt_reaction": "fired",
+      "a2_typing_keepalive": "fired",
+      "a3_terminal_reaction": "fired",
+      "emojis": [
+        "👀",
+        "✅"
+      ],
+      "typing_count": 1,
+      "turn_ran": true
+    },
+    "matrix": {
+      "declares": {
+        "react": true,
+        "typing": true,
+        "react_site": "wcore-channel-matrix/src/lib.rs:324",
+        "typing_site": "wcore-channel-matrix/src/lib.rs:305"
+      },
+      "a1_receipt_reaction": "fired",
+      "a2_typing_keepalive": "fired",
+      "a3_terminal_reaction": "fired",
+      "emojis": [
+        "👀",
+        "✅"
+      ],
+      "typing_count": 1,
+      "turn_ran": true
+    },
+    "slack": {
+      "declares": {
+        "react": true,
+        "typing": false,
+        "react_site": "wcore-channel-slack/src/lib.rs:267",
+        "typing_site": "TRAIT DEFAULT (silent no-op Ok(())) — wcore-channels/src/lib.rs:277"
+      },
+      "a1_receipt_reaction": "fired",
+      "a2_typing_keepalive": "not-supported",
+      "a3_terminal_reaction": "fired",
+      "emojis": [
+        "👀",
+        "✅"
+      ],
+      "typing_count": 0,
+      "turn_ran": true
+    },
+    "whatsapp": {
+      "declares": {
+        "react": true,
+        "typing": false,
+        "react_site": "wcore-channel-whatsapp/src/lib.rs:327",
+        "typing_site": "TRAIT DEFAULT (silent no-op Ok(())) — platform ties typing to a per-message read receipt (lib.rs:324-326)"
+      },
+      "a1_receipt_reaction": "fired",
+      "a2_typing_keepalive": "not-supported",
+      "a3_terminal_reaction": "fired",
+      "emojis": [
+        "👀",
+        "✅"
+      ],
+      "typing_count": 0,
+      "turn_ran": true
+    },
+    "msteams": {
+      "declares": {
+        "react": false,
+        "typing": true,
+        "react_site": "TRAIT DEFAULT (Err(Unsupported)) — wcore-channels/src/lib.rs:294",
+        "typing_site": "wcore-channel-msteams/src/lib.rs:381"
+      },
+      "a1_receipt_reaction": "not-supported",
+      "a2_typing_keepalive": "fired",
+      "a3_terminal_reaction": "not-supported",
+      "emojis": [],
+      "typing_count": 1,
+      "turn_ran": true
+    },
+    "discord": {
+      "declares": {
+        "react": true,
+        "typing": true,
+        "react_site": "wcore-channel-discord/src/lib.rs:444",
+        "typing_site": "wcore-channel-discord/src/lib.rs:435"
+      },
+      "a1_receipt_reaction": "fired",
+      "a2_typing_keepalive": "fired",
+      "a3_terminal_reaction": "fired",
+      "emojis": [
+        "👀",
+        "✅"
+      ],
+      "typing_count": 1,
+      "turn_ran": true
+    }
+  },
+  "legs": {
+    "telegram": {
+      "P": {
+        "adapter": "telegram",
+        "label": "P-ack-both",
+        "ack": "both",
+        "declares": {
+          "react": true,
+          "typing": true,
+          "react_site": "wcore-channel-telegram/src/lib.rs:373",
+          "typing_site": "wcore-channel-telegram/src/lib.rs:360"
+        },
+        "ready": true,
+        "turn_ran": true,
+        "turn_prompt": "probe f24na-telegram-P-ack-both\nCurrent date: 2026-07-29",
+        "prompt_carries_probe": true,
+        "reactions_total": 2,
+        "reaction_emojis": [
+          "👀",
+          "✅"
+        ],
+        "typing_total": 1,
+        "typing_at_ms": [
+          1785308908566
+        ],
+        "reaction_at_ms": [
+          1785308908563,
+          1785308909179
+        ],
+        "keepalive": null,
+        "replies_total": 1,
+        "affordances": {
+          "a1_receipt": "fired",
+          "a2_typing": "fired",
+          "a3_terminal": "fired",
+          "emojis": [
+            "👀",
+            "✅"
+          ],
+          "typing_count": 1
+        },
+        "gateway_log_bytes": 8284,
+        "fixture_journal": [
+          {
+            "kind": "deleteWebhook",
+            "at": "2026-07-29T07:08:28.309Z"
+          },
+          {
+            "kind": "submit",
+            "at": "2026-07-29T07:08:28.440Z",
+            "update_id": 1,
+            "message_id": 5551,
+            "text": "probe f24na-telegram-P-ack-both"
+          },
+          {
+            "kind": "reaction",
+            "at": "2026-07-29T07:08:28.563Z",
+            "emoji": "👀",
+            "conv": "24000001",
+            "msg": "5551"
+          },
+          {
+            "kind": "typing",
+            "at": "2026-07-29T07:08:28.566Z",
+            "conv": "24000001"
+          },
+          {
+            "kind": "reaction",
+            "at": "2026-07-29T07:08:29.179Z",
+            "emoji": "✅",
+            "conv": "24000001",
+            "msg": "5551"
+          },
+          {
+            "kind": "reply",
+            "at": "2026-07-29T07:08:29.180Z",
+            "text": "F24NA\\-REPLY f24na\\-telegram\\-P\\-ack\\-both"
+          }
+        ],
+        "notes": [
+          "llm fixture at http://127.0.0.1:37895 (delay=0ms)",
+          "telegram fixture at http://127.0.0.1:42107",
+          "readiness=true",
+          "delivered inbound (5551)",
+          "turn_ran=true after dispatch"
+        ]
+      },
+      "N": {
+        "adapter": "telegram",
+        "label": "N-ack-off",
+        "ack": "off",
+        "declares": {
+          "react": true,
+          "typing": true,
+          "react_site": "wcore-channel-telegram/src/lib.rs:373",
+          "typing_site": "wcore-channel-telegram/src/lib.rs:360"
+        },
+        "ready": true,
+        "turn_ran": true,
+        "turn_prompt": "probe f24na-telegram-N-ack-off\nCurrent date: 2026-07-29",
+        "prompt_carries_probe": true,
+        "reactions_total": 0,
+        "reaction_emojis": [],
+        "typing_total": 0,
+        "typing_at_ms": [],
+        "reaction_at_ms": [],
+        "keepalive": null,
+        "replies_total": 1,
+        "affordances": {
+          "a1_receipt": "not-fired",
+          "a2_typing": "not-fired",
+          "a3_terminal": "not-fired",
+          "emojis": [],
+          "typing_count": 0
+        },
+        "gateway_log_bytes": 8380,
+        "fixture_journal": [
+          {
+            "kind": "deleteWebhook",
+            "at": "2026-07-29T07:08:33.460Z"
+          },
+          {
+            "kind": "submit",
+            "at": "2026-07-29T07:08:33.595Z",
+            "update_id": 1,
+            "message_id": 5551,
+            "text": "probe f24na-telegram-N-ack-off"
+          },
+          {
+            "kind": "reply",
+            "at": "2026-07-29T07:08:34.327Z",
+            "text": "F24NA\\-REPLY f24na\\-telegram\\-N\\-ack\\-off"
+          }
+        ],
+        "notes": [
+          "llm fixture at http://127.0.0.1:45771 (delay=0ms)",
+          "telegram fixture at http://127.0.0.1:42185",
+          "readiness=true",
+          "delivered inbound (5551)",
+          "turn_ran=true after dispatch"
+        ]
+      }
+    },
+    "matrix": {
+      "P": {
+        "adapter": "matrix",
+        "label": "P-ack-both",
+        "ack": "both",
+        "declares": {
+          "react": true,
+          "typing": true,
+          "react_site": "wcore-channel-matrix/src/lib.rs:324",
+          "typing_site": "wcore-channel-matrix/src/lib.rs:305"
+        },
+        "ready": true,
+        "turn_ran": true,
+        "turn_prompt": "probe f24na-matrix-P-ack-both\nCurrent date: 2026-07-29",
+        "prompt_carries_probe": true,
+        "reactions_total": 2,
+        "reaction_emojis": [
+          "👀",
+          "✅"
+        ],
+        "typing_total": 1,
+        "typing_at_ms": [
+          1785308918874
+        ],
+        "reaction_at_ms": [
+          1785308918872,
+          1785308919490
+        ],
+        "keepalive": null,
+        "replies_total": 1,
+        "affordances": {
+          "a1_receipt": "fired",
+          "a2_typing": "fired",
+          "a3_terminal": "fired",
+          "emojis": [
+            "👀",
+            "✅"
+          ],
+          "typing_count": 1
+        },
+        "gateway_log_bytes": 8463,
+        "fixture_journal": [
+          {
+            "kind": "submit",
+            "at": "2026-07-29T07:08:38.755Z",
+            "cursor": 1,
+            "room": "!f24naroom:fixture.invalid",
+            "sender": "@f24nauser:fixture.invalid",
+            "event_id": "$f24naevt1",
+            "text": "probe f24na-matrix-P-ack-both"
+          },
+          {
+            "kind": "reaction",
+            "at": "2026-07-29T07:08:38.872Z",
+            "emoji": "👀",
+            "conv": "!f24naroom:fixture.invalid",
+            "msg": "$f24naevt1"
+          },
+          {
+            "kind": "typing",
+            "at": "2026-07-29T07:08:38.874Z",
+            "conv": "!f24naroom:fixture.invalid"
+          },
+          {
+            "kind": "reaction",
+            "at": "2026-07-29T07:08:39.490Z",
+            "emoji": "✅",
+            "conv": "!f24naroom:fixture.invalid",
+            "msg": "$f24naevt1"
+          },
+          {
+            "kind": "reply",
+            "at": "2026-07-29T07:08:39.491Z",
+            "text": "F24NA-REPLY f24na-matrix-P-ack-both"
+          }
+        ],
+        "notes": [
+          "llm fixture at http://127.0.0.1:35613 (delay=0ms)",
+          "matrix fixture at http://127.0.0.1:45887",
+          "readiness=true",
+          "delivered inbound (\"$f24naevt1\")",
+          "turn_ran=true after dispatch"
+        ]
+      },
+      "N": {
+        "adapter": "matrix",
+        "label": "N-ack-off",
+        "ack": "off",
+        "declares": {
+          "react": true,
+          "typing": true,
+          "react_site": "wcore-channel-matrix/src/lib.rs:324",
+          "typing_site": "wcore-channel-matrix/src/lib.rs:305"
+        },
+        "ready": true,
+        "turn_ran": true,
+        "turn_prompt": "probe f24na-matrix-N-ack-off\nCurrent date: 2026-07-29",
+        "prompt_carries_probe": true,
+        "reactions_total": 0,
+        "reaction_emojis": [],
+        "typing_total": 0,
+        "typing_at_ms": [],
+        "reaction_at_ms": [],
+        "keepalive": null,
+        "replies_total": 1,
+        "affordances": {
+          "a1_receipt": "not-fired",
+          "a2_typing": "not-fired",
+          "a3_terminal": "not-fired",
+          "emojis": [],
+          "typing_count": 0
+        },
+        "gateway_log_bytes": 8559,
+        "fixture_journal": [
+          {
+            "kind": "submit",
+            "at": "2026-07-29T07:08:43.908Z",
+            "cursor": 1,
+            "room": "!f24naroom:fixture.invalid",
+            "sender": "@f24nauser:fixture.invalid",
+            "event_id": "$f24naevt1",
+            "text": "probe f24na-matrix-N-ack-off"
+          },
+          {
+            "kind": "reply",
+            "at": "2026-07-29T07:08:44.640Z",
+            "text": "F24NA-REPLY f24na-matrix-N-ack-off"
+          }
+        ],
+        "notes": [
+          "llm fixture at http://127.0.0.1:35841 (delay=0ms)",
+          "matrix fixture at http://127.0.0.1:43951",
+          "readiness=true",
+          "delivered inbound (\"$f24naevt1\")",
+          "turn_ran=true after dispatch"
+        ]
+      }
+    },
+    "slack": {
+      "P": {
+        "adapter": "slack",
+        "label": "P-ack-both",
+        "ack": "both",
+        "declares": {
+          "react": true,
+          "typing": false,
+          "react_site": "wcore-channel-slack/src/lib.rs:267",
+          "typing_site": "TRAIT DEFAULT (silent no-op Ok(())) — wcore-channels/src/lib.rs:277"
+        },
+        "ready": true,
+        "turn_ran": true,
+        "turn_prompt": "probe f24na-slack-P-ack-both\nCurrent date: 2026-07-29",
+        "prompt_carries_probe": true,
+        "reactions_total": 2,
+        "reaction_emojis": [
+          "👀",
+          "✅"
+        ],
+        "typing_total": 0,
+        "typing_at_ms": [],
+        "reaction_at_ms": [
+          1785308929391,
+          1785308929965
+        ],
+        "keepalive": null,
+        "replies_total": 1,
+        "affordances": {
+          "a1_receipt": "fired",
+          "a2_typing": "not-supported",
+          "a3_terminal": "fired",
+          "emojis": [
+            "👀",
+            "✅"
+          ],
+          "typing_count": 0
+        },
+        "gateway_log_bytes": 8734,
+        "fixture_journal": [
+          {
+            "kind": "reaction",
+            "at": "2026-07-29T07:08:49.391Z",
+            "emoji": "👀",
+            "conv": "D24NACHAN",
+            "msg": "1785308929.000100"
+          },
+          {
+            "kind": "reaction",
+            "at": "2026-07-29T07:08:49.965Z",
+            "emoji": "✅",
+            "conv": "D24NACHAN",
+            "msg": "1785308929.000100"
+          },
+          {
+            "kind": "reply",
+            "at": "2026-07-29T07:08:49.965Z",
+            "text": "F24NA-REPLY f24na-slack-P-ack-both"
+          }
+        ],
+        "notes": [
+          "llm fixture at http://127.0.0.1:38599 (delay=0ms)",
+          "slack fixture at http://127.0.0.1:44079",
+          "readiness=true",
+          "slack webhook POST -> 200",
+          "delivered inbound (\"1785308929.000100\")",
+          "turn_ran=true after dispatch"
+        ]
+      },
+      "N": {
+        "adapter": "slack",
+        "label": "N-ack-off",
+        "ack": "off",
+        "declares": {
+          "react": true,
+          "typing": false,
+          "react_site": "wcore-channel-slack/src/lib.rs:267",
+          "typing_site": "TRAIT DEFAULT (silent no-op Ok(())) — wcore-channels/src/lib.rs:277"
+        },
+        "ready": true,
+        "turn_ran": true,
+        "turn_prompt": "probe f24na-slack-N-ack-off\nCurrent date: 2026-07-29",
+        "prompt_carries_probe": true,
+        "reactions_total": 0,
+        "reaction_emojis": [],
+        "typing_total": 0,
+        "typing_at_ms": [],
+        "reaction_at_ms": [],
+        "keepalive": null,
+        "replies_total": 1,
+        "affordances": {
+          "a1_receipt": "not-fired",
+          "a2_typing": "not-supported",
+          "a3_terminal": "not-fired",
+          "emojis": [],
+          "typing_count": 0
+        },
+        "gateway_log_bytes": 8732,
+        "fixture_journal": [
+          {
+            "kind": "reply",
+            "at": "2026-07-29T07:08:55.478Z",
+            "text": "F24NA-REPLY f24na-slack-N-ack-off"
+          }
+        ],
+        "notes": [
+          "llm fixture at http://127.0.0.1:45175 (delay=0ms)",
+          "slack fixture at http://127.0.0.1:38865",
+          "readiness=true",
+          "slack webhook POST -> 200",
+          "delivered inbound (\"1785308934.000100\")",
+          "turn_ran=true after dispatch"
+        ]
+      }
+    },
+    "whatsapp": {
+      "P": {
+        "adapter": "whatsapp",
+        "label": "P-ack-both",
+        "ack": "both",
+        "declares": {
+          "react": true,
+          "typing": false,
+          "react_site": "wcore-channel-whatsapp/src/lib.rs:327",
+          "typing_site": "TRAIT DEFAULT (silent no-op Ok(())) — platform ties typing to a per-message read receipt (lib.rs:324-326)"
+        },
+        "ready": true,
+        "turn_ran": true,
+        "turn_prompt": "probe f24na-whatsapp-P-ack-both\nCurrent date: 2026-07-29",
+        "prompt_carries_probe": true,
+        "reactions_total": 2,
+        "reaction_emojis": [
+          "👀",
+          "✅"
+        ],
+        "typing_total": 0,
+        "typing_at_ms": [],
+        "reaction_at_ms": [
+          1785308940380,
+          1785308940992
+        ],
+        "keepalive": null,
+        "replies_total": 1,
+        "affordances": {
+          "a1_receipt": "fired",
+          "a2_typing": "not-supported",
+          "a3_terminal": "fired",
+          "emojis": [
+            "👀",
+            "✅"
+          ],
+          "typing_count": 0
+        },
+        "gateway_log_bytes": 8743,
+        "fixture_journal": [
+          {
+            "kind": "reaction",
+            "at": "2026-07-29T07:09:00.380Z",
+            "emoji": "👀",
+            "conv": "15552220000",
+            "msg": "wamid.f24na-inbound-1"
+          },
+          {
+            "kind": "reaction",
+            "at": "2026-07-29T07:09:00.992Z",
+            "emoji": "✅",
+            "conv": "15552220000",
+            "msg": "wamid.f24na-inbound-1"
+          },
+          {
+            "kind": "reply",
+            "at": "2026-07-29T07:09:00.992Z",
+            "text": "F24NA-REPLY f24na-whatsapp-P-ack-both"
+          }
+        ],
+        "notes": [
+          "llm fixture at http://127.0.0.1:34981 (delay=0ms)",
+          "whatsapp fixture at http://127.0.0.1:43531",
+          "readiness=true",
+          "whatsapp webhook POST -> 200",
+          "delivered inbound (\"wamid.f24na-inbound-1\")",
+          "turn_ran=true after dispatch"
+        ]
+      },
+      "N": {
+        "adapter": "whatsapp",
+        "label": "N-ack-off",
+        "ack": "off",
+        "declares": {
+          "react": true,
+          "typing": false,
+          "react_site": "wcore-channel-whatsapp/src/lib.rs:327",
+          "typing_site": "TRAIT DEFAULT (silent no-op Ok(())) — platform ties typing to a per-message read receipt (lib.rs:324-326)"
+        },
+        "ready": true,
+        "turn_ran": true,
+        "turn_prompt": "probe f24na-whatsapp-N-ack-off\nCurrent date: 2026-07-29",
+        "prompt_carries_probe": true,
+        "reactions_total": 0,
+        "reaction_emojis": [],
+        "typing_total": 0,
+        "typing_at_ms": [],
+        "reaction_at_ms": [],
+        "keepalive": null,
+        "replies_total": 1,
+        "affordances": {
+          "a1_receipt": "not-fired",
+          "a2_typing": "not-supported",
+          "a3_terminal": "not-fired",
+          "emojis": [],
+          "typing_count": 0
+        },
+        "gateway_log_bytes": 8612,
+        "fixture_journal": [
+          {
+            "kind": "reply",
+            "at": "2026-07-29T07:09:06.458Z",
+            "text": "F24NA-REPLY f24na-whatsapp-N-ack-off"
+          }
+        ],
+        "notes": [
+          "llm fixture at http://127.0.0.1:38481 (delay=0ms)",
+          "whatsapp fixture at http://127.0.0.1:38845",
+          "readiness=true",
+          "whatsapp webhook POST -> 200",
+          "delivered inbound (\"wamid.f24na-inbound-1\")",
+          "turn_ran=true after dispatch"
+        ]
+      }
+    },
+    "msteams": {
+      "P": {
+        "adapter": "msteams",
+        "label": "P-ack-both",
+        "ack": "both",
+        "declares": {
+          "react": false,
+          "typing": true,
+          "react_site": "TRAIT DEFAULT (Err(Unsupported)) — wcore-channels/src/lib.rs:294",
+          "typing_site": "wcore-channel-msteams/src/lib.rs:381"
+        },
+        "ready": true,
+        "turn_ran": true,
+        "turn_prompt": "probe f24na-msteams-P-ack-both\nCurrent date: 2026-07-29",
+        "prompt_carries_probe": true,
+        "reactions_total": 0,
+        "reaction_emojis": [],
+        "typing_total": 1,
+        "typing_at_ms": [
+          1785308951412
+        ],
+        "reaction_at_ms": [],
+        "keepalive": null,
+        "replies_total": 1,
+        "affordances": {
+          "a1_receipt": "not-supported",
+          "a2_typing": "fired",
+          "a3_terminal": "not-supported",
+          "emojis": [],
+          "typing_count": 1
+        },
+        "gateway_log_bytes": 8923,
+        "fixture_journal": [
+          {
+            "kind": "token",
+            "at": "2026-07-29T07:09:11.157Z"
+          },
+          {
+            "kind": "openid",
+            "at": "2026-07-29T07:09:11.166Z"
+          },
+          {
+            "kind": "jwks",
+            "at": "2026-07-29T07:09:11.166Z"
+          },
+          {
+            "kind": "typing",
+            "at": "2026-07-29T07:09:11.412Z",
+            "conv": "/amer/v3/conversations/19%3Af24na%40thread.v2/activities"
+          },
+          {
+            "kind": "activity_out",
+            "at": "2026-07-29T07:09:11.412Z",
+            "type": "typing",
+            "raw_len": 17
+          },
+          {
+            "kind": "reply",
+            "at": "2026-07-29T07:09:12.023Z",
+            "text": "F24NA-REPLY f24na-msteams-P-ack-both"
+          },
+          {
+            "kind": "activity_out",
+            "at": "2026-07-29T07:09:12.023Z",
+            "type": "message",
+            "raw_len": 85
+          }
+        ],
+        "notes": [
+          "llm fixture at http://127.0.0.1:36405 (delay=0ms)",
+          "msteams BF fixture at http://127.0.0.1:40947",
+          "readiness=true",
+          "msteams webhook POST -> 200",
+          "delivered inbound (\"f24na-activity-1\")",
+          "turn_ran=true after dispatch"
+        ]
+      },
+      "N": {
+        "adapter": "msteams",
+        "label": "N-ack-off",
+        "ack": "off",
+        "declares": {
+          "react": false,
+          "typing": true,
+          "react_site": "TRAIT DEFAULT (Err(Unsupported)) — wcore-channels/src/lib.rs:294",
+          "typing_site": "wcore-channel-msteams/src/lib.rs:381"
+        },
+        "ready": true,
+        "turn_ran": true,
+        "turn_prompt": "probe f24na-msteams-N-ack-off\nCurrent date: 2026-07-29",
+        "prompt_carries_probe": true,
+        "reactions_total": 0,
+        "reaction_emojis": [],
+        "typing_total": 0,
+        "typing_at_ms": [],
+        "reaction_at_ms": [],
+        "keepalive": null,
+        "replies_total": 1,
+        "affordances": {
+          "a1_receipt": "not-supported",
+          "a2_typing": "not-fired",
+          "a3_terminal": "not-supported",
+          "emojis": [],
+          "typing_count": 0
+        },
+        "gateway_log_bytes": 8609,
+        "fixture_journal": [
+          {
+            "kind": "token",
+            "at": "2026-07-29T07:09:16.702Z"
+          },
+          {
+            "kind": "openid",
+            "at": "2026-07-29T07:09:16.707Z"
+          },
+          {
+            "kind": "jwks",
+            "at": "2026-07-29T07:09:16.708Z"
+          },
+          {
+            "kind": "reply",
+            "at": "2026-07-29T07:09:17.540Z",
+            "text": "F24NA-REPLY f24na-msteams-N-ack-off"
+          },
+          {
+            "kind": "activity_out",
+            "at": "2026-07-29T07:09:17.540Z",
+            "type": "message",
+            "raw_len": 84
+          }
+        ],
+        "notes": [
+          "llm fixture at http://127.0.0.1:33171 (delay=0ms)",
+          "msteams BF fixture at http://127.0.0.1:39683",
+          "readiness=true",
+          "msteams webhook POST -> 200",
+          "delivered inbound (\"f24na-activity-1\")",
+          "turn_ran=true after dispatch"
+        ]
+      }
+    },
+    "discord": {
+      "P": {
+        "adapter": "discord",
+        "label": "P-ack-both",
+        "ack": "both",
+        "declares": {
+          "react": true,
+          "typing": true,
+          "react_site": "wcore-channel-discord/src/lib.rs:444",
+          "typing_site": "wcore-channel-discord/src/lib.rs:435"
+        },
+        "ready": true,
+        "turn_ran": true,
+        "turn_prompt": "probe f24na-discord-P-ack-both\nCurrent date: 2026-07-29",
+        "prompt_carries_probe": true,
+        "reactions_total": 2,
+        "reaction_emojis": [
+          "👀",
+          "✅"
+        ],
+        "typing_total": 1,
+        "typing_at_ms": [
+          1785308962238
+        ],
+        "reaction_at_ms": [
+          1785308962235,
+          1785308962848
+        ],
+        "keepalive": null,
+        "replies_total": 0,
+        "affordances": {
+          "a1_receipt": "fired",
+          "a2_typing": "fired",
+          "a3_terminal": "fired",
+          "emojis": [
+            "👀",
+            "✅"
+          ],
+          "typing_count": 1
+        },
+        "gateway_log_bytes": 8281,
+        "fixture_journal": null,
+        "notes": [
+          "llm fixture at http://127.0.0.1:41185 (delay=0ms)",
+          "discord fixture at http://127.0.0.1:45811 (gateway ws://127.0.0.1:45811)",
+          "readiness=true",
+          "delivered inbound (1)",
+          "turn_ran=true after dispatch"
+        ]
+      },
+      "N": {
+        "adapter": "discord",
+        "label": "N-ack-off",
+        "ack": "off",
+        "declares": {
+          "react": true,
+          "typing": true,
+          "react_site": "wcore-channel-discord/src/lib.rs:444",
+          "typing_site": "wcore-channel-discord/src/lib.rs:435"
+        },
+        "ready": true,
+        "turn_ran": true,
+        "turn_prompt": "probe f24na-discord-N-ack-off\nCurrent date: 2026-07-29",
+        "prompt_carries_probe": true,
+        "reactions_total": 0,
+        "reaction_emojis": [],
+        "typing_total": 0,
+        "typing_at_ms": [],
+        "reaction_at_ms": [],
+        "keepalive": null,
+        "replies_total": 0,
+        "affordances": {
+          "a1_receipt": "not-fired",
+          "a2_typing": "not-fired",
+          "a3_terminal": "not-fired",
+          "emojis": [],
+          "typing_count": 0
+        },
+        "gateway_log_bytes": 8279,
+        "fixture_journal": null,
+        "notes": [
+          "llm fixture at http://127.0.0.1:44093 (delay=0ms)",
+          "discord fixture at http://127.0.0.1:42373 (gateway ws://127.0.0.1:42373)",
+          "readiness=true",
+          "delivered inbound (1)",
+          "turn_ran=true after dispatch"
+        ]
+      }
+    }
+  },
+  "keepalive": {
+    "adapter": "telegram",
+    "label": "K-keepalive",
+    "ack": "both",
+    "declares": {
+      "react": true,
+      "typing": true,
+      "react_site": "wcore-channel-telegram/src/lib.rs:373",
+      "typing_site": "wcore-channel-telegram/src/lib.rs:360"
+    },
+    "ready": true,
+    "turn_ran": true,
+    "turn_prompt": "probe f24na-telegram-K-keepalive\nCurrent date: 2026-07-29",
+    "prompt_carries_probe": true,
+    "reactions_total": 2,
+    "reaction_emojis": [
+      "👀",
+      "✅"
+    ],
+    "typing_total": 3,
+    "typing_at_ms": [
+      1785308972561,
+      1785308977563,
+      1785308982566
+    ],
+    "reaction_at_ms": [
+      1785308972559,
+      1785308985170
+    ],
+    "keepalive": {
+      "gradeable": true,
+      "during": 3,
+      "after": 0,
+      "watch_ms_after_end": 14023,
+      "loop_ran": true,
+      "aborted": true
+    },
+    "replies_total": 1,
+    "affordances": {
+      "a1_receipt": "fired",
+      "a2_typing": "fired",
+      "a3_terminal": "fired",
+      "emojis": [
+        "👀",
+        "✅"
+      ],
+      "typing_count": 3
+    },
+    "gateway_log_bytes": 8384,
+    "fixture_journal": [
+      {
+        "kind": "deleteWebhook",
+        "at": "2026-07-29T07:09:32.307Z"
+      },
+      {
+        "kind": "submit",
+        "at": "2026-07-29T07:09:32.438Z",
+        "update_id": 1,
+        "message_id": 5551,
+        "text": "probe f24na-telegram-K-keepalive"
+      },
+      {
+        "kind": "reaction",
+        "at": "2026-07-29T07:09:32.559Z",
+        "emoji": "👀",
+        "conv": "24000001",
+        "msg": "5551"
+      },
+      {
+        "kind": "typing",
+        "at": "2026-07-29T07:09:32.561Z",
+        "conv": "24000001"
+      },
+      {
+        "kind": "typing",
+        "at": "2026-07-29T07:09:37.563Z",
+        "conv": "24000001"
+      },
+      {
+        "kind": "typing",
+        "at": "2026-07-29T07:09:42.566Z",
+        "conv": "24000001"
+      },
+      {
+        "kind": "reaction",
+        "at": "2026-07-29T07:09:45.170Z",
+        "emoji": "✅",
+        "conv": "24000001",
+        "msg": "5551"
+      },
+      {
+        "kind": "reply",
+        "at": "2026-07-29T07:09:45.171Z",
+        "text": "F24NA\\-REPLY f24na\\-telegram\\-K\\-keepalive"
+      }
+    ],
+    "notes": [
+      "llm fixture at http://127.0.0.1:34295 (delay=12000ms)",
+      "telegram fixture at http://127.0.0.1:45457",
+      "readiness=true",
+      "delivered inbound (5551)",
+      "turn_ran=true after dispatch",
+      "post-guard-drop marker observed=true",
+      "keepalive verdict: during=3 after=0 loop_ran=true aborted=true (watched 14s past the guard drop)"
+    ]
+  },
+  "gates": [
+    {
+      "id": "G-telegram-P",
+      "adapter": "telegram",
+      "kind": "POSITIVE",
+      "desc": "ack=\"both\": every affordance telegram DECLARES is counted at the platform, by emoji identity",
+      "pass": true,
+      "detail": "ready=true turn_ran=true emojis=[\"👀\",\"✅\"] typing=1 a1=fired a2=fired a3=fired"
+    },
+    {
+      "id": "G-telegram-N",
+      "adapter": "telegram",
+      "kind": "NEGATIVE CONTROL",
+      "desc": "ack=\"off\", one variable changed: ZERO reactions and ZERO typing — WHILE THE TURN STILL RAN",
+      "pass": true,
+      "detail": "ready=true turn_ran=true reactions=0 typing=0"
+    },
+    {
+      "id": "G-matrix-P",
+      "adapter": "matrix",
+      "kind": "POSITIVE",
+      "desc": "ack=\"both\": every affordance matrix DECLARES is counted at the platform, by emoji identity",
+      "pass": true,
+      "detail": "ready=true turn_ran=true emojis=[\"👀\",\"✅\"] typing=1 a1=fired a2=fired a3=fired"
+    },
+    {
+      "id": "G-matrix-N",
+      "adapter": "matrix",
+      "kind": "NEGATIVE CONTROL",
+      "desc": "ack=\"off\", one variable changed: ZERO reactions and ZERO typing — WHILE THE TURN STILL RAN",
+      "pass": true,
+      "detail": "ready=true turn_ran=true reactions=0 typing=0"
+    },
+    {
+      "id": "G-slack-P",
+      "adapter": "slack",
+      "kind": "POSITIVE",
+      "desc": "ack=\"both\": every affordance slack DECLARES is counted at the platform, by emoji identity",
+      "pass": true,
+      "detail": "ready=true turn_ran=true emojis=[\"👀\",\"✅\"] typing=0 a1=fired a2=not-supported a3=fired"
+    },
+    {
+      "id": "G-slack-N",
+      "adapter": "slack",
+      "kind": "NEGATIVE CONTROL",
+      "desc": "ack=\"off\", one variable changed: ZERO reactions and ZERO typing — WHILE THE TURN STILL RAN",
+      "pass": true,
+      "detail": "ready=true turn_ran=true reactions=0 typing=0"
+    },
+    {
+      "id": "G-whatsapp-P",
+      "adapter": "whatsapp",
+      "kind": "POSITIVE",
+      "desc": "ack=\"both\": every affordance whatsapp DECLARES is counted at the platform, by emoji identity",
+      "pass": true,
+      "detail": "ready=true turn_ran=true emojis=[\"👀\",\"✅\"] typing=0 a1=fired a2=not-supported a3=fired"
+    },
+    {
+      "id": "G-whatsapp-N",
+      "adapter": "whatsapp",
+      "kind": "NEGATIVE CONTROL",
+      "desc": "ack=\"off\", one variable changed: ZERO reactions and ZERO typing — WHILE THE TURN STILL RAN",
+      "pass": true,
+      "detail": "ready=true turn_ran=true reactions=0 typing=0"
+    },
+    {
+      "id": "G-msteams-P",
+      "adapter": "msteams",
+      "kind": "POSITIVE",
+      "desc": "ack=\"both\": every affordance msteams DECLARES is counted at the platform, by emoji identity",
+      "pass": true,
+      "detail": "ready=true turn_ran=true emojis=[] typing=1 a1=not-supported a2=fired a3=not-supported"
+    },
+    {
+      "id": "G-msteams-N",
+      "adapter": "msteams",
+      "kind": "NEGATIVE CONTROL",
+      "desc": "ack=\"off\", one variable changed: ZERO reactions and ZERO typing — WHILE THE TURN STILL RAN",
+      "pass": true,
+      "detail": "ready=true turn_ran=true reactions=0 typing=0"
+    },
+    {
+      "id": "G-discord-P",
+      "adapter": "discord",
+      "kind": "POSITIVE",
+      "desc": "ack=\"both\": every affordance discord DECLARES is counted at the platform, by emoji identity",
+      "pass": true,
+      "detail": "ready=true turn_ran=true emojis=[\"👀\",\"✅\"] typing=1 a1=fired a2=fired a3=fired"
+    },
+    {
+      "id": "G-discord-N",
+      "adapter": "discord",
+      "kind": "NEGATIVE CONTROL",
+      "desc": "ack=\"off\", one variable changed: ZERO reactions and ZERO typing — WHILE THE TURN STILL RAN",
+      "pass": true,
+      "detail": "ready=true turn_ran=true reactions=0 typing=0"
+    },
+    {
+      "id": "G-telegram-K",
+      "adapter": "telegram",
+      "kind": "KEEPALIVE LIFECYCLE",
+      "desc": "a ~12s turn refreshes typing at least twice (the LOOP runs, not just its first send), and ZERO typing arrives after the guard drop becomes observable (AbortOnDrop actually aborts)",
+      "pass": true,
+      "detail": "gradeable=true during=3 after=0 loop_ran=true aborted=true watched_past_end_ms=14023"
+    }
+  ],
+  "all_pass": true
+}

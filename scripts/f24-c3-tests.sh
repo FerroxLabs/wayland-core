@@ -21,6 +21,7 @@ git rev-parse HEAD | tee -a "$OUT"
 
 say ""
 say "=== 1. wcore-channel-sms (F24-C3-H3 fix + its regression test) ==="
+# vacuity-checked: rc via PIPESTATUS[0]; executed count read back from /tmp/sms.txt below.
 cargo test -p wcore-channel-sms 2>&1 | tee -a "$OUT" | grep -E "^test result:|^running|^test f24|^error" | tee /tmp/sms.txt
 rc1=${PIPESTATUS[0]}
 say "rc=${rc1}"
@@ -30,12 +31,14 @@ say "=== 2. wcore-agent, the F24-C3-H1 policy-home test, BY FILE ==="
 # By file (--test <name>), not by filter: a filter that matches no test name
 # exits 0 having run nothing, and is the easiest of the four flavours to write
 # by accident.
+# vacuity-checked: rc via PIPESTATUS[0]; executed count read back from /tmp/agent.txt below.
 cargo test -p wcore-agent --test f24_c3_inbound_policy_home_test 2>&1 | tee -a "$OUT" | grep -E "^test result:|^running|^test |^error" | tee /tmp/agent.txt
 rc2=${PIPESTATUS[0]}
 say "rc=${rc2}"
 
 say ""
 say "=== 3. wcore-channels (the session-key kernel H3 turns on) ==="
+# vacuity-checked: rc via PIPESTATUS[0]; executed count read back from /tmp/channels.txt below.
 cargo test -p wcore-channels 2>&1 | tee -a "$OUT" | grep -E "^test result:|^error" | tee /tmp/channels.txt
 rc3=${PIPESTATUS[0]}
 say "rc=${rc3}"

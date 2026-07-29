@@ -10,31 +10,56 @@
 # env), so `.cargo/config.toml` is the only config-file mechanism that works.
 # The full stack-size rationale is recorded there.
 
+# ── Anti-vacuity: an invocation that matches ZERO tests must FAIL ──────────
+#
+# THIS FILE USED TO CARRY `no-tests = "fail"` UNDER `[profile.default]`.
+# IT NEVER WORKED. Measured 2026-07-29 on hetzner-dsm with cargo-nextest
+# 0.9.137, printed on EVERY `nextest run` and `nextest list` this repo has ever
+# executed:
+#
+#   warning: in config file .config/nextest.toml, ignoring unknown
+#            configuration key: profile.default.no-tests
+#
+# There is no such profile key (it is absent from nexte.st/schemas/repo-config.json).
+# `no-tests` is a CLI option only: `--no-tests=fail|pass|warn`. Verified both
+# directions on the SAME empty binary, so this is measured, not inferred:
+#   `nextest run --no-tests=fail --test packaged_driver_gate` -> rc=4, "no tests to run"
+#   `nextest run --no-tests=pass --test packaged_driver_gate` -> rc=0
+#
+# The fail-closed behaviour the repo has been getting is therefore the CLI
+# DEFAULT of whatever nextest is installed — which is exactly the dependency
+# the deleted key's own comment said it existed to remove. The intent was
+# right; the mechanism was a no-op reporting reassurance.
+#
+# THE REPLACEMENT, which IS honoured (measured: `required = "0.9.200"` against
+# an installed 0.9.137 aborts with `error: this repository requires nextest
+# version 0.9.200, but the current version is 0.9.137`):
+#
+# The floor is set to the oldest version whose zero-test behaviour has actually
+# been MEASURED on this repo — 0.9.137 — not to the oldest version that might
+# happen to work. `vx.toml` declares nextest as `nextest = "cargo nextest"`
+# with no version, and CI installs are unpinned (`tool: nextest`) or `^0.9`,
+# so without this floor any 0.9.x could supply a permissive default.
+nextest-version = { required = "0.9.137" }
+
 [profile.default]
-# An invocation that matches ZERO tests must FAIL, not pass.
+# Belt and braces for the gates that must never be vacuous: the
+# release-integrity invocations additionally pass `--no-tests=fail` explicitly
+# at the call site, so they do not depend on any default at all. See
+# .github/workflows/{ci,supply-chain}.yml and the justfile
+# `f01-packaged-driver-gate` / `harness` recipes.
 #
-# This closes the whole "exits 0 having certified nothing" family at the
-# invocation site rather than file by file. Three flavours of it are measured
-# in this repo and all three land here:
-#   (c) a filter that matches no test name — `cargo test -p wcore-cli migrate`
-#       exited 0 having run 0 tests, and the command *looks* targeted;
-#   (d) a file-level `#![cfg(feature = "...")]` — without the feature the
-#       binary contains zero tests and prints `running 0 tests` / `ok`. There
-#       are 22 file-level `#![cfg(...)]` test binaries in this workspace
-#       (15 feature-gated, 22 counting platform gates), so this is not rare;
-#   (a) every test `#[ignore]`d, when the run is scoped to one such binary.
-#
-# The key is scoped to the whole invocation, not per binary: a workspace run
-# is unaffected because it executes thousands of tests. Only a targeted run
-# that matches nothing fails — which is exactly the case that was silently
-# certifying nothing.
-#
-# Set explicitly rather than relied upon: `vx.toml` pins nextest as
-# `nextest = "cargo nextest"` with no version, so the CLI default of whatever
-# version happens to be installed would otherwise decide this.
-#
-# Inherited by profiles ci / e2e / eval, which do not override it.
-no-tests = "fail"
+# The population this protects, re-measured 2026-07-29 (the previous comment
+# here claimed 22; a full-file scan — the old count used a truncated
+# head-of-file window and missed gates below it — gives 44):
+#   44 test binaries carry a file-level `#![cfg(...)]`
+#      17 feature-gated, 27 platform-gated,
+#   23 more have every case `#[ignore]`d,
+#   out of ~488 integration-test binaries reachable by a bare `cargo test`.
+# Each compiles or collects to EMPTY under the wrong feature/platform/filter
+# and prints `test result: ok`. `cargo test` has no fail-closed option at all,
+# which is why `scripts/check-no-vacuous-cargo-test.py` forbids bare
+# `cargo test` in the justfile, workflows and scripts.
 
 # Local dev: friendly output, show failures immediately
 failure-output = "immediate"

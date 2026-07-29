@@ -64,6 +64,7 @@ use wcore_types::goal::{
 use crate::engine::AgentError;
 use crate::orchestration::anvil::TerminalState;
 use crate::orchestration::anvil::engine::{ClimbOutcome, EngineError};
+use crate::orchestration::council::CouncilOutcome;
 use crate::orchestration::council::driver::CouncilRunResult;
 use crate::orchestration::council::run::CouncilError;
 use crate::orchestration::workflow::runner::{WorkflowRunError, WorkflowRunResult};
@@ -246,6 +247,91 @@ pub enum FleetOutcome<'a> {
     DriverFailed { detail: String },
 }
 
+/// What a Council run produced.
+///
+/// Exists for the same reason as [`FleetOutcome`] and [`AnvilOutcome`]: the
+/// SHIPPED council entry point (`drive_council`) returns
+/// `anyhow::Result<CouncilRunResult>`, not `Result<_, CouncilError>`. The typed
+/// arm is kept and preferred — [`Self::from_anyhow`] downcasts, so a wrapped
+/// `CouncilError` still reaches its exact terminal category (`Unpriced`,
+/// `Exhausted{Resource}`, …) rather than being flattened. Only an error that is
+/// genuinely not a `CouncilError` falls through to `DriverFailed`.
+pub enum CouncilRunOutcome<'a> {
+    /// The council ran and produced a result.
+    Ran(&'a CouncilRunResult),
+    /// The MANUAL council path ran, producing a bare [`CouncilOutcome`].
+    ///
+    /// A separate variant because that path has no [`AssemblyPlan`] — the
+    /// operator's configured roster IS the plan. Constructing an empty
+    /// `AssemblyPlan` just to reach [`Self::Ran`] would fabricate a decision the
+    /// assembler never made, which is the same anti-pattern as squeezing a
+    /// driver failure into an engine error. The terminal mapping is identical to
+    /// `Ran(Council { .. })`, because it is the same counting rule over the same
+    /// two fields.
+    RanManual(&'a CouncilOutcome),
+    /// The council failed with its own typed error.
+    Failed(&'a CouncilError),
+    /// The driver failed around the council, for a stated reason.
+    DriverFailed { detail: String },
+}
+
+/// Hand-written because [`CouncilRunResult`] is not `Debug`, and deriving it
+/// there to satisfy this enum would be a drive-by change to the council's public
+/// API. The variant name is all a diagnostic needs here.
+impl std::fmt::Debug for CouncilRunOutcome<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ran(_) => f.write_str("CouncilRunOutcome::Ran(..)"),
+            Self::RanManual(_) => f.write_str("CouncilRunOutcome::RanManual(..)"),
+            Self::Failed(error) => write!(f, "CouncilRunOutcome::Failed({error})"),
+            Self::DriverFailed { detail } => {
+                write!(f, "CouncilRunOutcome::DriverFailed({detail})")
+            }
+        }
+    }
+}
+
+impl<'a> CouncilRunOutcome<'a> {
+    /// Classify a shipped-driver error, preferring the typed mapping.
+    ///
+    /// Written as a constructor rather than left to each call site because a
+    /// caller that forgot to downcast would silently lose `Unpriced` — the one
+    /// carrier the 22-02 census said the lifted taxonomy had to ADD, on the
+    /// grounds that folding it into `Blocked` loses why the run never started.
+    #[must_use]
+    pub fn from_anyhow(error: &'a anyhow::Error) -> Self {
+        error.downcast_ref::<CouncilError>().map_or_else(
+            || Self::DriverFailed {
+                detail: error.to_string(),
+            },
+            Self::Failed,
+        )
+    }
+}
+
+/// What an Anvil climb produced.
+///
+/// Modelled like [`FleetOutcome`] rather than as a bare `Result<_, &EngineError>`
+/// for exactly the reason stated there: the SHIPPED forge entry point
+/// (`drive_climb_full`) fails with `ForgeError` — no gate detected, workspace
+/// leased, receipt unbindable — and none of those is an [`EngineError`]. Calling
+/// a missing gate `EngineError::Builder` to satisfy a signature would be a
+/// fabricated terminal, so the driver's own failures get a carrier and land in
+/// `Blocked` with a stated reason.
+///
+/// Added when Anvil's production verb was attached to the Goal: before that the
+/// only caller was a test, which could always produce an `EngineError` because it
+/// was calling the engine directly rather than the forge.
+#[derive(Debug)]
+pub enum AnvilOutcome<'a> {
+    /// The climb ran and produced a terminal state.
+    Climbed(&'a ClimbOutcome),
+    /// The climb engine itself failed.
+    EngineFailed(&'a EngineError),
+    /// The forge failed around the climb, for a stated reason.
+    ForgeFailed { detail: String },
+}
+
 impl StrategyTermination {
     /// Adapt a Direct run.
     ///
@@ -375,29 +461,35 @@ impl StrategyTermination {
     /// [`GoalStrategy::can_produce_host_observed_evidence`] is false for it.
     /// This adapter has no route to `Verified` at all — see the `compile_fail`
     /// proof on [`Self::from_anvil`].
-    pub fn from_council(
-        owner: LoopOwner<CouncilTag>,
-        result: Result<&CouncilRunResult, &CouncilError>,
-    ) -> Self {
+    pub fn from_council(owner: LoopOwner<CouncilTag>, result: CouncilRunOutcome<'_>) -> Self {
         let terminal = match result {
-            Ok(CouncilRunResult::Council { outcome, .. }) => {
-                GoalTerminalState::PartiallyCompleted {
-                    completed: outcome.chosen_from.len() as u64,
-                    failed: outcome.skipped.len() as u64,
+            CouncilRunOutcome::DriverFailed { detail } => {
+                return owner.terminate(GoalTerminalState::Blocked { reason: detail });
+            }
+            // Two arms rather than an or-pattern: the driver path boxes its
+            // outcome and the manual path does not. Same counting rule.
+            CouncilRunOutcome::Ran(CouncilRunResult::Council { outcome, .. }) => {
+                council_counts(outcome)
+            }
+            CouncilRunOutcome::RanManual(outcome) => council_counts(outcome),
+            // One model's answer, no roster to count and no verification owner.
+            CouncilRunOutcome::Ran(CouncilRunResult::Direct { .. }) => {
+                GoalTerminalState::NeedsEscalation
+            }
+            CouncilRunOutcome::Ran(CouncilRunResult::Cancelled) => GoalTerminalState::Cancelled,
+            CouncilRunOutcome::Failed(CouncilError::UnpriceableRoster) => {
+                GoalTerminalState::Unpriced {
+                    detail: CouncilError::UnpriceableRoster.to_string(),
                 }
             }
-            // One model's answer, no roster to count and no verification owner.
-            Ok(CouncilRunResult::Direct { .. }) => GoalTerminalState::NeedsEscalation,
-            Ok(CouncilRunResult::Cancelled) => GoalTerminalState::Cancelled,
-            Err(CouncilError::UnpriceableRoster) => GoalTerminalState::Unpriced {
-                detail: CouncilError::UnpriceableRoster.to_string(),
-            },
-            Err(error @ CouncilError::OverBudget { .. }) => GoalTerminalState::Exhausted {
-                kind: ExhaustionKind::Resource,
-                attempts: 0,
-                detail: error.to_string(),
-            },
-            Err(error @ CouncilError::DailyBudgetExhausted { .. }) => {
+            CouncilRunOutcome::Failed(error @ CouncilError::OverBudget { .. }) => {
+                GoalTerminalState::Exhausted {
+                    kind: ExhaustionKind::Resource,
+                    attempts: 0,
+                    detail: error.to_string(),
+                }
+            }
+            CouncilRunOutcome::Failed(error @ CouncilError::DailyBudgetExhausted { .. }) => {
                 GoalTerminalState::Exhausted {
                     kind: ExhaustionKind::Resource,
                     attempts: 0,
@@ -405,16 +497,18 @@ impl StrategyTermination {
                 }
             }
             // Usable proposals ran short: a quality wall, not a resource one.
-            Err(error @ CouncilError::InsufficientProposals { got, .. }) => {
+            CouncilRunOutcome::Failed(error @ CouncilError::InsufficientProposals { got, .. }) => {
                 GoalTerminalState::Exhausted {
                     kind: ExhaustionKind::Quality,
                     attempts: *got as u64,
                     detail: error.to_string(),
                 }
             }
-            Err(error @ CouncilError::NoResolver) => GoalTerminalState::Blocked {
-                reason: error.to_string(),
-            },
+            CouncilRunOutcome::Failed(error @ CouncilError::NoResolver) => {
+                GoalTerminalState::Blocked {
+                    reason: error.to_string(),
+                }
+            }
         };
         owner.terminate(terminal)
     }
@@ -436,15 +530,19 @@ impl StrategyTermination {
     /// # A generic retry wrapper around a climb does not compile
     ///
     /// ```compile_fail
-    /// use wcore_agent::goal::strategy::{AnvilTag, LoopOwner, StrategyTermination};
-    /// use wcore_agent::orchestration::anvil::engine::{ClimbOutcome, EngineError};
+    /// use wcore_agent::goal::strategy::{AnvilOutcome, AnvilTag, LoopOwner, StrategyTermination};
+    /// use wcore_agent::orchestration::anvil::engine::ClimbOutcome;
     ///
     /// fn retry_wrapper(owner: LoopOwner<AnvilTag>, outcomes: &[ClimbOutcome]) {
     ///     // `owner` is moved by the first adapter call, so a second iteration
     ///     // is a use-after-move. This is Success Criterion 3's "no nested
     ///     // verification/retry owner", enforced by the borrow checker.
     ///     for outcome in outcomes {
-    ///         let _ = StrategyTermination::from_anvil(owner, Ok(outcome), 1);
+    ///         let _ = StrategyTermination::from_anvil(
+    ///             owner,
+    ///             AnvilOutcome::Climbed(outcome),
+    ///             1,
+    ///         );
     ///     }
     /// }
     /// ```
@@ -452,28 +550,35 @@ impl StrategyTermination {
     /// # A non-Anvil claim cannot be handed to the Anvil adapter
     ///
     /// ```compile_fail
-    /// use wcore_agent::goal::strategy::{CouncilTag, LoopOwner, StrategyTermination};
+    /// use wcore_agent::goal::strategy::{AnvilOutcome, CouncilTag, LoopOwner, StrategyTermination};
     /// use wcore_agent::orchestration::anvil::engine::ClimbOutcome;
     ///
     /// fn wrong_tag(owner: LoopOwner<CouncilTag>, outcome: &ClimbOutcome) {
     ///     // Council's verification owner is a model judge. The type system,
     ///     // not a reviewer, is what stops it borrowing Anvil's evidence path.
-    ///     let _ = StrategyTermination::from_anvil(owner, Ok(outcome), 1);
+    ///     let _ = StrategyTermination::from_anvil(
+    ///         owner,
+    ///         AnvilOutcome::Climbed(outcome),
+    ///         1,
+    ///     );
     /// }
     /// ```
     pub fn from_anvil(
         owner: LoopOwner<AnvilTag>,
-        result: Result<&ClimbOutcome, &EngineError>,
+        result: AnvilOutcome<'_>,
         required_stability: u32,
     ) -> Self {
         let outcome = match result {
-            Ok(outcome) => outcome,
+            AnvilOutcome::Climbed(outcome) => outcome,
             // Aborted before it could produce a terminal state through the
             // normal path — surfaced, never swallowed.
-            Err(error) => {
+            AnvilOutcome::EngineFailed(error) => {
                 return owner.terminate(GoalTerminalState::Blocked {
                     reason: error.to_string(),
                 });
+            }
+            AnvilOutcome::ForgeFailed { detail } => {
+                return owner.terminate(GoalTerminalState::Blocked { reason: detail });
             }
         };
         let terminal = match &outcome.terminal {
@@ -508,6 +613,18 @@ impl StrategyTermination {
             TerminalState::Superseded => GoalTerminalState::Superseded,
         };
         owner.terminate(terminal)
+    }
+}
+
+/// Chosen/skipped proposers, from the council's own provenance.
+///
+/// `skipped` survives as `failed`: a council answer fused from 2 of 5 proposers
+/// because 3 were keyless is not the same artifact as a unanimous one, and the
+/// difference is invisible in `final_text`.
+fn council_counts(outcome: &CouncilOutcome) -> GoalTerminalState {
+    GoalTerminalState::PartiallyCompleted {
+        completed: outcome.chosen_from.len() as u64,
+        failed: outcome.skipped.len() as u64,
     }
 }
 

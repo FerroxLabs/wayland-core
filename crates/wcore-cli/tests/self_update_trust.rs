@@ -14,7 +14,16 @@
 //! 2. **No credential, ever.** Every key in this file is generated at run time
 //!    from the OS CSPRNG into memory that dies with the test. No seed is
 //!    printed, committed or passed as an argument. The bundled production
-//!    trust root is EMPTY on purpose and this file proves it is refused.
+//!    trust root holds PUBLIC halves only; its secret halves live on the
+//!    minting machine and in one CI secret, and neither is reachable from this
+//!    file. Until 2026-07-29 that root shipped EMPTY and this file proved it
+//!    was refused; the real root has now been substituted, so the refusal is
+//!    proved against INJECTED placeholders instead
+//!    (`a_placeholder_trust_root_is_refused_however_it_arrives`) and the
+//!    bundled constant has its own guard
+//!    (`the_bundled_trust_root_is_real_and_holds_only_the_acceptance_role`).
+//!    Both must stay: the first keeps the refusal behaviour gated, the second
+//!    catches a regression back to a placeholder.
 //!
 //! 3. **Hermetic by construction.** The persisted freeze state is addressed by
 //!    an explicit path in every test but one, so no test can pollute another
@@ -499,16 +508,23 @@ fn the_persisted_state_path_honours_wayland_home() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_bundled_trust_root_refuses_to_construct_from_a_placeholder() {
-    // The single most important assertion in this file. Sean's real release
-    // public keys are not in this tree, so the bundled root ships EMPTY and
-    // the constructor must refuse it rather than trusting anything.
-    let error = ReleaseVerifier::bundled()
-        .expect_err("the bundled placeholder trust root must be REFUSED, never trusted");
+fn a_placeholder_trust_root_is_refused_however_it_arrives() {
+    // The single most important assertion in this file, and it now has to be
+    // written against INJECTED roots rather than the bundled one: the real
+    // FerroxLabs root was substituted on 2026-07-29, so `bundled()` succeeds.
+    // The refusal BEHAVIOUR is what must stay gated -- deleting these because
+    // the constant changed would retire the guard along with the placeholder.
+    let empty = r#"{"schema":"wayland.release.trust-root","schema_version":1,"keys":[]}"#;
+    let error = ReleaseVerifier::with_trust_root_json(empty.as_bytes())
+        .expect_err("an empty trust root must be REFUSED, never trusted");
     assert!(
         matches!(error, UpdateTrustError::PlaceholderTrustRoot(_)),
         "got {error:?}"
     );
+    // RETAINED across the substitution. `PlaceholderTrustRoot`'s `#[error(..)]`
+    // string names the constant unconditionally, so this assertion holds for an
+    // INJECTED root exactly as it held for the bundled one -- dropping it with
+    // the placeholder would have retired a live guard for no reason.
     let message = error.to_string();
     assert!(
         message.contains("RELEASE_TRUST_ROOT_JSON"),
@@ -533,13 +549,100 @@ fn the_bundled_trust_root_refuses_to_construct_from_a_placeholder() {
     // constructs, so this test cannot pass against a constructor that refuses
     // everything.
     Signer::fresh("release-acceptance-key").verifier();
+}
 
-    // And the shipped constant really is the empty placeholder, so nothing
-    // real leaked into the tree.
-    assert!(
-        RELEASE_TRUST_ROOT_JSON.contains("\"keys\":[]"),
-        "the bundled root must ship EMPTY: {RELEASE_TRUST_ROOT_JSON}"
+#[test]
+fn the_bundled_trust_root_is_real_and_holds_only_the_acceptance_role() {
+    // Substituted 2026-07-29. This is the assertion that would catch a
+    // regression to the placeholder, a leaked secret half, or a widened trust
+    // surface -- each of which is a different failure and each is checked.
+    ReleaseVerifier::bundled().expect("the bundled trust root must now construct");
+
+    let root: serde_json::Value =
+        serde_json::from_str(RELEASE_TRUST_ROOT_JSON).expect("bundled root must be valid JSON");
+    let keys = root["keys"].as_array().expect("keys must be an array");
+
+    assert_eq!(
+        keys.len(),
+        1,
+        "exactly one key belongs in the bundled root: {RELEASE_TRUST_ROOT_JSON}"
     );
+    assert_eq!(
+        keys[0]["role"], "release_acceptance",
+        "only the role the updater accepts may be bundled -- packaging, \
+         deployment_preparation and rollback_rehearsal could never authorise an \
+         install and would widen the trust surface for no function"
+    );
+    assert_eq!(
+        keys[0]["valid_from"], 0,
+        "valid_from must vouch for the first release it signs, not exclude it"
+    );
+
+    assert!(
+        keys[0]["retired_at"].is_null(),
+        "a bundled key that is already retired would refuse every install"
+    );
+
+    // No seed may ride along. A grep for the WORD "seed" is nearly vacuous --
+    // it passes on any document that simply spells the field differently -- so
+    // the real check is STRUCTURAL: the key object carries EXACTLY the five
+    // wire fields and nothing else, and the one key-shaped value present
+    // decodes to a well-formed 32-byte Ed25519 point rather than to anything
+    // else. `WireTrustedKey` is `deny_unknown_fields`, so a sixth field would
+    // also fail `bundled()` above; this asserts it at the document level too.
+    assert_eq!(
+        field_names(&keys[0]),
+        vec![
+            "key_id",
+            "public_key_base64",
+            "retired_at",
+            "role",
+            "valid_from"
+        ],
+        "no field beyond the five wire fields may appear on a bundled key"
+    );
+
+    let raw = decode_base64(
+        keys[0]["public_key_base64"]
+            .as_str()
+            .expect("must be a string"),
+    );
+    assert_eq!(raw.len(), 32, "a bundled key must be 32 bytes");
+    assert!(
+        raw.iter().any(|byte| *byte != 0),
+        "the all-zeros identity point is a placeholder, not a key"
+    );
+
+    // The field-set check must be ABLE TO FAIL. Same invocation, same
+    // extractor, one smuggled field: if this does not differ, the assertion
+    // above proves nothing.
+    let mut smuggled = keys[0].clone();
+    smuggled["private_key_base64"] = serde_json::Value::String("x".to_string());
+    assert_ne!(
+        field_names(&smuggled),
+        field_names(&keys[0]),
+        "the field-set instrument is dead: it cannot see a smuggled field"
+    );
+}
+
+/// Sorted field names of a JSON object, so the assertion does not depend on
+/// serialization order.
+fn field_names(value: &serde_json::Value) -> Vec<&str> {
+    let mut names: Vec<&str> = value
+        .as_object()
+        .expect("a trusted key must be a JSON object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+fn decode_base64(value: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .expect("a bundled key must be valid standard base64")
 }
 
 fn base64_zeros() -> String {

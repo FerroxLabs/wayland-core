@@ -1,0 +1,4 @@
+Build (aarch64-apple-darwin)	concl=cancelled	runner=GitHub Actions 1000033185	created=2026-07-29T06:51:11Z	started=2026-07-29T07:01:37Z	completed=2026-07-29T07:06:56Z
+CI (macos-latest)	concl=cancelled	runner=UNASSIGNED	created=2026-07-29T06:51:11Z	started=2026-07-29T06:51:11Z	completed=2026-07-29T07:06:37Z
+Build (x86_64-apple-darwin)	concl=cancelled	runner=UNASSIGNED	created=2026-07-29T06:51:11Z	started=2026-07-29T06:51:11Z	completed=2026-07-29T07:06:37Z
+Build (aarch64-apple-darwin) [self-hosted]	concl=skipped	runner=null	created=2026-07-29T06:51:11Z	started=2026-07-29T06:51:11Z	completed=2026-07-29T06:51:11Z

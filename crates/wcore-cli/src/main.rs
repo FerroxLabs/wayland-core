@@ -461,16 +461,21 @@ struct Cli {
     /// internal tooling). Reads + writes the project's
     /// `.wayland-core/memory/memory.db`.
     ///
-    /// HIDDEN (ledger row `23A-C1`). `run_skills_promote` is a `bail!` —
-    /// governed promotion is unimplemented, and so are the criterion's
-    /// `revoke` and `rollback` clauses. A flag that appears in `--help`
-    /// and can never succeed is an advertised dead surface, so the flag
-    /// stops being advertised while still parsing and still failing
-    /// loudly for anyone who already scripted it. This does NOT close
-    /// `23A-C1`; it only stops the product promising something it
-    /// cannot do. `tests/skills_promote_not_advertised.rs` guards both
-    /// halves. Un-hide only together with a real governed promotion.
-    #[arg(long, value_name = "PROCEDURE_ID", hide = true)]
+    /// 23A-C1: RE-ADVERTISED because governed promotion now exists.
+    ///
+    /// The flag was hidden while `run_skills_promote` was an unconditional
+    /// `bail!` — an advertised dead surface is the most-repeated defect
+    /// class on this program, so it stopped being advertised rather than
+    /// being left to lie. Un-hiding is gated on the capability being real,
+    /// which is what `wcore_cli::skill_govern` and
+    /// `wcore_skills::promote` now supply: a grant bound to a content
+    /// digest, a refusal for revoked artifacts, and a journal entry for
+    /// each outcome.
+    ///
+    /// Accepts a skill NAME or a procedure UUID. The UUID form is what
+    /// anyone who scripted the historical flag passes; the name form is
+    /// what `--skills-govern` prints.
+    #[arg(long, value_name = "SKILL_OR_PROCEDURE_ID")]
     skills_promote: Option<String>,
 
     /// W9.1 T4 (T11): archive a P4 procedure. Accepts either a
@@ -481,6 +486,25 @@ struct Cli {
     /// or unpin them through the curator UI first.
     #[arg(long, value_name = "PROCEDURE_ID")]
     skills_archive: Option<String>,
+
+    // ---- 23A-C1 governed skill lifecycle (one contiguous additive block) ----
+    /// 23A-C1: revoke an installed skill. Retains every byte first, then
+    /// removes it, then suppresses re-drafting, so the auto-draft loop
+    /// cannot silently recreate what you removed. Undo with
+    /// `--skills-rollback`.
+    #[arg(long, value_name = "SKILL")]
+    skills_revoke: Option<String>,
+
+    /// 23A-C1: restore a revoked skill byte for byte and clear its
+    /// suppression. The argument is the revocation id printed by
+    /// `--skills-revoke` and listed by `--skills-govern`.
+    #[arg(long, value_name = "REVOCATION_ID")]
+    skills_rollback: Option<String>,
+
+    /// 23A-C1: list installed skills with their promotion status, every
+    /// revocation in force, and the append-only governance journal.
+    #[arg(long)]
+    skills_govern: bool,
 
     /// M3.4: dump the memory state for a given session id. Prints all
     /// episodes scoped to that session at the session+project tiers,
@@ -1558,6 +1582,19 @@ async fn run() -> anyhow::Result<ExitCode> {
         run_skills_archive(id).await?;
         return Ok(ExitCode::SUCCESS);
     }
+    // ---- 23A-C1 governed skill lifecycle (one contiguous additive block) ----
+    if let Some(name) = cli.skills_revoke.as_deref() {
+        wcore_cli::skill_govern::run_revoke(name)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let Some(id) = cli.skills_rollback.as_deref() {
+        wcore_cli::skill_govern::run_rollback(id)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    if cli.skills_govern {
+        wcore_cli::skill_govern::run_list()?;
+        return Ok(ExitCode::SUCCESS);
+    }
 
     // M3.4: dump memory state for a given session.
     if let Some(session) = cli.memory_show.as_deref() {
@@ -2020,6 +2057,67 @@ async fn run() -> anyhow::Result<ExitCode> {
     // anyhow's default `Debug` print on `main`'s `Result::Err`. The REPL
     // path already routes errors through `output.emit_error` so this brings
     // the one-shot path to parity.
+    // ── F22C (Phase 22 Success Criterion 3): Direct's canonical transition ──
+    //
+    // The fifth loop owner. Attachment is by environment
+    // (`WAYLAND_GOAL_ID` + `WAYLAND_GOAL_JOURNAL`) rather than by flag,
+    // deliberately: this file is the shared multi-lane fence, and a flag pair
+    // would mean a second, non-contiguous edit to add it to `Cli`. The env
+    // route is already how this codebase hands a Goal's identity to a child
+    // process (`goal_cmd::ENV_GOAL`), so it is the existing mechanism.
+    //
+    // Opt-in and headless-only: with no Goal in the environment, or in the
+    // REPL, nothing below changes. `engine.run` here is THE production Direct
+    // invocation — the closure wraps it, and its return type is
+    // `StrategyTermination`, so there is no path out that terminates the Goal
+    // any other way and none that terminates it zero times.
+    if !prompt.is_empty()
+        && let Some((driver, goal_id)) = wcore_cli::goal_cmd::GoalAttachArgs::default().resolve()?
+    {
+        use wcore_agent::goal::{DirectOutcome, StrategyTermination};
+        let cursor = driver
+            .run_direct(&goal_id, |owner| async {
+                match engine.run(&prompt, "").await {
+                    Ok(run_result) => {
+                        output.emit_stream_end(
+                            "",
+                            run_result.turns,
+                            run_result.usage.input_tokens,
+                            run_result.usage.output_tokens,
+                            run_result.usage.cache_creation_tokens,
+                            run_result.usage.cache_read_tokens,
+                            run_result.finish_reason,
+                        );
+                        // A completed Direct run is UNCHECKED — Direct has no
+                        // verification owner — so the adapter maps it to
+                        // `NeedsEscalation`, not to a success category.
+                        if run_result.stop_reason == wcore_types::message::StopReason::MaxTurns {
+                            StrategyTermination::from_direct(
+                                owner,
+                                DirectOutcome::TurnLimitReached {
+                                    turns: run_result.turns as u64,
+                                },
+                            )
+                        } else {
+                            StrategyTermination::from_direct(owner, DirectOutcome::Completed)
+                        }
+                    }
+                    Err(error) => {
+                        output.emit_error(&format!("{error:#}"), false);
+                        StrategyTermination::from_direct(owner, DirectOutcome::Failed(&error))
+                    }
+                }
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("goal {} did not terminate: {e}", goal_id.as_str()))?;
+        wcore_cli::goal_cmd::print_canonical_transition(&driver, &goal_id, "direct", &cursor);
+        engine.run_stop_hooks().await;
+        for mgr in &result.mcp_managers {
+            mgr.shutdown().await;
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
     let exit_code = if prompt.is_empty() {
         repl_loop(&mut engine, &terminal, &output, &slash_dispatcher).await?;
         ExitCode::SUCCESS
@@ -2542,13 +2640,11 @@ async fn run_skills_audit(stale_after_days: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Promotion is suspended until F23 supplies a governed transaction that
-/// binds one reviewed procedure id to one canonical skill artifact. Reject
-/// before UUID parsing, database access, or filesystem mutation.
-async fn run_skills_promote(_id: &str) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "skill promotion is temporarily unavailable while governed promotion is being implemented"
-    )
+/// 23A-C1: governed promotion. Delegates to `wcore_cli::skill_govern`, which binds one
+/// reviewed artifact to one content digest, refuses revoked artifacts, and journals the
+/// outcome — the transaction whose absence is why this function used to be a `bail!`.
+async fn run_skills_promote(id: &str) -> anyhow::Result<()> {
+    wcore_cli::skill_govern::run_promote(id).await
 }
 
 /// W9.1 T4 (T11): archive a Staged or Active procedure. The state-
