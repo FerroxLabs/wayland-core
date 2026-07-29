@@ -97,3 +97,70 @@ edited, per the file's own convention.
 - [ ] F05 rows re-measured against the shipped binary
 - [ ] re-grade written
 - [ ] ledger row corrected
+
+---
+
+## M4 — LearnedPolicy: the lie was in the API, not in the capability report
+
+Measured at base, from a file (never a pipe), with the control repaired after my first
+known-positive (`cfg\.policy_gate`) returned **0** because rustfmt splits it across lines:
+
+| Measurement | Count |
+|---|---|
+| control 1 `&cfg.tools` (read in the same fn) | 3 |
+| control 2 `\.policy_gate` (proves the field-read pattern is greppable) | 3 |
+| **`cfg.learned_policy` — any read** | **0** |
+| **`\.learned_policy` in ANY form, incl. rustfmt-split** | **0** |
+| `CallActor::SubAgent` construction outside tests/docs | **0** |
+
+So `AgentExecutorConfig` carried a **`pub` field with zero readers in the workspace**, whose
+own doc comment said "each tool call's `(name, argv)` is run through the policy BEFORE the
+approval path". Setting it did nothing. The capability report was honest
+(`unavailable / runtime_path_unwired`); **the API was not.**
+
+`node_executor.rs:316-323` recorded the removal and pointed at `52b1ae2~..HEAD` to restore
+from. **That revision does not exist** — this repository's history begins at a squashed root
+`da5a18b5` (`git rev-list --count da5a18b5` = 1), so the original pre-filter is unrecoverable.
+Written fresh against `actor_acl_test.rs`, which is its surviving spec.
+
+## M5 — Decision: WIRE it, not delete it, and narrowing-only
+
+Three grounds, in order of weight:
+
+1. **The audit already decided.** `docs/design/2026-07-13-...-frontier-gap-audit-...md:245`:
+   *"wire learned policy only as a narrowing/preapproval aid; it must never override hard
+   denial or managed policy."* That is a wiring instruction with a constraint, not a
+   deletion instruction.
+2. **Deleting the field would not delete the capability.** `CapabilityId::LearnedPolicy` is
+   on the wire and rendered by the TUI `/doctor` surface; removing an enum variant is a
+   protocol break. Deletion would leave the advertised capability with even less behind it.
+3. **The constraint is expressible as control flow, not as a comment.** The gate is
+   consulted first and its denial is final; the learned policy sees only the survivors and
+   can only move allow→deny. An `AllowAlways` rule therefore cannot resurrect a gate denial
+   and cannot skip approval — it merely declines to narrow.
+
+## M6 — Gates, with the falsification
+
+- `cargo check -p wcore-agent --all-targets` rc=0, 0 error lines.
+- `cargo check --workspace --all-targets` rc=0, 0 error lines. (Run because this touches a
+  shared type — `ToolCallOutcome` gained a field; a `-p` check misses downstream users.)
+- `cargo nextest run -p wcore-agent --test actor_acl_test`: **8 run, 8 passed, 0 skipped.**
+  At base this binary ran **1 of 6** — five `#[ignore]`d cases and a guard.
+- **Negative control, one variable.** Severing only the pre-filter's input
+  (`let learned = cfg…` → `let learned … = None`) and changing nothing else:
+  `NEGATIVE_CONTROL_RC=100`, **`sub_agent_with_deny_policy_short_circuits` FAILED**, the
+  other 7 unchanged. Restored, and the restoration verified by **file content**
+  (`grep -c` on both forms: severed 0, restored 1), not by `git diff`'s exit status, which
+  is 0 unconditionally.
+
+  The 7 that stayed green under severance is itself a result: it shows
+  `allow_always_cannot_override_the_policy_gate` is a guard against escalation and NOT a
+  proof of wiring, which is exactly what its doc comment claims.
+
+## Status
+- [x] instrument defect found and repaired before publication
+- [x] F05 row 2 re-measured against the shipped binary — STALE, closed with live evidence
+- [x] F05 row 4 wired, gated, and falsified
+- [ ] live sub-agent deny against the real binary
+- [ ] re-grade written
+- [ ] ledger row corrected
