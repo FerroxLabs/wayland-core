@@ -99,3 +99,42 @@ inferencer can clobber: the row it overwrites is indistinguishable from one it w
 Rejected alternative: wiring A into the prompt. That changes prompt content for every
 existing user and duplicates B's block; the criterion asks for control over what the
 agent believes, not for a second copy of it.
+
+## Final measurements (all read back from unproxied tools)
+
+| Measurement | Result | Source |
+|---|---|---|
+| base red proof @ `eaff921d` | 1 passed (alive control), 1 FAILED | `base-red.log` |
+| — `BASE_CORRECTION_ON_WIRE` | **false** | ditto |
+| — `BASE_INFERENCE_STILL_ON_WIRE` | **true** | ditto |
+| clobber scope @ base | inferencer writes exactly 4 keys; `language.primary` reverted `ja-USERSAID`→`en`; `style` untouched | `clobber-scope.log` |
+| fixed wire proof | 3 passed, 0 failed, 0 ignored, 0 filtered out | `fixed-wire.log` |
+| `/usermodel` live drive | **19/19 GREEN** | `usermodel-live-drive.log` |
+| `/memory correct` live drive | **11/11 GREEN** | `memory-correct-live-drive.log` |
+| full suites @ HEAD | **3709 passed, 0 failed, 8 skipped** | nextest, post-merge |
+| credential sweep | live-key hits **0**; instrument liveness 20 files | `credential-sweep.log` |
+
+## Two instrument defects I found in MY OWN harness, and repaired in-lane
+
+1. **Exact-value marker was self-passing.** `INFERRED_STYLE_MARKER` was
+   `formality=0.40`. The engine's per-turn `observe_user_turn` folds a new style
+   fingerprint every turn, so the rendered number **drifts between sessions** —
+   the marker would have gone absent on its own and the headline "the correction
+   removed it" assertion would have passed with the correction doing nothing.
+   Caught because the sibling forget test failed for exactly that reason. Marker
+   is now structural (`- style: formality=`), and the control asserts the SAME
+   string is present when nothing is corrected.
+2. **Non-hex session id killed a whole drive silently-ish.** `--session-id`
+   requires 6-40 hex chars; `c3um1fee0001` and `c3mc1fee0001` contain `u`/`m`.
+   Every session exited 1 and 17 of 19 checks failed. The `alive`+known-positive
+   pairing is what made this read as RED rather than as a set of passing
+   absences — one absence check DID pass on a non-empty file, which is the
+   self-passing class in miniature. Fixed in both scripts and commented at the
+   line so the next author does not repeat it.
+
+## One live-only product defect found and fixed
+
+`/memory correct` printed `<uuid> corrected in semantic/project` and **never the
+corrected text**. The wire effect was correct throughout — this is a rendering
+defect, invisible to every test, and the identical class the memory lane found
+in `/memory why`. Found only by driving it. Fixed; drive now 11/11.
