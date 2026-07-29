@@ -1,0 +1,13 @@
+ok   R1 known-POSITIVE: a message dispatched during the disconnect window IS replayed on RESUME
+ok   R1b the disconnect is CONFIRMED, not assumed
+ok   R1c NO DUPLICATE: the replayed message arrives exactly once
+ok   R1d the replay is journalled, so a driver never has to infer it
+ok   R2 known-NEGATIVE: a message that was never dispatched is NOT reported as replayed
+ok   R2b known-NEGATIVE: a message dispatched BEFORE the resume point is NOT replayed again
+ok   R3 THE PRE-REPAIR FIXTURE WOULD HAVE MISSED IT — same scenario, gap NOT replayed
+ok   R3b the legacy failure is the SEQUENCE COLLISION, not a dead legacy client
+     legacy fixture: 15cda12d:scripts/f24-discord-fixture.mjs, 19230 bytes
+     legacy ledger : [{"id":"BEFORE-1","s":2},{"id":"BEFORE-2","s":3},{"id":"DURING-1","s":3},{"id":"AFTER-1","s":4}]
+     repaired ledger: [{"id":"BEFORE-1","s":2},{"id":"BEFORE-2","s":3},{"id":"DURING-1","s":4},{"id":"AFTER-1","s":5}]
+
+F24RECONNECT SELFTEST GREEN passed=8 failed=0

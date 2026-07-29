@@ -135,16 +135,25 @@ class MediaDiscordFixture extends DiscordFixture {
       // declared 25 MiB media_bounds is unenforceable by construction.
       attachments: attachments ?? [],
     };
-    let s = 0;
+    // Was a re-derivation of the base class's sequence allocation, and it
+    // carried the base class's collision bug with it: a dispatch reaching zero
+    // sockets fell back to `this.dispatched.length + 1`, which forgets that
+    // READY consumed sequence 1, so the number collided with an
+    // already-delivered one and RESUME could never replay it. Fixed in the
+    // base class 2026-07-29 (lane 24-reconnect); this call site now uses the
+    // single allocator so the two cannot drift apart again.
+    //
+    // Behaviour here is unchanged for this driver's own use — it dispatches to
+    // a connected client and never resumes — so no media/actions figure moves.
+    const s = this.nextSeq();
     for (const c of targets) {
-      c.seq += 1;
-      s = Math.max(s, c.seq);
-      this.send(c, { op: 0, t: 'MESSAGE_CREATE', s: c.seq, d: payload });
+      c.seq = s;
+      this.send(c, { op: 0, t: 'MESSAGE_CREATE', s, d: payload });
       c.delivered += 1;
     }
     this.dispatched.push({
       id,
-      s: s || this.dispatched.length + 1,
+      s,
       payload,
       sockets: targets.length,
       at: Date.now(),
