@@ -335,6 +335,13 @@ async function runLeg({ label, ack, withAttachment, binary, rootDir, budgetMs })
   }
 
   const report = fx.report();
+  // `report()` exposes `reactions_total` but NOT the reactions array, so the
+  // emoji identities must be read off the fixture instance itself, BEFORE
+  // `fx.stop()`. Reading `report.reactions` yields `undefined` and an empty
+  // emoji list — which failed G1 while the counts were already correct. Kept
+  // as an assertion on identity, not just count: a run that fired two 👀 and
+  // no completion reaction has the same `reactions_total` as a correct one.
+  const emojis = (fx.reactions ?? []).map((r) => r.emoji);
   const journal = readJournal(llmJournal);
 
   try {
@@ -355,7 +362,6 @@ async function runLeg({ label, ack, withAttachment, binary, rootDir, budgetMs })
     /* already gone */
   }
 
-  const emojis = report.reactions ? report.reactions.map((r) => r.emoji) : [];
   const turnPrompts = journal.filter((r) => r.kind === 'chat.completions').map((r) => r.user_text ?? '');
 
   const out = {
