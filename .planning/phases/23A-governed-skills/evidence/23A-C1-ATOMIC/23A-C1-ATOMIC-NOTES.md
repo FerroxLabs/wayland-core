@@ -74,3 +74,31 @@ duplicative, and they conflict in no file.
       driving the pre-fix non-atomic copy, must report PARTIAL > 0. Without that, `PARTIAL=0`
       is the self-passing known-negative LANE-BRIEF §3b-i warns about.
 - [ ] `/skill govern|revoke|rollback` live-driven on a real built binary, not just unit-tested.
+
+## T+late — ORCHESTRATOR CORRECTION: rebased onto the train, two of three deliverables already done
+
+Merged `gh/plan/f20-unified-audit-repair@4a872413`. `lane/23a-c1-governed@3a2234d7` IS an
+ancestor of it (`git merge-base --is-ancestor` → rc=0), so the pending lane the verdict graded
+separately has landed.
+
+- **H3 already fixed in the train** — `rollback()` stages via `promote::staging_root_for` and
+  publishes with `rename(2)`. My independent fix was the duplicate; dropped at the merge, taking
+  the train's `govern.rs`, `loader.rs` and `govern_revoke_rollback.rs` verbatim.
+- **Clauses (b)/(c) already surfaced** — `--skills-govern`, `--skills-revoke`,
+  `--skills-rollback` on `main.rs`. My `/skill` verbs are complementary: measured the train's
+  `slash/skill.rs` at 1 hit for `"list"` (control alive) and **0** for govern/revoke/rollback.
+
+**So the remaining value was verification, and it paid.** Re-ran my harness against the train's
+own implementation: `IN_WINDOW=29, ABSENT=28, WHOLE=1, PARTIAL=0`, with the legacy control at
+27/28 PARTIAL. That is the independent re-execution `23A-PHASE-VERDICT.md` §3 said had not been
+done, and it caught the WHOLE-after-kill branch my earlier run never reached.
+
+And it exposed **F23A-C1-H4**: `staging_with_SKILL_md=28` of 29 killed restores. Cause and
+consequence both measured with live controls, then fixed by a name fence in
+`collect_skill_md`. Full record in `23A-C1-ATOMIC-KILL-EVIDENCE.md`; verdict in
+`../../23A-C1-ATOMIC-SUMMARY.md`.
+
+**Instrument defect, repaired not noted:** zsh expands `"$VAR:crates/…"` as the `:c` modifier,
+which silently reported a present file as ABSENT; the redirect on the same line truncated
+`govern.rs` to 0 bytes before the command failed. Caught by the known-positive control erroring
+loudly. Always brace `"${VAR}:path"`, and check for damage after a failed `>` redirect.
