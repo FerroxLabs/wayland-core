@@ -409,21 +409,16 @@ pub async fn run_crucible(args: CrucibleArgs) -> anyhow::Result<()> {
                 .run_council(&goal_id, |owner| async {
                     match run_council(&args.task, &roster, &spawner, &base).await {
                         Ok(outcome) => {
-                            // The manual path produces a `CouncilOutcome`; the
-                            // adapter takes the driver's `CouncilRunResult`, so
-                            // it is wrapped in the `Council` variant WITHOUT a
-                            // plan — the manual roster IS the plan.
-                            let result = CouncilRunResult::Council {
-                                plan: AssemblyPlan::default(),
-                                outcome,
-                            };
+                            // `RanManual`, not `Ran`: this path has no
+                            // `AssemblyPlan` — the operator's configured roster
+                            // IS the plan — and fabricating an empty one to
+                            // reach the other variant would invent a decision
+                            // the assembler never made.
                             let termination = StrategyTermination::from_council(
                                 owner,
-                                CouncilRunOutcome::Ran(&result),
+                                CouncilRunOutcome::RanManual(&outcome),
                             );
-                            if let CouncilRunResult::Council { outcome, .. } = result {
-                                *carried.borrow_mut() = Some(outcome);
-                            }
+                            *carried.borrow_mut() = Some(outcome);
                             termination
                         }
                         Err(error) => {
