@@ -150,3 +150,67 @@ Same reasoning for email in the opposite direction: the operative intake cap gen
 real. Declaration drops 10 → 2.
 
 Next: cross-audit this before implementing (§4), because it is the lane's central call.
+
+## T+35 — cross-audit panel: UNANIMOUS B (3/3), one shared objection, then FALSIFIED
+
+| auditor | vote |
+|---|---|
+| codex `gpt-5.6-sol` | `PANEL_POSITION=B` — "B is contract repair; A is an undocumented policy change disguised as consistency" |
+| gemini 3.1 pro | `PANEL_POSITION=B` — "aligning the declaration to established runtime reality prevents capability regressions" |
+| kimi K3 | `PANEL_POSITION=B` — "A is the riskier option dressed up as the stricter one" |
+
+All three independently raised the **same** objection, which is the only one that mattered:
+*B assumes today's enforcement numbers are intentional, and you have not checked.* Kimi named
+the decisive test — **blame the enforcement constants, not just the declaration.**
+
+### Instrument defect #1 (mine), caught before it produced a false result
+
+First blame sweep returned **eight empty results**. Read naively that is "no provenance
+available", which would have let me proceed with the objection unresolved. Cause: zsh does
+**not** word-split unquoted variables, so `set -- $spec` put the whole `"path 370"` string in
+`$1` and left `$2` empty, making every `-L ,` malformed. `git blame` printed nothing and the
+loop swallowed it. Repaired with a function taking two real arguments; verified against a
+direct single invocation that returns a line.
+
+### The result — the objection is FALSIFIED, and the causality is the reverse
+
+| line | commit | date | author |
+|---|---|---|---|
+| discord `MAX_MEDIA_BYTES` 100 MiB | `a1085393e` | **2026-06-12** | Sean Donahoe |
+| telegram `MAX_MEDIA_BYTES` 100 MiB | `a1085393e` | **2026-06-12** | Sean Donahoe |
+| slack `MAX_MEDIA_BYTES` 100 MiB | `a1085393e` | **2026-06-12** | Sean Donahoe |
+| sms `MAX_MEDIA_BYTES` 16 MiB | `f638d68f5` | **2026-06-12** | Sean Donahoe |
+| signal `MAX_ATTACHMENT_BYTES` 64 MiB | `da6a3c62a` | **2026-06-12** | Sean Donahoe |
+| imessage `MAX_ATTACHMENT_BYTES` 64 MiB | `16d09fdba` | **2026-06-12** | Sean Donahoe |
+| email `MAX_INLINE_ATTACHMENT_BYTES` 2 MiB | `ce6e88e99` | **2026-06-12** | Sean Donahoe |
+| matrix `MAX_MEDIA_BYTES` 100 MiB | `8273b2ac1` | **2026-06-18** | Sean Donahoe |
+| — | | | |
+| discord **declaration** 25 MiB | `9b06a4778` | **2026-07-27** | ci |
+| email **declaration** 10 MiB | `9b06a4778` | **2026-07-27** | ci |
+
+`crates/wcore-channels/src/media.rs` — the entire `MediaBounds` module — was **added
+2026-07-27** (`de0367b0`, *"feat(24-03): complete the channel framework contract"*), and both
+adapter declarations the same day (`9b06a4778`, *"feat(24-03): reference-adapter probes and
+the shipped channel verbs"*).
+
+**The enforcement predates the declaration by six weeks, across six separate commits, each
+written next to the download path it guards. The declaration is the late artifact, authored
+in one sweep, and never wired to anything.**
+
+So the panel's worry — that B ratifies an accidental 100 MiB over a considered 25 MiB — is
+backwards. The 100 MiB values ARE the considered, per-adapter, original engineering. The
+25 MiB is the paperwork. By kimi's own stated criterion ("if blame shows 100 MiB was
+deliberate, B is unambiguously right"), **B is unambiguously right.**
+
+This also sharpens the finding itself: the bounds API was **advertised-but-dead from birth**.
+It was not a consumer that rotted away — there was never a consumer. It shipped as contract
+documentation for enforcement that already existed elsewhere and was never connected to it.
+
+### Adopted mitigations for the objection anyway (it was a good objection)
+
+1. `MediaBounds::DEFAULT_MAX_BYTES` stays at the conservative **25 MiB**, so a NEW adapter
+   that declares nothing still inherits the tight value. Only adapters with a measured,
+   already-enforced cap declare a larger one.
+2. Discord's platform fact ("25 MiB non-boosted upload ceiling") is **preserved in the doc
+   comment** rather than deleted, so the information the 25 survives even though it is no
+   longer masquerading as the intake bound.
