@@ -241,3 +241,45 @@ will hit them:
 - An isolated profile does **not** import `auth.json` (it warns and uses
   `credentials.toml`), so copying that file into a scratch home does not carry a
   credential across.
+
+---
+
+## 8. The 17 `wcore-agent --lib` failures are PRE-EXISTING — attributed, not assumed
+
+A broad regression run of `cargo test -p wcore-agent --lib` on this lane's HEAD
+came back red, which is exactly the moment a lane is tempted to report a green
+it did not measure or a regression it did not cause. Neither: I measured the
+base.
+
+| Run | Commit | Result |
+|---|---|---|
+| lane HEAD, run 1 | `f8b437fb` | `2184 passed; 17 failed; 3 ignored; 0 filtered out` |
+| lane HEAD, run 2 | `f8b437fb` | `2189 passed; 12 failed; 3 ignored; 0 filtered out` |
+| **merge-base** | **`4a872413`** | **`2164 passed; 17 failed; 3 ignored; 0 filtered out`** |
+
+`4a872413` contains **none** of this lane's code and fails 17 tests in the same
+families: `engine::audit_2026_05_22_tests`, `session::tests`,
+`session_journal::fault_tests`, `session_lifecycle::tests`,
+`orchestration::f13_durability_tests`,
+`engine::retry_wedge_protection_tests`. Built in a separate worktree
+(`/root/wayland-23b-c4-base`) at that exact SHA.
+
+Two further observations that rule this a contention artifact rather than a
+deterministic break:
+
+- **The failing set is not stable between two runs of the identical binary** —
+  17 then 12, overlapping but different. A code regression does not move.
+- `cargo test -p wcore-agent --lib -- --test-threads=1 session:: session_journal::`
+  on the lane HEAD → **`96 passed; 0 failed; 0 ignored; 2108 filtered out`**.
+  Single-threaded, the families pass completely.
+
+This matches the class the lane brief documents (shared `/tmp` on `hetzner-dsm`,
+per the merged `31-vacuous-greens` correction, plus wall-clock-budgeted
+durability tests under parallel load). **Reported as a pre-existing flake in the
+integration branch, not as a pass, and not as something this lane caused.**
+
+`cargo test -p wcore-cli --lib` shows one further red on both trees:
+`test always_fails ... FAILED` in a single-test binary — the `31-vacuous-greens`
+lane's deliberate anti-vacuity canary. Not this lane's, and it is supposed to
+fail. The real `wcore-cli` lib suite in the same invocation:
+`1854 passed; 0 failed; 1 ignored; 0 filtered out`.
