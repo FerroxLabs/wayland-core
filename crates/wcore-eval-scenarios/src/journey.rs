@@ -830,6 +830,21 @@ mod tests {
                 duplicates: 0,
                 losses: 0,
             },
+            // Deliberately the historically-published shape: all 12 deliveries
+            // carried by Slack alone, at Slack's endpoint. This fixture is the
+            // one the old receipt could not distinguish from a ten-adapter run,
+            // and keeping it that way means the refusal tests below are graded
+            // against the real defect rather than a tidied-up version of it.
+            adapter_coverage: AdapterCoverage {
+                registered_total: REGISTERED_ADAPTER_TOTAL,
+                exercised: vec![AdapterDelivery {
+                    adapter: "slack".into(),
+                    endpoint: "chat.postMessage".into(),
+                    submitted: 12,
+                    arrived: 12,
+                    unique: 12,
+                }],
+            },
             steps: steps(),
         }
     }
