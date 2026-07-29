@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use wcore_eval_scenarios::claims::{ClaimRegisterV1, publish, register_digest};
 use wcore_eval_scenarios::dialect::{
     CompiledStepV1, ToolSchemaCorpusV1, TranslationV1, VOCABULARY_VERSION, canonical_script,
-    compile_script, vocabulary_carries_no_product_token,
+    cohort_eligibility, compile_script, vocabulary_carries_no_product_token,
 };
 use wcore_eval_scenarios::dialect_discovery::RunningDiscoveryMeter;
 use wcore_eval_scenarios::fixtures::openai::{OpenAiFixtureScript, OpenAiStep};
@@ -150,6 +150,23 @@ enum DialectCommand {
     /// Print the pre-registered vocabulary's self-check: the version token and the result of the
     /// mechanical "no vocabulary token is a product name" assertion.
     Vocabulary,
+    /// THE COHORT GATE (panel amendment). Decide whether a dimension may be run AT ALL.
+    ///
+    /// A refusal by ANY harness makes the dimension ineligible for EVERY harness, including ours.
+    /// EXITS NON-ZERO when ineligible, so a driver script cannot proceed past it by accident —
+    /// the whole point of the gate is that it stops a run rather than annotating one.
+    Cohort {
+        /// Repeatable `label=path/to/corpus.json`. At least TWO are required: a comparative
+        /// benchmark that has lost a member has lost the thing it was measuring, and proceeding
+        /// with the survivors is how "we could not run the competitor, so we win" gets expressed.
+        #[arg(long = "member", value_name = "LABEL=CORPUS_JSON")]
+        members: Vec<String>,
+        #[arg(long)]
+        dimension: String,
+        /// Optional path to write the full `CohortEligibilityV1` decision as JSON.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -561,6 +578,41 @@ fn run_dialect(command: DialectCommand) -> anyhow::Result<String> {
             Ok(format!(
                 "DIALECT_VOCABULARY=OK version={VOCABULARY_VERSION} product_tokens_found=0\n"
             ))
+        }
+        DialectCommand::Cohort {
+            members,
+            dimension,
+            out,
+        } => {
+            let mut cohort = Vec::new();
+            for entry in &members {
+                let (label, path) = entry
+                    .split_once('=')
+                    .ok_or_else(|| anyhow::anyhow!("--member must be LABEL=PATH, got `{entry}`"))?;
+                let corpus: ToolSchemaCorpusV1 = serde_json::from_slice(&std::fs::read(path)?)?;
+                cohort.push((label.to_string(), corpus));
+            }
+            let decision = cohort_eligibility(&dimension, &cohort)?;
+            if let Some(out) = out {
+                std::fs::write(&out, serde_json::to_vec_pretty(&decision)?)?;
+            }
+            let mut report = String::new();
+            for member in &decision.members {
+                report.push_str(&format!(
+                    "  member={} declared_tools={} resolved={} refusal={} corpus_sha256={}\n",
+                    member.tool_label,
+                    member.declared_tools,
+                    member.resolved_tool.as_deref().unwrap_or("-"),
+                    member.refusal.as_deref().unwrap_or("-"),
+                    member.corpus_sha256
+                ));
+            }
+            // A gate that only ever printed would be a gate that cannot fail. Ineligible EXITS
+            // NON-ZERO, after printing every member's outcome so the cause is never a mystery.
+            if !decision.eligible {
+                anyhow::bail!("{}\n{report}", decision.verdict_line());
+            }
+            Ok(format!("{}\n{report}", decision.verdict_line()))
         }
         DialectCommand::Compile {
             corpus,
