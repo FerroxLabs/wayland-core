@@ -189,3 +189,71 @@ contiguous only, line delta reported. Fence exposure reported vs `861d1b1a`.
 
   Dispositions are being decided against this and will be written up with the argument
   for each, including the ones I decide NOT to import.
+
+- **t5 — LIVE before/after on `hetzner-dsm`, both arms driven by the same script.**
+  Corpus: path-exact rebuild of the real `~/.hermes` — **1909 real `SKILL.md` paths
+  and 14 real `SOUL.md` paths**, extracted read-only with `/usr/bin/find`, refilled
+  with generated bodies. **Not one byte of Sean's install was copied or transmitted**
+  (his home holds `auth.json` / `.env`; the lane brief forbids moving a secret to a
+  build host). Plus 2 planted executable skills and 24 planted memory notes — the
+  real home has **0** memory notes, so a real-corpus memory figure would be a
+  structural zero that proves nothing, and every memory number below is labelled
+  planted. `scripts/f26-import-corpus.sh`, `scripts/f26-import-proof.sh`.
+
+  BEFORE = release binary at my base; AFTER = release binary at my HEAD; both built
+  on hetzner, both run by one script against one corpus.
+
+  | files in the Wayland home, by category | BEFORE | AFTER |
+  |---|---|---|
+  | `config.toml` (profiles + non-exec MCP) | 1 | 1 |
+  | `migrate-quarantine/**` | 3 | 4 |
+  | `skills/**` (live, agent-loadable) | **0** | **1730** |
+  | `migrate-imported/personas/**` | **0** | **13** |
+  | `migrate-imported/memory/**` (planted corpus) | **0** | **24** |
+  | `migrate-imported/PROVENANCE.json` | **0** | **1** |
+  | **TOTAL** | **4** | **1773** |
+
+  **The BEFORE arm reproduces grade-26's independent "four files" exactly**, on a
+  different corpus, from a different script. That is the strongest evidence available
+  that the AFTER number is measuring the same thing.
+
+  Product's own report, AFTER: `discovered=1729 imported=1726 quarantined=3
+  excluded=0`, `Content written: 1767 files — 1664 skills, 13 personas, 24 memory
+  notes`. 1767 + config(1) + quarantine(4) + provenance(1) = **1773**, which is what
+  `/usr/bin/find` counted independently. The two instruments agree.
+
+  **Coverage, closed exactly.** Corpus `SKILL.md` under scan roots = **1732**;
+  separately identified = **1666** (1664 imported + 2 quarantined); difference
+  **66** — and all 66 are *nested inside* a directory that is itself a skill
+  (`skills/ferrox/ferrox-ns-context/skills/<sub>/`), verified by walking each missing
+  path's ancestors against the found set: **66/66 nested**. Their bytes DO land:
+  `find` over the written skills root shows **1664 `SKILL.md` at depth 2 and 66
+  deeper** = 1730 files, and one is read back at
+  `skills/ferrox-ns-context/skills/graphify/SKILL.md`. So nothing is lost; the 66 are
+  carried inside their parent rather than separately addressable — a consequence of
+  "do not descend into a skill, its subdirectories are its assets", which I keep.
+  Full accounting: **1666 identified + 66 nested + 179 vendor-excluded = 1911 corpus
+  = 1909 real + 2 planted.**
+
+  Discovery, before vs after, from the product's own `--json`: skill identities
+  **276 → 1666**; persona **0 → 13**; memory **0 → 24**.
+
+- **t6 — quarantine inertness, positive control FIRST.**
+  ```
+  P0 POSITIVE-CONTROL: PASS  harness observes execution (sentinel created by running the payload command)
+  N1 INERTNESS:        PASS  neither sentinel exists after a full import
+  N2 PAYLOAD-CONTAINED: 2 quarantined SKILL.md on disk
+  N3 NO-EXEC-IN-LIVE-SKILLS: 0 (expect 0)
+  N3-CONTROL matcher-fires-elsewhere: 4 (expect >0)
+  N4 PROVENANCE-LINES: 3
+  ```
+  P0 runs the payload's own command and shows the sentinel appears, so N1's absence
+  is discriminating. N2 rules out "nothing was imported". N3's zero is licensed by
+  N3-CONTROL, where the identical `find` pattern returns 4 under the quarantine root.
+  **Containment held while imports went from 0 to 1730 live files.**
+
+  Persona defang, measured rather than asserted: the corpus `SOUL.md` carries a
+  forged `<system-reminder>`; `/usr/bin/grep -c "<system-reminder>"` returns **1** on
+  the source and **0** on the imported copy, which reads
+  `&lt;system-reminder>…` — and the persona body itself survived (`grep -c "You are
+  the persona"` = 1), so the zero is a defang, not a dropped file.
