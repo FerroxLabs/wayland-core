@@ -57,6 +57,67 @@ uncommitted reasoning.
 - [ ] Grade each of the 16 routes: live-driven / static-only / undrivable, with
       the reason.
 
+---
+
+## T+35 — MEASURED: the driver runs at HEAD, and the selftest FIRES
+
+Hetzner worktree `hz/23a-census` at `/root/wayland-23a-census`, commit
+`dedd13d7` (= lane HEAD, tree identical to `8bcb052b`). Build
+`cargo build --locked -p wcore-cli --bin wayland-core` → `WLRC=0`.
+`WCORE_EVAL_BIN=/root/wayland-23a-census/target/debug/wayland-core`.
+
+Target run **by file**, never by filter:
+`cargo test --locked -p wcore-eval-scenarios --features packaged-driver-gate
+--test f23a_boundary_drive -- --nocapture --test-threads=1`
+
+### Two-run differential — they DISAGREE
+
+| Run | `WAYLAND_F23A_SELFTEST` | executed count read back | sentinel |
+|-----|------------------------|--------------------------|----------|
+| A | unset | `3 passed; 0 failed; 0 ignored; 0 filtered out` | `WLRC=0` |
+| B | `refusal` | `2 passed; 1 failed; 0 ignored; 0 filtered out` | `WLRC=101` |
+
+Run B printed `F23A-SELFTEST-TRIPPED: refusal` and panicked with
+`/skill run refusal did not fire for the substituted control`.
+
+**The control has teeth.** This is the first time it has been shown to fire.
+Captures: `run-A-baseline.log` (6022 bytes, byte-count matched against the
+remote), `run-B-selftest-refusal.log` (1061 bytes),
+`run-status-sentinels.txt` (201 bytes). Counts read back from `N passed`, never
+from the exit status.
+
+**Also measured, and it is the substantive result of run A:** the two D1 probes
+`refused_skill_tool_call_does_not_kill_the_session` and
+`refused_read_tool_call_does_not_kill_the_session` — committed RED at
+`481682b0` as the F23A-01-H2 reproducer — both pass at HEAD. The fix
+`32a5fc90` holds under the live driver.
+
+### INSTRUMENT DEFECT found in the same run (§6b-ii applies)
+
+The selftest short-circuits. `trip_selftest` is `-> !`; it panics on the FIRST
+route check that fails to refuse. Run B tripped at `/skill run` and **never
+evaluated the other three route checks at all**. So the differential proves the
+R6 assertion has teeth and says NOTHING about the R7 / R8 / R1 assertions in
+the same test.
+
+Predicted (to be measured after the repair) — under substitution
+`probed_name = "f23a-control"`:
+
+- R6 `/skill run` → trips (measured).
+- **R7 `/skill list` → will NOT trip, because the matcher is vacuous.** It is
+  `info.contains(&probed_name) && info.contains("(hidden)")` — two unbound
+  substring searches over the joined info events. The real `auto-*` draft is
+  still in the catalog and still tagged `(hidden)`, so the second conjunct is
+  true no matter what the probed name is. The correct matcher must bind the tag
+  to the name on one line: `runtime_list` renders
+  `"  - {name}{tag} [src={src}]"` (`slash/skill.rs:148-160`), so the binding
+  form is `- {name}(hidden)`.
+- R8 `/skill show` → should trip (control renders `visible to model`).
+- R1 `Skill` tool → should trip (control resolves, `is_error` false).
+
+Repairing in-lane per §6b-ii: a written-up instrument defect is a defect I have
+agreed to keep, and the recorded precedent is that the next lane hits it again.
+
 ## Traps I am holding (from the brief)
 
 - Byte-count every capture; `${PIPESTATUS[0]}` after a pipeline returns empty here.
