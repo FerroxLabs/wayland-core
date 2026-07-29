@@ -1,0 +1,3 @@
+[security]
+enabled = true
+egress_allow = ["api.machines.dev"]

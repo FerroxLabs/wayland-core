@@ -1,0 +1,6 @@
+WLRC_FIXED-allow=0
+WLRC_FIXED-deny=0
+WLRC_BASE-deny=0
+WLRC_FIXED-list-nokey=0
+WLRC_BASE-list-nokey=0
+WLDONE
