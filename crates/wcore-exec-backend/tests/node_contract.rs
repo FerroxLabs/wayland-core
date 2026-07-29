@@ -39,6 +39,151 @@ fn node_signing_key(seed: u8) -> SigningKey {
     SigningKey::from_bytes(&[seed; 32])
 }
 
+/// `NodeIdentity::local()` — the ONLY function that derives a real host's
+/// identity — had no test on any platform before this one. Every other test in
+/// this file builds `NodeIdentity` from a struct literal via [`identity_for`],
+/// so the derivation path was never executed by the suite. That is how the
+/// Linux-shaped assumption below survived.
+///
+/// `local_machine_id()` tries, in order: `WAYLAND_NODE_MACHINE_ID`, `HOSTNAME`,
+/// `COMPUTERNAME`, then `read_hostname_file()`, then gives up and returns the
+/// constant `"unknown-host"`. `read_hostname_file` is documented *"Unix hosts
+/// publish the hostname on disk regardless of shell environment"* and reads
+/// `/etc/hostname` and `/proc/sys/kernel/hostname`.
+///
+/// **That comment is false on macOS.** Darwin has neither file and no `/proc`
+/// at all; it keeps the hostname in the SystemConfiguration store. So on a Mac
+/// the chain runs off its end and every node reports the same constant.
+///
+/// The field's declared job (`pairing.rs`) is *"Stable per-host discriminator.
+/// Distinguishes two nodes an operator happened to give confusingly similar
+/// names."* A constant discriminates nothing, and the value still passes
+/// `validate()`, so nothing downstream rejects it.
+///
+/// Asserted, not assumed: the environment preconditions are checked and the
+/// test FAILS (rather than skipping) if any of the three variables is set,
+/// because a skip here is indistinguishable from a pass.
+#[cfg(target_os = "macos")]
+#[test]
+fn on_darwin_local_identity_falls_back_to_a_constant_because_the_hostname_files_are_linux_only() {
+    for var in ["WAYLAND_NODE_MACHINE_ID", "HOSTNAME", "COMPUTERNAME"] {
+        assert!(
+            std::env::var_os(var).is_none(),
+            "precondition: {var} is set, so this run measures the env branch, \
+             not the file-fallback branch. Unset it and re-run. Failing rather \
+             than skipping."
+        );
+    }
+
+    // The two paths the fallback reads. Both absent on Darwin.
+    for path in ["/etc/hostname", "/proc/sys/kernel/hostname"] {
+        assert!(
+            !std::path::Path::new(path).exists(),
+            "{path} exists on this Darwin host, which contradicts the premise"
+        );
+    }
+    // Known-positive control in the same test: without it the two assertions
+    // above would also pass on a filesystem probe that answered "no" to
+    // everything (LANE-BRIEF 3b-i).
+    assert!(
+        std::path::Path::new("/etc/hosts").exists(),
+        "instrument check failed: /etc/hosts must exist, so the two ABSENT \
+         results above are a measurement rather than a blind probe"
+    );
+
+    let key = node_signing_key(9);
+    let identity = NodeIdentity::local("probe-node", &key).expect("build a local identity");
+
+    assert_eq!(identity.os, "macos", "sanity: this arm is Darwin-only");
+    assert_eq!(
+        identity.machine_id, "unknown-host",
+        "on Darwin the machine_id fallback chain runs off its end. If this now \
+         reads a real hostname, the Linux-shaped fallback has been repaired and \
+         this test should be updated to assert the real value."
+    );
+
+    // The consequence that makes it a defect rather than a cosmetic gap: the
+    // degenerate value is accepted by the contract's own validator, so it
+    // propagates into the registry and into `node list` unchallenged.
+    identity
+        .validate()
+        .expect("the degenerate machine_id still validates — nothing rejects it");
+
+    // machine_id carries ZERO host-distinguishing information here: it is a
+    // compile-time constant, independent of this host. Two different Darwin
+    // hosts therefore cannot be told apart by it. Demonstrated within one
+    // process by showing the value does not vary with the identity's key.
+    let other = NodeIdentity::local("second-node", &node_signing_key(11))
+        .expect("build a second local identity");
+    assert_eq!(
+        other.machine_id, identity.machine_id,
+        "machine_id is a constant on Darwin"
+    );
+    assert_ne!(
+        other.key_id, identity.key_id,
+        "key_id still differs — the security identity is unaffected, which is \
+         why this is a MEDIUM operator-facing defect and not a key-forgery one"
+    );
+
+    println!(
+        "DARWIN machine_id fallback: machine_id={} os={} validates=yes key_id_differs=yes",
+        identity.machine_id, identity.os
+    );
+}
+
+/// The Linux half of the divergence above, so the pair is executable on both
+/// sides rather than measured on one and inferred on the other.
+///
+/// Same code, same env preconditions, opposite outcome: Linux publishes the
+/// hostname at `/etc/hostname` and `/proc/sys/kernel/hostname`, so the fallback
+/// returns a real per-host value and `machine_id` does the job it is documented
+/// to do. Run this on the Linux proof host over a NON-LOGIN ssh invocation —
+/// the shape a controller actually reaches a node with, and the shape in which
+/// `HOSTNAME` is not exported.
+#[cfg(target_os = "linux")]
+#[test]
+fn on_linux_local_identity_reads_a_real_per_host_value_from_the_hostname_file() {
+    for var in ["WAYLAND_NODE_MACHINE_ID", "HOSTNAME", "COMPUTERNAME"] {
+        assert!(
+            std::env::var_os(var).is_none(),
+            "precondition: {var} is set, so this run measures the env branch, \
+             not the file-fallback branch. Re-run over non-login ssh (`ssh host \
+             'cargo test …'`), which is how a controller reaches a node. \
+             Failing rather than skipping."
+        );
+    }
+
+    // At least one of the two fallback paths must exist and be non-empty —
+    // this is the thing Darwin lacks.
+    let from_file = ["/etc/hostname", "/proc/sys/kernel/hostname"]
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .expect("Linux publishes the hostname on disk; neither path was readable");
+    assert!(
+        !from_file.is_empty(),
+        "instrument check: the hostname file read back empty"
+    );
+
+    let key = node_signing_key(9);
+    let identity = NodeIdentity::local("probe-node", &key).expect("build a local identity");
+
+    assert_eq!(identity.os, "linux", "sanity: this arm is Linux-only");
+    assert_ne!(
+        identity.machine_id, "unknown-host",
+        "on Linux the fallback must find the hostname file. Reading \
+         'unknown-host' here would mean the Darwin defect has spread."
+    );
+    identity.validate().expect("identity validates");
+
+    println!(
+        "LINUX machine_id fallback: machine_id={} os={} hostname_file={} \
+         (Darwin returns the constant 'unknown-host' here)",
+        identity.machine_id, identity.os, from_file
+    );
+}
+
 fn identity_for(node_id: &str, machine: &str, os: &str, key: &SigningKey) -> NodeIdentity {
     NodeIdentity {
         node_id: node_id.into(),

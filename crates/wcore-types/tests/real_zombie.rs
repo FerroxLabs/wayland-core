@@ -312,3 +312,94 @@ fn a_fully_reaped_process_reads_as_dead() {
         "a reaped process (pid {pid}) must read as Dead"
     );
 }
+
+/// ARM D — the direction the old probe got wrong the OTHER way, and the only
+/// arm of the macOS probe with no Rust coverage until now.
+///
+/// The three arms already covered above all ask "is a corpse mistaken for
+/// alive?". This one asks the opposite: **is a genuinely live process mistaken
+/// for dead?** On macOS `kill(pid, 0)` against a process owned by another user
+/// fails with `EPERM`, not `ESRCH`, so the old `kill(pid, 0) == 0` shape
+/// reported `launchd` — pid 1, unambiguously running — as DEAD.
+///
+/// This was measured once, in C, at
+/// `.planning/evidence/zombie-probe/MACOS-PROBE-RESULT.txt` (`ARM D: live,
+/// other user (launchd) pid=1 kill(pid,0)_says_alive=0 … sysctl.p_stat=2 ->
+/// LIVE`). It has never been asserted in Rust, so nothing stopped the Rust arm
+/// from regressing back onto a permission-blind probe.
+///
+/// Why this matters beyond tidiness: a liveness probe that reads a live
+/// process as dead makes an orphan-reaper believe it has nothing to clean up.
+/// That is a false-clean, and it is the failure direction that leaves real
+/// processes running while the scan reports success.
+///
+/// **macOS-gated deliberately.** The arm needs a live process this test cannot
+/// signal. On the Linux proof host the suite runs as root, where `kill(1, 0)`
+/// succeeds and the divergence is unobservable — gating it to Darwin keeps the
+/// assertion honest rather than vacuous. The three assertions are:
+///
+/// 1. **known-positive** — pid 1 reads as `Live`.
+/// 2. **known-negative** — a reaped pid, checked by the same probe in the same
+///    test, reads as `Dead`. Without this, a probe that answered `Live` to
+///    everything would pass assertion 1.
+/// 3. **the old shape would have missed it** — `kill(1, 0)` fails at this same
+///    instant, so the pre-repair probe called pid 1 dead. This is the assertion
+///    that proves the macOS arm is doing work; the other two pass on a probe
+///    that merely wraps `kill`.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_process_owned_by_another_user_reads_as_live_and_the_old_shape_called_it_dead() {
+    // SAFETY: read-only libc call, no arguments, cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    assert_ne!(
+        euid, 0,
+        "ARM D is UNOBSERVABLE as root: root may signal pid 1, so `kill(1, 0)` \
+         succeeds and the old shape would NOT have missed it. Re-run as a \
+         normal user. Failing loudly rather than passing, because a silent \
+         skip here is indistinguishable from a green."
+    );
+
+    // Assertion 1 — known-positive. pid 1 (`launchd`) is running by definition:
+    // if it were not, the machine running this test would be dead.
+    assert_eq!(
+        process_liveness(1),
+        ProcessLiveness::Live,
+        "pid 1 (launchd) must read as Live; reading it as Dead is the \
+         false-clean direction that makes an orphan reaper believe there is \
+         nothing to reap"
+    );
+    assert!(process_is_alive(1), "process_is_alive must agree for pid 1");
+
+    // Assertion 2 — known-negative, same probe, same test. Guards against a
+    // probe that manufactures assertion 1 by answering Live unconditionally.
+    let mut child = corpse_command()
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("spawn");
+    let dead_pid = child.id();
+    child.wait().expect("reap it");
+    assert_eq!(
+        process_liveness(dead_pid),
+        ProcessLiveness::Dead,
+        "a reaped pid ({dead_pid}) must still read as Dead — otherwise \
+         assertion 1 proves only that the probe always says Live"
+    );
+
+    // Assertion 3 — the old shape would have missed it. THIS is the one that
+    // proves the macOS sysctl arm earns its complexity.
+    let old = old_shape_says_alive(1);
+    // SAFETY: read-only, returns the errno set by the `kill` above.
+    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    assert!(
+        !old,
+        "ARM D did not reproduce: `kill(1, 0)` SUCCEEDED as uid {euid}, so the \
+         old shape would not have missed pid 1 and this test proves nothing. \
+         Expected EPERM ({}). Got errno {errno}.",
+        libc::EPERM
+    );
+    println!(
+        "ARM D reproduced on Darwin: uid={euid} pid=1 new_probe=Live \
+         old_shape(kill(1,0))=alive:{old} errno={errno} (EPERM={})",
+        libc::EPERM
+    );
+}
