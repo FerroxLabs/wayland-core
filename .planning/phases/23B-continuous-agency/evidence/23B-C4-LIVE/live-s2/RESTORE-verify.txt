@@ -1,0 +1,1 @@
+F23_CACHE=verify trustworthy=true cost_truth=priced catalog_priced_round_trips=4 estimated_round_trips=0 unpriced_round_trips=0 cost_usd=0.036956 session_complete=true session=c5484268-1ddc-4e95-8f52-6ea0987d4baf path=/root/c4-live-s2/home-RESTORE/cache-ledger/c5484268-1ddc-4e95-8f52-6ea0987d4baf.json

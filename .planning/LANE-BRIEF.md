@@ -69,6 +69,39 @@ Commit to `lane/<PHASE>` only. **Do not merge into `plan/f20-unified-audit-repai
 orchestrator merges lanes serially. Push your branch with `git push gh lane/<PHASE>` (remote
 is `gh`, not `origin`).
 
+### "The previous agent is dead" is an ABSENCE CLAIM — measure it before acting
+
+**Orchestrator rule, earned 2026-07-29 at the orchestrator's own expense.** The harness reported a
+lane as failed with its state lost. I believed it and spawned a replacement onto the same branch
+and the same worktree. **The first agent was still alive.** Its commits and the replacement's
+interleave in the log — one of the first agent's commits has the replacement's commit as its
+parent. Two agents committed into one worktree concurrently. The first then finished, deleted its
+hetzner worktree and its binary *mid-investigation under the second*, and its final commit — the
+one carrying the evidence sections, the lane summary and the captures — **was never pushed**. The
+replacement deleted that branch while recreating a worktree and recovered it **only because git
+prints the SHA of a branch it deletes**.
+
+Nothing was lost, by a margin of one line of terminal output.
+
+A death notice is exactly the shape this file spends pages warning about: an absence, reported by
+an instrument, with no known-positive. Before acting on one, measure it — is the branch still
+advancing, is a process still on the build host, does the worktree still exist. And **never point
+a second agent at a worktree the first may still hold**; give the replacement its own.
+
+**Merging integration INTO your branch is required and fine. Pushing the result to integration
+is not.** These are one keystroke apart and a lane conflated them on 2026-07-29: it merged
+integration forward correctly, then pushed to `plan/f20-unified-audit-repair` instead of to its
+own ref. The push also dragged in a *second, unrelated* lane's in-flight branch that happened to
+be an ancestor — including a fix that had not yet been proven at the time.
+
+Nothing broke, because that fix was proven an hour later. **That is luck, not a process.** The
+orchestrator merges serially so that each lane's work is verified against a tree it has actually
+been tested on; a lane that self-merges removes that check silently and no one can tell from the
+log which merges were reviewed.
+
+Concretely: `git push gh HEAD:lane/<your-lane>`, never `git push gh HEAD:plan/...`. If you find
+yourself typing the integration branch name in a push command, stop.
+
 ## 2. Your workspace (hetzner — where code actually builds)
 
 ```bash
