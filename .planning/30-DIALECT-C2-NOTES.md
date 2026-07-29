@@ -568,3 +568,57 @@ recovery 15/15** under compiled dialects with the path confound removed. The pre
 ## T+6 — status
 
 Cohort ELIGIBLE at 2 members, symmetry proven, both dimensions exercised. Writing the deliverable.
+
+---
+
+## T+7 — final verification, and a self-inflicted false alarm worth recording
+
+### 7a. Final suite at deliverable HEAD `317807fb`
+
+```
+cargo test -p wcore-eval-scenarios --lib
+test result: ok. 263 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.62s
+FTRC=0
+```
+
+Executed count read back per LANE-BRIEF §3.2. `0 filtered out` confirms no flavour-(c) empty filter;
+2 ignored out of 265 is the normal partial-ignore case, not the all-ignored pathology.
+
+### 7b. The false alarm — I nearly reported a hang that was mine
+
+For ~20 minutes `--lib` appeared wedged on
+`process_tree::linux::tests::private_materialization_preserves_ali…`, a test in a file this lane
+never touched. **The tempting move was to report it as a pre-existing flake and move on.**
+
+`ps -eo pid,etime` showed **two** copies of the same test binary running, at 36:30 and 16:19: an
+earlier foreground run had been backgrounded on timeout and never died, and I had launched a second
+alongside it. `process_tree` tests contend. A clean single run then finished the same 263 tests in
+**0.62 s**.
+
+So the hang was **self-inflicted concurrency, not a product defect and not a flake**. Recording it
+because the near-miss is the interesting part: "cluster of failures in one crate under load — re-run
+in isolation before reporting a regression" (LANE-BRIEF §6) applies to a *hang* exactly as it applies
+to a failure, and I was one step from filing a false report against another lane's file.
+
+Second-order note: the `pkill -f "wcore_eval_scenarios-<hash>"` I used to clear the duplicates
+**matched its own command line** and killed the shell, and the run launched immediately after died of
+SIGTERM (signal 15) — which `cargo` surfaced as `error: test failed`, i.e. an infrastructure kill
+wearing a test-failure costume. Re-run under `setsid` with a non-self-matching pattern: clean.
+
+### 7c. Fence, verified against the merge-base SHA (never the branch name)
+
+```
+BASE=75babf329235484684ecee3a65973b0c197840c1
+git diff $BASE -- crates/wcore-cli/src/lib.rs crates/wcore-cli/src/main.rs   →  0 lines
+git diff $BASE -- crates/wcore-eval-scenarios/src/fixtures/openai.rs         →  0 lines
+git diff $BASE -- crates/wcore-eval-scenarios/src/dialect_exec.rs            →  557 lines  (known-positive)
+```
+
+The known-positive is what makes the two zeros measurements rather than a dead command.
+
+Frozen v1 protocol digest re-verified identical on host and in repo:
+`d18407e0b96bf753f66adc1eab7d21cbaeca1b9e627cecf0159095938b83ef25`.
+
+## LANE COMPLETE
+
+Deliverable: `.planning/phases/30-continuous-scorecard-frontier-review/30-DIALECT-C2.md`.
