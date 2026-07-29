@@ -1,0 +1,81 @@
+=== binary under test ===
+3118a22fc01074b0a1eedae9eb43af77fb04cf1d
+
+=== 1. independent sink first (stalls after 3) ===
+SINK_READY url=http://127.0.0.1:18477 journal=/tmp/24c1ab-run/arrivals.jsonl
+
+=== 2. seed 6 deliveries ===
+seeded=24
+
+=== 3. install + start the REAL service ===
+  binary:  /root/wayland-24-c1-abandoned/target/release/wayland-core
+gateway start requested (systemd)
+
+=== 4. COUNT POSITIVE DELIVERY at the independent sink ===
+  t=2s arrivals_at_sink=0
+  t=4s arrivals_at_sink=0
+  t=6s arrivals_at_sink=0
+  t=8s arrivals_at_sink=0
+  t=10s arrivals_at_sink=0
+  t=12s arrivals_at_sink=0
+  t=14s arrivals_at_sink=0
+  t=16s arrivals_at_sink=0
+  t=18s arrivals_at_sink=0
+  t=20s arrivals_at_sink=0
+  t=22s arrivals_at_sink=0
+  t=24s arrivals_at_sink=0
+  t=26s arrivals_at_sink=0
+  t=28s arrivals_at_sink=0
+  t=30s arrivals_at_sink=0
+  t=32s arrivals_at_sink=0
+  t=34s arrivals_at_sink=0
+  t=36s arrivals_at_sink=0
+  t=38s arrivals_at_sink=0
+  t=40s arrivals_at_sink=0
+  t=42s arrivals_at_sink=0
+  t=44s arrivals_at_sink=0
+  t=46s arrivals_at_sink=0
+  t=48s arrivals_at_sink=0
+  t=50s arrivals_at_sink=0
+  t=52s arrivals_at_sink=0
+  t=54s arrivals_at_sink=0
+  t=56s arrivals_at_sink=0
+  t=58s arrivals_at_sink=0
+  t=60s arrivals_at_sink=4
+ARRIVALS_AT_INDEPENDENT_SINK=4
+
+=== 5. surface BEFORE (must be EMPTY) ===
+No abandoned deliveries recorded in /tmp/24c1ab-run/home.
+
+=== 6. kill -9 while a delivery is stalled at the sink ===
+gateway_pid=3832568 at 16:33:31
+killed gateway and sink
+STATE_COUNTS_AFTER_KILL = {'settled': 3, 'attempted': 1}
+  CARRIED: cron:9c4825d3-fcfc-465a-b2d3-58448187cd7d:1785342809536 state= attempted dest= 24c1absink
+
+=== 7. platform restarts it; resume CARRIES the unsettled delivery ===
+  t=2s active=activating NRestarts=0
+  t=4s active=activating NRestarts=0
+  t=6s active=activating NRestarts=0
+  t=8s active=active NRestarts=1
+Jul 29 16:32:30 Ubuntu-2404-noble-amd64-base wayland-core[3832568]: [gateway] started pid=3832568 role=Owner profile=24c1ab carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+Jul 29 16:33:36 Ubuntu-2404-noble-amd64-base wayland-core[3879400]: [gateway] started pid=3879400 role=Owner profile=24c1ab carried=1 (unattempted 0 / unknown-outcome 1) quarantined=0
+
+=== 8. drain with a budget it cannot meet -> a REAL abandonment ===
+drain requested (budget 2000ms); gateway pid 3879400
+drain complete: Drained (deliveries pending 0)
+Jul 29 16:33:38 Ubuntu-2404-noble-amd64-base wayland-core[3879400]: [gateway] drain requested (budget Some(2000)ms)
+Jul 29 16:33:38 Ubuntu-2404-noble-amd64-base wayland-core[3879400]: [gateway] drain Clean: observations=1 abandoned=0 flushed=true
+
+=== 9. THE SURFACE: what did you give up on? ===
+No abandoned deliveries recorded in /tmp/24c1ab-run/home.
+--- json ---
+{
+  "abandoned": [],
+  "dropped_past_retention": 0,
+  "home": "/tmp/24c1ab-run/home",
+  "quarantined": 0,
+  "unacknowledged": 0
+}
+TARGET_DELIVERY_ID=
+ABORT: no abandonment to dispose of; the rest of this run would be vacuous
