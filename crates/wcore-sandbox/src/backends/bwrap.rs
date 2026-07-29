@@ -30,7 +30,7 @@ use crate::error::{Result, SandboxError};
 use crate::manifest::{NetworkPolicy, SandboxManifest};
 use crate::{DirectoryAuthority, ResourceLimitEnforcement, SandboxCommand, SandboxOutput};
 use async_trait::async_trait;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Once;
 
@@ -281,10 +281,29 @@ impl BubblewrapBackend {
         // mount ordering shadows them. Directory denies use one empty,
         // read-only bind. A writable tmpfs is not a denial: it hides reads but
         // lets the child mint replacement authority at the denied pathname.
-        let denied_directory_mask = if manifest
+        //
+        // Classify every denied path ONCE, then reduce the set to the mounts
+        // bubblewrap can actually realize (see `reduce_read_deny_mounts`), then
+        // render. Classifying before reducing is what lets the reduction know
+        // which entries are directories, and directories are the only entries
+        // that can subsume another.
+        let deny_entries: Vec<(PathBuf, DenyMountKind)> = manifest
             .fs_read_deny
             .iter()
-            .any(|path| std::fs::symlink_metadata(path).is_ok_and(|md| md.is_dir()))
+            .map(|path| {
+                let kind = match std::fs::symlink_metadata(path) {
+                    Ok(md) if md.is_dir() => DenyMountKind::Directory,
+                    Ok(_) => DenyMountKind::NonDirectory,
+                    // Path gone since enumeration — nothing to mask.
+                    Err(_) => DenyMountKind::Absent,
+                };
+                (path.clone(), kind)
+            })
+            .collect();
+        let deny_mounts = reduce_read_deny_mounts(&deny_entries);
+        let denied_directory_mask = if deny_mounts
+            .iter()
+            .any(|(_, kind)| *kind == DenyMountKind::Directory)
         {
             Some(tempfile::tempdir().map_err(|error| {
                 SandboxError::ExecFailed(format!("create read-deny directory mask: {error}"))
@@ -292,26 +311,22 @@ impl BubblewrapBackend {
         } else {
             None
         };
-        for p in &manifest.fs_read_deny {
-            match std::fs::symlink_metadata(p) {
-                Ok(md) if md.is_dir() => {
-                    let mask = denied_directory_mask
-                        .as_ref()
-                        .expect("directory deny mask was created")
-                        .path()
-                        .to_string_lossy()
-                        .into_owned();
-                    bwrap_argv.push("--ro-bind".into());
-                    bwrap_argv.push(mask);
-                    bwrap_argv.push(p.to_string_lossy().into_owned());
+        for (path, kind) in &deny_mounts {
+            let source = match kind {
+                DenyMountKind::Directory => denied_directory_mask
+                    .as_ref()
+                    .expect("directory deny mask was created")
+                    .path()
+                    .to_string_lossy()
+                    .into_owned(),
+                DenyMountKind::NonDirectory => "/dev/null".to_owned(),
+                DenyMountKind::Absent => {
+                    unreachable!("reduce_read_deny_mounts drops absent denies")
                 }
-                Ok(_) => {
-                    bwrap_argv.push("--ro-bind".into());
-                    bwrap_argv.push("/dev/null".into());
-                    bwrap_argv.push(p.to_string_lossy().into_owned());
-                }
-                Err(_) => { /* path gone since enumeration — nothing to mask */ }
-            }
+            };
+            bwrap_argv.push("--ro-bind".into());
+            bwrap_argv.push(source);
+            bwrap_argv.push(path.to_string_lossy().into_owned());
         }
 
         // Env injection (manifest-only; host env is dropped by --clearenv).
@@ -526,6 +541,92 @@ impl BubblewrapBackend {
     }
 }
 
+/// How a single `fs_read_deny` entry is realized as a bubblewrap mount.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DenyMountKind {
+    /// A directory: masked with one empty, read-only bind.
+    Directory,
+    /// Exists and is not a directory: masked with a `/dev/null` bind.
+    NonDirectory,
+    /// Vanished between enumeration and render — nothing to mask.
+    Absent,
+}
+
+/// Reduce classified `fs_read_deny` entries to the mounts bubblewrap can
+/// actually realize, preserving input order.
+///
+/// **Why this exists (21-C3-01).** bubblewrap enforces a deny by MOUNTING over
+/// the denied path, and a mount needs its mount point to be creatable. Once
+/// `/p` carries an empty READ-ONLY mask, `/p/q` no longer exists inside the
+/// namespace and cannot be `mkdir`'d, so a second `--ro-bind` at `/p/q` aborts
+/// the entire spawn before `execve`:
+///
+/// ```text
+/// bwrap: Can't mkdir /…/workspace/.git: Read-only file system
+/// ```
+///
+/// Measured on `hetzner-dsm` (bubblewrap 0.9.0): with the same two paths,
+/// `[/p, /p/q]` exits 1 having run nothing while `[/p/q, /p]` runs the shell
+/// and exits 0. The rendering was therefore ORDER-DEPENDENT even though
+/// `fs_read_deny` is a set, which is why the reduction lives here and not at
+/// any one caller — a caller cannot be asked to know bubblewrap's mount
+/// ordering, and three independent producers hand this renderer nested pairs:
+///
+/// - `wcore_agent::spawner`'s `[parent_workspace, git_common_dir]` for an
+///   isolated-mutation child. That pair is CORRECT: `git_common_dir` is
+///   `<parent>/.git` for an ordinary clone but the MAIN repo's `.git` — outside
+///   the parent — when the parent is itself a linked worktree. Whether it nests
+///   is a property of the parent's git layout, not a caller mistake.
+/// - `WorkspacePolicy::secret_deny_paths_dynamic`, whose secret walk can return
+///   both a credentials directory and a file inside it.
+/// - `wcore_swarm::dispatch`'s `sandbox_read_denies`.
+///
+/// The other two backends have no analogue: macOS `sandbox_exec` emits
+/// independent `(deny file-read* (subpath …))` SBPL rules and Windows
+/// AppContainer applies a protected DACL per object, so overlapping denies are
+/// simply both enforced.
+///
+/// **Why dropping is safe.** A deny nested under a DIRECTORY deny is redundant:
+/// the ancestor's empty read-only mask removes the descendant pathname from the
+/// namespace entirely, which is at least as strong as masking it directly
+/// (verified: with only the ancestor denied, a read of `<parent>/.git/config`
+/// fails and a write to `<parent>/.git/` fails `Directory nonexistent`).
+/// A `NonDirectory` entry can have no descendants, and an entry is never
+/// dropped for any other reason — this is the sole reduction.
+///
+/// Nesting is decided component-wise via `Path::starts_with`, so `/p-backup` is
+/// not treated as nested under `/p`. Comparison is lexical, so a symlinked
+/// alias of a denied ancestor is NOT recognised and both denies are emitted —
+/// that is the safe direction (a redundant mount that may abort, never a
+/// silently discarded denial).
+fn reduce_read_deny_mounts(entries: &[(PathBuf, DenyMountKind)]) -> Vec<(PathBuf, DenyMountKind)> {
+    let mut kept = Vec::with_capacity(entries.len());
+    for (index, (path, kind)) in entries.iter().enumerate() {
+        if *kind == DenyMountKind::Absent {
+            continue;
+        }
+        // Collapse an exact repeat onto its first occurrence.
+        if entries[..index].iter().any(|(earlier, earlier_kind)| {
+            *earlier_kind != DenyMountKind::Absent && earlier == path
+        }) {
+            continue;
+        }
+        // Drop anything strictly nested under a directory deny, wherever that
+        // ancestor sits in the list. Scanning the WHOLE list rather than the
+        // prefix is deliberate: the abort this prevents was order-dependent, so
+        // the reduction must not be.
+        if entries.iter().any(|(ancestor, ancestor_kind)| {
+            *ancestor_kind == DenyMountKind::Directory
+                && ancestor != path
+                && path.starts_with(ancestor)
+        }) {
+            continue;
+        }
+        kept.push((path.clone(), *kind));
+    }
+    kept
+}
+
 #[cfg(target_os = "linux")]
 fn bwrap_status_channel() -> Result<(
     std::io::BufReader<std::os::unix::net::UnixStream>,
@@ -572,6 +673,145 @@ mod tests {
         let backend = BubblewrapBackend::new();
         // Cannot assert true/false absolutely; just ensure no panic.
         let _ = backend.is_available();
+    }
+
+    // ── 21-C3-01: overlapping fs_read_deny entries aborted bubblewrap ────────
+    //
+    // The renderer mounts over each denied path, so a deny nested under a
+    // directory deny needed a mount point inside a read-only mask and bwrap
+    // aborted before `execve`. `reduce_read_deny_mounts` drops the nested,
+    // redundant deny. The live proof that containment survives the drop is
+    // `required_live_bwrap_overlapping_deny_runs_shell_and_still_contains`.
+
+    fn dir(path: &str) -> (PathBuf, DenyMountKind) {
+        (PathBuf::from(path), DenyMountKind::Directory)
+    }
+    fn file(path: &str) -> (PathBuf, DenyMountKind) {
+        (PathBuf::from(path), DenyMountKind::NonDirectory)
+    }
+    fn gone(path: &str) -> (PathBuf, DenyMountKind) {
+        (PathBuf::from(path), DenyMountKind::Absent)
+    }
+    fn paths(reduced: &[(PathBuf, DenyMountKind)]) -> Vec<String> {
+        reduced
+            .iter()
+            .map(|(p, _)| p.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The exact `spawner.rs` pair for an isolated-mutation child, in the order
+    /// it is constructed: parent workspace then `<parent>/.git`. This is the
+    /// input that aborted bwrap.
+    #[test]
+    fn nested_directory_deny_collapses_onto_its_ancestor() {
+        let entries = vec![dir("/ws/parent"), dir("/ws/parent/.git")];
+        let reduced = reduce_read_deny_mounts(&entries);
+        assert_eq!(
+            paths(&reduced),
+            vec!["/ws/parent".to_owned()],
+            "the nested .git deny is redundant under the parent mask and must not be mounted"
+        );
+        // Third assertion (LANE-BRIEF §6b-ii): the pre-fix renderer emitted one
+        // mount per entry, so it would have emitted TWO here — the exact
+        // sequence bwrap 0.9.0 aborts on. Without this the test would also pass
+        // on the unfixed renderer.
+        assert_eq!(
+            entries.len(),
+            2,
+            "the unreduced input must still be the two-mount sequence that aborted"
+        );
+    }
+
+    /// The abort was order-dependent — `[/p, /p/q]` failed while `[/p/q, /p]`
+    /// succeeded — so the reduction must not be. Both orders must reduce to the
+    /// same single ancestor mount.
+    #[test]
+    fn deny_reduction_is_independent_of_input_order() {
+        let ancestor_first = reduce_read_deny_mounts(&[dir("/ws/parent"), dir("/ws/parent/.git")]);
+        let descendant_first =
+            reduce_read_deny_mounts(&[dir("/ws/parent/.git"), dir("/ws/parent")]);
+        assert_eq!(paths(&ancestor_first), vec!["/ws/parent".to_owned()]);
+        assert_eq!(paths(&descendant_first), paths(&ancestor_first));
+    }
+
+    /// A file nested under a denied directory is equally redundant, and the
+    /// whole chain collapses to the outermost directory.
+    #[test]
+    fn nested_file_and_deep_chain_collapse_to_the_outermost_directory() {
+        let reduced = reduce_read_deny_mounts(&[
+            dir("/ws/parent"),
+            file("/ws/parent/.env"),
+            dir("/ws/parent/.git"),
+            file("/ws/parent/.git/config"),
+        ]);
+        assert_eq!(paths(&reduced), vec!["/ws/parent".to_owned()]);
+    }
+
+    /// Nesting is component-wise, not a string prefix: `/ws/parent-backup` is a
+    /// SIBLING of `/ws/parent` and dropping it would silently discard a denial.
+    #[test]
+    fn string_prefix_sibling_is_not_treated_as_nested() {
+        let reduced = reduce_read_deny_mounts(&[dir("/ws/parent"), dir("/ws/parent-backup")]);
+        assert_eq!(
+            paths(&reduced),
+            vec!["/ws/parent".to_owned(), "/ws/parent-backup".to_owned()],
+            "a sibling sharing a string prefix must keep its own deny mount"
+        );
+    }
+
+    /// Only a DIRECTORY deny masks a subtree. A non-directory deny is rendered
+    /// as a `/dev/null` bind over one pathname and subsumes nothing, so nothing
+    /// may be dropped on account of it. (Unreachable from a real filesystem;
+    /// pinned so a future classification change cannot open a hole quietly.)
+    #[test]
+    fn non_directory_deny_subsumes_nothing() {
+        let reduced = reduce_read_deny_mounts(&[file("/ws/parent"), dir("/ws/parent/.git")]);
+        assert_eq!(
+            paths(&reduced),
+            vec!["/ws/parent".to_owned(), "/ws/parent/.git".to_owned()]
+        );
+    }
+
+    /// A path that vanished between enumeration and render has nothing to mask,
+    /// and — critically — cannot be treated as a directory that subsumes its
+    /// descendants, because no mask will be mounted at it.
+    #[test]
+    fn absent_ancestor_is_dropped_and_does_not_subsume_its_descendant() {
+        let reduced = reduce_read_deny_mounts(&[gone("/ws/parent"), dir("/ws/parent/.git")]);
+        assert_eq!(
+            paths(&reduced),
+            vec!["/ws/parent/.git".to_owned()],
+            "an absent ancestor mounts no mask, so the descendant deny must survive"
+        );
+    }
+
+    /// An exact repeat collapses onto its first occurrence — one mount, one
+    /// pathname.
+    #[test]
+    fn exact_duplicate_deny_collapses_to_one_mount() {
+        let reduced = reduce_read_deny_mounts(&[dir("/ws/parent"), dir("/ws/parent")]);
+        assert_eq!(paths(&reduced), vec!["/ws/parent".to_owned()]);
+    }
+
+    /// Nothing is dropped when nothing overlaps: the reduction is not a
+    /// general-purpose filter and must leave a disjoint deny set untouched.
+    /// This is the "would the gate fail" control for every test above.
+    #[test]
+    fn disjoint_denies_are_left_untouched() {
+        let reduced = reduce_read_deny_mounts(&[
+            dir("/ws/parent"),
+            dir("/elsewhere/main-repo/.git"),
+            file("/ws/other/.env"),
+        ]);
+        assert_eq!(
+            paths(&reduced),
+            vec![
+                "/ws/parent".to_owned(),
+                "/elsewhere/main-repo/.git".to_owned(),
+                "/ws/other/.env".to_owned(),
+            ],
+            "a linked-worktree parent's git_common_dir sits outside the parent and must survive"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -838,6 +1078,111 @@ mod tests {
             .await
             .expect("required live bwrap admission execution");
         assert_eq!(output.exit_code, 0, "{output:?}");
+    }
+
+    /// Required live acceptance for 21-C3-01, BOTH HALVES in one run.
+    ///
+    /// Arm 1 is the instrument control: the same probe, the same paths, with an
+    /// EMPTY deny list. Both secrets must be readable. Without it a probe that
+    /// can never see the parent (wrong path, unbound mount, dead shell) would
+    /// report "REFUSED" for free, and the containment half would be vacuous.
+    ///
+    /// Arm 2 is the fix: `fs_read_deny = [parent, parent/.git]` — the exact
+    /// overlapping pair `spawner.rs` builds for an isolated-mutation child.
+    /// It must (a) RUN the shell, which before the fix it could not, bwrap
+    /// aborting with `Can't mkdir …/.git: Read-only file system`; and (b) still
+    /// refuse BOTH the parent read and the `.git` read. Either half alone is
+    /// not a pass: (a) without (b) is a hole, (b) without (a) is the broken
+    /// build that made three plans record a refusal that never happened.
+    ///
+    /// Fails if bwrap is absent — never skips.
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "bwrap is Linux-only")]
+    async fn required_live_bwrap_overlapping_deny_runs_shell_and_still_contains() {
+        let backend = BubblewrapBackend::new();
+        assert!(
+            backend.is_available(),
+            "required live bwrap must be installed and usable"
+        );
+
+        let parent = tempfile::tempdir().expect("parent workspace");
+        let parent_root = std::fs::canonicalize(parent.path()).expect("canonicalize parent");
+        std::fs::create_dir_all(parent_root.join(".git")).expect("parent .git");
+        std::fs::write(parent_root.join("secret.txt"), b"PARENTSECRET\n").expect("parent secret");
+        std::fs::write(parent_root.join(".git").join("config"), b"GITSECRET\n")
+            .expect("git secret");
+        let child = tempfile::tempdir().expect("child workspace");
+        let child_root = std::fs::canonicalize(child.path()).expect("canonicalize child");
+
+        // The liveness marker is assembled by the shell at runtime rather than
+        // written literally, so only a shell that actually executed can produce
+        // the joined string. (21-C3 §6: a marker embedded literally in the
+        // command text is satisfiable without the command ever running.)
+        let script = format!(
+            "printf %s%s SHELL RAN; echo; \
+             cat {parent}/secret.txt 2>/dev/null; \
+             cat {parent}/.git/config 2>/dev/null; \
+             exit 0",
+            parent = parent_root.display()
+        );
+        let run = |deny: Vec<PathBuf>| {
+            let manifest = SandboxManifest {
+                fs_read_allow: vec![parent_root.clone()],
+                fs_write_allow: vec![child_root.clone()],
+                fs_read_deny: deny,
+                network: NetworkPolicy::Deny,
+                ..Default::default()
+            };
+            let command = SandboxCommand {
+                argv: vec!["/bin/sh".into(), "-c".into(), script.clone()],
+                cwd: Some(child_root.clone()),
+            };
+            async move {
+                let backend = BubblewrapBackend::new();
+                backend.execute(&manifest, command).await
+            }
+        };
+
+        // ── Arm 1: control. No deny — the probe MUST see both secrets. ───────
+        let control = run(Vec::new()).await.expect("control execution");
+        let control_stdout = String::from_utf8_lossy(&control.stdout).into_owned();
+        assert!(
+            control_stdout.contains("SHELLRAN"),
+            "control shell must run; stdout={control_stdout:?} stderr={:?}",
+            String::from_utf8_lossy(&control.stderr)
+        );
+        assert!(
+            control_stdout.contains("PARENTSECRET") && control_stdout.contains("GITSECRET"),
+            "instrument is dead: the probe cannot read either secret even with NO deny, so a \
+             REFUSED reading in arm 2 would prove nothing; stdout={control_stdout:?}"
+        );
+
+        // ── Arm 2: the spawner's overlapping pair, ancestor first. ───────────
+        let denied = run(vec![parent_root.clone(), parent_root.join(".git")])
+            .await
+            .expect("overlapping-deny execution");
+        let denied_stdout = String::from_utf8_lossy(&denied.stdout).into_owned();
+        let denied_stderr = String::from_utf8_lossy(&denied.stderr).into_owned();
+        // Half 1 — the shell RUNS. This is what 21-C3-01 broke.
+        assert!(
+            !denied_stderr.contains("Can't mkdir"),
+            "bwrap aborted on the overlapping deny pair (21-C3-01): stderr={denied_stderr:?}"
+        );
+        assert!(
+            denied_stdout.contains("SHELLRAN"),
+            "a delegated mutating child must be able to run a shell; \
+             stdout={denied_stdout:?} stderr={denied_stderr:?}"
+        );
+        // Half 2 — containment is NOT weakened. Both reads still refused.
+        assert!(
+            !denied_stdout.contains("PARENTSECRET"),
+            "parent workspace leaked into the child: stdout={denied_stdout:?}"
+        );
+        assert!(
+            !denied_stdout.contains("GITSECRET"),
+            "parent .git leaked into the child — the nested deny was dropped without the \
+             ancestor mask covering it: stdout={denied_stdout:?}"
+        );
     }
 
     /// Required live acceptance: bubblewrap mints hard containment ONLY after a
