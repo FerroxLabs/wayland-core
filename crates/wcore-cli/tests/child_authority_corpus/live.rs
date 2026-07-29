@@ -704,6 +704,40 @@ struct LiveRun {
     /// 21-C3 — whether that same shell's write to a path INSIDE its own
     /// workspace succeeded. See [`CHILD_SHELL_WROTE_INSIDE`].
     child_shell_wrote_inside: bool,
+    /// 21-C3 — the `tool_result` bodies the CHILD sent back to its own
+    /// endpoint. Evidence only; nothing asserts on it.
+    child_tool_results: String,
+}
+
+/// Pull the `content` of every `tool_result` block out of a served request
+/// body. Deliberately a shallow structural walk rather than a regex: a regex
+/// over minified JSON is the kind of matcher that silently returns nothing and
+/// reads as "the child said nothing".
+fn extract_tool_result_bodies(body: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut stack = vec![value];
+    while let Some(node) = stack.pop() {
+        match node {
+            serde_json::Value::Object(map) => {
+                let is_tool_result = map
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|t| t == "tool_result");
+                if is_tool_result
+                    && let Some(content) = map.get("content").and_then(serde_json::Value::as_str)
+                {
+                    out.push(content.chars().take(400).collect::<String>());
+                }
+                stack.extend(map.into_iter().map(|(_, v)| v));
+            }
+            serde_json::Value::Array(items) => stack.extend(items),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Persist the full raw transcript of one live run and return its path.
@@ -793,6 +827,18 @@ fn run_live_with_batch(
         .collect();
     run.child_shell_ran = shell_marker_seen(&bodies, CHILD_SHELL_RAN);
     run.child_shell_wrote_inside = shell_marker_seen(&bodies, CHILD_SHELL_WROTE_INSIDE);
+    // 21-C3 — what the CHILD'S tool call actually returned, taken from the
+    // conversation the child sent back to its own endpoint. The child engine
+    // writes to a `NullSink`, so this never appears on the parent's screen and
+    // the corpus previously had no way to say WHY a live child obtained
+    // nothing. Carried as evidence only; no verdict reads it, so the corpus's
+    // rule that nothing asserts on an error shape is untouched.
+    run.child_tool_results = bodies
+        .iter()
+        .filter(|body| body.contains(CHILD_GOAL_L1) && body.contains("tool_result"))
+        .flat_map(|body| extract_tool_result_bodies(body))
+        .collect::<Vec<_>>()
+        .join(" | ");
     run.transcript_path = persist_transcript(
         dimension,
         transport,
@@ -843,6 +889,7 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
                 grandchild_turns: 0,
                 child_shell_ran: false,
                 child_shell_wrote_inside: false,
+                child_tool_results: String::new(),
                 transcript_path: String::new(),
             };
         }
@@ -944,6 +991,7 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
         grandchild_turns: 0,
         child_shell_ran: false,
         child_shell_wrote_inside: false,
+        child_tool_results: String::new(),
         transcript_path: String::new(),
     }
 }
@@ -1003,6 +1051,7 @@ fn run_headless(world: &LiveWorld) -> LiveRun {
                 grandchild_turns: 0,
                 child_shell_ran: false,
                 child_shell_wrote_inside: false,
+                child_tool_results: String::new(),
                 transcript_path: String::new(),
             };
         }
@@ -1048,6 +1097,7 @@ fn run_headless(world: &LiveWorld) -> LiveRun {
         grandchild_turns: 0,
         child_shell_ran: false,
         child_shell_wrote_inside: false,
+        child_tool_results: String::new(),
         transcript_path: String::new(),
     }
 }
@@ -1155,6 +1205,7 @@ fn run_headless_pty(world: &LiveWorld) -> LiveRun {
         grandchild_turns: 0,
         child_shell_ran: false,
         child_shell_wrote_inside: false,
+        child_tool_results: String::new(),
         transcript_path: String::new(),
     }
 }
@@ -1174,6 +1225,7 @@ fn run_headless_pty(world: &LiveWorld) -> LiveRun {
         grandchild_turns: 0,
         child_shell_ran: false,
         child_shell_wrote_inside: false,
+        child_tool_results: String::new(),
         transcript_path: String::new(),
     }
 }
@@ -1291,6 +1343,7 @@ fn run_tui(world: &LiveWorld) -> LiveRun {
         grandchild_turns: 0,
         child_shell_ran: false,
         child_shell_wrote_inside: false,
+        child_tool_results: String::new(),
         transcript_path: String::new(),
     }
 }
@@ -1315,6 +1368,7 @@ fn run_tui(world: &LiveWorld) -> LiveRun {
         grandchild_turns: 0,
         child_shell_ran: false,
         child_shell_wrote_inside: false,
+        child_tool_results: String::new(),
         transcript_path: String::new(),
     }
 }
@@ -1375,8 +1429,14 @@ fn observe(dimension: Dimension, world: &LiveWorld, run: &LiveRun) -> (Outcome, 
                          never returned on the wire, so the shell did not run. An absent effect \
                          from a shell that never started says nothing about tool authority, \
                          workspace containment or the approval gate, and is not recorded as a \
-                         refusal. {} delegated child provider turn(s) arrived",
-                        run.child_turns
+                         refusal. {} delegated child provider turn(s) arrived. What the child's \
+                         own tool call returned: {}",
+                        run.child_turns,
+                        if run.child_tool_results.is_empty() {
+                            "nothing — the child sent no tool_result back to its own endpoint"
+                        } else {
+                            &run.child_tool_results
+                        }
                     ),
                 )
             }
