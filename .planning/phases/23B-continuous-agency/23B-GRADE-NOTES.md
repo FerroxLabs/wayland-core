@@ -265,3 +265,44 @@ PARTIAL". Clause table (:20-23): observed MET, revoked MET, rolled back MET, can
 promotion met and explicitly NOT vacuously — **`promoted` STILL NOT MET (`bail!`, untouched)**.
 No VERDICT or DISPOSITION file exists in `23A-governed-skills/`. A sibling lane owns this; I
 record it and defer.
+
+### M10 — instrument-exposure check: this phase is NOT exposed to the two known-bad instruments
+
+- **`no-tests = "fail"` silently ignored:** not load-bearing. `.config/nextest.toml:37` does carry
+  it, but **every** 23B plan gate passes `--no-tests=fail` on the COMMAND LINE
+  (`23B-01-PLAN.md:158,193,194`; `23B-02-PLAN.md:166,200,201,243`; `23B-03-PLAN.md:170,171`), and
+  `23B-03-LIVE-EVIDENCE.md:183` red-proved the CLI flag works (exit **4** on a no-match filter).
+  Every reported suite reads back a non-zero executed count.
+- **nextest "flakiness" = fd/inotify exhaustion:** both red clusters in this phase were correctly
+  diagnosed, not laundered. 23B-02's 14 raw-harness failures passed in isolation and at
+  `--test-threads=1` (2101/0); 23B-03's four `child_authority_corpus` failures were re-run alone at
+  the untouched base `32e2f57d` and fail identically there.
+
+### M11 — C4 nuance that changes NOT MET from a blanket claim to a precise one
+
+`/cost` and `/compact` DO exist as TUI commands (`tui/commands/mod.rs:197,227,596,604`), and
+`/cost` renders session spend + per-turn breakdown (`tui/surfaces/diagnostics.rs:789,1890-1903`).
+But: `CacheHealthWarn` at `engine.rs:11081` is, per the code's own comment, *"Warning-only
+structured telemetry: greppable in the engine log, never alters the request"*; `TokenPressure` has
+**0** refs in `wcore-agent`/`wcore-cli`; no cost-regression thresholds exist. So one of four
+clauses has a partial surface and it **predates Phase 23 entirely**. Graded NOT MET rather than
+PARTIAL so the phase is not credited with work it did not do.
+
+### M12 — fence + supporting facts for the gap list
+
+- `git diff --name-status 861d1b1a HEAD` → 1 file added (NOTES). `git status --porcelain` empty.
+  `git diff --stat` over `crates/`, `.github/workflows`, and both fenced `wcore-cli` files → empty.
+  **Zero fence exposure.**
+- `ls scripts/f23*` → 15 scripts; **no `f23-session-operator-drive.ps1`**, so C2's Windows leg is
+  unbuilt, not merely undriven.
+- `ci.yml:7-31` already admits lane branches to `push.branches` (added 2026-07-27), so the macOS
+  *binary* is obtainable; the macOS journey blocker is the compiled **test harness**, which CI does
+  not upload → needs a `.github/workflows/ci.yml` edit, which lanes are fenced from.
+- Clock: now `2026-07-29T10:03:04Z`; Linux `f23-journey-day3.timer` armed for
+  `2026-07-30 14:31:00 UTC` → ~28 hours to recurrence of the G5a defect.
+
+## VERDICT WRITTEN
+
+`23B-PHASE-VERDICT.md` — **NOT ACHIEVED**. C1 PARTIAL (23A's, deferred), C2 PARTIAL,
+C3 NOT MET, C4 NOT MET, C5 NOT MET, C6 MET WITH STATED EXCEPTIONS. Costed 16-item gap list;
+G5a (Linux journey `HOME` abort) is urgent and recurs in ~28h.
