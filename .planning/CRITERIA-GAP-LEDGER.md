@@ -691,6 +691,25 @@ the shipped artifact. **If the `voice` feature is ever enabled in a release buil
 becomes blocking immediately**, because a shipped voice surface with zero interruption evidence is
 exactly the silent-failure class that blocks 24-C2.
 
+**Correction to the ordered-events sub-clause, 2026-07-29 (orchestrator).** `HANDOFF-2026-07-29-M1-WAVE2.md`
+§3 stated that this clause *"cannot pass for voice because it cannot pass for anything — the protocol
+has no sequence on ANY event"*. **That was wrong, and it was my claim.** Measured against the corpus:
+**6 of 51 event fixtures already carry an ordering field** — `anvil_receipt`,
+`anvil_receipt_invalidated`, `sub_agent_event`, `workflow_started`, `workflow_node_event`,
+`workflow_finished` — using `event_id` plus a monotonic `sequence` (`child_sequence` on the sub-agent
+event). Liveness control: the same glob matched `"type"` in all 51, so the 6/51 is a real
+discrimination and not a dead grep.
+
+What `contract/generate.rs:41-45` actually defers is narrower than I reported: **legacy ordinary-turn
+and tool events** have no producer event id or monotonic sequence, and Recovery v1 deliberately
+supplies a sanitized, content-free **journal cursor and replay stream** for those instead of
+retrofitting per-event sequence numbers.
+
+So the clause is **satisfiable, and by an existing in-repo mechanism** — voice events would simply
+adopt the `event_id` + `sequence` shape those six already use. It is not a design impossibility and
+does not require restating the criterion. It remains unexercised only because the voice feature is
+not built.
+
 #### 27-C5 — NOT MET
 
 > **"Deterministic corpora and packaged smokes pass on native macOS, Linux, and Windows."**
