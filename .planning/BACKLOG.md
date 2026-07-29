@@ -1579,3 +1579,13 @@ done ad hoc.
 **Also corrected by that lane:** a fourth stale advertised-but-dead site — the operator-facing
 msteams config schema still read *"send-only MVP; inbound webhook receive is deferred to v0.8.3"*,
 long false. That family now stands at nine recorded instances.
+
+## BL-OPENAPI-DOC-EMPTY — every REST operation ships with no summary or description (LOW)
+
+**Source:** `openapi-consumer`, 2026-07-29. **Pre-existing, not a regression of the 3.1.0 bump** —
+no handler carries a doc comment, so `/doc` rendered bare `METHOD /path` under 3.0.3 too.
+
+All **10** operations lack `summary` and `description`, so the spec viewer shipped inside
+`wayland-core` (`wcore-acp/src/transport/rest.rs:336`) renders method and path and nothing else.
+The endpoint is public by design (README:480, "for discovery"), so this is what a third-party
+integrator sees first. Cost is small — doc comments on the handlers — and it is not blocking.
