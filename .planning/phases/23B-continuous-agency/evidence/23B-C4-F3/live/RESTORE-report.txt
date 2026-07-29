@@ -1,0 +1,7 @@
+F23_CACHE=session id=c24f32dd-67ca-48ac-9031-dd817a2a46c7 round_trips=1 complete=true started=2026-07-29T16:35:09.709Z updated=2026-07-29T16:35:09.802Z path=/root/lane-cost-provider-live/home-RESTORE/cache-ledger/c24f32dd-67ca-48ac-9031-dd817a2a46c7.json
+F23_CACHE=quality hit_ratio=0.0000 warm_hit_ratio=0.0000 hit_round_trips=0 miss_round_trips=1 warm_round_trips=0 cache_read=0 cache_write=0 uncached_input=1126 output=5 total_input=1126
+F23_CACHE=invalidation distinct_causes=1 causes=no_marker:1
+F23_CACHE=invalidation_cause name=no_marker count=1
+F23_CACHE=pressure peak_watermark=1126 autocompact_threshold=167000 emergency_limit=197000 peak_pressure=0.0067 compactions=0 micro=0 auto=0 failed=0 tokens_reclaimed=0
+F23_CACHE=cost usd=0.000000 uncached_equivalent_usd=0.000000 saving_usd=0.000000 saving_ratio=0.0000 cost_truth=estimated catalog_priced_round_trips=0 estimated_round_trips=1 unpriced_round_trips=0
+F23_CACHE=cost_warning text=usd_is_a_family_rate_estimate_not_spend cost_truth=estimated

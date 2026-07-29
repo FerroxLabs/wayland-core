@@ -1,0 +1,1 @@
+F23_CACHE=verify trustworthy=false cost_truth=estimated catalog_priced_round_trips=0 estimated_round_trips=1 unpriced_round_trips=0 cost_usd=0.018840 session_complete=true session=30343417-893a-4abc-90d1-43ad343ba4d8 path=/root/lane-cost-provider-live/home-REVERT/cache-ledger/30343417-893a-4abc-90d1-43ad343ba4d8.json
