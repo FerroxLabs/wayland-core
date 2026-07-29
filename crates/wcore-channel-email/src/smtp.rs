@@ -494,8 +494,13 @@ mod tests {
     /// instead of a config error at connect time.
     #[test]
     fn tls_root_cert_path_that_does_not_exist_errors() {
-        let err = build_tls_params("smtp.acme.com", "/nonexistent/wayland-test/no-such-ca.pem")
-            .expect_err("a missing anchor file must not be ignored");
+        // `let ... else` rather than `expect_err`: `TlsParameters` is not
+        // `Debug`, so the `Result` cannot be unwrapped by the usual helpers.
+        let Err(err) =
+            build_tls_params("smtp.acme.com", "/nonexistent/wayland-test/no-such-ca.pem")
+        else {
+            panic!("a missing anchor file must not be ignored");
+        };
         let msg = err.to_string();
         assert!(
             msg.contains("tls_root_cert_path") && msg.contains("no-such-ca.pem"),
@@ -521,7 +526,9 @@ mod tests {
         let result = build_tls_params("smtp.acme.com", path.to_str().unwrap());
         let _ = std::fs::remove_file(&path);
 
-        let err = result.expect_err("a non-PEM anchor file must not be ignored");
+        let Err(err) = result else {
+            panic!("a non-PEM anchor file must not be ignored");
+        };
         assert!(
             err.to_string().contains("tls_root_cert_path"),
             "error must name the offending setting; got: {err}"
