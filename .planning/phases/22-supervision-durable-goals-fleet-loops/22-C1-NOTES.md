@@ -89,3 +89,68 @@ and hard-errors when `critical` is absent.
 ## Log
 - (t0) worktree created, baseline measured, notes committed.
 - (t+25m) drift probe written, self-tested 3/3, base drift proved pre-existing.
+
+## Measurement 2 (t+~45m) — the design, and two things I decided NOT to build
+
+### What the wire can reuse rather than re-spell
+
+`wcore-protocol` already depends on `wcore-types`, and `wcore_types::goal` already holds the
+canonical taxonomy with `Serialize + Deserialize`: `GoalId`, `GoalStrategy`, `GoalTerminalState`,
+`LoopPolicy`, `WaitKind`, `TaskId`. So the wire projection reuses those EXACT types. No second
+Goal vocabulary is minted on the protocol side — which is the failure mode 22-02/22-03 kept
+naming ("a surface that renders its own shape is a surface that can disagree with the chain",
+`goal_cmd.rs:577`).
+
+Only three shapes have no `wcore-types` home and must be mirrored: `GoalLifecycle`,
+`GoalAuthorityRecord` and the task ledger — all defined in `wcore-agent/src/session_journal/model.rs`,
+which `wcore-protocol` cannot depend on (agent depends on protocol, not the reverse).
+
+**Authority note.** `GoalAuthorityWire` deliberately does NOT reopen the route `record.rs:1-31`
+closes. The only function that turns a durable record into an effective envelope is
+`GoalAuthorityRecord::reconstruct`, it lives in `wcore-agent`, and it takes
+`GoalAuthorityRecord` — not the wire type. A host that deserializes `GoalAuthorityWire` holds a
+description, not an envelope.
+
+### DECIDED: no `ProtocolCommand` variant in this lane
+
+I was going to add a read-only `goal_resync` pull command. I am not, and the reason is a
+measurement, not caution: a host command has to be answered in the CLI command loop, which is
+`crates/wcore-cli/src/main.rs` — **fenced to another lane**. A command variant on the wire with
+no dispatcher is a wire type that advertises a capability nothing answers. That is precisely
+the false-advertising class this program has already paid for twice
+(`--skills-promote` bailing unconditionally, `INV-21-23.md:149`). So: producer events only,
+`ContractCapabilityStatus::ShapeOnly` (**not** `Available`) for the new capability, and the
+host pull command named explicitly in the seam request as the next increment with its
+dispatcher site.
+
+### DECIDED: narrow the task ledger on the wire, and prove the narrowing
+
+`GoalTaskState` carries the full attempt history (`attempts`, `handoffs`, `completion`). Mirroring
+it doubles the wire surface for data a control plane summarises anyway. The wire carries a
+per-task summary plus a closed `GoalTaskWireStatus`. The honest mitigation is `state_digest`
+over the canonical JSON of the FULL `GoalState` — same device `session_recovery_snapshot` uses —
+so a host can always tell which chain state its narrowed view corresponds to. Full history stays
+on `goal status`. Named in the seam request as a v2 candidate.
+
+### Falsifiable guard against the mirror drifting from the chain
+
+`wcore-agent` gets `goal/wire.rs` with the conversion and a **field-coverage test**: serialize a
+fully-populated `GoalState`, collect its top-level JSON keys, and assert every one is either
+represented on the wire projection or in an explicit `DELIBERATELY_NOT_ON_THE_WIRE` list. Add a
+field to `GoalState` and forget the projection and that test goes red. Without it the mirror
+silently rots, which is the whole risk of choosing a mirror over the reduced state itself.
+
+### Contract entries this drifts (all of it goes in the fenced seam request)
+
+- `EVENT_SPECS` 49 -> 51; `PRODUCER_EVENT_TYPES` 57 -> 59
+- `SOURCE_INPUTS` gains `crates/wcore-protocol/src/goal.rs` (else the new wire types are
+  outside the descriptor's own integrity hash — a real gap, not a formality)
+- `contract_capabilities()` gains `durable_goals_v1: ShapeOnly` -> `CapabilityStatusMismatch`
+- `CONTRACT_MINOR` 8 -> 9. An additive event set IS a minor bump; leaving it at 8 while the
+  event count moves 49 -> 51 would be a dishonest version. Flagged for veto in the seam request.
+- `desktop_contract_corpus.rs` count assertion 49 -> 51
+
+## Log
+- (t0) worktree created, baseline measured, notes committed.
+- (t+25m) drift probe written, self-tested 3/3, base drift proved pre-existing.
+- (t+45m) design fixed; command variant and full task ledger explicitly declined with reasons.
