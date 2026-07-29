@@ -76,6 +76,32 @@ impl HostChildController {
         self.spawner.spawn_host_child(config).await
     }
 
+    /// Create host-originated child work carrying the host's OWN authority
+    /// request for that child.
+    ///
+    /// F21-C3: [`Self::spawn_child`] can only ever produce a child at the
+    /// `SHARED_READ_ONLY_CHILD_TOOLS` floor, because it supplies no
+    /// [`ForkOverrides`]. That is not a narrower *enforcement* than the
+    /// standalone Delegate path — both converge on the single
+    /// `build_tool_registry` intersection — but it means a tool-authority or
+    /// budget request cannot be MADE on this surface, so the host surface could
+    /// not be compared against the standalone one at all. This entry point
+    /// supplies the missing request channel and nothing else.
+    ///
+    /// It grants no authority: `overrides.allowed_tools` can only ever SELECT
+    /// from what the parent session already holds, and `overrides.budget` can
+    /// only LOWER a cap. Both are intersected at the same seam that binds
+    /// [`Spawner::spawn_fork`].
+    pub async fn spawn_child_with_authority(
+        &self,
+        config: SubAgentConfig,
+        overrides: ForkOverrides,
+    ) -> SubAgentResult {
+        self.spawner
+            .spawn_host_child_with_overrides(config, overrides)
+            .await
+    }
+
     /// Pin supervision to the currently bound session generation.
     pub fn supervisor(&self) -> Result<DurableChildSupervisor, DurableSpawnerError> {
         self.spawner.durable_child_supervisor()
@@ -1107,9 +1133,45 @@ impl AgentSpawner {
     }
 
     /// Canonical host adapter for creating durable child work.
+    ///
+    /// Equivalent to [`Self::spawn_host_child_with_overrides`] with
+    /// `ForkOverrides::default()`, which is the request every existing host
+    /// caller already makes implicitly — so this remains byte-identical for
+    /// them.
     pub async fn spawn_host_child(&self, sub_config: SubAgentConfig) -> SubAgentResult {
-        self.spawn_one_with_origin(sub_config, ChildOrigin::Host)
+        self.spawn_host_child_with_overrides(sub_config, ForkOverrides::default())
             .await
+    }
+
+    /// Canonical host adapter for creating durable child work under an
+    /// EXPLICIT authority request.
+    ///
+    /// F21-C3: the host surface previously had no way to express a
+    /// tool-authority or budget request, because `spawn_one_with_origin`
+    /// substitutes `ForkOverrides::default()` unconditionally. That made three
+    /// of the eleven child-authority dimensions unmeasurable on this surface —
+    /// their corpus verdicts were WITHHELD rather than compared, and a withheld
+    /// verdict is not an equivalence.
+    ///
+    /// This carries the caller's own [`ForkOverrides`] to the SAME
+    /// `spawn_durable` seam that [`Spawner::spawn_fork`] uses, so the two
+    /// surfaces differ only in `ChildOrigin` and not in what binds the child.
+    /// The request is never authority: `allowed_tools` is intersected against
+    /// `parent_tool_authority` at `build_tool_registry` (the single production
+    /// construction site, with no skip arm), and `budget` is intersected
+    /// pointwise with the delegator's own envelope.
+    pub async fn spawn_host_child_with_overrides(
+        &self,
+        sub_config: SubAgentConfig,
+        overrides: ForkOverrides,
+    ) -> SubAgentResult {
+        self.spawn_durable(
+            sub_config,
+            overrides,
+            SpawnExtras::default(),
+            ChildOrigin::Host,
+        )
+        .await
     }
 
     /// Bind spawned children to the parent session's immutable sandbox.

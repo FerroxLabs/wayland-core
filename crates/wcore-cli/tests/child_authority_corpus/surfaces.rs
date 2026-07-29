@@ -1118,7 +1118,7 @@ fn render_duration(v: Option<Duration>) -> String {
 /// writes a probe file into the parent's workspace. The invariant is measured
 /// from the filesystem: if the probe exists, the child obtained a tool the
 /// parent does not hold.
-pub fn tool_widening_through_spawn_fork(session_tag: &str) -> ProbeResult {
+pub fn tool_widening_through_spawn_fork(session_tag: &str, seam: ChildSpawnSeam) -> ProbeResult {
     // Bounded, because the delegated child's OWN engine may block this process
     // forever. A child scripted to call Bash reaches the shipped confirmer,
     // which prompts on stdin — the HARNESS's stdin, inherited by the in-process
@@ -1136,7 +1136,7 @@ pub fn tool_widening_through_spawn_fork(session_tag: &str) -> ProbeResult {
     // whole probe. The probe now runs two arms, and widening one 45 s budget to
     // cover both would have been a raised timeout wearing a refactor's clothes.
     // Each arm keeps exactly the budget the single run had.
-    tool_widening_through_spawn_fork_inner(session_tag)
+    tool_widening_through_spawn_fork_inner(session_tag, seam)
 }
 
 /// Run `probe` on its own thread and give up after `budget`.
@@ -1180,6 +1180,64 @@ struct ToolArm {
     parent_workspace: String,
 }
 
+impl ToolArm {
+    /// Did this arm obtain ANY tool outside the read-only delegation floor?
+    ///
+    /// F21-C3. `Bash` and `Write` are independent members of the same class:
+    /// both sit outside `SHARED_READ_ONLY_CHILD_TOOLS`, and both are admitted
+    /// to a child's registry by exactly one predicate —
+    /// `build_tool_registry`'s intersection against `parent_tool_authority`.
+    /// Either one executing is therefore a positive observation that the child
+    /// held mutating authority, and the differential needs only one.
+    ///
+    /// Keying the gate on `Write` ALONE is what made this dimension read
+    /// NOT-EXPRESSIBLE on every cell. Measured at `5be91056`: the granted arm's
+    /// `Write` fails with *"path must be absolute"* — `Write`/`Read` demand an
+    /// absolute path and a delegated child's isolated checkout is allocated at
+    /// `<session>/delegated-workspaces/checkouts/<worker_id>`, which a scripted
+    /// corpus cannot know before the child launches (21-C3-04). In the SAME run
+    /// the granted arm's shell DID execute and the denied arm's shell did NOT,
+    /// the denied arm returning `Denied by policy: no matching grant for
+    /// actor+resource+action`. A working differential was already present and
+    /// the gate was reading past it.
+    ///
+    /// The `Bash` leg was previously unusable for an unrelated reason — the
+    /// overlapping-read-deny bubblewrap abort (21-C3-01) — which the
+    /// `f21-bwrap-overlap` lane has since fixed. This gate is only correct
+    /// BECAUSE that fix landed; before it, both observables were genuinely dead
+    /// and NOT-EXPRESSIBLE was the right answer.
+    fn obtained_any_mutating_tool(&self) -> bool {
+        self.obtained_mutating_tool || self.shell_executed
+    }
+}
+
+/// Which production child-spawn entry point an arm drives.
+///
+/// F21-C3: this is the ONLY thing that differs between the two SURFACES. Both
+/// variants converge on the same `spawn_durable` seam and therefore on the same
+/// single `build_tool_registry` intersection — which is precisely the claim the
+/// tool dimension needs tested rather than assumed, and the reason a surface
+/// difference here is meaningful instead of cosmetic.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ChildSpawnSeam {
+    /// `Spawner::spawn_fork` — `ChildOrigin::Delegate`. The standalone surface.
+    Delegate,
+    /// `AgentSpawner::spawn_host_child_with_overrides` — `ChildOrigin::Host`.
+    /// The host surface's own durable child path.
+    HostChild,
+}
+
+impl ChildSpawnSeam {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Delegate => "`Spawner::spawn_fork` (ChildOrigin::Delegate)",
+            Self::HostChild => {
+                "`AgentSpawner::spawn_host_child_with_overrides` (ChildOrigin::Host)"
+            }
+        }
+    }
+}
+
 /// The parent authority an arm runs under. This is the ONLY thing that differs
 /// between the two arms.
 enum ParentAuthority {
@@ -1192,11 +1250,16 @@ enum ParentAuthority {
 
 /// Drive one arm under the same 45 s bound the single-run probe carried, so
 /// adding a second arm does not silently double anyone's budget.
-fn tool_arm(session_tag: &str, authority: ParentAuthority, marker: &str) -> ToolArm {
+fn tool_arm(
+    session_tag: &str,
+    authority: ParentAuthority,
+    marker: &str,
+    seam: ChildSpawnSeam,
+) -> ToolArm {
     let tag = session_tag.to_owned();
     let marker_owned = marker.to_owned();
     run_bounded(Duration::from_secs(45), move || {
-        tool_arm_inner(&tag, authority, &marker_owned)
+        tool_arm_inner(&tag, authority, &marker_owned, seam)
     })
     .unwrap_or_else(|| ToolArm {
         shell_executed: false,
@@ -1218,13 +1281,30 @@ fn tool_arm(session_tag: &str, authority: ParentAuthority, marker: &str) -> Tool
 /// Drive one arm: a delegated child scripted to exercise a MUTATING tool the
 /// read-only delegation floor does not grant, then read the effect back.
 ///
-/// ## Why the probe tool is `Write` and not only `Bash` — 21-C3
+/// ## Why the probe drives BOTH `Write` and `Bash` — 21-C3
 ///
-/// `Bash` cannot reach a verdict on Linux at this SHA. Every delegated
-/// isolated-mutation child's shell dies in the sandbox before running (see
-/// `21-C3-NOTES.md` R2: `spawner.rs:1817` emits an OVERLAPPING read-deny pair
-/// and `bwrap.rs:295` aborts on it). A dimension whose only probe is blocked by
-/// an unrelated defect measures that defect, not authority.
+/// Neither observable is sufficient alone, and which one carries the verdict
+/// has changed as the tree moved. Both are driven, and
+/// `ToolArm::obtained_any_mutating_tool` accepts either.
+///
+/// `Bash` could not reach a verdict on Linux while 21-C3-01 was open: every
+/// delegated isolated-mutation child's shell died in the sandbox before running
+/// (`spawner.rs` emitted an OVERLAPPING read-deny pair and `bwrap.rs` aborted
+/// on it). The `f21-bwrap-overlap` lane fixed that in the renderer, and the
+/// shell now runs — measured at `5be91056`: the granted arm reports
+/// `shell executed: true`.
+///
+/// `Write` cannot reach a verdict either, for an unrelated and still-open
+/// reason (21-C3-04): `Write`/`Read` demand an ABSOLUTE path, and a delegated
+/// child's isolated checkout is allocated at
+/// `<session>/delegated-workspaces/checkouts/<worker_id>`, which a scripted
+/// corpus cannot know before the child launches. The granted arm's `Write`
+/// therefore returns `path must be absolute` in every run.
+///
+/// A dimension whose only probe is blocked by an unrelated defect measures that
+/// defect, not authority — which is why keying the gate on `Write` alone made
+/// every tool cell read NOT-EXPRESSIBLE while a working `Bash` differential sat
+/// unread in the same output.
 ///
 /// `Write` is the same class of request — a mutating tool outside
 /// `SHARED_READ_ONLY_CHILD_TOOLS`, admitted by `build_tool_registry` only when
@@ -1237,7 +1317,12 @@ fn tool_arm(session_tag: &str, authority: ParentAuthority, marker: &str) -> Tool
 ///
 /// `Bash` is still driven, in the same arm, and its outcome is recorded
 /// separately — that is how R2 was found and it must stay visible.
-fn tool_arm_inner(session_tag: &str, authority: ParentAuthority, marker: &str) -> ToolArm {
+fn tool_arm_inner(
+    session_tag: &str,
+    authority: ParentAuthority,
+    marker: &str,
+    seam: ChildSpawnSeam,
+) -> ToolArm {
     let staging = TempDir::new().expect("tempdir");
     let outside_path = std::fs::canonicalize(staging.path())
         .expect("canonical probe dir")
@@ -1327,7 +1412,19 @@ fn tool_arm_inner(session_tag: &str, authority: ParentAuthority, marker: &str) -
 
     let rt = runtime();
     let before = fixture.provider.calls();
-    let result = rt.block_on(fixture.spawner.spawn_fork(config, overrides));
+    // THE SURFACE VARIABLE. Both entry points carry the SAME `overrides` to the
+    // same `spawn_durable` seam; they differ in `ChildOrigin` and in which
+    // public API a caller reaches. Before F21-C3 the host arm did not exist,
+    // because `spawn_host_child` substituted `ForkOverrides::default()` and no
+    // tool request could be made on that surface at all.
+    let result = match seam {
+        ChildSpawnSeam::Delegate => rt.block_on(fixture.spawner.spawn_fork(config, overrides)),
+        ChildSpawnSeam::HostChild => rt.block_on(
+            fixture
+                .spawner
+                .spawn_host_child_with_overrides(config, overrides),
+        ),
+    };
     let child_turns = fixture.provider.calls().saturating_sub(before);
     let returned = fixture.provider.tool_results().join(" | ");
 
@@ -1363,7 +1460,7 @@ fn tool_arm_inner(session_tag: &str, authority: ParentAuthority, marker: &str) -
     }
 }
 
-fn tool_widening_through_spawn_fork_inner(session_tag: &str) -> ProbeResult {
+fn tool_widening_through_spawn_fork_inner(session_tag: &str, seam: ChildSpawnSeam) -> ProbeResult {
     // ARM 1 — THE KNOWN-POSITIVE. The parent holds Bash. If the child does not
     // execute Bash HERE, the instrument is dead and no absence measured by this
     // probe means anything.
@@ -1377,6 +1474,7 @@ fn tool_widening_through_spawn_fork_inner(session_tag: &str) -> ProbeResult {
         &format!("{session_tag}a"),
         ParentAuthority::HoldsBash,
         "CORPUSBASHGRANTED",
+        seam,
     );
     // ARM 2 — THE HOSTILE REQUEST. Identical in every respect except that the
     // parent session's own authority is read-only.
@@ -1384,11 +1482,12 @@ fn tool_widening_through_spawn_fork_inner(session_tag: &str) -> ProbeResult {
         &format!("{session_tag}d"),
         ParentAuthority::ReadOnly,
         "CORPUSBASHDENIED",
+        seam,
     );
 
     let shape = format!(
-        "TOOL-AUTHORITY DIFFERENTIAL. Two arms of the production Delegate path \
-         (`Spawner::spawn_fork`), identical in workspace, script, child config, requested toolset \
+        "TOOL-AUTHORITY DIFFERENTIAL through {}. Two arms of that production spawn path, \
+         identical in workspace, script, child config, requested toolset \
          (`allowed_tools=[\"Bash\",\"Write\",\"Read\"]`) and approval posture (all three \
          allow-listed in both arms, so the shipped confirmer is held constant and cannot be the \
          difference), with the sandbox runtime resolved in both by the production \
@@ -1400,6 +1499,7 @@ fn tool_widening_through_spawn_fork_inner(session_tag: &str) -> ProbeResult {
          ARM-DENIED (`narrow_parent_tool_authority([\"Read\",\"Grep\",\"Glob\"])`) in {}: {} child \
          turn(s), obtained the mutating tool: {}, shell executed: {}, its write escaped the \
          workspace: {}; returned: {}; child text: {}",
+        seam.label(),
         granted.parent_workspace,
         granted.child_turns,
         granted.obtained_mutating_tool,
@@ -1432,39 +1532,32 @@ fn tool_widening_through_spawn_fork_inner(session_tag: &str) -> ProbeResult {
     // never carried, and its absence is why a REFUSED here was unattributable
     // for three plans. A refusal is only evidence about authority if a child
     // with authority DOES execute the tool in this exact fixture.
-    if !granted.obtained_mutating_tool {
+    if !granted.obtained_any_mutating_tool() {
         return ProbeResult::new(
             Outcome::NotExpressible,
-            "no verdict — the mutating tool did not work even for a parent that holds it",
+            "no verdict — no mutating tool worked even for a parent that holds them",
             format!(
                 "the KNOWN-POSITIVE arm failed: a child of a parent holding the full \
-                 child-eligible tool set, granted the mutating toolset outright, could not write a \
-                 sentinel inside its own workspace and read it back. Something other than tool \
-                 authority is stopping the call, so the denied arm's absence proves nothing and is \
-                 not recorded as a refusal. \
-                 TWO CAUSES ARE MEASURED AND BOTH ARE CORPUS-SIDE LIMITS, NOT ENFORCEMENT: (1) the \
-                 shell leg cannot run at all — `spawner.rs:1817` gives an isolated-mutation child \
-                 the OVERLAPPING read-deny pair `[<parent>, <parent>/.git]` and `bwrap.rs:295` \
-                 renders each directory deny as `--ro-bind <empty mask> <path>`, so the second \
-                 needs a mount point inside the first's read-only mask and bubblewrap aborts \
-                 (`bwrap: Can't mkdir …/.git: Read-only file system`, reproduced standalone with \
-                 a control); and (2) the file leg cannot be targeted — `Write`/`Read` require an \
-                 ABSOLUTE path and a delegated child's isolated checkout is allocated at \
-                 `<session>/delegated-workspaces/checkouts/<worker_id>`, which a scripted corpus \
-                 cannot know before the child launches. Recording NOT-EXPRESSIBLE is the honest \
-                 result; a REFUSED here would be the vacuity this corpus exists to close. {shape}"
+                 child-eligible tool set, granted the mutating toolset outright, obtained NEITHER \
+                 mutating observable — its `Bash` did not execute AND its `Write`+read-back \
+                 sentinel did not return. Something other than tool authority is stopping both \
+                 calls, so the denied arm's absence proves nothing and is not recorded as a \
+                 refusal. Recording NOT-EXPRESSIBLE is the honest result; a REFUSED here would be \
+                 the vacuity this corpus exists to close. {shape}"
             ),
         );
     }
 
-    if denied.obtained_mutating_tool {
+    if denied.obtained_any_mutating_tool() {
         return ProbeResult::new(
             Outcome::Allowed,
             "a mutating tool the read-only parent does not itself hold",
             format!(
-                "the child of a READ-ONLY parent wrote a sentinel with `Write` and read it back. \
-                 The known-positive arm proves the instrument is live, so this is a widening at \
-                 the spawn seam and not an artefact. {shape}"
+                "the child of a READ-ONLY parent obtained a mutating tool outside the read-only \
+                 delegation floor (`Write` sentinel written and read back: {}; `Bash` executed: \
+                 {}). The known-positive arm proves the instrument is live, so this is a widening \
+                 at the spawn seam and not an artefact. {shape}",
+                denied.obtained_mutating_tool, denied.shell_executed
             ),
         );
     }
@@ -1915,7 +2008,9 @@ impl CorpusExecutor for StandaloneInProcess {
                 provider_no_channel_canary(Arc::clone(&fixture.spawner))
             }
             Dimension::Approval => approval_no_channel_canary(),
-            Dimension::Tool => tool_widening_through_spawn_fork("c04b5a-a11e-0003"),
+            Dimension::Tool => {
+                tool_widening_through_spawn_fork("c04b5a-a11e-0003", ChildSpawnSeam::Delegate)
+            }
             Dimension::Filesystem => filesystem_escape_probe(),
             Dimension::Secret => secret_read_probe(),
             Dimension::Egress => egress_probe(),
@@ -2007,13 +2102,18 @@ impl CorpusExecutor for HostProtocolInProcess {
             Dimension::Filesystem => host_child_read_probe(HostReadTarget::OutsideRoot),
             Dimension::Secret => host_child_read_probe(HostReadTarget::CredentialFile),
             Dimension::Egress => host_child_egress_probe(),
-            Dimension::Tool => host_request_surface_not_expressible(
-                "a tool-authority request",
-                &["tool", "allow", "capab", "permission"],
-                "`spawn_host_child` hardcodes `ForkOverrides::default()`, whose allowed_tools is \
-                 empty, so every host child gets the SHARED_READ_ONLY_CHILD_TOOLS floor and no \
-                 caller-supplied tool set",
-            ),
+            // F21-C3: this cell was NOT-EXPRESSIBLE for as long as the host
+            // surface had no way to carry a tool request —
+            // `spawn_host_child` substituted `ForkOverrides::default()`, so
+            // `allowed_tools` was always empty and every host child sat at the
+            // SHARED_READ_ONLY_CHILD_TOOLS floor. It now drives the SAME two-arm
+            // differential the standalone surface drives, through the host's own
+            // `spawn_host_child_with_overrides`, so the two are comparable and
+            // `assert_surface_equivalence` can finally FAIL on this dimension
+            // instead of skipping it as non-decisive.
+            Dimension::Tool => {
+                tool_widening_through_spawn_fork("c04b5a-a11e-0103", ChildSpawnSeam::HostChild)
+            }
             Dimension::FanOut => host_request_surface_not_expressible(
                 "a breadth request",
                 &["task", "batch", "count", "breadth", "fan", "concurren"],
