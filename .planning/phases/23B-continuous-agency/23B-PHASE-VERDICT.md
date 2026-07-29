@@ -99,6 +99,13 @@ confirming 23B-01's own stated rsync caveat.
   `23B-01-linux-drive.log` is that finding in action: **one checksum mismatch took out 4 of 15
   verbs in a single run.** Cost: the recovery surface's own failure mode is unrecoverable.
 
+- **Two of the driver's own assertions could not have failed** — the export-redaction marker
+  and the fork parent-immutability check (findings **SP-1** and **SP-2**, detailed below).
+  SP-1 is demonstrated in the retained evidence: the failing run printed
+  `EXPORT_NONCE_OCCURRENCES=0` — the value meaning "redaction proved" — on a run where the
+  export never happened. Cost: C2 cannot be promoted to MET on this driver until both are
+  repaired.
+
 **Confidence:** high on Linux (nonce-bound, provenance-asserted, driven against the shipped
 binary); the criterion is nonetheless PARTIAL on platform and surface coverage.
 
@@ -268,26 +275,113 @@ the brief's §3b-i demands and which nothing else in this phase supplies.
 
 ---
 
-## Instrument reliability — where confidence is downgraded, and where it need not be
+## Instrument reliability
 
-**The two known-bad instruments named in my dispatch do NOT undermine this phase's evidence:**
+**No grade in this document rests on either of the two instrument defects named in my dispatch,
+and a coordinator correction of 2026-07-29 has since disproved both.** Recorded here so no reader
+re-derives a downgrade from the superseded premises:
 
-- **`.config/nextest.toml`'s `no-tests = "fail"` being silently ignored:** not load-bearing here.
-  **Every 23B plan gate passes `--no-tests=fail` on the command line**, not via the config
-  (`23B-01-PLAN.md:158,193,194`; `23B-02-PLAN.md:166,200,201,243`; `23B-03-PLAN.md:170,171`), and
-  23B-03 red-proved that the CLI flag works (exit **4** on a filter matching no test). Every
-  reported suite also reads back a non-zero executed count (14/14, 19/19, 3418, 58/58, 57/57,
-  1244/1244, 3 passed). **This phase is not exposed to the vacuous-suite class.**
-- **`cargo nextest` "flakiness" being fd/inotify exhaustion:** the two red clusters in this phase
-  were both correctly diagnosed as contention or pre-existing rather than laundered into green.
-  23B-02's 14 raw-harness failures passed in isolation and `--test-threads=1` (2101 passed, 0
-  failed); 23B-03's four `wcore-cli::child_authority_corpus` failures were re-run **alone at the
-  untouched base** `32e2f57d` and fail identically there. Neither was claimed as this phase's green.
+- **"`no-tests = "fail"` is silently ignored, so a green suite may have run nothing" — FALSE for
+  nextest.** The key is inert on 0.9.137, but **fail-closed-on-zero-tests is that version's
+  built-in default**: measured on `hetzner-dsm` in an isolated scratch crate, a zero-match run
+  with *no config file at all* -> `rc=4, error: no tests to run`; with the inert key -> also
+  `rc=4`; matching-filter control -> `0`; real failing test -> `100`. **The guard is redundant,
+  not missing.** Every nextest count in this phase therefore means tests actually ran. The real
+  hazard is bare `cargo test` (`BL-F28-VACUOUS-GREENS`) — and no 23B criterion above rests on one.
+  *(Independently, every 23B plan gate also passes `--no-tests=fail` on the command line, and
+  23B-03 red-proved the flag at exit 4. Belt and braces, but the braces were never needed.)*
+- **"nextest flakiness = fd exhaustion" — does not reach this phase.** Peak runner fds are 299 of
+  a 1024 soft limit (29%); the cap needs ~346 test-threads. Independently, the two red clusters
+  here were correctly diagnosed rather than laundered: 23B-02's 14 raw-harness failures passed in
+  isolation and at `--test-threads=1` (2101/0); 23B-03's four `child_authority_corpus` failures
+  were re-run **alone at the untouched base** `32e2f57d` and fail identically there.
 
-**Where confidence IS downgraded:** Criterion 2, because the acceptance log 23B-01 cites is not in
-the tree (§C2). The criterion still stands on the retained 23B-02 re-drive, which has better
-provenance — but a reader trusting `23B-01-LIVE-EVIDENCE.md`'s table would be trusting a run
-nobody can re-read.
+**So every NOT MET above is NOT MET because the work does not exist, never because an instrument
+failed.** C4 has no artifact. C5's journey has not elapsed. C3 lacks the outbound-body proof its
+own plan is built around. None of that is instrument doubt.
+
+**Where confidence IS genuinely reduced — and both are product-evidence problems, not tooling:**
+
+1. **Criterion 2's cited acceptance log is not in the tree** (§C2). The criterion still stands on
+   the retained 23B-02 re-drive, which has better provenance — but a reader trusting
+   `23B-01-LIVE-EVIDENCE.md`'s table would be trusting a run nobody can re-read.
+2. **Two assertions in the session driver could not have failed** — see the next section.
+
+---
+
+## Assertions that could not have failed (the Phase 21-C3 class)
+
+Hunted deliberately, because this class is not covered by the instrument audit and was flagged as
+most likely to hide in 23B's session-recovery and memory evidence. **It is in the session driver,
+not in memory.** Each finding is proved by running the driver's own code shape in isolation, with
+a control showing the same code discriminates on a real file.
+
+**FINDING SP-1 (session export redaction) — self-passing, and DEMONSTRATED IN THE WILD.**
+`scripts/f23-session-operator-drive.sh:224-226`:
+
+```bash
+OCCURRENCES=$(grep -c -F "$PLANTED" "$EXPORT_PATH" 2>/dev/null)
+[ -n "$OCCURRENCES" ] || OCCURRENCES=0
+echo "F23_01_EXPORT_NONCE_OCCURRENCES=$OCCURRENCES"
+```
+
+If the export file does not exist, `grep` fails, the fallback forces `0`, and **`0` is the value
+that means "redaction proved"**. Measured: missing file -> `OCCURRENCES=0`; control, a real file
+containing the nonce -> `OCCURRENCES=1`. The instrument discriminates on a real file and passes
+for free on no file.
+
+**This is not theoretical — the retained evidence contains an instance.**
+`evidence/23B-01-linux-drive.log`:
+
+```
+F23_01_VERB=export platform=linux status=FAIL exit=1     <- export never happened
+F23_01_EXPORT_NONCE_OCCURRENCES=0                        <- redaction "proved" anyway
+```
+
+The source-side half of this proof is done correctly — lines 153-155 exit **71** if the planted
+nonce is not in the seeded session, explicitly naming the vacuity risk. The flaw is entirely on
+the output side: nothing asserts the export artifact exists or is non-empty. **Cost:** the
+redaction marker is not self-standing and must never be read without the export verb's status
+beside it. In the passing 23B-02 re-drive the export verb exited 0 with its token, so that run's
+redaction claim is probably sound — but "probably" is doing work a gate should do.
+
+**FINDING SP-2 (fork parent-immutability) — latent self-passing.**
+`scripts/f23-session-operator-drive.sh:205-213`:
+
+```bash
+PARENT_FILE=$(ls "$SESSIONS"/*_"$SEED_ID".json 2>/dev/null | head -1)
+PARENT_BEFORE=$(cksum < "$PARENT_FILE")
+... fork ...
+PARENT_AFTER=$(cksum < "$PARENT_FILE")
+[ "$PARENT_BEFORE" = "$PARENT_AFTER" ]   # -> BYTES_EQUAL=true
+```
+
+If the glob resolves to nothing, both `cksum` calls fail, both variables are empty, and **empty
+equals empty -> the assertion passes**. Measured: unresolved path -> `BYTES_EQUAL=true`; control,
+a real file genuinely mutated between the two reads -> `false`. The author guarded the sibling
+extraction — `CP_ID` gets an explicit `if [ -z ... ]; exit 72` at line 181 — and did not guard
+this one. Not demonstrated to have fired (the `show-fork` assertion at line 217 proves fork did
+real work in the passing runs), so this is a latent hole rather than a false pass on record.
+
+**Sound by contrast, and worth naming because it shows the author knew the shape:**
+`REWIND_BYTES_EQUAL` and `REWIND_LATER_FILE_REMOVED` both interpose a **genuine mutation** between
+the two measurements (`printf 'MUTATED\n' > "$TRACKED"`, and `$LATER` written after the
+checkpoint), so a no-op rewind goes red. Those two can fail. So can the exit-code assertions on
+all fifteen verbs, and the `search-miss` guard at lines 165-170, which explicitly refuses to
+assert on a bare `list_total` token because "a gate that cannot go red" proves nothing.
+
+**Memory evidence: checked and CLEAN on this class.**
+`forget_removes_the_item_and_reaches_the_changelog` (`provenance.rs:718-726`) asserts
+`summary_of(...) == None` after a forget with no same-test before-assert — but `summary_of` is
+proven able to return `Some` twice elsewhere in the same suite (`:693`, and `:799`
+`assert!(...is_some())`), and forgetting an absent id is separately asserted to error `NotFound`
+(`:714`). The helper cannot be silently dead. **No change to C3**, which is NOT MET for the
+reason already given: the outbound-provider-body proof does not exist.
+
+**Do these move a grade? No.** C2 was already PARTIAL on platform and surface coverage, and its
+strongest recovery property (rewind) is soundly proved. SP-1 and SP-2 do not create a false MET;
+they mean **C2 cannot be promoted to MET on the current driver**. Repairing them is a
+precondition for trusting any future green, and both are in the gap list as G2e.
 
 **Endorsed after independent re-derivation:** `BL-23B-H1`'s re-grade from HIGH to MEDIUM. Counted
 by me from the raw logs in `evidence/23B-H1-measure/`, not from the write-up:
@@ -328,12 +422,13 @@ build work alone.
 | G2b | 2 | macOS session-operator leg (binary route already open via CI artifacts) | 0.5 | pure build |
 | G2c | 2 | TUI `/checkpoint`, `/fork`, `/export` + one PTY leg | 1.5 | pure build |
 | G2d | 2 | Repair path for an unreadable journal — today one mismatch takes all twelve `session` verbs down | 1.5 | pure build |
+| **G2e** | 2 | **Repair two self-passing assertions in `f23-session-operator-drive.sh` (SP-1 export redaction, SP-2 fork immutability)** | 0.25 | pure build — **precondition for ever grading C2 as MET** |
 | G1a | 1 | Governed **promotion** (`bail!`, untouched) | 1-2 | pure build — **23A lane's** |
 | G6a | 6 | OPTIONAL semantic/RRF layer — would close 23B-03-M1's three mis-ordered concept queries | 1.5 | pure build — **not required for the criterion** |
 
-**Totals:** ~16.5 lane-sessions of pure build, **one item requiring authority this lane does not
-have (G5c)**, and **a hard 2-calendar-day floor on G5b that no amount of parallelism removes.**
-No gap needs a provider credential.
+**Totals:** 17 gaps, ~16.75 lane-sessions of pure build, **one item requiring authority this lane
+does not have (G5c)**, and **a hard 2-calendar-day floor on G5b that no amount of parallelism
+removes.** No gap needs a provider credential.
 
 **Sequencing recommendation.** G5a first and today — it is 15 minutes of work and 28 hours from
 costing another multi-day cycle. Then G5b in the background while G3a (the smallest step to a real

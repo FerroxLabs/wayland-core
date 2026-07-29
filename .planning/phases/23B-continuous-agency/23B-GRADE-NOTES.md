@@ -9,9 +9,12 @@ evidence already in the tree. **Append after every measurement. Do not batch to 
 - All load-bearing reads via `/usr/bin/git`, `/usr/bin/grep`, `/usr/bin/wc`, `/usr/bin/find`.
   `rtk` rewrites `git log`, `grep`, `cargo`, `wc -c` — measured, brief §3b.
 - Any absence claim needs a known-positive in the same invocation (brief §3b-i).
-- `cargo nextest` "flakiness" in this repo was fd exhaustion — 40 runs, 0 real failures.
-  `.config/nextest.toml`'s `no-tests = "fail"` is silently ignored by the installed nextest,
-  so a green suite may have run nothing. Downgrade confidence wherever evidence rests on either.
+- ~~`cargo nextest` "flakiness" was fd exhaustion; `no-tests = "fail"` is silently ignored, so a
+  green suite may have run nothing.~~ **BOTH PREMISES WITHDRAWN by coordinator correction,
+  2026-07-29 — see M13.** Fail-closed-on-zero-tests is nextest 0.9.137's built-in DEFAULT (the
+  config key is redundant, not missing), and peak runner fds are 299/1024. Neither reaches this
+  phase. **No grade here is downgraded on instrument grounds.** The live hazard is bare
+  `cargo test`, not nextest — and no 23B criterion rests on one.
 - Re-derive all arithmetic. Do not inherit a prior verdict's counts.
 
 ## The six criteria (from `.planning/ROADMAP.md` §Phase 23, lines 101-107)
@@ -306,3 +309,60 @@ PARTIAL so the phase is not credited with work it did not do.
 `23B-PHASE-VERDICT.md` — **NOT ACHIEVED**. C1 PARTIAL (23A's, deferred), C2 PARTIAL,
 C3 NOT MET, C4 NOT MET, C5 NOT MET, C6 MET WITH STATED EXCEPTIONS. Costed 16-item gap list;
 G5a (Linux journey `HOME` abort) is urgent and recurs in ~28h.
+
+### M13 — coordinator correction: both instrument premises withdrawn. No grade moves.
+
+Received 2026-07-29 after the verdict was first written. A dedicated audit lane disproved both
+premises I was given, **in the direction that would have made me under-grade**:
+
+- `no-tests = "fail"` IS inert on nextest 0.9.137 — but fail-closed-on-zero-tests is that
+  version's **built-in default**. Measured with controls in an isolated scratch crate: zero-match
+  with no config at all → `rc=4`; zero-match with the inert key → `rc=4`; matching filter → `0`;
+  real failing test → `100`. So "a green suite may have run nothing" is **false for every nextest
+  invocation**. The genuine hazard is bare `cargo test` (`BL-F28-VACUOUS-GREENS`).
+- fd exhaustion: peak 299 of 1024 (29%); cap needs ~346 test-threads. Signature sweep for
+  `exec failed` / `os error 24` / `cannot fork` / `RLIMIT_NOFILE` → zero files, with five
+  non-zero known-positives proving the grep alive.
+
+**Effect on this grade: none.** I checked my own verdict before editing
+(`grep -n "downgrade\|vacuous\|no-tests\|nextest"`): the only downgrades I recorded were (a) the
+minor, explicitly non-material index-driver extractor note under C6, and (b) C2's missing
+acceptance log — a *product-evidence* problem, not a tooling one. **Every NOT MET stands because
+the work does not exist.** M10 and the verdict's instrument section are rewritten to state the
+corrected facts rather than hedge; the hedging the brief asked for is removed.
+
+### M14 — the THIRD class, hunted on the coordinator's caveat: found, in the session driver.
+
+The audit checked whether grades rest on those two defects. It did NOT check for the Phase-21-C3
+class — an assertion that could not have failed. I hunted it in 23B's session-recovery and memory
+evidence, the two places named. **Two found, both in `scripts/f23-session-operator-drive.sh`.**
+
+**SP-1 — export redaction, self-passing AND demonstrated in the wild.** Lines 224-226:
+`OCCURRENCES=$(grep -c -F "$PLANTED" "$EXPORT_PATH" 2>/dev/null); [ -n "$OCCURRENCES" ] ||
+OCCURRENCES=0`. A missing export file yields `0`, and `0` is the value that means "redaction
+proved". Measured, with control: missing file → `0`; real file containing the nonce → `1`.
+**And it has already fired**: `evidence/23B-01-linux-drive.log` shows
+`F23_01_VERB=export … status=FAIL exit=1` immediately followed by
+`F23_01_EXPORT_NONCE_OCCURRENCES=0`. The source-side half is correct (lines 153-155 exit **71**
+if the planted nonce is absent from the seeded session, naming the vacuity risk by hand); the
+output side has no existence check.
+
+**SP-2 — fork parent-immutability, latent self-passing.** Lines 205-213: an unresolved
+`PARENT_FILE` glob makes both `cksum` reads fail, both variables empty, empty == empty → `true`.
+Measured: unresolved path → `BYTES_EQUAL=true`; control, real file mutated between reads →
+`false`. The sibling extraction `CP_ID` IS guarded (`if [ -z … ]; exit 72`, line 181); this one
+is not. Not demonstrated to have fired.
+
+**Sound, and checked rather than assumed:** `REWIND_BYTES_EQUAL` and `REWIND_LATER_FILE_REMOVED`
+each interpose a real mutation between the two measurements, so a no-op rewind goes red. The
+`search-miss` guard (lines 165-170) explicitly refuses to assert on a bare `list_total` token
+"because a gate that cannot go red proves nothing" — the author knew the class.
+
+**Memory: CLEAN on this class.** `forget_removes_the_item_and_reaches_the_changelog`
+(`provenance.rs:718-726`) has no same-test before-assert, but `summary_of` is proven able to
+return `Some` at `:693` and `:799`, and forgetting an absent id errors `NotFound` at `:714`.
+The helper cannot be silently dead. C3 unchanged.
+
+**Grade effect: none today.** C2 was already PARTIAL; rewind — its strongest recovery property —
+is soundly proved. But **C2 cannot be promoted to MET on this driver**, so SP-1/SP-2 are gap
+**G2e** (0.25 lane-sessions, pure build). Totals updated to 17 gaps / ~16.75 lane-sessions.
