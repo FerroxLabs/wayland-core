@@ -114,5 +114,64 @@ So `index build` not reproducing is only half the story: **a concurrency test on
 also fail to reproduce because one participant never started.** Assert both writers reached
 `START`, not just that the run exited.
 
-Still to run: the FIX arm (selector, no override) and the LOCAL+WAL control. Without both,
-this measures "concurrent NFS writes break" rather than "WAL on NFS breaks".
+## M4 — the two controls that make M3 a measurement rather than an anecdote
+
+Identical driver, identical concurrency, identical duration. Only the journal mode and the
+filesystem change.
+
+| arm | filesystem | mode (read back from the DB) | writes ok | writes err | own rows visible | `integrity_check` |
+|---|---|---|---|---|---|---|
+| 1 defect | NFS ×2 incoherent | `wal` (forced) | 19,655 | **37,121** | A: *query itself failed* / B: 3,834 vs 3,238 | **corrupt** |
+| 2 fix | NFS ×2 incoherent | `truncate` (**selector**) | 47,170 | **0** | 11,507/11,507 · 12,078/12,078 | `ok` |
+| 3 control | local ext4 | `wal` (forced) | 285,104 | **0** | 76,012/76,012 · 66,540/66,540 | `ok` |
+
+Arm 2 is the fix, at the product level, on the same mount that destroyed the database in arm 1.
+Arm 3 is what stops arm 1 from being explained by "the driver is simply racy" — the same code,
+the same four-task concurrency, WAL, 285k writes, zero errors. **Gap 1 CLOSED.**
+
+Arm 3 also re-earns WAL on local disks: 285k writes vs 47k, so the selector is worth having
+rather than a blanket disable.
+
+## M5 — GAP 2 CLOSED: macOS and Windows exercised on real network mounts
+
+New test `crates/wcore-config/tests/live_fs_class.rs`. `#[ignore]`d, and when the env is
+absent it **panics** rather than returning — an env-gated early `return` is the measured
+"printed `5 passed` for zero work" defect and this cannot do it.
+
+**macOS** — this Mac (`Darwin arm64`). Loopback-free SMB: Samba on hetzner bound to `127.0.0.1`
+only, reached through an ssh tunnel, mounted with `mount_smbfs` as an ordinary user (no sudo,
+nothing on hetzner exposed publicly). Write-through verified: a file written on the Mac was read
+back out of `/srv/walsmb` on hetzner. The mount shows **no `local` flag** — i.e. no `MNT_LOCAL`,
+which is the exact signal the classifier keys on.
+
+```
+LIVEFS os=macos network=/Users/seandonahoe/walfu-smb -> Network / Truncate
+LIVEFS os=macos local=/private/tmp                   -> Local / Wal
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Also ran `sqlite_journal::tests::mnt_local_matches_libc` — `#[cfg(target_os = "macos")]`, so it
+had never executed on any host in this program. **1 passed.** `MNT_LOCAL` really is `0x1000`.
+
+Both runs used the LANE-BRIEF §0 Darwin exception (single crate, single test file). Disclosed.
+
+**Windows** — `SeanD@seandesktop`, all work under `D:\walfu` (never `C:\`). `net use Z: \\localhost\D$`
+maps a real drive through the SMB redirector. `fsutil` is the independent control:
+`Z: - Remote/Network Drive`, `D: - Fixed Drive`.
+
+**`Z:\walfu\probe` and `D:\walfu\probe` are the same directory**, so nothing differs between the
+two arms except the access path — the answer is attributable to `GetDriveTypeW` alone. This is
+the arm no string inspection can reach: `Z:\` is spelled exactly like a local drive letter.
+
+```
+LIVEFS os=windows network=Z:\walfu\probe -> Network / Truncate
+LIVEFS os=windows local=D:\walfu\probe   -> Local / Wal
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+**Both hosts, both failure controls fire** (§3.2 — a gate I cannot make fail is not a gate):
+- local path handed in as the network path → `FAILED. 0 passed; 1 failed`
+- no env at all → `FAILED`, with the "must FAIL rather than silently pass" message.
+
+Note two `cargo` builds were running on the Windows box concurrently (the self-hosted runners);
+this test is not timing-sensitive, so contention does not affect the result.
