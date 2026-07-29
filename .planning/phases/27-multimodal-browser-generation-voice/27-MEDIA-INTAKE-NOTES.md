@@ -185,3 +185,18 @@ corrected in the same commit, per §6b-ii: repair the instrument in the lane tha
 - Read back `N passed`; `cargo` via rtk strips `0 filtered out`. Use `/usr/bin/env cargo`.
 - Compile ONLY on hetzner-dsm. Targeted `-p` builds, never full workspace.
 - Never echo the credential. stdin only.
+
+---
+
+## M6 — closing measurements (see 27-MEDIA-INTAKE.md for the full write-up)
+
+- LIVE POSITIVE: arm 4 fired, all three ground truths recovered, rc=0.
+- NEGATIVE (credential removed): liveness control FAILED — retained as evidence of
+  the control working, NOT counted as a vision proof.
+- NEGATIVE2 (one variable: invalid vision model): liveness passed, ground truth
+  absent, degradation observable at the user-visible surface, labelled `flux-router`.
+- Full-suite cluster measured at BASE (16 failed) vs mine (15, then 17 — unstable);
+  7 suspects pass 7/7 serially; 0 vision failures in either set. Pre-existing.
+- Fence exposure vs 861d1b1a: ZERO on wcore-cli/src/{lib,main}.rs.
+- Secret sweep: 0 hits, control alive, self-test 5/5 including the third assertion.
+- "One intake path": still RED, measured with a same-file control, reported RED.
