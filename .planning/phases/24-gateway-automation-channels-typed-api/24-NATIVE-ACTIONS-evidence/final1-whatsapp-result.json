@@ -1,0 +1,68 @@
+{
+  "adapter": "whatsapp",
+  "label": "P-ack-both",
+  "ack": "both",
+  "declares": {
+    "react": true,
+    "typing": false,
+    "react_site": "wcore-channel-whatsapp/src/lib.rs:327",
+    "typing_site": "TRAIT DEFAULT (silent no-op Ok(())) — platform ties typing to a per-message read receipt (lib.rs:324-326)"
+  },
+  "ready": true,
+  "turn_ran": true,
+  "turn_prompt": "probe f24na-whatsapp-P-ack-both\nCurrent date: 2026-07-29",
+  "prompt_carries_probe": true,
+  "reactions_total": 2,
+  "reaction_emojis": [
+    "👀",
+    "✅"
+  ],
+  "typing_total": 0,
+  "typing_at_ms": [],
+  "reaction_at_ms": [
+    1785308940380,
+    1785308940992
+  ],
+  "keepalive": null,
+  "replies_total": 1,
+  "affordances": {
+    "a1_receipt": "fired",
+    "a2_typing": "not-supported",
+    "a3_terminal": "fired",
+    "emojis": [
+      "👀",
+      "✅"
+    ],
+    "typing_count": 0
+  },
+  "gateway_log_bytes": 8743,
+  "fixture_journal": [
+    {
+      "kind": "reaction",
+      "at": "2026-07-29T07:09:00.380Z",
+      "emoji": "👀",
+      "conv": "15552220000",
+      "msg": "wamid.f24na-inbound-1"
+    },
+    {
+      "kind": "reaction",
+      "at": "2026-07-29T07:09:00.992Z",
+      "emoji": "✅",
+      "conv": "15552220000",
+      "msg": "wamid.f24na-inbound-1"
+    },
+    {
+      "kind": "reply",
+      "at": "2026-07-29T07:09:00.992Z",
+      "text": "F24NA-REPLY f24na-whatsapp-P-ack-both"
+    }
+  ],
+  "notes": [
+    "llm fixture at http://127.0.0.1:34981 (delay=0ms)",
+    "whatsapp fixture at http://127.0.0.1:43531",
+    "readiness=true",
+    "whatsapp webhook POST -> 200",
+    "delivered inbound (\"wamid.f24na-inbound-1\")",
+    "turn_ran=true after dispatch"
+  ]
+}
