@@ -1,0 +1,7 @@
+configured: 1   registered: 1
+f24h6 (slack)
+  state:      Unknown
+  reason:     registered; no poll observed yet
+  errors:     0
+  reconnects: 0
+wayland-core channel: 0 of 1 configured channels are NOT registered in the running gateway: inbound polling owned by another process
