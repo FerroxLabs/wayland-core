@@ -119,6 +119,37 @@ export PATH=/root/.cargo/bin:$PATH      # a bare `cargo` exits 127 — that is P
   `target/` first and say so.
 - When your phase is done, remove your hetzner worktree and its `target/`.
 
+### 2a. `git fetch origin` on hetzner USED TO update nothing but `main` — verify HEAD anyway
+
+Measured 2026-07-29 by the orchestrator. Every hetzner clone was made `--single-branch`, so
+`remote.origin.fetch` was `+refs/heads/main:refs/remotes/origin/main` **and nothing else** —
+37 of 40 tree paths, i.e. both underlying repositories. In those trees:
+
+```
+git fetch origin          # exit 0, prints nothing, updates ONLY origin/main
+git checkout origin/plan/f20-unified-audit-repair   # <- SILENTLY STALE
+```
+
+The remote-tracking ref stayed frozen at whenever someone last fetched it explicitly. The
+orchestrator hit this directly: a checkout that should have landed on the evening's integration
+head landed on a commit **21 hours older**, with a clean exit code and no warning. Had the
+workspace check run, it would have gone green — describing code that no longer exists.
+
+**The refspecs are now widened and 0 trees remain narrow.** The rule outlives the fix:
+
+- **Always assert the SHA you expected after any checkout or pull**, and abort if it differs.
+  `git rev-parse HEAD` compared against a SHA you obtained independently. This is the single
+  check that caught it; nothing else did.
+- Note the remote's NAME differs by host: on the **Mac** the GitHub remote is `gh` and `origin`
+  is a stale **local path** — a trap. On **hetzner** the GitHub remote is `origin`.
+- Get the authoritative head from GitHub itself when it matters:
+  `git ls-remote <remote> <branch>`, or `gh api repos/FerroxLabs/wayland-core/git/ref/heads/<branch>`.
+
+Related instrument defect, same family: `EXIT=$?` **after a pipe reports the last stage's
+status, not the command's.** `git fetch ... | head` reported `FETCH_EXIT=0` while printing
+`fatal: 'gh' does not appear to be a git repository`. Use `set -o pipefail`, or `${PIPESTATUS[0]}`,
+or do not pipe the command whose exit code you are about to trust.
+
 ## 3. The three standing rules (AGENTS.md §11 — established by measurement)
 
 1. **Live testing ranks at least as high as green code.** A phase is not done because the
@@ -179,7 +210,13 @@ so nothing looks wrong. Two classes measured:
 - **`ls`** — also rewritten: it alters the size column and reorders entries. Found 2026-07-29 by
   `lane/22-remaining`. Anything that counts or sizes files from a directory listing is affected.
 
-**Assume the list is incomplete.** Four tools were found in five days, each after a lane trusted it.
+- **`git status --porcelain`** — collapsed to the single word `ok` on a clean tree. Harmless
+  when clean; the hazard is that a machine-readable format you are parsing is not the format you
+  get back, so any script keying on porcelain output is reading something else. Note this one
+  fired **even though the command was written `command git`** — prefixing `command` does NOT
+  reliably escape the rewrite. Only the absolute path does.
+
+**Assume the list is incomplete.** Five tools were found in five days, each after a lane trusted it.
 The safe posture is that *any* proxied tool may re-render, so reach for the absolute path first
 rather than discovering the fifth member the hard way. The orchestrator hit this too on 2026-07-29:
 `git log` reported an unchanged HEAD immediately after a 24-branch merge train had moved it, and the
