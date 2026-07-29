@@ -91,7 +91,23 @@ pub fn tree_item_digest(entries: &BTreeMap<String, Vec<u8>>) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Where one imported item came from.
+/// Where one imported item came from — **and where it landed**.
+///
+/// # Why the destination is part of the record
+///
+/// A provenance document keyed only by the PEER's identity answers "what did
+/// this migration read?" but not "where did this file on my disk come from?",
+/// and the second question is the one an operator actually asks. After a real
+/// import the Wayland skills root holds hundreds of directories that are
+/// indistinguishable from the user's own; the on-disk name is
+/// [`sanitize_component`](super::content)-ed and may be digest-disambiguated on
+/// a collision, so it cannot be reversed back to a peer path by inspection.
+///
+/// `QuarantineEntry` already got this right — it carries `stored_path` beside
+/// its `Provenance`, so a contained payload is traceable in both directions.
+/// [`written_path`](Self::written_path) gives the IMPORTED side the same
+/// property under one vocabulary, and [`ProvenanceDocument::resolve_path`] is
+/// the reverse lookup it makes possible.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Provenance {
     /// The peer tool the item was read from, e.g. `hermes` / `openclaw`, or
@@ -109,6 +125,28 @@ pub struct Provenance {
     pub digest: String,
     /// RFC 3339 UTC, second precision — when the import recorded this item.
     pub imported_at: String,
+    /// Where the bytes landed, relative to the Wayland config dir and
+    /// `/`-separated — `skills/<name>` for a live data skill,
+    /// `migrate-imported/personas/<n>.md` for a staged persona,
+    /// `migrate-quarantine/payloads/<n>` for a contained item.
+    ///
+    /// `None` only for a record that names no destination at all (a legacy
+    /// document written before this field existed). An absent destination is
+    /// left absent rather than defaulted to a plausible-looking path: a
+    /// fabricated destination is worse than a missing one, because it reads as
+    /// evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub written_path: Option<String>,
+    /// Set when this item's bytes were byte-identical to an item already
+    /// written in the same run, so [`written_path`](Self::written_path) points
+    /// at content another identity wrote.
+    ///
+    /// Recorded rather than elided because without it a reader of
+    /// `written_path` would conclude two peer items each produced their own
+    /// copy, and a later selective rollback would delete a directory a second
+    /// identity still depends on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deduplicated_with: Option<String>,
 }
 
 impl Provenance {
@@ -124,7 +162,27 @@ impl Provenance {
             source_path: normalize_relative_path(source_path),
             digest: digest.into(),
             imported_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            written_path: None,
+            deduplicated_with: None,
         }
+    }
+
+    /// Record WHERE the bytes landed, relative to the Wayland config dir.
+    ///
+    /// Consuming-self so a call site cannot construct a record, forget the
+    /// destination, and still have it look complete: every producer in this
+    /// crate now ends in `.landed_at(...)`, which is greppable.
+    #[must_use]
+    pub fn landed_at(mut self, written_path: &str) -> Self {
+        self.written_path = Some(normalize_relative_path(written_path));
+        self
+    }
+
+    /// Mark this record as pointing at bytes another identity wrote.
+    #[must_use]
+    pub fn deduplicated_with(mut self, id: impl Into<String>) -> Self {
+        self.deduplicated_with = Some(id.into());
+        self
     }
 
     /// Same as [`Self::new`] with an explicit timestamp, so a test can pin the
@@ -142,6 +200,8 @@ impl Provenance {
             source_path: normalize_relative_path(source_path),
             digest: digest.into(),
             imported_at: imported_at.into(),
+            written_path: None,
+            deduplicated_with: None,
         }
     }
 }
@@ -196,6 +256,68 @@ impl ProvenanceDocument {
     pub fn from_json(s: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(s)
     }
+
+    /// Answer "where did the artifact at this path come from?".
+    ///
+    /// `query` is a path relative to the Wayland config dir; an absolute path
+    /// under a known home should be made relative by the caller. Matching is
+    /// **prefix-by-component**, not substring: a skill is imported as a
+    /// DIRECTORY, so the operator's question is nearly always about a file
+    /// inside one (`skills/notes/SKILL.md`) rather than about the directory
+    /// itself. A raw `starts_with` would additionally match `skills/notes-2`,
+    /// which is a different item — and on a real import, disambiguated names
+    /// like `notes-<digest>` sit right beside their base name, so that
+    /// off-by-one is not hypothetical.
+    ///
+    /// Returns every matching identity, longest destination first, so a nested
+    /// destination beats the ancestor that contains it. More than one match is
+    /// possible and is not an error: deduplicated identities deliberately share
+    /// one destination, and returning only the first would silently hide that
+    /// a second peer item also lives there.
+    pub fn resolve_path(&self, query: &str) -> Vec<(&str, &Provenance)> {
+        let q = normalize_relative_path(query);
+        let mut hits: Vec<(&str, &Provenance)> = self
+            .entries
+            .iter()
+            .filter(|(_, p)| match p.written_path.as_deref() {
+                Some(w) => path_covers(w, &q),
+                None => false,
+            })
+            .map(|(id, p)| (id.as_str(), p))
+            .collect();
+        hits.sort_by(|a, b| {
+            let la = a.1.written_path.as_deref().map(str::len).unwrap_or(0);
+            let lb = b.1.written_path.as_deref().map(str::len).unwrap_or(0);
+            lb.cmp(&la).then_with(|| a.0.cmp(b.0))
+        });
+        hits
+    }
+
+    /// Every record that names no destination.
+    ///
+    /// Exposed so the honesty property is checkable by a caller rather than
+    /// only by inspection: this is the F26-GRADE-H1 shape one level up — a
+    /// provenance entry with no `written_path` claims an item was recorded
+    /// without saying where it is.
+    pub fn without_destination(&self) -> Vec<&str> {
+        self.entries
+            .iter()
+            .filter(|(_, p)| p.written_path.is_none())
+            .map(|(id, _)| id.as_str())
+            .collect()
+    }
+}
+
+/// True when `written` is `query` itself or a path-component ancestor of it.
+fn path_covers(written: &str, query: &str) -> bool {
+    if written == query {
+        return true;
+    }
+    // The ancestor case, guarded on the separator so `a/b` does not cover
+    // `a/bc`.
+    query.len() > written.len()
+        && query.as_bytes()[written.len()] == b'/'
+        && query.starts_with(written)
 }
 
 #[cfg(test)]

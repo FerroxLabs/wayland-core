@@ -426,13 +426,19 @@ impl QuarantineStore {
         let entry = QuarantineEntry {
             id: req.id.clone(),
             reason: req.reason,
-            stored_path: rel_store,
             provenance: Provenance::new(
                 req.source_tool.clone(),
                 req.source_version.clone(),
                 &req.source_path,
                 digest,
-            ),
+            )
+            // The destination, rendered relative to the HOME rather than to the
+            // store root, so a contained item and an imported one answer "where
+            // are these bytes?" in one vocabulary. `stored_path` keeps its
+            // store-relative meaning for the promotion path, which resolves
+            // against `self.root`.
+            .landed_at(&format!("{QUARANTINE_DIR}/{rel_store}")),
+            stored_path: rel_store,
             promote_as: req.promote_as.clone(),
         };
         index.entries.insert(req.id.clone(), entry.clone());

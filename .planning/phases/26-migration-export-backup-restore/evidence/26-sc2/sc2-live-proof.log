@@ -1,0 +1,86 @@
+=== F26 SC2 live proof ===
+binary : /root/wayland-26sc2/target/release/wayland-core
+version: wayland-core 0.12.25
+workdir: /root/f26-sc2-live
+PASS: P0 positive control — the sentinel mechanism observes execution
+
+--- driving: migrate hermes --home <peer> --yes ---
+import rc=0
+    Migration plan: hermes → wayland-core
+    Source: /root/f26-sc2-live/peer
+    
+    Profiles (2):
+      • hermes/root
+          provider=anthropic model=claude-opus-4
+      • alpha
+          provider=anthropic model=claude-sonnet-4
+    
+    Will be QUARANTINED — imported but INERT until you promote them (1):
+      • skill:skills/repo-status — skill body carries a shell directive
+      Quarantined content is written outside every directory the agent loads skills from,
+      so it cannot run. Review it, then promote what you want with:
+        wayland-core migrate promote --id <identity>
+    
+    Imported 2 profiles (0 skipped), 0 MCP servers, 0 credentials.
+    Accounting: discovered=6 imported=5 quarantined=1 excluded=0 (the last three sum to the first).
+    Content written: 4 files — 2 skills, 1 persona, 0 memory notes.
+      1 imported file carried an execute bit; it was REMOVED. Measured against the
+      real peer trees, 68 of 349 peer skills ship a .sh/.py/.js helper, and a skill is
+      classified on its SKILL.md prose — so those helpers import live. They arrive inert:
+      running one is an explicit act (`sh <script>`), which goes through tool approval.
+      Personas and memory notes are STAGED under migrate-imported/ — they are not active until
+      you move them where you want them. Personas are stored with forged trust
+      delimiters neutralized.
+    
+    Quarantined 1 item — inert until an explicit promotion:
+      • skill:skills/repo-status — skill body carries a shell directive
+      Review with: wayland-core migrate quarantined
+
+--- half 2: executable content is quarantined and inert ---
+quarantined SKILL.md on disk: 1
+PASS: N2 the executable skill's bytes ARE contained (so N1 is containment, not an empty home)
+PASS: N1 the contained payload did not execute (licensed by P0 and N2)
+N3 directive-carrying skills in the LIVE root: 0 (expect 0)
+N3-CONTROL same matcher under quarantine:      1 (expect >0)
+PASS: N3 no directive-carrying skill is live, and the matcher demonstrably fires
+PASS: X1 the helper's BYTES crossed (a migration, not a filter)
+PASS: X2 the imported helper carries no execute bit (644)
+PASS: X2-CONTROL the source helper IS executable, so X2 measures a change
+PASS: X3 the helper did not run
+
+--- half 1: provenance preserved and queryable ---
+    Imported content (4 items):
+      • persona:profiles/alpha/SOUL.md
+          from:  profiles/alpha/SOUL.md (hermes)
+          at:    migrate-imported/personas/alpha.md
+          digest: 8b10c06028745aa5d34be0a6d1fe8ac06e12a465e636d89eb2ceff445bcc5143
+      • skill:skills/release-notes
+          from:  skills/release-notes (hermes)
+          at:    skills/release-notes
+          digest: 09f6e5b285cfe362c684e7f49c2974619540b71cd03db886e9b0f2c0ca07f9ac
+      • skill:skills/repo-status
+          from:  skills/repo-status (hermes)
+          at:    migrate-quarantine/payloads/skill_skills_repo-status-db26e6ffb5f9
+          digest: b0ac4ff138b84bb4f84f6de36ebbb377fc4f385cf8c5553ff4f55c0eb4ded68b
+      • skill:skills/with-helper
+          from:  skills/with-helper (hermes)
+          at:    skills/with-helper
+          digest: 5b6bbc1fa29984e0e9b61d2384a5c1e107fffe7e2efef8a0a8e18c4b4cc46078
+
+  query: where did skills/release-notes/SKILL.md come from?
+    skills/release-notes/SKILL.md came from:
+      • skill:skills/release-notes
+          from:  skills/release-notes (hermes)
+          at:    skills/release-notes
+          digest: 09f6e5b285cfe362c684e7f49c2974619540b71cd03db886e9b0f2c0ca07f9ac
+PASS: Q1 known-positive — a live imported artifact resolves to its peer source
+    No import record covers skills/my-own/SKILL.md
+    Nothing this machine imported from a peer landed there.
+PASS: Q2 known-negative — a locally authored skill is NOT attributed to a peer
+PASS: Q3 contained content is locatable through the same surface as live content
+PASS: Q4 the staged persona is locatable too
+PASS: Q5 every record names where its bytes are
+
+PASS: S1 the source tree is byte-identical after the import (3e1ec8816b86592f4ea37ca7cb2a5453)
+
+SC2 LIVE PROOF: PASS
