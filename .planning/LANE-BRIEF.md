@@ -276,6 +276,16 @@ Rules:
   mid-build when this was written.
 - Clean up your own `target/` when your lane ends. Do not delete another lane's tree.
 
+## 6a-ii. `/tmp` on hetzner is SHARED between lanes — your glob will catch their files
+
+A lane on 2026-07-29 ran a post-fix check that reported its defect still present. The evidence
+came from `/tmp/final-types.log` — **another lane's file**, caught by an over-broad glob. Many
+lanes run on `hetzner-dsm` at once and they all share `/tmp`.
+
+Write evidence to a path unique to your lane (`/tmp/<lane-name>-*` or inside your worktree), and
+**scope every glob you read back.** A measurement that silently includes another lane's output is
+not your measurement, and it can point either way — a false red as here, or a false green.
+
 ## 6b. A silent wait looks exactly like a hung agent — this has killed four lanes
 
 A stream watchdog kills an agent after **600s with no output**. A polling loop that prints
