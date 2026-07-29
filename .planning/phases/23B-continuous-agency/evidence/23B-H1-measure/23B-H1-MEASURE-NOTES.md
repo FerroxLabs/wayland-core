@@ -198,3 +198,47 @@ Neither HEAD nor `a7beafe5^` reproduces. The remaining control is 23B-01's own b
   fix, 23B-H1 is genuinely closed, and `a7beafe5` was not the thing that closed it; or
 - it does not → my harness still differs from 23B-01's procedure in a way I have to name,
   and I will name it rather than bank the zeros.
+
+---
+
+## T+150 — the control arms, and the one that mattered
+
+- `ob1` — **23B-01's own base `15971d1b`**, quiet: 12/12 clean, 15 tool events, 0 mismatches.
+  Binary pinned independently of `--version`: `sha256[0:16]=dc147bdd9db507ed`, and
+  `session --help` **exits 1** because the subcommand does not exist in that build — the same
+  pristine-binary check 23B-01 used on itself.
+- `ob2` — same binary, CPU load 63 → 66 (2.3× the original 28): 12/12 clean.
+- `ob3` — same binary, `--jobs 6`, load 70 → 114: 12/12 clean.
+- `ob4` — same binary, `--seed-max-turns 1` so the loop is cut off right after the tool
+  executes (the interrupted-turn shape): 10/10 clean, journals 62-63 KB.
+- `ob5` — same binary, `--jobs 4`, under **12 parallel `dd oflag=dsync` writers at 11 139 IOPS
+  / 1.25 GB/s plus a real concurrent `cargo build -p wcore-cli --release`**: 12/12 clean.
+
+`ob5` exists because my own adversarial pass found that "4× load" was CPU-only while 23B-01's
+stressor was concurrent *compilation* — heavy I/O and fsync pressure. The journal write path is
+`write_all` + `sync_all`, i.e. fsync-bound, so a CPU-only arm may not have touched the real
+stressor at all. Three panelists had already voted MEDIUM on that framing. Closing the hole was
+worth more than caveating it.
+
+**Total: 92 measurement runs, 153 tool events, 0 reproductions, three binaries.**
+
+## T+150 — second instrument defect in my own harness, found live and repaired
+
+The aggregator summed with `grep -o 'F23_H1_REACH=[^\n]*'`. In a POSIX BRE `[^\n]` excludes the
+characters `\` and `n`, NOT the newline — and `tool_events` contains an `n`, so every match
+stopped before the field. The harness printed `tool_events=0` for a run whose own per-run lines
+read `tool_events=1` and `tool_events=7`. Repaired with `.`; self-test extended to six
+assertions, and `SELFTEST_6_OLD_AGG_BLIND` replays the broken pattern to show it returns 0
+where truth is 8. Repaired in this lane, not written up and left.
+
+Third one, in the panel harness: `codex exec` blocks on an inherited stdin pipe even with the
+prompt passed as an argument — two 400 s timeouts, vote silently absent both times. Fixed with
+`< /dev/null`. New member of the brief's §4 list.
+
+## T+150 — no fix made, deliberately
+
+Root cause not named → per the mandate's own sequencing, no fix. Verified instead that the
+missing general **quarantine/reclaim path for an unreadable journal** is real: the only recovery
+in the tree is `recover_legacy_effect_receipt` (`session_journal.rs:2185`), keyed literally to
+`"effect_receipt":null`, and all twelve `session` verbs read the journal so a mismatch takes
+every operator move down at once. Recommended as a standalone backlog item.
