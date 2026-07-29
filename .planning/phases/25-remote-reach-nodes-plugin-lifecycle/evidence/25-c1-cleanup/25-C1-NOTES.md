@@ -137,6 +137,45 @@ A separate observation, NOT fixed here: an uncancelled `sleep 120` with `wall_ti
 also ends as a bare transport error (`HTTP 408 deadline_exceeded`, `cloud-cancel-PROBE2.txt`)
 rather than a `Timeout` receipt. Same family, different clause; recorded for BACKLOG.
 
+## t4 — merged onto the merge train (orchestrator correction), both gaps re-checked there
+
+The lane was based on `lane/grade-25`, which predates the 24-branch merge train. Merged
+`gh/plan/f20-unified-audit-repair` @ `4a872413` into this branch at `05a493a2`; merge-base
+`fd22dbf4`, no conflicts, `cargo fmt --check` clean.
+
+**Neither gap was closed by the train.** Read off the train tip itself, not inferred:
+
+```
+$ /usr/bin/git show gh/plan/f20-unified-audit-repair:crates/wcore-exec-backend/src/backends/ssh.rs
+201: wait "$child"
+202: status=$?
+203: rm -rf "$root"          <- still unreachable under `set -e` for a failing task
+
+$ /usr/bin/git log <merge-base>..gh/plan/f20-unified-audit-repair -- crates/wcore-exec-backend
+bf9fe2b8  fix(node-contract): run the identity probe through the inner std command
+de47947b  fix(ci): pin container source identity, derive node machine_id in a clean env, …
+```
+
+`bf9fe2b8` touches `tests/node_contract.rs` only (5 added lines). The train did not touch the
+ssh runner or the cloud execute path, so both fixes remain necessary and both apply cleanly.
+The cloud arm is likewise absent on the tip. Everything below is re-proved on the merged tree.
+
+### Instrument repair (§6b-ii), found while re-checking
+
+The cloud script's "which arm is compiled into this binary" line searched for the phrase
+`the cancellation destroyed the machine`, **which appears in no commit of this repository**. It
+printed `0` for the pre-fix binary and `0` for the fixed one — a reader that cannot
+distinguish the thing it exists to distinguish. It gated nothing (the live receipt is the
+proof), but it is repaired here rather than written up, with the three assertions §6b-ii asks
+for, measured against the retained pre-fix binary:
+
+```
+repaired reader on /root/f25c1-bin-base (PRE-FIX):
+  fixed-arm literal      : 0     <- known-negative fails
+  known-positive literal : 1     <- reader is alive
+  the OLD dud needle     : 0     <- the broken matcher would have missed it
+```
+
 ## Still to establish
 
 - [x] Leak reproduced live on a real ssh far end at BASE (count 1, `input.bin` present).

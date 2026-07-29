@@ -76,8 +76,20 @@ echo "tree:         $TREE"
 echo "tree HEAD:    $(/usr/bin/git -C "$TREE" rev-parse HEAD 2>&1)"
 echo "binary sha:   $(sha256sum "$BIN" | awk '{print $1}')"
 echo "credential:   sourced from /root/.wayland-f25-cloud.env (values never printed)"
-echo "cancel-receipt arm compiled into this binary (1 = present):"
-echo "  '$(printf 'cancelled-mid-flight')' marker: $(grep -a -c -F 'the cancellation destroyed the machine' "$BIN")"
+# WHICH cloud arm is compiled into THIS binary, read out of the binary.
+#
+# INSTRUMENT REPAIR, 2026-07-29: the first version of this line searched for
+# `the cancellation destroyed the machine` — a phrase that appears in NO commit
+# of this repository. It therefore printed 0 for the pre-fix binary and 0 for
+# the fixed one, i.e. it could not distinguish the thing it existed to
+# distinguish. It gated nothing (the live receipt is the real proof), but a dud
+# reader left in place is a dud reader the next lane trusts, so it is repaired
+# here rather than written up. The needle below is the literal the fixed arm
+# actually puts in the binary, and the two controls prove the reader works.
+echo "cloud cancel-receipt arm compiled into this binary (1 = present):"
+echo "  fixed-arm literal      : $(grep -a -c -F 'this receipt does not claim one' "$BIN")"
+echo "  known-positive literal : $(grep -a -c -F 'machine destroy, then the vendor' "$BIN") (in every build)"
+echo "  the OLD dud needle     : $(grep -a -c -F 'the cancellation destroyed the machine' "$BIN") (0 in every build — that was the defect)"
 
 echo
 echo "--- 0. is the credential live? Read the answer back from the PRODUCT."
