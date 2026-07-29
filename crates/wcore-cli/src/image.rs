@@ -105,7 +105,13 @@ pub async fn run_with_config_path(args: ImageArgs, config_path: &Path) -> Result
     //
     // The backend identity is the endpoint host plus the model, so a record
     // from here is distinguishable from one produced by the tool path.
-    let backend_id = format!("wayland-core image ({})", request.model);
+    // Name the billable HOST and model, not the command — the command is
+    // already the record's `tool`, and the first capture read
+    // "wayland-core image via wayland-core image (flux-image) (flux-image)".
+    // As a bonus this makes an operator rate-card entry of just the host
+    // (`"https://api.fluxrouter.ai"`) price every model on it, via the card's
+    // longest-prefix match.
+    let backend_id = format!("{}#{}", base_url.trim_end_matches('/'), request.model);
     let rate_card = media_rate_card(&doc);
     let units = match parse_size(args.size.as_deref()) {
         Some((w, h)) => MediaUnits::images_at(args.n, w, h),
