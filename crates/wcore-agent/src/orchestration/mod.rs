@@ -206,6 +206,12 @@ pub struct ToolCallOutcome {
     /// `ToolCallTrace.cancelled` on the matching trace. Empty on the normal
     /// path.
     pub cancelled_ids: Vec<String>,
+    /// How many calls in this batch the sub-agent learned-policy pre-filter
+    /// narrowed away. Always `0` unless the caller is a sub-agent AND a
+    /// [`LearnedPolicy`] is installed. The engine reads this to emit the
+    /// `learned_policy` capability's runtime outcome proof — the occurrence
+    /// triple must follow a real denial, never mere construction.
+    pub learned_policy_denials: usize,
 }
 
 type BatchToolOutcome = (
@@ -340,7 +346,12 @@ pub async fn execute_tool_calls_with_policy_gate(
         .await;
     };
 
-    let filtered = filter_tool_calls_by_policy(tool_calls, gate);
+    // This entry point predates the sub-agent actor: it is the standalone
+    // policy-gate helper, with no `AgentExecutorConfig` and therefore no
+    // caller class and no learned policy to consult. The pre-filter lives on
+    // the `dispatch_once` path (`node_executor.rs`), which is the one every
+    // spawned sub-agent turn actually takes.
+    let filtered = filter_tool_calls_by_policy(tool_calls, Some(gate), None);
     let allowed_calls = filtered.allowed_calls();
     let inner_outcome = execute_tool_calls_with_budget(
         registry,
@@ -363,6 +374,11 @@ struct PolicyFilteredCalls {
     allowed: Vec<(usize, ContentBlock)>,
     denied: Vec<(usize, ContentBlock)>,
     total: usize,
+    /// Subset of `denied` that the sub-agent learned-policy pre-filter
+    /// narrowed away (as opposed to the policy gate). Carried separately
+    /// because the two have different owners and only this one produces the
+    /// `learned_policy` capability's runtime outcome proof.
+    learned_denials: usize,
 }
 
 impl PolicyFilteredCalls {
@@ -415,24 +431,55 @@ impl PolicyFilteredCalls {
     }
 }
 
-/// Apply the optional actor/tool ACL gate before selecting a host or terminal
-/// approval path. This is not the immutable Managed execution-policy floor.
-/// The index tags let the caller restore the model's original call order.
+/// The argv string the learned policy pattern-matches against. `LearnedPolicy`
+/// documents its patterns as glob-like over a *joined argument list* (`git *`),
+/// which is a shell-shaped concept: for `Bash` the argument list IS the
+/// command, and for every other tool the closest honest rendering is the call's
+/// own input object. Two cases only — anything more would be guessing at which
+/// field a tool considers its "arguments".
+fn learned_policy_argv(input: &serde_json::Value) -> String {
+    match input.get("command").and_then(serde_json::Value::as_str) {
+        Some(command) => command.to_string(),
+        None => serde_json::to_string(input).unwrap_or_default(),
+    }
+}
+
+/// Apply the optional actor/tool ACL gate, then the optional sub-agent
+/// learned-policy pre-filter, before selecting a host or terminal approval
+/// path. Neither is the immutable Managed execution-policy floor. The index
+/// tags let the caller restore the model's original call order.
+///
+/// **Ordering is load-bearing and is the whole security argument.** The gate is
+/// consulted FIRST and its denial is final; the learned policy is only ever
+/// consulted on a call the gate already allowed, and it can only move
+/// allow → deny. An `AllowAlways` rule therefore cannot resurrect a
+/// gate-denied call and cannot skip the approval path — it merely declines to
+/// narrow, and the call continues down the ordinary dispatch route. That is the
+/// "narrowing / preapproval aid ... must never override hard denial or managed
+/// policy" constraint from the 2026-07-13 frontier gap audit §4, expressed as
+/// control flow rather than as a comment.
 fn filter_tool_calls_by_policy(
     tool_calls: &[ContentBlock],
-    gate: &crate::policy_gate::PolicyGate,
+    gate: Option<&crate::policy_gate::PolicyGate>,
+    learned: Option<&wcore_permissions::LearnedPolicy>,
 ) -> PolicyFilteredCalls {
     let mut allowed: Vec<(usize, ContentBlock)> = Vec::with_capacity(tool_calls.len());
     let mut denied: Vec<(usize, ContentBlock)> = Vec::new();
+    let mut learned_denials = 0usize;
     let mut result_idx = 0;
     for call in tool_calls {
         match call {
-            ContentBlock::ToolUse { id, name, .. } => {
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } => {
                 // Top-level dispatch uses the gate's default actor;
                 // sub-agent attribution is a v0.7 follow-up that needs
                 // source_agent threading through orchestration.
-                match gate.check_tool(name, None) {
-                    Ok(()) => allowed.push((result_idx, call.clone())),
+                let gate_verdict = match gate {
+                    Some(gate) => gate.check_tool(name, None),
+                    None => Ok(()),
+                };
+                match gate_verdict {
                     Err(deny) => denied.push((
                         result_idx,
                         ContentBlock::ToolResult {
@@ -441,6 +488,36 @@ fn filter_tool_calls_by_policy(
                             is_error: true,
                         },
                     )),
+                    Ok(()) => {
+                        // Narrowing pass. `Match { allow: true, .. }` and `Ask`
+                        // both fall through: this filter subtracts, never adds.
+                        let narrowed = learned.and_then(|policy| {
+                            match policy.evaluate(name, &learned_policy_argv(input)) {
+                                wcore_permissions::EvalResult::Match {
+                                    allow: false,
+                                    pattern,
+                                } => Some(pattern),
+                                _ => None,
+                            }
+                        });
+                        match narrowed {
+                            Some(pattern) => {
+                                learned_denials += 1;
+                                denied.push((
+                                    result_idx,
+                                    ContentBlock::ToolResult {
+                                        tool_use_id: id.clone(),
+                                        content: format!(
+                                            "Denied by sub-agent learned policy: \
+                                             {name} matched rule `{pattern}`"
+                                        ),
+                                        is_error: true,
+                                    },
+                                ));
+                            }
+                            None => allowed.push((result_idx, call.clone())),
+                        }
+                    }
                 }
                 result_idx += 1;
             }
@@ -454,6 +531,7 @@ fn filter_tool_calls_by_policy(
         allowed,
         denied,
         total: result_idx,
+        learned_denials,
     }
 }
 
@@ -461,6 +539,7 @@ fn merge_policy_outcome(
     filtered: PolicyFilteredCalls,
     inner_outcome: ToolCallOutcome,
 ) -> ToolCallOutcome {
+    let learned_denials = filtered.learned_denials;
     // Re-merge into original order. `allowed[i]` corresponds to
     // `inner_outcome.results[i]`; `denied[j].0` is its original index.
     let mut results: Vec<Option<ContentBlock>> = (0..filtered.total).map(|_| None).collect();
@@ -493,6 +572,7 @@ fn merge_policy_outcome(
         // gate only filters denied tools (which never dispatch), so forwarding
         // verbatim keeps the mapping correct.
         cancelled_ids: inner_outcome.cancelled_ids,
+        learned_policy_denials: learned_denials,
     }
 }
 
@@ -696,6 +776,7 @@ pub(crate) async fn execute_tool_calls_with_budget_and_effects(
         modifiers,
         hook_outcomes,
         cancelled_ids,
+        learned_policy_denials: 0,
     })
 }
 
@@ -3155,6 +3236,7 @@ async fn execute_tool_calls_with_approval_budget_effects_inner(
         modifiers,
         hook_outcomes,
         cancelled_ids,
+        learned_policy_denials: 0,
     })
 }
 

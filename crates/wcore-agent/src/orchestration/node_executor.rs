@@ -122,13 +122,15 @@ pub struct AgentExecutorConfig {
     /// unchanged. `SubAgent { id, .. }` activates the learned-policy
     /// pre-filter below (see `dispatch_once`).
     pub actor: CallActor,
-    /// v0.8.0 Task I (1.D.3): opt-in learned-policy pre-filter for
-    /// sub-agent callers. When `Some` AND `actor.is_sub_agent()`, each
-    /// tool call's `(name, argv)` is run through the policy BEFORE the
-    /// approval path. A deny short-circuits with an error
-    /// `ToolResult`; an allow or `Ask` falls through to the normal
-    /// dispatch path. `None` (the default) preserves byte-identical
-    /// pre-task-I behaviour even when `actor` is set.
+    /// v0.8.0 Task I (1.D.3), re-wired in Phase 22: opt-in learned-policy
+    /// pre-filter for sub-agent callers. When `Some` AND
+    /// `actor.is_sub_agent()`, each tool call's `(name, argv)` is run through
+    /// the policy AFTER `policy_gate` and BEFORE the approval path. A deny
+    /// short-circuits with an error `ToolResult`; an allow or `Ask` falls
+    /// through to the normal dispatch path, so this filter can only narrow —
+    /// it can neither resurrect a gate-denied call nor skip approval. `None`
+    /// (the default) preserves byte-identical pre-task-I behaviour even when
+    /// `actor` is set.
     pub learned_policy: Option<Arc<LearnedPolicy>>,
     /// AUDIT B-1 / A2 — session-root cancellation token threaded into
     /// every tool dispatch. `engine::run` passes a child of the
@@ -313,21 +315,27 @@ async fn dispatch_once(
     Result<ToolCallOutcome, ExecutionControl>,
     Option<HookEngine>,
 ) {
-    // v0.8.1 U11 — sub-agent ACL pre-filter scope-down. The 1.D.3
-    // pre-filter shipped in v0.8.0 I never fires in production
-    // (CallActor::SubAgent is never constructed; LearnedPolicy::new is
-    // never wired into AgentExecutorConfig). Removed pending a real
-    // sub-agent spawn path that sets the actor + a procedural-memory
-    // policy source. CallActor type is retained on AgentExecutorConfig
-    // because it defaults to Root (zero overhead) and is ready to
-    // activate when needed.
+    // Phase 22 (22-02 Task 3) — the v0.8.0 1.D.3 sub-agent ACL pre-filter is
+    // WIRED again, and this time it has a production caller: `AgentSpawner`
+    // stamps every child engine with `CallActor::SubAgent` and hands it the
+    // parent's `LearnedPolicy`. Before this, `AgentExecutorConfig` carried a
+    // `pub learned_policy` field with ZERO readers anywhere in the workspace
+    // while its own doc comment claimed the field was consulted here — a knob
+    // that did nothing, which is the advertised-but-dead class.
+    //
     // The policy gate is an unconditional floor, not an alternative approval
-    // rail. Filter first, then send every allowed call through the host or
-    // terminal approval path selected for this session.
-    let mut filtered = cfg
-        .policy_gate
-        .as_ref()
-        .map(|gate| filter_tool_calls_by_policy(tool_calls, gate));
+    // rail, and the learned policy is strictly downstream of it: see
+    // `filter_tool_calls_by_policy`, which consults the gate first and only
+    // offers the survivors to the learned policy, so the pre-filter can
+    // subtract but never add. Filter first, then send every allowed call
+    // through the host or terminal approval path selected for this session.
+    let learned = cfg
+        .actor
+        .is_sub_agent()
+        .then(|| cfg.learned_policy.as_deref())
+        .flatten();
+    let mut filtered = (cfg.policy_gate.is_some() || learned.is_some())
+        .then(|| filter_tool_calls_by_policy(tool_calls, cfg.policy_gate.as_ref(), learned));
     if let Some(filtered) = filtered.as_mut() {
         filtered.journal_denials(&cfg.tools, effect_scope, tool_calls);
     }
@@ -385,16 +393,17 @@ async fn dispatch_once(
     (outcome, hooks)
 }
 
-// v0.8.1 U11 — `sub_agent_prefilter` and `merge_prefilter_denies` removed
-// alongside the pre-filter call site above. The `LearnedPolicy` /
-// `DeniedPartition` plumbing was orphaned: every production caller
-// constructs `AgentExecutorConfig` with `actor: CallActor::Root` and
-// `learned_policy: None`, so the helpers were unreachable. They lived
-// here as a working spec; when a future wave wires a real sub-agent
-// spawn path that constructs `CallActor::SubAgent` and threads a
-// procedural-memory `LearnedPolicy` into the config, restore from git
-// history at `52b1ae2~..HEAD` and re-enable the `#[ignore]`'d
-// integration tests in `actor_acl_test.rs`.
+// Phase 22 (22-02 Task 3) — the standalone `sub_agent_prefilter` /
+// `merge_prefilter_denies` helpers the v0.8.1 U11 note pointed at are NOT
+// restored, deliberately. Their original source is not recoverable (this
+// repository's history begins at a squashed root, `da5a18b5`, so the
+// `52b1ae2~..HEAD` range the note names does not exist), and reintroducing a
+// second partition/merge pair would have given the dispatch path two orderings
+// to reason about. Instead the narrowing pass was folded into the existing
+// `filter_tool_calls_by_policy` / `merge_policy_outcome` pair, which already
+// owns "deny before dispatch, then restore the model's call order" and now
+// enforces gate-before-learned-policy structurally. The five `actor_acl_test`
+// cases the note asked to re-enable are re-enabled.
 
 #[cfg(test)]
 mod tests {

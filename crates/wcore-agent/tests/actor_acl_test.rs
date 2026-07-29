@@ -1,14 +1,15 @@
 //! v0.8.0 Task I (1.D.3) — sub-agent ACL pre-filter integration tests.
 //!
-//! v0.8.1 U11 — all tests in this file are `#[ignore]`'d because the
-//! pre-filter they exercise has been removed from
-//! `node_executor::dispatch_once` (it never fired in production:
-//! `CallActor::SubAgent` was never constructed and `LearnedPolicy` was
-//! never threaded into `AgentExecutorConfig`). The test code remains as
-//! a working spec — when a future wave wires a real sub-agent spawn
+//! Phase 22 (22-02 Task 3) — RE-ENABLED. The v0.8.1 U11 note said these
+//! would be un-`#[ignore]`d "when a future wave wires a real sub-agent spawn
 //! path that constructs `CallActor::SubAgent` and a procedural-memory
-//! `LearnedPolicy`, restore the pre-filter from `52b1ae2~..HEAD` and
-//! remove the `#[ignore]` annotations.
+//! `LearnedPolicy`". That wave is Phase 22: `AgentSpawner` now stamps
+//! `CallActor::SubAgent` on every child engine it builds and hands it the
+//! parent's `LearnedPolicy`, and `dispatch_once` consults both again. The
+//! pre-filter itself was NOT restored from `52b1ae2~..HEAD` — that revision
+//! does not exist, this repository's history begins at a squashed root — it
+//! was folded into `filter_tool_calls_by_policy`, which now runs the policy
+//! gate first and offers only its survivors to the learned policy.
 //!
 //! These prove that `AgentExecutorConfig::{actor, learned_policy}` are
 //! actually consulted by `dispatch_once` via `AgentNodeExecutor`. The
@@ -168,7 +169,6 @@ fn expect_denied(results: &[ContentBlock]) {
 }
 
 #[tokio::test]
-#[ignore = "v0.8.1 U11: pre-filter removed, will re-enable when sub-agent ACL wired"]
 async fn root_actor_bypasses_deny_policy() {
     // Even with a deny-everything policy in place, the Root actor
     // bypasses the sub-agent pre-filter — the approval path applies
@@ -179,7 +179,6 @@ async fn root_actor_bypasses_deny_policy() {
 }
 
 #[tokio::test]
-#[ignore = "v0.8.1 U11: pre-filter removed, will re-enable when sub-agent ACL wired"]
 async fn sub_agent_with_allow_policy_runs_tool() {
     // SubAgent + allow policy → pre-filter says Allow, falls through to
     // the normal approval path, tool runs.
@@ -189,7 +188,6 @@ async fn sub_agent_with_allow_policy_runs_tool() {
 }
 
 #[tokio::test]
-#[ignore = "v0.8.1 U11: pre-filter removed, will re-enable when sub-agent ACL wired"]
 async fn sub_agent_with_deny_policy_short_circuits() {
     // The primary wiring proof: a SubAgent caller with a deny-everything
     // policy gets an error ToolResult before dispatch — the MockTool
@@ -200,7 +198,6 @@ async fn sub_agent_with_deny_policy_short_circuits() {
 }
 
 #[tokio::test]
-#[ignore = "v0.8.1 U11: pre-filter removed, will re-enable when sub-agent ACL wired"]
 async fn sub_agent_ask_policy_falls_through_to_approval() {
     // Empty LearnedPolicy → every evaluate() returns Ask, which the
     // pre-filter treats as "fall through to the normal dispatch path".
@@ -211,7 +208,6 @@ async fn sub_agent_ask_policy_falls_through_to_approval() {
 }
 
 #[tokio::test]
-#[ignore = "v0.8.1 U11: pre-filter removed, will re-enable when sub-agent ACL wired"]
 async fn sub_agent_without_policy_runs_tool() {
     // SubAgent actor but no learned_policy configured → pre-filter is
     // skipped entirely; normal dispatch path applies and the tool runs.
@@ -220,34 +216,87 @@ async fn sub_agent_without_policy_runs_tool() {
     expect_executed(&results);
 }
 
+/// The narrowing-only guarantee, and the only case here that can catch the
+/// dangerous direction of this feature.
+///
+/// The 2026-07-13 frontier gap audit §4 is explicit: learned policy may be
+/// wired "only as a narrowing/preapproval aid; it must never override hard
+/// denial or managed policy." Cases 1-5 above all check that a DENY denies or
+/// that a non-deny lets the tool run — none of them can fail if an
+/// `AllowAlways` rule were wired to bypass the policy gate, which is the
+/// escalation this feature could plausibly introduce.
+///
+/// So: a policy gate that denies `guarded` outright, PLUS an allow-everything
+/// learned policy on a sub-agent caller. The call must still be denied, and
+/// denied BY THE GATE — the learned policy must not be able to resurrect it.
+#[tokio::test]
+async fn allow_always_cannot_override_the_policy_gate() {
+    let mut cfg = sub_agent_cfg(Some(allow_all_policy()));
+    // A gate whose parent authority contains no tools at all denies everything.
+    cfg.policy_gate = Some(wcore_agent::policy_gate::PolicyGate::from_parent_tools(
+        std::iter::empty::<&str>(),
+    ));
+    let results = run_dispatch(cfg, "t6").await;
+    assert_eq!(results.len(), 1, "expected exactly one result");
+    match &results[0] {
+        ContentBlock::ToolResult {
+            is_error, content, ..
+        } => {
+            assert!(*is_error, "AllowAlways must not resurrect a gate denial");
+            assert!(
+                content.contains("Denied by policy:"),
+                "the surviving denial must be the GATE's, not the learned policy's; got: {content}"
+            );
+            assert!(
+                !content.contains("tool-executed"),
+                "MockTool payload must NOT have been produced; got: {content}"
+            );
+        }
+        other => panic!("expected ToolResult, got {other:?}"),
+    }
+}
+
+/// Ordering control for the case above: with the SAME allow-everything policy
+/// and NO gate, the tool runs. One variable — the gate — so the assertion
+/// above is shown to be measuring the gate rather than passing for any reason.
+#[tokio::test]
+async fn the_gate_is_the_variable_in_the_override_test() {
+    let cfg = sub_agent_cfg(Some(allow_all_policy()));
+    assert!(cfg.policy_gate.is_none());
+    let results = run_dispatch(cfg, "t7").await;
+    expect_executed(&results);
+}
+
 /// Zero-execution guard — and it has to RUN to be one.
 ///
-/// Every test in this binary is `#[ignore]`d, so `cargo test --test actor_acl_test`
-/// executes 0 of 5 and still exits 0 printing `test result: ok`. This guard is
-/// deliberately NOT `#[ignore]`d: three suites in this repo carried a guard that
-/// was itself ignored, which made each inert against precisely the scenario it
-/// existed for — it could only fire under `--ignored`, by which point the real
-/// cases were running anyway.
+/// This binary's five cases were `#[ignore]`d from v0.8.1 U11 until Phase 22,
+/// so `cargo test --test actor_acl_test` executed 0 of 5 and still exited 0
+/// printing `test result: ok`. They are no longer ignored, but the guard is
+/// kept, inverted, and made stronger: it now FAILS if any test in this binary
+/// is ever `#[ignore]`d back into inertness while a caller declares intent to
+/// run the suite.
 ///
 /// It always runs, so this binary can never report success on zero executed
-/// tests, and it FAILS when a caller sets `WAYLAND_REQUIRE_IGNORED=1` to declare a run of the
-/// ignored cases while passing an invocation that cannot execute any of them.
-/// Skipped under nextest, whose `no-tests = "fail"` policy covers the same
-/// ground at the invocation site.
+/// tests.
 #[test]
 fn zero_execution_guard() {
     if std::env::var_os("NEXTEST").is_some() {
         return;
     }
-    if std::env::var("WAYLAND_REQUIRE_IGNORED").as_deref() != Ok("1") {
-        return;
+    let ignored = std::process::Command::new(std::env::current_exe().expect("test binary path"))
+        .args(["--list", "--ignored"])
+        .output();
+    if let Ok(output) = ignored {
+        let listed = String::from_utf8_lossy(&output.stdout);
+        let count = listed
+            .lines()
+            .filter(|line| line.contains(": test"))
+            .count();
+        assert_eq!(
+            count, 0,
+            "this suite's cases were un-#[ignore]d in Phase 22 when the sub-agent \
+             ACL pre-filter was wired; {count} are ignored again, which would let \
+             the binary exit 0 having proven nothing about the pre-filter"
+        );
     }
-    let asked_for_ignored = std::env::args().any(|a| a == "--ignored" || a == "--include-ignored");
-    assert!(
-        asked_for_ignored,
-        "declared intent to run this suite's 5 #[ignore]d cases, but neither \
-         --ignored nor --include-ignored was passed, so zero of them can execute. \
-         Exiting 0 here would certify nothing. Re-run with: \
-         cargo test -p wcore-agent --test actor_acl_test -- --ignored --test-threads=1"
-    );
 }
