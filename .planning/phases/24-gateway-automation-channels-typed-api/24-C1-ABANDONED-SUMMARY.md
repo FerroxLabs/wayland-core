@@ -258,6 +258,12 @@ the window expires duplicates rather than being suppressed. **BLOCKER for Sean.*
 ## 7. Gates — real numbers, and which run each came from
 
 Compiled and run on `hetzner-dsm` at `848595e9`; only `cargo fmt --all -- --check` on the Mac.
+The `wcore-gateway` suite was **re-run at the final SHA `eece2904`** after a whitespace-only
+follow-up commit, and returned the identical counts (49 / 7 / 9 / 8 / 4 / 0). That commit
+exists because an earlier `cargo fmt --all` touched two files and only one was staged — narrow
+staging is required here (§0 forbids `git add -A`), and the cost is that a second file can be
+left behind. `git status --porcelain` on the final tree is empty and `cargo fmt --check`
+returns rc=0 with 0 lines of output, read without a pipe.
 Counts read back from an **unproxied** cargo over ssh, with `0 ignored` / `0 filtered out`
 intact (the Mac-side `rtk` proxy strips exactly those two fields).
 
