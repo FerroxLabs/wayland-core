@@ -1134,12 +1134,76 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                                     };
                                     registered_n = names;
                                     registration_error = None;
+
+                                    // F24-C3-H5. Re-registering the ADAPTER is
+                                    // only half a reload. The inbound access
+                                    // policy and the tool posture were both read
+                                    // once at startup and were unreachable
+                                    // afterwards, so a channel added here was
+                                    // absent from them, fell through to the
+                                    // fail-closed `InboundPolicy::default` — an
+                                    // empty allowlist — and had every message
+                                    // silently denied. Meanwhile `channel
+                                    // health` reported it `healthy`, the
+                                    // registration count said it was there, and
+                                    // its webhook answered 200. Three surfaces,
+                                    // all wrong, and no error anywhere.
+                                    //
+                                    // Measured with a one-variable control: the
+                                    // identical config from the identical
+                                    // generator was ADMITTED when present at
+                                    // startup and DENIED when introduced by
+                                    // reload.
+                                    //
+                                    // `reload_policies` refreshes the policy and
+                                    // the posture in ONE swap. Refreshing only
+                                    // the policy would let messages arrive under
+                                    // the dispatcher's fallback posture instead
+                                    // of the configured one — a passing test
+                                    // over the wrong permissions, which is worse
+                                    // than the fail-closed defect it replaces.
+                                    //
+                                    // Nothing is torn down: the subscriber and
+                                    // the webhook host hold the same registry
+                                    // Arc, so the swap is visible on the very
+                                    // next inbound event.
+                                    let policies_note = match inbound_host
+                                        .as_ref()
+                                        .map(|h| h.reload_policies())
+                                    {
+                                        Some(Ok(n)) => n.to_string(),
+                                        // The policy files did not parse. The
+                                        // registry kept what it had rather than
+                                        // revoking every running channel, and
+                                        // the operator is told — silently
+                                        // serving stale policy is how a
+                                        // half-applied reload becomes the next
+                                        // finding.
+                                        Some(Err(e)) => {
+                                            registration_error = Some(format!(
+                                                "channel reload: adapters reloaded but inbound \
+                                                 policies did NOT: {e}. The previously loaded \
+                                                 policies are still in effect, so a newly added \
+                                                 channel will deny every message until this is \
+                                                 fixed and reload is run again."
+                                            ));
+                                            format!("KEPT-STALE ({e})")
+                                        }
+                                        // No inbound stack in this process (no
+                                        // provider, or config absent). Said out
+                                        // loud rather than printed as `0`,
+                                        // which would read as "the reload found
+                                        // no policies".
+                                        None => "no-inbound-host".to_string(),
+                                    };
+
                                     eprintln!(
-                                        "[gateway] channel reload: added={:?} replaced={:?} removed={:?} unchanged={:?}",
+                                        "[gateway] channel reload: added={:?} replaced={:?} removed={:?} unchanged={:?} policies={}",
                                         report.added,
                                         report.replaced,
                                         report.removed,
-                                        report.unchanged
+                                        report.unchanged,
+                                        policies_note
                                     );
                                 }
                                 Err(e) => {

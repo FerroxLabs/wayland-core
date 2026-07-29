@@ -116,6 +116,9 @@ function hex(n) {
 // class this module was written to close, and it would fail in the direction
 // that blames the product. If this import fails the driver must die loudly.
 import { classify, matches, instrumentFault, legacyMatches } from './f24-correlate.mjs';
+// F24-C3-H5. Kept in a module rather than inline so the self-test exercises the
+// shipped matcher; an instrument whose self-test re-implements it drifts.
+import { observedPostureIn, denialsIn } from './f24-gateway-log.mjs';
 
 /**
  * Does `text` carry `token`?
@@ -256,9 +259,24 @@ class ClauseRun {
     );
   }
 
-  /** Write one slack-platform channel config. Used for both the base set and
-   *  the adapter added mid-run for the reload leg. */
-  writeSlackChannel(name, allowedUser) {
+  /**
+   * Write one slack-platform channel config. Used for both the base set and
+   * the adapter added mid-run for the reload leg.
+   *
+   * F24-C3-H5 added `tools` / `toolRoot`. They default to the historical values
+   * so every existing call site is byte-identical, and the CONTROL and the
+   * EXPERIMENT still share this one generator — which is what makes the
+   * one-variable claim true. A second generator would silently become the
+   * variable under test.
+   *
+   * The third channel is deliberately written with `tools = "workspace"`, not
+   * the default `conversational`. That is the live analogue of mutation M2:
+   * under a policy-only repair the reloaded channel would receive messages
+   * (so an arrivals-only leg goes green) while the dispatcher resolved it to
+   * the fallback `Conversational` posture. Configuring a NON-default posture is
+   * the only way the log can tell those two worlds apart.
+   */
+  writeSlackChannel(name, allowedUser, tools = 'conversational', toolRoot = null) {
     fs.writeFileSync(
       path.join(this.home, 'channels', `${name}.toml`),
       [
@@ -279,10 +297,67 @@ class ClauseRun {
         `dm_allowlist = ["${allowedUser}"]`,
         'group = "disabled"',
         'require_mention = true',
-        'tools = "conversational"',
+        `tools = "${tools}"`,
+        ...(toolRoot ? [`tool_workspace_root = "${toolRoot}"`] : []),
         '',
       ].join('\n'),
     );
+  }
+
+  /**
+   * The jail root the `workspace`-posture channel is confined to. Created up
+   * front: a `Workspace` posture builds a `SandboxedFs` over this path, and a
+   * missing directory would fail engine construction — which would surface as
+   * "no reply" and be indistinguishable from the product defect under test.
+   */
+  toolJailRoot() {
+    const p = path.join(this.runDir, 'chan-jail');
+    fs.mkdirSync(p, { recursive: true });
+    return p;
+  }
+
+  /**
+   * The tool posture the product actually resolved for `channelName`, read out
+   * of the gateway's own log.
+   *
+   * `channel_dispatch.rs` emits `channel turn dispatch` with `channel=` and
+   * `posture=` on EVERY admitted turn, so this observes the permission the turn
+   * genuinely ran under rather than the one the config asked for. It is the
+   * only surface that can distinguish the correct repair from the half-fix:
+   * both deliver the message, and only one runs it under the configured
+   * posture.
+   *
+   * The matching itself lives in `f24-gateway-log.mjs` so the self-test can
+   * exercise the SHIPPED matcher instead of a copy of it. This method is only
+   * the file read.
+   */
+  observedPosture(channelName) {
+    if (!this.gatewayLog || !fs.existsSync(this.gatewayLog)) {
+      return { posture: null, tier: 'no-log', sightings: 0 };
+    }
+    return observedPostureIn(fs.readFileSync(this.gatewayLog, 'utf8'), channelName);
+  }
+
+  /**
+   * Whether the gateway POSITIVELY logged a denial for `channelName` since
+   * `sinceBytes`.
+   *
+   * A "still denies" leg asserted only as "no new arrival" is self-passing on a
+   * dead pipe, a wrong URL, or a gateway that died — every one of which
+   * produces the same zero (§3b-i). So the denial must be SEEN, not inferred.
+   *
+   * The byte slice is returned alongside the count because a zero over a
+   * zero-byte slice has counted nothing and must not read as "no denials".
+   */
+  denialsFor(channelName, sinceBytes = 0) {
+    if (!this.gatewayLog || !fs.existsSync(this.gatewayLog)) return { count: 0, bytes: 0 };
+    const slice = fs.readFileSync(this.gatewayLog, 'utf8').slice(sinceBytes);
+    return { count: denialsIn(slice, channelName), bytes: Buffer.byteLength(slice, 'utf8') };
+  }
+
+  gatewayLogBytes() {
+    if (!this.gatewayLog || !fs.existsSync(this.gatewayLog)) return 0;
+    return fs.statSync(this.gatewayLog).size;
   }
 
   // ── the binary ─────────────────────────────────────────────────────────────
@@ -299,7 +374,12 @@ class ClauseRun {
         ...process.env,
         WAYLAND_HOME: this.home,
         WAYLAND_VAULT_PASSPHRASE: this.vaultPassphrase,
-        RUST_LOG: 'wcore_agent::bootstrap=info,wcore_agent::channel_inbound=debug,wcore_channels=debug',
+        // `wcore_agent::channel_dispatch=debug` added for F24-C3-H5: it is the
+        // only surface that reports the tool posture a turn actually ran
+        // under, which is what separates the real repair from the half-fix.
+        RUST_LOG:
+          'wcore_agent::bootstrap=info,wcore_agent::channel_inbound=debug,' +
+          'wcore_agent::channel_dispatch=debug,wcore_channels=debug',
       },
     });
     this.gatewayChild = child;
@@ -531,12 +611,19 @@ function parseArgs(argv) {
     binary: null,
     runDir: path.join(os.tmpdir(), `f24-c3-clauses-${Date.now()}`),
     allAtStart: false,
+    // F24-C3-H5. `--posture-baseline-out` is written by the CONTROL run
+    // (`--all-at-start`); `--posture-baseline-in` is read by the reload run,
+    // which then asserts the two lifecycles resolved the same permission.
+    postureBaselineOut: null,
+    postureBaselineIn: null,
   };
   for (let i = 2; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--binary') out.binary = argv[++i];
     else if (a === '--run-dir') out.runDir = argv[++i];
     else if (a === '--all-at-start') out.allAtStart = true;
+    else if (a === '--posture-baseline-out') out.postureBaselineOut = argv[++i];
+    else if (a === '--posture-baseline-in') out.postureBaselineIn = argv[++i];
     else {
       process.stderr.write(`unknown argument: ${a}\n`);
       process.exit(2);
@@ -586,7 +673,7 @@ async function main() {
     // config and any divergence in it would silently become the variable under
     // test.
     if (args.allAtStart) {
-      R.writeSlackChannel('f24finthree', 'U24FINTHREE');
+      R.writeSlackChannel('f24finthree', 'U24FINTHREE', 'workspace', R.toolJailRoot());
       R.note('CONTROL MODE --all-at-start: 3 channels on disk BEFORE start; reload legs skipped');
     } else {
       R.note('base config: 2 channels on disk, 1 held back for the reload leg');
@@ -698,8 +785,27 @@ async function main() {
           `FAIL here would mean the config is at fault and there is NO product defect.`,
         after - before,
       );
+
+      // F24-C3-H5. The STARTUP-lifecycle posture, recorded so the reload run
+      // can assert equality against it rather than against a value hardcoded
+      // in the driver. A hardcoded expectation only proves the driver agrees
+      // with itself; this proves the two LIFECYCLES agree with each other.
+      const p = R.observedPosture('f24finthree');
+      R.postureBaseline = p;
+      R.record(
+        'lifecycle-control',
+        'startup-posture-observed',
+        p.posture !== null,
+        `posture=${p.posture} tier=${p.tier} sightings=${p.sightings}. ` +
+          `null here is an INSTRUMENT problem (no dispatch line), not a product finding.`,
+        p.sightings,
+      );
+      if (args.postureBaselineOut && p.posture !== null) {
+        fs.writeFileSync(args.postureBaselineOut, JSON.stringify(p, null, 2));
+        R.note(`posture baseline written to ${args.postureBaselineOut}: ${JSON.stringify(p)}`);
+      }
     } else if (bound) {
-      R.writeSlackChannel('f24finthree', 'U24FINTHREE');
+      R.writeSlackChannel('f24finthree', 'U24FINTHREE', 'workspace', R.toolJailRoot());
       R.note('third channel written to disk; gateway NOT yet told');
       sleep(5000);
       const h = R.channelHealth();
@@ -751,6 +857,74 @@ async function main() {
         `token=${s3.token} accepted=${s3.accepted} http=${s3.httpStatus} tier=${got3.tier} arrivals_before=${before} arrivals_after=${after} ` +
           `after=${got3.after_ms}ms`,
         after - before,
+      );
+
+      // ── F24-C3-H5: the POSTURE legs. ───────────────────────────────────────
+      //
+      // Arrival is not enough and this is the exact reason the finding lane
+      // refused to fix the defect in a hurry. A repair that refreshed only the
+      // access policy makes the leg above go green while the dispatcher still
+      // resolves this channel to its fallback `Conversational` scope — the
+      // channel receives, and runs under permissions nobody configured. That
+      // outcome is NOT fail-closed, so it is worse than the bug it replaces,
+      // and an arrivals-only acceptance test cannot see it.
+      const obs = R.observedPosture('f24finthree');
+      R.record(
+        'reconnect-reload',
+        'reloaded-adapter-runs-under-its-configured-posture',
+        obs.posture === 'Workspace',
+        `observed_posture=${obs.posture} want=Workspace tier=${obs.tier} sightings=${obs.sightings}. ` +
+          `The config says tools="workspace"; the dispatcher fallback is Conversational, so ` +
+          `"Conversational" here means the policy was refreshed and the POSTURE was not — the ` +
+          `half-fix. "null" means no turn was dispatched at all (an instrument or arrival problem).`,
+        obs.sightings,
+      );
+
+      // Cross-lifecycle equality. Read from the CONTROL run's recorded value
+      // when one was supplied, so this asserts that reload and startup agree
+      // rather than that the driver agrees with itself.
+      if (args.postureBaselineIn) {
+        let baseline = null;
+        try {
+          baseline = JSON.parse(fs.readFileSync(args.postureBaselineIn, 'utf8'));
+        } catch (e) {
+          R.fault('posture-baseline', `cannot read ${args.postureBaselineIn}: ${e.message}`);
+        }
+        if (baseline) {
+          R.record(
+            'reconnect-reload',
+            'reloaded-posture-equals-startup-posture',
+            baseline.posture !== null && obs.posture === baseline.posture,
+            `reload=${obs.posture} startup=${baseline.posture} ` +
+              `(from ${args.postureBaselineIn}). The same config through two lifecycles must ` +
+              `resolve to the same permission.`,
+            obs.sightings,
+          );
+        }
+      }
+
+      // ── F24-C3-H5: fail-closed must SURVIVE the repair. ────────────────────
+      //
+      // The cheapest wrong fix is an open policy. It would pass every arrival
+      // leg above. So a sender OUTSIDE the reloaded channel's allowlist must
+      // still be denied — and the denial is asserted POSITIVELY, out of the
+      // gateway's own log, not inferred from "no new arrival". A zero is
+      // produced for free by a dead pipe, a wrong URL or a dead gateway.
+      const logMark = R.gatewayLogBytes();
+      const beforeIntruder = R.arrivals().records.length;
+      const intruder = R.postSlackInbound('f24finthree', 'U24INTRUDER', 'DF24FINTHREE');
+      sleep(15_000);
+      const afterIntruder = R.arrivals().records.length;
+      const denied = R.denialsFor('f24finthree', logMark);
+      R.record(
+        'reconnect-reload',
+        'reloaded-adapter-still-denies-a-non-allowlisted-sender',
+        denied.count > 0 && afterIntruder === beforeIntruder,
+        `intruder_token=${intruder.token} accepted=${intruder.accepted} http=${intruder.httpStatus} ` +
+          `denials_seen=${denied.count} log_slice_bytes=${denied.bytes} ` +
+          `arrivals_before=${beforeIntruder} arrivals_after=${afterIntruder}. ` +
+          `The denial is SIGHTED in the gateway log, so this leg cannot pass on a dead pipe.`,
+        denied.count,
       );
 
       // The original adapters must still work after a reload. A reload that
@@ -805,6 +979,16 @@ async function main() {
       instrument_fault: R.instrumentFaults.length > 0,
       instrument_faults: R.instrumentFaults,
       webhook_host_bound: bound,
+      // F24-C3-H5: the permission each channel's turns actually ran under,
+      // read from the gateway's own log. Recorded for every channel so a
+      // reader can see that the two unchanged ones stayed Conversational
+      // while the reloaded one is Workspace — i.e. that the swap was targeted
+      // and did not simply elevate everything.
+      observed_postures: {
+        f24finone: R.observedPosture('f24finone'),
+        f24fintwo: R.observedPosture('f24fintwo'),
+        f24finthree: R.observedPosture('f24finthree'),
+      },
       legs: R.legs,
       clauses_addressed: ['health', 'reconnect-reload'],
       clauses_NOT_addressed: ['media', 'native-actions'],

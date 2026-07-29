@@ -1,0 +1,18 @@
+2026-07-29T02:49:58.115122Z  INFO channel auto-registered channel=f24finone platform=slack
+2026-07-29T02:49:58.115196Z  INFO channel auto-registered channel=f24finthree platform=slack
+2026-07-29T02:49:58.115218Z  INFO channel auto-registered channel=f24fintwo platform=slack
+[gateway] channels registered=3
+[gateway] inbound: subscriber spawned, webhook host listening bind=127.0.0.1:18899 policies=3
+[gateway] started pid=604323 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+2026-07-29T02:49:59.039658Z DEBUG channel turn dispatch channel=f24finone posture=Conversational
+2026-07-29T02:49:59.066171Z  INFO W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+2026-07-29T02:49:59.066183Z  INFO M3.2: memory.enabled ON — decay scheduler spawned interval_secs=3600
+2026-07-29T02:49:59.068379Z  INFO user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+2026-07-29T02:49:59.069068Z  INFO channel engine tool posture applied posture=Conversational sandbox_enforces_read_deny=true
+2026-07-29T02:49:59.162978Z  INFO another process owns the schedule; this session observes and will not fire dir=/root/f24h5-ev/ctl/home/cron
+2026-07-29T02:50:02.251318Z DEBUG channel turn dispatch channel=f24finthree posture=Workspace
+2026-07-29T02:50:02.256179Z  INFO W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+2026-07-29T02:50:02.256198Z  INFO M3.2: memory.enabled ON — decay scheduler spawned interval_secs=3600
+2026-07-29T02:50:02.260027Z  INFO user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+2026-07-29T02:50:02.261554Z  INFO channel engine tool posture applied posture=Workspace sandbox_enforces_read_deny=true
+2026-07-29T02:50:02.262101Z  INFO another process owns the schedule; this session observes and will not fire dir=/root/f24h5-ev/ctl/home/cron
