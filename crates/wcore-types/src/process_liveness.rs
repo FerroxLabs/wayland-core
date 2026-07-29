@@ -179,48 +179,125 @@ mod platform {
     use super::ProcessLiveness;
 
     /// `SZOMB` from `<sys/proc.h>`: `SIDL 1, SRUN 2, SSLEEP 3, SSTOP 4,
-    /// SZOMB 5`. Not re-exported by the `libc` crate for Apple targets, so it
-    /// is spelled out here with its source rather than assumed.
-    const SZOMB: libc::c_char = 5;
+    /// SZOMB 5`. The `libc` crate does export `libc::SZOMB` for Apple, but as
+    /// a `u32`; the byte read out of the kernel buffer below is a `c_char`, so
+    /// the comparison is done on the value with its source named.
+    const SZOMB: i8 = 5;
+
+    /// Byte offset of `kinfo_proc.kp_proc.p_stat`.
+    ///
+    /// The `libc` crate does **not** define `kinfo_proc` for Apple targets
+    /// (measured: three `E0425`s from
+    /// `cargo check -p wcore-types --target aarch64-apple-darwin`, libc
+    /// 0.2.186), so the two fields this probe needs are read out of the raw
+    /// kernel buffer. The offsets are not guessed — they were printed by
+    /// `offsetof` on real hardware; see
+    /// `.planning/evidence/zombie-probe/MACOS-PROBE-RESULT.txt`:
+    ///
+    /// ```text
+    /// ABI sizeof(struct kinfo_proc)  = 648
+    /// ABI offsetof(kp_proc.p_stat)   = 36
+    /// ABI offsetof(kp_proc.p_pid)    = 40
+    /// ```
+    ///
+    /// Both fields sit in the fixed prefix of `struct extern_proc`
+    /// (`p_un[16] | p_vmspace(8) | p_sigacts(8) | p_flag(4) | p_stat(1)`),
+    /// which is identical on `x86_64` and `aarch64` because both are LP64.
+    const P_STAT_OFFSET: usize = 36;
+    /// Byte offset of `kinfo_proc.kp_proc.p_pid`. Read back purely as a
+    /// self-check on the two offsets above — see [`liveness`].
+    const P_PID_OFFSET: usize = 40;
 
     pub(super) fn liveness(pid: u32) -> ProcessLiveness {
-        // macOS has no /proc. `kill(pid, 0)` succeeds for a zombie exactly as
-        // it does on Linux, so it cannot be the probe either. The kernel's
-        // own answer is `kinfo_proc.kp_proc.p_stat`.
+        // macOS has no /proc, and `kill(pid, 0)` returns 0 for a macOS zombie
+        // exactly as it does on Linux — measured, ARM A of the C probe above.
+        // It is also wrong in the OTHER direction here: `kill(1, 0)` fails
+        // with EPERM for launchd, so the old shape reported a live process as
+        // dead (ARM D). `sysctl KERN_PROC_PID` is right on both arms.
+        //
+        // `proc_pidinfo(PROC_PIDTBSDINFO)` was the obvious alternative and is
+        // DISQUALIFIED: it fails with EPERM for a live process owned by
+        // another user, indistinguishably from its ESRCH failure for a corpse,
+        // so "libproc failed => dead" is universal denial.
         let mut mib: [libc::c_int; 4] = [
             libc::CTL_KERN,
             libc::KERN_PROC,
             libc::KERN_PROC_PID,
             pid as libc::c_int,
         ];
-        let mut info: libc::kinfo_proc = unsafe { std::mem::zeroed() };
-        let mut size = std::mem::size_of::<libc::kinfo_proc>();
 
-        // SAFETY: `mib` is a 4-element array matching the `namelen` argument,
-        // `info` is a live, correctly sized `kinfo_proc`, and `size` is its
-        // byte length in/out. No pointer outlives this call.
+        // Ask for the size first rather than hardcoding 648, so a future
+        // kernel that grows the struct does not silently truncate.
+        let mut needed: libc::size_t = 0;
+        // SAFETY: `mib` has exactly the 4 elements declared by `namelen`; a
+        // null `oldp` with a live `oldlenp` is the documented size query.
         let rc = unsafe {
             libc::sysctl(
                 mib.as_mut_ptr(),
                 4,
-                (&mut info as *mut libc::kinfo_proc).cast::<libc::c_void>(),
-                &mut size,
+                std::ptr::null_mut(),
+                &mut needed,
                 std::ptr::null_mut(),
                 0,
             )
         };
-
         if rc != 0 {
             return match std::io::Error::last_os_error().raw_os_error() {
                 Some(libc::ESRCH) => ProcessLiveness::Dead,
                 _ => ProcessLiveness::Indeterminate,
             };
         }
-        // A successful sysctl that filled nothing in means "no such process".
+        if needed == 0 {
+            // A successful query that needs zero bytes means "no such
+            // process" — this is the shape a fully reaped pid produces
+            // (ARM C), and it does NOT come back as ESRCH.
+            return ProcessLiveness::Dead;
+        }
+
+        let mut buffer = vec![0u8; needed];
+        let mut size = needed;
+        // SAFETY: `buffer` is `size` bytes long and stays borrowed for the
+        // duration of the call; `size` is the in/out length.
+        let rc = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                4,
+                buffer.as_mut_ptr().cast::<libc::c_void>(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc != 0 {
+            return match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::ESRCH) => ProcessLiveness::Dead,
+                _ => ProcessLiveness::Indeterminate,
+            };
+        }
         if size == 0 {
             return ProcessLiveness::Dead;
         }
-        if info.kp_proc.p_stat == SZOMB {
+        if size < P_PID_OFFSET + 4 {
+            // Too short to contain the fields — cannot tell, do not guess.
+            return ProcessLiveness::Indeterminate;
+        }
+
+        // Self-check on the hardcoded offsets: read `p_pid` back and require
+        // it to be the pid we asked about. If Apple ever moves these fields,
+        // this probe degrades to `Indeterminate` (which `process_is_alive`
+        // renders as the conservative "assume alive") instead of silently
+        // reading some unrelated byte as a process state.
+        let readback = i32::from_ne_bytes([
+            buffer[P_PID_OFFSET],
+            buffer[P_PID_OFFSET + 1],
+            buffer[P_PID_OFFSET + 2],
+            buffer[P_PID_OFFSET + 3],
+        ]);
+        if readback != pid as i32 {
+            return ProcessLiveness::Indeterminate;
+        }
+
+        if buffer[P_STAT_OFFSET] as i8 == SZOMB {
             ProcessLiveness::Dead
         } else {
             ProcessLiveness::Live
