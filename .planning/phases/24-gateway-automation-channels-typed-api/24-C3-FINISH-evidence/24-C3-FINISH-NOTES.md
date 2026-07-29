@@ -112,4 +112,105 @@ blocker.
    and which are measurable with the fixtures that already exist?
 
 ---
+
+## T+35 — P1 RESULT: the seam survey. Two of the four are drivable TODAY with zero Rust.
+
+Source-level, read from the shipped construction path (`wcore-channels-registry`'s
+`make_*` → the adapter's `new()`), not from the `#[doc(hidden)]` test constructors. That
+distinction is the whole point: Discord's seam *existed* as `with_bases` and was still
+unreachable, because the registry built through `new()`. So the only question that matters
+is **what `new()` consumes from config.**
+
+| adapter | inbound transport | seam reachable from a config file? | Rust change needed | shape |
+|---|---|---|---|---|
+| **matrix** | HTTP long-poll `/sync` | **YES — `homeserver_url`** | **ZERO** | telegram-shaped, but *stronger* |
+| **signal** | stdio JSON-RPC subprocess | **YES — `signal_cli_path`** | **ZERO** | not a URL seam at all |
+| msteams | inbound webhook + outbound REST | PARTIAL — `service_url` yes, `token_url` NO | 1–2 config fields | discord-shaped |
+| imessage | SQLite poll + AppleScript send | env-only (`$HOME`), and macOS-gated | send path has no seam | blocked on platform |
+
+### matrix — `homeserver_url`, and it is a *required* field
+
+`MatrixConfig.homeserver_url` (`config.rs:9`) has **no `#[serde(default)]` and no production
+constant**. `MatrixChannel::new` (`lib.rs:61-62`) does
+`let api_base = config.homeserver_url.clone(); Self::with_base(...)`, and
+`registry::make_matrix` (`lib.rs:179`) calls `new()`. So a config naming
+`homeserver_url = "http://127.0.0.1:PORT"` points the **shipped binary** at a fixture.
+
+This is a stronger seam than telegram's, and the difference is worth stating precisely.
+Telegram, slack, whatsapp, sms and msteams all carry a `#[serde(default)]` production
+endpoint, so a fixture run must *override* a default that would otherwise reach the vendor —
+and the control test ("a config naming no override still reaches production") is load-bearing.
+Matrix has no default to reach past: every matrix config that has ever parsed already names
+its homeserver, because a homeserver is per-deployment by design. **There is no production
+default to preserve, so there is no control test to write and no regression surface.**
+
+Egress is not a blocker: matrix uses the same `wcore_egress::EgressClient` as telegram,
+slack, discord and whatsapp, all of which have been driven against loopback fixtures.
+
+**Cost: fixture only.** The `/sync` long-poll is the same shape as telegram's `getUpdates`
+fixture that already exists in `scripts/f24-tg-fixture.mjs` — an HTTP endpoint that holds a
+request open and returns a batch with a cursor. Nothing like Discord's hand-rolled RFC6455.
+
+### signal — `signal_cli_path`, and it is not a network seam at all
+
+`SignalConfig.signal_cli_path` (`config.rs:18`, `#[serde(default = "default_signal_cli_path")]`
+→ bare `signal-cli` on `$PATH`). `RealLauncher::launch` (`subprocess.rs:53-62`) does
+`Command::new(cli_path).arg("-a").arg(account).arg("jsonRpc")` with piped stdio.
+`registry::make_signal` (`lib.rs:166`) calls `new()`.
+
+So the fixture is **an executable script that speaks JSON-RPC frames on stdin/stdout.** No
+HTTP, no TLS, no port, no certificate — categorically simpler than every other adapter's
+fixture, including the webhook ones. The seam is a `PathBuf` in operator-owned config, at the
+same trust level as `credential_handle`; it is not reachable from a message.
+
+**This breaks the framing I was given.** The brief said the telegram and discord precedents
+are both "config-level base-URL seams". Signal's is a config-level **subprocess-path** seam.
+Anyone searching the four remaining adapters for a `*_base_url` field would have found
+nothing in signal and concluded it had no seam — when in fact it has the cheapest one in the
+entire set.
+
+### msteams — discord-shaped, and the blocker is the token endpoint, not the service URL
+
+Two endpoints, and only one is seamed:
+
+- outbound `service_url` — `#[serde(default)]` config field, present (`config.rs:17`). Fine.
+- **AAD token** `BF_TOKEN_URL` = `https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token`
+  (`token.rs:12-13`). `MsTeamsChannel::with_token_url` exists but is **`#[doc(hidden)]`**
+  (`lib.rs:82`) and `new()` hardcodes the constant (`lib.rs:78`); `make_msteams`
+  (`registry:192`) calls `new()`.
+
+This is **precisely the Discord situation**: the seam exists in Rust and no out-of-process
+harness can reach it. Consequence: msteams cannot even *start* against a fixture, because
+`start()` must acquire an app token from Microsoft before anything else happens. A third
+hardcoded endpoint, `BF_OPENID_METADATA_URL` (`auth.rs:42-43`), is needed for inbound JWT
+validation — `BotFrameworkAuth` takes it as a constructor arg (`auth.rs:115`), so it is
+plumbed but likewise not config-reachable.
+
+**Cost: 1–2 `#[serde(default)]` config fields + a control test**, then a webhook fixture that
+also mints a JWKS. The Rust change is telegram-sized; the fixture is larger than matrix's
+because it must sign JWTs. Call it ~2 sessions.
+
+### imessage — the send path has no seam, and the platform blocks it anyway
+
+- Read path: `chat_db_path()` (`db.rs:26-32`) is a **free function taking no argument**,
+  called directly at `channel.rs:156` and `:223`. It reads `$HOME` and appends
+  `Library/Messages/chat.db`. So there *is* an env-level seam for the inbound half — point
+  `$HOME` at a temp dir holding a fixture SQLite file with chat.db's schema.
+- Send path: `applescript.rs` shells to `osascript`. macOS-only, and gated behind TCC
+  Automation consent that a headless run cannot grant.
+- The whole crate is `#[cfg(target_os = "macos")]` (`lib.rs:3`, and `make_imessage` is
+  `#[cfg(target_os = "macos")]` at `registry:199`).
+
+So iMessage is **not blocked on a seam — it is blocked on the platform.** It cannot be built
+on hetzner (cfg'd out) and cannot be built on the Mac (standing constraint: no cargo on the
+Mac). A macOS leg needs the CI-published `wayland-core-aarch64-apple-darwin` artifact, and
+even then the reply half needs TCC consent. **Do not cost this as a fixture problem.**
+
+### What this changes about item 2
+
+The four were not equidistant, and were being treated as if they were. Two require **no Rust
+change at all** and one of those two (signal) has the simplest fixture in the phase. The
+correct order for anyone continuing is **matrix → signal → msteams → imessage**, and the
+first two do not need a seam plan, only a fixture.
+
 <!-- append below this line after every measurement -->
