@@ -1,0 +1,39 @@
+[run2-base-sequenced] prefilling memory.db to ~150 MiB ...
+[run2-base-sequenced] prefill done in 0.8s, memory.db = 158.3 MiB
+[run2-base-sequenced] waiting for writers: 0/3 started (iter 0, 1785339280)
+[run2-base-sequenced] waiting for writers: 3/3 started (iter 1, 1785339281)
+[run2-base-sequenced] journal modes reported by writers: {'w0': 'wal', 'w1': 'wal', 'w2': 'wal'}
+[run2-base-sequenced] all 3 writers exited; home is at rest
+[run2-base-sequenced] pre-archive committed high-water marks: {'w0': 21577, 'w1': 21327, 'w2': 21237}
+[run2-base-sequenced] backup create rc=0 in 13.15s
+archive: /tmp/lane-backup-sqlite-run2-base-sequenced/backup.tar.gz
+payloads: 2
+tree_digest: 96d42b6cc7103f21291d40598fb07077b72e05ad12608ecd3fc3f13a96be1792
+credentials_backend: unknown
+secrets_carried: no
+windows_unrestorable_paths: 0
+[run2-base-sequenced] post-archive committed high-water marks: {'w0': 21577, 'w1': 21327, 'w2': 21237}
+[run2-base-sequenced] backup restore rc=0
+restored: /tmp/lane-backup-sqlite-run2-base-sequenced/restored
+payloads: 2
+recovered_before_start: 0
+remap_disposition: remapped
+credential remap: backend `unknown` — 0 credential source(s) will be absent after restore. action: none required; every secret source resolves inside the restored home.
+[run2-base-sequenced] restored entries: ['config.toml', 'memory.db']
+---- RESULT ----
+ARM: sequenced
+WRITERS: 3
+ARCHIVE-SECONDS: 13.15
+   ...(integrity_check problem lines elided)...
+ARM: sequenced
+WRITERS: 3
+ARCHIVE-SECONDS: 13.15
+PRE-ARCHIVE-COMMITTED: 64141
+RESTORED-SIDECARS: []
+INTEGRITY-CHECK: ok
+INTEGRITY-PROBLEM-LINES: 0
+MISSING-COMMITTED-ROWS: 0
+MISSING-BY-WRITER: {'w0': 0, 'w1': 0, 'w2': 0}
+VERDICT: PASS
+WLRC=0
+WLDONE

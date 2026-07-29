@@ -1,0 +1,10 @@
+SOURCE-NEEDLE-ROWID: 1999
+SOURCE-MAX-ROWID: 1999
+SOURCE-FTS-RESOLVES-TO: ep-needle
+---- PRIMITIVE PROBE ----
+SQLITE-VERSION: 3.45.1
+VACUUM-INTO: {'max_rowid': 1999, 'fts_resolves_to': 'ep-needle', 'integrity': 'ok'}
+VACUUM-INTO-PRESERVES-ROWID-IDENTITY: True
+SQLITE3-BACKUP: {'max_rowid': 1999, 'fts_resolves_to': 'ep-needle', 'integrity': 'ok'}
+SQLITE3-BACKUP-PRESERVES-ROWID-IDENTITY: True
+VERDICT: VACUUM-INTO=SAFE, SQLITE3-BACKUP=SAFE
