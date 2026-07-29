@@ -31,6 +31,23 @@ use wcore_types::process_liveness::{ProcessLiveness, process_is_alive, process_l
 /// `Child` so the corpse is never reaped. Blocks until the child's stdout
 /// reaches EOF, which happens inside the child's exit path — an ordering
 /// guarantee that needs no external tool.
+///
+/// A corpse is constructed differently on each family because the two families
+/// keep corpses differently, and pretending otherwise produces a racy test:
+///
+/// * **Unix** — spawn, wait for the child's stdout to reach EOF (which happens
+///   inside its exit path), and **never** `wait()` it. The unreaped child is a
+///   zombie in state `Z`. Caller then polls an independent oracle for `Z`,
+///   because fd teardown in `do_exit` happens fractionally before the task
+///   actually becomes a zombie.
+/// * **Windows** — spawn and `wait()` it, so the process has *definitively*
+///   exited, then keep the `Child` alive. Rust's `Child` holds the process
+///   HANDLE until it drops, and an open handle keeps the pid **reserved**, so
+///   `OpenProcess` keeps succeeding for a process that is already gone. That
+///   is the Windows analogue of the zombie, and constructing it this way makes
+///   the test deterministic rather than dependent on how far into its exit
+///   path `cmd.exe` had got when the pipe closed.
+#[cfg(unix)]
 fn spawn_unreaped_corpse() -> (std::process::Child, u32) {
     let mut child = corpse_command()
         .stdout(Stdio::piped())
@@ -44,6 +61,27 @@ fn spawn_unreaped_corpse() -> (std::process::Child, u32) {
     stdout
         .read_to_end(&mut sink)
         .expect("read the corpse's stdout to EOF");
+    (child, pid)
+}
+
+#[cfg(windows)]
+fn spawn_unreaped_corpse() -> (std::process::Child, u32) {
+    let mut child = corpse_command()
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("spawn a child that exits immediately");
+    let pid = child.id();
+    // `wait()` on Windows is `WaitForSingleObject` + `GetExitCodeProcess`; it
+    // does NOT close the handle, which `Child` keeps until drop. So after this
+    // returns the process is certainly exited AND its pid is certainly still
+    // reserved — both halves of the hazard, with no race.
+    let status = child.wait().expect("wait for the child to exit");
+    assert_eq!(
+        status.code(),
+        Some(7),
+        "independent confirmation that the child really exited, and with the \
+         status we asked for"
+    );
     (child, pid)
 }
 
@@ -208,7 +246,8 @@ fn a_real_unreaped_corpse_reads_as_dead_and_the_old_shape_would_have_missed_it()
     #[cfg(unix)]
     let oracle = settle_into_corpse(pid);
     #[cfg(windows)]
-    let oracle = String::from("exited (stdout reached EOF); pid held by parent handle");
+    let oracle =
+        String::from("wait() returned exit code 7; pid still reserved by the parent's handle");
 
     println!("independent oracle for pid {pid}: {oracle}");
 
