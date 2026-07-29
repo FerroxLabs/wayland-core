@@ -3,6 +3,69 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Serialize a string-keyed map in ASCENDING KEY ORDER.
+///
+/// `HashMap` iteration order is randomized *per map instance* — `RandomState`
+/// reseeds every map, even two built on the same thread — so serializing the
+/// same logical config twice emitted its `[profiles.*]` / `[providers.*]` /
+/// `[mcp.servers.*]` sections in a DIFFERENT order each time. The product
+/// therefore rewrote the operator's `config.toml` with a spurious whole-file
+/// diff on every save, and `migrate_hermes::import_is_idempotent_without_over-
+/// write` (which compares two round-trips byte for byte) failed 13 times in 25
+/// at base. Measured proof: the two writes differed ONLY in `[profiles.beta]`
+/// preceding `[profiles.alpha]` versus the reverse — byte-identical otherwise.
+///
+/// Sorting at the SERIALIZER (rather than switching the fields to `BTreeMap`)
+/// is deliberate. `providers` / `profiles` / `servers` are public fields, and
+/// `&HashMap<String, McpServerConfig>` / `HashMap<String, ProviderConfig>`
+/// appear in signatures across `wcore-mcp`, `wcore-agent` and `wcore-cli` —
+/// including two in `crates/wcore-cli/src/main.rs`, a file under a
+/// shared-file fence that permits only minimal ADDITIVE edits. A type change
+/// would have rippled signature churn through that fence and collided with
+/// every concurrent lane. This achieves the same determinism with no public
+/// API change and no cross-crate ripple.
+///
+/// Deserialization is unaffected: order is not significant on the way in.
+fn serialize_sorted_map<S, V>(map: &HashMap<String, V>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+    V: Serialize,
+{
+    use serde::ser::SerializeMap;
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort_unstable();
+    let mut out = serializer.serialize_map(Some(map.len()))?;
+    for k in keys {
+        out.serialize_entry(k, &map[k])?;
+    }
+    out.end()
+}
+
+/// `serialize_sorted_map` for an optional map. `None` stays `None`; `Some` is
+/// emitted in ascending key order.
+fn serialize_sorted_opt_map<S, V>(
+    map: &Option<HashMap<String, V>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+    V: Serialize,
+{
+    match map {
+        None => serializer.serialize_none(),
+        Some(m) => {
+            use serde::ser::SerializeMap;
+            let mut keys: Vec<&String> = m.keys().collect();
+            keys.sort_unstable();
+            let mut out = serializer.serialize_map(Some(m.len()))?;
+            for k in keys {
+                out.serialize_entry(k, &m[k])?;
+            }
+            out.end()
+        }
+    }
+}
+
 use crate::browser::BrowserConfig;
 use crate::compact::CompactConfig;
 use crate::compat::ProviderCompat;
@@ -112,10 +175,12 @@ pub struct McpServerConfig {
     /// For stdio transport: arguments to the command
     pub args: Option<Vec<String>>,
     /// Environment variables to set for this server (stdio)
+    #[serde(serialize_with = "serialize_sorted_opt_map")]
     pub env: Option<HashMap<String, String>>,
     /// For SSE/HTTP transport: the URL
     pub url: Option<String>,
     /// HTTP headers for SSE/HTTP transports
+    #[serde(serialize_with = "serialize_sorted_opt_map")]
     pub headers: Option<HashMap<String, String>>,
     /// Whether tools from this server should be deferred (name-only stub sent to LLM).
     /// Defaults to true when omitted — MCP tools are deferred by default to reduce
@@ -169,6 +234,7 @@ impl McpServerConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct McpConfig {
     #[serde(default)]
+    #[serde(serialize_with = "serialize_sorted_map")]
     pub servers: HashMap<String, McpServerConfig>,
     /// W6 F17 — MCP curation policy.
     /// `Off` exposes every connected MCP tool (today's behaviour). `TopK(n)`
@@ -318,9 +384,11 @@ pub struct ConfigFile {
     pub execution: ExecutionConfig,
 
     #[serde(default)]
+    #[serde(serialize_with = "serialize_sorted_map")]
     pub providers: HashMap<String, ProviderConfig>,
 
     #[serde(default)]
+    #[serde(serialize_with = "serialize_sorted_map")]
     pub profiles: HashMap<String, ProfileConfig>,
 
     #[serde(default)]
@@ -5710,11 +5778,21 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(wayland_home_env)]
     fn test_api_key_missing_returns_error() {
         // Remove all env vars that could supply a key so the function must fail.
-        // Note: single-threaded tests share the process environment; clearing here
-        // is safe for unit test purposes.
-        // SAFETY: single-threaded test context; no other threads read these vars.
+        //
+        // The previous comment claimed "single-threaded test context; no other
+        // threads read these vars". Both halves were false: `cargo test` runs
+        // this binary's tests on a POOL of threads sharing one process, and
+        // `ANTHROPIC_API_KEY` is read by `resolve_api_key` on behalf of every
+        // test that calls `Config::resolve`. Clearing it here therefore yanked
+        // the credential out from under concurrently-running tests. Joins the
+        // `wayland_home_env` serial group, which is this crate's de-facto
+        // process-env group -- the two other API-key mutators
+        // (`connected_providers_detects_key_ambient_and_oauth_excludes_keyless`,
+        // `for_provider_discovery_overrides_identifying_fields`) are already in
+        // it despite the group's WAYLAND_HOME-shaped name.
         unsafe {
             std::env::remove_var("API_KEY");
             std::env::remove_var("ANTHROPIC_API_KEY");
@@ -6895,6 +6973,13 @@ enabled = false
     }
 
     #[test]
+    // READER of process env: `Config::resolve` resolves through
+    // `wayland_config_dir()` (WAYLAND_HOME) and the API-key vars, so it must
+    // join the same group as the WRITERS. `#[serial]` serializes writers
+    // against writers only -- an unlisted READER still races them, which is
+    // how this test failed with "No API key found" while every mutator was
+    // already serialized.
+    #[serial_test::serial(wayland_home_env)]
     fn test_resolve_with_project_dir_loads_project_config() {
         let tmp = tempfile::tempdir().unwrap();
         let project_toml = tmp.path().join(".wayland-core.toml");
@@ -6933,6 +7018,13 @@ max_tokens = 1234
     /// #112: a CLI `--max-tokens` always marks the cap explicit, regardless of
     /// what any config file says.
     #[test]
+    // READER of process env: `Config::resolve` resolves through
+    // `wayland_config_dir()` (WAYLAND_HOME) and the API-key vars, so it must
+    // join the same group as the WRITERS. `#[serial]` serializes writers
+    // against writers only -- an unlisted READER still races them, which is
+    // how this test failed with "No API key found" while every mutator was
+    // already serialized.
+    #[serial_test::serial(wayland_home_env)]
     fn test_resolve_cli_max_tokens_marks_explicit() {
         let tmp = tempfile::tempdir().unwrap();
         let cli_args = CliArgs {
@@ -7085,6 +7177,13 @@ enabled = false
     }
 
     #[test]
+    // READER of process env: `Config::resolve` resolves through
+    // `wayland_config_dir()` (WAYLAND_HOME) and the API-key vars, so it must
+    // join the same group as the WRITERS. `#[serial]` serializes writers
+    // against writers only -- an unlisted READER still races them, which is
+    // how this test failed with "No API key found" while every mutator was
+    // already serialized.
+    #[serial_test::serial(wayland_home_env)]
     fn approval_mode_parses_from_toml_and_resolves_onto_config() {
         // The full path: `[default] approval_mode` in TOML → merge → resolved
         // Config.approval_mode (what the TUI boot consumer reads).
@@ -7252,6 +7351,13 @@ enabled = false
     }
 
     #[test]
+    // READER of process env: `Config::resolve` resolves through
+    // `wayland_config_dir()` (WAYLAND_HOME) and the API-key vars, so it must
+    // join the same group as the WRITERS. `#[serial]` serializes writers
+    // against writers only -- an unlisted READER still races them, which is
+    // how this test failed with "No API key found" while every mutator was
+    // already serialized.
+    #[serial_test::serial(wayland_home_env)]
     fn test_resolve_without_project_dir_uses_cwd() {
         let cli_args = CliArgs {
             provider: Some("anthropic".into()),
@@ -7474,13 +7580,100 @@ skills_lifecycle = true
     }
 
     // -------------------------------------------------------------------------
+    // Serialization determinism (config.toml must not churn on every save)
+    // -------------------------------------------------------------------------
+
+    /// Serializing the SAME logical config twice must produce identical bytes.
+    ///
+    /// Builds two `ConfigFile`s with the same entries inserted in OPPOSITE
+    /// order: `RandomState` reseeds each `HashMap`, so with the unsorted
+    /// serializer their `[profiles.*]` / `[providers.*]` sections came out in
+    /// different orders and this comparison failed. Many keys are used because
+    /// two keys collide in the same bucket order roughly half the time -- with
+    /// 12, a passing run by luck is about 1 in 12!.
+    ///
+    /// `session.directory` is PINNED because `ConfigFile::default()` is not
+    /// pure: it calls `default_session_dir()`, which reads `WAYLAND_HOME`. The
+    /// first version of this test left it at its default and duly flaked --
+    /// the two builds straddled another test's `WAYLAND_HOME` mutation and
+    /// serialized different session paths, so the test became a VICTIM of the
+    /// very race it sits next to. Pinning the env-derived field is what makes
+    /// the "no env, parallel-safe, no #[serial]" claim actually true.
+    #[test]
+    fn serializing_the_same_config_twice_is_byte_identical() {
+        fn build(reverse: bool) -> ConfigFile {
+            let mut cfg = ConfigFile::default();
+            cfg.session.directory = "/pinned/sessions".to_string();
+            let names = [
+                "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota",
+                "kappa", "lambda", "mu",
+            ];
+            let mut order: Vec<&str> = names.to_vec();
+            if reverse {
+                order.reverse();
+            }
+            for n in order {
+                cfg.profiles.insert(
+                    n.to_string(),
+                    ProfileConfig {
+                        provider: Some("anthropic".into()),
+                        model: Some(format!("model-{n}")),
+                        ..Default::default()
+                    },
+                );
+                cfg.providers.insert(
+                    n.to_string(),
+                    ProviderConfig {
+                        api_key: Some(format!("key-{n}")),
+                        ..Default::default()
+                    },
+                );
+            }
+            cfg
+        }
+
+        let a = toml::to_string_pretty(&build(false)).expect("serialize a");
+        let b = toml::to_string_pretty(&build(true)).expect("serialize b");
+        assert_eq!(
+            a, b,
+            "config serialization is order-dependent: the same logical config \
+             produced two different files, so every save rewrites the operator's \
+             config.toml with a spurious diff"
+        );
+
+        // The instrument must be able to fail: prove the keys really are present
+        // and really are sorted, so an empty/degenerate map cannot pass this.
+        let alpha = a.find("[profiles.alpha]").expect("alpha profile emitted");
+        let beta = a.find("[profiles.beta]").expect("beta profile emitted");
+        let mu = a.find("[profiles.mu]").expect("mu profile emitted");
+        assert!(
+            alpha < beta && beta < mu,
+            "profiles must serialize in ascending key order"
+        );
+    }
+
+    // -------------------------------------------------------------------------
     // F-010: wayland_config_dir() canonical helper tests
     // -------------------------------------------------------------------------
 
     #[test]
+    #[serial_test::serial(wayland_home_env)]
     fn wayland_config_dir_uses_wayland_home_when_set() {
-        // Serial isolation is not required here because we restore the env var
-        // within the test; the variable name is unique to this assertion.
+        // These tests MUST mutate the process environment, because the
+        // behaviour under test IS env resolution -- so they join the existing
+        // `wayland_home_env` serial group rather than injecting.
+        //
+        // The previous comment here claimed serial isolation was unnecessary
+        // "because we restore the env var within the test; the variable name is
+        // unique to this assertion." Both halves were false. Restoring on the
+        // way out does nothing for the window BETWEEN set and restore, during
+        // which every concurrently-running test observes the mutated value. And
+        // `WAYLAND_HOME` is the most-shared variable in the workspace (141
+        // references), not unique to this assertion. Measured effect: this test
+        // raced `env_file::tests::load_wayland_env_file_applies_without_over-
+        // riding`, which is itself `#[serial]` -- and `#[serial]` only
+        // serializes against OTHER `#[serial]` tests, so one unprotected
+        // mutator defeats the whole group.
         let key = "WAYLAND_HOME";
         let prev = std::env::var_os(key);
         unsafe {
@@ -7495,6 +7688,7 @@ skills_lifecycle = true
     }
 
     #[test]
+    #[serial_test::serial(wayland_home_env)]
     fn wayland_config_dir_uses_xdg_data_home_when_no_wayland_home() {
         let wh_key = "WAYLAND_HOME";
         let xdg_key = "XDG_DATA_HOME";
@@ -7517,6 +7711,7 @@ skills_lifecycle = true
     }
 
     #[test]
+    #[serial_test::serial(wayland_home_env)]
     fn wayland_config_dir_falls_back_to_dirs_config_dir() {
         // When neither env var is set, result ends with "wayland-core".
         let wh_key = "WAYLAND_HOME";

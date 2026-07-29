@@ -120,6 +120,7 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [dev-dependencies]
+serial_test.workspace = true
 wcore-mcp = { workspace = true }
 wcore-egress = { workspace = true }
 # Tests need the wayland-core binary available — declaring wcore-cli as

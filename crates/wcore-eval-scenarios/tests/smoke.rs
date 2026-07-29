@@ -149,6 +149,7 @@ async fn hung_scenario_does_not_leak_pid() {
 /// ignored and the test falls back to the default — that would make
 /// `WCORE_EVAL_BIN` a footgun.
 #[test]
+#[serial_test::serial(wcore_eval_bin_env)]
 fn binary_discovery_rejects_missing_override() {
     let guard = EnvGuard::set("WCORE_EVAL_BIN", "/nonexistent/path/to/wayland-core");
     let r = discover_binary();
@@ -160,6 +161,7 @@ fn binary_discovery_rejects_missing_override() {
 }
 
 #[test]
+#[serial_test::serial(wcore_eval_bin_env)]
 fn binary_discovery_honors_absolute_cargo_target_dir() {
     let temp = tempfile::TempDir::new().expect("target tempdir");
     let bin_name = if cfg!(windows) {
@@ -181,10 +183,15 @@ fn binary_discovery_honors_absolute_cargo_target_dir() {
     assert_eq!(discovered, expected);
 }
 
-/// Minimal RAII env-var guard for the discovery test. `tokio::test`
-/// processes share env state with sibling tests; nextest's
-/// `[profile.eval] test-threads = 1` makes this safe in the eval
-/// profile, but we restore on drop regardless.
+/// Minimal RAII env-var guard for the discovery test.
+///
+/// Restoring on drop is NOT sufficient on its own: it does nothing for the
+/// window between set and restore, during which a concurrent test sees the
+/// mutated value. The previous comment leaned on nextest's
+/// `[profile.eval] test-threads = 1`, which is true for that profile and FALSE
+/// under plain `cargo test` -- where both discovery tests run in parallel in
+/// one process and both mutate `WCORE_EVAL_BIN`. They are now in a shared
+/// serial group; this guard still restores state on the way out.
 struct EnvGuard {
     key: &'static str,
     prev: Option<std::ffi::OsString>,

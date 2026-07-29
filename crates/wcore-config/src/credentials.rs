@@ -2241,7 +2241,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(vault_passphrase_env)]
+    #[serial_test::serial(vault_passphrase_env, wayland_home_env)]
     fn confidential_auto_never_downgrades_to_plaintext() {
         let dir = tempdir().unwrap();
         let _home = EnvVarGuard::set("WAYLAND_HOME", dir.path().to_str().unwrap());
@@ -2544,7 +2544,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(vault_passphrase_env)]
+    #[serial_test::serial(vault_passphrase_env, wayland_home_env)]
     fn confidential_auto_uses_encrypted_vault_without_plaintext_fallback() {
         let _passphrase = EnvPassphraseGuard::set("confidential-auto-passphrase");
         let dir = tempdir().unwrap();
@@ -2815,7 +2815,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(vault_passphrase_env)]
+    #[serial_test::serial(vault_passphrase_env, wayland_home_env)]
     fn open_store_auto_isolated_migrates_plaintext_to_vault() {
         let _pass = EnvPassphraseGuard::set("migrate-pass-5");
         let dir = tempdir().unwrap();
