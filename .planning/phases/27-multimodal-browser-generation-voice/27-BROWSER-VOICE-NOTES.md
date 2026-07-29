@@ -245,6 +245,103 @@ This is better than the e2e test's synthetic Dead arm: the box is dead in its
 created detached at `861d1b1a`. Release build of `-p wcore-cli --bin wayland-core`
 started (targeted, per §2 — not a full workspace build).
 
+## M-6 — INSTRUMENT DEFECT FOUND AND REPAIRED IN-LANE (§6b-ii)
+
+While hunting a tool-enumeration surface I ran:
+
+```
+/usr/bin/grep -rn "json_stream\|json-stream" --include="*.rs" crates/wcore-cli/src/cli.rs | wc -l   → 0
+/usr/bin/grep -rniE "list.?tools|ListTools|print_tools" … crates/wcore-cli/src/  → (nothing)
+```
+
+The control returned **0**, which is impossible for `json-stream`. Cause:
+
+```
+ls crates/wcore-cli/src/cli.rs → No such file or directory (rc=1)
+```
+
+**There is no `cli.rs`.** Every search against it returns a free zero, and a
+zero is the *success value* for "this surface does not exist". Had I skipped
+the control I would have reported "the CLI has no tool-enumeration surface"
+on the strength of a search of a file that does not exist. This is the exact
+§3b-i class, hit live, in this lane.
+
+**Instrument repaired, not merely noted** (§6b-ii): the rule I now apply is
+*stat the target before searching it*. Re-run against the real file:
+
+```
+/usr/bin/grep -c "json-stream" crates/wcore-cli/src/main.rs → 22
+```
+
+Self-test, three assertions (§6b-ii demands the third):
+1. **known-positive passes** — `json-stream` in `main.rs` → 22, non-zero. ✅
+2. **known-negative fails** — `cli.rs` does not stat, so the search is refused
+   rather than returning 0. ✅
+3. **the old broken instrument would have missed it** — the pre-repair command
+   returned `0` for `json-stream`, a string that occurs 22 times in the crate.
+   The repair changes the answer, so it is not a no-op. ✅
+
+## M-7 — C4 ANSWERED DECISIVELY: voice EXISTS but is NOT SHIPPED
+
+`crates/wcore-agent/src/bootstrap.rs:1361-1364`:
+
+```rust
+#[cfg(feature = "voice")]
+if let Some(vm) = crate::tool_backends::voice_mode::build_voice_mode_backend(&self.config) {
+    registry.register(Box::new(wcore_tools::voice_mode::VoiceModeTool::new(vm)));
+}
+```
+
+`crates/wcore-agent/Cargo.toml`:
+```toml
+voice = ["dep:cpal", "dep:hound"]     # not referenced by any default
+```
+
+`crates/wcore-cli/Cargo.toml`:
+```toml
+default = ["remote-registry", "workflow", "monitor", "review_artifact"]
+```
+
+**`voice` is absent from `default`.** The comment states the intent outright:
+*"A TUI must not hard-require ALSA at runtime, so the default binary is built
+without it"* (Issue #14, cpal → `libasound.so.2` on Linux).
+
+**Therefore the streaming-voice mic-capture loop is compiled OUT of the default
+shipped artifact.** This is the honest existence answer C4 needed, and it
+reframes the phase verdict's grade. The verdict called C4 *"an execution
+shortfall, not an environmental impossibility"*. That is **half right**: the
+`seandesktop` route was indeed not taken, but no run of the *shipped* binary on
+any machine could have exercised `voice_mode`, because the tool is not in it.
+Exercising C4 requires **building a non-default artifact first**.
+
+**Important boundary — do not overstate this.** Two adjacent voice surfaces are
+NOT feature-gated and ARE in the default binary, credential-gated only:
+- `tts` (`bootstrap.rs:1348`) — OpenAI > ElevenLabs > feature-gated piper;
+- `transcribe_audio` (`bootstrap.rs:1337`) — Groq/OpenAI Whisper, or `FLUX_API_KEY`.
+
+So "voice is absent" would be **false**. The precise claim is: *TTS-out and
+STT-on-a-file ship; the streaming mic-capture loop that C4's interruption and
+cancellation clauses are about does not.*
+
+**Costed:** proving C4 needs `cargo build -p wcore-cli --features voice` **plus**
+a host with a real capture device. hetzner-dsm is headless with no capture
+device, so it cannot host the second half at any price. That is `seandesktop`
+(`ssh SeanD@seandesktop`), and it is a whole build + audio-driven interruption
+run. **This is my deferral candidate**, and it is deferred on measured cost, not
+on a guess.
+
+## M-8 — C3 generation is credential-gated, NOT feature-gated
+
+`bootstrap.rs:1304-1310` — `image_gen` registers whenever
+`build_image_gen_backend(&self.config, false)` returns `Some`. No `#[cfg]`.
+So unlike voice it **is** in the default binary and hides itself via
+`is_available()` when no key resolves. The second arg `false` is
+`allow_pollinations` — the keyless fallback is opt-in and currently
+unreachable from config (the comment says the config field is future work).
+
+C3 is therefore reachable in principle on the shipped binary with a credential,
+which is what `~/.wayland-secrets/flux.env` is for. Ranked behind C2.
+
 ## Log
 
 - **T+0** worktree verified, brief + verdict + MEDIA-* ledger row read.
@@ -254,3 +351,6 @@ started (targeted, per §2 — not a full workspace build).
 - **T+3** M-3 recorded: HIGH candidate — `true` proves resolvability, not work.
 - **T+4** M-4 recorded: voice and generation both EXIST; my voice prior was wrong.
 - **T+5** M-5 hetzner negative control confirmed natural; release build running.
+- **T+6** M-6 instrument defect (missing `cli.rs` free zero) found AND repaired, with a three-assertion self-test.
+- **T+7** M-7 C4 answered: `voice` is not in `wcore-cli` default features, so the streaming mic loop is NOT in the shipped binary. Deferral candidate, costed.
+- **T+8** M-8 C3 is credential-gated only, so it IS in the shipped binary.
