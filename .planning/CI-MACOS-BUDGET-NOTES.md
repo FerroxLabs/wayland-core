@@ -159,3 +159,38 @@ half of that capability survives untouched and unconditionally. Only the macOS h
 rationing. Narrowing: on `lane/**` pushes, schedule the three macOS jobs **only on opt-in**
 (`[ci-darwin]` / `[ci-macos]` in the head-commit message). `main`, the integration branch and
 all pull requests keep the full matrix.
+
+### M7 — first implementation measured and REVERTED (new finding)
+
+The `budget` job + `needs:` form was implemented, pushed and measured. `ubuntu-latest` is
+itself congested — live census 2026-07-29 ~06:10Z across 16 in-flight runs:
+
+| label | completed | in_progress | queued |
+|---|---|---|---|
+| macos-latest | 4 | **5** | **36** |
+| ubuntu-latest | 36 | 13 | **32** |
+| windows-latest | 16 | 12 | 2 |
+| self-hosted Windows | 4 | 0 | 11 |
+
+macOS `in_progress == 5` independently re-confirms the ceiling from M4 by a completely
+different method (live census vs interval sweep). And ubuntu congestion meant the budget job
+sat **queued 14+ minutes** on run 30426418225 before `ci`/`build` were even created. Reverted
+to a zero-job inline `strategy.matrix` expression.
+
+### M8 — controlled before/after, and the live counterfactual
+
+| arm | run | commit | config | jobs | macOS |
+|---|---|---|---|---|---|
+| A | 30425956850 | 27df8b7c | unmodified | 11 (12 incl. `report`) | **3** |
+| B1 | 30427513255 | d8daf8e0 | this change, no token | **8** | **0** |
+
+Same 22-minute window, integration branch still on the unmodified config, identical
+`jobs.total_count` call: runs 30427396244 / 30426790209 / 30426629499 / 30426570745 /
+30426416317 / 30426366364 all **jobs=0**. Known-positives in the same call: 12 and 8.
+
+### M9 — artifact route proven end-to-end on this Mac
+
+`gh run download 30399974106 -n wayland-core-aarch64-apple-darwin` →
+`file` says `Mach-O 64-bit executable arm64`; `./wayland-core --version` → `wayland-core
+0.12.25`, rc=0, on `uname -m = arm64`. Lane-branch route known-positive: run 30419996325 on
+`lane/24-gateway-surface` carries `wayland-core-x86_64-apple-darwin`.
