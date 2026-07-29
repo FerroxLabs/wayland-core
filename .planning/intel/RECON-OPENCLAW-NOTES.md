@@ -314,3 +314,116 @@ Providers are plugin-contributed under a `migrationProviders` contract:
   model.ts 12.7K, source.ts 8.1K, apply.ts 8.6K, plan.ts 7.3K, files-and-skills.test.ts 28.8K).
 
 Still to read: what `migrate-hermes/source.ts` + `memory.ts` + `skills.ts` actually map.
+
+---
+
+## MEASUREMENT 6 — what Hermes migration actually maps, and how unmappable state is handled
+
+`extensions/migrate-hermes/plan.ts:buildHermesPlan` produces a `MigrationPlan`
+(`{ providerId, source, target, summary, items[], warnings[], nextSteps[], metadata }`)
+where each `MigrationItem` is `{ id, kind, action, source, target, status, reason, message,
+details }`. `kind` ∈ file | workspace | memory | skill | auth | secret | manual | archive;
+`action` ∈ copy | append | archive; `status` ∈ planned | conflict.
+
+Discovery (`source.ts`) probes for: `config.yaml`, `.env`, `auth.json`, `active_profile`,
+`SOUL.md`, `AGENTS.md`, `skills/`, `memories/`, plus an OpenCode `auth.json` at
+`~/.local/share/opencode/auth.json` (XDG-aware, with root-parent and home fallbacks).
+
+Concept mapping:
+- `config.yaml` → OpenClaw config items + a **model ref** item (`resolveHermesModelRef`)
+- `.env` → provider secrets (`buildSecretItems`)
+- `auth.json` / global / opencode auth → auth profile items (`buildAuthItems`)
+- `SOUL.md`, `AGENTS.md` → `workspace/` files
+- `MEMORY.md`, `USER.md` → memory items, **`action: "append"`** into the workspace; in
+  memory-only mode instead copied under `workspace/memory/imports/hermes/` with
+  `collectionId: "hermes"` so imported memory stays an identifiable collection
+- `skills/` → skill items, with `EXCLUDED_SKILL_DIRS` (`.git`, `node_modules`, `.venv`,
+  `__pycache__`, `.pytest_cache`, …) and `SKILL_SUPPORT_DIRS`
+  (`references`, `templates`, `assets`, `scripts`) preserved as part of a skill
+
+**Unmappable state is archived, not dropped.** `HERMES_ARCHIVE_DIRS` (plugins, sessions, logs,
+cron, mcp-tokens, plans, workspace, skins, kanban, pairing, platforms) and
+`HERMES_ARCHIVE_FILES` (`state.db`, `hermes_state.db`, `projects.db`, `response_store.db`,
+`memory_store.db`, `verification_evidence.db`, `kanban.db`, `retaindb_queue.db`,
+`gateway_state.json`, `channel_directory.json`, `channel_aliases.json`, `processes.json`,
+`feishu_comment_pairing.json`) become `kind: "archive"` items with the message
+*"Archived in the migration report for manual review; not imported into live config."*
+
+Warnings are specific and security-aware, e.g.: *"Hermes and OpenClaw must not keep using the
+same imported OpenAI OAuth refresh grant after migration; reauthenticate one side before running
+both."* And retired providers become `kind: "manual"` items with a concrete remedy
+(`usesRetiredHermesQwenProvider` → "Authenticate qwen with an API key after migration:
+`openclaw onboard --auth-choice qwen-api-key`").
+
+### Our side, measured (not assumed)
+
+`crates/wcore-cli/src/migrate/` — `mod.rs` 41.5K, `quarantine.rs` 34.3K, `hermes.rs` 19.7K,
+**`openclaw.rs` 18.8K**, `select.rs` 12.8K, `provenance.rs` 10.5K.
+
+`hermes.rs` doc comments state the import set directly: `profiles/<name>/config.yaml` (a `model:`
+block), `profiles/<name>/.env` (provider-named keys), and `profiles/<name>/{skills/, SOUL.md,
+memories/}` **"counted for the deferred"** — i.e. enumerated, reported, and *not imported*
+(`deferred.skills += count_subdirs(...)`, `deferred.memory_files += count_memory_notes(...)`).
+Root-level `config.yaml` + `.env` were added after a measured gap (F26-01 gap 4).
+
+So the brief's "we import 4 files" is accurate in kind: **we import config + env; we defer skills,
+SOUL and memories.** OpenClaw imports all of those plus auth, and archives the rest.
+We do have `openclaw.rs` — **we migrate FROM OpenClaw; they do not migrate from us.**
+
+---
+
+## MEASUREMENT 7 — native app targets
+
+`apps/` = `macos/`, `ios/`, `android/`, `linux/`, `macos-mlx-tts/`, `swabble/`, `shared/`, `.i18n/`.
+
+- **macOS** — SwiftPM (`apps/macos/Package.swift`). Products: `.executable OpenClaw`,
+  `.executable openclaw-mac` (CLI), `.library OpenClawIPC`, `.library OpenClawDiscovery`.
+  Dependencies include **Sparkle** (updates), `OpenClawKit` + `OpenClawChatUI`,
+  `OpenClawMLXTTSProtocol`, `SwabbleKit`, `MenuBarExtraAccess`, `KeyboardShortcuts`,
+  `PeekabooBridge`/`PeekabooAutomationKit` (screen automation), `swift-subprocess`.
+- **Update mechanism** — `appcast.xml` at repo root is a **Sparkle 2 RSS appcast**
+  (`xmlns:sparkle`), served from `raw.githubusercontent.com/openclaw/openclaw/main/appcast.xml`.
+  Latest item at this HEAD: **2026.7.1**, `sparkle:version 2607000190`,
+  `sparkle:minimumSystemVersion 15.0`. 2131 further lines = full release-note history in-band.
+- **iOS** — `Sources/` covers Calendar, Camera, Contacts, EventKit, Health, Location, Motion,
+  Media, Push, LiveActivity, Gateway, Chat, Onboarding, Permissions, Design, Device, Model.
+  Plus `WatchApp/`, `ShareExtension/`, `ActivityWidget/`, `UITests/`, `fastlane/`,
+  `APP-REVIEW-NOTES.md`, signing xcconfigs. This is a shipped App Store product.
+- **Android** — Gradle (`build.gradle.kts`), `app/`, `wear/`, `wear-shared/`, `benchmark/`,
+  `fastlane/`, `VERSIONING.md`, `THIRD_PARTY_LICENSES/`.
+- **swabble** — Swift 6.2 on-device wake-word daemon (Speech.framework, macOS 26),
+  default wake word `clawd`, "zero network usage"; `SwabbleKit` shared into iOS/macOS.
+- **linux** — `src-tauri/` + `ui/` (Tauri).
+
+---
+
+## MEASUREMENT 8 — dead-surface sweep
+
+I looked for advertised-but-unreachable surfaces (we have found ten in our own tree). Findings:
+
+- **Music generation is NOT dead**, though it has no `infer` verb. It is reachable as an *agent
+  tool*: `src/agents/tools/music-generate-tool.ts` + `.actions.ts` + `music-generate-background.ts`,
+  with 5 provider manifests. So media has **two** surfaces — the `infer` CLI and the agent tool
+  family (`image-generate-tool.ts` 41.7K with a **109.0K** test, `media-tool-shared.ts` 20.5K,
+  `media-generate-background-shared.ts` 25.2K for async generation). I nearly filed music as
+  dead on the strength of its CLI absence; checking the second surface corrected it.
+- **`fleet`** is self-labelled *"Provision and manage isolated tenant cells (experimental)"* —
+  their own honest not-finished marker.
+- **`qa`** is env-gated out of help unless `isPrivateQaCliEnabled()` — deliberately private,
+  not dead.
+- **`clawbot`** is described as "Legacy clawbot command aliases" — retained compatibility shim.
+- `crestodian` is a hidden deprecated alias for `setup`.
+- I did **not** find an advertised media/task/migration surface with no implementation behind it.
+  Every capability id in `CAPABILITY_METADATA` traces to a registrar in
+  `src/cli/capability-cli/`, and every media contract kind in a manifest traces to an
+  implementation file in that extension.
+
+### Their gaps versus us (measured)
+
+- **Plugin isolation: none.** `grep -rl "WebAssembly|\.wasm|wasmtime" src/plugins` → **0**
+  (instrument proven alive: `grep -rl "plugin" src/plugins` → **724**). Plugins are in-process
+  TypeScript.
+- **Sandboxing is Docker.** Their `sandbox` sub-CLI is *"Manage sandbox containers (Docker-based
+  agent isolation)"*. Only 10 files in `src` mention `bwrap|sandbox-exec|AppContainer`, and the
+  one I read (`src/infra/dispatch-wrapper-resolution.ts:458`) uses `sandbox-exec` to
+  **unwrap/recognise** an already-wrapped invocation, not to apply its own confinement.
