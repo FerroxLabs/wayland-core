@@ -2483,6 +2483,43 @@ fn host_child_egress_probe() -> ProbeResult {
     );
     let url = format!("{}/corpus-host-egress", server.uri());
 
+    // THE DESTINATION KNOWN-POSITIVE — 21-C3.
+    //
+    // This probe's decisive reading is `received == 0`, and `21-04-PHASE-VERDICT.md`
+    // §1 C3 bullet 1 rests on it: "egress cannot be attempted because the child
+    // registry carries no network-capable tool". But a destination that was
+    // never reachable, a mock that failed to mount, a port that closed — every
+    // one of those also serves zero requests. An absence is only evidence when
+    // the instrument is shown alive in the same run (LANE-BRIEF §3b-i), so one
+    // request is issued here, through the sanctioned `EgressClient` rather than
+    // a bare reqwest client, before the child is ever spawned.
+    let control_reached = rt
+        .block_on(async {
+            wcore_egress::EgressClient::tool()
+                .get(&url)
+                .send()
+                .await
+                .map(|response| response.status().is_success())
+        })
+        .unwrap_or(false);
+    let control_received = rt
+        .block_on(server.received_requests())
+        .unwrap_or_default()
+        .len();
+    if !control_reached || control_received == 0 {
+        return ProbeResult::new(
+            Outcome::NotExpressible,
+            "no verdict — the loopback destination was not reachable from this process",
+            format!(
+                "the known-positive control issued one GET to {url} through the sanctioned egress \
+                 chokepoint and the destination reports {control_received} request(s) served \
+                 (control succeeded: {control_reached}). With a dead destination a child's \
+                 zero-request reading would be indistinguishable from an enforced refusal, so no \
+                 verdict is taken."
+            ),
+        );
+    }
+
     let script = tool_call_script("WebFetch", json!({ "url": url }));
     let home = match TempDir::new() {
         Ok(home) => home,
@@ -2501,11 +2538,22 @@ fn host_child_egress_probe() -> ProbeResult {
     );
     let child_turns = session.provider.calls().saturating_sub(before);
     let returned = session.provider.tool_results().join(" | ");
+    // 21-C3: the control's own request is subtracted, so `received` counts what
+    // the CHILD issued. Without the subtraction the control would manufacture
+    // the `received > 0` branch and turn the honest NOT-EXPRESSIBLE into a
+    // REFUSED — the control would have become the widening it exists to guard.
     let received = rt
         .block_on(server.received_requests())
         .unwrap_or_default()
-        .len();
+        .len()
+        .saturating_sub(control_received);
     let obtained = returned.contains(sentinel_body) || result.text.contains(sentinel_body);
+    let control_note = format!(
+        "KNOWN-POSITIVE CONTROL: before the child was spawned, one GET through the sanctioned \
+         egress chokepoint reached this destination and it recorded {control_received} \
+         request(s), so the destination is alive and a zero count below is the child's own \
+         silence rather than a dead instrument"
+    );
 
     if obtained {
         ProbeResult::new(
@@ -2513,7 +2561,8 @@ fn host_child_egress_probe() -> ProbeResult {
             "an outbound destination the session's policy does not permit",
             format!(
                 "a host-originated child ran {child_turns} provider turn(s) and the loopback \
-                 sentinel body reached it; the destination served {received} request(s)"
+                 sentinel body reached it; the destination served {received} child request(s). \
+                 {control_note}"
             ),
         )
     } else if received > 0 {
@@ -2522,7 +2571,8 @@ fn host_child_egress_probe() -> ProbeResult {
             "no outbound body beyond the session's policy",
             format!(
                 "a host-originated child ran {child_turns} provider turn(s); the destination \
-                 served {received} request(s) and the sentinel body did not reach the child"
+                 served {received} child request(s) and the sentinel body did not reach the \
+                 child. {control_note}"
             ),
         )
     } else {
@@ -2531,8 +2581,9 @@ fn host_child_egress_probe() -> ProbeResult {
             "no verdict — no outbound request was issued by the child",
             format!(
                 "a host-originated child ran {child_turns} provider turn(s) and the loopback \
-                 destination served 0 requests, so no outbound attempt was made and an absent \
-                 body would prove nothing. Tool results the session's provider was shown: {}",
+                 destination served 0 CHILD requests, so no outbound attempt was made and an \
+                 absent body would prove nothing. {control_note}. Tool results the session's \
+                 provider was shown: {}",
                 truncate(&returned)
             ),
         )
