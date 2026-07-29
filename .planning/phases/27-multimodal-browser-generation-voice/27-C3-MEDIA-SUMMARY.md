@@ -221,32 +221,46 @@ A capture that looks like evidence and contains none.
 
 ## 5. Gates
 
+All figures below are read back from the `test result:` line of an unproxied
+`cargo` on `hetzner-dsm`, including the `ignored` and `filtered out` counts —
+a suite can exit 0 having run zero tests.
+
 | Gate | Result |
 |---|---|
-| `cargo test -p wcore-tools --lib media_cost` | **8 passed; 0 failed; 0 ignored; 995 filtered** |
-| `cargo test -p wcore-agent --test f27_media_generation` | **12 passed; 0 failed; 0 ignored; 0 filtered** |
-| `cargo test -p wcore-agent --lib capability_advisory` | **5 passed; 0 failed; 0 ignored** |
+| `cargo test -p wcore-tools --lib media_cost` | **8 passed; 0 failed; 0 ignored; 995 filtered out** |
+| `cargo test -p wcore-agent --test f27_media_generation` | **12 passed; 0 failed; 0 ignored; 0 filtered out** |
+| `cargo test -p wcore-agent --lib capability_advisory` | **5 passed; 0 failed; 0 ignored; 2180 filtered out** |
+| `cargo test -p wcore-tools --lib` (whole crate) | **1000 passed; 0 failed; 3 ignored; 0 filtered out** |
+| `cargo test -p wcore-config --lib -- --test-threads=1` | **562 passed; 0 failed; 0 ignored; 0 filtered out** |
+| `cargo test -p wcore-agent --lib -- --test-threads=4` | **2182 passed; 0 failed; 3 ignored; 0 filtered out** |
+| `cargo test -p wcore-cli --lib image::` | **14 passed; 0 failed; 0 ignored; 1841 filtered out** |
+| `cargo clippy -p wcore-tools -p wcore-config -p wcore-agent -p wcore-cli --all-targets -- -D warnings` | **clean** |
 | mutation control | **13/13, `MUTATION_CONTROL=PASS`** |
 | secret sweep | **`SECRET_SWEEP=PASS`, 0 hits, 4/4 controls fired** |
 | live probe | **rc=0 on all five legs; arm read back from the product's own output** |
 | `cargo fmt --all` | clean |
 
-### Two RED results I am reporting as RED, both shown NOT to be mine
+### Two REDs seen during the run, both shown NOT to be mine — and both now green
 
-- **`wcore-config`: 561 passed, 1 failed** — `profile_home_ignores_control_char_override`.
-  Passes **1/1 in isolation**. Cause: `wayland_config_dir_uses_wayland_home_when_set` sets the
+- **`wcore-config` under default parallelism: 561 passed, 1 failed** —
+  `profile_home_ignores_control_char_override`. Passes **1/1 in isolation** and the crate is
+  **562/562 with `--test-threads=1`**. Cause: `wayland_config_dir_uses_wayland_home_when_set` sets the
   process-global `WAYLAND_HOME`, and its in-source comment claims *"serial isolation is not
   required here … the variable name is unique to this assertion"* — which is **false**; the
   failing test reads the same variable. My `wcore-config` diff is **+33/−0** and touches neither
   test. **MEDIUM, pre-existing, non-blocking → BACKLOG.**
-- **`wcore-agent --lib`: 2170 passed, 12 failed** — every one a
-  `session journal writer lease is already held` under parallelism. Serially: **77/77** and
-  **37/37**. Disk was at 70% (515 G free), so this is *not* the exhaustion cause the phase
-  verdict described. Pre-existing parallel-execution contention, non-blocking.
+- **`wcore-agent --lib` under default parallelism: 2170 passed, 12 failed** — every one a
+  `session journal writer lease is already held`. The affected modules pass **77/77** and
+  **37/37** serially, and the whole crate is **2182/2182 at `--test-threads=4`**. Disk was at
+  70% (515 G free), so this is *not* the exhaustion cause the phase verdict described.
+  Pre-existing parallel-execution contention, non-blocking.
 
 **One regression that WAS mine, and how it was caught:** `cargo clippy --all-targets` failed on
 `ToolsConfig` literals in two test helpers that no per-package `cargo test -p` ever compiled.
-That is the workspace-vs-package lesson exactly; fixed in `4` follow-up commits.
+That is the workspace-vs-package lesson exactly. Fixed across `wcore-agent/tests/common/mod.rs`,
+`tests/acceptance/helpers.rs` and the three `tests/e2e/*` helpers. **The fenced
+`crates/wcore-cli/src/main.rs` needed no edit** — its literal already used
+`..Default::default()`.
 
 ---
 
