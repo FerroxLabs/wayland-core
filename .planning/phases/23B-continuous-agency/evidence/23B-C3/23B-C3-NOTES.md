@@ -99,6 +99,52 @@ privacy problem the dispatch names: **a control that reports success and does no
 `SELECT ... FROM facts WHERE tier=?1 AND superseded_by IS NULL AND embedding IS NOT NULL` with no
 privacy/retention predicate at all.
 
+## M2 — the finding PROVED at the wire, red at base and green after the fix
+
+Two runs of the same probe shape, both on `hetzner-dsm`, both `cargo nextest ... --no-tests=fail
+--retries 0`, both counts read back.
+
+**RED at base `5bbb0fbc`** (`evidence/23B-C3/base-redproof.log`, source
+`evidence/23B-C3/c3_redproof.rs.txt`). The file calls the base control API —
+`MemoryControls::forget_episode` / `set_privacy_scope` / `set_retention`, which is exactly what
+`slash/memory.rs` called — and performs the identical two-turn wiremock capture:
+
+```
+Summary [0.585s] 5 tests run: 1 passed, 4 failed, 0 skipped
+  PASS  the_probe_can_fail                                         <- harness alive
+  FAIL  forget_at_base_leaves_the_value_in_the_outbound_body
+  FAIL  privacy_at_base_reports_success_and_changes_nothing
+  FAIL  retention_at_base_reports_success_and_changes_nothing
+  FAIL  provenance_at_base_says_nothing_about_the_facts_in_the_prompt
+```
+
+with these diagnostic lines printed by the tests themselves:
+
+```
+BASE_FORGET_OUTCOME=Some("memory item not found: partition=episodic tier=project id=367a69b3-…")
+BASE_PRIVACY_CONTROL_REPORTED=ok
+BASE_RETENTION_CONTROL_REPORTED=ok
+BASE_PROVENANCE hits=0 provenance_entries=0
+```
+
+Read those four lines together and the criterion's whole failure is on one screen:
+
+- **forget could not even address the item.** `NotFound partition=episodic` for a fact the same
+  test had just proved was in the outbound body.
+- **privacy and retention both returned `ok`** and the nonce was still on the wire on the next
+  turn. A control that reports success and does not act.
+- **`search_with_provenance` returned `hits=0`** for a query the probe proved does inject —
+  `/memory why` was structurally incapable of describing the content in the prompt.
+
+`the_probe_can_fail` PASSING in the same run is what makes the four failures findings rather than
+a dead instrument (§3b-i, §3.2).
+
+**GREEN after the fix**, HEAD of `lane/23b-c3-memory` (`evidence/23B-C3/fixed-green.log`):
+
+```
+Summary [0.716s] 8 tests run: 8 passed, 0 skipped
+```
+
 ## Planned order (dispatch says prioritise forgetting, correction, provenance)
 
 1. G3a forgetting-in-the-prompt proof (mock provider body capture) — the criterion's legal weight.
