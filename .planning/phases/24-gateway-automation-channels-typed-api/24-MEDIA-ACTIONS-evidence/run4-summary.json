@@ -1,0 +1,131 @@
+{
+  "generated_at": "2026-07-29T04:00:04.398Z",
+  "binary": "/root/wayland-24-media-actions/target/release/wayland-core",
+  "out_dir": "/root/f24ma-run4",
+  "matcher_selftest": [
+    {
+      "name": "known-positive: the real runtime notice MATCHES",
+      "pass": true
+    },
+    {
+      "name": "known-negative: a plain prompt DOES NOT match",
+      "pass": true
+    },
+    {
+      "name": "the OLD BROKEN matcher (source-transcribed, newline inside the phrase) MISSES the real notice",
+      "pass": true
+    }
+  ],
+  "legs": {
+    "A": {
+      "label": "A-ack-both-image",
+      "ack": "both",
+      "with_attachment": true,
+      "identified": true,
+      "dispatched_sockets": 1,
+      "turn_ran": true,
+      "reactions_total": 2,
+      "reaction_emojis": [
+        "👀",
+        "✅"
+      ],
+      "typing_total": 1,
+      "turn_prompt_count": 1,
+      "prompt_carries_notice": true,
+      "prompt_carries_probe_text": true,
+      "gateway_log_bytes": 8435,
+      "llm_journal_bytes": 561,
+      "notes": [
+        "llm fixture at http://127.0.0.1:34061",
+        "discord fixture at http://127.0.0.1:41409 (gateway ws://127.0.0.1:41409)",
+        "gateway IDENTIFYed after ~500ms",
+        "dispatched MESSAGE_CREATE to 1 socket(s), attachments=1",
+        "turn observed at the LLM fixture after ~750ms"
+      ]
+    },
+    "B": {
+      "label": "B-ack-off-image",
+      "ack": "off",
+      "with_attachment": true,
+      "identified": true,
+      "dispatched_sockets": 1,
+      "turn_ran": true,
+      "reactions_total": 0,
+      "reaction_emojis": [],
+      "typing_total": 0,
+      "turn_prompt_count": 1,
+      "prompt_carries_notice": true,
+      "prompt_carries_probe_text": true,
+      "gateway_log_bytes": 8433,
+      "llm_journal_bytes": 560,
+      "notes": [
+        "llm fixture at http://127.0.0.1:37011",
+        "discord fixture at http://127.0.0.1:46331 (gateway ws://127.0.0.1:46331)",
+        "gateway IDENTIFYed after ~500ms",
+        "dispatched MESSAGE_CREATE to 1 socket(s), attachments=1",
+        "turn observed at the LLM fixture after ~750ms"
+      ]
+    },
+    "C": {
+      "label": "C-ack-both-noimage",
+      "ack": "both",
+      "with_attachment": false,
+      "identified": true,
+      "dispatched_sockets": 1,
+      "turn_ran": true,
+      "reactions_total": 2,
+      "reaction_emojis": [
+        "👀",
+        "✅"
+      ],
+      "typing_total": 1,
+      "turn_prompt_count": 1,
+      "prompt_carries_notice": false,
+      "prompt_carries_probe_text": true,
+      "gateway_log_bytes": 8537,
+      "llm_journal_bytes": 245,
+      "notes": [
+        "llm fixture at http://127.0.0.1:35937",
+        "discord fixture at http://127.0.0.1:42303 (gateway ws://127.0.0.1:42303)",
+        "gateway IDENTIFYed after ~500ms",
+        "dispatched MESSAGE_CREATE to 1 socket(s), attachments=0",
+        "turn observed at the LLM fixture after ~750ms"
+      ]
+    }
+  },
+  "gates": [
+    {
+      "id": "G1",
+      "clause": "native actions",
+      "kind": "POSITIVE",
+      "desc": "ack=\"both\": 👀 on receipt AND a completion reaction AND ≥1 typing indicator, counted at the platform",
+      "pass": true,
+      "detail": "identified=true reactions=2 emojis=[\"👀\",\"✅\"] typing=1"
+    },
+    {
+      "id": "G2",
+      "clause": "native actions",
+      "kind": "NEGATIVE CONTROL",
+      "desc": "ack=\"off\", one variable changed: ZERO reactions and ZERO typing — while the turn still ran",
+      "pass": true,
+      "detail": "identified=true turn_ran=true reactions=0 typing=0"
+    },
+    {
+      "id": "G3",
+      "clause": "media",
+      "kind": "POSITIVE",
+      "desc": "an inbound image reaches the turn prompt carrying the honest degraded notice",
+      "pass": true,
+      "detail": "turn_ran=true prompts=1 notice=true"
+    },
+    {
+      "id": "G4",
+      "clause": "media",
+      "kind": "NEGATIVE CONTROL",
+      "desc": "no attachment: notice ABSENT — and the prompt capture proven alive on the same run (§3b-i)",
+      "pass": true,
+      "detail": "turn_ran=true capture_alive=true notice=false"
+    }
+  ],
+  "all_pass": true
+}

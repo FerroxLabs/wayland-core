@@ -1,0 +1,1 @@
+{"seq":1,"kind":"chat.completions","at":"2026-07-29T03:59:12.878Z","model":"f24ma-fixture","stream":true,"user_text":"f24ma probe C-ack-both-noimage\nCurrent date: 2026-07-29","correlation":"no-correlation","reply":"F24C3-REPLY no-correlation"}

@@ -1,0 +1,49 @@
+[2m2026-07-29T03:59:02.430457Z[0m [33m WARN[0m WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+[2m2026-07-29T03:59:02.645726Z[0m [32m INFO[0m migrated existing plaintext credentials into the encrypted vault [3mcount[0m[2m=[0m1
+[2m2026-07-29T03:59:02.646009Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24ma [3mplatform[0m[2m=[0mdiscord
+[gateway] channels registered=1
+[2m2026-07-29T03:59:02.646212Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-29T03:59:02.646242Z[0m [32m INFO[0m transcription: using whisper-1 at http://127.0.0.1:35873/v1/audio/transcriptions (active OpenAI-wire provider)
+[gateway] inbound: subscriber spawned, webhook host disabled policies=1
+[2m2026-07-29T03:59:02.646948Z[0m [32m INFO[0m F24_CHANNEL_LEASE=owner — this process owns inbound polling for this home [3mholder[0m[2m=[0m"gateway" [3mpid[0m[2m=[0m1608606 [3mdir[0m[2m=[0m/root/f24ma-run3/A-ack-both-image/home/channels
+[2m2026-07-29T03:59:02.755751Z[0m [32m INFO[0m headless cron handler: using the caller's ChannelManager; not registering or starting a second one
+[gateway] started pid=1608606 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+[2m2026-07-29T03:59:02.756795Z[0m [34mDEBUG[0m sent IDENTIFY
+[2m2026-07-29T03:59:02.757357Z[0m [34mDEBUG[0m READY received; session captured for resume
+[2m2026-07-29T03:59:03.008815Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37
+[2m2026-07-29T03:59:03.010819Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+[2m2026-07-29T03:59:03.010853Z[0m [33m WARN[0m not advertising computer_use: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"computer_use" [3mreason[0m[2m=[0mneither DISPLAY nor WAYLAND_DISPLAY is set, so no display server is reachable and the X11 backend cannot connect [3mremedy[0m[2m=[0mrun inside a graphical session, or export DISPLAY for an available X server (e.g. an Xvfb instance) before starting
+[2m2026-07-29T03:59:03.011006Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+[2m2026-07-29T03:59:03.011327Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback
+[2m2026-07-29T03:59:03.011353Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices
+[2m2026-07-29T03:59:03.011359Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue
+[2m2026-07-29T03:59:03.011364Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search
+[2m2026-07-29T03:59:03.011370Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists
+[2m2026-07-29T03:59:03.011375Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums
+[2m2026-07-29T03:59:03.011380Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library
+[2m2026-07-29T03:59:03.011396Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao
+[2m2026-07-29T03:59:03.011443Z[0m [32m INFO[0m image_gen: using gpt-image-1 at http://127.0.0.1:35873 (active OpenAI-wire provider)
+[2m2026-07-29T03:59:03.011478Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+[2m2026-07-29T03:59:03.011604Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-29T03:59:03.011655Z[0m [32m INFO[0m transcription: using whisper-1 at http://127.0.0.1:35873/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-29T03:59:03.011753Z[0m [32m INFO[0m tts: using OpenAI TTS at http://127.0.0.1:35873 (active OpenAI-wire provider)
+[2m2026-07-29T03:59:03.012209Z[0m [33m WARN[0m video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+[2m2026-07-29T03:59:03.012223Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-29T03:59:03.012996Z[0m [33m WARN[0m plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool [3mplugin[0m[2m=[0mwayland-browser [3mtool[0m[2m=[0mexecute [3mfq_name[0m[2m=[0mBrowser::execute
+[2m2026-07-29T03:59:03.027461Z[0m [33m WARN[0m semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+[2m2026-07-29T03:59:03.027592Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T03:59:03.027599Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T03:59:03.029650Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T03:59:03.030307Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T03:59:03.069040Z[0m [32m INFO[0m transcription: using whisper-1 at http://127.0.0.1:35873/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-29T03:59:03.069442Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24ma-run3/A-ack-both-image/home/cron
+[2m2026-07-29T03:59:03.124654Z[0m [33m WARN[0m WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+[2m2026-07-29T03:59:03.555040Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24ma-fixture"
+[2m2026-07-29T03:59:03.555055Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24ma-fixture"
+[2m2026-07-29T03:59:03.555058Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24ma-fixture"
+[2m2026-07-29T03:59:03.563415Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24ma-fixture"
+[2m2026-07-29T03:59:03.564119Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24ma-fixture"
+[2m2026-07-29T03:59:03.596615Z[0m [32m INFO[0m external edits detected (transcript-suppressed): User edited 951 files while I was thinking (`/root/wayland-24-media-actions/docs`, `/root/wayland-24-media-actions/docs/design`, `/root/wayland-24-media-actions/docs/design/flux-282-reference`, `/root/wayland-24-media-actions/docs/decisions…[truncated]
+[2m2026-07-29T03:59:03.610111Z[0m [32m INFO[0m auto-memorize skipped this session; no facts saved [3mskip_reason[0m[2m=[0mSome(BelowFactThreshold) [3mcandidates[0m[2m=[0m0
+[gateway] shutdown signal received
+[gateway] drain Clean: observations=1 abandoned=0 flushed=true

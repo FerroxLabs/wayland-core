@@ -289,3 +289,22 @@ additive file that imports it.
 Vision live leg: **UNREACHABLE** — no `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`GEMINI_API_KEY`
 available and `build_vision_backend` never consults `FLUX_API_KEY`. Reported as a determination,
 not attempted.
+
+---
+
+# T+150 — MEASURED. Both clauses driven on discord; report written.
+
+Runs 3 and 4 both `all_pass=true`. G1 `reactions=2 emojis=["👀","✅"] typing=1`; G2 `turn_ran=true
+reactions=0 typing=0`; G3 `notice=true`; G4 `capture_alive=true notice=false`.
+
+Instrument defects this lane: **7**, three of them in my own driver (sync sleep blocking the
+in-process fixture; reading `report.reactions` which `report()` does not expose; plus the
+matcher hazard the self-test guards). Both driver defects produced FAILs, never false passes.
+
+Gates proven able to redden by real runs, not only mutation: run 1 failed 4/4 (NOT MEASURED),
+run 2 failed G1 alone.
+
+Secret sweep executed: value length 51, name-hits 3 (control alive), value-hits **0**. No
+credential used; spend zero.
+
+Final report: `24-MEDIA-ACTIONS.md`. Verdict: `24-C3` STILL NOT MET and not claimed.
