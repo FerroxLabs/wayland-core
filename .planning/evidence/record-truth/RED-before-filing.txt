@@ -1,0 +1,30 @@
+SHAPE 1 — findings claimed filed but absent from BACKLOG.md: 27
+  DROPPED  F22-M1                   MEDIUM       .planning/SEAM-REQUESTS/22.md:7
+  DROPPED  F22-M2                   MEDIUM       .planning/SEAM-REQUESTS/22.md:22
+  DROPPED  F23A-01-M1               HIGH         .planning/SEAM-REQUESTS/23A.md:8
+  DROPPED  F23A-01-M2               MEDIUM       .planning/SEAM-REQUESTS/23A.md:8
+  DROPPED  F23A-01-M3               MEDIUM       .planning/SEAM-REQUESTS/23A.md:8
+  DROPPED  F23A-01-H1               MEDIUM       .planning/SEAM-REQUESTS/23A.md:8
+  DROPPED  F23A-01-H2               HIGH         .planning/SEAM-REQUESTS/23A.md:24
+  DROPPED  23B-M1                   MEDIUM       .planning/SEAM-REQUESTS/23B.md:95
+  DROPPED  23B-M2                   MEDIUM       .planning/SEAM-REQUESTS/23B.md:95
+  DROPPED  23B-M3                   MEDIUM       .planning/SEAM-REQUESTS/23B.md:95
+  DROPPED  23B-M4                   MEDIUM       .planning/SEAM-REQUESTS/23B.md:95
+  DROPPED  23B-H1                   HIGH         .planning/SEAM-REQUESTS/23B.md:111
+  DROPPED  F21-02-01                CRITICAL     .planning/phases/21-child-authority-and-budget-inheritance/21-04-PHASE-VERDICT.md:234
+  DROPPED  F21-02-03                CRITICAL     .planning/phases/21-child-authority-and-budget-inheritance/21-04-PHASE-VERDICT.md:234
+  DROPPED  F21-02-02                HIGH         .planning/phases/21-child-authority-and-budget-inheritance/21-04-PHASE-VERDICT.md:234
+  DROPPED  F24-J-M1                 HIGH         .planning/phases/24-gateway-automation-channels-typed-api/24-C5-FINISH-SUMMARY.md:225
+  DROPPED  F24-J-H2                 MEDIUM       .planning/phases/24-gateway-automation-channels-typed-api/24-C5-FINISH-SUMMARY.md:254
+  DROPPED  F24-J-H3                 UNSPECIFIED  .planning/phases/24-gateway-automation-channels-typed-api/24-C5-FINISH-SUMMARY.md:254
+  DROPPED  F24-J-M1                 MEDIUM       .planning/phases/24-gateway-automation-channels-typed-api/24-C5-JOURNEY-SUMMARY.md:258
+  DROPPED  F24-C-M1                 UNSPECIFIED  .planning/phases/24-gateway-automation-channels-typed-api/24-C5-JOURNEY-SUMMARY.md:318
+  DROPPED  F24-J-H3                 UNSPECIFIED  .planning/phases/24-gateway-automation-channels-typed-api/24-C5-JOURNEY-SUMMARY.md:318
+  DROPPED  F26-02-A                 MEDIUM       .planning/phases/26-migration-export-backup-restore/26-02-SUMMARY.md:146
+  DROPPED  F26-02-B                 MEDIUM       .planning/phases/26-migration-export-backup-restore/26-02-SUMMARY.md:146
+  DROPPED  F26-02-E                 MEDIUM       .planning/phases/26-migration-export-backup-restore/26-02-SUMMARY.md:146
+  DROPPED  F26-02-D                 LOW          .planning/phases/26-migration-export-backup-restore/26-02-SUMMARY.md:146
+  DROPPED  F26-04-A                 MEDIUM       .planning/phases/26-migration-export-backup-restore/26-04-SUMMARY.md:167
+  DROPPED  F29-03-08                MEDIUM       .planning/phases/29-supply-chain-release-integrity/29-03-SUMMARY.md:222
+
+RESULT: FINDINGS PRESENT
