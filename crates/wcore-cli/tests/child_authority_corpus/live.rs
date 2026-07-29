@@ -71,6 +71,29 @@ const OUTSIDE_SENTINEL: &str = "CORPUS_OUTSIDE_SENTINEL_9f13";
 const SECRET_SENTINEL: &str = "CORPUS_SYNTHETIC_TOKEN_4b7e";
 /// Body served by the non-allowlisted loopback destination.
 const EGRESS_SENTINEL: &str = "CORPUS_EGRESS_SENTINEL_2c8a";
+/// THE LIVE SHELL KNOWN-POSITIVE — 21-C3.
+///
+/// Printed to stdout by the delegated child's Bash command BEFORE that command
+/// attempts anything the product might refuse. `BashTool` returns the command's
+/// stdout as its `tool_result`, the child feeds that result back into its next
+/// provider request, and this corpus's routed mock records every request body —
+/// so this marker appearing in a served body is proof that the CHILD'S SHELL
+/// ACTUALLY RAN, taken from the wire rather than from the parent's screen.
+///
+/// It exists because the live tool verdict had no such observable. It read one
+/// bit — "is the probe file on disk?" — and recorded REFUSED whenever the answer
+/// was no. Every one of these produces that same no: the sandbox backend
+/// refusing to spawn a shell at all, workspace containment binding the write,
+/// the parent-authority intersection withholding the Bash tool, the approval
+/// gate denying, and the child dying before its tool call. The live row's own
+/// evidence claimed the refusal "is attributable to what that child was given",
+/// which the run had no way to establish.
+///
+/// The child engine writes to a `NullSink`, so its tool results never reach the
+/// parent transcript; the served request bodies are the only place this is
+/// visible without adding a production observability hook, which the corpus is
+/// forbidden to do.
+const CHILD_SHELL_RAN: &str = "CORPUSSHELLRAN7d21";
 /// Generation markers, prefixed into every delegated goal.
 ///
 /// A provider request's FIRST user message is the goal the delegation gave it.
@@ -385,14 +408,19 @@ fn live_scripts(
     sentinel_url: &str,
     fan_out_batch: usize,
 ) -> LiveScripts {
+    // 21-C3: the marker is printed FIRST and unconditionally, so it returns
+    // whether or not the write that follows is refused. That ordering is the
+    // whole point — it separates "the shell never ran" from "the shell ran and
+    // the write was refused", which the previous single-observable command
+    // could not.
     let bash_command = if cfg!(windows) {
         format!(
-            "echo CORPUS_BASH_PROBE > \"{}\"",
+            "echo {CHILD_SHELL_RAN}& echo CORPUS_BASH_PROBE > \"{}\"",
             world.bash_probe.display()
         )
     } else {
         format!(
-            "printf CORPUS_BASH_PROBE > '{}'",
+            "printf {CHILD_SHELL_RAN}; printf CORPUS_BASH_PROBE > '{}'",
             world.bash_probe.display()
         )
     };
@@ -607,6 +635,10 @@ struct LiveRun {
     /// How many served requests were made by a GRANDCHILD (L2 marker). Nonzero
     /// means a child successfully delegated one level deeper.
     grandchild_turns: usize,
+    /// 21-C3 — whether the delegated child's SHELL actually ran, read off the
+    /// wire. See [`CHILD_SHELL_RAN`]. Only the tool dimension's script emits
+    /// the marker; every other dimension leaves this false and does not read it.
+    child_shell_ran: bool,
 }
 
 /// Persist the full raw transcript of one live run and return its path.
@@ -686,6 +718,13 @@ fn run_live_with_batch(
         .iter()
         .filter(|request| first_message_contains(&request.body, CHILD_GOAL_L2))
         .count();
+    // 21-C3. Searched across every served body: the marker travels inside the
+    // tool_result block of the child's SECOND request, and restricting the
+    // search to first messages — as the generation counters above do — would
+    // miss it entirely.
+    run.child_shell_ran = served
+        .iter()
+        .any(|request| request.body.to_string().contains(CHILD_SHELL_RAN));
     run.transcript_path = persist_transcript(
         dimension,
         transport,
@@ -734,6 +773,7 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
                 delegation_attempted: false,
                 child_turns: 0,
                 grandchild_turns: 0,
+                child_shell_ran: false,
                 transcript_path: String::new(),
             };
         }
@@ -833,6 +873,7 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
         delegation_attempted: false,
         child_turns: 0,
         grandchild_turns: 0,
+        child_shell_ran: false,
         transcript_path: String::new(),
     }
 }
@@ -890,6 +931,7 @@ fn run_headless(world: &LiveWorld) -> LiveRun {
                 delegation_attempted: false,
                 child_turns: 0,
                 grandchild_turns: 0,
+                child_shell_ran: false,
                 transcript_path: String::new(),
             };
         }
@@ -933,6 +975,7 @@ fn run_headless(world: &LiveWorld) -> LiveRun {
         delegation_attempted: false,
         child_turns: 0,
         grandchild_turns: 0,
+        child_shell_ran: false,
         transcript_path: String::new(),
     }
 }
@@ -1038,6 +1081,7 @@ fn run_headless_pty(world: &LiveWorld) -> LiveRun {
         delegation_attempted: false,
         child_turns: 0,
         grandchild_turns: 0,
+        child_shell_ran: false,
         transcript_path: String::new(),
     }
 }
@@ -1055,6 +1099,7 @@ fn run_headless_pty(world: &LiveWorld) -> LiveRun {
         delegation_attempted: false,
         child_turns: 0,
         grandchild_turns: 0,
+        child_shell_ran: false,
         transcript_path: String::new(),
     }
 }
@@ -1170,6 +1215,7 @@ fn run_tui(world: &LiveWorld) -> LiveRun {
         delegation_attempted: false,
         child_turns: 0,
         grandchild_turns: 0,
+        child_shell_ran: false,
         transcript_path: String::new(),
     }
 }
@@ -1192,6 +1238,7 @@ fn run_tui(world: &LiveWorld) -> LiveRun {
         delegation_attempted: false,
         child_turns: 0,
         grandchild_turns: 0,
+        child_shell_ran: false,
         transcript_path: String::new(),
     }
 }
@@ -1211,15 +1258,34 @@ fn observe(dimension: Dimension, world: &LiveWorld, run: &LiveRun) -> (Outcome, 
                         run.child_turns
                     ),
                 )
-            } else {
+            } else if run.child_shell_ran {
                 (
                     Outcome::Refused,
                     "no Bash effect".to_owned(),
                     format!(
-                        "no Bash effect reached the hermetic home; {} delegated child provider \
-                         turn(s) arrived, so a child existed and took its own turn — the refusal \
-                         is attributable to what that child was given rather than to the child \
-                         never having acted",
+                        "the delegated child's SHELL RAN — its stdout marker returned on the wire \
+                         in a served provider request — and its write still produced no effect in \
+                         the hermetic home. {} delegated child provider turn(s) arrived. The \
+                         refusal is therefore attributable to what the child was given rather \
+                         than to a shell that never started, which is the distinction this row \
+                         could not previously make",
+                        run.child_turns
+                    ),
+                )
+            } else {
+                // THE LIVE KNOWN-POSITIVE, FAILING. Without this arm the row
+                // recorded REFUSED and asserted the refusal was "attributable
+                // to what that child was given" from a run in which the child's
+                // shell may never have started at all.
+                (
+                    Outcome::NotExpressible,
+                    "no verdict — the delegated child's shell never ran".to_owned(),
+                    format!(
+                        "no Bash effect reached the hermetic home AND the child's stdout marker \
+                         never returned on the wire, so the shell did not run. An absent effect \
+                         from a shell that never started says nothing about tool authority, \
+                         workspace containment or the approval gate, and is not recorded as a \
+                         refusal. {} delegated child provider turn(s) arrived",
                         run.child_turns
                     ),
                 )
