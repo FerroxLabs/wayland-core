@@ -31,6 +31,10 @@ wcore-cron = { workspace = true }
 # declares as permitted; wcore-config depends only on
 # wcore-types/wcore-compact/wcore-budget, so there is no cycle.
 wcore-config = { workspace = true }
+# `wcore_types::process_liveness` — the single zombie-aware liveness probe
+# behind `pidlock::process_is_alive`. wcore-types is the bottom layer with
+# zero internal deps, so no cycle is possible. See .planning/ZOMBIE-PROBE.md.
+wcore-types = { workspace = true }
 
 chrono = { workspace = true }
 dirs = { workspace = true }
