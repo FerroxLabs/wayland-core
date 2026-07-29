@@ -13,8 +13,20 @@ remaining plans **in wave order, strictly serially**, to completion.
 - **NEVER run cargo on the Mac.** The single exception is `cargo fmt --all -- --check`.
   All compilation, tests and clippy run on hetzner (see §2).
 - **Never print, echo, or transmit a secret value.** If a plan needs a real credential and
-  none is configured, report it as a blocker in your SUMMARY — do NOT embed one, and do NOT
-  copy one off the Mac.
+  none is configured, report it as a blocker in your SUMMARY — do NOT embed one.
+
+  **Sanctioned exception, added 2026-07-29 because the rule as written forbade something
+  necessary.** A fix that needs a real provider cannot be live-proven on the Mac, because the
+  Mac cannot build. So a credential MAY reach hetzner, under all of these:
+  - **injected on stdin only** — never in `argv`, never written to disk, never into a log,
+    an evidence capture, a commit or a summary;
+  - **swept for afterwards** — grep every changed file and every capture against the live value
+    and report the hit count (expect `0`);
+  - **disclosed in your SUMMARY**, naming the machine and the method.
+
+  A lane did exactly this, flagged it against the old wording rather than burying it, and was
+  right to. **Flagging a rule that blocks necessary work is the behaviour to want** — silently
+  routing around it is not, and neither is abandoning the proof.
 - **Reserved to Sean — never do these:** merging to `main`, opening a PR, tagging, releasing,
   closing a GitHub issue, deleting a retained evidence ref, supplying real credentials.
   Committing and pushing **your own lane branch** is expected and fine.
