@@ -123,11 +123,19 @@ for i in $(seq 1 20); do
   echo "waiting for mock: iteration $i"; sleep 1
 done
 
+# Durable sessions need the credentials vault unlocked. The binary said so
+# itself ("set WAYLAND_VAULT_PASSPHRASE_FD ... or turn durable sessions off"),
+# and unlocking is the right answer: turning durable sessions off would change
+# the configuration under test. The passphrase is generated per run, handed
+# over on a file descriptor, and never written to disk or into any capture.
+VAULT_PASS=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d " \n")
+
 run() { # run <capture-name> <prompt>
   local name="$1"; shift
-  ( cd "$PROJ" && "$BIN" --provider anthropic --api-key sk-live-not-real \
+  ( cd "$PROJ" && exec 9< <(printf '%s' "$VAULT_PASS") && \
+    WAYLAND_VAULT_PASSPHRASE_FD=9 "$BIN" --provider anthropic --api-key sk-live-not-real \
       --base-url "http://127.0.0.1:$PORT" --model claude-mock \
-      --session-id "c3live" "$@" ) > "$ROOT/out/$name.txt" 2>&1
+      --session-id "c30f1feed0" "$@" ) > "$ROOT/out/$name.txt" 2>&1
   echo "F23_C3_LIVE_RC=$? verb=$name"
 }
 
@@ -144,7 +152,7 @@ need "$ROOT/out/act-cold.txt" "no turn in this session has run a memory recall y
 echo "=== 2. plant a fact THROUGH the product (assert_fact tool call) ==="
 touch "$CAP_DIR/PLANT"
 run plant "remember my deployment region"
-need "$ROOT/out/plant.txt" "" "plant turn produced output"
+need "$ROOT/out/plant.txt" "assert_fact" "plant turn actually invoked the assert_fact tool"
 
 echo "=== 3. the planted fact reaches the OUTBOUND PROVIDER BODY ==="
 run recall1 "what is my recorded deployment region"
@@ -160,9 +168,13 @@ run act-warm "/memory activation"
 need "$ROOT/out/act-warm.txt" "$NONCE" "activation record names the injected fact"
 need "$ROOT/out/act-warm.txt" "into your prompt" "activation record says it reached the prompt"
 
-echo "=== 5. /memory why reports SEMANTIC provenance ==="
+echo "=== 5. /memory why reports SEMANTIC provenance for the planted fact ==="
+# Asserting the NONCE, not the word "semantic": "semantic" appears in the
+# command's own help text, so a binary that printed only usage would have
+# passed. The nonce can only come from a real recall.
 run why "/memory why recorded deployment region"
-need "$ROOT/out/why.txt" "semantic" "/memory why reports the semantic partition"
+need "$ROOT/out/why.txt" "$NONCE" "/memory why surfaces the planted fact itself"
+need "$ROOT/out/why.txt" "semantic/project" "/memory why names the semantic partition and tier"
 
 echo "=== 6. nudges are reachable and settable ==="
 run nudge-show "/memory nudge"
