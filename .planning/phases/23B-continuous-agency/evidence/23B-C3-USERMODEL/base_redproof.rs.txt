@@ -1,0 +1,259 @@
+//! BASE RED PROOF — run at `plan/f20-unified-audit-repair` @ eaff921d, i.e.
+//! BEFORE this lane's fix. Copied to
+//! `crates/wcore-agent/tests/user_model_base_redproof.rs` in a throwaway
+//! worktree; never committed to the lane branch.
+//!
+//! It asks the one question the criterion asks: **if a user corrects what the
+//! agent believes about them, does the correction reach the model, and does the
+//! belief it replaces stop reaching the model?**
+//!
+//! At base the only user-model write surface that exists at all is
+//! `MemoryApi::update_user_model` — the `SystemToken`-only P5 partition write
+//! that the 23B verdict's G3c names. So that is the surface this proof drives.
+//!
+//! Expected at base: BOTH assertions fail. The correction never appears in the
+//! outbound body (P5 has no production read into any prompt), and the inferred
+//! style line is still there (nothing suppresses it).
+
+mod common;
+
+use std::path::Path;
+use std::sync::Arc;
+
+use common::{RECOVERY_TEST_KEY, configure_persisted_test_session};
+use serde_json::json;
+use wcore_agent::bootstrap::AgentBootstrap;
+use wcore_agent::output::null_sink::NullSink;
+use wcore_config::compat::ProviderCompat;
+use wcore_config::config::{Config, ProviderType};
+use wcore_config::debug::DebugConfig;
+use wcore_memory::MemoryApi;
+use wcore_memory::v2_types::AccessToken;
+use wcore_providers::LlmProvider;
+use wcore_providers::anthropic::AnthropicProvider;
+use wcore_user_model::{LocalBackend, Observation, UserModelBackend};
+use wiremock::matchers::{method, path as wm_path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+const PROBE_QUESTION: &str = "summarise the deployment plan";
+const SEED_FINGERPRINT: [f32; 4] = [0.8, 0.6, 0.6, 0.2];
+const INFERRED_STYLE_MARKER: &str = "- style: formality=";
+const CORRECTION_VALUE: &str = "blunt, no preamble QK7UM3NONCE";
+const BOOTSTRAP_USER_ID: &str = "default";
+
+fn anthropic_test_config(base_url: &str) -> Config {
+    let mut config = Config {
+        provider_label: "anthropic".into(),
+        provider: ProviderType::Anthropic,
+        api_key: "sk-ant-not-a-real-key".into(),
+        base_url: base_url.into(),
+        model: "claude-mock".into(),
+        max_tokens: 256,
+        max_turns: Some(1),
+        compat: ProviderCompat::anthropic_defaults(),
+        ..Default::default()
+    };
+    config.memory.enabled = true;
+    config
+}
+
+fn anthropic_text_sse(text: &str) -> String {
+    format!(
+        "event: message_start\ndata: {message_start}\n\n\
+         event: content_block_start\ndata: {block_start}\n\n\
+         event: content_block_delta\ndata: {delta}\n\n\
+         event: content_block_stop\ndata: {block_stop}\n\n\
+         event: message_delta\ndata: {message_delta}\n\n\
+         event: message_stop\ndata: {message_stop}\n\n",
+        message_start = json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_um_mock", "type": "message", "role": "assistant",
+                "content": [], "model": "claude-mock",
+                "stop_reason": serde_json::Value::Null,
+                "stop_sequence": serde_json::Value::Null,
+                "usage": { "input_tokens": 10, "output_tokens": 1 }
+            }
+        }),
+        block_start = json!({
+            "type": "content_block_start", "index": 0,
+            "content_block": { "type": "text", "text": "" }
+        }),
+        delta = json!({
+            "type": "content_block_delta", "index": 0,
+            "delta": { "type": "text_delta", "text": text }
+        }),
+        block_stop = json!({ "type": "content_block_stop", "index": 0 }),
+        message_delta = json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": "end_turn", "stop_sequence": serde_json::Value::Null },
+            "usage": { "output_tokens": 1 }
+        }),
+        message_stop = json!({ "type": "message_stop" }),
+    )
+}
+
+async fn start_mock_anthropic() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(wm_path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(anthropic_text_sse("ok")),
+        )
+        .mount(&server)
+        .await;
+    server
+}
+
+fn user_model_path(cwd: &Path) -> std::path::PathBuf {
+    wcore_memory::paths::auto_memory_dir(cwd)
+        .map(|d| d.join("user-model.json"))
+        .unwrap_or_else(|| cwd.join(".wayland").join("user-model.json"))
+}
+
+async fn seed_inferred_style(cwd: &Path) {
+    let backend = LocalBackend::with_persistence(user_model_path(cwd)).expect("open");
+    backend
+        .observe(
+            BOOTSTRAP_USER_ID,
+            Observation {
+                style_fingerprint: Some(SEED_FINGERPRINT),
+                ts_secs: 1_700_000_000,
+                ..Observation::default()
+            },
+        )
+        .await
+        .expect("seed");
+}
+
+async fn drive_cold_session(server: &MockServer, cwd: &Path, msg_id: &str) {
+    let provider: Arc<dyn LlmProvider> = Arc::new(AnthropicProvider::new(
+        "sk-ant-not-a-real-key",
+        &server.uri(),
+        ProviderCompat::anthropic_defaults(),
+        DebugConfig::default(),
+    ));
+    let mut config = anthropic_test_config(&server.uri());
+    configure_persisted_test_session(&mut config, cwd);
+    let mut built = AgentBootstrap::new(config, cwd.to_str().unwrap(), null_output())
+        .provider(provider)
+        .build()
+        .await
+        .expect("bootstrap");
+    built
+        .engine
+        .init_session(msg_id, cwd.to_str().unwrap(), None)
+        .expect("session");
+    built.engine.use_recovery_test_key(&RECOVERY_TEST_KEY);
+    if let Err(e) = built.engine.run(PROBE_QUESTION, msg_id).await {
+        panic!("turn {msg_id} failed before reaching the provider: {e}");
+    }
+}
+
+fn null_output() -> Arc<dyn wcore_agent::output::OutputSink> {
+    Arc::new(NullSink)
+}
+
+async fn captured_bodies(server: &MockServer) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .expect("recorded")
+        .into_iter()
+        .map(|r| String::from_utf8(r.body).expect("utf8"))
+        .collect()
+}
+
+/// Harness-alive control. Must PASS at base — if it fails, every "the
+/// correction is absent" result below is a dead instrument rather than a
+/// finding.
+#[tokio::test]
+async fn base_probe_is_alive() {
+    let server = start_mock_anthropic().await;
+    let workdir = tempfile::TempDir::new().unwrap();
+    let cwd = workdir.path();
+    seed_inferred_style(cwd).await;
+    drive_cold_session(&server, cwd, "msg-base-alive").await;
+    let bodies = captured_bodies(&server).await;
+    assert_eq!(bodies.len(), 1, "one outbound request expected");
+    assert!(
+        bodies[0].contains(PROBE_QUESTION),
+        "the captured body is not a real outbound prompt"
+    );
+    assert!(
+        bodies[0].contains(INFERRED_STYLE_MARKER),
+        "the inferred user model does not reach the wire at base, so nothing below \
+         measures anything. Body was: {}",
+        bodies[0]
+    );
+    println!("BASE_PROBE_ALIVE=ok inferred_style_on_wire=true");
+}
+
+/// **The red proof.** At base, correct the user model through the only surface
+/// that exists (`update_user_model`, G3c's named surface), end the session, and
+/// look at the next outbound body.
+#[tokio::test]
+async fn base_user_model_correction_never_reaches_the_provider() {
+    let server = start_mock_anthropic().await;
+    let workdir = tempfile::TempDir::new().unwrap();
+    let cwd = workdir.path();
+    seed_inferred_style(cwd).await;
+
+    drive_cold_session(&server, cwd, "msg-base-1").await;
+    let bodies = captured_bodies(&server).await;
+    assert!(bodies[0].contains(INFERRED_STYLE_MARKER), "inference on wire");
+
+    // The correction, through base's only user-model write surface.
+    let memory: Arc<dyn MemoryApi> = Arc::new(
+        wcore_memory::open_for_test(&std::env::temp_dir())
+            .await
+            .expect("memory"),
+    );
+    let correction_accepted = memory
+        .update_user_model(
+            "style",
+            serde_json::Value::String(CORRECTION_VALUE.to_string()),
+            AccessToken::System,
+        )
+        .await
+        .is_ok();
+    println!("BASE_CORRECTION_WRITE_REPORTED={correction_accepted}");
+
+    // Session end: the P5 inference G3c says clobbers it.
+    let inferencer = wcore_memory::partition::UserModelInferencer::new(memory.clone());
+    let _ = inferencer.infer_and_persist(&[]).await;
+    let after = memory
+        .user_model(AccessToken::System)
+        .await
+        .expect("read back")
+        .entries
+        .into_iter()
+        .find(|e| e.key == "style")
+        .map(|e| e.value.to_string());
+    println!("BASE_CORRECTION_IN_STORE_AFTER_SESSION_END={after:?}");
+
+    drive_cold_session(&server, cwd, "msg-base-2").await;
+    let bodies = captured_bodies(&server).await;
+    assert_eq!(bodies.len(), 2, "two outbound requests expected");
+    println!(
+        "BASE_CORRECTION_ON_WIRE={} BASE_INFERENCE_STILL_ON_WIRE={}",
+        bodies[1].contains(CORRECTION_VALUE),
+        bodies[1].contains(INFERRED_STYLE_MARKER)
+    );
+
+    // These are the two assertions the FIXED code passes. Both must FAIL here.
+    assert!(
+        bodies[1].contains(CORRECTION_VALUE),
+        "BASE RED 1/2: the user's correction never reached the outbound provider body. \
+         Body was: {}",
+        bodies[1]
+    );
+    assert!(
+        !bodies[1].contains(INFERRED_STYLE_MARKER),
+        "BASE RED 2/2: the belief the user corrected is STILL in the outbound body. \
+         Body was: {}",
+        bodies[1]
+    );
+}

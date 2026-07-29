@@ -1,0 +1,27 @@
+• The user wants a panel position answer. This is a decision question, no tools needed. But wait — this working directory has panel-codex.txt, panel-gemini.txt, panel-kimi.txt, panel-question.txt — this appears to be a panel session where I'm the Kimi panelist. The question is in panel-question.txt presumably. I should just answer in the required format. Should I write to panel-kimi.txt? The user message contains the question directly. The instructions say answer with PANEL_POSITION=<letter> then ≤200 words. I'll just answer directly. Maybe also write to panel-kimi.txt since the setup suggests it? The user didn't ask to write a file. Keep it simple — just answer.
+
+  My pick: (b) is cleanest honesty-wise, but (c) — does it look wired? A command that states "no delivery path exists yet" on every invocation doesn't look wired; it discloses. But is keeping a control that governs nothing, even labeled, valuable? The criterion requires "see and control nudges". (b) fails the criterion visibly but honestly; (a) risks inventing an actor to satisfy a criterion — forbidden failure mode.
+
+  Actually (b): removing the command means the criterion is unmet — but the criterion is about the product requirement; deferring delivery to a later phase means the criterion should be deferred too. The honest option: the bound exists but nothing to bind. (c) makes the state of the world legible to the user — a labeled placeholder. Is a labeled placeholder "looks-wired-but-isn't"? No — the forbidden state is deception; explicit disclosure on every invocation is the opposite of deception. However, an advertised control that governs nothing is called out as a failure mode too. (c) keeps the advertisement.
+
+  Hmm. Choose between (b) and (c). The constraint says "an advertised control that governs nothing" is a failure mode — that's the current state. (c) converts hidden vacuity into disclosed vacuity. But is disclosed vacuity acceptable? The argument for (b): NudgeBudget is internal infra for a later phase; infrastructure without a consumer shouldn't have UI. UI surface should ship with the delivery path. The criterion "see and control nudges" is simply not yet deliverable, and the honest move is to not pretend partial satisfaction. (c) leaves a permanent disclaimer UX that trains users to ignore the command and still reads as a feature.
+
+  But counter-argument for (c): removing the command hides the capability; keeping it with disclosure lets early users inspect the bound. Yet there's nothing to control, so inspection has no value.
+
+  I'll pick (b): remove from the surface, keep infrastructure, and the criterion is marked as deferred/blocked on the delivery phase — not redefined. (c) is not the deceptive third state, but it's a zombie UI: an advertised control over nothing, which the constraints name as a failure mode in its own right.
+
+  Also (a) should be rejected: inventing an actor purely to satisfy the criterion is the named failure mode; a token "minimal caller" that nudges about nothing meaningful is exactly that.
+
+  Keep ≤200 words.
+
+• PANEL_POSITION=b
+
+  Justification:
+
+  (c) is not literally the forbidden "looks-wired-but-isn't" state — a disclaimer on every invocation discloses rather than deceives. But it fails the other named test: it remains an *advertised control that governs nothing*. A permanently self-disclaiming command is zombie UI. It occupies the command surface, appears in help, invites users to set a cap on an event that never fires, and the disclaimer's existence pressures a future phase to keep a UI shape chosen before the delivery semantics were known. Disclosure converts deception into legibility; it does not convert vacuity into value.
+
+  (a) is the trap the constraints name explicitly: a "minimal real caller" invented now would be a proactive actor whose purpose is to justify the bound, not to serve the user — the bound would govern a token gesture, which is redefining success downward with extra code.
+
+  (b) is the honest option: `NudgeBudget` stays as tested internal infrastructure, the surface ships when the delivery phase ships, and the criterion is recorded as *deferred*, not partially met. Deferral stated plainly is not redefining success; a visible knob on a null event is.
+
+To resume this session: kimi -r session_b7357962-a60c-4eb0-be16-cfc9a3373b87
