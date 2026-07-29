@@ -63,3 +63,36 @@ Ports: pick high/odd, five other lanes live. No global pkill.
 - [ ] Which fixtures can count reactions/typing on their platform surface.
 - [ ] Live runs per adapter.
 - [ ] `AbortOnDrop` keepalive termination proof.
+
+---
+
+## T+45 — instrument built and MUTATION-PROVED
+
+`scripts/f24-native-actions.mjs` (new, strictly additive — edits nothing; carries its OWN
+telegram/matrix/slack/msteams fixtures so the shared `f24-tg-fixture.mjs`,
+`f24-matrix-fixture.mjs`, `f24-msteams-fixture.mjs`, `f24-inbound.mjs` are untouched while
+five lanes are live; subclasses `DiscordFixture` the way `f24-media-actions.mjs` did).
+
+Why local fixtures rather than the shared ones: the shared tg fixture answers
+`sendChatAction`/`setMessageReaction` through its catch-all, so a COUNT survives — but the
+EMOJI does not. The shared matrix fixture records `sendReaction` without the `m.relates_to.key`.
+This lane grades on emoji IDENTITY, so neither could serve it.
+
+### Self-test: 4 assertions, all PASS — and both mutations redden
+
+| mutation | effect | result |
+|---|---|---|
+| A3 reverted to count-only (`reactions.length >= 2`) | — | assertion 3 **FAIL**, others PASS |
+| `not-supported` collapsed into `not-fired` | — | assertion 4 **FAIL**, others PASS |
+
+Assertion 3 is the §6b-ii third assertion: two 👀 and NO terminal reaction. Count-only grading
+calls that a complete ack cycle. Assertion 4 is the silent-default trap: the `send_typing`
+trait default is a NO-OP `Ok(())`, so zero typing on a non-declaring adapter must read
+`not-supported`, which is a different fact from `not-fired`.
+
+### Build
+`hetzner-dsm:/root/wayland-24na` @ 75babf32, `cargo build --release -p wcore-cli --bin wayland-core`
+→ `Finished release profile in 5m 46s`, binary 96322688 bytes.
+
+Ports chosen away from every live lane: webhook 21473 (18787 f24-inbound, 18211 discord,
+19631-3 msteams-attach all taken). Fixture ports are ephemeral (bind :0).
