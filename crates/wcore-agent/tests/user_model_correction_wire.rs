@@ -453,7 +453,10 @@ async fn forgetting_a_correction_returns_the_subject_to_inference_on_the_wire() 
     drive_cold_session(&server, cwd, "msg-fg-1").await;
     let bodies = captured_bodies(&server).await;
     assert_body_is_a_live_instrument(&bodies, 0, "forget session 1");
-    assert!(bodies[0].contains(CORRECTION_VALUE), "correction on the wire");
+    assert!(
+        bodies[0].contains(CORRECTION_VALUE),
+        "correction on the wire"
+    );
     assert!(
         !bodies[0].contains(INFERRED_STYLE_MARKER),
         "inference suppressed while corrected"

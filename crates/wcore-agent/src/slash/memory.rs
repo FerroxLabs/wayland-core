@@ -251,7 +251,6 @@ impl MemoryHandler {
         }
     }
 
-
     /// 23B-C3 — `/memory activation [on|off]`.
     ///
     /// The criterion's first clause, and the one that had no surface at all.

@@ -131,9 +131,9 @@ impl UserModelHandler {
             Ok(previous) => {
                 let key = wcore_user_model::correction::normalise_key(key);
                 let mut out = match previous {
-                    Some(UserCorrection { value: old, .. }) => format!(
-                        "/usermodel correct: {key} = {value}  (was: {old})\n"
-                    ),
+                    Some(UserCorrection { value: old, .. }) => {
+                        format!("/usermodel correct: {key} = {value}  (was: {old})\n")
+                    }
                     None => format!("/usermodel correct: {key} = {value}\n"),
                 };
                 // Say plainly when it takes effect. The user-context block is
@@ -234,7 +234,10 @@ mod tests {
     fn bare_show_says_nothing_is_corrected_rather_than_printing_an_empty_list() {
         let out = run(&handler(), "/usermodel");
         assert!(out.contains("corrected nothing"), "got: {out}");
-        assert!(out.contains("/usermodel correct"), "must say how; got: {out}");
+        assert!(
+            out.contains("/usermodel correct"),
+            "must say how; got: {out}"
+        );
     }
 
     #[test]

@@ -476,9 +476,12 @@ mod tests {
             ..Default::default()
         };
         let corrections = corrections_of(&[("style", "blunt, no preamble")]);
-        let block =
-            render_user_context_block_with_corrections(&brief, &Preferences::default(), &corrections)
-                .unwrap();
+        let block = render_user_context_block_with_corrections(
+            &brief,
+            &Preferences::default(),
+            &corrections,
+        )
+        .unwrap();
         assert!(
             !block.contains("formality=0.70"),
             "corrected style must not sit next to the numbers it corrects"
@@ -513,11 +516,8 @@ mod tests {
         prefs
             .expertise
             .insert("rust".to_string(), ExpertiseLevel::Expert);
-        let with_empty = render_user_context_block_with_corrections(
-            &brief,
-            &prefs,
-            &Corrections::default(),
-        );
+        let with_empty =
+            render_user_context_block_with_corrections(&brief, &prefs, &Corrections::default());
         assert_eq!(with_empty, render_user_context_block(&brief, &prefs));
         assert!(
             !with_empty.unwrap().contains("authoritative"),
@@ -533,9 +533,12 @@ mod tests {
             ..Default::default()
         };
         let corrections = corrections_of(&[("summary", "x")]);
-        let block =
-            render_user_context_block_with_corrections(&brief, &Preferences::default(), &corrections)
-                .unwrap();
+        let block = render_user_context_block_with_corrections(
+            &brief,
+            &Preferences::default(),
+            &corrections,
+        )
+        .unwrap();
         assert!(
             block.contains("- name: Inferred Name"),
             "correcting `summary` must not suppress `name`"

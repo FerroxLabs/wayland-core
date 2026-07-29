@@ -371,8 +371,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let backend =
             crate::LocalBackend::with_persistence(tmp.path().join("user-model.json")).unwrap();
-        let store = CorrectionStore::with_persistence(tmp.path().join("user-corrections.json"))
-            .unwrap();
+        let store =
+            CorrectionStore::with_persistence(tmp.path().join("user-corrections.json")).unwrap();
         store.correct("u", "style", "blunt", 1).await.unwrap();
 
         for i in 0..50 {
