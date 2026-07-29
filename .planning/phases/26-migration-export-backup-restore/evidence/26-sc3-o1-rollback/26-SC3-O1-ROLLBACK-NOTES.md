@@ -125,7 +125,78 @@ construction, so re-snapshotting on the way back would be pointless work and wou
 a read-write connection against a store that may be damaged. So `copy_inner` needs an
 explicit direction, not a blanket "snapshot any db you see".
 
+## Minute 60-140 — RED reproduced, fixed, re-proved
+
+Binaries (`sha256sum`, unproxied, on hetzner):
+- BASE `7cf8d45d8e4dad5c94cf5afd73dd6b3fea1083d32516b14a0d34af9c4bbb6972` @ 2c8b6d1d
+- FIX  `a242cc99ddc9bdaeb812ba87926706a3f407038661ae8bfdae5c150eff35ee4f` @ 79087cd4
+
+### RED at base — 7 FAIL / 1 PASS over 8 concurrent runs
+
+First sweep (original instrument): c1 FAIL(101), c2 FAIL(100), c3 FAIL(101), c4 PASS.
+Second sweep (repaired instrument): r1 FAIL(100), r2 FAIL(101) **and lost 16 rows
+committed before the restore was launched**, r3 FAIL(1), r4 FAIL(1).
+Controls (`--arm sequenced`, same writers stopped first): **2/2 PASS**, one demanding
+65,914 rows — so the control is not vacuous and the harness can report a pass.
+
+Two distinct corruption signatures, both with `restore` and `recover` exiting 0:
+- `*** in database main ***` at 100-101 problem lines (SQLite's reporting cap);
+- `wrong # of entries in index sqlite_autoindex_rows_committed_1`.
+
+Every base run restored `['memory.db-shm', 'memory.db-wal']` into the home — the torn
+trio put back beside the database, which is the mechanism.
+
+**c4 PASSED at base.** Recorded rather than dropped: the defect is probabilistic, so a
+single green run at base would have "disproved" it. That is exactly why the brief
+demands a demonstrated red rather than a green.
+
+### An instrument defect of my own, repaired in-lane (§6b-ii)
+
+Run c3 reported `MISSING-COMMITTED-ROWS: -107`. Under `PRIMARY KEY (wid, n)` with
+`n = 1..need`, `COUNT(*) WHERE n <= need` cannot exceed `need` — the corrupt btree
+inflated the count. My accounting summed SIGNED differences, so such a surplus can
+cancel a real loss from another writer.
+
+Repaired: `account_rows()` clamps per writer and reports `IMPOSSIBLE-SURPLUS-ROWS`
+separately, failing on it. `scripts/sqlite-restore-rollback-selftest.py` carries the
+three assertions; A3 is the load-bearing one and it prints
+`A3 verdicts on the same data: OLD=PASS NEW=FAIL` — the old matcher returned a clean
+PASS on data that had lost 107 committed rows.
+
+### GREEN with the fix — 4/4 PASS under HEAVIER load
+
+f1-f4 all PASS, `ROLLED-BACK-SIDECARS: []`, control PASS (67,092 rows demanded).
+The fixed arm is not an easier experiment: capture takes **2.21-2.77s** vs base's
+**0.96-1.06s**, and the writers committed **~+3,700 each** across it vs **~+2,000** at
+base. It passed under strictly more concurrency than the arm that failed.
+
+### `journal.rs` WAS touched — and the re-proofs
+
+Unavoidable: the raw `std::fs::copy` is `copy_inner`, inside `journal.rs`.
+
+`cargo test -p wcore-cli --lib -- backup:: migrate::` →
+`102 passed; 0 failed; 0 ignored; 0 measured; 1776 filtered out` (base: 98; +4 mine,
+so all four compiled and ran — no silent skip).
+
+**Known-negative:** reverting only `copy_tree_excluding_journal` to `SqliteMode::Verbatim`
+makes 3 of the 4 new tests FAIL (verbatim output in the SUMMARY). The fourth,
+`a_file_merely_NAMED_like_a_database_is_still_byte_identical`, passes in BOTH arms —
+correct, since its job is to prove the change is a no-op for non-databases.
+
+Re-proofs against the fixed binary:
+| proof | result |
+|---|---|
+| `portability-interrupt-proof.sh` | `DIGEST-EQUAL: yes` / `PROOF-OK` |
+| `portability-backup-rollback-sweep.sh` | `PROOF: PASS`, rollback-arm byte-diff 0, known-negative arm damaged 9/9 |
+| `portability-migrate-rollback-proof.sh --peer openclaw` | `PROOF: PASS`, byte-diff 0, negative arm 6 |
+| `portability-migrate-interrupt-proof.sh` | `PROOF: PASS peer=hermes trials=9 mid=9 recovered=9` |
+| `portability-migrate-rollback-proof.sh --peer hermes` | **FAIL** — `only 1 of 9 kills landed mid-apply` |
+
+The hermes failure is its own anti-vacuity guard firing on kill TIMING, not a
+byte-identity failure (`ROLLBACK-ARM-BYTE-DIFF-UNEXPLAINED: 0`). Prior lane recorded
+6/9 mid. Under investigation by A/B against the BASE binary on the same host — I will
+not report it either way until the control says whether it is my change or the host.
+
 ## Status
 
-Base build running on hetzner (`hz/restore-rollback-sqlite` @ 2c8b6d1d, HEAD asserted).
-Next: write the rollback proof harness, then reproduce RED at base.
+A/B (3x base, 3x fix, hermes) running.
