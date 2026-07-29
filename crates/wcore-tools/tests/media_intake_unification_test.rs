@@ -62,9 +62,16 @@ fn resolve(path: PathBuf) -> Result<(&'static str, Vec<u8>), String> {
 
 // ── path validation: the whole boundary the audio path was missing ─────────
 
-/// KNOWN-NEGATIVE, RED at base. Every other file-reading tool in this tree
-/// requires an absolute path. `transcribe_audio` took the model-supplied string
-/// verbatim into `PathBuf::from`.
+/// Every other file-reading tool in this tree requires an absolute path.
+/// `transcribe_audio` took the model-supplied string verbatim into
+/// `PathBuf::from`.
+///
+/// **Honest note: this one passed at base, and for the WRONG reason** — the
+/// relative name does not exist relative to the test's cwd, so base failed with
+/// ENOENT rather than with a path-policy refusal. It is retained as a
+/// regression pin, NOT counted as one of the four measured RED results. The
+/// discriminating absolute-path test is `audio_refuses_a_traversal_segment`,
+/// whose target file genuinely exists.
 #[test]
 fn audio_refuses_a_relative_path() {
     let err = resolve(PathBuf::from("some/relative/clip.wav"))
@@ -85,7 +92,9 @@ fn image_refuses_a_relative_path_control() {
     );
 }
 
-/// KNOWN-NEGATIVE, RED at base.
+/// KNOWN-NEGATIVE. **Measured RED at base** (`evidence/27-c1/BASE-*-RED.txt`):
+/// base returned `Ok(("audio/wav", ...))` for a path carrying a `..`
+/// component.
 #[test]
 fn audio_refuses_a_traversal_segment() {
     let dir = tempfile::tempdir().unwrap();
@@ -109,10 +118,15 @@ fn image_refuses_a_traversal_segment_control() {
     assert!(load_local_image(via_traversal.to_str().unwrap()).is_err());
 }
 
-/// KNOWN-NEGATIVE, RED at base, and the sharpest one: on Windows, opening a
-/// UNC target triggers an outbound SMB connect that leaks a NetNTLM hash to an
-/// attacker-chosen host BEFORE any content check. `#644` closed this on every
-/// other file surface. The audio path never had it.
+/// On Windows, opening a UNC target triggers an outbound SMB connect that leaks
+/// a NetNTLM hash to an attacker-chosen host BEFORE any content check. `#644`
+/// closed this on every other file surface; the audio path never had it.
+///
+/// **Honest note: this passed at base ON LINUX, and for the wrong reason** —
+/// `\\attacker\share\clip.wav` is a relative filename on Unix, so base failed
+/// with ENOENT. The platform where this negative discriminates is Windows,
+/// which this lane could not run. Recorded as source-evidenced, not measured
+/// on the platform that matters.
 #[test]
 fn audio_refuses_a_unc_target() {
     for spelling in [r"\\attacker\share\clip.wav", "//attacker/share/clip.wav"] {
@@ -124,8 +138,11 @@ fn audio_refuses_a_unc_target() {
     }
 }
 
-/// KNOWN-NEGATIVE, RED at base. A path the deny-list names must never be
-/// opened by a media tool, whatever the extension claims.
+/// KNOWN-NEGATIVE. **Measured RED at base**, and the most serious of the four:
+/// base READ a file at a deny-listed credential path and returned its bytes as
+/// `("audio/wav", ...)`, ready to be posted to a third-party speech-to-text
+/// provider. `path_validation`'s deny-list — which every other file tool in
+/// this tree consults — was never called on this path.
 #[test]
 fn audio_refuses_a_denylisted_credential_path() {
     let dir = tempfile::tempdir().unwrap();
@@ -149,8 +166,9 @@ fn image_refuses_a_denylisted_credential_path_control() {
     assert!(load_local_image(secret.to_str().unwrap()).is_err());
 }
 
-/// KNOWN-NEGATIVE, RED at base. The image path walked with `O_NOFOLLOW`; the
-/// audio path followed symlinks freely.
+/// KNOWN-NEGATIVE. **Measured RED at base**: the image path walked with
+/// `O_NOFOLLOW`; the audio path followed symlinks freely and returned the
+/// target's bytes.
 #[cfg(unix)]
 #[test]
 fn audio_refuses_a_symlinked_leaf() {
@@ -166,33 +184,57 @@ fn audio_refuses_a_symlinked_leaf() {
 
 // ── the bound ──────────────────────────────────────────────────────────────
 
+/// Build a sparse fixture that is `multiple` times the cap, with a real
+/// container header at the front so the FORMAT check can never be what does
+/// the refusing. Sparse, so it costs ~0 bytes on disk.
+fn oversize_fixture(path: &std::path::Path, header: &[u8], len: u64) {
+    use std::io::{Seek, SeekFrom, Write};
+    let f = std::fs::File::create(path).unwrap();
+    f.set_len(len).unwrap();
+    drop(f);
+    let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    f.seek(SeekFrom::Start(0)).unwrap();
+    f.write_all(header).unwrap();
+    assert_eq!(std::fs::metadata(path).unwrap().len(), len);
+}
+
 /// **THE bound-enforcement known-negative.**
 ///
 /// An input that exceeds `TRANSCRIPTION_MAX_BYTES` must be REFUSED, and the
 /// refusal must cite the file's FULL length — a number only obtainable from
-/// the descriptor's own metadata, never from a truncated read. If the cap
-/// check is deleted from `media_intake::admit_open`, this test goes red:
-/// the oversize file is admitted and `resolve_source` returns `Ok`.
+/// the descriptor's own metadata, before any payload read.
 ///
-/// The fixture is sparse (`set_len`), so it costs ~0 bytes on disk while
-/// genuinely reporting a length above the cap.
+/// # This test was itself self-passing once, and the repair is the point
+///
+/// The first version used a fixture of exactly `cap + 1`. Deleting the
+/// stat-side cap from `media_intake::admit_open` did NOT turn it red, because
+/// the defence-in-depth check after the bounded `take(cap + 1)` refuses with
+/// `actual = cap + 1` — the SAME number the stat would have reported. The
+/// assertion could not tell the two enforcement points apart, so it passed on
+/// an instrument with the enforcement under test removed. That is exactly the
+/// self-passing class LANE-BRIEF §3.2 names, found in this lane's own gate.
+///
+/// The repair is the fixture size: at `3 × cap` the two enforcement points
+/// report DIFFERENT numbers — the stat reports `3 × cap`, the read-side
+/// fallback can only ever report `cap + 1`. Asserting the full length
+/// therefore discriminates.
+///
+/// Three assertions, per LANE-BRIEF §6b-ii:
+/// 1. known-positive — an under-cap file is admitted (`a_valid_wav_...`);
+/// 2. known-negative — this oversize file is refused;
+/// 3. **the old broken assertion would have missed it** — the refusal must
+///    NOT cite `cap + 1`, which is the only number the un-repaired test could
+///    ever have seen and the number the read-side fallback produces.
+///
+/// Mutation-proved: deleting the stat-side cap turns this red. See
+/// `evidence/27-c1/MUTATION-cap-removed.txt`.
 #[test]
-fn audio_over_the_declared_cap_is_refused_before_it_is_read() {
+fn audio_over_the_declared_cap_is_refused_from_the_stat_not_from_the_read() {
     let dir = tempfile::tempdir().unwrap();
     let over = dir.path().join("over-cap.wav");
-    let f = std::fs::File::create(&over).unwrap();
-    let oversize = TRANSCRIPTION_MAX_BYTES as u64 + 1;
-    f.set_len(oversize).unwrap();
-    drop(f);
-    // Write a real WAV header at the front so the format check cannot be what
-    // does the refusing — only the cap can.
-    {
-        use std::io::{Seek, SeekFrom, Write};
-        let mut f = std::fs::OpenOptions::new().write(true).open(&over).unwrap();
-        f.seek(SeekFrom::Start(0)).unwrap();
-        f.write_all(&wav_bytes()).unwrap();
-    }
-    assert_eq!(std::fs::metadata(&over).unwrap().len(), oversize);
+    let cap = TRANSCRIPTION_MAX_BYTES as u64;
+    let oversize = cap * 3;
+    oversize_fixture(&over, &wav_bytes(), oversize);
 
     let err = resolve(over).expect_err("a file over the declared cap must be refused");
     assert!(
@@ -201,30 +243,38 @@ fn audio_over_the_declared_cap_is_refused_before_it_is_read() {
     );
     assert!(
         err.contains(&oversize.to_string()),
-        "refusal must cite the FULL length {oversize} from the descriptor's own \
-         metadata, not a truncated read length; got: {err}"
+        "refusal must cite the FULL length {oversize} taken from the descriptor's \
+         own metadata BEFORE any payload read; got: {err}"
+    );
+    assert!(
+        !err.contains(&(cap + 1).to_string()),
+        "refusal cites {} — that is the read-side fallback's number, which means \
+         the stat-side cap did not fire; got: {err}",
+        cap + 1
     );
 }
 
 /// The same bound at the image surface, so the two surfaces are shown to be
 /// enforcing through the SAME mechanism rather than each having their own.
 #[test]
-fn image_over_the_declared_cap_is_refused_before_it_is_read() {
+fn image_over_the_declared_cap_is_refused_from_the_stat_not_from_the_read() {
     let dir = tempfile::tempdir().unwrap();
     let over = dir.path().join("over-cap.png");
-    let f = std::fs::File::create(&over).unwrap();
-    let oversize = wcore_tools::vision_tools::VISION_MAX_BYTES as u64 + 1;
-    f.set_len(oversize).unwrap();
-    drop(f);
-    {
-        use std::io::{Seek, SeekFrom, Write};
-        let mut f = std::fs::OpenOptions::new().write(true).open(&over).unwrap();
-        f.seek(SeekFrom::Start(0)).unwrap();
-        f.write_all(&png_bytes()).unwrap();
-    }
+    let cap = wcore_tools::vision_tools::VISION_MAX_BYTES as u64;
+    let oversize = cap * 3;
+    oversize_fixture(&over, &png_bytes(), oversize);
+
     let err = load_local_image(over.to_str().unwrap()).expect_err("over cap must be refused");
     assert!(err.contains("too large"), "got: {err}");
-    assert!(err.contains(&oversize.to_string()), "got: {err}");
+    assert!(
+        err.contains(&oversize.to_string()),
+        "must cite the FULL length {oversize}; got: {err}"
+    );
+    assert!(
+        !err.contains(&(cap + 1).to_string()),
+        "cites the read-side fallback's number, so the stat-side cap did not \
+         fire; got: {err}"
+    );
 }
 
 // ── cross-class confusion ──────────────────────────────────────────────────
@@ -257,6 +307,12 @@ fn a_wav_is_not_admitted_as_an_image_and_a_webp_is_not_admitted_as_audio() {
 
 /// A file whose extension contradicts its bytes is refused at BOTH surfaces,
 /// by the same cross-check, in the same place.
+///
+/// **Measured RED at base** on the IMAGE half: the cross-check lived in
+/// `wcore-cli`'s composer against its own private extension table, so
+/// `vision_analyze` — reached by the MODEL rather than by the user — admitted
+/// a PNG named `.jpg`. Consolidating moved the check under both surfaces and
+/// deleted the composer's duplicate table.
 #[test]
 fn an_extension_that_contradicts_the_bytes_is_refused_at_both_surfaces() {
     let dir = tempfile::tempdir().unwrap();
