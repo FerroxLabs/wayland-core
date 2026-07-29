@@ -1,0 +1,10 @@
+1785333156.375 listening on 127.0.0.1:18734 delegate=True
+1785333157.346 POST /v1/chat/completions role=probe (script not advanced)
+1785333157.585 POST /v1/chat/completions role=parent step=1 stream=True tools=8
+1785333157.603 POST /v1/chat/completions role=parent step=2 stream=True tools=8
+1785333157.603     last_tool_result[parent:2] = "     1\tparent probe content"
+1785333157.612 POST /v1/chat/completions role=child step=1 stream=True tools=3
+1785333157.615 POST /v1/chat/completions role=child step=2 stream=True tools=3
+1785333157.615     last_tool_result[child:2] = "Denied by sub-agent learned policy: Read matched rule `*`"
+1785333157.643 POST /v1/chat/completions role=parent step=3 stream=True tools=9
+1785333157.643     last_tool_result[parent:3] = "{\"results\":[{\"name\":\"delegate-WL22P-CHILD-MARKER\",\"status\":\"completed\",\"summary\":\"WL22P_CHILD_DONE\",\"task_index\":0,\"tokens\":{\"input\":0,\"output\":0},\"turns\":2}]}"

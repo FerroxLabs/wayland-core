@@ -99,3 +99,17 @@ activation of any kind is observable on any topology in this tree.** The fix is 
 `ChannelSink` to forward capability activations to the parent's sink, which needs a relay
 event and therefore a contract regeneration this lane may not run. Named here rather than
 attempted, and NOT counted as closed.
+
+## Reproduced at lane HEAD
+
+`pos/` was captured against the binary built at `a39d3945`; HEAD is `c5ca677c` and differs by one
+clippy-equivalent line (`then` → `then_some`). Rather than carry that as a caveat the whole proof
+was re-run against the HEAD binary — `pos-at-head/canned-requests.log`:
+
+```
+last_tool_result[parent:2] = "     1\tparent probe content"
+last_tool_result[child:2]  = "Denied by sub-agent learned policy: Read matched rule `*`"
+```
+
+and `pos-at-head/stream.jsonl` carries
+`{"type":"capability_activation","capability":"learned_policy","stage":"ready"}`.

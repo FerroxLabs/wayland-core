@@ -83,3 +83,11 @@ The same activation stream also shows, at this SHA:
 Both map to `CONT-*` (cache economics), not `GOAL-*`. Reported, not edited — see the
 SUMMARY. `learned_policy` is the one row of the four that the binary still reports
 `unavailable / runtime_path_unwired`, which is what this lane went on to wire.
+
+## Reproduced at lane HEAD
+
+The capture above was taken against a binary built at base `5457710e` (the monitor wiring is
+pre-existing, so base is the right binary for a staleness claim). Both legs were re-run against
+the binary built from lane HEAD `c5ca677c` and reproduce exactly —
+`wl22r-at-head/stream.jsonl`: `mid_flight_monitor_decision` = **1**,
+`mid_flight_monitor … "stage":"observed"` = **1**.
