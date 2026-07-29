@@ -58,6 +58,13 @@ enum Command {
         /// The 40-hex source commit the driven binary must have been built from.
         #[arg(long)]
         expect_commit: String,
+        /// Refuse a receipt exercising fewer than N distinct channel adapters.
+        ///
+        /// Omitted, a one-adapter journey verifies — it is a legitimate journey
+        /// — but the success line reports `adapters=1/10` so it cannot be read
+        /// as a matrix. Supply this when the claim being made IS a matrix.
+        #[arg(long)]
+        min_adapters: Option<u64>,
     },
     /// Prove every canary travelled a real capture path and none reached the
     /// document about to be committed.
@@ -108,10 +115,17 @@ fn run() -> anyhow::Result<String> {
             binary,
             expect_platform,
             expect_commit,
+            min_adapters,
         } => {
             let raw = read_to_string(&receipt)?;
-            let line = verify_receipt(&raw, &binary, &expect_platform, &expect_commit)
-                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            let line = verify_receipt(
+                &raw,
+                &binary,
+                &expect_platform,
+                &expect_commit,
+                min_adapters,
+            )
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
             Ok(line)
         }
         Command::Scan {
