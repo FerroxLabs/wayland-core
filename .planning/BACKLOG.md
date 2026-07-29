@@ -1939,3 +1939,55 @@ was surfaced, not caused, by the merge.
 that no longer covers any field. Test-only, no product impact. Left untouched by
 its finder on the surgical-changes rule.
 
+
+---
+
+## From lane/cost-provider and lane/backup-sqlite (2026-07-29) — named by their finders, not fixed
+
+### `BL-F26-SC3-O1-ROLLBACK` — `restore --replace` still writes the SQLite trio as raw bytes (HIGH-adjacent)
+
+Named by `lane/backup-sqlite`, which fixed the identical defect on the **archive**
+side and deliberately did not touch this one. `restore --replace` captures the
+prior home into the undo store as raw bytes, so a concurrent writer during a
+rollback produces exactly the torn database that lane measured at base: restored
+DB corrupt with ~100 `btreeInitPage() error 11` lines, and in one run **20 rows
+lost that were committed before the operation even launched** — with both verbs
+exiting 0.
+
+`wcore-config/src/sqlite_snapshot.rs` is reusable here as-is. The reason it was
+left is real and should be respected: changing `journal.rs` would invalidate that
+file's existing interruption proofs, so this needs its own re-proof rather than a
+drive-by edit. **Severity carried as the archive-side defect's, since it is the
+same corruption on the same data by the same mechanism.**
+
+Also unexercised on the archive side, stated by its finder: **network filesystems
+and Windows.**
+
+### `BL-C4-F3-FAILOVER` — a configured failover arm still mislabels ledger and TurnTrace (MEDIUM)
+
+The budget settle path tracks a failover correctly (`engine.rs:10678`); the trace
+does not. Distinct mechanism from `C4-F3` and a larger change, so `lane/cost-provider`
+named it rather than widening its own fix.
+
+### `BL-C4-F3-KNOWNFREE` — a proved-free turn reads `cost_truth=estimated`, and `cache verify` exits 7 (MEDIUM)
+
+`cost_is_known_free` yields a **proved** $0, but `CostSource` has no `KnownFree`
+grade, so a free local turn is recorded as merely estimated and `cache verify`
+exits 7 on it. The cost is right and the confidence label is wrong.
+
+### `BL-C4-F3-BUDGET-KEY` — budget keys on `unwrap_or("")` where everything else uses `"unknown"` (LOW)
+
+`engine.rs:9950`. Inconsistent empty-identity default; everything else in the path
+defaults to `"unknown"`.
+
+### `BL-C4-F3-PROVIDER-LABEL` — `config.provider_label` still says `anthropic` for a local run (LOW)
+
+Display-surface residue of `C4-F3`. Not on the pricing path.
+
+### `BL-C4-F3-COUNCIL` — the council path has no router, so local compat would price a remote member at $0 (MEDIUM, deliberately not fixed)
+
+`lane/cost-provider` left the council path alone on purpose: there is no router
+there, so applying the local compat would price a **real remote** member at $0 —
+an error in the dangerous direction. Closing `C4-F3` for council needs per-member
+route resolution first. **Do not "extend the fix" here without it.**
+
