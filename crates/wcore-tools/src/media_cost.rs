@@ -63,9 +63,19 @@ use serde_json::{Value, json};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MediaUnits {
     /// Number of media artifacts produced (images returned, clips rendered).
+    /// Always known — it is the count of artifacts the caller received.
     pub images: u32,
-    pub width: u32,
-    pub height: u32,
+    /// Pixel dimensions, when the surface actually knows them.
+    ///
+    /// `None` is a real case, not a placeholder: the `wayland-core image`
+    /// subcommand lets the size be omitted, in which case the provider picks
+    /// and the response does not say. **A zero sentinel was rejected here** —
+    /// `0x0` reads as a measurement and would flow into a megapixel total as
+    /// if the call had produced nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
     /// Seconds of audio/video billed, when the shape has a duration and the
     /// provider reports one. `None` for still images.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,17 +87,43 @@ impl MediaUnits {
     pub fn one_image(width: u32, height: u32) -> Self {
         Self {
             images: 1,
-            width,
-            height,
+            width: Some(width),
+            height: Some(height),
             billed_seconds: None,
         }
     }
 
-    /// Total megapixels produced. This is the unit most image providers price
-    /// on, and it separates `landscape` (1536x1024) from `square` (1024x1024)
-    /// — i.e. it changes when the requested work changes.
-    pub fn megapixels(&self) -> f64 {
-        (f64::from(self.width) * f64::from(self.height) * f64::from(self.images)) / 1_000_000.0
+    /// `n` artifacts whose pixel dimensions this surface does not know.
+    /// The count is still recorded, because the count is still billable.
+    pub fn images_of_unknown_size(images: u32) -> Self {
+        Self {
+            images,
+            width: None,
+            height: None,
+            billed_seconds: None,
+        }
+    }
+
+    /// `n` artifacts at a known size.
+    pub fn images_at(images: u32, width: u32, height: u32) -> Self {
+        Self {
+            images,
+            width: Some(width),
+            height: Some(height),
+            billed_seconds: None,
+        }
+    }
+
+    /// Total megapixels produced, or `None` when the dimensions are unknown.
+    /// This is the unit most image providers price on, and it separates
+    /// `landscape` (1536x1024) from `square` (1024x1024) — i.e. it changes
+    /// when the requested work changes.
+    ///
+    /// Returns `Option` rather than `0.0` so an unknown size can never be
+    /// summed into a session total as if it were free.
+    pub fn megapixels(&self) -> Option<f64> {
+        let (w, h) = (self.width?, self.height?);
+        Some((f64::from(w) * f64::from(h) * f64::from(self.images)) / 1_000_000.0)
     }
 }
 
@@ -311,16 +347,13 @@ impl MediaCostRecord {
             },
             (None, _) => "unpriced".to_string(),
         };
+        let size = match (self.units.width, self.units.height, self.units.megapixels()) {
+            (Some(w), Some(h), Some(mp)) => format!("{w}x{h} = {mp:.3} MP"),
+            _ => "size not reported by this surface".to_string(),
+        };
         format!(
-            "{} via {} ({}): {} image(s) {}x{} = {:.3} MP — {}",
-            self.tool,
-            self.backend_id,
-            self.model,
-            self.units.images,
-            self.units.width,
-            self.units.height,
-            self.units.megapixels(),
-            price
+            "{} via {} ({}): {} image(s) {} — {}",
+            self.tool, self.backend_id, self.model, self.units.images, size, price
         )
     }
 }
@@ -374,8 +407,13 @@ pub struct MediaCostSummary {
     pub total_usd: f64,
     /// Total media artifacts produced across the session.
     pub images: u32,
-    /// Total megapixels produced across the session.
+    /// Total megapixels produced across the session, counting only the calls
+    /// whose dimensions were known.
     pub megapixels: f64,
+    /// Calls whose dimensions the surface did not report. Reported alongside
+    /// `megapixels` for the same reason `unpriced_calls` sits alongside
+    /// `total_usd`: a total that silently omits them is misleading.
+    pub calls_of_unknown_size: usize,
 }
 
 /// Session-scoped accumulation of [`MediaCostRecord`]s.
@@ -410,6 +448,7 @@ impl MediaCostLedger {
             total_usd: 0.0,
             images: 0,
             megapixels: 0.0,
+            calls_of_unknown_size: 0,
         };
         for r in records.iter() {
             match r.cost_usd {
@@ -420,7 +459,10 @@ impl MediaCostLedger {
                 None => summary.unpriced_calls += 1,
             }
             summary.images += r.units.images;
-            summary.megapixels += r.units.megapixels();
+            match r.units.megapixels() {
+                Some(mp) => summary.megapixels += mp,
+                None => summary.calls_of_unknown_size += 1,
+            }
         }
         summary
     }
@@ -470,8 +512,8 @@ mod tests {
             "aspect change must change the recorded megapixels"
         );
         assert!(
-            (landscape.units.megapixels() - 1.572_864).abs() < 1e-9,
-            "landscape megapixels drifted: {}",
+            (landscape.units.megapixels().expect("known size") - 1.572_864).abs() < 1e-9,
+            "landscape megapixels drifted: {:?}",
             landscape.units.megapixels()
         );
 
@@ -549,12 +591,7 @@ mod tests {
             "image_generate",
             "OpenAI gpt-image-1",
             "gpt-image-1",
-            MediaUnits {
-                images: 2,
-                width: 1536,
-                height: 1024,
-                billed_seconds: None,
-            },
+            MediaUnits::images_at(2, 1536, 1024),
             None,
             &rc,
         );
@@ -656,6 +693,28 @@ mod tests {
             (s.megapixels - (1.048_576 + 1.572_864)).abs() < 1e-9,
             "megapixels: {}",
             s.megapixels
+        );
+        assert_eq!(s.calls_of_unknown_size, 0);
+
+        // A call whose size the surface does not know must NOT be folded into
+        // the megapixel total as if it were zero-sized.
+        ledger.record(MediaCostRecord::for_success(
+            "image_generate",
+            "silent-backend",
+            "m",
+            MediaUnits::images_of_unknown_size(3),
+            None,
+            &rc,
+        ));
+        let s2 = ledger.summary();
+        assert_eq!(s2.calls_of_unknown_size, 1);
+        assert_eq!(
+            s2.images, 5,
+            "the artifact COUNT is still known and billable"
+        );
+        assert!(
+            (s2.megapixels - s.megapixels).abs() < 1e-12,
+            "an unknown-size call must not move the megapixel total"
         );
     }
 

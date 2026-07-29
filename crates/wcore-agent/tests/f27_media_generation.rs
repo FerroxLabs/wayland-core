@@ -515,13 +515,20 @@ async fn builtin_shape_record_varies_with_the_requested_work() {
 
     let records = ledger.snapshot();
     assert_eq!(records.len(), 3);
-    let dims: Vec<(u32, u32)> = records
+    let dims: Vec<(Option<u32>, Option<u32>)> = records
         .iter()
         .map(|r| (r.units.width, r.units.height))
         .collect();
-    assert_eq!(dims, vec![(1536, 1024), (1024, 1024), (1024, 1536)]);
+    assert_eq!(
+        dims,
+        vec![
+            (Some(1536), Some(1024)),
+            (Some(1024), Some(1024)),
+            (Some(1024), Some(1536))
+        ]
+    );
 
-    let mp: Vec<f64> = records.iter().map(|r| r.units.megapixels()).collect();
+    let mp: Vec<Option<f64>> = records.iter().map(|r| r.units.megapixels()).collect();
     assert!(
         mp[0] != mp[1],
         "landscape and square must not record identical megapixels: {mp:?}"

@@ -26,6 +26,7 @@ use toml::value::Table;
 use wcore_providers::ProviderError;
 use wcore_providers::flux_image::{FluxImageClient, ImageRequest};
 use wcore_providers::flux_router::FLUX_ROUTER_DEFAULT_BASE_URL;
+use wcore_tools::media_cost::{MediaCostRecord, MediaOutcome, MediaRateCard, MediaUnits};
 
 /// `wayland-core image` arguments.
 #[derive(Args, Debug)]
@@ -95,15 +96,79 @@ pub async fn run_with_config_path(args: ImageArgs, config_path: &Path) -> Result
         .with_size(args.size.clone())
         .with_max_price(args.max_price);
 
+    // F27-C3 — this subcommand is a SECOND billable generation surface,
+    // separate from the `image_generate` tool, and until now it produced no
+    // cost record at all. Measured live on 2026-07-29: one invocation wrote a
+    // 249,886-byte JPEG from a real paid account and neither of its output
+    // streams contained a single accounting token. `--n` multiplies that
+    // silently.
+    //
+    // The backend identity is the endpoint host plus the model, so a record
+    // from here is distinguishable from one produced by the tool path.
+    let backend_id = format!("wayland-core image ({})", request.model);
+    let rate_card = media_rate_card(&doc);
+    let units = match parse_size(args.size.as_deref()) {
+        Some((w, h)) => MediaUnits::images_at(args.n, w, h),
+        // The provider chooses the size when `--size` is omitted and does not
+        // report it back, so the dimensions are genuinely unknown here. The
+        // COUNT is still known, and the count is still what gets billed.
+        None => MediaUnits::images_of_unknown_size(args.n),
+    };
+
     let client = FluxImageClient::new(&api_key, &base_url);
     let response = match client.generate(&request).await {
         Ok(r) => r,
-        Err(e) => bail!("{}", format_provider_error(&e, &request.model, &base_url)),
+        Err(e) => {
+            // Not free. A refused or errored generation may still have been
+            // charged, so it is recorded as billing-unknown rather than as $0
+            // or as nothing at all.
+            emit_accounting(MediaCostRecord::for_failure(
+                "wayland-core image",
+                &backend_id,
+                &request.model,
+                units,
+                provider_error_category(&e),
+            ));
+            bail!("{}", format_provider_error(&e, &request.model, &base_url));
+        }
     };
 
     if response.data.is_empty() {
+        emit_accounting(
+            MediaCostRecord::for_success(
+                "wayland-core image",
+                &backend_id,
+                &request.model,
+                units,
+                None,
+                &rate_card,
+            )
+            .with_outcome(MediaOutcome::Failed {
+                category: "no_images_returned".to_string(),
+            }),
+        );
         bail!("image: Flux returned no images");
     }
+
+    // Record the artifacts actually returned, not the number requested — a
+    // provider that returns fewer than `--n` must not be recorded as having
+    // produced `n`.
+    let delivered = u32::try_from(response.data.len()).unwrap_or(u32::MAX);
+    let billed_units = MediaUnits {
+        images: delivered,
+        ..units
+    };
+    emit_accounting(MediaCostRecord::for_success(
+        "wayland-core image",
+        &backend_id,
+        &request.model,
+        billed_units,
+        // FluxImageClient discards the HTTP response, so no provider-reported
+        // figure is reachable from here. Phase 27 measured that this endpoint
+        // returns none in any channel anyway.
+        None,
+        &rate_card,
+    ));
 
     // Surface the SynthID watermark notice (Gemini arms) on stderr so it does
     // not contaminate piped image bytes on stdout.
@@ -132,6 +197,59 @@ pub async fn run_with_config_path(args: ImageArgs, config_path: &Path) -> Result
     }
 
     Ok(())
+}
+
+/// Print the cost record on stderr so it never contaminates piped image bytes
+/// on stdout. Both a human line and the machine-readable JSON, because this
+/// surface is scripted as often as it is read.
+fn emit_accounting(record: MediaCostRecord) {
+    eprintln!("accounting: {}", record.summary_line());
+    eprintln!("accounting_json: {}", record.to_json());
+}
+
+/// Stable failure class, so a failure here is comparable with the same failure
+/// through the `image_generate` tool.
+fn provider_error_category(e: &ProviderError) -> &'static str {
+    match e {
+        ProviderError::PremiumLocked { .. } => "premium_locked",
+        ProviderError::UpgradeRequired { .. } => "upgrade_required",
+        ProviderError::SpendCeilingUnresolved { .. } => "spend_ceiling_unresolved",
+        ProviderError::MissingApiKey => "no_provider_configured",
+        ProviderError::Api { status, .. } if *status == 401 => "unauthorized_or_unknown_model",
+        ProviderError::Api { status, .. } if *status == 402 => "insufficient_credits",
+        ProviderError::Api { status, .. } if *status == 403 => "forbidden",
+        _ => "other",
+    }
+}
+
+/// Parse a `WIDTHxHEIGHT` size string. Returns `None` for absent or
+/// unparseable input rather than guessing.
+fn parse_size(size: Option<&str>) -> Option<(u32, u32)> {
+    let raw = size?;
+    let (w, h) = raw.trim().split_once(['x', 'X'])?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+}
+
+/// Operator rate card from `[tools.media_pricing]` in the global config.
+/// Absent or malformed means "price nothing", never "price zero".
+fn media_rate_card(doc: &Table) -> MediaRateCard {
+    let entries = doc
+        .get("tools")
+        .and_then(|t| t.as_table())
+        .and_then(|t| t.get("media_pricing"))
+        .and_then(|t| t.as_table())
+        .map(|t| {
+            t.iter()
+                .filter_map(|(k, v)| {
+                    Some((
+                        k.clone(),
+                        v.as_float().or_else(|| v.as_integer().map(|i| i as f64))?,
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    MediaRateCard::new(entries)
 }
 
 /// Map a [`ProviderError`] to a user-facing message, keeping the typed
