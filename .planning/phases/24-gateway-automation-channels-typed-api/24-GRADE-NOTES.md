@@ -143,3 +143,67 @@ The consistent reasons given across lanes, which I must now test independently r
 2. every figure is Linux; macOS and Windows have nothing
 3. the two designated REFERENCE adapters (discord, email) lacked inbound fixture seams
    (discord CHANGED by `24-c3-discord`; email still unmeasurable by configuration alone)
+
+### M5 — the two pending branches, read from their tips (T+45)
+
+Both confirmed NOT merged: `/usr/bin/git merge-base --is-ancestor <branch> HEAD` → false for both.
+Merge-base for both is `75babf32`.
+
+**`lane/24-native-actions`** — `git diff --name-status 75babf32 lane/24-native-actions` = **10 files,
+all `A` (additions), ZERO under `crates/`.** One new driver script `scripts/f24-native-actions.mjs`,
+one report, one notes file, 7 evidence JSON/logs.
+
+**This is the single most important structural fact about the pending work.** The lane changed no
+product code. It *measured* product code that is already merged. So "pending merge" here means the
+EVIDENCE is unmerged — **not** that the capability is unmerged. The `native actions` capability it
+proves is in the RC today; only the proof of it is on a branch. That distinction changes the grade
+materially and I nearly missed it.
+
+Its matrix (6 adapters × 3 affordances, `gateway run`, Linux, platform-side counting, per-adapter
+negative control): 5/5 adapters declaring `react` fire both reactions; 4/4 declaring `send_typing`
+fire typing; msteams correctly reports `not supported` for react and telegram/matrix/discord fire
+all three. **Zero advertised-but-dead.**
+
+That last is a NEGATIVE claim, so per §3b-i I checked its instrument: the lane proved the census
+grep alive on a known-positive in the same shape (`max_message_len` → 9 files) before reporting the
+zeros. It also distinguishes `not-supported` from `not-fired` as separate verdicts — which is the
+control that stops the silent `send_typing` no-op default from scoring a free pass. **Accepted.**
+
+**`lane/e2e-product-smoke`** — also all additions, 0 `.rs` files. **The brief's "12/12" is not what
+the report says.** Its own frontmatter: `steps-total: 14, steps-passed: 12, steps-failed: 0,
+steps-not-reached: 2`. So **12 of 14**, and the 2 not reached are **TUI on a real terminal** and
+**Windows/macOS cold start**. 12/12 would imply full coverage; 12/14-with-2-unreached does not.
+Correcting the brief's arithmetic — this is exactly the "never inherit arithmetic" case.
+
+Also: this lane is a general product cold-start smoke (turn, 5 tools, sandbox, skill, memory, MCP,
+resume, crash). **It maps to the phase GOAL's "install, run" but to none of the five criteria
+directly** — it does not touch gateway lifecycle, automation, channels or the typed API. I will not
+credit it to any criterion. It is real evidence that the product is not hollow; it is not C1-C5.
+
+### M6 — a stale claim tested and FALSIFIED: active-turn visibility IS rendered (T+55)
+
+`24-PHASE-REPORT.md` says *"active-turn visibility — MET as a projection field; never rendered to an
+operator, because no verb exists to render it."* **That is no longer true.**
+
+```
+/usr/bin/grep -rn "active_turn|turns_in_flight|in_flight" crates/wcore-gateway/src crates/wcore-cli/src --include=*.rs
+```
+(concept search, not one keyword, per §3b-i.3 — `active_turn` alone returns 0 in the gateway and
+would have "confirmed" the stale claim for free; the concept lives under `turns_in_flight`.)
+
+- `wcore-gateway/src/lifecycle.rs:182` — `StatusProjection.turns_in_flight: usize`, a `Serialize` field
+- `wcore-cli/src/gateway.rs:479` — `--json` prints the whole projection
+- `wcore-cli/src/gateway.rs:494` — **`println!("  turns in flight:    {}", proj.turns_in_flight)`**
+  in the human-readable path
+
+So `gateway status` renders active turns in **both** forms. Verb exists, field reaches the operator.
+**Clause MET.** Instrument control: 58 `println!` and 23 `profile` hits in the same file, so the
+file and the grep were both alive.
+
+### M7 — C2 trigger state in the current tree (T+55)
+
+`crates/wcore-cli/src/cron.rs:44-57` now documents `once/every/cron/event/commit` and states
+verbatim that *"`webhook:` and `poll:` are NOT accepted: nothing in this build can fire them."*
+`cron.rs:350` prints `WILL NEVER FIRE` for persisted legacy jobs. So the **false advertising is
+retired** and `event` fires via `cron publish`. **The plane was not built**: webhook and poll have
+no producers. C2 cannot be MET.
