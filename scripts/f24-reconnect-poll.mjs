@@ -37,7 +37,6 @@
 import { execFileSync, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -66,93 +65,42 @@ function control(url, method, body) {
 }
 
 /**
- * A TCP proxy that can make the upstream VANISH.
+ * Handle to the OUT-OF-PROCESS kill proxy (`f24-killproxy.mjs`).
  *
- * `open()` forwards. `kill()` destroys every live connection and refuses new
- * ones — `socket.destroy()` on accept rather than a clean FIN, because a
- * refused-and-reset peer is what a disappeared host looks like, whereas a
- * graceful close tells the client the server meant it.
+ * It is a separate OS process because this driver sleeps with `Atomics.wait`,
+ * which blocks the whole Node event loop. An in-process proxy cannot forward a
+ * byte while the driver waits — and the driver waits almost all the time.
  *
- * It counts what it did (`accepted`, `refused`, `killed`) so a driver can PROVE
- * the outage happened and PROVE traffic resumed afterwards, instead of
- * inferring an outage from an absence — which is free (LANE-BRIEF §3b-i).
+ * That is not a precaution, it is a repair: the first version of this file
+ * embedded the proxy and the run reported `sync_total=0` with
+ * `/sync failed; backing off — error sending request`, which reads as "the
+ * matrix adapter cannot reach its homeserver". A product defect, from an
+ * instrument that was not listening.
  */
-class KillProxy {
-  constructor(upstreamPort) {
-    this.upstreamPort = upstreamPort;
-    this.live = new Set();
-    this.accepted = 0;
-    this.refused = 0;
-    this.killed = 0;
-    this.up = true;
-  }
-
-  start() {
-    return new Promise((resolve) => {
-      this.server = net.createServer((client) => {
-        if (!this.up) {
-          this.refused += 1;
-          client.destroy();
-          return;
-        }
-        this.accepted += 1;
-        const upstream = net.connect(this.upstreamPort, '127.0.0.1');
-        const pair = { client, upstream };
-        this.live.add(pair);
-        const done = () => {
-          this.live.delete(pair);
-          client.destroy();
-          upstream.destroy();
-        };
-        client.on('error', done);
-        upstream.on('error', done);
-        client.on('close', done);
-        upstream.on('close', done);
-        client.pipe(upstream);
-        upstream.pipe(client);
-      });
-      this.server.listen(0, '127.0.0.1', () => {
-        this.port = this.server.address().port;
-        resolve(this.port);
-      });
-    });
-  }
-
-  kill() {
-    this.up = false;
-    const n = this.live.size;
-    for (const p of this.live) {
-      try {
-        p.client.destroy();
-        p.upstream.destroy();
-      } catch {
-        /* noop */
-      }
-    }
-    this.live.clear();
-    this.killed += n;
-    return n;
-  }
-
-  restore() {
-    this.up = true;
+class ProxyHandle {
+  constructor(dataPort, controlPort) {
+    this.dataPort = dataPort;
+    this.controlPort = controlPort;
   }
 
   get url() {
-    return `http://127.0.0.1:${this.port}`;
+    return `http://127.0.0.1:${this.dataPort}`;
+  }
+
+  kill() {
+    return control(`http://127.0.0.1:${this.controlPort}/__proxy/kill`, 'POST', {}).killed;
+  }
+
+  restore() {
+    return control(`http://127.0.0.1:${this.controlPort}/__proxy/restore`, 'POST', {});
   }
 
   stats() {
-    return { accepted: this.accepted, refused: this.refused, killed: this.killed, up: this.up, live: this.live.size };
+    return control(`http://127.0.0.1:${this.controlPort}/__proxy/stats`, 'GET');
   }
 
   stop() {
-    try {
-      this.kill();
-      this.server?.close();
-    } catch {
-      /* noop */
-    }
+    /* the child process is killed by the driver's cleanup */
   }
 }
 
@@ -428,9 +376,23 @@ async function main2(d, args) {
   );
   d.mxUrl = m[1];
   const upstreamPort = Number(new URL(d.mxUrl).port);
-  d.proxy = new KillProxy(upstreamPort);
-  await d.proxy.start();
+  const pm = d.startFixture(
+    'f24-killproxy.mjs',
+    ['--upstream-port', String(upstreamPort)],
+    /KILLPROXY_READY data=(\d+) control=(\d+)/,
+    'killproxy.log',
+  );
+  d.proxy = new ProxyHandle(Number(pm[1]), Number(pm[2]));
   d.note(`homeserver fixture ${d.mxUrl}; binary will talk to the KILL PROXY at ${d.proxy.url}`);
+
+  // PROVE the proxy forwards BEFORE the binary depends on it. Without this a
+  // dead proxy presents as "the adapter cannot reach its homeserver" — the
+  // exact misreading that cost this lane a run.
+  const through = control(`${d.proxy.url}/__control/report`, 'GET');
+  if (typeof through?.sync_total !== 'number') {
+    throw new Error(`the kill proxy does not forward to the homeserver (got ${JSON.stringify(through)}) — NOT MEASURED`);
+  }
+  d.note(`proxy forwards: reached the homeserver report through it (sync_total=${through.sync_total})`);
 
   d.startLlm();
   d.preflightCorrelation();
