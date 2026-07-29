@@ -118,6 +118,49 @@ Predicted (to be measured after the repair) — under substitution
 Repairing in-lane per §6b-ii: a written-up instrument defect is a defect I have
 agreed to keep, and the recorded precedent is that the next lane hits it again.
 
+---
+
+## T+75 — instrument repaired, and the vacuity is now MEASURED not argued
+
+Repair commits `159682e9` (short-circuit + binding matcher + 3-assertion
+self-test) and `7b5ee047` (live legacy-matcher diagnostic). Hetzner worktree
+reset to each in turn; four more runs.
+
+| Run | commit | selftest | executed count read back | sentinel |
+|-----|--------|----------|--------------------------|----------|
+| C | `159682e9` | unset | `4 passed; 0 failed; 0 ignored; 0 filtered out` | `WLRC=0` |
+| D | `159682e9` | `refusal` | `3 passed; 1 failed; 0 ignored; 0 filtered out` | `WLRC=101` |
+| E | `7b5ee047` | unset | `4 passed; 0 failed; 0 ignored; 0 filtered out` | `WLRC=0` |
+| F | `7b5ee047` | `refusal` | `3 passed; 1 failed; 0 ignored; 0 filtered out` | `WLRC=101` |
+
+Count went 3 → 4 because the repair adds `list_tags_hidden_matcher_selftest`.
+The baseline stays green under a STRICTLY STRONGER R7 matcher — nothing was
+weakened to reach it.
+
+Run F, the load-bearing lines, verbatim:
+
+```
+F23A-SELFTEST-ROUTE: R6 /skill run    refused=false
+F23A-SELFTEST-ROUTE: R7 /skill list   refused=false
+F23A-SELFTEST-ROUTE: R8 /skill show   refused=false
+F23A-SELFTEST-ROUTE: R1 Skill tool    refused=false
+F23A-SELFTEST-LEGACY: R7 /skill list  old_matcher=true
+F23A-SELFTEST-TRIPPED: refusal
+... not discriminating: []
+```
+
+**All four route checks now discriminate** (`toothless == []`), where before the
+differential exercised exactly one of them.
+
+**And the R7 vacuity is measured on the live bytes:** the pre-repair matcher
+reports `true` — "the quarantined draft is tagged hidden" — while being handed
+the user-authored, model-VISIBLE control. It was a self-passing gate of the
+kind LANE-BRIEF §3.2 enumerates, sitting inside the instrument built to hunt
+that class. Twelfth recorded instance.
+
+Captures: `run-C..F-*.log`, byte counts 633 / 1628 / 633 / 1752, each matched
+against the remote `wc -c` before and after transfer.
+
 ## Traps I am holding (from the brief)
 
 - Byte-count every capture; `${PIPESTATUS[0]}` after a pipeline returns empty here.

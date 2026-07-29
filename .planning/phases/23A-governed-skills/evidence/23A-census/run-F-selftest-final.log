@@ -1,0 +1,27 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s
+     Running tests/f23a_boundary_drive.rs (target/debug/deps/f23a_boundary_drive-a821b4e9ce4cf874)
+
+running 4 tests
+test generated_draft_is_refused_at_every_route_while_user_content_is_not ... F23A-SELFTEST-ROUTE: R6 /skill run refused=false (a discriminating check reports false under substitution)
+F23A-SELFTEST-ROUTE: R7 /skill list refused=false (a discriminating check reports false under substitution)
+F23A-SELFTEST-ROUTE: R8 /skill show refused=false (a discriminating check reports false under substitution)
+F23A-SELFTEST-ROUTE: R1 Skill tool refused=false (a discriminating check reports false under substitution)
+F23A-SELFTEST-LEGACY: R7 /skill list old_matcher=true (unbound conjunct; disagreement with the R7 line above is the repair)
+F23A-SELFTEST-TRIPPED: refusal
+
+thread 'generated_draft_is_refused_at_every_route_while_user_content_is_not' (3402821) panicked at crates/wcore-eval-scenarios/tests/f23a_boundary_drive.rs:54:5:
+F23A self-test injected a refusal-control failure: the user-authored control was substituted for the draft at every route; checks that still reported a refusal, and are therefore not discriminating: []
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test list_tags_hidden_matcher_selftest ... ok
+test refused_read_tool_call_does_not_kill_the_session ... ok
+test refused_skill_tool_call_does_not_kill_the_session ... ok
+
+failures:
+
+failures:
+    generated_draft_is_refused_at_every_route_while_user_content_is_not
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.61s
+
+error: test failed, to rerun pass `-p wcore-eval-scenarios --test f23a_boundary_drive`
