@@ -40,8 +40,16 @@
 //!
 //! Checks 3 and 5 are independent and neither subsumes the other. 3 is a digest check and passes
 //! for a perfectly-compiled translation belonging to somebody else; 5 is an identity check and
-//! passes for a hand-edited translation belonging to the right harness. The negative-control suite
-//! in `tests/dialect_exec_gate.rs` exercises each one alone.
+//! passes for a hand-edited translation belonging to the right harness. The tests below exercise
+//! each one alone.
+//!
+//! # What this does NOT stop
+//!
+//! Check 5 trusts the manifest. A **hand-written** manifest claiming any `tool_label` defeats it,
+//! which the lane's own dynamic negative control relies on in order to execute a mis-compiled
+//! dialect at all. So `bind_translation` prevents an accident, not an adversary. Closing it needs
+//! the manifest bound to the discovery pass that produced it — a signature, or a digest chain from
+//! the observed wire bytes.
 
 use std::collections::BTreeMap;
 
