@@ -44,9 +44,28 @@ def check(label, ok, detail=""):
 
 workdir = tempfile.mkdtemp(prefix=f"wl-{NONCE}-")
 env = dict(os.environ)
-env["WAYLAND_CONFIG_PATH"] = os.path.join(workdir, "config.toml")
-with open(env["WAYLAND_CONFIG_PATH"], "w") as handle:
-    handle.write("[provider]\nname = \"anthropic\"\n")
+
+# `WAYLAND_CONFIG_PATH` is an UNSUPPORTED override — the product lists it as
+# such in its own runtime diagnostics, and setting it changed nothing: the
+# global `/root/.config/wayland-core/config.toml` still won and its
+# `backend = "plaintext"` refused to start a durable session. Measured, not
+# assumed.
+#
+# So the config ROOT is redirected instead. This also keeps the drive off the
+# shared hetzner config that other lanes use — nothing outside `workdir` is
+# read or written.
+config_root = os.path.join(workdir, "config")
+os.makedirs(os.path.join(config_root, "wayland-core"), exist_ok=True)
+env["XDG_CONFIG_HOME"] = config_root
+env["HOME"] = workdir
+config_path = os.path.join(config_root, "wayland-core", "config.toml")
+with open(config_path, "w") as handle:
+    handle.write(
+        "[provider]\nname = \"anthropic\"\n\n"
+        "[storage.credentials.backend.encrypted_file]\n"
+        f"cipher_path = \"{os.path.join(workdir, 'credentials.enc')}\"\n"
+        f"key_params_path = \"{os.path.join(workdir, 'credentials.kdf.json')}\"\n"
+    )
 
 # Durable sessions refuse to start against a plaintext credential backend, and
 # durable sessions are the whole point here — a Goal lives in the session
