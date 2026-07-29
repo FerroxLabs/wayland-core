@@ -259,6 +259,23 @@ Note `hetzner-dsm` genuinely **cannot** reach `seandesktop` (`Permission denied 
 that one is real, and is a separate authorization request pending with Sean. Do not conflate the
 two: your Mac reaches both hosts; the two hosts cannot reach each other.
 
+### On SeanDesktop, work on `D:\` — NOT `C:\` (Sean, 2026-07-29)
+
+`C:` is 1862 GB with only **167 GB free**. `D:` is 7452 GB with **5413 GB free**, and `E:` is
+1863 GB essentially untouched. **New working directories go under `D:\`.**
+
+**We are why C: is full.** Lanes have been creating working directories at the *root of* `C:\` —
+~50 of them (`ferrox-win` 174 GB, `wayland-dev` 147 GB, `ferrox-win-f0403`, `ferrox-win-p21`,
+`wl-test-99`, `p22*`, `wl-uat-*`, `f2[0-8]*`, `C:\tmp`) totalling **512 GB**, of which **471 GB is
+Rust `target/`**. The evidence directories are ~0 GB — the cost is entirely build output.
+
+Rules:
+- Do not create directories at the root of `C:\`. Use `D:\<lane-name>\`.
+- **Never delete `C:\actions-runner-{core,ferrox,wayland}`** — three live self-hosted runner
+  services. Check for running `Runner.Worker`/`cargo`/`rustc` before any cleanup; two CI jobs were
+  mid-build when this was written.
+- Clean up your own `target/` when your lane ends. Do not delete another lane's tree.
+
 ## 6b. A silent wait looks exactly like a hung agent — this has killed four lanes
 
 A stream watchdog kills an agent after **600s with no output**. A polling loop that prints
