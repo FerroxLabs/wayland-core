@@ -170,3 +170,33 @@ OLD=STILL-BUILDING   <- the old matcher cannot tell A1 from A2
 **Second repair:** the build itself now runs in the **foreground** of a long-lived ssh
 connection rather than via `Start-Process`, so the process cannot be orphaned by session
 teardown in the first place.
+
+---
+
+## Lane close-out
+
+Final HEAD `49336a0b` on `lane/25-c4-windows`, pushed to `gh` (verified:
+`git ls-remote gh refs/heads/lane/25-c4-windows` returns the same SHA). Fence vs
+merge-base `632ad619` in `wcore-cli/src/{lib,main}.rs`: **0 lines**. Entire source
+diff: **one file**, `crates/wcore-cli/src/backend.rs`, +80/-18.
+
+### Disk on `D:\`
+
+| when | `D:\lane-25c4-win` | of which `target/` | `D:\lane-25c4-ev` |
+|---|---|---|---|
+| peak | 13.99 GB | 13.91 GB | 0 GB |
+| after cleanup | **0.08 GB** | removed | **0.14 GB** (evidence + the built exe, kept for reproduction) |
+
+`D:` went from `freeGB=5400` back to `freeGB=5412`. The fixed binary is retained as
+`D:\lane-25c4-ev\wayland-core-fa16cb53.exe`, SHA256 `B05FD40B…5264F8` — the same hash the
+proof recorded — so a follow-up can re-run the legs without a 3-minute rebuild.
+
+Nothing was created at the root of `C:\`. `C:\actions-runner-{core,ferrox,wayland}` all
+still exist and were never touched.
+
+### Stray check, and the self-match trap it walks into
+
+A process-table scan for the marker `lane-25c4` returned **1 match** after cleanup. That is
+NOT a stray: naming it showed `PID=44572 NAME=powershell.exe` — the scanning shell itself,
+whose own command line contains the marker. Exactly the false positive `25-c4-egress`
+filed as a phantom orphan. Zero `cargo.exe` / `rustc.exe` remain.
