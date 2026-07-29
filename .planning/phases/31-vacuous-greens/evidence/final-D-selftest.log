@@ -1,0 +1,9 @@
+A1 PASS  known-positive detected at line 3
+A2 PASS  known-negative clean (nextest + --no-run + marker + prose)
+A3a PASS the real pre-fix ci.yml:266 line IS caught (it shipped unguarded)
+A4 PASS  yaml step name does not false-fire (real defect, found on first run)
+A4 PASS  backticked prose does not false-fire (real defect, found on first run)
+A3b PASS naive substring matcher false-fires 5x on the clean fixture
+
+SELF-TEST: PASSED (6 assertions)
+WLRC=0
