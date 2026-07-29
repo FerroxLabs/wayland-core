@@ -96,3 +96,22 @@ trait default is a NO-OP `Ok(())`, so zero typing on a non-declaring adapter mus
 
 Ports chosen away from every live lane: webhook 21473 (18787 f24-inbound, 18211 discord,
 19631-3 msteams-attach all taken). Fixture ports are ephemeral (bind :0).
+
+## T+60 — LIVE RESULTS, three adapters (real binary, `gateway run`, hetzner-dsm)
+
+| adapter | A1 receipt 👀 | A2 typing | A3 terminal ✅ | emojis counted at platform | negative control |
+|---|---|---|---|---|---|
+| telegram | fired | fired | fired | `["👀","✅"]` typing=1 | PASS reactions=0 typing=0, turn_ran=true |
+| matrix | fired | fired | fired | `["👀","✅"]` typing=1 | PASS reactions=0 typing=0, turn_ran=true |
+| slack | fired | **not-supported** | fired | `["👀","✅"]` typing=0 | PASS reactions=0 typing=0, turn_ran=true |
+
+Runs `/root/f24na-run1` (telegram), `run2` (matrix), `run3` (slack). all_pass=true each.
+
+Slack's `["👀","✅"]` is notable: slack does NOT receive unicode on the wire. `react`
+(`slack/src/lib.rs:267`) maps through `api::slack_emoji_name` (`api.rs:242`) to the SHORTCODE
+`eyes`/`white_check_mark`, and the fixture maps back. So this row additionally proves the
+shortcode mapping is live end-to-end, not just that two reactions arrived.
+
+Slack A2 `not-supported` is a MEASUREMENT, not an assumption: the fixture would have counted a
+typing call at `/api/*typing*` had one been made, and counted zero. The declared surface says
+slack keeps the trait's SILENT no-op default (`lib.rs:264-266` states this explicitly).
