@@ -38,8 +38,8 @@ pub use kernel::{GoalKernel, GoalRecovery};
 pub use ledger::{ClaimOutcome, GoalLedger, TaskAuthority};
 pub use record::{AuthorityUnreconstructable, GoalAuthorityRecord};
 pub use strategy::{
-    AnvilTag, CouncilTag, DirectOutcome, DirectTag, FleetOutcome, FleetTag, ForgeFlowsTag,
-    GoalLoop, GoalLoopError, LoopOwner, StrategyTag, StrategyTermination,
+    AnvilOutcome, AnvilTag, CouncilTag, DirectOutcome, DirectTag, FleetOutcome, FleetTag,
+    ForgeFlowsTag, GoalLoop, GoalLoopError, LoopOwner, StrategyTag, StrategyTermination,
 };
 pub use wire::{
     event_line, goal_projection, goal_snapshot_event, goal_state_digest, goal_stream,

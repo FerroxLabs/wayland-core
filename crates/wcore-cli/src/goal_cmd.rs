@@ -67,6 +67,19 @@ pub const ENV_EPOCH: &str = "WAYLAND_GOAL_EPOCH";
 pub const ENV_ATTEMPT: &str = "WAYLAND_GOAL_ATTEMPT";
 pub const ENV_WORKER: &str = "WAYLAND_GOAL_WORKER";
 
+/// Journal a Goal-attached engine reads its durable Goal from.
+///
+/// The Goal id already reaches child processes through [`ENV_GOAL`] — that is
+/// how `goal run` hands a task's identity to `exec-task`. The journal path is
+/// its missing other half: with both, ANY engine entry point can discover that
+/// it is running under a Goal without every verb in the CLI having to grow a
+/// pair of flags. That matters for the two engines whose arguments are assembled
+/// field-by-field in `main.rs` (Council and Direct), where a flag pair would
+/// mean editing the shared fence twice.
+pub const ENV_JOURNAL: &str = "WAYLAND_GOAL_JOURNAL";
+/// Loop-owner claim lease for an env-attached engine. Optional.
+pub const ENV_LEASE: &str = "WAYLAND_GOAL_LEASE";
+
 /// Default identity this binary presents as the Goal's parent envelope.
 ///
 /// A Goal resumes only against the envelope it was authorized under; a mismatch
@@ -122,8 +135,23 @@ pub struct GoalAttachArgs {
     /// Loop-owner claim lease. A claim is evidence the owner is alive; once it
     /// expires a successor may supersede it, which is what stops a `kill -9`
     /// from deadlocking the Goal permanently.
-    #[arg(long = "goal-lease", default_value = "60s")]
+    #[arg(long = "goal-lease", default_value = DEFAULT_GOAL_LEASE)]
     pub goal_lease: String,
+}
+
+/// Default loop-owner claim lease, matching `goal run --lease`.
+pub const DEFAULT_GOAL_LEASE: &str = "60s";
+
+impl Default for GoalAttachArgs {
+    /// The "no flags" form, for verbs whose arguments are assembled by hand in
+    /// `main.rs` and which therefore attach through the environment only.
+    fn default() -> Self {
+        Self {
+            goal_journal: None,
+            goal: None,
+            goal_lease: DEFAULT_GOAL_LEASE.to_owned(),
+        }
+    }
 }
 
 impl GoalAttachArgs {
@@ -135,11 +163,27 @@ impl GoalAttachArgs {
     /// unfalsifiable from the outside, which is the whole defect class this
     /// criterion exists to close.
     pub fn resolve(&self) -> anyhow::Result<Option<(GoalLoop, GoalId)>> {
-        let (Some(journal), Some(goal)) = (self.goal_journal.as_ref(), self.goal.as_ref()) else {
+        // Flags win; the environment is the fallback, never an override. A
+        // stray inherited `WAYLAND_GOAL_ID` must not silently re-point a run
+        // that named its Goal explicitly on the command line.
+        let journal = self
+            .goal_journal
+            .clone()
+            .or_else(|| std::env::var_os(ENV_JOURNAL).map(PathBuf::from));
+        let goal = self
+            .goal
+            .clone()
+            .or_else(|| std::env::var(ENV_GOAL).ok().filter(|v| !v.is_empty()));
+        let (Some(journal), Some(goal)) = (journal.as_ref(), goal.as_ref()) else {
             return Ok(None);
         };
-        let lease = humantime::parse_duration(&self.goal_lease)
-            .map_err(|e| anyhow::anyhow!("invalid --goal-lease '{}': {e}", self.goal_lease))?;
+        let lease_spec = if self.goal_lease == DEFAULT_GOAL_LEASE {
+            std::env::var(ENV_LEASE).unwrap_or_else(|_| self.goal_lease.clone())
+        } else {
+            self.goal_lease.clone()
+        };
+        let lease = humantime::parse_duration(&lease_spec)
+            .map_err(|e| anyhow::anyhow!("invalid goal lease '{lease_spec}': {e}"))?;
         let handle = open_journal(journal)?;
         let lease_ms = u64::try_from(lease.as_millis()).unwrap_or(u64::MAX);
         let driver = GoalLoop::new(GoalKernel::new(handle)).with_lease_ms(lease_ms);

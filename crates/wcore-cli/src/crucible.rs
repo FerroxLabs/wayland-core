@@ -22,6 +22,7 @@ use wcore_agent::orchestration::council::{
     GateConfig, ProposerSpec, Roster, Stakes, classify_task, drive_council, log_assembly,
     run_council, validate_and_build,
 };
+use wcore_agent::goal::StrategyTermination;
 use wcore_agent::spawner::{AgentSpawner, SubAgentConfig};
 use wcore_config::config::{CliArgs, Config, ConfigFile, load_merged_config_file};
 use wcore_config::crucible::{AssemblyMode, CouncilMode, CrucibleConfig};
@@ -456,20 +457,74 @@ async fn run_crucible_auto(
         }
     };
 
-    match drive_council(
-        &args.task,
-        runnable,
-        &base,
-        &cf.crucible,
-        &ov,
-        &spawner,
-        &TtyApprover {
-            auto_spend: cf.crucible.crucible_auto_spend,
-        },
-        &refilter,
-    )
-    .await?
-    {
+    let approver = TtyApprover {
+        auto_spend: cf.crucible.crucible_auto_spend,
+    };
+
+    // ONE production invocation, called from exactly one of the two branches
+    // below. Written as a closure rather than duplicated so the Goal-attached
+    // path cannot drift from the unattached one: same task, roster, config,
+    // overrides, spawner, approver and refilter, by construction.
+    let drive_once = || {
+        drive_council(
+            &args.task,
+            runnable,
+            &base,
+            &cf.crucible,
+            &ov,
+            &spawner,
+            &approver,
+            &refilter,
+        )
+    };
+
+    // ── F22C: the canonical terminal transition, when asked for ─────────────
+    //
+    // Attachment is by environment (`WAYLAND_GOAL_ID` + `WAYLAND_GOAL_JOURNAL`)
+    // rather than by flag, because `CrucibleArgs` is assembled field-by-field in
+    // `main.rs` and a flag pair would mean two edits to the shared fence. The
+    // env route is the one this codebase already uses to hand a Goal's identity
+    // to a child process, so it is the existing mechanism, not a new one.
+    let attachment = crate::goal_cmd::GoalAttachArgs::default().resolve()?;
+    let result = match attachment {
+        Some((driver, goal_id)) => {
+            // The council's own result is carried back out of the closure so the
+            // advisor follow-on below runs identically under a Goal. The closure
+            // itself must return a `StrategyTermination` and nothing else, which
+            // is what makes the canonical transition unavoidable.
+            let carried: std::cell::RefCell<Option<CouncilRunResult>> =
+                std::cell::RefCell::new(None);
+            let cursor = driver
+                .run_council(&goal_id, |owner| async {
+                    match drive_once().await {
+                        Ok(result) => {
+                            let termination =
+                                StrategyTermination::from_council(owner, Ok(&result));
+                            *carried.borrow_mut() = Some(result);
+                            termination
+                        }
+                        // Carried into the terminal transition as the real
+                        // error, never swallowed into a clean terminal.
+                        Err(error) => {
+                            eprintln!("crucible: {error}");
+                            StrategyTermination::from_council(owner, Err(&error))
+                        }
+                    }
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("goal {} did not terminate: {e}", goal_id.as_str()))?;
+            crate::goal_cmd::print_canonical_transition(&driver, &goal_id, "council", &cursor);
+            match carried.into_inner() {
+                Some(result) => result,
+                // The council failed; it has been reported and the Goal has
+                // already terminated through the canonical transition.
+                None => return Ok(()),
+            }
+        }
+        None => drive_once().await?,
+    };
+
+    match result {
         CouncilRunResult::Direct { spec, text } => {
             eprintln!("crucible: direct answer via {spec}");
             // `base` is the SESSION DEFAULT config (auto premise: no roster pinned),

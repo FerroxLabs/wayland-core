@@ -246,6 +246,29 @@ pub enum FleetOutcome<'a> {
     DriverFailed { detail: String },
 }
 
+/// What an Anvil climb produced.
+///
+/// Modelled like [`FleetOutcome`] rather than as a bare `Result<_, &EngineError>`
+/// for exactly the reason stated there: the SHIPPED forge entry point
+/// (`drive_climb_full`) fails with `ForgeError` — no gate detected, workspace
+/// leased, receipt unbindable — and none of those is an [`EngineError`]. Calling
+/// a missing gate `EngineError::Builder` to satisfy a signature would be a
+/// fabricated terminal, so the driver's own failures get a carrier and land in
+/// `Blocked` with a stated reason.
+///
+/// Added when Anvil's production verb was attached to the Goal: before that the
+/// only caller was a test, which could always produce an `EngineError` because it
+/// was calling the engine directly rather than the forge.
+#[derive(Debug)]
+pub enum AnvilOutcome<'a> {
+    /// The climb ran and produced a terminal state.
+    Climbed(&'a ClimbOutcome),
+    /// The climb engine itself failed.
+    EngineFailed(&'a EngineError),
+    /// The forge failed around the climb, for a stated reason.
+    ForgeFailed { detail: String },
+}
+
 impl StrategyTermination {
     /// Adapt a Direct run.
     ///
@@ -436,15 +459,19 @@ impl StrategyTermination {
     /// # A generic retry wrapper around a climb does not compile
     ///
     /// ```compile_fail
-    /// use wcore_agent::goal::strategy::{AnvilTag, LoopOwner, StrategyTermination};
-    /// use wcore_agent::orchestration::anvil::engine::{ClimbOutcome, EngineError};
+    /// use wcore_agent::goal::strategy::{AnvilOutcome, AnvilTag, LoopOwner, StrategyTermination};
+    /// use wcore_agent::orchestration::anvil::engine::ClimbOutcome;
     ///
     /// fn retry_wrapper(owner: LoopOwner<AnvilTag>, outcomes: &[ClimbOutcome]) {
     ///     // `owner` is moved by the first adapter call, so a second iteration
     ///     // is a use-after-move. This is Success Criterion 3's "no nested
     ///     // verification/retry owner", enforced by the borrow checker.
     ///     for outcome in outcomes {
-    ///         let _ = StrategyTermination::from_anvil(owner, Ok(outcome), 1);
+    ///         let _ = StrategyTermination::from_anvil(
+    ///             owner,
+    ///             AnvilOutcome::Climbed(outcome),
+    ///             1,
+    ///         );
     ///     }
     /// }
     /// ```
@@ -452,28 +479,35 @@ impl StrategyTermination {
     /// # A non-Anvil claim cannot be handed to the Anvil adapter
     ///
     /// ```compile_fail
-    /// use wcore_agent::goal::strategy::{CouncilTag, LoopOwner, StrategyTermination};
+    /// use wcore_agent::goal::strategy::{AnvilOutcome, CouncilTag, LoopOwner, StrategyTermination};
     /// use wcore_agent::orchestration::anvil::engine::ClimbOutcome;
     ///
     /// fn wrong_tag(owner: LoopOwner<CouncilTag>, outcome: &ClimbOutcome) {
     ///     // Council's verification owner is a model judge. The type system,
     ///     // not a reviewer, is what stops it borrowing Anvil's evidence path.
-    ///     let _ = StrategyTermination::from_anvil(owner, Ok(outcome), 1);
+    ///     let _ = StrategyTermination::from_anvil(
+    ///         owner,
+    ///         AnvilOutcome::Climbed(outcome),
+    ///         1,
+    ///     );
     /// }
     /// ```
     pub fn from_anvil(
         owner: LoopOwner<AnvilTag>,
-        result: Result<&ClimbOutcome, &EngineError>,
+        result: AnvilOutcome<'_>,
         required_stability: u32,
     ) -> Self {
         let outcome = match result {
-            Ok(outcome) => outcome,
+            AnvilOutcome::Climbed(outcome) => outcome,
             // Aborted before it could produce a terminal state through the
             // normal path — surfaced, never swallowed.
-            Err(error) => {
+            AnvilOutcome::EngineFailed(error) => {
                 return owner.terminate(GoalTerminalState::Blocked {
                     reason: error.to_string(),
                 });
+            }
+            AnvilOutcome::ForgeFailed { detail } => {
+                return owner.terminate(GoalTerminalState::Blocked { reason: detail });
             }
         };
         let terminal = match &outcome.terminal {

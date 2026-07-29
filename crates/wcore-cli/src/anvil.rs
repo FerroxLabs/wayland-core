@@ -9,7 +9,8 @@
 use std::sync::Arc;
 
 use clap::Args;
-use wcore_agent::orchestration::anvil::forge::drive_climb_full;
+use wcore_agent::goal::{AnvilOutcome, StrategyTermination};
+use wcore_agent::orchestration::anvil::forge::{FORGE_REQUIRED_STABILITY, drive_climb_full};
 use wcore_agent::orchestration::anvil::seat::{
     materialize_standalone_driver_seat, materialize_valve_seat,
 };
@@ -22,6 +23,16 @@ pub struct ForgeArgs {
     /// The task to forge. Anvil is for work with a REAL, checkable gate
     /// (tests / build / lint) — it forges a candidate that passes it.
     pub task: String,
+    /// Run this climb as the ONE loop owner of a durable Goal, and terminate it
+    /// through the canonical Goal transition (F22C).
+    ///
+    /// Opt-in. Without `--goal` this is byte-for-byte the pre-F22C path. Anvil
+    /// is the only one of the five strategies that can reach
+    /// `GoalTerminalState::Verified`, and it reaches it only by handing the
+    /// adapter the gate observation the climb engine measured — the CLI has no
+    /// parameter through which it could supply one.
+    #[command(flatten)]
+    pub goal: crate::goal_cmd::GoalAttachArgs,
 }
 
 /// Admission gate for the forge verb: refuse before any provider/spawner
@@ -97,6 +108,58 @@ pub async fn run_forge(args: ForgeArgs) -> anyhow::Result<()> {
     let valve_spawner = valve_seat
         .as_ref()
         .map(|s| &s.spawner as &dyn wcore_types::spawner::Spawner);
+
+    // ── F22C: the canonical terminal transition, when asked for ─────────────
+    //
+    // The climb below is THE production one — the same `drive_climb_full` over
+    // the same seat, workspace, gate and sandbox. Attaching a Goal wraps that
+    // one call in `GoalLoop::run_anvil`; it does not build a second forge.
+    if let Some((driver, goal_id)) = args.goal.resolve()? {
+        let cursor = driver
+            .run_anvil(&goal_id, |owner| async move {
+                match drive_climb_full(
+                    &args.task,
+                    &cf.anvil,
+                    &workspace,
+                    &spawner,
+                    valve_spawner,
+                    &emitter,
+                    &session_id,
+                    &uuid::Uuid::new_v4().to_string(),
+                    &uuid::Uuid::new_v4().to_string(),
+                    sandbox,
+                )
+                .await
+                {
+                    Ok(outcome) => {
+                        print_climb_summary(&outcome);
+                        StrategyTermination::from_anvil(
+                            owner,
+                            AnvilOutcome::Climbed(&outcome),
+                            FORGE_REQUIRED_STABILITY,
+                        )
+                    }
+                    // A forge failure is NOT an `EngineError`; it gets the
+                    // driver-failure carrier and lands in `Blocked` with the
+                    // real reason rather than a fabricated engine category.
+                    Err(error) => {
+                        eprintln!("forge: {error}");
+                        StrategyTermination::from_anvil(
+                            owner,
+                            AnvilOutcome::ForgeFailed {
+                                detail: error.to_string(),
+                            },
+                            FORGE_REQUIRED_STABILITY,
+                        )
+                    }
+                }
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("goal {} did not terminate: {e}", goal_id.as_str()))?;
+        crate::goal_cmd::print_canonical_transition(&driver, &goal_id, "anvil", &cursor);
+        return Ok(());
+    }
+
     match drive_climb_full(
         &args.task,
         &cf.anvil,
@@ -112,20 +175,28 @@ pub async fn run_forge(args: ForgeArgs) -> anyhow::Result<()> {
     .await
     {
         Ok(outcome) => {
-            // The receipt already went to stdout; this is a human summary on stderr.
-            eprintln!(
-                "forge: terminal={:?} stamp={} checks={}/{} iterations={} valve_fires={}",
-                outcome.terminal,
-                outcome.stamp,
-                outcome.checks_passed,
-                outcome.checks_total,
-                outcome.iterations,
-                outcome.valve_fires,
-            );
+            print_climb_summary(&outcome);
             Ok(())
         }
         Err(e) => anyhow::bail!("forge: {e}"),
     }
+}
+
+/// The human summary on stderr. The receipt itself already went to stdout.
+///
+/// Extracted so the Goal-attached path and the unattached path print the SAME
+/// line — a second copy would let them drift, and "the attached run behaves
+/// identically" is what makes the attachment a wrapper rather than a fork.
+fn print_climb_summary(outcome: &wcore_agent::orchestration::anvil::engine::ClimbOutcome) {
+    eprintln!(
+        "forge: terminal={:?} stamp={} checks={}/{} iterations={} valve_fires={}",
+        outcome.terminal,
+        outcome.stamp,
+        outcome.checks_passed,
+        outcome.checks_total,
+        outcome.iterations,
+        outcome.valve_fires,
+    );
 }
 
 #[cfg(test)]
