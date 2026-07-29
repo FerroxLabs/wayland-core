@@ -1,0 +1,89 @@
+{
+  "adapter": "telegram",
+  "label": "K-keepalive",
+  "ack": "both",
+  "declares": {
+    "react": true,
+    "typing": true,
+    "react_site": "wcore-channel-telegram/src/lib.rs:373",
+    "typing_site": "wcore-channel-telegram/src/lib.rs:360"
+  },
+  "ready": true,
+  "turn_ran": true,
+  "turn_prompt": "probe f24na-telegram-K-keepalive\nCurrent date: 2026-07-29",
+  "prompt_carries_probe": true,
+  "reactions_total": 2,
+  "reaction_emojis": [
+    "👀",
+    "✅"
+  ],
+  "typing_total": 3,
+  "typing_after_turn": 2,
+  "replies_total": 1,
+  "affordances": {
+    "a1_receipt": "fired",
+    "a2_typing": "fired",
+    "a3_terminal": "fired",
+    "emojis": [
+      "👀",
+      "✅"
+    ],
+    "typing_count": 3
+  },
+  "gateway_log_bytes": 8380,
+  "fixture_journal": [
+    {
+      "kind": "deleteWebhook",
+      "at": "2026-07-29T06:58:04.458Z"
+    },
+    {
+      "kind": "submit",
+      "at": "2026-07-29T06:58:04.590Z",
+      "update_id": 1,
+      "message_id": 5551,
+      "text": "probe f24na-telegram-K-keepalive"
+    },
+    {
+      "kind": "reaction",
+      "at": "2026-07-29T06:58:04.710Z",
+      "emoji": "👀",
+      "conv": "24000001",
+      "msg": "5551"
+    },
+    {
+      "kind": "typing",
+      "at": "2026-07-29T06:58:04.713Z",
+      "conv": "24000001"
+    },
+    {
+      "kind": "typing",
+      "at": "2026-07-29T06:58:09.733Z",
+      "conv": "24000001"
+    },
+    {
+      "kind": "typing",
+      "at": "2026-07-29T06:58:14.735Z",
+      "conv": "24000001"
+    },
+    {
+      "kind": "reaction",
+      "at": "2026-07-29T06:58:17.322Z",
+      "emoji": "✅",
+      "conv": "24000001",
+      "msg": "5551"
+    },
+    {
+      "kind": "reply",
+      "at": "2026-07-29T06:58:17.323Z",
+      "text": "F24NA\\-REPLY f24na\\-telegram\\-K\\-keepalive"
+    }
+  ],
+  "notes": [
+    "llm fixture at http://127.0.0.1:36511 (delay=12000ms)",
+    "telegram fixture at http://127.0.0.1:36831",
+    "readiness=true",
+    "delivered inbound (5551)",
+    "turn_ran=true after dispatch",
+    "typing signals AFTER the turn completed: 2"
+  ]
+}

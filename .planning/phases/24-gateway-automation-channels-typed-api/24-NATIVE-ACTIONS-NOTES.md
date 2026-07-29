@@ -164,3 +164,32 @@ DEBUG ack 'seen' reaction failed (non-fatal) channel=f24na error=react is unsupp
 That is the RECEIPT only. The TERMINAL reaction is `let _ =` (`channel_inbound.rs:552`) and
 `react_on` (`manager.rs:750-763`) does not log either — so the terminal drop is silent at EVERY
 log level. At the default `info` level the operator gets NOTHING for either.
+
+## T+130 — whatsapp added; the DECLARED SURFACE IS NOW CLOSED
+
+`/root/f24na-final1` + `/root/f24na-final2`, 13/13 gates PASS on both, verdicts and matrix
+byte-identical, `generated_at`/`out_dir` distinct (two genuine runs, sha `aa50e741…` / `e984b423…`).
+
+| adapter | A1 receipt 👀 | A2 typing | A3 terminal ✅ |
+|---|---|---|---|
+| telegram | fired | fired | fired |
+| matrix | fired | fired | fired |
+| slack | fired | not-supported | fired |
+| whatsapp | fired | not-supported | fired |
+| msteams | not-supported | fired | not-supported |
+| discord | fired | fired | fired |
+
+**5/5 adapters that declare `react` fire BOTH reactions. 4/4 that declare `send_typing` fire
+typing. ZERO advertised-but-dead instances on this surface** — notable, because that class has
+nine recorded instances elsewhere in this program.
+
+whatsapp's A2 `not-supported` has a stated platform reason at `whatsapp/src/lib.rs:324-326`:
+WhatsApp ties the typing indicator to a per-message read receipt, which needs the message id,
+and the keepalive does not carry one.
+
+### Adapter census (instrument alive: `max_message_len`, a sibling declared surface WITH
+### consumers, returns 9 files from the same search shape)
+10 adapter crates: discord, email, imessage, matrix, msteams, signal, slack, sms, telegram,
+whatsapp. 5 override `react`; 4 override `send_typing` (5 files — `matrix/rest.rs` is a helper,
+not the trait impl). **All 6 adapters that declare EITHER affordance are measured. The 4 that
+declare NEITHER (email, signal, imessage, sms) are unmeasured and unclaimed.**

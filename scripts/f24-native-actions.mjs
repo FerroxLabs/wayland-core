@@ -806,6 +806,57 @@ class SlackFixture extends AckLedger {
 }
 
 // ---------------------------------------------------------------------------
+// WHATSAPP fixture — Graph `/{ver}/{phone_number_id}/messages`
+// ---------------------------------------------------------------------------
+// `react` (`whatsapp/src/lib.rs:327`) POSTs `type:"reaction"` to the SAME
+// endpoint the reply uses (`api.rs:490-502`), so — exactly like msteams —
+// `type` is the only thing separating an ack from a reply and the fixture must
+// split on it. Unicode emoji go on the wire directly here (no shortcode hop).
+//
+// `send_typing` deliberately keeps the trait no-op, and the source states WHY
+// (`lib.rs:324-326`): WhatsApp's typing indicator is tied to a per-message read
+// receipt, which needs the message id — and the keepalive does not carry one.
+// That is a platform constraint, not an omission.
+class WhatsappFixture extends AckLedger {
+  constructor() {
+    super();
+    this.server = http.createServer(async (req, res) => {
+      const body = await readBody(req);
+      const url = new URL(req.url, 'http://127.0.0.1');
+      let parsed = {};
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        /* raw length recorded regardless */
+      }
+      if (url.pathname.endsWith('/messages')) {
+        if (parsed.type === 'reaction') {
+          this.reaction(parsed.reaction?.emoji ?? '(unparsed)', String(parsed.to ?? ''), String(parsed.reaction?.message_id ?? ''));
+        } else {
+          this.replied(String(parsed.text?.body ?? ''));
+        }
+        return sendJson(res, {
+          messaging_product: 'whatsapp',
+          contacts: [{ wa_id: String(parsed.to ?? '') }],
+          messages: [{ id: `wamid.f24na-out-${this.journal.length}` }],
+        });
+      }
+      this.rec('unknown_endpoint', { method: req.method, path: url.pathname });
+      return sendJson(res, { error: 'unknown' }, 404);
+    });
+  }
+
+  async start() {
+    this.url = await listen(this.server);
+    return this.url;
+  }
+
+  async stop() {
+    await new Promise((r) => this.server.close(r));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // MSTEAMS fixture — Bot Framework: openid + jwks + token + activities
 // ---------------------------------------------------------------------------
 // The adapter has NO `react` override, so A1/A3 are `not-supported` by the
@@ -917,6 +968,7 @@ const DECLARES = {
   matrix: { react: true, typing: true, react_site: 'wcore-channel-matrix/src/lib.rs:324', typing_site: 'wcore-channel-matrix/src/lib.rs:305' },
   slack: { react: true, typing: false, react_site: 'wcore-channel-slack/src/lib.rs:267', typing_site: 'TRAIT DEFAULT (silent no-op Ok(())) — wcore-channels/src/lib.rs:277' },
   msteams: { react: false, typing: true, react_site: 'TRAIT DEFAULT (Err(Unsupported)) — wcore-channels/src/lib.rs:294', typing_site: 'wcore-channel-msteams/src/lib.rs:381' },
+  whatsapp: { react: true, typing: false, react_site: 'wcore-channel-whatsapp/src/lib.rs:327', typing_site: 'TRAIT DEFAULT (silent no-op Ok(())) — platform ties typing to a per-message read receipt (lib.rs:324-326)' },
 };
 
 function baseConfig({ home, llmUrl, webhook }) {
@@ -1066,6 +1118,64 @@ async function runLeg({ adapter, ack, label, binary, rootDir, budgetMs, llmDelay
       });
       note(`slack webhook POST -> ${r.status}`);
       return ts;
+    };
+  } else if (adapter === 'whatsapp') {
+    const accessToken = 'f24na-wa-not-a-real-token';
+    const appSecret = crypto.randomBytes(24).toString('hex');
+    const phoneNumberId = 'F24NAPHONE';
+    const from = '15552220000';
+    needsWebhook = true;
+    fx = new WhatsappFixture();
+    const url = await fx.start();
+    note(`whatsapp fixture at ${url}`);
+    fs.writeFileSync(
+      path.join(home, 'credentials.toml'),
+      ['[secrets]', `"whatsapp.f24na.access_token" = "${accessToken}"`, `"whatsapp.f24na.app_secret" = "${appSecret}"`, ''].join('\n'),
+      { mode: 0o600 },
+    );
+    fs.writeFileSync(
+      path.join(home, 'channels', 'f24na.toml'),
+      [
+        'name = "f24na"', 'platform = "whatsapp"', 'enabled = true', '',
+        '[options]',
+        'workspace_name = "f24na"',
+        `phone_number_id = "${phoneNumberId}"`,
+        `default_recipient = "${from}"`,
+        'credential_handle_access_token = "whatsapp.f24na.access_token"',
+        'credential_handle_app_secret = "whatsapp.f24na.app_secret"',
+        `api_base_url = "${url}"`,
+        'graph_version = "v18.0"',
+        'max_retry_attempts = 1', '',
+        '[inbound]', 'dm = "allowlist"', `dm_allowlist = ["${from}"]`,
+        'group = "disabled"', 'require_mention = false', 'tools = "conversational"',
+        `ack = "${ack}"`, '',
+      ].join('\n'),
+    );
+    deliver = async () => {
+      const messageId = 'wamid.f24na-inbound-1';
+      const payload = JSON.stringify({
+        object: 'whatsapp_business_account',
+        entry: [{
+          id: 'f24na-waba',
+          changes: [{
+            field: 'messages',
+            value: {
+              messaging_product: 'whatsapp',
+              metadata: { display_phone_number: '15550000000', phone_number_id: phoneNumberId },
+              contacts: [{ profile: { name: 'f24na' }, wa_id: from }],
+              messages: [{ from, id: messageId, timestamp: String(Math.floor(Date.now() / 1000)), type: 'text', text: { body: `probe ${correlation}` } }],
+            },
+          }],
+        }],
+      });
+      const sig = `sha256=${crypto.createHmac('sha256', appSecret).update(payload).digest('hex')}`;
+      const r = await fetch(`http://127.0.0.1:${PORTS.webhook}/webhooks/f24na`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-hub-signature-256': sig },
+        body: payload,
+      });
+      note(`whatsapp webhook POST -> ${r.status}`);
+      return messageId;
     };
   } else if (adapter === 'msteams') {
     const appId = 'f24na-app-id';
