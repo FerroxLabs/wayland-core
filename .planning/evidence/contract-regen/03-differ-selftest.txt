@@ -1,0 +1,4 @@
+[ok] A1 known-positive: a digest-only re-stamp classifies DIGEST-ONLY
+[ok] A2 known-negative: a wire change classifies SHAPE CHANGE even when a digest moved in the same edit
+[ok] A3 the OLD method (`git diff --numstat`) reports an IDENTICAL '1	1	fixture.jsonl' for both, i.e. would have missed the shape change; this script separates them
+3 passed, 0 failed

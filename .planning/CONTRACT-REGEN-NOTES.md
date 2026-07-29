@@ -44,3 +44,63 @@ The digest script's own self-test passes 3/3 including the load-bearing A3 (§6b
 - [ ] confirm `golden_v0_1_21` still passes (independent wire pin)
 - [ ] prove the guard can still FAIL after regeneration (mutation test)
 - [ ] check whether OpenAPI 3.1.0 endpoint is in the corpus
+
+## M3 — which commits moved the digest (measured, not inferred)
+
+`5f74d559` was the last re-pin. 475 commits since; 11 touch a SOURCE_INPUTS path, and
+**all 11 moved `source_inputs_digest`**:
+
+| moved | commit | source inputs touched |
+|---|---|---|
+| MOVED | `793bead9` | bootstrap.rs, **main.rs** |
+| MOVED | `85b60a2f` | bootstrap.rs, protocol_sink.rs |
+| MOVED | `27d24bef` | bootstrap.rs |
+| MOVED | `bf959017` | bootstrap.rs — **doc comment relocation only, 9+/9-** |
+| MOVED | `9fe6ad86` | bootstrap.rs |
+| MOVED | `e41dbd0e` | bootstrap.rs |
+| MOVED | `bce987fa` | bootstrap.rs |
+| MOVED | `743e52bb` | **main.rs** |
+| MOVED | `b18ecc1f` | bootstrap.rs |
+| MOVED | `f38272f8` | bootstrap.rs |
+| MOVED | `71315c03` | bootstrap.rs |
+
+Correction to the framing I was given: the dominant driver is
+`crates/wcore-agent/src/bootstrap.rs` (9 of 11), not `main.rs` (2 of 11).
+
+## M4 — regeneration (hetzner `hz/contract-regen` @ `08969a26`)
+
+BEFORE, `cargo test -p wcore-protocol --test desktop_contract_corpus`:
+`14 passed; 1 failed` — `checked_corpus_matches_real_serializers_byte_for_byte`,
+drift = exactly 5 files. `WLRC=101`.
+
+`wcore-contract generate` -> rc 0. Exactly the same 5 files modified, 0 added, 0 deleted.
+
+| digest | before | after |
+|---|---|---|
+| `schema_digest` | `e5d1744a…` | `e5d1744a…` **UNCHANGED** |
+| `fixture_digest` | `634bbbe9…` | `de2b19bd…` |
+| `source_inputs_digest` | `2517099 6…` | `c9944359…` |
+
+`source_inputs_digest` after == the value the Mac python script computed independently
+(`c99443599a27…`), so the two implementations agree.
+
+## M5 — the diff is a digest re-stamp, proven structurally
+
+`git diff` is useless here: these fixtures are ONE line of JSON, so a digest re-stamp and a
+wire-shape change both report `1 1`. Wrote `.planning/scripts/contract-regen-diff.py`
+(JSON-leaf differ) with a 3-assertion self-test; A3 proves `git diff --numstat` reports an
+identical `1\t1\tfixture.jsonl` for both cases, i.e. the old instrument could not have caught
+a smuggled shape change. Self-test 3/3.
+
+All 5 files classify **DIGEST-ONLY**, 0 shape leaves, and every file is byte-length identical
+before and after (1757->1757 x4, 19326->19326). `counts`, `source_inputs`, `capabilities`,
+`fixture_inventory`, `subcontracts` all unchanged.
+
+**No wire-shape change is being absorbed.**
+
+## M6 — still to establish
+
+- [ ] guard passes after regeneration (assert the N passed count)
+- [ ] `golden_v0_1_21.rs` still passes
+- [ ] guard can still FAIL (mutation test — a corpus that matches anything is worthless)
+- [ ] OpenAPI 3.1.0 endpoint — is it in the corpus at all?
