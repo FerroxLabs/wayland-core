@@ -1,0 +1,5 @@
+[gateway]
+[providers.anthropic]
+api_key  [value elided]
+base_url  [value elided]
+note  [value elided]

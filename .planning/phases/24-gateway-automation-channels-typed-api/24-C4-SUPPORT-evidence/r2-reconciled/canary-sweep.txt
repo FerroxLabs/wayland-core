@@ -1,0 +1,8 @@
+/root/wl-r2-bundle/channel-health.json:0
+/root/wl-r2-bundle/gateway-status.json:0
+/root/wl-r2-bundle/recent-log.txt:0
+/root/wl-r2-bundle/manifest.json:0
+/root/wl-r2-bundle/credential-keys.txt:0
+/root/wl-r2-bundle/ledger-summary.json:0
+/root/wl-r2-bundle/config-keys.txt:0
+/root/wl-r2-bundle/environment-keys.txt:0
