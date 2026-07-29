@@ -1,0 +1,750 @@
+[inbound] sink http://127.0.0.1:45641 journal=/root/h6-runs/run1/arrivals.jsonl
+[inbound] llm fixture http://127.0.0.1:43709 journal=/root/h6-runs/run1/turns.jsonl
+[inbound] telegram fixture http://127.0.0.1:35537 journal=/root/h6-runs/run1/telegram.jsonl
+[inbound] matrix fixture http://127.0.0.1:44581 journal=/root/h6-runs/run1/matrix.jsonl
+[inbound] signal-cli fixture installed /root/h6-runs/run1/signal-cli mode=755 bytes=8965
+[inbound] mail fixture cert /root/h6-runs/run1/tls/fixture-cert.pem (1151 bytes)
+[inbound] mail fixture imap=35335 smtp=39125 control=40843 journal=/root/h6-runs/run1/mail.jsonl
+[inbound] binary /root/wayland-24-h6/target/release/wayland-core
+[inbound] build-info wayland-core 0.12.25 (source ae9fbbd44caba69a3ef131fe86dae480bb599ace)
+[inbound] sha256 d618d3766db2f30eaf75f68a0865b15ac5d831a6aec40189d49f8a05f610f364
+[inbound] runtime=json-stream argv=["--json-stream"]
+[inbound] waiting for webhook host: 0s 2026-07-29T03:58:02.916Z
+[inbound] waiting for webhook host: 1s 2026-07-29T03:58:03.962Z
+[inbound] waiting for webhook host: 2s 2026-07-29T03:58:05.007Z
+[inbound] webhook host up after 3s: HEALTHZ 200 ok
+[inbound] matrix slack transport=webhook tag=6e0b73a5
+[inbound] awaiting f24c3-slack-admit-6e0b73a5: 0/1 after 1s 2026-07-29T03:58:06.113Z
+[inbound] PASS slack/admit — POST rc=0 HTTP 200 | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+[inbound] PASS slack/route — reply_text="F24C3-REPLY f24c3-slack-admit-6e0b73a5" carries_correlation=true conversation_id="D24C3ONE" want="D24C3ONE"
+[inbound] settling: 1s 2026-07-29T03:58:07.167Z
+[inbound] settling: 2s 2026-07-29T03:58:08.168Z
+[inbound] settling: 3s 2026-07-29T03:58:09.168Z
+[inbound] settling: 4s 2026-07-29T03:58:10.168Z
+[inbound] settling: 5s 2026-07-29T03:58:11.168Z
+[inbound] settling: 6s 2026-07-29T03:58:12.169Z
+[inbound] settling: 7s 2026-07-29T03:58:13.169Z
+[inbound] settling: 8s 2026-07-29T03:58:14.169Z
+[inbound] settling: 9s 2026-07-29T03:58:15.169Z
+[inbound] settling: 10s 2026-07-29T03:58:16.170Z
+[inbound] settling: 11s 2026-07-29T03:58:17.170Z
+[inbound] settling: 12s 2026-07-29T03:58:18.170Z
+[inbound] settling: 13s 2026-07-29T03:58:19.170Z
+[inbound] settling: 14s 2026-07-29T03:58:20.170Z
+[inbound] settling: 15s 2026-07-29T03:58:21.171Z
+[inbound] settling: 16s 2026-07-29T03:58:22.171Z
+[inbound] settling: 17s 2026-07-29T03:58:23.171Z
+[inbound] settling: 18s 2026-07-29T03:58:24.172Z
+[inbound] settling: 19s 2026-07-29T03:58:25.172Z
+[inbound] settling: 20s 2026-07-29T03:58:26.172Z
+[inbound] awaiting f24c3-slack-dedupe-control-6e0b73a5: 0/1 after 1s 2026-07-29T03:58:27.227Z
+[inbound] PASS slack/dedupe — replay rc=0 at +1054ms (inside the 60000ms TTL) | arrivals before=1 after=1 (want equal) | turns before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+[inbound] settling: 1s 2026-07-29T03:58:28.281Z
+[inbound] settling: 2s 2026-07-29T03:58:29.281Z
+[inbound] settling: 3s 2026-07-29T03:58:30.282Z
+[inbound] settling: 4s 2026-07-29T03:58:31.282Z
+[inbound] settling: 5s 2026-07-29T03:58:32.282Z
+[inbound] settling: 6s 2026-07-29T03:58:33.283Z
+[inbound] settling: 7s 2026-07-29T03:58:34.283Z
+[inbound] settling: 8s 2026-07-29T03:58:35.283Z
+[inbound] settling: 9s 2026-07-29T03:58:36.283Z
+[inbound] settling: 10s 2026-07-29T03:58:37.284Z
+[inbound] settling: 11s 2026-07-29T03:58:38.284Z
+[inbound] settling: 12s 2026-07-29T03:58:39.284Z
+[inbound] settling: 13s 2026-07-29T03:58:40.284Z
+[inbound] settling: 14s 2026-07-29T03:58:41.285Z
+[inbound] settling: 15s 2026-07-29T03:58:42.285Z
+[inbound] settling: 16s 2026-07-29T03:58:43.285Z
+[inbound] settling: 17s 2026-07-29T03:58:44.285Z
+[inbound] settling: 18s 2026-07-29T03:58:45.286Z
+[inbound] settling: 19s 2026-07-29T03:58:46.286Z
+[inbound] settling: 20s 2026-07-29T03:58:47.286Z
+[inbound] PASS slack/access — denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+[inbound] awaiting f24c3-slack-bind-6e0b73a5: 0/1 after 1s 2026-07-29T03:58:48.339Z
+[inbound] PASS slack/bind — conv1="D24C3ONE" conv2="D24C3TWO" want2="D24C3TWO" distinct=true
+[inbound] steady slack: going quiet for 30000ms before 3 messages at 4000ms spacing
+[inbound] settling: 1s 2026-07-29T03:58:49.340Z
+[inbound] settling: 2s 2026-07-29T03:58:50.340Z
+[inbound] settling: 3s 2026-07-29T03:58:51.340Z
+[inbound] settling: 4s 2026-07-29T03:58:52.341Z
+[inbound] settling: 5s 2026-07-29T03:58:53.341Z
+[inbound] settling: 6s 2026-07-29T03:58:54.341Z
+[inbound] settling: 7s 2026-07-29T03:58:55.341Z
+[inbound] settling: 8s 2026-07-29T03:58:56.342Z
+[inbound] settling: 9s 2026-07-29T03:58:57.342Z
+[inbound] settling: 10s 2026-07-29T03:58:58.342Z
+[inbound] settling: 11s 2026-07-29T03:58:59.342Z
+[inbound] settling: 12s 2026-07-29T03:59:00.343Z
+[inbound] settling: 13s 2026-07-29T03:59:01.343Z
+[inbound] settling: 14s 2026-07-29T03:59:02.343Z
+[inbound] settling: 15s 2026-07-29T03:59:03.343Z
+[inbound] settling: 16s 2026-07-29T03:59:04.343Z
+[inbound] settling: 17s 2026-07-29T03:59:05.344Z
+[inbound] settling: 18s 2026-07-29T03:59:06.344Z
+[inbound] settling: 19s 2026-07-29T03:59:07.344Z
+[inbound] settling: 20s 2026-07-29T03:59:08.345Z
+[inbound] settling: 21s 2026-07-29T03:59:09.345Z
+[inbound] settling: 22s 2026-07-29T03:59:10.345Z
+[inbound] settling: 23s 2026-07-29T03:59:11.345Z
+[inbound] settling: 24s 2026-07-29T03:59:12.345Z
+[inbound] settling: 25s 2026-07-29T03:59:13.346Z
+[inbound] settling: 26s 2026-07-29T03:59:14.346Z
+[inbound] settling: 27s 2026-07-29T03:59:15.346Z
+[inbound] settling: 28s 2026-07-29T03:59:16.346Z
+[inbound] settling: 29s 2026-07-29T03:59:17.347Z
+[inbound] settling: 30s 2026-07-29T03:59:18.347Z
+[inbound] settling: 1s 2026-07-29T03:59:19.400Z
+[inbound] settling: 2s 2026-07-29T03:59:20.400Z
+[inbound] settling: 3s 2026-07-29T03:59:21.400Z
+[inbound] settling: 4s 2026-07-29T03:59:22.401Z
+[inbound] settling: 1s 2026-07-29T03:59:23.453Z
+[inbound] settling: 2s 2026-07-29T03:59:24.454Z
+[inbound] settling: 3s 2026-07-29T03:59:25.454Z
+[inbound] settling: 4s 2026-07-29T03:59:26.454Z
+[inbound] awaiting f24c3-slack-steady2-6e0b73a5: 0/1 after 1s 2026-07-29T03:59:27.507Z
+[inbound] PASS slack/steady — after 30000ms quiet: 3/3 steady-state messages arrived per-message=[1,1,1] (a startup-only matrix cannot see this class — F24-C3-H4 lost 5 of 6 here while every startup leg passed)
+[inbound] matrix whatsapp transport=webhook tag=afc8da4c
+[inbound] awaiting f24c3-whatsapp-admit-afc8da4c: 0/1 after 1s 2026-07-29T03:59:28.561Z
+[inbound] PASS whatsapp/admit — POST rc=0 HTTP 200 | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+[inbound] PASS whatsapp/route — reply_text="F24C3-REPLY f24c3-whatsapp-admit-afc8da4c" carries_correlation=true conversation_id="15552220000" want="15552220000"
+[inbound] settling: 1s 2026-07-29T03:59:29.615Z
+[inbound] settling: 2s 2026-07-29T03:59:30.615Z
+[inbound] settling: 3s 2026-07-29T03:59:31.616Z
+[inbound] settling: 4s 2026-07-29T03:59:32.616Z
+[inbound] settling: 5s 2026-07-29T03:59:33.616Z
+[inbound] settling: 6s 2026-07-29T03:59:34.616Z
+[inbound] settling: 7s 2026-07-29T03:59:35.617Z
+[inbound] settling: 8s 2026-07-29T03:59:36.617Z
+[inbound] settling: 9s 2026-07-29T03:59:37.617Z
+[inbound] settling: 10s 2026-07-29T03:59:38.617Z
+[inbound] settling: 11s 2026-07-29T03:59:39.617Z
+[inbound] settling: 12s 2026-07-29T03:59:40.618Z
+[inbound] settling: 13s 2026-07-29T03:59:41.618Z
+[inbound] settling: 14s 2026-07-29T03:59:42.618Z
+[inbound] settling: 15s 2026-07-29T03:59:43.618Z
+[inbound] settling: 16s 2026-07-29T03:59:44.618Z
+[inbound] settling: 17s 2026-07-29T03:59:45.619Z
+[inbound] settling: 18s 2026-07-29T03:59:46.619Z
+[inbound] settling: 19s 2026-07-29T03:59:47.619Z
+[inbound] settling: 20s 2026-07-29T03:59:48.619Z
+[inbound] awaiting f24c3-whatsapp-dedupe-control-afc8da4c: 0/1 after 1s 2026-07-29T03:59:49.675Z
+[inbound] PASS whatsapp/dedupe — replay rc=0 at +1054ms (inside the 60000ms TTL) | arrivals before=1 after=1 (want equal) | turns before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+[inbound] settling: 1s 2026-07-29T03:59:50.730Z
+[inbound] settling: 2s 2026-07-29T03:59:51.730Z
+[inbound] settling: 3s 2026-07-29T03:59:52.730Z
+[inbound] settling: 4s 2026-07-29T03:59:53.731Z
+[inbound] settling: 5s 2026-07-29T03:59:54.731Z
+[inbound] settling: 6s 2026-07-29T03:59:55.731Z
+[inbound] settling: 7s 2026-07-29T03:59:56.731Z
+[inbound] settling: 8s 2026-07-29T03:59:57.732Z
+[inbound] settling: 9s 2026-07-29T03:59:58.732Z
+[inbound] settling: 10s 2026-07-29T03:59:59.732Z
+[inbound] settling: 11s 2026-07-29T04:00:00.732Z
+[inbound] settling: 12s 2026-07-29T04:00:01.733Z
+[inbound] settling: 13s 2026-07-29T04:00:02.733Z
+[inbound] settling: 14s 2026-07-29T04:00:03.733Z
+[inbound] settling: 15s 2026-07-29T04:00:04.734Z
+[inbound] settling: 16s 2026-07-29T04:00:05.734Z
+[inbound] settling: 17s 2026-07-29T04:00:06.734Z
+[inbound] settling: 18s 2026-07-29T04:00:07.734Z
+[inbound] settling: 19s 2026-07-29T04:00:08.735Z
+[inbound] settling: 20s 2026-07-29T04:00:09.735Z
+[inbound] PASS whatsapp/access — denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+[inbound] awaiting f24c3-whatsapp-bind-afc8da4c: 0/1 after 1s 2026-07-29T04:00:10.788Z
+[inbound] PASS whatsapp/bind — conv1="15552220000" conv2="15552221111" want2="15552221111" distinct=true
+[inbound] steady whatsapp: going quiet for 30000ms before 3 messages at 4000ms spacing
+[inbound] settling: 1s 2026-07-29T04:00:11.789Z
+[inbound] settling: 2s 2026-07-29T04:00:12.789Z
+[inbound] settling: 3s 2026-07-29T04:00:13.789Z
+[inbound] settling: 4s 2026-07-29T04:00:14.790Z
+[inbound] settling: 5s 2026-07-29T04:00:15.790Z
+[inbound] settling: 6s 2026-07-29T04:00:16.790Z
+[inbound] settling: 7s 2026-07-29T04:00:17.790Z
+[inbound] settling: 8s 2026-07-29T04:00:18.790Z
+[inbound] settling: 9s 2026-07-29T04:00:19.790Z
+[inbound] settling: 10s 2026-07-29T04:00:20.791Z
+[inbound] settling: 11s 2026-07-29T04:00:21.791Z
+[inbound] settling: 12s 2026-07-29T04:00:22.791Z
+[inbound] settling: 13s 2026-07-29T04:00:23.791Z
+[inbound] settling: 14s 2026-07-29T04:00:24.792Z
+[inbound] settling: 15s 2026-07-29T04:00:25.792Z
+[inbound] settling: 16s 2026-07-29T04:00:26.792Z
+[inbound] settling: 17s 2026-07-29T04:00:27.792Z
+[inbound] settling: 18s 2026-07-29T04:00:28.793Z
+[inbound] settling: 19s 2026-07-29T04:00:29.793Z
+[inbound] settling: 20s 2026-07-29T04:00:30.793Z
+[inbound] settling: 21s 2026-07-29T04:00:31.793Z
+[inbound] settling: 22s 2026-07-29T04:00:32.794Z
+[inbound] settling: 23s 2026-07-29T04:00:33.794Z
+[inbound] settling: 24s 2026-07-29T04:00:34.794Z
+[inbound] settling: 25s 2026-07-29T04:00:35.794Z
+[inbound] settling: 26s 2026-07-29T04:00:36.795Z
+[inbound] settling: 27s 2026-07-29T04:00:37.795Z
+[inbound] settling: 28s 2026-07-29T04:00:38.795Z
+[inbound] settling: 29s 2026-07-29T04:00:39.795Z
+[inbound] settling: 30s 2026-07-29T04:00:40.795Z
+[inbound] settling: 1s 2026-07-29T04:00:41.851Z
+[inbound] settling: 2s 2026-07-29T04:00:42.851Z
+[inbound] settling: 3s 2026-07-29T04:00:43.852Z
+[inbound] settling: 4s 2026-07-29T04:00:44.852Z
+[inbound] settling: 1s 2026-07-29T04:00:45.906Z
+[inbound] settling: 2s 2026-07-29T04:00:46.907Z
+[inbound] settling: 3s 2026-07-29T04:00:47.907Z
+[inbound] settling: 4s 2026-07-29T04:00:48.907Z
+[inbound] awaiting f24c3-whatsapp-steady2-afc8da4c: 0/1 after 1s 2026-07-29T04:00:49.960Z
+[inbound] PASS whatsapp/steady — after 30000ms quiet: 3/3 steady-state messages arrived per-message=[1,1,1] (a startup-only matrix cannot see this class — F24-C3-H4 lost 5 of 6 here while every startup leg passed)
+[inbound] matrix sms transport=webhook tag=231f7a3f
+[inbound] awaiting f24c3-sms-admit-231f7a3f: 0/1 after 1s 2026-07-29T04:00:51.016Z
+[inbound] PASS sms/admit — POST rc=0 HTTP 200 | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+[inbound] PASS sms/route — reply_text="F24C3-REPLY f24c3-sms-admit-231f7a3f" carries_correlation=true conversation_id="+15553330000" want="+15553330000"
+[inbound] settling: 1s 2026-07-29T04:00:52.071Z
+[inbound] settling: 2s 2026-07-29T04:00:53.071Z
+[inbound] settling: 3s 2026-07-29T04:00:54.071Z
+[inbound] settling: 4s 2026-07-29T04:00:55.071Z
+[inbound] settling: 5s 2026-07-29T04:00:56.072Z
+[inbound] settling: 6s 2026-07-29T04:00:57.072Z
+[inbound] settling: 7s 2026-07-29T04:00:58.072Z
+[inbound] settling: 8s 2026-07-29T04:00:59.072Z
+[inbound] settling: 9s 2026-07-29T04:01:00.072Z
+[inbound] settling: 10s 2026-07-29T04:01:01.073Z
+[inbound] settling: 11s 2026-07-29T04:01:02.073Z
+[inbound] settling: 12s 2026-07-29T04:01:03.073Z
+[inbound] settling: 13s 2026-07-29T04:01:04.073Z
+[inbound] settling: 14s 2026-07-29T04:01:05.074Z
+[inbound] settling: 15s 2026-07-29T04:01:06.074Z
+[inbound] settling: 16s 2026-07-29T04:01:07.074Z
+[inbound] settling: 17s 2026-07-29T04:01:08.074Z
+[inbound] settling: 18s 2026-07-29T04:01:09.075Z
+[inbound] settling: 19s 2026-07-29T04:01:10.075Z
+[inbound] settling: 20s 2026-07-29T04:01:11.075Z
+[inbound] awaiting f24c3-sms-dedupe-control-231f7a3f: 0/1 after 1s 2026-07-29T04:01:12.130Z
+[inbound] PASS sms/dedupe — replay rc=0 at +1055ms (inside the 60000ms TTL) | arrivals before=1 after=1 (want equal) | turns before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+[inbound] settling: 1s 2026-07-29T04:01:13.186Z
+[inbound] settling: 2s 2026-07-29T04:01:14.186Z
+[inbound] settling: 3s 2026-07-29T04:01:15.186Z
+[inbound] settling: 4s 2026-07-29T04:01:16.186Z
+[inbound] settling: 5s 2026-07-29T04:01:17.187Z
+[inbound] settling: 6s 2026-07-29T04:01:18.187Z
+[inbound] settling: 7s 2026-07-29T04:01:19.187Z
+[inbound] settling: 8s 2026-07-29T04:01:20.187Z
+[inbound] settling: 9s 2026-07-29T04:01:21.188Z
+[inbound] settling: 10s 2026-07-29T04:01:22.188Z
+[inbound] settling: 11s 2026-07-29T04:01:23.188Z
+[inbound] settling: 12s 2026-07-29T04:01:24.188Z
+[inbound] settling: 13s 2026-07-29T04:01:25.189Z
+[inbound] settling: 14s 2026-07-29T04:01:26.189Z
+[inbound] settling: 15s 2026-07-29T04:01:27.189Z
+[inbound] settling: 16s 2026-07-29T04:01:28.189Z
+[inbound] settling: 17s 2026-07-29T04:01:29.190Z
+[inbound] settling: 18s 2026-07-29T04:01:30.190Z
+[inbound] settling: 19s 2026-07-29T04:01:31.190Z
+[inbound] settling: 20s 2026-07-29T04:01:32.190Z
+[inbound] PASS sms/access — denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+[inbound] awaiting f24c3-sms-bind-231f7a3f: 0/1 after 1s 2026-07-29T04:01:33.243Z
+[inbound] PASS sms/bind — conv1="+15553330000" conv2="+15553331111" want2="+15553331111" distinct=true
+[inbound] steady sms: going quiet for 30000ms before 3 messages at 4000ms spacing
+[inbound] settling: 1s 2026-07-29T04:01:34.244Z
+[inbound] settling: 2s 2026-07-29T04:01:35.244Z
+[inbound] settling: 3s 2026-07-29T04:01:36.245Z
+[inbound] settling: 4s 2026-07-29T04:01:37.245Z
+[inbound] settling: 5s 2026-07-29T04:01:38.245Z
+[inbound] settling: 6s 2026-07-29T04:01:39.245Z
+[inbound] settling: 7s 2026-07-29T04:01:40.245Z
+[inbound] settling: 8s 2026-07-29T04:01:41.246Z
+[inbound] settling: 9s 2026-07-29T04:01:42.246Z
+[inbound] settling: 10s 2026-07-29T04:01:43.246Z
+[inbound] settling: 11s 2026-07-29T04:01:44.246Z
+[inbound] settling: 12s 2026-07-29T04:01:45.246Z
+[inbound] settling: 13s 2026-07-29T04:01:46.247Z
+[inbound] settling: 14s 2026-07-29T04:01:47.247Z
+[inbound] settling: 15s 2026-07-29T04:01:48.247Z
+[inbound] settling: 16s 2026-07-29T04:01:49.247Z
+[inbound] settling: 17s 2026-07-29T04:01:50.248Z
+[inbound] settling: 18s 2026-07-29T04:01:51.248Z
+[inbound] settling: 19s 2026-07-29T04:01:52.248Z
+[inbound] settling: 20s 2026-07-29T04:01:53.248Z
+[inbound] settling: 21s 2026-07-29T04:01:54.249Z
+[inbound] settling: 22s 2026-07-29T04:01:55.249Z
+[inbound] settling: 23s 2026-07-29T04:01:56.249Z
+[inbound] settling: 24s 2026-07-29T04:01:57.249Z
+[inbound] settling: 25s 2026-07-29T04:01:58.250Z
+[inbound] settling: 26s 2026-07-29T04:01:59.250Z
+[inbound] settling: 27s 2026-07-29T04:02:00.250Z
+[inbound] settling: 28s 2026-07-29T04:02:01.250Z
+[inbound] settling: 29s 2026-07-29T04:02:02.251Z
+[inbound] settling: 30s 2026-07-29T04:02:03.251Z
+[inbound] settling: 1s 2026-07-29T04:02:04.305Z
+[inbound] settling: 2s 2026-07-29T04:02:05.305Z
+[inbound] settling: 3s 2026-07-29T04:02:06.305Z
+[inbound] settling: 4s 2026-07-29T04:02:07.306Z
+[inbound] settling: 1s 2026-07-29T04:02:08.360Z
+[inbound] settling: 2s 2026-07-29T04:02:09.360Z
+[inbound] settling: 3s 2026-07-29T04:02:10.360Z
+[inbound] settling: 4s 2026-07-29T04:02:11.360Z
+[inbound] awaiting f24c3-sms-steady2-231f7a3f: 0/1 after 1s 2026-07-29T04:02:12.413Z
+[inbound] PASS sms/steady — after 30000ms quiet: 3/3 steady-state messages arrived per-message=[1,1,1] (a startup-only matrix cannot see this class — F24-C3-H4 lost 5 of 6 here while every startup leg passed)
+[inbound] matrix telegram transport=poll tag=cbc4cc7f
+[inbound] awaiting f24c3-telegram-admit-cbc4cc7f: 0/1 after 1s 2026-07-29T04:02:13.471Z
+[inbound] PASS telegram/admit — POST rc=0 SUBMIT 200 {"ok":true,"update_id":1} | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+[inbound] PASS telegram/route — reply_text="F24C3\\-REPLY f24c3\\-telegram\\-admit\\-cbc4cc7f" carries_correlation=true conversation_id="24030001" want="24030001"
+[inbound] settling: 1s 2026-07-29T04:02:14.527Z
+[inbound] settling: 2s 2026-07-29T04:02:15.527Z
+[inbound] settling: 3s 2026-07-29T04:02:16.527Z
+[inbound] settling: 4s 2026-07-29T04:02:17.527Z
+[inbound] settling: 5s 2026-07-29T04:02:18.528Z
+[inbound] settling: 6s 2026-07-29T04:02:19.528Z
+[inbound] settling: 7s 2026-07-29T04:02:20.528Z
+[inbound] settling: 8s 2026-07-29T04:02:21.528Z
+[inbound] settling: 9s 2026-07-29T04:02:22.529Z
+[inbound] settling: 10s 2026-07-29T04:02:23.529Z
+[inbound] settling: 11s 2026-07-29T04:02:24.529Z
+[inbound] settling: 12s 2026-07-29T04:02:25.529Z
+[inbound] settling: 13s 2026-07-29T04:02:26.530Z
+[inbound] settling: 14s 2026-07-29T04:02:27.530Z
+[inbound] settling: 15s 2026-07-29T04:02:28.530Z
+[inbound] settling: 16s 2026-07-29T04:02:29.530Z
+[inbound] settling: 17s 2026-07-29T04:02:30.530Z
+[inbound] settling: 18s 2026-07-29T04:02:31.531Z
+[inbound] settling: 19s 2026-07-29T04:02:32.531Z
+[inbound] settling: 20s 2026-07-29T04:02:33.531Z
+[inbound] awaiting f24c3-telegram-dedupe-control-cbc4cc7f: 0/1 after 1s 2026-07-29T04:02:34.587Z
+[inbound] PASS telegram/dedupe — replay rc=0 at +1058ms (inside the 60000ms TTL) | arrivals before=1 after=1 (want equal) | turns before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+[inbound] settling: 1s 2026-07-29T04:02:35.652Z
+[inbound] settling: 2s 2026-07-29T04:02:36.652Z
+[inbound] settling: 3s 2026-07-29T04:02:37.652Z
+[inbound] settling: 4s 2026-07-29T04:02:38.653Z
+[inbound] settling: 5s 2026-07-29T04:02:39.653Z
+[inbound] settling: 6s 2026-07-29T04:02:40.653Z
+[inbound] settling: 7s 2026-07-29T04:02:41.653Z
+[inbound] settling: 8s 2026-07-29T04:02:42.653Z
+[inbound] settling: 9s 2026-07-29T04:02:43.654Z
+[inbound] settling: 10s 2026-07-29T04:02:44.654Z
+[inbound] settling: 11s 2026-07-29T04:02:45.654Z
+[inbound] settling: 12s 2026-07-29T04:02:46.654Z
+[inbound] settling: 13s 2026-07-29T04:02:47.654Z
+[inbound] settling: 14s 2026-07-29T04:02:48.655Z
+[inbound] settling: 15s 2026-07-29T04:02:49.655Z
+[inbound] settling: 16s 2026-07-29T04:02:50.655Z
+[inbound] settling: 17s 2026-07-29T04:02:51.655Z
+[inbound] settling: 18s 2026-07-29T04:02:52.656Z
+[inbound] settling: 19s 2026-07-29T04:02:53.656Z
+[inbound] settling: 20s 2026-07-29T04:02:54.656Z
+[inbound] PASS telegram/access — denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+[inbound] awaiting f24c3-telegram-bind-cbc4cc7f: 0/1 after 1s 2026-07-29T04:02:55.711Z
+[inbound] PASS telegram/bind — conv1="24030001" conv2="24030002" want2="24030002" distinct=true
+[inbound] steady telegram: going quiet for 30000ms before 3 messages at 4000ms spacing
+[inbound] settling: 1s 2026-07-29T04:02:56.713Z
+[inbound] settling: 2s 2026-07-29T04:02:57.713Z
+[inbound] settling: 3s 2026-07-29T04:02:58.713Z
+[inbound] settling: 4s 2026-07-29T04:02:59.713Z
+[inbound] settling: 5s 2026-07-29T04:03:00.713Z
+[inbound] settling: 6s 2026-07-29T04:03:01.713Z
+[inbound] settling: 7s 2026-07-29T04:03:02.714Z
+[inbound] settling: 8s 2026-07-29T04:03:03.714Z
+[inbound] settling: 9s 2026-07-29T04:03:04.714Z
+[inbound] settling: 10s 2026-07-29T04:03:05.714Z
+[inbound] settling: 11s 2026-07-29T04:03:06.714Z
+[inbound] settling: 12s 2026-07-29T04:03:07.715Z
+[inbound] settling: 13s 2026-07-29T04:03:08.715Z
+[inbound] settling: 14s 2026-07-29T04:03:09.715Z
+[inbound] settling: 15s 2026-07-29T04:03:10.715Z
+[inbound] settling: 16s 2026-07-29T04:03:11.716Z
+[inbound] settling: 17s 2026-07-29T04:03:12.716Z
+[inbound] settling: 18s 2026-07-29T04:03:13.716Z
+[inbound] settling: 19s 2026-07-29T04:03:14.716Z
+[inbound] settling: 20s 2026-07-29T04:03:15.716Z
+[inbound] settling: 21s 2026-07-29T04:03:16.717Z
+[inbound] settling: 22s 2026-07-29T04:03:17.717Z
+[inbound] settling: 23s 2026-07-29T04:03:18.717Z
+[inbound] settling: 24s 2026-07-29T04:03:19.717Z
+[inbound] settling: 25s 2026-07-29T04:03:20.718Z
+[inbound] settling: 26s 2026-07-29T04:03:21.718Z
+[inbound] settling: 27s 2026-07-29T04:03:22.718Z
+[inbound] settling: 28s 2026-07-29T04:03:23.718Z
+[inbound] settling: 29s 2026-07-29T04:03:24.719Z
+[inbound] settling: 30s 2026-07-29T04:03:25.719Z
+[inbound] settling: 1s 2026-07-29T04:03:26.773Z
+[inbound] settling: 2s 2026-07-29T04:03:27.773Z
+[inbound] settling: 3s 2026-07-29T04:03:28.773Z
+[inbound] settling: 4s 2026-07-29T04:03:29.773Z
+[inbound] settling: 1s 2026-07-29T04:03:30.827Z
+[inbound] settling: 2s 2026-07-29T04:03:31.827Z
+[inbound] settling: 3s 2026-07-29T04:03:32.828Z
+[inbound] settling: 4s 2026-07-29T04:03:33.828Z
+[inbound] awaiting f24c3-telegram-steady2-cbc4cc7f: 0/1 after 1s 2026-07-29T04:03:34.882Z
+[inbound] PASS telegram/steady — after 30000ms quiet: 3/3 steady-state messages arrived per-message=[1,1,1] (a startup-only matrix cannot see this class — F24-C3-H4 lost 5 of 6 here while every startup leg passed)
+[inbound] matrix matrix transport=poll tag=5b9786cf
+[inbound] awaiting f24c3-matrix-admit-5b9786cf: 0/1 after 1s 2026-07-29T04:03:35.939Z
+[inbound] PASS matrix/admit — POST rc=0 {"ok":true,"cursor":1,"event_id":"$f245b9786cf0001"} | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+[inbound] PASS matrix/route — reply_text="F24C3-REPLY f24c3-matrix-admit-5b9786cf" carries_correlation=true conversation_id="!f24room1:f24.invalid" want="!f24room1:f24.invalid"
+[inbound] settling: 1s 2026-07-29T04:03:36.994Z
+[inbound] settling: 2s 2026-07-29T04:03:37.995Z
+[inbound] settling: 3s 2026-07-29T04:03:38.995Z
+[inbound] settling: 4s 2026-07-29T04:03:39.995Z
+[inbound] settling: 5s 2026-07-29T04:03:40.996Z
+[inbound] settling: 6s 2026-07-29T04:03:41.996Z
+[inbound] settling: 7s 2026-07-29T04:03:42.996Z
+[inbound] settling: 8s 2026-07-29T04:03:43.996Z
+[inbound] settling: 9s 2026-07-29T04:03:44.997Z
+[inbound] settling: 10s 2026-07-29T04:03:45.997Z
+[inbound] settling: 11s 2026-07-29T04:03:46.997Z
+[inbound] settling: 12s 2026-07-29T04:03:47.997Z
+[inbound] settling: 13s 2026-07-29T04:03:48.997Z
+[inbound] settling: 14s 2026-07-29T04:03:49.998Z
+[inbound] settling: 15s 2026-07-29T04:03:50.998Z
+[inbound] settling: 16s 2026-07-29T04:03:51.998Z
+[inbound] settling: 17s 2026-07-29T04:03:52.998Z
+[inbound] settling: 18s 2026-07-29T04:03:53.998Z
+[inbound] settling: 19s 2026-07-29T04:03:54.999Z
+[inbound] settling: 20s 2026-07-29T04:03:55.999Z
+[inbound] awaiting f24c3-matrix-dedupe-control-5b9786cf: 0/1 after 1s 2026-07-29T04:03:57.053Z
+[inbound] PASS matrix/dedupe — replay rc=0 at +1056ms (inside the 60000ms TTL) | arrivals before=1 after=1 (want equal) | turns before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+[inbound] settling: 1s 2026-07-29T04:03:58.108Z
+[inbound] settling: 2s 2026-07-29T04:03:59.109Z
+[inbound] settling: 3s 2026-07-29T04:04:00.109Z
+[inbound] settling: 4s 2026-07-29T04:04:01.109Z
+[inbound] settling: 5s 2026-07-29T04:04:02.109Z
+[inbound] settling: 6s 2026-07-29T04:04:03.109Z
+[inbound] settling: 7s 2026-07-29T04:04:04.110Z
+[inbound] settling: 8s 2026-07-29T04:04:05.110Z
+[inbound] settling: 9s 2026-07-29T04:04:06.110Z
+[inbound] settling: 10s 2026-07-29T04:04:07.110Z
+[inbound] settling: 11s 2026-07-29T04:04:08.111Z
+[inbound] settling: 12s 2026-07-29T04:04:09.111Z
+[inbound] settling: 13s 2026-07-29T04:04:10.111Z
+[inbound] settling: 14s 2026-07-29T04:04:11.111Z
+[inbound] settling: 15s 2026-07-29T04:04:12.111Z
+[inbound] settling: 16s 2026-07-29T04:04:13.112Z
+[inbound] settling: 17s 2026-07-29T04:04:14.112Z
+[inbound] settling: 18s 2026-07-29T04:04:15.112Z
+[inbound] settling: 19s 2026-07-29T04:04:16.113Z
+[inbound] settling: 20s 2026-07-29T04:04:17.113Z
+[inbound] PASS matrix/access — denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+[inbound] awaiting f24c3-matrix-bind-5b9786cf: 0/1 after 1s 2026-07-29T04:04:18.170Z
+[inbound] PASS matrix/bind — conv1="!f24room1:f24.invalid" conv2="!f24room2:f24.invalid" want2="!f24room2:f24.invalid" distinct=true
+[inbound] steady matrix: going quiet for 30000ms before 3 messages at 4000ms spacing
+[inbound] settling: 1s 2026-07-29T04:04:19.171Z
+[inbound] settling: 2s 2026-07-29T04:04:20.172Z
+[inbound] settling: 3s 2026-07-29T04:04:21.172Z
+[inbound] settling: 4s 2026-07-29T04:04:22.172Z
+[inbound] settling: 5s 2026-07-29T04:04:23.172Z
+[inbound] settling: 6s 2026-07-29T04:04:24.173Z
+[inbound] settling: 7s 2026-07-29T04:04:25.173Z
+[inbound] settling: 8s 2026-07-29T04:04:26.173Z
+[inbound] settling: 9s 2026-07-29T04:04:27.173Z
+[inbound] settling: 10s 2026-07-29T04:04:28.174Z
+[inbound] settling: 11s 2026-07-29T04:04:29.174Z
+[inbound] settling: 12s 2026-07-29T04:04:30.174Z
+[inbound] settling: 13s 2026-07-29T04:04:31.174Z
+[inbound] settling: 14s 2026-07-29T04:04:32.175Z
+[inbound] settling: 15s 2026-07-29T04:04:33.175Z
+[inbound] settling: 16s 2026-07-29T04:04:34.175Z
+[inbound] settling: 17s 2026-07-29T04:04:35.175Z
+[inbound] settling: 18s 2026-07-29T04:04:36.175Z
+[inbound] settling: 19s 2026-07-29T04:04:37.176Z
+[inbound] settling: 20s 2026-07-29T04:04:38.176Z
+[inbound] settling: 21s 2026-07-29T04:04:39.176Z
+[inbound] settling: 22s 2026-07-29T04:04:40.176Z
+[inbound] settling: 23s 2026-07-29T04:04:41.177Z
+[inbound] settling: 24s 2026-07-29T04:04:42.177Z
+[inbound] settling: 25s 2026-07-29T04:04:43.177Z
+[inbound] settling: 26s 2026-07-29T04:04:44.177Z
+[inbound] settling: 27s 2026-07-29T04:04:45.177Z
+[inbound] settling: 28s 2026-07-29T04:04:46.178Z
+[inbound] settling: 29s 2026-07-29T04:04:47.178Z
+[inbound] settling: 30s 2026-07-29T04:04:48.178Z
+[inbound] settling: 1s 2026-07-29T04:04:49.231Z
+[inbound] settling: 2s 2026-07-29T04:04:50.231Z
+[inbound] settling: 3s 2026-07-29T04:04:51.232Z
+[inbound] settling: 4s 2026-07-29T04:04:52.232Z
+[inbound] settling: 1s 2026-07-29T04:04:53.287Z
+[inbound] settling: 2s 2026-07-29T04:04:54.287Z
+[inbound] settling: 3s 2026-07-29T04:04:55.287Z
+[inbound] settling: 4s 2026-07-29T04:04:56.287Z
+[inbound] awaiting f24c3-matrix-steady2-5b9786cf: 0/1 after 1s 2026-07-29T04:04:57.343Z
+[inbound] PASS matrix/steady — after 30000ms quiet: 3/3 steady-state messages arrived per-message=[1,1,1] (a startup-only matrix cannot see this class — F24-C3-H4 lost 5 of 6 here while every startup leg passed)
+[inbound] signal-cli fixture reached: control port=36411 pid=1595495
+[inbound] matrix signal transport=subprocess tag=9ad79742
+[inbound] awaiting f24c3-signal-admit-9ad79742: 0/1 after 1s 2026-07-29T04:04:58.376Z
+[inbound] PASS signal/admit — POST rc=0 {"ok":true,"timestamp":1700000001000,"pid":1595495} | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+[inbound] PASS signal/route — reply_text="F24C3-REPLY f24c3-signal-admit-9ad79742" carries_correlation=true conversation_id="+15552240001" want="+15552240001"
+[inbound] settling: 1s 2026-07-29T04:04:59.403Z
+[inbound] settling: 2s 2026-07-29T04:05:00.403Z
+[inbound] settling: 3s 2026-07-29T04:05:01.403Z
+[inbound] settling: 4s 2026-07-29T04:05:02.403Z
+[inbound] settling: 5s 2026-07-29T04:05:03.404Z
+[inbound] settling: 6s 2026-07-29T04:05:04.404Z
+[inbound] settling: 7s 2026-07-29T04:05:05.404Z
+[inbound] settling: 8s 2026-07-29T04:05:06.404Z
+[inbound] settling: 9s 2026-07-29T04:05:07.405Z
+[inbound] settling: 10s 2026-07-29T04:05:08.405Z
+[inbound] settling: 11s 2026-07-29T04:05:09.405Z
+[inbound] settling: 12s 2026-07-29T04:05:10.406Z
+[inbound] settling: 13s 2026-07-29T04:05:11.406Z
+[inbound] settling: 14s 2026-07-29T04:05:12.406Z
+[inbound] settling: 15s 2026-07-29T04:05:13.406Z
+[inbound] settling: 16s 2026-07-29T04:05:14.407Z
+[inbound] settling: 17s 2026-07-29T04:05:15.407Z
+[inbound] settling: 18s 2026-07-29T04:05:16.407Z
+[inbound] settling: 19s 2026-07-29T04:05:17.407Z
+[inbound] settling: 20s 2026-07-29T04:05:18.407Z
+[inbound] awaiting f24c3-signal-dedupe-control-9ad79742: 0/1 after 1s 2026-07-29T04:05:19.434Z
+[inbound] PASS signal/dedupe — replay rc=0 at +1028ms (inside the 60000ms TTL) | arrivals before=1 after=1 (want equal) | turns before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+[inbound] settling: 1s 2026-07-29T04:05:20.462Z
+[inbound] settling: 2s 2026-07-29T04:05:21.462Z
+[inbound] settling: 3s 2026-07-29T04:05:22.462Z
+[inbound] settling: 4s 2026-07-29T04:05:23.463Z
+[inbound] settling: 5s 2026-07-29T04:05:24.463Z
+[inbound] settling: 6s 2026-07-29T04:05:25.463Z
+[inbound] settling: 7s 2026-07-29T04:05:26.463Z
+[inbound] settling: 8s 2026-07-29T04:05:27.464Z
+[inbound] settling: 9s 2026-07-29T04:05:28.464Z
+[inbound] settling: 10s 2026-07-29T04:05:29.464Z
+[inbound] settling: 11s 2026-07-29T04:05:30.464Z
+[inbound] settling: 12s 2026-07-29T04:05:31.465Z
+[inbound] settling: 13s 2026-07-29T04:05:32.465Z
+[inbound] settling: 14s 2026-07-29T04:05:33.465Z
+[inbound] settling: 15s 2026-07-29T04:05:34.465Z
+[inbound] settling: 16s 2026-07-29T04:05:35.466Z
+[inbound] settling: 17s 2026-07-29T04:05:36.466Z
+[inbound] settling: 18s 2026-07-29T04:05:37.466Z
+[inbound] settling: 19s 2026-07-29T04:05:38.466Z
+[inbound] settling: 20s 2026-07-29T04:05:39.467Z
+[inbound] PASS signal/access — denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+[inbound] awaiting f24c3-signal-bind-9ad79742: 0/1 after 1s 2026-07-29T04:05:40.494Z
+[inbound] PASS signal/bind — conv1="+15552240001" conv2="+15552240002" want2="+15552240002" distinct=true
+[inbound] steady signal: going quiet for 30000ms before 3 messages at 4000ms spacing
+[inbound] settling: 1s 2026-07-29T04:05:41.495Z
+[inbound] settling: 2s 2026-07-29T04:05:42.495Z
+[inbound] settling: 3s 2026-07-29T04:05:43.495Z
+[inbound] settling: 4s 2026-07-29T04:05:44.496Z
+[inbound] settling: 5s 2026-07-29T04:05:45.496Z
+[inbound] settling: 6s 2026-07-29T04:05:46.496Z
+[inbound] settling: 7s 2026-07-29T04:05:47.496Z
+[inbound] settling: 8s 2026-07-29T04:05:48.496Z
+[inbound] settling: 9s 2026-07-29T04:05:49.497Z
+[inbound] settling: 10s 2026-07-29T04:05:50.497Z
+[inbound] settling: 11s 2026-07-29T04:05:51.497Z
+[inbound] settling: 12s 2026-07-29T04:05:52.497Z
+[inbound] settling: 13s 2026-07-29T04:05:53.498Z
+[inbound] settling: 14s 2026-07-29T04:05:54.498Z
+[inbound] settling: 15s 2026-07-29T04:05:55.498Z
+[inbound] settling: 16s 2026-07-29T04:05:56.498Z
+[inbound] settling: 17s 2026-07-29T04:05:57.498Z
+[inbound] settling: 18s 2026-07-29T04:05:58.499Z
+[inbound] settling: 19s 2026-07-29T04:05:59.499Z
+[inbound] settling: 20s 2026-07-29T04:06:00.499Z
+[inbound] settling: 21s 2026-07-29T04:06:01.499Z
+[inbound] settling: 22s 2026-07-29T04:06:02.500Z
+[inbound] settling: 23s 2026-07-29T04:06:03.500Z
+[inbound] settling: 24s 2026-07-29T04:06:04.500Z
+[inbound] settling: 25s 2026-07-29T04:06:05.500Z
+[inbound] settling: 26s 2026-07-29T04:06:06.500Z
+[inbound] settling: 27s 2026-07-29T04:06:07.501Z
+[inbound] settling: 28s 2026-07-29T04:06:08.501Z
+[inbound] settling: 29s 2026-07-29T04:06:09.501Z
+[inbound] settling: 30s 2026-07-29T04:06:10.501Z
+[inbound] settling: 1s 2026-07-29T04:06:11.529Z
+[inbound] settling: 2s 2026-07-29T04:06:12.529Z
+[inbound] settling: 3s 2026-07-29T04:06:13.529Z
+[inbound] settling: 4s 2026-07-29T04:06:14.529Z
+[inbound] settling: 1s 2026-07-29T04:06:15.556Z
+[inbound] settling: 2s 2026-07-29T04:06:16.557Z
+[inbound] settling: 3s 2026-07-29T04:06:17.557Z
+[inbound] settling: 4s 2026-07-29T04:06:18.557Z
+[inbound] awaiting f24c3-signal-steady2-9ad79742: 0/1 after 1s 2026-07-29T04:06:19.584Z
+[inbound] PASS signal/steady — after 30000ms quiet: 3/3 steady-state messages arrived per-message=[1,1,1] (a startup-only matrix cannot see this class — F24-C3-H4 lost 5 of 6 here while every startup leg passed)
+[inbound] imap poller seeded after 0s: select#1 exists=0 uid_next=1000 (watermark seeds to uid_next-1)
+[inbound] awaiting email turn f24c3-email-admit-96289250: 0/1 after 0s 2026-07-29T04:06:20.621Z
+[inbound] awaiting email turn f24c3-email-admit-96289250: 0/1 after 1s 2026-07-29T04:06:21.622Z
+[inbound] PASS email-admission/fetch — deliver={"ok":true,"uid":1000} | imap.uid_fetch before=0 after=1 (the shipped binary completed a TLS IMAP session against the fixture cert via SSL_CERT_FILE)
+[inbound] PASS email-admission/admit — turns(fixture-journal)=1 want=1 for an allowlisted From:
+[inbound] settling: 1s 2026-07-29T04:06:22.654Z
+[inbound] settling: 2s 2026-07-29T04:06:23.654Z
+[inbound] settling: 3s 2026-07-29T04:06:24.654Z
+[inbound] settling: 4s 2026-07-29T04:06:25.654Z
+[inbound] settling: 5s 2026-07-29T04:06:26.655Z
+[inbound] settling: 6s 2026-07-29T04:06:27.655Z
+[inbound] settling: 7s 2026-07-29T04:06:28.655Z
+[inbound] settling: 8s 2026-07-29T04:06:29.655Z
+[inbound] settling: 9s 2026-07-29T04:06:30.656Z
+[inbound] settling: 10s 2026-07-29T04:06:31.656Z
+[inbound] settling: 11s 2026-07-29T04:06:32.656Z
+[inbound] settling: 12s 2026-07-29T04:06:33.656Z
+[inbound] settling: 13s 2026-07-29T04:06:34.657Z
+[inbound] settling: 14s 2026-07-29T04:06:35.657Z
+[inbound] settling: 15s 2026-07-29T04:06:36.657Z
+[inbound] awaiting email turn f24c3-email-dedupe-control-96289250: 0/1 after 0s 2026-07-29T04:06:37.683Z
+[inbound] PASS email-admission/dedupe — replay of the SAME Message-ID at +2061ms (inside the 60000ms TTL) | turns before=1 after=1 (want equal) | positive-control fresh Message-ID turns=1 want=1
+[inbound] settling: 1s 2026-07-29T04:06:38.711Z
+[inbound] settling: 2s 2026-07-29T04:06:39.711Z
+[inbound] settling: 3s 2026-07-29T04:06:40.711Z
+[inbound] settling: 4s 2026-07-29T04:06:41.712Z
+[inbound] settling: 5s 2026-07-29T04:06:42.712Z
+[inbound] settling: 6s 2026-07-29T04:06:43.712Z
+[inbound] settling: 7s 2026-07-29T04:06:44.713Z
+[inbound] settling: 8s 2026-07-29T04:06:45.713Z
+[inbound] settling: 9s 2026-07-29T04:06:46.713Z
+[inbound] settling: 10s 2026-07-29T04:06:47.713Z
+[inbound] settling: 11s 2026-07-29T04:06:48.713Z
+[inbound] settling: 12s 2026-07-29T04:06:49.714Z
+[inbound] settling: 13s 2026-07-29T04:06:50.714Z
+[inbound] settling: 14s 2026-07-29T04:06:51.714Z
+[inbound] settling: 15s 2026-07-29T04:06:52.715Z
+[inbound] settling: 16s 2026-07-29T04:06:53.715Z
+[inbound] settling: 17s 2026-07-29T04:06:54.715Z
+[inbound] settling: 18s 2026-07-29T04:06:55.715Z
+[inbound] settling: 19s 2026-07-29T04:06:56.716Z
+[inbound] settling: 20s 2026-07-29T04:06:57.716Z
+[inbound] PASS email-admission/access — denied From: turns=0 want=0 | CONTROL admit-turn=1 want=1 | CONTROL the denied message WAS fetched (uid_fetch 3->4), so the zero is a refusal at the access gate and not an unread mailbox
+[inbound] awaiting email turn f24c3-email-bind-96289250: 0/1 after 0s 2026-07-29T04:06:58.744Z
+[inbound] PASS email-admission/second-sender-admitted — turns=1 want=1 for the second allowlisted sender. NOTE this is NOT the 24-C3 bind leg: the turns journal carries no conversation id, so it cannot show the two senders bound to DISTINCT sessions. That remains unproven for email.
+[inbound] steady state: 0/6 turns after 0s 2026-07-29T04:06:59.902Z
+[inbound] steady state: 0/6 turns after 1s 2026-07-29T04:07:00.904Z
+[inbound] steady state: 0/6 turns after 2s 2026-07-29T04:07:01.907Z
+[inbound] steady state: 1/6 turns after 3s 2026-07-29T04:07:02.909Z
+[inbound] steady state: 1/6 turns after 4s 2026-07-29T04:07:03.910Z
+[inbound] steady state: 1/6 turns after 5s 2026-07-29T04:07:04.912Z
+[inbound] steady state: 1/6 turns after 6s 2026-07-29T04:07:05.913Z
+[inbound] steady state: 2/6 turns after 7s 2026-07-29T04:07:06.914Z
+[inbound] steady state: 2/6 turns after 8s 2026-07-29T04:07:07.916Z
+[inbound] steady state: 2/6 turns after 9s 2026-07-29T04:07:08.918Z
+[inbound] steady state: 3/6 turns after 10s 2026-07-29T04:07:09.919Z
+[inbound] steady state: 3/6 turns after 11s 2026-07-29T04:07:10.921Z
+[inbound] steady state: 3/6 turns after 12s 2026-07-29T04:07:11.923Z
+[inbound] steady state: 4/6 turns after 13s 2026-07-29T04:07:12.923Z
+[inbound] steady state: 4/6 turns after 14s 2026-07-29T04:07:13.925Z
+[inbound] steady state: 4/6 turns after 15s 2026-07-29T04:07:14.926Z
+[inbound] steady state: 5/6 turns after 16s 2026-07-29T04:07:15.927Z
+[inbound] steady state: 5/6 turns after 17s 2026-07-29T04:07:16.928Z
+[inbound] steady state: 5/6 turns after 18s 2026-07-29T04:07:17.929Z
+[inbound] steady state: 5/6 turns after 19s 2026-07-29T04:07:18.930Z
+[inbound] PASS email-admission/steady-state — 6 messages delivered back-to-back | turns per message=[1,1,1,1,1,1] (want all 1) | delivered-and-never-fetched=0 want=0 | fetched-more-than-once=0 want=0 | imap.uid_fetch 5->11 | max_concurrent_imap_sessions=1 (2 would mean two pollers competing on one mailbox; 0 would mean nothing polled at all)
+[inbound] NOT MEASURED email: the reply could not leave: 86 SMTP session(s) reached the fixture, completed EHLO and STARTTLS, and were refused at certificate verification — "C08C3419F3790000:error:0A000416:SSL routines:ssl3_read_bytes:ssl/tls alert certificate unknown:../deps/openssl/openssl/ssl/record/rec_layer_s3.c:916:SSL alert number 46". SMTP is lettre/rustls (Cargo.toml:11, tokio1-rustls-tls) whose resolved deps include webpki-roots and NOT rustls-native-certs; webpki-roots is a compiled-in root set that reads no file and no environment variable, so SSL_CERT_FILE cannot redirect it on ANY platform. The five legs of 24-C3 are defined on arrivals, so they are NOT MEASURED for email — see email_admission_probe for what WAS established about the inbound half.
+[inbound] awaiting f24c3-matrix-restartpre-0d3685de: 0/1 after 1s 2026-07-29T04:07:20.045Z
+[inbound] PASS matrix-restart/pre-restart-live-control — arrivals=1 want=1 — establishes that this channel DOES receive on this run, so a zero after the restart cannot be explained by the channel never having worked
+[inbound] waiting for the binary to exit: 0s pid=1594399 2026-07-29T04:07:21.099Z
+[inbound] waiting for the binary to exit: 1s pid=1594399 2026-07-29T04:07:22.100Z
+[inbound] waiting for the binary to exit: 2s pid=1594399 2026-07-29T04:07:23.100Z
+[inbound] waiting for the binary to exit: 3s pid=1594399 2026-07-29T04:07:24.101Z
+[inbound] waiting for the binary to exit: 4s pid=1594399 2026-07-29T04:07:25.101Z
+[inbound] waiting for the binary to exit: 5s pid=1594399 2026-07-29T04:07:26.101Z
+[inbound] waiting for the binary to exit: 6s pid=1594399 2026-07-29T04:07:27.102Z
+[inbound] waiting for the binary to exit: 7s pid=1594399 2026-07-29T04:07:28.102Z
+[inbound] waiting for the binary to exit: 8s pid=1594399 2026-07-29T04:07:29.103Z
+[inbound] waiting for the binary to exit: 9s pid=1594399 2026-07-29T04:07:30.103Z
+[inbound] waiting for the binary to exit: 10s pid=1594399 2026-07-29T04:07:31.103Z
+[inbound] waiting for the binary to exit: 11s pid=1594399 2026-07-29T04:07:32.104Z
+[inbound] waiting for the binary to exit: 12s pid=1594399 2026-07-29T04:07:33.104Z
+[inbound] waiting for the binary to exit: 13s pid=1594399 2026-07-29T04:07:34.105Z
+[inbound] waiting for the binary to exit: 14s pid=1594399 2026-07-29T04:07:35.105Z
+[inbound] waiting for the binary to exit: 15s pid=1594399 2026-07-29T04:07:36.105Z
+[inbound] waiting for the binary to exit: 16s pid=1594399 2026-07-29T04:07:37.105Z
+[inbound] waiting for the binary to exit: 17s pid=1594399 2026-07-29T04:07:38.106Z
+[inbound] waiting for the binary to exit: 18s pid=1594399 2026-07-29T04:07:39.106Z
+[inbound] waiting for the binary to exit: 19s pid=1594399 2026-07-29T04:07:40.107Z
+[inbound] waiting for the binary to exit: 20s pid=1594399 2026-07-29T04:07:41.107Z
+[inbound] waiting for the binary to exit: 21s pid=1594399 2026-07-29T04:07:42.108Z
+[inbound] waiting for the binary to exit: 22s pid=1594399 2026-07-29T04:07:43.108Z
+[inbound] waiting for the binary to exit: 23s pid=1594399 2026-07-29T04:07:44.108Z
+[inbound] waiting for the binary to exit: 24s pid=1594399 2026-07-29T04:07:45.109Z
+[inbound] waiting for the binary to exit: 25s pid=1594399 2026-07-29T04:07:46.109Z
+[inbound] waiting for the binary to exit: 26s pid=1594399 2026-07-29T04:07:47.110Z
+[inbound] waiting for the binary to exit: 27s pid=1594399 2026-07-29T04:07:48.110Z
+[inbound] waiting for the binary to exit: 28s pid=1594399 2026-07-29T04:07:49.111Z
+[inbound] waiting for the binary to exit: 29s pid=1594399 2026-07-29T04:07:50.111Z
+[inbound] waiting for SIGKILL to land: 0s pid=1594399
+[inbound] binary pid=1594399 did not exit within 30s of SIGTERM; SIGKILLed, reaped=true
+[inbound] settling: 1s 2026-07-29T04:07:52.112Z
+[inbound] settling: 2s 2026-07-29T04:07:53.112Z
+[inbound] settling: 3s 2026-07-29T04:07:54.112Z
+[inbound] settling: 4s 2026-07-29T04:07:55.113Z
+[inbound] settling: 5s 2026-07-29T04:07:56.113Z
+[inbound] gap message injected while the binary was down: {"ok":true,"cursor":17,"event_id":"$f240d3685degap"}
+[inbound] settling: 1s 2026-07-29T04:07:57.218Z
+[inbound] settling: 2s 2026-07-29T04:07:58.218Z
+[inbound] settling: 3s 2026-07-29T04:07:59.218Z
+[inbound] settling: 4s 2026-07-29T04:08:00.219Z
+[inbound] settling: 5s 2026-07-29T04:08:01.219Z
+[inbound] PASS matrix-restart/binary-down-and-quiet-during-the-gap — stopped=true pid=1594399 exit_secs=30 (SIGKILL) | fixture sync_total before_stop=280 after_stop=280 after_gap=280 (want after_gap == after_stop: nothing polled while down)
+[inbound] runtime=json-stream argv=["--json-stream"]
+[inbound] waiting for the restarted binary to /sync: 0s syncs=280 2026-07-29T04:08:02.435Z
+[inbound] restarted binary issued a /sync after 1s (sync_total 280 -> 282, initial_sync_total 1 -> 1)
+[inbound] PASS matrix-restart/restarted-binary-resyncs — sync_total 280 -> 282 (want an increase: the restarted process must reach the homeserver at all). initial_sync_total 1 -> 1 — an increase here means it re-seeded; no increase means it resumed a persisted cursor
+[inbound] PASS matrix-restart/gap-event-was-served-to-the-restarted-process — the fixture answered 1 sync(s) after the restart; they carried [{"sync":281,"initial":false,"served":["$f240d3685degap"]}]; looking for $f240d3685degap -> true (on a incremental sync). THIS IS THE H2 EXCLUSION: without it a zero below could mean the fixture never served the message, which is a harness fault and not product loss. where=incremental means the adapter resumed and ASKED for the window it missed; where=initial means it was offered the window on a sync whose timeline it discards
+[inbound] awaiting f24c3-matrix-restartpost-0d3685de: 0/1 after 1s 2026-07-29T04:08:03.546Z
+[inbound] PASS matrix-restart/post-restart-live-control — arrivals=1 want=1 — a message sent AFTER the restart. Without this, a process that came up broken would look identical to one that dropped only the gap
+[inbound] PASS matrix-restart/gap-message-survives-the-restart — verdict=PASS arrivals=1 want>=1 for a message delivered to the homeserver while the binary was down and served back to the restarted process. CONTROLS HELD: pre-restart delivery=1, post-restart delivery=1, fixture served the event after the restart=true (on a incremental sync). A zero here is silent inbound loss across a restart: the cursor did not survive the process, so the first /sync after the restart was an initial sync whose timeline the replay guard discards — exactly the window that was missed.
+
+INBOUND MATRIX RED platform=linux runtime=json-stream legs=36/42 failed=0 not_measured=6 accounted=42/42 probe_failed=false restart_verdict=PASS arrivals_total=18 telegram_arrivals=6 mail_arrivals=0 matrix_arrivals=9 signal_arrivals=6 turns_total=48 instrument_fault=false
+  journal bytes: {"arrivals":4860,"turns":13677,"telegram":146700,"mail":240988,"matrix":80557,"signal":3160,"core_log":7363}
+  matrix fixture: events=11 syncs=283 initial_syncs=1 max_concurrent_sync=1 replies=9
+  signal fixture: spawns=2 [1595495,1748215] path=/root/h6-runs/run1/signal-cli
+  PASS matrix-restart/pre-restart-live-control: arrivals=1 want=1 — establishes that this channel DOES receive on this run, so a zero after the restart cannot be explained by the channel never having worked
+  PASS matrix-restart/binary-down-and-quiet-during-the-gap: stopped=true pid=1594399 exit_secs=30 (SIGKILL) | fixture sync_total before_stop=280 after_stop=280 after_gap=280 (want after_gap == after_stop: nothing polled while down)
+  PASS matrix-restart/restarted-binary-resyncs: sync_total 280 -> 282 (want an increase: the restarted process must reach the homeserver at all). initial_sync_total 1 -> 1 — an increase here means it re-seeded; no increase means it resumed a persisted cursor
+  PASS matrix-restart/gap-event-was-served-to-the-restarted-process: the fixture answered 1 sync(s) after the restart; they carried [{"sync":281,"initial":false,"served":["$f240d3685degap"]}]; looking for $f240d3685degap -> true (on a incremental sync). THIS IS THE H2 EXCLUSION: without it a zero below could mean the fixture never served the message, which is a harness fault and not product loss. where=incremental means the adapter resumed and ASKED for the window it missed; where=initial means it was offered the window on a sync whose timeline it discards
+  PASS matrix-restart/post-restart-live-control: arrivals=1 want=1 — a message sent AFTER the restart. Without this, a process that came up broken would look identical to one that dropped only the gap
+  PASS matrix-restart/gap-message-survives-the-restart: verdict=PASS arrivals=1 want>=1 for a message delivered to the homeserver while the binary was down and served back to the restarted process. CONTROLS HELD: pre-restart delivery=1, post-restart delivery=1, fixture served the event after the restart=true (on a incremental sync). A zero here is silent inbound loss across a restart: the cursor did not survive the process, so the first /sync after the restart was an initial sync whose timeline the replay guard discards — exactly the window that was missed.
+  MATRIX-RESTART VERDICT=PASS gap_event=$f240d3685degap gap_arrivals=1
+  mail fixture: mailbox=11 imap_sessions=325 max_concurrent_imap=1 smtp_delivered=0 smtp_failures=88
+    uid=1000 from=allowed@fixture.invalid fetches=1 seen_by=238
+    uid=1001 from=allowed@fixture.invalid fetches=1 seen_by=242
+    uid=1002 from=allowed@fixture.invalid fetches=1 seen_by=251
+    uid=1003 from=denied@fixture.invalid fetches=1 seen_by=256
+    uid=1004 from=second@fixture.invalid fetches=1 seen_by=266
+    uid=1005 from=allowed@fixture.invalid fetches=1 seen_by=271
+    uid=1006 from=allowed@fixture.invalid fetches=1 seen_by=271
+    uid=1007 from=allowed@fixture.invalid fetches=1 seen_by=271
+    uid=1008 from=allowed@fixture.invalid fetches=1 seen_by=271
+    uid=1009 from=allowed@fixture.invalid fetches=1 seen_by=271
+    uid=1010 from=allowed@fixture.invalid fetches=1 seen_by=271
+  PASS email-admission/fetch: deliver={"ok":true,"uid":1000} | imap.uid_fetch before=0 after=1 (the shipped binary completed a TLS IMAP session against the fixture cert via SSL_CERT_FILE)
+  PASS email-admission/admit: turns(fixture-journal)=1 want=1 for an allowlisted From:
+  PASS email-admission/dedupe: replay of the SAME Message-ID at +2061ms (inside the 60000ms TTL) | turns before=1 after=1 (want equal) | positive-control fresh Message-ID turns=1 want=1
+  PASS email-admission/access: denied From: turns=0 want=0 | CONTROL admit-turn=1 want=1 | CONTROL the denied message WAS fetched (uid_fetch 3->4), so the zero is a refusal at the access gate and not an unread mailbox
+  PASS email-admission/second-sender-admitted: turns=1 want=1 for the second allowlisted sender. NOTE this is NOT the 24-C3 bind leg: the turns journal carries no conversation id, so it cannot show the two senders bound to DISTINCT sessions. That remains unproven for email.
+  PASS email-admission/steady-state: 6 messages delivered back-to-back | turns per message=[1,1,1,1,1,1] (want all 1) | delivered-and-never-fetched=0 want=0 | fetched-more-than-once=0 want=0 | imap.uid_fetch 5->11 | max_concurrent_imap_sessions=1 (2 would mean two pollers competing on one mailbox; 0 would mean nothing polled at all)
+  NOT-MEASURED email/admit: the reply could not leave: 86 SMTP session(s) reached the fixture, completed EHLO and STARTTLS, and were refused at certificate verification — "C08C3419F3790000:error:0A000416:SSL routines:ssl3_read_bytes:ssl/tls alert certificate unknown:../deps/openssl/openssl/ssl/record/rec_layer_s3.c:916:SSL alert number 46". SMTP is lettre/rustls (Cargo.toml:11, tokio1-rustls-tls) whose resolved deps include webpki-roots and NOT rustls-native-certs; webpki-roots is a compiled-in root set that reads no file and no environment variable, so SSL_CERT_FILE cannot redirect it on ANY platform. The five legs of 24-C3 are defined on arrivals, so they are NOT MEASURED for email — see email_admission_probe for what WAS established about the inbound half.
+  NOT-MEASURED email/dedupe: the reply could not leave: 86 SMTP session(s) reached the fixture, completed EHLO and STARTTLS, and were refused at certificate verification — "C08C3419F3790000:error:0A000416:SSL routines:ssl3_read_bytes:ssl/tls alert certificate unknown:../deps/openssl/openssl/ssl/record/rec_layer_s3.c:916:SSL alert number 46". SMTP is lettre/rustls (Cargo.toml:11, tokio1-rustls-tls) whose resolved deps include webpki-roots and NOT rustls-native-certs; webpki-roots is a compiled-in root set that reads no file and no environment variable, so SSL_CERT_FILE cannot redirect it on ANY platform. The five legs of 24-C3 are defined on arrivals, so they are NOT MEASURED for email — see email_admission_probe for what WAS established about the inbound half.
+  NOT-MEASURED email/access: the reply could not leave: 86 SMTP session(s) reached the fixture, completed EHLO and STARTTLS, and were refused at certificate verification — "C08C3419F3790000:error:0A000416:SSL routines:ssl3_read_bytes:ssl/tls alert certificate unknown:../deps/openssl/openssl/ssl/record/rec_layer_s3.c:916:SSL alert number 46". SMTP is lettre/rustls (Cargo.toml:11, tokio1-rustls-tls) whose resolved deps include webpki-roots and NOT rustls-native-certs; webpki-roots is a compiled-in root set that reads no file and no environment variable, so SSL_CERT_FILE cannot redirect it on ANY platform. The five legs of 24-C3 are defined on arrivals, so they are NOT MEASURED for email — see email_admission_probe for what WAS established about the inbound half.
+  NOT-MEASURED email/bind: the reply could not leave: 86 SMTP session(s) reached the fixture, completed EHLO and STARTTLS, and were refused at certificate verification — "C08C3419F3790000:error:0A000416:SSL routines:ssl3_read_bytes:ssl/tls alert certificate unknown:../deps/openssl/openssl/ssl/record/rec_layer_s3.c:916:SSL alert number 46". SMTP is lettre/rustls (Cargo.toml:11, tokio1-rustls-tls) whose resolved deps include webpki-roots and NOT rustls-native-certs; webpki-roots is a compiled-in root set that reads no file and no environment variable, so SSL_CERT_FILE cannot redirect it on ANY platform. The five legs of 24-C3 are defined on arrivals, so they are NOT MEASURED for email — see email_admission_probe for what WAS established about the inbound half.
+  NOT-MEASURED email/route: the reply could not leave: 86 SMTP session(s) reached the fixture, completed EHLO and STARTTLS, and were refused at certificate verification — "C08C3419F3790000:error:0A000416:SSL routines:ssl3_read_bytes:ssl/tls alert certificate unknown:../deps/openssl/openssl/ssl/record/rec_layer_s3.c:916:SSL alert number 46". SMTP is lettre/rustls (Cargo.toml:11, tokio1-rustls-tls) whose resolved deps include webpki-roots and NOT rustls-native-certs; webpki-roots is a compiled-in root set that reads no file and no environment variable, so SSL_CERT_FILE cannot redirect it on ANY platform. The five legs of 24-C3 are defined on arrivals, so they are NOT MEASURED for email — see email_admission_probe for what WAS established about the inbound half.
+  NOT-MEASURED email/steady: the reply could not leave: 86 SMTP session(s) reached the fixture, completed EHLO and STARTTLS, and were refused at certificate verification — "C08C3419F3790000:error:0A000416:SSL routines:ssl3_read_bytes:ssl/tls alert certificate unknown:../deps/openssl/openssl/ssl/record/rec_layer_s3.c:916:SSL alert number 46". SMTP is lettre/rustls (Cargo.toml:11, tokio1-rustls-tls) whose resolved deps include webpki-roots and NOT rustls-native-certs; webpki-roots is a compiled-in root set that reads no file and no environment variable, so SSL_CERT_FILE cannot redirect it on ANY platform. The five legs of 24-C3 are defined on arrivals, so they are NOT MEASURED for email — see email_admission_probe for what WAS established about the inbound half.
+  telegram fixture: submitted=8 still_pending=[] polls=557 max_concurrent_getupdates=1
+  PASS slack/admit: POST rc=0 HTTP 200 | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+  PASS slack/route: reply_text="F24C3-REPLY f24c3-slack-admit-6e0b73a5" carries_correlation=true conversation_id="D24C3ONE" want="D24C3ONE"
+  PASS slack/dedupe: replay rc=0 at +1054ms (inside the 60000ms TTL) | arrivals before=1 after=1 (want equal) | turns before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+  PASS slack/access: denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+  PASS slack/bind: conv1="D24C3ONE" conv2="D24C3TWO" want2="D24C3TWO" distinct=true
+  PASS slack/steady: after 30000ms quiet: 3/3 steady-state messages arrived per-message=[1,1,1] (a startup-only matrix cannot see this class — F24-C3-H4 lost 5 of 6 here while every startup leg passed)
+  PASS whatsapp/admit: POST rc=0 HTTP 200 | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+  PASS whatsapp/route: reply_text="F24C3-REPLY f24c3-whatsapp-admit-afc8da4c" carries_correlation=true conversation_id="15552220000" want="15552220000"
+  PASS whatsapp/dedupe: replay rc=0 at +1054ms (inside the 60000ms TTL) | arrivals before=1 after=1 (want equal) | turns before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+  PASS whatsapp/access: denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+  PASS whatsapp/bind: conv1="15552220000" conv2="15552221111" want2="15552221111" distinct=true
+  PASS whatsapp/steady: after 30000ms quiet: 3/3 steady-state messages arrived per-message=[1,1,1] (a startup-only matrix cannot see this class — F24-C3-H4 lost 5 of 6 here while every startup leg passed)
+  PASS sms/admit: POST rc=0 HTTP 200 | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+  PASS sms/route: reply_text="F24C3-REPLY f24c3-sms-admit-231f7a3f" carries_correlation=true conversation_id="+15553330000" want="+15553330000"
+  PASS sms/dedupe: replay rc=0 at +1055ms (inside the 60000ms TTL) | arrivals before=1 after=1 (want equal) | turns before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+  PASS sms/access: denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+  PASS sms/bind: conv1="+15553330000" conv2="+15553331111" want2="+15553331111" distinct=true
+  PASS sms/steady: after 30000ms quiet: 3/3 steady-state messages arrived per-message=[1,1,1] (a startup-only matrix cannot see this class — F24-C3-H4 lost 5 of 6 here while every startup leg passed)
+  PASS telegram/admit: POST rc=0 SUBMIT 200 {"ok":true,"update_id":1} | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+  PASS telegram/route: reply_text="F24C3\\-REPLY f24c3\\-telegram\\-admit\\-cbc4cc7f" carries_correlation=true conversation_id="24030001" want="24030001"
+  PASS telegram/dedupe: replay rc=0 at +1058ms (inside the 60000ms TTL) | arrivals before=1 after=1 (want equal) | turns before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+  PASS telegram/access: denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+  PASS telegram/bind: conv1="24030001" conv2="24030002" want2="24030002" distinct=true
+  PASS telegram/steady: after 30000ms quiet: 3/3 steady-state messages arrived per-message=[1,1,1] (a startup-only matrix cannot see this class — F24-C3-H4 lost 5 of 6 here while every startup leg passed)
+  PASS matrix/admit: POST rc=0 {"ok":true,"cursor":1,"event_id":"$f245b9786cf0001"} | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+  PASS matrix/route: reply_text="F24C3-REPLY f24c3-matrix-admit-5b9786cf" carries_correlation=true conversation_id="!f24room1:f24.invalid" want="!f24room1:f24.invalid"
+  PASS matrix/dedupe: replay rc=0 at +1056ms (inside the 60000ms TTL) | arrivals before=1 after=1 (want equal) | turns before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+  PASS matrix/access: denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+  PASS matrix/bind: conv1="!f24room1:f24.invalid" conv2="!f24room2:f24.invalid" want2="!f24room2:f24.invalid" distinct=true
+  PASS matrix/steady: after 30000ms quiet: 3/3 steady-state messages arrived per-message=[1,1,1] (a startup-only matrix cannot see this class — F24-C3-H4 lost 5 of 6 here while every startup leg passed)
+  PASS signal/admit: POST rc=0 {"ok":true,"timestamp":1700000001000,"pid":1595495} | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+  PASS signal/route: reply_text="F24C3-REPLY f24c3-signal-admit-9ad79742" carries_correlation=true conversation_id="+15552240001" want="+15552240001"
+  PASS signal/dedupe: replay rc=0 at +1028ms (inside the 60000ms TTL) | arrivals before=1 after=1 (want equal) | turns before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+  PASS signal/access: denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+  PASS signal/bind: conv1="+15552240001" conv2="+15552240002" want2="+15552240002" distinct=true
+  PASS signal/steady: after 30000ms quiet: 3/3 steady-state messages arrived per-message=[1,1,1] (a startup-only matrix cannot see this class — F24-C3-H4 lost 5 of 6 here while every startup leg passed)

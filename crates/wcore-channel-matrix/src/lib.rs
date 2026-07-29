@@ -17,6 +17,7 @@ pub mod config;
 pub mod error;
 mod rest;
 mod sync;
+mod sync_store;
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -189,6 +190,10 @@ impl Channel for MatrixChannel {
             user_id: self.config.user_id.clone(),
             inbox: Arc::clone(&self.inbox),
             shutdown: rx,
+            // F24-C3-H6 — the `/sync` cursor survives this process, keyed by
+            // the account it belongs to, so a restart resumes instead of
+            // discarding the downtime window as an initial sync.
+            state_path: sync_store::state_path(&self.api_base, &self.config.user_id, &self.name),
         };
         let handle = tokio::spawn(sync::sync_loop(args));
         self.poll_handle = Some(handle);
