@@ -1,0 +1,152 @@
+=== F25C1 FOUR SURFACES, ONE COMMIT ===
+2026-07-29T13:33:16Z
+controller: Ubuntu-2404-noble-amd64-base
+tree HEAD:  05a493a2de45d003d99aecbecdff8cc9458fb678
+binary sha: b61916e19cd299c548248603680cede6e5d3ad3b83d06bcf8bb54f0b2b5d0a5d
+
+--- availability, read back from the product
+BACKEND    KIND       AVAILABLE    PROBE BASIS            DETAIL
+local      local      yes          sandbox_backend_probe  platform containment backend 'bubblewrap' probed available
+container  container  yes          daemon_ping            container daemon answered a version ping: server 29.2.1
+ssh        ssh        yes          ssh_handshake          ssh handshake to f25c1-far reached the far end
+cloud      cloud      yes          vendor_api_call        vendor API answered 200 for app wayland-f25-test machine listing
+
+Availability is answered from a real probe in every row — the container backend from a daemon ping rather than socket presence, the ssh backend from a real handshake, the cloud backend from an authenticated API call. A backend with no credential reports NO and names what is missing; it never falls back to another backend.
+LIST_EXIT=0
+
+=== RUN local (built-in reference task, byte-identical on every surface) ===
+task:        f25-reference
+backend:     local
+transport:   Local via localhost
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: NotApplicable
+wall ms:     1
+receipt:     /root/f25c1-evidence/four-receipt-local.json
+RUN_local_EXIT=0
+
+=== RUN container (built-in reference task, byte-identical on every surface) ===
+task:        f25-reference
+backend:     container
+transport:   Container via wayland-f25-f25-reference
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: NotApplicable
+wall ms:     1303
+receipt:     /root/f25c1-evidence/four-receipt-container.json
+RUN_container_EXIT=0
+
+=== RUN ssh (built-in reference task, byte-identical on every surface) ===
+task:        f25-reference
+backend:     ssh
+transport:   Ssh via f25c1-far
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: NotApplicable
+wall ms:     206
+receipt:     /root/f25c1-evidence/four-receipt-ssh.json
+RUN_ssh_EXIT=0
+
+=== RUN cloud (built-in reference task, byte-identical on every surface) ===
+task:        f25-reference
+backend:     cloud
+transport:   Cloud via 811d192c512138
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: Observed { transitions: ["created:created", "started:started", "suspended:suspended", "resumed:started previous_state=suspended", "ram-witness before=f25-ram-witness-f25-reference-nonce boot_id=d8a370c1-eec2-4575-97ab-338b139e9958 uptime=1s / after=f25-ram-witness-f25-reference-nonce boot_id=d8a370c1-eec2-4575-97ab-338b139e9958 uptime=2s"] }
+wall ms:     8628
+receipt:     /root/f25c1-evidence/four-receipt-cloud.json
+RUN_cloud_EXIT=0
+
+=== NORMALIZED EQUIVALENCE DIFF — all four, in ONE invocation ===
+receipts compared: 4
+  local      transport=local      endpoint=localhost wall_ms=1
+  container  transport=container  endpoint=wayland-f25-f25-reference wall_ms=1303
+  ssh        transport=ssh        endpoint=f25c1-far wall_ms=206
+  cloud      transport=cloud      endpoint=811d192c512138 wall_ms=8628
+
+EXPECTED-DIVERGENT fields (excluded from the normalized body by design):
+  local      backend.backend_id     local
+  local      backend.instance_id    b35889dfdf064c6786e45210a7f23b01
+  local      backend.version        0.12.25
+  local      backend.key_id         39ef451e367b12dbd4718c5cba9396270e30054dcf920d267c7b17ed5e760c28
+  local      transport.kind         local
+  local      transport.endpoint     localhost
+  local      timing.wall_ms         1
+  local      hibernation            {"kind":"not_applicable"}
+  container  backend.backend_id     container
+  container  backend.instance_id    b35889dfdf064c6786e45210a7f23b01
+  container  backend.version        0.12.25
+  container  backend.key_id         581ccf4b979b0305fe79969b0e028578b2aba958b85f72cd8587dbfbc0bb45bd
+  container  transport.kind         container
+  container  transport.endpoint     wayland-f25-f25-reference
+  container  timing.wall_ms         1303
+  container  hibernation            {"kind":"not_applicable"}
+  ssh        backend.backend_id     ssh
+  ssh        backend.instance_id    b35889dfdf064c6786e45210a7f23b01
+  ssh        backend.version        0.12.25
+  ssh        backend.key_id         a74ca61011f4c9f6f3e0a8844983475ee97f451343c94a551616dc39c9a7988f
+  ssh        transport.kind         ssh
+  ssh        transport.endpoint     f25c1-far
+  ssh        timing.wall_ms         206
+  ssh        hibernation            {"kind":"not_applicable"}
+  cloud      backend.backend_id     cloud
+  cloud      backend.instance_id    b35889dfdf064c6786e45210a7f23b01
+  cloud      backend.version        0.12.25
+  cloud      backend.key_id         7828c85769674de0328a6f3f17d723fe948591c5422a179701bdb6969299ae16
+  cloud      transport.kind         cloud
+  cloud      transport.endpoint     811d192c512138
+  cloud      timing.wall_ms         8628
+  cloud      hibernation            {"kind":"observed","transitions":["created:created","started:started","suspended:suspended","resumed:started previous_state=suspended","ram-witness before=f25-ram-witness-f25-reference-nonce boot_id=d8a370c1-eec2-4575-97ab-338b139e9958 uptime=1s / after=f25-ram-witness-f25-reference-nonce boot_id=d8a370c1-eec2-4575-97ab-338b139e9958 uptime=2s"]}
+
+NORMALIZED DIFF: EQUIVALENT
+The four normalized bodies agree on task digests, resource budget, backend ceiling, event ordering and content digests, artifact digest, terminal status, exposed-secret names and egress decision.
+DIFF_EXIT=0
+
+=== orphan scan for the reference nonce, after all four ===
+orphan scan for task f25-reference (nonce f25-reference-nonce)
+
+  backend    cloud
+  mechanism  NONE: stopping a cloud machine is a vendor API call, not a kernel mechanism. ProcessTreeMechanism has no variant for it, and if the API call does not land the machine keeps running
+  method     GET /apps/<app>/machines?metadata.wayland_task_nonce=<nonce>
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    container
+  mechanism  kernel-backed: ProcessTreeMechanism::DockerContainerReap — the container daemon force-removing the container and its whole tree
+  method     docker ps -a --filter label=wayland.task.nonce=<nonce>
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    local
+  mechanism  kernel-backed: ProcessTreeMechanism::LinuxPidNamespaceReap — the platform sandbox backend's PID namespace, with /proc descendant discovery
+  method     live-task registry UNION a real enumeration of the host process table
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    ssh
+  mechanism  BEST-EFFORT: a remote process group killed over the same ssh transport. ProcessTreeMechanism has NO variant that crosses an ssh connection, so nothing kernel-backed on the controller reaps the far end; a remote child that calls setsid survives
+  method     remote `ps -eo pid,args` filtered on the task nonce
+  count      0 (MEASURED)
+  rows       (none)
+
+TOTAL: 0 orphan(s) measured across 4 backend(s); 0 surface(s) NOT measured
+SCAN_EXIT=0
+
+=== F25C1-FOUR-SURFACE LEDGER ===
+F25C1-SC1-ONE-COMMIT: 05a493a2de45d003d99aecbecdff8cc9458fb678
+F25C1-SC1-LOCAL: exit=0
+F25C1-SC1-CONTAINER: exit=0
+F25C1-SC1-SSH: exit=0 target=f25c1-far (containerised sshd, separate namespace, same physical host)
+F25C1-SC1-CLOUD: exit=0 app=wayland-f25-test
+F25C1-SC1-DIFF: exit=0 (0 = EQUIVALENT)
+F25C1-SC1-ORPHANS: exit=0 (0 = none found and every surface measurable)
+2026-07-29T13:33:28Z
