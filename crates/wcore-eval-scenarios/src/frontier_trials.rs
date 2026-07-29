@@ -1091,10 +1091,7 @@ mod tests {
         assert!((m.estimate - 0.5).abs() < f64::EPSILON);
 
         let sha = "a".repeat(64);
-        let compiled = vec![
-            record(0, true, Some(&sha)),
-            record(1, true, Some(&sha)),
-        ];
+        let compiled = vec![record(0, true, Some(&sha)), record(1, true, Some(&sha))];
         let m = fold(&compiled).expect("an all-v2 leg must fold");
         assert_eq!(m.trials, 2);
         assert!((m.estimate - 1.0).abs() < f64::EPSILON);
@@ -1187,7 +1184,10 @@ mod tests {
     /// The guard must not swallow the zero-trial refusal it sits in front of.
     #[test]
     fn the_dialect_guard_does_not_mask_the_zero_trial_refusal() {
-        assert!(matches!(fold(&[]), Err(FrontierTrialError::ZeroTrials { .. })));
+        assert!(matches!(
+            fold(&[]),
+            Err(FrontierTrialError::ZeroTrials { .. })
+        ));
     }
 
     /// A v1 record on disk has no `dialect` key at all. It must still deserialize, or every

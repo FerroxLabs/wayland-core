@@ -903,8 +903,7 @@ fn run_trials(command: TrialsCommand) -> anyhow::Result<String> {
                 (Some(t), Some(c), Some(m)) => {
                     let translation: TranslationV1 = serde_json::from_slice(&std::fs::read(t)?)?;
                     let corpus: ToolSchemaCorpusV1 = serde_json::from_slice(&std::fs::read(c)?)?;
-                    let manifest: DiscoveryManifestV1 =
-                        serde_json::from_slice(&std::fs::read(m)?)?;
+                    let manifest: DiscoveryManifestV1 = serde_json::from_slice(&std::fs::read(m)?)?;
                     // The harness label comes from the INVOCATION we are about to spawn, never
                     // from the translation — otherwise the thing being checked would be
                     // supplying its own answer.
@@ -1017,9 +1016,11 @@ fn absolutize_path_arguments(steps: &[OpenAiStep], workspace: &Path) -> Vec<Open
                         obj.iter()
                             .map(|(k, v)| {
                                 let out = match v.as_str() {
-                                    Some(s) if is_bare_relative_path(s) => serde_json::Value::String(
-                                        workspace.join(s).display().to_string(),
-                                    ),
+                                    Some(s) if is_bare_relative_path(s) => {
+                                        serde_json::Value::String(
+                                            workspace.join(s).display().to_string(),
+                                        )
+                                    }
                                     _ => v.clone(),
                                 };
                                 (k.clone(), out)
@@ -1046,7 +1047,9 @@ fn is_bare_relative_path(value: &str) -> bool {
         && !value.contains('\\')
         && !value.contains(char::is_whitespace)
         && !value.contains('*')
-        && value.rfind('.').is_some_and(|i| i > 0 && i + 1 < value.len())
+        && value
+            .rfind('.')
+            .is_some_and(|i| i > 0 && i + 1 < value.len())
 }
 
 fn steps_for(

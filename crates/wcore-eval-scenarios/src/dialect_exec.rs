@@ -258,12 +258,7 @@ mod tests {
     fn string_param(names: &[&str]) -> serde_json::Value {
         let props: serde_json::Map<String, serde_json::Value> = names
             .iter()
-            .map(|n| {
-                (
-                    (*n).to_string(),
-                    serde_json::json!({ "type": "string" }),
-                )
-            })
+            .map(|n| ((*n).to_string(), serde_json::json!({ "type": "string" })))
             .collect();
         serde_json::json!({
             "type": "object",
