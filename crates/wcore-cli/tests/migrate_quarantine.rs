@@ -462,6 +462,16 @@ async fn t5_quarantined_content_is_absent_from_what_the_agent_would_load() {
         !names.iter().any(|n| n == "repo-status"),
         "the quarantined skill must be absent from what the agent would load; got {names:?}"
     );
+    // F26-GRADE-H1, the other half of the same enumeration: the DATA skill from
+    // the same import IS listed. This is the strongest available statement that
+    // the import is real — not "a file exists" but "the real loader will hand
+    // this skill to the agent" — and it is a live positive control for the
+    // absence directly above, taken in the SAME enumeration rather than a
+    // separate one that could differ.
+    assert!(
+        names.iter().any(|n| n == "release-notes"),
+        "an imported data skill must be loadable by the real loader; got {names:?}"
+    );
 
     // Positive control for the ENUMERATION itself: promote the same item and
     // the same loader now lists it. Without this, "absent" would be equally
