@@ -265,6 +265,61 @@ distinguishable by *where* they land: instance exhaustion panics **inside** a ru
 (`TRY 1 FAIL`), whereas fd exhaustion kills the **spawn** (`TRY 1 XFAIL`, 0.000s). Three tests
 is not 18-22, so this is a contributor, not the explanation.
 
+---
+
+## MEASUREMENT 4 — the multi-lane condition does NOT reproduce it either
+
+4 concurrent copies of the suite at default concurrency (= what "five lanes live" looks
+like), 2 rounds, `ulimit -n 1024`, `nproc` 96, `inotify max_user_instances` 512:
+
+```
+round=1 copy=1..4  emfile=0 execfail1=0 realfail1=0  2172 passed  (34.7-35.4s)
+round=2 copy=1..4  emfile=0 execfail1=0 realfail1=0  2172 passed  (34.6-35.4s)
+```
+
+8/8 clean. Load reached 31.27 — real contention, wall time rose ~11%, zero failures.
+
+Running total of clean runs at **default** concurrency on this tree: **17/17, 0 failures.**
+I could not reproduce 22/18 at default concurrency, and I am not going to claim I did.
+
+## THE FIX
+
+`scripts/fd-budget.sh` (new) + two additive lines in `justfile` (`test`, `test-ci`).
+
+It computes demand (`4 x test-threads + 192`, from the measured 2.9 fds/thread plus
+headroom), raises the soft `RLIMIT_NOFILE` toward the hard limit to meet it, and if it
+cannot, **refuses to run and names the resource** rather than letting the run proceed into a
+nondeterministic EMFILE regime.
+
+- **It is not serialisation.** Concurrency is untouched; no test is serialised, no
+  `#[serial]` added, no test-group created, `test-threads = "num-cpus"` left alone.
+- **It is a no-op on every host we currently use.** hetzner needs 576 of its 1024; CI
+  runners are small. So it changes no current behaviour — which also means it is not
+  what makes my post-fix runs green, and I say so in the counterfactual below.
+- Windows is an explicit pass-through: no `RLIMIT_NOFILE` governs spawn there.
+- `just -n test-ci` verified to expand to
+  `scripts/fd-budget.sh vx cargo nextest run --workspace --profile ci --no-fail-fast`.
+
+### Self-test — four assertions, and it has actually failed
+
+`bash scripts/fd-budget.sh --self-test`
+
+```
+self-test setup: constrained budget established, soft/hard = 64/64
+self-test 1 PASS: adequate budget -> guard passes, command runs
+self-test 2 PASS: inadequate budget -> guard fails loudly, command suppressed
+self-test 3 PASS: unguarded path silently proceeds on the same budget the guard rejects
+fd-budget self-test: 3/3 PASS
+```
+
+Assertion 3 is the one that proves the guard does anything — without it, 1 and 2 pass on a
+guard that is never consulted. The **setup** assertion was added because the first revision
+of this self-test reported a false FAIL on assertion 2: it lowered the *hard* limit before
+the *soft* limit, which is an error that leaves the hard limit untouched, so the guard
+correctly raised the soft limit back up and ran the command. The instrument was repaired in
+this lane rather than written up and left (LANE-BRIEF §6b-ii), and the setup assertion now
+makes that failure mode impossible to have silently.
+
 ## Open questions I must not paper over
 
 - Does nextest ever run more than one test per process here? (`--lib` is one binary; I
