@@ -62,6 +62,99 @@ trap cleanup EXIT
 say() { printf '%s\n' "$*"; }
 fail() { say "FAIL: $*"; rc_overall=1; }
 
+# --- the compile detector, and why it is a function -------------------------
+#
+# The FIRST version of this check was `grep -qE '^error' <log>` and it was
+# structurally incapable of ever passing. `cargo test` prints
+#
+#     error: test failed, to rerun pass `-p wcore-cli --test migrate_quarantine`
+#
+# whenever ANY test fails — which is the exact condition this script exists to
+# produce. So the check reported "the mutant did not compile" on a mutant that
+# had plainly compiled and run 33 tests, and it would have done so on every
+# successful run forever.
+#
+# The repair reads a POSITIVE signal instead of scanning for a negative one:
+# the test harness prints `running <N> tests` only after the binary was built
+# and started. Compiler errors are still counted, but cargo's own post-run
+# summary lines are excluded by name rather than by hope.
+#
+# `--self-test` exercises this on three synthetic logs; see `self_test()`.
+compiled_ok() {
+  local log="$1"
+  local harness compile_errs
+  harness="$(grep -cE '^running [0-9]+ tests' "$log")"
+  compile_errs="$(grep -E '^error' "$log" \
+    | grep -vE '^error: test failed' \
+    | grep -vE "^error: process didn't exit successfully" \
+    | grep -cE '.')"
+  [ "$harness" -ge 1 ] && [ "$compile_errs" -eq 0 ]
+}
+
+# The pre-repair matcher, kept ONLY so the self-test can demonstrate that the
+# repair changes an outcome. Never used for a real reading.
+compiled_ok_old_broken() {
+  ! grep -qE '^error' "$1"
+}
+
+self_test() {
+  local d rc
+  d="$(mktemp -d)"
+  rc=0
+
+  # A1 known-positive: a build that SUCCEEDED and then had failing tests. This
+  # is the exact log shape the real run produces, and the shape the old matcher
+  # got wrong.
+  cat >"$d/pos.log" <<'LOG'
+   Compiling wcore-cli v0.12.25
+warning: unused import: `x`
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.78s
+     Running tests/migrate_quarantine.rs
+running 33 tests
+test t5_quarantined_content_is_absent_from_what_the_agent_would_load ... FAILED
+test result: FAILED. 23 passed; 10 failed; 0 ignored; 0 measured; 0 filtered out
+error: test failed, to rerun pass `-p wcore-cli --test migrate_quarantine`
+LOG
+
+  # A2 known-negative: a genuine compile failure. No harness line, a real
+  # rustc diagnostic.
+  cat >"$d/neg.log" <<'LOG'
+   Compiling wcore-cli v0.12.25
+error[E0308]: mismatched types
+  --> crates/wcore-cli/src/migrate/quarantine.rs:171:9
+error: could not compile `wcore-cli` (lib) due to 1 previous error
+LOG
+
+  if compiled_ok "$d/pos.log"; then
+    echo "SELF-TEST A1 known-positive        : PASS (a compiled-then-failed log reads as compiled)"
+  else
+    echo "SELF-TEST A1 known-positive        : FAIL"; rc=1
+  fi
+  if compiled_ok "$d/neg.log"; then
+    echo "SELF-TEST A2 known-negative        : FAIL"; rc=1
+  else
+    echo "SELF-TEST A2 known-negative        : PASS (a real rustc error reads as not compiled)"
+  fi
+  # A3 is the assertion that proves the repair DOES something. Without it, this
+  # self-test would pass on the broken matcher too — which is the defect class
+  # this programme keeps re-finding.
+  if compiled_ok_old_broken "$d/pos.log"; then
+    echo "SELF-TEST A3 old-matcher-misses-it : FAIL (the old matcher agreed, so the repair is inert)"; rc=1
+  else
+    echo "SELF-TEST A3 old-matcher-misses-it : PASS (the OLD matcher calls A1 'did not compile')"
+  fi
+  rm -rf "$d"
+  [ "$rc" -eq 0 ] && echo "SELF-TEST: PASS" || echo "SELF-TEST: FAIL"
+  return "$rc"
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+  trap - EXIT
+  rm -f "$BACKUP"; rm -rf "$WORK"
+  self_test
+  exit $?
+fi
+
 say "=== F26 SC2 quarantine known-negative ==="
 say "repo:  $ROOT"
 say "cargo: $CARGO"
@@ -127,12 +220,12 @@ say
 say "--- M2/M3: build the mutant, then read the test result back ---"
 ( cd "$ROOT" && "$CARGO" test -p wcore-cli --test migrate_quarantine ) \
   >"$WORK/mut.log" 2>&1
-if grep -qE '^error(\[E[0-9]+\])?:' "$WORK/mut.log"; then
+if compiled_ok "$WORK/mut.log"; then
+  say "M2 COMPILED: yes"
+else
   say "M2 COMPILED: no"
   fail "M2 the mutant did not compile — a red from a build failure is NOT evidence"
-  sed -n '1,25p' "$WORK/mut.log"
-else
-  say "M2 COMPILED: yes"
+  grep -E '^error' "$WORK/mut.log" | head -5
 fi
 mut_line="$(grep -E '^test result:' "$WORK/mut.log" | tail -1)"
 say "M3 ${mut_line:-<no test result line>}"
