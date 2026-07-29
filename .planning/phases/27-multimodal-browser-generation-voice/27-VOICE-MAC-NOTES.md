@@ -244,3 +244,74 @@ relabel or stop `sean-mac-arm64`** (cost two attempts to register).
   Adjacent, LOW: module doc `:17` calls `CpalAudioPlayer` an *"output stream via the
   same host (primary)"*; the impl shells out to `afplay`/`aplay`/`powershell` and
   contains no cpal output stream. Doc contradicts impl.
+
+- **T+11 — INSTRUMENT DEFECT #1 IN MY OWN HARNESS, caught by my own self-test,
+  repaired in-lane (§6b-ii), regression-guarded.** My first `tone_ratio` returned
+  `0.0` whenever the off-band floor was ≤ EPSILON, on the reasoning "zero floor =
+  all-zero buffer". **That conflated the two opposite states.** A mathematically pure
+  tone leaks exactly zero into other exact Goertzel bins, so **the purest possible
+  POSITIVE signal scored 0.0 — identical to a dead capture path.** Had the self-test
+  not carried a known-positive, this file would have reported "no tone" on every arm
+  and published a confident, wholly fabricated negative. That is the §3b-i failure
+  mode exactly, inside the instrument built to avoid it.
+
+  Repair: discriminate on **total** signal power (zero only for true silence) and
+  floor the denominator relative to it. Self-test assertion **(4)** is the regression
+  guard: pure tone and digital silence must never score within `TONE_PRESENT_RATIO`
+  of each other again.
+
+- **T+12 — ★ CAPTURE DEVICE PROVEN LIVE, with a discriminating control. ★**
+
+  Instrument self-test, 4 assertions, all pass:
+  ```
+  SELF-TEST(3): quiet-tone rms=42 ratio=499949020.7 | loud-dither rms=400 ratio=0.2
+  SELF-TEST(4): pure-tone ratio=5.000e8            | digital-silence ratio=0
+  ```
+  Assertion (3) is the executable refutation of the withdrawn RMS-5 claim: **RMS ranks
+  the DEAD dither (400) 9.5× ABOVE the LIVE tone (42). Goertzel ranks the tone 2.5
+  billion× above the dither.** Amplitude is not merely a weak discriminator here — it
+  is *inverted*.
+
+  Live arms, real `CpalAudioRecorder`, real default input device (HyperX QuadCast 2,
+  48 kHz → resampled to 16 kHz), **output volume left at the host's own setting of 6/100
+  — I did not change it, and verified 6 before and 6 after**:
+  ```
+  ARM B-control-no-tone : samples=48051 mid_rms=48  rms=49.0  tone_ratio=  1.15
+  ARM A-live-tone-playing: samples=48051 mid_rms=433 rms=433.3 tone_ratio=116.66
+  DISCRIMINATION: control 1.15 (<=3 req) | tone 116.66 (>=20 req) | separation 101.7x
+  ```
+  Thresholds were **pre-registered in the source before either arm ran** (`TONE_PRESENT_RATIO
+  = 20`, `TONE_ABSENT_RATIO = 3`) with the 13 dB justification, and the band between
+  them is an explicit INDETERMINATE zone rather than a split.
+
+  **Why this is a discrimination and not a bigger number:** the control arm is *not*
+  silence — it carries genuine ambient room noise at **rms 49, ten times the RMS-5 that
+  the withdrawn claim rested on** — and it still scores 1.15, i.e. no 1 kHz content. The
+  two arms differ only spectrally. Broadband noise cannot manufacture a 1 kHz peak at
+  any amplitude, and a TCC-denied path would score rms 0 / ratio 0 in **both** arms.
+  48051 samples ≈ 3 s × 16 kHz confirms the stream was genuinely flowing.
+
+- **T+13 — C4 `cancellation`: MET, live, with the pre-condition proved.**
+  ```
+  PRE-CANCEL : is_recording=true current_rms=98   <- stream PROVEN FLOWING first
+  POST-CANCEL: is_recording=false rms=0 stop=Empty
+  ```
+  "It stopped" is free on a stream that never started, so the test hard-fails if
+  `current_rms == 0` before the cancel. It did not. Full file:
+  **`3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`** — executed count
+  asserted, not inferred from exit status.
+
+- **T+14 — DECISION: I am NOT implementing barge-in, and here is the reasoning,
+  including the case against me.**
+  I can implement `CpalAudioPlayer::stop` (hold the `Child`, kill it on stop) in ~30
+  lines in a file I own. I am declining, on LANE-BRIEF §5's severity policy:
+  the capability is **unreachable in every shipped build** (voice is in no default
+  feature set), so real-world impact today is **zero** → **MEDIUM → BACKLOG,
+  non-blocking**, and §5 says explicitly *"Do not invent a stricter rule — that is
+  what turned Phase 20 into a 74-plan loop."*
+  **Against myself:** it is a small, contained fix in my own file, and declining
+  leaves a known gap. **Why that does not move me:** the gap's value is higher as a
+  *finding* than as a patch, because it is the precise, checkable precondition that
+  blocks the shipping recommendation I was asked to make. Fixing it silently would
+  convert a blocking gate into an invisible one. Recorded as a decision, not a
+  deferral.
