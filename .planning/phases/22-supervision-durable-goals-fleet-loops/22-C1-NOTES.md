@@ -47,3 +47,45 @@ Scope order per lane instruction: protocol FIRST. If only one lands, it is the p
 ## Log
 
 - (t0) worktree created, baseline measured, notes committed.
+
+## Measurement 1 (t+~25m) — the corpus is ALREADY drifted at base, before I touch anything
+
+Instrument: `22-C1-EVIDENCE/contract-drift-probe.py` (self-test 3/3 PASS). It re-implements
+`contract/canonical.rs::digest_named_bytes` in Python and reproduces the generator's own
+`schema_digest` **exactly** — so the port is proved correct by a value the instrument did not
+choose. Under that proof, `source_inputs_digest` does NOT match:
+
+```
+schema_digest        computed == recorded   (sha256:e5d1744a…)  -> instrument proved correct
+source_inputs_digest computed  = sha256:c9944359…
+                     recorded  = sha256:25170996…               -> MISMATCH at base
+```
+
+`SOURCE_INPUTS` (spec.rs:~830) hashes the **file bytes** of 40 files including
+`crates/wcore-protocol/src/{events,commands}.rs`. Consequences, both load-bearing for this lane:
+
+1. **ANY byte-level edit to `events.rs` or `commands.rs` drifts the contract descriptor.**
+   There is no "additive enough to avoid the seam" edit. `observation.rs:342`
+   (`SourceInputsDigestMismatch`) makes it a hard error at `ready` for a pinned Desktop.
+   So a fenced seam request is unavoidable, exactly as the lane instruction anticipated.
+2. **The regeneration is already owed and is not mine.** 3 of 40 SOURCE_INPUTS changed since
+   the last authorized re-stamp `5f74d559` (2026-07-28): `wcore-agent/src/bootstrap.rs`,
+   `wcore-agent/src/output/protocol_sink.rs`, `wcore-cli/src/main.rs` — all other lanes'
+   work. The drift CI job fails at base, which corroborates `INV-21-23.md:95`.
+
+Baseline capture: `22-C1-EVIDENCE/drift-at-base.txt` (970 bytes, rc=3).
+
+### Design consequence
+
+Additive-but-unfenced is impossible. So take the honest additive route: new `ProtocolEvent`
+variants + new `HostCommand` variants + new `EVENT_SPECS`/`COMMAND_SPECS`/`PRODUCER_*_TYPES`
+entries, all **new wire types**, zero change to any existing variant's shape, and a fenced
+seam request naming them. `golden_v0_1_21.rs` must stay green — it pins existing shapes.
+
+Unknown-event safety net measured at `observation.rs:355-369`: an event type NOT in
+`PRODUCER_EVENT_TYPES` is dropped when `critical:false`, hard-errors when `critical:true`,
+and hard-errors when `critical` is absent.
+
+## Log
+- (t0) worktree created, baseline measured, notes committed.
+- (t+25m) drift probe written, self-tested 3/3, base drift proved pre-existing.
