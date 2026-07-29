@@ -107,8 +107,8 @@ s = open(p).read()
 a = """    pub fn one_image(width: u32, height: u32) -> Self {
         Self {
             images: 1,
-            width,
-            height,
+            width: Some(width),
+            height: Some(height),
             billed_seconds: None,
         }
     }"""
@@ -116,8 +116,8 @@ b = """    pub fn one_image(_width: u32, _height: u32) -> Self {
         // MUTATION M1: pin the units so the record cannot vary.
         Self {
             images: 1,
-            width: 1536,
-            height: 1024,
+            width: Some(1536),
+            height: Some(1024),
             billed_seconds: None,
         }
     }"""
