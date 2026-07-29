@@ -5508,6 +5508,34 @@ async fn run_json_stream_mode(
                     continue;
                 }
             }
+            // F22-C1 — host CONTROL of a durable Goal. One arm for all five
+            // commands; the decision logic lives in
+            // `wcore_agent::goal::control` so this fenced file gains a single
+            // contiguous block rather than five handlers.
+            //
+            // `handle_goal_control` NEVER returns an empty vec for a Goal
+            // command: an accepted one answers with `goal_snapshot`, a refused
+            // one with `goal_control_refused`. That is what keeps this arm from
+            // being a surface that accepts and silently does nothing — the
+            // failure mode the catch-all arm below would otherwise produce.
+            goal_command @ (ProtocolCommand::GoalOpen(_)
+            | ProtocolCommand::GoalDeclareTask(_)
+            | ProtocolCommand::GoalAdvance(_)
+            | ProtocolCommand::GoalCancel(_)
+            | ProtocolCommand::GoalResync(_)) => {
+                let live_session_id = engine.current_session_id();
+                let goal_events = wcore_agent::goal::handle_goal_control(
+                    engine.session_journal(),
+                    live_session_id.as_deref(),
+                    &wcore_agent::goal::GoalParentEnvelope::local_session_default(),
+                    audit_unix_time_millis()?,
+                    &goal_command,
+                )
+                .unwrap_or_default();
+                for event in &goal_events {
+                    let _ = writer.emit(event);
+                }
+            }
             ProtocolCommand::SessionResync(command) => {
                 handle_session_resync(
                     &engine,

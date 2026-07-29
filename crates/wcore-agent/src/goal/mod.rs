@@ -23,6 +23,7 @@
 //! reason `ChildTransactionState` does: it is part of what the existing reducer
 //! folds, not a second store.
 
+pub mod control;
 mod fleet;
 mod kernel;
 mod ledger;
@@ -30,6 +31,7 @@ mod record;
 pub mod strategy;
 pub mod wire;
 
+pub use control::{GoalParentEnvelope, handle_goal_control};
 pub use fleet::{
     FleetRecovery, FleetRun, GoalFleetDriver, TaskAssignment, TaskExecution, TaskExecutor,
     WaveOutcome,
