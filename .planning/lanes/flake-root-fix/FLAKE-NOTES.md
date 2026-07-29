@@ -145,6 +145,78 @@ races (wrong values) and reduce, but do not eliminate, the crash surface. Fully 
 it means not mutating process env in a multi-threaded process at all — i.e. injection
 everywhere, which is a much larger change than this lane. **Reported, not papered over.**
 
+## BASELINE — `wcore-config --lib`, 25 reps at base `eaff921d`
+
+Recomputed from the 25 per-rep logs on disk (the harness's own summary line was
+lost: I overwrote the running script with `scp`, and bash re-reads a script from
+its byte offset, so the in-flight run died with a syntax error at rep ~24. The
+per-rep logs were already written and are unaffected; tally is from them.)
+
+| | count | of 25 |
+|---|---|---|
+| PASS | 9 | 36% |
+| FAIL (assertion) | 14 | 56% |
+| **CRASH (SIGSEGV)** | **2** | **8%** |
+| **failure rate (FAIL+CRASH)** | **16** | **64%** |
+
+**The victim set MOVES between runs**, exactly as the four lanes reported — five
+different tests failed across the 25 reps:
+
+| failing test | reps |
+|---|---|
+| `config::tests::resolves_same_and_cross_provider_fallbacks_with_independent_credentials` | 9 |
+| `env_file::tests::load_wayland_env_file_applies_without_overriding` | 2 |
+| `config::tests::test_resolve_with_project_dir_loads_project_config` | 2 |
+| `config::tests::test_resolve_omitted_max_tokens_reads_as_not_explicit` | 1 |
+| `config::tests::test_resolve_cli_max_tokens_marks_explicit` | 1 |
+
+Every one of these is a VICTIM (a reader), not a source. That is why four lanes
+each diagnosed a different "root cause" — they were each looking at whichever
+reader lost the race that run.
+
+## CENSUS — final numbers (repaired scanner; see instrument repairs below)
+
+Contention unit is the TEST BINARY (`cargo test` gives each crate's `--lib` and
+each `tests/*.rs` its own process), and only variables touched by >1 test in the
+SAME binary can flake.
+
+| | base `eaff921d` | fixed |
+|---|---|---|
+| UNPROTECTED mutators of a contended var | **7** | **0** |
+| Regime splits (1 var, >1 independent lock, same binary) | **4** | **0** |
+
+The 7: `wcore-browser::lib` x2 (`WAYLAND_CAMOUFOX_BIN`), `wcore-config::lib` x4
+(`WAYLAND_HOME`, `XDG_DATA_HOME`, `ANTHROPIC_API_KEY`), `wcore-cua::lib` x1
+(`WAYLAND_DISPLAY`).
+
+**The "regime split" class is the subtle one and was not previously reported.**
+`serial_test`'s groups are INDEPENDENT locks: a bare `#[serial]` takes the
+default group and does NOT exclude `#[serial(wayland_home_env)]`. In
+`wcore-config::lib`, `WAYLAND_HOME` was mutated from THREE regimes at once
+(UNPROTECTED, default, `wayland_home_env`). A test can therefore look correctly
+protected and still race.
+
+## FALSE PREMISES IN THE SOURCE (each one a comment asserting safety that was untrue)
+
+1. `wcore-exec-backend/src/registry.rs:119` — "single-threaded per process under
+   nextest". True for CI's runner, false for `cargo test`.
+2. `wcore-config/src/config.rs` (`wayland_config_dir_uses_wayland_home_when_set`)
+   — "Serial isolation is not required here because we restore the env var
+   within the test; the variable name is unique to this assertion." Restoring
+   does nothing for the set→restore WINDOW, and `WAYLAND_HOME` has 141
+   references.
+3. `wcore-config/src/config.rs` (`test_api_key_missing_returns_error`) —
+   "single-threaded test context; no other threads read these vars."
+4. `wcore-config/src/env_file.rs` — "#[serial] keeps it off the other
+   env-reading tests' threads." It was in the DEFAULT group while all ~14 peers
+   were in `wayland_home_env`, so it excluded none of them.
+5. `wcore-browser/src/liveness.rs` — "the only env var touched is this one, and
+   no other test in this module reads it." The very next test in that module
+   sets the same variable.
+6. `wcore-cua/src/liveness.rs` — "no other test in this module touches them."
+   Scoped to the MODULE; the contention unit is the BINARY, and `adapter.rs`
+   mutates the same variable.
+
 ## NOT A DEFECT — do not "fix"
 
 `always_fails` (`crates/wcore-cli/src/plugin/scaffold.rs:274`) is a **string literal the
