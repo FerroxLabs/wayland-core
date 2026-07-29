@@ -35,6 +35,13 @@
 //! would consume is budget not spent live-proving the kill-and-recover path.
 //! The gap is named rather than absorbed.
 //!
+//! `support-bundle` was added afterwards and is NOT one of the nine. It exists
+//! because Success Criterion 4 asks for *"useful redacted health/log/support
+//! evidence"* and `wcore_gateway::support_bundle` had no operator surface at
+//! all (`F24-C4-H1`). It covers part of what `doctor` and `logs` were wanted
+//! for, by SHIPPING the evidence rather than rendering it — which is the
+//! shape the criterion actually asks for. See `gateway/support.rs`.
+//!
 //! # Where each verb's authority lives
 //!
 //! No policy is invented here. `install`/`uninstall`/`start`/`stop` render
