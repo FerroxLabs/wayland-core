@@ -3,61 +3,61 @@ PROBE config_written=/root/wayland-27c3-live/home/config.toml   # contains NO cr
 PROBE config_credential_tokens=0
 === RUN p1-arm-readback
 RC_p1-arm-readback=0
-  stdout_bytes=11  stderr_bytes=3207
+  stdout_bytes=10  stderr_bytes=3207
 --- P1 resolver arm line (the product's own output):
-[2m2026-07-29T13:54:16.953993Z[0m [32m INFO[0m image_gen: using gpt-image-1 at https://api.fluxrouter.ai/v1/images/generations (active OpenAI-wire provider)
+[2m2026-07-29T13:59:25.206161Z[0m [32m INFO[0m image_gen: using gpt-image-1 at https://api.fluxrouter.ai/v1/images/generations (active OpenAI-wire provider)
 --- P1 turn actually ran? (a capture with no turn is not evidence):
   probe_ok_in_output=1
 === RUN p2-default-model
 RC_p2-default-model=0
-  stdout_bytes=136  stderr_bytes=4925
+  stdout_bytes=171  stderr_bytes=4926
 --- P2 accounting blocks found in the protocol stream:
 0
 --- P2 media_cost tracing lines:
-[2m2026-07-29T13:55:51.612660Z[0m [32m INFO[0m media call accounted: image_generate via unresolved (unresolved): 1 image(s) 1536x1024 = 1.573 MP — unpriced — the call failed and it is unknown whether the provider billed for it. Not treated as $0. [3mtool[0m[2m=[0mimage_generate [3mbackend_id[0m[2m=[0munresolved [3mmodel[0m[2m=[0munresolved [3mimages[0m[2m=[0m1 [3mmegapixels[0m[2m=[0m1.572864 [3mcost_usd[0m[2m=[0mNone
+[2m2026-07-29T14:00:55.635126Z[0m [32m INFO[0m media call accounted: image_generate via unresolved (unresolved): 1 image(s) 1536x1024 = 1.573 MP — unpriced — the call failed and it is unknown whether the provider billed for it. Not treated as $0. [3mtool[0m[2m=[0mimage_generate [3mbackend_id[0m[2m=[0munresolved [3mmodel[0m[2m=[0munresolved [3mimages[0m[2m=[0m1 [3mmegapixels[0m[2m=[0m1.572864 [3mcost_usd[0m[2m=[0mNone
 === RUN p3-entitled-model
 RC_p3-entitled-model=0
-  stdout_bytes=15790  stderr_bytes=5288
+  stdout_bytes=7456  stderr_bytes=4979
 --- P3 resolver arm line:
-[2m2026-07-29T13:55:53.194659Z[0m [32m INFO[0m image_gen: using flux-image at https://api.fluxrouter.ai/v1/images/generations (active OpenAI-wire provider)
+[2m2026-07-29T14:00:57.888982Z[0m [32m INFO[0m image_gen: using flux-image at https://api.fluxrouter.ai/v1/images/generations (active OpenAI-wire provider)
 --- P3 media_cost tracing lines:
-[2m2026-07-29T13:56:40.799472Z[0m [32m INFO[0m media call accounted: image_generate via OpenAI flux-image (OpenAI flux-image): 1 image(s) 1792x1024 = 1.835 MP — unpriced — this provider reports no cost for this call, and no local rate-card entry matched. The call was still billable. [3mtool[0m[2m=[0mimage_generate [3mbackend_id[0m[2m=[0mOpenAI flux-image [3mmodel[0m[2m=[0mOpenAI flux-image [3mimages[0m[2m=[0m1 [3mmegapixels[0m[2m=[0m1.835008 [3mcost_usd[0m[2m=[0mNone
+[2m2026-07-29T14:01:44.587444Z[0m [32m INFO[0m media call accounted: image_generate via OpenAI flux-image (OpenAI flux-image): 1 image(s) 1792x1024 = 1.835 MP — unpriced — this provider reports no cost for this call, and no local rate-card entry matched. The call was still billable. [3mtool[0m[2m=[0mimage_generate [3mbackend_id[0m[2m=[0mOpenAI flux-image [3mmodel[0m[2m=[0mOpenAI flux-image [3mimages[0m[2m=[0m1 [3mmegapixels[0m[2m=[0m1.835008 [3mcost_usd[0m[2m=[0mNone
 --- P3 accounting presence:
   accounting_occurrences=0
 === RUN p4-image-subcommand
 RC_p4-image-subcommand=0
-  artifact_bytes=261352
+  artifact_bytes=137457
 --- P4 any cost/accounting token in either stream:
   accounting_hits=2
 --- P4 liveness control for that grep (a known-positive in the SAME files):
   control_hits_wrote=1
-  p4_stderr_verbatim: accounting: wayland-core image via wayland-core image (flux-image) (flux-image): 1 image(s) size not reported by this surface — unpriced — this provider reports no cost for this call, and no local rate-card entry matched. The call was still billable.
-accounting_json: {"backend_id":"wayland-core image (flux-image)","model":"flux-image","outcome":{"status":"ok"},"price_source":{"kind":"unpriced","reason":"provider_reports_no_cost"},"tool":"wayland-core image","units":{"images":1}}
-wrote /root/wayland-27c3-live/p4.png (261352 bytes)
+  p4_stderr_verbatim: accounting: wayland-core image via https://api.fluxrouter.ai/v1#flux-image (flux-image): 1 image(s) size not reported by this surface — unpriced — this provider reports no cost for this call, and no local rate-card entry matched. The call was still billable.
+accounting_json: {"backend_id":"https://api.fluxrouter.ai/v1#flux-image","model":"flux-image","outcome":{"status":"ok"},"price_source":{"kind":"unpriced","reason":"provider_reports_no_cost"},"tool":"wayland-core image","units":{"images":1}}
+wrote /root/wayland-27c3-live/p4.png (137457 bytes)
 --- P4 accounting lines (present as of the 27-c3 repair):
-accounting: wayland-core image via wayland-core image (flux-image) (flux-image): 1 image(s) size not reported by this surface — unpriced — this provider reports no cost for this call, and no local rate-card entry matched. The call was still billable.
-accounting_json: {"backend_id":"wayland-core image (flux-image)","model":"flux-image","outcome":{"status":"ok"},"price_source":{"kind":"unpriced","reason":"provider_reports_no_cost"},"tool":"wayland-core image","units":{"images":1}}
+accounting: wayland-core image via https://api.fluxrouter.ai/v1#flux-image (flux-image): 1 image(s) size not reported by this surface — unpriced — this provider reports no cost for this call, and no local rate-card entry matched. The call was still billable.
+accounting_json: {"backend_id":"https://api.fluxrouter.ai/v1#flux-image","model":"flux-image","outcome":{"status":"ok"},"price_source":{"kind":"unpriced","reason":"provider_reports_no_cost"},"tool":"wayland-core image","units":{"images":1}}
 === RUN p5-image-subcommand-varied
 RC_p5-image-subcommand-varied=1
 --- P5 accounting lines:
-accounting: wayland-core image via wayland-core image (flux-image) (flux-image): 2 image(s) 1024x1024 = 2.097 MP — unpriced — the call failed and it is unknown whether the provider billed for it. Not treated as $0.
-accounting_json: {"backend_id":"wayland-core image (flux-image)","model":"flux-image","outcome":{"category":"other","status":"failed"},"price_source":{"kind":"unpriced","reason":"call_failed_billing_unknown"},"tool":"wayland-core image","units":{"height":1024,"images":2,"width":1024}}
+accounting: wayland-core image via https://api.fluxrouter.ai/v1#flux-image (flux-image): 2 image(s) 1024x1024 = 2.097 MP — unpriced — the call failed and it is unknown whether the provider billed for it. Not treated as $0.
+accounting_json: {"backend_id":"https://api.fluxrouter.ai/v1#flux-image","model":"flux-image","outcome":{"category":"other","status":"failed"},"price_source":{"kind":"unpriced","reason":"call_failed_billing_unknown"},"tool":"wayland-core image","units":{"height":1024,"images":2,"width":1024}}
 --- P4 vs P5 accounting_json differ?
   CLI_RECORD_VARIES=YES
 
 PROBE_DONE captures_in=/root/wayland-27c3-live
-total 356
-drwxr-xr-x   3 root root   4096 Jul 29 13:58 .
-drwx------ 239 root root  36864 Jul 29 13:58 ..
-drwxr-xr-x   6 root root   4096 Jul 29 13:58 home
--rw-r--r--   1 root root   3207 Jul 29 13:55 p1-arm-readback.stderr
--rw-r--r--   1 root root     11 Jul 29 13:55 p1-arm-readback.stdout
--rw-r--r--   1 root root   4925 Jul 29 13:55 p2-default-model.stderr
--rw-r--r--   1 root root    136 Jul 29 13:55 p2-default-model.stdout
--rw-r--r--   1 root root   5288 Jul 29 13:58 p3-entitled-model.stderr
--rw-r--r--   1 root root  15790 Jul 29 13:58 p3-entitled-model.stdout
--rw-r--r--   1 root root    540 Jul 29 13:58 p4-image-subcommand.stderr
--rw-r--r--   1 root root      0 Jul 29 13:58 p4-image-subcommand.stdout
--rw-r--r--   1 root root 261352 Jul 29 13:58 p4.png
--rw-r--r--   1 root root    582 Jul 29 13:58 p5-image-subcommand-varied.stderr
--rw-r--r--   1 root root      0 Jul 29 13:58 p5-image-subcommand-varied.stdout
+total 228
+drwxr-xr-x   3 root root   4096 Jul 29 14:02 .
+drwx------ 239 root root  36864 Jul 29 14:00 ..
+drwxr-xr-x   6 root root   4096 Jul 29 14:02 home
+-rw-r--r--   1 root root   3207 Jul 29 14:00 p1-arm-readback.stderr
+-rw-r--r--   1 root root     10 Jul 29 14:00 p1-arm-readback.stdout
+-rw-r--r--   1 root root   4926 Jul 29 14:00 p2-default-model.stderr
+-rw-r--r--   1 root root    171 Jul 29 14:00 p2-default-model.stdout
+-rw-r--r--   1 root root   4979 Jul 29 14:02 p3-entitled-model.stderr
+-rw-r--r--   1 root root   7456 Jul 29 14:02 p3-entitled-model.stdout
+-rw-r--r--   1 root root    556 Jul 29 14:02 p4-image-subcommand.stderr
+-rw-r--r--   1 root root      0 Jul 29 14:02 p4-image-subcommand.stdout
+-rw-r--r--   1 root root 137457 Jul 29 14:02 p4.png
+-rw-r--r--   1 root root    598 Jul 29 14:02 p5-image-subcommand-varied.stderr
+-rw-r--r--   1 root root      0 Jul 29 14:02 p5-image-subcommand-varied.stdout
