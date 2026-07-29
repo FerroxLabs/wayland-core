@@ -44,9 +44,76 @@ fn selftest_refusal() -> bool {
 /// Fail the way the self-test contract requires: print the tripped marker so
 /// the platform wrapper's gate can read it out of captured stdout, then panic
 /// so the process exits nonzero.
+///
+/// This is called ONCE, after every route check has been evaluated and
+/// reported. It used to be called inline at the first check that failed, which
+/// made the whole differential worth exactly one assertion — see the comment on
+/// `route_checks` below.
 fn trip_selftest(detail: &str) -> ! {
     println!("F23A-SELFTEST-TRIPPED: refusal");
     panic!("F23A self-test injected a refusal-control failure: {detail}");
+}
+
+/// Does `/skill list` tag THIS name hidden, bound on a single rendered line?
+///
+/// `runtime_list` renders one entry per catalog ref as
+/// `"  - {name} (hidden) [src={src}]"` — the tag is emitted as `format!(" {tag}")`
+/// immediately after the name (`crates/wcore-agent/src/slash/skill.rs:156-164`).
+///
+/// The matcher this replaces was
+/// `info.contains(name) && info.contains("(hidden)")`: two UNBOUND substring
+/// searches over the whole joined info stream. The quarantined `auto-*` draft is
+/// always in the catalog and always carries the tag, so the second conjunct is
+/// true for every possible input — the matcher could not distinguish a hidden
+/// name from a visible one, and reported "tagged hidden" for a
+/// user-authored, model-visible skill. Measured 2026-07-29 by the 23A-CENSUS
+/// two-run differential. `list_tags_hidden_matcher_selftest` below is the
+/// three-assertion proof that this form fixes it.
+fn list_tags_hidden(info: &str, name: &str) -> bool {
+    info.lines().any(|line| {
+        line.trim()
+            .strip_prefix("- ")
+            .and_then(|rest| rest.strip_prefix(name))
+            .is_some_and(|rest| rest.trim_start().starts_with("(hidden)"))
+    })
+}
+
+/// Self-test for the repaired matcher. Three assertions, because two is not
+/// enough: a known-positive and a known-negative both pass on the BROKEN
+/// matcher too in some shapes, so the third assertion is the only one that
+/// proves the repair does anything at all.
+#[test]
+fn list_tags_hidden_matcher_selftest() {
+    // The exact rendering of `runtime_list` for a catalog holding one
+    // quarantined generated draft and one visible user-authored control.
+    let rendered = "Skills in catalog (2):\n\
+         \x20 - auto-f23a-draft (hidden) [src=user]\n\
+         \x20 - f23a-control [src=user]\n\
+         \nSummary: 1 visible to the model, 1 hidden.\n";
+
+    // 1. Known-positive: the quarantined draft IS tagged hidden.
+    assert!(
+        list_tags_hidden(rendered, "auto-f23a-draft"),
+        "repaired matcher must see the draft's own (hidden) tag"
+    );
+
+    // 2. Known-negative: the user-authored control is NOT tagged hidden, even
+    //    though the string "(hidden)" appears elsewhere in the same listing.
+    assert!(
+        !list_tags_hidden(rendered, "f23a-control"),
+        "repaired matcher must not credit a visible skill with another \
+         entry's (hidden) tag"
+    );
+
+    // 3. The old matcher would have MISSED it. Without this assertion the
+    //    self-test passes on the broken instrument and proves nothing.
+    let old_matcher = |info: &str, name: &str| info.contains(name) && info.contains("(hidden)");
+    assert!(
+        old_matcher(rendered, "f23a-control"),
+        "the old unbound-conjunct matcher is supposed to report TRUE for the \
+         visible control — if it does not, this self-test is not exercising \
+         the defect it was written for"
+    );
 }
 
 /// A tempdir home + project pair with the skills lifecycle enabled on BOTH
@@ -415,53 +482,84 @@ async fn generated_draft_is_refused_at_every_route_while_user_content_is_not() {
 
     let info = driven.info_events.join("\n");
 
-    // Route: /skill run — an explicit refusal the operator can read.
-    let run_refused = info.contains("quarantined and cannot be run");
-    if !run_refused && selftest_refusal() {
-        trip_selftest("/skill run refusal did not fire for the substituted control");
-    }
-    assert!(
-        run_refused,
-        "/skill run on a quarantined draft must refuse in words the operator can read. \
-         info_events=\n{info}"
-    );
-
-    // Route: /skill list — present, tagged hidden. The operator must still be
-    // able to SEE what is quarantined; that is the other half of Criterion 1.
-    let listed_hidden = info.contains(&probed_name) && info.contains("(hidden)");
-    if !listed_hidden && selftest_refusal() {
-        trip_selftest("/skill list did not tag the substituted control hidden");
-    }
-    assert!(
-        listed_hidden,
-        "/skill list must show the draft AND tag it hidden. info_events=\n{info}"
-    );
-
-    // Route: /skill show — metadata visible, body NOT disclosed.
-    let shown_hidden = info.contains("visibility: hidden from model");
-    if !shown_hidden && selftest_refusal() {
-        trip_selftest("/skill show did not report the substituted control hidden");
-    }
-    assert!(
-        shown_hidden,
-        "/skill show must report the draft hidden from the model. info_events=\n{info}"
-    );
-
-    // Route: Skill tool call — not-found to the model, and no body disclosure.
     let probe = driven
         .trace
         .entries
         .iter()
         .find(|entry| entry.call_id == "quarantined-skill-probe")
         .expect("the quarantined Skill tool call reached the product");
-    if !probe.is_error && selftest_refusal() {
-        trip_selftest("the Skill tool executed the substituted control as if quarantined");
+
+    // Every model-facing route this target reaches, evaluated BEFORE any of
+    // them is acted on.
+    //
+    // This used to be four `if !check && selftest_refusal() { trip_selftest(..) }`
+    // guards written inline, and `trip_selftest` returns `!`. So a
+    // `WAYLAND_F23A_SELFTEST=refusal` run panicked at the FIRST check and never
+    // evaluated the other three: the differential proved one assertion had
+    // teeth and said nothing whatever about the rest. Measured 2026-07-29
+    // (23A-CENSUS run B tripped at `/skill run` and stopped). Collecting first
+    // and failing once is what makes the differential worth four assertions
+    // instead of one.
+    let route_checks: [(&str, bool); 4] = [
+        // R6 — `/skill run`: an explicit refusal the operator can read.
+        (
+            "R6 /skill run",
+            info.contains("quarantined and cannot be run"),
+        ),
+        // R7 — `/skill list`: present, tagged hidden ON ITS OWN LINE. The
+        // operator must still be able to SEE what is quarantined; that is the
+        // other half of Criterion 1.
+        ("R7 /skill list", list_tags_hidden(&info, &probed_name)),
+        // R8 — `/skill show`: metadata visible, body NOT disclosed.
+        (
+            "R8 /skill show",
+            info.contains("visibility: hidden from model"),
+        ),
+        // R1 — `Skill` tool call: not-found to the model.
+        ("R1 Skill tool", probe.is_error),
+    ];
+
+    if selftest_refusal() {
+        // The substitution handed every check content that legitimately DOES
+        // resolve. A check with teeth must therefore report `false`; a check
+        // that still reports `true` is not discriminating and is named here.
+        for (label, refused) in route_checks {
+            println!(
+                "F23A-SELFTEST-ROUTE: {label} refused={refused} \
+                 (a discriminating check reports false under substitution)"
+            );
+        }
+        // The third assertion of `list_tags_hidden_matcher_selftest`, taken on
+        // the LIVE info stream rather than a synthetic rendering: the matcher
+        // R7 used before this lane, evaluated against the same bytes. It is
+        // expected to print `true` while R7 above prints `false` — that
+        // disagreement is the measurement that the old instrument was vacuous
+        // here, not merely arguably vacuous.
+        let legacy_r7 = info.contains(&probed_name) && info.contains("(hidden)");
+        println!(
+            "F23A-SELFTEST-LEGACY: R7 /skill list old_matcher={legacy_r7} \
+             (unbound conjunct; disagreement with the R7 line above is the repair)"
+        );
+        let toothless: Vec<&str> = route_checks
+            .iter()
+            .filter(|(_, refused)| *refused)
+            .map(|(label, _)| *label)
+            .collect();
+        trip_selftest(&format!(
+            "the user-authored control was substituted for the draft at every \
+             route; checks that still reported a refusal, and are therefore \
+             not discriminating: {toothless:?}"
+        ));
     }
-    assert!(
-        probe.is_error,
-        "a quarantined draft must not execute through the Skill tool: {}",
-        probe.output
-    );
+
+    for (label, refused) in route_checks {
+        assert!(
+            refused,
+            "{label} did not refuse the quarantined draft '{probed_name}'. \
+             info_events=\n{info}"
+        );
+    }
+
     assert!(
         !probe.output.contains("Repeat this exact safe operation"),
         "the refusal disclosed the draft body it exists to withhold: {}",

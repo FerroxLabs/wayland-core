@@ -1,0 +1,12 @@
+WLRC=0
+WLBIN=/root/wayland-23a-census/target/debug/wayland-core
+WLSELFTEST=NONE
+WLDONE
+---
+WLRC=101
+WLBIN=/root/wayland-23a-census/target/debug/wayland-core
+WLSELFTEST=refusal
+WLDONE
+---
+WLRC=0
+WLDONE
