@@ -235,4 +235,38 @@ if [ "${passed}" -ne "${EXPECTED_TESTS}" ]; then
   exit 1
 fi
 
-printf '\nDRILL PASSED: %s tests executed against a CLI-minted corpus.\n' "${passed}"
+# ---------------------------------------------------------------------------
+say "NEGATIVE CONTROL: the drill must be able to go RED"
+# ---------------------------------------------------------------------------
+# Ten green tests prove nothing until the harness is shown to discriminate. A
+# corpus a verifier accepts unconditionally, a `decide_update` that proceeds on
+# everything, or a corpus loader that silently returns the same file for every
+# name would ALL produce the run above. So: swap the pristine control for the
+# packaging-signed manifest — a real, valid signature under the wrong role — and
+# require the suite to fail. The control is what every test re-proves first, so
+# breaking it must break the whole drill.
+cp "${corpus}/accepted-release-manifest.json" "${workdir}/accepted.keep"
+cp "${corpus}/packaging-signed-release-manifest.json" "${corpus}/accepted-release-manifest.json"
+
+set +e
+WAYLAND_RELEASE_PIPELINE_CORPUS="${corpus}" \
+  "${CARGO}" test -p wcore-cli --test release_manifest_pipeline -- --ignored \
+  > "${workdir}/negative.out" 2>&1
+negative_status="$?"
+set -e
+cp "${workdir}/accepted.keep" "${corpus}/accepted-release-manifest.json"
+
+negative_line="$(/usr/bin/grep -E '^test result:' "${workdir}/negative.out" | tail -1 || true)"
+negative_failed="$(printf '%s' "${negative_line}" | /usr/bin/grep -oE '[0-9]+ failed' | /usr/bin/grep -oE '[0-9]+' | head -1)"
+negative_failed="${negative_failed:-0}"
+echo "${negative_line:-<no result line>}"
+
+if [ "${negative_status}" -eq 0 ] || [ "${negative_failed}" -eq 0 ]; then
+  echo "INSTRUMENT DEAD: the drill stayed green with a wrong-role manifest as its control." >&2
+  echo "Every PASS above is therefore worthless. Fix the harness before trusting any of it." >&2
+  exit 1
+fi
+echo "negative control refused as required: ${negative_failed} test(s) failed on a broken corpus"
+
+printf '\nDRILL PASSED: %s tests executed against a CLI-minted corpus,\n' "${passed}"
+printf 'and %s failed when the corpus was deliberately broken.\n' "${negative_failed}"
