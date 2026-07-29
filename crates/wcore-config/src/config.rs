@@ -6951,6 +6951,13 @@ enabled = false
     }
 
     #[test]
+    // READER of process env: `Config::resolve` resolves through
+    // `wayland_config_dir()` (WAYLAND_HOME) and the API-key vars, so it must
+    // join the same group as the WRITERS. `#[serial]` serializes writers
+    // against writers only -- an unlisted READER still races them, which is
+    // how this test failed with "No API key found" while every mutator was
+    // already serialized.
+    #[serial_test::serial(wayland_home_env)]
     fn test_resolve_with_project_dir_loads_project_config() {
         let tmp = tempfile::tempdir().unwrap();
         let project_toml = tmp.path().join(".wayland-core.toml");
@@ -6989,6 +6996,13 @@ max_tokens = 1234
     /// #112: a CLI `--max-tokens` always marks the cap explicit, regardless of
     /// what any config file says.
     #[test]
+    // READER of process env: `Config::resolve` resolves through
+    // `wayland_config_dir()` (WAYLAND_HOME) and the API-key vars, so it must
+    // join the same group as the WRITERS. `#[serial]` serializes writers
+    // against writers only -- an unlisted READER still races them, which is
+    // how this test failed with "No API key found" while every mutator was
+    // already serialized.
+    #[serial_test::serial(wayland_home_env)]
     fn test_resolve_cli_max_tokens_marks_explicit() {
         let tmp = tempfile::tempdir().unwrap();
         let cli_args = CliArgs {
@@ -7141,6 +7155,13 @@ enabled = false
     }
 
     #[test]
+    // READER of process env: `Config::resolve` resolves through
+    // `wayland_config_dir()` (WAYLAND_HOME) and the API-key vars, so it must
+    // join the same group as the WRITERS. `#[serial]` serializes writers
+    // against writers only -- an unlisted READER still races them, which is
+    // how this test failed with "No API key found" while every mutator was
+    // already serialized.
+    #[serial_test::serial(wayland_home_env)]
     fn approval_mode_parses_from_toml_and_resolves_onto_config() {
         // The full path: `[default] approval_mode` in TOML → merge → resolved
         // Config.approval_mode (what the TUI boot consumer reads).
@@ -7308,6 +7329,13 @@ enabled = false
     }
 
     #[test]
+    // READER of process env: `Config::resolve` resolves through
+    // `wayland_config_dir()` (WAYLAND_HOME) and the API-key vars, so it must
+    // join the same group as the WRITERS. `#[serial]` serializes writers
+    // against writers only -- an unlisted READER still races them, which is
+    // how this test failed with "No API key found" while every mutator was
+    // already serialized.
+    #[serial_test::serial(wayland_home_env)]
     fn test_resolve_without_project_dir_uses_cwd() {
         let cli_args = CliArgs {
             provider: Some("anthropic".into()),
