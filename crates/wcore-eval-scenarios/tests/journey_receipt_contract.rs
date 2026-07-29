@@ -1028,7 +1028,8 @@ fn bind_reports_the_adapter_fraction_it_bound() {
     ]);
     assert!(output.status.success(), "{}", stderr(&output));
     let line = stdout(&output);
-    assert!(line.contains("platforms=3"), "{line}");
+    assert!(line.contains("receipts=3"), "{line}");
+    assert!(line.contains("platforms=linux,macos,windows"), "{line}");
     assert!(line.contains("adapters=3/10"), "{line}");
     assert!(line.contains("exercised=slack,sms,whatsapp"), "{line}");
 }
