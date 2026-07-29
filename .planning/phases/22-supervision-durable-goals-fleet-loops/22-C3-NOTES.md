@@ -595,4 +595,104 @@ contains the build, so the repair changes an outcome rather than decorating a pa
   nothing deleted) — disclosed because the earlier lane's SUMMARY claimed "no existing
   test was modified" and that is no longer true of this file.
 - **T+75** — instrument defect §8 found and repaired.
+- **T+95** — all five engines wired; `cargo check -p wcore-cli --all-targets` rc=0,
+  errors=0, wcore-cli built (repaired matcher = 1).
+
+---
+
+## §10. NESTED-OWNER PROOF — with its queries, its known-positives, and its limits
+
+The criterion's second half — *"with no nested verification/retry owner"* — is a
+**known-negative**, so per §3b-i it is the single easiest thing in this lane to pass
+without doing any work. Every query below therefore carries a **known-positive in the same
+sweep**, and the queries are stated so a reader can re-run them.
+
+### What I am and am not claiming
+
+**I am NOT claiming nothing in Core ever retries.** That would be false and easy to catch:
+`goal/fleet.rs` retries TASKS (attempt records, leases, epochs), Anvil climbs up to
+`max_iterations`, ForgeFlows re-attempts schema validation, Council re-solicits proposals.
+Those are engines doing their jobs.
+
+**I AM claiming:** once a Goal has a loop owner, there is exactly ONE owner of that Goal's
+verification/retry, and no second owner can produce, repeat or override its termination.
+That is the claim the four queries below test.
+
+### Q1 — who can WRITE a canonical termination?
+
+```
+$ /usr/bin/grep -rn "finish_loop_owner\|GoalLoopOwnerFinished" crates --include='*.rs' \
+    | /usr/bin/grep -v "^crates/wcore-agent/tests/"
+```
+Known-positive in the same sweep: `finish_loop_owner` → **6 hits** (instrument alive).
+
+**Result: exactly ONE production writer** — `strategy.rs:721`, inside `GoalLoop::finish`.
+Every other hit is the reducer, the model, the wire projection or a doc comment — readers,
+not writers. `GoalKernel::finish_loop_owner` is `pub(crate)`.
+
+### Q2 — the retry/verification CONCEPT, across its whole vocabulary
+
+Searched (not one keyword — §3b-i.3):
+`retry|retries|re_?try|attempt|reattempt|backoff|re_?run|rerun|re_?verify|reverify|max_attempts|max_iterations|escalat`
+Known-positive: `attempt` matches **237 files** workspace-wide (instrument alive).
+
+**Result inside `crates/wcore-agent/src/goal/`: 40 hits, none of which is a Goal-level
+retry owner.** Every `strategy.rs` hit is an `attempts:` **payload field of a terminal
+state** — data recorded ABOUT what an engine did, not a mechanism that re-runs it. Every
+`fleet.rs` hit is TASK-level attempt bookkeeping, owned by the 22-03 ledger at one level.
+
+### Q3 — every call site of the five `run_*` entry points
+
+```
+$ /usr/bin/grep -rnE "\.run_(direct|forgeflows|fleet|council|anvil)\(" crates --include='*.rs'
+```
+Known-positive: `run_fleet` → **5 hits** (instrument alive).
+
+**Result: exactly FIVE production call sites, one per engine, no engine twice:**
+
+| Engine | Production call site |
+|---|---|
+| Anvil | `crates/wcore-cli/src/anvil.rs:119` |
+| Council | `crates/wcore-cli/src/crucible.rs:498` |
+| ForgeFlows | `crates/wcore-cli/src/workflow.rs:260` |
+| Fleet | `crates/wcore-cli/src/goal_cmd.rs:658` |
+| Direct | `crates/wcore-cli/src/main.rs:2031` |
+
+The two further hits (`strategy.rs:857`, `:868`) are inside `#[cfg(test)] mod tests`, which
+begins at line **774** — verified, because `grep -v "/tests/"` does NOT exclude an inline
+test module and would otherwise have inflated this count.
+
+### Q4 — production callers of the kernel's RAW terminate paths
+
+```
+$ /usr/bin/grep -rnE "\.terminate\(|\.terminate_verified\(" crates --include='*.rs' \
+    | /usr/bin/grep -v "/tests/" | /usr/bin/grep -v "owner.terminate"
+```
+**Result: ZERO Goal-related hits.** All seven matches are process/job termination in
+`wcore-sandbox` and `wcore-eval-scenarios` — a different `terminate`. So no production code
+reaches a Goal terminal except through the five adapters.
+
+### Q5 — the compile-level refusal, FALSIFIED rather than asserted
+
+A `compile_fail` doctest passes when the snippet fails to compile for **any** reason —
+including a typo I introduced while editing it. So it is worthless unless falsified. I
+removed the retry loop (one variable: `for outcome in outcomes` →
+`if let Some(outcome) = outcomes.first()`) so `owner` moves exactly once:
+
+```
+test ... from_anvil (line 512) - compile fail ... FAILED
+---- stdout ----
+Test compiled successfully, but it's marked `compile_fail`.
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out
+NEGATIVE_CONTROL_RC=101
+```
+Restored; `git diff --stat` on the file is **empty**. **The retry loop is the only reason
+that gate is green**, so the borrow-checker refusal of a nested retry owner is real.
+
+### The honest limit of Q3
+
+The "no enclosing loop" check I ran reads only 6 lines above each call site, so it cannot
+see a loop further out. **It is corroborating, not load-bearing.** The load-bearing
+argument is Q5: `LoopOwner` is neither `Clone` nor `Copy` and every adapter takes it by
+value, so a loop around an adapter does not compile — and that gate is now proven alive.
 
