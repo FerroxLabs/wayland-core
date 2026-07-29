@@ -71,7 +71,7 @@ fn turn_json(
     write: u64,
     cost: f64,
     uncached_equiv: f64,
-    priced: bool,
+    cost_source: &str,
     cause: Option<&str>,
     watermark: u64,
 ) -> serde_json::Value {
@@ -87,7 +87,7 @@ fn turn_json(
         "cache_write_tokens": write,
         "output_tokens": 250,
         "cost_usd": cost,
-        "cost_priced": priced,
+        "cost_source": cost_source,
         "uncached_equivalent_usd": uncached_equiv,
         "watermark_tokens": watermark,
         "conservative_watermark_tokens": watermark + 1_000,
@@ -136,7 +136,7 @@ fn healthy(dir: &Path, session: &str) {
                 20_000,
                 0.0900,
                 0.0750,
-                true,
+                "catalog",
                 Some("no_marker"),
                 20_000,
             ),
@@ -147,12 +147,12 @@ fn healthy(dir: &Path, session: &str) {
                 500,
                 0.0030,
                 0.0030,
-                true,
+                "catalog",
                 Some("system_prompt_drift"),
                 21_000,
             ),
-            turn_json(3, 500, 20_000, 0, 0.0090, 0.0615, true, None, 41_000),
-            turn_json(4, 500, 20_500, 0, 0.0092, 0.0630, true, None, 62_000),
+            turn_json(3, 500, 20_000, 0, 0.0090, 0.0615, "catalog", None, 41_000),
+            turn_json(4, 500, 20_500, 0, 0.0092, 0.0630, "catalog", None, 62_000),
         ],
         vec![],
     );
@@ -230,9 +230,39 @@ fn report_names_every_invalidation_cause_with_its_count() {
         tmp.path(),
         "sess-inval",
         vec![
-            turn_json(1, 1_000, 0, 0, 0.01, 0.01, true, Some("no_marker"), 1_000),
-            turn_json(2, 1_000, 0, 0, 0.01, 0.01, true, Some("expired"), 2_000),
-            turn_json(3, 1_000, 0, 0, 0.01, 0.01, true, Some("expired"), 3_000),
+            turn_json(
+                1,
+                1_000,
+                0,
+                0,
+                0.01,
+                0.01,
+                "catalog",
+                Some("no_marker"),
+                1_000,
+            ),
+            turn_json(
+                2,
+                1_000,
+                0,
+                0,
+                0.01,
+                0.01,
+                "catalog",
+                Some("expired"),
+                2_000,
+            ),
+            turn_json(
+                3,
+                1_000,
+                0,
+                0,
+                0.01,
+                0.01,
+                "catalog",
+                Some("expired"),
+                3_000,
+            ),
             turn_json(
                 4,
                 1_000,
@@ -240,7 +270,7 @@ fn report_names_every_invalidation_cause_with_its_count() {
                 0,
                 0.01,
                 0.01,
-                true,
+                "catalog",
                 Some("history_rewritten"),
                 4_000,
             ),
@@ -269,7 +299,9 @@ fn report_names_every_invalidation_cause_with_its_count() {
     write_ledger(
         tmp2.path(),
         "sess-clean",
-        vec![turn_json(1, 100, 9_000, 0, 0.01, 0.05, true, None, 9_100)],
+        vec![turn_json(
+            1, 100, 9_000, 0, 0.01, 0.05, "catalog", None, 9_100,
+        )],
         vec![],
     );
     let clean = stdout(&run(tmp2.path(), &["report"]));
@@ -286,8 +318,18 @@ fn report_exposes_token_pressure_against_the_real_thresholds() {
         tmp.path(),
         "sess-pressure",
         vec![
-            turn_json(1, 10_000, 0, 0, 0.01, 0.01, true, Some("no_marker"), 10_000),
-            turn_json(2, 10_000, 0, 0, 0.01, 0.01, true, None, 120_000),
+            turn_json(
+                1,
+                10_000,
+                0,
+                0,
+                0.01,
+                0.01,
+                "catalog",
+                Some("no_marker"),
+                10_000,
+            ),
+            turn_json(2, 10_000, 0, 0, 0.01, 0.01, "catalog", None, 120_000),
         ],
         vec![
             serde_json::json!({
@@ -356,7 +398,7 @@ fn cost_varies_with_the_session_it_reports_on() {
             0,
             0.0150,
             0.0150,
-            true,
+            "catalog",
             Some("no_marker"),
             1_000,
         )],
@@ -372,7 +414,7 @@ fn cost_varies_with_the_session_it_reports_on() {
             0,
             13.5000,
             13.5000,
-            true,
+            "catalog",
             Some("no_marker"),
             900_000,
         )],
@@ -408,7 +450,7 @@ fn cache_saving_is_signed_and_a_write_heavy_session_reports_a_loss() {
             40_000,
             0.0765,
             0.0615,
-            true,
+            "catalog",
             Some("no_marker"),
             41_000,
         )],
@@ -441,14 +483,25 @@ fn an_unpriced_model_is_reported_as_unpriced_not_as_free() {
         tmp.path(),
         "sess-unpriced",
         vec![
-            turn_json(1, 50_000, 0, 0, 0.0, 0.0, false, Some("no_marker"), 50_000),
-            turn_json(2, 50_000, 0, 0, 0.0, 0.0, false, None, 100_000),
+            turn_json(
+                1,
+                50_000,
+                0,
+                0,
+                0.0,
+                0.0,
+                "unpriced",
+                Some("no_marker"),
+                50_000,
+            ),
+            turn_json(2, 50_000, 0, 0, 0.0, 0.0, "unpriced", None, 100_000),
         ],
         vec![],
     );
     let o = stdout(&run(tmp.path(), &["report"]));
     assert_eq!(field(&o, "cost", "cost_truth"), "unpriced");
     assert_eq!(field(&o, "cost", "unpriced_round_trips"), "2");
+    assert_eq!(field(&o, "cost", "catalog_priced_round_trips"), "0");
     assert!(
         o.contains("F23_CACHE=cost_warning"),
         "a $0.00 that means `we cannot price this` must carry a warning:\n{o}"
@@ -481,15 +534,89 @@ fn verify_passes_only_when_every_round_trip_is_priced() {
         mixed.path(),
         "sess-mixed",
         vec![
-            turn_json(1, 1_000, 0, 0, 0.01, 0.01, true, Some("no_marker"), 1_000),
-            turn_json(2, 1_000, 0, 0, 0.01, 0.01, true, None, 2_000),
-            turn_json(3, 1_000, 0, 0, 0.00, 0.00, false, None, 3_000),
+            turn_json(
+                1,
+                1_000,
+                0,
+                0,
+                0.01,
+                0.01,
+                "catalog",
+                Some("no_marker"),
+                1_000,
+            ),
+            turn_json(2, 1_000, 0, 0, 0.01, 0.01, "catalog", None, 2_000),
+            turn_json(3, 1_000, 0, 0, 0.00, 0.00, "unpriced", None, 3_000),
         ],
         vec![],
     );
     let bad = run(mixed.path(), &["verify"]);
     assert_eq!(code(&bad), 7, "stdout:\n{}", stdout(&bad));
     assert_eq!(field(&stdout(&bad), "verify", "cost_truth"), "partial");
+}
+
+#[test]
+fn a_family_rate_estimate_does_not_pass_verify() {
+    // The finding that produced `CostSource`: `resolve_turn_cost` reports
+    // `priced = true` for a model the catalog has never heard of, using the
+    // provider FAMILY's rate. That number looks exactly like spend and is not.
+    // It must not clear the gate, and it must be labelled distinctly from an
+    // outright-unpriced session.
+    let tmp = tempfile::tempdir().unwrap();
+    write_ledger(
+        tmp.path(),
+        "sess-estimated",
+        vec![
+            turn_json(
+                1,
+                1_000,
+                0,
+                0,
+                0.015,
+                0.015,
+                "provider_defaults",
+                Some("no_marker"),
+                1_000,
+            ),
+            turn_json(
+                2,
+                1_000,
+                0,
+                0,
+                0.015,
+                0.015,
+                "provider_defaults",
+                None,
+                2_000,
+            ),
+        ],
+        vec![],
+    );
+    let v = run(tmp.path(), &["verify"]);
+    assert_eq!(code(&v), 7, "stdout:\n{}", stdout(&v));
+    let o = stdout(&v);
+    assert_eq!(field(&o, "verify", "cost_truth"), "estimated");
+    assert_eq!(field(&o, "verify", "trustworthy"), "false");
+    assert_eq!(field(&o, "verify", "estimated_round_trips"), "2");
+    assert_eq!(field(&o, "verify", "unpriced_round_trips"), "0");
+
+    // And `report` says so in words, distinctly from the unpriced warning.
+    let r = stdout(&run(tmp.path(), &["report"]));
+    assert_eq!(
+        field(&r, "cost_warning", "text"),
+        "usd_is_a_family_rate_estimate_not_spend"
+    );
+
+    // Known-negative: the fully-catalogued fixture must NOT produce a warning
+    // line at all, so the assertion above is not matching a line that is
+    // always emitted.
+    let good = tempfile::tempdir().unwrap();
+    healthy(good.path(), "sess-catalogued");
+    let gr = stdout(&run(good.path(), &["report"]));
+    assert!(
+        !gr.contains("F23_CACHE=cost_warning"),
+        "a fully catalogued session must not carry a cost warning:\n{gr}"
+    );
 }
 
 #[test]
@@ -519,7 +646,7 @@ fn list_reports_every_session_and_report_selects_by_id() {
             0,
             0.1234,
             0.1234,
-            true,
+            "catalog",
             Some("no_marker"),
             7_777,
         )],
@@ -566,6 +693,7 @@ fn json_output_carries_the_derived_figures_not_just_the_raw_counters() {
         );
     }
     assert_eq!(v["cost_truth"], "priced");
+    assert_eq!(v["priced_round_trips"], 4);
     assert_eq!(v["cost_trustworthy"], true);
 }
 

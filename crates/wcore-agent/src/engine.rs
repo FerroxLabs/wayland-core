@@ -12945,7 +12945,7 @@ impl AgentEngine {
         effective_model: &str,
         diagnostic: &Option<CacheDiagnostic>,
     ) {
-        use crate::cache_ledger::{TurnSample, cause_of_diagnostic};
+        use crate::cache_ledger::{CostSource, TurnSample, cause_of_diagnostic};
         use wcore_providers::cache_observation::InvalidationCause;
 
         if !crate::cache_ledger::recording_enabled() {
@@ -12962,6 +12962,27 @@ impl AgentEngine {
             turn_usage.cache_creation_tokens,
             &self.compat,
         );
+        // `resolve_turn_cost` reports `priced = true` for BOTH an exact catalog
+        // row and the `ProviderCompat` family fallback. Ask the catalog
+        // separately so the ledger can tell an operator which one they are
+        // looking at — measured: model `test-model` came back `priced = true`
+        // at Anthropic's generic rate, which is an estimate, not spend.
+        let cost_source = if pricing_turn_cost_with_cache(
+            &provider,
+            effective_model,
+            turn_usage.input_tokens,
+            turn_usage.output_tokens,
+            turn_usage.cache_read_tokens,
+            turn_usage.cache_creation_tokens,
+        )
+        .is_some()
+        {
+            CostSource::Catalog
+        } else if resolved.priced {
+            CostSource::ProviderDefaults
+        } else {
+            CostSource::Unpriced
+        };
         // The counterfactual: the same work with no prompt cache at all, so
         // every cached token is billed as ordinary input.
         let uncached_input = turn_usage
@@ -13000,7 +13021,7 @@ impl AgentEngine {
             output_tokens: turn_usage.output_tokens,
             invalidation_cause: cause,
             cost_usd: resolved.usd,
-            cost_priced: resolved.priced,
+            cost_source,
             uncached_equivalent_usd: uncached.usd,
             watermark_tokens: self.compact_state.last_real_input_tokens,
             conservative_watermark_tokens: self.compact_state.last_input_tokens,

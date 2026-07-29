@@ -25,12 +25,19 @@
 //!
 //! ## Cost truth is a status, not a number
 //!
-//! [`TurnSample::cost_priced`] carries `wcore_pricing`'s `PriceStatus.priced`
-//! flag. A `$0.00` from an unpriced model and a `$0.00` from a genuinely free
-//! model are **different facts**, and a ledger that renders both as `0.00`
-//! is worse than no ledger. [`LedgerSummary::cost_truth`] therefore grades the
-//! session's cost as [`CostTruth::Priced`], [`CostTruth::Partial`] or
-//! [`CostTruth::Unpriced`], and `cache verify` exits non-zero on the latter two.
+//! [`TurnSample::cost_source`] records WHERE the USD figure came from, because
+//! three different things had been rendering as one number:
+//!
+//! - a `$0.00` from a model nobody could price;
+//! - a `$0.00` from a genuinely free model;
+//! - a real-looking figure derived from the provider FAMILY's rate because the
+//!   catalog did not list the model — measured live while building this, on
+//!   model `test-model`, which `resolve_turn_cost` reports as `priced = true`.
+//!
+//! [`LedgerSummary::cost_truth`] therefore grades the session
+//! [`CostTruth::Priced`], [`CostTruth::Estimated`], [`CostTruth::Partial`] or
+//! [`CostTruth::Unpriced`], and `cache verify` exits non-zero on all but the
+//! first.
 //!
 //! The second half of cost truth is the counterfactual: the ledger records both
 //! what the session **was** billed and what the same tokens **would have** been
@@ -56,6 +63,46 @@ pub const LEDGER_SCHEMA: u32 = 1;
 
 /// Directory name under the Wayland home holding one ledger per session.
 pub const LEDGER_DIR: &str = "cache-ledger";
+
+/// Where a round-trip's USD figure came from.
+///
+/// This is not a boolean, and that is the point. `AgentEngine::resolve_turn_cost`
+/// has two price paths and reports `priced = true` for both: an exact
+/// `wcore-pricing` catalog row for this provider×model, and — when the catalog
+/// misses — the `ProviderCompat` family default. Those are different kinds of
+/// fact. A `claude-opus-4-7` row is a published rate; the same rate applied to
+/// an unrecognised model id because it was dispatched to Anthropic is a
+/// **directional estimate for a model nobody priced**.
+///
+/// Measured while building this: a session on model `test-model` came back
+/// `priced = true` at Anthropic's generic rate. Rendering that identically to a
+/// catalog price is how a cost surface earns trust it has not got, so the
+/// ledger records the provenance and [`CostTruth`] grades on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CostSource {
+    /// Exact `wcore-pricing` catalog row for this provider×model.
+    Catalog,
+    /// `ProviderCompat` family defaults — the catalog did not know this model.
+    ProviderDefaults,
+    /// No price could be produced at all; `cost_usd` is `0.0` and means nothing.
+    Unpriced,
+}
+
+impl CostSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Catalog => "catalog",
+            Self::ProviderDefaults => "provider_defaults",
+            Self::Unpriced => "unpriced",
+        }
+    }
+
+    /// Did a price of any kind come out?
+    pub fn is_priced(&self) -> bool {
+        !matches!(self, Self::Unpriced)
+    }
+}
 
 // ── Per-turn sample ─────────────────────────────────────────────────────────
 
@@ -92,9 +139,8 @@ pub struct TurnSample {
     // -- cost truth ---------------------------------------------------------
     /// What this round-trip was billed, cache rates applied.
     pub cost_usd: f64,
-    /// `false` means the catalog could not price this provider×model. The
-    /// USD figure is then a floor, not a fact.
-    pub cost_priced: bool,
+    /// Where [`Self::cost_usd`] came from. Not a bool: see [`CostSource`].
+    pub cost_source: CostSource,
     /// What the SAME tokens would have cost with no cache: every cached token
     /// re-billed at the ordinary input rate.
     pub uncached_equivalent_usd: f64,
@@ -395,10 +441,10 @@ impl CacheLedger {
             s.output_tokens = s.output_tokens.saturating_add(t.output_tokens);
             s.cost_usd += t.cost_usd;
             s.uncached_equivalent_usd += t.uncached_equivalent_usd;
-            if t.cost_priced {
-                s.priced_round_trips += 1;
-            } else {
-                s.unpriced_round_trips += 1;
+            match t.cost_source {
+                CostSource::Catalog => s.catalog_priced_round_trips += 1,
+                CostSource::ProviderDefaults => s.estimated_round_trips += 1,
+                CostSource::Unpriced => s.unpriced_round_trips += 1,
             }
             if t.is_hit() {
                 s.hit_round_trips += 1;
@@ -451,9 +497,14 @@ pub const WARM_AFTER_ROUND_TRIPS: u64 =
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CostTruth {
-    /// Every round-trip priced from the catalog. The USD figure is a fact.
+    /// Every round-trip priced from an exact catalog row. The USD figure is a
+    /// fact.
     Priced,
-    /// Some round-trips are unpriced. The USD figure is a **floor**.
+    /// Every round-trip has a price, but at least one came from
+    /// [`CostSource::ProviderDefaults`] — the provider family's rate applied to
+    /// a model the catalog does not list. Directionally right; not a fact.
+    Estimated,
+    /// Some round-trips have no price at all. The USD figure is a **floor**.
     Partial,
     /// No round-trip could be priced (or there are none). The USD figure
     /// carries no information and must not be presented as spend.
@@ -464,12 +515,17 @@ impl CostTruth {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Priced => "priced",
+            Self::Estimated => "estimated",
             Self::Partial => "partial",
             Self::Unpriced => "unpriced",
         }
     }
 
     /// Can an operator trust the USD number as spend?
+    ///
+    /// Only [`Self::Priced`]. An estimate at the family rate for an unlisted
+    /// model is useful for direction and wrong for accounting, and the whole
+    /// reason this type exists is that the two had been rendering identically.
     pub fn is_trustworthy(&self) -> bool {
         matches!(self, Self::Priced)
     }
@@ -512,7 +568,12 @@ pub struct LedgerSummary {
     // cost truth
     pub cost_usd: f64,
     pub uncached_equivalent_usd: f64,
-    pub priced_round_trips: u64,
+    /// Round-trips priced from an exact catalog row.
+    pub catalog_priced_round_trips: u64,
+    /// Round-trips priced from provider-family defaults — an estimate for a
+    /// model the catalog does not list.
+    pub estimated_round_trips: u64,
+    /// Round-trips with no price at all.
     pub unpriced_round_trips: u64,
 }
 
@@ -564,12 +625,22 @@ impl LedgerSummary {
         self.peak_watermark_tokens as f64 / self.autocompact_threshold_tokens as f64
     }
 
+    /// Round-trips that produced a price of any kind.
+    pub fn priced_round_trips(&self) -> u64 {
+        self.catalog_priced_round_trips + self.estimated_round_trips
+    }
+
     /// Grade the trustworthiness of [`Self::cost_usd`].
+    ///
+    /// Ordered worst-first so a single bad round-trip cannot be averaged away
+    /// by good ones — a total is only as trustworthy as its weakest row.
     pub fn cost_truth(&self) -> CostTruth {
-        if self.priced_round_trips == 0 {
+        if self.priced_round_trips() == 0 {
             CostTruth::Unpriced
         } else if self.unpriced_round_trips > 0 {
             CostTruth::Partial
+        } else if self.estimated_round_trips > 0 {
+            CostTruth::Estimated
         } else {
             CostTruth::Priced
         }
@@ -889,7 +960,7 @@ mod tests {
             output_tokens: 100,
             invalidation_cause: None,
             cost_usd: 0.01,
-            cost_priced: true,
+            cost_source: CostSource::Catalog,
             uncached_equivalent_usd: 0.02,
             watermark_tokens: 10_000 * round_trip,
             conservative_watermark_tokens: 11_000 * round_trip,
@@ -1028,20 +1099,48 @@ mod tests {
         let mut l = CacheLedger::new("sess-cost");
         l.record_turn(sample(1, 1_000, 0, 0));
         let mut unpriced = sample(2, 1_000, 0, 0);
-        unpriced.cost_priced = false;
+        unpriced.cost_source = CostSource::Unpriced;
         unpriced.cost_usd = 0.0;
         l.record_turn(unpriced);
         let s = l.summarize();
         assert_eq!(s.cost_truth(), CostTruth::Partial);
         assert!(!s.cost_truth().is_trustworthy());
         assert_eq!(s.unpriced_round_trips, 1);
+        assert_eq!(s.catalog_priced_round_trips, 1);
+    }
+
+    #[test]
+    fn a_family_default_price_is_estimated_not_priced() {
+        // The distinction this whole type exists for. One round-trip whose USD
+        // came from the provider's family rate rather than a catalog row makes
+        // the session's total an estimate — and `is_trustworthy` must say no.
+        let mut l = CacheLedger::new("sess-estimated");
+        l.record_turn(sample(1, 1_000, 0, 0));
+        let mut est = sample(2, 1_000, 0, 0);
+        est.cost_source = CostSource::ProviderDefaults;
+        l.record_turn(est);
+        let s = l.summarize();
+        assert_eq!(s.cost_truth(), CostTruth::Estimated);
+        assert!(!s.cost_truth().is_trustworthy());
+        assert_eq!(s.estimated_round_trips, 1);
+        assert_eq!(s.unpriced_round_trips, 0);
+        // And it is NOT collapsed into Priced: the known-negative that proves
+        // the grade is actually reading the source.
+        assert_ne!(s.cost_truth(), CostTruth::Priced);
+
+        // An unpriced row present alongside an estimated one grades worse, not
+        // averaged — a total is only as good as its weakest row.
+        let mut worse = sample(3, 1_000, 0, 0);
+        worse.cost_source = CostSource::Unpriced;
+        l.record_turn(worse);
+        assert_eq!(l.summarize().cost_truth(), CostTruth::Partial);
     }
 
     #[test]
     fn cost_truth_unpriced_when_nothing_priced() {
         let mut l = CacheLedger::new("sess-unpriced");
         let mut t = sample(1, 1_000, 0, 0);
-        t.cost_priced = false;
+        t.cost_source = CostSource::Unpriced;
         t.cost_usd = 0.0;
         l.record_turn(t);
         assert_eq!(l.summarize().cost_truth(), CostTruth::Unpriced);

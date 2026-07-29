@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
-use wcore_agent::cache_ledger::{CacheLedger, CostTruth};
+use wcore_agent::cache_ledger::{CacheLedger, CostSource, CostTruth};
 use wcore_agent::engine::AgentEngine;
 use wcore_agent::output::OutputSink;
 use wcore_agent::output::terminal::TerminalSink;
@@ -197,9 +197,22 @@ async fn a_real_run_writes_a_ledger_with_one_row_per_round_trip() {
     assert_eq!(s.cache_write_tokens, 20_000);
     assert_eq!(s.hit_round_trips, 2);
     assert_eq!(s.miss_round_trips, 1);
+    // 40_500 cache reads over 81_500 total input — the 20_000 cache WRITES on
+    // the cold open are in the denominator on purpose. A first draft asserted
+    // `> 0.6` on the assumption writes were excluded, and failed at 0.497; the
+    // assertion was wrong, not the ratio.
     assert!(
-        s.hit_ratio() > 0.6,
-        "hit ratio should be dominated by the two warm reads, got {}",
+        (s.hit_ratio() - 40_500.0 / 81_500.0).abs() < 1e-6,
+        "hit ratio {} does not match cache_read / total_input",
+        s.hit_ratio()
+    );
+    // The warm window excludes the two cold opening round-trips, so it must
+    // read much better than the session average.
+    assert_eq!(s.warm_round_trips, 1);
+    assert!(
+        s.warm_hit_ratio() > 0.97 && s.warm_hit_ratio() > s.hit_ratio(),
+        "warm={} all={}",
+        s.warm_hit_ratio(),
         s.hit_ratio()
     );
 
@@ -218,15 +231,27 @@ async fn recorded_cost_varies_with_the_tokens_and_beats_the_uncached_counterfact
     // The specific defect this guards: a cost observable that reports the same
     // number regardless of what happened. Two engines, identical in every way
     // except the token counts their provider reports, must produce different
-    // costs — and the cached run must come out cheaper than its own uncached
-    // counterfactual.
+    // costs.
+    //
+    // The `spend` shape is READ-dominated (one small cache write, then many
+    // reads) so its counterfactual is genuinely more expensive. A first draft
+    // used a write-heavy shape and asserted the cache always saves; it failed
+    // at 11.2575 billed vs 10.0075 uncached, because Anthropic's cache-write
+    // rate is 1.25x input and a session that writes far more than it reads
+    // really does cost MORE than an uncached one. That is a true fact about
+    // prompt caching, not a bug — so both directions are asserted below,
+    // each on a shape that actually exhibits it.
     async fn spend(dir: &std::path::Path, scale: u64) -> (f64, f64) {
         let provider = Arc::new(ScriptedProvider::new(vec![
-            tool_turn("t1", usage(10 * scale, 300, 0, 10 * scale)),
-            text_turn("done", usage(scale, 300, 10 * scale, 0)),
+            tool_turn("t1", usage(scale, 300, 0, scale)),
+            tool_turn("t2", usage(100, 300, 10 * scale, 0)),
+            text_turn("done", usage(100, 300, 10 * scale, 0)),
         ]));
         let mut config = test_config();
         config.model = "claude-opus-4-7".to_string();
+        // Compaction off: this test measures cost, and a compaction pass would
+        // consume a scripted turn and change the token totals underneath it.
+        config.compact.enabled = false;
         let mut engine = AgentEngine::new_with_provider(
             provider,
             config,
@@ -236,6 +261,7 @@ async fn recorded_cost_varies_with_the_tokens_and_beats_the_uncached_counterfact
         engine.set_cache_ledger_dir(dir);
         engine.run("go", "m").await.expect("run should succeed");
         let s = read_only_ledger(dir).summarize();
+        assert_eq!(s.round_trips, 3, "the script must run to completion");
         (s.cost_usd, s.uncached_equivalent_usd)
     }
 
@@ -250,22 +276,55 @@ async fn recorded_cost_varies_with_the_tokens_and_beats_the_uncached_counterfact
         "cost is INVARIANT or barely moving across a 100x workload: {small} -> {large}"
     );
 
-    // The counterfactual is priced through the same catalog, and re-billing the
-    // cache reads as ordinary input must cost strictly more.
+    // Read-dominated: the counterfactual, priced through the same catalog with
+    // every cached token re-billed as input, must cost strictly more.
     assert!(
         small_uncached > small && large_uncached > large,
-        "the uncached counterfactual must exceed the billed cost: \
+        "a read-dominated session must beat its uncached counterfactual: \
          {small_uncached} vs {small}, {large_uncached} vs {large}"
+    );
+
+    // Write-dominated: the OTHER direction, on a shape that exhibits it. This
+    // is the known-negative for the assertion above — without it, a saving
+    // hardcoded positive would pass.
+    let loss_dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![text_turn(
+        "done",
+        usage(1_000, 300, 0, 100_000),
+    )]));
+    let mut config = test_config();
+    config.model = "claude-opus-4-7".to_string();
+    config.compact.enabled = false;
+    let mut engine =
+        AgentEngine::new_with_provider(provider, config, ToolRegistry::new(), silent_output());
+    engine.set_cache_ledger_dir(loss_dir.path());
+    engine.run("go", "m").await.expect("run should succeed");
+    let loss = read_only_ledger(loss_dir.path()).summarize();
+    assert!(
+        loss.cache_saving_usd() < 0.0,
+        "a session that writes 100k of cache and reads none must report a \
+         NEGATIVE saving, got {} (billed {}, uncached {})",
+        loss.cache_saving_usd(),
+        loss.cost_usd,
+        loss.uncached_equivalent_usd
     );
 }
 
 #[tokio::test]
 #[serial_test::serial(wayland_cache_ledger_env)]
-async fn an_uncatalogued_model_is_recorded_unpriced_rather_than_free() {
-    // `test_config()`'s default model is not in the pricing catalog. A ledger
-    // that recorded that as `$0.00 priced` would be indistinguishable from a
-    // genuinely free session — the exact failure the CostTruth grade exists to
-    // prevent, proved here through the engine rather than a fixture.
+async fn an_uncatalogued_model_is_recorded_as_an_estimate_not_as_spend() {
+    // MEASURED FINDING, and the reason `CostSource` exists.
+    //
+    // `test_config()`'s model `test-model` is not in the pricing catalog. The
+    // first draft of this test asserted the engine would record it UNPRICED.
+    // It came back PRICED — `resolve_turn_cost` falls through to the
+    // `ProviderCompat` family rate, so an unknown model dispatched to Anthropic
+    // is billed at Anthropic's generic rate and reported with `priced = true`.
+    //
+    // That number is not a lie, but it is not spend either, and it had been
+    // rendering identically to a catalog price. The ledger therefore records
+    // the SOURCE, and this test pins the honest answer: `provider_defaults`,
+    // grading the session `Estimated` and NOT trustworthy.
     let dir = tempfile::tempdir().unwrap();
     let provider = Arc::new(ScriptedProvider::new(vec![text_turn(
         "done",
@@ -282,11 +341,35 @@ async fn an_uncatalogued_model_is_recorded_unpriced_rather_than_free() {
     engine.set_cache_ledger_dir(dir.path());
     engine.run("go", "m").await.expect("run should succeed");
 
-    let s = read_only_ledger(dir.path()).summarize();
+    let ledger = read_only_ledger(dir.path());
+    assert_eq!(ledger.turns[0].cost_source, CostSource::ProviderDefaults);
+    let s = ledger.summarize();
     assert_eq!(s.round_trips, 1);
-    assert_eq!(s.cost_truth(), CostTruth::Unpriced);
-    assert!(!s.cost_truth().is_trustworthy());
-    assert_eq!(s.unpriced_round_trips, 1);
+    assert_eq!(s.cost_truth(), CostTruth::Estimated);
+    assert!(
+        !s.cost_truth().is_trustworthy(),
+        "a family-rate estimate must not be presented as spend"
+    );
+    assert_eq!(s.estimated_round_trips, 1);
+    assert_eq!(s.catalog_priced_round_trips, 0);
+
+    // Known-negative: the SAME engine on a catalogued model must grade
+    // `Priced`, so the grade above is reading the source rather than always
+    // returning Estimated.
+    let dir2 = tempfile::tempdir().unwrap();
+    let provider2 = Arc::new(ScriptedProvider::new(vec![text_turn(
+        "done",
+        usage(50_000, 1_000, 0, 0),
+    )]));
+    let mut config2 = test_config();
+    config2.model = "claude-opus-4-7".to_string();
+    let mut engine2 =
+        AgentEngine::new_with_provider(provider2, config2, ToolRegistry::new(), silent_output());
+    engine2.set_cache_ledger_dir(dir2.path());
+    engine2.run("go", "m").await.expect("run should succeed");
+    let s2 = read_only_ledger(dir2.path()).summarize();
+    assert_eq!(s2.cost_truth(), CostTruth::Priced);
+    assert!(s2.cost_truth().is_trustworthy());
 }
 
 #[tokio::test]

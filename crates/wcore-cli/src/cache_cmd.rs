@@ -188,11 +188,13 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
             let s = ledger.summarize();
             let truth = s.cost_truth();
             println!(
-                "F23_CACHE=verify trustworthy={} cost_truth={} priced_round_trips={} \
-                 unpriced_round_trips={} cost_usd={:.6} session_complete={} session={} path={}",
+                "F23_CACHE=verify trustworthy={} cost_truth={} catalog_priced_round_trips={} \
+                 estimated_round_trips={} unpriced_round_trips={} cost_usd={:.6} \
+                 session_complete={} session={} path={}",
                 truth.is_trustworthy(),
                 truth.as_str(),
-                s.priced_round_trips,
+                s.catalog_priced_round_trips,
+                s.estimated_round_trips,
                 s.unpriced_round_trips,
                 s.cost_usd,
                 s.session_complete,
@@ -203,11 +205,13 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
                 Ok(ExitCode::SUCCESS)
             } else {
                 eprintln!(
-                    "wayland-core cache verify: cost is {} — {} of {} round-trips could not be \
-                     priced, so ${:.6} is a FLOOR, not spend.",
+                    "wayland-core cache verify: cost is {} — of {} round-trips, {} were priced \
+                     from provider-family defaults rather than a catalog row and {} could not be \
+                     priced at all, so ${:.6} must not be reported as spend.",
                     truth.as_str(),
-                    s.unpriced_round_trips,
                     s.round_trips,
+                    s.estimated_round_trips,
+                    s.unpriced_round_trips,
                     s.cost_usd,
                 );
                 Ok(ExitCode::from(EXIT_COST_NOT_TRUSTWORTHY))
@@ -234,7 +238,7 @@ fn print_turn(t: &TurnSample) {
     println!(
         "F23_CACHE=turn round_trip={} turn={} provider={} model={} retention={} \
          uncached_input={} cache_read={} cache_write={} output={} hit={} hit_ratio={:.4} \
-         invalidation={} cost_usd={:.6} priced={} uncached_equivalent_usd={:.6} \
+         invalidation={} cost_usd={:.6} cost_source={} uncached_equivalent_usd={:.6} \
          saving_usd={:.6} watermark={} threshold={} emergency_limit={} pressure={:.4}",
         t.round_trip,
         t.turn,
@@ -249,7 +253,7 @@ fn print_turn(t: &TurnSample) {
         t.hit_ratio(),
         t.invalidation_cause.map(|c| c.as_str()).unwrap_or("-"),
         t.cost_usd,
-        t.cost_priced,
+        t.cost_source.as_str(),
         t.uncached_equivalent_usd,
         t.cache_saving_usd(),
         t.watermark_tokens,
@@ -326,13 +330,15 @@ fn print_report(s: &LedgerSummary, path: &std::path::Path) {
     // 4 — cost truth
     println!(
         "F23_CACHE=cost usd={:.6} uncached_equivalent_usd={:.6} saving_usd={:.6} \
-         saving_ratio={:.4} cost_truth={} priced_round_trips={} unpriced_round_trips={}",
+         saving_ratio={:.4} cost_truth={} catalog_priced_round_trips={} \
+         estimated_round_trips={} unpriced_round_trips={}",
         s.cost_usd,
         s.uncached_equivalent_usd,
         s.cache_saving_usd(),
         s.cache_saving_ratio(),
         s.cost_truth().as_str(),
-        s.priced_round_trips,
+        s.catalog_priced_round_trips,
+        s.estimated_round_trips,
         s.unpriced_round_trips,
     );
     if s.cost_truth() != CostTruth::Priced {
@@ -340,7 +346,11 @@ fn print_report(s: &LedgerSummary, path: &std::path::Path) {
         // like a priced one is the failure mode this whole surface exists to
         // avoid.
         println!(
-            "F23_CACHE=cost_warning text=usd_is_a_floor_not_spend cost_truth={}",
+            "F23_CACHE=cost_warning text={} cost_truth={}",
+            match s.cost_truth() {
+                CostTruth::Estimated => "usd_is_a_family_rate_estimate_not_spend",
+                _ => "usd_is_a_floor_not_spend",
+            },
             s.cost_truth().as_str()
         );
     }
