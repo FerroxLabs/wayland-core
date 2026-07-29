@@ -67,15 +67,25 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const PROBE_QUESTION: &str = "summarise the deployment plan";
 
 /// The style fingerprint seeded through the real `LocalBackend::observe`.
-/// `fold_style` uses alpha = 1/(obs_count+1); on the FIRST observation
-/// obs_count is 1, so alpha is 0.5 — the stored value is half the fingerprint.
-/// 0.8 → 0.40, which is well clear of the 0.05 render threshold and renders
-/// deterministically as `formality=0.40`.
+/// High on every axis so the folded value clears the 0.05 render threshold.
 const SEED_FINGERPRINT: [f32; 4] = [0.8, 0.6, 0.6, 0.2];
 
-/// What the rendered inferred-style line looks like once seeded. This string
-/// is the thing a correction must REMOVE from the prompt.
-const INFERRED_STYLE_MARKER: &str = "formality=0.40";
+/// The inferred-style line's structural prefix — the thing a correction must
+/// REMOVE from the prompt.
+///
+/// This is deliberately NOT an exact number such as `formality=0.40`. The
+/// engine's per-turn `observe_user_turn` folds a fresh style fingerprint on
+/// every turn, so the rendered value **drifts between sessions**. An exact-value
+/// marker would therefore go absent in session 2 on its own, and the headline
+/// test's "the correction removed it" assertion would have passed without the
+/// correction doing anything — a self-passing gate.
+///
+/// Found by this file's own forget test failing for exactly that reason before
+/// the marker was structural; the earlier exact-value form is why the headline
+/// assertion needed the paired control in
+/// [`the_control_proves_the_probe_can_fail`], which now asserts this same
+/// string IS present when no correction is made.
+const INFERRED_STYLE_MARKER: &str = "- style: formality=";
 
 /// The user's own words. A nonce so a match cannot come from anywhere else.
 const CORRECTION_VALUE: &str = "blunt, no preamble QK7UM3NONCE";
@@ -403,6 +413,18 @@ async fn the_control_proves_the_probe_can_fail() {
         bodies[1].contains("User context (from rolling profile)"),
         "control: the user-context block is not being rendered at all, so the headline \
          test's absence assertion would pass for the wrong reason. Body was: {}",
+        bodies[1]
+    );
+    // The load-bearing assertion. The headline test claims this exact string is
+    // absent from session 2 *because of the correction*. Here — same shape, same
+    // clobber machinery, no correction — it must be PRESENT. Without this, EMA
+    // drift, a path change or a bootstrap reorder could remove the string on its
+    // own and the headline test would pass having proved nothing.
+    assert!(
+        bodies[1].contains(INFERRED_STYLE_MARKER),
+        "control: the inferred style line is absent from session 2 even though NO \
+         correction was made. Something other than a correction removes it, so the \
+         headline test's absence assertion proves nothing. Body was: {}",
         bodies[1]
     );
     assert!(
