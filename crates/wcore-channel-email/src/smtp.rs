@@ -15,6 +15,7 @@ use lettre::message::header::{HeaderName, HeaderValue};
 use lettre::message::{Attachment, Message, MultiPart, SinglePart, header::ContentType};
 use lettre::transport::smtp::AsyncSmtpTransport;
 use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::client::{Certificate, Tls, TlsParameters};
 use lettre::transport::smtp::response::Response;
 use lettre::{AsyncTransport, Tokio1Executor};
 
@@ -68,20 +69,63 @@ impl LettreSender {
     /// Build a STARTTLS sender for `host:port` with username/password
     /// SASL PLAIN auth. Returns Err if the relay builder rejects the
     /// host (e.g. malformed name).
+    ///
+    /// `tls_root_cert_path`, when set, names a PEM file holding one or more
+    /// additional trust anchors to accept **in addition to** the roots this
+    /// build already trusts. It is the only way to reach a relay presenting a
+    /// private or self-signed chain, because this crate builds `lettre` with
+    /// `tokio1-rustls-tls`, whose `CertificateStore::Default` resolves to the
+    /// compiled-in `webpki-roots` Mozilla bundle — no platform trust store is
+    /// consulted on any OS, so `SSL_CERT_FILE` and the system keychain have no
+    /// effect on this path. (The IMAP path is unrelated: it uses `native-tls`,
+    /// which does consult the platform store.)
+    ///
+    /// Certificate and hostname verification stay **fully enabled**: lettre's
+    /// `add_root_certificate` only appends to the root store, and its
+    /// verification-disabling branch is gated solely on `accept_invalid_certs` /
+    /// `accept_invalid_hostnames`, neither of which is set here or reachable
+    /// from config. Adding a root is a trust decision; disabling verification is
+    /// not the same thing and is deliberately not offered.
     pub fn new(
         host: &str,
         port: u16,
         username: String,
         password: String,
+        tls_root_cert_path: Option<&str>,
     ) -> Result<Self, EmailError> {
         let creds = Credentials::new(username, password);
-        let transport = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
+        let mut builder = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
             .map_err(|e| EmailError::Smtp(format!("build relay {host}: {e}")))?
             .port(port)
-            .credentials(creds)
-            .build();
-        Ok(Self { inner: transport })
+            .credentials(creds);
+
+        if let Some(path) = tls_root_cert_path {
+            // `starttls_relay` has already installed
+            // `Tls::Required(TlsParameters::new(host))`, so an extra anchor can
+            // only be introduced by replacing those parameters wholesale.
+            builder = builder.tls(Tls::Required(build_tls_params(host, path)?));
+        }
+
+        Ok(Self {
+            inner: builder.build(),
+        })
     }
+}
+
+/// Read a PEM trust anchor from `path` and build STARTTLS parameters for
+/// `host` that trust it in addition to the compiled-in roots.
+///
+/// Split out from `LettreSender::new` so the PEM read/parse failure modes are
+/// unit-testable without standing up an SMTP relay.
+pub(crate) fn build_tls_params(host: &str, path: &str) -> Result<TlsParameters, EmailError> {
+    let pem = std::fs::read(path)
+        .map_err(|e| EmailError::Smtp(format!("read smtp tls_root_cert_path {path}: {e}")))?;
+    let cert = Certificate::from_pem(&pem)
+        .map_err(|e| EmailError::Smtp(format!("parse smtp tls_root_cert_path {path}: {e}")))?;
+    TlsParameters::builder(host.to_string())
+        .add_root_certificate(cert)
+        .build()
+        .map_err(|e| EmailError::Smtp(format!("build tls params for {host}: {e}")))
 }
 
 #[async_trait]

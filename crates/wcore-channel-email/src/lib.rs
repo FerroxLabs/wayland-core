@@ -266,6 +266,7 @@ impl Channel for EmailChannel {
                     self.config.smtp.port,
                     smtp_user.clone(),
                     smtp_pass,
+                    self.config.smtp.tls_root_cert_path.as_deref(),
                 )
                 .map_err(ChannelError::from)?,
             )
@@ -649,6 +650,7 @@ mod tests {
                 port: 587,
                 user_credential_handle: "email.test.smtp_user".to_string(),
                 password_credential_handle: "email.test.smtp_pass".to_string(),
+                tls_root_cert_path: None,
             },
             imap: None,
         }
