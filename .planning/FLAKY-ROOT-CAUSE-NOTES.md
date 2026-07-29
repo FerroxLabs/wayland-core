@@ -149,6 +149,51 @@ unsupported at 0.9.137. This does not affect my numbers (I read the executed cou
 directly, 2172, and cross-checked against `nextest list` = 2172) but it is a live self-passing
 gate in the repo and I must report it.
 
+---
+
+## MEASUREMENT 2 — REPRODUCED by oversubscription. The mechanism is EMFILE in the runner.
+
+Same worktree/commit. Only knob changed: `--test-threads`. No machine loading, so other
+lanes are undisturbed and the confound in Measurement 1(b) is removed rather than added to.
+
+| test-threads | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| 96 (default) | 2172 passed | 2172 passed | 2172 passed |
+| 192 (2x) | 2172 passed | 2172 passed | 2172 passed |
+| 384 (4x) | 2172 passed | 2172 passed, **37 flaky** | 2161 passed, **85 flaky, 11 exec failed**, rc=100 |
+| 768 (8x) | 2172 passed | 2172 passed, **79 flaky** | 2172 passed, **66 flaky** |
+
+Classification of every non-pass in the worst run (`oversub-384/run-3.log`), raw grep:
+
+```
+TRY 1 XFAIL  : 96      <- exec failed, i.e. nextest could not SPAWN the test
+TRY 1 FAIL   : 0       <- real test-assertion failures
+distinct error strings: 107 x "- Too many open files (os error 24)"
+```
+
+**Zero tests failed an assertion. Every single failure was the harness failing to `fork`/`exec`
+a test process because the runner ran out of file descriptors.** 85 of the 96 succeeded on the
+profile's `retries = 1`; the 11 that hit it on both attempts became the reported `exec failed`.
+
+### This falsifies CLASS-ENV-01 as the mechanism for this suite
+
+- Not env mutation: nextest is process-per-test, and in any case no test body ran.
+- Not lease contention, not a shared temp path, not a port, not a global registry: **the test
+  process never started.** A test that does not execute cannot race anything.
+- The failing set shifts run-to-run in both directions because *which* test is unlucky enough
+  to request a spawn at the moment the fd table is full is pure scheduling — exactly the
+  "differs in both directions, not a stable subset" signature the brief reports.
+- `--test-threads=1` is clean because one child at a time needs ~3 fds.
+
+Host fd limit measured: `ulimit -n` (soft `RLIMIT_NOFILE`) = **1024** on a non-interactive ssh
+shell — the shell every lane uses. nextest holds pipe fds per concurrently-running child, so
+peak runner fd usage scales with `--test-threads`.
+
+Note this is the *same errno and the same shape* as the `wcore-skills` EMFILE cluster already
+recorded in BACKLOG CLASS-ENV-01 row 3 ("~20 EMFILE failures at 0.007s"), which was filed under
+an env-mutation heading it does not belong to. **That row is a resource-exhaustion finding
+wearing an env-mutation label**, and the 18-22 counts in my brief match its magnitude.
+
 ## Open questions I must not paper over
 
 - Does nextest ever run more than one test per process here? (`--lib` is one binary; I
