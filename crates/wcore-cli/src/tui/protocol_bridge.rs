@@ -4846,6 +4846,57 @@ mod tests {
         );
     }
 
+    /// F22-C1 control: a REFUSED command must be visible in the TUI.
+    ///
+    /// The TUI can now issue Goal commands (`TuiEngine::issue_goal_control`),
+    /// so it must be able to show that one was rejected. The refusal that
+    /// matters most is the one that arrives with NO Goals and NO transitions —
+    /// `goal_not_found` on a fresh session — because the segment's original
+    /// early-return keyed on exactly those two being empty and would have
+    /// rendered nothing at all.
+    #[test]
+    fn a_refused_goal_command_is_visible_even_with_no_goals_at_all() {
+        let mut app = App::new();
+        assert!(
+            goal_status_summary(&app).is_none(),
+            "precondition: an untouched session renders no Goal segment"
+        );
+
+        apply_event(
+            &mut app,
+            ProtocolEvent::GoalControlRefused {
+                goal_version: 1,
+                request_id: "req-1".to_owned(),
+                session_id: "s".to_owned(),
+                goal_id: "ghost".to_owned(),
+                reason: wcore_protocol::events::GoalControlRefusalReason::GoalNotFound,
+            },
+        );
+
+        let refusal = app
+            .goal_last_refusal
+            .as_ref()
+            .expect("a refusal must land in view state");
+        assert_eq!(refusal.request_id, "req-1");
+        assert_eq!(refusal.goal_id, "ghost");
+
+        // THE assertion: with zero goals and zero transitions the segment must
+        // still render, and must say "refused". The pre-repair early-return
+        // returned None here, so a refused command looked exactly like a
+        // session that had never issued one.
+        let summary =
+            goal_status_summary(&app).expect("a refusal alone must keep the segment alive");
+        assert!(
+            summary.contains("refused") && summary.contains("goal_not_found"),
+            "a refusal must name itself in the status line: {summary}"
+        );
+        // It must NOT claim a snapshot is coming — nothing is.
+        assert!(
+            !summary.contains("awaiting snapshot"),
+            "a refusal must not promise a snapshot that will never arrive: {summary}"
+        );
+    }
+
     /// A re-snapshot must REPLACE, or the status line counts one Goal twice.
     #[test]
     fn re_snapshotting_one_goal_replaces_it_rather_than_accumulating() {
