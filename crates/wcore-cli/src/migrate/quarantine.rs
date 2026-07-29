@@ -663,14 +663,43 @@ pub struct ScannedExecutable {
     pub name: String,
 }
 
+/// How deep below a skill root a skill directory may sit.
+///
+/// **This bound is a measurement, not a guess.** Against Sean's real
+/// `~/.hermes`, skill directories occur at depths 2–6 relative to the home:
+/// `skills/<skill>/` (22), `skills/<group>/<skill>/` (157),
+/// `profiles/<p>/skills/<skill>/` (252), `profiles/<p>/skills/<group>/<skill>/`
+/// (960), and deeper groupings (339). Relative to a ROOT that is 4 levels, so
+/// the bound is set at 6 for headroom while still refusing to walk an entire
+/// home. A bound is required rather than optional: an unbounded walk of a peer
+/// home reaches `logs/`, `cache/` and vendored git checkouts.
+pub const MAX_SKILL_ROOT_DEPTH: usize = 6;
+
 /// Directories a peer home keeps skills in, relative to the home.
 ///
 /// Hermes keeps them at `skills/` and `profiles/<name>/skills/`; OpenClaw at
-/// `plugin-skills/` and `agents/<name>/skills/`. Both roots are scanned for
-/// either source, because a home carrying both layouts is a real migration and
-/// guessing wrong loses items.
+/// `plugin-skills/`, `agents/<name>/skills/` and `plugins/`. Every root is
+/// scanned for either source, because a home carrying both layouts is a real
+/// migration and guessing wrong loses items.
+///
+/// # What is deliberately NOT a root, and why (F26-GRADE-M1)
+///
+/// The real `~/.hermes` carries **1909** `SKILL.md` files. **179** of them live
+/// under `hermes-agent/` and `hermes-office/`, which are **git checkouts of the
+/// peer product itself** — `~/.hermes/hermes-agent/.git` exists, beside
+/// `cli.py`, `Dockerfile` and `CONTRIBUTING.md`. Their `optional-skills/` tree
+/// is the VENDOR's shipped catalog, not the user's setup: it arrives with the
+/// peer product and is re-obtained by installing it. Copying it into a Wayland
+/// home would duplicate a library the user never authored, and it is the single
+/// easiest way to inflate an "imported" count without migrating anything of
+/// the user's. The remaining **1730 are user-authored and in scope**, and the
+/// accounting closes exactly: 1730 + 179 = 1909.
 pub fn peer_skill_roots(home: &Path) -> Vec<PathBuf> {
-    let mut roots = vec![home.join("skills"), home.join("plugin-skills")];
+    let mut roots = vec![
+        home.join("skills"),
+        home.join("plugin-skills"),
+        home.join("plugins"),
+    ];
     for parent in ["profiles", "agents"] {
         let base = home.join(parent);
         if let Ok(rd) = fs::read_dir(&base) {
@@ -682,10 +711,13 @@ pub fn peer_skill_roots(home: &Path) -> Vec<PathBuf> {
             kids.sort();
             for k in kids {
                 roots.push(k.join("skills"));
+                roots.push(k.join("plugin-skills"));
             }
         }
     }
     roots.retain(|p| p.is_dir());
+    roots.sort();
+    roots.dedup();
     roots
 }
 
@@ -694,42 +726,192 @@ pub fn peer_skill_roots(home: &Path) -> Vec<PathBuf> {
 /// A directory is a skill when it holds a `SKILL.md`. Its body is classified by
 /// the existing detector; a body with no directive is DATA and importable
 /// without promotion.
+///
+/// # Why this recurses (F26-GRADE-M1)
+///
+/// The previous implementation inspected only an **immediate child** of a root,
+/// which measured **274 of 1909** real skills — 14%. That was not a live
+/// execution hole while nothing was imported, but it converts into one the
+/// moment import widens, which is why the grading lane required the two changes
+/// land together. Real peer homes GROUP skills
+/// (`profiles/<p>/skills/creative/<skill>/`), and grouping accounts for the
+/// single largest bucket (960 items) — a bucket no amount of extra roots can
+/// reach. The walk is bounded by [`MAX_SKILL_ROOT_DEPTH`] and does not descend
+/// INTO a directory already identified as a skill, so a skill's own asset
+/// subdirectories cannot be mistaken for nested skills.
 pub fn scan_peer_skills(home: &Path) -> Vec<(ScannedExecutable, Classification)> {
     let mut out = Vec::new();
     for root in peer_skill_roots(home) {
-        let Ok(rd) = fs::read_dir(&root) else {
-            continue;
-        };
+        scan_skill_root(home, &root, 0, &mut out);
+    }
+    // One home can reach the same directory through two roots (a `skills` root
+    // and a `plugin-skills` root that a peer symlinks together). Identity is
+    // the home-relative path, so deduping on it keeps the accounting's
+    // one-outcome-per-identity invariant true.
+    out.sort_by(|a, b| a.0.id.cmp(&b.0.id));
+    out.dedup_by(|a, b| a.0.id == b.0.id);
+    out
+}
+
+fn scan_skill_root(
+    home: &Path,
+    dir: &Path,
+    depth: usize,
+    out: &mut Vec<(ScannedExecutable, Classification)>,
+) {
+    if depth > MAX_SKILL_ROOT_DEPTH {
+        return;
+    }
+    // A symlinked directory is not followed: the same choice `collect_bounded`
+    // makes, and the reason a hostile link in a peer home cannot redirect the
+    // scan out of the tree (or into a cycle).
+    match fs::symlink_metadata(dir) {
+        Ok(m) if m.file_type().is_symlink() => return,
+        Ok(_) => {}
+        Err(_) => return,
+    }
+    let Ok(rd) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut kids: Vec<PathBuf> = rd
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    kids.sort();
+    for child in kids {
+        let skill_md = child.join("SKILL.md");
+        match fs::read_to_string(&skill_md) {
+            Ok(body) => {
+                let name = child
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let relative = normalize_relative_path(
+                    &child.strip_prefix(home).unwrap_or(&child).to_string_lossy(),
+                );
+                let class = classify_skill_body(&body, LoadedFrom::Skills);
+                out.push((
+                    ScannedExecutable {
+                        id: format!("skill:{relative}"),
+                        reason: ExecutableReason::SkillShellDirective,
+                        dir: child,
+                        relative,
+                        name,
+                    },
+                    class,
+                ));
+                // Do NOT descend into a skill: its own subdirectories are its
+                // assets, not nested skills.
+            }
+            // Not a skill — it may be a GROUPING directory, which is how real
+            // peer homes hold the majority of their skills.
+            Err(_) => scan_skill_root(home, &child, depth + 1, out),
+        }
+    }
+}
+
+/// One persona body found in a peer home.
+#[derive(Debug, Clone)]
+pub struct ScannedData {
+    /// Published identity, `kind:relative-path`.
+    pub id: String,
+    /// Absolute path to the file.
+    pub path: PathBuf,
+    /// Home-relative, normalized path.
+    pub relative: String,
+    /// Preferred on-disk name for the imported copy.
+    pub name: String,
+}
+
+/// Every persona body a peer home carries.
+///
+/// Hermes writes a persona as `SOUL.md` at the home root and under each
+/// `profiles/<name>/`; the measured real home holds 13 profile personas plus
+/// one at the root. OpenClaw's equivalents live under `identity/`.
+pub fn scan_peer_personas(home: &Path) -> Vec<ScannedData> {
+    let mut out = Vec::new();
+    let mut push = |path: PathBuf, name: String| {
+        if path.is_file() {
+            let relative = normalize_relative_path(
+                &path.strip_prefix(home).unwrap_or(&path).to_string_lossy(),
+            );
+            out.push(ScannedData {
+                id: format!("persona:{relative}"),
+                path,
+                relative,
+                name,
+            });
+        }
+    };
+    push(home.join("SOUL.md"), "root".to_string());
+    if let Ok(rd) = fs::read_dir(home.join("profiles")) {
         let mut kids: Vec<PathBuf> = rd
             .filter_map(Result::ok)
             .map(|e| e.path())
             .filter(|p| p.is_dir())
             .collect();
         kids.sort();
-        for dir in kids {
-            let skill_md = dir.join("SKILL.md");
-            let Ok(body) = fs::read_to_string(&skill_md) else {
-                continue;
-            };
-            let name = dir
+        for k in kids {
+            let name = k
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
-            let relative =
-                normalize_relative_path(&dir.strip_prefix(home).unwrap_or(&dir).to_string_lossy());
-            let class = classify_skill_body(&body, LoadedFrom::Skills);
-            out.push((
-                ScannedExecutable {
-                    id: format!("skill:{relative}"),
-                    reason: ExecutableReason::SkillShellDirective,
-                    dir,
-                    relative,
-                    name,
-                },
-                class,
-            ));
+            push(k.join("SOUL.md"), name);
         }
     }
+    out
+}
+
+/// Every memory note a peer home carries.
+///
+/// `memories/*.md` at the home root and under each `profiles/<name>/`, and
+/// OpenClaw's `memory/*.md`. The `MEMORY.md` entrypoint is excluded, mirroring
+/// the `wcore-memory` legacy importer's exclusion — it is an index of the
+/// others, not a note.
+pub fn scan_peer_memory(home: &Path) -> Vec<ScannedData> {
+    let mut out = Vec::new();
+    let mut dirs: Vec<PathBuf> = vec![home.join("memories"), home.join("memory")];
+    if let Ok(rd) = fs::read_dir(home.join("profiles")) {
+        let mut kids: Vec<PathBuf> = rd
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        kids.sort();
+        for k in kids {
+            dirs.push(k.join("memories"));
+            dirs.push(k.join("memory"));
+        }
+    }
+    for d in dirs {
+        let Ok(rd) = fs::read_dir(&d) else { continue };
+        let mut files: Vec<PathBuf> = rd
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && p.extension().and_then(|x| x.to_str()) == Some("md")
+                    && p.file_name().and_then(|x| x.to_str()) != Some("MEMORY.md")
+            })
+            .collect();
+        files.sort();
+        for f in files {
+            let relative =
+                normalize_relative_path(&f.strip_prefix(home).unwrap_or(&f).to_string_lossy());
+            // The stored name carries the source profile, so two profiles'
+            // notes of the same name stay distinguishable without a digest.
+            let name = relative.replace('/', "__");
+            out.push(ScannedData {
+                id: format!("memory:{relative}"),
+                path: f,
+                relative,
+                name,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out.dedup_by(|a, b| a.id == b.id);
     out
 }
 

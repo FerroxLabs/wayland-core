@@ -1,0 +1,11 @@
+   Compiling wcore-cli v0.12.25 (/root/wayland-26-import/crates/wcore-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.36s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/migrate_quarantine.rs (target/debug/deps/migrate_quarantine-a78c814d7c92d058)
+
+running 1 test
+test zz_scratch_old_t2_assertions_only ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.01s
+
