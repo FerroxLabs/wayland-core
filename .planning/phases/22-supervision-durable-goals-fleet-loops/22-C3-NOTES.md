@@ -887,3 +887,81 @@ $ /usr/bin/git diff 861d1b1a -- crates/wcore-cli/src/main.rs | /usr/bin/grep -c 
 `lib.rs` **untouched**. The env-based attachment for Direct and Council exists precisely to
 hold this to one block instead of four.
 
+---
+
+## §18. A FOURTH instrument defect of my own — the pipe that stole the exit status
+
+My gate script ran `cargo clippy … | tail -25; echo CLIPPY_RC=$?`. It printed
+**`CLIPPY_RC=0` while clippy had FAILED** — `$?` was `tail`'s status, not clippy's. This is
+the **first** self-passing class named in the lane brief (§3.2: *"a pipe steals exit
+status"*), and I wrote it into my own harness.
+
+It was caught only because the clippy error text was still visible in the same output. Had
+I trimmed the log, I would have reported a clean clippy off a red run.
+
+**Repaired** by redirecting to a file and capturing the status with no pipe in between:
+
+```
+cargo clippy -p wcore-agent -p wcore-cli --all-targets --all-features -- -D warnings \
+  > /tmp/c3-clippy.txt 2>&1
+echo CLIPPY_RC=$?          # now clippy's own status
+```
+Re-run after repair: **`CLIPPY_RC=101`** — i.e. the repaired instrument immediately
+reported a red the broken one had called green. That is the §6b-ii third assertion
+satisfied by events rather than by a contrived case.
+
+## §19. A REAL clippy regression I introduced, and what caused it
+
+Declaring `FORGE_REQUIRED_STABILITY` between `#[allow(clippy::too_many_arguments)]` and the
+`drive_climb_full` it guarded **detached the attribute from its function**, unsuppressing a
+lint that had been suppressed since before this lane. `drive_climb_full` has ten
+parameters; none of them is mine.
+
+Fixed by moving the const **above** the function's doc block, with a comment recording why
+it lives there. A second, genuine instance then appeared — `open_goal` reached eight
+parameters because `--strategy` is new — and took an explicit `#[allow]` with a stated
+reason, matching `forge.rs`'s existing pattern for flat CLI entry points.
+
+Final: **`CLIPPY_RC=0`, `clippy error lines: 0`**, captured without a pipe.
+
+## §20. `cargo fmt` and the wcore-cli red, classified rather than assumed
+
+**fmt.** First check was **RED** — 8,537 diff bytes, all in match arms I had rewritten with
+`sed`, which does not know about line width. Applied `cargo fmt --all`; re-check
+**0 bytes, rc=0**.
+
+**The one wcore-cli red.** Full-crate run: `2336 tests run: 2335 passed (3 slow, 1 flaky),
+1 timed out, 9 skipped`. The red is
+`remedy_advertisements::advertised_tool_names_resolve_to_a_real_tool`, `TRY 2 TMT` at
+60.004s — a genuine timeout, **not** the `exec failed` fd-exhaustion class the brief warns
+about, so the brief's "reclassify it" escape does not apply.
+
+I did **not** assume it was pre-existing. Measured in two steps:
+
+| Run | Result |
+|---|---|
+| that test ALONE at HEAD `d47756c7` | `1 test run: 0 passed, 1 timed out` — so NOT lane contention |
+| that test ALONE at **BASE `861d1b1a`** | `1 test run: 0 passed, 1 timed out`, `TRY 2 TMT [60.004s]` — **identical** |
+
+**Pre-existing at base, unchanged by this lane.** The hetzner worktree was reset back to
+`d47756c7` afterwards and the restore was verified in the same log.
+
+## §21. Final gate results
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` (Mac) | rc=0, **0 bytes** |
+| `cargo clippy -p wcore-agent -p wcore-cli --all-targets --all-features -- -D warnings` | **rc=0, 0 error lines** (status captured without a pipe) |
+| `cargo check --workspace --all-targets` | rc=0 — run deliberately, since new adapter variants are the change class that breaks downstream exhaustive matches while `-p` stays green |
+| `cargo nextest run -p wcore-agent` | **3079 run, 3079 passed**, 11 skipped |
+| `cargo nextest run -p wcore-agent --test goal_strategy_test` | **17 run, 17 passed, 0 skipped** |
+| `cargo test --doc -p wcore-agent -- goal::strategy` | **2 passed, 0 failed** (nextest does NOT run doctests) |
+| `cargo nextest run -p wcore-cli` | 2336 run, 2335 passed, **1 timed out — pre-existing at BASE (§20)** |
+
+## §22. Log (final)
+
+- **T+230** — kill/exactly-once + negative control complete.
+- **T+250** — orchestrator process died; branch survived at `a0fe57d3`, one uncommitted
+  file recovered intact and committed. **Every measurement above was already committed.**
+- **T+265** — clippy regression §19 fixed; fmt applied; wcore-cli red classified at BASE.
+
