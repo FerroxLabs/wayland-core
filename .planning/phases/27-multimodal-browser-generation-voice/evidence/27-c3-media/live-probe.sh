@@ -28,12 +28,25 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 
 # --- credential intake, stdin only -----------------------------------------
 # The file may be `FLUX_API_KEY=value` or a bare value. Parse without echoing.
+# NOTE, and this cost a wasted probe: the file is `export FLUX_API_KEY=...`.
+# The first version of this parser anchored on `FLUX_API_KEY` at line start,
+# missed the `export ` prefix, fell through to the bare-value branch and sent
+# the ENTIRE LINE as the credential. The provider replied
+# `401 ... Received=expo****` — i.e. it had been handed the word "export".
+# A parser bug is indistinguishable from a dead key at the call site, and
+# would have been reported as a credential blocker. Handle both spellings, and
+# reject anything that still looks like a shell fragment.
 RAW="$(cat)"
-KEY="$(printf '%s' "$RAW" | sed -n 's/^[[:space:]]*FLUX_API_KEY[[:space:]]*=[[:space:]]*//p' | tr -d '"'"'"'\r' | head -1)"
+KEY="$(printf '%s' "$RAW" | sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}FLUX_API_KEY[[:space:]]*=[[:space:]]*//p' | tr -d '"'"'"'\r' | head -1)"
 if [ -z "$KEY" ]; then
   KEY="$(printf '%s' "$RAW" | tr -d '\r' | head -1)"
 fi
 unset RAW
+case "$KEY" in
+  *=*|*" "*)
+    echo "PROBE=ABORT reason=key_still_contains_shell_syntax_after_parse len=${#KEY}"
+    exit 2 ;;
+esac
 if [ -z "$KEY" ]; then
   echo "PROBE=ABORT reason=no_key_on_stdin"
   exit 2
@@ -67,7 +80,12 @@ run_agent() {
     unset ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY \
           FAL_API_KEY HF_API_KEY OPENROUTER_API_KEY API_KEY GROQ_API_KEY
     export RUST_LOG="wcore_agent::tool_backends=info,wcore::media_cost=info,wcore_agent::bootstrap=info"
-    "$@" timeout 180 "$BIN" --json-stream --yolo -p flux-router -m flux-fast \
+    # NOT --json-stream: with a positional prompt, json-stream mode waits for
+    # message frames on stdin and exits after the capability handshake without
+    # ever driving a turn. The first version of this probe used it and produced
+    # three byte-identical 4506-byte captures with no model turn in any of them
+    # — a capture that looks like evidence and contains none.
+    "$@" timeout 180 "$BIN" --no-tui --yolo -p flux-router -m flux-fast \
       "$prompt"
   ) > "$OUT/$label.stdout" 2> "$OUT/$label.stderr"
   local rc=$?
@@ -84,8 +102,8 @@ run_agent() {
 run_agent p1-arm-readback "Reply with exactly: PROBE_OK. Do not use any tools."
 echo "--- P1 resolver arm line (the product's own output):"
 grep -h "image_gen: using" "$OUT/p1-arm-readback.stderr" || echo "  (none — image_generate did NOT register)"
-echo "--- P1 provider/base_url as the product reports it:"
-grep -hoE '"(provider|model)":"[^"]*"' "$OUT/p1-arm-readback.stdout" | sort -u | head -5
+echo "--- P1 turn actually ran? (a capture with no turn is not evidence):"
+echo "  probe_ok_in_output=$(grep -c "PROBE_OK" "$OUT/p1-arm-readback.stdout" || true)"
 
 # --------------------------------------------------------------------------
 # P2 — billable generation with the product's DEFAULT image model in a Flux
