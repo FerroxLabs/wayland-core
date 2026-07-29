@@ -230,3 +230,105 @@ infrastructure**, and I will not claim the probe-GET allow as a denial — that 
 allowed is correct behaviour.
 
 **NOT YET ESTABLISHED — do not read M3/M5 as closing the egress clause.**
+
+---
+
+## M7 — G4 CLOSED ON LINUX: a real policy-level egress DENY, live
+
+Evidence: `25-c4-egress-2x2.txt`, raw captures `25-c4-scan-{allow,deny}-raw.txt`.
+Binary `b64695df` on `hetzner-dsm`. Credential present and identical in both arms.
+Command identical in both arms: `wayland-core backend orphans --nonce <32-hex>`.
+
+**The single variable** is one key in an isolated `XDG_CONFIG_HOME` config:
+
+```
+allow:  egress_allow = ["api.machines.dev"]     → product logs ENFORCING allowlisted=38
+deny:   egress_allow = []                       → product logs ENFORCING allowlisted=36
+```
+
+| arm | cloud row, verbatim from the product |
+|---|---|
+| **allow** | `enumerated=false found=0 via vendor machine listing failed: machine listing returned HTTP 404: {"error":"app not found"}` |
+| **deny** | `enumerated=false found=0 via vendor machine listing failed: egress denied: GET with a long or high-entropy path/query to a non-allowlisted host. Egress to \`api.machines.dev\` is blocked by the security policy.` |
+
+**The positive direction is proven first and it is not a stub:** in the allow arm the
+request physically left the machine and **Fly's own servers answered HTTP 404**. A vendor
+response cannot be produced by a broken build, an absent policy, or a no-op — which is
+precisely the property the verdict says the old denied-egress case lacked (it would have
+passed against a build with `wcore-egress` deleted, because `CredentialAbsent` fires before
+any socket opens). Here the two arms differ by exactly one config key and produce
+**vendor-answered** vs **policy-denied**.
+
+Why this request and not the machine-create POST: `backend run --backend cloud` aborts at
+`availability()` (a short-path GET, correctly classified `Ask`→Allow) because the F25 Fly
+app no longer exists, so the POST is unreachable without creating billable infrastructure —
+which I declined to do. The orphan-scan GET carries the nonce in its query
+(`/apps/<app>/machines?metadata.wayland_task_nonce=<nonce>`), and a realistic high-entropy
+nonce trips `get_carries_data` (`longest_token_run >= HIGH_ENTROPY_TOKEN_LEN = 24`;
+nonce length 32). That is the product's real exfil rule firing on a real operator input,
+not a contrivance.
+
+### I do NOT claim a fail-open here — and I nearly filed one
+
+My first read of this output was "denied egress yields `found=0` and `EXIT=0` — fail-open."
+**That was wrong, and the product is behaving correctly.** Its own summary line refuses the
+laundering explicitly:
+
+> `1 orphan(s) found; 2 surface(s) could NOT be enumerated. An un-enumerated surface is not
+> a clean surface — a scan that could not run must never be read as zero orphans.`
+
+`enumerated=false` is carried per-row and the summary counts un-enumerated surfaces
+separately. The only soft edge is the process exit code being 0, which the verdict already
+recorded as a known, accepted limitation. **Filing this as a security escape would have been
+a false positive against a correct product**, which is the most expensive error available
+here. Recorded as a near-miss, not a finding.
+
+## M8 — MY OWN HARNESS FILED A FALSE ORPHAN, and I caught it
+
+Both 2×2 arms reported `local enumerated=true found=1`. There was **no orphan**.
+
+The local scanner enumerates the host process table for the nonce. My ssh harness set
+`NONCE=a7f3…` on its own command line, so **the harness's own shell matched**, and the
+scanner counted it. The raw captures show it: the `- process table:` detail line is my own
+`bash -c cd /root/wayland-25c4 && … NONCE=a7f3… …`.
+
+Disproof, and note my FIRST control was itself contaminated:
+
+| control | nonce in process argvs beforehand | `local found=` |
+|---|---|---|
+| 2×2 arms (nonce on my command line) | ≥1 | **1** ← false positive |
+| control B (nonce in a file, but literal still in my *outer* ssh command) | **2** (measured) | 1 ← still contaminated |
+| control C (nonce generated ON hetzner via `openssl rand -hex 16`, never transmitted) | **0** (measured) | **0** ✅ |
+
+Control C is the clean one: the nonce never crossed the wire and appeared in zero argvs, and
+the count went to zero. **The `found=1` was entirely my instrument.**
+
+This is the trap named in my lane instruction — an instrument reporting a product escape
+that did not happen. Had I reported "1 orphan survived the egress denial", it would have
+been a false security finding on a correct product.
+
+**Harness rule for anyone re-running Phase 25 orphan scans: never put the nonce on a
+command line.** Generate it on the target host into a file and read it from there. Any
+evidence run that types the nonce into a shell inflates `local found=` by at least one. This
+is a caveat on the phase's Half-B positive controls, not a product defect: nonce-based
+process-table scanning cannot distinguish a harness from an orphan, and should not try.
+
+## M9 — secret sweep (both credentials), instrument proven in BOTH directions
+
+Required by my lane instruction. My FIRST sweep was vacuous and I caught it: the burn-key
+file line is `export FLUX_API_KEY=…`, my regex anchored `^FLUX_API_KEY=`, the needle came
+back **empty**, and `grep -F ""` matched every line of every file — reporting **4 "hits"**
+while the liveness control also "passed" trivially, because an empty pattern matches
+anything. **An empty needle is a self-passing sweep in both directions at once.**
+
+Repaired: assert the needle is non-empty and ABORT if not; liveness on the real value;
+known-negative on the reversed value (proves the sweep is not matching everything).
+
+| needle | len | A) liveness (planted) | B) known-neg (reversed) | C) lane artifacts | D) full tracked diff |
+|---|---|---|---|---|---|
+| `FLUX_API_KEY` (burn key, Mac) | 51 | 1 ✅ | 0 ✅ | **0** | **0** |
+| `WAYLAND_F25_CLOUD_*` (2 values, hetzner) | 641, 12 | 2 ✅ | 0 ✅ | **0** | — |
+
+**Burn-key hit count: 0.** Cloud-credential hit count: 0. Neither value was printed,
+echoed, committed or transmitted; the cloud credential was consumed by sourcing the 0600
+file on the host that already held it, and never crossed the wire.
