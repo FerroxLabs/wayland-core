@@ -1492,3 +1492,28 @@ general. It is not. The working invocation is `-p flux-router -m flux-fast` plus
 block. The message names neither Flux nor the credential that was present. Cost 0.25 — either
 accept the prefix for registered providers, or name the configured-but-unselected provider in
 the error. Evidence: `evidence/27-credentialled/27-NOTES.md`.
+
+## BL-23B-H1 — session journal read-back mismatch (MEDIUM, non-reproducing)
+
+**Source:** `23B-H1`, originally graded HIGH. **Disposition 2026-07-29: MEDIUM, backlog.**
+
+Does not reproduce at HEAD, at the pre-fix binary, or at 23B-01's own base commit: **92 runs, 153
+tool events, 0 mismatches**, under CPU load to 114, 6-way concurrency, a turn cut mid-flight, and
+fsync saturation at 11,139 IOPS.
+
+**Why the earlier evidence cannot be relied on in EITHER direction:** the inherited reproduction
+harness pointed at `http://127.0.0.1:1` with a placeholder key, so **no run ever dispatched a tool
+event** — and it had no bucket for that, folding non-reaching runs into `resume_ok`. All 46 prior
+non-reproductions were produced that way.
+
+**This is a non-reproduction, not a disproof.** Root cause remains unidentified. Excluded by
+measurement: the previous fix is not what changed the outcome, and the original base code state is
+not sufficient. Excluded by reading: the textbook cause of this signature, plus six other serde
+shapes. **Residual:** the original sighting's provider configuration was never recorded.
+
+**Re-escalate on any fresh sighting** — the reach-proven harness is `scripts/f23-h1-repro-live.sh`,
+which emits `F23_H1_REACH=` per run so a non-reaching run can never again be counted as a pass.
+
+**Separate, real, and not built:** an unreadable journal has no repair path. Only
+`recover_legacy_effect_receipt` exists, keyed literally to a null receipt, and **all twelve `session`
+verbs read the journal — so one mismatch takes every operator move down at once.**
