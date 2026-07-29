@@ -229,9 +229,21 @@ output.**
 | C4 transcription — the whole voice loop downstream of the mic | `GROQ_API_KEY` (in-source: the free tier) **or** `OPENAI_API_KEY` |
 | C4 spoken reply, and therefore barge-in interruption | `OPENAI_API_KEY` or `ELEVENLABS_API_KEY` |
 
-One of these has a credential-free escape worth a successor's time: **Piper
+~~One of these has a credential-free escape worth a successor's time: **Piper
 voices are downloadable and run locally**, which is the only route to a real
-barge-in that does not go through Sean.
+barge-in that does not go through Sean.~~
+
+> **CORRECTION (lane `27-credentialled`, 2026-07-29) — the struck sentence is
+> FALSE and was derived from the warning string, not the implementation.**
+> Piper is dead four independent ways in this tree: `piper_download` is
+> registered as a tool nowhere (`build_piper_download_backend()`,
+> `piper.rs:295`, has zero production callers); `build_piper_tts_backend()`
+> returns `None` unconditionally (`piper.rs:340-345`); `synthesize` is a hard
+> stub (`piper.rs:374`); and `piper_tts` is in no `default` feature list, so
+> the branch is not compiled into any shipped binary. A successor who follows
+> this recommendation burns a session and finds a stub. **There is no
+> credential-free route to barge-in today.** See `INV-26-27.md` BLOCKER-27-H1
+> and `evidence/27-credentialled/`.
 
 I did **not** verify the reported Anthropic 401 either way — nothing on this
 lane needed an Anthropic credential once the local-model route worked, so I

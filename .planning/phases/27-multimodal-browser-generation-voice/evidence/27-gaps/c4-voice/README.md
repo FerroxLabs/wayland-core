@@ -79,10 +79,27 @@ voice_mode: no STT backend configured — capture works, transcribe will error
 **"Capture works."** So real audio CAN flow with no credential at all. What
 cannot happen without one is everything downstream of the microphone.
 
-The TTS row has a credential-free escape the others do not: Piper voices are
+~~The TTS row has a credential-free escape the others do not: Piper voices are
 downloadable and run locally. A successor who wants barge-in without a paid
 key should pull that thread — it is the only route to a real interruption that
-does not go through Sean.
+does not go through Sean.~~
+
+> **CORRECTION (lane `27-credentialled`, 2026-07-29): FALSE. Do not pull this
+> thread.** The recommendation was derived from the `tts.rs:141-144` warning
+> text rather than from `piper.rs`. Measured in the tree: `piper_download` is
+> registered as a tool nowhere; `build_piper_tts_backend()` returns `None`
+> unconditionally (`piper.rs:340-345`); `PiperTtsBackend::synthesize` is
+> `Err(DependencyMissing("piper TTS synthesis pending v0.9.1 wiring"))`
+> (`piper.rs:374`); and the `piper_tts` feature is in no `default` list, so
+> none of it is compiled into a shipped binary. Barge-in has **no**
+> credential-free route today.
+>
+> The 2026-07-29 credentialled lane also closed the other half of this
+> question: `flux-router` **does** serve `/v1/audio/transcriptions` (verbatim
+> round-trip, negative control fires) but **not** `/v1/audio/speech` — every
+> allowed `flux-voice*` model returns HTTP 500 there. So even a Flux
+> credential does not unblock TTS. See
+> `evidence/27-credentialled/c4-flux-voice-probe.log`.
 
 ## 3. Named blockers, exactly as required
 
