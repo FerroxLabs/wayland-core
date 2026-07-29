@@ -51,7 +51,22 @@ let passed = 0;
 let failed = 0;
 const lines = [];
 async function check(name, fn) {
-  const r = fn();
+  // The try/catch is not decoration. Without it a thrown assertion escapes
+  // main(), the process exits 2 (this file's USAGE code), `failed` is never
+  // incremented and the `passed=N failed=M` verdict line is never printed —
+  // so a genuine assertion failure is indistinguishable from a usage error and
+  // the count a reader is told to read back does not exist. Found 2026-07-29 by
+  // the mutation sweep in `24-RECONNECT-evidence/mutate-instrument.py`: all
+  // three mutations "REDDENED" with rc=2 and `NO VERDICT LINE`, which grades a
+  // failure correctly ONLY by accident of the exit code. Repaired rather than
+  // noted (LANE-BRIEF §6b-ii).
+  let r;
+  try {
+    r = fn();
+  } catch (e) {
+    fail(name, e);
+    return;
+  }
   if (r && typeof r.then === 'function') {
     failed += 1;
     lines.push(`FAIL ${name}\n     test returned a thenable; await inside it instead`);
