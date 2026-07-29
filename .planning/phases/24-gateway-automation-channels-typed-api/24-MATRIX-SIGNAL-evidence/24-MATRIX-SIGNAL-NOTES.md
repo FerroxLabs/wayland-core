@@ -61,6 +61,114 @@ is NOT MET and must not be claimed.
 - New legs must be able to FAIL — self-test with three assertions including "the old
   broken matcher would have missed it".
 
+## T+35 — SOURCE READ COMPLETE. Both seams verified myself; one likely HIGH found.
+
+### Seam 1 — signal. CONFIRMED, and it IS the cheapest in the phase.
+
+- `crates/wcore-channel-signal/src/config.rs:18` — `signal_cli_path: PathBuf`, but
+  **with** `#[serde(default = "default_signal_cli_path")]` returning `PathBuf::from("signal-cli")`.
+  **CORRECTION to 24-C3-FINISH §4b:** it says matrix has "no production default to preserve,
+  so there is no control test to write" — true of matrix, and by omission it reads as though
+  signal is the same. Signal DOES have a production default (bare `signal-cli`, PATH lookup).
+  A control assertion is therefore warranted for signal and not for matrix.
+- `subprocess.rs:52-63` — `RealLauncher::launch` = `Command::new(cli_path).arg("-a")
+  .arg(account).arg("jsonRpc")` with stdin/stdout/stderr piped, `kill_on_drop(true)`.
+- `lib.rs:82-83` — `SignalChannel::new` → `Self::with_launcher(name, config, Arc::new(RealLauncher))`.
+  `with_launcher` is the `#[doc(hidden)]` test seam; `new()` is the shipped one and it hardwires
+  `RealLauncher`. **The fixture must therefore be a real executable on disk** — the trait seam
+  is NOT reachable from config, but the PATH is, and that is enough.
+- `wcore-channels-registry/src/lib.rs:157-169` — `make_signal` calls `SignalChannel::new`. Shipped path.
+- Wire: line-delimited JSON-RPC 2.0 on stdio.
+  - inbound notification: `{"jsonrpc":"2.0","method":"receive","params":{"account":..,
+    "envelope":{"source":"+1..","sourceName":"..","timestamp":<ms>,"dataMessage":{"message":"..",
+    "timestamp":<ms>}}}}`
+  - outbound: `{"jsonrpc":"2.0","id":N,"method":"send","params":{"recipient":["+1.."],"message":".."}}`
+    → must answer `{"jsonrpc":"2.0","id":N,"result":{"timestamp":<ms>,"results":[{"type":"SUCCESS"}]}}`
+    (`jsonrpc.rs:135-168`, `classify_delivery`).
+- Identity mapping (`subprocess.rs:262-331`): dedupe `id` = `format!("{ts_ms}")` — **the envelope
+  timestamp IS the message id**. `conversation_id` = groupId ?? source ?? sourceUuid.
+  `sender_id` = sourceUuid ?? source ?? sourceName. So sending only `source` (no `sourceUuid`)
+  makes signal **peer-keyed**, the same shape as whatsapp/sms/telegram.
+  `chat_type` = Direct when `groupInfo` absent.
+- **No HTTP, no TLS, no port, no certificate.** Verdict: costing was RIGHT.
+
+### Seam 2 — matrix. CONFIRMED.
+
+- `config.rs:9` `homeserver_url: String`, required, no default. `lib.rs:61` `new()` does
+  `let api_base = config.homeserver_url.clone();` → `with_base`. `with_base` is the
+  `#[doc(hidden)]` test seam, and `new()` feeds it straight from config. Registry `make_matrix`
+  (`registry:173-184`) calls `new()`. Shipped path, zero Rust.
+- Inbound: `GET {api_base}/_matrix/client/v3/sync?timeout=30000[&since=..]`, bearer auth.
+- Outbound: `PUT {api_base}/_matrix/client/v3/rooms/{room}/send/m.room.message/{txnId}` (`rest.rs:135`).
+  Fixture journals this as the arrival, `conversation_id` = room id.
+- Identity mapping (`sync.rs:323-372`): dedupe `id` = **`event_id`**; `conversation_id` = room id;
+  `sender_id` = `ev.sender` mxid. **Matrix is ROOM-keyed** (like slack), not peer-keyed —
+  bind leg = two rooms, one sender.
+- **CRITICAL fixture detail:** `chat_type` is `Direct` ONLY when
+  `rooms.join[room].summary."m.joined_member_count" == 2` (`sync.rs:328-331`); anything else,
+  including an omitted summary, is `Group`. The other adapters' configs set `group = "disabled"`,
+  so a fixture that omits the summary would have every message dropped by GROUP policy and the
+  run would read as inbound loss for a reason that is my fixture's fault. Summary must be emitted
+  on every sync response, not just the initial one.
+- Bot self-echo skip: `ev.sender == bot_user_id` → skipped. Sender must not be the bot mxid.
+
+### FINDING CANDIDATE — matrix inbound restart. The answer is YES, there is an equivalent.
+
+`sync.rs:190` — `let mut since: Option<String> = None;` is a **process-local variable inside
+`sync_loop`**. It is never written anywhere.
+
+`sync.rs:212-226` — `let is_initial = since.is_none();` and events are emitted **only when
+`!is_initial`**. The initial sync is consumed for its cursor and its timeline is discarded
+(documented "initial-sync replay guard", `sync.rs:8-12`).
+
+Composition: **on every process restart `since` resets to `None`, so the first `/sync` is an
+initial sync, so its entire timeline is discarded.** A real homeserver returns recent room
+timeline in an initial sync — including everything delivered while the process was down. Those
+messages are dropped silently: no error, no retry, no log an operator reads, and the channel
+reports healthy.
+
+This is the inbound twin of the outbound txn-id defect (reuse after restart → HTTP 200 with the
+OLD event id → new message vanishes reporting success). Same root shape: **state that must
+survive a restart does not.**
+
+**It is NOT an unavoidable tradeoff, and the proof is in this repo.** Same concept search over
+the sibling polling adapter:
+
+```
+/usr/bin/grep -rniE 'persist|watermark|checkpoint|state_dir|cursor|resume|fs::write|fs::read' \
+    crates/wcore-channel-matrix/src/   ->  5 hits, ALL comments/CredentialsStore, zero persistence
+    crates/wcore-channel-email/src/    -> 24 hits, real persistence
+```
+Instrument proven alive on a known-positive in the same shape: `next_batch` in the matrix crate
+→ **16 hits**. So the matrix zero is a measured zero, not a dead grep.
+
+`crates/wcore-channel-email/src/imap.rs:120` states the intent verbatim:
+"**Resume the UID watermark from disk so a restart neither replays the [backlog] nor [loses
+the gap]**". Email solves exactly this problem deliberately. Matrix implements the replay-guard
+half and omits the resume half.
+
+**Status: READ, NOT YET PROVEN LIVE.** Must not be reported until a live run separates:
+- H1 (product) restart drops the gap;
+- H2 (my fixture) the fixture never put the gap message in the initial-sync timeline, so there
+  was nothing to lose.
+The control must show the SAME message arriving when delivered with no restart, and the fixture
+must independently report that the initial sync it served DID contain the gap event.
+
+## Plan
+
+1. `scripts/f24-matrix-fixture.mjs` — homeserver: `/sync` long-poll with real `since` cursor
+   semantics + room summary, `PUT .../send/...` journalling, `__control/{submit,report,health}`.
+2. `scripts/f24-signal-fixture.mjs` — an **executable** speaking JSON-RPC on stdio, plus a
+   sidecar control socket so the driver can inject while the binary owns the process's stdio.
+3. Wire both into `f24-inbound.mjs` (`ADAPTERS`, `TRANSPORT`, readers, configs, `runMatrix` cfgs).
+4. Add the **steady-state leg** to `runMatrix` for every adapter.
+5. Add a **matrix restart leg** proving/disproving the finding above.
+6. Self-test with the mandatory three assertions.
+7. Live run on hetzner.
+
 ## Status
 
-T+0: worktree created, brief + 24-C3-FINISH read, harness outlined. Nothing measured yet.
+T+0: worktree created, brief + 24-C3-FINISH read, harness outlined.
+T+35: both seams verified from the shipped construction path. Matrix restart defect candidate
+found by source read, with a sibling reference implementation proving it is not a tradeoff.
+Nothing live yet.
