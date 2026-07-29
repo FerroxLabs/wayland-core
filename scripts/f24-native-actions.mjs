@@ -218,7 +218,58 @@ function selfTest() {
     pass: sl.a2_typing === 'not-supported' && sl.a1_receipt === 'fired',
   });
 
+  // ── the ledger-read repair, and proof it does something (§6b-ii) ────────
+  // Defect: `DiscordFixture` is not an `AckLedger` and has no `replies`, so an
+  // unguarded `[...fx.replies]` threw and killed the whole discord leg. The
+  // repair guards `replies`/`journal` — the two fields that only DESCRIBE — and
+  // deliberately does NOT guard `reactions`/`typing`, the two that GRADE.
+  const fixtureWithoutReplies = { reactions: [{ emoji: EYES }], typing: [] };
+  const fixtureWithoutCounters = { replies: [] };
+
+  let repairedOk = false;
+  try {
+    readLedger(fixtureWithoutReplies);
+    repairedOk = true;
+  } catch {
+    repairedOk = false;
+  }
+  let brokenWouldThrow = false;
+  try {
+    // The pre-repair read, verbatim.
+    // eslint-disable-next-line no-unused-vars
+    const _ = [...fixtureWithoutReplies.replies];
+  } catch {
+    brokenWouldThrow = true;
+  }
+  out.push({
+    name: 'THE REPAIR (ledger read): a fixture with no `replies` is read successfully — where the old unguarded read THREW and killed the leg',
+    pass: repairedOk === true && brokenWouldThrow === true,
+  });
+
+  // The free-negative guard: a fixture missing the counters that GRADE must
+  // throw, not quietly yield an empty ledger that reads as a clean `not-fired`.
+  let gradingCountersStillFatal = false;
+  try {
+    readLedger(fixtureWithoutCounters);
+  } catch {
+    gradingCountersStillFatal = true;
+  }
+  out.push({
+    name: 'free-negative guard: a fixture missing `reactions`/`typing` THROWS rather than grading a silent NOT-FIRED',
+    pass: gradingCountersStillFatal === true,
+  });
+
   return out;
+}
+
+/** Read an adapter fixture's ack ledger. See the self-test above for why the
+ * describing fields are guarded and the grading fields are not. */
+export function readLedger(fx) {
+  return {
+    reactions: [...fx.reactions],
+    typing: [...fx.typing],
+    replies: Array.isArray(fx.replies) ? [...fx.replies] : [],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1100,11 +1151,18 @@ async function runLeg({ adapter, ack, label, binary, rootDir, budgetMs, llmDelay
     note(`typing signals AFTER the turn completed: ${typingAfterTurn}`);
   }
 
-  const ledger = {
-    reactions: [...fx.reactions],
-    typing: [...fx.typing],
-    replies: [...fx.replies],
-  };
+  // `DiscordFixture` is the one fixture here NOT derived from `AckLedger` — it
+  // carries `reactions` and `typing` (which is all the grading needs) but no
+  // `replies`/`journal`. Reading them unguarded threw `fx.replies is not
+  // iterable` and killed the discord leg outright. That failed LOUDLY rather
+  // than grading a zero, which is the safe direction, but it is still an
+  // instrument defect and is repaired here rather than written up (§6b-ii).
+  //
+  // The two counters that GRADE are read unguarded on purpose: if a fixture
+  // ever lacks `reactions` or `typing`, this must throw rather than silently
+  // substitute `[]` — an empty-array fallback would turn a missing instrument
+  // into a clean `not-fired`, which is exactly the free-negative trap (§3b-i).
+  const ledger = readLedger(fx);
 
   try {
     child.kill('SIGTERM');
@@ -1139,7 +1197,7 @@ async function runLeg({ adapter, ack, label, binary, rootDir, budgetMs, llmDelay
     replies_total: ledger.replies.length,
     affordances: graded,
     gateway_log_bytes: fs.existsSync(gwLog) ? fs.statSync(gwLog).size : 0,
-    fixture_journal: fx.journal ?? null,
+    fixture_journal: Array.isArray(fx.journal) ? fx.journal : null,
     notes,
   };
   fs.writeFileSync(path.join(runDir, 'result.json'), `${JSON.stringify(out, null, 2)}\n`);
