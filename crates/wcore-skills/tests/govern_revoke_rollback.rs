@@ -355,3 +355,187 @@ fn an_unreadable_tombstone_does_not_un_suppress_the_others() {
         "one corrupt tombstone must not silently un-suppress every other revocation"
     );
 }
+
+// ---------------------------------------------------------------------------
+// F23A-C1-H3 — the restore is atomic
+//
+// Before the fix, `rollback` ran `copy_tree(&payload, &record.source_dir)` straight into the
+// live skills directory. `copy_tree_inner` opens with `create_dir_all(to)`, so ANY failure
+// part-way through left `source_dir` present and incomplete -- a skill the loader would pick
+// up with missing content.
+//
+// These tests do not need a process kill to be falsifiable: the pre-fix code creates
+// `source_dir` before it copies its first byte, so a restore that fails at any point is a
+// deterministic red on the old implementation and a green on the new one. The kill harness
+// (`kill-23a-c1-atomic.sh`) proves the same property against a real SIGKILL; these tests keep
+// it from regressing in CI, where killing a process mid-syscall is not reproducible.
+// ---------------------------------------------------------------------------
+
+/// Write a governance generation + tombstone by hand, so a test can hand `rollback` a payload
+/// that `revoke` itself would have refused to create. Returns the revocation id.
+fn plant_revocation(store: &GovernanceStore, source_dir: &Path, skill_name: &str) -> String {
+    let id = format!("planted-{skill_name}");
+    let record = serde_json::json!({
+        "revocation_id": id,
+        "skill_name": skill_name,
+        "signature": serde_json::Value::Null,
+        "source_dir": source_dir,
+        "revoked_at": "2026-07-29T00:00:00Z",
+        "file_count": 1,
+        "byte_count": 1,
+    });
+    let encoded = serde_json::to_vec_pretty(&record).unwrap();
+    std::fs::create_dir_all(store.root().join("tombstones")).unwrap();
+    std::fs::write(
+        store.root().join("tombstones").join(format!("{id}.json")),
+        &encoded,
+    )
+    .unwrap();
+    std::fs::create_dir_all(store.root().join("generations").join(&id)).unwrap();
+    std::fs::write(
+        store
+            .root()
+            .join("generations")
+            .join(&id)
+            .join("revocation.json"),
+        &encoded,
+    )
+    .unwrap();
+    id
+}
+
+/// Any live staging directory left under `root`. Empty in every terminal state.
+fn staging_leftovers(root: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    rd.flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|n| n.starts_with(wcore_skills::govern::ROLLBACK_STAGING_PREFIX))
+        })
+        .collect()
+}
+
+#[test]
+fn a_restore_that_fails_part_way_leaves_no_directory_at_all() {
+    let f = fixture();
+    let target = f.skills.join("auto-atomic");
+    let id = plant_revocation(&f.store, &target, "auto-atomic");
+
+    // Build a payload `copy_tree` is guaranteed to reject part-way: a normal file it will
+    // happily copy, plus a directory chain deeper than MAX_SNAPSHOT_DEPTH (8). Whichever
+    // order `read_dir` yields, the copy starts and then fails -- which is exactly the state
+    // the old implementation could not survive.
+    let payload = f.store.root().join("generations").join(&id).join("payload");
+    std::fs::create_dir_all(&payload).unwrap();
+    std::fs::write(payload.join("SKILL.md"), "restored body\n").unwrap();
+    let mut deep = payload.clone();
+    for i in 0..10 {
+        deep = deep.join(format!("d{i}"));
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(deep.join("deep.txt"), "too deep\n").unwrap();
+
+    let err = f
+        .store
+        .rollback(&id)
+        .expect_err("a payload deeper than the depth cap must not restore");
+    assert!(
+        matches!(err, GovernError::RefusedSnapshot { .. }),
+        "expected the depth cap to be what refused, got: {err}"
+    );
+
+    // The property. Pre-fix this directory exists, because `copy_tree` creates it before
+    // copying anything.
+    assert!(
+        !target.exists(),
+        "a failed restore left {} behind -- that is F23A-C1-H3",
+        target.display()
+    );
+    assert!(
+        staging_leftovers(&f.skills).is_empty(),
+        "failed restore left staging garbage in the skills root: {:?}",
+        staging_leftovers(&f.skills)
+    );
+
+    // And the failure is not terminal: suppression is still in force, so the operator can
+    // fix the payload and retry rather than being left with no revocation and no skill.
+    assert!(
+        f.store.is_revoked("auto-atomic", None),
+        "a failed restore must not clear the tombstone"
+    );
+}
+
+#[test]
+fn a_successful_restore_publishes_whole_and_leaves_no_staging_behind() {
+    let f = fixture();
+    let dir = write_draft(&f.skills, "auto-whole", "whole-sig", "original body\n");
+    std::fs::create_dir_all(dir.join("refs")).unwrap();
+    std::fs::write(dir.join("refs").join("a.md"), "nested\n").unwrap();
+
+    let rec = f.store.revoke(&dir).unwrap();
+    assert!(!dir.exists());
+
+    let restored = f.store.rollback(&rec.revocation_id).unwrap();
+    assert_eq!(restored, dir);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
+        "original body\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("refs").join("a.md")).unwrap(),
+        "nested\n"
+    );
+    assert!(dir.join("manifest.json").is_file());
+    assert!(
+        staging_leftovers(&f.skills).is_empty(),
+        "successful restore left staging garbage: {:?}",
+        staging_leftovers(&f.skills)
+    );
+}
+
+#[tokio::test]
+async fn a_staging_directory_is_never_discovered_as_a_skill() {
+    let f = fixture();
+
+    // A real skill, so the loader is demonstrably alive in this same invocation. Without it,
+    // "the staging directory was not loaded" passes for free on a loader that loads nothing.
+    write_draft(&f.skills, "control-visible", "ctl-sig", "control body\n");
+
+    // A staging directory as a kill mid-restore would leave it: correctly named, holding a
+    // complete-looking SKILL.md.
+    let staged = f.skills.join(format!(
+        "{}deadbeef.partial",
+        wcore_skills::govern::ROLLBACK_STAGING_PREFIX
+    ));
+    std::fs::create_dir_all(&staged).unwrap();
+    std::fs::write(
+        staged.join("SKILL.md"),
+        "---\nname: half-restored\ndescription: should never load\n---\nbody\n",
+    )
+    .unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let loaded =
+        wcore_skills::loader::load_all_skills(tmp.path(), &[f.skills.clone()], true, None).await;
+    let names: Vec<&str> = loaded.iter().map(|s| s.name.as_str()).collect();
+
+    assert!(
+        names.contains(&"control-visible"),
+        "KNOWN-POSITIVE FAILED: the loader found nothing at all, so the negative below \
+         proves nothing. loaded = {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.contains("half-restored")),
+        "a rollback staging directory was discovered as a skill: {names:?}"
+    );
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.starts_with(wcore_skills::govern::ROLLBACK_STAGING_PREFIX)),
+        "a rollback staging directory was discovered under its own name: {names:?}"
+    );
+}
