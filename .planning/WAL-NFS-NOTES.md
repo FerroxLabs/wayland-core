@@ -72,3 +72,45 @@ POSIX path — this returns `false` for it. Two more copies in `wcore-tools`
 - [ ] Does the pre-fix code actually SIGBUS on a real NFS mount? Loopback NFS on hetzner.
 - [ ] Centralised selector in `wcore-config`; 5 call sites converted.
 - [ ] Three-assertion self-test incl. "pre-fix would have chosen WAL in both".
+
+---
+
+## M5 — real loopback NFS mount stood up on hetzner (2026-07-29)
+
+`nfs-kernel-server` installed; export `/srv/walnfs-export` → mount `/mnt/walnfs`, NFSv3 over TCP
+to 127.0.0.1. Kernel-confirmed discriminating control:
+
+```
+/mnt/walnfs  fstype=nfs          <- statfs magic 0x6969
+/root        fstype=ext2/ext3    <- local
+```
+
+**WAL is accepted on NFS.** `PRAGMA journal_mode=WAL` returns `wal` (read back, not assumed),
+table created, row inserted, `rows=1`. A single sequential client does **not** crash.
+So the naive claim "WAL on NFS crashes" is FALSE as stated.
+
+## M6 — MY FIRST SIGBUS REPRODUCTION WAS A DEAD INSTRUMENT. The control caught it.
+
+Probe: hold a live WAL connection (shm mapped), have a second actor `truncate -s 0` the
+`-shm` (modelling "a peer host rebuilds the shm during recovery"), then touch the mapping.
+
+```
+### NFS   (fstype=nfs)         TRUNCATED -shm  -> rc=135  KILLED BY SIGNAL 7 (BUS)
+### LOCAL (fstype=ext2/ext3)   TRUNCATED -shm  -> rc=135  KILLED BY SIGNAL 7 (BUS)
+```
+
+**The local arm SIGBUSed identically.** Truncating any mmap'd file below a live mapping raises
+SIGBUS on every filesystem — that is POSIX mmap semantics, not an NFS defect. So the experiment
+does not discriminate, and a SIGBUS from it is worth **nothing** as evidence about NFS.
+
+Had I run only the NFS arm I would have published a false reproduction. The known-negative arm
+is the entire reason this was caught. Logged as the lane's own instance of the class.
+
+Truncation is therefore an INVALID model: it conflates "peer host rebuilds the shm" with
+"somebody truncated the file", and the latter is fatal everywhere.
+
+### What actually needs proving
+On ONE host all processes share a page cache, so the `-shm` mapping IS coherent and WAL works.
+The documented failure needs a genuinely second client. Next: mount the same export twice with
+`nosharecache` (separate superblocks → separate inode/page caches → genuinely incoherent mmap)
+and run two concurrent WAL writers with NO artificial truncation.
