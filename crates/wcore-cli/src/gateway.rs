@@ -1051,6 +1051,46 @@ fn channel_health_report(
     }
 }
 
+/// Compose the single `registration_error` string `channel health` fails on out
+/// of the three independent things that can degrade inbound.
+///
+/// F24-C3-H6a. These were previously one accumulated variable, which is why a
+/// `channel reload` — an operation that re-evaluates ONLY adapter registration —
+/// could clear the other two by assigning `None` to the lot. They are separated
+/// here by WHO ESTABLISHES THEM and WHEN, because that is what decides whether a
+/// given event is entitled to clear one:
+///
+/// - `registration` — adapter registration and the credentials store. Redone by
+///   every reload, so a reload legitimately clears it.
+/// - `inbound_absent` — this process built no inbound stack. Decided once, at
+///   startup, and nothing rebuilds it; true for the process's life.
+/// - `not_polling` — this process is not the inbound poller RIGHT NOW. Read live
+///   from the supervisor at every publish, never cached, because the supervisor
+///   re-claims each tick and this can go from true to false without anything
+///   else happening. Caching it produced a permanently-red health surface; see
+///   LANE-BRIEF 3b-iii.
+fn compose_registration_error(
+    registration: &Option<String>,
+    inbound_absent: &Option<String>,
+    not_polling: bool,
+) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(e) = inbound_absent {
+        parts.push(e.clone());
+    }
+    if not_polling {
+        parts.push("inbound polling owned by another process".to_string());
+    }
+    if let Some(e) = registration {
+        parts.push(e.clone());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("; "))
+    }
+}
+
 /// Publish the projection a second process reads.
 ///
 /// Written to a same-directory temporary and renamed, so a `status` racing a
@@ -1269,13 +1309,12 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                 }
                 Err(e) => {
                     eprintln!("[gateway] inbound dispatch unavailable: {e}");
-                    registration_error = Some(match registration_error.take() {
-                        Some(prev) => format!("{prev}; inbound dispatch unavailable: {e}"),
-                        None => format!("inbound dispatch unavailable: {e}"),
-                    });
-                    // F24-C3-H6a. The inbound host is built ONCE, here. No
-                    // reload rebuilds it, so this is true for the life of the
-                    // process and a reload must not clear it.
+                    // F24-C3-H6a. Recorded as PERSISTENT, not as a registration
+                    // error. The inbound host is built exactly once, here, and no
+                    // reload rebuilds it — so this is true for the life of the
+                    // process and a reload is not entitled to clear it. It is
+                    // deliberately not also folded into `registration_error`, or
+                    // the composed health message would carry it twice.
                     persistent_error = Some(match persistent_error.take() {
                         Some(prev) => format!("{prev}; inbound dispatch unavailable: {e}"),
                         None => format!("inbound dispatch unavailable: {e}"),
@@ -1311,20 +1350,13 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
              this gateway will send but not poll",
             poll_lease.owner_pid()
         );
-        registration_error = Some(match registration_error.take() {
-            Some(prev) => format!("{prev}; inbound polling owned by another process"),
-            None => "inbound polling owned by another process".to_string(),
-        });
-        // F24-C3-H6a. The lease is attempted ONCE, above. No reload re-attempts
-        // it, so "this gateway will send but not poll" stays true for the life
-        // of the process however many times the operator reloads. Note the fact
-        // being preserved is about THIS process's polling, not about who else
-        // holds the lease now — the statement does not decay if the other
-        // holder exits, because this process still is not polling.
-        persistent_error = Some(match persistent_error.take() {
-            Some(prev) => format!("{prev}; inbound polling owned by another process"),
-            None => "inbound polling owned by another process".to_string(),
-        });
+        // NOT folded into `registration_error`. F24-C3-H6a: the lease is not a
+        // fixed fact. `ChannelPollSupervisor` below re-claims every tick and
+        // wins as soon as the current holder exits, so a boot-time string
+        // frozen into the health document would go PERMANENTLY red — reporting
+        // a degradation that had resolved and that nothing could ever clear.
+        // The lease component is therefore recomputed from the supervisor's
+        // LIVE role at every publish; see `lease_note`.
     }
 
     if registered_n > 0
@@ -1350,7 +1382,11 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
     //
     // Held rather than named `_`: `_` would drop it immediately, releasing the
     // lease at the top of `gateway run` and reopening the race.
-    let _poll_supervisor = wcore_agent::channel_lease::ChannelPollSupervisor::spawn(
+    //
+    // Named (no longer `_poll_supervisor`) because F24-C3-H6 reads its LIVE
+    // ownership on every tick — both to decide whether a reload may start poll
+    // tasks, and to report the current lease role in `channel health`.
+    let poll_supervisor = wcore_agent::channel_lease::ChannelPollSupervisor::spawn(
         &home,
         "gateway",
         poll_lease,
@@ -1399,7 +1435,11 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
         &channel_health_report(
             &home,
             registered_n,
-            &registration_error,
+            &compose_registration_error(
+                &registration_error,
+                &persistent_error,
+                !poll_supervisor.is_owner(),
+            ),
             &*channels.read().await,
         ),
     );
@@ -1492,12 +1532,15 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                                     // here rather than left to `reload`,
                                     // because the right to poll belongs to the
                                     // lease and `ChannelManager` cannot see it.
-                                    // The STARTUP path already gates
-                                    // `start_all` on `poll_lease.is_owner()`;
-                                    // this is the same gate on the same
-                                    // decision, which is why it must not be a
-                                    // default hidden inside `reload`.
-                                    let start_policy = if poll_lease.is_owner() {
+                                    // The STARTUP path gates `start_all` on lease
+                                    // ownership; this is the same gate on the
+                                    // same decision, which is why it must not be
+                                    // a default hidden inside `reload`. Read from
+                                    // the SUPERVISOR, not the boot lease, so a
+                                    // gateway that has since won the lease does
+                                    // start polling and one that has not does
+                                    // not.
+                                    let start_policy = if poll_supervisor.is_owner() {
                                         wcore_channels_registry::wcore_channels::StartPolicy::StartNewlyRegistered
                                     } else {
                                         wcore_channels_registry::wcore_channels::StartPolicy::LeaveStopped
@@ -1510,13 +1553,18 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                                         (report, names)
                                     };
                                     registered_n = names;
-                                    // F24-C3-H6a. Clear only what this reload
-                                    // actually re-evaluated — adapter
-                                    // registration — and restore the facts it
-                                    // did not. `= None` here is what let a
-                                    // reload report a dead inbound path as
-                                    // healthy.
-                                    registration_error = persistent_error.clone();
+                                    // F24-C3-H6a. Clears ONLY the adapter
+                                    // registration error, which is the only
+                                    // thing this block re-evaluated. It used to
+                                    // clear the whole composed health error,
+                                    // which also erased "this process has no
+                                    // inbound stack" and "this process is not
+                                    // the poller" — neither of which a reload
+                                    // establishes anything about. Those two are
+                                    // now separate and are recomposed at publish
+                                    // time, so this assignment cannot reach
+                                    // them.
+                                    registration_error = None;
 
                                     // F24-C3-H5. Re-registering the ADAPTER is
                                     // only half a reload. The inbound access
@@ -1563,22 +1611,13 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                                         // half-applied reload becomes the next
                                         // finding.
                                         Some(Err(e)) => {
-                                            // Appended, not assigned: a
-                                            // persistent fact restored two
-                                            // lines above must not be
-                                            // overwritten by this one.
-                                            let note = format!(
+                                            registration_error = Some(format!(
                                                 "channel reload: adapters reloaded but inbound \
                                                  policies did NOT: {e}. The previously loaded \
                                                  policies are still in effect, so a newly added \
                                                  channel will deny every message until this is \
                                                  fixed and reload is run again."
-                                            );
-                                            registration_error =
-                                                Some(match registration_error.take() {
-                                                    Some(prev) => format!("{prev}; {note}"),
-                                                    None => note,
-                                                });
+                                            ));
                                             format!("KEPT-STALE ({e})")
                                         }
                                         // No inbound stack in this process (no
@@ -1598,27 +1637,16 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                                         policies_note
                                     );
                                 }
-                                // These two branches already leave health
-                                // failing, so they cannot produce a false
-                                // green — but they must still not DROP the
-                                // persistent fact from the message an operator
-                                // reads.
                                 Err(e) => {
                                     eprintln!("[gateway] channel reload failed: {e}");
-                                    registration_error = Some(match &persistent_error {
-                                        Some(prev) => format!("{prev}; {e}"),
-                                        None => e.to_string(),
-                                    });
+                                    registration_error = Some(e.to_string());
                                 }
                             }
                         }
                         Err(e) => {
                             eprintln!("[gateway] channel reload: credentials store: {e}");
-                            let note = format!("credentials store unavailable: {e}");
-                            registration_error = Some(match &persistent_error {
-                                Some(prev) => format!("{prev}; {note}"),
-                                None => note,
-                            });
+                            registration_error =
+                                Some(format!("credentials store unavailable: {e}"));
                         }
                     }
                 }
@@ -1628,7 +1656,23 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                 publish(&home, &project(&plane, plane.state()))?;
                 // Republished on the SAME tick as the projection so the two
                 // surfaces can never disagree about when they were observed.
-                let _ = crate::channel::publish_health(&home, &channel_health_report(&home, registered_n, &registration_error, &*channels.read().await));
+                // The lease component is read from the supervisor HERE rather
+                // than from a cached boot value, so it tracks the live role in
+                // both directions (F24-C3-H6a).
+                let health_error = compose_registration_error(
+                    &registration_error,
+                    &persistent_error,
+                    !poll_supervisor.is_owner(),
+                );
+                let _ = crate::channel::publish_health(
+                    &home,
+                    &channel_health_report(
+                        &home,
+                        registered_n,
+                        &health_error,
+                        &*channels.read().await,
+                    ),
+                );
             }
         }
     }
@@ -1766,6 +1810,112 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // F24-C3-H6a — what a reload is and is not entitled to clear.
+    //
+    // These are unit-level and deliberately NOT the proof of the finding; the
+    // proof is the driven run in
+    // `scripts/f24-c3-h6-reload-clears-error.sh`, which reads `channel
+    // health`'s real exit code across a real reload of a real gateway. What
+    // these pin down is the SEPARATION the fix depends on, so a later edit that
+    // re-merges the three components fails here and not only in a live run.
+    // -----------------------------------------------------------------------
+
+    /// The regression, expressed on the composer: clearing the registration
+    /// component must NOT clear a live lease degradation.
+    ///
+    /// Before the fix a reload assigned `None` to one accumulated variable that
+    /// held all three facts, and `channel health` went from failing to passing
+    /// without anything about the dead path changing.
+    #[test]
+    fn clearing_the_registration_error_leaves_a_live_lease_degradation_reported() {
+        // A reload has just succeeded, so the registration component is gone.
+        let after_reload = compose_registration_error(&None, &None, true);
+        assert_eq!(
+            after_reload.as_deref(),
+            Some("inbound polling owned by another process"),
+            "a reload cleared the report of a poll lease it never re-attempted"
+        );
+        // ... and the health surface must therefore still be failing.
+        assert!(
+            !crate::channel::ChannelHealthReport {
+                configured: 1,
+                registered: 1,
+                registration_error: after_reload,
+                channels: Vec::new(),
+            }
+            .is_complete(),
+            "registered >= configured, so this is the ONLY thing that can fail; \
+             if it passes, `channel health` reports a non-polling gateway as complete"
+        );
+    }
+
+    /// The same for an absent inbound stack, which no reload rebuilds.
+    #[test]
+    fn clearing_the_registration_error_leaves_an_absent_inbound_stack_reported() {
+        let absent = Some("inbound dispatch unavailable: no provider".to_string());
+        let after_reload = compose_registration_error(&None, &absent, false);
+        assert_eq!(
+            after_reload.as_deref(),
+            Some("inbound dispatch unavailable: no provider")
+        );
+    }
+
+    /// CAN IT PASS? (LANE-BRIEF 3b-iii.) The composed error must reach `None`
+    /// in the achievable state where nothing is degraded — otherwise the two
+    /// assertions above hold against a health surface that is simply always
+    /// red, and they would prove nothing.
+    #[test]
+    fn a_healthy_gateway_composes_no_error_at_all() {
+        assert_eq!(compose_registration_error(&None, &None, false), None);
+        assert!(
+            crate::channel::ChannelHealthReport {
+                configured: 1,
+                registered: 1,
+                registration_error: None,
+                channels: Vec::new(),
+            }
+            .is_complete()
+        );
+    }
+
+    /// The lease component must track the LIVE role in the clearing direction
+    /// too. The supervisor re-claims every tick and wins when the previous
+    /// holder exits; a cached boot value would leave this permanently red.
+    #[test]
+    fn winning_the_lease_back_clears_the_lease_component_without_a_reload() {
+        let while_observer = compose_registration_error(&None, &None, true);
+        let after_winning = compose_registration_error(&None, &None, false);
+        assert!(
+            while_observer.is_some(),
+            "known-positive: reported as observer"
+        );
+        assert_eq!(
+            after_winning, None,
+            "the supervisor won the lease and nothing else changed, so the \
+             degradation must clear on its own"
+        );
+    }
+
+    /// All three at once, in a fixed order, joined once each. Guards against a
+    /// component being dropped or duplicated by a future edit to the composer.
+    #[test]
+    fn every_component_appears_exactly_once_and_in_a_stable_order() {
+        let composed = compose_registration_error(
+            &Some("registration boom".to_string()),
+            &Some("inbound dispatch unavailable: x".to_string()),
+            true,
+        )
+        .expect("three degradations must compose to something");
+        assert_eq!(
+            composed,
+            "inbound dispatch unavailable: x; inbound polling owned by another \
+             process; registration boom"
+        );
+        assert_eq!(composed.matches("inbound polling owned").count(), 1);
+        assert_eq!(composed.matches("inbound dispatch unavailable").count(), 1);
+    }
 
     #[test]
     fn the_default_profile_is_named_not_empty() {
