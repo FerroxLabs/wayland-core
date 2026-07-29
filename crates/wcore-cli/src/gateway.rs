@@ -807,6 +807,20 @@ fn open_ledger(scope: &ScopeArgs) -> Result<(PathBuf, wcore_gateway::ledger::Del
     Ok((home, ledger))
 }
 
+/// Whether re-sending this abandonment could put a SECOND copy at the
+/// destination, and therefore needs the operator to confirm it checked.
+///
+/// The only safe case is a delivery that provably never left: `Some(false)`,
+/// abandoned before any attempt started. `Some(true)` was in flight and may have
+/// landed. `None` is a record written before attempt tracking existed, and is
+/// read the SAME as `Some(true)` — deliberately. An unknown here means the
+/// journal cannot say whether the message landed, and resolving an unknown in
+/// favour of "just send it" is exactly the duplicate the abandonment was written
+/// to prevent.
+fn resend_needs_confirmation(was_attempted: Option<bool>) -> bool {
+    was_attempted != Some(false)
+}
+
 /// Mark an abandonment reviewed, so compaction may eventually retire it.
 fn ack(scope: &ScopeArgs, id: &str) -> Result<()> {
     let (home, mut ledger) = open_ledger(scope)?;
@@ -858,10 +872,7 @@ async fn resend(scope: &ScopeArgs, id: &str, confirmed: bool, also_ack: bool) ->
             )
         })?;
 
-    // `None` — a record written before attempt tracking existed — is read as
-    // "may have landed". Guessing the other way would silently authorise a
-    // duplicate, which is the exact outcome the abandonment prevented.
-    if record.was_attempted != Some(false) && !confirmed {
+    if resend_needs_confirmation(record.was_attempted) && !confirmed {
         bail!(
             "{id} was already in flight when it was abandoned, so it may have reached {}. \
              Re-sending could put a second copy there.\n\n  {}\n\nCheck the destination. If \
@@ -1807,6 +1818,44 @@ mod tests {
             .get_subcommands()
             .map(|c| c.get_name().to_string())
             .collect()
+    }
+
+    /// An abandonment that can be listed but not disposed of is only half a
+    /// surface. Both verbs must be REACHABLE, not merely written: a handler
+    /// that is never wired into `GatewayCmd` is dead code that reads as done.
+    #[test]
+    fn the_abandonment_can_be_disposed_of_as_well_as_listed() {
+        let verbs = verb_names();
+        for v in ["abandoned", "ack", "resend"] {
+            assert!(
+                verbs.contains(&v.to_string()),
+                "`gateway {v}` must exist; got {verbs:?}"
+            );
+        }
+    }
+
+    /// The one decision that stands between `gateway resend` and a duplicate at
+    /// the destination.
+    ///
+    /// `None` is the case that matters and the easy one to get wrong. It means
+    /// the record pre-dates attempt tracking, so the journal cannot say whether
+    /// the message landed — and an unknown must be read as "it might have".
+    /// Reading it as "it did not" would silently authorise exactly the second
+    /// copy the abandonment was written to prevent.
+    #[test]
+    fn resend_demands_confirmation_unless_the_delivery_provably_never_left() {
+        assert!(
+            !resend_needs_confirmation(Some(false)),
+            "never attempted: it cannot be at the destination, so no confirmation"
+        );
+        assert!(
+            resend_needs_confirmation(Some(true)),
+            "in flight when abandoned: it may have landed"
+        );
+        assert!(
+            resend_needs_confirmation(None),
+            "UNKNOWN must be treated as 'may have landed', never as 'safe'"
+        );
     }
 
     #[test]
