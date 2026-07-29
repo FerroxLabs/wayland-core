@@ -781,11 +781,10 @@ mod tests {
         // mockito server answering in microseconds.
         let mut reached = false;
         for _ in 0..200 {
-            if let Loaded::Cursor(c) = sync_store::load_from(state_path) {
-                if c == want_cursor {
-                    reached = true;
-                    break;
-                }
+            if matches!(sync_store::load_from(state_path), Loaded::Cursor(ref c) if c == want_cursor)
+            {
+                reached = true;
+                break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
