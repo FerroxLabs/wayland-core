@@ -7535,17 +7535,25 @@ skills_lifecycle = true
 
     /// Serializing the SAME logical config twice must produce identical bytes.
     ///
-    /// Needs no env and no filesystem, so it is parallel-safe and needs no
-    /// `#[serial]`. It builds two `ConfigFile`s with the same entries inserted
-    /// in OPPOSITE order: `RandomState` reseeds each `HashMap`, so with the
-    /// unsorted serializer their `[profiles.*]` / `[providers.*]` sections came
-    /// out in different orders and this comparison failed. Many keys are used
-    /// because two keys collide in the same bucket order roughly half the time
-    /// -- with 12, a passing run by luck is about 1 in 12!.
+    /// Builds two `ConfigFile`s with the same entries inserted in OPPOSITE
+    /// order: `RandomState` reseeds each `HashMap`, so with the unsorted
+    /// serializer their `[profiles.*]` / `[providers.*]` sections came out in
+    /// different orders and this comparison failed. Many keys are used because
+    /// two keys collide in the same bucket order roughly half the time -- with
+    /// 12, a passing run by luck is about 1 in 12!.
+    ///
+    /// `session.directory` is PINNED because `ConfigFile::default()` is not
+    /// pure: it calls `default_session_dir()`, which reads `WAYLAND_HOME`. The
+    /// first version of this test left it at its default and duly flaked --
+    /// the two builds straddled another test's `WAYLAND_HOME` mutation and
+    /// serialized different session paths, so the test became a VICTIM of the
+    /// very race it sits next to. Pinning the env-derived field is what makes
+    /// the "no env, parallel-safe, no #[serial]" claim actually true.
     #[test]
     fn serializing_the_same_config_twice_is_byte_identical() {
         fn build(reverse: bool) -> ConfigFile {
             let mut cfg = ConfigFile::default();
+            cfg.session.directory = "/pinned/sessions".to_string();
             let names = [
                 "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota",
                 "kappa", "lambda", "mu",
