@@ -492,9 +492,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 /// answer describe the user's real home rather than the wreckage.
 pub(crate) fn dir_holds_state(dir: &Path) -> bool {
     match std::fs::read_dir(dir) {
-        Ok(mut it) => {
-            it.any(|e| e.is_ok_and(|e| e.file_name() != std::ffi::OsStr::new(journal::JOURNAL_DIR)))
-        }
+        Ok(mut it) => it.any(|e| e.is_ok_and(|e| !journal::is_bookkeeping(&e.file_name()))),
         Err(_) => false,
     }
 }

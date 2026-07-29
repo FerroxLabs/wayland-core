@@ -184,7 +184,11 @@ fn copy_outside(home: &Path, dst: &Path) -> Result<()> {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy().into_owned();
-        if MIGRATE_SCOPE.contains(&name_str.as_str()) || name_str == journal::JOURNAL_DIR {
+        // The scope is excluded because the journal covers it. Bookkeeping is
+        // excluded because a killed process leaves a crash marker behind, and a
+        // probe that fired on that would report an out-of-scope write for every
+        // interrupted run.
+        if MIGRATE_SCOPE.contains(&name_str.as_str()) || journal::is_bookkeeping(&name) {
             continue;
         }
         let from = entry.path();

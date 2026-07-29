@@ -37,6 +37,33 @@ use super::BackupError;
 /// Journal directory under the home being operated on.
 pub const JOURNAL_DIR: &str = ".wayland-backup-journal";
 
+/// True for a name that is Wayland's own bookkeeping rather than user state.
+///
+/// Two things live in a home that a user never put there and never notices:
+/// this module's journal directory, and [`crate::crash_sentinel`]'s
+/// `.dirty-death.<pid>` markers. Both must be invisible to a home's tree digest
+/// for the same reason — measured 2026-07-29, when a rolled-back import came
+/// back with EVERY user file byte-identical and the digest still differed,
+/// solely because the killed process had left its own crash marker behind.
+///
+/// Getting this wrong is not a cosmetic error. The digest is the comparand that
+/// SC3's "restore exact pre-operation state" is judged on, so bookkeeping inside
+/// it would make an exact rollback report as inexact, and the only way to reach
+/// a green would have been to weaken the assertion.
+///
+/// The constants are imported, never re-spelled: a second copy of
+/// `".dirty-death."` here is a constant that can drift from the module that
+/// writes it.
+pub fn is_bookkeeping(name: &std::ffi::OsStr) -> bool {
+    if name == std::ffi::OsStr::new(JOURNAL_DIR) {
+        return true;
+    }
+    let Some(s) = name.to_str() else {
+        return false;
+    };
+    s == crate::crash_sentinel::FLAG_FILE || s.starts_with(crate::crash_sentinel::PID_FLAG_PREFIX)
+}
+
 /// One mutating operation's write-ahead record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OpRecord {
@@ -466,20 +493,22 @@ fn prune_journal_root(root: &Path) {
     }
 }
 
-/// Digest of `target` ignoring the journal directory.
+/// Digest of `target` ignoring Wayland's own bookkeeping ([`is_bookkeeping`]).
 ///
-/// Reuses 26-01's `tree_digest` rather than growing a second digest: the journal
-/// directory is moved aside for the measurement only when one exists, which is
-/// never the case for a first operation on a clean home.
+/// Reuses 26-01's `tree_digest` rather than growing a second digest: the
+/// bookkeeping is filtered out through a shadow copy only when some is present,
+/// which is never the case for a first operation on a clean home.
 fn digest_excluding_journal(target: &Path) -> Result<String, BackupError> {
-    let journal = target.join(JOURNAL_DIR);
-    if !journal.exists() {
+    let has_bookkeeping = std::fs::read_dir(target)
+        .map(|it| it.flatten().any(|e| is_bookkeeping(&e.file_name())))
+        .unwrap_or(false);
+    if !has_bookkeeping {
         return Ok(wcore_config::portability::tree_digest(target)
             .map_err(BackupError::io("digest target tree"))?
             .digest);
     }
-    // A concurrent operation already created the journal. Digest a filtered
-    // shadow so the value stays comparable with a journal-free tree.
+    // Digest a filtered shadow so the value stays comparable with a home that
+    // carries no bookkeeping at all.
     let shadow = tempfile::tempdir().map_err(BackupError::io("shadow dir"))?;
     copy_tree_excluding_journal(target, shadow.path())?;
     Ok(wcore_config::portability::tree_digest(shadow.path())
@@ -510,7 +539,7 @@ fn copy_inner(src: &Path, dst: &Path, skip_journal: bool) -> Result<(), BackupEr
     for entry in entries {
         let entry = entry.map_err(BackupError::io("read copy entry"))?;
         let name = entry.file_name();
-        if skip_journal && name == std::ffi::OsStr::new(JOURNAL_DIR) {
+        if skip_journal && is_bookkeeping(&name) {
             continue;
         }
         let from = entry.path();
@@ -538,7 +567,10 @@ fn clear_tree_excluding_journal(target: &Path) -> Result<(), BackupError> {
     };
     for entry in entries {
         let entry = entry.map_err(BackupError::io("read clear entry"))?;
-        if entry.file_name() == std::ffi::OsStr::new(JOURNAL_DIR) {
+        // Bookkeeping is not this operation's to destroy. A live process's
+        // crash marker in particular belongs to that process, and deleting it
+        // would suppress a crash report the operator is entitled to.
+        if is_bookkeeping(&entry.file_name()) {
             continue;
         }
         let path = entry.path();
@@ -879,6 +911,46 @@ mod tests {
         // above is not passing by refusing everything.
         let ok = begin_scoped(&home, "migrate", &["a/b/c"]).unwrap();
         assert_eq!(ok.scope(), &["a/b/c"]);
+    }
+
+    /// Measured on hetzner 2026-07-29: a rolled-back import came back with every
+    /// user file byte-identical, and the digest still differed — solely because
+    /// the SIGKILLed process had left `.dirty-death.<pid>` behind. The digest is
+    /// the comparand SC3's "exact pre-operation state" is judged on, so
+    /// bookkeeping inside it makes an exact rollback report as inexact.
+    #[test]
+    fn a_crash_marker_left_by_a_killed_process_is_not_part_of_the_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        seed(&home);
+        let pre = target_digest(&home).unwrap();
+
+        // Exactly what a killed process leaves: a per-pid crash marker.
+        std::fs::write(home.join(".dirty-death.4242"), b"{}").unwrap();
+        assert_eq!(
+            target_digest(&home).unwrap(),
+            pre,
+            "a crash marker moved the home's digest"
+        );
+        // And the legacy un-scoped name too.
+        std::fs::write(home.join(".dirty-death"), b"{}").unwrap();
+        assert_eq!(target_digest(&home).unwrap(), pre);
+
+        // The predicate must be able to say NO, or it would hide real files.
+        assert!(!is_bookkeeping(std::ffi::OsStr::new("config.toml")));
+        assert!(!is_bookkeeping(std::ffi::OsStr::new("dirty-death.1")));
+        assert!(is_bookkeeping(std::ffi::OsStr::new(".dirty-death.1")));
+        assert!(is_bookkeeping(std::ffi::OsStr::new(JOURNAL_DIR)));
+
+        // A real user file with a similar-looking name still moves the digest,
+        // so the exclusion is not swallowing user state.
+        std::fs::write(home.join(".dirty-deathbed-notes.md"), b"user").unwrap();
+        assert_ne!(
+            target_digest(&home).unwrap(),
+            pre,
+            "the bookkeeping exclusion swallowed a user file"
+        );
     }
 
     /// A record written before scoping existed must still deserialize, and must

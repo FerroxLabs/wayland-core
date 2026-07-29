@@ -243,12 +243,12 @@ echo "SCOPE-PROBE: armed, reference import rc=0"
 #   completed   (post)    -> after rollback, NOT equal to PRE; the work stands
 MID=0; PRECLASS=0; POSTCLASS=0
 INT_EQ=0; INT_NEQ=0; COMP_EQ=0; MID_DIFFER=0
-RESIDUE=0; RECOVERED_TOTAL=0
+RESIDUE=0; RECOVERED_TOTAL=0; DIFF_UNEXPLAINED=0
 run_arm() {
     ARM="$1"; DO_KILL="$2"; DO_ROLLBACK="$3"
     MID=0; PRECLASS=0; POSTCLASS=0
     INT_EQ=0; INT_NEQ=0; COMP_EQ=0; MID_DIFFER=0
-    RESIDUE=0; RECOVERED_TOTAL=0
+    RESIDUE=0; RECOVERED_TOTAL=0; DIFF_UNEXPLAINED=0
     echo
     echo "--- ARM: $ARM (kill=$DO_KILL rollback=$DO_ROLLBACK) ---"
     echo "TRIAL-TABLE[$ARM]: trial delay_ms class recovered digest_equal journal_residue"
@@ -315,6 +315,19 @@ run_arm() {
         # left behind, so that is checked separately rather than assumed.
         if [ -d "$H/.wayland-backup-journal" ]; then RES=yes; RESIDUE=$((RESIDUE + 1)); else RES=no; fi
 
+        # INDEPENDENT byte-level check. The digest excludes Wayland's own
+        # bookkeeping by design, which is correct — but it means the digest
+        # cannot be the only evidence, or the exclusion list becomes a place to
+        # hide a difference. `diff -rq` compares the trees with NO exclusions and
+        # this allowlists exactly the two bookkeeping names, so any other
+        # difference is reported however small.
+        diff -rq "$TEMPLATE" "$H" > "$WORK/$ARM-$k.diff" 2>&1
+        UNEXPLAINED=$(grep -v -e '\.wayland-backup-journal' -e '\.dirty-death' \
+                          < "$WORK/$ARM-$k.diff" | grep -c . )
+        if [ "$CLASS" != post ] && [ "${UNEXPLAINED:-0}" -gt 0 ]; then
+            DIFF_UNEXPLAINED=$((DIFF_UNEXPLAINED + 1))
+        fi
+
         printf 'TRIAL[%s]: %d %d %s %s %s %s\n' "$ARM" "$k" "$DELAY_MS" "$CLASS" "$REC" "$EQ" "$RES"
 
         if [ -n "$EVIDENCE" ] && [ "$CLASS" = mid ] && [ "$k" -le 3 ]; then
@@ -340,12 +353,13 @@ run_arm() {
     echo "ARM-$ARM MID-DAMAGED-BEFORE-ROLLBACK: $MID_DIFFER"
     echo "ARM-$ARM JOURNAL-RESIDUE: $RESIDUE"
     echo "ARM-$ARM RECOVERED-OPERATIONS: $RECOVERED_TOTAL"
+    echo "ARM-$ARM BYTE-DIFF-UNEXPLAINED: $DIFF_UNEXPLAINED"
 }
 
 # --- arm 1: the property ------------------------------------------------------
 run_arm rollback yes yes
 R_MID=$MID; R_INT_EQ=$INT_EQ; R_INT_NEQ=$INT_NEQ; R_COMP_EQ=$COMP_EQ
-R_RESIDUE=$RESIDUE; R_REC=$RECOVERED_TOTAL
+R_RESIDUE=$RESIDUE; R_REC=$RECOVERED_TOTAL; R_DIFFU=$DIFF_UNEXPLAINED
 
 # --- arm 2: the known-negative ------------------------------------------------
 # The identical kills with the rollback REMOVED. A mid-apply kill must leave the
@@ -366,6 +380,7 @@ echo "ROLLBACK-ARM-INTERRUPTED-DIFFERS-PRE: $R_INT_NEQ"
 echo "ROLLBACK-ARM-COMPLETED-REVERTED: $R_COMP_EQ"
 echo "ROLLBACK-ARM-JOURNAL-RESIDUE: $R_RESIDUE"
 echo "ROLLBACK-ARM-RECOVERED: $R_REC"
+echo "ROLLBACK-ARM-BYTE-DIFF-UNEXPLAINED: $R_DIFFU"
 echo "NOROLLBACK-ARM-MID: $N_MID"
 echo "NOROLLBACK-ARM-MID-DAMAGED: $N_MID_DIFFER"
 echo "NOROLLBACK-ARM-INTERRUPTED-EQUAL-PRE: $N_INT_EQ"
@@ -394,6 +409,8 @@ echo "NOKILL-ARM-COMPLETED-REVERTED: $K_COMP_EQ"
     || FAIL "fewer homes came back to PRE ($R_INT_EQ) than were interrupted mid-apply ($R_MID)"
 [ "$R_RESIDUE" -eq 0 ] \
     || FAIL "$R_RESIDUE rolled-back homes still carry journal bookkeeping"
+[ "$R_DIFFU" -eq 0 ] \
+    || FAIL "$R_DIFFU interrupted homes differ from the template by something OTHER than Wayland bookkeeping (see the .diff files); the digest agreed, so the exclusion list was hiding it"
 
 # Recovery must not revert work that finished.
 [ "$R_COMP_EQ" -eq 0 ] \

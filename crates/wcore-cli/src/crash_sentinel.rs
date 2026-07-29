@@ -34,10 +34,15 @@ use std::path::{Path, PathBuf};
 /// Filename of the legacy un-scoped flag written under `$WAYLAND_HOME` by
 /// builds before per-process scoping (#181). Read once at startup for
 /// migration (report + delete), never written again.
-const FLAG_FILE: &str = ".dirty-death";
+///
+/// `pub(crate)` because [`crate::backup::journal`] must exclude these markers
+/// from a home's tree digest — they are this module's bookkeeping, not user
+/// state, and a killed process leaves one behind. A second copy of the literal
+/// over there would be a constant that can drift.
+pub(crate) const FLAG_FILE: &str = ".dirty-death";
 
 /// Per-process flags are named `.dirty-death.<pid>` (#181).
-const PID_FLAG_PREFIX: &str = ".dirty-death.";
+pub(crate) const PID_FLAG_PREFIX: &str = ".dirty-death.";
 
 /// Tolerance when comparing a flag's recorded owner start time against the
 /// OS-reported start time for the same pid. Both sides are computed by the
