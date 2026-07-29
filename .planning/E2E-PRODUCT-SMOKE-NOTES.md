@@ -136,3 +136,19 @@ Instrument liveness: `FLUX_API_KEY` count in config.rs = 1, `SAKANA_API_KEY` (co
 reached; token accounting printed. Journey will use `flux-standard`.
 
 Next: the continuous journey, steps 2-8.
+
+### T+150 — CLOSED. Full report at `.planning/E2E-PRODUCT-SMOKE.md`
+
+12 passed / 0 failed / 2 not reached (TUI-on-a-pty, and non-Linux platforms).
+Two MEDIUM findings, both about message text, both routed to BACKLOG.
+
+**Four instrument defects in my own harness**, all repaired in-lane with self-tests:
+`grep -c` double-counting (`"0\n0"`), `pgrep -f` self-matching the prompt text,
+command substitution capturing narration, and SIGKILL delivered to a wrapper subshell
+instead of the product. The first three produced FAIL verdicts on correct product
+behaviour — including a sandbox gate that printed the exact opposite of what happened.
+Run 1, reported as-is, would have filed four false findings, one a false security escape.
+
+Secret sweep: 0 hits over 357 files on hetzner and 8 on the Mac, each with a planted
+copy scoring 1 in the immediately preceding arm.
+Fence: 0 lines in the two shared files; known-positive control 144 lines.
