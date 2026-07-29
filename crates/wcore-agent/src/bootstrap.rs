@@ -2739,6 +2739,12 @@ impl AgentBootstrap {
             capabilities: workspace_policy.developer_capabilities(),
         };
 
+        // Resolved BEFORE `self.config` is moved into the engine below. The
+        // channel media enricher (further down) needs the same STT backend the
+        // tool registry got, and the resolver is now config-aware so it cannot
+        // be called after the move. `Option<Arc<_>>` is cheap to clone.
+        let media_transcription = crate::tool_backends::build_transcription_backend(&self.config);
+
         let pricing_refresher_constructed = self.config.provider_chain.enabled;
         let mut engine = if let Some(session) = self.resume_session {
             AgentEngine::resume_active_with_provider(
@@ -3226,8 +3232,7 @@ impl AgentBootstrap {
                 // answers an unseen image blind from a bare URL.
                 let media_enricher = {
                     let vision = crate::tool_backends::build_vision_backend();
-                    let transcription =
-                        crate::tool_backends::build_transcription_backend(&self.config);
+                    let transcription = media_transcription.clone();
                     let source = Arc::new(crate::channel_media::ManagerMediaSource::new(
                         std::sync::Arc::clone(&lifted),
                     ));
