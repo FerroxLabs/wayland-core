@@ -149,3 +149,9 @@ Anything unmeasurable stays **NOT MEASURED**. Not FAIL, not PASS.
 - **T+40** — hetzner worktree `hz/27-cred` at `/root/wayland-27cred` created at lane HEAD
   `8ff6a3eb`; `cargo build --release -p wcore-cli` running (`/root/wayland-27cred-build.log`).
   Host has `node v22.21.1` (the MCP fixture needs it) and 714 G free on `/`.
+
+- **T+CLOSE** — all measurements complete. C3: 7 NOT MEASURED cells → 3 PASS + 4 FAIL, zero
+  NOT MEASURED remaining. C4: transcription provider-reachable and product-unreachable; TTS
+  provider-dead. Three harness defects found and repaired in-lane (pipe-steals-exit-status,
+  silently-dropped second message, headless vault). Spend ≈ $0.82. Full write-up in
+  `../../27-CREDENTIALLED-SUMMARY.md`, which supersedes these notes.
