@@ -48,6 +48,12 @@ pub enum PeerSource {
     /// which is not the peer's name and not the CLI subcommand.
     #[serde(rename = "openclaw")]
     OpenClaw,
+    /// SpaceXAI's `grok` terminal coding agent (`grok-build`). The wire name is
+    /// the BINARY's name, `grok`, not the repository's — a plan naming
+    /// `grok_build` would not match anything a user can type.
+    Grok,
+    /// Google's `gemini` CLI.
+    Gemini,
 }
 
 impl PeerSource {
@@ -56,6 +62,8 @@ impl PeerSource {
         match self {
             PeerSource::Hermes => "hermes",
             PeerSource::OpenClaw => "openclaw",
+            PeerSource::Grok => "grok",
+            PeerSource::Gemini => "gemini",
         }
     }
 }
@@ -105,9 +113,23 @@ pub const ROOT_PROFILE_ID: &str = "hermes/root";
 /// The same, for an OpenClaw home's `agents.defaults` block.
 pub const OPENCLAW_ROOT_PROFILE_ID: &str = "openclaw/root";
 
+/// The same, for a grok home's `config.toml` `[models]` block.
+pub const GROK_ROOT_PROFILE_ID: &str = "grok/root";
+
+/// The same, for a gemini home's `settings.json` `model` block.
+pub const GEMINI_ROOT_PROFILE_ID: &str = "gemini/root";
+
 /// True when an id names a peer's root-level setup rather than a named profile.
+///
+/// Every id here contains `/`, which is not a legal directory-name character on
+/// any platform this ships to — so no peer profile directory can spoof one. The
+/// property is structural, and [`root_profile_ids_are_unspoofable`] asserts it
+/// rather than leaving it to the comment.
 pub fn is_root_profile_id(id: &str) -> bool {
-    id == ROOT_PROFILE_ID || id == OPENCLAW_ROOT_PROFILE_ID
+    id == ROOT_PROFILE_ID
+        || id == OPENCLAW_ROOT_PROFILE_ID
+        || id == GROK_ROOT_PROFILE_ID
+        || id == GEMINI_ROOT_PROFILE_ID
 }
 
 /// One discovered thing, mapped or named.
@@ -258,6 +280,62 @@ mod tests {
 
     fn item(kind: ItemKind, id: &str) -> DiscoveredItem {
         DiscoveredItem::new(kind, id, format!("profiles/{id}"), format!("profiles.{id}"))
+    }
+
+    /// Every peer's wire name round-trips, and the four are distinct.
+    ///
+    /// The negative half is the half that can fail: `serde`'s default
+    /// `snake_case` rule would have emitted `open_claw` for `OpenClaw`, so a
+    /// rename that is dropped produces a plan naming a peer that no CLI
+    /// subcommand matches. Asserted against the literal wire strings, not
+    /// against `as_str()` — comparing the enum to itself would pass on any
+    /// spelling.
+    #[test]
+    fn every_peer_wire_name_round_trips_and_none_collide() {
+        let all = [
+            (PeerSource::Hermes, "\"hermes\""),
+            (PeerSource::OpenClaw, "\"openclaw\""),
+            (PeerSource::Grok, "\"grok\""),
+            (PeerSource::Gemini, "\"gemini\""),
+        ];
+        for (src, wire) in all {
+            assert_eq!(serde_json::to_string(&src).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<PeerSource>(wire).unwrap(),
+                src,
+                "{wire} did not deserialize back to its own variant"
+            );
+        }
+        // Known-negative: `open_claw` is what the DEFAULT rule would emit, and
+        // it must not be accepted — otherwise the rename is decorative.
+        assert!(serde_json::from_str::<PeerSource>("\"open_claw\"").is_err());
+        assert!(serde_json::from_str::<PeerSource>("\"grok_build\"").is_err());
+
+        let mut names: Vec<&str> = all.iter().map(|(s, _)| s.as_str()).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(before, names.len(), "two peers share a wire name");
+    }
+
+    /// A root-profile id must be unspoofable by a peer profile DIRECTORY, and
+    /// the property that makes it so is that it contains `/`.
+    #[test]
+    fn root_profile_ids_are_unspoofable() {
+        for id in [
+            ROOT_PROFILE_ID,
+            OPENCLAW_ROOT_PROFILE_ID,
+            GROK_ROOT_PROFILE_ID,
+            GEMINI_ROOT_PROFILE_ID,
+        ] {
+            assert!(id.contains('/'), "{id} is spoofable by a directory name");
+            assert!(is_root_profile_id(id), "{id} is not recognised as a root");
+        }
+        // Known-negative: the bare names a user might expect are NOT roots, so
+        // a real profile called `root` still reads as a profile.
+        for id in ["root", "grok", "gemini", "hermes", "openclaw"] {
+            assert!(!is_root_profile_id(id), "{id} wrongly reads as a root id");
+        }
     }
 
     #[test]

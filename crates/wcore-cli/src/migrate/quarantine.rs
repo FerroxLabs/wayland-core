@@ -688,6 +688,13 @@ pub const MAX_SKILL_ROOT_DEPTH: usize = 6;
 /// scanned for either source, because a home carrying both layouts is a real
 /// migration and guessing wrong loses items.
 ///
+/// **grok and gemini-cli required no new root**, which was verified rather than
+/// assumed: grok's user skills are `<home>/skills/<n>/SKILL.md`
+/// (`xai-grok-shell/src/builtin.rs:75,134,150`) and gemini's are
+/// `<home>/skills/` (`core/src/config/storage.ts:101-103`) — both already the
+/// first entry below. Adding a redundant root would have read as work while
+/// changing nothing.
+///
 /// # What is deliberately NOT a root, and why (F26-GRADE-M1)
 ///
 /// The real `~/.hermes` carries **1909** `SKILL.md` files. **179** of them live
@@ -700,6 +707,10 @@ pub const MAX_SKILL_ROOT_DEPTH: usize = 6;
 /// easiest way to inflate an "imported" count without migrating anything of
 /// the user's. The remaining **1730 are user-authored and in scope**, and the
 /// accounting closes exactly: 1730 + 179 = 1909.
+///
+/// The same distinction applies to grok's `bundled/` (the product's shipped
+/// catalog) and `server-skills/` (pushed by the vendor's server). Neither is a
+/// root here; both are counted in the grok source's `deferred_other`.
 pub fn peer_skill_roots(home: &Path) -> Vec<PathBuf> {
     let mut roots = vec![
         home.join("skills"),
@@ -835,6 +846,12 @@ pub struct ScannedData {
 /// Hermes writes a persona as `SOUL.md` at the home root and under each
 /// `profiles/<name>/`; the measured real home holds 13 profile personas plus
 /// one at the root. OpenClaw's equivalents live under `identity/`.
+///
+/// grok writes them as `personas/<name>.toml` — a FILE each, not a directory,
+/// and TOML rather than markdown (`xai-grok-shell/src/config/mod.rs:279-315`).
+/// Scanned here rather than in the grok source module for the same reason the
+/// roots are unioned: one home carrying two layouts is a real migration, and a
+/// second, divergent scanner is what drifts.
 pub fn scan_peer_personas(home: &Path) -> Vec<ScannedData> {
     let mut out = Vec::new();
     let mut push = |path: PathBuf, name: String| {
@@ -866,17 +883,51 @@ pub fn scan_peer_personas(home: &Path) -> Vec<ScannedData> {
             push(k.join("SOUL.md"), name);
         }
     }
+    if let Ok(rd) = fs::read_dir(home.join("personas")) {
+        let mut files: Vec<PathBuf> = rd
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("toml"))
+            .collect();
+        files.sort();
+        for f in files {
+            let name = f
+                .file_stem()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            push(f, name);
+        }
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out.dedup_by(|a, b| a.id == b.id);
     out
 }
 
 /// Every memory note a peer home carries.
 ///
-/// `memories/*.md` at the home root and under each `profiles/<name>/`, and
-/// OpenClaw's `memory/*.md`. The `MEMORY.md` entrypoint is excluded, mirroring
-/// the `wcore-memory` legacy importer's exclusion — it is an index of the
-/// others, not a note.
+/// `memories/*.md` at the home root and under each `profiles/<name>/`,
+/// OpenClaw's `memory/*.md`, and grok's `memory/*.md`. The `MEMORY.md`
+/// entrypoint is excluded, mirroring the `wcore-memory` legacy importer's
+/// exclusion — it is an index of the others, not a note.
+///
+/// gemini-cli is the exception in this set: its memory is a SINGLE root
+/// document, `GEMINI.md` (`core/src/tools/memoryTool.ts:11`), which the
+/// directory walk below cannot reach. Handled explicitly rather than by adding
+/// the home itself as a memory directory — that would sweep every unrelated
+/// `*.md` at a peer's root into the import.
 pub fn scan_peer_memory(home: &Path) -> Vec<ScannedData> {
     let mut out = Vec::new();
+
+    let gemini_context = home.join("GEMINI.md");
+    if gemini_context.is_file() {
+        out.push(ScannedData {
+            id: "memory:GEMINI.md".to_string(),
+            path: gemini_context,
+            relative: "GEMINI.md".to_string(),
+            name: "GEMINI.md".to_string(),
+        });
+    }
+
     let mut dirs: Vec<PathBuf> = vec![home.join("memories"), home.join("memory")];
     if let Ok(rd) = fs::read_dir(home.join("profiles")) {
         let mut kids: Vec<PathBuf> = rd
