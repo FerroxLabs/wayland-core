@@ -979,8 +979,14 @@ mod tests {
             l.mark_resent("live"),
             Err(LedgerError::NotAbandoned { .. })
         ));
-        assert!(matches!(l.acknowledge("nope"), Err(LedgerError::Unknown(_))));
-        assert!(matches!(l.mark_resent("nope"), Err(LedgerError::Unknown(_))));
+        assert!(matches!(
+            l.acknowledge("nope"),
+            Err(LedgerError::Unknown(_))
+        ));
+        assert!(matches!(
+            l.mark_resent("nope"),
+            Err(LedgerError::Unknown(_))
+        ));
     }
 
     /// Whether an attempt had STARTED is the fact that decides if re-sending can
