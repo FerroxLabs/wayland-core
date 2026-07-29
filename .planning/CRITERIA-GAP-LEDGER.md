@@ -289,7 +289,7 @@ Also open and unfixed: **F23A-01-H2**, any errored tool call kills the session, 
 Phase 24 has moved more than any other since its own report. Grades below are measured against the
 tree, not `24-PHASE-REPORT.md`.
 
-#### 24-C1 — PARTIAL (was NOT MET on any platform)
+#### 24-C1 — NOT MET (re-graded 2026-07-29; was PARTIAL, was NOT MET on any platform)
 
 > **"Native service lifecycle, profile isolation, active-turn visibility, drain, restart, upgrade,
 > and rollback work without lost or duplicate delivery."** (`ROADMAP.md:117`)
@@ -306,14 +306,65 @@ outcome was UNKNOWN across a `kill -9` produced exactly one message where it pre
 **The specific unmet clauses**: *upgrade* and *rollback* were never performed on any platform;
 the whole measurement is **Linux only**; the 12-of-12 clean tally is short (F24-C-M1); and nine
 channel adapters inherit `supports_outbound_idempotency() == false`, for which an outcome-unknown
-delivery is now correctly **abandoned** rather than duplicated — safe and honest, and not the same
-thing as delivered.
+delivery is **abandoned** rather than duplicated — safe and honest, and not the same thing as
+delivered.
 
-**Closing it requires**: the same live journey on macOS (launchd) and Windows (Task Scheduler), an
+---
+
+**RE-GRADED 2026-07-29 by `lane/24-idempotency` — this row's PARTIAL does not survive measurement.
+Criterion 1 is NOT MET.** Full evidence: `24-C1-IDEMPOTENCY-SUMMARY.md`.
+
+Criterion 1 is a **conjunction** — the gateway's own header reads *"no delivery is lost and none is
+duplicated"*. Graded on each half separately:
+
+- **No-duplicate half: HOLDS** on all ten adapters, and is now *measured* on four rather than
+  reasoned about on one.
+- **No-loss half: FAILS on nine of ten**, by construction, in the crash-during-send window.
+
+**The 12-of-12 tally was graded on the one adapter of ten that implements the property under test.**
+`scripts/f24-journey.mjs:380` is `platform = "slack"` and is the only `platform = "…"` line in the
+driver; Slack (`wcore-channel-slack/src/lib.rs:234`) is the sole override of a trait method that
+defaults to `false` at `wcore-channels/src/lib.rs:139`.
+
+**The design's choice is nonetheless correct, and that is now a fact rather than an inference.** One
+delivery key was replayed twice through real adapters over real HTTP, built by the production
+factory. Telegram, Twilio SMS and WhatsApp each put **two messages** at the destination with no
+dedupe token on the wire; Slack carried the key on both attempts. That known-positive is what makes
+the other three interpretable. So abandoning prevents a **genuine** duplicate, not a hypothetical one.
+
+The honest restatement to carry forward: *no duplicate delivery on 10/10 adapters (measured on 4);
+exactly-once delivery on 1/10 (Slack, Linux only). On the other nine an outcome-unknown delivery is
+abandoned, and that abandonment is currently unrecoverable and unsurfaced.*
+
+**A new HIGH falls out of it, and it is ours alone.** The abandon path claims in-source that such a
+delivery is *"recorded, terminal, and nameable by an operator"*. The code does not implement that:
+`ledger.rs:214 pending()` and `:223 pending_count()` both exclude `Abandoned`; `:253 compact()`
+classes it as terminal history, so the record is **eligible to be deleted**; and `DeliveryState::Abandoned`
+has no consumer anywhere outside `ledger.rs`. The only signal is one `tracing::warn!`. This is what
+converts a deliberate recorded non-delivery into an unrecoverable one. In flight as
+`lane/24-c1-abandoned`.
+
+**"Outbound idempotency for the nine adapters" was the wrong closing requirement.** The cost is not
+uniform and mostly cannot be paid in code: **7 of 10 platforms provide no idempotency primitive at
+all** (Telegram, Twilio, Meta Graph, SMTP, signal-cli, AppleScript iMessage, MS Teams) — for those,
+`false` is permanent and truthful, and closing them is a **product decision** (an explicit per-channel
+at-most-once vs at-least-once policy, exposed as configuration), not an implementation. Only two are
+cheap: **Matrix** already PUTs to its native idempotency slot but derives `txn_id` from a
+process-local counter that resets to 1 on restart (`rest.rs:13`), and **Discord** already sends a
+dedup `nonce` that is deliberately distinct across restarts. Both ≈0.5 session.
+
+**Severities as graded** (4-way cross-audit: codex 5.6 Sol HIGH, gemini 3.1 Pro MEDIUM, kimi K3
+MEDIUM, internal adversarial HIGH): the **abandonment policy itself is MEDIUM** — it is the correct
+and only available trade, and a HIGH would demand a fix that cannot exist. The **missing operator
+surface and recovery path is HIGH** — fixable entirely in our code. Matrix/Discord are **MEDIUM**.
+
+**Closing it requires**: the same live journey on macOS (launchd) and Windows (Task Scheduler); an
 upgrade/rollback drive (`binary_path`/`binary_version` already exist in the projection precisely so
-these are distinguishable), and outbound idempotency for the nine adapters.
+these are distinguishable); the §3 operator-surface HIGH; the two cheap adapters; and a **product
+decision** on the remaining seven.
 
-**Cost: 2–3 lane-sessions.** **RELEASE-BLOCKING for macOS and Windows** (see §3).
+**Cost: 2–3 lane-sessions**, plus the product decision, which is Sean's.
+**RELEASE-BLOCKING for macOS and Windows** (see §3).
 
 #### 24-C2 — PARTIAL
 
