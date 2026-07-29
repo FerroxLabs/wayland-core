@@ -31,10 +31,25 @@ use crate::db::{
 const SEND_QUEUE_MAX: usize = 50;
 const OSASCRIPT_TIMEOUT_MS: u64 = 15_000;
 
+/// The single source of this adapter's inbound media bounds.
+///
+/// [`Channel::media_bounds`] returns this, and [`MAX_ATTACHMENT_BYTES`] is
+/// derived from it. One constant, both sites, so the advertised number and the
+/// enforced number cannot drift apart.
+///
+/// This adapter previously declared NOTHING, so it advertised the 25 MiB trait
+/// default while enforcing a hardcoded 64 MiB, because the declaration had no
+/// reader anywhere in the workspace. 64 MiB is the value that has actually
+/// governed inbound reads since 2026-06-12.
+pub const MEDIA_BOUNDS: wcore_channels::MediaBounds = wcore_channels::MediaBounds {
+    max_bytes: 64 * 1024 * 1024,
+    max_attachments: 10,
+};
+
 /// Upper bound on a single attachment read in `fetch_media`. iMessage media is
 /// already on local disk (no network fetch), but a multi-GB video must not be
 /// slurped into memory; the enricher only needs bytes for vision/transcription.
-const MAX_ATTACHMENT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES: u64 = MEDIA_BOUNDS.max_bytes;
 
 /// Coarse [`MediaKind`] for a local attachment path, keyed off its extension.
 /// Used only to label inbound attachments so the host enricher routes them
@@ -283,6 +298,12 @@ impl Channel for IMessageChannel {
         })
         .await
         .map_err(|e| ChannelError::Transport(format!("attachment read task panic: {e}")))?
+    }
+
+    /// This adapter's inbound intake policy — see [`MEDIA_BOUNDS`], from which
+    /// [`MAX_ATTACHMENT_BYTES`] is derived.
+    fn media_bounds(&self) -> wcore_channels::MediaBounds {
+        MEDIA_BOUNDS
     }
 }
 

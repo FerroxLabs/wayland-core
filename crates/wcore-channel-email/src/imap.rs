@@ -616,7 +616,11 @@ const MAX_MIME_DEPTH: usize = 20;
 /// Email images/audio are typically well under this; larger parts stay
 /// metadata-only (fetch_media returns Rejected and the enricher falls back to
 /// the bare summary), keeping the inbound event bounded with no temp files.
-const MAX_INLINE_ATTACHMENT_BYTES: usize = 2 * 1024 * 1024;
+///
+/// Derived from the adapter's DECLARED bound rather than being a second
+/// hardcoded number, so `media_bounds()` cannot advertise one figure while this
+/// path enforces another — which it did, advertising 10 MiB against this 2 MiB.
+const MAX_INLINE_ATTACHMENT_BYTES: usize = crate::MEDIA_BOUNDS.max_bytes as usize;
 
 fn walk_mime(headers: &[String], body: &str, depth: usize) -> MimeResult {
     let ct = parse_content_type(headers);

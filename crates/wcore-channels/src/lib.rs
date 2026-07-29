@@ -162,9 +162,30 @@ pub trait Channel: Send + Sync {
         Ok(ProbeReport::unsupported(self.name(), self.platform()))
     }
 
-    /// This adapter's DECLARED inbound media bounds. Enforced by
-    /// [`media::normalize`](crate::media::normalize). The default is finite —
+    /// This adapter's DECLARED inbound media bounds. The default is finite —
     /// an unbounded default is a fetch whose size a hostile sender chooses.
+    ///
+    /// # Where this is enforced, and why the answer used to be "nowhere"
+    ///
+    /// `max_bytes` is enforced on every fetched payload by
+    /// [`ChannelManager::fetch_media_on`](crate::ChannelManager::fetch_media_on),
+    /// which is the only production path to adapter media, and again inside
+    /// each adapter's own download path so an oversize body is refused while
+    /// streaming rather than after it has been buffered. Both read one constant
+    /// per adapter crate, so the advertised number and the enforced number are
+    /// the same number by construction.
+    ///
+    /// That last sentence is load-bearing and was not previously true. This
+    /// method was declared, overridden, and then read at exactly one site in
+    /// the entire workspace — a unit test. Every adapter that enforced a cap
+    /// enforced an unrelated hardcoded constant instead, diverging in BOTH
+    /// directions: discord advertised 25 MiB and fetched up to 100, email
+    /// advertised 10 MiB and never inlined past 2, and seven further adapters
+    /// advertised nothing at all while enforcing 100/64/16 MiB. Read
+    /// [`media::normalize`](crate::media::normalize) for the declaration-time
+    /// half (platform-reported size, before any fetch); it is deliberately NOT
+    /// the only enforcement point, because a platform that reports no size is
+    /// not a platform sending a small file.
     fn media_bounds(&self) -> MediaBounds {
         MediaBounds::default()
     }

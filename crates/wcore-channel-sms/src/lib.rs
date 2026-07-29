@@ -23,6 +23,22 @@ pub mod config;
 pub mod error;
 pub mod inbound;
 
+/// The single source of this adapter's inbound media bounds.
+///
+/// [`Channel::media_bounds`] returns this, and [`api::MAX_MEDIA_BYTES`] — which
+/// `api::download_media` enforces both on `Content-Length` and on the decoded
+/// body — is derived from it. One constant, both sites, so the advertised
+/// number and the enforced number cannot drift apart.
+///
+/// This adapter previously declared NOTHING, so it advertised the 25 MiB trait
+/// default while enforcing a hardcoded 16 MiB. Unusually among the adapters
+/// this gap ran the SAFE way (it enforced less than it promised) — but a
+/// promise no code reads is not safe in either direction, it is just unread.
+pub const MEDIA_BOUNDS: wcore_channels::MediaBounds = wcore_channels::MediaBounds {
+    max_bytes: 16 * 1024 * 1024,
+    max_attachments: 10,
+};
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -316,6 +332,12 @@ impl Channel for SmsChannel {
         )
         .await
         .map_err(ChannelError::from)
+    }
+
+    /// This adapter's inbound intake policy — see [`MEDIA_BOUNDS`], from which
+    /// [`api::MAX_MEDIA_BYTES`] is derived.
+    fn media_bounds(&self) -> wcore_channels::MediaBounds {
+        MEDIA_BOUNDS
     }
 }
 

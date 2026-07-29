@@ -97,7 +97,11 @@ fn next_unkeyed_txn_id() -> String {
 /// to prevent an OOM-DoS from a homeserver that omits/lies about
 /// `Content-Length`. Matches the 100 MiB cap used by the Discord/Slack/Telegram
 /// media paths.
-const MAX_MEDIA_BYTES: usize = 100 * 1024 * 1024;
+///
+/// Derived from the adapter's DECLARED bound rather than being a second
+/// hardcoded number, so `media_bounds()` cannot advertise one figure while this
+/// path enforces another.
+const MAX_MEDIA_BYTES: usize = crate::MEDIA_BOUNDS.max_bytes as usize;
 
 /// Wall-clock timeout for a media download request (including the body read).
 const MEDIA_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);

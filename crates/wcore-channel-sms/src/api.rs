@@ -26,7 +26,11 @@ pub(crate) const MEDIA_HOSTS: &[&str] = &["api.twilio.com"];
 
 /// Cap on a single inbound media fetch. MMS media is small; bound it so an
 /// oversized/malicious resource can't exhaust memory.
-pub(crate) const MAX_MEDIA_BYTES: u64 = 16 * 1024 * 1024;
+///
+/// Derived from the adapter's DECLARED bound rather than being a second
+/// hardcoded number, so `media_bounds()` cannot advertise one figure while this
+/// path enforces another.
+pub(crate) const MAX_MEDIA_BYTES: u64 = crate::MEDIA_BOUNDS.max_bytes;
 
 /// Download one inbound MMS media resource from Twilio.
 ///

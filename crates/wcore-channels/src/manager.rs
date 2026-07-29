@@ -771,6 +771,23 @@ impl ChannelManager {
     /// channel's mutex across the download, briefly pausing that one channel's
     /// poll/send while its own just-received media is fetched. The enricher
     /// bounds the call with a timeout so a slow media host can't stall it.
+    ///
+    /// # This is where a declared bound stops being decorative
+    ///
+    /// The payload is checked against the originating channel's
+    /// [`Channel::media_bounds`](crate::Channel::media_bounds) before it is
+    /// handed back. This is the ONLY production path to adapter media
+    /// (`ChannelMediaEnricher` reaches every attachment through here), so it is
+    /// the one site that can make every adapter's declaration load-bearing —
+    /// including the adapters that carry no size check of their own and would
+    /// otherwise be bounded by nothing but the trait default they never read.
+    ///
+    /// An adapter's own fetch path is still expected to cap the *streamed* read
+    /// at the same number, so a hostile payload is refused before it is
+    /// buffered rather than after. That per-adapter cap and this one are read
+    /// from a single constant per crate precisely so they cannot drift apart —
+    /// which is exactly what they had done: every adapter that enforced a cap
+    /// enforced a different number from the one it advertised.
     pub async fn fetch_media_on(
         &self,
         name: &str,
@@ -781,7 +798,30 @@ impl ChannelManager {
             .get(name)
             .ok_or_else(|| ChannelError::Config(format!("unknown channel: {name}")))?;
         let guard = slot.lock().await;
-        guard.fetch_media(attachment).await
+        let bounds = guard.media_bounds();
+        let bytes = guard.fetch_media(attachment).await?;
+        let len = bytes.len() as u64;
+        if len > bounds.max_bytes {
+            return Err(ChannelError::Rejected(format!(
+                "attachment is {len} bytes, over channel {name}'s declared \
+                 {} byte media bound",
+                bounds.max_bytes
+            )));
+        }
+        Ok(bytes)
+    }
+
+    /// The bounds channel `name` declares via
+    /// [`Channel::media_bounds`](crate::Channel::media_bounds), or `None` if no
+    /// such channel is registered.
+    ///
+    /// Exposed so the inbound media enricher can apply `max_attachments`, which
+    /// [`Self::fetch_media_on`] structurally cannot: that method sees one
+    /// attachment at a time and a per-message count bound needs the whole list.
+    pub async fn media_bounds_on(&self, name: &str) -> Option<crate::MediaBounds> {
+        let slot = self.channels.get(name)?;
+        let guard = slot.lock().await;
+        Some(guard.media_bounds())
     }
 
     /// List names of registered channels, sorted alphabetically.
