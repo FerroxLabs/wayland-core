@@ -806,7 +806,12 @@ fn apply_plan(
                 content.import_memory_note(&req)
             };
             match result {
-                Ok(item) => {
+                // The count is incremented only on a successful write, and the
+                // authoritative file total still comes from the store's own
+                // counter (`content.files_written()`) rather than from here —
+                // two independent numbers that a reader can cross-check, which
+                // is the property F26-GRADE-H1 was missing.
+                Ok(_) => {
                     if is_persona {
                         written.personas += 1;
                     } else {
