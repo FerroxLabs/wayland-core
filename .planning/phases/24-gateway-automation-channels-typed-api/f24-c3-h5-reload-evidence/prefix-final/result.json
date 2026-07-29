@@ -1,0 +1,17 @@
+{
+  "finding": "F24-C3-H6",
+  "binary": "/tmp/f24c3h6-wayland-core-PREFIX",
+  "pass": 5,
+  "fail": 1,
+  "rc_health_after_lease_released": 0,
+  "rc_health_before_reload": 1,
+  "rc_health_after_reload": 0,
+  "legs": [
+    {"leg":"gateway-observed-the-lost-lease","pass":true,"detail":"[gateway] inbound polling is owned by another process (pid None); this gateway will send but not poll "},
+    {"leg":"health-fails-while-the-lease-is-lost--OLD-SHAPE","pass":true,"detail":"rc=1: wayland-core channel: 0 of 1 configured channels are NOT registered in the running gateway: inbound polling owned by another process "},
+    {"leg":"the-reload-actually-ran","pass":true,"detail":"[gateway] channel reload: added=[] replaced=[f24h6] removed=[] unchanged=[] policies=1 "},
+    {"leg":"health-STILL-fails-after-a-successful-reload","pass":false,"detail":"rc=0 — a reload that fixed NOTHING erased the degradation report "},
+    {"leg":"the-degradation-was-still-real-at-the-final-reading","pass":true,"detail":"foreign lock holder pid 1740703 still alive "},
+    {"leg":"health-CLEARS-once-the-lease-is-won-back-with-no-reload","pass":true,"detail":"rc=0 after ~500ms: configured: 1   registered: 1 "}
+  ]
+}
