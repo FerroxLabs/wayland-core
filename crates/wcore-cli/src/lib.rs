@@ -205,3 +205,11 @@ pub mod channel;
 // bypass refusal and the contained-profile context are testable under
 // `cargo test -p wcore-cli --lib`.
 pub mod sandbox_cmd;
+
+// The single chokepoint that guarantees a `--json-stream` host is told WHY the
+// engine refused to start. Before this, three of four startup refusal paths
+// exited with ZERO protocol frames and put the reason on stderr, which the
+// protocol consumer does not read. Lives in the lib so the decision rule is
+// testable under `cargo test -p wcore-cli --lib`, while the end-to-end proof
+// drives the real binary and reads its stdout as the host does.
+pub mod startup_error;

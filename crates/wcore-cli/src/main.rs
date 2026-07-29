@@ -989,7 +989,19 @@ fn main() -> anyhow::Result<ExitCode> {
                 .enable_all()
                 .thread_stack_size(8 * 1024 * 1024)
                 .build()?;
-            runtime.block_on(run_until_shutdown(run(), shutdown_signal()))
+            let outcome = runtime.block_on(run_until_shutdown(run(), shutdown_signal()));
+            // The startup-refusal chokepoint. Any error escaping `run()` before
+            // the `ready` frame went out is a refusal the `--json-stream` host
+            // must hear about on STDOUT — anyhow would otherwise print it to
+            // stderr, which the protocol consumer does not read, leaving the
+            // desktop app with a pipe that opened and closed carrying nothing.
+            // Runs while `runtime` is still alive and is a no-op for non-
+            // protocol runs, for runs that reached `ready`, and for the
+            // pre-existing #186 sites that already reported.
+            if let Err(error) = &outcome {
+                wcore_cli::startup_error::report_startup_refusal(error);
+            }
+            outcome
         })
         .map_err(|e| anyhow::anyhow!("failed to spawn wcore-cli entry thread: {e}"))?;
     entry
@@ -1028,6 +1040,13 @@ fn init_failure_message(err: &anyhow::Error, provider_label: &str) -> String {
 
 async fn run() -> anyhow::Result<ExitCode> {
     let mut cli = Cli::parse();
+    // Record protocol mode before ANY fallible startup work, so every refusal
+    // from here to the `ready` frame reaches the host as an error frame rather
+    // than as stderr text the protocol consumer never reads. The emit itself
+    // happens once, at the process-exit chokepoint in `main`.
+    if cli.json_stream {
+        wcore_cli::startup_error::mark_json_stream_active();
+    }
     let approval_bypass = cli.force || cli.dangerously_skip_permissions;
     let dangerous_ttl_secs = cli
         .dangerous_ttl_secs
@@ -1786,10 +1805,12 @@ async fn run() -> anyhow::Result<ExitCode> {
                 }
                 return Ok(ExitCode::SUCCESS);
             }
-            if cli.json_stream {
+            if cli.json_stream && wcore_cli::startup_error::claim_startup_error_emission() {
                 // #186: a json-stream host (desktop app) otherwise sees only a bare exit
                 // code and shows a generic "wcore exited with code 1 during init". Emit a
                 // structured error event so the real, actionable reason reaches the host UI.
+                // The claim above keeps this more specific message and stands the
+                // process-exit chokepoint down, so the host is told exactly once.
                 let w = wcore_protocol::writer::ProtocolWriter::new();
                 let _ = w.emit(&wcore_protocol::events::ProtocolEvent::Error {
                     msg_id: None,
@@ -4303,7 +4324,11 @@ async fn run_json_stream_mode(
         Ok(r) => r,
         Err(e) => {
             // #186: surface init failure to the json-stream host instead of a bare exit.
-            output.emit_error(&init_failure_message(&e, &provider_name), false);
+            // The claim keeps this specific message and stands the process-exit
+            // chokepoint down, so the host receives exactly one error frame.
+            if wcore_cli::startup_error::claim_startup_error_emission() {
+                output.emit_error(&init_failure_message(&e, &provider_name), false);
+            }
             return Err(e);
         }
     };
@@ -4372,6 +4397,10 @@ async fn run_json_stream_mode(
         engine.advertised_capabilities(),
         Some(execution_policy_sequence.current().clone()),
     );
+    // Startup succeeded and the host has its `ready`. Everything after this
+    // belongs to the live session, whose errors the protocol sink reports, so
+    // the startup-refusal chokepoint stands down here.
+    wcore_cli::startup_error::mark_ready_emitted();
     for (name, reason) in &credential_skips {
         let _ = writer.emit(&ProtocolEvent::McpFailed {
             name: name.clone(),
