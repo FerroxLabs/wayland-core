@@ -337,6 +337,20 @@ fields.
 
 ---
 
+## 8b. Two properties I could have broken and did not
+
+Both are known-negatives, so both carry a control taken in the same invocation.
+
+**`--dry-run --json` still writes nothing.** File counts in the two dry-run homes from
+the before/after run: **0 and 0**, while the identical counter reports **1773** on the
+apply home — so the zeros are non-mutation, not a dead counter.
+
+**The source tree is still never written.** Files in the peer corpus modified during the
+runs: **0** (`find -newermt "-25 minutes"`), across a session that drove the binary over
+it five times.
+
+---
+
 ## 9. Fence exposure vs `861d1b1a`
 
 ```
@@ -362,7 +376,15 @@ $ /usr/bin/git status --porcelain | grep '^??' | wc -l
 
 Sean's real peer installs were **read only**. Only path names left the Mac — 1909
 `SKILL.md` paths, 14 `SOUL.md` paths, 12 profile names — never file contents, never a
-credential. No file under `/Users/seandonahoe/dev/resources/` was touched.
+credential.
+
+Proven rather than asserted: `find ~/.hermes/skills ~/.hermes/profiles ~/.hermes/SOUL.md
+-mmin -360` returns **0**, and the identical predicate returns **1** on a file I touched
+deliberately, so the zero is a dead-tree fact and not a dead `find`. Under
+`/Users/seandonahoe/dev/resources/` the same predicate returns 2 — both are
+`hermes-agent/.git` and `openclaw/.git`, mtime **13:46**, roughly three and a half hours
+before this lane started. I read nothing under `resources/` at all; those are someone
+else's fetch, and I am naming them rather than reporting a clean zero I did not get.
 
 ---
 
