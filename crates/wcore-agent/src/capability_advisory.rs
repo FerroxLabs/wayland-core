@@ -146,8 +146,20 @@ mod tests {
         );
         // Missing ones are named with their fix.
         assert!(advisory.contains("Image generation"));
+        // F27-C3: the image-generation hint must name the config-provider arm
+        // AND the credential that drives it. Measured live: a session with
+        // only FLUX_API_KEY set registers the tool through that arm, so a hint
+        // that omits it is wrong in the one configuration this product ships.
         assert!(
-            advisory.contains("set OPENAI_API_KEY, FAL_API_KEY, GEMINI_API_KEY, or HF_API_KEY")
+            advisory.contains(
+                "set FLUX_API_KEY, OPENAI_API_KEY, FAL_API_KEY, GEMINI_API_KEY, or HF_API_KEY"
+            ),
+            "image-gen hint must lead with the config-arm credential: {advisory}"
+        );
+        assert!(
+            advisory.contains("or configure an OpenAI-wire provider"),
+            "image-gen hint must name the config arm in words, since no env-var \
+             name expresses it: {advisory}"
         );
         assert!(advisory.contains("Text-to-speech"));
         assert!(advisory.contains("set DISCORD_BOT_TOKEN"));
