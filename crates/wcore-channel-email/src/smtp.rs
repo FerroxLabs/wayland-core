@@ -18,6 +18,8 @@ use lettre::transport::smtp::authentication::Credentials;
 use lettre::transport::smtp::client::{Certificate, Tls, TlsParameters};
 use lettre::transport::smtp::response::Response;
 use lettre::{AsyncTransport, Tokio1Executor};
+use rustls_pki_types::CertificateDer;
+use rustls_pki_types::pem::PemObject;
 
 use crate::error::EmailError;
 
@@ -117,9 +119,40 @@ impl LettreSender {
 ///
 /// Split out from `LettreSender::new` so the PEM read/parse failure modes are
 /// unit-testable without standing up an SMTP relay.
+///
+/// # Why the anchors are counted here
+///
+/// `lettre::…::Certificate::from_pem` does NOT reject input that contains no
+/// certificate. On the rustls path it is implemented as
+/// `CertificateDer::pem_slice_iter(pem).collect::<Result<Vec<_>, _>>()`, and
+/// that iterator yields **nothing** for bytes with no PEM block rather than an
+/// error — so the collect succeeds and returns an EMPTY certificate set.
+/// `add_root_certificate` then pushes a certificate carrying zero anchors and
+/// lettre's `for rustls_cert in cert.rustls` loop iterates zero times.
+///
+/// The result would be a sender that builds cleanly, silently trusts only the
+/// default roots, and fails much later with an opaque TLS error — the operator
+/// having pointed the setting at a private key, an empty file or a typo'd path.
+/// Counting the anchors converts that into a config error at connect time,
+/// naming the file. (`from_pem` on the native-tls path *does* reject such
+/// input; this crate builds lettre with rustls, so it does not.)
 pub(crate) fn build_tls_params(host: &str, path: &str) -> Result<TlsParameters, EmailError> {
     let pem = std::fs::read(path)
         .map_err(|e| EmailError::Smtp(format!("read smtp tls_root_cert_path {path}: {e}")))?;
+
+    // Parsed with the same parser lettre uses, so this count cannot disagree
+    // with what lettre will actually load.
+    let anchors = CertificateDer::pem_slice_iter(&pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| EmailError::Smtp(format!("parse smtp tls_root_cert_path {path}: {e}")))?;
+    if anchors.is_empty() {
+        return Err(EmailError::Smtp(format!(
+            "smtp tls_root_cert_path {path} contains no CERTIFICATE PEM block; \
+             refusing to build a sender that would silently fall back to the \
+             default roots"
+        )));
+    }
+
     let cert = Certificate::from_pem(&pem)
         .map_err(|e| EmailError::Smtp(format!("parse smtp tls_root_cert_path {path}: {e}")))?;
     TlsParameters::builder(host.to_string())

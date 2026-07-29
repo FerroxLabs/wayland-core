@@ -11,6 +11,11 @@ chrono = { workspace = true, features = ["serde"] }
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
 imap = { version = "2" }
 native-tls = "0.2"
+# Used to COUNT the anchors in `smtp.tls_root_cert_path` with the same parser
+# lettre uses. Needed because lettre's `Certificate::from_pem` returns Ok on
+# input containing no PEM block (empty anchor set) on the rustls path — see
+# `smtp::build_tls_params`. Already resolved transitively; adds no new crate.
+rustls-pki-types = "1"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
