@@ -103,3 +103,77 @@ with `--select`/`--exclude` on export only. That is the export half and it is re
 - [ ] F26-GAPS-H1 `save_index` fix present at HEAD + kill-distribution re-proof.
 - [ ] SC1 macOS leg ran at ancestor `b671f9ad`, not the certified tree.
 - [ ] SC4 corpora, positive-control shape.
+
+---
+
+## M2 — F26-GAPS-H1: fixed, and proven by a kill distribution (minute ~70)
+
+Fix present at HEAD and unmodified since: `quarantine.rs:369-374` `save_index` calls
+`wcore_config::atomic_write`, not `fs::write`. `/usr/bin/git log --oneline -1 --
+crates/wcore-cli/src/migrate/quarantine.rs` → `a170ee24 fix(migrate): write the
+quarantine index atomically (F26-GAPS-H1)`, and `git merge-base --is-ancestor a170ee24
+HEAD` → **ancestor**. So the fix is at my base with no later edit to that file.
+
+**Arithmetic re-derived from the logs myself, not from the summary:**
+
+| log | source SHA | TRIAL lines | mid | corrupt idx | not-recovered | verdict line |
+|---|---|---|---|---|---|---|
+| `hermes.log` | `c23a08b9` (pre) | 21 | 17 | 1 | **1** | `PROOF: FAIL` |
+| `openclaw.log` | `c23a08b9` (pre) | 21 | 18 | 4 | **4** | `PROOF: FAIL` |
+| `hermes-fixed.log` | `a170ee24` (post) | 21 | 17 | 0 | 0 | `PROOF: PASS` |
+| `openclaw-fixed.log` | `a170ee24` (post) | 21 | 18 | 0 | 0 | `PROOF: PASS` |
+
+35 mid-apply kills each side. Pre-fix **5/35 unrecovered (14.3%)** — matches the brief's
+"5 of 35". Post-fix **0/35**. This is a kill distribution, not an inspection.
+
+**The gate can fail, and did.** The pre-fix logs carry `PROOF: FAIL` from the same
+harness — the single most important fact about this instrument. Additional controls I
+confirmed present in the logs rather than in the prose: `DETERMINISM-CONTROL: pass`,
+`SENSITIVITY-CONTROL: pass (profile-drop, payload-byte, index-entry all detected)`
+(three deformations that must each change the fingerprint), and `nokill.log` as the
+classifier's negative control (`KILL-ENABLED: no`, `CLASS-MID: 0`, 5 post).
+`SENTINEL-UNCHANGED: yes` on all four runs.
+
+Residual, stated: `ORPHAN-PAYLOAD-TRIALS` is still **9 (hermes) / 11 (openclaw)**
+post-fix — a payload directory can be written before its index entry exists. Every such
+trial still recovers on re-drive, so it is not data loss; it is not "no orphans" either.
+
+## M3 — SC1's real-credential leg: reproduced INDEPENDENTLY, and its missing control supplied
+
+I re-ran the inherited macOS leg myself rather than reading it:
+`sh scripts/portability-real-state-check.sh /Users/seandonahoe/f26-artifacts/b671/wayland-core`
+→ `extracted 7 real secret values`, `hermes items=14`, `openclaw items=3`,
+both `non-mutation confirmed`, **`0 hits`** each, `REAL-STATE CHECK PASSED`, rc=0.
+Independent tree digests I took before and after my own runs are byte-identical:
+hermes `d385dfa6…d75d` → `d385dfa6…d75d`; openclaw `b43014b2…c71e` → `b43014b2…c71e`.
+**Sean's real homes were not mutated by me.**
+
+**But "0 hits" is the self-passing shape (§3b-i), and the script had no planted-secret
+positive control.** It guards its INPUTS well (empty extraction, zero items, unparseable
+JSON, changed digest are each hard-red) but never demonstrates the MATCHER can fire.
+Per §6b-ii I repaired the instrument rather than noting the defect: new
+`scripts/portability-redaction-positive-control.sh`, three assertions —
+
+```
+EXTRACTED-TOTAL: 7
+ACTUALLY-SEARCHED: 7
+PLANT-LENGTH: 122   (value never printed)
+hermes/openclaw A1 known-positive:        PASS  (matcher fires on a PLANTED real secret)
+hermes/openclaw A2 known-negative:        PASS  (untouched document carries none)
+hermes/openclaw A3 dead-instrument-misses: PASS  (the guarded failure mode reports 0)
+POSITIVE-CONTROL: PASS
+```
+
+A3 is the assertion that makes the control mean anything. With it, the 0-hit result is
+non-vacuous **for the first time**. The control plants into a COPY; no peer home is written.
+
+**The limit the certification itself names, and it is real.** The macOS leg ran at
+`b671f9ad`. `git log b671f9ad..HEAD -- crates/wcore-config/src/portability/
+crates/wcore-cli/src/migrate/` returns **10 commits**, and `portability/redact.rs` —
+the redaction module itself — is among the changed files. Three are redaction fixes:
+`255d06ba` scrub credentials embedded in free-form plan details, `dd8579bc` make the
+details scrub a type invariant, `f63da68a` narrow the credential name field. So the
+real-credential evidence covers code that has since changed in exactly the module
+responsible for the property. It is evidence FOR the property and it is **not evidence
+at HEAD**. (The direction is favourable — the later commits harden — but that is an
+argument, not a measurement, and the whole point of this leg was to stop arguing.)
