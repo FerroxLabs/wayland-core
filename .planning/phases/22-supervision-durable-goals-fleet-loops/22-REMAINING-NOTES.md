@@ -164,3 +164,30 @@ Three grounds, in order of weight:
 - [ ] live sub-agent deny against the real binary
 - [ ] re-grade written
 - [ ] ledger row corrected
+
+---
+
+## M7 — final state
+
+All gates re-run at lane HEAD `c5ca677c`, isolated (not under another lane's full-workspace run):
+
+- `cargo check --workspace --all-targets` — `WS_RC=0`, 0 error lines
+- `cargo clippy -p wcore-agent -p wcore-permissions --all-targets --all-features -- -D warnings`
+  — `CLIPPY_RC=0`, 0 error lines (first run RED at 101)
+- `cargo nextest run -p wcore-agent` — **3096 run / 3096 passed / 6 skipped**
+- `cargo nextest run -p wcore-permissions` — **53 run / 53 passed / 1 skipped**
+- `cargo nextest run -p wcore-agent --test actor_acl_test` — **8 run / 8 passed / 0 skipped**
+- both live proofs reproduced against the HEAD release binary
+
+Shared fence `crates/wcore-cli/src/{lib,main}.rs`: **untouched**, diffed against the merge-base
+SHA captured once, and the empty result control-tested against a file I did change (`40  31`).
+
+## Status — final
+- [x] instrument defects (4) found and repaired in-lane, each with a self-test
+- [x] F05 row 2 — STALE, corrected with live evidence + one-variable negative control
+- [x] F05 row 4 — wired narrowing-only, live-proven, falsified at compile time
+- [x] live sub-agent deny against the real binary
+- [x] re-grade written and superseding
+- [x] ledger row corrected and promoted, panel 3-0 + adversarial dissent preserved
+- [ ] Criterion 1's control half — DELIBERATELY OPEN, see SUMMARY §8.1
+- [ ] learned-policy F05 outcome-proof column — NOT closed, see SUMMARY §9
