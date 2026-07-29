@@ -90,3 +90,83 @@ request vocabulary. The asymmetry is that `SubAgentConfig` cannot carry it.
       per brief, a single-surface policy-string assertion proves nothing.
 - [ ] Known-negative with three assertions per §6b-ii.
 - [ ] Windows: state plainly if unmeasured.
+
+---
+
+## Phase 1 — BASELINE MEASURED (hetzner-dsm, `/root/wayland-21c3eq`, SHA `27ca2d2a`)
+
+`cargo test -p wcore-cli --test child_authority_corpus`, unproxied
+(`/root/.cargo/bin/cargo`):
+
+```
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.19s
+```
+
+`WLRC=0` + `WLDONE` both present. Log: `/tmp/21c3eq-base.log`, table from
+`/tmp/21c3eq-base-nocap.log`.
+
+### P-5. The measured 11×4 table at HEAD, against the table in my brief
+
+Extracted with
+`grep -oE "^COMBINATION :: corpus_[a-z_]+ :: linux :: [a-z-]+ :: [a-z-]+ :: [A-Z-]+"`.
+
+| Dimension | SA in-proc | HP in-proc | SA live | HP live | vs brief |
+|---|---|---|---|---|---|
+| tool | **NOT-EXPR** | NOT-EXPR | **REFUSED** | **NOT-EXPR** | **3 of 4 differ** |
+| filesystem | REFUSED | REFUSED | REFUSED | REFUSED | held |
+| egress | REFUSED | NOT-EXPR | REFUSED | REFUSED | held |
+| secret | REFUSED | REFUSED | REFUSED | REFUSED | held |
+| depth | REFUSED | REFUSED | **REFUSED** | **REFUSED** | **2 differ** (brief: NOT-EXPR live) |
+| fan-out | REFUSED | NOT-EXPR | **REFUSED** | **REFUSED** | **2 differ** (brief: NOT-EXPR live) |
+| time | REFUSED | REFUSED | NOT-EXPR | NOT-EXPR | held |
+| token | REFUSED | REFUSED | NOT-EXPR | NOT-EXPR | held |
+| cost | REFUSED | REFUSED | NOT-EXPR | NOT-EXPR | held |
+| provider | NO-CHANNEL | **REFUSED** | NO-CHANNEL | NO-CHANNEL | **1 differs** |
+| approval | NO-CHANNEL | REFUSED | NO-CHANNEL | NO-CHANNEL | held |
+
+**Zero ALLOWED on any dimension, any surface, any mode — the brief's claim on this HELD.**
+
+### P-6. Brief claim 4 (fan-out undetermined live on both surfaces) — **FALSE at HEAD**
+
+Measured: `corpus_fan_out :: standalone :: live :: REFUSED` and
+`corpus_fan_out :: host-protocol :: live :: REFUSED`. Lane `21-c3-hostile` closed this with an
+at-cap control. Nothing for me to determine here — it is already determined. The remaining
+fan-out gap is the **host-protocol IN-PROCESS** cell only.
+
+### P-7. The real remaining gap is narrower than the brief, and it is TOOL
+
+`is_decisive` (`surfaces.rs:135-137`) = `Refused | Allowed | NoChannel`. `NOT-EXPRESSIBLE` is
+**not** decisive, and `assert_surface_equivalence` (`child_authority_corpus.rs:341-343`)
+`continue`s when either side is non-decisive. So every NOT-EXPR cell makes the equivalence
+assertion **vacuous for that pairing**.
+
+Applying that to the measured table, the equivalence pairs that ACTUALLY RUN:
+
+| Dimension | in-process pair | live pair |
+|---|---|---|
+| tool | **SKIPPED** (both NOT-EXPR) | **SKIPPED** (HP NOT-EXPR) |
+| egress | SKIPPED (HP NOT-EXPR) | runs |
+| fan-out | SKIPPED (HP NOT-EXPR) | runs |
+| time / token / cost | runs | SKIPPED (both NOT-EXPR) |
+| filesystem / secret / depth / provider / approval | runs | runs |
+
+⇒ **`tool` is the ONLY dimension with zero running equivalence pairs in either mode.** That is
+the sharpest statement of the unmet criterion, and it is not the statement the brief or the
+ledger makes.
+
+### P-8. Why each tool cell is non-decisive (verbatim causes, from the run)
+
+- **HP in-process** — *"the host child-spawn request type carries the fields [name, prompt,
+  max_turns, max_tokens, system_prompt, provider, model, temperature] and none of them expresses
+  a tool-authority request; `spawn_host_child` hardcodes `ForkOverrides::default()`"*. ← the one
+  cell my remit can fix by extending the request type.
+- **HP live** — *"the delegated child's shell never ran"*.
+- **SA in-process** — *"the KNOWN-POSITIVE arm failed: … could not write a sentinel inside its
+  own workspace and read it back"* (the bwrap overlapping-deny defect, 21-C3-01).
+- **SA live** — REFUSED, but *"ATTRIBUTED TO WORKSPACE CONTAINMENT, NOT TOOL AUTHORITY"*.
+
+**Consequence for design.** Three of those four are blocked by reading an EFFECT (a file on
+disk, a shell that ran). `f21_02_01_child_tool_authority.rs` already proves tool authority by
+reading the child's **own registry off the wire** instead, and passes. A registry-reading probe
+sidesteps 21-C3-01 (bwrap), 21-C3-03 (confirmer) and 21-C3-04 (unknown checkout root) at once.
+That, not an effect probe, is the shape the tool differential needs.
