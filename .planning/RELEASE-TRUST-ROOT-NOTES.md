@@ -126,3 +126,29 @@ Three distinct tests went red with three distinct messages:
 which is the point of the split: the refusal behaviour is independent of the constant, and the
 constant carries its own separate guard. The inherited edit's shape is vindicated; only its
 completeness was wrong (M6) and one assertion was over-deleted (M4).
+
+### M9 — clippy clean; two full-suite failures, both proved NOT mine
+
+`cargo clippy -p wcore-cli --all-targets` at `bb14c976`: **zero warnings.** The only `warning:`
+line in the log is cargo's pre-existing `imap-proto v0.10.2` future-incompat NOTE, not a lint.
+
+`cargo test -p wcore-cli` (full) showed 34 result lines, 32 `ok`, two `FAILED`:
+
+| failure | disposition | evidence |
+|---|---|---|
+| `always_fails` (`--lib`, 0 passed / 1 failed) | **not a test — a FIXTURE.** `crates/wcore-cli/src/plugin/scaffold.rs:274` writes the literal `#[test]\nfn always_fails() { panic!("deliberate"); }` into a scaffolded plugin template. A scaffolded crate got picked up as a workspace member during the run. Cannot be reached by a change to `update_trust.rs`. | base full run, below |
+| `import_is_idempotent_without_overwrite` (`migrate_hermes`, 6/7) | **full-suite contention artifact.** | isolated reruns |
+
+Isolated reruns of `migrate_hermes`, unproxied cargo, same targets:
+
+```
+base 63481a2d, alone:      test result: ok. 7 passed; 0 failed; 0 ignored; 0 filtered out
+mine bb14c976, alone:      test result: ok. 7 passed; 0 failed; 0 ignored; 0 filtered out
+mine bb14c976, full suite: test result: FAILED. 6 passed; 1 failed
+```
+
+Passes alone at BOTH commits, fails only under full-suite load — the contention class the lane
+brief documents. `git status --porcelain` in the hetzner worktree is **0 lines** after the run,
+so no tracked file was polluted.
+
+Reported as measured, not waved away: neither is green, and neither is caused by this lane.
