@@ -358,6 +358,37 @@ Precedent, 2026-07-29: an orchestrator told a lane to "rebase onto integration" 
 `git rebase` outright. The lane merged instead, reached the same stated end — a branch that merges
 cleanly — and flagged the conflict. That was the correct handling.
 
+### Your brief's MEASUREMENTS are probably stale — re-verify every one before acting
+
+This is the single most repeated finding of 2026-07-29. Integration moves under the orchestrator
+while it is writing your brief, so file:line claims and grep counts in it decay within hours. Four
+lanes in one night found orchestrator measurements false:
+
+- `22-C1`'s ledger row asserted zero `Goal` symbols in `wcore-protocol`, zero goal references under
+  the TUI, and no producer fixtures. **Three of four false at HEAD.**
+- `24-C1`'s brief listed four claims about the abandon path. **Two false** — a lane the orchestrator
+  did not know about had already landed.
+- `23B-H1`'s brief cited a HIGH row while a **superseding MEDIUM row for the same finding sat in the
+  same file**, and neither the orchestrator nor the brief noticed.
+- `C4-F3`'s description was right but shallow: the root cause was a layer below where it pointed.
+
+**So: verify the premise, then act. Report which claims held and which did not — that report is part
+of the deliverable, not an aside.** A refutation with evidence is a complete and valuable result; do
+not manufacture work to match a brief that measurement has already falsified.
+
+### Two instrument traps that produced false results this night
+
+- **Never share a `CARGO_TARGET_DIR` across worktrees when a crate bakes `CARGO_MANIFEST_DIR` into
+  its output.** `wcore-protocol` does, via `source_digest()`. A cached rlib then points into a
+  worktree you later delete, and the ENOENT surfaces as unrelated test failures **in files you never
+  touched**. One lane nearly reported a false regression from this; `cargo clean -p <crate>` cleared
+  it and the suite returned to 14/0.
+- **`git checkout -- <path>` is NOT the forbidden operation.** §0 forbids `git checkout` and
+  `git reset --hard` because they move refs and can discard other lanes' work. Restoring **one named
+  path** in your own worktree moves no ref and touches no other lane — it is fine, and a lane that
+  disclosed using it had done nothing wrong. `git reset --hard` remains forbidden outright, and a
+  lane did use it once this night, which is the thing not to repeat.
+
 ### On SeanDesktop, work on `D:\` — NOT `C:\` (Sean, 2026-07-29)
 
 `C:` is 1862 GB with only **167 GB free**. `D:` is 7452 GB with **5413 GB free**, and `E:` is
