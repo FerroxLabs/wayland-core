@@ -446,7 +446,11 @@ mod tests {
                      "required":["command"]}}}
             ]
         });
-        let response = reqwest::Client::new()
+        // Routed through the B1 egress chokepoint rather than a raw `reqwest::Client`, per
+        // `clippy::disallowed_methods`. `wcore-egress` is already a dev-dependency of this crate
+        // and this is a `#[cfg(test)]` path, so no new internal-crate edge is created — the
+        // rationale that earned `judge.rs` its scoped allow does not apply here.
+        let response = wcore_egress::EgressClient::tool()
             .post(&url)
             .json(&body)
             .send()
