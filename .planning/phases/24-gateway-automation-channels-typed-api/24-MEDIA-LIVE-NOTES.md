@@ -103,6 +103,36 @@ Header verified `RIFF....WAVE` → `detect_audio_mime` returns `audio/wav`
 Leg C is the control the predecessor's shape could not have: a backend returning a canned string
 would pass a naive positive gate. C requires the derived text to TRACK THE AUDIO.
 
+## T+70 — instrument self-test MUTATION-PROVED, and Flux STT probed live
+
+`node scripts/f24-media-live.mjs --selftest` → 6/6 PASS, on Mac and on hetzner.
+Three assertions per §6b-ii, and each **mutation-proved to redden**:
+
+| mutation | assertion that FAILED | rc |
+|---|---|---|
+| needle → `'zzz-never-appears-zzz'` | known-positive | 1 |
+| needle → `''` | known-negative | 1 |
+| broken-matcher → `'no transcription backend'` (a form that DOES match) | **THIRD** | 1 |
+
+The third is the one that matters: it proves the "old broken matcher misses it" assertion actually
+discriminates, rather than passing on any input.
+
+**Flux STT probed directly from hetzner before spending any gateway run.** Credential delivered on
+**curl's stdin** via `curl --config -` — never in `argv`, never written to hetzner's disk.
+
+| audio | HTTP | time | transcript returned |
+|---|---|---|---|
+| a1.wav | **200** | 2.12s | `" The Quantum Ferret audited 19 Crimson Bicycles on Thursday morning."` |
+| a2.wav | **200** | 1.45s | `" 17 Velvet Lighthouses inspected the Marmalade Orchestra last winter."` |
+
+So the credential is live, `flux-voice-fast` serves `/v1/audio/transcriptions` in the
+`verbose_json` shape the backend parses, and hetzner has egress to it.
+
+**Note for the scorer:** the engine renders numbers as DIGITS — "nineteen"→"19", "seventeen"→"17".
+So a1 recovers 7/8 of its content words and a2 recovers 6/7; both clear `minHits=5` with margin.
+**Cross-hits are zero in both directions on the REAL transcripts**, not merely on my synthetic
+sentences — which is what makes the anti-echo gate meaningful.
+
 ## Credential handling
 
 `~/.wayland-secrets/flux.env` (mode 600, outside every repo). Loaded via `set -a; . file; set +a`
