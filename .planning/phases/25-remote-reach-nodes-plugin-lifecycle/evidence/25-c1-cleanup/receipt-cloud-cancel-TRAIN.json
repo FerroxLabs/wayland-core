@@ -1,0 +1,76 @@
+{
+  "schema": "wayland.execution-backend-receipt",
+  "schema_version": 1,
+  "body_sha256": "0c221d0f49e9eb165423bffd4b7dbf30fac3e2f82965e0efcf2138af0d67a9d0",
+  "body": {
+    "protocol_version": 1,
+    "backend": {
+      "backend_id": "cloud",
+      "instance_id": "b35889dfdf064c6786e45210a7f23b01",
+      "version": "0.12.25",
+      "key_id": "7828c85769674de0328a6f3f17d723fe948591c5422a179701bdb6969299ae16"
+    },
+    "transport": {
+      "kind": "cloud",
+      "endpoint": "822e99a7e333e8"
+    },
+    "task": {
+      "task_id": "f25c1cancel",
+      "workspace_sha256": "abada7bc0fd25803d51b2fd720d1db5e3f0daad1b9c3fe9bca5f3e4e568f940f",
+      "input_sha256": "7a9788cb9b71a6121c9771a3e4cef75e35deff5c60ded25e4202029c3c6274b9",
+      "resources": {
+        "cpu_millis": 30000,
+        "memory_bytes": 268435456,
+        "wall_time_ms": 60000,
+        "output_bytes": 1048576
+      }
+    },
+    "limits": {
+      "cpu_millis": 30000,
+      "memory_bytes": 268435456,
+      "wall_time_ms": 60000,
+      "output_bytes": 1048576
+    },
+    "events_sha256": "c001289118b8a6cef992ba07508a9fffff1ac1c51e66beba0bc4b985b20dccde",
+    "events": [
+      {
+        "sequence": 1,
+        "event": {
+          "kind": "task_accepted",
+          "task_id": "f25c1cancel",
+          "backend_id": "cloud",
+          "workspace_sha256": "abada7bc0fd25803d51b2fd720d1db5e3f0daad1b9c3fe9bca5f3e4e568f940f",
+          "input_sha256": "7a9788cb9b71a6121c9771a3e4cef75e35deff5c60ded25e4202029c3c6274b9"
+        }
+      },
+      {
+        "sequence": 2,
+        "event": {
+          "kind": "cancelled",
+          "reason": "operator cancelled"
+        }
+      }
+    ],
+    "artifact": null,
+    "terminal": {
+      "kind": "cancelled",
+      "reason": "operator cancelled"
+    },
+    "timing": {
+      "started_unix_ms": 1785331797052,
+      "finished_unix_ms": 1785331812799,
+      "wall_ms": 15747
+    },
+    "hibernation": {
+      "kind": "not_observed",
+      "reason": "the run was cancelled before it could report a hibernation observation; this receipt does not claim one"
+    },
+    "secrets_exposed": [],
+    "egress_decision": "allow-all-default-no-policy-installed"
+  },
+  "attestation": {
+    "algorithm": "ed25519",
+    "key_id": "7828c85769674de0328a6f3f17d723fe948591c5422a179701bdb6969299ae16",
+    "signature_base64": "ecwp7UYiEdLR23fkbJxJkYATp8wRJaHotP5lm837wz/RNNECH6nWq2fVOc+9wzRBeSfEm8RYvFn9rBTWt35xBQ=="
+  }
+}

@@ -183,7 +183,26 @@ fn ssh_base_args(target: &str) -> Vec<String> {
 /// end's LOGIN shell parses ssh's remote command string before this script
 /// ever runs. Unquoted, a value carrying `;` was executed by that login shell
 /// and this script never saw it.
-const REMOTE_RUNNER: &str = r#"
+///
+/// # Cleanup, and the trap that is deliberately NOT here
+///
+/// The task root is removed on the way out, and — since 2026-07-29 — on the
+/// FAILING way out too. It previously was not: `set -e` aborted the script at
+/// `wait` whenever the task exited non-zero, so `rm -rf "$root"` never ran and
+/// `input.bin` was left on the far end by every failing task. Six such roots
+/// were found on a real node (`25-HOSTS-SUMMARY.md` FINDING 5).
+///
+/// The tempting general fix is `trap 'rm -rf "$root"' EXIT`. It is NOT used,
+/// and that is a decision rather than an oversight. When the controller dies
+/// mid-task the ssh connection drops and this script is signalled, while the
+/// `setsid` child deliberately survives — that surviving child is the ONLY
+/// unplanted positive control the orphan sweep has, and `$root/.pid` is the
+/// primary signal [`REMOTE_SCAN`] reads to find it. An EXIT trap would delete
+/// that evidence out from under a live orphan and turn a real finding into a
+/// clean zero. Cleanup therefore runs only where the child has already exited;
+/// cancellation cleans up through [`REMOTE_KILL`], which ends in its own
+/// `rm -rf "$root"`.
+pub const REMOTE_RUNNER: &str = r#"
 set -eu
 nonce="$1"; shift
 b64input="$1"; shift
@@ -198,8 +217,15 @@ export WAYLAND_TASK_NONCE="$nonce"
 setsid "$@" &
 child=$!
 echo "$child" > "$root/.pid"
-wait "$child"
-status=$?
+# `wait` REPORTS the child's status, and under `set -e` a non-zero status
+# aborts the script right here — before the two lines below. That is how a
+# failing task left its whole task root on the far end, `input.bin` (the
+# task's own input bytes) included. `|| status=$?` takes this one command out
+# of `set -e`'s reach; the status is still the child's and is still what this
+# script exits with, so nothing about the reported outcome changes.
+status=0
+wait "$child" || status=$?
+cd /
 rm -rf "$root"
 exit "$status"
 "#;
