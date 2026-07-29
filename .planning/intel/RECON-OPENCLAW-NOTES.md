@@ -97,3 +97,58 @@ boot, and whether "detached" means a real OS process or an in-daemon record.
 5. Native app targets: `apps/{macos,ios,android}` + `appcast.xml` scope and update mechanism.
 6. Our nearest equivalent per area, from `crates/` in this repo — and honest gap sizing.
 7. Dead-surface sweep: which advertised areas are NOT reachable / NOT exported / NOT packaged.
+
+---
+
+## MEASUREMENT 2 — the CLI surface is now definitive (reachability oracle found)
+
+Reachability is decided by two descriptor catalogs, both `as const satisfies` typed, both
+consumed by `buildCommandGroupEntries` in `src/cli/program/command-group-descriptors.ts`,
+which **throws `Unknown command descriptor: <name>`** if a registrar names a command that has
+no descriptor. So the catalogs are load-bearing, not documentation.
+
+- `src/cli/program/core-command-descriptors.ts` — 22 root commands.
+- `src/cli/program/subcli-descriptors.ts` — 41 sub-CLIs.
+- `src/cli/command-catalog.ts` — 102 `commandPath:` entries (startup/fast-path policy only).
+
+Core roots: setup, crestodian(hidden), onboard, configure, config, backup, **migrate**, doctor,
+dashboard, reset, uninstall, message, mcp, transcripts, agent, agents, status, health, audit,
+sessions, **commitments**, **tasks**.
+
+Sub-CLIs include: acp, gateway, daemon, logs, system, models, promos, **infer**, **capability**,
+approvals, exec-approvals, exec-policy, **nodes**, devices, node, worker, sandbox, fleet,
+worktrees, attach, tui, terminal, chat, cron, dns, docs, qa(env-gated), proxy, hooks, webhooks,
+qr, clawbot, pairing, plugins, channels, directory, security, secrets, skills, update, completion.
+
+### Correction to my own first-pass hypothesis
+
+I initially saw no `media`/`image`/`tts` root command and was about to record media as
+"agent-internal only". **That would have been wrong.** The surface is named `infer`
+(alias `capability`) — the vocabulary trap §3b-i.3 warns about. Registered in
+`src/cli/capability-cli.ts:registerCapabilityCli`, which composes eight registrars:
+model, image, audio, tts, video, web, embedding, plus list/inspect.
+
+### `openclaw infer` — 31 self-describing capability ids
+
+From `src/cli/capability-cli/metadata.ts` (`CAPABILITY_METADATA`), each entry carrying
+`id`, `description`, `transports` (`local` | `gateway`), `flags[]`, `resultShape`:
+
+- `model.run|list|inspect|providers|auth.login|auth.logout|auth.status`
+- `image.generate|edit|describe|describe-many|providers`
+- `audio.transcribe|providers`
+- `tts.convert|voices|providers|personas|status|enable|disable|set-provider|set-persona`
+- `video.generate|describe|providers`
+- `web.search|fetch|providers`
+- `embedding.create|providers`
+
+`infer capability list` / `infer capability inspect --name <id>` render this table at runtime —
+the CLI **introspects its own capability matrix**, and `CapabilityEnvelope` is a uniform result
+shape (`ok`, `capability`, `transport`, `provider`, `model`, `attempts[]`, `inputs[]`,
+`outputs[]`, `ignoredOverrides[]`, `error`) across every one of them.
+
+`image generate` alone exposes 13 flags including `--aspect-ratio`, `--resolution` (1K/2K/4K),
+`--output-format`, `--background`, `--quality`, `--openai-moderation`, `--timeout-ms`.
+This is not a demo surface.
+
+**`transports: ["local","gateway"]`** on `model.run` and the whole `tts.*` family is significant:
+the same capability id runs either in-process or against the gateway daemon.
