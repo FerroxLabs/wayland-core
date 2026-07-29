@@ -1,0 +1,8 @@
+BACKEND    KIND       AVAILABLE    PROBE BASIS            DETAIL
+local      local      yes          sandbox_backend_probe  platform containment backend 'appcontainer' probed available
+container  container  NO           daemon_ping            docker daemon refused the version ping: error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.47/version": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.
+ssh        ssh        NO           credential_absent      WAYLAND_EXEC_SSH_TARGET is not set
+cloud      cloud      NO           vendor_api_call        vendor API answered HTTP 401: {"error":"Authenticate: token validation error"}
+
+
+Availability is answered from a real probe in every row — the container backend from a daemon ping rather than socket presence, the ssh backend from a real handshake, the cloud backend from an authenticated API call. A backend with no credential reports NO and names what is missing; it never falls back to another backend.

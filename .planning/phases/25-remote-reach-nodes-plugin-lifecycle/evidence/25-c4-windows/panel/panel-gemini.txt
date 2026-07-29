@@ -1,0 +1,25 @@
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_manage_contacts_batch" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_manage_contact_group" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_search_engine_info" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_list_script_projects" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_script_project" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_script_content" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_create_script_project" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_update_script_content" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_run_script_function" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_manage_deployment" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_list_deployments" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_list_script_processes" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_delete_script_project" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_get_script_metrics" to fit within the 64 character limit. This tool may require user approval.
+Truncating MCP tool name "mcp_io.github.taylorwilsdon-google-workspace-mcp_generate_trigger_code" to fit within the 64 character limit. This tool may require user approval.
+Hook system message: [ijfw] Smart mode
+[ijfw] Memory loaded (997 things remembered)
+[ijfw] Welcome back -- picking up where you left off.
+[ijfw] Ready.
+Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY.
+Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY.
+EQUIVALENT
+
+Both responses are application-layer HTTP statuses containing provider-specific JSON, proving a TLS tunnel reached the remote edge. To generate this 401 locally without physical egress, the host would need an intercepting MITM proxy, a DNS sinkhole routing to a local mock server, or a network-level hook (like an LSP or eBPF) configured with a trusted TLS certificate. Because faking the 404 requires the exact same level of local MITM spoofing, the 401 proof is not materially weaker.
+Hook system message: [ijfw] Session 1064 complete (997 memory entries).
