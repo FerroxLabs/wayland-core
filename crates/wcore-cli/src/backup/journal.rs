@@ -380,9 +380,16 @@ fn preserve_scope(target: &Path, undo_dir: &Path, scope: &[String]) -> Result<()
         };
         let to = undo_dir.join(scope_store_name(rel));
         if meta.is_dir() && !meta.file_type().is_symlink() {
-            copy_tree_all(&from, &to)?;
+            // A live subtree: databases nested inside a scoped directory get
+            // the same consistent capture as the whole-tree path.
+            capture_tree(&from, &to)?;
         } else if meta.is_file() {
-            std::fs::copy(&from, &to).map_err(BackupError::io("preserve scoped file"))?;
+            if wcore_config::sqlite_snapshot::is_sqlite_database(&from) {
+                wcore_config::sqlite_snapshot::snapshot_database(&from, &to)
+                    .map_err(|e| BackupError::SqliteCapture(format!("{rel}: {e}")))?;
+            } else {
+                std::fs::copy(&from, &to).map_err(BackupError::io("preserve scoped file"))?;
+            }
         } else {
             // A symlink at a scope root is not something this operation may
             // mutate blind, and copying it would not round-trip. Record it as
@@ -426,6 +433,25 @@ fn restore_scope(target: &Path, undo_dir: &Path, scope: &[String]) -> Result<(),
             copy_tree_all(&from, &dest)?;
         } else {
             std::fs::copy(&from, &dest).map_err(BackupError::io("restore scoped file"))?;
+            // A preserved database is a FOLDED capture with no sidecars. The
+            // sidecars that stood beside the original are not in scope, so
+            // nothing else removes them — and a stale `-wal` left next to a
+            // rolled-back database is itself a corruption vector, because
+            // SQLite will replay it over a file it does not belong to.
+            //
+            // Unreachable with today's `MIGRATE_SCOPE` (quarantine,
+            // migrate-imported, skills, config.toml — no database among them).
+            // Handled anyway: the cost is three `remove_file` calls and the
+            // alternative is a silent corruption the day something adds one.
+            if wcore_config::sqlite_snapshot::is_sqlite_database(&from) {
+                for suffix in wcore_config::sqlite_snapshot::DERIVED_SIDECAR_SUFFIXES {
+                    let side = PathBuf::from(format!("{}{suffix}", dest.display()));
+                    if side.exists() {
+                        std::fs::remove_file(&side)
+                            .map_err(BackupError::io("remove stale sidecar on rollback"))?;
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -522,20 +548,88 @@ pub fn target_digest(target: &Path) -> Result<String, BackupError> {
     digest_excluding_journal(target)
 }
 
+/// Which direction a tree copy is running in, and therefore how it must treat a
+/// SQLite database it meets.
+///
+/// The two directions are NOT symmetric, which is why this is an explicit
+/// parameter rather than a blanket "snapshot any database you see":
+///
+/// * [`SqliteMode::Capture`] reads the user's LIVE home. A database there may
+///   have a writer committing into it, so it must be captured through
+///   [`wcore_config::sqlite_snapshot`] — see below.
+/// * [`SqliteMode::Verbatim`] reads the undo store, which is a quiescent copy
+///   nothing is writing. Re-snapshotting it would be pointless work, and worse:
+///   it would open a read-write connection against a store whose whole job is
+///   to be handed back unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqliteMode {
+    Capture,
+    Verbatim,
+}
+
 fn copy_tree_excluding_journal(src: &Path, dst: &Path) -> Result<(), BackupError> {
-    copy_inner(src, dst, true)
+    copy_inner(src, dst, true, SqliteMode::Capture)
 }
 
 fn copy_tree_all(src: &Path, dst: &Path) -> Result<(), BackupError> {
-    copy_inner(src, dst, false)
+    copy_inner(src, dst, false, SqliteMode::Verbatim)
 }
 
-fn copy_inner(src: &Path, dst: &Path, skip_journal: bool) -> Result<(), BackupError> {
+/// Capture a live subtree into the undo store.
+fn capture_tree(src: &Path, dst: &Path) -> Result<(), BackupError> {
+    copy_inner(src, dst, false, SqliteMode::Capture)
+}
+
+/// Names in one directory that are SQLite databases, and the derived sidecars
+/// belonging to them.
+///
+/// Both answers are computed for the WHOLE directory before anything is read,
+/// for the reason `archive::SqliteCapturePlan` documents: a `-wal` is only a
+/// sidecar if the file it names is genuinely a database, so deciding per-entry
+/// inside the loop would either drop an unrelated file ending in `-wal`, or
+/// carry a real sidecar whose database sorted after it.
+fn sqlite_plan(
+    files: &[(String, PathBuf)],
+) -> (
+    std::collections::BTreeSet<String>,
+    std::collections::BTreeSet<String>,
+) {
+    use wcore_config::sqlite_snapshot::{is_derived_sidecar_of, is_sqlite_database};
+
+    let databases: std::collections::BTreeSet<String> = files
+        .iter()
+        .filter(|(_, path)| is_sqlite_database(path))
+        .map(|(name, _)| name.clone())
+        .collect();
+    let sidecars: std::collections::BTreeSet<String> = files
+        .iter()
+        .map(|(name, _)| name)
+        .filter(|name| {
+            !databases.contains(*name) && databases.iter().any(|db| is_derived_sidecar_of(name, db))
+        })
+        .cloned()
+        .collect();
+    (databases, sidecars)
+}
+
+fn copy_inner(
+    src: &Path,
+    dst: &Path,
+    skip_journal: bool,
+    sqlite: SqliteMode,
+) -> Result<(), BackupError> {
     std::fs::create_dir_all(dst).map_err(BackupError::io("create copy dir"))?;
     let entries = match std::fs::read_dir(src) {
         Ok(e) => e,
         Err(_) => return Ok(()),
     };
+
+    // Collect first, decide second, copy third. The undo store is the ONLY
+    // record of the user's prior home, so the SQLite question has to be settled
+    // across the whole directory before any byte of it is read.
+    let mut dirs: Vec<(std::ffi::OsString, PathBuf)> = Vec::new();
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    let mut opaque: Vec<(std::ffi::OsString, PathBuf)> = Vec::new();
     for entry in entries {
         let entry = entry.map_err(BackupError::io("read copy entry"))?;
         let name = entry.file_name();
@@ -550,11 +644,46 @@ fn copy_inner(src: &Path, dst: &Path, skip_journal: bool) -> Result<(), BackupEr
         if meta.file_type().is_symlink() {
             continue;
         }
-        let to = dst.join(&name);
         if meta.is_dir() {
-            copy_inner(&from, &to, false)?;
+            dirs.push((name, from));
         } else if meta.is_file() {
-            std::fs::copy(&from, &to).map_err(BackupError::io("copy file"))?;
+            match name.to_str() {
+                Some(s) => files.push((s.to_string(), from)),
+                // A non-UTF-8 name cannot be compared against a database name,
+                // so it can be neither a database we capture nor a sidecar we
+                // drop. Copied verbatim, which is what it was before.
+                None => opaque.push((name, from)),
+            }
+        }
+    }
+
+    let (databases, sidecars) = match sqlite {
+        SqliteMode::Capture => sqlite_plan(&files),
+        SqliteMode::Verbatim => Default::default(),
+    };
+
+    for (name, from) in dirs {
+        copy_inner(&from, &dst.join(&name), false, sqlite)?;
+    }
+    for (name, from) in opaque {
+        std::fs::copy(&from, dst.join(&name)).map_err(BackupError::io("copy file"))?;
+    }
+    for (name, from) in &files {
+        // A derived sidecar is not carried: the capture has already absorbed
+        // everything it contains, and a restored `-shm` is a wal-index owned by
+        // a process that no longer exists.
+        if sidecars.contains(name) {
+            continue;
+        }
+        let to = dst.join(name);
+        if databases.contains(name) {
+            // Failure REFUSES the operation. Falling back to `fs::copy` here
+            // would silently reinstate the defect this exists to close, behind
+            // an undo store now claiming to hold a consistent home.
+            wcore_config::sqlite_snapshot::snapshot_database(from, &to)
+                .map_err(|e| BackupError::SqliteCapture(format!("{}: {e}", from.display())))?;
+        } else {
+            std::fs::copy(from, &to).map_err(BackupError::io("copy file"))?;
         }
     }
     Ok(())
@@ -991,5 +1120,190 @@ mod tests {
             target.join("config.toml").exists(),
             "recovery wiped a tree it never preserved"
         );
+    }
+
+    // ---- BL-F26-SC3-O1-ROLLBACK -------------------------------------------
+    //
+    // The undo store captured the prior home with `std::fs::copy` per file,
+    // walked with `read_dir` — each member of a WAL trio read at a different
+    // instant. Measured on `hetzner-dsm` through the real binary: a rolled-back
+    // home came back with `memory.db-wal` and `memory.db-shm` beside a database
+    // failing `integrity_check` with 101 problem lines, while `backup restore`
+    // and `backup recover` both exited 0.
+
+    /// A database with UNCHECKPOINTED content in its WAL, so a capture is only
+    /// correct if it folds the WAL in. A checkpointed database would pass even
+    /// on an implementation that ignored the WAL entirely.
+    fn seeded_wal_db(path: &Path, rows: i64) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        conn.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT NOT NULL)")
+            .unwrap();
+        for i in 0..rows {
+            conn.execute("INSERT INTO t (id, v) VALUES (?1, ?2)", (i, "x"))
+                .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn the_undo_store_holds_a_folded_database_and_none_of_its_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("home");
+        std::fs::create_dir_all(&target).unwrap();
+        seed(&target);
+
+        // The connection is held open across the capture, so the WAL is live
+        // and uncheckpointed exactly as it is for a running Wayland.
+        let live = seeded_wal_db(&target.join("memory.db"), 400);
+        assert!(
+            target.join("memory.db-wal").exists(),
+            "no WAL was produced; this test would prove nothing"
+        );
+        assert!(
+            std::fs::metadata(target.join("memory.db-wal"))
+                .unwrap()
+                .len()
+                > 0,
+            "the WAL is empty; this test would prove nothing"
+        );
+
+        let mut guard = begin(&target, "restore").unwrap();
+        guard.preserve_target(&target).unwrap();
+        let undo = guard.undo_dir().to_path_buf();
+
+        assert!(
+            undo.join("memory.db").is_file(),
+            "no database was preserved"
+        );
+        assert!(
+            !undo.join("memory.db-wal").exists(),
+            "the undo store carried a -wal; a restored sidecar is derived state \
+             belonging to a process that no longer exists"
+        );
+        assert!(!undo.join("memory.db-shm").exists());
+
+        let cap = rusqlite::Connection::open(undo.join("memory.db")).unwrap();
+        let verdict: String = cap
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(verdict, "ok", "the preserved database does not verify");
+        let n: i64 = cap
+            .query_row("SELECT COUNT(*) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 400, "the capture lost uncheckpointed WAL content");
+        drop(live);
+    }
+
+    #[test]
+    fn a_rolled_back_home_gets_a_database_that_opens_and_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("home");
+        std::fs::create_dir_all(&target).unwrap();
+        seed(&target);
+        let live = seeded_wal_db(&target.join("memory.db"), 250);
+
+        let mut guard = begin(&target, "restore").unwrap();
+        guard.preserve_target(&target).unwrap();
+
+        // What a killed `--replace` leaves: the target cleared, donor payloads
+        // part-written. The live connection is dropped first, because after
+        // `clear_target` the database it holds has been unlinked.
+        drop(live);
+        clear_tree_excluding_journal(&target).unwrap();
+        std::fs::write(target.join("donor.txt"), "from the archive").unwrap();
+        assert!(
+            !target.join("memory.db").exists(),
+            "the target really was cleared"
+        );
+
+        std::mem::forget(guard); // the owner died without committing
+        let report = recover_with(&target, |_| false).unwrap();
+        assert_eq!(report.recovered, 1);
+
+        assert!(
+            !target.join("donor.txt").exists(),
+            "rollback left the interrupted operation's output behind"
+        );
+        assert!(
+            !target.join("memory.db-wal").exists(),
+            "rollback restored a stale -wal beside the database"
+        );
+        assert!(!target.join("memory.db-shm").exists());
+
+        let back = rusqlite::Connection::open(target.join("memory.db")).unwrap();
+        let verdict: String = back
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(verdict, "ok");
+        let n: i64 = back
+            .query_row("SELECT COUNT(*) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 250, "the rolled-back database lost committed rows");
+    }
+
+    #[test]
+    fn a_file_merely_NAMED_like_a_database_is_still_byte_identical() {
+        // This is the test that keeps the EXISTING interruption proofs valid.
+        // `portability-migrate-rollback-proof.sh` writes a 22-byte text stub
+        // called `memory.db`; if capture were selected by FILENAME that stub
+        // would be rewritten and the proofs' byte-identity assertion would
+        // start failing for a reason that has nothing to do with SQLite.
+        // Detection is by header magic, so it must survive untouched.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("home");
+        std::fs::create_dir_all(&target).unwrap();
+        seed(&target);
+        let stub = b"PRIOR-USER-MEMORY-DB\n";
+        std::fs::write(target.join("memory.db"), stub).unwrap();
+        // And a file that merely ENDS in `-wal` while naming no database.
+        std::fs::write(target.join("notes-wal"), b"user notes, not a sidecar").unwrap();
+        let pre = target_digest(&target).unwrap();
+
+        let mut guard = begin(&target, "restore").unwrap();
+        guard.preserve_target(&target).unwrap();
+        let undo = guard.undo_dir().to_path_buf();
+
+        assert_eq!(
+            std::fs::read(undo.join("memory.db")).unwrap(),
+            stub,
+            "a non-database named memory.db was not preserved byte-for-byte"
+        );
+        assert!(
+            undo.join("notes-wal").is_file(),
+            "an unrelated file ending in -wal was dropped as a sidecar"
+        );
+
+        std::fs::write(target.join("config.toml"), "MUTATED").unwrap();
+        std::mem::forget(guard);
+        assert_eq!(recover_with(&target, |_| false).unwrap().recovered, 1);
+        assert_eq!(
+            target_digest(&target).unwrap(),
+            pre,
+            "a tree with no real database must still roll back byte-exactly"
+        );
+    }
+
+    #[test]
+    fn a_sidecar_is_dropped_only_for_its_own_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("home");
+        std::fs::create_dir_all(&target).unwrap();
+        seed(&target);
+        let live = seeded_wal_db(&target.join("memory.db"), 32);
+        // A real database's sidecar goes; an identically-suffixed file naming a
+        // DIFFERENT, non-database stem stays.
+        std::fs::write(target.join("other.db-wal"), b"not a sidecar of anything").unwrap();
+
+        let mut guard = begin(&target, "restore").unwrap();
+        guard.preserve_target(&target).unwrap();
+        let undo = guard.undo_dir().to_path_buf();
+
+        assert!(!undo.join("memory.db-wal").exists());
+        assert!(
+            undo.join("other.db-wal").is_file(),
+            "a -wal whose named database does not exist was wrongly dropped"
+        );
+        drop(live);
     }
 }

@@ -146,6 +146,47 @@ def read_progress(markers: Path, wids: list[str]) -> dict[str, int]:
     return out
 
 
+def account_rows(need: dict[str, int], have: dict[str, int]) -> tuple[int, int, dict[str, int]]:
+    """Row accounting that cannot cancel a loss against an impossibility.
+
+    `rows_committed` is `PRIMARY KEY (wid, n)` and every writer commits
+    `n = 1..need`, so `COUNT(*) WHERE n <= need` can never exceed `need`. A
+    CORRUPT database can nonetheless report that it does: measured on
+    `hetzner-dsm`, run `base-c3` returned `have = need + 107` for one writer
+    off a database failing `integrity_check` with 101 problem lines.
+
+    The first version of this summed the SIGNED differences, so that +107
+    would have cancelled 107 genuinely missing rows from another writer and
+    reported `MISSING-COMMITTED-ROWS: 0`. Repaired rather than written up
+    (LANE-BRIEF §6b-ii); `sqlite-restore-rollback-selftest.py` holds the
+    three-assertion self-test, including the one that proves the OLD version
+    would have missed it.
+
+    Returns `(missing, surplus, per_writer_missing)`. A non-zero SURPLUS is
+    itself a corruption finding, never rounded away.
+    """
+    missing = 0
+    surplus = 0
+    detail: dict[str, int] = {}
+    for w, n in need.items():
+        got = have.get(w, 0)
+        detail[w] = max(0, n - got)
+        missing += max(0, n - got)
+        surplus += max(0, got - n)
+    return missing, surplus, detail
+
+
+def account_rows_SIGNED(need: dict[str, int], have: dict[str, int]) -> int:
+    """The BROKEN accounting this harness shipped with, retained as evidence.
+
+    The self-test asserts this one reports a clean 0 for a case that has really
+    lost rows, and that `account_rows` does not. Without that third assertion
+    the self-test would pass on the broken instrument too. Never called by the
+    driver.
+    """
+    return sum(n - have.get(w, 0) for w, n in need.items())
+
+
 def read_records(home: Path) -> list[dict]:
     """Every open journal record in `home`, parsed.
 
@@ -418,6 +459,7 @@ def main() -> int:
     integrity = "unreadable"
     integrity_lines = -1
     missing_total = 0
+    surplus_total = 0
     missing_detail: dict[str, int] = {}
     try:
         rconn = sqlite3.connect(f"file:{rdb}?mode=ro", uri=True)
@@ -425,17 +467,13 @@ def main() -> int:
         joined = "\n".join(str(r[0]) for r in rows)
         integrity_lines = len([ln for ln in joined.splitlines() if ln.strip()])
         integrity = "ok" if joined.strip() == "ok" else joined.splitlines()[0]
+        have: dict[str, int] = {}
         for w in wids:
-            need = pre[w]
-            if need <= 0:
-                missing_detail[w] = 0
-                continue
-            have = rconn.execute(
+            have[w] = rconn.execute(
                 "SELECT COUNT(*) FROM rows_committed WHERE wid = ? AND n <= ?",
-                (w, need),
+                (w, pre[w]),
             ).fetchone()[0]
-            missing_detail[w] = need - have
-            missing_total += need - have
+        missing_total, surplus_total, missing_detail = account_rows(pre, have)
         rconn.close()
     except sqlite3.DatabaseError as exc:
         integrity = f"DatabaseError: {exc}"
@@ -453,7 +491,11 @@ def main() -> int:
     print(f"INTEGRITY-PROBLEM-LINES: {integrity_lines if integrity != 'ok' else 0}")
     print(f"MISSING-COMMITTED-ROWS: {missing_total}")
     print(f"MISSING-BY-WRITER: {missing_detail}")
-    ok = integrity == "ok" and missing_total == 0
+    # A count that EXCEEDS what the schema can hold is impossible on a sound
+    # database, so it is reported as its own finding rather than folded into
+    # the missing total where it would cancel a real loss.
+    print(f"IMPOSSIBLE-SURPLUS-ROWS: {surplus_total}")
+    ok = integrity == "ok" and missing_total == 0 and surplus_total == 0
     # --- G6: a pass that demanded nothing is not a pass --------------------
     if ok and sum(pre.values()) == 0:
         print("VERDICT: ABORTED-VACUOUS-NOTHING-WAS-DEMANDED")
