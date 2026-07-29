@@ -1,0 +1,44 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling version_check v0.9.5
+   Compiling typenum v1.20.1
+   Compiling serde_core v1.0.228
+   Compiling autocfg v1.5.1
+   Compiling libc v0.2.186
+   Compiling serde v1.0.228
+   Compiling zmij v1.0.21
+   Compiling serde_json v1.0.150
+   Compiling generic-array v0.14.7
+   Compiling num-traits v0.2.19
+   Compiling thiserror v2.0.18
+   Compiling core-foundation-sys v0.8.7
+   Compiling iana-time-zone v0.1.65
+   Compiling cfg-if v1.0.4
+   Compiling memchr v2.8.1
+   Compiling itoa v1.0.18
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling digest v0.10.7
+   Compiling cpufeatures v0.2.17
+   Compiling sha2 v0.10.9
+   Compiling syn v2.0.117
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling async-trait v0.1.89
+   Compiling chrono v0.4.44
+   Compiling wcore-types v0.12.25 (/Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-open-highs/crates/wcore-types)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.35s
+     Running tests/real_zombie.rs (target/debug/deps/real_zombie-c3ada7f68a6ad021)
+
+running 5 tests
+test a_fully_reaped_process_reads_as_dead ... ok
+test a_live_process_owned_by_another_user_reads_as_live_and_the_old_shape_called_it_dead ... ARM D reproduced on Darwin: uid=501 pid=1 new_probe=Live old_shape(kill(1,0))=alive:false errno=1 (EPERM=1)
+ok
+test a_live_process_reads_as_live ... ok
+test a_real_unreaped_corpse_reads_as_dead_and_the_old_shape_would_have_missed_it ... independent oracle for pid 62651: ps state=Z
+ok
+test the_running_test_process_reads_as_live ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

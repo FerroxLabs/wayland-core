@@ -1,0 +1,4 @@
+SELFTEST 1 PASS  known-positive -> TRUE_RC=0
+SELFTEST 2 PASS  known-negative -> TRUE_RC=7 (exact code, not collapsed to 1)
+SELFTEST 3 PASS  old shape reported rc=0 for a command that exited 7 -- the repair is load-bearing
+SELFTEST SUMMARY: 3 checks, 0 failed
