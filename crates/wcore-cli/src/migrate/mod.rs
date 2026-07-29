@@ -44,7 +44,7 @@ use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use wcore_config::config::{McpServerConfig, ProfileConfig, patch_global_config};
@@ -60,6 +60,7 @@ pub mod quarantine;
 pub mod select;
 
 use content::{ContentRequest, ImportedContentStore};
+use provenance::{PROVENANCE_FILE, Provenance, ProvenanceDocument};
 use quarantine::{Classification, QuarantineRequest, QuarantineStore};
 use select::{Accounting, Outcome, QuarantineReason, Selection};
 
@@ -72,6 +73,15 @@ pub enum MigrateCmd {
     Openclaw(HermesArgs),
     /// List imported content held in quarantine.
     Quarantined,
+    /// Show the provenance of content this machine imported — what came from a
+    /// peer, and where it landed.
+    ///
+    /// The complement of [`Quarantined`](Self::Quarantined): that answers
+    /// "what was contained", this answers "where did the file in my skills
+    /// directory come from". SC2 requires an import to PRESERVE provenance, and
+    /// a record with no way to read it back preserves it only in the sense that
+    /// a locked box preserves its contents.
+    Imported(ImportedArgs),
     /// Promote quarantined content out of containment — the EXPLICIT OPERATOR
     /// ACTION, and the only thing that can.
     ///
@@ -81,6 +91,23 @@ pub enum MigrateCmd {
     /// one invocation, so a realistic promotion does not cost one operator
     /// action per item.
     Promote(PromoteArgs),
+}
+
+/// Options for `migrate imported`.
+#[derive(Args, Debug)]
+pub struct ImportedArgs {
+    /// Ask where ONE artifact came from, by its path.
+    ///
+    /// Accepts a path relative to the Wayland config dir or an absolute path
+    /// under it, and a path INSIDE an imported directory
+    /// (`skills/notes/SKILL.md`) as well as the directory itself — because the
+    /// file is what an operator has in front of them when the question occurs
+    /// to them.
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<PathBuf>,
+    /// Emit the records as JSON instead of the prose listing.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Options for `migrate promote`.
@@ -536,6 +563,7 @@ pub fn run(cmd: MigrateCmd) -> Result<()> {
         MigrateCmd::Hermes(args) => run_source(PeerSource::Hermes, args),
         MigrateCmd::Openclaw(args) => run_source(PeerSource::OpenClaw, args),
         MigrateCmd::Quarantined => run_quarantined(),
+        MigrateCmd::Imported(args) => run_imported(args),
         MigrateCmd::Promote(args) => run_promote(args),
     }
 }
@@ -560,6 +588,111 @@ fn run_quarantined() -> Result<()> {
     }
     println!("\nPromote with: wayland-core migrate promote --id <identity> [--id …]");
     Ok(())
+}
+
+/// Load the union of every provenance record this home holds.
+///
+/// Two stores, one vocabulary. The imported document
+/// (`migrate-imported/PROVENANCE.json`) and the quarantine index both key by
+/// the SAME published identity and both now carry a home-relative
+/// `written_path`, so a single lookup answers for live, staged and contained
+/// content alike. Reading only one of them would answer "where did this come
+/// from?" with a confident "nowhere" for half the artifacts on disk — the
+/// known-negative failure this program keeps re-finding.
+pub fn imported_provenance(home: &std::path::Path) -> Result<ProvenanceDocument> {
+    let mut doc = ProvenanceDocument::new();
+    let staged = home.join(content::IMPORT_STAGE_DIR).join(PROVENANCE_FILE);
+    if staged.is_file() {
+        let text = std::fs::read_to_string(&staged)
+            .with_context(|| format!("reading {}", staged.display()))?;
+        let loaded = ProvenanceDocument::from_json(&text)
+            .with_context(|| format!("parsing {}", staged.display()))?;
+        for (id, p) in loaded.entries {
+            doc.insert(id, p);
+        }
+    }
+    let store = QuarantineStore::new(home.join(quarantine::QUARANTINE_DIR));
+    for e in store.entries().unwrap_or_default() {
+        doc.insert(e.id.clone(), e.provenance.clone());
+    }
+    Ok(doc)
+}
+
+/// `migrate imported` — where did the content on this machine come from?
+fn run_imported(args: ImportedArgs) -> Result<()> {
+    let home = wcore_config::config::wayland_config_dir();
+    let doc = imported_provenance(&home)?;
+
+    if let Some(path) = &args.path {
+        // Accept an absolute path under the home as readily as a relative one:
+        // the operator has a path from `ls`, not a path in our coordinates.
+        let rel = path
+            .strip_prefix(&home)
+            .unwrap_or(path.as_path())
+            .to_string_lossy()
+            .to_string();
+        let hits = doc.resolve_path(&rel);
+        if args.json {
+            let out: Vec<_> = hits
+                .iter()
+                .map(|(id, p)| serde_json::json!({ "identity": id, "provenance": p }))
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&out)?);
+            return Ok(());
+        }
+        if hits.is_empty() {
+            // An honest "no record", NOT a guess. This is the negative answer
+            // the command must be able to give: a path Wayland's own user
+            // authored has no provenance, and saying so is the whole value of
+            // being able to ask.
+            println!("No import record covers {}", path.display());
+            println!("Nothing this machine imported from a peer landed there.");
+            return Ok(());
+        }
+        println!("{} came from:", path.display());
+        for (id, p) in &hits {
+            print_provenance(id, p);
+        }
+        return Ok(());
+    }
+
+    if args.json {
+        println!("{}", doc.to_json()?);
+        return Ok(());
+    }
+    if doc.is_empty() {
+        println!("No peer content has been imported into this home.");
+        return Ok(());
+    }
+    println!("Imported content ({} item{}):", doc.len(), plural(doc.len(), "", "s"));
+    for (id, p) in &doc.entries {
+        print_provenance(id, p);
+    }
+    // A record that names no destination is reported rather than rendered as
+    // though it were complete — the F26-GRADE-H1 shape one level up.
+    let orphans = doc.without_destination();
+    if !orphans.is_empty() {
+        println!(
+            "\n{} record{} name no destination and cannot be located on disk: {}",
+            orphans.len(),
+            plural(orphans.len(), "", "s"),
+            orphans.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn print_provenance(id: &str, p: &Provenance) {
+    println!("  • {id}");
+    println!("      from:  {} ({})", p.source_path, p.source_tool);
+    match &p.written_path {
+        Some(w) => println!("      at:    {w}"),
+        None => println!("      at:    (no destination recorded)"),
+    }
+    if let Some(first) = &p.deduplicated_with {
+        println!("      note:  identical content, written by {first}");
+    }
+    println!("      digest: {}", p.digest);
 }
 
 /// `migrate promote` — THE explicit operator action.

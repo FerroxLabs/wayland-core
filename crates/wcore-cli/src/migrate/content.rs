@@ -251,8 +251,11 @@ impl ImportedContentStore {
         let bytes = total_of(&collected);
 
         if let Some((first_id, first_path)) = self.seen.get(&digest).cloned() {
-            // Byte-identical to something already written this run.
-            self.record_provenance(req, &digest);
+            // Byte-identical to something already written this run. The
+            // provenance still names a destination — the one the FIRST identity
+            // wrote — and says so, so a reader of `written_path` is not misled
+            // into thinking two copies exist.
+            self.record_provenance(req, &digest, &first_path, Some(&first_id));
             return Ok(ImportedItem {
                 id: req.id.clone(),
                 written_path: first_path,
@@ -273,7 +276,7 @@ impl ImportedContentStore {
         let written_path = format!("skills/{name}");
         self.seen
             .insert(digest.clone(), (req.id.clone(), written_path.clone()));
-        self.record_provenance(req, &digest);
+        self.record_provenance(req, &digest, &written_path, None);
         Ok(ImportedItem {
             id: req.id.clone(),
             written_path,
@@ -425,7 +428,7 @@ impl ImportedContentStore {
         self.files_written += 1;
         self.bytes_written += len;
         let written_path = self.relative_of(&target);
-        self.record_provenance(req, &digest);
+        self.record_provenance(req, &digest, &written_path, None);
         Ok(ImportedItem {
             id: req.id.clone(),
             written_path,
@@ -485,16 +488,31 @@ impl ImportedContentStore {
         (format!("{}-{}", base, &digest[..12]), true)
     }
 
-    fn record_provenance(&mut self, req: &ContentRequest, digest: &str) {
-        self.provenance.insert(
-            req.id.clone(),
-            Provenance::new(
-                req.source_tool.clone(),
-                req.source_version.clone(),
-                &req.source_path,
-                digest,
-            ),
-        );
+    /// Record one identity's provenance.
+    ///
+    /// `written_path` is REQUIRED rather than optional, and is taken from the
+    /// write that just happened rather than predicted before it — the same
+    /// discipline F26-GRADE-H1 forced on the outcome. A record that names no
+    /// destination is exactly the shape this module exists to stop: it says an
+    /// item was imported without saying where it is.
+    fn record_provenance(
+        &mut self,
+        req: &ContentRequest,
+        digest: &str,
+        written_path: &str,
+        deduplicated_with: Option<&str>,
+    ) {
+        let mut p = Provenance::new(
+            req.source_tool.clone(),
+            req.source_version.clone(),
+            &req.source_path,
+            digest,
+        )
+        .landed_at(written_path);
+        if let Some(first) = deduplicated_with {
+            p = p.deduplicated_with(first);
+        }
+        self.provenance.insert(req.id.clone(), p);
     }
 
     fn relative_of(&self, path: &Path) -> String {
