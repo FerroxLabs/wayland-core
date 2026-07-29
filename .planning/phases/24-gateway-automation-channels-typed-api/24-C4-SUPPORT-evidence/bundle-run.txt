@@ -1,0 +1,16 @@
+support bundle: /root/wl-24c4-bundle
+  home:            /root/wl-24c4-home
+  gateway alive:   true
+  members:         8
+    config-keys.txt
+    credential-keys.txt
+    environment-keys.txt
+    gateway-liveness.json
+    gateway-status.json
+    channel-health.json
+    deliveries.jsonl
+    recent-log.txt
+  known secrets:   2
+  redactions:      1
+  absent sources:  none
+  read it before you attach it: /root/wl-24c4-bundle

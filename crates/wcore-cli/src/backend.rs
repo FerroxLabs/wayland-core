@@ -94,10 +94,65 @@ pub enum BackendCmd {
 #[derive(Subcommand, Debug)]
 pub enum ReceiptCmd {
     /// Verify a receipt file's integrity and internal consistency.
-    Verify { path: PathBuf },
+    Verify {
+        path: PathBuf,
+        /// Additionally verify the receipt's ATTESTATION against the named
+        /// backend's live verifying key — identity, not merely integrity.
+        ///
+        /// Without this flag the command is integrity-only BY DESIGN: a receipt
+        /// cannot authenticate itself, because the verifying key is not carried
+        /// in the file. With it, the caller names the backend whose live key the
+        /// receipt must verify against, which turns "this receipt is internally
+        /// consistent" into "this receipt was signed by the backend it claims to
+        /// come from". A receipt signed by a rotated-out or foreign key fails
+        /// HERE, on identity, while its body digest still checks out — which is
+        /// the only way to catch a re-signed or misattributed receipt.
+        #[arg(long = "against-backend")]
+        against_backend: Option<String>,
+    },
+}
+
+/// Resolve config and arm the process-global egress boundary for this command.
+///
+/// SECURITY (F25 Criterion 4): `TopCmd::Backend` early-returns from `main`'s
+/// dispatch (`main.rs`, the `TopCmd::Backend` arm returns an `ExitCode`
+/// directly) hundreds of lines BEFORE main's own `install_egress_policy`
+/// chokepoint. Without this call the `cloud` backend's three
+/// `wcore_egress::EgressClient::new()` sites — `api_get`, `api_post_json` and
+/// `api_delete` in `wcore-exec-backend/src/backends/cloud.rs` — run under
+/// `GlobalDefaultPolicy`, which falls back to `EgressDecision::Allow` when
+/// nothing is installed. Every outbound request this operator surface makes was
+/// therefore ungated, and the receipt said so out loud:
+/// `"egress_decision": "allow-all-default-no-policy-installed"`.
+///
+/// This is the same defect, and the same fix, as `acp.rs` and `workflow.rs`
+/// already carry; `backend` was simply not on the list. The install is one-shot
+/// and idempotent, so a parent process that already installed a policy wins and
+/// this is a no-op.
+///
+/// A config that fails to resolve must NOT silently leave the boundary down:
+/// the whole point is that an unarmed policy is a fail-open. We surface the
+/// error and refuse to run the command.
+fn arm_egress_policy() -> Result<()> {
+    let config = wcore_config::config::Config::resolve(&wcore_config::config::CliArgs {
+        provider: None,
+        api_key: None,
+        base_url: None,
+        model: None,
+        max_tokens: None,
+        max_turns: None,
+        system_prompt: None,
+        profile: None,
+        auto_approve: false,
+        project_dir: None,
+    })
+    .context("resolving config to arm the egress policy for `backend`")?;
+    wcore_agent::egress::install_egress_policy(&config);
+    Ok(())
 }
 
 pub async fn run(args: BackendArgs) -> Result<()> {
+    arm_egress_policy()?;
     match args.cmd {
         BackendCmd::List { json } => list(json).await,
         BackendCmd::Probe { name } => probe(&name).await,
@@ -114,8 +169,12 @@ pub async fn run(args: BackendArgs) -> Result<()> {
             json,
         } => scan(&task_id, nonce.as_deref(), json).await,
         BackendCmd::Receipt {
-            cmd: ReceiptCmd::Verify { path },
-        } => verify_receipt(&path),
+            cmd:
+                ReceiptCmd::Verify {
+                    path,
+                    against_backend,
+                },
+        } => verify_receipt(&path, against_backend.as_deref()),
         BackendCmd::Diff { receipts } => diff(&receipts),
     }
 }
@@ -328,7 +387,7 @@ async fn orphans(nonce: &str) -> Result<()> {
     Ok(())
 }
 
-fn verify_receipt(path: &PathBuf) -> Result<()> {
+fn verify_receipt(path: &PathBuf, against_backend: Option<&str>) -> Result<()> {
     let bytes =
         std::fs::read(path).with_context(|| format!("reading receipt {}", path.display()))?;
     let receipt: ExecutionReceipt = serde_json::from_slice(&bytes)
@@ -342,12 +401,50 @@ fn verify_receipt(path: &PathBuf) -> Result<()> {
     println!(
         "INTEGRITY: OK — body digest, event ordering, single terminal event and internal consistency all hold."
     );
-    println!(
-        "IDENTITY:  NOT ESTABLISHED by this command. A receipt cannot authenticate itself: \
-         verifying identity requires a verifying key the caller already pinned, which a receipt \
-         file does not carry. Use the conformance harness or a caller holding the pinned key."
-    );
-    Ok(())
+    let Some(name) = against_backend else {
+        println!(
+            "IDENTITY:  NOT ESTABLISHED by this command. A receipt cannot authenticate itself: \
+             verifying identity requires a verifying key the caller already pinned, which a receipt \
+             file does not carry. Pass --against-backend <name> to check it against a live \
+             backend's key, or use the conformance harness."
+        );
+        return Ok(());
+    };
+
+    // Identity. The caller has named the backend whose live key this receipt
+    // must verify against, so we now hold a pinned key and the "a receipt
+    // cannot authenticate itself" objection no longer applies. This check is
+    // INDEPENDENT of the body digest above: a receipt re-signed by a
+    // rotated-out or foreign key has a perfectly intact body and is caught
+    // only here.
+    let reference = reference_backend_named(name, reference_budget())
+        .with_context(|| format!("resolving backend '{name}' to obtain its live verifying key"))?
+        .ok_or_else(|| {
+            anyhow!("unknown backend '{name}' — cannot establish identity against it")
+        })?;
+    match receipt.verify(&reference.identity, &reference.verifying_key) {
+        Ok(()) => {
+            println!(
+                "IDENTITY:  OK — the attestation verifies against backend '{name}' (key id {}). \
+                 This receipt was signed by the backend it claims to come from.",
+                reference.identity.key_id
+            );
+            Ok(())
+        }
+        Err(e) => {
+            // Fail closed, and say which check failed. A caller must be able to
+            // tell "the bytes were altered" from "the signer was not who this
+            // receipt claims" — they have different responses.
+            bail!(
+                "IDENTITY: REFUSED — this receipt does NOT verify against backend '{name}' \
+                 (expected key id {}, receipt carries key id {}): {e}. The body digest is \
+                 intact, so this is an identity failure, not a tampering failure: the receipt \
+                 was signed by a different (rotated-out, foreign or compromised) key.",
+                reference.identity.key_id,
+                receipt.body.backend.key_id
+            )
+        }
+    }
 }
 
 fn diff(paths: &[PathBuf]) -> Result<()> {

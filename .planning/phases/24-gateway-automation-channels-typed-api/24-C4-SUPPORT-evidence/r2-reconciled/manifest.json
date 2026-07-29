@@ -1,0 +1,20 @@
+{
+  "created_at": "2026-07-29T13:31:47.462123228+00:00",
+  "home": "/root/wl-r2-home",
+  "os": "linux",
+  "arch": "x86_64",
+  "binary_path": "/root/wayland-24-c4-r2/target/debug/wayland-core",
+  "binary_version": "0.12.25",
+  "members": [
+    "config-keys.txt",
+    "credential-keys.txt",
+    "environment-keys.txt",
+    "gateway-status.json",
+    "ledger-summary.json",
+    "channel-health.json",
+    "recent-log.txt"
+  ],
+  "known_secrets": 3,
+  "redactions": 1,
+  "absent_sources": []
+}

@@ -170,6 +170,7 @@ pub struct ImportedContentStore {
     taken: std::collections::BTreeSet<String>,
     files_written: usize,
     bytes_written: u64,
+    exec_bits_stripped: usize,
 }
 
 impl ImportedContentStore {
@@ -184,6 +185,7 @@ impl ImportedContentStore {
             taken: std::collections::BTreeSet::new(),
             files_written: 0,
             bytes_written: 0,
+            exec_bits_stripped: 0,
         }
     }
 
@@ -210,6 +212,15 @@ impl ImportedContentStore {
 
     pub fn bytes_written(&self) -> u64 {
         self.bytes_written
+    }
+
+    /// Files whose SOURCE carried an execute bit that this import removed.
+    ///
+    /// Reported to the operator rather than done silently: a peer skill's
+    /// helper script arriving inert is a decision, and a decision the user is
+    /// not told about cannot be reviewed.
+    pub fn exec_bits_stripped(&self) -> usize {
+        self.exec_bits_stripped
     }
 
     /// Import a DATA skill into the live skills root.
@@ -246,13 +257,16 @@ impl ImportedContentStore {
         };
 
         let collected = collect_bounded(&dir)?;
-        let digest = tree_item_digest(&collected);
-        let files = collected.len();
-        let bytes = total_of(&collected);
+        let digest = tree_item_digest(&collected.files);
+        let files = collected.files.len();
+        let bytes = total_of(&collected.files);
 
         if let Some((first_id, first_path)) = self.seen.get(&digest).cloned() {
-            // Byte-identical to something already written this run.
-            self.record_provenance(req, &digest);
+            // Byte-identical to something already written this run. The
+            // provenance still names a destination — the one the FIRST identity
+            // wrote — and says so, so a reader of `written_path` is not misled
+            // into thinking two copies exist.
+            self.record_provenance(req, &digest, &first_path, Some(&first_id));
             return Ok(ImportedItem {
                 id: req.id.clone(),
                 written_path: first_path,
@@ -270,10 +284,11 @@ impl ImportedContentStore {
         self.taken.insert(name.clone());
         self.files_written += files;
         self.bytes_written += bytes;
+        self.exec_bits_stripped += collected.executable.len();
         let written_path = format!("skills/{name}");
         self.seen
             .insert(digest.clone(), (req.id.clone(), written_path.clone()));
-        self.record_provenance(req, &digest);
+        self.record_provenance(req, &digest, &written_path, None);
         Ok(ImportedItem {
             id: req.id.clone(),
             written_path,
@@ -425,7 +440,7 @@ impl ImportedContentStore {
         self.files_written += 1;
         self.bytes_written += len;
         let written_path = self.relative_of(&target);
-        self.record_provenance(req, &digest);
+        self.record_provenance(req, &digest, &written_path, None);
         Ok(ImportedItem {
             id: req.id.clone(),
             written_path,
@@ -485,16 +500,31 @@ impl ImportedContentStore {
         (format!("{}-{}", base, &digest[..12]), true)
     }
 
-    fn record_provenance(&mut self, req: &ContentRequest, digest: &str) {
-        self.provenance.insert(
-            req.id.clone(),
-            Provenance::new(
-                req.source_tool.clone(),
-                req.source_version.clone(),
-                &req.source_path,
-                digest,
-            ),
-        );
+    /// Record one identity's provenance.
+    ///
+    /// `written_path` is REQUIRED rather than optional, and is taken from the
+    /// write that just happened rather than predicted before it — the same
+    /// discipline F26-GRADE-H1 forced on the outcome. A record that names no
+    /// destination is exactly the shape this module exists to stop: it says an
+    /// item was imported without saying where it is.
+    fn record_provenance(
+        &mut self,
+        req: &ContentRequest,
+        digest: &str,
+        written_path: &str,
+        deduplicated_with: Option<&str>,
+    ) {
+        let mut p = Provenance::new(
+            req.source_tool.clone(),
+            req.source_version.clone(),
+            &req.source_path,
+            digest,
+        )
+        .landed_at(written_path);
+        if let Some(first) = deduplicated_with {
+            p = p.deduplicated_with(first);
+        }
+        self.provenance.insert(req.id.clone(), p);
     }
 
     fn relative_of(&self, path: &Path) -> String {
@@ -525,14 +555,28 @@ fn total_of(files: &BTreeMap<String, Vec<u8>>) -> u64 {
     files.values().map(|b| b.len() as u64).sum()
 }
 
+/// A source subtree, read into memory, with the paths that carried an execute
+/// bit recorded separately.
+#[derive(Debug, Default)]
+struct CollectedTree {
+    files: BTreeMap<String, Vec<u8>>,
+    /// Relative paths whose SOURCE file was executable by someone.
+    ///
+    /// Kept out of the digest deliberately: the digest is over bytes and must
+    /// stay platform-stable (Windows has no POSIX mode), and an item must not
+    /// read as tampered because it crossed a filesystem that cannot express a
+    /// mode bit.
+    executable: std::collections::BTreeSet<String>,
+}
+
 /// Read a source directory into memory under the import bounds.
 ///
 /// `symlink_metadata` is used so a symlink is seen AS a symlink rather than as
 /// its target — the same choice `collect_bounded` in `quarantine.rs`,
 /// `fingerprint_workspace` and `profile::copy_tree_inner` all make, and the
 /// reason a hostile link cannot redirect the read out of the peer tree.
-fn collect_bounded(dir: &Path) -> Result<BTreeMap<String, Vec<u8>>, ImportError> {
-    let mut out = BTreeMap::new();
+fn collect_bounded(dir: &Path) -> Result<CollectedTree, ImportError> {
+    let mut out = CollectedTree::default();
     let mut total: u64 = 0;
     collect_inner(dir, dir, &mut out, &mut total)?;
     Ok(out)
@@ -541,7 +585,7 @@ fn collect_bounded(dir: &Path) -> Result<BTreeMap<String, Vec<u8>>, ImportError>
 fn collect_inner(
     root: &Path,
     dir: &Path,
-    out: &mut BTreeMap<String, Vec<u8>>,
+    out: &mut CollectedTree,
     total: &mut u64,
 ) -> Result<(), ImportError> {
     let meta = fs::symlink_metadata(dir)?;
@@ -570,28 +614,81 @@ fn collect_inner(
         *total = total
             .checked_add(meta.len())
             .ok_or(ImportError::SurfaceTooLarge)?;
-        if *total > MAX_IMPORT_TOTAL_BYTES || out.len() + 1 > MAX_IMPORT_FILES {
+        if *total > MAX_IMPORT_TOTAL_BYTES || out.files.len() + 1 > MAX_IMPORT_FILES {
             return Err(ImportError::SurfaceTooLarge);
         }
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .to_string();
-        out.insert(normalize_relative_path(&rel), fs::read(&path)?);
+        let rel =
+            normalize_relative_path(&path.strip_prefix(root).unwrap_or(&path).to_string_lossy());
+        if is_executable(&meta) {
+            out.executable.insert(rel.clone());
+        }
+        out.files.insert(rel, fs::read(&path)?);
     }
     Ok(())
 }
 
-fn write_tree(dest: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<(), ImportError> {
+/// Did the SOURCE file carry an execute bit for anyone?
+#[cfg(unix)]
+fn is_executable(meta: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o111 != 0
+}
+
+/// Windows has no POSIX execute bit; executability is decided by extension and
+/// by `PATHEXT`, neither of which the import can strip. Reported as none, which
+/// is honest — the count means "execute bits removed", and on Windows there
+/// were none to remove.
+#[cfg(not(unix))]
+fn is_executable(_meta: &fs::Metadata) -> bool {
+    false
+}
+
+/// Write a collected subtree, **with every execute bit removed**.
+///
+/// # Why this is explicit rather than left to `fs::write`
+///
+/// Measured against the real peer trees under `~/dev/resources`: **68 of 349
+/// peer skills carry a `.sh` / `.py` / `.js` script or an execute-bit file**,
+/// and `classify_skill_body` reads only the SKILL.md PROSE — so every one of
+/// those 68 classifies `Data` and imports live. Wayland never auto-runs them
+/// (its only auto-execution surface is the `` ```! `` directive, which IS
+/// classified and contained), so this is not the containment breach it first
+/// looks like. But a peer script arriving with `0755` is one `./install.sh`
+/// away from running, and the containment decision would never have been made.
+///
+/// `fs::write` on a NEW path already produces a non-executable file, so the
+/// property held by accident before this. An accident is not a control: it
+/// depends on the umask, it does not hold when the target already exists (a
+/// truncating write keeps the existing mode), and nothing announced it, so it
+/// could regress silently. The mode is now set explicitly, the count is
+/// reported to the operator, and `t25` fails if either goes away.
+fn write_tree(dest: &Path, tree: &CollectedTree) -> Result<(), ImportError> {
     fs::create_dir_all(dest)?;
-    for (rel, bytes) in files {
+    for (rel, bytes) in &tree.files {
         let target = dest.join(rel);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::write(&target, bytes)?;
+        strip_execute_bits(&target)?;
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn strip_execute_bits(path: &Path) -> Result<(), ImportError> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(path)?.permissions();
+    let mode = perms.mode();
+    if mode & 0o111 != 0 {
+        perms.set_mode(mode & !0o111);
+        fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn strip_execute_bits(_path: &Path) -> Result<(), ImportError> {
     Ok(())
 }
 

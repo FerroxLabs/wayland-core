@@ -175,6 +175,14 @@ fn local_image_path(image_url: &str) -> Result<Option<PathBuf>, String> {
     Ok(Some(PathBuf::from(image_url)))
 }
 
+// `is_unc_path` and `open_local_image` used to live here. Both moved into
+// `crate::media_intake` when the six media surfaces were consolidated onto one
+// intake: the UNC guard is now applied ONCE, inside `media_intake::admit_open`,
+// still through `wcore_config::network_path::has_unc_prefix` (lane
+// `wal-followups`' single implementation), and the symlink-refusing open walk
+// became `media_intake::open_once`, which is private so no other module can
+// open a caller-named media file. Keeping a second copy here would have
+// restored the duplication both lanes removed.
 /// The composer / vision local-file boundary.
 ///
 /// Classifies the argument (a `file://` URI or a bare path) and hands it to
@@ -813,11 +821,15 @@ mod tests {
         assert!(res.is_err(), "a directory must be rejected, got: {res:?}");
     }
 
-    // `is_network_path_flags_unc_only` moved to `crate::media_intake` as
-    // `network_path_detection_flags_unc_and_nothing_else` when the UNC refusal
-    // became shared. It gained an assertion there: the consolidated intake
-    // refuses `\\server\share\...` on EVERY platform, where this
-    // vision-only helper returned `false` for that string on Unix.
+    // TWO UNC tests used to live here and both moved to `crate::media_intake`,
+    // where they were folded into `unc_guard_flags_unc_on_every_platform`:
+    //   * `is_network_path_flags_unc_only` (mine), and
+    //   * `unc_guard_flags_unc_on_every_platform` (`lane/wal-followups`).
+    // Their site disappeared because `load_local_image` now delegates to the
+    // chokepoint and carries no UNC check of its own. The union of both
+    // assertion sets is asserted there, including the `\\?\C:\` verbatim-local
+    // case, which is the one whose classification the UNC consolidation
+    // changed.
 
     /// End-to-end: a local image drives the backend, with the null fetcher
     /// proving the local path never crosses the network seam.

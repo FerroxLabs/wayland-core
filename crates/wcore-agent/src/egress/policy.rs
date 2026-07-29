@@ -33,9 +33,18 @@ use super::consent::{ConsentDecision, ConsentDoorbell};
 pub enum EgressPosture {
     /// On by default — classify and gate.
     Enforce,
-    /// The hard off switch (C8): allow all egress. Reached only via the
-    /// config-file `[security] enabled = false` plus the explicit
-    /// `--i-accept-exfil-risk` CLI flag (wired at bootstrap, B2.4).
+    /// The hard off switch (C8): allow all egress.
+    ///
+    /// **Reached by the config-file `[security] enabled = false` ALONE.** This
+    /// doc previously claimed an additional `--i-accept-exfil-risk` CLI flag was
+    /// required. **That flag does not exist** — the product answers
+    /// `error: unexpected argument`. Measured and corrected 2026-07-29 by lane
+    /// `25-c4-egress`; the user-facing deny message advertised it too.
+    ///
+    /// So a config file on its own disables the egress boundary, with no
+    /// second, deliberate act by the operator. Whether to add that interlock is
+    /// an open owner decision: requiring a flag changes behaviour for every
+    /// existing user, so it is not a lane's call to make silently.
     Off,
 }
 
@@ -121,8 +130,8 @@ impl AgentEgressPolicy {
             reason: format!(
                 "{reason}. Egress to `{host}` is blocked by the security policy. \
                  Add it under `[security] egress_allow = [..]` in your config, or \
-                 disable the policy with `[security] enabled = false` + \
-                 `--i-accept-exfil-risk` if you accept the exfiltration risk."
+                 disable the policy entirely with `[security] enabled = false` if \
+                 you accept the exfiltration risk."
             ),
         }
     }

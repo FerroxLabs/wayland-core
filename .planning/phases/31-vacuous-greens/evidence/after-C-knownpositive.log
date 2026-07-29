@@ -1,0 +1,20 @@
+warning: in config file .config/nextest.toml, ignoring unknown configuration key: profile.default.no-tests
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.28s
+────────────
+ Nextest run ID 3e3a76cb-1e42-4ce0-9b5a-d81d1e7c1376 with nextest profile: default
+    Starting 12 tests across 1 binary
+        PASS [   0.005s] ( 1/12) wcore-eval-scenarios::sbom_contract a_version_with_build_metadata_is_percent_encoded_in_the_package_url
+        PASS [   0.005s] ( 2/12) wcore-eval-scenarios::sbom_contract a_package_with_no_declared_license_is_explicitly_unknown
+        PASS [   0.005s] ( 3/12) wcore-eval-scenarios::sbom_contract malformed_or_empty_metadata_is_a_typed_error
+        PASS [   0.006s] ( 4/12) wcore-eval-scenarios::sbom_contract the_serial_number_is_derived_from_the_canonical_output_not_the_raw_input
+        PASS [   0.006s] ( 5/12) wcore-eval-scenarios::sbom_contract a_duplicate_package_url_is_an_error_rather_than_a_silent_deduplication
+        PASS [   0.006s] ( 6/12) wcore-eval-scenarios::sbom_contract a_source_carrying_a_filesystem_path_is_refused
+        PASS [   0.006s] ( 7/12) wcore-eval-scenarios::sbom_contract workspace_members_are_distinguishable_from_registry_dependencies
+        PASS [   0.006s] ( 8/12) wcore-eval-scenarios::sbom_contract the_document_carries_no_timestamp_and_no_random_serial
+        PASS [   0.006s] ( 9/12) wcore-eval-scenarios::sbom_contract no_absolute_path_from_the_input_reaches_the_output
+        PASS [   0.006s] (10/12) wcore-eval-scenarios::sbom_contract identical_metadata_produces_byte_identical_sbom
+        PASS [   0.018s] (11/12) wcore-eval-scenarios::sbom_contract the_pinned_fixture_reproduces_its_recorded_digest
+        PASS [   0.020s] (12/12) wcore-eval-scenarios::sbom_contract components_are_sorted_by_package_url
+────────────
+     Summary [   0.021s] 12 tests run: 12 passed, 0 skipped
+WLRC=0

@@ -38,9 +38,12 @@
 //! `support-bundle` was added afterwards and is NOT one of the nine. It exists
 //! because Success Criterion 4 asks for *"useful redacted health/log/support
 //! evidence"* and `wcore_gateway::support_bundle` had no operator surface at
-//! all (`F24-C4-H1`). It covers part of what `doctor` and `logs` were wanted
-//! for, by SHIPPING the evidence rather than rendering it — which is the
-//! shape the criterion actually asks for. See `gateway/support.rs`.
+//! all (`F24-C4-H1`) — a census returned one `pub mod` declaration and two
+//! references inside the module's own test file, so the criterion's second half
+//! was unreachable from the shipped binary while the gap ledger recorded the
+//! criterion MET. It covers part of what `doctor` and `logs` were wanted for,
+//! by SHIPPING the evidence rather than rendering it — which is the shape the
+//! criterion actually asks for. See `gateway/support.rs`.
 //!
 //! # Where each verb's authority lives
 //!
@@ -49,7 +52,9 @@
 //! `for_this_platform()` is the single platform-selection point in the
 //! workspace; `status` renders `wcore_gateway::lifecycle::StatusProjection`;
 //! `drain` drives `wcore_gateway::drain::DrainController` through the
-//! `AutomationPlane`. This module is a surface, not a second implementation.
+//! `AutomationPlane`; `support-bundle` drives
+//! `wcore_gateway::support_bundle::collect` and adds no redaction rule of its
+//! own. This module is a surface, not a second implementation.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

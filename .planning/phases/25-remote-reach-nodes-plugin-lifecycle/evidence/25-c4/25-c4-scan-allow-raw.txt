@@ -1,0 +1,9 @@
+[2m2026-07-29T13:08:18.719337Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m38
+local      enumerated=true  found=1 via live-task registry UNION a real enumeration of the host process table
+           - process table: 3288354 3287736 3288354       0 bash -c cd /root/wayland-25c4 && B=$PWD/target/debug/wayland-core set -a; . /root/.wayland-f25-cloud.env; set +a NONCE=a7f3c9d2e5b18406fa2c7d93e6150bc4 echo "nonce length=${#NONCE}  (exfil rule fires at longest_token_run >= 24)" echo "URL the scan will build: /apps/<app>/machines?metadata.wayland_task_nonce=$NONCE" for ARM in allow deny; do   echo "############ ARM=$ARM ############"   echo "config: $(tr "\n" " " < ev/cfg/$ARM/wayland-core/config.toml)"   XDG_CONFIG_HOME=/root/wayland-25c4/ev/cfg/$ARM $B backend orphans --nonce $NONCE > ev/scan-$ARM.txt 2>&1   echo "EXIT=$?"   /usr/bin/grep -i "egress security" ev/scan-$ARM.txt | head -1   /usr/bin/grep -i "cloud" ev/scan-$ARM.txt | head -4 done
+container  enumerated=true  found=0 via docker ps -a --filter label=wayland.task.nonce=<nonce>
+ssh        enumerated=false found=0 via WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned
+cloud      enumerated=false found=0 via vendor machine listing failed: machine listing returned HTTP 404: {"error":"app not found"}
+
+
+1 orphan(s) found; 2 surface(s) could NOT be enumerated. An un-enumerated surface is not a clean surface — a scan that could not run must never be read as zero orphans.

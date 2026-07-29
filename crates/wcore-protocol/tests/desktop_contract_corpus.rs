@@ -316,9 +316,9 @@ fn manifest_pins_generator_and_all_three_digests() {
     assert_eq!(manifest["contract"]["major"], CONTRACT_MAJOR);
     assert_eq!(manifest["contract"]["minor"], CONTRACT_MINOR);
     assert_eq!(manifest["commands"].as_array().unwrap().len(), 18);
-    assert_eq!(manifest["events"].as_array().unwrap().len(), 49);
+    assert_eq!(manifest["events"].as_array().unwrap().len(), 51);
     assert_eq!(manifest["counts"]["commands"], 18);
-    assert_eq!(manifest["counts"]["events"], 49);
+    assert_eq!(manifest["counts"]["events"], 51);
     assert_eq!(manifest["counts"]["child_types"], 3);
     assert_eq!(
         manifest["child_types"],

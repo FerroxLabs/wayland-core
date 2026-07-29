@@ -232,6 +232,19 @@ jobs:
       - name: Check formatting
         run: vx just fmt-check
 
+      # An instrument that cannot fail is not evidence. `cargo nextest` fails
+      # closed on a zero-test run (`no-tests = "fail"`); `cargo test` does not
+      # and never has. This gate fails the build if a new bare `cargo test`
+      # appears in the justfile, a workflow, or a script without either
+      # `--no-run` or an explicit executed-count assertion. Pure text scan,
+      # ~50ms, so it runs on Linux only. Self-test:
+      # `python3 scripts/check-no-vacuous-cargo-test.py --self-test`.
+      - name: No vacuous `cargo test` invocations
+        if: runner.os == 'Linux'
+        run: |
+          python3 scripts/check-no-vacuous-cargo-test.py --self-test
+          python3 scripts/check-no-vacuous-cargo-test.py
+
       - name: Clippy (warnings = errors)
         run: vx just lint
 
@@ -275,8 +288,17 @@ jobs:
 
       # F01 E3 runs on every supported native OS. Bind discovery to the exact
       # pre-built release artifact so a stale debug binary cannot satisfy it.
+      #
+      # nextest, NOT `cargo test`: `packaged_driver_gate.rs` is
+      # `#![cfg(feature = "packaged-driver-gate")]`, so if that feature is ever
+      # renamed, dropped, or fails to activate, the binary compiles EMPTY and
+      # `cargo test` prints `test result: ok. 0 passed` and exits 0 — a
+      # release-integrity gate certifying nothing. Measured on this checkout:
+      # `cargo test --test packaged_driver_gate` without the feature exits 0;
+      # `cargo nextest run` on the identical binary exits 4 ("no tests to run")
+      # via `no-tests = "fail"` in .config/nextest.toml.
       - name: F01 packaged wayland-eval driver gate
-        run: vx cargo test --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
+        run: vx cargo nextest run --no-tests=fail --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
         env:
           WAYLAND_BUILD_SOURCE_SHA: ${{ github.sha }}
           WCORE_EVAL_BIN: ${{ github.workspace }}/target/release/wayland-core${{ runner.os == 'Windows' && '.exe' || '' }}
@@ -375,7 +397,31 @@ jobs:
       #   container + --init, LIVE child    -> ALIVE, /proc state 'S'  FAIL  <- control
       # That last arm is the one that matters: --init does NOT make these tests
       # unfailable. A genuinely surviving descendant still reds them.
-      DOCKER_RUN: docker run --rm --init --network=host -e CARGO_PROFILE_DEV_DEBUG=line-tables-only -e CARGO_INCREMENTAL=0 -v ${{ github.workspace }}:/work -w /work
+      # `-e WAYLAND_BUILD_SOURCE_SHA` (2026-07-29) is load-bearing, not hygiene.
+      # `docker run` here has NO `-u`, so the container runs as **root** while the
+      # bind-mounted workspace is owned by the runner uid (1001). git refuses that:
+      # `fatal: detected dubious ownership in repository at '/work'`, rc=128
+      # (reproduced directly: as root a root-owned repo answers `rev-parse HEAD`
+      # rc=0, the same repo chowned to 1001 answers rc=128). `actions/checkout`
+      # DOES add a safe.directory exception, but for `/home/runner/work/...` in the
+      # RUNNER's git config — a different path, uid and HOME than this container.
+      #
+      # `crates/wcore-cli/build.rs` therefore got no `git rev-parse HEAD` and
+      # embedded `WAYLAND_SOURCE_SHA=unknown`, which
+      # `wcore-eval-scenarios::artifact` correctly refuses at seal time —
+      # `packaged_f04_run_is_repeatable_and_content_addressed` failed on every
+      # retry of CI run 30434804220 with `Probe("expected source identity is not
+      # 40 lowercase hexadecimal characters")`. The non-containerized Linux leg
+      # passed at the same commit, because it never lost git.
+      #
+      # `github.sha` is the authoritative identity of what was checked out (for
+      # `pull_request` it is the merge commit, which is what checkout materialises),
+      # so passing it is strictly better provenance than re-deriving it from a git
+      # invocation. Adding `-e GIT_CONFIG_*=safe.directory` was the alternative and
+      # was rejected: it repairs git-in-container generally but leaves provenance
+      # derived rather than pinned, and the `F01 packaged wayland-eval driver gate`
+      # step below already established the pinned-env idiom.
+      DOCKER_RUN: docker run --rm --init --network=host -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} -e CARGO_PROFILE_DEV_DEBUG=line-tables-only -e CARGO_INCREMENTAL=0 -v ${{ github.workspace }}:/work -w /work
 
       # Same as DOCKER_RUN plus the four grants bubblewrap needs. Applied ONLY to
       # the test step -- fmt, clippy, build and audit keep the default posture,
@@ -435,7 +481,14 @@ jobs:
       # container -- GitHub tightening userns, a base-image change, a dropped flag
       # -- this step goes RED instead of silently skipping. Mirrors the
       # WCORE_SMOKE_REQUIRE_PREBUILT idiom (#190).
-      DOCKER_RUN_SANDBOX: docker run --rm --init --network=host --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined -e WCORE_REQUIRE_ENFORCING_SANDBOX=1 -e CARGO_PROFILE_DEV_DEBUG=line-tables-only -e CARGO_INCREMENTAL=0 -v ${{ github.workspace }}:/work -w /work
+      #
+      # `-e WAYLAND_BUILD_SOURCE_SHA` is here for the same reason it is on
+      # DOCKER_RUN above (see that block): this is the step that runs the test
+      # suite, so it is the one that consumes the embedded source identity. The
+      # two variables MUST agree — a different value between the pre-build step
+      # and the test step re-triggers `cargo:rerun-if-env-changed` and rebuilds
+      # wcore-cli for no reason.
+      DOCKER_RUN_SANDBOX: docker run --rm --init --network=host --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined -e WCORE_REQUIRE_ENFORCING_SANDBOX=1 -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} -e CARGO_PROFILE_DEV_DEBUG=line-tables-only -e CARGO_INCREMENTAL=0 -v ${{ github.workspace }}:/work -w /work
     steps:
       # ── macOS runner budget report ────────────────────────────────────
       # The residual risk of an opt-in gate is SILENT ABSENCE: a lane push goes
@@ -574,6 +627,48 @@ jobs:
           max_attempts: 2
           command: $DOCKER_RUN_SANDBOX "$CI_IMAGE" cargo nextest run --workspace --profile ci --no-fail-fast
 
+      # ── Voice suite (2026-07-29, lane/voice-bargein) ──────────────────
+      # `voice` is off by default (it hard-links libasound.so.2 on Linux —
+      # see crates/wcore-agent/Cargo.toml:234), and `tool_backends::voice_mode`
+      # is `#[cfg(feature = "voice")]`. Consequence, measured: BEFORE this
+      # step, `grep -rn voice .github justfile` returned ZERO — the voice
+      # tests ran in NO CI configuration on any platform. A test that never
+      # runs is not a test, and that is exactly how an empty
+      # `CpalAudioPlayer::stop()` shipped with a green suite.
+      #
+      # The image already installs libasound2-dev (line ~507), so this costs
+      # one incremental rebuild of wcore-agent, not a new job or a new dep.
+      #
+      # ANTI-VACUITY. `cargo test <filter>` exits 0 having run ZERO tests when
+      # the filter matches nothing — the easiest self-passing gate in this repo
+      # (LANE-BRIEF §3.2 flavour (c)). So the executed count is READ BACK and
+      # compared against a floor; a filter typo or a deleted module reds the
+      # step instead of passing silently. `set -o pipefail` because a pipe
+      # would otherwise steal cargo's exit status. Floors are the counts
+      # measured at the commit that added this step (agent 14, tools 32).
+      - name: Voice suite (--features voice; runs in no other configuration)
+        run: |
+          set -euo pipefail
+          run_suite() {
+            crate="$1"; min="$2"; shift 2
+            echo "=== $crate (floor: $min executed) ==="
+            if ! out="$($DOCKER_RUN "$CI_IMAGE" cargo test -p "$crate" "$@" 2>&1)"; then
+              printf '%s\n' "$out" | tail -40
+              echo "::error::$crate voice suite FAILED"
+              exit 1
+            fi
+            printf '%s\n' "$out" | grep -E '^(test |test result:)' || true
+            n="$(printf '%s\n' "$out" | sed -n 's/^test result: ok\. \([0-9]*\) passed;.*/\1/p' | tail -1)"
+            n="${n:-0}"
+            echo "$crate: executed $n voice tests (floor $min)"
+            if [ "$n" -lt "$min" ]; then
+              echo "::error::$crate ran $n voice tests, expected >= $min — a suite that exits 0 having run nothing is not a suite"
+              exit 1
+            fi
+          }
+          run_suite wcore-agent 14 --features voice --lib voice_mode
+          run_suite wcore-tools 32 --lib voice_mode
+
       # WCORE_SMOKE_REQUIRE_PREBUILT=1 (passed into the container): a missing
       # release artifact is a hard failure here, never a silent skip (#190).
       - name: Release binary smoke (catches plugin dead-code-strip)
@@ -582,8 +677,13 @@ jobs:
       # F01 E3 — non-optional packaged boundary proof. The release Core binary
       # built above reports this checkout's exact source SHA; wayland-eval then
       # verifies its digest and drives both PASS and hard-gate failure locally.
+      #
+      # nextest, NOT `cargo test` — see the identical step in the native matrix
+      # job above for the measurement. The CI image already installs nextest
+      # (`cargo install --locked cargo-nextest` in the Dockerfile heredoc), and
+      # the two neighbouring steps in this job already use it.
       - name: F01 packaged wayland-eval driver gate
-        run: $DOCKER_RUN -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} "$CI_IMAGE" cargo test --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
+        run: $DOCKER_RUN -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} "$CI_IMAGE" cargo nextest run --no-tests=fail --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
 
       - name: Security audit
         run: $DOCKER_RUN "$CI_IMAGE" cargo audit

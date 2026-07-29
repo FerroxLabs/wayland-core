@@ -738,7 +738,60 @@ impl ExecutionBackend for CloudBackend {
         let cancelled = cancel_marker_taken(&task.task_id);
         registry::forget(&task.task_id)?;
 
-        let (exec, hibernation) = run?;
+        // A CANCELLED cloud run reaches this point as a FAILED vendor call, and
+        // that is not a transport fault to report as one.
+        //
+        // `cancel` destroys the machine out from under the in-flight exec, so
+        // the vendor answers the exec with an error — measured live on
+        // 2026-07-29 as `HTTP 412 failed_precondition: exec request failed:
+        // EOF`, and as `HTTP 408 deadline_exceeded` when the timing differs.
+        // Without this arm the error propagated, `execute` returned `Err`, and
+        // the cloud surface wrote NO RECEIPT AT ALL for a cancellation — while
+        // local, container and ssh all write one carrying
+        // `Cancelled { reason: "operator cancelled" }`. Criterion 1 asks for
+        // equivalent receipts AND cancellation across the four backends, so a
+        // cancellation the fourth backend cannot attest is a real gap, and it
+        // was invisible until the leg was actually driven.
+        //
+        // The cancel marker is the discriminator and it is authoritative: only
+        // `cancel` writes it, and `cancel_marker_taken` above has already
+        // consumed it. An error with no marker is still a genuine failure and
+        // still propagates.
+        let (exec, hibernation) = match run {
+            Ok(pair) => pair,
+            Err(err) => {
+                let Some(reason) = cancelled else {
+                    return Err(err);
+                };
+                return outcome_receipt(
+                    task,
+                    &self.capabilities,
+                    &self.identity,
+                    &self.signer,
+                    &policy,
+                    RunOutcome {
+                        // Nothing of the vendor's error text reaches the
+                        // receipt: it is control-plane output, and the receipt
+                        // is for the TASK.
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        exit_code: -1,
+                        endpoint: machine_id,
+                        cancelled: Some(reason),
+                        // The hibernation observation died with the failed
+                        // drive, and a cancelled run must not claim one it
+                        // cannot show (binding condition C1).
+                        hibernation: HibernationObservation::NotObserved {
+                            reason: "the run was cancelled before it could report a hibernation \
+                                     observation; this receipt does not claim one"
+                                .into(),
+                        },
+                        started_unix_ms: started,
+                        finished_unix_ms: finished,
+                    },
+                );
+            }
+        };
         if !destroyed {
             return Err(ExecError::Transport(format!(
                 "the task machine {machine_id} could not be destroyed; it may still be running \
@@ -963,6 +1016,84 @@ mod tests {
             availability.detail.contains(TOKEN_ENV),
             "the unavailable verdict must name the missing credential, got: {}",
             availability.detail
+        );
+    }
+
+    /// A cancelled cloud run must produce a CANCELLED RECEIPT, not a bare
+    /// transport error.
+    ///
+    /// Driven live on 2026-07-29 and this is the defect that drive found:
+    /// `cancel` destroys the machine out from under the in-flight exec, the
+    /// vendor answers `HTTP 412 failed_precondition`, and before the arm in
+    /// `execute` existed that error propagated and the cloud surface wrote
+    /// **no receipt at all** — while local, container and ssh each wrote one
+    /// carrying `Cancelled { reason: "operator cancelled" }`. See
+    /// `evidence/25-c1-cleanup/cloud-cancel-BEFORE.txt` (ABSENT) against
+    /// `cloud-cancel-AFTER.txt` (WRITTEN).
+    ///
+    /// This pins the receipt SHAPE that arm builds. The live re-drive is what
+    /// proves the arm is reached; a unit test cannot destroy a real machine.
+    #[test]
+    fn a_cancelled_cloud_run_yields_a_cancelled_receipt_and_claims_no_hibernation() {
+        use crate::receipt::TerminalStatus;
+
+        let backend = CloudBackend::new(crate::conformance::reference_budget()).unwrap();
+        let task = crate::conformance::reference_task(
+            "f25c1cancel",
+            "f25c1cancel",
+            crate::conformance::reference_budget(),
+        );
+        let policy = backend.effective_policy(&task).unwrap();
+
+        // Exactly the RunOutcome the cancelled arm constructs.
+        let cancelled = |reason: Option<String>| {
+            outcome_receipt(
+                &task,
+                &backend.capabilities,
+                &backend.identity,
+                &backend.signer,
+                &policy,
+                RunOutcome {
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    exit_code: -1,
+                    endpoint: "8d967d9fe40308".into(),
+                    cancelled: reason,
+                    hibernation: HibernationObservation::NotObserved {
+                        reason: "the run was cancelled before it could report a hibernation \
+                                 observation; this receipt does not claim one"
+                            .into(),
+                    },
+                    started_unix_ms: 1,
+                    finished_unix_ms: 2,
+                },
+            )
+            .unwrap()
+        };
+
+        let receipt = cancelled(Some("operator cancelled".into()));
+        assert!(
+            matches!(receipt.body.terminal, TerminalStatus::Cancelled { .. }),
+            "a cancelled run must terminate as Cancelled, got {:?}",
+            receipt.body.terminal
+        );
+        // A cancelled run must not carry a hibernation claim it cannot show.
+        assert!(matches!(
+            receipt.body.hibernation,
+            HibernationObservation::NotObserved { .. }
+        ));
+        // And the receipt must still be a receipt: integrity holds.
+        receipt.verify_integrity_only().unwrap();
+
+        // NEGATIVE CONTROL. Without the cancel marker the identical outcome
+        // must NOT read as a cancellation — otherwise the arm would relabel
+        // every genuine cloud failure as an operator cancellation, which is a
+        // worse defect than the one it fixes.
+        let uncancelled = cancelled(None);
+        assert!(
+            !matches!(uncancelled.body.terminal, TerminalStatus::Cancelled { .. }),
+            "an uncancelled failure was labelled Cancelled: {:?}",
+            uncancelled.body.terminal
         );
     }
 

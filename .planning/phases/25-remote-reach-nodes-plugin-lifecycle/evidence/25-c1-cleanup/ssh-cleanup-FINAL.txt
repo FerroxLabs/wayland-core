@@ -1,0 +1,115 @@
+=== F25C1 SSH CLEANUP — PHASE FINAL ===
+2026-07-29T13:18:50Z
+controller: Ubuntu-2404-noble-amd64-base
+tree:       /root/wayland-25c1
+tree HEAD:  74e002b24f669d28269b9372178d226576377126
+binary:     /root/wayland-25c1/target/release/wayland-core
+binary sha: 7b758f640495031f2583073cc7e149ed5fdea7ca06fb305ba21a148bf7cd01ed
+binary mtime: 2026-07-29 13:17:10.833946623 +0000
+far end:    ddc848056f15 Linux 
+runner shape compiled into this binary (1 = present, 0 = absent):
+  fixed-shape  '|| status=$?'  : 1
+  known-positive 'rm -rf $root': 2
+
+--- 0. start from a clean far end
+roots carrying wayland-f25 after purge: 0
+
+--- 1. INSTRUMENT ALIVENESS (a counter that cannot say 1 cannot say 0 either)
+F25C1-INSTRUMENT-POSITIVE: decoy roots counted = 1 (expect 1)
+F25C1-INSTRUMENT-NEGATIVE: decoy roots after removal = 0 (expect 0)
+
+--- 2. THE FAILING TASK (exit 7), through the shipped binary
+{
+  "task_id": "f25c1fail",
+  "nonce": "f25c1fail",
+  "workspace": [{"path": "README.txt", "bytes": "ZjI1YzEgd29ya3NwYWNlCg=="}],
+  "input": "d2F5bGFuZC1mMjUtYzEtSU5QVVQtQllURVMtVEhBVC1NVVNULU5PVC1CRS1MRUZULUJFSElORAo=",
+  "argv": ["sh","-c","echo \"$WAYLAND_TASK_NONCE ran on $(hostname) at $(date -u +%FT%TZ)\" > /tmp/f25c1-task-ran-witness.txt; exit 7"],
+  "artifact_name": "stdout.bin",
+  "resources": {"cpu_millis": 30000, "memory_bytes": 268435456, "wall_time_ms": 60000, "output_bytes": 1048576}
+}
+  task:        f25c1fail
+  backend:     ssh
+  transport:   Ssh via f25c1-far
+  terminal:    Failure { code: "exit-7" }
+  input sha:   530a1e3c30bb421103e20815b6db22845159b211f7101f9a5b0d23301398abf8
+  workspace:   44eac9f0f82a50405ff9f220035290dac2717a4598dd6bf82f77e8b1526f3baa
+  hibernation: NotApplicable
+  wall ms:     208
+  receipt:     /root/f25c1-evidence/receipt-fail-FINAL.json
+RUN_EXIT=0
+
+--- 3. DID THE TASK ACTUALLY RUN ON THE FAR END?
+    (a zero root count means nothing if the task never ran there)
+  witness: f25c1fail ran on ddc848056f15 at 2026-07-29T13:18:52Z
+F25C1-TASK-RAN-ON-FAR-END: witness lines carrying the nonce = 1
+
+--- 4. WHAT THE FAILING TASK LEFT BEHIND
+  F25C1-LIST-BEGIN
+  F25C1-LIST-END
+F25C1-LEAKED-ROOTS-FINAL: 0
+  contents of any leaked root:
+  ls: cannot access '/tmp/wayland-f25-f25c1fail': No such file or directory
+  --- input.bin ---
+  cat: /tmp/wayland-f25-f25c1fail/input.bin: No such file or directory
+F25C1-LEAKED-INPUT-BYTES-FINAL: 0 (1 = the task's own input is readable on the far end)
+
+--- 5. the receipt the product wrote for that failing task
+  receipt:   /root/f25c1-evidence/receipt-fail-FINAL.json
+  schema:    wayland.execution-backend-receipt v1
+  backend:   ssh
+  key id:    a74ca61011f4c9f6f3e0a8844983475ee97f451343c94a551616dc39c9a7988f
+  terminal:  Failure { code: "exit-7" }
+  INTEGRITY: OK — body digest, event ordering, single terminal event and internal consistency all hold.
+  IDENTITY:  NOT ESTABLISHED by this command. A receipt cannot authenticate itself: verifying identity requires a verifying key the caller already pinned, which a receipt file does not carry. Use the conformance harness or a caller holding the pinned key.
+
+--- 6. THE SUCCEEDING TASK (exit 0) — the same counter must read zero
+  task:        f25c1ok
+  backend:     ssh
+  transport:   Ssh via f25c1-far
+  terminal:    Success
+  input sha:   530a1e3c30bb421103e20815b6db22845159b211f7101f9a5b0d23301398abf8
+  workspace:   44eac9f0f82a50405ff9f220035290dac2717a4598dd6bf82f77e8b1526f3baa
+  artifact:    stdout.bin e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 (0 bytes)
+  hibernation: NotApplicable
+  wall ms:     210
+  receipt:     /root/f25c1-evidence/receipt-ok-FINAL.json
+F25C1-SUCCESS-PATH-ROOTS-FINAL: 0 (expect 0 in every phase)
+
+--- 7. post-run orphan scan through the product's own surface
+  orphan scan for task f25c1fail (nonce f25c1fail)
+  
+    backend    cloud
+    mechanism  NONE: stopping a cloud machine is a vendor API call, not a kernel mechanism. ProcessTreeMechanism has no variant for it, and if the API call does not land the machine keeps running
+    method     backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+    count      NOT MEASURED — the surface could not be enumerated (backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back), so no count exists — this is NOT zero orphans
+    rows       (none)
+  
+    backend    container
+    mechanism  kernel-backed: ProcessTreeMechanism::DockerContainerReap — the container daemon force-removing the container and its whole tree
+    method     docker ps -a --filter label=wayland.task.nonce=<nonce>
+    count      0 (MEASURED)
+    rows       (none)
+  
+    backend    local
+    mechanism  kernel-backed: ProcessTreeMechanism::LinuxPidNamespaceReap — the platform sandbox backend's PID namespace, with /proc descendant discovery
+    method     live-task registry UNION a real enumeration of the host process table
+    count      0 (MEASURED)
+    rows       (none)
+  
+    backend    ssh
+    mechanism  BEST-EFFORT: a remote process group killed over the same ssh transport. ProcessTreeMechanism has NO variant that crosses an ssh connection, so nothing kernel-backed on the controller reaps the far end; a remote child that calls setsid survives
+    method     remote `ps -eo pid,args` filtered on the task nonce
+    count      0 (MEASURED)
+    rows       (none)
+  
+  TOTAL: 0 orphan(s) measured across 4 backend(s); 1 surface(s) NOT measured
+SCAN_EXIT=0
+
+=== F25C1-SUMMARY-FINAL ===
+F25C1-FINAL-INSTRUMENT: positive=1 negative=0
+F25C1-FINAL-TASK-RAN-ON-FAR-END: 1
+F25C1-FINAL-LEAKED-ROOTS-AFTER-FAILING-TASK: 0
+F25C1-FINAL-LEAKED-INPUT-BYTES: 0
+F25C1-FINAL-ROOTS-AFTER-SUCCEEDING-TASK: 0
+2026-07-29T13:18:54Z

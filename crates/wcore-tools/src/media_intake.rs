@@ -371,18 +371,21 @@ impl IntakePolicy {
     }
 }
 
-/// Windows UNC / device / verbatim forms, and the `//host/share` spelling,
-/// never reach the filesystem here. Opening one triggers an outbound SMB
-/// connect (a NetNTLM-hash leak vector) before any content check.
-fn is_network_path(path: &Path) -> bool {
-    if matches!(
-        path.components().next(),
-        Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
-    ) {
-        return true;
-    }
-    let s = path.to_string_lossy();
-    s.starts_with("\\\\") || s.starts_with("//")
+/// Windows UNC and `file://host/share` forms never reach the filesystem here.
+///
+/// Delegates to [`wcore_config::network_path::has_unc_prefix`], the single
+/// implementation. The local copy this replaces matched any `\\`/`//` prefix,
+/// so it also called `\\?\C:\Users\x` — a verbatim path to a **local disk** —
+/// a network path, and reported it as `IntakeError::NetworkPath`. That input
+/// is still refused, by `validate_user_path` on the next line, but now as
+/// `DeviceOrVerbatimPath`: the accurate reason. No input that was rejected
+/// before is accepted now.
+///
+/// Spelling, not storage: a file on a mounted share is deliberately still
+/// admitted. See `wcore_config::network_path` for why, and for the other
+/// question.
+fn is_unc_path(path: &Path) -> bool {
+    wcore_config::network_path::has_unc_prefix(path)
 }
 
 /// Open a media file without following a symlink/reparse point.
@@ -530,11 +533,11 @@ fn open_once(path: &Path, noun: &'static str) -> Result<File, IntakeError> {
 /// Use this when the caller streams (an archive reader). Use [`admit_path`]
 /// when the caller wants bounded bytes.
 pub fn admit_open(path: &Path, policy: &IntakePolicy) -> Result<AdmittedHandle, IntakeError> {
-    if is_network_path(path) {
+    if is_unc_path(path) {
         return Err(IntakeError::NetworkPath(path.to_path_buf()));
     }
     let validated = validate_user_path(path).map_err(|e| IntakeError::Path(e.to_string()))?;
-    if is_network_path(&validated) {
+    if is_unc_path(&validated) {
         return Err(IntakeError::NetworkPath(validated));
     }
 
@@ -904,26 +907,77 @@ mod tests {
             admit_path(&p, &any()),
             Err(IntakeError::NetworkPath(_))
         ));
-        let p = PathBuf::from("//server/share/image.png");
+        // The forward-slash spelling of the same share. Windows accepts it;
+        // the pre-consolidation local check happened to catch it by matching a
+        // bare `//` prefix, and the shared check catches it as an actual UNC
+        // name. Asserted so the consolidation cannot quietly narrow the guard.
         assert!(matches!(
-            admit_path(&p, &any()),
+            admit_path(&PathBuf::from("//server/share/image.png"), &any()),
             Err(IntakeError::NetworkPath(_))
         ));
     }
 
-    /// Moved from `vision_tools::is_network_path_flags_unc_only`, and
-    /// STRENGTHENED: the consolidated intake refuses the `\\server\share`
-    /// spelling on every platform, not only on Windows. On Unix that string is
-    /// a relative name `validate_user_path` would refuse anyway, so refusing it
-    /// here costs nothing and removes a platform-dependent answer.
+    /// The one input whose CLASSIFICATION the UNC consolidation changed.
+    ///
+    /// `\\?\C:\…` is a verbatim path to a **local disk**. The local
+    /// `is_network_path` this file used to carry matched any `\\` prefix, so it
+    /// called that a network path and refused it as `NetworkPath` — the right
+    /// refusal for the wrong reason. It is now correctly not-UNC, and the
+    /// refusal comes from `validate_user_path`'s device/verbatim guard instead.
+    ///
+    /// The assertion that matters is **still rejected**: a consolidation that
+    /// tightened the naming while opening a hole would be a bad trade, so the
+    /// rejection is asserted here rather than reasoned about in a comment.
     #[test]
-    fn network_path_detection_flags_unc_and_nothing_else() {
-        // Ordinary paths are never network paths (the common case).
-        assert!(!is_network_path(Path::new("/Users/me/x.png")));
-        assert!(!is_network_path(Path::new("relative/x.png")));
-        // Both UNC spellings, on every platform.
-        assert!(is_network_path(Path::new(r"\\server\share\x.png")));
-        assert!(is_network_path(Path::new("//server/share/x.png")));
+    fn a_verbatim_local_path_is_still_refused_but_no_longer_as_a_network_path() {
+        let p = PathBuf::from(r"\\?\C:\Users\alice\image.png");
+        let err = admit_path(&p, &any()).expect_err("verbatim paths must stay refused");
+        assert!(
+            !matches!(err, IntakeError::NetworkPath(_)),
+            "a verbatim path to a local disk is not a network path; got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("device") || err.to_string().contains("verbatim"),
+            "expected the device/verbatim refusal, got: {err}"
+        );
+
+        // And the verbatim UNC form is the opposite case: it IS a network
+        // path, and must not fall into the device/verbatim bucket.
+        assert!(matches!(
+            admit_path(&PathBuf::from(r"\\?\UNC\server\share\image.png"), &any()),
+            Err(IntakeError::NetworkPath(_))
+        ));
+    }
+
+    /// The UNC guard, asserted at the one place the intake now consults it.
+    ///
+    /// This test absorbs TWO predecessors so neither lane's assertions are
+    /// lost to the merge:
+    ///   * `vision_tools::is_network_path_flags_unc_only` (mine, relocated
+    ///     when the guard moved into the chokepoint), and
+    ///   * `vision_tools::unc_guard_flags_unc_on_every_platform`
+    ///     (`lane/wal-followups`), whose site disappeared because
+    ///     `load_local_image` now delegates to this module and no longer
+    ///     carries a UNC check of its own.
+    ///
+    /// The union is asserted, not the intersection. The `\\?\C:\` case is
+    /// theirs and is the one that matters: a verbatim path to a LOCAL disk is
+    /// not a UNC share, and must not be refused with a message naming the
+    /// wrong hazard. It is still refused — see
+    /// `a_verbatim_local_path_is_still_refused_but_no_longer_as_a_network_path`.
+    #[test]
+    fn unc_guard_flags_unc_on_every_platform() {
+        // Ordinary paths are never UNC (the common case).
+        assert!(!is_unc_path(Path::new("/Users/me/x.png")));
+        assert!(!is_unc_path(Path::new("relative/x.png")));
+        // Every UNC spelling, on EVERY platform. The implementation this
+        // replaced used `Component::Prefix`, which never matches on a Unix
+        // target, so these were `#[cfg(windows)]`-gated and never ran here.
+        assert!(is_unc_path(Path::new(r"\\server\share\x.png")));
+        assert!(is_unc_path(Path::new("//server/share/x.png")));
+        assert!(is_unc_path(Path::new(r"\\?\UNC\server\share\x.png")));
+        // A verbatim path to a LOCAL disk is not a network path.
+        assert!(!is_unc_path(Path::new(r"\\?\C:\Users\me\x.png")));
     }
 
     #[test]

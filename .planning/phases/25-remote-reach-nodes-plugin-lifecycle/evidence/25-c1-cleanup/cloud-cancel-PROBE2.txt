@@ -1,0 +1,111 @@
+=== F25C1 CLOUD CANCELLATION — PHASE PROBE2 ===
+2026-07-29T13:05:39Z
+controller:   Ubuntu-2404-noble-amd64-base
+tree:         /root/wayland-25c1
+tree HEAD:    01ebc765ec6b0f89e110af828271206549352fd4
+binary sha:   9bc18141319569d1449e3b3382117c31e5ca5a87387dbbe5a009648b0953d7eb
+credential:   sourced from /root/.wayland-f25-cloud.env (values never printed)
+cancel-receipt arm compiled into this binary (1 = present):
+  'cancelled-mid-flight' marker: 0
+
+--- 0. is the credential live? Read the answer back from the PRODUCT.
+  backend:       cloud
+  available:     true
+  probe basis:   VendorApiCall
+  probe detail:  vendor API answered 200 for app wayland-f25-test machine listing
+  healthy:       true
+  live tasks:    0
+  health detail: vendor API answered 200 for app wayland-f25-test machine listing
+  probe basis read back from the product: VendorApiCall (a real authenticated call, not an env guess)
+
+--- 1. census BEFORE, both instruments
+  product : cloud      enumerated=true  found=0 via GET /apps/<app>/machines?metadata.wayland_task_nonce=<nonce>
+  vendor  : count=0 
+
+--- 2. the task
+{
+  "task_id": "f25c1cancel",
+  "nonce": "f25c1cancel",
+  "workspace": [{"path": "README.txt", "bytes": "ZjI1YzEgY2FuY2VsCg=="}],
+  "input": "d2F5bGFuZC1mMjUtYzEtY2xvdWQtY2FuY2VsLWlucHV0Cg==",
+  "argv": ["sleep", "120"],
+  "artifact_name": "stdout.bin",
+  "resources": {"cpu_millis": 30000, "memory_bytes": 268435456, "wall_time_ms": 60000, "output_bytes": 1048576}
+}
+
+--- 3. start it through the shipped binary, in the background
+run pid: 3224101
+
+--- 4. watch the vendor's own machine state, and cancel only AFTER a resume
+  t+2s  
+  t+4s  [{"id":"8d967d9fe40308" "state":"created" "events":[{"id":"01KYPZP5QMPTDHE2AH6HD4HD25" {"id":"01KYPZP5N24YAGCP085NZ325MW" 
+  t+6s  [{"id":"8d967d9fe40308" "state":"suspending" "events":[{"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" {"id":"01KYPZP5QMPTDHE2AH6HD4HD25" {"id":"01KYPZP5N24YAGCP085NZ325MW" 
+  t+8s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+10s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+12s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+14s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+16s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+18s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+20s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+22s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+24s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+26s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+28s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+30s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+32s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+34s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+36s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+38s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+40s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+42s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+44s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+46s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+48s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+50s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+52s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+54s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+56s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+58s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+60s  [{"id":"8d967d9fe40308" "state":"started" "events":[{"id":"01KYPZPB1J1XCHY10WMZP2XEVB" {"id":"01KYPZPAV6K6KXG2B5KQ8YJNFG" {"id":"01KYPZP9AH4Y0PX67WXJC0WH9Z" {"id":"01KYPZP8N3CZ6WZ0CTJP3VZZE8" {"id":"01KYPZP7JGAPDFGRZ4DHHKN14A" 
+  t+62s  
+  t+64s  
+  -> the run finished before a resume was observed
+F25C1-MACHINE-OBSERVED-PROBE2: seen=1 suspended=0 resumed=0
+
+--- 5. census WHILE THE TASK IS LIVE — this is the census instruments' known-positive
+  product : cloud      enumerated=true  found=0 via GET /apps/<app>/machines?metadata.wayland_task_nonce=<nonce>
+  vendor  : count=0
+F25C1-CENSUS-ALIVE-PROBE2: vendor_count_while_running=0 (0 here would mean both later zeros prove nothing)
+
+--- 6. CANCEL, from a SECOND process
+  wayland-core backend: no backend owns task 'f25c1cancel': cloud: task f25c1cancel is not known to backend <any>
+CANCEL_EXIT=1
+
+--- 7. what the run process did
+  run exited after ~3s of waiting
+RUN_AFTER_CANCEL_EXIT=1
+  --- run output ---
+  wayland-core backend: transport failed: machine exec returned HTTP 408: {"error":"deadline_exceeded: Post \"http://unix/v1/exec\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"}
+  
+
+--- 8. did a RECEIPT survive the cancellation?
+  no receipt file was written
+F25C1-CLOUD-CANCEL-RECEIPT-PROBE2: ABSENT
+
+--- 9. census AFTER, both instruments
+  product : cloud      enumerated=true  found=0 via GET /apps/<app>/machines?metadata.wayland_task_nonce=<nonce>
+  vendor  : count=0 
+
+    backend    cloud
+    mechanism  NONE: stopping a cloud machine is a vendor API call, not a kernel mechanism. ProcessTreeMechanism has no variant for it, and if the API call does not land the machine keeps running
+    method     GET /apps/<app>/machines?metadata.wayland_task_nonce=<nonce>
+    count      0 (MEASURED)
+    rows       (none)
+SCAN_EXIT=0
+
+=== F25C1-CLOUD-SUMMARY-PROBE2 ===
+F25C1-PROBE2-MACHINE-SEEN: 1   SUSPENDED: 0   RESUMED: 0
+F25C1-PROBE2-VENDOR-COUNT-WHILE-RUNNING: 0
+F25C1-PROBE2-VENDOR-COUNT-AFTER-CANCEL: 0
+F25C1-PROBE2-PRODUCT-ROW-AFTER-CANCEL: cloud      enumerated=true  found=0 via GET /apps/<app>/machines?metadata.wayland_task_nonce=<nonce>
+2026-07-29T13:06:58Z

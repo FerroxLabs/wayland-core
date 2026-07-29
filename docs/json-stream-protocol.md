@@ -52,7 +52,7 @@ Emitted once after initialization completes. Client MUST wait for this before se
   "contract": {
     "name": "wayland-desktop-core",
     "major": 1,
-    "minor": 8,
+    "minor": 9,
     "generator": "wcore-desktop-contract-gen/11",
     "fixture_digest": "sha256:0704...",
     "schema_digest": "sha256:e5d1...",

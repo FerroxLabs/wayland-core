@@ -1,0 +1,40 @@
+=== F25C1 GATE-CAN-FAIL ===
+2026-07-29T13:03:12Z
+tree HEAD: 01ebc765ec6b0f89e110af828271206549352fd4
+REVERTED-THE-FIX-IN-PLACE (the pre-2026-07-29 runner is now compiled)
+
+--- the test, against the PRE-FIX runner (must be RED)
+assertion failed: REMOTE_RUNNER.contains(r#"wait "$child" || status=$?"#)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- a_failing_task_leaves_nothing_on_the_far_end stdout ----
+
+thread 'a_failing_task_leaves_nothing_on_the_far_end' (3150605) panicked at crates/wcore-exec-backend/tests/ssh_remote_runner_cleanup.rs:126:5:
+input.bin — the task's own input bytes — was left on the far end after a failing task
+
+
+failures:
+    a_failing_task_leaves_nothing_on_the_far_end
+    cleanup_is_not_bought_by_deleting_a_live_orphans_evidence
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p wcore-exec-backend --test ssh_remote_runner_cleanup`
+TESTRC_ON_UNFIXED=101
+
+--- restored; working tree must be clean:
+  (no DIRTY line above = the revert left nothing behind)
+
+--- the same test, against the SHIPPED runner (must be GREEN, with a real count)
+    Finished `release` profile [optimized] target(s) in 10.09s
+     Running tests/ssh_remote_runner_cleanup.rs (target/release/deps/ssh_remote_runner_cleanup-7fe1fc3ac1a5f199)
+
+running 3 tests
+test cleanup_is_not_bought_by_deleting_a_live_orphans_evidence ... ok
+test a_succeeding_task_still_leaves_nothing_and_still_reports_success ... ok
+test a_failing_task_leaves_nothing_on_the_far_end ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+TESTRC_ON_FIXED=0
+2026-07-29T13:03:33Z

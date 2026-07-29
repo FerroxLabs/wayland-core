@@ -342,20 +342,17 @@ fn is_macos_network_fstype(fstype: &str) -> bool {
 // Windows: UNC prefix + GetDriveTypeW.
 // ---------------------------------------------------------------------------
 
-/// Classify a Windows path string as UNC (network): `\\server\share` or
+/// Classify a Windows path as UNC (network): `\\server\share` or
 /// `\\?\UNC\server\share`. The `\\.\` device and `\\?\C:\` verbatim-local
 /// forms are not network; mapped drives are caught by `GetDriveTypeW`.
+///
+/// This was a fourth private copy of the workspace's UNC check. It now
+/// delegates to [`crate::network_path::has_unc_prefix`] — the shared version
+/// additionally handles the forward-slash spelling, which Windows accepts and
+/// this copy did not.
 #[cfg(any(windows, test))]
 fn is_windows_unc(path: &str) -> bool {
-    let Some(rest) = path.strip_prefix(r"\\") else {
-        return false;
-    };
-    if let Some(verbatim) = rest.strip_prefix(r"?\") {
-        return verbatim
-            .get(..4)
-            .is_some_and(|p| p.eq_ignore_ascii_case(r"UNC\"));
-    }
-    !rest.starts_with(r".\")
+    crate::network_path::has_unc_prefix(std::path::Path::new(path))
 }
 
 #[cfg(target_os = "linux")]

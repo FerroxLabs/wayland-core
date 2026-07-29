@@ -1,0 +1,20 @@
+COMMIT: b64695df08368a9247285e91fc350109bd82eb3f
+HOST:   Ubuntu-2404-noble-amd64-base  2026-07-29T13:10:13Z
+
+=== ALLOW ARM (config: egress_allow=["api.machines.dev"]) ===
+local      enumerated=true  found=1 via live-task registry UNION a real enumeration of the host process table
+container  enumerated=true  found=0 via docker ps -a --filter label=wayland.task.nonce=<nonce>
+ssh        enumerated=false found=0 via WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned
+cloud      enumerated=false found=0 via vendor machine listing failed: machine listing returned HTTP 404: {"error":"app not found"}
+1 orphan(s) found; 2 surface(s) could NOT be enumerated. An un-enumerated surface is not a clean surface — a scan that could not run must never be read as zero orphans.
+
+=== DENY ARM (config: egress_allow=[]) ===
+local      enumerated=true  found=1 via live-task registry UNION a real enumeration of the host process table
+container  enumerated=true  found=0 via docker ps -a --filter label=wayland.task.nonce=<nonce>
+ssh        enumerated=false found=0 via WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned
+cloud      enumerated=false found=0 via vendor machine listing failed: egress denied: GET with a long or high-entropy path/query to a non-allowlisted host. Egress to `api.machines.dev` is blocked by the security policy. Add it under `[security] egress_allow = [..]` in your config, or disable the policy with `[security] enabled = false` + `--i-accept-exfil-risk` if you accept the exfiltration risk.
+1 orphan(s) found; 2 surface(s) could NOT be enumerated. An un-enumerated surface is not a clean surface — a scan that could not run must never be read as zero orphans.
+
+=== CLEAN-NONCE CONTROL (nonce in 0 argvs) ===
+local      enumerated=true  found=0 via live-task registry UNION a real enumeration of the host process table
+0 orphan(s) found; 2 surface(s) could NOT be enumerated. An un-enumerated surface is not a clean surface — a scan that could not run must never be read as zero orphans.

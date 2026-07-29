@@ -1,0 +1,3 @@
+[2m2026-07-29T12:56:51.774254Z[0m [32m INFO[0m headless cron handler: using the caller's ChannelManager; not registering or starting a second one
+[gateway] started pid=2999135 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+[gateway] provider auth rejected using token [REDACTED] (retrying)

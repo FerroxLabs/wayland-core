@@ -170,33 +170,15 @@ pub fn validate_user_path(path: &Path) -> Result<PathBuf, PathValidationError> {
 /// directly on Windows (authoritative), and (b) normalize `/`→`\` before the
 /// portable string match (which is also what the cross-platform tests exercise).
 fn looks_like_unc(path: &Path, s: &str) -> bool {
-    // Authoritative on Windows: classify via the parsed prefix, which already
-    // normalizes separators and recognizes every UNC spelling.
-    #[cfg(windows)]
-    {
-        use std::path::Prefix;
-        if let Some(Component::Prefix(p)) = path.components().next()
-            && matches!(p.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
-        {
-            return true;
-        }
-    }
-    #[cfg(not(windows))]
-    let _ = path;
-
-    // Portable backstop: normalize separators, then match UNC forms.
-    let norm: String = s.chars().map(|c| if c == '/' { '\\' } else { c }).collect();
-    let lower = norm.to_ascii_lowercase();
-    // Verbatim UNC: \\?\UNC\server\share (case-insensitive prefix).
-    if lower.starts_with(r"\\?\unc\") {
-        return true;
-    }
-    // Plain UNC: two leading separators then a host character — exclude the
-    // verbatim `\\?\` and device `\\.\` namespaces.
-    if let Some(rest) = norm.strip_prefix(r"\\") {
-        return !matches!(rest.chars().next(), Some('?') | Some('.') | None);
-    }
-    false
+    // This logic now lives in `wcore_config::network_path`, which is where the
+    // other four copies in this workspace were consolidated onto. It was
+    // promoted from here because this was the best of the five: it normalizes
+    // separators, is authoritative via the parsed prefix on Windows, and is
+    // the only one that kept UNC distinct from the verbatim/device namespaces.
+    // Two of the others called `\\?\C:\Users\x` — a local disk — a network
+    // path because they lacked that distinction.
+    let _ = s;
+    wcore_config::network_path::has_unc_prefix(path)
 }
 
 /// #644: does `path`/`s` name a Windows device (`\\.\`) or verbatim (`\\?\`)
@@ -214,29 +196,11 @@ fn looks_like_unc(path: &Path, s: &str) -> bool {
 /// function. Mirrors `looks_like_unc`'s dual strategy: authoritative parsed
 /// prefix on Windows, portable normalized-string match everywhere.
 fn looks_like_device_or_verbatim(path: &Path, s: &str) -> bool {
-    #[cfg(windows)]
-    {
-        use std::path::Prefix;
-        if let Some(Component::Prefix(p)) = path.components().next()
-            && matches!(
-                p.kind(),
-                Prefix::VerbatimDisk(..) | Prefix::DeviceNS(..) | Prefix::Verbatim(..)
-            )
-        {
-            return true;
-        }
-    }
-    #[cfg(not(windows))]
-    let _ = path;
-
-    // Portable backstop: normalize separators, then match the device / verbatim
-    // lead-ins. `\\?\UNC\...` is UNC (handled earlier) — never device/verbatim.
-    let norm: String = s.chars().map(|c| if c == '/' { '\\' } else { c }).collect();
-    let lower = norm.to_ascii_lowercase();
-    if lower.starts_with(r"\\?\unc\") {
-        return false;
-    }
-    lower.starts_with(r"\\?\") || lower.starts_with(r"\\.\")
+    // Consolidated alongside `looks_like_unc` — see the note there. Keeping
+    // the two in one module is what makes "`\\?\UNC\...` is UNC, never
+    // device/verbatim" checkable in one place instead of four.
+    let _ = s;
+    wcore_config::network_path::has_device_or_verbatim_prefix(path)
 }
 
 /// If `path` is a symlink, follow it (up to 8 hops) to an absolute,

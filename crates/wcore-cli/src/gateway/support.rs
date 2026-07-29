@@ -39,16 +39,42 @@
 //!    also feeds the config and credentials files to
 //!    `Redactor::learn_secret_values_from_file`, which was added for it.
 //!
+//! 3. **Which config it reads is not a free choice** (`F24-C4-M1`). See
+//!    [`config_sources`]: `--home` is a `WAYLAND_HOME` override that is never
+//!    exported, so resolving the config path from the process environment
+//!    pointed the redactor at the wrong file.
+//!
+//! # And one thing the library cannot check for itself
+//!
+//! `collect` scrubs each member as it writes it and reports what it did. That
+//! report is the library grading its own work. [`members_still_carrying_a_known_secret`]
+//! re-reads the finished bundle and asks the opposite question over the bytes
+//! that were actually written; on a hit this verb **refuses with a non-zero
+//! exit** instead of printing a path. It is the only check here that can catch
+//! a redaction defect in the library rather than inherit one.
+//!
 //! # Read it before you send it
 //!
 //! The bundle is a plain directory, not an archive, by the library's design:
 //! the operator can read exactly what they are about to hand over. This
 //! surface prints the path and the archive command rather than archiving on
 //! the operator's behalf.
+//!
+//! # Reconciliation note
+//!
+//! Two lanes built this verb concurrently off different bases (`lane/
+//! support-bundle` and `lane/24-c4-support`), neither able to see the other.
+//! This file is the landed module plus the second lane's three additions: the
+//! post-condition above, `config_sources`, and the `channel-health.json`
+//! member. The second lane's own layout (an inline `fn` in `gateway.rs`), its
+//! raw `deliveries.jsonl` projection and its required `--out` were all
+//! DISCARDED in favour of what was already here — the child module, the ledger
+//! summary and the timestamped default are better, and are the reason this is
+//! a graft rather than a replacement.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use wcore_gateway::lifecycle::{GatewayState, StatusProjection};
 use wcore_gateway::support_bundle::{self, BundleSources, Redactor};
@@ -58,6 +84,59 @@ use super::{ScopeArgs, is_registered, read_live_projection, spec};
 /// The gateway's own stdout/stderr sink, as written into every generated
 /// service unit (`wcore_gateway::service`: `StandardOutPath {home}/gateway.log`).
 const LOG_FILE: &str = "gateway.log";
+
+/// Which `config.toml` / `credentials.toml` this bundle reads.
+///
+/// **`F24-C4-M1`.** This was `wcore_config::config::global_config_path()`
+/// unconditionally, and that is wrong whenever `--home` is used without the
+/// matching environment variable. `wayland_config_dir()` resolves from the
+/// PROCESS env `WAYLAND_HOME`, while [`ScopeArgs::home`] is a flag that is
+/// never exported — so `gateway support-bundle --home /X` read the AMBIENT
+/// config, not `/X`'s.
+///
+/// That is not a cosmetic mismatch, and it is why this is a fix rather than a
+/// tidy-up: these two paths feed `Redactor::learn_secret_values_from_file`.
+/// Reading the wrong pair means the scrubber learns secrets that are not in
+/// play and **fails to learn the ones that are** — so a log line quoting
+/// `/X`'s credential would have shipped verbatim, with the bundle reporting a
+/// healthy non-zero `known_secrets` the whole time. A redactor armed with the
+/// wrong secrets is more dangerous than an empty one, because the manifest no
+/// longer flags it.
+///
+/// `--home` IS a `WAYLAND_HOME` override, so when it is given the config
+/// directory is that home; otherwise resolution is deferred to the crate that
+/// owns it.
+fn config_sources(scope: &ScopeArgs, home: &Path) -> (PathBuf, PathBuf) {
+    match &scope.home {
+        Some(_) => (home.join("config.toml"), home.join("credentials.toml")),
+        None => (
+            wcore_config::config::global_config_path(),
+            wcore_config::config::credentials_storage_path(),
+        ),
+    }
+}
+
+/// Every known secret, re-scanned across the FINISHED bundle.
+///
+/// The post-condition, and it is not decoration. `collect` scrubs each member
+/// as it writes it; this asks the opposite question afterwards — *is any known
+/// secret still present anywhere under the bundle root?* — over the bytes that
+/// were actually written, including members no scrub path touched. It is the
+/// only check in this surface that can catch a redaction defect in the library
+/// itself rather than trusting the library's own report.
+///
+/// Reads bytes and converts lossily rather than `read_to_string`, because a
+/// member that is not valid UTF-8 would otherwise be skipped silently — and a
+/// secret that survived into a non-text member is still a leak.
+fn members_still_carrying_a_known_secret(root: &Path, redactor: &Redactor) -> Vec<PathBuf> {
+    support_bundle::bundle_files(root)
+        .into_iter()
+        .filter(|p| match std::fs::read(p) {
+            Ok(bytes) => redactor.scrub(&String::from_utf8_lossy(&bytes)).1 > 0,
+            Err(_) => false,
+        })
+        .collect()
+}
 
 pub async fn support_bundle(scope: &ScopeArgs, out: Option<PathBuf>, json: bool) -> Result<()> {
     let home = scope.home()?;
@@ -73,8 +152,7 @@ pub async fn support_bundle(scope: &ScopeArgs, out: Option<PathBuf>, json: bool)
 
     // ---- The redactor is built BEFORE any source is read, so that no read
     // path can run against an unarmed scrubber.
-    let config = wcore_config::config::global_config_path();
-    let credentials = wcore_config::config::credentials_storage_path();
+    let (config, credentials) = config_sources(scope, &home);
     let mut redactor = Redactor::new();
     redactor.learn_from_environment();
     redactor.learn_secret_values_from_file(&config);
@@ -154,6 +232,16 @@ pub async fn support_bundle(scope: &ScopeArgs, out: Option<PathBuf>, json: bool)
         projections.push(p);
     }
 
+    // ---- Channel health, copied verbatim after scrubbing when a gateway has
+    // published it. Criterion 4 names "redacted **health**/log/support
+    // evidence" and this file is the gateway's health publication, so a bundle
+    // without it is missing a third of what the clause asks for. Pushed
+    // unconditionally: `collect` NAMES an absent projection in
+    // `absent_sources`, which is strictly better than omitting it, because a
+    // member that was never collected and a gateway that published no health
+    // are otherwise indistinguishable to the engineer reading the bundle.
+    projections.push(crate::channel::channel_health_path(&home));
+
     let sources = BundleSources {
         config: Some(config),
         credentials: Some(credentials),
@@ -163,6 +251,31 @@ pub async fn support_bundle(scope: &ScopeArgs, out: Option<PathBuf>, json: bool)
 
     let manifest = support_bundle::collect(&home, &out_dir, &sources, &redactor)
         .with_context(|| format!("cannot write a support bundle into {}", out_dir.display()))?;
+
+    // ---- THE POST-CONDITION. Everything above trusts `collect` to have
+    // scrubbed what it wrote; this is the only step that checks. A hit here is
+    // a redaction defect in the library, and the right response is to refuse
+    // rather than to print a path an operator will attach to a ticket.
+    //
+    // The directory is NOT deleted. Deleting it destroys the only evidence of
+    // the defect, and a bundle sitting on the operator's own disk has crossed
+    // no boundary — the hazard is sending it, and the refusal is what stops
+    // that. The exit status is non-zero so a script cannot proceed either.
+    let leaked = members_still_carrying_a_known_secret(&out_dir, &redactor);
+    if !leaked.is_empty() {
+        bail!(
+            "REDACTION FAILURE — do NOT send this bundle. {} member(s) under {} \
+             still contain a known secret value: {}. The directory has been left \
+             in place deliberately, as evidence; delete it once reported.",
+            leaked.len(),
+            out_dir.display(),
+            leaked
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
 
     if json {
         println!(
@@ -294,5 +407,191 @@ mod tests {
         );
         // And it must not have clobbered what was already there.
         assert!(out.join("someone-elses-private-file").exists());
+    }
+
+    // -----------------------------------------------------------------------
+    // Grafted from lane `24-c4-support`. Each of these was mutation-proved on
+    // that lane and is re-proved on this reconciled code.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_leak_detector_finds_a_planted_secret_and_is_quiet_on_a_clean_tree() {
+        // The post-condition is a NEGATIVE claim — "no member still carries a
+        // known secret" — and a negative passes for free on a dead instrument.
+        // Both directions are asserted, and the positive one is what makes the
+        // negative worth anything.
+        const PLANT: &str = "F24C4-LEAK-DETECTOR-PROBE-9a71fe30";
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("b");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::write(root.join("clean.txt"), "nothing here").unwrap();
+
+        let mut redactor = Redactor::new();
+        assert!(redactor.learn(PLANT), "the probe must be learnable");
+
+        // KNOWN-NEGATIVE first, so a detector that always reports a hit fails.
+        assert!(
+            members_still_carrying_a_known_secret(&root, &redactor).is_empty(),
+            "a clean tree must produce no findings"
+        );
+
+        // KNOWN-POSITIVE, in a NON-UTF8 member: `read_to_string` would skip
+        // this file silently and report the tree clean.
+        let mut bytes = vec![0xff, 0xfe];
+        bytes.extend_from_slice(PLANT.as_bytes());
+        std::fs::write(root.join("nested/leaky.bin"), &bytes).unwrap();
+
+        let found = members_still_carrying_a_known_secret(&root, &redactor);
+        assert_eq!(
+            found.len(),
+            1,
+            "the planted secret must be found: {found:?}"
+        );
+        assert!(
+            found[0].ends_with("nested/leaky.bin"),
+            "and the scan must recurse: {found:?}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_home_redirects_the_config_sources_with_it() {
+        // F24-C4-M1. `--home` is a WAYLAND_HOME override that is never
+        // exported, so resolving the config path from the process environment
+        // pointed the REDACTOR at the wrong file — it would learn secrets that
+        // are not in play and miss the ones that are.
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("explicit-home");
+        let scope = ScopeArgs {
+            profile: None,
+            home: Some(home.clone()),
+        };
+        let (config, credentials) = config_sources(&scope, &home);
+        assert_eq!(config, home.join("config.toml"));
+        assert_eq!(credentials, home.join("credentials.toml"));
+
+        // With no `--home`, resolution is deferred to the crate that owns it
+        // rather than reinvented here.
+        let ambient = ScopeArgs {
+            profile: None,
+            home: None,
+        };
+        let (c2, _) = config_sources(&ambient, &home);
+        assert_eq!(c2, wcore_config::config::global_config_path());
+        assert_ne!(
+            c2,
+            home.join("config.toml"),
+            "the two arms must be distinguishable, or this test cannot fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_credential_in_the_named_home_is_learned_and_scrubbed_from_the_log() {
+        // The end-to-end consequence of F24-C4-M1, and the reason it is a fix
+        // rather than a tidy-up. A secret that lives ONLY in the `--home`
+        // config must reach the scrubber, or the log member ships it verbatim.
+        const SECRET: &str = "F24C4-HOME-SCOPED-SECRET-4b1d77e0";
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            format!("[providers.anthropic]\napi_key = \"{SECRET}\"\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(LOG_FILE),
+            format!("[gateway] auth rejected using token {SECRET}\n"),
+        )
+        .unwrap();
+
+        // POSITIVE CONTROL: the secret really is in the log before collection,
+        // or its absence afterwards proves nothing.
+        assert!(
+            std::fs::read_to_string(home.join(LOG_FILE))
+                .unwrap()
+                .contains(SECRET)
+        );
+
+        let out = dir.path().join("bundle");
+        let scope = ScopeArgs {
+            profile: Some("t".into()),
+            home: Some(home.clone()),
+        };
+        support_bundle(&scope, Some(out.clone()), false)
+            .await
+            .expect("the bundle must be produced");
+
+        let log = std::fs::read_to_string(out.join("recent-log.txt")).unwrap();
+        assert!(
+            !log.contains(SECRET),
+            "the log member leaked a secret that lived in the --home config: {log}"
+        );
+        assert!(
+            log.contains(support_bundle::REDACTED),
+            "and it must have been replaced rather than dropped: {log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_health_is_collected_when_a_gateway_published_it() {
+        // Criterion 4 names "redacted HEALTH/log/support evidence". The health
+        // publication is a real file; a bundle without it is missing a third of
+        // the clause.
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            crate::channel::channel_health_path(&home),
+            r#"{"configured":2,"registered":2}"#,
+        )
+        .unwrap();
+
+        let out = dir.path().join("bundle");
+        let scope = ScopeArgs {
+            profile: Some("t".into()),
+            home: Some(home.clone()),
+        };
+        support_bundle(&scope, Some(out.clone()), false)
+            .await
+            .unwrap();
+
+        let raw = std::fs::read_to_string(out.join("manifest.json")).unwrap();
+        let manifest: support_bundle::BundleManifest = serde_json::from_str(&raw).unwrap();
+        assert!(
+            manifest.members.iter().any(|m| m == "channel-health.json"),
+            "channel health must be a declared member: {:?}",
+            manifest.members
+        );
+        assert!(out.join("channel-health.json").exists());
+
+        // KNOWN-NEGATIVE, so the assertion above is not satisfied by a member
+        // that is always present: with no health file the absence must be
+        // NAMED rather than silently skipped.
+        let home2 = dir.path().join("home2");
+        std::fs::create_dir_all(&home2).unwrap();
+        let out2 = dir.path().join("bundle2");
+        let scope2 = ScopeArgs {
+            profile: Some("t".into()),
+            home: Some(home2.clone()),
+        };
+        support_bundle(&scope2, Some(out2.clone()), false)
+            .await
+            .unwrap();
+        let m2: support_bundle::BundleManifest =
+            serde_json::from_str(&std::fs::read_to_string(out2.join("manifest.json")).unwrap())
+                .unwrap();
+        assert!(
+            !m2.members.iter().any(|m| m == "channel-health.json"),
+            "no health file existed, so no member may be invented"
+        );
+        assert!(
+            m2.absent_sources
+                .iter()
+                .any(|a| a.contains("channel-health.json")),
+            "and the absence must be NAMED: {:?}",
+            m2.absent_sources
+        );
     }
 }
