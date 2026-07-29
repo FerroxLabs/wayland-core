@@ -113,7 +113,23 @@ impl SignalChannel {
 /// Cap on a single inbound attachment read. signal-cli has already written the
 /// bytes to local disk; bound the read so an oversized file can't exhaust
 /// memory.
-const MAX_ATTACHMENT_BYTES: u64 = 64 * 1024 * 1024;
+/// The single source of this adapter's inbound media bounds.
+///
+/// [`Channel::media_bounds`] returns this, and [`MAX_ATTACHMENT_BYTES`] — the
+/// cap `fetch_media` applies to the on-disk attachment before reading it — is
+/// derived from it. One constant, both sites, so the advertised number and the
+/// enforced number cannot drift apart.
+///
+/// This adapter previously declared NOTHING, so it advertised the 25 MiB trait
+/// default while enforcing a hardcoded 64 MiB, because the declaration had no
+/// reader anywhere in the workspace. 64 MiB is the value that has actually
+/// governed inbound reads since 2026-06-12.
+pub const MEDIA_BOUNDS: wcore_channels::MediaBounds = wcore_channels::MediaBounds {
+    max_bytes: 64 * 1024 * 1024,
+    max_attachments: 10,
+};
+
+const MAX_ATTACHMENT_BYTES: u64 = MEDIA_BOUNDS.max_bytes;
 
 #[async_trait]
 impl Channel for SignalChannel {
@@ -369,6 +385,12 @@ impl Channel for SignalChannel {
         })
         .await
         .map_err(|e| ChannelError::Transport(format!("attachment read task panic: {e}")))?
+    }
+
+    /// This adapter's inbound intake policy — see [`MEDIA_BOUNDS`], from which
+    /// [`MAX_ATTACHMENT_BYTES`] is derived.
+    fn media_bounds(&self) -> wcore_channels::MediaBounds {
+        MEDIA_BOUNDS
     }
 }
 

@@ -367,8 +367,13 @@ pub(crate) async fn download_bytes(
     // Stream the body with a hard cap so a CDN response that omits/lies about
     // Content-Length can't buffer unbounded into an OOM (defense-in-depth on
     // top of the CDN host allowlist above).
-    const MAX_MEDIA_BYTES: usize = 100 * 1024 * 1024;
-    let bytes = wcore_egress::read_body_capped(resp, MAX_MEDIA_BYTES)
+    //
+    // The cap is the adapter's DECLARED bound, not a second hardcoded number.
+    // It used to be a private `const MAX_MEDIA_BYTES = 100 MiB` while
+    // `media_bounds()` advertised 25 MiB to anyone who asked — an advertised
+    // limit no code path read.
+    let max_bytes = usize::try_from(crate::MEDIA_BOUNDS.max_bytes).unwrap_or(usize::MAX);
+    let bytes = wcore_egress::read_body_capped(resp, max_bytes)
         .await
         .map_err(|e| DiscordError::Http(format!("media body read: {e}")))?;
     Ok(bytes)

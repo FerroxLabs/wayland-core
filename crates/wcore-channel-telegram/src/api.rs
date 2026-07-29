@@ -913,8 +913,9 @@ pub(crate) async fn download_bytes(
     }
     // Bounded streamed read — a media endpoint with no/forged Content-Length
     // can't OOM the process (defense-in-depth atop the file-host allowlist).
-    const MAX_MEDIA_BYTES: usize = 100 * 1024 * 1024;
-    let bytes = wcore_egress::read_body_capped(resp, MAX_MEDIA_BYTES)
+    // The cap is the adapter's DECLARED bound, not a second hardcoded number.
+    let max_bytes = usize::try_from(crate::MEDIA_BOUNDS.max_bytes).unwrap_or(usize::MAX);
+    let bytes = wcore_egress::read_body_capped(resp, max_bytes)
         .await
         .map_err(|e| TelegramError::Http(format!("media body read: {e}")))?;
     Ok(bytes)

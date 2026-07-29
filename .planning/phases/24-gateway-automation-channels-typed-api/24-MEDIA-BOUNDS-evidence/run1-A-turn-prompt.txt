@@ -1,0 +1,16 @@
+f24ma probe A-12-attachments-over-bound
+
+[attachments received with this message:
+  1. Image (image/png) — description: [Inbound image received but NOT analyzed: no vision backend is configured, so the assistant cannot see this image. Do not guess its contents. To enable image understanding, set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY.]
+  2. Image (image/png) — description: [Inbound image received but NOT analyzed: no vision backend is configured, so the assistant cannot see this image. Do not guess its contents. To enable image understanding, set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY.]
+  3. Image (image/png) — description: [Inbound image received but NOT analyzed: no vision backend is configured, so the assistant cannot see this image. Do not guess its contents. To enable image understanding, set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY.]
+  4. Image (image/png) — description: [Inbound image received but NOT analyzed: no vision backend is configured, so the assistant cannot see this image. Do not guess its contents. To enable image understanding, set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY.]
+  5. Image (image/png) — description: [Inbound image received but NOT analyzed: no vision backend is configured, so the assistant cannot see this image. Do not guess its contents. To enable image understanding, set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY.]
+  6. Image (image/png) — description: [Inbound image received but NOT analyzed: no vision backend is configured, so the assistant cannot see this image. Do not guess its contents. To enable image understanding, set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY.]
+  7. Image (image/png) — description: [Inbound image received but NOT analyzed: no vision backend is configured, so the assistant cannot see this image. Do not guess its contents. To enable image understanding, set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY.]
+  8. Image (image/png) — description: [Inbound image received but NOT analyzed: no vision backend is configured, so the assistant cannot see this image. Do not guess its contents. To enable image understanding, set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY.]
+  9. Image (image/png) — description: [Inbound image received but NOT analyzed: no vision backend is configured, so the assistant cannot see this image. Do not guess its contents. To enable image understanding, set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY.]
+  10. Image (image/png) — description: [Inbound image received but NOT analyzed: no vision backend is configured, so the assistant cannot see this image. Do not guess its contents. To enable image understanding, set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY.]
+  11. Image (image/png) — description: [Inbound attachment 11 of 12 was NOT analyzed: it is past this channel's declared bound of 10 attachments per message. The assistant has NOT seen its contents; do not guess.]
+  12. Image (image/png) — description: [Inbound attachment 12 of 12 was NOT analyzed: it is past this channel's declared bound of 10 attachments per message. The assistant has NOT seen its contents; do not guess.]]
+Current date: 2026-07-29

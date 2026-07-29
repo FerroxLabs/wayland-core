@@ -51,6 +51,25 @@ pub const DISCORD_API_BASE: &str = "https://discord.com";
 /// Production Gateway base URL. Override in tests via [`DiscordChannel::with_bases`].
 pub const DISCORD_GATEWAY_BASE: &str = "wss://gateway.discord.gg";
 
+/// The single source of this adapter's inbound media bounds.
+///
+/// [`Channel::media_bounds`] returns this, and [`rest::download_bytes`] caps
+/// the streamed body at `MEDIA_BOUNDS.max_bytes`. One constant, both sites, so
+/// the advertised number and the enforced number cannot drift apart.
+///
+/// They previously had: this adapter advertised 25 MiB while `download_bytes`
+/// buffered up to 100 MiB from a hardcoded constant, because nothing in the
+/// workspace ever read the declaration. 100 MiB is the value that has actually
+/// governed inbound fetches since 2026-06-12 and is retained deliberately —
+/// Discord's own per-attachment ceiling is 25 MiB only for a NON-BOOSTED
+/// upload, and boosted servers and Nitro senders legitimately exceed it, so
+/// declaring 25 here would degrade media this adapter has always accepted.
+/// `max_bytes` is an intake policy, not a restatement of a platform tier.
+pub const MEDIA_BOUNDS: wcore_channels::MediaBounds = wcore_channels::MediaBounds {
+    max_bytes: 100 * 1024 * 1024,
+    max_attachments: 10,
+};
+
 /// Production Discord channel adapter.
 pub struct DiscordChannel {
     name: String,
@@ -401,12 +420,10 @@ impl Channel for DiscordChannel {
         }
     }
 
-    /// Discord's per-attachment ceiling for a non-boosted upload.
+    /// This adapter's inbound intake policy — see [`MEDIA_BOUNDS`], which is
+    /// the same constant [`rest::download_bytes`] caps the streamed body at.
     fn media_bounds(&self) -> wcore_channels::MediaBounds {
-        wcore_channels::MediaBounds {
-            max_bytes: 25 * 1024 * 1024,
-            max_attachments: 10,
-        }
+        MEDIA_BOUNDS
     }
 
     /// Discord caps a single message at 2000 characters.

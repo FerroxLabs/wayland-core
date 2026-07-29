@@ -33,6 +33,28 @@ mod sent_index;
 pub mod smtp;
 mod uid_store;
 
+/// The single source of this adapter's inbound media bounds.
+///
+/// [`Channel::media_bounds`] returns this, and the IMAP parser's
+/// `MAX_INLINE_ATTACHMENT_BYTES` is derived from it. One constant, both sites,
+/// so the advertised number and the enforced number cannot drift apart.
+///
+/// Email is the adapter whose divergence ran the OTHER way: it advertised
+/// 10 MiB while the parser has only ever inlined parts up to 2 MiB (since
+/// 2026-06-12), so it under-delivered against its own promise by 5x. The
+/// enforced 2 MiB is retained and now declared, because for email the parser's
+/// inline ceiling IS the intake bound — attachments arrive base64-inlined in
+/// the message body rather than being fetched over the network, and a part
+/// above the ceiling never becomes fetchable bytes at all. Declaring 10 MiB
+/// would advertise an intake this adapter has never performed.
+///
+/// `max_attachments` stays at email's own 20 (a mail message carries more
+/// parts than a chat message), and is enforced by the inbound media enricher.
+pub const MEDIA_BOUNDS: wcore_channels::MediaBounds = wcore_channels::MediaBounds {
+    max_bytes: 2 * 1024 * 1024,
+    max_attachments: 20,
+};
+
 /// Production email channel adapter.
 pub struct EmailChannel {
     name: String,
@@ -529,15 +551,10 @@ impl Channel for EmailChannel {
         }
     }
 
-    /// Inline attachment ceiling. Email attachments arrive base64-inlined by
-    /// the IMAP parser rather than fetched, so this bound governs how much of
-    /// a message body is retained, and it is lower than a link-based platform's
-    /// for that reason.
+    /// This adapter's inbound intake policy — see [`MEDIA_BOUNDS`], from which
+    /// the IMAP parser's inline ceiling is derived.
     fn media_bounds(&self) -> wcore_channels::MediaBounds {
-        wcore_channels::MediaBounds {
-            max_bytes: 10 * 1024 * 1024,
-            max_attachments: 20,
-        }
+        MEDIA_BOUNDS
     }
 
     /// Return the bytes of an inbound email attachment. The IMAP parser already

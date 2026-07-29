@@ -19,6 +19,22 @@ mod rest;
 mod sync;
 mod sync_store;
 
+/// The single source of this adapter's inbound media bounds.
+///
+/// [`Channel::media_bounds`] returns this, and `rest::MAX_MEDIA_BYTES` — the
+/// cap `rest::download_media` streams the body under — is derived from it. One
+/// constant, both sites, so the advertised number and the enforced number
+/// cannot drift apart.
+///
+/// This adapter previously declared NOTHING, so it advertised the 25 MiB trait
+/// default while enforcing a hardcoded 100 MiB, because the declaration had no
+/// reader anywhere in the workspace. 100 MiB is the value that has actually
+/// governed inbound fetches since 2026-06-18.
+pub const MEDIA_BOUNDS: wcore_channels::MediaBounds = wcore_channels::MediaBounds {
+    max_bytes: 100 * 1024 * 1024,
+    max_attachments: 10,
+};
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -341,6 +357,12 @@ impl Channel for MatrixChannel {
         rest::download_media(&self.http, &self.api_base, token, &attachment.url)
             .await
             .map_err(|e| ChannelError::Transport(e.to_string()))
+    }
+
+    /// This adapter's inbound intake policy — see [`MEDIA_BOUNDS`], from which
+    /// the media download cap is derived.
+    fn media_bounds(&self) -> wcore_channels::MediaBounds {
+        MEDIA_BOUNDS
     }
 }
 

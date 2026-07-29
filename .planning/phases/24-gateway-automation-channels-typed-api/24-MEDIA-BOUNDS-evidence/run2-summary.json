@@ -1,0 +1,98 @@
+{
+  "generated_at": "2026-07-29T06:14:01.467Z",
+  "binary": "/root/wayland-24-media-bounds/target/debug/wayland-core",
+  "out_dir": "/tmp/f24mcb-run2",
+  "matcher_selftest": [
+    {
+      "name": "known-positive: the real runtime notice MATCHES",
+      "pass": true
+    },
+    {
+      "name": "known-negative: a plain prompt DOES NOT match",
+      "pass": true
+    },
+    {
+      "name": "the OLD BROKEN matcher (source-transcribed, newline inside the phrase) MISSES the real notice",
+      "pass": true
+    }
+  ],
+  "legs": {
+    "A": {
+      "label": "A-12-attachments-over-bound",
+      "ack": "off",
+      "attachment_count": 12,
+      "prompt_carries_count_bound_notice": true,
+      "count_bound_notice_hits": 2,
+      "identified": true,
+      "dispatched_sockets": 1,
+      "turn_ran": true,
+      "reactions_total": 0,
+      "reaction_emojis": [],
+      "typing_total": 0,
+      "turn_prompt_count": 1,
+      "prompt_carries_notice": true,
+      "prompt_carries_probe_text": true,
+      "gateway_log_bytes": 8363,
+      "llm_journal_bytes": 3464,
+      "notes": [
+        "llm fixture at http://127.0.0.1:36743",
+        "discord fixture at http://127.0.0.1:39327 (gateway ws://127.0.0.1:39327)",
+        "gateway IDENTIFYed after ~6000ms",
+        "dispatched MESSAGE_CREATE to 1 socket(s), attachments=12",
+        "turn observed at the LLM fixture after ~8250ms"
+      ]
+    },
+    "B": {
+      "label": "B-3-attachments-under-bound",
+      "ack": "off",
+      "attachment_count": 3,
+      "prompt_carries_count_bound_notice": false,
+      "count_bound_notice_hits": 0,
+      "identified": true,
+      "dispatched_sockets": 1,
+      "turn_ran": true,
+      "reactions_total": 0,
+      "reaction_emojis": [],
+      "typing_total": 0,
+      "turn_prompt_count": 1,
+      "prompt_carries_notice": true,
+      "prompt_carries_probe_text": true,
+      "gateway_log_bytes": 8265,
+      "llm_journal_bytes": 1118,
+      "notes": [
+        "llm fixture at http://127.0.0.1:33367",
+        "discord fixture at http://127.0.0.1:32815 (gateway ws://127.0.0.1:32815)",
+        "gateway IDENTIFYed after ~5750ms",
+        "dispatched MESSAGE_CREATE to 1 socket(s), attachments=3",
+        "turn observed at the LLM fixture after ~8250ms"
+      ]
+    }
+  },
+  "gates": [
+    {
+      "id": "C1",
+      "clause": "declared max_attachments is enforced",
+      "kind": "POSITIVE",
+      "desc": "12 inbound attachments against a declared bound of 10: the turn prompt carries the past-bound notice for EXACTLY the 2 over the bound",
+      "pass": true,
+      "detail": "identified=true turn_ran=true notice=true hits=2 (want exactly 2)"
+    },
+    {
+      "id": "C2",
+      "clause": "declared max_attachments is enforced",
+      "kind": "NEGATIVE CONTROL",
+      "desc": "3 attachments, one variable changed: notice ABSENT - and the prompt capture proven alive on the same run",
+      "pass": true,
+      "detail": "identified=true turn_ran=true capture_alive=true notice=false"
+    },
+    {
+      "id": "C3",
+      "clause": "the in-bound attachments were still processed",
+      "kind": "LIVENESS CONTROL",
+      "desc": "the first 10 are NOT skipped - they carry the ordinary no-vision notice, proving the enricher ran rather than bailing out early",
+      "pass": true,
+      "detail": "turn_ran=true prompts=1 vision_notice=true"
+    }
+  ],
+  "all_pass": true
+}
