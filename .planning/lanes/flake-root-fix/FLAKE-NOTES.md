@@ -74,10 +74,58 @@ CI runner (nextest) and FALSE under `cargo test`. It also leaks: the var outlive
 var of its own — it is a pure VICTIM of another test's leak via `Config::resolve`
 reading process env.
 
+## HARNESS SELF-TEST (`repeat.sh`, per LANE-BRIEF §6b-ii — three assertions)
+
+A rep counts as PASS only if it BOTH exited 0 AND reported >= MIN_TESTS executed.
+
+1. **Known-positive passes** — `-p wcore-config --lib test_resolve_cli_max_tokens_marks_explicit`
+   -> `rep 1/1 rc=0 PASS(ran=1)`. (Also proves that test is GREEN IN ISOLATION,
+   supporting the victim theory.)
+2. **Known-negative fails** — demonstrated on real data by the exec-backend
+   baseline: `rc=101 FAIL(ran=88)` graded FAIL, 18 times.
+3. **The naive matcher would have missed it** — `-p wcore-config --lib
+   zzz_no_such_test_name_xyz` -> `rep 1/1 rc=0 VACUOUS(ran=0)`. Exit status says
+   SUCCESS; the harness grades VACUOUS. An exit-status-only matcher scores this a
+   PASS. This is the assertion that proves the anti-vacuity check does anything.
+
+## FIX 1 — wcore-exec-backend state dir (Kind B) — PROVEN
+
+`registry.rs`: `state_dir()` now consults a **thread-local** override installed by an
+RAII `StateDirGuard`, before the env var and the default. `with_temp_state` uses the
+guard instead of `set_var`. Per-thread injection (the codebase's stated preference)
+makes the tests independent WITHOUT serializing them and without weakening an assertion.
+Injected at the single centralized resolver rather than threading a parameter through
+its 11 call sites, which would have touched production paths in `local.rs`,
+`container.rs`, `node/registry.rs` and `pairing.rs` for a test-isolation defect.
+
+| | reps | PASS | FAIL | VACUOUS | rate | load avg |
+|---|---|---|---|---|---|---|
+| BEFORE `b6e4019f^` | 25 | 7 | 18 | 0 | **18/25 = 72%** | 1.69 |
+| AFTER `b6e4019f`   | 25 | 25 | 0 | 0 | **0/25 = 0%** | 7.50 |
+
+Single culprit in all 18 failing reps:
+`registry::tests::a_recorded_task_is_readable_by_another_caller_and_removable`.
+Raw output carried `0 ignored; 0 filtered out`, and `ran=89` on every green rep.
+**The after-run was at 4x the load of the before-run** — for a logic race that makes
+failure MORE likely, so 0/25 is a conservative result, not a lucky quiet box.
+
+`tests/fail_closed_matrix.rs:559` also sets this var but is the ONLY mutation in its
+binary, and integration-test binaries are separate processes, so it cannot race.
+Left unchanged (AGENTS.md §3, surgical changes).
+
+## NOT A DEFECT — do not "fix"
+
+`always_fails` (`crates/wcore-cli/src/plugin/scaffold.rs:274`) is a **string literal the
+product writes** into scaffolded plugin templates: `#[test] fn always_fails() {
+panic!("deliberate"); }`. A scaffolded crate gets picked up as a workspace member, so its
+deliberate panic surfaces in `cargo test -p wcore-cli --lib`. It is a FIXTURE and is
+SUPPOSED to fail. At least six prior lanes have re-diagnosed it. Untouched.
+
 ## Status log
 
 - [x] Worktree verified, hetzner worktree created at base.
 - [x] Full census (test vs production, + `#[serial]` attribution).
-- [ ] Baseline failure-rate measurement (N reps at base).
-- [ ] Fixes.
-- [ ] After failure-rate measurement (same N, same box).
+- [x] Harness self-test (3 assertions).
+- [x] Baseline + after for wcore-exec-backend: 18/25 -> 0/25.
+- [ ] Kind A HashMap ordering fix + rate.
+- [ ] wcore-config --lib baseline + after.
