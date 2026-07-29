@@ -152,3 +152,36 @@ brief documents. `git status --porcelain` in the hetzner worktree is **0 lines**
 so no tracked file was polluted.
 
 Reported as measured, not waved away: neither is green, and neither is caused by this lane.
+
+### M10 — the end-to-end drill, and it can fail
+
+`.github/scripts/release-manifest-drill.sh` on hetzner, throwaway keys from
+`wayland-release trust-root-init` into a temp dir deleted on exit:
+
+```
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+NEGATIVE CONTROL (pristine control swapped for the packaging-signed manifest):
+test result: FAILED. 1 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Nine of ten go red on a broken corpus. The tenth only checks file presence and correctly
+survives. In-script known-positive/known-negative pair before the Rust side runs: the live root
+verifies the control (`MANIFEST VERIFIED`), the retired root refuses the same bytes
+(`key is retired: release-acceptance-key`).
+
+### M11 — sweep instrument was DEAD on first attempt, repaired in-lane
+
+First credential sweep returned 0 hits on every pattern — and the known-positive returned
+nothing, which is what exposed it. Cause: **zsh does not word-split an unquoted `$FILES`**, so
+the whole list arrived as one non-existent filename. Every sweep passed for free.
+
+Repaired (bash array built with `while read`, not `mapfile` — bash 3 on macOS has no
+`mapfile`). Post-repair, instrument proved alive (known-positive = 2 occurrences; decoy = 1):
+SWEEP1/2/3 all **0**. Hit count 0.
+
+### M12 — final state
+
+`always_fails` confirmed FAILING at BASE `63481a2d` in the same full-suite invocation, so it is
+pre-existing and proved, not assumed.
+
+Fence vs `63481a2d`: `lib.rs` + `main.rs` = **0 lines**; `ci.yml` = **0 lines**.

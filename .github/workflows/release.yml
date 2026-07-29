@@ -243,6 +243,16 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Same set the `build` job installs for Linux. `wayland-release` pulls in
+      # `wcore-config`, which pulls `keyring`; a missing system library here
+      # would fail the tool build and take the whole release with it, so this
+      # mirrors the proven list rather than guessing a smaller one.
+      - name: Install Linux system deps
+        if: steps.manifest_guard.outputs.skip == 'false'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libseccomp-dev libasound2-dev pkg-config
+
       - name: Setup vx (installs Rust from vx.toml)
         if: steps.manifest_guard.outputs.skip == 'false'
         uses: loonghao/vx@v0.9.17
