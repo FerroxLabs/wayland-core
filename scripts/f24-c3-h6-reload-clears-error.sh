@@ -24,6 +24,98 @@
 # anything is the self-passing shape LANE-BRIEF 3b-i warns about.
 set -u -o pipefail
 
+# ---------------------------------------------------------------------------
+# Lock-holder primitives, shared by the run and by `--selftest`.
+#
+# `lock_is_free` is the instrument's own precondition check. Everything that
+# grades the product downstream of a lease change depends on it, so it is a
+# named function tested directly rather than an inline assumption.
+# ---------------------------------------------------------------------------
+lock_is_free() { flock -n -x "$1" -c true 2>/dev/null; }
+
+hold_lease() { # hold_lease <lockfile> <logfile> -> echoes the holder PGID
+  printf '\0' > "$1"
+  setsid flock -x "$1" -c 'echo LOCKHELD; sleep 900' > "$2" 2>&1 &
+  local pid=$!
+  local i
+  for i in $(seq 1 50); do
+    grep -q LOCKHELD "$2" 2>/dev/null && break
+    sleep 0.2
+  done
+  echo "$pid"
+}
+
+# Kill the holder's whole process GROUP, then PROVE the lock is free.
+#
+# The proof is the point. Without it a failed release is indistinguishable from
+# the product refusing to clear a degradation -- and it produced exactly that
+# false red once already.
+release_lease() {
+  kill -TERM -- "-$LOCK_PID" 2>/dev/null || kill -TERM "$LOCK_PID" 2>/dev/null
+  wait "$LOCK_PID" 2>/dev/null
+  local i
+  for i in $(seq 1 50); do
+    if lock_is_free "$LOCK"; then return 0; fi
+    sleep 0.2
+  done
+  echo "INSTRUMENT-FAULT: asked to release the poll lease and it is STILL held"
+  echo "after 10s. Anything measured past this point would be graded against a"
+  echo "precondition that never changed, so no product verdict is issued."
+  fuser -v "$LOCK" 2>&1 | head
+  exit 2
+}
+
+# ---------------------------------------------------------------------------
+# `--selftest` — three assertions, per LANE-BRIEF 6b-ii.
+#
+# (1) known-positive: the holder really takes the lock.
+# (2) known-negative: the repaired release really frees it.
+# (3) THE OLD BROKEN SHAPE WOULD HAVE MISSED IT: `kill <flock-pid>` alone leaves
+#     the lock held, which is the bug that manufactured a false red against a
+#     correct product fix. Without (3), (1) and (2) both pass on the broken
+#     instrument too and prove nothing about the repair.
+# ---------------------------------------------------------------------------
+if [ "${1:-}" = "--selftest" ]; then
+  T=$(mktemp -d "/tmp/f24c3h6-selftest-XXXXXX")
+  LOCK="$T/l"; ST_PASS=0; ST_FAIL=0
+  st() { if [ "$2" = ok ]; then ST_PASS=$((ST_PASS+1)); echo "PASS  $1 — $3";
+         else ST_FAIL=$((ST_FAIL+1)); echo "FAIL  $1 — $3"; fi }
+
+  LOCK_PID=$(hold_lease "$LOCK" "$T/h.log")
+  if lock_is_free "$LOCK"; then
+    st "1-known-positive-holder-takes-the-lock" no "the lock read as FREE while held"
+  else
+    st "1-known-positive-holder-takes-the-lock" ok "lock reads as held (pgid $LOCK_PID)"
+  fi
+
+  if release_lease && lock_is_free "$LOCK"; then
+    st "2-known-negative-repaired-release-frees-it" ok "lock reads as free after a group kill"
+  else
+    st "2-known-negative-repaired-release-frees-it" no "still held after the repaired release"
+  fi
+
+  # (3) Reproduce the OLD release on a fresh holder and show it does NOT free.
+  LOCK2="$T/l2"
+  OLD_PID=$(hold_lease "$LOCK2" "$T/h2.log")
+  kill "$OLD_PID" 2>/dev/null      # <- the old, broken release: flock only
+  wait "$OLD_PID" 2>/dev/null
+  sleep 1
+  if lock_is_free "$LOCK2"; then
+    st "3-the-old-release-would-have-missed-it" no \
+      "the old kill DID free the lock, so the repair changes nothing and the false red had another cause"
+  else
+    st "3-the-old-release-would-have-missed-it" ok \
+      "old kill left the lock HELD ($(fuser "$LOCK2" 2>&1 | tr -s ' ')) — this is what graded a correct fix as red"
+    LOCK_PID=$OLD_PID; LOCK="$LOCK2"; release_lease   # clean up properly
+  fi
+
+  rm -rf "$T"
+  echo
+  echo "selftest: $ST_PASS passed / $ST_FAIL failed"
+  [ "$ST_FAIL" -eq 0 ]
+  exit $?
+fi
+
 BIN="${1:?usage: $0 <binary> <run-dir>}"
 RUN="${2:?usage: $0 <binary> <run-dir>}"
 
@@ -82,27 +174,32 @@ TOML
 # Pre-created at exactly one byte: the product rewrites a sentinel of any other
 # length BEFORE locking, and a rewrite is not what is under test.
 # ---------------------------------------------------------------------------
-printf '\0' > "$LOCK"
-flock -x "$LOCK" -c 'echo LOCKHELD; sleep 900' > "$RUN/lockholder.log" 2>&1 &
-LOCK_PID=$!
+LOCK_PID=$(hold_lease "$LOCK" "$RUN/lockholder.log")
 
-# LANE-BRIEF 6a-i: assert the PARTICIPANT STARTED. A lock holder that never
-# acquired makes this a one-actor run, and the contention this whole test is
-# about cannot appear with one actor -- it would read as a clean pass.
-for _ in $(seq 1 50); do
-  grep -q LOCKHELD "$RUN/lockholder.log" 2>/dev/null && break
-  sleep 0.2
-done
+# LANE-BRIEF 6a-i: assert the PARTICIPANT STARTED, and assert it two ways. A
+# lock holder that never acquired makes this a one-actor run, and the contention
+# this whole test is about cannot appear with one actor -- it would read as a
+# clean pass. The `LOCKHELD` line proves the process ran; `lock_is_free` proves
+# it actually took the lock, which is the fact the run depends on.
 if ! grep -q LOCKHELD "$RUN/lockholder.log" 2>/dev/null; then
-  echo "INSTRUMENT-FAULT: the foreign lock holder never acquired the lease."
-  kill "$LOCK_PID" 2>/dev/null
+  echo "INSTRUMENT-FAULT: the foreign lock holder never announced itself."
+  kill -TERM -- "-$LOCK_PID" 2>/dev/null
   exit 2
 fi
-echo "setup: foreign lock holder live (pid $LOCK_PID) on $LOCK"
+if lock_is_free "$LOCK"; then
+  echo "INSTRUMENT-FAULT: the holder announced itself but the lock reads as FREE,"
+  echo "so the gateway below would WIN the lease and the run would measure the"
+  echo "wrong world entirely."
+  kill -TERM -- "-$LOCK_PID" 2>/dev/null
+  exit 2
+fi
+echo "setup: foreign lock holder live (pgid $LOCK_PID) and lock verified HELD"
 
 cleanup() {
   [ -n "${GW_PID:-}" ] && kill "$GW_PID" 2>/dev/null
-  kill "$LOCK_PID" 2>/dev/null
+  # Group kill, or the inherited `sleep` outlives the run and holds the lock
+  # for 15 minutes -- which is also how stray holders accumulated on the host.
+  kill -TERM -- "-$LOCK_PID" 2>/dev/null || kill -TERM "$LOCK_PID" 2>/dev/null
   wait 2>/dev/null
 }
 trap cleanup EXIT
@@ -206,8 +303,7 @@ fi
 # So: release the lease and assert health clears BY ITSELF, with no reload. The
 # supervisor re-claims every tick, so winning it back is the achievable world in
 # which this gate must go green.
-kill "$LOCK_PID" 2>/dev/null
-wait "$LOCK_PID" 2>/dev/null
+release_lease   # kills the whole holder group AND PROVES the lock is free
 RC_RELEASED=1
 for i in $(seq 1 40); do
   RC_RELEASED=$(health "$RUN/health-released.txt")
