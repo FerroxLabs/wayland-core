@@ -808,6 +808,19 @@ mod tests {
         assert_eq!(backend.snapshot().len(), 0);
     }
 
+    /// Wording changed deliberately when this path joined the shared intake,
+    /// and the assertion GAINED clauses rather than losing one.
+    ///
+    /// Before: `Failed to stat audio file: No such file or directory` — a
+    /// message describing an implementation step (`fs::metadata`) that the
+    /// unified path no longer performs, because it opens once instead of
+    /// stat-ing by name and then reading by name again.
+    ///
+    /// After: `File not found: <path>` — the SAME wording the PDF and document
+    /// surfaces already produce for the same condition, so a host matching on
+    /// "not found" now gets one answer from every media surface instead of
+    /// three. The assertion now additionally requires that the refusal names
+    /// the offending path, which the old message did not carry.
     #[test]
     fn missing_local_path_rejected() {
         let backend = Arc::new(CapturingTranscriptionBackend::new("never called"));
@@ -818,8 +831,13 @@ mod tests {
         );
         assert!(r.is_error);
         assert!(
-            r.content.contains("Failed to stat") || r.content.contains("not a regular file"),
+            r.content.contains("not found") || r.content.contains("not a regular file"),
             "got: {}",
+            r.content
+        );
+        assert!(
+            r.content.contains("/nonexistent/path/audio.mp3"),
+            "the refusal must name the path it refused; got: {}",
             r.content
         );
         assert_eq!(backend.snapshot().len(), 0);
