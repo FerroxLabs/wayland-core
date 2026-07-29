@@ -82,8 +82,18 @@ use crate::govern::{
     write_atomic,
 };
 
-/// Directory name for in-progress installs. A sibling of the skills root, never inside it.
-const STAGING: &str = ".promote-staging";
+/// Directory name for in-progress installs.
+///
+/// Intended as a sibling of the skills root. It is **not always** one: `staging_root_for`
+/// takes the *parent of the directory being written*, so for a namespaced skill such as the
+/// auto-drafter's `skills/auto/auto-<sig>/` it resolves to `skills/.promote-staging` —
+/// inside the tree `collect_skill_md` walks. Guaranteeing otherwise is not possible in
+/// general: `rename(2)` needs the staging area on the target's filesystem, and skills roots
+/// nest arbitrarily via `--add-dir`, `$WAYLAND_HOME` and project roots.
+///
+/// So discovery is fenced by name instead — `loader::collect_skill_md` skips this directory
+/// (F23A-C1-H4). That skip is the load-bearing guarantee; the location is a best effort.
+pub(crate) const STAGING: &str = ".promote-staging";
 
 /// Hard cap on a promotion digest walk, mirroring the snapshot caps in `govern.rs`.
 const MAX_DIGEST_DEPTH: usize = 8;
