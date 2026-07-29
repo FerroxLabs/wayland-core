@@ -92,3 +92,43 @@ now `initial=0 incremental=1` with arrivals=1. Same instrument, opposite result.
 
 **Steady state, counted, live:** `matrix/steady 3/3 [1,1,1]` after 30s quiet; all six
 measurable adapters 3/3. Matrix 6/6, signal 6/6.
+
+---
+
+## T+~150min — degradation paths proven live; two instrument defects of my own
+
+**Live degradation probe v3** (`24-H6-evidence/degradation-probe/`), three incarnations of the
+shipped binary against one fixture:
+| incarnation | state | result |
+|---|---|---|
+| A first start | `Absent` | INFO seeded, persisted `s0`, `initials=1` |
+| A control | — | **KNOWN-POSITIVE healthy-climb `syncs 3 -> 8` over 10s, `proc=LIVE(S)`** |
+| B clean restart | `Cursor` | INFO resumed, **`initials 1 -> 1`** — did NOT re-seed |
+| C corrupt cursor | `Corrupt` | **WARN** with `reason=` and `path=`; `initials 1 -> 2` (re-seeded); junk replaced with `s0`; **NOT WEDGED `syncs 13 -> 17` over 10s, `proc=LIVE(S)`** |
+
+**TWO INSTRUMENT DEFECTS OF MY OWN, both repaired, both blaming the product:**
+- **v1** started the binary with `< /dev/null`. `--json-stream` is a stdio surface: stdin at EOF
+  = the peer hung up, so it exited after two syncs. v1's NOT-WEDGED check then read a stalled
+  counter off an already-exited process: **`syncs 5 -> 5`**, which reads as a permanent wedge.
+  I was about to have a live "the fix wedges on a corrupt cursor" finding that was entirely my
+  harness. Repaired: stdin held by `tail -f /dev/null`, and every counter reading is paired
+  with a zombie-aware liveness state (`/proc/<pid>/stat`, `Z`/`X` = DEAD) so an exited process
+  can never again be read as a wedged one. Third assertion is the measured outcome change:
+  same product, same commit — v1 `5 -> 5` (exited), v3 **`13 -> 17` (LIVE)**.
+- **v2** held stdin with a FIFO opened inside a command substitution; the binary never started
+  and every counter read 0 — which would have read as "the adapter never syncs at all".
+
+**Known limitation, stated rather than papered over:** the wedge guard for a cursor the
+*homeserver rejects* (HTTP 400) is unit-proven against a real 400 from `mockito`, **not**
+live-proven. `f24-matrix-fixture.mjs`'s `parseSince` treats any unparseable token as an
+initial sync and never answers 400, so this fixture structurally cannot exercise that path.
+
+**Two siblings, not one.** The finding lane cited `imap.rs`. At the merge-base there were
+**two** adapters already persisting a resume position under the same `channel-state/`
+directory — `wcore-channel-email/src/uid_store.rs` AND
+`wcore-channel-telegram/src/offset_store.rs`. Matrix was the only polling adapter without one.
+
+**Final gates at `bf894aeb`:** clippy `-p wcore-channel-matrix --all-targets` = **0 warnings**;
+`cargo test -p wcore-channel-matrix` = **36 passed / 0 failed / 0 ignored**;
+`cargo test -p wcore-channels-registry` (downstream consumer) = **11 passed / 0 failed**;
+`cargo fmt --all -- --check` clean. Fence diff vs captured BASE SHA `e77b44b0` = **0 bytes**.
