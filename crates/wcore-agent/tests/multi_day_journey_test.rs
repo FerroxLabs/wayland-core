@@ -58,8 +58,7 @@ use wcore_agent::session_journal::{
 };
 use wcore_budget::{BudgetCap, BudgetTracker, ExecutionBudget};
 use wcore_types::goal::{
-    GoalAuthorityRequest, GoalId, GoalStrategy, GoalTerminalState, LoopPolicy, WaitKind,
-    resolve_goal_authority,
+    GoalAuthorityRequest, GoalId, GoalStrategy, LoopPolicy, WaitKind, resolve_goal_authority,
 };
 
 // ── Shared vocabulary ────────────────────────────────────────────────────────
