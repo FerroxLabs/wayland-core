@@ -2046,6 +2046,67 @@ async fn run() -> anyhow::Result<ExitCode> {
     // anyhow's default `Debug` print on `main`'s `Result::Err`. The REPL
     // path already routes errors through `output.emit_error` so this brings
     // the one-shot path to parity.
+    // ── F22C (Phase 22 Success Criterion 3): Direct's canonical transition ──
+    //
+    // The fifth loop owner. Attachment is by environment
+    // (`WAYLAND_GOAL_ID` + `WAYLAND_GOAL_JOURNAL`) rather than by flag,
+    // deliberately: this file is the shared multi-lane fence, and a flag pair
+    // would mean a second, non-contiguous edit to add it to `Cli`. The env
+    // route is already how this codebase hands a Goal's identity to a child
+    // process (`goal_cmd::ENV_GOAL`), so it is the existing mechanism.
+    //
+    // Opt-in and headless-only: with no Goal in the environment, or in the
+    // REPL, nothing below changes. `engine.run` here is THE production Direct
+    // invocation — the closure wraps it, and its return type is
+    // `StrategyTermination`, so there is no path out that terminates the Goal
+    // any other way and none that terminates it zero times.
+    if !prompt.is_empty()
+        && let Some((driver, goal_id)) = wcore_cli::goal_cmd::GoalAttachArgs::default().resolve()?
+    {
+        use wcore_agent::goal::{DirectOutcome, StrategyTermination};
+        let cursor = driver
+            .run_direct(&goal_id, |owner| async {
+                match engine.run(&prompt, "").await {
+                    Ok(run_result) => {
+                        output.emit_stream_end(
+                            "",
+                            run_result.turns,
+                            run_result.usage.input_tokens,
+                            run_result.usage.output_tokens,
+                            run_result.usage.cache_creation_tokens,
+                            run_result.usage.cache_read_tokens,
+                            run_result.finish_reason,
+                        );
+                        // A completed Direct run is UNCHECKED — Direct has no
+                        // verification owner — so the adapter maps it to
+                        // `NeedsEscalation`, not to a success category.
+                        if run_result.stop_reason == wcore_types::message::StopReason::MaxTurns {
+                            StrategyTermination::from_direct(
+                                owner,
+                                DirectOutcome::TurnLimitReached {
+                                    turns: run_result.turns as u64,
+                                },
+                            )
+                        } else {
+                            StrategyTermination::from_direct(owner, DirectOutcome::Completed)
+                        }
+                    }
+                    Err(error) => {
+                        output.emit_error(&format!("{error:#}"), false);
+                        StrategyTermination::from_direct(owner, DirectOutcome::Failed(&error))
+                    }
+                }
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("goal {} did not terminate: {e}", goal_id.as_str()))?;
+        wcore_cli::goal_cmd::print_canonical_transition(&driver, &goal_id, "direct", &cursor);
+        engine.run_stop_hooks().await;
+        for mgr in &result.mcp_managers {
+            mgr.shutdown().await;
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
     let exit_code = if prompt.is_empty() {
         repl_loop(&mut engine, &terminal, &output, &slash_dispatcher).await?;
         ExitCode::SUCCESS
