@@ -39,7 +39,9 @@ ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CARGO="${CARGO:-/root/.cargo/bin/cargo}"
 command -v "$CARGO" >/dev/null 2>&1 || CARGO="$(command -v cargo)"
 TARGET="$ROOT/crates/wcore-cli/src/migrate/quarantine.rs"
+TARGET2="$ROOT/crates/wcore-cli/src/migrate/content.rs"
 BACKUP="$(mktemp)"
+BACKUP2="$(mktemp)"
 WORK="$(mktemp -d)"
 rc_overall=0
 
@@ -52,9 +54,15 @@ REQUIRED_RED=(
   t19_live_negative_leg_quarantined_payload_does_not_execute
 )
 
+# Tests that MUST go red when the exec-bit guard is removed (mutation 2).
+REQUIRED_RED2=(
+  t25_an_imported_peer_script_arrives_without_its_execute_bit
+)
+
 cleanup() {
   if [ -s "$BACKUP" ]; then cp "$BACKUP" "$TARGET"; fi
-  rm -f "$BACKUP"
+  if [ -s "$BACKUP2" ]; then cp "$BACKUP2" "$TARGET2"; fi
+  rm -f "$BACKUP" "$BACKUP2"
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -150,7 +158,7 @@ LOG
 
 if [ "${1:-}" = "--self-test" ]; then
   trap - EXIT
-  rm -f "$BACKUP"; rm -rf "$WORK"
+  rm -f "$BACKUP" "$BACKUP2"; rm -rf "$WORK"
   self_test
   exit $?
 fi
@@ -158,8 +166,10 @@ fi
 say "=== F26 SC2 quarantine known-negative ==="
 say "repo:  $ROOT"
 say "cargo: $CARGO"
-[ -f "$TARGET" ] || { say "FATAL: $TARGET not found"; exit 2; }
+[ -f "$TARGET" ]  || { say "FATAL: $TARGET not found"; exit 2; }
+[ -f "$TARGET2" ] || { say "FATAL: $TARGET2 not found"; exit 2; }
 cp "$TARGET" "$BACKUP"
+cp "$TARGET2" "$BACKUP2"
 
 # --- M0: the suite is GREEN before anything is touched ----------------------
 # Without this, a red run later cannot be attributed to the mutation.
@@ -246,12 +256,77 @@ for t in "${REQUIRED_RED[@]}"; do
   fi
 done
 
+# --- M6..M8: the SECOND mutation — a mode-preserving writer -----------------
+#
+# The first mutation removes containment. This one removes the guard that keeps
+# an imported peer SCRIPT inert, and it exists because t25's mode assertion is
+# NOT self-evidently discriminating: `fs::write` produces 0644 on a new path
+# regardless, so simply DELETING `strip_execute_bits` leaves t25 green and the
+# guard would read as load-bearing while doing nothing.
+#
+# The realistic regression is not deletion, it is a copy-based writer: the
+# obvious refactor of `write_tree` to `fs::copy` (or any implementation that
+# carries the source mode over) reintroduces 0755 imports. That is what this
+# mutation simulates, and t25 MUST go red under it or the guard is decoration.
+say
+say "--- M6 mutation 2: write_tree preserves the source execute bit ---"
+cp "$BACKUP" "$TARGET"        # undo mutation 1 before layering the next
+python3 - "$TARGET2" <<'PY2'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+old = """        fs::write(&target, bytes)?;
+        strip_execute_bits(&target)?;"""
+new = """        fs::write(&target, bytes)?;
+        // F26-KNOWN-NEGATIVE MUTATION 2 — a copy-based writer carries the
+        // source mode over. The guard is removed on purpose.
+        #[cfg(unix)]
+        if tree.executable.contains(rel) {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&target)?.permissions();
+            let m = perms.mode();
+            perms.set_mode(m | 0o111);
+            fs::set_permissions(&target, perms)?;
+        }"""
+if old not in s:
+    sys.stderr.write("MUTATION2-ANCHOR-MISSING\n")
+    sys.exit(3)
+open(p, 'w', encoding='utf-8').write(s.replace(old, new, 1))
+PY2
+if [ $? -ne 0 ] || cmp -s "$BACKUP2" "$TARGET2"; then
+  say "M6 APPLIED: no"
+  fail "M6 could not apply mutation 2; a green run below would be meaningless"
+else
+  say "M6 APPLIED: yes ($(diff "$BACKUP2" "$TARGET2" | grep -c '^[<>]') changed lines)"
+  ( cd "$ROOT" && "$CARGO" test -p wcore-cli --test migrate_quarantine ) \
+    >"$WORK/mut2.log" 2>&1
+  if compiled_ok "$WORK/mut2.log"; then
+    say "M7 COMPILED: yes"
+  else
+    say "M7 COMPILED: no"
+    fail "M7 mutant 2 did not compile — a red from a build failure is NOT evidence"
+    grep -E '^error' "$WORK/mut2.log" | head -5
+  fi
+  mut2_line="$(grep -E '^test result:' "$WORK/mut2.log" | tail -1)"
+  say "M8 ${mut2_line:-<no test result line>}"
+  say "M8 the tests that went red:"
+  grep -E '^test .* FAILED$' "$WORK/mut2.log" | sed 's/^/    /' || true
+  for t in "${REQUIRED_RED2[@]}"; do
+    if grep -qE "^test $t \.\.\. FAILED$" "$WORK/mut2.log"; then
+      say "M8 REQUIRED-RED $t: FAILED (as required)"
+    else
+      fail "M8 REQUIRED-RED $t stayed green with the exec-bit guard removed"
+    fi
+  done
+fi
+cp "$BACKUP2" "$TARGET2"
+
 # --- M4 + M5: restore, prove the restore, and re-run to GREEN ---------------
 say
 say "--- M4/M5: restore and re-prove ---"
 cp "$BACKUP" "$TARGET"
-if cmp -s "$BACKUP" "$TARGET"; then
-  say "M4 RESTORED: yes (byte-identical to the pre-mutation file)"
+if cmp -s "$BACKUP" "$TARGET" && cmp -s "$BACKUP2" "$TARGET2"; then
+  say "M4 RESTORED: yes (both files byte-identical to their pre-mutation state)"
 else
   fail "M4 the tree was NOT restored"
 fi

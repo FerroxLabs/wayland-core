@@ -1679,13 +1679,23 @@ fn t24_deduplicated_identities_share_one_destination_and_say_so() {
 ///   A1 known-positive       — the source file really was executable, asserted
 ///                             before anything is claimed about the copy.
 ///   A2 the property         — the landed file is NOT executable.
-///   A3 the-discriminator    — the product's own `exec_bits_stripped` counts
-///                             it. Delete the stripping and this goes to 0 and
-///                             the test goes red; `fs::write`'s incidentally
-///                             non-executable output would keep A2 green on its
-///                             own, which is why A2 alone would prove nothing.
-///   A4 known-negative       — a NON-executable sibling is not counted, so A3
-///                             is not a counter that increments on everything.
+///   A3 disclosure           — the product COUNTS the executable payload it
+///                             imported, so the operator is told rather than
+///                             quietly protected.
+///   A4 known-negative       — a non-executable sibling still imports, so A2 is
+///                             not passing because nothing was written.
+///
+/// # What makes A2 discriminating, stated plainly because it is not obvious
+///
+/// `fs::write` produces `0644` on a new path whatever the source mode was, so
+/// **simply deleting `strip_execute_bits` would leave A2 green** — the guard
+/// would read as load-bearing while doing nothing, which is this programme's
+/// signature defect. The realistic regression is not deletion but a copy-based
+/// `write_tree` (`fs::copy`, or any implementation that carries the mode over),
+/// and that is what `scripts/f26-quarantine-known-negative.sh` mutation 2
+/// simulates. **A2 goes red under it** — see `REQUIRED_RED2` and the M6..M8
+/// block. Without that mutation this test would be an assertion about `fs`
+/// semantics wearing a security property's clothes.
 #[test]
 #[serial]
 #[cfg(unix)]
