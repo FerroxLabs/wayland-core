@@ -22,9 +22,13 @@ an explicit `check` and its return code is read back as an integer.
 ## The three arms
 
 * `--arm concurrent` — writers live across the archive. Known-negative.
-* `--arm quiescent`  — no writers at all. This is the control that proves the
+* `--arm sequenced`  — the SAME writers commit the SAME rows and are then
+  STOPPED before the archive starts. This is the control that proves the
   harness is CAPABLE of reporting a pass; without it a FAIL in the concurrent
-  arm is equally consistent with a harness that always fails.
+  arm is equally consistent with a harness that always fails. It isolates
+  concurrency as the only variable — a `--arm quiescent` control with no
+  writers at all would also have made the row-survival question vacuous,
+  leaving only `integrity_check` doing any work.
 * `--arm concurrent` again, after the fix. Positive.
 
 ## Anti-vacuity guards (LANE-BRIEF section 6a-i)
@@ -122,7 +126,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--bin", required=True, help="path to the wayland-core binary")
     ap.add_argument("--workdir", required=True)
-    ap.add_argument("--arm", choices=["concurrent", "quiescent"], default="concurrent")
+    ap.add_argument(
+        "--arm",
+        choices=["concurrent", "sequenced", "quiescent"],
+        default="concurrent",
+    )
     ap.add_argument("--writers", type=int, default=3)
     ap.add_argument("--prefill-mb", type=int, default=300)
     ap.add_argument("--duration", type=float, default=180.0)
@@ -155,7 +163,10 @@ def main() -> int:
         f"memory.db = {db.stat().st_size / 1048576:.1f} MiB"
     )
 
-    wids = [f"w{i}" for i in range(args.writers)] if args.arm == "concurrent" else []
+    wids = [f"w{i}" for i in range(args.writers)] if args.arm != "quiescent" else []
+    # `sequenced` runs the writers for a bounded burst and stops them BEFORE the
+    # archive; `concurrent` lets them run across it.
+    writer_duration = 10.0 if args.arm == "sequenced" else args.duration
     procs = []
     for w in wids:
         procs.append(
@@ -166,7 +177,7 @@ def main() -> int:
                     str(db),
                     w,
                     str(markers),
-                    str(args.duration),
+                    str(writer_duration),
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=open(work / f"writer-{w}.err", "w"),
@@ -199,6 +210,17 @@ def main() -> int:
             print("VERDICT: ABORTED-NOT-WAL")
             return 5
 
+    if args.arm == "sequenced":
+        # The control: let the burst finish and every writer EXIT, so the home
+        # is genuinely at rest when the archive starts. Same code, same rows.
+        for p in procs:
+            p.wait(timeout=300)
+        alive = [i for i, p in enumerate(procs) if p.poll() is None]
+        if alive:
+            print(f"VERDICT: ABORTED-WRITERS-STILL-ALIVE-IN-SEQUENCED-ARM {alive}")
+            return 9
+        print(f"[{args.label}] all {len(procs)} writers exited; home is at rest")
+
     pre = read_progress(markers, wids)
     print(f"[{args.label}] pre-archive committed high-water marks: {pre}")
 
@@ -218,7 +240,7 @@ def main() -> int:
     print(f"[{args.label}] post-archive committed high-water marks: {post}")
 
     # --- anti-vacuity guard 2: every writer was ALIVE ACROSS the window -----
-    if wids:
+    if wids and args.arm == "concurrent":
         stalled = [w for w in wids if post[w] <= pre[w]]
         if stalled:
             print(f"WRITERS-STALLED-ACROSS-ARCHIVE: {stalled}")
@@ -266,11 +288,19 @@ def main() -> int:
 
     # --- the two questions --------------------------------------------------
     integrity = "unreadable"
+    integrity_lines = -1
     missing_total = 0
     missing_detail: dict[str, int] = {}
     try:
         rconn = sqlite3.connect(f"file:{rdb}?mode=ro", uri=True)
-        integrity = rconn.execute("PRAGMA integrity_check").fetchone()[0]
+        rows = rconn.execute("PRAGMA integrity_check").fetchall()
+        # integrity_check returns one row per problem, capped at 100 by SQLite,
+        # and a single row reading exactly "ok" when the database is sound.
+        # Reported as a COUNT plus the first line: the raw dump is thousands of
+        # lines and buries the verdict.
+        joined = "\n".join(str(r[0]) for r in rows)
+        integrity_lines = len([ln for ln in joined.splitlines() if ln.strip()])
+        integrity = "ok" if joined.strip() == "ok" else joined.splitlines()[0]
         for w in wids:
             need = pre[w]
             if need <= 0:
@@ -295,9 +325,15 @@ def main() -> int:
     print(f"PRE-ARCHIVE-COMMITTED: {sum(pre.values())}")
     print(f"RESTORED-SIDECARS: {[e for e in entries if e.startswith('memory.db-')]}")
     print(f"INTEGRITY-CHECK: {integrity}")
+    print(f"INTEGRITY-PROBLEM-LINES: {integrity_lines if integrity != 'ok' else 0}")
     print(f"MISSING-COMMITTED-ROWS: {missing_total}")
     print(f"MISSING-BY-WRITER: {missing_detail}")
     ok = integrity == "ok" and missing_total == 0
+    # A pass in an arm that demanded nothing is not a pass. The row-survival
+    # question is only meaningful if there were rows to demand.
+    if ok and args.arm != "quiescent" and sum(pre.values()) == 0:
+        print("VERDICT: ABORTED-VACUOUS-NOTHING-WAS-DEMANDED")
+        return 10
     print(f"VERDICT: {'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
 
