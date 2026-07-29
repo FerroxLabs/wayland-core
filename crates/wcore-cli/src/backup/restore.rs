@@ -52,6 +52,12 @@ pub struct RestoreOutcome {
     pub manifest: Manifest,
     /// Digest of the target before the operation, as recorded in the journal.
     pub pre_digest: String,
+    /// Operations left in flight by a DEAD owner that this run rolled back
+    /// before it started (F26-SC3-H1). Non-zero means the home had been damaged
+    /// by an earlier interruption and was returned to its pre-operation state
+    /// first — the user is told, because it changes what they were restoring
+    /// over.
+    pub recovered_before_start: usize,
 }
 
 pub fn restore_archive(
@@ -85,7 +91,30 @@ pub fn restore_archive(
     //    propagates as an error from here, so nothing is written.
     let plan = remap::plan_remap(&manifest, target, opts.accept_missing_secrets)?;
 
-    // 4. Refuse an occupied target unless replacement was asked for explicitly.
+    // 4. Settle any operation an earlier process left in flight, BEFORE the
+    //    occupancy decision and before opening a journal of our own
+    //    (F26-SC3-H1).
+    //
+    //    `backup recover` is a command the user has never heard of. What they
+    //    actually do after a restore is killed is run the restore again. If the
+    //    dead operation's record and undo store survive that, they outlive a
+    //    SUCCESSFUL restore — and the next recovery pass, whenever it happens,
+    //    rolls the home back to a tree that predates it, destroying the content
+    //    that was restored.
+    //
+    //    It has to come BEFORE the occupancy check, not merely before `begin`.
+    //    An interrupted restore clears the target first, so what it leaves
+    //    behind looks EMPTY; deciding occupancy against that wreckage would let
+    //    a plain `restore` — with no `--replace` — sail past the refusal and
+    //    then overwrite the live home that recovery is about to put back. The
+    //    occupancy question is about the user's real prior state, so it must be
+    //    asked once that state has been restored.
+    //
+    //    Only DEAD owners are acted on — a concurrent restore's work is not
+    //    ours to undo (the #181 rule, enforced inside `journal::recover`).
+    let recovery = journal::recover(target)?;
+
+    // 5. Refuse an occupied target unless replacement was asked for explicitly.
     let occupied = dir_holds_state(target);
     if occupied && !opts.replace {
         return Err(BackupError::TargetOccupied(target.to_path_buf()));
@@ -93,7 +122,7 @@ pub fn restore_archive(
 
     std::fs::create_dir_all(target).map_err(BackupError::io("create target home"))?;
 
-    // 5. Write-ahead intent, then preserve the prior tree, then mutate.
+    // 6. Write-ahead intent, then preserve the prior tree, then mutate.
     let mut guard = journal::begin(target, "restore")?;
     let pre_digest = guard.pre_digest().to_string();
     guard.preserve_target(target)?;
@@ -108,6 +137,7 @@ pub fn restore_archive(
                 remap: plan,
                 manifest,
                 pre_digest,
+                recovered_before_start: recovery.recovered,
             })
         }
         Err(e) => {
@@ -575,6 +605,104 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(target.join("skills/demo/SKILL.md")).unwrap(),
             "archived body"
+        );
+    }
+
+    /// The second half of F26-SC3-H1: recovery must precede the OCCUPANCY
+    /// decision, not merely precede `journal::begin`.
+    ///
+    /// An interrupted restore clears the target before it writes, so the home it
+    /// leaves behind holds no state. If occupancy is judged against that
+    /// wreckage, a plain `restore` — no `--replace`, the mode whose entire
+    /// contract is "I will not overwrite a home that has something in it" —
+    /// stops refusing, and goes on to overwrite the live home that recovery is
+    /// about to put back.
+    #[test]
+    fn an_interrupted_restore_does_not_disarm_the_occupied_target_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        seed_source(&src);
+        let arc = dir.path().join("a.tar.gz");
+        create_archive(&src, &arc, false).unwrap();
+
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("config.toml"), "LIVE PROFILE").unwrap();
+        std::fs::write(target.join("irreplaceable.txt"), "USER DATA").unwrap();
+        let pristine = journal::target_digest(&target).unwrap();
+
+        // Prove the premise: this home IS occupied, so a plain restore refuses.
+        assert!(dir_holds_state(&target));
+
+        // An interrupted restore leaves it looking empty.
+        {
+            let mut guard = journal::begin(&target, "restore").unwrap();
+            guard.preserve_target(&target).unwrap();
+            clear_target(&target).unwrap();
+            std::mem::forget(guard);
+        }
+        assert!(
+            !dir_holds_state(&target),
+            "premise: the wreckage of an interrupted restore does not look occupied"
+        );
+
+        // A plain restore — no --replace — must STILL refuse, and must leave the
+        // home in its true pre-operation state.
+        let err = restore_archive(&arc, &target, RestoreOptions::default()).unwrap_err();
+        assert!(
+            matches!(err, BackupError::TargetOccupied(_)),
+            "an interrupted restore disarmed the occupied-target refusal: {err:?}"
+        );
+        assert_eq!(
+            journal::target_digest(&target).unwrap(),
+            pristine,
+            "the refusal did not leave the home in its pre-operation state"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("irreplaceable.txt")).unwrap(),
+            "USER DATA"
+        );
+    }
+
+    /// The count is reported, so an operator learns that the home they restored
+    /// over had been damaged by an earlier interruption.
+    #[test]
+    fn a_recovered_interruption_is_reported_and_a_clean_run_reports_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        seed_source(&src);
+        let arc = dir.path().join("a.tar.gz");
+        create_archive(&src, &arc, false).unwrap();
+
+        // Clean run: nothing to recover.
+        let clean = dir.path().join("clean");
+        let out = restore_archive(&arc, &clean, RestoreOptions::default()).unwrap();
+        assert_eq!(out.recovered_before_start, 0);
+
+        // Interrupted-then-retried run: exactly one recovered.
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("config.toml"), "LIVE").unwrap();
+        {
+            let mut guard = journal::begin(&target, "restore").unwrap();
+            guard.preserve_target(&target).unwrap();
+            clear_target(&target).unwrap();
+            std::mem::forget(guard);
+        }
+        let out = restore_archive(
+            &arc,
+            &target,
+            RestoreOptions {
+                replace: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            out.recovered_before_start, 1,
+            "the recovered interruption was not reported"
         );
     }
 

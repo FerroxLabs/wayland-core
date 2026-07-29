@@ -236,6 +236,10 @@ pub fn run(cmd: BackupCmd) -> Result<(), BackupError> {
             )?;
             println!("restored: {}", home.display());
             println!("payloads: {}", outcome.written);
+            // F26-SC3-H1: say so when this run had to undo an earlier
+            // interruption first. Silence would hide the fact that the home
+            // being restored over was not the one the operator last saw.
+            println!("recovered_before_start: {}", outcome.recovered_before_start);
             println!("remap_disposition: {}", outcome.remap.disposition);
             if !outcome.remap.message.is_empty() {
                 println!("{}", outcome.remap.message);
