@@ -71,7 +71,61 @@ implicit rowid).
    **A stale sidecar next to a restored db is itself a corruption vector** — must
    handle sidecar removal on the restore leg, not just the capture leg.
 
+## Minute 15-40 — the constraint resolves better than expected
+
+### Q3 answered for the whole-tree path
+
+`restore_from_undo()` L350-356 calls `clear_tree_excluding_journal(target)` **before**
+`copy_tree_all(undo_dir, target)`. So the target is emptied first and no stale
+`-wal`/`-shm` can survive a whole-tree rollback to sit beside a folded capture.
+My worry #3 is closed for `restore --replace`. It is NOT closed for `restore_scope()`
+L401-431, which removes only scope entries — but see below, no SQLite db is in scope.
+
+### `MIGRATE_SCOPE` contains no database
+
+`crates/wcore-cli/src/migrate/rollback.rs` L78-83:
+`[quarantine, migrate-imported, skills, config.toml]`. No `memory.db`. So the scoped
+capture leg reaches a database only if one is nested inside `skills/` or `quarantine/`,
+which goes through `copy_tree_all` -> `copy_inner` and is covered by the same fix.
+
+### The existing interruption proofs contain NO real SQLite database
+
+Query (unproxied):
+`/usr/bin/grep -in "sqlite\|memory\.db\|\.db\b" <the 3 proof scripts> <2 corpus gens>`
+Instrument liveness in the same sweep: `grep -c "config.toml"` on the same file list
+returned 4 / 2 / 1 / 0 — it discriminates, so the near-empty result below is a
+measurement and not a free zero (LANE-BRIEF §3b-i).
+
+Single hit across all five files:
+```
+scripts/portability-migrate-rollback-proof.sh:173:printf 'PRIOR-USER-MEMORY-DB\n' > "$TEMPLATE/memory.db"
+```
+That file is **named** `memory.db` and is a 22-byte text stub — it has no
+`SQLite format 3\0` header. Because `sqlite_snapshot::is_sqlite_database()` decides by
+**header magic and never by filename**, that stub is byte-copied exactly as today.
+
+**Consequence: the fix is a no-op on every existing proof corpus.** The three
+journal-dependent proofs should return exactly what they returned before. That is a
+checkable prediction, not an assumption — I will re-run all three and report.
+
+### The honest cost of the fix (must be stated, not buried)
+
+Folding a WAL into the main file means a rolled-back SQLite database is a consistent
+**equivalent database, not byte-identical bytes**. SC3's clause is "restore exact
+pre-operation state", and for a live database that clause was already unsatisfiable —
+the bytes being restored today are a torn mixture, i.e. not the pre-operation state
+either. So this trades an *unachievable* byte-exactness for an achievable consistency,
+and it must be named as an exception exactly as the archive lane named
+`sqlite_captures` / `omitted_sqlite_sidecars` in the manifest.
+
+### Fix shape decided
+
+Capture legs snapshot; restore legs byte-copy. The undo store is quiescent by
+construction, so re-snapshotting on the way back would be pointless work and would open
+a read-write connection against a store that may be damaged. So `copy_inner` needs an
+explicit direction, not a blanket "snapshot any db you see".
+
 ## Status
 
-Nothing built or measured yet beyond the above reading. Next: hetzner worktree,
-reproduce at base under load.
+Base build running on hetzner (`hz/restore-rollback-sqlite` @ 2c8b6d1d, HEAD asserted).
+Next: write the rollback proof harness, then reproduce RED at base.
