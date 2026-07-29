@@ -40,15 +40,28 @@ works with the undocumented `OPENAI_IMAGE_MODEL=flux-image`.
    compat, then the global `gpt-image-1` fallback.
 5. NOT `if base_url.contains("flux")` — that is the exact anti-pattern AGENTS.md quotes as WRONG.
 
-## Still to establish
+## Established — ALL CLOSED (see `../../F27-IMAGE-DEFAULT-SUMMARY.md` for the figures)
 
-- [ ] Compiles + unit gates on hetzner (`/root/.cargo/bin/cargo`, targeted `-p`, never bare).
-- [ ] LIVE arm A: FluxRouter, **no `OPENAI_IMAGE_MODEL` set**, image generated, model read back
-      from the product's own resolver log (LANE-BRIEF §3b-ii — this host injects
-      `ANTHROPIC_API_KEY` regardless of what I unset).
-- [ ] Known-negative: revert the compat default, watch the failure return, restore.
-- [ ] OpenAI non-regression: preset still resolves `gpt-image-1` (unit; no OpenAI key expected).
-- [ ] Secret sweep with a liveness control.
+- [x] Compiles + unit gates on hetzner. 35 / 4 / 12 / 571 / 2214 passed, 0 failed.
+- [x] LIVE arm A1: FluxRouter, **no `OPENAI_IMAGE_MODEL` set** → the product's own log says
+      `image_gen: using flux-image at https://api.fluxrouter.ai/v1/images/generations`,
+      outcome ok, real 1792x1024 image. `live-probe-run.txt`.
+- [x] Known-negative, **twice**: (a) live env-forced `gpt-image-1` on the same key →
+      `call_failed_billing_unknown`; (b) live SOURCE revert of the compat default, real
+      rebuild → `gpt-image-1`, restore → `flux-image`. `LIVE_SOURCE_REVERT=PASS`.
+- [x] OpenAI non-regression: `openai_session_still_defaults_to_gpt_image_1`, plus an
+      `assert_ne!` between the two providers that M2 proves can fail. No OpenAI key was
+      available, so this leg is unit-level — stated as such.
+- [x] Secret sweep: `SECRET_SWEEP=PASS`, 0 hits, 5/5 liveness controls fired.
+- [x] Merged `gh/plan/f20-unified-audit-repair` @ `632ad619` (merge, not rebase — §0), gates
+      re-run at the merged commit `c6b895df`.
+
+## Instrument defect found and repaired in-lane (§6b-ii)
+
+`live-source-revert.sh` v1 never `cd`'d into the build root, so `cargo build` failed and both
+stages measured the STALE binary; the pipe into `tail -1` stole cargo's exit status. Repaired,
+with a `--self-test` whose third assertion shows v1 observed **rc=0** for a build that printed
+`error: could not find Cargo.toml`. `INSTRUMENT_SELF_TEST=PASS` 3/3.
 
 ## Reusable prior art
 
