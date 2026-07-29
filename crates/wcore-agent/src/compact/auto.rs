@@ -566,7 +566,14 @@ mod tests {
             Message::new(Role::User, vec![text("hello")]),
             Message::new(Role::Assistant, vec![text("hi")]),
         ];
-        assert_eq!(drop_unanswered_tool_calls(&raw), raw);
+        // `Message` has no `PartialEq` (it lives in wcore-types and this lane
+        // does not widen a shared type for a test), so compare structurally.
+        let out = drop_unanswered_tool_calls(&raw);
+        assert_eq!(out.len(), raw.len(), "no message may be dropped");
+        for (a, b) in out.iter().zip(raw.iter()) {
+            assert_eq!(a.role, b.role);
+            assert_eq!(a.content.len(), b.content.len());
+        }
     }
 
     /// Fake provider that records the model id from the request it is given,
