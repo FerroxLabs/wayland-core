@@ -1287,7 +1287,76 @@ pub enum ProtocolEvent {
         /// The lifecycle the Goal is in AFTER the transition.
         lifecycle: crate::goal::GoalLifecycleWire,
     },
+    /// A host Goal CONTROL command was refused, with a typed reason (F22-C1).
+    ///
+    /// Additive, and mandatory rather than convenient. The five Goal commands
+    /// are answered in a command loop whose match ends in a catch-all that
+    /// merely logs (`wcore-cli/src/main.rs`), so without an explicit refusal
+    /// event every rejected command would be indistinguishable from one that
+    /// was accepted and did nothing — the advertised-but-dead shape this
+    /// surface exists to avoid. `session_recovery_unavailable` is the same
+    /// pattern for the recovery commands.
+    ///
+    /// Correlated by `request_id`, because a refusal has no cursor to correlate
+    /// on: the whole point of several reasons is that the Goal or the state the
+    /// host named does not exist.
+    GoalControlRefused {
+        goal_version: u16,
+        request_id: String,
+        session_id: String,
+        /// The Goal the refused command named. Carried even when no such Goal
+        /// exists, so a host can tell which of several in-flight requests was
+        /// refused without holding its own request table.
+        goal_id: String,
+        reason: GoalControlRefusalReason,
+    },
     Pong,
+}
+
+/// Typed reasons a host Goal control command was refused (F22-C1).
+///
+/// Closed, and deliberately keeps causes apart that a host would otherwise be
+/// tempted to retry identically. `GoalNotFound` and `CursorStale` in particular
+/// settle differently: the first means the host named something that never
+/// existed, the second means the host's view is behind and a resync fixes it.
+/// Collapsing them is how a control plane builds a silent retry loop against a
+/// Goal that will never appear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalControlRefusalReason {
+    /// `goal_version` is not the version this Core speaks.
+    UnsupportedVersion,
+    /// The command named a session that is not the live one.
+    SessionNotFound,
+    /// No durable Goal with that id exists in this session's journal.
+    GoalNotFound,
+    /// A Goal with that id already exists; `goal_open` is not an upsert.
+    GoalAlreadyExists,
+    /// The supplied cursor is not the Goal's current cursor — the host is
+    /// acting on a view that has since moved. Resync and re-issue.
+    CursorStale,
+    /// The Goal has already terminated, so it cannot advance or be cancelled.
+    GoalTerminated,
+    /// Advancing would exceed the loop bound the Goal was authorized for.
+    IterationCeilingReached,
+    /// A task with that id is already declared in this Goal's ledger.
+    TaskAlreadyDeclared,
+    /// The task named a dependency that is not declared in this Goal's ledger.
+    ///
+    /// Distinct from [`Self::Malformed`] and from [`Self::JournalError`] on
+    /// purpose. The ledger refuses an undeclared dependency because treating
+    /// one as satisfied would release a dependent on a task that never exists;
+    /// the host's fix is to declare the dependency FIRST and re-issue, which is
+    /// a different action from correcting a malformed field and a very
+    /// different one from retrying a failed disk write.
+    DependencyNotDeclared,
+    /// The command was structurally valid but a field was not usable —
+    /// an empty id, an out-of-range bound.
+    Malformed,
+    /// This process has no durable journal, so no Goal can be controlled.
+    JournalUnavailable,
+    /// The journal rejected the append.
+    JournalError,
 }
 
 /// Result of a session-scoped runtime MCP removal request.

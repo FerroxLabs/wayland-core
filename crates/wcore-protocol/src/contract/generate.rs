@@ -1165,14 +1165,16 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
             "durable_child_model_v1".into(),
             ContractCapabilityStatus::Available,
         ),
-        // F22-C1. ShapeOnly, NOT Available, and the difference is load-bearing:
-        // Core emits `goal_snapshot`/`goal_transition`, but there is no host
-        // command to pull one, because answering a command requires the CLI
-        // command loop in `crates/wcore-cli/src/main.rs`. Advertising this
-        // `Available` would claim a round trip that nothing completes.
+        // F22-C1. Promoted ShapeOnly -> Available in the SAME change that
+        // added the five Goal control commands AND their dispatcher in
+        // `crates/wcore-cli/src/main.rs`, never before it. The round trip a
+        // host now completes is: `goal_open`/`goal_declare_task`/
+        // `goal_advance`/`goal_cancel`/`goal_resync` in, `goal_snapshot` or
+        // `goal_control_refused` out. While only the events existed this was
+        // correctly ShapeOnly, because nothing answered a command.
         (
             "durable_goals_v1".into(),
-            ContractCapabilityStatus::ShapeOnly,
+            ContractCapabilityStatus::Available,
         ),
         (
             "host_delegated_delivery".into(),
