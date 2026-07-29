@@ -28,6 +28,7 @@ use wcore_egress::EgressClient as Client;
 use wcore_tools::image_generation_tool::{
     ImageGenerationBackend, ImageGenerationError, ImageGenerationRequest, ImageGenerationResponse,
 };
+use wcore_tools::media_cost::ReportedCost;
 
 use wcore_config::config::Config;
 
@@ -96,10 +97,26 @@ pub fn build_image_gen_backend(
 ) -> Option<Arc<dyn ImageGenerationBackend>> {
     // 1. Prefer the active OpenAI-wire provider's resolved key + base_url.
     if let Some(backend) = dalle_backend_from_config(config) {
+        // Log the RESOLVED endpoint, not `config.base_url`.
+        //
+        // Measured 2026-07-29 during the F27-C3 live probe: in a FluxRouter
+        // session `config.base_url` is EMPTY (the Flux default is filled in
+        // downstream by `openai_wire_media_base`), so this line printed
+        // `image_gen: using gpt-image-1 at  (active OpenAI-wire provider)` —
+        // a trailing blank where the billable host should be. That is the one
+        // resolver whose endpoint routing #310 exists to fix, and it was the
+        // only one of the five that did not say where it points; `vision` and
+        // `transcription` on the same boot both printed their full Flux URL.
+        //
+        // This matters beyond tidiness: LANE-BRIEF §3b-ii requires a provider
+        // claim to be read back from the product's own output, because this
+        // host injects `ANTHROPIC_API_KEY` regardless of what the shell
+        // unsets. An empty base_url makes image generation the one media
+        // capability whose arm could NOT be read back.
         tracing::info!(
             "image_gen: using {} at {} (active OpenAI-wire provider)",
             backend.model,
-            config.base_url
+            backend.endpoint()
         );
         return Some(Arc::new(backend));
     }
@@ -170,6 +187,52 @@ fn map_http_error(status: u16, body: &str, provider: &str) -> ImageGenerationErr
         ));
     }
     ImageGenerationError::Other(format!("{provider} returned HTTP {status}: {preview}"))
+}
+
+/// F27-C3 — response headers that carry a per-call cost, in the order they
+/// are consulted.
+///
+/// Measured on a live FluxRouter account in Phase 27: `x-flux-cost-usd` is
+/// present on `/v1/chat/completions` and on the transcription endpoint, and
+/// **absent on `/v1/images/generations`** — that provider prices images in no
+/// channel at all. Reading the header is still correct: it costs nothing, and
+/// it is what makes the difference between "the provider said so" and "the
+/// operator estimated it" a real distinction rather than a dead branch.
+const COST_HEADERS: &[&str] = &[
+    "x-flux-cost-usd",
+    "x-cost-usd",
+    "openai-processing-cost-usd",
+];
+
+/// Extract a provider-reported cost from HTTP response headers.
+///
+/// Returns `None` when no known header is present or its value does not parse
+/// as a number. **Never returns `Some(0.0)` as a stand-in for "absent"** — an
+/// absent price and a zero price are different claims.
+fn cost_from_headers(headers: &reqwest::header::HeaderMap) -> Option<ReportedCost> {
+    for name in COST_HEADERS {
+        if let Some(raw) = headers.get(*name)
+            && let Ok(text) = raw.to_str()
+            && let Ok(usd) = text.trim().parse::<f64>()
+            && usd.is_finite()
+        {
+            return Some(ReportedCost::from_header(*name, usd));
+        }
+    }
+    None
+}
+
+/// Extract a provider-reported cost from a parsed JSON response body.
+/// Consulted only when no header carried one.
+fn cost_from_body(parsed: &Value) -> Option<ReportedCost> {
+    for path in ["/usage/cost_usd", "/cost_usd"] {
+        if let Some(usd) = parsed.pointer(path).and_then(|v| v.as_f64())
+            && usd.is_finite()
+        {
+            return Some(ReportedCost::from_body(path.trim_start_matches('/'), usd));
+        }
+    }
+    None
 }
 
 /// Wrap an `async` block in the two-layer timeout pattern (R-H1).
@@ -304,8 +367,11 @@ impl DalleBackend {
     /// Resolved request endpoint (`{base_url}/images/generations`). Exposed
     /// so the resolver wiring (#310) can be unit-asserted without a network
     /// round-trip.
-    #[cfg(test)]
-    pub(crate) fn endpoint(&self) -> &str {
+    ///
+    /// No longer `#[cfg(test)]`: the resolver's own boot log must be able to
+    /// name the endpoint it will actually bill against. See the call site in
+    /// [`build_image_gen_backend`] for why that matters.
+    pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
 
@@ -392,6 +458,10 @@ impl ImageGenerationBackend for DalleBackend {
                     ImageGenerationError::Other(format!("openai dall-e request failed: {e}"))
                 })?;
             let status = resp.status();
+            // F27-C3 — headers must be read BEFORE `text()` consumes the
+            // response. This is the only channel in which any provider in
+            // this family has ever been measured returning a price.
+            let header_cost = cost_from_headers(resp.headers());
             let txt = resp
                 .text()
                 .await
@@ -441,6 +511,7 @@ impl ImageGenerationBackend for DalleBackend {
                 used_provider: format!("OpenAI {model}"),
                 width: w,
                 height: h,
+                reported_cost: header_cost.or_else(|| cost_from_body(&parsed)),
             })
         })
         .await
@@ -535,6 +606,10 @@ impl ImageGenerationBackend for FalFluxBackend {
                 used_provider: "FAL FLUX schnell".to_string(),
                 width: req_w,
                 height: req_h,
+                // FAL prices per-request out of band; nothing on this response
+                // carries a figure, so the record stays honestly unpriced
+                // unless the operator configures a rate card.
+                reported_cost: None,
             })
         })
         .await
@@ -635,6 +710,8 @@ impl ImageGenerationBackend for GeminiImagenBackend {
                 used_provider: "Gemini Imagen 3".to_string(),
                 width: req_w,
                 height: req_h,
+                // Google returns no per-call price on the generate endpoint.
+                reported_cost: None,
             })
         })
         .await
@@ -717,6 +794,8 @@ impl ImageGenerationBackend for HfFluxBackend {
                 used_provider: "Hugging Face FLUX.1-schnell".to_string(),
                 width: req_w,
                 height: req_h,
+                // The HF inference API returns raw image bytes and no price.
+                reported_cost: None,
             })
         })
         .await
@@ -807,6 +886,9 @@ impl ImageGenerationBackend for PollinationsBackend {
                 used_provider: "Pollinations.ai".to_string(),
                 width: req_w,
                 height: req_h,
+                // Pollinations is unbilled by construction; there is no price
+                // to report and none is invented.
+                reported_cost: None,
             })
         })
         .await

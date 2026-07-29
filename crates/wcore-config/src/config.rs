@@ -975,6 +975,26 @@ pub struct ToolsConfig {
     /// retained temporarily for compatibility paths removed in F09.
     #[serde(default)]
     pub allow_no_sandbox: Option<bool>,
+    /// F27-C3 — operator-supplied USD-per-artifact prices for billable media
+    /// generation, keyed by the backend label the tool reports (e.g.
+    /// `"OpenAI gpt-image-1"`). Matching is exact first, then longest prefix,
+    /// so `"OpenAI"` prices the family and `"OpenAI gpt-image-1"` overrides
+    /// one member.
+    ///
+    /// ```toml
+    /// [tools.media_pricing]
+    /// "OpenAI gpt-image-1" = 0.08
+    /// ```
+    ///
+    /// **Empty by default, deliberately.** Measured in Phase 27: FluxRouter
+    /// returns no cost for an image in any channel — not a header, not the
+    /// body — so nothing can price that call except the operator. Any figure
+    /// resolved from this map is recorded as `local_rate_card`, never as
+    /// provider-reported, so an estimate can never be read as the provider's
+    /// own number. With no entry, a media call is recorded with its units and
+    /// reported `unpriced` — never as `$0.00`.
+    #[serde(default)]
+    pub media_pricing: std::collections::BTreeMap<String, f64>,
 }
 
 impl Default for ToolsConfig {
@@ -988,6 +1008,8 @@ impl Default for ToolsConfig {
             env_passthrough: Vec::new(),
             sandbox: None,
             allow_no_sandbox: None,
+            // F27-C3: empty means "price nothing and say so", never "$0".
+            media_pricing: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -4062,6 +4084,15 @@ fn merge_config_files_with_trust(
     } else {
         global.tools.allow_list.clone()
     };
+    // F27-C3 — media prices merge key-by-key with the project layer winning,
+    // matching how the rest of this function resolves scalar overrides. A
+    // project that prices one backend must not silently drop the operator's
+    // global prices for every other backend.
+    let merged_media_pricing = {
+        let mut merged = global.tools.media_pricing.clone();
+        merged.extend(project.tools.media_pricing.clone());
+        merged
+    };
     let tools = if project.tools.allow_list != default_allow_list() || project.tools.auto_approve {
         ToolsConfig {
             auto_approve: clamped_auto_approve,
@@ -4081,6 +4112,7 @@ fn merge_config_files_with_trust(
             sandbox: project.tools.sandbox.or(global.tools.sandbox),
             // GHSA-8r7g: tighten-only (see clamp above).
             allow_no_sandbox: clamped_allow_no_sandbox,
+            media_pricing: merged_media_pricing,
         }
     } else {
         ToolsConfig {
@@ -4096,6 +4128,7 @@ fn merge_config_files_with_trust(
             sandbox: project.tools.sandbox.or(global.tools.sandbox),
             // GHSA-8r7g: tighten-only (see clamp above).
             allow_no_sandbox: clamped_allow_no_sandbox,
+            media_pricing: merged_media_pricing,
         }
     };
 

@@ -64,6 +64,9 @@ use wcore_protocol::events::ToolCategory;
 use wcore_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
+use crate::media_cost::{
+    MediaCostLedger, MediaCostRecord, MediaOutcome, MediaRateCard, MediaUnits, ReportedCost,
+};
 use crate::url_safety::is_safe_url;
 
 /// Hard cap on the returned image payload — applied to either the
@@ -136,6 +139,15 @@ pub struct ImageGenerationResponse {
     pub used_provider: String,
     pub width: u32,
     pub height: u32,
+    /// F27-C3 accounting. A cost figure the backend **actually observed** on
+    /// the wire — an HTTP response header or a body field. Backends must
+    /// leave this `None` when the provider returned nothing; it is measured
+    /// true of FluxRouter image generation that no channel carries a cost.
+    /// Never synthesise a value here: the tool distinguishes "the provider
+    /// said so" from "the operator estimated it" and that distinction is only
+    /// sound if this field means what it says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_cost: Option<ReportedCost>,
 }
 
 /// Error categories used by the tool to produce friendly user-facing
@@ -165,6 +177,23 @@ pub enum ImageGenerationError {
     /// Anything else — preserved verbatim.
     #[error("image generation failed: {0}")]
     Other(String),
+}
+
+impl ImageGenerationError {
+    /// Stable machine-readable failure class. F27-C3 asks whether failure
+    /// semantics are *consistent* across the built-in, MCP-only, late-MCP and
+    /// combined presentations of the same capability — that question is only
+    /// answerable if failures carry a comparable label rather than only a
+    /// prose message, so this is that label.
+    pub fn category(&self) -> &'static str {
+        match self {
+            Self::BackendNotConfigured(_) => "backend_not_configured",
+            Self::NoProviderConfigured(_) => "no_provider_configured",
+            Self::PromptRejected(_) => "prompt_rejected",
+            Self::InsufficientCredits(_) => "insufficient_credits",
+            Self::Other(_) => "other",
+        }
+    }
 }
 
 /// **The seam.** Real implementation lives in the host (`wcore-agent`
@@ -256,6 +285,14 @@ impl ImageGenerationBackend for CapturingImageGenerationBackend {
 pub struct ImageGenerationTool {
     backend: Arc<dyn ImageGenerationBackend>,
     backend_configured: bool,
+    /// F27-C3. Operator-configured USD-per-image prices. Empty by default —
+    /// an unconfigured install records units and reports `unpriced`, and never
+    /// invents a figure.
+    rate_card: MediaRateCard,
+    /// F27-C3. Session-scoped accumulation of the per-call records. `None`
+    /// when the host did not bind one; the record still reaches the model and
+    /// the protocol host through the tool result either way.
+    ledger: Option<Arc<MediaCostLedger>>,
 }
 
 impl Default for ImageGenerationTool {
@@ -272,6 +309,8 @@ impl ImageGenerationTool {
         Self {
             backend: Arc::new(NullImageGenerationBackend),
             backend_configured: false,
+            rate_card: MediaRateCard::default(),
+            ledger: None,
         }
     }
 
@@ -280,7 +319,46 @@ impl ImageGenerationTool {
         Self {
             backend,
             backend_configured: true,
+            rate_card: MediaRateCard::default(),
+            ledger: None,
         }
+    }
+
+    /// F27-C3. Bind an operator-configured price list. Without one, calls are
+    /// recorded with their units and reported `unpriced`.
+    pub fn with_rate_card(mut self, rate_card: MediaRateCard) -> Self {
+        self.rate_card = rate_card;
+        self
+    }
+
+    /// F27-C3. Bind a session ledger so media spend accumulates somewhere a
+    /// host can total it.
+    pub fn with_cost_ledger(mut self, ledger: Arc<MediaCostLedger>) -> Self {
+        self.ledger = Some(ledger);
+        self
+    }
+
+    /// Record one media call and hand back the JSON block that rides in the
+    /// tool result. Recording and surfacing are done in one place so a record
+    /// can never reach the ledger without also reaching the caller, or vice
+    /// versa.
+    fn account(&self, record: MediaCostRecord) -> Value {
+        tracing::info!(
+            target: "wcore::media_cost",
+            tool = %record.tool,
+            backend_id = %record.backend_id,
+            model = %record.model,
+            images = record.units.images,
+            megapixels = record.units.megapixels(),
+            cost_usd = ?record.cost_usd,
+            "media call accounted: {}",
+            record.summary_line()
+        );
+        let block = record.to_json();
+        if let Some(ledger) = &self.ledger {
+            ledger.record(record);
+        }
+        block
     }
 
     /// Bound the size of the backend-returned `image` field. For
@@ -444,15 +522,35 @@ Returns a single image URL or data URL. Display it via markdown: ![desc](URL)."
 
         match self.backend.generate(req).await {
             Ok(resp) => {
+                // F27-C3. The provider performed the work at the dimensions it
+                // reports back, so the record is built from the RESPONSE, not
+                // from what was asked for. Built once here and reused by every
+                // exit below, so no post-call branch can drop the accounting.
+                let billed = MediaCostRecord::for_success(
+                    self.name(),
+                    resp.used_provider.clone(),
+                    resp.used_provider.clone(),
+                    MediaUnits::one_image(resp.width, resp.height),
+                    resp.reported_cost.clone(),
+                    &self.rate_card,
+                );
+
                 // Bound the returned payload size (defense-in-depth
                 // against pathological backends).
                 if let Err(e) = Self::check_payload_size(&resp.image) {
+                    // The upstream call SUCCEEDED and was billable — the
+                    // rejection is ours. Account it, or the user pays for an
+                    // image they never see and nothing records the spend.
+                    let accounting = self.account(billed.with_outcome(MediaOutcome::Failed {
+                        category: "payload_rejected_locally".to_string(),
+                    }));
                     return ToolResult {
                         content: json!({
                             "success": false,
                             "image": null,
                             "error": e,
                             "freeFallbackUsed": false,
+                            "accounting": accounting,
                         })
                         .to_string(),
                         is_error: true,
@@ -461,18 +559,25 @@ Returns a single image URL or data URL. Display it via markdown: ![desc](URL)."
                 // SSRF sanity check on returned URL (data: URLs and
                 // http:// pre-signed URLs pass through).
                 if let Err(e) = Self::check_image_url_ssrf(&resp.image) {
+                    // Same reasoning as the payload-size branch: billable work
+                    // happened upstream before we refused the result.
+                    let accounting = self.account(billed.with_outcome(MediaOutcome::Failed {
+                        category: "unsafe_url_rejected_locally".to_string(),
+                    }));
                     return ToolResult {
                         content: json!({
                             "success": false,
                             "image": null,
                             "error": e,
                             "freeFallbackUsed": false,
+                            "accounting": accounting,
                         })
                         .to_string(),
                         is_error: true,
                     };
                 }
 
+                let accounting = self.account(billed);
                 ToolResult {
                     content: json!({
                         "success": true,
@@ -481,6 +586,7 @@ Returns a single image URL or data URL. Display it via markdown: ![desc](URL)."
                         "usedProvider": resp.used_provider,
                         "width": resp.width,
                         "height": resp.height,
+                        "accounting": accounting,
                     })
                     .to_string(),
                     is_error: false,
@@ -488,13 +594,33 @@ Returns a single image URL or data URL. Display it via markdown: ![desc](URL)."
             }
             Err(e) => {
                 let friendly = Self::friendly_error(&e);
+                // F27-C3. A failed call is accounted too, and explicitly NOT as
+                // $0.00 — a provider can bill for a rejected prompt. The units
+                // recorded are the units that were requested.
+                //
+                // The two configuration errors are the exception: no request
+                // ever left the process, so nothing was billable and inventing
+                // a record for them would overstate spend.
+                let accounting = match &e {
+                    ImageGenerationError::BackendNotConfigured(_)
+                    | ImageGenerationError::NoProviderConfigured(_) => Value::Null,
+                    _ => self.account(MediaCostRecord::for_failure(
+                        self.name(),
+                        "unresolved",
+                        "unresolved",
+                        MediaUnits::one_image(width, height),
+                        e.category(),
+                    )),
+                };
                 ToolResult {
                     content: json!({
                         "success": false,
                         "image": null,
                         "error": format!("Error generating image: {e}"),
                         "details": friendly,
+                        "errorCategory": e.category(),
                         "freeFallbackUsed": false,
+                        "accounting": accounting,
                     })
                     .to_string(),
                     is_error: true,
@@ -514,6 +640,7 @@ mod tests {
             used_provider: "OpenAI gpt-image-1".to_string(),
             width: 1536,
             height: 1024,
+            reported_cost: None,
         }
     }
 
@@ -652,6 +779,7 @@ mod tests {
                 used_provider: "FAL FLUX 2 Pro".to_string(),
                 width: 1024,
                 height: 1024,
+                reported_cost: None,
             },
         ));
         let tool = ImageGenerationTool::with_backend(backend);

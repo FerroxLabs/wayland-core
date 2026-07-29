@@ -37,7 +37,22 @@ const OPTIONAL_CAPABILITIES: &[Capability] = &[
     Capability {
         label: "Image generation",
         tool: "image_generate",
-        hint: "set OPENAI_API_KEY, FAL_API_KEY, GEMINI_API_KEY, or HF_API_KEY",
+        // F27-C3. `FLUX_API_KEY` leads because the resolver's FIRST and
+        // highest-priority arm is `dalle_backend_from_config` — an active
+        // OpenAI-wire provider (FluxRouter or OpenAI) resolved from config,
+        // which is not a `read_env_key` call at all.
+        //
+        // MEASURED 2026-07-29 on `hetzner-dsm`, not read off the source: a
+        // session with ONLY `FLUX_API_KEY` set booted with
+        // `image_gen: using gpt-image-1 ... (active OpenAI-wire provider)`,
+        // i.e. the tool registered through an arm this hint did not name.
+        // A user with a Flux key who hit the old advisory was told to set one
+        // of four keys, none of which was the one they already had — the same
+        // defect family as the `[browser]` / `[browser.policy]` remediation
+        // that sent every user in a circle. Every OTHER media hint here
+        // already names the OpenAI-wire arm; this was the outlier.
+        hint: "set FLUX_API_KEY, OPENAI_API_KEY, FAL_API_KEY, GEMINI_API_KEY, or HF_API_KEY \
+               (or configure an OpenAI-wire provider)",
     },
     Capability {
         label: "Image understanding (vision)",
@@ -131,8 +146,20 @@ mod tests {
         );
         // Missing ones are named with their fix.
         assert!(advisory.contains("Image generation"));
+        // F27-C3: the image-generation hint must name the config-provider arm
+        // AND the credential that drives it. Measured live: a session with
+        // only FLUX_API_KEY set registers the tool through that arm, so a hint
+        // that omits it is wrong in the one configuration this product ships.
         assert!(
-            advisory.contains("set OPENAI_API_KEY, FAL_API_KEY, GEMINI_API_KEY, or HF_API_KEY")
+            advisory.contains(
+                "set FLUX_API_KEY, OPENAI_API_KEY, FAL_API_KEY, GEMINI_API_KEY, or HF_API_KEY"
+            ),
+            "image-gen hint must lead with the config-arm credential: {advisory}"
+        );
+        assert!(
+            advisory.contains("or configure an OpenAI-wire provider"),
+            "image-gen hint must name the config arm in words, since no env-var \
+             name expresses it: {advisory}"
         );
         assert!(advisory.contains("Text-to-speech"));
         assert!(advisory.contains("set DISCORD_BOT_TOKEN"));
@@ -163,12 +190,92 @@ mod tests {
         keys
     }
 
+    /// The credential that populates `config.api_key` for the resolver's
+    /// config-provider arm in the setup this product ships as its flagship.
+    const CONFIG_ARM_KEY: &str = "FLUX_API_KEY";
+
+    /// Does this resolver consult a config-resolved provider (rather than only
+    /// environment variables)? Such an arm can enable a capability with NO
+    /// matching `read_env_key`, which is exactly what the old guard could not
+    /// see.
+    fn resolver_has_config_arm(src: &str) -> bool {
+        src.contains("dalle_backend_from_config") || src.contains("openai_wire_media_base")
+    }
+
+    /// Does a hint tell the user that configuring a provider — not just
+    /// exporting a key — is a route to the capability?
+    fn hint_names_config_arm(hint: &str) -> bool {
+        hint.contains("OpenAI-wire provider")
+    }
+
     /// Extract the `*_API_KEY` / `*_TOKEN` env-var names named in a hint string.
     fn env_vars_in(hint: &str) -> Vec<String> {
         hint.split(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
             .filter(|t| t.ends_with("_API_KEY") || t.ends_with("_TOKEN"))
             .map(|t| t.to_string())
             .collect()
+    }
+
+    /// Self-test for the Guard 1b repair (F27-C3), with the three assertions
+    /// LANE-BRIEF §6b-ii requires — the third being the one that proves the
+    /// repair does anything at all.
+    ///
+    /// Without assertion 3, this whole self-test would pass unchanged on the
+    /// BROKEN guard, because the broken guard's predicate is not exercised
+    /// here. Assertion 3 is what demonstrates the old matcher could not have
+    /// caught the defect that was actually shipped.
+    #[test]
+    fn config_arm_guard_catches_what_the_env_var_matcher_could_not() {
+        // The exact hint that shipped before this repair.
+        const OLD_BROKEN_HINT: &str =
+            "set OPENAI_API_KEY, FAL_API_KEY, GEMINI_API_KEY, or HF_API_KEY";
+        let shipped_hint = OPTIONAL_CAPABILITIES
+            .iter()
+            .find(|c| c.tool == "image_generate")
+            .map(|c| c.hint)
+            .expect("image_generate capability present");
+
+        // 1. Known-positive: the repaired guard accepts the hint we now ship.
+        assert!(
+            hint_names_config_arm(shipped_hint),
+            "repaired guard rejects the shipped hint: {shipped_hint}"
+        );
+
+        // 2. Known-negative: the repaired guard REJECTS the hint that shipped
+        //    the defect. A guard that accepts everything is not a guard.
+        assert!(
+            !hint_names_config_arm(OLD_BROKEN_HINT),
+            "repaired guard accepts the very hint that omitted the config arm"
+        );
+
+        // 3. The old matcher would have MISSED it. `env_vars_in` on the broken
+        //    hint yields exactly the resolver's `read_env_key` list, so the
+        //    pre-repair equality assertion passed on it — which is precisely
+        //    why the defect shipped. This is the assertion that proves the
+        //    repair is not decorative.
+        assert_eq!(
+            env_vars_in(OLD_BROKEN_HINT),
+            vec![
+                "OPENAI_API_KEY",
+                "FAL_API_KEY",
+                "GEMINI_API_KEY",
+                "HF_API_KEY"
+            ],
+            "the broken hint must still satisfy the OLD env-var matcher — if it no \
+             longer does, this self-test has stopped demonstrating the blind spot"
+        );
+
+        // And the detector fires on the real resolver source, not just on
+        // strings: the config arm genuinely exists in the file.
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tool_backends/image_gen.rs"),
+        )
+        .expect("read image_gen resolver source");
+        assert!(resolver_has_config_arm(&src));
+        assert!(
+            !resolver_has_config_arm("fn build() { read_env_key(\"OPENAI_API_KEY\"); }"),
+            "the config-arm detector must not fire on an env-only resolver"
+        );
     }
 
     /// Anti-drift: the env-var hints in `OPTIONAL_CAPABILITIES` must stay in
@@ -202,10 +309,35 @@ mod tests {
             .find(|c| c.tool == "image_generate")
             .map(|c| c.hint)
             .expect("image_generate capability present");
+        // The hint leads with the config-arm credential, then names every
+        // `read_env_key` probe in resolver order.
+        let mut expected = vec![CONFIG_ARM_KEY.to_string()];
+        expected.extend(resolver_keys.iter().cloned());
         assert_eq!(
             env_vars_in(image_hint),
-            resolver_keys,
-            "image_generate hint env vars must match the resolver's probe order exactly: {image_hint}"
+            expected,
+            "image_generate hint env vars must match the config arm followed by the \
+             resolver's probe order exactly: {image_hint}"
+        );
+
+        // Guard 1b — REPAIR (F27-C3). The assertion above compares the hint
+        // against `read_env_key` calls only, so it is STRUCTURALLY BLIND to
+        // the resolver's first arm, `dalle_backend_from_config`, which reads
+        // no env var. It therefore certified a hint that omitted the arm that
+        // actually enables the tool in a FluxRouter session — measured live on
+        // 2026-07-29. Noting that and moving on would leave the defect in
+        // place (LANE-BRIEF §6b-ii), so the instrument is repaired here:
+        // whenever the resolver consults a config-provider arm, the hint must
+        // say so in words as well as naming a key.
+        assert!(
+            resolver_has_config_arm(&image_gen_src),
+            "the image_gen resolver no longer consults a config provider arm — if that \
+             is intended, drop this guard and the OpenAI-wire clause from the hint"
+        );
+        assert!(
+            hint_names_config_arm(image_hint),
+            "the image_gen resolver's FIRST arm resolves an OpenAI-wire provider from \
+             config, which no env-var name can express. The hint must say so: {image_hint}"
         );
 
         // Guard 2: every env var named in ANY hint must actually be read by some

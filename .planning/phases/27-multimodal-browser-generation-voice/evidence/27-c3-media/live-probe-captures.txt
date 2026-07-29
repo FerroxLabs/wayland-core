@@ -1,0 +1,119 @@
+########## p1-arm-readback.stderr
+warning: /root/wayland-27c3-live/home/config.toml has permissions 0o644; tightening to 0o600 on next write
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /root/wayland-27c3-live/home/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+[2m2026-07-29T13:59:25.205844Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+[2m2026-07-29T13:59:25.206161Z[0m [32m INFO[0m image_gen: using gpt-image-1 at https://api.fluxrouter.ai/v1/images/generations (active OpenAI-wire provider)
+[2m2026-07-29T13:59:25.206183Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+[2m2026-07-29T13:59:25.206255Z[0m [32m INFO[0m vision: using flux-auto at https://api.fluxrouter.ai/v1/chat/completions (active OpenAI-wire provider)
+[2m2026-07-29T13:59:25.206292Z[0m [32m INFO[0m transcription: using flux-voice-fast at https://api.fluxrouter.ai/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-29T13:59:25.206336Z[0m [32m INFO[0m tts: using OpenAI TTS at  (active OpenAI-wire provider)
+[2m2026-07-29T13:59:25.206640Z[0m [33m WARN[0m video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+[2m2026-07-29T13:59:25.206707Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-29T13:59:25.224388Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T13:59:25.224453Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T13:59:25.227401Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T14:00:06.867753Z[0m [32m INFO[0m transcription: using flux-voice-fast at https://api.fluxrouter.ai/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-29T14:00:06.867818Z[0m [32m INFO[0m vision: using flux-auto at https://api.fluxrouter.ai/v1/chat/completions (active OpenAI-wire provider)
+[2m2026-07-29T14:00:06.868403Z[0m [32m INFO[0m F-014: channels auto-registered from ~/.wayland/channels [3mcount[0m[2m=[0m0
+[2m2026-07-29T14:00:06.868484Z[0m [32m INFO[0m Phase 1B-2: inbound channel subscriber spawned
+[2m2026-07-29T14:00:06.869817Z[0m [32m INFO[0m F-014: channel_manager.start_all() complete — inbound polling active
+Pricing unavailable for flux-router/flux-fast; the call remains bounded by the token envelope and cost is unpriced, not $0.
+
+[turns: 1 | tokens: 3076 in / 4 out]
+########## p1-arm-readback.stdout
+* PROBE_OK
+########## p2-default-model.stderr
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /root/wayland-27c3-live/home/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+[2m2026-07-29T14:00:09.484676Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+[2m2026-07-29T14:00:09.484968Z[0m [32m INFO[0m image_gen: using gpt-image-1 at https://api.fluxrouter.ai/v1/images/generations (active OpenAI-wire provider)
+[2m2026-07-29T14:00:09.484989Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+[2m2026-07-29T14:00:09.485063Z[0m [32m INFO[0m vision: using flux-auto at https://api.fluxrouter.ai/v1/chat/completions (active OpenAI-wire provider)
+[2m2026-07-29T14:00:09.485106Z[0m [32m INFO[0m transcription: using flux-voice-fast at https://api.fluxrouter.ai/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-29T14:00:09.485148Z[0m [32m INFO[0m tts: using OpenAI TTS at  (active OpenAI-wire provider)
+[2m2026-07-29T14:00:09.485467Z[0m [33m WARN[0m video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+[2m2026-07-29T14:00:09.485528Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-29T14:00:09.488723Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T14:00:09.488760Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T14:00:09.490707Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T14:00:50.867260Z[0m [32m INFO[0m transcription: using flux-voice-fast at https://api.fluxrouter.ai/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-29T14:00:50.867324Z[0m [32m INFO[0m vision: using flux-auto at https://api.fluxrouter.ai/v1/chat/completions (active OpenAI-wire provider)
+[2m2026-07-29T14:00:50.867998Z[0m [32m INFO[0m F-014: channels auto-registered from ~/.wayland/channels [3mcount[0m[2m=[0m0
+[2m2026-07-29T14:00:50.868085Z[0m [32m INFO[0m Phase 1B-2: inbound channel subscriber spawned
+[2m2026-07-29T14:00:50.868521Z[0m [32m INFO[0m F-014: channel_manager.start_all() complete — inbound polling active
+Pricing unavailable for flux-router/flux-fast; the call remains bounded by the token envelope and cost is unpriced, not $0.
+> ToolSearch({"query":"image_generate"})
+  └> [
+  {
+    "description": "Generate high-quality images from text prompts. Uses the configured image-gen provider (Google Imagen, OpenAI DALL-E, or FAL FLUX 2 Pro). Returns a single image URL or data URL. Display it via markdown: ![desc](URL).",
+    "name": "image_generate",
+    "parameters": {
+      "properties": {
+        "aspect_ratio": {
+          "default": "landscape",
+          "description": "Aspect ratio: 'landscape' (16:9), 'portrait' (9:16), 'square' (1:1).",
+          "enum": [
+      ...
+Pricing unavailable for flux-router/flux-fast; the call remains bounded by the token envelope and cost is unpriced, not $0.
+> image_generate({"prompt":"a small red lighthouse at dusk"})
+[2m2026-07-29T14:00:55.635126Z[0m [32m INFO[0m media call accounted: image_generate via unresolved (unresolved): 1 image(s) 1536x1024 = 1.573 MP — unpriced — the call failed and it is unknown whether the provider billed for it. Not treated as $0. [3mtool[0m[2m=[0mimage_generate [3mbackend_id[0m[2m=[0munresolved [3mmodel[0m[2m=[0munresolved [3mimages[0m[2m=[0m1 [3mmegapixels[0m[2m=[0m1.572864 [3mcost_usd[0m[2m=[0mNone
+  X {"accounting":{"backend_id":"unresolved","model":"unresolved","outcome":{"category":"other","status":"failed"},"price_source":{"kind":"unpriced","reason":"call_failed_billing_unknown"},"tool":"image_generate","units":{"height":1024,"images":1,"width":1536}},"details":"There was a problem generating the image. Error: openai image returned HTTP 401: {\"error\":{\"message\":\"unauthorized\"}}","error":"Error generating image: image generation failed: openai image returned HTTP 401: {\"error\":{\"me...
+Pricing unavailable for flux-router/flux-fast; the call remains bounded by the token envelope and cost is unpriced, not $0.
+
+[turns: 3 | tokens: 10184 in / 297 out]
+########## p2-default-model.stdout
+
+* The image generation attempt failed due to an authorization error (HTTP 401 unauthorized). Please ensure the OpenAI API key is properly configured for image generation.
+########## p3-entitled-model.stderr
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /root/wayland-27c3-live/home/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+[2m2026-07-29T14:00:57.888700Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+[2m2026-07-29T14:00:57.888982Z[0m [32m INFO[0m image_gen: using flux-image at https://api.fluxrouter.ai/v1/images/generations (active OpenAI-wire provider)
+[2m2026-07-29T14:00:57.889002Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+[2m2026-07-29T14:00:57.889073Z[0m [32m INFO[0m vision: using flux-auto at https://api.fluxrouter.ai/v1/chat/completions (active OpenAI-wire provider)
+[2m2026-07-29T14:00:57.889109Z[0m [32m INFO[0m transcription: using flux-voice-fast at https://api.fluxrouter.ai/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-29T14:00:57.889154Z[0m [32m INFO[0m tts: using OpenAI TTS at  (active OpenAI-wire provider)
+[2m2026-07-29T14:00:57.889431Z[0m [33m WARN[0m video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+[2m2026-07-29T14:00:57.889489Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-29T14:00:57.892679Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T14:00:57.892720Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T14:00:57.894758Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T14:01:39.213533Z[0m [32m INFO[0m transcription: using flux-voice-fast at https://api.fluxrouter.ai/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-29T14:01:39.213603Z[0m [32m INFO[0m vision: using flux-auto at https://api.fluxrouter.ai/v1/chat/completions (active OpenAI-wire provider)
+[2m2026-07-29T14:01:39.214237Z[0m [32m INFO[0m F-014: channels auto-registered from ~/.wayland/channels [3mcount[0m[2m=[0m0
+[2m2026-07-29T14:01:39.214316Z[0m [32m INFO[0m Phase 1B-2: inbound channel subscriber spawned
+[2m2026-07-29T14:01:39.214948Z[0m [32m INFO[0m F-014: channel_manager.start_all() complete — inbound polling active
+Pricing unavailable for flux-router/flux-fast; the call remains bounded by the token envelope and cost is unpriced, not $0.
+> ToolSearch({"query":"image_generate"})
+  └> [
+  {
+    "description": "Generate high-quality images from text prompts. Uses the configured image-gen provider (Google Imagen, OpenAI DALL-E, or FAL FLUX 2 Pro). Returns a single image URL or data URL. Display it via markdown: ![desc](URL).",
+    "name": "image_generate",
+    "parameters": {
+      "properties": {
+        "aspect_ratio": {
+          "default": "landscape",
+          "description": "Aspect ratio: 'landscape' (16:9), 'portrait' (9:16), 'square' (1:1).",
+          "enum": [
+      ...
+Pricing unavailable for flux-router/flux-fast; the call remains bounded by the token envelope and cost is unpriced, not $0.
+> image_generate({"prompt":"a small red lighthouse at dusk"})
+[2m2026-07-29T14:01:44.587444Z[0m [32m INFO[0m media call accounted: image_generate via OpenAI flux-image (OpenAI flux-image): 1 image(s) 1792x1024 = 1.835 MP — unpriced — this provider reports no cost for this call, and no local rate-card entry matched. The call was still billable. [3mtool[0m[2m=[0mimage_generate [3mbackend_id[0m[2m=[0mOpenAI flux-image [3mmodel[0m[2m=[0mOpenAI flux-image [3mimages[0m[2m=[0m1 [3mmegapixels[0m[2m=[0m1.835008 [3mcost_usd[0m[2m=[0mNone
+  └> {"accounting":{"backend_id":"OpenAI flux-image","model":"OpenAI flux-image","outcome":{"status":"ok"},"price_source":{"kind":"unpriced","reason":"provider_reports_no_cost"},"tool":"image_generate","units":{"height":1024,"images":1,"width":1792}},"freeFallbackUsed":false,"height":1024,"image":"data:image/png;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAIBAQEBAQIBAQECAgICAgQDAgICAgUEBAMEBgUGBgYFBgYGBwkIBgcJBwYGCAsICQoKCgoKBggLDAsKDAkKCgr/2wBDAQICAgICAgUDAwUKBwYHCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoK...
+Pricing unavailable for flux-router/flux-fast; the call remains bounded by the token envelope and cost is unpriced, not $0.
+
+[turns: 3 | tokens: 243334 in / 43 out]
+########## p3-entitled-model.stdout
+
+* ![a small red lighthouse at dusk](data:image/png;base64,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oAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACgAoAKACDone.
+########## p4-image-subcommand.stderr
+accounting: wayland-core image via https://api.fluxrouter.ai/v1#flux-image (flux-image): 1 image(s) size not reported by this surface — unpriced — this provider reports no cost for this call, and no local rate-card entry matched. The call was still billable.
+accounting_json: {"backend_id":"https://api.fluxrouter.ai/v1#flux-image","model":"flux-image","outcome":{"status":"ok"},"price_source":{"kind":"unpriced","reason":"provider_reports_no_cost"},"tool":"wayland-core image","units":{"images":1}}
+wrote /root/wayland-27c3-live/p4.png (137457 bytes)
+########## p4-image-subcommand.stdout
+
+########## p5-image-subcommand-varied.stderr
+accounting: wayland-core image via https://api.fluxrouter.ai/v1#flux-image (flux-image): 2 image(s) 1024x1024 = 2.097 MP — unpriced — the call failed and it is unknown whether the provider billed for it. Not treated as $0.
+accounting_json: {"backend_id":"https://api.fluxrouter.ai/v1#flux-image","model":"flux-image","outcome":{"category":"other","status":"failed"},"price_source":{"kind":"unpriced","reason":"call_failed_billing_unknown"},"tool":"wayland-core image","units":{"height":1024,"images":2,"width":1024}}
+wayland-core image: image generation failed: API error 502: error code: 502
+
+########## p5-image-subcommand-varied.stdout
+

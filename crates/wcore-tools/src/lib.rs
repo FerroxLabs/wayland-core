@@ -91,6 +91,12 @@ pub mod markdown_tool;
 // third party issue its own open, so the bytes parsed were not provably the
 // bytes validated. See the module docs for the syscall trace.
 pub mod media_intake;
+// Phase 27 (F27-03): per-call cost record for billable media generation.
+// Measured need: a media call produced NO cost record of any kind, because the
+// only cost sink in the product is a provider reserve→settle keyed to token
+// counts and a media call has no tokens. See the module docs for the live
+// header/body probe that constrains the design.
+pub mod media_cost;
 // T2-C2: Mixture-of-Agents tool (Wang 2024 — proposer fan-out + aggregator synth).
 pub mod moa;
 // T6 (v0.6.3 Tier 2B): Notion REST API tool — page/block reads +

@@ -1304,8 +1304,19 @@ impl AgentBootstrap {
         if let Some(b) =
             crate::tool_backends::image_gen::build_image_gen_backend(&self.config, false)
         {
+            // F27-C3 — bind the media cost record. Image generation is
+            // billable; before this the call produced no cost record at all
+            // because the product's only cost sink is a provider
+            // reserve→settle keyed to token counts, which a media call has
+            // none of. The rate card comes from `[tools.media_pricing]` and
+            // is empty unless the operator filled it in, in which case the
+            // resolved figure is stamped `local_rate_card` and never
+            // presented as the provider's own number.
             registry.register(Box::new(
-                wcore_tools::image_generation_tool::ImageGenerationTool::with_backend(b),
+                wcore_tools::image_generation_tool::ImageGenerationTool::with_backend(b)
+                    .with_rate_card(wcore_tools::media_cost::MediaRateCard::new(
+                        self.config.tools.media_pricing.clone(),
+                    )),
             ));
         }
         // `web` tool — wired to a real search backend so the model

@@ -1,0 +1,46 @@
+=== BASELINE (unmutated) — every gate must be GREEN before any mutation
+    A mutation control is meaningless if the gate was already red.
+--- baseline/unit-variance (expect: GREEN)
+  baseline/unit-variance: rc=0  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1002 filtered out; finished in 0.00s
+--- baseline/e2e-variance (expect: GREEN)
+  baseline/e2e-variance: rc=0  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+--- baseline/e2e-header-cost (expect: GREEN)
+  baseline/e2e-header-cost: rc=0  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+--- baseline/e2e-unpriced (expect: GREEN)
+  baseline/e2e-unpriced: rc=0  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+--- baseline/e2e-failure-not-zero (expect: GREEN)
+  baseline/e2e-failure-not-zero: rc=0  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+--- M1/unit-variance (expect: RED)
+  M1/unit-variance: rc=101  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1002 filtered out; finished in 0.00s
+--- M1/e2e-variance (expect: RED)
+  M1/e2e-variance: rc=101  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+--- M2/e2e-header-cost (expect: RED)
+  M2/e2e-header-cost: rc=101  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+--- M2/e2e-unpriced-still-green (expect: GREEN)
+  M2/e2e-unpriced-still-green: rc=0  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+--- M3/unit-failure-not-zero (expect: RED)
+  M3/unit-failure-not-zero: rc=101  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1002 filtered out; finished in 0.00s
+--- M3/e2e-failure-not-zero (expect: RED)
+  M3/e2e-failure-not-zero: rc=101  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+--- M4/unit-rate-card-label (expect: RED)
+  M4/unit-rate-card-label: rc=101  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1002 filtered out; finished in 0.00s
+--- M4/e2e-rate-card-label (expect: RED)
+  M4/e2e-rate-card-label: rc=101  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+=== RESULTS
+
+OK       baseline/unit-variance -> GREEN as required
+OK       baseline/e2e-variance -> GREEN as required
+OK       baseline/e2e-header-cost -> GREEN as required
+OK       baseline/e2e-unpriced -> GREEN as required
+OK       baseline/e2e-failure-not-zero -> GREEN as required
+OK       M1/unit-variance -> RED as required
+OK       M1/e2e-variance -> RED as required
+OK       M2/e2e-header-cost -> RED as required
+OK       M2/e2e-unpriced-still-green -> GREEN as required
+OK       M3/unit-failure-not-zero -> RED as required
+OK       M3/e2e-failure-not-zero -> RED as required
+OK       M4/unit-rate-card-label -> RED as required
+OK       M4/e2e-rate-card-label -> RED as required
+
+MUTATION_CONTROL=PASS  (every gate proved able to fail)
