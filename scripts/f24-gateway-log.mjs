@@ -32,10 +32,11 @@
  *   one channel's `channel=` to another's `posture=`, and a matcher that
  *   mis-attributes silently is worse than one that finds nothing.
  */
-export function observedPostureIn(logText, channelName) {
-  if (typeof logText !== 'string' || logText.length === 0) {
+export function observedPostureIn(rawLogText, channelName) {
+  if (typeof rawLogText !== 'string' || rawLogText.length === 0) {
     return { posture: null, tier: 'no-log', sightings: 0 };
   }
+  const logText = stripAnsi(rawLogText);
   const esc = escapeRe(channelName);
 
   const sameLine = new RegExp(
@@ -69,10 +70,46 @@ export function observedPostureIn(logText, channelName) {
  * dead pipe, a wrong URL, a crashed gateway or a typo'd channel name — every
  * one of which produces the same zero. The denial has to be SIGHTED.
  */
-export function denialsIn(logText, channelName) {
-  if (typeof logText !== 'string' || logText.length === 0) return 0;
+export function denialsIn(rawLogText, channelName) {
+  if (typeof rawLogText !== 'string' || rawLogText.length === 0) return 0;
   const re = new RegExp(`inbound denied[^\\n]*?channel\\s*=\\s*"?${escapeRe(channelName)}"?`, 'g');
-  return (logText.match(re) || []).length;
+  return (stripAnsi(rawLogText).match(re) || []).length;
+}
+
+/**
+ * Remove ANSI SGR escapes.
+ *
+ * **This is an instrument repair, made after the instrument produced a false
+ * absence — the exact failure class this program keeps rediscovering.**
+ *
+ * The first live control run of these matchers reported `posture=null,
+ * sightings=0` for EVERY channel, and the leg dutifully graded FAIL. The line
+ * was in the log the whole time. `tracing-subscriber` colourises field names
+ * when it writes, so what is on disk is not
+ *
+ *     channel turn dispatch channel=f24finthree posture=Workspace
+ *
+ * but
+ *
+ *     channel turn dispatch \x1b[3mchannel\x1b[0m\x1b[2m=\x1b[0mf24finthree ...
+ *
+ * — the escape sequences sit BETWEEN the field name and the `=`, so
+ * `channel\s*=` cannot match. Every posture read came back null, which is
+ * indistinguishable from "the product never dispatched" and would have been
+ * reported as a product finding by a less suspicious reading.
+ *
+ * It was caught only because the leg carried a positive control that ALSO read
+ * null: a channel known to have been admitted (its reply is in the sink
+ * journal) cannot honestly have no dispatch line, so the zero had to be the
+ * instrument. That is the entire argument for pairing every zero with a
+ * control.
+ *
+ * Repaired here rather than noted (§6b-ii), with three self-test assertions
+ * over the VERBATIM bytes captured from that run.
+ */
+export function stripAnsi(s) {
+  // eslint-disable-next-line no-control-regex
+  return String(s).replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
 }
 
 function escapeRe(s) {

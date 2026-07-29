@@ -482,6 +482,74 @@ check('denial matcher: the OLD shape (absence of arrival) would have missed a de
   );
 });
 
+// ── The ANSI repair (§6b-ii), asserted over VERBATIM captured bytes ──────────
+//
+// Copied byte-for-byte out of `gateway.log` from the first live control run,
+// where the un-stripped matcher reported `posture=null sightings=0` for every
+// channel while these very lines sat in the file. Hand-writing the fixture
+// would have reproduced my assumption rather than the product's output, which
+// is how the bug got in.
+const ANSI_LINES = [
+  '\x1b[2m2026-07-29T02:47:44.188238Z\x1b[0m \x1b[34mDEBUG\x1b[0m channel turn dispatch \x1b[3mchannel\x1b[0m\x1b[2m=\x1b[0mf24finone \x1b[3mposture\x1b[0m\x1b[2m=\x1b[0mConversational',
+  '\x1b[2m2026-07-29T02:47:47.149052Z\x1b[0m \x1b[34mDEBUG\x1b[0m channel turn dispatch \x1b[3mchannel\x1b[0m\x1b[2m=\x1b[0mf24finthree \x1b[3mposture\x1b[0m\x1b[2m=\x1b[0mWorkspace',
+  '\x1b[2m2026-07-29T02:47:49.000000Z\x1b[0m \x1b[32m INFO\x1b[0m inbound denied \x1b[3mchannel\x1b[0m\x1b[2m=\x1b[0mf24finthree \x1b[3mreason\x1b[0m\x1b[2m=\x1b[0msender not in dm allowlist',
+  '',
+].join('\n');
+
+/** The matcher exactly as it was before the ANSI repair. */
+function preRepairPosture(logText, channelName) {
+  const re = new RegExp(
+    `channel turn dispatch[^\\n]*?channel\\s*=\\s*"?${channelName}"?[^\\n]*?posture\\s*=\\s*([A-Za-z]+)`,
+    'g',
+  );
+  let m;
+  let last = null;
+  while ((m = re.exec(logText)) !== null) last = m[1];
+  return last;
+}
+
+check('ANSI repair, known-positive: real colourised bytes yield the real posture', () => {
+  const p = observedPostureIn(ANSI_LINES, 'f24finthree');
+  assert(p.posture === 'Workspace', `want Workspace from the real bytes, got ${p.posture}`);
+  assert(p.tier === 'same-line', `want same-line, got ${p.tier}`);
+  assert(
+    observedPostureIn(ANSI_LINES, 'f24finone').posture === 'Conversational',
+    'and the other channel must read as its own posture, not the first one found',
+  );
+  assert(denialsIn(ANSI_LINES, 'f24finthree') === 1, 'the denial matcher must survive ANSI too');
+});
+
+check('ANSI repair, known-negative: a genuinely absent channel still reads null', () => {
+  assert(observedPostureIn(ANSI_LINES, 'nosuchchannel').posture === null, 'must stay null');
+  assert(denialsIn(ANSI_LINES, 'nosuchchannel') === 0, 'must stay 0');
+  // Liveness in the same invocation, so this zero is not free (§3b-i).
+  assert(
+    observedPostureIn(ANSI_LINES, 'f24finthree').posture === 'Workspace',
+    'liveness control: the same matcher over the same bytes still sees a real posture',
+  );
+});
+
+check('THE THIRD ASSERTION: the pre-repair matcher would have missed these lines', () => {
+  // This is the assertion that proves the repair does anything. Without it the
+  // self-test passes on the broken matcher too.
+  assert(
+    preRepairPosture(ANSI_LINES, 'f24finthree') === null,
+    'the OLD matcher must be shown blind to the colourised line — if it can read it, ' +
+      'the ANSI repair is not what fixed the live run and this evidence is wrong',
+  );
+  assert(
+    observedPostureIn(ANSI_LINES, 'f24finthree').posture === 'Workspace',
+    'and the NEW matcher must read it',
+  );
+  // Both matchers must still agree on UNcoloured input, so the repair is
+  // additive rather than a rewrite that changed the semantics.
+  assert(
+    preRepairPosture(LOG_REPAIRED, 'f24finthree') ===
+      observedPostureIn(LOG_REPAIRED, 'f24finthree').posture,
+    'on plain text the repair must be a no-op',
+  );
+});
+
 check('both matchers: a channel name is escaped, not injected, into the pattern', () => {
   // A name containing regex metacharacters must not silently widen the match —
   // that is how one channel's evidence gets attributed to another.
