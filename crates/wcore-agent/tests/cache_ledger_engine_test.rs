@@ -190,6 +190,12 @@ async fn a_real_run_writes_a_ledger_with_one_row_per_round_trip() {
     assert!(!ledger.turns[0].is_hit());
     assert!(ledger.turns[1].is_hit());
     assert!(ledger.turns[2].is_hit());
+    // A cold open that successfully WROTE cache is normal, not an
+    // invalidation, and must not be mislabelled `no_marker`.
+    assert_eq!(
+        ledger.turns[0].invalidation_cause, None,
+        "a cold open that wrote cache is not an invalidation"
+    );
 
     let s = ledger.summarize();
     assert_eq!(s.round_trips, 3);
@@ -384,6 +390,37 @@ async fn an_uncatalogued_model_is_recorded_as_an_estimate_not_as_spend() {
     let s2 = read_only_ledger(dir2.path()).summarize();
     assert_eq!(s2.cost_truth(), CostTruth::Priced);
     assert!(s2.cost_truth().is_trustworthy());
+}
+
+#[tokio::test]
+#[serial_test::serial(wayland_cache_ledger_env)]
+async fn a_provider_with_no_prompt_cache_at_all_is_attributed_no_marker() {
+    // MEASURED on a live local-Ollama session: round-trip 1 arrived at the
+    // ledger with NO invalidation cause. `CacheBreakDetector` returns
+    // `Healthy { hit_rate: 0.0 }` for the first request because it has nothing
+    // to compare against, which makes `CacheBreakCause::FirstRequest`
+    // unreachable from the engine — so the one round-trip that is guaranteed
+    // to be a miss was the one round-trip nothing explained.
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![text_turn(
+        "done",
+        usage(4_000, 10, 0, 0),
+    )]));
+    let mut config = test_config();
+    config.model = "claude-opus-4-7".to_string();
+    let mut engine =
+        AgentEngine::new_with_provider(provider, config, ToolRegistry::new(), silent_output());
+    engine.set_cache_ledger_dir(dir.path());
+    engine.run("go", "m").await.expect("run should succeed");
+
+    let ledger = read_only_ledger(dir.path());
+    assert_eq!(
+        ledger.turns[0].invalidation_cause,
+        Some(wcore_providers::cache_observation::InvalidationCause::NoMarker),
+        "an opening round-trip that neither read nor wrote cache must say why"
+    );
+    let s = ledger.summarize();
+    assert_eq!(s.invalidation_causes.get("no_marker"), Some(&1));
 }
 
 #[tokio::test]

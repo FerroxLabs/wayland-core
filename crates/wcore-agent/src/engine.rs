@@ -13007,6 +13007,24 @@ impl AgentEngine {
         {
             cause = Some(InvalidationCause::HistoryRewritten);
         }
+        // MEASURED on a live Ollama session: round-trip 1 recorded NO cause at
+        // all. `CacheBreakDetector::compute_diagnostic` returns
+        // `Healthy { hit_rate: 0.0 }` for the first request because it has no
+        // previous turn to compare against, so `CacheBreakCause::FirstRequest`
+        // is unreachable from the engine and the opening round-trip — always a
+        // miss — arrived at the ledger unattributed.
+        //
+        // Attribute it here, and ONLY in the case the vocabulary actually
+        // describes: neither a read nor a write happened, so no cache marker
+        // was honoured. A round-trip that WROTE cache is a normal cold open and
+        // is deliberately left unattributed rather than mislabelled `no_marker`.
+        if cause.is_none()
+            && round_trip == 1
+            && turn_usage.cache_read_tokens == 0
+            && turn_usage.cache_creation_tokens == 0
+        {
+            cause = Some(InvalidationCause::NoMarker);
+        }
 
         let sample = TurnSample {
             turn: turn as u64,
