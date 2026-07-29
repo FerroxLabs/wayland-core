@@ -1,0 +1,19 @@
+=== A: wcore-protocol golden contract (proves ready/error shapes unchanged) ===
+test golden_thinking_v0_1_21 ... ok
+test golden_tool_cancelled_v0_1_21 ... ok
+test golden_usage_with_full_cache_fields_v0_1_21 ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+=== B: wcore-cli --lib (startup_error unit tests) serial ===
+test workflow::tests::validate_malformed_file_surfaces_typed_error ... ok
+test workflow::tests::validate_missing_file_errors ... ok
+test workflow::tests::workflow_spawner_binds_authority_and_cannot_downgrade_mutation ... ok
+test workflow::tests::workflow_spawner_cancels_a_hung_provider_at_the_wall_cap ... ok
+test workflow::tests::workflow_spawner_stops_before_provider_call_at_tiny_cap ... ok
+
+test result: ok. 1837 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 37.53s
+
+=== C: clippy wcore-cli ===
+CLIPPY_DONE
+REGRESSDONE

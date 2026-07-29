@@ -1,0 +1,236 @@
+   Compiling libc v0.2.186
+   Compiling cfg_aliases v0.1.1
+   Compiling vte_generate_state_changes v0.1.2
+   Compiling plotters-backend v0.3.7
+   Compiling ciborium-io v0.2.2
+   Compiling assert-json-diff v2.0.2
+   Compiling itertools v0.10.5
+   Compiling wcore-cli v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-cli)
+   Compiling unicode-width v0.1.14
+   Compiling deadpool-runtime v0.1.4
+   Compiling downcast-rs v1.2.1
+   Compiling shell-words v1.1.1
+   Compiling nix v0.28.0
+   Compiling ciborium-ll v0.2.2
+   Compiling cast v0.3.0
+   Compiling tinytemplate v1.2.1
+   Compiling serial_test_derive v3.5.0
+   Compiling similar v2.7.0
+   Compiling vte v0.11.1
+   Compiling plotters-svg v0.3.7
+   Compiling ciborium v0.2.2
+   Compiling colored v3.1.1
+   Compiling anes v0.1.6
+   Compiling oorandom v11.1.5
+   Compiling plotters v0.3.7
+   Compiling vt100 v0.15.2
+   Compiling criterion-plot v0.5.0
+   Compiling getrandom v0.2.17
+   Compiling parking_lot_core v0.9.12
+   Compiling errno v0.3.14
+   Compiling mio v1.2.1
+   Compiling socket2 v0.6.4
+   Compiling getrandom v0.4.2
+   Compiling dirs-sys v0.5.0
+   Compiling dbus v0.9.11
+   Compiling time v0.3.47
+   Compiling rtoolbox v0.0.5
+   Compiling filetime v0.2.29
+   Compiling libseccomp v0.4.0
+   Compiling rand_core v0.6.4
+   Compiling signal-hook-registry v1.4.8
+   Compiling parking_lot v0.12.5
+   Compiling ring v0.17.14
+   Compiling tempfile v3.27.0
+   Compiling dirs v6.0.0
+   Compiling uuid v1.23.2
+   Compiling crypto-common v0.1.7
+   Compiling rand_chacha v0.3.1
+   Compiling password-hash v0.5.0
+   Compiling tokio v1.52.3
+   Compiling digest v0.10.7
+   Compiling cipher v0.4.4
+   Compiling universal-hash v0.5.1
+   Compiling rand v0.8.6
+   Compiling poly1305 v0.8.0
+   Compiling aead v0.5.2
+   Compiling sha2 v0.10.9
+   Compiling chacha20 v0.9.1
+   Compiling blake2 v0.10.6
+   Compiling wcore-budget v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-budget)
+   Compiling rpassword v7.5.2
+   Compiling tar v0.4.46
+   Compiling chacha20poly1305 v0.10.1
+   Compiling wcore-types v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-types)
+   Compiling argon2 v0.5.3
+   Compiling hmac v0.12.1
+   Compiling getrandom v0.3.4
+   Compiling rand v0.10.1
+   Compiling ff v0.12.1
+   Compiling rand_core v0.9.5
+   Compiling crypto-bigint v0.4.9
+   Compiling group v0.12.1
+   Compiling rand_chacha v0.9.0
+   Compiling signature v1.6.4
+   Compiling cbc v0.1.2
+   Compiling ecb v0.1.2
+   Compiling rand v0.9.4
+   Compiling rustls-webpki v0.103.13
+   Compiling aes v0.8.4
+   Compiling sha1 v0.10.6
+   Compiling md-5 v0.10.6
+   Compiling rfc6979 v0.3.1
+   Compiling elliptic-curve v0.12.3
+   Compiling crypto-bigint v0.5.5
+   Compiling wcore-repomap v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-repomap)
+   Compiling simple_asn1 v0.6.4
+   Compiling rustls v0.23.40
+   Compiling dbus-secret-service v4.1.0
+   Compiling rand_distr v0.5.1
+   Compiling ecdsa v0.14.8
+   Compiling keyring v3.6.3
+   Compiling p256 v0.11.1
+   Compiling lopdf v0.42.0
+   Compiling jsonwebtoken v10.3.0
+   Compiling signal-hook v0.3.18
+   Compiling inotify-sys v0.1.5
+   Compiling openssl-sys v0.9.116
+   Compiling inotify v0.11.2
+   Compiling wasmtime-internal-jit-icache-coherence v36.0.12
+   Compiling signal-hook-mio v0.2.5
+   Compiling wasmtime-internal-fiber v36.0.12
+   Compiling crossterm v0.29.0
+   Compiling wasmtime v36.0.12
+   Compiling notify v8.2.0
+   Compiling postgres-protocol v0.6.12
+   Compiling openssl v0.10.80
+   Compiling ratatui-widgets v0.3.0
+   Compiling curve25519-dalek v4.1.3
+   Compiling postgres-types v0.2.14
+   Compiling cap-rand v3.4.5
+   Compiling whoami v2.1.2
+   Compiling ratatui-crossterm v0.1.0
+   Compiling is-terminal v0.4.17
+   Compiling plist v1.10.0
+   Compiling wcore-permissions v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-permissions)
+   Compiling open v5.3.5
+   Compiling tracing-appender v0.2.5
+   Compiling self-replace v1.5.0
+   Compiling ratatui-macros v0.7.0
+   Compiling ed25519-dalek v2.2.0
+   Compiling ratatui v0.30.0
+   Compiling tui-input v0.15.3
+   Compiling tui-tree-widget v0.24.0
+   Compiling nucleo v0.5.0
+   Compiling tokio-util v0.7.18
+   Compiling tower v0.5.3
+   Compiling wcore-protocol v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-protocol)
+   Compiling aws-smithy-async v1.2.14
+   Compiling wcore-cron v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-cron)
+   Compiling wcore-user-model v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-user-model)
+   Compiling syntect v5.3.0
+   Compiling tower-http v0.6.11
+   Compiling sysinfo v0.33.1
+   Compiling h2 v0.4.14
+   Compiling tokio-rustls v0.26.4
+   Compiling wcore-sandbox v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-sandbox)
+   Compiling aws-smithy-types v1.4.9
+   Compiling tungstenite v0.24.0
+   Compiling native-tls v0.2.18
+   Compiling pdf-extract v0.12.0
+   Compiling imap v2.4.1
+   Compiling aws-smithy-runtime-api v1.12.3
+   Compiling aws-smithy-query v0.60.15
+   Compiling tokio-tungstenite v0.24.0
+   Compiling lettre v0.11.22
+   Compiling tokio-postgres v0.7.18
+   Compiling num_cpus v1.17.0
+   Compiling serial2 v0.2.37
+   Compiling filedescriptor v0.8.3
+   Compiling deadpool v0.12.3
+   Compiling aws-smithy-schema v0.1.0
+   Compiling aws-smithy-http v0.63.6
+   Compiling aws-credential-types v1.2.14
+   Compiling aws-smithy-observability v0.2.6
+   Compiling aws-smithy-json v0.62.7
+   Compiling portable-pty v0.9.0
+   Compiling aws-types v1.3.16
+   Compiling aws-sigv4 v1.4.3
+   Compiling wcore-plugin-api v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-plugin-api)
+   Compiling hyper v1.10.1
+   Compiling criterion v0.5.1
+   Compiling serial_test v3.5.0
+   Compiling tokio-postgres-rustls v0.13.0
+   Compiling hyper-util v0.1.20
+   Compiling wasmtime-wasi-io v36.0.12
+   Compiling wcore-agents-pack v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-agents-pack)
+   Compiling wayland-browser v0.12.25 (/root/wayland-json-stream-refusal/crates/wayland-browser)
+   Compiling wcore-pluginsrc v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-pluginsrc)
+   Compiling wayland-cua v0.12.25 (/root/wayland-json-stream-refusal/crates/wayland-cua)
+   Compiling wcore-dispatch v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-dispatch)
+   Compiling wasmtime-wasi v36.0.12
+   Compiling hyper-rustls v0.27.9
+   Compiling axum v0.7.9
+   Compiling mockito v1.7.2
+   Compiling wiremock v0.6.5
+   Compiling reqwest v0.12.28
+   Compiling aws-smithy-http-client v1.1.13
+   Compiling aws-smithy-runtime v1.11.3
+   Compiling wcore-config v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-config)
+   Compiling wcore-egress v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-egress)
+   Compiling wayland-honcho v0.12.25 (/root/wayland-json-stream-refusal/crates/wayland-honcho)
+   Compiling wcore-honcho-adapter v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-honcho-adapter)
+   Compiling aws-runtime v1.7.3
+   Compiling aws-sdk-sso v1.98.0
+   Compiling aws-sdk-ssooidc v1.100.0
+   Compiling aws-sdk-sts v1.103.0
+   Compiling aws-config v1.8.16
+   Compiling wcore-channels v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-channels)
+   Compiling wcore-observability v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-observability)
+   Compiling wcore-pricing v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-pricing)
+   Compiling wcore-replay v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-replay)
+   Compiling wcore-exec-backend v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-exec-backend)
+   Compiling wcore-acp v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-acp)
+   Compiling wcore-gateway v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-gateway)
+   Compiling wcore-eval-scenarios v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-eval-scenarios)
+   Compiling wcore-memory v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-memory)
+   Compiling wcore-channel-whatsapp v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-channel-whatsapp)
+   Compiling wcore-channel-msteams v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-channel-msteams)
+   Compiling wcore-channel-signal v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-channel-signal)
+   Compiling wcore-channel-telegram v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-channel-telegram)
+   Compiling wcore-providers v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-providers)
+   Compiling wcore-channel-discord v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-channel-discord)
+   Compiling wcore-channel-email v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-channel-email)
+   Compiling wcore-channel-slack v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-channel-slack)
+   Compiling wcore-channel-matrix v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-channel-matrix)
+   Compiling wcore-channel-sms v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-channel-sms)
+   Compiling wcore-tools v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-tools)
+   Compiling wcore-swarm v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-swarm)
+   Compiling wcore-channels-registry v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-channels-registry)
+   Compiling wcore-plugin-wasm v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-plugin-wasm)
+   Compiling wcore-mcp v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-mcp)
+   Compiling wcore-cua v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-cua)
+   Compiling wcore-browser v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-browser)
+   Compiling wcore-skills v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-skills)
+   Compiling wcore-plugin-subprocess v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-plugin-subprocess)
+   Compiling wcore-eval v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-eval)
+   Compiling wcore-evolve v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-evolve)
+   Compiling wayland-ollama v0.12.25 (/root/wayland-json-stream-refusal/crates/wayland-ollama)
+   Compiling wcore-agent v0.12.25 (/root/wayland-json-stream-refusal/crates/wcore-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 17s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/json_stream_startup_refusal.rs (target/debug/deps/json_stream_startup_refusal-327e42567fe10063)
+
+running 6 tests
+test corrupt_config_refusal_reaches_the_host ... ok
+test healthy_start_still_emits_ready ... ok
+test missing_api_key_still_reports_exactly_once ... ok
+test plaintext_credentials_refusal_reaches_the_host ... ok
+test profile_guard_refusal_reaches_the_host ... ok
+test refusal_is_on_stdout_not_merely_somewhere ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.59s
+
+TESTRC=0
+TESTDONE
