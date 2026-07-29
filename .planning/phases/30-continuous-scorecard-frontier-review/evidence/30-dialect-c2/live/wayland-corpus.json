@@ -1,0 +1,184 @@
+{
+  "corpus_version": 1,
+  "tools": [
+    {
+      "name": "Bash",
+      "description": "Executes a shell command and returns its output.\n\nIMPORTANT: Do NOT use Bash when a dedicated tool is available:\n- File search: use Glob (not find or ls)\n- Content search: use Grep (not grep or rg)\n- Read files: use Read (not cat, head, or tail)\n- Edit files: use Edit (not sed or awk)\n- Write files: use Write (not echo or cat with heredoc)\n- Web access: the Bash sandbox has NO NETWORK — curl/wget/git-fetch and other network commands fail (empty output). To read a URL use the WebFetch tool; to search the web use the `web` tool with operation \"search\". Do NOT retry with curl/wget.\n\n# Instructions\n- Use absolute paths to avoid working directory confusion.\n- When issuing multiple independent commands, make parallel tool calls instead of chaining them. Use `&&` only when commands depend on each other.\n- You may specify an optional timeout in milliseconds (default 120000, max 600000).\n\n# Git safety\n- Never force push, reset --hard, or use --no-verify unless explicitly asked.\n- Prefer creating new commits over amending existing ones.",
+      "parameters": {
+        "properties": {
+          "command": {
+            "description": "The command to execute",
+            "type": "string"
+          },
+          "timeout": {
+            "description": "Timeout in milliseconds (default 120000, max 600000)",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "Edit",
+      "description": "Performs exact string replacements in files.\n\nUsage:\n- You must use the Read tool first before editing a file.\n- The old_string must be unique in the file. If multiple matches exist, the edit will fail. Provide more surrounding context to make it unique, or use replace_all to change every occurrence.\n- Use replace_all for renaming variables or replacing all instances of a string.\n- Prefer Edit over Write for modifying existing files — Edit only sends the diff.\n- When matching text from Read output, preserve the exact indentation (tabs/spaces).",
+      "parameters": {
+        "properties": {
+          "file_path": {
+            "description": "The absolute path to the file to modify",
+            "type": "string"
+          },
+          "new_string": {
+            "description": "The replacement text",
+            "type": "string"
+          },
+          "old_string": {
+            "description": "The text to replace",
+            "type": "string"
+          },
+          "replace_all": {
+            "description": "Replace all occurrences (default false)",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "file_path",
+          "old_string",
+          "new_string"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "Forge",
+      "description": "Iterate-until-verified forge for work with a REAL executable gate (tests, build, typecheck). Use when the user wants work driven to a provable finish line — \"make sure it's right\", \"iterate until it's green/done\", \"this must be verified\" — and the workspace has (or the task implies) a checkable gate.\n\n- Forks a builder into an isolated git worktree; your tree is never touched. The winning change lands on a candidate branch for review.\n- Runs the gate sandboxed (network-denied) every round; only a passing gate earns the `verified` stamp. Returns a receipt: terminal state, checks, iterations, cost.\n- The gate comes from `[anvil] gate` config or is auto-detected (cargo/npm/go/pytest/just/make).\n- For judgment work with NO checkable reward (naming, prose, architecture opinions), do NOT use Forge — that is Crucible council territory.\n- Long-running: a climb can take several minutes.",
+      "parameters": {
+        "properties": {
+          "task": {
+            "description": "The change to forge, stated as intent with its finish line (e.g. \"fix the failing auth tests\", \"make `cargo test -p x` pass after adding retry backoff\"). Use paths RELATIVE to the repo root only — never absolute paths: the forge builds in its own isolated worktree and supplies the working directory itself.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "Glob",
+      "description": "Fast file pattern matching tool that works with any codebase size.\n\n- Supports glob patterns like \"**/*.rs\" or \"src/**/*.ts\".\n- Returns matching file paths sorted by modification time (newest first).\n- Returns at most 100 results. Only returns files, not directories.\n- The path parameter defaults to the current working directory.\n- Use this tool when you need to find files by name or extension patterns.",
+      "parameters": {
+        "properties": {
+          "path": {
+            "description": "Root directory (default: cwd)",
+            "type": "string"
+          },
+          "pattern": {
+            "description": "Glob pattern, e.g. \"**/*.rs\"",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "Grep",
+      "description": "Searches file contents using regex patterns (powered by ripgrep).\n\nIMPORTANT: ALWAYS use this Grep tool for content search. NEVER run grep or rg as a Bash command.\n\n- Supports full regex syntax (e.g., \"log.*Error\", \"fn\\\\s+\\\\w+\").\n- Use the glob parameter to filter by file pattern (e.g., \"*.rs\").\n- Output is truncated to 250 lines.\n- Set case_insensitive to true for case-insensitive search.",
+      "parameters": {
+        "properties": {
+          "case_insensitive": {
+            "description": "Case insensitive search",
+            "type": "boolean"
+          },
+          "glob": {
+            "description": "File filter pattern, e.g. \"*.rs\"",
+            "type": "string"
+          },
+          "path": {
+            "description": "Directory to search in (default: cwd)",
+            "type": "string"
+          },
+          "pattern": {
+            "description": "The regex pattern to search for",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "Read",
+      "description": "Reads a file from the local filesystem. Returns content with line numbers.\n\nUsage:\n- The file_path parameter must be an absolute path, not a relative path.\n- By default, it reads the entire file. Use offset and limit for partial reads on large files.\n- To read just one definition from a large Rust/TypeScript/JavaScript file, pass symbol=\"name\" (a function, struct, enum, trait, impl, class, or interface). Returns only that symbol's lines plus a hint for expanding back to the full file. Saves tokens when you only need one definition.\n- Results are returned with line numbers (1-based) followed by a tab and the line content.\n- Binary files return \"(binary file, N bytes)\" instead of content.\n- This tool can only read files, not directories. To list a directory, use Bash with ls.",
+      "parameters": {
+        "properties": {
+          "file_path": {
+            "description": "The absolute path to the file to read",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Maximum number of lines to read",
+            "type": "integer"
+          },
+          "offset": {
+            "description": "Line number to start reading from (0-based)",
+            "type": "integer"
+          },
+          "symbol": {
+            "description": "Return only this named symbol (function/struct/enum/trait/impl/class/interface) from a Rust/TS/JS file, instead of the whole file. Ignored if the file type is unsupported or the symbol is not found (a recoverable message lists available names).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file_path"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "ToolSearch",
+      "description": "Search for deferred tools and load their full schema. Use this before calling any deferred tool. Deferred tools (name-only; load the full schema via this tool before calling): Archive, AskUserQuestion, Browser, Cua, Delegate, EnterPlanMode, Git, Jsonl, RepoMap, Skill, Spawn, WebFetch, Workflow, assert_fact, aws_cli, clarify, cronjob, doc_extract, email_parse, execute, gcloud, github_api, gitlab_api, image_generate, image_inspect, kubectl, linear_api, markdown_table, notion_api, pdf_extract, record_episode, send_message, session_search, sql_query, text_to_speech, todo, transcribe_audio, vision_analyze, wayland_status, wayland_telemetry_query, web.",
+      "parameters": {
+        "properties": {
+          "query": {
+            "description": "Tool name or keyword to search for",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "Write",
+      "description": "Writes content to a file, creating parent directories if needed.\n\nUsage:\n- This tool overwrites the existing file completely (not append).\n- If the file already exists, you must use Read first to see its current content.\n- Prefer Edit over Write for modifying existing files — Edit only sends the diff.\n- Use Write only for creating new files or complete rewrites.",
+      "parameters": {
+        "properties": {
+          "content": {
+            "description": "The content to write to the file",
+            "type": "string"
+          },
+          "file_path": {
+            "description": "The absolute path to the file to write",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file_path",
+          "content"
+        ],
+        "type": "object"
+      }
+    }
+  ]
+}

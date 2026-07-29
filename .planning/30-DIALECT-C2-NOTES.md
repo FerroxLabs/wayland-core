@@ -362,3 +362,79 @@ oracle check. That is a protocol v3 question, not a repair I may make mid-measur
 
 Compiler proven to work and proven insufficient. Next: a labelled DIAGNOSTIC (not a scored leg)
 absolutizing the path for BOTH arms, to prove the diagnosis rather than assert it.
+
+---
+
+## T+4 — MEASUREMENT 4: the 2x2 factorial, and both negative controls
+
+All on `hetzner-dsm`, real `wayland-core`, real loopback meter, frozen v1 protocol file
+(`d18407e0b9…`) in every cell. Records pulled to `evidence/30-dialect-c2/live/` and **recounted
+independently on the Mac from the pulled JSONL**, not taken from the runner's own summary line.
+
+### 4a. The factorial — two factors, neither sufficient alone
+
+| | frozen v1 script (`write_file`) | compiled dialect (`Write`) |
+|---|---|---|
+| **relative path** (as registered) | **ARM-A 0/30** | **ARM-B 0/30** |
+| absolutized path (diagnostic) | **ARM-D 0/10** | **ARM-C 30/30** |
+
+Independent recount: `arm-a` 30 FAILURE, `arm-b` 30 FAILURE, `arm-c` **30 SUCCESS**,
+`arm-d` 10 FAILURE. Every arm's `driven_tools` and `diagnostic` stamp read back from the records.
+
+**Both factors are necessary and neither is sufficient.** That is a controlled isolation, not an
+inference from co-occurrence — the failure mode this program keeps getting caught by.
+
+- The dialect compiler is **necessary**: A and D, which lack it, fail at every path setting.
+- The dialect compiler is **not sufficient**: B has it and still fails.
+- The path convention is a **genuine second, independent confound**: B → C changes nothing but the
+  path and moves 0/30 to 30/30.
+
+**ARM-C is also the proof the lane brief asked for.** A compiled dialect, driven end-to-end against
+a real harness, produces the oracle artifact with the correct content digest on 30 of 30 trials.
+The compiler makes the harness do the actual work; it does not merely fail more politely.
+
+### 4b. Negative control 1 (static) — the guard fires, and for the RIGHT reason
+
+Peer-flavour snake_case corpus, compiled cleanly (`translation_sha256 dc33a244…`, tool `write_file`),
+honest manifest saying `hermes`, launched against the `wayland` invocation:
+
+```
+wayland-scorecard: DIALECT_EXEC_HARNESS_MISMATCH corpus_declared_by=hermes launching=wayland
+                   — refusing to drive a harness with another harness's dialect     rc=1
+```
+
+**Instrument repair, per LANE-BRIEF §6b-ii.** My first attempt at this control extracted the corpus
+digest by `sed`-scraping the compiler's stdout and captured a leading newline, so the run refused
+with `CORPUS_MANIFEST_MISMATCH` — a refusal for the **wrong reason**, which would have passed as a
+green negative control while proving nothing about the harness binding. Repaired at source: the
+manifest generator now reads `corpus_sha256` out of the translation JSON the compiler wrote and
+asserts `len==64 and sha.strip()==sha` before use. Re-run then produced the intended
+`HARNESS_MISMATCH`. The refusal is now asserted **by error identity, not by exit status.**
+
+### 4c. Negative control 2 (dynamic) — a mis-compiled dialect REDDENS
+
+The guard refusing is not enough; the brief asks for a mis-compiled dialect whose *measurement*
+goes red. So the manifest was **forged** to claim `tool_label: "wayland"` while carrying the peer's
+snake_case corpus. The binder accepts it, and wayland is driven with `write_file`:
+
+```
+NC-B  script=dialect_compiled+DIAGNOSTIC_ABSOLUTIZED  driven_tools=write_file  trials=10 success=0
+```
+
+**0/10, at the exact configuration where the correct dialect scores 30/30.** Same binary, same
+protocol, same oracle, same path handling — the compiled tool name is the only difference. A
+compiler that silently degraded one arm would show up here, and it does.
+
+### 4d. FINDING D (MEDIUM) — the harness binding is defeated by a forged manifest
+
+NC-B works *because* the manifest can be forged. So check 5 is only as trustworthy as the manifest's
+provenance, and a hand-written manifest defeats it. Published rather than patched: the fix is to
+bind the manifest to the discovery pass that produced it (a signature, or a digest chain from the
+observed wire bytes), which is a larger change than this lane should make mid-measurement.
+
+Stated plainly: **`bind_translation` prevents an accident, not an adversary.**
+
+## T+4 — status
+
+Compiler proven necessary, proven insufficient, proven not to be a confound itself, and both
+negative controls red. Next: can any leg actually be re-taken?
