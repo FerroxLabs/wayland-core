@@ -59,11 +59,36 @@ the tested one.
 - `--runtime` is validated (`f24-inbound.mjs:2683`): a typo exits 2 rather than silently
   measuring `--json-stream` and labelling it `gateway`.
 
+## Concurrency defect in the SHARED harness — runs A/A2/B all suspect (T+~2h)
+
+Reported by `lane/24-h6` and independently consistent with what I measured:
+
+- `scripts/f24-inbound.mjs` binds a **FIXED** port `127.0.0.1:18787`, and its launcher
+  `pkill`s **global patterns** that match other lanes' processes. **It cannot be run
+  concurrently on `hetzner-dsm`.** Two lanes using it silently kill each other mid-run.
+- Their collision was with **my run A2** (they cite pid `1923079`; my A2 driver was `1922470`
+  and its children `1922474/1922475`). I had already killed A2 as contaminated on my own
+  evidence (3 concurrent drivers, legs burning 90s budgets with `0/1` arrivals) BEFORE their
+  report arrived — the two accounts agree.
+- **It also retro-explains run A's unexplained driver death**: killed abruptly right after
+  writing `result.json`, leaving its gateway child orphaned with `cleanup()` never having run.
+  That is the signature of an external `pkill`, not of a driver fault.
+- It further explains the orphan "ignoring SIGTERM": `cleanup()` never sent it one. My later
+  manual `kill -TERM` was a separate act, and I used `kill -0` (the flawed check), so **no
+  SIGTERM claim is made from it.**
+
+**Disposition: runs A, A2 and B are ALL discarded and NOT graded.** I cannot prove runs A and
+B were overlap-free (I verified no drivers immediately before each launch, but not throughout),
+and a number I cannot defend is worth less than one I re-take. Re-running both surfaces on a
+confirmed-idle host and grading only those.
+
 ## Still to establish
 
-1. Run A: 42-cell matrix, `--runtime gateway`, at `3fe3832a`.
-2. Run B: 42-cell matrix, `--runtime json-stream`, at `3fe3832a` (paired same-commit control).
+1. Verify host idle (no `f24-inbound` drivers, `18787` free) — then run A3 `--runtime gateway`.
+2. Verify idle again — then run B2 `--runtime json-stream` (paired same-commit control).
 3. Surface-to-surface diff; report any divergence with defect-grade rigour.
+4. State explicitly in the report whether the graded numbers came from an overlap-free run.
+5. Clean up by **pid only** — never by shared pattern, which is the defect itself.
 
 ## Standing constraints for this lane
 
