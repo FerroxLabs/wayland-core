@@ -279,3 +279,48 @@ Workspace gates at the same commit: `cargo check --workspace --all-targets`
 `TRUE_RC=0`, `cargo clippy --workspace --all-targets -- -D warnings`
 `TRUE_RC=0` (one pre-existing third-party note about `imap-proto v0.10.2`),
 `cargo fmt --all -- --check` `TRUE_RC=0`.
+
+## T+200 — Windows: the typecheck was green and the hardware was RED
+
+`SeanD@seandesktop` (the account the plans use; reachable first try),
+`C:\wl-zombie` worktree. Status-file readback pattern per LANE-BRIEF §6b-ii,
+because every non-zero exit collapses to 1 across ssh+PowerShell.
+
+At `3a1e0b0a`: **`WLRC=101`, `3 passed; 1 failed`** — the corpse read `Live`.
+`cargo check --target x86_64-pc-windows-msvc` had been clean at that same
+commit. This is LANE-BRIEF §3.1 in one measurement: a green typecheck is not a
+measurement.
+
+Diagnosis, done by making the construction deterministic rather than by
+guessing: the Windows corpse was built by reading the child's stdout to EOF,
+but on Windows the pipe closes inside `cmd.exe`'s exit path *before* the
+process object signals, so the harness was racing. Rebuilt as spawn → `wait()`
+(asserting exit code 7, so the process has certainly exited) → keep the
+`Child`, whose retained HANDLE keeps the pid reserved. That makes a `Live`
+verdict indict the arm rather than the harness.
+
+At `a939c156`: **`WLCLIPPY=0  WLRC=0  4 passed; 0 failed`.** So the arm was
+right and the harness was racy — and I only know which because the construction
+was made deterministic instead of the assertion being relaxed.
+
+**The substantive finding: assertion 3 passed on Windows too.** `OpenProcess`
+succeeded for a process that had already exited, i.e. the old shape reports it
+ALIVE on Windows as well. The defect exists on all three platforms, in three
+different idioms.
+
+The failed run also surfaced an `unused_imports` warning (`std::io::Read`,
+unix-only after the split) that `clippy -D warnings` would have failed in the
+Windows CI leg. Gated; `WLCLIPPY=0` confirms.
+
+## T+210 — final state
+
+| gate | host | result |
+|---|---|---|
+| `cargo nextest run -p wcore-types` | hetzner | `151 tests run: 151 passed, 0 skipped` |
+| `clippy -p wcore-types --all-targets -D warnings` | hetzner | `TRUE_RC=0` |
+| `cargo fmt --all -- --check` | hetzner | `TRUE_RC=0` |
+| `cargo check --workspace --all-targets` | hetzner | `TRUE_RC=0` |
+| `clippy --workspace --all-targets -D warnings` | hetzner | `TRUE_RC=0` |
+| `real_zombie` | **seandesktop** | `4 passed; 0 failed` |
+| `clippy -p wcore-types -D warnings` | **seandesktop** | `WLCLIPPY=0` |
+| fence vs merge-base `797d4889` | mac | **empty diff** |

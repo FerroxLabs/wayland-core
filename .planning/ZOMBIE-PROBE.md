@@ -208,10 +208,53 @@ and `p_pid` from the raw kernel buffer at offsets printed by `offsetof` on real
 hardware (`36` and `40`; `sizeof = 648`), and **reads `p_pid` back to verify
 the offsets**. An ABI drift becomes `Indeterminate`, never a wrong answer.
 
+### Windows — run on real hardware, and it went RED first
+
+`SeanD@seandesktop`, `C:\wl-zombie`. Read back via a status file
+(`WLRC=` first, `WLDONE` last, read in a *separate* ssh call) because every
+non-zero exit collapses to `1` across ssh+PowerShell.
+
+**The cross-compile typecheck was green and the real hardware was red.** At
+`3a1e0b0a`: `WLRC=101`, `3 passed; 1 failed`, the corpse reading `Live`. This
+is precisely what LANE-BRIEF §3.1 exists for — a green typecheck is not a
+measurement.
+
+Diagnosing which was at fault, the arm or the harness: the Windows corpse was
+being built by reading the child's stdout to EOF, but on Windows the pipe
+closes inside `cmd.exe`'s exit path *before* the process object signals, so the
+test was racing. Rebuilt deterministically — spawn, `wait()` (so the process
+has certainly exited, confirmed by asserting the exit code is 7), and keep the
+`Child`, whose retained HANDLE keeps the pid **reserved**. A `Live` verdict now
+indicts the arm, not the harness. At `a939c156`:
+
+```
+WLCLIPPY=0  WLRC=0  HEAD=a939c156  WLDONE
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured
+```
+
+So the arm was correct and the harness was racy. **And assertion 3 passed on
+Windows**, which is the substantive finding: `OpenProcess` succeeded for a
+process that had already exited — the old shape reports it ALIVE there too.
+Windows had the defect, in its own idiom.
+
+The failed run also surfaced an `unused_imports` warning (`std::io::Read`,
+unix-only after the split) that `clippy -D warnings` would have failed in the
+Windows CI leg. Gated; `WLCLIPPY=0` above is the confirmation.
+
 ### Cross-target typechecks, hetzner
 
 `cargo check -p wcore-types --all-targets --target …` — `TRUE_RC=0` for
 `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-pc-windows-msvc`.
+Necessary, and demonstrably not sufficient: see the Windows red above.
+
+### Final state, both real platforms, at `a939c156`
+
+```
+Linux   (hetzner)      cargo nextest run -p wcore-types  151 tests run: 151 passed, 0 skipped
+Linux   (hetzner)      clippy -p wcore-types -D warnings TRUE_RC=0 ; fmt TRUE_RC=0
+Windows (seandesktop)  real_zombie                       4 passed; 0 failed
+Windows (seandesktop)  clippy -p wcore-types -D warnings WLCLIPPY=0
+```
 
 ---
 
@@ -330,6 +373,10 @@ and, for codex, from the LAST match.
 
 ## 6. What I did NOT do — stated plainly
 
+- **macOS is the one platform not behaviourally proven in Rust.** Linux and
+  Windows both are, on real hardware, against a real corpse. macOS is proven at
+  the kernel-semantics and algorithm level only (§3) — the gap is the Rust
+  translation, and it is a rule-imposed gap, detailed next.
 - **Did not verify the macOS arm by running Rust on macOS.** LANE-BRIEF §0
   forbids cargo on the Mac and no permitted host executes Darwin code. What IS
   proven there: the kernel semantics, the ABI offsets, and the exact algorithm
@@ -362,10 +409,18 @@ and, for codex, from the LAST match.
   cycle is possible): `wcore-eval-scenarios`, `wcore-exec-backend`,
   `wcore-gateway`. Plus `libc` (unix) and `windows-sys` (windows), target-gated,
   added to `wcore-types` itself.
-- **Shared-file fence: untouched.** No edits to `crates/wcore-cli/src/lib.rs`
-  or `main.rs` (verified against the merge-base SHA, not the branch name),
-  none to `.github/workflows/ci.yml`, none to `.planning/BACKLOG.md`.
+- **Shared-file fence: untouched, verified against the MERGE-BASE SHA**
+  (`797d4889`), not the branch name:
+
+  ```
+  git diff 797d4889 --stat -- crates/wcore-cli/src/lib.rs crates/wcore-cli/src/main.rs \
+                              .github/workflows/ci.yml .planning/BACKLOG.md
+  <empty>
+  ```
+
   `wcore-cli/src/cron.rs` IS edited — it is not a fenced file.
+- Full change: **27 files, +1998 / -284**, of which 5 are `.planning/` evidence
+  and 22 are `crates/`.
 - **`wcore-gateway::pidlock::process_is_alive` changes behaviour on Windows for
   `ERROR_ACCESS_DENIED`**: previously `false` (lock reclaimable), now
   `Indeterminate → true` (lock held). That is the safe direction for a lock,
