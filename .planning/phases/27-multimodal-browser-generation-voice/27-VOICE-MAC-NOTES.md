@@ -108,3 +108,78 @@ relabel or stop `sean-mac-arm64`** (cost two attempts to register).
 - **T+0** — worktree verified, LANE-BRIEF read in full, prior lane report
   (`a9f818d0`, 27-BROWSER-VOICE.md) read in full. Priors and ranking pre-registered
   above. Nothing measured yet beyond the table above.
+
+- **T+1 — M1. The prior lane's diagnosis is HALF WRONG, and the half that is wrong
+  is the half that matters.** Prior lane: *"the streaming mic-capture loop is compiled
+  OUT of the shipped artifact."* Measured:
+
+  | component | file | size | gated? |
+  |---|---|---|---|
+  | VoiceMode state machine + `VoiceModeTool` | `wcore-tools/src/voice_mode.rs` | 55.3 KB | **NO — `pub mod voice_mode;` at `lib.rs:240`, ungated** |
+  | cpal recorder / player (`CpalAudioRecorder`) | `wcore-agent/src/tool_backends/voice_mode.rs` | 38.6 KB | YES — `#[cfg(feature="voice")]` `mod.rs:83` |
+  | registration | `bootstrap.rs:1361` | — | YES |
+
+  `cpal` appears **1** time in `wcore-tools/Cargo.toml` and it is a **comment**;
+  `grep -E '^\s*(cpal|hound)\s*='` → rc=1. Instrument alive (the count of 1 proves
+  the file was read). So **the entire state machine that C4's five properties are
+  about — start/stop/cancel/toggle, the RMS surface, the hallucination filter — is
+  ALREADY COMPILED INTO THE DEFAULT SHIPPED BINARY.** What is compiled out is only
+  the concrete mic device and the registration line.
+
+  Consequence for the shipping question: turning `voice` on by default costs the
+  **cpal+hound link only**, not 55 KB of new code. That materially lowers the price
+  the prior lane implied.
+
+- **T+2 — M2. `wcore-protocol` has ZERO voice/audio event identity.** Concept
+  search (§3b-i.3 — concept, not keyword), whole crate, 20 files:
+
+  ```
+  liveness controls: "pub enum" 62   |  "tooluse|tool_" 182   (instrument alive)
+  voice 2   audio 0   microphone|mic 0   speech 0   transcri 1
+  capture 6  record 38  stt|whisper 0   tts 0   listen 0
+  ```
+  **The 2 `voice` hits are the substring in `"Re: invoice"`** (`events.rs:1777,1787`,
+  an email test). True voice count = **0**. The single `transcri` hit is a doc
+  comment stating the protocol carries *"never transcript text"* — i.e. the absence
+  is deliberate, not an oversight.
+
+  **This is the keyword trap firing in my favour and I nearly took it:** a naive
+  `grep -c voice` returns **2**, which reads as "voice events exist". They do not.
+
+- **T+3 — M3. Tool surface (this is what "ordered protocol events" can even mean).**
+  `VoiceModeTool` exposes 5 discrete actions — `toggle_record`, `start`, `stop`,
+  `cancel`, `status` (`voice_mode.rs:962`), each a separate LLM tool call. So
+  ordering is observable **only** through the generic ToolUse/ToolResult ladder;
+  there is no voice-specific event. `is_concurrency_safe() == false` — deliberately
+  serialised, comment: *"The recorder owns a single mic device — overlapping starts
+  would race on the audio handle."*
+
+- **T+4 — M4, and it is the sharpest thing in the lane so far.** `stop` collapses
+  three distinct states into one:
+  ```rust
+  Ok(RecordingOutcome::Empty) => ... "note": "recording was empty (too short / silent / cancelled)"
+  ```
+  **The product itself cannot distinguish silence from cancellation from a dead
+  capture device.** That is precisely the discrimination failure that made a prior
+  lane on this programme withdraw its RMS-5 claim — except here it is baked into
+  the shipped API, not into a lane's harness. Candidate finding; severity to be
+  argued, not asserted.
+
+- **T+5 — build.** `cargo test -p wcore-agent --features voice --lib --no-run` on
+  the Mac (Darwin exception, disclosed). `Compiling cpal|hound|coreaudio` → **4**
+  matches, so cpal links on Darwin via CoreAudio with no ALSA involved. Note the
+  Cargo comment justifying OFF-by-default says *"must not hard-require ALSA"* —
+  **an argument that does not apply to Darwin at all.**
+
+- **T+6 — LOW doc defect.** `voice_mode.rs:75` says *"60s at 16 kHz mono i16 =
+  ~1.92M samples ≈ 3.8 MB"*. `SAMPLE_RATE = 16_000` (`wcore-tools/src/voice_mode.rs:79`)
+  → 16_000 × 60 = **960,000 samples = 1.92 MB**. The comment states *samples* where
+  it means *bytes*; out by 2×. Cosmetic, recorded not fixed (not my fence).
+
+- **T+7 — candidate defect to measure, NOT yet claimed.** `RingBuffer::push` does
+  `self.samples.remove(0)` when at capacity — an O(n) memmove over 960,000 i16 on
+  **every sample** past 60 s, executed **inside the cpal input callback** (the
+  closure passed to `build_input_stream` locks `state_for_data` and pushes). At 16 kHz
+  that is ~1.9 MB moved 16,000×/s ≈ 30 GB/s. If real, the audio callback cannot keep
+  up and capture degrades past 60 s. **I have not measured this yet and will not
+  claim it until I have.** It is also only reachable on a >60 s recording.
