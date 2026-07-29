@@ -265,11 +265,26 @@ try:
         json.dumps(cancelled)[:200],
     )
     lifecycle = ((cancelled.get("goal") or {}).get("lifecycle")) or {}
+    # `terminal` is a TAGGED OBJECT (`{"state": "cancelled"}`), not a bare
+    # string. The first version of this matcher compared it to the string
+    # "cancelled" and reported FAIL against a payload that was in fact exactly
+    # right — an instrument defect, repaired here rather than written up.
+    # `GoalTerminalState` has data-carrying variants (`partially_completed`,
+    # `blocked`, `exhausted`), so a tag is the only shape it could have had;
+    # the string form never existed.
+    terminal = lifecycle.get("terminal")
+    terminal_state = terminal.get("state") if isinstance(terminal, dict) else terminal
     check(
         "GOAL STATE CHANGED: lifecycle -> terminated/cancelled",
-        lifecycle.get("state") == "terminated"
-        and lifecycle.get("terminal") == "cancelled",
+        lifecycle.get("state") == "terminated" and terminal_state == "cancelled",
         json.dumps(lifecycle),
+    )
+    # Third assertion: the OLD matcher must genuinely have been wrong, so this
+    # repair demonstrably does something rather than passing either way.
+    check(
+        "instrument repair is load-bearing (old string compare would have failed)",
+        terminal != "cancelled" and terminal_state == "cancelled",
+        f"terminal={json.dumps(terminal)}",
     )
 
     # ------------------------------ KNOWN-NEGATIVE: cancelling a dead Goal
