@@ -56,3 +56,34 @@ A canary must be seeded into a real input so the positive control fires.
 ---
 
 _(appended as measurements land; do not read this file as a conclusion)_
+
+---
+
+## M4 — the verb is built, and DRIVEN from the shipped binary (2026-07-29)
+
+`gateway support-bundle --home <H> --out <D>`, added in `80d1bdf8`. Zero edits to
+either fenced file.
+
+- unit: `cargo test -p wcore-cli --lib gateway::` → **14 passed, 0 failed, 0 ignored,
+  1836 filtered out** (5 of the 14 are new).
+- existing suite: `cargo test -p wcore-gateway --test support_bundle_redaction` →
+  **4 passed, 0 failed, 1 ignored**.
+- LIVE: real gateway running (`pid 2999135`, `status` → `Running`), canary seeded into
+  `config.toml`, `credentials.toml` and `gateway.log`, bundle produced BY THE SHIPPED
+  BINARY: **8 members, known_secrets=2, redactions=1, absent_sources=0**.
+- the `#[ignore]`d `live_bundle_canary` gate DRIVEN for the first time:
+  **1 passed, 0 ignored, 4 filtered out**.
+- that gate PROVED ABLE TO FAIL twice: leaky bundle → `A_RC=101`; unseeded input dir
+  (positive-control leg) → `B_RC=101`.
+- §3b-ii read-back: the bundle at the REAL home shows
+  `ANTHROPIC_API_KEY [value elided: name marks a secret]` (1 hit) and the real key
+  VALUE appears in **0** bundle files, while the same `/usr/bin/grep -F -l` finds it in
+  `/root/.wayland/.env` (**1**). Differential negative, not a bare zero.
+- the isolated-home run did NOT see `ANTHROPIC_API_KEY` (0 hits) — because
+  `main.rs:951 load_wayland_env_file()` reads `$WAYLAND_HOME/.env` and my home had none.
+  Not a defect; recorded because it looked like one for ten minutes.
+
+Evidence: `24-C4-SUPPORT-evidence/`.
+
+Still to do: mutation-prove the 5 new tests and the new production refusal path; then
+the C2/C3 residuals.
