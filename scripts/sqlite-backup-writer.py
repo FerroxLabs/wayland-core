@@ -13,6 +13,16 @@ Contract with the driver:
 * `<markers>/PROGRESS-<wid>` holds the highest `n` this writer has COMMITTED.
   It is written after the commit returns, so it always under-reports; the
   driver's "must survive" set is conservative in the right direction.
+
+  It is published with `os.replace`, NOT by truncating in place. Measured
+  2026-07-29 on this harness's very first run: an in-place `open(path, "w")`
+  leaves the file ZERO BYTES for the window between truncate and write, and the
+  driver read exactly that window — reporting `w1: 2820 -> 0` and ABORTing with
+  `ABORTED-NO-CONCURRENCY-DURING-ARCHIVE` for a writer that was in fact
+  committing at full speed. The guard was right to fire; the instrument was
+  wrong. Repaired here rather than written up, per LANE-BRIEF section 6b-ii,
+  and `sqlite-backup-harness-selftest.py` holds the three-assertion self-test
+  that proves the repair does something.
 * `<markers>/JOURNALMODE-<wid>` records the mode SQLite actually reported, so
   the driver asserts the arm it believes it is running (LANE-BRIEF section 3b-ii).
 """
@@ -21,6 +31,37 @@ import os
 import sqlite3
 import sys
 import time
+
+
+def publish_progress(path: str, n: int) -> None:
+    """Publish `n` so a concurrent reader can NEVER observe a partial value.
+
+    `open(path, "w")` truncates first, so the file is zero bytes until the
+    write lands. A reader in that window sees an empty file. `os.replace` is
+    atomic on POSIX and on Windows, so the reader sees either the old value or
+    the new one — never nothing. Exported so the self-test can drive it.
+    """
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as fh:
+        fh.write(str(n))
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+def publish_progress_TRUNCATING(path: str, n: int) -> None:
+    """The BROKEN publisher this harness shipped with, retained as evidence.
+
+    The self-test asserts that this one CAN be caught mid-truncation and the
+    repaired one cannot. Without that third assertion the self-test would pass
+    on the broken instrument too, which is the failure mode LANE-BRIEF section
+    6b-ii names. Never called by the writer.
+    """
+    with open(path, "w") as fh:
+        time.sleep(0.002)  # the truncate/write window, widened to be observable
+        fh.write(str(n))
+        fh.flush()
+        os.fsync(fh.fileno())
 
 
 def main() -> int:
@@ -73,10 +114,7 @@ def main() -> int:
                 break
             continue
 
-        with open(progress_path, "w") as fh:
-            fh.write(str(n))
-            fh.flush()
-            os.fsync(fh.fileno())
+        publish_progress(progress_path, n)
 
         if n == 1:
             with open(os.path.join(markers, f"START-{wid}"), "w") as fh:

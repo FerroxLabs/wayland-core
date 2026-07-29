@@ -89,14 +89,32 @@ def prefill(db: Path, mb: int) -> None:
     conn.close()
 
 
+class HarnessError(RuntimeError):
+    """The instrument failed. Never silently degraded into a data point."""
+
+
 def read_progress(markers: Path, wids: list[str]) -> dict[str, int]:
+    """Read every writer's committed high-water mark.
+
+    An unreadable or empty marker RAISES. The first version of this function
+    coerced it to 0, and that turned an instrument fault into the reading
+    `w1: 2820 -> 0`, i.e. a fabricated "this writer stalled". A harness that
+    can silently substitute a plausible number for a failed read is exactly the
+    self-passing-gate class, pointed the other way.
+    """
     out: dict[str, int] = {}
     for w in wids:
         p = markers / f"PROGRESS-{w}"
         try:
-            out[w] = int(p.read_text().strip() or "0")
-        except (OSError, ValueError):
-            out[w] = 0
+            raw = p.read_text().strip()
+        except OSError as exc:
+            raise HarnessError(f"progress marker unreadable for {w}: {exc}") from exc
+        if not raw:
+            raise HarnessError(f"progress marker EMPTY for {w} (non-atomic publish?)")
+        try:
+            out[w] = int(raw)
+        except ValueError as exc:
+            raise HarnessError(f"progress marker for {w} is not an int: {raw!r}") from exc
     return out
 
 
