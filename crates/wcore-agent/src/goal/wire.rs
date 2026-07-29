@@ -23,8 +23,6 @@
 //!    `GoalState` and forget this module, and that test goes red rather than the
 //!    wire quietly rotting.
 
-use serde_json::json;
-
 use wcore_protocol::events::{ProtocolEvent, RecoveryCursor};
 use wcore_protocol::goal::{
     GOAL_PROTOCOL_VERSION, GoalAuthorityWire, GoalLifecycleWire, GoalLoopOwnerWire, GoalProjection,
@@ -41,7 +39,13 @@ use super::record::GoalAuthorityRecord;
 /// Fields of `GoalState` that are deliberately not carried on the v1 wire.
 ///
 /// Empty today. It exists so that withholding a field is an explicit, reviewable
-/// act rather than an omission the coverage test cannot distinguish from a bug.
+/// act rather than an omission the coverage test cannot distinguish from a bug,
+/// and it lives HERE rather than inside the test module so anyone editing
+/// [`goal_projection`] meets it in the same screen.
+///
+/// `cfg(test)` because the coverage test is its only consumer — the declaration
+/// is the record, the test is the enforcement.
+#[cfg(test)]
 const DELIBERATELY_NOT_ON_THE_WIRE: &[&str] = &[];
 
 /// Digest over the canonical JSON of the complete reduced Goal state.
@@ -284,6 +288,8 @@ pub fn goal_stream(
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
+
+    use serde_json::json;
 
     use super::*;
     use crate::session_journal::{GoalTaskAttempt, GoalTaskCompletion};
