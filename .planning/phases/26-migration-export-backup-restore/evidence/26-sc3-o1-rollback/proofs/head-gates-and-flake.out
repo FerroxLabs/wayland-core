@@ -1,0 +1,9 @@
+===CLIPPY
+      1 warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+===CLIPPY-END
+===FLAKE 10x migrate_hermes::import_is_idempotent_without_overwrite at HEAD 05c08140
+FLAKE-RESULT: passed=3 failed=7 of 10
+===TRUNCATE ARM (the journal mode a network filesystem selects)
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+truncate-arm rc=0
+FINALDONE
