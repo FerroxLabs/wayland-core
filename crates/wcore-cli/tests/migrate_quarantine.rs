@@ -1480,7 +1480,10 @@ fn t23_an_imported_artifact_resolves_back_to_the_peer_it_came_from() {
     // Assert the artifact is really there FIRST; a missing file would make
     // every lookup below return a comforting zero.
     let landed = home.path().join("skills/release-notes/SKILL.md");
-    assert!(landed.is_file(), "{landed:?} must exist for A1 to mean anything");
+    assert!(
+        landed.is_file(),
+        "{landed:?} must exist for A1 to mean anything"
+    );
 
     let hits = doc.resolve_path("skills/release-notes/SKILL.md");
     assert_eq!(
@@ -1514,7 +1517,8 @@ fn t23_an_imported_artifact_resolves_back_to_the_peer_it_came_from() {
     // The prefix boundary, which is not hypothetical: a real import writes
     // `notes` and `notes-<digest>` side by side.
     assert!(
-        doc.resolve_path("skills/release-notes-2/SKILL.md").is_empty(),
+        doc.resolve_path("skills/release-notes-2/SKILL.md")
+            .is_empty(),
         "an adjacent name must not be covered by a shorter one"
     );
 
@@ -1533,12 +1537,7 @@ fn t23_an_imported_artifact_resolves_back_to_the_peer_it_came_from() {
         !contained.is_empty(),
         "the executable fixtures must be contained AND locatable"
     );
-    let q_path = doc
-        .get(contained[0])
-        .unwrap()
-        .written_path
-        .clone()
-        .unwrap();
+    let q_path = doc.get(contained[0]).unwrap().written_path.clone().unwrap();
     assert!(
         home.path().join(&q_path).exists(),
         "a contained item's recorded destination must be real: {q_path}"
@@ -1583,7 +1582,9 @@ fn t23_an_imported_artifact_resolves_back_to_the_peer_it_came_from() {
     }
     assert_eq!(legacy.len(), doc.len(), "the legacy shape loses no ENTRIES");
     assert!(
-        legacy.resolve_path("skills/release-notes/SKILL.md").is_empty(),
+        legacy
+            .resolve_path("skills/release-notes/SKILL.md")
+            .is_empty(),
         "the pre-change record shape must be unable to answer this — if it can, \
          this test proves nothing"
     );

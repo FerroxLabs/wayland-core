@@ -617,12 +617,8 @@ fn collect_inner(
         if *total > MAX_IMPORT_TOTAL_BYTES || out.files.len() + 1 > MAX_IMPORT_FILES {
             return Err(ImportError::SurfaceTooLarge);
         }
-        let rel = normalize_relative_path(
-            &path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy(),
-        );
+        let rel =
+            normalize_relative_path(&path.strip_prefix(root).unwrap_or(&path).to_string_lossy());
         if is_executable(&meta) {
             out.executable.insert(rel.clone());
         }

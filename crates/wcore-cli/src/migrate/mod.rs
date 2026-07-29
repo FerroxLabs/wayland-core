@@ -676,7 +676,11 @@ fn run_imported(args: ImportedArgs) -> Result<()> {
         println!("No peer content has been imported into this home.");
         return Ok(());
     }
-    println!("Imported content ({} item{}):", doc.len(), plural(doc.len(), "", "s"));
+    println!(
+        "Imported content ({} item{}):",
+        doc.len(),
+        plural(doc.len(), "", "s")
+    );
     for (id, p) in &doc.entries {
         print_provenance(id, p);
     }
