@@ -152,12 +152,13 @@ pub async fn probe(camoufox_base_url: &str) -> BrowserLiveness {
         // disagree with the thing it is predicting. See `camoufox_program`.
         let cfg = crate::supervisor::SupervisorConfig::local_camoufox(camoufox_base_url);
 
-        if let Some(program) = camoufox_program(&cfg) {
-            if program_resolves(program) {
-                return BrowserLiveness::Ready {
-                    via: "camoufox-binary",
-                };
-            }
+        // `None` (observe-only mode) is NOT a failure here — it means the
+        // supervisor was told not to spawn anything, so fall through to the
+        // healthcheck rather than looking for a binary.
+        if camoufox_program(&cfg).is_some_and(program_resolves) {
+            return BrowserLiveness::Ready {
+                via: "camoufox-binary",
+            };
         }
 
         // No local binary, but an externally managed sidecar (e.g. one the
