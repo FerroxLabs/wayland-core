@@ -57,6 +57,7 @@ pub mod hermes;
 pub mod openclaw;
 pub mod provenance;
 pub mod quarantine;
+pub mod rollback;
 pub mod select;
 
 use content::{ContentRequest, ImportedContentStore};
@@ -797,7 +798,22 @@ fn run_source(source: PeerSource, args: HermesArgs) -> Result<()> {
         return Ok(());
     }
 
-    let report = apply_plan(
+    // SC3 / G3. Everything from here to `commit()` is undoable. The journal is
+    // opened AFTER the confirmation and the dry-run exits, because those paths
+    // write nothing and a journal over a no-op would only add bookkeeping to a
+    // home that was never touched.
+    let home_dir = wcore_config::config::wayland_config_dir();
+    let guard = rollback::ApplyGuard::open(&home_dir)?;
+    if guard.recovered_before_start() > 0 {
+        println!(
+            "Rolled back {} interrupted import{} before starting; your home is back \
+             to the state it was in before that run.",
+            guard.recovered_before_start(),
+            plural(guard.recovered_before_start(), "", "s")
+        );
+    }
+
+    let report = match apply_plan(
         &plan,
         &surface,
         &published,
@@ -805,7 +821,18 @@ fn run_source(source: PeerSource, args: HermesArgs) -> Result<()> {
         source,
         args.include_credentials,
         args.overwrite,
-    )?;
+    ) {
+        Ok(report) => report,
+        Err(e) => {
+            // A failed apply is an interruption with a return value. Rolling
+            // back here is what stops a half-written import from becoming the
+            // home's new state; the rollback error, if any, is chained so a
+            // failure to undo can never be mistaken for a clean abort.
+            guard.rollback()?;
+            return Err(e);
+        }
+    };
+    guard.commit()?;
     print_report(&report, &plan);
     Ok(())
 }
