@@ -523,3 +523,76 @@ this does not touch the credential rule at all. Unique port per §"many lanes ar
 it turns out an engine cannot be driven to termination this way, I will say so and show
 the call sites, not invent an exit (Honesty rule: no "termination state 4").
 
+---
+
+## §7. NEW FINDING — the adapters were typed against engine internals, not the
+## shipped verbs. Two of five did not even compile against production.
+
+This is the strongest evidence I have that the four adapters had never been production
+wired, and I did not have to argue for it — the compiler produced it.
+
+**Anvil.** `from_anvil` took `Result<&ClimbOutcome, &EngineError>`. The shipped forge
+entry point is `drive_climb_full`, which returns `Result<ClimbOutcome, ForgeError>`.
+`ForgeError` (`NoGate`, `Lease`, `Worktree`, `GateUnrunnable`, `Receipt`, `Disabled`) is a
+disjoint type from `EngineError` (`Builder`, `Gate`). **There was no way to call the Anvil
+adapter from the Anvil verb.**
+
+**Council.** `from_council` took `Result<&CouncilRunResult, &CouncilError>`. The shipped
+`drive_council` returns `anyhow::Result<CouncilRunResult>`. Compiler, verbatim:
+
+```
+error[E0308]: mismatched types
+   --> crates/wcore-cli/src/crucible.rs:510:74
+    |  StrategyTermination::from_council(owner, Err(&error))
+    |                                                ^^^^^^ expected `&CouncilError`, found `&Error`
+```
+
+**Why this matters more than the call-site count.** A missing caller is consistent with
+"nobody got round to it". A signature that *cannot accept* what the production entry point
+returns is proof the wiring was never attempted, because attempting it fails to compile on
+the first try. The construction was verified against the engines' internal APIs and the
+tests exercised those same internal APIs, so the test suite could be fully green while the
+product path did not typecheck.
+
+**What I did NOT do:** squeeze `ForgeError::NoGate` into `EngineError::Builder`, or flatten
+every council error into `Blocked`. Both would have compiled. The module itself already
+names that anti-pattern — *"squeezing that into `FleetError::Timeout` to satisfy a
+signature would be a fabricated terminal"* — and it already had the answer:
+`FleetOutcome::DriverFailed`. I mirrored it: `AnvilOutcome` and `CouncilRunOutcome`, each
+with a typed arm and a `DriverFailed` arm. `CouncilRunOutcome::from_anyhow` **downcasts**,
+so a wrapped `CouncilError` still lands on its exact category — `Unpriced` survives, which
+is the one carrier the 22-02 census said the lifted taxonomy had to add.
+
+## §8. A defect in MY OWN instrument, found and repaired in-lane (§6b-ii)
+
+I gated each build on `grep -c "Checking wcore-cli"`. It returned **0** on a build that had
+succeeded — because `cargo check --all-targets` prints **`Compiling wcore-cli`** for the
+binary target, not `Checking`. So my gate reported "the crate was not built" while it had
+been built cleanly, and, worse, the same matcher returning 0 is what a genuinely skipped
+build looks like. **A known-negative that fires for free — §3b-i, arriving in my own hands
+for the second time this lane** (the first was zsh eating `--include=*.rs`).
+
+§6b-ii is explicit that writing this up and moving on is not a fix, so I repaired the
+matcher to `grep -cE "(Checking|Compiling) wcore-cli v"` and gave it the required **three**
+assertions, run on hetzner:
+
+```
+A1 known-positive, repaired matcher (expect >0): 1
+A2 known-negative, repaired matcher (expect  0): 0
+A3 known-positive, OLD broken matcher (expect 0 = would have MISSED it): 0
+--- repaired matcher on the real build log (expect 1): 1
+```
+
+**A3 is the one that matters** — it shows the old matcher scored 0 on a log that genuinely
+contains the build, so the repair changes an outcome rather than decorating a passing test.
+
+## §9. Log (continued)
+
+- **T+40** — `goal open --strategy` landed; ForgeFlows attached to `workflow run`;
+  `cargo check -p wcore-cli --all-targets` rc=0, errors=0.
+- **T+70** — Anvil + Council attached. Two adapter signature changes forced by §7.
+  Test call sites adapted mechanically (no assertion changed, nothing `#[ignore]`d,
+  nothing deleted) — disclosed because the earlier lane's SUMMARY claimed "no existing
+  test was modified" and that is no longer true of this file.
+- **T+75** — instrument defect §8 found and repaired.
+
