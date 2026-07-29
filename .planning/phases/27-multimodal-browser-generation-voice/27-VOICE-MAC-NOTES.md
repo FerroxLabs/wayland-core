@@ -315,3 +315,44 @@ relabel or stop `sean-mac-arm64`** (cost two attempts to register).
   blocks the shipping recommendation I was asked to make. Fixing it silently would
   convert a blocking gate into an invisible one. Recorded as a decision, not a
   deferral.
+
+- **T+15 — INSTRUMENT DEFECT #2 in the overflow gate, repaired in-lane.** Run 1 FAILED
+  (tail ratio 0.41 → "capture degraded"); an immediate re-run PASSED (11227.13,
+  retained exactly 960000 samples = the documented 60 s cap, stop took 45 ms). **A gate
+  that reports a product defect on one run and a clean pass on the next is not measuring
+  the product, and publishing run 1 would have been a fabricated HIGH.** Repaired rather
+  than merely noted (§6b-ii): (a) speaker wake-up pre-roll before capture — the host's
+  default output is a Bluetooth speaker that sleeps and eats the first seconds of
+  playback; (b) the tone is now scored over the **whole retained buffer** as well as the
+  tail, separating the two causes the single assertion conflated — *whole LOW* = the
+  tone never reached the mic (acoustic path, INDETERMINATE, says nothing about the
+  ring), *whole HIGH + tail LOW* = a real degradation. **I do not claim the
+  `Vec::remove(0)` defect.** T+7's arithmetic stands as a concern; the measurement does
+  not support a finding on this hardware.
+
+- **T+16 — ★ THE SHIPPING ANSWER, and I refuted the panel's own escape hatch. ★**
+  Both panel legs turned on whether ALSA is a hard load-time link. Gemini's stated
+  strongest counter-argument to itself was: *"If the ALSA linkage is actually deferred
+  via runtime `dlopen` … the headless Linux risk is zero."* So I measured rather than
+  accept either answer.
+
+  Resolved the **Linux** dependency graph from the Mac without building
+  (`cargo tree --target x86_64-unknown-linux-gnu`), with a control:
+  ```
+  --features voice : cpal v0.15.3 -> alsa v0.9.1 -> alsa-sys v0.3.1
+  without feature  : 0 matches for alsa|cpal      (control: the query discriminates)
+  ```
+  Then read `alsa-sys 0.3.1`'s `build.rs` from the registry cache — it is
+  `pkg_config::probe_library("alsa")`, which emits `cargo:rustc-link-lib=asound`.
+  **That is a hard dynamic `NEEDED libasound.so.2`, not `dlopen`.** The escape hatch
+  does not exist: on a Linux host without ALSA, `ld.so` fails **before `main()`**, so
+  the self-hide of Fact 4 never runs — no Rust code runs at all.
+  **Defaulting `voice` would convert a missing audio library into total failure of the
+  CLI for every headless Linux user who will never own a microphone.** The Cargo
+  comment's rationale is therefore correct, and correct for a reason it does not state.
+
+- **T+17 — restart.** The orchestrator process exited mid-flight (account switch). All
+  five commits survived; one modified file (`voice_live_capture_mac.rs`) was in the tree,
+  verified complete + compiling before being committed as `3d060f9d`. Two background jobs
+  died and were re-run. Nothing was lost, because the notes-first discipline meant every
+  measurement above was already on disk.
