@@ -1,4 +1,12 @@
-use std::collections::HashMap;
+// Maps that are SERIALIZED into `config.toml` are `BTreeMap`, never `HashMap`.
+// `HashMap` iteration order is randomized per instance (`RandomState` reseeds
+// each map, even within one thread), so serializing the same logical config
+// twice emitted its `[profiles.*]` / `[providers.*]` sections in a DIFFERENT
+// order each time -- rewriting the operator's config file with a spurious diff
+// on every save. `BTreeMap` orders by key, which is both deterministic and the
+// friendlier order to read. `HashMap` remains correct for maps that stay
+// in-memory.
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -112,11 +120,11 @@ pub struct McpServerConfig {
     /// For stdio transport: arguments to the command
     pub args: Option<Vec<String>>,
     /// Environment variables to set for this server (stdio)
-    pub env: Option<HashMap<String, String>>,
+    pub env: Option<BTreeMap<String, String>>,
     /// For SSE/HTTP transport: the URL
     pub url: Option<String>,
     /// HTTP headers for SSE/HTTP transports
-    pub headers: Option<HashMap<String, String>>,
+    pub headers: Option<BTreeMap<String, String>>,
     /// Whether tools from this server should be deferred (name-only stub sent to LLM).
     /// Defaults to true when omitted — MCP tools are deferred by default to reduce
     /// input token usage. Set to `false` to send full schemas eagerly.
@@ -169,7 +177,7 @@ impl McpServerConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct McpConfig {
     #[serde(default)]
-    pub servers: HashMap<String, McpServerConfig>,
+    pub servers: BTreeMap<String, McpServerConfig>,
     /// W6 F17 — MCP curation policy.
     /// `Off` exposes every connected MCP tool (today's behaviour). `TopK(n)`
     /// trims the per-turn MCP tool list to the n highest-ranked tools via
@@ -318,10 +326,10 @@ pub struct ConfigFile {
     pub execution: ExecutionConfig,
 
     #[serde(default)]
-    pub providers: HashMap<String, ProviderConfig>,
+    pub providers: BTreeMap<String, ProviderConfig>,
 
     #[serde(default)]
-    pub profiles: HashMap<String, ProfileConfig>,
+    pub profiles: BTreeMap<String, ProfileConfig>,
 
     #[serde(default)]
     pub tools: ToolsConfig,
@@ -5688,11 +5696,21 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(wayland_home_env)]
     fn test_api_key_missing_returns_error() {
         // Remove all env vars that could supply a key so the function must fail.
-        // Note: single-threaded tests share the process environment; clearing here
-        // is safe for unit test purposes.
-        // SAFETY: single-threaded test context; no other threads read these vars.
+        //
+        // The previous comment claimed "single-threaded test context; no other
+        // threads read these vars". Both halves were false: `cargo test` runs
+        // this binary's tests on a POOL of threads sharing one process, and
+        // `ANTHROPIC_API_KEY` is read by `resolve_api_key` on behalf of every
+        // test that calls `Config::resolve`. Clearing it here therefore yanked
+        // the credential out from under concurrently-running tests. Joins the
+        // `wayland_home_env` serial group, which is this crate's de-facto
+        // process-env group -- the two other API-key mutators
+        // (`connected_providers_detects_key_ambient_and_oauth_excludes_keyless`,
+        // `for_provider_discovery_overrides_identifying_fields`) are already in
+        // it despite the group's WAYLAND_HOME-shaped name.
         unsafe {
             std::env::remove_var("API_KEY");
             std::env::remove_var("ANTHROPIC_API_KEY");
@@ -7456,9 +7474,23 @@ skills_lifecycle = true
     // -------------------------------------------------------------------------
 
     #[test]
+    #[serial_test::serial(wayland_home_env)]
     fn wayland_config_dir_uses_wayland_home_when_set() {
-        // Serial isolation is not required here because we restore the env var
-        // within the test; the variable name is unique to this assertion.
+        // These tests MUST mutate the process environment, because the
+        // behaviour under test IS env resolution -- so they join the existing
+        // `wayland_home_env` serial group rather than injecting.
+        //
+        // The previous comment here claimed serial isolation was unnecessary
+        // "because we restore the env var within the test; the variable name is
+        // unique to this assertion." Both halves were false. Restoring on the
+        // way out does nothing for the window BETWEEN set and restore, during
+        // which every concurrently-running test observes the mutated value. And
+        // `WAYLAND_HOME` is the most-shared variable in the workspace (141
+        // references), not unique to this assertion. Measured effect: this test
+        // raced `env_file::tests::load_wayland_env_file_applies_without_over-
+        // riding`, which is itself `#[serial]` -- and `#[serial]` only
+        // serializes against OTHER `#[serial]` tests, so one unprotected
+        // mutator defeats the whole group.
         let key = "WAYLAND_HOME";
         let prev = std::env::var_os(key);
         unsafe {
@@ -7473,6 +7505,7 @@ skills_lifecycle = true
     }
 
     #[test]
+    #[serial_test::serial(wayland_home_env)]
     fn wayland_config_dir_uses_xdg_data_home_when_no_wayland_home() {
         let wh_key = "WAYLAND_HOME";
         let xdg_key = "XDG_DATA_HOME";
@@ -7495,6 +7528,7 @@ skills_lifecycle = true
     }
 
     #[test]
+    #[serial_test::serial(wayland_home_env)]
     fn wayland_config_dir_falls_back_to_dirs_config_dir() {
         // When neither env var is set, result ends with "wayland-core".
         let wh_key = "WAYLAND_HOME";
