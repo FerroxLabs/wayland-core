@@ -1031,6 +1031,7 @@ mod tests {
             elapsed_ms: 10,
             exit_status: Some(1),
             dialect: None,
+            diagnostic: None,
         }];
         assert!(matches!(
             proportion_measurement(
