@@ -1913,8 +1913,25 @@ mod tests {
         .unwrap();
         // POSITIVE CONTROL: the misleading projection really is on disk and
         // really does claim Running, or "reported dead" would prove nothing.
+        //
+        // The EXACT serialized token is asserted, not a case-agnostic fragment.
+        // `GatewayState` is `#[serde(rename_all = "snake_case")]`, so the byte
+        // sequence on disk is `"running"` and NOT `"Running"` — and this lane's
+        // first mutation of the liveness path searched for `"Running"`,
+        // therefore never fired, and reported this test as surviving a
+        // mutation it had never actually been given. Pinning the token here is
+        // the repair: anyone writing the next mutation reads the real one off
+        // this line.
         let raw = std::fs::read_to_string(home.join(STATUS_FILE)).unwrap();
-        assert!(raw.contains("unning"), "seeded projection: {raw}");
+        assert!(
+            raw.contains("\"running\""),
+            "seeded projection must carry the snake_case token: {raw}"
+        );
+        assert!(
+            !raw.contains("\"Running\""),
+            "there is no CamelCase token on disk; a matcher looking for one \
+             fires never: {raw}"
+        );
 
         let out = dir.path().join("bundle");
         let scope = ScopeArgs {
