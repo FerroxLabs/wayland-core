@@ -1,0 +1,31 @@
+F25-C4 WINDOWS RE-RUN — host=seandesktop  binary=C:errox-25h\wayland-core.exe (0.12.25)
+date=2026-07-29T13:15:20Z  transport=ssh+PowerShell, exit codes read from a STATUS FILE (WLRC/WLDONE), not from ssh
+
+BINARY=C:\ferrox-25h\wayland-core.exe
+WLRC_PROBE=0
+WLRC_RUN=1
+WLDONE
+
+--- probe cloud output ---
+backend:       cloud
+available:     false
+probe basis:   CredentialAbsent
+probe detail:  backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+healthy:       false
+live tasks:    0
+health detail: backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+
+--- backend run --backend cloud output ---
+wayland-core.exe : wayland-core backend: backend 'cloud' is unavailable and this command does NOT 
+fall back: backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT 
+falling back (probe CredentialAbsent)
+At line:13 char:7
++ $o2 = & $B backend run --backend cloud --receipt-out D:\lane-25c4\r.j ...
++       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (wayland-core ba...edentialAbsent):String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+receipt written: 
+False
