@@ -25,7 +25,7 @@
 //! untouched and never touches the store — existing literal-header MCP servers
 //! are unaffected even when the store is empty or locked.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use crate::config::McpServerConfig;
 use crate::credentials::{CredentialsError, CredentialsStore};
@@ -162,7 +162,7 @@ impl McpCredentialSkipReason {
 /// advertise capabilities or diagnostics must use both halves.
 #[derive(Debug, Default)]
 pub struct McpServerResolution {
-    pub connectable: BTreeMap<String, McpServerConfig>,
+    pub connectable: HashMap<String, McpServerConfig>,
     pub skipped: Vec<(String, McpCredentialSkipReason)>,
 }
 
@@ -172,14 +172,14 @@ pub struct McpServerResolution {
 /// credential-reference disclosure. Other servers continue independently. The
 /// input map (the long-lived `Config`) is never mutated.
 pub fn resolve_servers_for_connect(
-    servers: &BTreeMap<String, McpServerConfig>,
+    servers: &HashMap<String, McpServerConfig>,
     store: &dyn CredentialsStore,
-) -> BTreeMap<String, McpServerConfig> {
+) -> HashMap<String, McpServerConfig> {
     resolve_servers_for_connect_with_report(servers, store).connectable
 }
 
 pub fn resolve_servers_for_connect_with_report(
-    servers: &BTreeMap<String, McpServerConfig>,
+    servers: &HashMap<String, McpServerConfig>,
     store: &dyn CredentialsStore,
 ) -> McpServerResolution {
     let mut resolution = McpServerResolution::default();
@@ -216,13 +216,13 @@ pub fn resolve_servers_for_connect_with_report(
 /// credentials store itself cannot be opened; literal-header servers remain
 /// usable while reference-bearing servers fail closed before transport spawn.
 pub fn without_credential_references(
-    servers: &BTreeMap<String, McpServerConfig>,
-) -> BTreeMap<String, McpServerConfig> {
+    servers: &HashMap<String, McpServerConfig>,
+) -> HashMap<String, McpServerConfig> {
     without_credential_references_with_report(servers).connectable
 }
 
 pub fn without_credential_references_with_report(
-    servers: &BTreeMap<String, McpServerConfig>,
+    servers: &HashMap<String, McpServerConfig>,
 ) -> McpServerResolution {
     let mut resolution = McpServerResolution::default();
     for (name, server) in servers {

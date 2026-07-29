@@ -1,15 +1,70 @@
-// Maps that are SERIALIZED into `config.toml` are `BTreeMap`, never `HashMap`.
-// `HashMap` iteration order is randomized per instance (`RandomState` reseeds
-// each map, even within one thread), so serializing the same logical config
-// twice emitted its `[profiles.*]` / `[providers.*]` sections in a DIFFERENT
-// order each time -- rewriting the operator's config file with a spurious diff
-// on every save. `BTreeMap` orders by key, which is both deterministic and the
-// friendlier order to read. `HashMap` remains correct for maps that stay
-// in-memory.
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+/// Serialize a string-keyed map in ASCENDING KEY ORDER.
+///
+/// `HashMap` iteration order is randomized *per map instance* — `RandomState`
+/// reseeds every map, even two built on the same thread — so serializing the
+/// same logical config twice emitted its `[profiles.*]` / `[providers.*]` /
+/// `[mcp.servers.*]` sections in a DIFFERENT order each time. The product
+/// therefore rewrote the operator's `config.toml` with a spurious whole-file
+/// diff on every save, and `migrate_hermes::import_is_idempotent_without_over-
+/// write` (which compares two round-trips byte for byte) failed 13 times in 25
+/// at base. Measured proof: the two writes differed ONLY in `[profiles.beta]`
+/// preceding `[profiles.alpha]` versus the reverse — byte-identical otherwise.
+///
+/// Sorting at the SERIALIZER (rather than switching the fields to `BTreeMap`)
+/// is deliberate. `providers` / `profiles` / `servers` are public fields, and
+/// `&HashMap<String, McpServerConfig>` / `HashMap<String, ProviderConfig>`
+/// appear in signatures across `wcore-mcp`, `wcore-agent` and `wcore-cli` —
+/// including two in `crates/wcore-cli/src/main.rs`, a file under a
+/// shared-file fence that permits only minimal ADDITIVE edits. A type change
+/// would have rippled signature churn through that fence and collided with
+/// every concurrent lane. This achieves the same determinism with no public
+/// API change and no cross-crate ripple.
+///
+/// Deserialization is unaffected: order is not significant on the way in.
+fn serialize_sorted_map<S, V>(map: &HashMap<String, V>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+    V: Serialize,
+{
+    use serde::ser::SerializeMap;
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort_unstable();
+    let mut out = serializer.serialize_map(Some(map.len()))?;
+    for k in keys {
+        out.serialize_entry(k, &map[k])?;
+    }
+    out.end()
+}
+
+/// `serialize_sorted_map` for an optional map. `None` stays `None`; `Some` is
+/// emitted in ascending key order.
+fn serialize_sorted_opt_map<S, V>(
+    map: &Option<HashMap<String, V>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+    V: Serialize,
+{
+    match map {
+        None => serializer.serialize_none(),
+        Some(m) => {
+            use serde::ser::SerializeMap;
+            let mut keys: Vec<&String> = m.keys().collect();
+            keys.sort_unstable();
+            let mut out = serializer.serialize_map(Some(m.len()))?;
+            for k in keys {
+                out.serialize_entry(k, &m[k])?;
+            }
+            out.end()
+        }
+    }
+}
 
 use crate::browser::BrowserConfig;
 use crate::compact::CompactConfig;
@@ -120,11 +175,13 @@ pub struct McpServerConfig {
     /// For stdio transport: arguments to the command
     pub args: Option<Vec<String>>,
     /// Environment variables to set for this server (stdio)
-    pub env: Option<BTreeMap<String, String>>,
+    #[serde(serialize_with = "serialize_sorted_opt_map")]
+    pub env: Option<HashMap<String, String>>,
     /// For SSE/HTTP transport: the URL
     pub url: Option<String>,
     /// HTTP headers for SSE/HTTP transports
-    pub headers: Option<BTreeMap<String, String>>,
+    #[serde(serialize_with = "serialize_sorted_opt_map")]
+    pub headers: Option<HashMap<String, String>>,
     /// Whether tools from this server should be deferred (name-only stub sent to LLM).
     /// Defaults to true when omitted — MCP tools are deferred by default to reduce
     /// input token usage. Set to `false` to send full schemas eagerly.
@@ -177,7 +234,8 @@ impl McpServerConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct McpConfig {
     #[serde(default)]
-    pub servers: BTreeMap<String, McpServerConfig>,
+    #[serde(serialize_with = "serialize_sorted_map")]
+    pub servers: HashMap<String, McpServerConfig>,
     /// W6 F17 — MCP curation policy.
     /// `Off` exposes every connected MCP tool (today's behaviour). `TopK(n)`
     /// trims the per-turn MCP tool list to the n highest-ranked tools via
@@ -326,10 +384,12 @@ pub struct ConfigFile {
     pub execution: ExecutionConfig,
 
     #[serde(default)]
-    pub providers: BTreeMap<String, ProviderConfig>,
+    #[serde(serialize_with = "serialize_sorted_map")]
+    pub providers: HashMap<String, ProviderConfig>,
 
     #[serde(default)]
-    pub profiles: BTreeMap<String, ProfileConfig>,
+    #[serde(serialize_with = "serialize_sorted_map")]
+    pub profiles: HashMap<String, ProfileConfig>,
 
     #[serde(default)]
     pub tools: ToolsConfig,
@@ -7466,6 +7526,71 @@ skills_lifecycle = true
         assert_eq!(
             serialized_value("[observability]\nskills_lifecycle = true\n"),
             Some(true)
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Serialization determinism (config.toml must not churn on every save)
+    // -------------------------------------------------------------------------
+
+    /// Serializing the SAME logical config twice must produce identical bytes.
+    ///
+    /// Needs no env and no filesystem, so it is parallel-safe and needs no
+    /// `#[serial]`. It builds two `ConfigFile`s with the same entries inserted
+    /// in OPPOSITE order: `RandomState` reseeds each `HashMap`, so with the
+    /// unsorted serializer their `[profiles.*]` / `[providers.*]` sections came
+    /// out in different orders and this comparison failed. Many keys are used
+    /// because two keys collide in the same bucket order roughly half the time
+    /// -- with 12, a passing run by luck is about 1 in 12!.
+    #[test]
+    fn serializing_the_same_config_twice_is_byte_identical() {
+        fn build(reverse: bool) -> ConfigFile {
+            let mut cfg = ConfigFile::default();
+            let names = [
+                "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota",
+                "kappa", "lambda", "mu",
+            ];
+            let mut order: Vec<&str> = names.to_vec();
+            if reverse {
+                order.reverse();
+            }
+            for n in order {
+                cfg.profiles.insert(
+                    n.to_string(),
+                    ProfileConfig {
+                        provider: Some("anthropic".into()),
+                        model: Some(format!("model-{n}")),
+                        ..Default::default()
+                    },
+                );
+                cfg.providers.insert(
+                    n.to_string(),
+                    ProviderConfig {
+                        api_key: Some(format!("key-{n}")),
+                        ..Default::default()
+                    },
+                );
+            }
+            cfg
+        }
+
+        let a = toml::to_string_pretty(&build(false)).expect("serialize a");
+        let b = toml::to_string_pretty(&build(true)).expect("serialize b");
+        assert_eq!(
+            a, b,
+            "config serialization is order-dependent: the same logical config \
+             produced two different files, so every save rewrites the operator's \
+             config.toml with a spurious diff"
+        );
+
+        // The instrument must be able to fail: prove the keys really are present
+        // and really are sorted, so an empty/degenerate map cannot pass this.
+        let alpha = a.find("[profiles.alpha]").expect("alpha profile emitted");
+        let beta = a.find("[profiles.beta]").expect("beta profile emitted");
+        let mu = a.find("[profiles.mu]").expect("mu profile emitted");
+        assert!(
+            alpha < beta && beta < mu,
+            "profiles must serialize in ascending key order"
         );
     }
 
