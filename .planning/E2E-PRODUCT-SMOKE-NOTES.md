@@ -69,3 +69,70 @@ Not `/Users/seandonahoe/dev/waylandcore`. Safe to proceed.
 
 Open at this point: nothing measured yet. Next action is host + build reconnaissance
 on `hetzner-dsm`.
+
+---
+
+### T+45 — instrument built and provenance-checked
+
+`cargo build --release -p wcore-cli` on `hetzner-dsm` worktree `/root/wayland-e2e` @ `75babf32`,
+`BUILDRC=0`, `grep -c "^error" BUILD.log = 0`, `Finished release profile in 5m 45s`.
+
+```
+wayland-core --version    -> wayland-core 0.12.25
+wayland-core --build-info -> wayland-core 0.12.25 (source 75babf329235484684ecee3a65973b0c197840c1)
+```
+
+The embedded source SHA equals my base commit. Stale-build class closed by measurement,
+not assumption.
+
+### T+50 — STEP 1 MEASURED (cold start, no credential used)
+
+Condition: `env -i` child, so no `DBUS_SESSION_BUS_ADDRESS`, no keyring — a genuinely
+headless first run. (The host itself *has* gnome-keyring installed and a bus at
+`/run/user/0/bus`; `env -i` is what makes the condition real rather than assumed.)
+
+| route | rc | what the user sees |
+|---|---|---|
+| 1a bare first run | 1 | plaintext-0600 credential warning, then `No API key found …(API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY)` |
+| 1b `--doctor` | 1 | good: 1 pass / 3 missing / 4 warn / 1 skip, per-distro install hints. Notes config could not load |
+| 1b `init` | 0 | scaffolds `.wayland/config.toml` + `WAYLAND.md` |
+| 1b malformed toml | 1 | **excellent** — exact line/column, caret, `unclosed table, expected ]` |
+| 1b typo'd section | 1 | **excellent** — explicit WARN per key: ``ignoring unknown or mis-sectioned config key `providrs` … check for a typo`` |
+| 1b valid config, no key | 1 | same `No API key found` text |
+| 1b unwritable WAYLAND_HOME | 1 | fails on the key first; the permission problem is never named |
+
+**Regression check on the prior HIGH:** `HEADLESS-KEYRING-FINDING.md` reported the headless
+error's remedy wrong three ways. At my base the text is now:
+`… On a headless host set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor —
+preferred) or WAYLAND_VAULT_PASSPHRASE to unlock the encrypted vault, or turn durable
+sessions off with [session] enabled = false`. That is the corrected text and it names the
+route the prior lane proved works. **Prior fix confirmed present and live at 75babf32.**
+
+### T+55 — FINDING A (measured, paired controls)
+
+`MissingApiKey`'s text names 3 environment variables. `resolve_api_key_from_env` consults
+**23**. With `provider = "flux-router"` configured, I ran five arms, fake keys only:
+
+| arm | var set | rc | `No API key found` lines |
+|---|---|---|---|
+| control | none | 1 | 1 |
+| named | `ANTHROPIC_API_KEY` | 1 | **1** |
+| named | `OPENAI_API_KEY` | 1 | **1** |
+| named | `API_KEY` | 1 | **0** (got past resolution) |
+| **not named** | `FLUX_API_KEY` | 1 | **0** (got past resolution) |
+
+So two of the three variables the error tells the user to set are **inert for the
+configured provider** and reproduce the identical error, while the variable that is
+actually correct is not mentioned. `API_KEY` is the one named variable that works, so the
+text is followable — it is misleading, not dead. Both directions measured in one run;
+neither arm is an absence claim.
+
+Instrument liveness: `FLUX_API_KEY` count in config.rs = 1, `SAKANA_API_KEY` (control) = 1,
+23 distinct `std::env::var("*_API_KEY")` sites enumerated from the function body.
+
+### T+58 — pre-flight, live credential
+
+`flux-fast` and `flux-standard` both rc=0, both answered `391` (17×23). Provider genuinely
+reached; token accounting printed. Journey will use `flux-standard`.
+
+Next: the continuous journey, steps 2-8.
